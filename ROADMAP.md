@@ -168,7 +168,7 @@ Checked: b30's opening cutscene (letterbox, engine glows, water, fog) lined up w
 - Coverage alpha only works for blends that replace or add to what's under them. Multiplying blends need the world's colour, which the game no longer has.
 - Compare the two renderers directly: a half-strength blend of the game's full picture over the viewer's found the cinematic field-of-view bug in one screenshot.
 
-## Phase 6: Audio and multiplayer parity  ← *in progress*
+## Phase 6: Audio and multiplayer parity ✅ (done)
 
 OpenCE branch `bevy-bridge-multiplayer` (protocol 6).
 
@@ -180,7 +180,12 @@ OpenCE branch `bevy-bridge-multiplayer` (protocol 6).
 - [x] Options UI (F10): DLSS Ray Reconstruction and quality, ReSTIR, light levels, exposure and the stats text, saved between runs
 - [ ] Internet play (OpenCE's invite links) through a viewer: untested
 
-## Phase 7 (long term): Native Rust subsystems
+### What Phase 6 taught us
+
+- The hidden game already did most of the work: its own mixer plays positioned sound, and its own menus drive multiplayer through the overlay. The viewer's job was to follow it: reloading levels, a bridge per game, and the camera as the listener.
+- OpenCE's network test harness (`HALO_NETWORK_TEST`, loopback addresses per game) makes a two-machine system link check scriptable on one PC.
+
+## Phase 7 (long term): Native Rust subsystems  ← *next*
 
 Move subsystems out of the 32-bit process one at a time behind the bridge interface, ordered by payoff:
 

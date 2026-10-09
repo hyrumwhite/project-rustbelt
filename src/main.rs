@@ -224,6 +224,7 @@ fn main() -> AppExit {
         .insert_resource(LightingSettings::default())
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
+        .add_systems(Update, start_camera)
         .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate));
 
     if args.screenshot.is_some() {
@@ -248,7 +249,7 @@ fn main() -> AppExit {
         )
             .add_systems(PostUpdate, (update_control_text, update_performance_text));
         #[cfg(feature = "dlss")]
-        app.add_systems(Update, ((toggle_dlss_rr, cycle_dlss_quality).run_if(bridge::not_forwarding), enable_dlss));
+        app.add_systems(Update, (toggle_dlss_rr, cycle_dlss_quality).run_if(bridge::not_forwarding));
     }
 
     app.run()
@@ -386,10 +387,12 @@ fn setup_camera(
     settings: Res<LightingSettings>,
     sky_cubemap: Option<Res<SkyCubemap>>,
     mut images: ResMut<Assets<Image>>,
+    #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
 ) {
     let mut camera = commands.spawn((
         Camera3d::default(),
-        Camera { clear_color: ClearColorConfig::Custom(Color::BLACK), ..default() },
+        // (inactive for its first frames: start_camera)
+        Camera { clear_color: ClearColorConfig::Custom(Color::BLACK), is_active: args.pathtracer, ..default() },
         start.0,
         // Msaa::Off and STORAGE_BINDING main textures are required by Solari
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
@@ -422,7 +425,10 @@ fn setup_camera(
         ));
     }
 
-    // (DLSS Ray Reconstruction is turned on a moment later: enable_dlss)
+    #[cfg(feature = "dlss")]
+    if dlss_rr_supported.is_some() {
+        camera.insert(Dlss::<DlssRayReconstructionFeature>::default());
+    }
 
     if let Some((direction, color, power)) = level_sky.0.sun {
         commands.spawn((
@@ -541,24 +547,18 @@ fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With
     info!("--camera {:.2},{:.2},{:.2},{yaw:.1},{pitch:.1}", p.x, -p.z, p.y);
 }
 
-/// Frames to wait before turning DLSS Ray Reconstruction on. DLSS creates its
-/// feature with GPU work wgpu does not track; done while the window's surface
-/// is first configured, wgpu's wait for an idle queue fails ("Failed to wait
-/// for GPU to come idle") and the app stops. A moment later the surface has
-/// settled.
-#[cfg(feature = "dlss")]
-const DLSS_START_FRAME: u32 = 30;
+/// Frames the camera waits before it starts rendering. DLSS creates its
+/// feature (on the camera's first frame) with GPU work wgpu does not track;
+/// done while the window's surface is first configured, wgpu's wait for an
+/// idle queue fails ("Failed to wait for GPU to come idle") and the app
+/// stops. A moment later the surface has settled. (Adding DLSS to a camera
+/// that already renders is not enough: it stays off.)
+const CAMERA_START_FRAME: u32 = 30;
 
-#[cfg(feature = "dlss")]
-fn enable_dlss(
-    mut frames: Local<u32>,
-    camera: Single<Entity, With<SolariLighting>>,
-    dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
-    mut commands: Commands,
-) {
+fn start_camera(mut frames: Local<u32>, mut camera: Single<&mut Camera, With<SolariLighting>>) {
     *frames += 1;
-    if *frames == DLSS_START_FRAME && dlss_rr_supported.is_some() {
-        commands.entity(*camera).insert(Dlss::<DlssRayReconstructionFeature>::default());
+    if *frames == CAMERA_START_FRAME {
+        camera.is_active = true;
     }
 }
 

@@ -19,7 +19,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
 };
-use halo_bridge::{Bridge, Snapshot, OBJECT_HIDDEN};
+use halo_bridge::{Bridge, Snapshot, OBJECT_HIDDEN, OBJECT_MODEL};
 use std::{sync::Arc, time::Duration};
 
 /// Starts OpenCE on the map at `map_path`: its data root is the folder that
@@ -224,12 +224,14 @@ fn sync_objects(
             if objects.modelless.contains_key(&key) {
                 continue;
             }
-            let definition = halo_map::TagRef { group: 0, datum: Some(object.definition_index) };
-            let model = halo_map::objects::object_model(&builder.cache, definition)
-                .ok()
-                .flatten()
-                .and_then(|m| m.datum)
-                .and_then(|m| builder.animated_model(m, object.region_permutations, assets));
+            // (a model the game draws by itself names its model tag directly)
+            let model_datum = if object.flags & OBJECT_MODEL != 0 {
+                Some(object.definition_index)
+            } else {
+                let definition = halo_map::TagRef { group: 0, datum: Some(object.definition_index) };
+                halo_map::objects::object_model(&builder.cache, definition).ok().flatten().and_then(|m| m.datum)
+            };
+            let model = model_datum.and_then(|m| builder.animated_model(m, object.region_permutations, assets));
             let Some(model) = model else {
                 objects.modelless.insert(key, ());
                 continue;

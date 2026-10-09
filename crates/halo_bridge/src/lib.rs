@@ -16,7 +16,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;
@@ -25,6 +25,9 @@ const MAPPING_NAME: &[u8] = b"Local\\HaloBevyBridge\0";
 
 pub const OBJECT_HIDDEN: u32 = 1 << 0;
 pub const OBJECT_FIRST_PERSON: u32 = 1 << 1;
+/// Not an object but a model the game draws by itself (the first-person
+/// weapon and hands): [`Object::definition_index`] is the model tag.
+pub const OBJECT_MODEL: u32 = 1 << 2;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]

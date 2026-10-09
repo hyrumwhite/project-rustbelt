@@ -102,6 +102,8 @@ enum Surface {
     /// Rasterized only, blended over the scene (Solari traces opaque
     /// surfaces only).
     Transparent(Handle<HaloTransparentMaterial>),
+    /// Glass and water: rasterized only, a blended `StandardMaterial`.
+    Blended(Handle<StandardMaterial>),
 }
 
 #[derive(Clone)]
@@ -409,6 +411,21 @@ impl<'a> LevelBuilder<'a> {
                 }
                 return;
             }
+            Surface::Blended(material) => {
+                if raster {
+                    commands.spawn((
+                        Name::new(name),
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material.clone()),
+                        bevy::light::NotShadowCaster,
+                        Transform::default(),
+                        ChildOf(parent),
+                    ));
+                    self.stats.meshes += 1;
+                    self.stats.transparent_meshes += 1;
+                }
+                return;
+            }
         };
         let mut traced = commands.spawn((
             Name::new(name.clone()),
@@ -546,6 +563,9 @@ impl<'a> LevelBuilder<'a> {
         let emits = info.emitted_power > 0.0 && radiance != Vec3::ZERO;
 
         if info.shader_type.is_transparent() && !emits {
+            if let Some(material) = self.glass_or_water_material(info, assets) {
+                return Some(Surface::Blended(material));
+            }
             return self.transparent_material(info, 0.0, assets).map(Surface::Transparent);
         }
         let self_illumination = info.self_illumination.and_then(|si| match si {
@@ -610,6 +630,41 @@ impl<'a> LevelBuilder<'a> {
             _ => None,
         };
         Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance }))
+    }
+
+    /// Glass and water as smooth, blended surfaces: Halo draws them in
+    /// several passes (tint, reflection, ripples); this keeps their colour,
+    /// transparency and a reflection of the sky from the environment map.
+    fn glass_or_water_material(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<Handle<StandardMaterial>> {
+        let texture = |map: Option<TagRef>, this: &mut Self, assets: &mut LevelAssets| {
+            map.and_then(|m| m.datum).and_then(|d| this.textures.get(this.cache, d, 0, true, assets.images))
+        };
+        let material = if let Some(glass) = info.glass {
+            let [r, g, b] = glass.tint;
+            StandardMaterial {
+                base_color: Color::srgba(r, g, b, 0.35),
+                base_color_texture: texture(glass.diffuse_map.or(glass.tint_map), self, assets),
+                perceptual_roughness: 0.05,
+                reflectance: 0.6,
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: None,
+                ..default()
+            }
+        } else if let Some(water) = info.water {
+            let [r, g, b, a] = water.perpendicular_tint;
+            StandardMaterial {
+                base_color: Color::srgba(r, g, b, a.clamp(0.3, 0.9)),
+                base_color_texture: texture(water.base_map, self, assets),
+                perceptual_roughness: 0.08,
+                reflectance: 0.5,
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: None,
+                ..default()
+            }
+        } else {
+            return None;
+        };
+        Some(assets.materials.add(material))
     }
 
     /// A transparent chicago or generic shader's combiner material: its maps

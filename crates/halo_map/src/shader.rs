@@ -180,6 +180,31 @@ pub struct Reflection {
     pub mask: SpecularMask,
 }
 
+/// `shader_transparent_glass`: a tinted, reflective see-through surface.
+#[derive(Debug, Clone, Copy)]
+pub struct Glass {
+    pub tint: [f32; 3],
+    pub tint_map: Option<TagRef>,
+    pub diffuse_map: Option<TagRef>,
+    /// Reflection colour seen head-on and at grazing angles (RGBA).
+    pub reflection_perpendicular: [f32; 4],
+    pub reflection_parallel: [f32; 4],
+}
+
+/// `shader_transparent_water`.
+#[derive(Debug, Clone, Copy)]
+pub struct Water {
+    pub base_map: Option<TagRef>,
+    /// Tint seen head-on and at grazing angles (RGBA).
+    pub perpendicular_tint: [f32; 4],
+    pub parallel_tint: [f32; 4],
+}
+
+fn argb(p: crate::Ptr<'_>, offset: usize) -> Result<[f32; 4]> {
+    // real_argb_color: alpha, red, green, blue
+    Ok([p.f32(offset + 4)?, p.f32(offset + 8)?, p.f32(offset + 12)?, p.f32(offset)?])
+}
+
 /// Light a surface gives off by itself, beyond its radiosity emission.
 #[derive(Debug, Clone, Copy)]
 pub enum SelfIllumination {
@@ -220,6 +245,8 @@ pub struct ShaderInfo {
     /// `shader_environment`'s diffuse layers.
     pub environment: Option<EnvironmentDiffuse>,
     pub reflection: Option<Reflection>,
+    pub glass: Option<Glass>,
+    pub water: Option<Water>,
 }
 
 fn nonzero(v: f32) -> f32 {
@@ -256,6 +283,8 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         multipurpose_map: None,
         environment: None,
         reflection: None,
+        glass: None,
+        water: None,
     };
 
     if tag.group == groups::SHADER_ENVIRONMENT {
@@ -348,6 +377,24 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         info.uv_scale = [if u == 0.0 { 1.0 } else { u }, if v == 0.0 { 1.0 } else { v }];
     }
 
+    if shader_type == ShaderType::Glass {
+        use layout::shader_transparent_glass_definition as g;
+        info.glass = Some(Glass {
+            tint: root.vec3(g::TINT_COLOR)?,
+            tint_map: present(root.reference(g::TINT_MAP)?),
+            diffuse_map: present(root.reference(g::DIFFUSE_MAP)?),
+            reflection_perpendicular: argb(root, g::REFLECTION_VIEW_PERPENDICULAR_COLOR)?,
+            reflection_parallel: argb(root, g::REFLECTION_VIEW_PARALLEL_COLOR)?,
+        });
+    }
+    if shader_type == ShaderType::Water {
+        use layout::shader_transparent_water_definition as w;
+        info.water = Some(Water {
+            base_map: present(root.reference(w::BASE_MAP)?),
+            perpendicular_tint: argb(root, w::VIEW_PERPENDICULAR_TINT_COLOR)?,
+            parallel_tint: argb(root, w::VIEW_PARALLEL_TINT_COLOR)?,
+        });
+    }
     if matches!(shader_type, ShaderType::TransparentGeneric | ShaderType::TransparentChicago) {
         use layout::shader_transparent as t;
         let (base, map_size, map, scale_u, scale_v, offset_u, offset_v) = if shader_type == ShaderType::TransparentGeneric {

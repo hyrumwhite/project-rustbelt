@@ -306,6 +306,23 @@ pub mod shader_transparent_generic_stage {
     pub const ALPHA_OUTPUT_MAPPING: usize = 0x6e;
 }
 
+pub mod shader_transparent_glass_definition {
+    pub const TINT_COLOR: usize = 0x54;
+    pub const TINT_MAP: usize = 0x64;
+    pub const REFLECTION_VIEW_PERPENDICULAR_COLOR: usize = 0x8c;
+    pub const REFLECTION_VIEW_PARALLEL_COLOR: usize = 0x9c;
+    pub const DIFFUSE_MAP_SCALE: usize = 0x154;
+    pub const DIFFUSE_MAP: usize = 0x158;
+}
+
+pub mod shader_transparent_water_definition {
+    pub const BASE_MAP: usize = 0x4c;
+    pub const VIEW_PERPENDICULAR_TINT_COLOR: usize = 0x6c;
+    pub const VIEW_PARALLEL_TINT_COLOR: usize = 0x7c;
+    pub const RIPPLE_SCALE: usize = 0xc4;
+    pub const RIPPLE_MAPS: usize = 0xc8;
+}
+
 pub mod sky_definition {
     pub const SIZEOF: usize = 0xd0;
     pub const MODEL: usize = 0x0;

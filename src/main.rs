@@ -1,8 +1,11 @@
 //! Halo: Combat Evolved levels rendered by Bevy Solari (real-time ray
 //! tracing), with DLSS Ray Reconstruction when built with `--features dlss`.
 //!
-//! Phases 1-2 of ROADMAP.md: a retail Xbox map's structure BSPs and placed objects, textured,
-//! lit by the level's sun and sky and by its light-emitting shaders.
+//! Phases 1-3 of ROADMAP.md: a retail Xbox map's structure BSPs, placed
+//! objects and sky, with Halo's materials, lit by the level's sun and sky and
+//! by its light-emitting surfaces.
+
+#![allow(clippy::too_many_arguments, reason = "Bevy systems take their resources and queries as arguments")]
 
 mod level;
 mod material;

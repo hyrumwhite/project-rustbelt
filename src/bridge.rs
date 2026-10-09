@@ -252,6 +252,7 @@ fn sync_objects(
     mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
     mut transparent_materials: ResMut<Assets<HaloTransparentMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
     mut flat_normal: Local<Option<Handle<Image>>>,
 ) {
@@ -265,6 +266,7 @@ fn sync_objects(
         environment_materials: &mut environment_materials,
         transparent_materials: &mut transparent_materials,
         images: &mut images,
+        inverse_bindposes: &mut inverse_bindposes,
         neutral_detail: neutral_detail.0.clone(),
         flat_normal,
     };

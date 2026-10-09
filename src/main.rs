@@ -341,6 +341,7 @@ struct LevelAssetParams<'w> {
     environment_materials: ResMut<'w, Assets<HaloEnvironmentMaterial>>,
     transparent_materials: ResMut<'w, Assets<HaloTransparentMaterial>>,
     images: ResMut<'w, Assets<Image>>,
+    inverse_bindposes: ResMut<'w, Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<'w, NeutralDetail>,
 }
 
@@ -383,6 +384,7 @@ fn load_level(
         environment_materials: &mut params.environment_materials,
         transparent_materials: &mut params.transparent_materials,
         images: &mut params.images,
+        inverse_bindposes: &mut params.inverse_bindposes,
         neutral_detail: params.neutral_detail.0.clone(),
         flat_normal: Handle::default(),
     };

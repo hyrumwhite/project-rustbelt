@@ -168,11 +168,17 @@ Checked: b30's opening cutscene (letterbox, engine glows, water, fog) lined up w
 - Coverage alpha only works for blends that replace or add to what's under them. Multiplying blends need the world's colour, which the game no longer has.
 - Compare the two renderers directly: a half-strength blend of the game's full picture over the viewer's found the cinematic field-of-view bug in one screenshot.
 
-## Phase 6: Audio and multiplayer parity  ← *next*
+## Phase 6: Audio and multiplayer parity  ← *in progress*
 
-- Sound playback from the bridge (or a Rust Xbox ADPCM decoder + Bevy audio), with 3D positioning and sound environments
-- Check that OpenCE's netcode/system link works through the bridge
-- Options UI for ray-tracing quality and DLSS modes
+OpenCE branch `bevy-bridge-multiplayer` (protocol 6).
+
+- [x] Sound: the hidden game already plays it (OpenCE's mixer: Xbox ADPCM, 3D positioning, occlusion, I3DL2 reverb). The bridge's input block now carries a listener, so with the viewer flying free (F8) the game hears from the viewer's camera.
+- [x] Level changes: the viewer follows the game's level (the menus, the next campaign level, each multiplayer game). It unloads the old level (everything sits under one root entity) and loads the new map, with its sky and sun. `--menu` starts the game at its menus, which the overlay shows and the forwarded input drives.
+- [x] A bridge per game (`game.bevy_bridge_name`): each viewer's game shares under its own name and writes its own log, so several viewers run side by side
+- [x] System link through the bridge. Checked with OpenCE's network test harness on one machine: one viewer's game hosted Blood Gulch and the other's joined. Both games logged the same player positions every tick, and each viewer showed its own player's view, with the other player drawn.
+- [x] Change colours (from phase 5): the bridge shares each object's four change colours, and the first-person arms' and weapon's. Model shaders tint their base maps where the multipurpose map's alpha says, as the Xbox shader does, so armour, team colours and Blood Gulch's autumn trees are right.
+- [x] Options UI (F10): DLSS Ray Reconstruction and quality, ReSTIR, light levels, exposure and the stats text, saved between runs
+- [ ] Internet play (OpenCE's invite links) through a viewer: untested
 
 ## Phase 7 (long term): Native Rust subsystems
 

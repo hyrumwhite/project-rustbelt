@@ -11,6 +11,7 @@
 mod bridge;
 mod level;
 mod material;
+mod options;
 mod overlay;
 mod sky;
 mod textures;
@@ -163,7 +164,7 @@ impl Args {
 }
 
 /// Live-tunable light levels (Halo's radiosity powers have no physical unit).
-#[derive(Resource, Clone)]
+#[derive(Resource, Clone, PartialEq)]
 struct LightingSettings {
     /// Lux per unit of Halo sun power.
     sun_scale: f32,
@@ -247,6 +248,9 @@ fn main() -> AppExit {
             return AppExit::error();
         }
     };
+    // the options saved last time (F10)
+    let saved = if args.pathtracer { None } else { options::SavedSettings::load() };
+
     let mut app = App::new();
 
     #[cfg(feature = "dlss")]
@@ -255,7 +259,7 @@ fn main() -> AppExit {
     app.add_plugins((default_plugins(&args, overlay), SolariPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))
-        .insert_resource(LightingSettings::default())
+        .insert_resource(saved.as_ref().map_or_else(LightingSettings::default, |s| s.lighting.clone()))
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
         .add_systems(Update, start_camera)
@@ -278,6 +282,10 @@ fn main() -> AppExit {
     if args.pathtracer {
         app.add_plugins(PathtracingPlugin);
     } else {
+        app.add_plugins(options::OptionsPlugin);
+        if let Some(saved) = saved {
+            app.insert_resource(options::PendingSettings(saved));
+        }
         app.add_systems(
             Update,
             (
@@ -784,6 +792,7 @@ struct PerformanceText;
 fn setup_ui(mut commands: Commands) {
     commands.spawn((
         ControlText,
+        options::StatsText,
         Text::default(),
         TextFont { font_size: FontSize::Px(12.0), ..default() },
         Node {
@@ -805,6 +814,7 @@ fn setup_ui(mut commands: Commands) {
             ..default()
         },
         BackgroundColor(Color::srgba(0.10, 0.10, 0.10, 0.8)),
+        options::StatsText,
         children![(PerformanceText, Text::default(), TextFont { font_size: FontSize::Px(10.0), ..default() })],
     ));
 }
@@ -886,7 +896,7 @@ fn update_control_text(
     {
         s += "\nNo denoiser: build with --features dlss";
     }
-    s += "\nWASD/QE fly, Shift run, right mouse or M to look, P print camera";
+    s += "\nWASD/QE fly, Shift run, right mouse or M to look, P print camera, F10 options";
     text.0 = s;
 }
 

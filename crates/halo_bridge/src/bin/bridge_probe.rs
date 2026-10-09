@@ -55,6 +55,11 @@ fn main() {
             if last_report.elapsed() >= Duration::from_secs(1) {
                 let hidden = snapshot.objects.iter().filter(|o| o.flags & OBJECT_HIDDEN != 0).count();
                 let first_person = snapshot.objects.iter().any(|o| o.flags & OBJECT_FIRST_PERSON != 0);
+                let coloured: Vec<_> = snapshot
+                    .objects
+                    .iter()
+                    .filter(|o| o.change_colors.iter().flatten().any(|&c| c < 0.999))
+                    .collect();
                 println!(
                     "{frames} frames/s | {} (map {}) bsp {} tick {} | {} objects ({hidden} hidden), {} nodes{} | camera {:?}",
                     snapshot.scenario_name,
@@ -66,6 +71,14 @@ fn main() {
                     if first_person { ", first person" } else { "" },
                     snapshot.camera.map(|c| c.position)
                 );
+                if let Some(object) = coloured.first() {
+                    println!(
+                        "  {} objects with change colours, e.g. {:08x}: {:?}",
+                        coloured.len(),
+                        object.object_index,
+                        object.change_colors
+                    );
+                }
                 frames = 0;
                 last_report = Instant::now();
             }

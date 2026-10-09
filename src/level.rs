@@ -143,6 +143,8 @@ struct ModelPiece {
     node: usize,
     mesh: Handle<Mesh>,
     surface: Surface,
+    /// Its shader, for change colours.
+    shader: Option<u32>,
 }
 
 /// A Halo `real_matrix4x3` as an affine transform (Halo space).
@@ -166,6 +168,8 @@ pub struct LevelBuilder {
     surfaces: HashMap<Option<u32>, ShaderSurface>,
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
     animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
+    /// Surfaces tinted by a change colour, by shader and colour.
+    coloured_surfaces: HashMap<(u32, [u8; 3]), Surface>,
     loaded_bsps: Vec<usize>,
     light_proxy: Option<Handle<Mesh>>,
     /// Whether light fixtures get emissive proxies.
@@ -198,6 +202,7 @@ impl LevelBuilder {
             surfaces: HashMap::default(),
             models: HashMap::default(),
             animated_models: HashMap::default(),
+            coloured_surfaces: HashMap::default(),
             loaded_bsps: Vec::new(),
             light_proxy: None,
             fixture_lights: true,
@@ -589,7 +594,7 @@ impl LevelBuilder {
                         texcoord: v.texcoord,
                     });
                     let mesh = assets.meshes.add(build_mesh(vertices, &indices, shader.uv_scale));
-                    pieces.push(ModelPiece { node, mesh, surface: surface.clone() });
+                    pieces.push(ModelPiece { node, mesh, surface: surface.clone(), shader: shader_ref.datum });
                 }
             }
         }
@@ -604,6 +609,8 @@ impl LevelBuilder {
         commands: &mut Commands,
         model: &AnimatedModel,
         raster: bool,
+        change_colors: &[[f32; 3]; 4],
+        assets: &mut LevelAssets,
     ) -> (Entity, Vec<Option<Entity>>) {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
         self.adopt(commands, root);
@@ -612,7 +619,8 @@ impl LevelBuilder {
             let node = *nodes[piece.node].get_or_insert_with(|| {
                 commands.spawn((Transform::default(), Visibility::default(), ChildOf(root))).id()
             });
-            self.spawn_mesh(commands, node, model.name.clone(), piece.mesh.clone(), &piece.surface, raster);
+            let surface = self.coloured_surface(piece, change_colors, assets);
+            self.spawn_mesh(commands, node, model.name.clone(), piece.mesh.clone(), &surface, raster);
         }
         (root, nodes)
     }
@@ -677,6 +685,41 @@ impl LevelBuilder {
             }
         }
         Ok(out)
+    }
+
+    /// A piece's surface with the object's change colour, where its shader
+    /// takes one (made once per shader and colour).
+    fn coloured_surface(&mut self, piece: &ModelPiece, change_colors: &[[f32; 3]; 4], assets: &mut LevelAssets) -> Surface {
+        let Surface::Solid(solid) = &piece.surface else { return piece.surface.clone() };
+        let Some(shader) = piece.shader else { return piece.surface.clone() };
+        let info = shader::shader_info(&self.cache, TagRef { group: 0, datum: Some(shader) }).ok().flatten();
+        let Some((source, multipurpose)) =
+            info.as_ref().and_then(|i| Some((i.change_color?, i.multipurpose_map.and_then(|m| m.datum)?)))
+        else {
+            return piece.surface.clone();
+        };
+        let color = change_colors[source].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+        if color == [255; 3] {
+            return piece.surface.clone();
+        }
+        if let Some(surface) = self.coloured_surfaces.get(&(shader, color)) {
+            return surface.clone();
+        }
+        let bake = crate::textures::Bake::ChangeColor {
+            base: info.as_ref().and_then(|i| i.base_map).and_then(|b| b.datum),
+            multipurpose,
+            color,
+        };
+        let surface = match (self.textures.baked(&self.cache, bake, assets.images), assets.materials.get(&solid.standard)) {
+            (Some(texture), Some(material)) => {
+                let material = StandardMaterial { base_color_texture: Some(texture), ..material.clone() };
+                Surface::Solid(SolidSurface { standard: assets.materials.add(material), ..solid.clone() })
+            }
+            _ => piece.surface.clone(),
+        };
+        debug!("change colour {color:?} on {}", info.as_ref().map_or("", |i| i.name.as_str()));
+        self.coloured_surfaces.insert((shader, color), surface.clone());
+        surface
     }
 
     /// The material for a shader, made once per shader.

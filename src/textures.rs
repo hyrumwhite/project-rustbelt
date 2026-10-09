@@ -34,6 +34,10 @@ pub enum Bake {
     /// from rough dielectric (mask 0) to `roughness`/`metallic` (mask 1), as
     /// f32 bits.
     MetallicRoughness { mask: u32, channel: u8, roughness: u32, metallic: u32 },
+    /// A model base map tinted by an object's change colour where the
+    /// multipurpose map's alpha says, as the Xbox model shader does:
+    /// `base * lerp(1, color, multipurpose.a)` (8-bit, display-encoded).
+    ChangeColor { base: Option<u32>, multipurpose: u32, color: [u8; 3] },
 }
 
 /// Roughness where a surface's specular mask is zero.
@@ -181,6 +185,32 @@ fn modulate_base(
     (w, h, out, true)
 }
 
+/// The base map (at its own size; white without one) times `lerp(1, color,
+/// mask.a)`, its alpha kept.
+fn change_color(mask: &bitmap::Decoded, base: Option<&bitmap::Decoded>, color: [u8; 3]) -> (u32, u32, Vec<u8>, bool) {
+    let (w, h) = base.map_or((mask.width, mask.height), |b| (b.width, b.height));
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let (mx, my) = (x * mask.width / w, y * mask.height / h);
+            let amount = mask.data[((my * mask.width + mx) * 4 + 3) as usize] as f32 / 255.0;
+            let texel = match base {
+                Some(b) => {
+                    let o = ((y * w + x) * 4) as usize;
+                    [b.data[o], b.data[o + 1], b.data[o + 2], b.data[o + 3]]
+                }
+                None => [255; 4],
+            };
+            for c in 0..3 {
+                let tint = 1.0 + (color[c] as f32 / 255.0 - 1.0) * amount;
+                out.push((texel[c] as f32 * tint).round() as u8);
+            }
+            out.push(texel[3]);
+        }
+    }
+    (w, h, out, true)
+}
+
 /// (width, height, RGBA8 texels, sRGB-encoded)
 fn bake_rgba(cache: &CacheFile, bake: Bake) -> halo_map::Result<(u32, u32, Vec<u8>, bool)> {
     match bake {
@@ -188,6 +218,11 @@ fn bake_rgba(cache: &CacheFile, bake: Bake) -> halo_map::Result<(u32, u32, Vec<u
             let mask = rgba8(cache, multipurpose)?;
             let base = base.map(|b| rgba8(cache, b)).transpose()?;
             Ok(modulate_base(&mask, base.as_ref(), |texel| [texel[1] as f32 / 255.0; 3]))
+        }
+        Bake::ChangeColor { base, multipurpose, color } => {
+            let mask = rgba8(cache, multipurpose)?;
+            let base = base.map(|b| rgba8(cache, b)).transpose()?;
+            Ok(change_color(&mask, base.as_ref(), color))
         }
         Bake::MetallicRoughness { mask, channel, roughness, metallic } => {
             let mask = rgba8(cache, mask)?;

@@ -7,7 +7,7 @@ This project ports Halo: Combat Evolved to the **Bevy 0.20** engine and renders 
 
 It's based on the [OpenCE](../OpenCE) decompilation. See [ROADMAP.md](ROADMAP.md) for the architecture and phases.
 
-**Status: Phase 4 done (playable); Phase 5 under way.** With `--opence`, the viewer runs the actual game ([OpenCE](../OpenCE), hidden in the background) and you play it in the ray-traced window, with the game's HUD and effects drawn over it (see *Play*). Without it, the viewer loads a retail Xbox map directly from the `.map` file: its level geometry and every object the scenario places (scenery, vehicles, weapons, devices), with Halo's materials:
+**Status: Phases 1–5 done; Phase 6 (audio and multiplayer) under way.** With `--opence`, the viewer runs the actual game ([OpenCE](../OpenCE), hidden in the background) and you play it in the ray-traced window, with the game's HUD and effects drawn over it (see *Play*). Without it, the viewer loads a retail Xbox map directly from the `.map` file: its level geometry and every object the scenario places (scenery, vehicles, weapons, devices), with Halo's materials:
 - detail maps and bump maps on level surfaces;
 - alpha-tested grates and fences;
 - reflections and shininess from Halo's specular settings;
@@ -60,6 +60,7 @@ The camera starts at the scenario's first player start. Without `--features dlss
 | R | Toggle ReSTIR |
 | 3 | Toggle DLSS Ray Reconstruction (`dlss` builds) |
 | 4 | Cycle DLSS quality: Auto → DLAA → Quality → Balanced → Performance → Ultra Performance |
+| F10 | Options: DLSS Ray Reconstruction and quality, ReSTIR, light levels, exposure, the stats text. They are saved (`%APPDATA%\halo_rt\settings.txt`) and used again next time. Turning DLSS back on may need a restart. |
 
 The top-right panel shows GPU timings for each Solari pass and for DLSS-RR.
 
@@ -71,15 +72,30 @@ Playing needs OpenCE built from its `bevy-bridge` branch, which shares the game'
 cargo run --release --features dlss -- b30 --opence ..\OpenCE-bevy\build\windows\halo.exe
 ```
 
-The game starts hidden on the level (the map's folder's parent is its data root) and stops when you close the viewer.
+The game starts hidden on the level (the map's folder's parent is its data root) and stops when you close the viewer. With `--menu` it starts at its own menus instead (`cargo run --release --features dlss -- --opence ..\OpenCE-bevy\build\windows\halo.exe --menu`), shown in the viewer. Pick a campaign level or a multiplayer game there. The viewer follows the game from level to level: the next campaign level, the menus, each game of a multiplayer session. The game's log is `halo_rt_opence-<viewer process id>.log` in the temporary folder; the viewer prints its path.
 
 | Key | Action |
 | --- | --- |
 | Click | Play: the mouse and keyboard go to the game (Halo's own bindings) |
 | F12 | Let go of the mouse |
-| F8 | Leave the game's camera and fly free (WASD/QE, right mouse to look); F8 again follows |
+| F8 | Leave the game's camera and fly free (WASD/QE, right mouse to look); F8 again follows. While you fly, you hear the game from the flying camera. |
+| F10 | The viewer's options (the mouse is the viewer's while they're open) |
 
-The viewer's lighting hotkeys work while you're not playing. `--show-game` also shows the game's own window. `--bridge` attaches to a game you started yourself with `HALO_BEVY_BRIDGE=1`.
+The viewer's lighting hotkeys work while you're not playing. `--show-game` also shows the game's own window. `--bridge` attaches to a game you started yourself with `HALO_BEVY_BRIDGE=1` (and `--bridge-name` to one started with `HALO_BEVY_BRIDGE_NAME`).
+
+Sound is the game's own: OpenCE plays it with 3D positioning, occlusion and reverb.
+
+**Multiplayer.** Each viewer's game shares the world under its own name, so several viewers can run at once. System link works through them, with the armour and team colours drawn. To try it on one machine, give each game its own loopback address (OpenCE's `HALO_NET_ADDRESS` and `HALO_NET_BROADCAST`). Then host and join from the menus. OpenCE's test harness can also do it without the menus:
+
+```powershell
+$env:HALO_NET_ONLINE = "0"
+# one terminal: host Blood Gulch
+$env:HALO_NETWORK_TEST = "host:bloodgulch"; $env:HALO_NET_ADDRESS = "127.0.0.200"; $env:HALO_NET_BROADCAST = "127.0.0.201"
+cargo run --release --features dlss -- --opence ..\OpenCE-bevy\build\windows\halo.exe --menu
+# another: join it
+$env:HALO_NETWORK_TEST = "join"; $env:HALO_NET_ADDRESS = "127.0.0.201"; $env:HALO_NET_BROADCAST = "127.0.0.200"
+cargo run --release --features dlss -- --opence ..\OpenCE-bevy\build\windows\halo.exe --menu
+```
 
 The game also shares its own picture without the opaque world: the HUD, menus, cutscene letterboxing, particles, decals, fog, water and every transparent surface, drawn over a clear screen and composited over the ray-traced frame (the *game overlay*, `src/overlay.rs`). The viewer pairs each overlay picture with the world frame it was drawn for. The window is then a fixed 1280×720, the size the hidden game draws at, so the two pictures share a shape. `--no-overlay` leaves the overlay out and draws the transparent surfaces in Bevy, as before. For debugging, `HALO_RT_OVERLAY_DEBUG=1` tints the overlay's coverage red. With `HALO_RT_OVERLAY_DEBUG=2` and `HALO_BEVY_OVERLAY_DEBUG_WORLD=1` (which makes the game draw its opaque world too), the game's whole picture shows at half strength over the viewer's, so you can compare the two.
 
@@ -91,7 +107,7 @@ The game also shares its own picture without the opaque world: the HUD, menus, c
 | `crates/halo_map` | A Bevy-free reader for Xbox cache files: inflation, tag index, BSP geometry, models, object placements, bitmaps (swizzle, DXT/BC, P8 bump), shaders, transparent-shader combiner programs (built and evaluated), skies (and a CPU sky renderer), scenario. |
 | `crates/halo_map/src/layout.rs` | Tag struct offsets, **generated** from OpenCE's C headers. |
 | `tools/tag_layout` | The generator: `python tools/tag_layout/gen.py` compiles each `probe*.c` against `../OpenCE` with clang (i686 MSVC ABI) and reads the offsets back. Add a field to a probe and re-run it to expose it. |
-| `src/` | The Bevy app: `level.rs` (BSPs, objects and the sky model → meshes and materials), `material.rs` + `shaders/` (the Halo environment material extension and the transparent combiner material), `textures.rs` (bitmaps → images, emissive and roughness bakes), `sky.rs` (sun, sky light and sky cubemap), `bridge.rs` (`--bridge`/`--opence`: the game's objects, camera and input), `overlay.rs` (the game's HUD, effects and transparent surfaces composited over the frame), `main.rs` (camera, controls, DLSS). |
+| `src/` | The Bevy app: `level.rs` (BSPs, objects and the sky model → meshes and materials), `material.rs` + `shaders/` (the Halo environment material extension and the transparent combiner material), `textures.rs` (bitmaps → images, emissive and roughness bakes), `sky.rs` (sun, sky light and sky cubemap), `bridge.rs` (`--bridge`/`--opence`: the game's objects, camera and input), `overlay.rs` (the game's HUD, effects and transparent surfaces composited over the frame), `options.rs` (the F10 options, saved between runs), `main.rs` (camera, controls, DLSS, loading and following levels). |
 | `examples/solari_demo.rs` | Bevy's Solari example (PICA PICA scene), kept as a reference: `cargo run --release --example solari_demo`. |
 
 ### `halo_map` CLI

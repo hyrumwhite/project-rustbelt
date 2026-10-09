@@ -180,6 +180,7 @@ struct Tracked {
     root: Entity,
     definition: u32,
     permutations: [u8; 8],
+    change_colors: [[f32; 3]; 4],
     model: Arc<AnimatedModel>,
     nodes: Vec<Option<Entity>>,
 }
@@ -280,7 +281,11 @@ fn sync_objects(
         seen.insert(object.object_index, ());
         // an object whose definition or permutations changed is made again
         let current = objects.tracked.get(&object.object_index);
-        if current.is_some_and(|t| t.definition != object.definition_index || t.permutations != object.region_permutations) {
+        if current.is_some_and(|t| {
+            t.definition != object.definition_index
+                || t.permutations != object.region_permutations
+                || t.change_colors != object.change_colors
+        }) {
             let old = objects.tracked.remove(&object.object_index).unwrap();
             commands.entity(old.root).despawn();
         }
@@ -301,13 +306,14 @@ fn sync_objects(
                 objects.modelless.insert(key, ());
                 continue;
             };
-            let (root, nodes) = builder.spawn_animated_model(&mut commands, &model, raster);
+            let (root, nodes) = builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, assets);
             objects.tracked.insert(
                 object.object_index,
                 Tracked {
                     root,
                     definition: object.definition_index,
                     permutations: object.region_permutations,
+                    change_colors: object.change_colors,
                     model,
                     nodes,
                 },
@@ -395,7 +401,7 @@ pub fn not_forwarding(forward: Option<Res<ForwardInput>>) -> bool {
 }
 
 /// Keys the viewer keeps for itself even while forwarding.
-const VIEWER_KEYS: [KeyCode; 2] = [KeyCode::F8, KeyCode::F12];
+const VIEWER_KEYS: [KeyCode; 3] = [KeyCode::F8, KeyCode::F10, KeyCode::F12];
 
 /// Click to play (grab the cursor), F12 to let go.
 fn grab_cursor(
@@ -404,15 +410,18 @@ fn grab_cursor(
     follow: Res<FollowGame>,
     window: Single<(&Window, &mut bevy::window::CursorOptions), With<bevy::window::PrimaryWindow>>,
     mut forward: ResMut<ForwardInput>,
+    panel: Option<Res<crate::options::OptionsPanel>>,
 ) {
     use bevy::window::CursorGrabMode;
     let (window, mut cursor) = window.into_inner();
     let grabbed = cursor.grab_mode != CursorGrabMode::None;
-    let release = keys.just_pressed(KeyCode::F12) || !window.focused || !follow.0;
+    // (the options panel has the mouse while it's open)
+    let panel_open = panel.is_some_and(|p| p.open);
+    let release = keys.just_pressed(KeyCode::F12) || !window.focused || !follow.0 || panel_open;
     if grabbed && release {
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
-    } else if !grabbed && follow.0 && window.focused && buttons.just_pressed(MouseButton::Left) {
+    } else if !grabbed && !panel_open && follow.0 && window.focused && buttons.just_pressed(MouseButton::Left) {
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }

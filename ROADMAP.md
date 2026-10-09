@@ -185,11 +185,13 @@ OpenCE branch `bevy-bridge-multiplayer` (protocol 6).
 - The hidden game already did most of the work: its own mixer plays positioned sound, and its own menus drive multiplayer through the overlay. The viewer's job was to follow it: reloading levels, a bridge per game, and the camera as the listener.
 - OpenCE's network test harness (`HALO_NETWORK_TEST`, loopback addresses per game) makes a two-machine system link check scriptable on one PC.
 
-## Phase 7 (long term): Native Rust subsystems  ← *next*
+## Phase 7 (long term): Native Rust subsystems  ← *in progress*
 
 Move subsystems out of the 32-bit process one at a time behind the bridge interface, ordered by payoff:
 
-1. Camera and input
+1. Camera and input ✅ (OpenCE branch `bevy-bridge-native-input`, protocol 7)
+   - [x] Input is the viewer's: keyboard and mouse (phase 4), and now gamepads. Bevy reads the controllers and the bridge forwards up to four in SDL's layout. While the viewer owns them, the game's XInput layer takes them instead of physical pads, which a hidden window never receives. The game's rumble comes back and plays on the controller.
+   - [x] Camera: measured, and kept in the game. The game's shared camera follows the mouse within one frame (median 7.5 ms, at most 9.1 ms, at 144 frames a second; `bridge_probe latency`). A Rust camera predicting the aim could save only that. It would also put the game's world-anchored overlay (water, effects, decals, drawn with the game's camera) out of step with the scene on fast turns.
 2. Objects and physics
 3. Effects
 4. Scripts (`hs`)

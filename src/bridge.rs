@@ -127,7 +127,7 @@ impl Plugin for BridgePlugin {
             .init_resource::<FollowGame>()
             .init_resource::<ForwardInput>()
             .add_systems(First, read_frame.in_set(ReadFrame))
-            .add_systems(PreUpdate, (grab_cursor, forward_input).chain().after(bevy::input::InputSystems))
+            .add_systems(PreUpdate, (grab_cursor, forward_input, forward_gamepads).chain().after(bevy::input::InputSystems))
             .add_systems(Update, (toggle_follow, sync_objects, sync_camera).chain());
     }
 }
@@ -478,6 +478,103 @@ fn forward_input(
         state.listener_up = to_halo(*camera.up(), 1.0);
     }
     link.bridge.write_input(state);
+}
+
+/// Forwards the gamepads to the game while it has this window's attention
+/// (focused, following the game's camera, the options closed), and plays
+/// the game's rumble on them.
+fn forward_gamepads(
+    gamepads: Query<(Entity, &bevy::input::gamepad::Gamepad)>,
+    follow: Res<FollowGame>,
+    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+    panel: Option<Res<crate::options::OptionsPanel>>,
+    mut link: ResMut<BridgeLink>,
+    mut rumble_requests: MessageWriter<bevy::input::gamepad::GamepadRumbleRequest>,
+    mut playing: Local<Vec<(Entity, [u16; 2])>>,
+    time: Res<Time>,
+    mut since_refresh: Local<f32>,
+) {
+    use bevy::input::gamepad::{GamepadAxis, GamepadButton, GamepadRumbleIntensity, GamepadRumbleRequest};
+    use halo_bridge::sdl_button as b;
+    const BUTTONS: [(GamepadButton, u32); 15] = [
+        (GamepadButton::South, b::SOUTH),
+        (GamepadButton::East, b::EAST),
+        (GamepadButton::West, b::WEST),
+        (GamepadButton::North, b::NORTH),
+        (GamepadButton::Select, b::BACK),
+        (GamepadButton::Mode, b::GUIDE),
+        (GamepadButton::Start, b::START),
+        (GamepadButton::LeftThumb, b::LEFT_STICK),
+        (GamepadButton::RightThumb, b::RIGHT_STICK),
+        (GamepadButton::LeftTrigger, b::LEFT_SHOULDER),
+        (GamepadButton::RightTrigger, b::RIGHT_SHOULDER),
+        (GamepadButton::DPadUp, b::DPAD_UP),
+        (GamepadButton::DPadDown, b::DPAD_DOWN),
+        (GamepadButton::DPadLeft, b::DPAD_LEFT),
+        (GamepadButton::DPadRight, b::DPAD_RIGHT),
+    ];
+    let attending = window.focused && follow.0 && panel.is_none_or(|p| !p.open);
+    let mut pads = Vec::new();
+    let mut entities = Vec::new();
+    if attending {
+        for (entity, gamepad) in gamepads.iter().take(halo_bridge::GAMEPADS) {
+            let mut pad = halo_bridge::Gamepad::default();
+            for (button, bit) in BUTTONS {
+                if gamepad.pressed(button) {
+                    pad.buttons |= 1 << bit;
+                }
+            }
+            let stick = |v: Option<f32>| (v.unwrap_or(0.0).clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            let trigger = |v: Option<f32>| (v.unwrap_or(0.0).clamp(0.0, 1.0) * 32767.0).round() as i16;
+            // (SDL's y axes point down, Bevy's up)
+            pad.axes = [
+                stick(gamepad.get(GamepadAxis::LeftStickX)),
+                stick(gamepad.get(GamepadAxis::LeftStickY).map(|v| -v)),
+                stick(gamepad.get(GamepadAxis::RightStickX)),
+                stick(gamepad.get(GamepadAxis::RightStickY).map(|v| -v)),
+                trigger(gamepad.get(GamepadButton::LeftTrigger2)),
+                trigger(gamepad.get(GamepadButton::RightTrigger2)),
+            ];
+            pads.push(pad);
+            entities.push(entity);
+        }
+    }
+    link.bridge.write_gamepads(&pads);
+
+    // the game's rumble: started or stopped as it changes, and renewed
+    // while it lasts (each request plays for a second)
+    *since_refresh += time.delta_secs();
+    let refresh = *since_refresh > 0.5;
+    if refresh {
+        *since_refresh = 0.0;
+    }
+    let rumble = link.bridge.rumble();
+    let mut now = Vec::new();
+    for (index, &entity) in entities.iter().enumerate() {
+        let motors = rumble[index];
+        let before = playing.iter().find(|(e, _)| *e == entity).map(|(_, m)| *m).unwrap_or([0, 0]);
+        if motors != before || (refresh && motors != [0, 0]) {
+            rumble_requests.write(GamepadRumbleRequest::Stop { gamepad: entity });
+            if motors != [0, 0] {
+                rumble_requests.write(GamepadRumbleRequest::Add {
+                    gamepad: entity,
+                    duration: Duration::from_secs(1),
+                    intensity: GamepadRumbleIntensity {
+                        strong_motor: motors[0] as f32 / 65535.0,
+                        weak_motor: motors[1] as f32 / 65535.0,
+                    },
+                });
+            }
+        }
+        now.push((entity, motors));
+    }
+    // (pads no longer forwarded stop)
+    for (entity, motors) in playing.iter() {
+        if *motors != [0, 0] && !entities.contains(entity) {
+            rumble_requests.write(GamepadRumbleRequest::Stop { gamepad: *entity });
+        }
+    }
+    *playing = now;
 }
 
 /// A key's SDL scancode: its USB HID keyboard usage.

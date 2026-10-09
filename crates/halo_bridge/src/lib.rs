@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;
@@ -129,6 +129,47 @@ impl Input {
     }
 }
 
+/// A gamepad forwarded to the game (`struct bevy_bridge_gamepad`), in SDL's
+/// terms: a bit per `SDL_GamepadButton`, axes in `SDL_GamepadAxis` order
+/// and ranges (sticks -32768..32767 with y down, triggers 0..32767).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Gamepad {
+    pub buttons: u32,
+    pub axes: [i16; 6],
+    /// The game's rumble (low and high frequency motors, 0..65535); only the
+    /// game writes it.
+    pub rumble: [u16; 2],
+}
+
+pub const GAMEPADS: usize = 4;
+
+/// `SDL_GamepadButton`.
+pub mod sdl_button {
+    pub const SOUTH: u32 = 0;
+    pub const EAST: u32 = 1;
+    pub const WEST: u32 = 2;
+    pub const NORTH: u32 = 3;
+    pub const BACK: u32 = 4;
+    pub const GUIDE: u32 = 5;
+    pub const START: u32 = 6;
+    pub const LEFT_STICK: u32 = 7;
+    pub const RIGHT_STICK: u32 = 8;
+    pub const LEFT_SHOULDER: u32 = 9;
+    pub const RIGHT_SHOULDER: u32 = 10;
+    pub const DPAD_UP: u32 = 11;
+    pub const DPAD_DOWN: u32 = 12;
+    pub const DPAD_LEFT: u32 = 13;
+    pub const DPAD_RIGHT: u32 = 14;
+}
+
+#[repr(C)]
+struct Gamepads {
+    active: u32,
+    count: u32,
+    pads: [Gamepad; GAMEPADS],
+}
+
 #[repr(C)]
 struct OverlayHeader {
     sequence: u32,
@@ -147,6 +188,7 @@ struct Shared {
     writer_process_id: u32,
     reserved: [u32; 3],
     input: Input,
+    gamepads: Gamepads,
     frames: [Frame; FRAMES],
     overlay_enabled: u32,
     latest_overlay: u32,
@@ -161,6 +203,7 @@ const _: () = assert!(std::mem::size_of::<Object>() == 76);
 const _: () = assert!(std::mem::size_of::<Node>() == 52);
 const _: () = assert!(std::mem::size_of::<Camera>() == 40);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);
+const _: () = assert!(std::mem::size_of::<Gamepad>() == 20);
 
 /// One frame of the game's world.
 #[derive(Debug, Clone, Default)]
@@ -282,6 +325,37 @@ impl Bridge {
             std::ptr::write_volatile(target, *input);
         }
         fence(Ordering::Release);
+    }
+
+    /// Forwards gamepads to the game, which then takes them in place of its
+    /// own (the first shares port 0 with the keyboard). Their rumble fields
+    /// are the game's and are left alone.
+    pub fn write_gamepads(&mut self, pads: &[Gamepad]) {
+        let count = pads.len().min(GAMEPADS);
+        // SAFETY: the view is writable and at least size_of::<Shared>()
+        // bytes; the game only reads these fields
+        unsafe {
+            let block = &raw const (*self.shared).gamepads as *mut Gamepads;
+            for (index, pad) in pads.iter().take(count).enumerate() {
+                let target = &raw mut (*block).pads[index];
+                std::ptr::write_volatile(&raw mut (*target).buttons, pad.buttons);
+                std::ptr::write_volatile(&raw mut (*target).axes, pad.axes);
+            }
+            for index in count..GAMEPADS {
+                let target = &raw mut (*block).pads[index];
+                std::ptr::write_volatile(&raw mut (*target).buttons, 0);
+                std::ptr::write_volatile(&raw mut (*target).axes, [0; 6]);
+            }
+            std::ptr::write_volatile(&raw mut (*block).count, count as u32);
+            fence(Ordering::Release);
+            std::ptr::write_volatile(&raw mut (*block).active, 1);
+        }
+    }
+
+    /// The game's rumble for each gamepad (low, high frequency motor).
+    pub fn rumble(&self) -> [[u16; 2]; GAMEPADS] {
+        // SAFETY: as in check()
+        unsafe { std::array::from_fn(|i| std::ptr::read_volatile(&(*self.shared).gamepads.pads[i].rumble)) }
     }
 
     /// Whether the game shares overlays.

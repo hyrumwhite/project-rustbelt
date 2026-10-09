@@ -1,0 +1,129 @@
+# Halo: Combat Evolved on Bevy (Solari + DLSS) — Roadmap
+
+Goal: run Halo: CE — from the [OpenCE](../OpenCE) decompilation (Xbox build 2342) and the retail
+Xbox maps — with Bevy as the renderer, lit by Solari real-time ray tracing and DLSS Ray
+Reconstruction.
+
+## Starting point (what OpenCE is)
+
+| Fact | Consequence |
+| --- | --- |
+| ~500k lines of decompiled C (AI 79k, rasterizer 44k, interface 42k, bitmaps 37k, game 32k, hs 28k, units 25k, …) plus a 95k-line port layer (`port/linux`). | A line-by-line Rust rewrite is years of work, so the port has to be incremental. |
+| A **32-bit x86** program. Tag data is loaded at the fixed Xbox address `0x803A6000`, and every tag struct holds 32-bit pointers. | The game code can't be linked into a 64-bit process without rewriting every tag struct. The DLSS SDK only ships 64-bit libraries. |
+| The port renders by **emulating Direct3D 8 + NV2A shaders on OpenGL** (`d3d8_gl.c`, `nv2a_psh.c`, `nv2a_vsh.c`). | That layer only sees triangles and textures, not a scene. Ray tracing needs scene data, so Bevy has to hook in *above* the rasterizer: game state → Bevy entities. |
+| Retail maps are zlib-compressed Xbox cache files (`head` … `foot`, version 5). | The map format is well defined by OpenCE's headers. A native Rust loader is practical. |
+| OpenCE's own code is CC0. The game data is Microsoft's. | We never ship or commit game data. The user supplies `maps/` (OpenCE extracts it from a disc image). |
+
+## Architecture
+
+```
+            ┌──────────────────────── 64-bit Bevy process ────────────────────────┐
+ maps/*.map │ halo_map (Rust)          halo_rt (Bevy app)                         │
+ ─────────► │  cache file ─► tags ─►   BSP / models / bitmaps / shaders ─► meshes, │
+            │  (layout generated       StandardMaterial, lights ─► Solari + DLSS   │
+            │   from OpenCE headers)                                               │
+            │                          ▲ per-frame game state (Phase 4)            │
+            └──────────────────────────┼──────────────────────────────────────────┘
+                                       │ shared memory: camera, objects, node
+                                       │ matrices, effects   ◄── input
+            ┌──────────────────────────┴───── 32-bit OpenCE process ──────────────┐
+            │ OpenCE simulation (AI, physics, scripts, network) with rasterizer   │
+            │ calls replaced by a render-state exporter                           │
+            └──────────────────────────────────────────────────────────────────────┘
+```
+
+- **`crates/halo_map`**: a pure-Rust, Bevy-free reader for Xbox cache files.
+  - Struct offsets are **generated from OpenCE's own C headers** by `tools/tag_layout` (clang, i686 MSVC ABI), so they are the compiler's numbers rather than hand-counted ones.
+  - The generated file is committed, so OpenCE isn't needed to build.
+- **`halo_rt`**: the Bevy app. It converts tags into Bevy assets and entities and owns rendering, the camera and the UI.
+- **The simulation bridge** (Phase 4): OpenCE runs headless in its own 32-bit process and streams render state to Bevy. This gets the whole game playable without first rewriting 400k lines of game logic. Individual subsystems can still move to Rust later (Phase 7) behind the same interface.
+
+Coordinates: Halo is Z-up and measured in world units (1 wu = 10 ft = 3.048 m). Bevy is Y-up and measured in metres. The mapping is `bevy = (x, z, -y) * 3.048`.
+
+---
+
+## Phase 1: Map loader + static level viewer ✅ (done)
+
+Deliverable: `cargo run --release --features dlss -- b30` flies a free camera through The Silent Cartographer's level geometry, textured and lit by Solari with DLSS-RR.
+
+- [x] Workspace layout: `halo_map` library, `halo_rt` app; the Solari demo moved to `examples/`
+- [x] `tools/tag_layout`: generates struct offsets/sizes from OpenCE headers → `crates/halo_map/src/layout.rs`
+- [x] Cache file: header check, zlib decompression, tag index, address → file-offset translation per image (tag data and each BSP)
+- [x] Tag access: by datum, group or name; `tag_block` / `tag_reference` / `tag_data` readers with bounds checks
+- [x] Scenario → structure BSP references → BSP header → `structure_bsp`
+- [x] BSP geometry: lightmaps → materials → compressed vertices (11:11:10 normals) + surfaces, winding fixed for Bevy
+- [x] Bitmaps: Xbox swizzle, DXT1/3/5 passthrough as BC1/2/3 with mips, A8R8G8B8 / X8R8G8B8 / R5G6B5 / A1R5G5B5 / A4R4G4B4 / A8 / Y8 / AY8 / A8Y8 → RGBA8 (P8 bump, cube and 3D textures moved to phase 3)
+- [x] Shaders: base maps → `StandardMaterial`; shaders with radiosity emission → Solari emissive lights
+- [x] Sky: the sun → directional light; the hemisphere sky light → environment light + skybox (a stand-in for skies without one)
+- [x] Bevy viewer: meshes + `RaytracingMesh3d`, free camera at the player start, Solari, DLSS-RR, map/BSP selection, live light tuning, `--screenshot`
+- [x] `halo_map` CLI: info / tags / bsp (stats + winding check) / shaders / sky / bitmaps (decode-all) / bitmap → PNG
+
+Checked on b30 (2 BSPs, 58k triangles), a10 (9 BSPs, 364k triangles) and bloodgulch. All of their 2D bitmaps decode. Frames take about 2 ms of GPU time at 1280×720 with DLSS-RR on an RTX 5080.
+
+### What Phase 1 taught us (format notes)
+
+- Built maps have the `_bitmap_cached_bit` set, which means `pixels_offset` is already absolute. Adding the group's `pixel_data.file_offset` again (as `texture_cache_bitmap_new` does at build time) breaks every texture.
+- BSP triangles are clockwise when seen from the front (100% of triangles in every BSP checked), so the viewer swaps two indices per triangle.
+- The decompiled `sky_light` leaves colour, power and direction in `unused30`. They sit at the Halo Editing Kit offsets 0x50, 0x5C and 0x68.
+- The Xbox build has no `shader_transparent_chicago_extended`, so the shader types run: environment 3, model 4, generic 5, chicago 6, water 7, glass 8, meter 9, plasma 10.
+- Halo's light fixtures are mostly transparent-generic (`sotr`) shaders with radiosity emission. Drawn opaque and emissive, they light interiors on their own.
+
+## Phase 2: World content and real lighting  ← *next*
+
+- Scenery, machines, vehicles, weapons and equipment placed from the scenario palettes
+- Models (`mod2`/`mode` on Xbox): compressed model vertices, triangle strips, regions/permutations, LODs (highest only), default-pose node matrices
+- `shader_model`: base map, multipurpose map (specular/self-illum/reflection masks)
+- Sky geometry (the `sky ` tag's model) as the backdrop, and/or captured into the environment cubemap; replaces phase 1's gradient stand-in
+- Emissive surfaces from self-illumination maps (environment shaders' primary/secondary/plasma), not just radiosity emission; physically calibrated light units
+- Lights (`ligh`) attached to objects/markers → emissive proxies or Bevy lights
+- Optional "baked" mode: show the original radiosity lightmaps (`lightmap_group` bitmaps + lightmap UVs) for side-by-side comparison
+
+## Phase 3: Material fidelity
+
+- Detail maps (`biased multiply`, `multiply`, `biased add`) baked into or composited onto the base colour
+- Bump maps (height → normal) → `normal_map_texture`
+- Specular masks and cube maps → roughness/metallic heuristics, so Solari gives real reflections
+- Alpha-tested environment shaders → masked materials (Solari support permitting)
+- Transparent shaders (`schi`, `scex`, `sgla`, `swat`, `smet`, `spla`): glass and water through a raster overlay, since Solari is opaque-only
+- Texture animation, Xbox cube-map faces, mip chains, 3D textures
+
+## Phase 4: Simulation bridge (playable)
+
+- Build OpenCE headless (`HALO_BEVY_BRIDGE`), with the D3D8 rasterizer replaced by a render-state exporter at the `render_*` / `rasterizer_*` scene level
+- Shared-memory protocol (versioned, double-buffered): camera, loaded BSP, visible objects (tag index, node matrices, permutation, colour change, shader parameters), dynamic lights, decals, particles/contrails, weather, first-person model
+- Input and window events from Bevy → OpenCE input layer (`xinput_sdl.c` equivalent)
+- Process management: spawn OpenCE, handshake, map loading, crash reporting
+- Frame interpolation between sim ticks (30 Hz sim → display rate; see `render_interpolation.c`)
+
+## Phase 5: Effects, HUD and presentation
+
+- Particles, contrails, decals, lightning and lens flares (raster passes on top of Solari)
+- HUD, menus and text (Bevy UI drawing OpenCE's widget output, or the bridge sending 2D draw lists)
+- Active camouflage, plasma, screen effects, fog, water
+- Cutscenes and cinematic letterboxing
+
+## Phase 6: Audio and multiplayer parity
+
+- Sound playback from the bridge (or a Rust Xbox ADPCM decoder + Bevy audio), with 3D positioning and sound environments
+- Check that OpenCE's netcode/system link works through the bridge
+- Options UI for ray-tracing quality and DLSS modes
+
+## Phase 7 (long term): Native Rust subsystems
+
+Move subsystems out of the 32-bit process one at a time behind the bridge interface, ordered by payoff:
+
+1. Camera and input
+2. Objects and physics
+3. Effects
+4. Scripts (`hs`)
+5. AI
+6. Networking
+
+When nothing is left in the 32-bit process, the bridge goes away.
+
+## Known risks
+
+- **Solari is experimental.** It needs hardware ray tracing and supports opaque `StandardMaterial` only. Transparent and alpha-tested content needs a fallback.
+- **Interior lighting.** Halo's interiors are lit almost entirely by baked radiosity. To look right under Solari, they need emissive light sources recovered from shaders, lens-flare markers and `ligh` tags (Phase 2).
+- **32/64-bit split.** The shared-memory bridge has to stay cheap. A frame's state is small (hundreds of objects × nodes), so this should be fine.
+- **Legal.** Never commit or redistribute game data or DLSS binaries.

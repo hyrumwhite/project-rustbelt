@@ -1,0 +1,37 @@
+[workspace]
+members = ["crates/halo_map"]
+
+[package]
+name = "halo_rt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+description = "Halo: Combat Evolved maps rendered with Bevy Solari ray tracing and DLSS"
+
+[features]
+default = []
+# NVIDIA DLSS (Ray Reconstruction denoising + upscaling). Requires the DLSS SDK,
+# Vulkan SDK and clang at build time — see README.md.
+dlss = ["bevy/dlss"]
+
+[dependencies]
+halo_map = { path = "crates/halo_map" }
+bevy = { version = "0.20.0", features = ["bevy_solari", "https", "free_camera"] }
+argh = "0.1.12"
+
+[dev-dependencies]
+# examples/solari_demo.rs
+chacha20 = { version = "0.10.0", default-features = false, features = ["rng"] }
+rand = "0.10.0"
+
+# Fast-ish iteration: light optimization for our code, full optimization for deps.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

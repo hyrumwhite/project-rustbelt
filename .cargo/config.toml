@@ -1,0 +1,4 @@
+# Point dlss_wgpu's build script at the SDK cloned by scripts/setup-dlss.ps1.
+# An existing DLSS_SDK environment variable takes precedence.
+[env]
+DLSS_SDK = { value = "vendor/DLSS", relative = true }

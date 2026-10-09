@@ -1,0 +1,246 @@
+//! Inspect Halo Xbox cache files.
+//!
+//! ```text
+//! halo_map info    <map>
+//! halo_map tags    <map> [group]
+//! halo_map bsp     <map>
+//! halo_map shaders <map>
+//! halo_map sky     <map>
+//! halo_map bitmap  <map> <tag name> <out.png> [bitmap index]
+//! halo_map bitmaps <map>          (decode every bitmap; report by format)
+//! ```
+
+use halo_map::{bitmap, bsp, fourcc, fourcc_str, groups, scenario, shader, sky, CacheFile};
+use std::{collections::BTreeMap, process::ExitCode, time::Instant};
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (Some(command), Some(path)) = (args.first(), args.get(1)) else {
+        eprintln!("usage: halo_map <info|tags|bsp|shaders|sky|bitmap|bitmaps> <map> [args]");
+        return ExitCode::FAILURE;
+    };
+    let start = Instant::now();
+    let cache = match CacheFile::open(path) {
+        Ok(cache) => cache,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let loaded = start.elapsed();
+    let result = match command.as_str() {
+        "info" => info(&cache, loaded),
+        "tags" => tags(&cache, args.get(2)),
+        "bsp" => bsps(&cache),
+        "shaders" => shaders(&cache),
+        "sky" => skies(&cache),
+        "bitmap" => export_bitmap(&cache, &args[2..]),
+        "bitmaps" => all_bitmaps(&cache),
+        other => Err(format!("unknown command {other}").into()),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+type CliResult = Result<(), Box<dyn std::error::Error>>;
+
+fn info(cache: &CacheFile, loaded: std::time::Duration) -> CliResult {
+    let h = &cache.header;
+    println!("name         {}", h.name);
+    println!("build        {}", h.build);
+    println!("version      {}", h.version);
+    println!("file length  {:#x} ({:.1} MiB inflated in {loaded:.2?})", h.file_length, h.file_length as f64 / 1048576.0);
+    println!("tag data     {:#x} bytes at {:#x}", h.tag_data_size, h.tag_data_offset);
+    println!("tags         {}", cache.tags.len());
+    println!("scenario     {}", cache.tag(cache.scenario_datum)?.name);
+    for start in scenario::player_starts(cache)?.iter().take(4) {
+        println!("player start {:?} facing {:.2} bsp {}", start.position, start.facing, start.bsp_index);
+    }
+    let mut by_group: BTreeMap<String, usize> = BTreeMap::new();
+    for tag in &cache.tags {
+        *by_group.entry(fourcc_str(tag.group)).or_default() += 1;
+    }
+    println!("groups       {}", by_group.iter().map(|(g, n)| format!("{g}:{n}")).collect::<Vec<_>>().join(" "));
+    Ok(())
+}
+
+fn tags(cache: &CacheFile, group: Option<&String>) -> CliResult {
+    let group = group.map(|g| {
+        let mut code = [b' '; 4];
+        code[..g.len().min(4)].copy_from_slice(&g.as_bytes()[..g.len().min(4)]);
+        fourcc(&code)
+    });
+    for tag in cache.tags.iter().filter(|t| group.is_none_or(|g| t.is_a(g))) {
+        println!("{:#010x} {} {:#010x} {}", tag.datum, fourcc_str(tag.group), tag.base_address, tag.name);
+    }
+    Ok(())
+}
+
+fn bsps(cache: &CacheFile) -> CliResult {
+    for reference in bsp::references(cache)? {
+        println!(
+            "bsp {} {} — {:#x} bytes at file {:#x}, loaded at {:#010x}",
+            reference.index, reference.name, reference.space.size, reference.space.file_offset, reference.space.base
+        );
+        let start = Instant::now();
+        let loaded = bsp::Bsp::load(cache, &reference)?;
+        let materials = loaded.materials()?;
+        let bounds = loaded.world_bounds()?;
+        let vertices: usize = materials.iter().map(|m| m.vertices.len()).sum();
+        let triangles: usize = materials.iter().map(|m| m.indices.len() / 3).sum();
+
+        // Winding: compare each triangle's geometric normal with its vertices'
+        // normals, to know which way the game's triangles face.
+        let (mut agree, mut disagree) = (0usize, 0usize);
+        for material in &materials {
+            for tri in material.indices.chunks_exact(3) {
+                let [a, b, c] = [0, 1, 2].map(|i| material.vertices[tri[i] as usize]);
+                let e1 = sub(b.position, a.position);
+                let e2 = sub(c.position, a.position);
+                let n = cross(e1, e2);
+                let vn = add(add(a.normal, b.normal), c.normal);
+                let d = dot(n, vn);
+                if d > 0.0 {
+                    agree += 1;
+                } else if d < 0.0 {
+                    disagree += 1;
+                }
+            }
+        }
+        let normal_lengths: Vec<f32> = materials
+            .iter()
+            .flat_map(|m| m.vertices.iter().map(|v| dot(v.normal, v.normal).sqrt()))
+            .collect();
+        let mean_normal = normal_lengths.iter().sum::<f32>() / normal_lengths.len().max(1) as f32;
+        println!(
+            "  {} materials, {vertices} vertices, {triangles} triangles, read in {:.2?}",
+            materials.len(),
+            start.elapsed()
+        );
+        println!("  bounds x {:?} y {:?} z {:?}", bounds[0], bounds[1], bounds[2]);
+        println!("  counter-clockwise triangles (cross(b-a, c-a) along normals): {agree}, clockwise: {disagree}");
+        println!("  mean |normal| {mean_normal:.3}");
+        let outside = materials
+            .iter()
+            .flat_map(|m| &m.vertices)
+            .filter(|v| (0..3).any(|i| v.position[i] < bounds[i][0] - 0.01 || v.position[i] > bounds[i][1] + 0.01))
+            .count();
+        println!("  vertices outside the bounds: {outside}");
+    }
+    Ok(())
+}
+
+fn shaders(cache: &CacheFile) -> CliResult {
+    let mut seen = std::collections::BTreeSet::new();
+    for reference in bsp::references(cache)? {
+        let loaded = bsp::Bsp::load(cache, &reference)?;
+        for material in loaded.materials()? {
+            let Some(datum) = material.shader.datum else { continue };
+            if !seen.insert(datum) {
+                continue;
+            }
+            match shader::shader_info(cache, material.shader)? {
+                Some(info) => {
+                    let base = info.base_map.and_then(|r| r.datum).map(|d| cache.tag(d).map(|t| t.name.clone()));
+                    println!(
+                        "{} {:?} {} emit {:?}x{:.1} base {:?}",
+                        fourcc_str(info.group),
+                        info.shader_type,
+                        info.name,
+                        info.emitted_light,
+                        info.emitted_power,
+                        base.transpose()?.unwrap_or_default()
+                    );
+                }
+                None => println!("(none)"),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn skies(cache: &CacheFile) -> CliResult {
+    for sky in sky::skies(cache)? {
+        println!("{}", sky.name);
+        for light in &sky.lights {
+            println!(
+                "  light color {:?} power {:.3} direction {:?} diameter {:.4}",
+                light.color, light.power, light.direction, light.diameter
+            );
+        }
+    }
+    Ok(())
+}
+
+fn export_bitmap(cache: &CacheFile, args: &[String]) -> CliResult {
+    let [name, out, rest @ ..] = args else {
+        return Err("usage: halo_map bitmap <map> <tag name> <out.png> [index]".into());
+    };
+    let index: usize = rest.first().map(|s| s.parse()).transpose()?.unwrap_or(0);
+    let tag = cache.find_tag(groups::BITMAP, name).ok_or_else(|| format!("no bitmap tag {name}"))?;
+    let bitmaps = bitmap::bitmaps(cache, tag.datum)?;
+    for (i, b) in bitmaps.iter().enumerate() {
+        println!(
+            "  [{i}] {}x{}x{} {:?} {:?} flags {:#06x} levels {} pixels {:#x}+{:#x}",
+            b.width, b.height, b.depth, b.kind, b.format, b.flags, b.levels, b.pixels_offset, b.pixels_size
+        );
+    }
+    let b = bitmaps.get(index).ok_or("bitmap index out of range")?;
+    let decoded = b.decode_rgba8(cache)?;
+    image::save_buffer(out, &decoded.data, decoded.width, decoded.height, image::ColorType::Rgba8)?;
+    println!("wrote {out}");
+    Ok(())
+}
+
+fn all_bitmaps(cache: &CacheFile) -> CliResult {
+    let mut counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut failures = Vec::new();
+    for tag in cache.tags.iter().filter(|t| t.group == groups::BITMAP) {
+        let bitmaps = match bitmap::bitmaps(cache, tag.datum) {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push(format!("{}: {e}", tag.name));
+                continue;
+            }
+        };
+        for (i, b) in bitmaps.iter().enumerate() {
+            let swizzled = if b.flags & (1 << 3) != 0 { " swizzled" } else { "" };
+            let entry = counts.entry(format!("{:?} {:?}{swizzled}", b.kind, b.format)).or_default();
+            match b.decode(cache, u32::MAX) {
+                Ok(_) => entry.0 += 1,
+                Err(e) => {
+                    entry.1 += 1;
+                    if b.kind == bitmap::Kind::Texture2d && b.format != bitmap::Format::P8Bump {
+                        failures.push(format!("{}[{i}]: {e}", tag.name));
+                    }
+                }
+            }
+        }
+    }
+    for (key, (ok, failed)) in &counts {
+        println!("{key:40} decoded {ok:5}  unsupported/failed {failed:5}");
+    }
+    for failure in failures.iter().take(20) {
+        println!("FAIL {failure}");
+    }
+    println!("{} unexpected failures", failures.len());
+    Ok(())
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}

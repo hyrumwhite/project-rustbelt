@@ -1,0 +1,20 @@
+[package]
+name = "halo_map"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+description = "Reader for Halo: Combat Evolved Xbox cache files (.map), with layouts generated from OpenCE"
+
+[features]
+default = ["cli"]
+# The `halo_map` inspection binary (PNG export needs `image`).
+cli = ["dep:image"]
+
+[dependencies]
+flate2 = "1.1"
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+
+[[bin]]
+name = "halo_map"
+required-features = ["cli"]

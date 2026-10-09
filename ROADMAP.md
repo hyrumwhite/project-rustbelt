@@ -117,15 +117,34 @@ On b30, every transparent surface is drawn except one meter and one plasma shade
 - Bevy sorts transparent meshes by the centres of their bounds, not their origins. Sky layers need a large negative depth bias (so they draw before the level's transparents) plus a step per layer bigger than the sky.
 - A custom `Material` culls back faces by default. Sky layers are seen from inside, so they must be double-sided.
 
-## Phase 4: Simulation bridge (playable)  ← *next*
+## Phase 4: Simulation bridge (playable) ✅ (done)
 
-- Build OpenCE headless (`HALO_BEVY_BRIDGE`), with the D3D8 rasterizer replaced by a render-state exporter at the `render_*` / `rasterizer_*` scene level
-- Shared-memory protocol (versioned, double-buffered): camera, loaded BSP, visible objects (tag index, node matrices, permutation, colour change, shader parameters), dynamic lights, decals, particles/contrails, weather, first-person model
-- Input and window events from Bevy → OpenCE input layer (`xinput_sdl.c` equivalent)
-- Process management: spawn OpenCE, handshake, map loading, crash reporting
-- Frame interpolation between sim ticks (30 Hz sim → display rate; see `render_interpolation.c`)
+Deliverable: `cargo run --release --features dlss -- b30 --opence <OpenCE>\build\windows\halo.exe` starts the game hidden and plays it in the Bevy window, ray traced.
 
-## Phase 5: Effects, HUD and presentation
+OpenCE side, branch `bevy-bridge` (worktree `../OpenCE-bevy`):
+- [x] `port/linux/game/bevy_bridge.c`: with `game.bevy_bridge` on, `render_frame` writes the first player's camera and every object's interpolated node matrices, definition, region permutations and visibility to shared memory (`bevy_bridge_protocol.h`; two frame buffers with sequence locks; a named file mapping on Windows, POSIX shm elsewhere)
+- [x] The first-person weapon and hands, recorded as `first_person_weapon_draw` poses them
+- [x] Input from the renderer: `bevy_bridge_input.c` turns the forwarded keyboard and mouse into SDL events before the platform layer polls, so bindings, menus and aiming work unchanged
+- [x] `game.bevy_bridge_map`: a level to load at start-up
+
+Viewer side:
+- [x] `crates/halo_bridge`: the protocol mirrored in Rust, snapshot reading and input writing; `bridge_probe` (with `walk`) checks it end to end without a window
+- [x] `--bridge`: the game's objects, spawned as they appear, split by node and posed every frame at `node matrix × default inverse` (the tag's baked `runtime_default_inverse_matrix`), hidden as the game hides them, despawned when deleted; the camera follows the game's (F8 flies free)
+- [x] Playing from the viewer: click to grab the mouse, F12 to let go; the viewer's hotkeys pause while playing
+- [x] `--opence <halo.exe>`: starts the game hidden on the map's scenario and stops it with the viewer; `--show-game` keeps its window
+- [x] Frame interpolation comes from the game (`render_interpolation.c`): it exports at display rate
+- [ ] Moved to phase 5: true two-node skinning (bipeds use a rigid per-node split now, with small seams at joints); change colours; shader animation from object functions (the rifle's ammo digits); effects, decals and dynamic lights; showing only the active BSP
+
+Checked: b30's opening cutscene (Pelicans, the troop bay landing), first-person gameplay with the assault rifle, a10's opening. A scripted walk through the bridge moves the player. Bridged starts are stable: 8 of 8 a10 starts clean with DLSS-RR running.
+
+### What Phase 4 taught us
+
+- OpenCE already blends node matrices and the camera between ticks for display-rate frames. Exporting from `render_frame` gets those blended poses for free.
+- Halo's node default inverse matrices are baked into the cache file, so the renderer needs no skeleton maths of its own.
+- Injecting SDL events is the narrowest input seam. Nothing in the game or the port's input code had to change.
+- DLSS creates its feature with GPU work that wgpu doesn't track. If that happens during the window's first surface configure, wgpu's idle wait fails and Bevy quits. Starting the camera 30 frames in avoids the race. Adding DLSS to a camera that's already rendering doesn't work: it stays off.
+
+## Phase 5: Effects, HUD and presentation  ← *next*
 
 - Particles, contrails, decals, lightning and lens flares (raster passes on top of Solari)
 - HUD, menus and text (Bevy UI drawing OpenCE's widget output, or the bridge sending 2D draw lists)

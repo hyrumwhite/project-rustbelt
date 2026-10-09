@@ -7,7 +7,7 @@ This project ports Halo: Combat Evolved to the **Bevy 0.20** engine and renders 
 
 It's based on the [OpenCE](../OpenCE) decompilation. See [ROADMAP.md](ROADMAP.md) for the architecture and phases.
 
-**Status: Phase 3 done.** The viewer loads a retail Xbox map directly from the `.map` file: its level geometry and every object the scenario places (scenery, vehicles, weapons, devices), with Halo's materials:
+**Status: Phase 4 done: playable.** With `--opence`, the viewer runs the actual game ([OpenCE](../OpenCE), hidden in the background) and you play it in the ray-traced window (see *Play*). Without it, the viewer loads a retail Xbox map directly from the `.map` file: its level geometry and every object the scenario places (scenery, vehicles, weapons, devices), with Halo's materials:
 - detail maps and bump maps on level surfaces;
 - alpha-tested grates and fences;
 - reflections and shininess from Halo's specular settings;
@@ -63,14 +63,33 @@ The camera starts at the scenario's first player start. Without `--features dlss
 
 The top-right panel shows GPU timings for each Solari pass and for DLSS-RR.
 
+## Play
+
+Playing needs OpenCE built from its `bevy-bridge` branch, which shares the game's world with the viewer and takes input from it. The branch is checked out at `../OpenCE-bevy`. Build it as OpenCE's Windows README says (`python configure.py`, then `ninja windows`). Then:
+
+```powershell
+cargo run --release --features dlss -- b30 --opence ..\OpenCE-bevy\build\windows\halo.exe
+```
+
+The game starts hidden on the level (the map's folder's parent is its data root) and stops when you close the viewer.
+
+| Key | Action |
+| --- | --- |
+| Click | Play: the mouse and keyboard go to the game (Halo's own bindings) |
+| F12 | Let go of the mouse |
+| F8 | Leave the game's camera and fly free (WASD/QE, right mouse to look); F8 again follows |
+
+The viewer's lighting hotkeys work while you're not playing. `--show-game` also shows the game's own window. `--bridge` attaches to a game you started yourself with `HALO_BEVY_BRIDGE=1`.
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
+| `crates/halo_bridge` | The bridge to OpenCE: its shared-memory protocol mirrored, frame snapshots, input forwarding; `bridge_probe` to inspect a running game. |
 | `crates/halo_map` | A Bevy-free reader for Xbox cache files: inflation, tag index, BSP geometry, models, object placements, bitmaps (swizzle, DXT/BC, P8 bump), shaders, transparent-shader combiner programs (built and evaluated), skies (and a CPU sky renderer), scenario. |
 | `crates/halo_map/src/layout.rs` | Tag struct offsets, **generated** from OpenCE's C headers. |
 | `tools/tag_layout` | The generator: `python tools/tag_layout/gen.py` compiles each `probe*.c` against `../OpenCE` with clang (i686 MSVC ABI) and reads the offsets back. Add a field to a probe and re-run it to expose it. |
-| `src/` | The Bevy app: `level.rs` (BSPs, objects and the sky model → meshes and materials), `material.rs` + `shaders/` (the Halo environment material extension and the transparent combiner material), `textures.rs` (bitmaps → images, emissive and roughness bakes), `sky.rs` (sun, sky light and sky cubemap), `main.rs` (camera, controls, DLSS). |
+| `src/` | The Bevy app: `level.rs` (BSPs, objects and the sky model → meshes and materials), `material.rs` + `shaders/` (the Halo environment material extension and the transparent combiner material), `textures.rs` (bitmaps → images, emissive and roughness bakes), `sky.rs` (sun, sky light and sky cubemap), `bridge.rs` (`--bridge`/`--opence`: the game's objects, camera and input), `main.rs` (camera, controls, DLSS). |
 | `examples/solari_demo.rs` | Bevy's Solari example (PICA PICA scene), kept as a reference: `cargo run --release --example solari_demo`. |
 
 ### `halo_map` CLI

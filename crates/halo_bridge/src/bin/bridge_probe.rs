@@ -1,11 +1,13 @@
 //! Prints what a running OpenCE shares through its Bevy bridge, once a second.
 //!
 //! ```text
-//! bridge_probe [seconds] [walk]
+//! bridge_probe [seconds] [walk] [listen]
 //! ```
 //!
 //! `walk` also forwards input: W held (and the mouse turning slowly) for the
-//! second half, to check the game takes input through the bridge.
+//! second half, to check the game takes input through the bridge. `listen`
+//! moves the game's listener to a point of its own for the second half (the
+//! game logs the change). `HALO_BEVY_BRIDGE_NAME` names the bridge.
 
 use halo_bridge::{Bridge, OBJECT_FIRST_PERSON, OBJECT_HIDDEN};
 use std::time::{Duration, Instant};
@@ -13,9 +15,13 @@ use std::time::{Duration, Instant};
 fn main() {
     let seconds: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(10);
     let walk = std::env::args().any(|a| a == "walk");
+    // (the game hears from a point above the start for the second half)
+    let listen = std::env::args().any(|a| a == "listen");
+    // (HALO_BEVY_BRIDGE_NAME, as the game takes it)
+    let name = std::env::var("HALO_BEVY_BRIDGE_NAME").unwrap_or_else(|_| halo_bridge::DEFAULT_NAME.to_string());
     let mut input = halo_bridge::Input::default();
     let mut bridge = loop {
-        match Bridge::open() {
+        match Bridge::open_named(&name) {
             Ok(bridge) => break bridge,
             Err(e) => {
                 eprintln!("{e}; retrying");
@@ -34,6 +40,14 @@ fn main() {
             if walking {
                 input.mouse_x += 1;
             }
+            bridge.write_input(&input);
+        }
+        if listen {
+            let listening = start.elapsed() > Duration::from_secs(seconds / 2);
+            input.listener_valid = u32::from(listening);
+            input.listener_position = [0.0, 0.0, 50.0];
+            input.listener_forward = [1.0, 0.0, 0.0];
+            input.listener_up = [0.0, 0.0, 1.0];
             bridge.write_input(&input);
         }
         if let Some(snapshot) = bridge.read() {

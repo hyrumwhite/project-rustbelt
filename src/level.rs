@@ -176,6 +176,9 @@ pub struct LevelBuilder {
     pub matte: bool,
     /// Leave out transparent surfaces (the game's overlay draws them).
     pub skip_transparent: bool,
+    /// The parent of everything this level spawns, so that despawning it
+    /// unloads the level (when the bridged game changes level).
+    pub root: Option<Entity>,
     pub stats: LevelStats,
 }
 
@@ -201,8 +204,16 @@ impl LevelBuilder {
             show_light_proxies: false,
             matte: false,
             skip_transparent: false,
+            root: None,
             stats: LevelStats { map_name: cache.header.name.clone(), ..default() },
             cache,
+        }
+    }
+
+    /// Puts a top-level entity of this level under [`Self::root`].
+    pub fn adopt(&self, commands: &mut Commands, entity: Entity) {
+        if let Some(root) = self.root {
+            commands.entity(entity).insert(ChildOf(root));
         }
     }
 
@@ -222,6 +233,7 @@ impl LevelBuilder {
             let level = commands
                 .spawn((Name::new(reference.name.clone()), Transform::default(), Visibility::default()))
                 .id();
+            self.adopt(commands, level);
             for (material_index, material) in loaded.materials()?.into_iter().enumerate() {
                 if material.indices.is_empty() {
                     continue;
@@ -262,6 +274,7 @@ impl LevelBuilder {
     ) -> halo_map::Result<()> {
         let placements = objects::placements(&self.cache)?;
         let objects_root = commands.spawn((Name::new("objects"), Transform::default(), Visibility::default())).id();
+        self.adopt(commands, objects_root);
         for placement in &placements {
             // (multiplayer vehicles have no BSP flags: the game type spawns them)
             let in_loaded_bsp =
@@ -326,6 +339,7 @@ impl LevelBuilder {
         let dome = commands
             .spawn((Name::new(model.name.clone()), SkyDome, Transform::default(), Visibility::default()))
             .id();
+        self.adopt(commands, dome);
         let mut layer = 0;
         for geometry in model.geometries_for(&[], model::HIGHEST_DETAIL) {
             for part in model.geometry(geometry)? {
@@ -592,6 +606,7 @@ impl LevelBuilder {
         raster: bool,
     ) -> (Entity, Vec<Option<Entity>>) {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
+        self.adopt(commands, root);
         let mut nodes: Vec<Option<Entity>> = vec![None; model.default_inverses.len().max(1)];
         for piece in &model.pieces {
             let node = *nodes[piece.node].get_or_insert_with(|| {

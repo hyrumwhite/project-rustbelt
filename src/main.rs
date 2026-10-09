@@ -94,6 +94,14 @@ struct Args {
     /// with --opence, show the game's own window too
     #[argh(switch)]
     show_game: bool,
+    /// with --bridge, the name of the game's bridge (its
+    /// HALO_BEVY_BRIDGE_NAME; default HaloBevyBridge)
+    #[argh(option)]
+    bridge_name: Option<String>,
+    /// with --opence, start at the game's menus instead of on the map (the
+    /// viewer follows the game to whatever level it plays)
+    #[argh(switch)]
+    menu: bool,
     /// with --opence, leave out the game's overlay (its HUD, effects and
     /// transparent surfaces) and draw the transparent surfaces here
     #[argh(switch)]
@@ -180,6 +188,7 @@ fn main() -> AppExit {
     let mut link = None;
     let mut game_process = None;
     let mut overlay = false;
+    let mut bridge_name = args.bridge_name.clone().unwrap_or_else(|| halo_bridge::DEFAULT_NAME.to_string());
     if let Some(exe) = args.opence.clone() {
         args.bridge = true;
         let map_path = match args.map_path() {
@@ -199,7 +208,10 @@ fn main() -> AppExit {
                 return AppExit::error();
             }
         };
-        match bridge::launch_game(&exe, &map_path, args.show_game, !args.no_overlay) {
+        match {
+            bridge_name = bridge::own_bridge_name();
+            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay)
+        } {
             // (stops the game when the viewer exits, or gives up on it)
             Ok(child) => game_process = Some(bridge::GameProcess(child)),
             Err(e) => {
@@ -209,7 +221,7 @@ fn main() -> AppExit {
         }
     }
     if args.bridge {
-        let Some((bridge, snapshot)) = bridge::wait_for_game(std::time::Duration::from_secs(300)) else {
+        let Some((bridge, snapshot)) = bridge::wait_for_game(&bridge_name, std::time::Duration::from_secs(300)) else {
             eprintln!("no OpenCE game shared a frame; start it with HALO_BEVY_BRIDGE=1 and load a level");
             return AppExit::error();
         };
@@ -235,8 +247,6 @@ fn main() -> AppExit {
             return AppExit::error();
         }
     };
-    let level_sky = sky::SkyLighting::from_map(&cache);
-
     let mut app = App::new();
 
     #[cfg(feature = "dlss")]
@@ -244,7 +254,6 @@ fn main() -> AppExit {
 
     app.add_plugins((default_plugins(&args, overlay), SolariPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
         .insert_resource(args.clone())
-        .insert_resource(LevelSky(level_sky))
         .insert_resource(overlay::OverlayMode(overlay))
         .insert_resource(LightingSettings::default())
         .insert_resource(MapFile(Some(cache)))
@@ -257,7 +266,7 @@ fn main() -> AppExit {
     }
     if let Some(mut link) = link {
         link.sync_to_overlay = overlay;
-        app.insert_resource(link).add_plugins(bridge::BridgePlugin);
+        app.insert_resource(link).add_plugins(bridge::BridgePlugin).add_systems(PreUpdate, follow_level);
         if overlay {
             app.add_plugins(overlay::OverlayPlugin);
         }
@@ -314,38 +323,71 @@ fn default_plugins(args: &Args, overlay: bool) -> impl PluginGroup {
         })
 }
 
+/// The assets a level's meshes and materials go into.
+#[derive(bevy::ecs::system::SystemParam)]
+struct LevelAssetParams<'w> {
+    render_device: Res<'w, RenderDevice>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    environment_materials: ResMut<'w, Assets<HaloEnvironmentMaterial>>,
+    transparent_materials: ResMut<'w, Assets<HaloTransparentMaterial>>,
+    images: ResMut<'w, Assets<Image>>,
+    neutral_detail: Res<'w, NeutralDetail>,
+}
+
+/// The parent of the loaded level's entities.
+#[derive(Resource)]
+struct LevelRoot(Entity);
+
 fn setup_level(
     mut commands: Commands,
     mut map: ResMut<MapFile>,
     args: Res<Args>,
     overlay: Res<overlay::OverlayMode>,
-    render_device: Res<RenderDevice>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
-    mut transparent_materials: ResMut<Assets<HaloTransparentMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    neutral_detail: Res<NeutralDetail>,
+    settings: Res<LightingSettings>,
+    mut params: LevelAssetParams,
 ) {
-    let cache = std::sync::Arc::new(map.0.take().expect("level loads once"));
+    let cache = map.0.take().expect("level loads once");
+    let root = commands.spawn((Name::new("level"), Transform::default(), Visibility::default())).id();
+    commands.insert_resource(LevelRoot(root));
+    load_level(cache, root, &args, overlay.0, &settings, &mut commands, &mut params);
+}
+
+/// Loads `cache`'s level under `root`: its BSPs, the lights of its objects
+/// (or all its objects, unbridged), its sky and sun; and the resources that
+/// describe it (`LevelStats`, `LevelSky`, `SkyCubemap`, `CameraStart`, and
+/// bridged, `BridgeLevel`).
+fn load_level(
+    cache: CacheFile,
+    root: Entity,
+    args: &Args,
+    overlay: bool,
+    settings: &LightingSettings,
+    commands: &mut Commands,
+    params: &mut LevelAssetParams,
+) {
+    let level_sky = sky::SkyLighting::from_map(&cache);
+    let cache = std::sync::Arc::new(cache);
     let mut assets = LevelAssets {
-        meshes: &mut meshes,
-        materials: &mut materials,
-        environment_materials: &mut environment_materials,
-        transparent_materials: &mut transparent_materials,
-        images: &mut images,
-        neutral_detail: neutral_detail.0.clone(),
+        meshes: &mut params.meshes,
+        materials: &mut params.materials,
+        environment_materials: &mut params.environment_materials,
+        transparent_materials: &mut params.transparent_materials,
+        images: &mut params.images,
+        neutral_detail: params.neutral_detail.0.clone(),
         flat_normal: Handle::default(),
     };
+    let mut commands = commands;
     assets.flat_normal = assets.images.add(material::flat_normal_image());
-    let bc_supported = render_device.features().contains(WgpuFeatures::TEXTURE_COMPRESSION_BC);
+    let bc_supported = params.render_device.features().contains(WgpuFeatures::TEXTURE_COMPRESSION_BC);
     let start = std::time::Instant::now();
     let mut builder = LevelBuilder::new(cache.clone(), bc_supported);
+    builder.root = Some(root);
     builder.fixture_lights = !args.no_fixture_lights;
     builder.show_light_proxies = args.show_light_proxies;
     builder.matte = args.matte;
     // (the game's overlay has them)
-    builder.skip_transparent = overlay.0;
+    builder.skip_transparent = overlay;
     if let Err(e) = builder.spawn_bsps(args.bsp, !args.pathtracer, &mut commands, &mut assets) {
         error!("loading {}: {e}", cache.header.name);
     }
@@ -363,10 +405,30 @@ fn setup_level(
         }
         match sky::sky_model_cubemap(&cache, model, assets.images) {
             Ok(Some(cubemap)) => commands.insert_resource(SkyCubemap(cubemap)),
-            Ok(None) => {}
-            Err(e) => error!("sky environment map: {e}"),
+            Ok(None) => commands.remove_resource::<SkyCubemap>(),
+            Err(e) => {
+                error!("sky environment map: {e}");
+                commands.remove_resource::<SkyCubemap>();
+            }
         }
+    } else {
+        commands.remove_resource::<SkyCubemap>();
     }
+    if let Some((direction, color, power)) = level_sky.sun {
+        commands.spawn((
+            Name::new("sun"),
+            DirectionalLight {
+                color,
+                illuminance: power * settings.sun_scale,
+                // Solari replaces shadow maps
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            Transform::default().looking_to(-direction, Vec3::Y),
+            ChildOf(root),
+        ));
+    }
+    commands.insert_resource(LevelSky(level_sky));
     let stats = builder.stats.clone();
     info!(
         "{}: {} bsps ({} triangles), {} objects ({} triangles, {} failed), {} fixture lights, {} meshes, {} emissive, {} transparent ({} not drawn), {} texture failures ({:.2?})",
@@ -398,6 +460,7 @@ fn setup_level(
     };
     commands.insert_resource(CameraStart(transform));
     commands.insert_resource(stats);
+
     if args.bridge {
         commands.insert_resource(bridge::BridgeLevel { builder, raster: !args.pathtracer });
     }
@@ -447,20 +510,8 @@ fn setup_camera(
         camera.insert(FreeCamera { walk_speed: 6.0, run_speed: 25.0, ..default() });
     }
 
-    if let Some((color, power)) = level_sky.0.sky {
-        let cubemap = match sky_cubemap {
-            Some(sky) => sky.0.clone(),
-            None => sky::gradient_cubemap(color, &mut images),
-        };
-        camera.insert((
-            EnvironmentMapLight {
-                diffuse_map: cubemap.clone(),
-                specular_map: cubemap.clone(),
-                intensity: power * settings.sky_scale,
-                ..default()
-            },
-            Skybox { image: Some(cubemap), brightness: power * settings.sky_scale, ..default() },
-        ));
+    if let Some(sky) = sky_environment(&level_sky, sky_cubemap.as_deref(), &settings, &mut images) {
+        camera.insert(sky);
     }
 
     #[cfg(feature = "dlss")]
@@ -468,19 +519,90 @@ fn setup_camera(
         camera.insert(Dlss::<DlssRayReconstructionFeature>::default());
     }
 
-    if let Some((direction, color, power)) = level_sky.0.sun {
-        commands.spawn((
-            DirectionalLight {
-                color,
-                illuminance: power * settings.sun_scale,
-                // Solari replaces shadow maps
-                shadow_maps_enabled: false,
-                ..default()
-            },
-            Transform::default().looking_to(-direction, Vec3::Y),
-        ));
-    }
 }
+/// The camera's environment light and skybox for the level's sky.
+fn sky_environment(
+    level_sky: &LevelSky,
+    sky_cubemap: Option<&SkyCubemap>,
+    settings: &LightingSettings,
+    images: &mut Assets<Image>,
+) -> Option<(EnvironmentMapLight, Skybox)> {
+    let (color, power) = level_sky.0.sky?;
+    let cubemap = match sky_cubemap {
+        Some(sky) => sky.0.clone(),
+        None => sky::gradient_cubemap(color, images),
+    };
+    Some((
+        EnvironmentMapLight {
+            diffuse_map: cubemap.clone(),
+            specular_map: cubemap.clone(),
+            intensity: power * settings.sky_scale,
+            ..default()
+        },
+        Skybox { image: Some(cubemap), brightness: power * settings.sky_scale, ..default() },
+    ))
+}
+
+/// Bridged: when the game changes level (a new map, the menus, the next
+/// game of a multiplayer session), unloads this one and loads the game's.
+fn follow_level(
+    mut commands: Commands,
+    link: Res<bridge::BridgeLink>,
+    args: Res<Args>,
+    overlay: Res<overlay::OverlayMode>,
+    mut settings: ResMut<LightingSettings>,
+    mut root: ResMut<LevelRoot>,
+    stats: Res<LevelStats>,
+    mut objects: ResMut<bridge::BridgeObjects>,
+    camera: Single<Entity, With<Camera3d>>,
+    mut window: Single<&mut Window, With<bevy::window::PrimaryWindow>>,
+    mut params: LevelAssetParams,
+    mut failed: Local<Option<String>>,
+) {
+    let Some(snapshot) = &link.latest else { return };
+    let map = snapshot.map_name();
+    if map.is_empty() || map.eq_ignore_ascii_case(&stats.map_name) || failed.as_deref() == Some(map) {
+        return;
+    }
+    let level_args = Args { map: map.to_string(), ..args.clone() };
+    let cache = match level_args.map_path().map_err(|e| e.to_string()).and_then(|p| CacheFile::open(&p).map_err(|e| e.to_string())) {
+        Ok(cache) => cache,
+        Err(e) => {
+            // (the old level stays; the game plays on)
+            error!("the game changed to {}, which can't be loaded: {e}", snapshot.scenario_name);
+            *failed = Some(map.to_string());
+            return;
+        }
+    };
+    info!("the game changed level: {} -> {}", stats.map_name, snapshot.scenario_name);
+    *failed = None;
+    commands.entity(root.0).despawn();
+    objects.clear();
+    root.0 = commands.spawn((Name::new("level"), Transform::default(), Visibility::default())).id();
+    load_level(cache, root.0, &args, overlay.0, &settings, &mut commands, &mut params);
+    window.title = format!("Halo RT - {map}");
+    // the camera's sky, once the new level's resources are in
+    let camera = *camera;
+    commands.queue(move |world: &mut World| {
+        let sky = world.resource::<LevelSky>().clone();
+        let settings = world.resource::<LightingSettings>().clone();
+        let cubemap = world.get_resource::<SkyCubemap>().map(|c| SkyCubemap(c.0.clone()));
+        let environment =
+            world.resource_scope(|_, mut images: Mut<Assets<Image>>| sky_environment(&sky, cubemap.as_ref(), &settings, &mut images));
+        let mut camera = world.entity_mut(camera);
+        match environment {
+            Some(environment) => {
+                camera.insert(environment);
+            }
+            None => {
+                camera.remove::<(EnvironmentMapLight, Skybox)>();
+            }
+        }
+    });
+    // (applies the emissive levels to the new level's materials)
+    settings.set_changed();
+}
+
 
 /// `[`/`]` emissive, `-`/`=` sun, `9`/`0` sky, `,`/`.` exposure, R ReSTIR.
 fn adjust_lighting(

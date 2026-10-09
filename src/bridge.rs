@@ -26,10 +26,12 @@ use std::{sync::Arc, time::Duration};
 /// holds the maps folder, the level is the map's scenario, the bridge is on
 /// and (unless `show`) its window is hidden. With `overlay`, it shares its
 /// overlay (`crate::overlay`), drawing at the viewer's window size. Its output
-/// goes to `halo_rt_opence.log` in the temporary folder.
+/// goes to `halo_rt_opence-<viewer process id>.log` in the temporary folder.
 pub fn launch_game(
     exe: &std::path::Path,
     map_path: &std::path::Path,
+    start_on_map: bool,
+    bridge_name: &str,
     show: bool,
     overlay: bool,
 ) -> std::io::Result<std::process::Child> {
@@ -40,15 +42,19 @@ pub fn launch_game(
         .parent()
         .and_then(|maps| maps.parent())
         .ok_or_else(|| Error::new(ErrorKind::NotFound, "the map is not in a maps folder"))?;
-    let log = std::fs::File::create(std::env::temp_dir().join("halo_rt_opence.log"))?;
+    let log_path = std::env::temp_dir().join(format!("halo_rt_opence-{}.log", std::process::id()));
+    let log = std::fs::File::create(&log_path)?;
     let mut command = std::process::Command::new(exe);
     command
         .current_dir(exe.parent().unwrap_or(std::path::Path::new(".")))
         .env("HALO_BEVY_BRIDGE", "1")
-        .env("HALO_BEVY_BRIDGE_MAP", &scenario)
+        .env("HALO_BEVY_BRIDGE_NAME", bridge_name)
         .env("HALO_DATA_ROOT", data_root)
         .stdout(log.try_clone()?)
         .stderr(log);
+    if start_on_map {
+        command.env("HALO_BEVY_BRIDGE_MAP", &scenario);
+    }
     if !show {
         // hidden, and small and windowed so it never takes the display; it
         // stays vsynced, so its frames (and the poses it shares) come at the
@@ -62,7 +68,8 @@ pub fn launch_game(
         let (width, height) = crate::overlay::WINDOW_SIZE;
         command.env("HALO_BEVY_BRIDGE_OVERLAY", "1").env("HALO_WINDOW_SIZE", format!("{width}x{height}"));
     }
-    eprintln!("starting OpenCE on {scenario} (data root {})", data_root.display());
+    let start = if start_on_map { format!("on {scenario}") } else { "at its menus".to_string() };
+    eprintln!("starting OpenCE {start} (data root {}; its log: {})", data_root.display(), log_path.display());
     command.spawn()
 }
 
@@ -77,13 +84,19 @@ impl Drop for GameProcess {
     }
 }
 
-/// Waits for a running game to share a frame, so the viewer knows which map
-/// to load. `None` after `timeout`.
-pub fn wait_for_game(timeout: Duration) -> Option<(Bridge, Snapshot)> {
+/// The bridge name for a game this viewer starts: its own, so that several
+/// viewers (each with its game) can run at once, as system link needs.
+pub fn own_bridge_name() -> String {
+    format!("{}-{}", halo_bridge::DEFAULT_NAME, std::process::id())
+}
+
+/// Waits for the game sharing as `name` to share a frame, so the viewer
+/// knows which map to load. `None` after `timeout`.
+pub fn wait_for_game(name: &str, timeout: Duration) -> Option<(Bridge, Snapshot)> {
     let start = std::time::Instant::now();
     let mut announced = false;
     while start.elapsed() < timeout {
-        match Bridge::open() {
+        match Bridge::open_named(name) {
             Ok(mut bridge) => {
                 if let Some(snapshot) = bridge.read()
                     && !snapshot.scenario_name.is_empty()
@@ -183,6 +196,12 @@ impl BridgeObjects {
     pub fn count(&self) -> usize {
         self.tracked.len()
     }
+
+    /// Forgets every object (their entities went with the level).
+    pub fn clear(&mut self) {
+        self.tracked.clear();
+        self.modelless.clear();
+    }
 }
 
 fn read_frame(mut link: ResMut<BridgeLink>) {
@@ -250,6 +269,11 @@ fn sync_objects(
     };
     let BridgeLevel { builder, raster } = &mut *level;
     let raster = *raster;
+    // (a frame of another level than the one loaded: the viewer is about to
+    // follow the game there, main.rs follow_level)
+    if !snapshot.map_name().eq_ignore_ascii_case(&builder.stats.map_name) {
+        return;
+    }
 
     let mut seen = HashMap::<u32, ()>::default();
     for object in &snapshot.objects {
@@ -396,6 +420,8 @@ fn grab_cursor(
 }
 
 fn forward_input(
+    follow: Res<FollowGame>,
+    camera: Single<&GlobalTransform, With<Camera3d>>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<bevy::input::mouse::AccumulatedMouseMotion>,
@@ -432,6 +458,15 @@ fn forward_input(
             bevy::input::mouse::MouseScrollUnit::Pixel => scroll.delta.y / 100.0,
         };
         state.wheel = state.wheel.wrapping_add(steps.round() as i32);
+    }
+    // flying free, the game hears from this camera
+    state.listener_valid = u32::from(!follow.0);
+    if !follow.0 {
+        let to_halo = |v: Vec3, scale: f32| [v.x / scale, -v.z / scale, v.y / scale];
+        let scale = halo_map::math::METERS_PER_WORLD_UNIT;
+        state.listener_position = to_halo(camera.translation(), scale);
+        state.listener_forward = to_halo(*camera.forward(), 1.0);
+        state.listener_up = to_halo(*camera.up(), 1.0);
     }
     link.bridge.write_input(state);
 }

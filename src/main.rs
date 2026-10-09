@@ -263,7 +263,8 @@ fn main() -> AppExit {
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
         .add_systems(Update, start_camera)
-        .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate));
+        .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate))
+        .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));
 
     if args.screenshot.is_some() {
         app.add_systems(Update, screenshot_and_exit);

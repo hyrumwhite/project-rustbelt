@@ -171,6 +171,8 @@ pub struct LevelBuilder {
     /// Surfaces tinted by a change colour, by shader and colour.
     coloured_surfaces: HashMap<(u32, [u8; 3]), Surface>,
     loaded_bsps: Vec<usize>,
+    /// Each loaded BSP's root entity, by BSP index.
+    pub bsp_roots: Vec<(usize, Entity)>,
     light_proxy: Option<Handle<Mesh>>,
     /// Whether light fixtures get emissive proxies.
     pub fixture_lights: bool,
@@ -204,6 +206,7 @@ impl LevelBuilder {
             animated_models: HashMap::default(),
             coloured_surfaces: HashMap::default(),
             loaded_bsps: Vec::new(),
+            bsp_roots: Vec::new(),
             light_proxy: None,
             fixture_lights: true,
             show_light_proxies: false,
@@ -261,6 +264,7 @@ impl LevelBuilder {
                 self.stats.triangles += material.indices.len() / 3;
             }
             self.loaded_bsps.push(reference.index);
+            self.bsp_roots.push((reference.index, level));
             self.stats.bsps += 1;
         }
         self.stats.texture_failures = self.textures.failures;
@@ -313,6 +317,9 @@ impl LevelBuilder {
                     ChildOf(objects_root),
                 ))
                 .id();
+            if placement.on_bsp_flags != 0 {
+                commands.entity(object).insert(OnBsps(placement.on_bsp_flags as u32));
+            }
             for (mesh, surface, triangles) in parts.into_iter().flatten() {
                 self.spawn_mesh(commands, object, name.clone(), mesh, &surface, raster);
                 self.stats.object_triangles += triangles;
@@ -439,6 +446,8 @@ impl LevelBuilder {
         let mut proxy = commands.spawn((
             Name::new("light fixture light"),
             RaytracingMesh3d(mesh.clone()),
+            TracedMesh(mesh.clone()),
+            Visibility::Inherited,
             MeshMaterial3d(material),
             EmissiveSurface { radiance: light * LIGHT_PROXY_RADIANCE },
             // object space is Bevy-converted Halo space: Halo forward (+x) is +x
@@ -497,6 +506,8 @@ impl LevelBuilder {
         let mut traced = commands.spawn((
             Name::new(name.clone()),
             RaytracingMesh3d(mesh.clone()),
+            TracedMesh(mesh.clone()),
+            Visibility::Inherited,
             MeshMaterial3d(surface.standard.clone()),
             Transform::default(),
             ChildOf(parent),
@@ -1076,6 +1087,32 @@ fn sky_layer_map(info: &ShaderInfo) -> Option<shader::TransparentMap> {
 }
 
 /// Keeps the sky centred on the camera.
+/// A ray-traced mesh, kept so that it can leave the ray-traced scene while
+/// hidden and come back: Solari traces every `RaytracingMesh3d`, visible or
+/// not.
+#[derive(Component)]
+pub struct TracedMesh(pub Handle<Mesh>);
+
+/// A placed object's BSPs (a bit per BSP index): shown only while one of
+/// them is the active BSP (bridged).
+#[derive(Component)]
+pub struct OnBsps(pub u32);
+
+/// Puts hidden ray-traced meshes out of the ray-traced scene, and shown ones
+/// back.
+pub fn sync_traced_visibility(
+    mut commands: Commands,
+    traced: Query<(Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>), Changed<InheritedVisibility>>,
+) {
+    for (entity, mesh, visibility, in_scene) in &traced {
+        if visibility.get() && !in_scene {
+            commands.entity(entity).insert(RaytracingMesh3d(mesh.0.clone()));
+        } else if !visibility.get() && in_scene {
+            commands.entity(entity).remove::<RaytracingMesh3d>();
+        }
+    }
+}
+
 pub fn follow_camera(
     camera: Query<&Transform, (With<Camera3d>, Without<SkyDome>)>,
     mut domes: Query<&mut Transform, With<SkyDome>>,

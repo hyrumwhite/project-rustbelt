@@ -128,7 +128,7 @@ impl Plugin for BridgePlugin {
             .init_resource::<ForwardInput>()
             .add_systems(First, read_frame.in_set(ReadFrame))
             .add_systems(PreUpdate, (grab_cursor, forward_input, forward_gamepads).chain().after(bevy::input::InputSystems))
-            .add_systems(Update, (toggle_follow, sync_objects, sync_camera).chain());
+            .add_systems(Update, (toggle_follow, sync_objects, sync_camera, sync_active_bsp).chain());
     }
 }
 
@@ -363,6 +363,44 @@ fn node_transform(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy:
         position: node.position,
     });
     Transform::from_matrix(Mat4::from(*to_bevy * world * *default_inverse * *from_bevy))
+}
+
+/// Shows only the BSP the game is in (and the placed light fixtures of it),
+/// as the game draws only that one.
+fn sync_active_bsp(
+    link: Res<BridgeLink>,
+    level: Res<BridgeLevel>,
+    mut visibility: Query<&mut Visibility>,
+    fixtures: Query<(Entity, &crate::level::OnBsps)>,
+    mut shown: Local<Option<usize>>,
+) {
+    let Some(snapshot) = &link.latest else { return };
+    let builder = &level.builder;
+    if builder.bsp_roots.len() < 2 || snapshot.structure_bsp_index < 0 {
+        return;
+    }
+    if !snapshot.map_name().eq_ignore_ascii_case(&builder.stats.map_name) {
+        return;
+    }
+    let active = snapshot.structure_bsp_index as usize;
+    if *shown != Some(active) {
+        info!("the game is in BSP {active}");
+        *shown = Some(active);
+    }
+    let mut show = |entity: Entity, shown: bool| {
+        if let Ok(mut v) = visibility.get_mut(entity) {
+            let wanted = if shown { Visibility::Inherited } else { Visibility::Hidden };
+            if *v != wanted {
+                *v = wanted;
+            }
+        }
+    };
+    for &(index, root) in &builder.bsp_roots {
+        show(root, index == active);
+    }
+    for (entity, bsps) in &fixtures {
+        show(entity, active < 32 && bsps.0 & (1 << active) != 0);
+    }
 }
 
 fn sync_camera(

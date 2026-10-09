@@ -2,7 +2,7 @@
 
     python tools/tag_layout/gen.py [--opence ../OpenCE] [--clang clang]
 
-Compiles probe.c with the flags OpenCE's Windows build gives game units
+Compiles each probe*.c with the flags OpenCE's Windows build gives game units
 (i686-pc-windows-msvc, MSVC layout) to LLVM IR, reads each `layout__*`
 constant, and writes them as Rust constants grouped by struct.
 """
@@ -57,16 +57,22 @@ def main():
             "-iquote", "port/linux/include", "-iquote", "port/linux/game",
             *[f"-I{d}" for d in game.get("include_dirs", [])],
             "-Iport/include/xdk",
-            "-S", "-emit-llvm", "-o", "-", str(HERE / "probe.c"),
+            "-S", "-emit-llvm", "-o", "-",
         ]
-        result = subprocess.run(command, cwd=opence, capture_output=True, text=True)
-        if result.returncode != 0:
-            sys.exit(result.stderr)
+        # one translation unit per tag schema file: each defines structures
+        # of its own and they cannot all be included together
+        ir = []
+        for probe in sorted(HERE.glob("probe*.c")):
+            result = subprocess.run(command + [str(probe)], cwd=opence, capture_output=True, text=True)
+            if result.returncode != 0:
+                sys.exit(f"{probe.name}:\n{result.stderr}")
+            ir.append(result.stdout)
 
     values = defaultdict(dict)
-    for match in re.finditer(r"^@layout__(\w+?)__(\w+) = .*? i32 (-?\d+)", result.stdout, re.M):
+    for match in re.finditer(r"^@layout__(\w+?)__(\w+) = .*? i32 (-?\d+)", "\n".join(ir), re.M):
         struct, field, value = match.groups()
-        values[struct][field] = int(value)
+        if values[struct].setdefault(field, int(value)) != int(value):
+            sys.exit(f"{struct}.{field} differs between probes")
     if not values:
         sys.exit("no layout constants found in clang output")
 

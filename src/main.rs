@@ -52,9 +52,37 @@ struct Args {
     /// use the reference pathtracer instead of real-time lighting
     #[argh(switch)]
     pathtracer: bool,
+    /// start the camera at x,y,z[,yaw,pitch]: Halo world units and degrees
+    /// (press P in the viewer to print the current view in this form)
+    #[argh(option, from_str_fn(parse_camera))]
+    camera: Option<[f32; 5]>,
+    /// leave out the scenario's objects (BSP geometry only)
+    #[argh(switch)]
+    no_objects: bool,
     /// save a screenshot here once the lighting has settled, then exit
     #[argh(option)]
     screenshot: Option<PathBuf>,
+}
+
+fn parse_camera(value: &str) -> Result<[f32; 5], String> {
+    let numbers: Vec<f32> =
+        value.split(',').map(|n| n.trim().parse::<f32>().map_err(|e| format!("{n}: {e}"))).collect::<Result<_, _>>()?;
+    match numbers[..] {
+        [x, y, z] => Ok([x, y, z, 0.0, 0.0]),
+        [x, y, z, yaw] => Ok([x, y, z, yaw, 0.0]),
+        [x, y, z, yaw, pitch] => Ok([x, y, z, yaw, pitch]),
+        _ => Err("expected x,y,z[,yaw,pitch]".into()),
+    }
+}
+
+/// A camera at a Halo position looking along a Halo yaw and pitch (radians).
+fn halo_camera(position: [f32; 3], yaw: f32, pitch: f32) -> Transform {
+    let eye = Vec3::from(halo_to_bevy(position, METERS_PER_WORLD_UNIT));
+    let forward = Vec3::from(halo_to_bevy(
+        [yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin()],
+        1.0,
+    ));
+    Transform::from_translation(eye).looking_to(forward, Vec3::Y)
 }
 
 impl Args {
@@ -125,7 +153,7 @@ fn main() -> AppExit {
     if args.pathtracer {
         app.add_plugins(PathtracingPlugin);
     } else {
-        app.add_systems(Update, (adjust_lighting, apply_lighting).chain())
+        app.add_systems(Update, ((adjust_lighting, apply_lighting).chain(), print_camera))
             .add_systems(PostUpdate, (update_control_text, update_performance_text));
         #[cfg(feature = "dlss")]
         app.add_systems(Update, (toggle_dlss_rr, cycle_dlss_quality));
@@ -181,13 +209,21 @@ fn setup_level(
     ) {
         error!("loading {}: {e}", cache.header.name);
     }
+    if !args.no_objects
+        && let Err(e) = builder.spawn_objects(!args.pathtracer, &mut commands, &mut meshes, &mut materials, &mut images)
+    {
+        error!("placing objects: {e}");
+    }
     let stats = builder.stats;
     info!(
-        "{}: {} bsps, {} meshes, {} triangles, {} emissive, {} transparent skipped, {} texture failures ({:.2?})",
+        "{}: {} bsps ({} triangles), {} objects ({} triangles, {} failed), {} meshes, {} emissive, {} transparent skipped, {} texture failures ({:.2?})",
         stats.map_name,
         stats.bsps,
-        stats.meshes,
         stats.triangles,
+        stats.objects,
+        stats.object_triangles,
+        stats.object_failures,
+        stats.meshes,
         stats.emissive_meshes,
         stats.skipped_transparent,
         stats.texture_failures,
@@ -196,15 +232,14 @@ fn setup_level(
 
     // Where the first player starts, facing as they do.
     let start = scenario::player_starts(&cache).ok().and_then(|s| s.into_iter().find(|s| args.bsp.is_none_or(|b| s.bsp_index < 0 || s.bsp_index as usize == b)));
-    let transform = match start {
-        Some(start) => {
+    let transform = match (args.camera, start) {
+        (Some([x, y, z, yaw, pitch]), _) => halo_camera([x, y, z], yaw.to_radians(), pitch.to_radians()),
+        (None, Some(start)) => {
             let [x, y, z] = start.position;
-            let eye = Vec3::from(halo_to_bevy([x, y, z + 0.62], METERS_PER_WORLD_UNIT));
-            let forward = Vec3::from(halo_to_bevy([start.facing.cos(), start.facing.sin(), 0.0], 1.0));
-            Transform::from_translation(eye).looking_to(forward, Vec3::Y)
+            halo_camera([x, y, z + 0.62], start.facing, 0.0)
         }
         // no start in this BSP: look across it from above its centre
-        None => bsp_overview(&cache, args.bsp.unwrap_or(0)).unwrap_or_else(|| Transform::from_xyz(0.0, 10.0, 0.0)),
+        (None, None) => bsp_overview(&cache, args.bsp.unwrap_or(0)).unwrap_or_else(|| Transform::from_xyz(0.0, 10.0, 0.0)),
     };
     commands.insert_resource(CameraStart(transform));
     commands.insert_resource(stats);
@@ -356,6 +391,20 @@ fn apply_lighting(
     }
 }
 
+/// P: log the camera as a `--camera` argument.
+fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With<Camera3d>>) {
+    if !keys.just_pressed(KeyCode::KeyP) {
+        return;
+    }
+    let p = camera.translation / METERS_PER_WORLD_UNIT;
+    let f = camera.forward();
+    // Bevy (x, y, z) is Halo (x, -z, y)
+    let (hx, hy, hz) = (f.x, -f.z, f.y);
+    let yaw = hy.atan2(hx).to_degrees();
+    let pitch = hz.clamp(-1.0, 1.0).asin().to_degrees();
+    info!("--camera {:.2},{:.2},{:.2},{yaw:.1},{pitch:.1}", p.x, -p.z, p.y);
+}
+
 #[cfg(feature = "dlss")]
 fn toggle_dlss_rr(
     key_input: Res<ButtonInput<KeyCode>>,
@@ -447,11 +496,12 @@ fn update_control_text(
     let mut s = String::new();
     if let Some(stats) = stats {
         s += &format!(
-            "{} - {} BSPs, {} meshes, {}k triangles, {} emissive\n",
+            "{} - {} BSPs ({}k tris), {} objects ({}k tris), {} emissive meshes\n",
             stats.map_name,
             stats.bsps,
-            stats.meshes,
             stats.triangles / 1000,
+            stats.objects,
+            stats.object_triangles / 1000,
             stats.emissive_meshes
         );
     }
@@ -473,7 +523,7 @@ fn update_control_text(
     {
         s += "\nNo denoiser: build with --features dlss";
     }
-    s += "\nWASD/QE fly, Shift run, right mouse or M to look";
+    s += "\nWASD/QE fly, Shift run, right mouse or M to look, P print camera";
     text.0 = s;
 }
 

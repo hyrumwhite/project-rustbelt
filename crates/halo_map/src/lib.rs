@@ -15,6 +15,8 @@ pub mod bsp;
 mod cache;
 pub mod layout;
 pub mod math;
+pub mod model;
+pub mod objects;
 pub mod scenario;
 pub mod shader;
 pub mod sky;
@@ -47,6 +49,9 @@ pub mod groups {
     pub const SHADER_ENVIRONMENT: u32 = fourcc(b"senv");
     pub const SHADER_MODEL: u32 = fourcc(b"soso");
     pub const SKY: u32 = fourcc(b"sky ");
+    pub const MODEL: u32 = fourcc(b"mode");
+    /// The parent of every object group (`scen`, `vehi`, `weap`, ...).
+    pub const OBJECT: u32 = fourcc(b"obje");
 }
 
 #[derive(Debug)]

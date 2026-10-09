@@ -1,4 +1,5 @@
-//! A Halo level's structure BSPs as Bevy meshes and materials.
+//! A Halo level as Bevy entities: its structure BSPs and the objects its
+//! scenario places.
 
 use crate::textures::TextureCache;
 use bevy::{
@@ -11,6 +12,8 @@ use bevy::{
 use halo_map::{
     bsp,
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
+    model::{self, Model},
+    objects::{self, Placement},
     shader::{self, ShaderInfo, ShaderType},
     CacheFile, TagRef,
 };
@@ -23,6 +26,10 @@ pub struct EmissiveSurface {
     pub radiance: Vec3,
 }
 
+/// An object placed from the scenario.
+#[derive(Component)]
+pub struct HaloObject;
+
 /// What a loaded level contains, for the overlay.
 #[derive(Resource, Default)]
 pub struct LevelStats {
@@ -31,12 +38,16 @@ pub struct LevelStats {
     pub meshes: usize,
     pub triangles: usize,
     pub emissive_meshes: usize,
+    pub objects: usize,
+    pub object_triangles: usize,
+    pub object_failures: usize,
     /// Transparent-shader geometry not drawn yet (glass, water, ...).
     pub skipped_transparent: usize,
     pub texture_failures: usize,
 }
 
 /// How a shader's surfaces are drawn.
+#[derive(Clone)]
 enum Surface {
     Opaque(Handle<StandardMaterial>),
     Emissive(Handle<StandardMaterial>, Vec3),
@@ -44,11 +55,32 @@ enum Surface {
     Skip,
 }
 
+/// A shader's material and the texture coordinate scale it applies.
+#[derive(Clone)]
+struct ShaderSurface {
+    surface: Surface,
+    uv_scale: [f32; 2],
+}
+
+/// A model's meshes for one permutation choice, made once and instanced.
+type ModelMeshes = Vec<(Handle<Mesh>, Surface, usize)>;
+
 pub struct LevelBuilder<'a> {
     pub cache: &'a CacheFile,
     pub textures: TextureCache,
-    surfaces: HashMap<Option<u32>, Surface>,
+    surfaces: HashMap<Option<u32>, ShaderSurface>,
+    models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
+    loaded_bsps: Vec<usize>,
     pub stats: LevelStats,
+}
+
+/// One vertex in Halo's convention, as BSPs and models both provide.
+struct SourceVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    binormal: [f32; 3],
+    tangent: [f32; 3],
+    texcoord: [f32; 2],
 }
 
 impl<'a> LevelBuilder<'a> {
@@ -57,6 +89,8 @@ impl<'a> LevelBuilder<'a> {
             cache,
             textures: TextureCache::new(bc_supported),
             surfaces: HashMap::default(),
+            models: HashMap::default(),
+            loaded_bsps: Vec::new(),
             stats: LevelStats { map_name: cache.header.name.clone(), ..default() },
         }
     }
@@ -83,37 +117,169 @@ impl<'a> LevelBuilder<'a> {
                 if material.indices.is_empty() {
                     continue;
                 }
-                let surface = self.surface(material.shader, materials, images);
-                let (handle, radiance) = match surface {
-                    Surface::Opaque(h) => (h.clone(), None),
-                    Surface::Emissive(h, radiance) => (h.clone(), Some(*radiance)),
-                    Surface::Skip => {
-                        self.stats.skipped_transparent += 1;
-                        continue;
-                    }
-                };
-                let mesh = meshes.add(build_mesh(&material));
-                let mut entity = commands.spawn((
-                    Name::new(format!("{} material {material_index}", reference.name)),
-                    RaytracingMesh3d(mesh.clone()),
-                    MeshMaterial3d(handle),
-                    Transform::default(),
-                    ChildOf(level),
-                ));
-                if raster {
-                    entity.insert(Mesh3d(mesh));
+                let shader = self.surface(material.shader, materials, images);
+                if matches!(shader.surface, Surface::Skip) {
+                    self.stats.skipped_transparent += 1;
+                    continue;
                 }
-                if let Some(radiance) = radiance {
-                    entity.insert(EmissiveSurface { radiance });
-                    self.stats.emissive_meshes += 1;
-                }
-                self.stats.meshes += 1;
+                let vertices = material.vertices.iter().map(|v| SourceVertex {
+                    position: v.position,
+                    normal: v.normal,
+                    binormal: v.binormal,
+                    tangent: v.tangent,
+                    texcoord: v.texcoord,
+                });
+                let mesh = meshes.add(build_mesh(vertices, &material.indices, shader.uv_scale));
+                let name = format!("{} material {material_index}", reference.name);
+                self.spawn_mesh(commands, level, name, mesh, &shader.surface, raster);
                 self.stats.triangles += material.indices.len() / 3;
             }
+            self.loaded_bsps.push(reference.index);
             self.stats.bsps += 1;
         }
         self.stats.texture_failures = self.textures.failures;
         Ok(())
+    }
+
+    /// Spawns the objects the game would create in the loaded BSPs.
+    pub fn spawn_objects(
+        &mut self,
+        raster: bool,
+        commands: &mut Commands,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) -> halo_map::Result<()> {
+        let placements = objects::placements(self.cache)?;
+        let objects_root = commands.spawn((Name::new("objects"), Transform::default(), Visibility::default())).id();
+        for placement in &placements {
+            // (multiplayer vehicles have no BSP flags: the game type spawns them)
+            let in_loaded_bsp =
+                placement.on_bsp_flags == 0 || self.loaded_bsps.iter().any(|&b| placement.in_bsp(b));
+            if placement.not_automatic || !in_loaded_bsp {
+                continue;
+            }
+            let Some(model) = objects::object_model(self.cache, placement.definition)?.and_then(|m| m.datum) else {
+                continue;
+            };
+            let Some(parts) = self.model_meshes(model, placement.region_permutations, meshes, materials, images)
+            else {
+                continue;
+            };
+            let name = self.cache.tag(placement.definition.datum.unwrap())?.name.clone();
+            let object = commands
+                .spawn((
+                    Name::new(name.clone()),
+                    HaloObject,
+                    placement_transform(placement),
+                    Visibility::default(),
+                    ChildOf(objects_root),
+                ))
+                .id();
+            for (mesh, surface, triangles) in parts {
+                self.spawn_mesh(commands, object, name.clone(), mesh, &surface, raster);
+                self.stats.object_triangles += triangles;
+            }
+            self.stats.objects += 1;
+        }
+        self.stats.texture_failures = self.textures.failures;
+        Ok(())
+    }
+
+    fn spawn_mesh(
+        &mut self,
+        commands: &mut Commands,
+        parent: Entity,
+        name: String,
+        mesh: Handle<Mesh>,
+        surface: &Surface,
+        raster: bool,
+    ) {
+        let (material, radiance) = match surface {
+            Surface::Opaque(h) => (h.clone(), None),
+            Surface::Emissive(h, radiance) => (h.clone(), Some(*radiance)),
+            Surface::Skip => return,
+        };
+        let mut entity = commands.spawn((
+            Name::new(name),
+            RaytracingMesh3d(mesh.clone()),
+            MeshMaterial3d(material),
+            Transform::default(),
+            ChildOf(parent),
+        ));
+        if raster {
+            entity.insert(Mesh3d(mesh));
+        }
+        if let Some(radiance) = radiance {
+            entity.insert(EmissiveSurface { radiance });
+            self.stats.emissive_meshes += 1;
+        }
+        self.stats.meshes += 1;
+    }
+
+    /// A model's meshes at the highest level of detail, made once per
+    /// (model, permutations).
+    fn model_meshes(
+        &mut self,
+        datum: u32,
+        permutations: [u8; 8],
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) -> Option<ModelMeshes> {
+        if let Some(cached) = self.models.get(&(datum, permutations)) {
+            return cached.clone();
+        }
+        let built = match self.build_model(datum, &permutations, meshes, materials, images) {
+            Ok(parts) => Some(parts),
+            Err(e) => {
+                let name = self.cache.tag(datum).map(|t| t.name.clone()).unwrap_or_default();
+                warn!("model {name}: {e}");
+                self.stats.object_failures += 1;
+                None
+            }
+        };
+        self.models.insert((datum, permutations), built.clone());
+        built
+    }
+
+    fn build_model(
+        &mut self,
+        datum: u32,
+        permutations: &[u8],
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) -> halo_map::Result<ModelMeshes> {
+        let model = Model::load(self.cache, datum)?;
+        let mut out = Vec::new();
+        for geometry in model.geometries_for(permutations, model::HIGHEST_DETAIL) {
+            for part in model.geometry(geometry)? {
+                if part.indices.is_empty() {
+                    continue;
+                }
+                let shader_ref = model
+                    .shaders
+                    .get(part.shader_index.max(0) as usize)
+                    .copied()
+                    .unwrap_or(TagRef { group: 0, datum: None });
+                let shader = self.surface(shader_ref, materials, images);
+                if matches!(shader.surface, Surface::Skip) {
+                    self.stats.skipped_transparent += 1;
+                    continue;
+                }
+                let vertices = part.vertices.iter().map(|v| SourceVertex {
+                    position: v.position,
+                    normal: v.normal,
+                    binormal: v.binormal,
+                    tangent: v.tangent,
+                    texcoord: v.texcoord,
+                });
+                let mesh = meshes.add(build_mesh(vertices, &part.indices, shader.uv_scale));
+                out.push((mesh, shader.surface, part.indices.len() / 3));
+            }
+        }
+        Ok(out)
     }
 
     /// The material for a shader, made once per shader.
@@ -122,19 +288,23 @@ impl<'a> LevelBuilder<'a> {
         shader: TagRef,
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
-    ) -> &Surface {
-        if !self.surfaces.contains_key(&shader.datum) {
-            let info = match shader::shader_info(self.cache, shader) {
-                Ok(info) => info,
-                Err(e) => {
-                    warn!("shader {:?}: {e}", shader.datum);
-                    None
-                }
-            };
-            let surface = self.make_surface(info.as_ref(), materials, images);
-            self.surfaces.insert(shader.datum, surface);
+    ) -> ShaderSurface {
+        if let Some(surface) = self.surfaces.get(&shader.datum) {
+            return surface.clone();
         }
-        &self.surfaces[&shader.datum]
+        let info = match shader::shader_info(self.cache, shader) {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("shader {:?}: {e}", shader.datum);
+                None
+            }
+        };
+        let surface = ShaderSurface {
+            surface: self.make_surface(info.as_ref(), materials, images),
+            uv_scale: info.as_ref().map_or([1.0, 1.0], |i| i.uv_scale),
+        };
+        self.surfaces.insert(shader.datum, surface.clone());
+        surface
     }
 
     fn make_surface(
@@ -184,26 +354,33 @@ impl<'a> LevelBuilder<'a> {
     }
 }
 
-/// A BSP material's triangles as a Solari-compatible mesh: positions,
-/// normals, UV0 and tangents, u32 indices, no UV1.
-fn build_mesh(material: &bsp::Material) -> Mesh {
-    let positions: Vec<[f32; 3]> =
-        material.vertices.iter().map(|v| halo_to_bevy(v.position, METERS_PER_WORLD_UNIT)).collect();
-    let normals: Vec<[f32; 3]> = material.vertices.iter().map(|v| halo_to_bevy(v.normal, 1.0)).collect();
-    let uvs: Vec<[f32; 2]> = material.vertices.iter().map(|v| v.texcoord).collect();
-    let tangents: Vec<[f32; 4]> = material
-        .vertices
-        .iter()
-        .map(|v| {
-            let (n, t, b) = (Vec3::from(v.normal), Vec3::from(v.tangent), Vec3::from(v.binormal));
-            let handedness = if n.cross(t).dot(b) < 0.0 { -1.0 } else { 1.0 };
-            let [x, y, z] = halo_to_bevy(v.tangent, 1.0);
-            [x, y, z, handedness]
-        })
-        .collect();
+/// A placement's position and orientation in Bevy's convention. Halo's
+/// object axes (forward, left, up) form the rotation's columns; the change to
+/// Bevy coordinates C makes it C·R·Cᵀ.
+fn placement_transform(placement: &Placement) -> Transform {
+    let [forward, left, up] = placement.axes();
+    let halo_rotation = Mat3::from_cols(Vec3::from(forward), Vec3::from(left), Vec3::from(up));
+    let to_bevy = Mat3::from_cols(Vec3::X, Vec3::NEG_Z, Vec3::Y);
+    let rotation = Quat::from_mat3(&(to_bevy * halo_rotation * to_bevy.transpose()));
+    Transform::from_translation(Vec3::from(placement.bevy_position())).with_rotation(rotation.normalize())
+}
+
+/// Halo triangles as a Solari-compatible mesh: positions, normals, UV0 and
+/// tangents, u32 indices, no UV1.
+fn build_mesh(vertices: impl Iterator<Item = SourceVertex>, indices: &[u32], uv_scale: [f32; 2]) -> Mesh {
+    let (mut positions, mut normals, mut uvs, mut tangents) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for v in vertices {
+        positions.push(halo_to_bevy(v.position, METERS_PER_WORLD_UNIT));
+        normals.push(halo_to_bevy(v.normal, 1.0));
+        uvs.push([v.texcoord[0] * uv_scale[0], v.texcoord[1] * uv_scale[1]]);
+        let (n, t, b) = (Vec3::from(v.normal), Vec3::from(v.tangent), Vec3::from(v.binormal));
+        let handedness = if n.cross(t).dot(b) < 0.0 { -1.0 } else { 1.0 };
+        let [x, y, z] = halo_to_bevy(v.tangent, 1.0);
+        tangents.push([x, y, z, handedness]);
+    }
     // Halo's triangles are clockwise seen from the front (Direct3D);
     // Bevy's front faces are counter-clockwise.
-    let indices: Vec<u32> = material.indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
+    let indices: Vec<u32> = indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
 
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
@@ -211,4 +388,35 @@ fn build_mesh(material: &bsp::Material) -> Mesh {
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, tangents)
         .with_inserted_indices(Indices::U32(indices))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use halo_map::objects::ObjectKind;
+
+    fn placement(rotation: [f32; 3]) -> Placement {
+        Placement {
+            kind: ObjectKind::Scenery,
+            definition: TagRef { group: 0, datum: None },
+            position: [0.0; 3],
+            rotation,
+            on_bsp_flags: 1,
+            not_automatic: false,
+            region_permutations: [0; 8],
+        }
+    }
+
+    /// An object's local forward (Halo +x) must end up along its yawed
+    /// Halo forward, converted to Bevy.
+    #[test]
+    fn yaw_turns_forward_counter_clockwise() {
+        let t = placement_transform(&placement([std::f32::consts::FRAC_PI_2, 0.0, 0.0]));
+        // Halo +x in Bevy is +x; after a quarter turn it should face Halo +y,
+        // which is Bevy -z.
+        let forward = t.rotation * Vec3::X;
+        assert!(forward.abs_diff_eq(Vec3::NEG_Z, 1e-5), "{forward}");
+        // up stays up
+        assert!((t.rotation * Vec3::Y).abs_diff_eq(Vec3::Y, 1e-5));
+    }
 }

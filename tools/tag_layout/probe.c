@@ -73,6 +73,9 @@ LAYOUT_SIZE(structure_surface)
 LAYOUT_SIZE(vertex_buffer)
 LAYOUT_OFFSET(vertex_buffer, type)
 LAYOUT_OFFSET(vertex_buffer, count)
+LAYOUT_OFFSET(vertex_buffer, offset)
+LAYOUT_OFFSET(vertex_buffer, base_address)
+LAYOUT_OFFSET(vertex_buffer, hardware_format)
 
 /* bitmaps */
 LAYOUT_OFFSET(bitmap_group, pixel_data)

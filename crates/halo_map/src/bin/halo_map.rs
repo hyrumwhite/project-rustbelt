@@ -8,15 +8,16 @@
 //! halo_map sky     <map>
 //! halo_map bitmap  <map> <tag name> <out.png> [bitmap index]
 //! halo_map bitmaps <map>          (decode every bitmap; report by format)
+//! halo_map objects <map> [list]   (placements; decode every placed model)
 //! ```
 
-use halo_map::{bitmap, bsp, fourcc, fourcc_str, groups, scenario, shader, sky, CacheFile};
+use halo_map::{bitmap, bsp, fourcc, fourcc_str, groups, model, objects, scenario, shader, sky, CacheFile};
 use std::{collections::BTreeMap, process::ExitCode, time::Instant};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(command), Some(path)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: halo_map <info|tags|bsp|shaders|sky|bitmap|bitmaps> <map> [args]");
+        eprintln!("usage: halo_map <info|tags|bsp|shaders|sky|bitmap|bitmaps|objects> <map> [args]");
         return ExitCode::FAILURE;
     };
     let start = Instant::now();
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
         "sky" => skies(&cache),
         "bitmap" => export_bitmap(&cache, &args[2..]),
         "bitmaps" => all_bitmaps(&cache),
+        "objects" => objects(&cache, args.get(2).is_some_and(|a| a == "list")),
         other => Err(format!("unknown command {other}").into()),
     };
     match result {
@@ -229,6 +231,80 @@ fn all_bitmaps(cache: &CacheFile) -> CliResult {
         println!("FAIL {failure}");
     }
     println!("{} unexpected failures", failures.len());
+    Ok(())
+}
+
+fn objects(cache: &CacheFile, list: bool) -> CliResult {
+    let placements = objects::placements(cache)?;
+    if list {
+        for p in &placements {
+            let name = p.definition.datum.map(|d| cache.tag(d).map(|t| t.name.clone())).transpose()?.unwrap_or_default();
+            println!(
+                "{:?} {name} at {:.2},{:.2},{:.2} yaw {:.1} bsps {:#x}{}",
+                p.kind,
+                p.position[0],
+                p.position[1],
+                p.position[2],
+                p.rotation[0].to_degrees(),
+                p.on_bsp_flags,
+                if p.not_automatic { " (scripted)" } else { "" }
+            );
+        }
+    }
+    let mut by_kind: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for p in &placements {
+        let e = by_kind.entry(format!("{:?}", p.kind)).or_default();
+        e.0 += 1;
+        if p.not_automatic {
+            e.1 += 1;
+        }
+    }
+    for (kind, (n, scripted)) in &by_kind {
+        println!("{kind:13} {n:4} placed ({scripted} by scripts only)");
+    }
+
+    let mut models = std::collections::BTreeSet::new();
+    for p in &placements {
+        if let Some(m) = objects::object_model(cache, p.definition)?.and_then(|m| m.datum) {
+            models.insert(m);
+        }
+    }
+    let (mut agree, mut disagree, mut triangles, mut failures) = (0usize, 0usize, 0usize, 0usize);
+    let (mut normal_sum, mut normal_count) = (0f32, 0usize);
+    for &datum in &models {
+        let result = (|| -> halo_map::Result<()> {
+            let m = model::Model::load(cache, datum)?;
+            for g in m.geometries_for(&[], model::HIGHEST_DETAIL) {
+                for part in m.geometry(g)? {
+                    triangles += part.indices.len() / 3;
+                    for tri in part.indices.chunks_exact(3) {
+                        let [a, b, c] = [0, 1, 2].map(|i| part.vertices[tri[i] as usize]);
+                        let n = cross(sub(b.position, a.position), sub(c.position, a.position));
+                        let d = dot(n, add(add(a.normal, b.normal), c.normal));
+                        if d > 0.0 {
+                            agree += 1;
+                        } else if d < 0.0 {
+                            disagree += 1;
+                        }
+                    }
+                    for v in &part.vertices {
+                        normal_sum += dot(v.normal, v.normal).sqrt();
+                        normal_count += 1;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            failures += 1;
+            println!("FAIL {}: {e}", cache.tag(datum).map(|t| t.name.as_str()).unwrap_or("?"));
+        }
+    }
+    println!(
+        "{} models: {triangles} triangles at highest detail, counter-clockwise {agree} / clockwise {disagree}, mean |normal| {:.3}, {failures} failed",
+        models.len(),
+        normal_sum / normal_count.max(1) as f32
+    );
     Ok(())
 }
 

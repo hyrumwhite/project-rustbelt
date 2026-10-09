@@ -5,6 +5,16 @@
 
 #![allow(dead_code)]
 
+pub mod _object_definition {
+    pub const SIZEOF: usize = 0x17c;
+    pub const TYPE: usize = 0x0;
+    pub const MODEL: usize = 0x28;
+    pub const ANIMATION_GRAPH: usize = 0x38;
+    pub const MODIFIER_SHADER: usize = 0x90;
+    pub const ATTACHMENTS: usize = 0x140;
+    pub const CHANGE_COLORS: usize = 0x164;
+}
+
 pub mod bitmap_data {
     pub const SIZEOF: usize = 0x30;
     pub const SIGNATURE: usize = 0x0;
@@ -24,6 +34,72 @@ pub mod bitmap_group {
     pub const BITMAPS: usize = 0x60;
 }
 
+pub mod control_placement {
+    pub const SIZEOF: usize = 0x40;
+}
+
+pub mod equipment_placement {
+    pub const SIZEOF: usize = 0x28;
+}
+
+pub mod light_fixture_placement {
+    pub const SIZEOF: usize = 0x58;
+}
+
+pub mod machine_placement {
+    pub const SIZEOF: usize = 0x40;
+}
+
+pub mod model {
+    pub const SIZEOF: usize = 0xe8;
+    pub const FLAGS: usize = 0x0;
+    pub const BASE_MAP_SCALE: usize = 0x30;
+    pub const MARKERS: usize = 0xac;
+    pub const NODES: usize = 0xb8;
+    pub const REGIONS: usize = 0xc4;
+    pub const GEOMETRIES: usize = 0xd0;
+    pub const SHADERS: usize = 0xdc;
+}
+
+pub mod model_geometry {
+    pub const SIZEOF: usize = 0x30;
+    pub const PARTS: usize = 0x24;
+}
+
+pub mod model_geometry_part {
+    pub const SIZEOF: usize = 0x68;
+    pub const FLAGS: usize = 0x0;
+    pub const SHADER_INDEX: usize = 0x4;
+    pub const TRIANGLE_BUFFER: usize = 0x44;
+    pub const VERTEX_BUFFER: usize = 0x54;
+}
+
+pub mod model_node {
+    pub const SIZEOF: usize = 0x9c;
+    pub const NEXT_SIBLING_NODE_INDEX: usize = 0x20;
+    pub const FIRST_CHILD_NODE_INDEX: usize = 0x22;
+    pub const PARENT_NODE_INDEX: usize = 0x24;
+    pub const DEFAULT_TRANSLATION: usize = 0x28;
+    pub const DEFAULT_ROTATION: usize = 0x34;
+}
+
+pub mod model_region {
+    pub const SIZEOF: usize = 0x4c;
+    pub const PERMUTATIONS: usize = 0x40;
+}
+
+pub mod model_region_permutation {
+    pub const SIZEOF: usize = 0x58;
+    pub const FLAGS: usize = 0x20;
+    pub const GEOMETRY_INDICES: usize = 0x40;
+}
+
+pub mod model_shader_reference {
+    pub const SIZEOF: usize = 0x20;
+    pub const SHADER: usize = 0x0;
+    pub const PERMUTATION_INDEX: usize = 0x10;
+}
+
 pub mod player_starting_location {
     pub const SIZEOF: usize = 0x34;
     pub const POSITION: usize = 0x0;
@@ -35,10 +111,51 @@ pub mod scenario {
     pub const SIZEOF: usize = 0x5b0;
     pub const SKY_REFERENCES: usize = 0x30;
     pub const TYPE: usize = 0x3c;
+    pub const OBJECT_NAMES: usize = 0x204;
     pub const SCENERY: usize = 0x210;
     pub const SCENERY_PALETTE: usize = 0x21c;
+    pub const BIPEDS: usize = 0x228;
+    pub const BIPED_PALETTE: usize = 0x234;
+    pub const VEHICLES: usize = 0x240;
+    pub const VEHICLE_PALETTE: usize = 0x24c;
+    pub const EQUIPMENT: usize = 0x258;
+    pub const EQUIPMENT_PALETTE: usize = 0x264;
+    pub const WEAPONS: usize = 0x270;
+    pub const WEAPON_PALETTE: usize = 0x27c;
+    pub const MACHINES: usize = 0x294;
+    pub const MACHINE_PALETTE: usize = 0x2a0;
+    pub const CONTROLS: usize = 0x2ac;
+    pub const CONTROL_PALETTE: usize = 0x2b8;
+    pub const LIGHT_FIXTURES: usize = 0x2c4;
+    pub const LIGHT_FIXTURES_PALETTE: usize = 0x2d0;
     pub const PLAYERS: usize = 0x354;
     pub const STRUCTURE_BSP_REFERENCES: usize = 0x5a4;
+}
+
+pub mod scenario_light_fixture_datum {
+    pub const SIZEOF: usize = 0x48;
+    pub const COLOR: usize = 0x30;
+    pub const INTENSITY: usize = 0x3c;
+}
+
+pub mod scenario_object_datum {
+    pub const SIZEOF: usize = 0x28;
+    pub const PALETTE_ENTRY_INDEX: usize = 0x0;
+    pub const NAME_INDEX: usize = 0x2;
+    pub const PLACEMENT_FLAGS: usize = 0x4;
+    pub const POSITION: usize = 0x8;
+    pub const ROTATION: usize = 0x14;
+    pub const ON_BSP_FLAGS: usize = 0x20;
+}
+
+pub mod scenario_object_palette_entry {
+    pub const SIZEOF: usize = 0x30;
+    pub const REFERENCE: usize = 0x0;
+}
+
+pub mod scenario_object_permutation {
+    pub const SIZEOF: usize = 0x20;
+    pub const REGION_PERMUTATIONS: usize = 0x10;
 }
 
 pub mod scenario_structure_bsp_reference {
@@ -47,6 +164,16 @@ pub mod scenario_structure_bsp_reference {
     pub const FILE_SIZE: usize = 0x4;
     pub const BASE_ADDRESS: usize = 0x8;
     pub const STRUCTURE_BSP: usize = 0x10;
+}
+
+pub mod scenario_weapon_datum {
+    pub const SIZEOF: usize = 0x5c;
+    pub const PERMUTATION: usize = 0x28;
+}
+
+pub mod scenery_placement {
+    pub const SIZEOF: usize = 0x48;
+    pub const PERMUTATION: usize = 0x28;
 }
 
 pub mod shader_base {
@@ -146,8 +273,24 @@ pub mod tag_reference {
     pub const INDEX: usize = 0xc;
 }
 
+pub mod triangle_buffer {
+    pub const SIZEOF: usize = 0x10;
+    pub const TYPE: usize = 0x0;
+    pub const COUNT: usize = 0x4;
+    pub const BASE_ADDRESS: usize = 0x8;
+    pub const HARDWARE_FORMAT: usize = 0xc;
+}
+
+pub mod unit_placement {
+    pub const SIZEOF: usize = 0x78;
+    pub const PERMUTATION: usize = 0x28;
+}
+
 pub mod vertex_buffer {
     pub const SIZEOF: usize = 0x14;
     pub const TYPE: usize = 0x0;
     pub const COUNT: usize = 0x4;
+    pub const OFFSET: usize = 0x8;
+    pub const BASE_ADDRESS: usize = 0xc;
+    pub const HARDWARE_FORMAT: usize = 0x10;
 }

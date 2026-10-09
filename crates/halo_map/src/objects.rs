@@ -83,6 +83,9 @@ pub struct Placement {
     pub not_automatic: bool,
     /// Permutation index per model region.
     pub region_permutations: [u8; 8],
+    /// A light fixture's light: colour and intensity, as the lightmapper
+    /// used them.
+    pub light: Option<([f32; 3], f32)>,
 }
 
 impl Placement {
@@ -140,6 +143,12 @@ pub fn placements(cache: &CacheFile) -> Result<Vec<Placement>> {
                 on_bsp_flags: element.u16(d::ON_BSP_FLAGS)?,
                 not_automatic: element.u16(d::PLACEMENT_FLAGS)? & PLACEMENT_NOT_AUTOMATIC != 0,
                 region_permutations,
+                light: if kind == ObjectKind::LightFixture {
+                    use layout::scenario_light_fixture_datum as l;
+                    Some((element.vec3(l::COLOR)?, element.f32(l::INTENSITY)?))
+                } else {
+                    None
+                },
             });
         }
     }

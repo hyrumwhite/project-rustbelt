@@ -240,14 +240,15 @@ fn objects(cache: &CacheFile, list: bool) -> CliResult {
         for p in &placements {
             let name = p.definition.datum.map(|d| cache.tag(d).map(|t| t.name.clone())).transpose()?.unwrap_or_default();
             println!(
-                "{:?} {name} at {:.2},{:.2},{:.2} yaw {:.1} bsps {:#x}{}",
+                "{:?} {name} at {:.2},{:.2},{:.2} yaw {:.1} bsps {:#x}{}{}",
                 p.kind,
                 p.position[0],
                 p.position[1],
                 p.position[2],
                 p.rotation[0].to_degrees(),
                 p.on_bsp_flags,
-                if p.not_automatic { " (scripted)" } else { "" }
+                if p.not_automatic { " (scripted)" } else { "" },
+                p.light.map(|(c, i)| format!(" light {c:?} x{i}")).unwrap_or_default()
             );
         }
     }

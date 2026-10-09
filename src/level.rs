@@ -38,6 +38,15 @@ pub struct SkyDome;
 /// particular size; this puts it far beyond any level (skies are ~10⁵ units).
 const SKY_SCALE: f32 = 1.0;
 
+/// Light fixtures become small emissive spheres (Solari lights only with
+/// emissive geometry, directional lights and the environment).
+const LIGHT_PROXY_RADIUS: f32 = 0.12;
+/// How far in front of its fixture (metres) a light sits, clear of the wall.
+const LIGHT_PROXY_OFFSET: f32 = 0.3;
+/// Radiance per unit of fixture intensity, relative to shader radiosity
+/// power (a fixture's sphere is far smaller than a glowing panel).
+const LIGHT_PROXY_RADIANCE: f32 = 4000.0;
+
 /// What a loaded level contains, for the overlay.
 #[derive(Resource, Default)]
 pub struct LevelStats {
@@ -49,6 +58,8 @@ pub struct LevelStats {
     pub objects: usize,
     pub object_triangles: usize,
     pub object_failures: usize,
+    /// Light fixtures turned into emissive proxies.
+    pub lights: usize,
     /// Transparent-shader geometry not drawn yet (glass, water, ...).
     pub skipped_transparent: usize,
     pub texture_failures: usize,
@@ -79,6 +90,11 @@ pub struct LevelBuilder<'a> {
     surfaces: HashMap<Option<u32>, ShaderSurface>,
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
     loaded_bsps: Vec<usize>,
+    light_proxy: Option<Handle<Mesh>>,
+    /// Whether light fixtures get emissive proxies.
+    pub fixture_lights: bool,
+    /// Rasterize the light proxies too (to see where they are).
+    pub show_light_proxies: bool,
     pub stats: LevelStats,
 }
 
@@ -99,6 +115,9 @@ impl<'a> LevelBuilder<'a> {
             surfaces: HashMap::default(),
             models: HashMap::default(),
             loaded_bsps: Vec::new(),
+            light_proxy: None,
+            fixture_lights: true,
+            show_light_proxies: false,
             stats: LevelStats { map_name: cache.header.name.clone(), ..default() },
         }
     }
@@ -167,13 +186,15 @@ impl<'a> LevelBuilder<'a> {
             if placement.not_automatic || !in_loaded_bsp {
                 continue;
             }
-            let Some(model) = objects::object_model(self.cache, placement.definition)?.and_then(|m| m.datum) else {
-                continue;
+            // (light fixtures often have no model, only their light)
+            let model = objects::object_model(self.cache, placement.definition)?.and_then(|m| m.datum);
+            let parts = match model {
+                Some(model) => self.model_meshes(model, placement.region_permutations, meshes, materials, images),
+                None => None,
             };
-            let Some(parts) = self.model_meshes(model, placement.region_permutations, meshes, materials, images)
-            else {
+            if parts.is_none() && placement.light.is_none() {
                 continue;
-            };
+            }
             let name = self.cache.tag(placement.definition.datum.unwrap())?.name.clone();
             let object = commands
                 .spawn((
@@ -184,9 +205,15 @@ impl<'a> LevelBuilder<'a> {
                     ChildOf(objects_root),
                 ))
                 .id();
-            for (mesh, surface, triangles) in parts {
+            for (mesh, surface, triangles) in parts.into_iter().flatten() {
                 self.spawn_mesh(commands, object, name.clone(), mesh, &surface, raster);
                 self.stats.object_triangles += triangles;
+            }
+            if let Some((color, intensity)) = placement.light
+                && intensity > 0.0
+                && self.fixture_lights
+            {
+                self.spawn_light_proxy(commands, object, Vec3::from(color) * intensity, meshes, materials);
             }
             self.stats.objects += 1;
         }
@@ -257,6 +284,45 @@ impl<'a> LevelBuilder<'a> {
             }
         }
         Ok(())
+    }
+
+    /// An invisible emissive sphere in front of a light fixture: it lights
+    /// the ray-traced scene (and shows in reflections) but is never rasterized.
+    fn spawn_light_proxy(
+        &mut self,
+        commands: &mut Commands,
+        object: Entity,
+        light: Vec3,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) {
+        let mesh = self
+            .light_proxy
+            .get_or_insert_with(|| {
+                meshes.add(
+                    Sphere::new(LIGHT_PROXY_RADIUS)
+                        .mesh()
+                        .build()
+                        .with_generated_tangents()
+                        .expect("sphere has normals and UVs"),
+                )
+            })
+            .clone();
+        let material = materials.add(StandardMaterial { base_color: Color::BLACK, ..default() });
+        let mut proxy = commands.spawn((
+            Name::new("light fixture light"),
+            RaytracingMesh3d(mesh.clone()),
+            MeshMaterial3d(material),
+            EmissiveSurface { radiance: light * LIGHT_PROXY_RADIANCE },
+            // object space is Bevy-converted Halo space: Halo forward (+x) is +x
+            Transform::from_xyz(LIGHT_PROXY_OFFSET, 0.0, 0.0),
+            ChildOf(object),
+        ));
+        if self.show_light_proxies {
+            proxy.insert(Mesh3d(mesh));
+        }
+        self.stats.emissive_meshes += 1;
+        self.stats.lights += 1;
     }
 
     fn spawn_mesh(
@@ -504,6 +570,7 @@ mod tests {
             on_bsp_flags: 1,
             not_automatic: false,
             region_permutations: [0; 8],
+            light: None,
         }
     }
 

@@ -56,6 +56,12 @@ struct Args {
     /// (press P in the viewer to print the current view in this form)
     #[argh(option, from_str_fn(parse_camera))]
     camera: Option<[f32; 5]>,
+    /// don't turn light fixtures into light sources
+    #[argh(switch)]
+    no_fixture_lights: bool,
+    /// draw the light fixtures' emissive proxy spheres
+    #[argh(switch)]
+    show_light_proxies: bool,
     /// leave out the scenario's objects (BSP geometry only)
     #[argh(switch)]
     no_objects: bool,
@@ -200,6 +206,8 @@ fn setup_level(
     let bc_supported = render_device.features().contains(WgpuFeatures::TEXTURE_COMPRESSION_BC);
     let start = std::time::Instant::now();
     let mut builder = LevelBuilder::new(&cache, bc_supported);
+    builder.fixture_lights = !args.no_fixture_lights;
+    builder.show_light_proxies = args.show_light_proxies;
     if let Err(e) = builder.spawn_bsps(
         args.bsp,
         !args.pathtracer,
@@ -222,13 +230,14 @@ fn setup_level(
     }
     let stats = builder.stats;
     info!(
-        "{}: {} bsps ({} triangles), {} objects ({} triangles, {} failed), {} meshes, {} emissive, {} transparent skipped, {} texture failures ({:.2?})",
+        "{}: {} bsps ({} triangles), {} objects ({} triangles, {} failed), {} fixture lights, {} meshes, {} emissive, {} transparent skipped, {} texture failures ({:.2?})",
         stats.map_name,
         stats.bsps,
         stats.triangles,
         stats.objects,
         stats.object_triangles,
         stats.object_failures,
+        stats.lights,
         stats.meshes,
         stats.emissive_meshes,
         stats.skipped_transparent,

@@ -18,8 +18,11 @@ It's based on the [OpenCE](../OpenCE) decompilation. See [ROADMAP.md](ROADMAP.md
 No game data is included. You need the retail Xbox maps (`a10.map`, `b30.map`, `bloodgulch.map`, …). OpenCE extracts them from a disc image on first run (see its README). Point the viewer at the folder that holds them:
 
 ```powershell
-$env:HALO_MAPS = "C:\path\to\maps"      # or pass --maps-dir each time
+setx HALO_MAPS "C:\path\to\maps"      # once; open a new terminal afterwards
+# or pass --maps-dir C:\path\to\maps each time
 ```
+
+Without either, the viewer looks in `./maps`, a `maps` folder next to the executable, and `../OpenCE/build/windows/maps` (where OpenCE's Windows build extracts them). If it can't find the map, it lists the folders it tried.
 
 ## Run
 

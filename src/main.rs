@@ -176,7 +176,24 @@ fn main() -> AppExit {
     let mut game_process = None;
     if let Some(exe) = args.opence.clone() {
         args.bridge = true;
-        match bridge::launch_game(&exe, &args.map_path().unwrap_or_default(), args.show_game) {
+        let map_path = match args.map_path() {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("{e}");
+                eprintln!("pass --maps-dir <folder>, or set HALO_MAPS to the folder holding the Xbox maps, e.g.");
+                eprintln!("  setx HALO_MAPS \"C:\\path\\to\\maps\"   (then open a new terminal)");
+                return AppExit::error();
+            }
+        };
+        // (absolute: the game runs from its own folder)
+        let exe = match std::fs::canonicalize(&exe) {
+            Ok(exe) => exe,
+            Err(e) => {
+                eprintln!("could not find OpenCE at {}: {e}", exe.display());
+                return AppExit::error();
+            }
+        };
+        match bridge::launch_game(&exe, &map_path, args.show_game) {
             // (stops the game when the viewer exits, or gives up on it)
             Ok(child) => game_process = Some(bridge::GameProcess(child)),
             Err(e) => {

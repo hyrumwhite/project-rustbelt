@@ -44,6 +44,12 @@ drive the controller.
 
 #include <SDL3/SDL.h>
 #include <math.h>
+
+/* bevy_bridge_input.c: a Bevy renderer's gamepads, which while it forwards
+them (a count of 0 or more; -1 otherwise) stand in for the SDL ones */
+int bevy_bridge_gamepad_count(void);
+int bevy_bridge_gamepad_read(int index, unsigned long *buttons, short axes[6]);
+void bevy_bridge_gamepad_rumble(int index, unsigned short low, unsigned short high);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -735,8 +741,51 @@ static void merge_button(XINPUT_GAMEPAD *pad, int analog_index, BOOL down)
 		pad->bAnalogButtons[analog_index] = 0xff;
 }
 
+/* a gamepad's buttons (a bit per SDL_GamepadButton) and axes, from SDL or
+from a Bevy renderer */
+struct gamepad_reading
+{
+	unsigned long buttons;
+	Sint16 axes[SDL_GAMEPAD_AXIS_COUNT];
+};
+
+static void gamepad_reading_state(struct gamepad_reading const *reading, XINPUT_GAMEPAD *pad);
+
 static void sdl_gamepad_state(SDL_Gamepad *gamepad, XINPUT_GAMEPAD *pad)
 {
+	struct gamepad_reading reading;
+	int index;
+
+	memset(&reading, 0, sizeof(reading));
+	for (index = 0; index < SDL_GAMEPAD_BUTTON_COUNT && index < 32; index++)
+	{
+		if (SDL_GetGamepadButton(gamepad, (SDL_GamepadButton)index))
+			reading.buttons |= 1UL << index;
+	}
+	for (index = 0; index < SDL_GAMEPAD_AXIS_COUNT; index++)
+		reading.axes[index] = SDL_GetGamepadAxis(gamepad, (SDL_GamepadAxis)index);
+	gamepad_reading_state(&reading, pad);
+}
+
+/* the renderer's gamepad `index` (bevy_bridge_gamepad_count) */
+static void bridge_gamepad_state(int index, XINPUT_GAMEPAD *pad)
+{
+	struct gamepad_reading reading;
+	short axes[6];
+	int axis;
+
+	memset(&reading, 0, sizeof(reading));
+	if (!bevy_bridge_gamepad_read(index, &reading.buttons, axes))
+		return;
+	for (axis = 0; axis < 6 && axis < SDL_GAMEPAD_AXIS_COUNT; axis++)
+		reading.axes[axis] = axes[axis];
+	gamepad_reading_state(&reading, pad);
+}
+
+static void gamepad_reading_state(struct gamepad_reading const *reading, XINPUT_GAMEPAD *pad)
+{
+#define BUTTON(b) ((reading->buttons >> (b)) & 1)
+#define AXIS(a) (reading->axes[(a)])
 	static const struct
 	{
 		SDL_GamepadButton button;
@@ -758,33 +807,35 @@ static void sdl_gamepad_state(SDL_Gamepad *gamepad, XINPUT_GAMEPAD *pad)
 
 	for (index = 0; index < (int)(sizeof(digital) / sizeof(digital[0])); index++)
 	{
-		if (SDL_GetGamepadButton(gamepad, digital[index].button))
+		if (BUTTON(digital[index].button))
 			pad->wButtons |= digital[index].mask;
 	}
-	merge_button(pad, XINPUT_GAMEPAD_A, SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_SOUTH));
-	merge_button(pad, XINPUT_GAMEPAD_B, SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_EAST));
-	merge_button(pad, XINPUT_GAMEPAD_X, SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_WEST));
-	merge_button(pad, XINPUT_GAMEPAD_Y, SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_NORTH));
+	merge_button(pad, XINPUT_GAMEPAD_A, BUTTON(SDL_GAMEPAD_BUTTON_SOUTH));
+	merge_button(pad, XINPUT_GAMEPAD_B, BUTTON(SDL_GAMEPAD_BUTTON_EAST));
+	merge_button(pad, XINPUT_GAMEPAD_X, BUTTON(SDL_GAMEPAD_BUTTON_WEST));
+	merge_button(pad, XINPUT_GAMEPAD_Y, BUTTON(SDL_GAMEPAD_BUTTON_NORTH));
 	/* the Duke's white and black buttons sit where later pads have shoulders */
-	merge_button(pad, XINPUT_GAMEPAD_WHITE, SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER));
-	merge_button(pad, XINPUT_GAMEPAD_BLACK, SDL_GetGamepadButton(gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER));
+	merge_button(pad, XINPUT_GAMEPAD_WHITE, BUTTON(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER));
+	merge_button(pad, XINPUT_GAMEPAD_BLACK, BUTTON(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER));
 
-	left_trigger = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) * 255 / 32767;
-	right_trigger = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) * 255 / 32767;
+	left_trigger = AXIS(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) * 255 / 32767;
+	right_trigger = AXIS(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) * 255 / 32767;
 	if (left_trigger > pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER])
 		pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = (BYTE)left_trigger;
 	if (right_trigger > pad->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER])
 		pad->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] = (BYTE)right_trigger;
 
 	/* a stick only overrides the keyboard when it is pushed further */
-	value = stick(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTX), FALSE);
+	value = stick(AXIS(SDL_GAMEPAD_AXIS_LEFTX), FALSE);
 	if (abs(value) > abs(pad->sThumbLX)) pad->sThumbLX = value;
-	value = stick(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFTY), TRUE);
+	value = stick(AXIS(SDL_GAMEPAD_AXIS_LEFTY), TRUE);
 	if (abs(value) > abs(pad->sThumbLY)) pad->sThumbLY = value;
-	value = stick(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX), FALSE);
+	value = stick(AXIS(SDL_GAMEPAD_AXIS_RIGHTX), FALSE);
 	if (abs(value) > abs(pad->sThumbRX)) pad->sThumbRX = value;
-	value = stick(SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY), TRUE);
+	value = stick(AXIS(SDL_GAMEPAD_AXIS_RIGHTY), TRUE);
 	if (abs(value) > abs(pad->sThumbRY)) pad->sThumbRY = value;
+#undef BUTTON
+#undef AXIS
 }
 
 /* ---------- XAPI */
@@ -799,9 +850,19 @@ VOID WINAPI XInitDevices(DWORD preallocation_type_count, PXDEVICE_PREALLOC_TYPE 
 static DWORD connected_gamepads(void)
 {
 	SDL_Gamepad *gamepads[PORT_COUNT];
-	int count = sdl_gamepads(gamepads);
+	int count;
 	DWORD mask = XDEVICE_PORT0_MASK;
 	int port;
+	int bridge_count = bevy_bridge_gamepad_count();
+
+	if (bridge_count >= 0)
+	{
+		/* (the renderer's: the first shares port 0 with the keyboard) */
+		for (port = 1; port < PORT_COUNT && port < bridge_count; port++)
+			mask |= 1UL << port;
+		return mask;
+	}
+	count = sdl_gamepads(gamepads);
 
 	/* the first pad shares port 0 with the keyboard (port_gamepad) */
 	for (port = 1; port < PORT_COUNT; port++)
@@ -880,12 +941,15 @@ DWORD WINAPI XInputGetState(HANDLE device, PXINPUT_STATE state)
 	int port = controller_port(device);
 	SDL_Gamepad *gamepads[PORT_COUNT];
 	int count;
+	/* (a Bevy renderer's gamepads, while it forwards them) */
+	int bridge_count;
 
 	memset(state, 0, sizeof(*state));
 	if (port < 0)
 		return ERROR_DEVICE_NOT_CONNECTED;
 	platform_pump_events();
 	count = sdl_gamepads(gamepads);
+	bridge_count = bevy_bridge_gamepad_count();
 	if (port == 0)
 	{
 		struct platform_input_state input;
@@ -907,7 +971,12 @@ DWORD WINAPI XInputGetState(HANDLE device, PXINPUT_STATE state)
 			else
 				keyboard_controls(held, &state->Gamepad);
 		}
-		if (port_gamepad(gamepads, count, 0))
+		if (bridge_count >= 0)
+		{
+			if (bridge_count > 0)
+				bridge_gamepad_state(0, &state->Gamepad);
+		}
+		else if (port_gamepad(gamepads, count, 0))
 			sdl_gamepad_state(gamepads[0], &state->Gamepad);
 		test_input_gamepad(&state->Gamepad);
 		if (abs(state->Gamepad.sThumbRX) > STICK_AIMING_DEFLECTION ||
@@ -917,6 +986,11 @@ DWORD WINAPI XInputGetState(HANDLE device, PXINPUT_STATE state)
 			stick_aimed_ms = SDL_GetTicks();
 			pthread_mutex_unlock(&mouse_lock);
 		}
+	}
+	else if (bridge_count >= 0)
+	{
+		if (port < bridge_count)
+			bridge_gamepad_state(port, &state->Gamepad);
 	}
 	else if (port_gamepad(gamepads, count, port))
 	{
@@ -943,6 +1017,12 @@ DWORD WINAPI XInputSetState(HANDLE device, PXINPUT_FEEDBACK feedback)
 	feedback->Header.dwStatus = ERROR_SUCCESS;
 	if (port < 0)
 		return ERROR_DEVICE_NOT_CONNECTED;
+	if (bevy_bridge_gamepad_count() >= 0)
+	{
+		/* (the renderer plays it on its own gamepad) */
+		bevy_bridge_gamepad_rumble(port, feedback->Rumble.wLeftMotorSpeed, feedback->Rumble.wRightMotorSpeed);
+		return ERROR_SUCCESS;
+	}
 	count = sdl_gamepads(gamepads);
 	if (port_gamepad(gamepads, count, port))
 	{

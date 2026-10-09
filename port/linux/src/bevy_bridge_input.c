@@ -141,3 +141,41 @@ void bevy_bridge_input_pump(SDL_Window *window)
 	}
 	bevy_bridge_last = input;
 }
+
+/* ---------- gamepads */
+
+int bevy_bridge_gamepad_count(void)
+{
+	struct bevy_bridge_shared *shared = (struct bevy_bridge_shared *)bevy_bridge_platform_shared();
+	unsigned long count;
+
+	if (!shared || !__atomic_load_n(&shared->gamepads.active, __ATOMIC_ACQUIRE))
+		return -1;
+	count = shared->gamepads.count;
+	return (int)(count < BEVY_BRIDGE_GAMEPADS ? count : BEVY_BRIDGE_GAMEPADS);
+}
+
+int bevy_bridge_gamepad_read(int index, unsigned long *buttons, short axes[6])
+{
+	struct bevy_bridge_shared *shared = (struct bevy_bridge_shared *)bevy_bridge_platform_shared();
+	struct bevy_bridge_gamepad volatile const *pad;
+	int axis;
+
+	if (!shared || index < 0 || index >= BEVY_BRIDGE_GAMEPADS)
+		return 0;
+	pad = &shared->gamepads.pads[index];
+	*buttons = pad->buttons;
+	for (axis = 0; axis < 6; axis++)
+		axes[axis] = pad->axes[axis];
+	return 1;
+}
+
+void bevy_bridge_gamepad_rumble(int index, unsigned short low, unsigned short high)
+{
+	struct bevy_bridge_shared *shared = (struct bevy_bridge_shared *)bevy_bridge_platform_shared();
+
+	if (!shared || index < 0 || index >= BEVY_BRIDGE_GAMEPADS)
+		return;
+	shared->gamepads.pads[index].rumble[0] = low;
+	shared->gamepads.pads[index].rumble[1] = high;
+}

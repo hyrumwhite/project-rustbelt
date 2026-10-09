@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 6
+#define BEVY_BRIDGE_VERSION 7
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
 #define BEVY_BRIDGE_FRAMES 2
@@ -152,6 +152,31 @@ struct bevy_bridge_overlay
 	unsigned long reserved[4];
 };
 
+/* a gamepad the renderer forwards */
+struct bevy_bridge_gamepad
+{
+	/* the buttons held, a bit per SDL_GamepadButton */
+	unsigned long buttons;
+	/* SDL_GamepadAxis order and ranges: left x, left y, right x, right y
+	(-32768..32767, y down), left trigger, right trigger (0..32767) */
+	short axes[6];
+	/* the game's rumble for it (0..65535: the low and high frequency
+	motors), which only the game writes */
+	unsigned short rumble[2];
+};
+
+#define BEVY_BRIDGE_GAMEPADS 4
+
+/* the renderer's gamepads: while `active`, the game takes these instead of
+the ones it finds itself (whose input a hidden window would not get), the
+first sharing port 0 with the keyboard as a gamepad of its own would */
+struct bevy_bridge_gamepads
+{
+	unsigned long active;
+	unsigned long count;
+	struct bevy_bridge_gamepad pads[BEVY_BRIDGE_GAMEPADS];
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -163,6 +188,7 @@ struct bevy_bridge_shared
 	unsigned long writer_process_id;
 	unsigned long reserved[3];
 	struct bevy_bridge_input input;
+	struct bevy_bridge_gamepads gamepads;
 	struct bevy_bridge_frame frames[BEVY_BRIDGE_FRAMES];
 	/* nonzero when the game shares overlays (game.bevy_bridge_overlay) */
 	unsigned long overlay_enabled;

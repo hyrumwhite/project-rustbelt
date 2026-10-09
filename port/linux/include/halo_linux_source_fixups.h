@@ -75,6 +75,8 @@ opaque world is drawn only into the depth buffer; and whether the overlay is
 drawn at all */
 void halo_screen_overlay_world(unsigned char world);
 unsigned char halo_screen_overlay(void);
+/* around the first-person weapon, whose blended parts go to the overlay */
+void halo_screen_overlay_first_person(unsigned char first_person);
 /* the mouse in the menus (source/interface/ui_widget.c) */
 #include "halo_ui_pointer.h"
 

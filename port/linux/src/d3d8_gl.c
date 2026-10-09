@@ -3174,6 +3174,9 @@ void bevy_bridge_overlay_commit(void);
 static int overlay_mode = -1;
 /* drawing the opaque world: depth only */
 static BOOL overlay_world;
+/* drawing the first-person weapon, whose transparent parts (the rifle's
+ammo counter) it draws with it: those still go to the overlay */
+static BOOL overlay_first_person;
 
 static BOOL overlay_enabled(void)
 {
@@ -3201,6 +3204,12 @@ void halo_screen_overlay_world(unsigned char world)
 	if (debug_world < 0)
 		debug_world = getenv("HALO_BEVY_OVERLAY_DEBUG_WORLD") != NULL;
 	overlay_world = world && overlay_enabled() && !debug_world;
+}
+
+/* render_objects.c: around the first-person weapon */
+void halo_screen_overlay_first_person(unsigned char first_person)
+{
+	overlay_first_person = first_person && overlay_enabled();
 }
 
 /* render.c: whether its passes that only finish the opaque world's picture
@@ -3318,7 +3327,9 @@ static void apply_raster_state(BOOL has_depth)
 		/* the world: depth only; after it, every colour write also writes
 		coverage, and alpha-only passes (which build masks over the world's
 		picture) are left out */
-		if (overlay_world || !(write & (D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE)))
+		BOOL world = overlay_world && !(overlay_first_person && rs[D3DRS_ALPHABLENDENABLE]);
+
+		if (world || !(write & (D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE)))
 			write = 0;
 		else
 			write |= D3DCOLORWRITEENABLE_ALPHA;

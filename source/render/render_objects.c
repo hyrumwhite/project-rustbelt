@@ -354,7 +354,11 @@ void render_objects(
 	{
 		if (first_person_pass != rasterizer_debug_options.draw_first_person_weapon_first)
 		{
+			/* port: its blended parts (the rifle's ammo counter) go to the
+			Bevy bridge's overlay, which draws the rest itself */
+			halo_screen_overlay_first_person(TRUE);
 			first_person_weapon_draw();
+			halo_screen_overlay_first_person(FALSE);
 		}
 		else
 		{

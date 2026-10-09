@@ -3,10 +3,12 @@
 //!
 //! Phases 1-3 of ROADMAP.md: a retail Xbox map's structure BSPs, placed
 //! objects and sky, with Halo's materials, lit by the level's sun and sky and
-//! by its light-emitting surfaces.
+//! by its light-emitting surfaces. Phase 4: with `--bridge`, the objects and
+//! camera of a running OpenCE game instead (see [`bridge`]).
 
 #![allow(clippy::too_many_arguments, reason = "Bevy systems take their resources and queries as arguments")]
 
+mod bridge;
 mod level;
 mod material;
 mod sky;
@@ -76,6 +78,14 @@ struct Args {
     /// save a screenshot here once the lighting has settled, then exit
     #[argh(option)]
     screenshot: Option<PathBuf>,
+    /// how many frames to render before the screenshot (default 300)
+    #[argh(option, default = "300")]
+    screenshot_after: u32,
+    /// draw a running OpenCE game (its objects and camera) instead of the
+    /// map's placements; the map is the game's (start OpenCE with
+    /// HALO_BEVY_BRIDGE=1)
+    #[argh(switch)]
+    bridge: bool,
 }
 
 fn parse_camera(value: &str) -> Result<[f32; 5], String> {
@@ -154,7 +164,17 @@ impl Default for LightingSettings {
 struct LevelSky(sky::SkyLighting);
 
 fn main() -> AppExit {
-    let args: Args = argh::from_env();
+    let mut args: Args = argh::from_env();
+    let mut link = None;
+    if args.bridge {
+        let Some((bridge, snapshot)) = bridge::wait_for_game(std::time::Duration::from_secs(300)) else {
+            eprintln!("no OpenCE game shared a frame; start it with HALO_BEVY_BRIDGE=1 and load a level");
+            return AppExit::error();
+        };
+        eprintln!("bridged to OpenCE: {} ({} objects)", snapshot.scenario_name, snapshot.objects.len());
+        args.map = snapshot.map_name().to_string();
+        link = Some(bridge::BridgeLink { bridge, latest: Some(snapshot), frames: 0 });
+    }
     let path = match args.map_path() {
         Ok(path) => path,
         Err(e) => {
@@ -189,6 +209,9 @@ fn main() -> AppExit {
 
     if args.screenshot.is_some() {
         app.add_systems(Update, screenshot_and_exit);
+    }
+    if let Some(link) = link {
+        app.insert_resource(link).add_plugins(bridge::BridgePlugin);
     }
 
     if args.pathtracer {
@@ -239,7 +262,7 @@ fn setup_level(
     mut images: ResMut<Assets<Image>>,
     neutral_detail: Res<NeutralDetail>,
 ) {
-    let cache = map.0.take().expect("level loads once");
+    let cache = std::sync::Arc::new(map.0.take().expect("level loads once"));
     let mut assets = LevelAssets {
         meshes: &mut meshes,
         materials: &mut materials,
@@ -252,15 +275,17 @@ fn setup_level(
     assets.flat_normal = assets.images.add(material::flat_normal_image());
     let bc_supported = render_device.features().contains(WgpuFeatures::TEXTURE_COMPRESSION_BC);
     let start = std::time::Instant::now();
-    let mut builder = LevelBuilder::new(&cache, bc_supported);
+    let mut builder = LevelBuilder::new(cache.clone(), bc_supported);
     builder.fixture_lights = !args.no_fixture_lights;
     builder.show_light_proxies = args.show_light_proxies;
     builder.matte = args.matte;
     if let Err(e) = builder.spawn_bsps(args.bsp, !args.pathtracer, &mut commands, &mut assets) {
         error!("loading {}: {e}", cache.header.name);
     }
-    if !args.no_objects
-        && let Err(e) = builder.spawn_objects(!args.pathtracer, &mut commands, &mut assets)
+    // a bridged game places the objects itself; the map still gives the
+    // light fixtures' lights
+    if (!args.no_objects || args.bridge)
+        && let Err(e) = builder.spawn_objects(!args.pathtracer, args.bridge, &mut commands, &mut assets)
     {
         error!("placing objects: {e}");
     }
@@ -275,7 +300,7 @@ fn setup_level(
             Err(e) => error!("sky environment map: {e}"),
         }
     }
-    let stats = builder.stats;
+    let stats = builder.stats.clone();
     info!(
         "{}: {} bsps ({} triangles), {} objects ({} triangles, {} failed), {} fixture lights, {} meshes, {} emissive, {} transparent ({} not drawn), {} texture failures ({:.2?})",
         stats.map_name,
@@ -306,6 +331,9 @@ fn setup_level(
     };
     commands.insert_resource(CameraStart(transform));
     commands.insert_resource(stats);
+    if args.bridge {
+        commands.insert_resource(bridge::BridgeLevel { builder, raster: !args.pathtracer });
+    }
 }
 
 #[derive(Resource)]
@@ -335,7 +363,6 @@ fn setup_camera(
     let mut camera = commands.spawn((
         Camera3d::default(),
         Camera { clear_color: ClearColorConfig::Custom(Color::BLACK), ..default() },
-        FreeCamera { walk_speed: 6.0, run_speed: 25.0, ..default() },
         start.0,
         // Msaa::Off and STORAGE_BINDING main textures are required by Solari
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
@@ -346,6 +373,10 @@ fn setup_camera(
         camera.insert(Pathtracer::default());
     } else {
         camera.insert(SolariLighting::default());
+    }
+    // a bridged camera follows the game's until F detaches it
+    if !args.bridge {
+        camera.insert(FreeCamera { walk_speed: 6.0, run_speed: 25.0, ..default() });
     }
 
     if let Some((color, power)) = level_sky.0.sky {
@@ -528,14 +559,13 @@ fn screenshot_and_exit(
     mut exit: MessageWriter<AppExit>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-    const CAPTURE_FRAME: u32 = 300;
     *frames += 1;
-    if *frames == CAPTURE_FRAME
+    if *frames == args.screenshot_after
         && let Some(path) = args.screenshot.clone()
     {
         commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
     }
-    if *frames == CAPTURE_FRAME + 30 {
+    if *frames == args.screenshot_after + 30 {
         exit.write(AppExit::Success);
     }
 }
@@ -579,10 +609,34 @@ fn update_control_text(
     settings: Res<LightingSettings>,
     stats: Option<Res<LevelStats>>,
     solari: Single<&SolariLighting>,
+    link: Option<ResMut<bridge::BridgeLink>>,
+    bridged: Option<Res<bridge::BridgeObjects>>,
+    follow: Option<Res<bridge::FollowGame>>,
+    time: Res<Time>,
+    mut rate: Local<(f32, u32)>,
     #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
     #[cfg(feature = "dlss")] dlss_camera: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolariLighting>>,
 ) {
     let mut s = String::new();
+    if let (Some(mut link), Some(bridged), Some(follow)) = (link, bridged, follow) {
+        // the game's frame rate, over the last second
+        rate.0 += time.delta_secs();
+        if rate.0 >= 1.0 {
+            rate.1 = (link.frames as f32 / rate.0).round() as u32;
+            link.frames = 0;
+            rate.0 = 0.0;
+        }
+        let game = link.latest.as_ref();
+        s += &format!(
+            "OpenCE bridge: {} at tick {}, {} game frames/s, drawing {} of {} objects - F: {}\n",
+            game.map_or("", |g| g.scenario_name.as_str()),
+            game.map_or(0, |g| g.game_tick),
+            rate.1,
+            bridged.count(),
+            game.map_or(0, |g| g.objects.len()),
+            if follow.0 { "free camera" } else { "follow the game's camera" }
+        );
+    }
     if let Some(stats) = stats {
         s += &format!(
             "{} - {} BSPs ({}k tris), {} objects ({}k tris), {} emissive meshes\n",

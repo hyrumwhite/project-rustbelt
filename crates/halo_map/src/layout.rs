@@ -81,6 +81,7 @@ pub mod model_node {
     pub const PARENT_NODE_INDEX: usize = 0x24;
     pub const DEFAULT_TRANSLATION: usize = 0x28;
     pub const DEFAULT_ROTATION: usize = 0x34;
+    pub const RUNTIME_DEFAULT_INVERSE_MATRIX: usize = 0x68;
 }
 
 pub mod model_region {

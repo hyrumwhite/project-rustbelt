@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/halo_map"]
+members = ["crates/halo_map", "crates/halo_bridge"]
 
 [package]
 name = "halo_rt"
@@ -17,6 +17,7 @@ dlss = ["bevy/dlss"]
 
 [dependencies]
 halo_map = { path = "crates/halo_map" }
+halo_bridge = { path = "crates/halo_bridge" }
 bevy = { version = "0.20.0", features = ["bevy_solari", "https", "free_camera"] }
 argh = "0.1.12"
 

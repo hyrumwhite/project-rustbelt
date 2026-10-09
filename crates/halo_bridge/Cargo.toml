@@ -1,0 +1,12 @@
+[package]
+name = "halo_bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+description = "Reads the frames OpenCE shares with a renderer (its bevy_bridge): camera and object node matrices"
+
+[dependencies]
+
+[[bin]]
+name = "bridge_probe"

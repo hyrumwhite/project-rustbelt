@@ -3168,6 +3168,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "halo_bridge"
+version = "0.1.0"
+
+[[package]]
 name = "halo_map"
 version = "0.1.0"
 dependencies = [
@@ -3182,6 +3186,7 @@ dependencies = [
  "argh",
  "bevy",
  "chacha20",
+ "halo_bridge",
  "halo_map",
  "rand",
 ]

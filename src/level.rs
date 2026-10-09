@@ -10,6 +10,7 @@ use crate::{
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
+    math::Affine3A,
     platform::collections::HashMap,
     prelude::*,
     solari::prelude::RaytracingMesh3d,
@@ -22,6 +23,7 @@ use halo_map::{
     shader::{self, ShaderInfo, ShaderType},
     CacheFile, TagRef,
 };
+use std::sync::Arc;
 
 /// A level material that emits light; its emissive strength follows
 /// [`crate::LightingSettings::emissive_scale`].
@@ -61,7 +63,7 @@ const LIGHT_PROXY_RADIANCE: f32 = 4000.0;
 const SELF_ILLUMINATION_RADIANCE: f32 = 2.5;
 
 /// What a loaded level contains, for the overlay.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct LevelStats {
     pub map_name: String,
     pub bsps: usize,
@@ -128,11 +130,42 @@ struct ShaderSurface {
 /// A model's meshes for one permutation choice, made once and instanced.
 type ModelMeshes = Vec<(Handle<Mesh>, Surface, usize)>;
 
-pub struct LevelBuilder<'a> {
-    pub cache: &'a CacheFile,
+/// A model split by node for an animated object (see
+/// [`LevelBuilder::animated_model`]).
+pub struct AnimatedModel {
+    pub name: String,
+    pieces: Vec<ModelPiece>,
+    /// Per node, its default inverse matrix (Halo space).
+    pub default_inverses: Vec<Affine3A>,
+}
+
+struct ModelPiece {
+    node: usize,
+    mesh: Handle<Mesh>,
+    surface: Surface,
+}
+
+/// A Halo `real_matrix4x3` as an affine transform (Halo space).
+pub fn halo_affine(m: &halo_map::model::Matrix4x3) -> Affine3A {
+    Affine3A::from_cols(
+        Vec3A::from(m.forward) * m.scale,
+        Vec3A::from(m.left) * m.scale,
+        Vec3A::from(m.up) * m.scale,
+        Vec3A::from(m.position),
+    )
+}
+
+/// Halo space (Z up, world units) to Bevy's (Y up, metres) as an affine map.
+pub fn halo_to_bevy_affine() -> Affine3A {
+    Affine3A::from_mat3(Mat3::from_cols(Vec3::X, Vec3::NEG_Z, Vec3::Y) * METERS_PER_WORLD_UNIT)
+}
+
+pub struct LevelBuilder {
+    pub cache: Arc<CacheFile>,
     pub textures: TextureCache,
     surfaces: HashMap<Option<u32>, ShaderSurface>,
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
+    animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
     loaded_bsps: Vec<usize>,
     light_proxy: Option<Handle<Mesh>>,
     /// Whether light fixtures get emissive proxies.
@@ -153,19 +186,20 @@ struct SourceVertex {
     texcoord: [f32; 2],
 }
 
-impl<'a> LevelBuilder<'a> {
-    pub fn new(cache: &'a CacheFile, bc_supported: bool) -> Self {
+impl LevelBuilder {
+    pub fn new(cache: Arc<CacheFile>, bc_supported: bool) -> Self {
         LevelBuilder {
-            cache,
             textures: TextureCache::new(bc_supported),
             surfaces: HashMap::default(),
             models: HashMap::default(),
+            animated_models: HashMap::default(),
             loaded_bsps: Vec::new(),
             light_proxy: None,
             fixture_lights: true,
             show_light_proxies: false,
             matte: false,
             stats: LevelStats { map_name: cache.header.name.clone(), ..default() },
+            cache,
         }
     }
 
@@ -177,11 +211,11 @@ impl<'a> LevelBuilder<'a> {
         commands: &mut Commands,
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
-        for reference in bsp::references(self.cache)? {
+        for reference in bsp::references(&self.cache)? {
             if only.is_some_and(|i| i != reference.index) {
                 continue;
             }
-            let loaded = bsp::Bsp::load(self.cache, &reference)?;
+            let loaded = bsp::Bsp::load(&self.cache, &reference)?;
             let level = commands
                 .spawn((Name::new(reference.name.clone()), Transform::default(), Visibility::default()))
                 .id();
@@ -213,14 +247,17 @@ impl<'a> LevelBuilder<'a> {
         Ok(())
     }
 
-    /// Spawns the objects the game would create in the loaded BSPs.
+    /// Spawns the objects the game would create in the loaded BSPs; with
+    /// `lights_only`, only the light fixtures' lights (when a running game
+    /// places the objects, see [`crate::bridge`]).
     pub fn spawn_objects(
         &mut self,
         raster: bool,
+        lights_only: bool,
         commands: &mut Commands,
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
-        let placements = objects::placements(self.cache)?;
+        let placements = objects::placements(&self.cache)?;
         let objects_root = commands.spawn((Name::new("objects"), Transform::default(), Visibility::default())).id();
         for placement in &placements {
             // (multiplayer vehicles have no BSP flags: the game type spawns them)
@@ -229,8 +266,15 @@ impl<'a> LevelBuilder<'a> {
             if placement.not_automatic || !in_loaded_bsp {
                 continue;
             }
+            if lights_only && placement.light.is_none() {
+                continue;
+            }
             // (light fixtures often have no model, only their light)
-            let model = objects::object_model(self.cache, placement.definition)?.and_then(|m| m.datum);
+            let model = if lights_only {
+                None
+            } else {
+                objects::object_model(&self.cache, placement.definition)?.and_then(|m| m.datum)
+            };
             let parts = match model {
                 Some(model) => self.model_meshes(model, placement.region_permutations, assets),
                 None => None,
@@ -274,7 +318,8 @@ impl<'a> LevelBuilder<'a> {
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
         use bevy::light::NotShadowCaster;
-        let model = Model::load(self.cache, model_datum)?;
+        let cache = self.cache.clone();
+        let model = Model::load(&cache, model_datum)?;
         let dome = commands
             .spawn((Name::new(model.name.clone()), SkyDome, Transform::default(), Visibility::default()))
             .id();
@@ -282,7 +327,7 @@ impl<'a> LevelBuilder<'a> {
         for geometry in model.geometries_for(&[], model::HIGHEST_DETAIL) {
             for part in model.geometry(geometry)? {
                 let Some(shader_ref) = model.shaders.get(part.shader_index.max(0) as usize).copied() else { continue };
-                let Some(info) = shader::shader_info(self.cache, shader_ref)? else { continue };
+                let Some(info) = shader::shader_info(&self.cache, shader_ref)? else { continue };
                 let depth_bias = SKY_BIAS + layer as f32 * SKY_LAYER_BIAS;
                 if let Some(material) = self.transparent_material(&info, depth_bias, assets) {
                     let vertices = part.vertices.iter().map(|v| SourceVertex {
@@ -306,7 +351,7 @@ impl<'a> LevelBuilder<'a> {
                 }
                 let (texture, uv_scale, uv_offset) = match sky_layer_map(&info) {
                     Some(map) => (
-                        map.bitmap.datum.and_then(|d| self.textures.get(self.cache, d, 0, true, assets.images)),
+                        map.bitmap.datum.and_then(|d| self.textures.get(&self.cache, d, 0, true, assets.images)),
                         map.uv_scale,
                         map.uv_offset,
                     ),
@@ -461,6 +506,99 @@ impl<'a> LevelBuilder<'a> {
         self.stats.meshes += 1;
     }
 
+    /// A model's meshes split by node, for an object the game moves (see
+    /// [`crate::bridge`]): each triangle goes with the node that moves its
+    /// first vertex most (a rigid stand-in for Halo's two-node skinning), and
+    /// a node's pieces are drawn at `node matrix * default inverse`, as the
+    /// game draws its parts. Made once per (model, permutations).
+    pub fn animated_model(
+        &mut self,
+        datum: u32,
+        permutations: [u8; 8],
+        assets: &mut LevelAssets,
+    ) -> Option<Arc<AnimatedModel>> {
+        if let Some(cached) = self.animated_models.get(&(datum, permutations)) {
+            return cached.clone();
+        }
+        let built = match self.build_animated_model(datum, &permutations, assets) {
+            Ok(model) => Some(Arc::new(model)),
+            Err(e) => {
+                let name = self.cache.tag(datum).map(|t| t.name.clone()).unwrap_or_default();
+                warn!("model {name}: {e}");
+                self.stats.object_failures += 1;
+                None
+            }
+        };
+        self.animated_models.insert((datum, permutations), built.clone());
+        built
+    }
+
+    fn build_animated_model(
+        &mut self,
+        datum: u32,
+        permutations: &[u8],
+        assets: &mut LevelAssets,
+    ) -> halo_map::Result<AnimatedModel> {
+        let cache = self.cache.clone();
+        let model = Model::load(&cache, datum)?;
+        let mut pieces = Vec::new();
+        for geometry in model.geometries_for(permutations, model::HIGHEST_DETAIL) {
+            for part in model.geometry(geometry)? {
+                if part.indices.is_empty() {
+                    continue;
+                }
+                let shader_ref = model
+                    .shaders
+                    .get(part.shader_index.max(0) as usize)
+                    .copied()
+                    .unwrap_or(TagRef { group: 0, datum: None });
+                let shader = self.surface(shader_ref, assets);
+                let Some(surface) = shader.surface else {
+                    self.stats.skipped_transparent += 1;
+                    continue;
+                };
+                let mut by_node: HashMap<usize, Vec<u32>> = HashMap::default();
+                for triangle in part.indices.chunks_exact(3) {
+                    let v = &part.vertices[triangle[0] as usize];
+                    let node = if v.node_weights[0] >= v.node_weights[1] { v.nodes[0] } else { v.nodes[1] } as usize;
+                    by_node.entry(node.min(model.nodes.len().saturating_sub(1))).or_default().extend_from_slice(triangle);
+                }
+                for (node, indices) in by_node {
+                    let vertices = part.vertices.iter().map(|v| SourceVertex {
+                        position: v.position,
+                        normal: v.normal,
+                        binormal: v.binormal,
+                        tangent: v.tangent,
+                        texcoord: v.texcoord,
+                    });
+                    let mesh = assets.meshes.add(build_mesh(vertices, &indices, shader.uv_scale));
+                    pieces.push(ModelPiece { node, mesh, surface: surface.clone() });
+                }
+            }
+        }
+        let default_inverses = model.nodes.iter().map(|n| halo_affine(&n.default_inverse)).collect();
+        Ok(AnimatedModel { name: model.name, pieces, default_inverses })
+    }
+
+    /// Spawns an animated model: a root, an entity per node it draws (whose
+    /// transforms the caller sets each frame) and its pieces under them.
+    pub fn spawn_animated_model(
+        &mut self,
+        commands: &mut Commands,
+        model: &AnimatedModel,
+        raster: bool,
+    ) -> (Entity, Vec<Option<Entity>>) {
+        let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
+        let mut nodes: Vec<Option<Entity>> = vec![None; model.default_inverses.len().max(1)];
+        for piece in &model.pieces {
+            let node = *nodes[piece.node].get_or_insert_with(|| {
+                commands.spawn((Transform::default(), Visibility::default(), ChildOf(root))).id()
+            });
+            self.spawn_mesh(commands, node, model.name.clone(), piece.mesh.clone(), &piece.surface, raster);
+        }
+        (root, nodes)
+    }
+
     /// A model's meshes at the highest level of detail, made once per
     /// (model, permutations).
     fn model_meshes(
@@ -491,7 +629,8 @@ impl<'a> LevelBuilder<'a> {
         permutations: &[u8],
         assets: &mut LevelAssets,
     ) -> halo_map::Result<ModelMeshes> {
-        let model = Model::load(self.cache, datum)?;
+        let cache = self.cache.clone();
+        let model = Model::load(&cache, datum)?;
         let mut out = Vec::new();
         for geometry in model.geometries_for(permutations, model::HIGHEST_DETAIL) {
             for part in model.geometry(geometry)? {
@@ -531,7 +670,7 @@ impl<'a> LevelBuilder<'a> {
         if let Some(surface) = self.surfaces.get(&shader.datum) {
             return surface.clone();
         }
-        let info = match shader::shader_info(self.cache, shader) {
+        let info = match shader::shader_info(&self.cache, shader) {
             Ok(info) => info,
             Err(e) => {
                 warn!("shader {:?}: {e}", shader.datum);
@@ -558,7 +697,7 @@ impl<'a> LevelBuilder<'a> {
         let base_color_texture = info
             .base_map
             .and_then(|r| r.datum)
-            .and_then(|datum| self.textures.get(self.cache, datum, 0, true, assets.images));
+            .and_then(|datum| self.textures.get(&self.cache, datum, 0, true, assets.images));
         let radiance = Vec3::from(info.emitted_light) * info.emitted_power;
         let emits = info.emitted_power > 0.0 && radiance != Vec3::ZERO;
 
@@ -574,7 +713,7 @@ impl<'a> LevelBuilder<'a> {
                     base: info.base_map.and_then(|b| b.datum),
                     multipurpose: multipurpose_map.datum?,
                 };
-                Some((self.textures.baked(self.cache, bake, assets.images)?, Vec3::from(color_upper)))
+                Some((self.textures.baked(&self.cache, bake, assets.images)?, Vec3::from(color_upper)))
             }
             shader::SelfIllumination::Environment { map, primary, secondary, plasma } => {
                 let bake = crate::textures::Bake::EnvironmentSelfIllumination {
@@ -582,7 +721,7 @@ impl<'a> LevelBuilder<'a> {
                     map: map.datum?,
                     colors: [primary, secondary, plasma].map(|c| c.map(f32::to_bits)),
                 };
-                Some((self.textures.baked(self.cache, bake, assets.images)?, Vec3::ONE))
+                Some((self.textures.baked(&self.cache, bake, assets.images)?, Vec3::ONE))
             }
         });
         let shine = self.shininess(info, assets);
@@ -616,7 +755,7 @@ impl<'a> LevelBuilder<'a> {
         // base map does (StandardMaterial has one set of texture coordinates)
         let mut material = material;
         if let Some(environment) = &info.environment {
-            let base_size = info.base_map.and_then(|b| b.datum).and_then(|d| bitmap_size(self.cache, d));
+            let base_size = info.base_map.and_then(|b| b.datum).and_then(|d| bitmap_size(&self.cache, d));
             if let Some((normal_map, scale)) = self.bump_map(environment, base_size, assets.images)
                 && scale.abs_diff_eq(Vec2::ONE, 1e-3)
             {
@@ -637,7 +776,7 @@ impl<'a> LevelBuilder<'a> {
     /// transparency and a reflection of the sky from the environment map.
     fn glass_or_water_material(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<Handle<StandardMaterial>> {
         let texture = |map: Option<TagRef>, this: &mut Self, assets: &mut LevelAssets| {
-            map.and_then(|m| m.datum).and_then(|d| this.textures.get(this.cache, d, 0, true, assets.images))
+            map.and_then(|m| m.datum).and_then(|d| this.textures.get(&this.cache, d, 0, true, assets.images))
         };
         let material = if let Some(glass) = info.glass {
             let [r, g, b] = glass.tint;
@@ -678,7 +817,7 @@ impl<'a> LevelBuilder<'a> {
         use shader::BlendFunction;
         let transparent = info.transparent.as_ref()?;
         let shader_ref = TagRef { group: info.group, datum: Some(info.datum) };
-        let program = match halo_map::combiner::program(self.cache, shader_ref) {
+        let program = match halo_map::combiner::program(&self.cache, shader_ref) {
             Ok(program) => program?,
             Err(e) => {
                 warn!("shader {}: {e}", info.name);
@@ -694,7 +833,7 @@ impl<'a> LevelBuilder<'a> {
                 continue;
             }
             let Some(map) = slot else { continue };
-            let Some(image) = map.bitmap.datum.and_then(|d| self.textures.get(self.cache, d, 0, true, assets.images))
+            let Some(image) = map.bitmap.datum.and_then(|d| self.textures.get(&self.cache, d, 0, true, assets.images))
             else {
                 continue;
             };
@@ -751,7 +890,7 @@ impl<'a> LevelBuilder<'a> {
                 roughness: roughness.to_bits(),
                 metallic: metallic.to_bits(),
             };
-            self.textures.baked(self.cache, bake, assets.images)
+            self.textures.baked(&self.cache, bake, assets.images)
         });
         match texture {
             // the texture holds the values; the factors multiply them
@@ -771,13 +910,13 @@ impl<'a> LevelBuilder<'a> {
         assets: &mut LevelAssets,
     ) -> Handle<HaloEnvironmentMaterial> {
         use shader::{DetailFunction, EnvironmentType};
-        let base_size = info.base_map.and_then(|b| b.datum).and_then(|d| bitmap_size(self.cache, d));
+        let base_size = info.base_map.and_then(|b| b.datum).and_then(|d| bitmap_size(&self.cache, d));
         let mut layer = |map: Option<shader::DetailMap>| -> (Handle<Image>, Vec2) {
             let Some(map) = map else { return (assets.neutral_detail.clone(), Vec2::ONE) };
             let Some(datum) = map.bitmap.datum else { return (assets.neutral_detail.clone(), Vec2::ONE) };
-            let image = self.textures.get(self.cache, datum, 0, true, assets.images);
+            let image = self.textures.get(&self.cache, datum, 0, true, assets.images);
             // rescaled detail maps repeat relative to the base map's size
-            let rescale = match (environment.rescale_detail_maps, base_size, bitmap_size(self.cache, datum)) {
+            let rescale = match (environment.rescale_detail_maps, base_size, bitmap_size(&self.cache, datum)) {
                 (true, Some(base), Some(detail)) => base / detail,
                 _ => Vec2::ONE,
             };
@@ -836,8 +975,8 @@ impl<'a> LevelBuilder<'a> {
     ) -> Option<(Handle<Image>, Vec2)> {
         let map = environment.bump_map?;
         let datum = map.bitmap.datum?;
-        let image = self.textures.get(self.cache, datum, 0, false, images)?;
-        let rescale = match (environment.rescale_bump_map, base_size, bitmap_size(self.cache, datum)) {
+        let image = self.textures.get(&self.cache, datum, 0, false, images)?;
+        let rescale = match (environment.rescale_bump_map, base_size, bitmap_size(&self.cache, datum)) {
             (true, Some(base), Some(bump)) => base / bump,
             _ => Vec2::ONE,
         };

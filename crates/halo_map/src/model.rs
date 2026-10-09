@@ -26,6 +26,16 @@ const TRIANGLE_BUFFER_STRIP: i16 = 1;
 pub const LEVELS_OF_DETAIL: usize = 5;
 pub const HIGHEST_DETAIL: usize = LEVELS_OF_DETAIL - 1;
 
+/// `real_matrix4x3`: `position + scale * (x * forward + y * left + z * up)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Matrix4x3 {
+    pub scale: f32,
+    pub forward: [f32; 3],
+    pub left: [f32; 3],
+    pub up: [f32; 3],
+    pub position: [f32; 3],
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub name: String,
@@ -33,6 +43,10 @@ pub struct Node {
     pub default_translation: [f32; 3],
     /// i, j, k, w.
     pub default_rotation: [f32; 4],
+    /// The inverse of the node's default (rest pose) matrix in model space,
+    /// as the map was built (`runtime_default_inverse_matrix`): a part
+    /// attached to the node is drawn at `node matrix * default inverse`.
+    pub default_inverse: Matrix4x3,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +111,16 @@ impl<'a> Model<'a> {
                     parent: (parent >= 0).then_some(parent as usize),
                     default_translation: node.vec3(t)?,
                     default_rotation: [node.f32(q)?, node.f32(q + 4)?, node.f32(q + 8)?, node.f32(q + 12)?],
+                    default_inverse: {
+                        let m = n::RUNTIME_DEFAULT_INVERSE_MATRIX;
+                        Matrix4x3 {
+                            scale: node.f32(m)?,
+                            forward: node.vec3(m + 4)?,
+                            left: node.vec3(m + 16)?,
+                            up: node.vec3(m + 28)?,
+                            position: node.vec3(m + 40)?,
+                        }
+                    },
                 })
             })
             .collect::<Result<_>>()?;

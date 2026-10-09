@@ -9,6 +9,7 @@
 //! halo_map bitmap  <map> <tag name> <out.png> [bitmap index]
 //! halo_map bitmaps <map>          (decode every bitmap; report by format)
 //! halo_map objects <map> [list]   (placements; decode every placed model)
+//! halo_map skypano <map> <out.png> (the sky model as an equirectangular panorama)
 //! ```
 
 use halo_map::{bitmap, bsp, fourcc, fourcc_str, groups, model, objects, scenario, shader, sky, CacheFile};
@@ -17,7 +18,7 @@ use std::{collections::BTreeMap, process::ExitCode, time::Instant};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(command), Some(path)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: halo_map <info|tags|bsp|shaders|sky|bitmap|bitmaps|objects> <map> [args]");
+        eprintln!("usage: halo_map <info|tags|bsp|shaders|sky|bitmap|bitmaps|objects|skypano> <map> [args]");
         return ExitCode::FAILURE;
     };
     let start = Instant::now();
@@ -37,6 +38,7 @@ fn main() -> ExitCode {
         "sky" => skies(&cache),
         "bitmap" => export_bitmap(&cache, &args[2..]),
         "bitmaps" => all_bitmaps(&cache),
+        "skypano" => sky_panorama(&cache, &args[2..]),
         "objects" => objects(&cache, args.get(2).is_some_and(|a| a == "list")),
         other => Err(format!("unknown command {other}").into()),
     };
@@ -306,6 +308,26 @@ fn objects(cache: &CacheFile, list: bool) -> CliResult {
         models.len(),
         normal_sum / normal_count.max(1) as f32
     );
+    Ok(())
+}
+
+fn sky_panorama(cache: &CacheFile, args: &[String]) -> CliResult {
+    let out = args.first().ok_or("usage: halo_map skypano <map> <out.png>")?;
+    let model = sky::skies(cache)?.into_iter().find_map(|s| s.model).and_then(|m| m.datum).ok_or("no sky model")?;
+    let renderer = sky::SkyRenderer::new(cache, model)?;
+    let (w, h) = (1024u32, 512u32);
+    let start = Instant::now();
+    let mut pixels = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        let pitch = std::f32::consts::FRAC_PI_2 - (y as f32 + 0.5) / h as f32 * std::f32::consts::PI;
+        for x in 0..w {
+            let yaw = (x as f32 + 0.5) / w as f32 * std::f32::consts::TAU;
+            let direction = [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin()];
+            pixels.extend(renderer.sample(direction).map(|c| (c * 255.0).round() as u8));
+        }
+    }
+    image::save_buffer(out, &pixels, w, h, image::ColorType::Rgb8)?;
+    println!("wrote {out} in {:.2?}", start.elapsed());
     Ok(())
 }
 

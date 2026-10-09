@@ -251,3 +251,180 @@ mod tests {
         assert_eq!(generic_input(&GENERIC_ALPHA_INPUT_REGISTERS, 5, 0), 24);
     }
 }
+
+/// Evaluates a combiner program for one pixel, as `halo_transparent.wesl`
+/// does on the GPU (and the port's `nv2a_psh.c`): `textures` are t0-t3 as
+/// stored (8-bit gamma, 0..1); v0 and v1 are white. Returns RGBA, 0..1.
+pub fn evaluate(program: &CombinerProgram, textures: [[f32; 4]; 4]) -> [f32; 4] {
+    type Rgba = [f32; 4];
+    let mut registers = [[0.0f32; 4]; 16];
+    registers[8..12].copy_from_slice(&textures);
+    registers[4] = [1.0; 4];
+    registers[5] = [1.0; 4];
+    registers[12] = [0.0, 0.0, 0.0, textures[0][3]];
+
+    let unique_c0 = program.flags & 0x1000 != 0;
+    let unique_c1 = program.flags & 0x10000 != 0;
+    let mux_msb = program.flags & 0x100 != 0;
+    fn map4(v: Rgba, f: impl Fn(f32) -> f32) -> Rgba {
+        v.map(f)
+    }
+    fn mul(a: Rgba, b: Rgba) -> Rgba {
+        std::array::from_fn(|i| a[i] * b[i])
+    }
+    fn dot3(a: Rgba, b: Rgba) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+    /// One input byte's register as RGB, or as a scalar for the alpha portion.
+    fn channels(source: Rgba, byte: u32, alpha_portion: bool) -> Rgba {
+        let alpha_channel = byte & 0x10 != 0;
+        if alpha_portion {
+            [if alpha_channel { source[3] } else { source[2] }; 4]
+        } else if alpha_channel {
+            [source[3]; 4]
+        } else {
+            [source[0], source[1], source[2], 0.0]
+        }
+    }
+
+    let read = |registers: &[Rgba; 16], index: u32, stage: usize| -> Rgba {
+        match index {
+            1 => program.constant0[if unique_c0 { stage } else { 0 }],
+            2 => program.constant1[if unique_c1 { stage } else { 0 }],
+            i => registers[i as usize],
+        }
+    };
+    let input = |registers: &[Rgba; 16], byte: u32, alpha_portion: bool, stage: usize| -> Rgba {
+        let value = channels(read(registers, byte & 0x0f, stage), byte, alpha_portion);
+        match byte & 0xe0 {
+            0x00 => map4(value, |x| x.max(0.0)),
+            0x20 => map4(value, |x| 1.0 - x.clamp(0.0, 1.0)),
+            0x40 => map4(value, |x| 2.0 * x.max(0.0) - 1.0),
+            0x60 => map4(value, |x| 1.0 - 2.0 * x.max(0.0)),
+            0x80 => map4(value, |x| x.max(0.0) - 0.5),
+            0xa0 => map4(value, |x| 0.5 - x.max(0.0)),
+            0xc0 => value,
+            _ => map4(value, |x| -x),
+        }
+    };
+    let output_mapping = |v: Rgba, flags: u32| -> Rgba {
+        let mapped = match flags & 0x38 {
+            0x08 => map4(v, |x| x - 0.5),
+            0x10 => map4(v, |x| x * 2.0),
+            0x18 => map4(v, |x| (x - 0.5) * 2.0),
+            0x20 => map4(v, |x| x * 4.0),
+            0x30 => map4(v, |x| x * 0.5),
+            _ => v,
+        };
+        map4(mapped, |x| x.clamp(-1.0, 1.0))
+    };
+
+    for stage in 0..program.stage_count.min(MAXIMUM_STAGES) {
+        let mut results = [[0.0f32; 4]; 6];
+        for portion in 0..2 {
+            let alpha = portion == 1;
+            let (inputs, outputs) = if alpha {
+                (program.alpha_inputs[stage], program.alpha_outputs[stage])
+            } else {
+                (program.rgb_inputs[stage], program.rgb_outputs[stage])
+            };
+            let flags = outputs >> 12;
+            let a = input(&registers, (inputs >> 24) & 0xff, alpha, stage);
+            let b = input(&registers, (inputs >> 16) & 0xff, alpha, stage);
+            let c = input(&registers, (inputs >> 8) & 0xff, alpha, stage);
+            let d = input(&registers, inputs & 0xff, alpha, stage);
+            let ab = if !alpha && flags & 0x02 != 0 { [dot3(a, b); 4] } else { mul(a, b) };
+            let cd = if !alpha && flags & 0x01 != 0 { [dot3(c, d); 4] } else { mul(c, d) };
+            let sum = if flags & 0x04 != 0 {
+                let r0a = registers[12][3];
+                let pick_cd = if mux_msb { r0a >= 0.5 } else { ((r0a * 255.0 + 0.5) as u32) & 1 != 0 };
+                if pick_cd { cd } else { ab }
+            } else {
+                std::array::from_fn(|i| ab[i] + cd[i])
+            };
+            results[portion * 3] = output_mapping(ab, flags);
+            results[portion * 3 + 1] = output_mapping(cd, flags);
+            results[portion * 3 + 2] = output_mapping(sum, flags);
+        }
+        // write back once both portions have read their inputs
+        for portion in 0..2 {
+            let alpha = portion == 1;
+            let outputs = if alpha { program.alpha_outputs[stage] } else { program.rgb_outputs[stage] };
+            let destinations = [(outputs >> 4) & 0x0f, outputs & 0x0f, (outputs >> 8) & 0x0f];
+            for (k, &destination) in destinations.iter().enumerate() {
+                // only v0, v1, t0-t3, r0 and r1 are writable
+                if !(destination == 4 || destination == 5 || (8..=13).contains(&destination)) {
+                    continue;
+                }
+                let value = results[portion * 3 + k];
+                let register = &mut registers[destination as usize];
+                if alpha {
+                    register[3] = value[3];
+                } else {
+                    register[..3].copy_from_slice(&value[..3]);
+                }
+            }
+        }
+    }
+
+    // final combiner: rgb = A*B + (1-A)*C + D, alpha = G
+    let final_input = |registers: &[Rgba; 16], byte: u32, alpha_portion: bool| -> Rgba {
+        let source = match byte & 0x0f {
+            1 => program.constant0[0],
+            2 => program.constant1[0],
+            i => registers[i as usize],
+        };
+        let value = map4(channels(source, byte, alpha_portion), |x| x.clamp(0.0, 1.0));
+        if byte & 0x20 != 0 { map4(value, |x| 1.0 - x) } else { value }
+    };
+    let (abcd, efg) = (program.final_abcd, program.final_efg);
+    let e = final_input(&registers, (efg >> 24) & 0xff, false);
+    let f = final_input(&registers, (efg >> 16) & 0xff, false);
+    registers[15] = mul(e, f);
+    registers[14] = std::array::from_fn(|i| (registers[5][i] + registers[12][i]).clamp(0.0, 1.0));
+    let fa = final_input(&registers, (abcd >> 24) & 0xff, false);
+    let fb = final_input(&registers, (abcd >> 16) & 0xff, false);
+    let fc = final_input(&registers, (abcd >> 8) & 0xff, false);
+    let fd = final_input(&registers, abcd & 0xff, false);
+    let rgb: [f32; 3] = std::array::from_fn(|i| (fa[i] * fb[i] + (1.0 - fa[i]) * fc[i] + fd[i]).clamp(0.0, 1.0));
+    let alpha = final_input(&registers, (efg >> 8) & 0xff, true)[3];
+    [rgb[0], rgb[1], rgb[2], alpha]
+}
+
+#[cfg(test)]
+mod evaluate_tests {
+    use super::*;
+
+    /// The generic shader with no stages copies its first map.
+    #[test]
+    fn stageless_generic_passes_map_0() {
+        let mut program =
+            CombinerProgram { stage_count: 1, flags: 0x11100, final_abcd: 0x0C, final_efg: 0x1C00, ..Default::default() };
+        program.rgb_inputs[0] = 0x08200000;
+        program.rgb_outputs[0] = 0x000000c0;
+        program.alpha_inputs[0] = 0x18200000;
+        program.alpha_outputs[0] = 0x000000c0;
+        let t0 = [0.25, 0.5, 0.75, 0.6];
+        let out = evaluate(&program, [t0, [0.0; 4], [0.0; 4], [0.0; 4]]);
+        for i in 0..4 {
+            assert!((out[i] - t0[i]).abs() < 1e-6, "{out:?}");
+        }
+    }
+
+    /// Chicago "multiply" (function 2): map 0 times map 1.
+    #[test]
+    fn chicago_multiply() {
+        let mut program =
+            CombinerProgram { stage_count: 3, flags: 0x11000, final_abcd: 0x0C, final_efg: 0x1C00, ..Default::default() };
+        program.rgb_inputs[0] = 0x08200000;
+        program.alpha_inputs[0] = 0x18200000;
+        program.rgb_inputs[1] = CHICAGO_STAGE_INCREMENTS[2] + CHICAGO_RGB_INPUTS[0][2];
+        program.alpha_inputs[1] = CHICAGO_STAGE_INCREMENTS[2] + CHICAGO_ALPHA_INPUTS[2];
+        for s in 0..2 {
+            program.rgb_outputs[s] = 0xc00;
+            program.alpha_outputs[s] = 0xc00;
+        }
+        let out = evaluate(&program, [[0.5, 0.5, 0.5, 1.0], [0.5, 1.0, 0.0, 0.5], [0.0; 4], [0.0; 4]]);
+        assert_eq!(out, [0.25, 0.5, 0.0, 0.5]);
+    }
+}

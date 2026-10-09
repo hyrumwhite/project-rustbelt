@@ -264,10 +264,16 @@ fn setup_level(
     {
         error!("placing objects: {e}");
     }
-    if let Some(model) = halo_map::sky::skies(&cache).ok().and_then(|s| s.into_iter().find_map(|s| s.model)).and_then(|m| m.datum)
-        && let Err(e) = builder.spawn_sky(model, &mut commands, &mut assets)
-    {
-        error!("sky: {e}");
+    let sky_model = halo_map::sky::skies(&cache).ok().and_then(|s| s.into_iter().find_map(|s| s.model)).and_then(|m| m.datum);
+    if let Some(model) = sky_model {
+        if let Err(e) = builder.spawn_sky(model, &mut commands, &mut assets) {
+            error!("sky: {e}");
+        }
+        match sky::sky_model_cubemap(&cache, model, assets.images) {
+            Ok(Some(cubemap)) => commands.insert_resource(SkyCubemap(cubemap)),
+            Ok(None) => {}
+            Err(e) => error!("sky environment map: {e}"),
+        }
     }
     let stats = builder.stats;
     info!(
@@ -305,6 +311,10 @@ fn setup_level(
 #[derive(Resource)]
 struct CameraStart(Transform);
 
+/// The sky model rendered into a cubemap, for the environment light.
+#[derive(Resource)]
+struct SkyCubemap(Handle<Image>);
+
 fn bsp_overview(cache: &CacheFile, index: usize) -> Option<Transform> {
     let reference = halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index == index)?;
     let [x, y, z] = halo_map::bsp::Bsp::load(cache, &reference).ok()?.world_bounds().ok()?;
@@ -318,6 +328,7 @@ fn setup_camera(
     start: Res<CameraStart>,
     level_sky: Res<LevelSky>,
     settings: Res<LightingSettings>,
+    sky_cubemap: Option<Res<SkyCubemap>>,
     mut images: ResMut<Assets<Image>>,
     #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
 ) {
@@ -338,7 +349,10 @@ fn setup_camera(
     }
 
     if let Some((color, power)) = level_sky.0.sky {
-        let cubemap = sky::gradient_cubemap(color, &mut images);
+        let cubemap = match sky_cubemap {
+            Some(sky) => sky.0.clone(),
+            None => sky::gradient_cubemap(color, &mut images),
+        };
         camera.insert((
             EnvironmentMapLight {
                 diffuse_map: cubemap.clone(),

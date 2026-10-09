@@ -650,7 +650,8 @@ impl<'a> LevelBuilder<'a> {
                 cull_mode: None,
                 ..default()
             }
-        } else if let Some(water) = info.water {
+        } else {
+            let water = info.water?;
             let [r, g, b, a] = water.perpendicular_tint;
             StandardMaterial {
                 base_color: Color::srgba(r, g, b, a.clamp(0.3, 0.9)),
@@ -661,8 +662,6 @@ impl<'a> LevelBuilder<'a> {
                 cull_mode: None,
                 ..default()
             }
-        } else {
-            return None;
         };
         Some(assets.materials.add(material))
     }

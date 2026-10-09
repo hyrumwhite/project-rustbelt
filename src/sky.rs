@@ -2,8 +2,10 @@
 //!
 //! Halo skies list the distant lights the lightmapper used: a small-diameter
 //! sun and usually a wide hemisphere "sky" light. The sun becomes a
-//! directional light. The sky light becomes an environment map (a gradient
-//! cubemap of its colour), which Solari samples as sky lighting.
+//! directional light. The sky light becomes an environment light, which
+//! Solari samples as sky lighting: a cubemap of the sky model itself (its
+//! layers composited on the CPU, see [`halo_map::sky::SkyRenderer`]), or a
+//! gradient of the sky light's colour for skies without a model.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -56,15 +58,42 @@ fn color([r, g, b]: [f32; 3]) -> Color {
 
 /// A small cubemap: `sky` above the horizon fading to a dim ground below.
 pub fn gradient_cubemap(sky: Color, images: &mut Assets<Image>) -> Handle<Image> {
-    const SIZE: u32 = 16;
     let sky = sky.to_linear();
     let ground = LinearRgba::rgb(sky.red * 0.12, sky.green * 0.11, sky.blue * 0.1);
-    let mut data = Vec::with_capacity((SIZE * SIZE * 6 * 4) as usize);
+    cubemap(16, images, |dir| {
+        let t = dir.y.clamp(-1.0, 1.0);
+        let c = if t >= 0.0 {
+            let k = 0.55 + 0.45 * t;
+            LinearRgba::rgb(sky.red * k, sky.green * k, sky.blue * k)
+        } else {
+            ground
+        };
+        let srgb = Color::from(c).to_srgba();
+        [srgb.red, srgb.green, srgb.blue]
+    })
+}
+
+/// The sky model's layers, composited in every direction (see
+/// [`halo_map::sky::SkyRenderer`]).
+pub fn sky_model_cubemap(cache: &CacheFile, model_datum: u32, images: &mut Assets<Image>) -> halo_map::Result<Option<Handle<Image>>> {
+    let renderer = halo_map::sky::SkyRenderer::new(cache, model_datum)?;
+    if renderer.is_empty() {
+        return Ok(None);
+    }
+    // Bevy (x, y, z) is Halo (x, -z, y); the composite is 8-bit gamma, which
+    // the sRGB texture stores as is
+    Ok(Some(cubemap(64, images, |dir| renderer.sample([dir.x, -dir.z, dir.y]))))
+}
+
+/// A cubemap whose texel colours (sRGB, 0..1) `colour` gives per direction
+/// (Bevy coordinates, unit length).
+fn cubemap(size: u32, images: &mut Assets<Image>, colour: impl Fn(Vec3) -> [f32; 3]) -> Handle<Image> {
+    let mut data = Vec::with_capacity((size * size * 6 * 4) as usize);
     for face in 0..6 {
-        for y in 0..SIZE {
-            for x in 0..SIZE {
-                let u = (x as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
-                let v = (y as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+        for y in 0..size {
+            for x in 0..size {
+                let u = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
                 // wgpu cube face order and orientation: +X, -X, +Y, -Y, +Z, -Z
                 let dir = match face {
                     0 => Vec3::new(1.0, -v, -u),
@@ -75,20 +104,13 @@ pub fn gradient_cubemap(sky: Color, images: &mut Assets<Image>) -> Handle<Image>
                     _ => Vec3::new(-u, -v, -1.0),
                 }
                 .normalize();
-                let t = dir.y.clamp(-1.0, 1.0);
-                let c = if t >= 0.0 {
-                    let k = 0.55 + 0.45 * t;
-                    LinearRgba::rgb(sky.red * k, sky.green * k, sky.blue * k)
-                } else {
-                    ground
-                };
-                let srgb = Color::from(c).to_srgba();
-                data.extend([srgb.red, srgb.green, srgb.blue, 1.0].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
+                let [r, g, b] = colour(dir);
+                data.extend([r, g, b, 1.0].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
             }
         }
     }
     let mut image = Image::new(
-        Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 6 },
+        Extent3d { width: size, height: size, depth_or_array_layers: 6 },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,

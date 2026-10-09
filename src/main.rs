@@ -86,6 +86,13 @@ struct Args {
     /// HALO_BEVY_BRIDGE=1)
     #[argh(switch)]
     bridge: bool,
+    /// start this OpenCE (halo.exe, built from its bevy-bridge branch) on
+    /// the map, hidden, and play it here (implies --bridge)
+    #[argh(option)]
+    opence: Option<PathBuf>,
+    /// with --opence, show the game's own window too
+    #[argh(switch)]
+    show_game: bool,
 }
 
 fn parse_camera(value: &str) -> Result<[f32; 5], String> {
@@ -166,6 +173,18 @@ struct LevelSky(sky::SkyLighting);
 fn main() -> AppExit {
     let mut args: Args = argh::from_env();
     let mut link = None;
+    let mut game_process = None;
+    if let Some(exe) = args.opence.clone() {
+        args.bridge = true;
+        match bridge::launch_game(&exe, &args.map_path().unwrap_or_default(), args.show_game) {
+            // (stops the game when the viewer exits, or gives up on it)
+            Ok(child) => game_process = Some(bridge::GameProcess(child)),
+            Err(e) => {
+                eprintln!("could not start {}: {e}", exe.display());
+                return AppExit::error();
+            }
+        }
+    }
     if args.bridge {
         let Some((bridge, snapshot)) = bridge::wait_for_game(std::time::Duration::from_secs(300)) else {
             eprintln!("no OpenCE game shared a frame; start it with HALO_BEVY_BRIDGE=1 and load a level");
@@ -213,6 +232,9 @@ fn main() -> AppExit {
     if let Some(link) = link {
         app.insert_resource(link).add_plugins(bridge::BridgePlugin);
     }
+    if let Some(game_process) = game_process {
+        app.insert_resource(game_process);
+    }
 
     if args.pathtracer {
         app.add_plugins(PathtracingPlugin);
@@ -226,7 +248,7 @@ fn main() -> AppExit {
         )
             .add_systems(PostUpdate, (update_control_text, update_performance_text));
         #[cfg(feature = "dlss")]
-        app.add_systems(Update, (toggle_dlss_rr, cycle_dlss_quality).run_if(bridge::not_forwarding));
+        app.add_systems(Update, ((toggle_dlss_rr, cycle_dlss_quality).run_if(bridge::not_forwarding), enable_dlss));
     }
 
     app.run()
@@ -364,7 +386,6 @@ fn setup_camera(
     settings: Res<LightingSettings>,
     sky_cubemap: Option<Res<SkyCubemap>>,
     mut images: ResMut<Assets<Image>>,
-    #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
 ) {
     let mut camera = commands.spawn((
         Camera3d::default(),
@@ -401,10 +422,7 @@ fn setup_camera(
         ));
     }
 
-    #[cfg(feature = "dlss")]
-    if dlss_rr_supported.is_some() {
-        camera.insert(Dlss::<DlssRayReconstructionFeature>::default());
-    }
+    // (DLSS Ray Reconstruction is turned on a moment later: enable_dlss)
 
     if let Some((direction, color, power)) = level_sky.0.sun {
         commands.spawn((
@@ -521,6 +539,27 @@ fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With
     let yaw = hy.atan2(hx).to_degrees();
     let pitch = hz.clamp(-1.0, 1.0).asin().to_degrees();
     info!("--camera {:.2},{:.2},{:.2},{yaw:.1},{pitch:.1}", p.x, -p.z, p.y);
+}
+
+/// Frames to wait before turning DLSS Ray Reconstruction on. DLSS creates its
+/// feature with GPU work wgpu does not track; done while the window's surface
+/// is first configured, wgpu's wait for an idle queue fails ("Failed to wait
+/// for GPU to come idle") and the app stops. A moment later the surface has
+/// settled.
+#[cfg(feature = "dlss")]
+const DLSS_START_FRAME: u32 = 30;
+
+#[cfg(feature = "dlss")]
+fn enable_dlss(
+    mut frames: Local<u32>,
+    camera: Single<Entity, With<SolariLighting>>,
+    dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
+    mut commands: Commands,
+) {
+    *frames += 1;
+    if *frames == DLSS_START_FRAME && dlss_rr_supported.is_some() {
+        commands.entity(*camera).insert(Dlss::<DlssRayReconstructionFeature>::default());
+    }
 }
 
 #[cfg(feature = "dlss")]

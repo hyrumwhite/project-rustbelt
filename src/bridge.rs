@@ -22,6 +22,51 @@ use bevy::{
 use halo_bridge::{Bridge, Snapshot, OBJECT_HIDDEN};
 use std::{sync::Arc, time::Duration};
 
+/// Starts OpenCE on the map at `map_path`: its data root is the folder that
+/// holds the maps folder, the level is the map's scenario, the bridge is on
+/// and (unless `show`) its window is hidden. Its output goes to
+/// `halo_rt_opence.log` in the temporary folder.
+pub fn launch_game(exe: &std::path::Path, map_path: &std::path::Path, show: bool) -> std::io::Result<std::process::Child> {
+    use std::io::{Error, ErrorKind};
+    let cache = halo_map::CacheFile::open(map_path).map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
+    let scenario = cache.tag(cache.scenario_datum).map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?.name.clone();
+    let data_root = map_path
+        .parent()
+        .and_then(|maps| maps.parent())
+        .ok_or_else(|| Error::new(ErrorKind::NotFound, "the map is not in a maps folder"))?;
+    let log = std::fs::File::create(std::env::temp_dir().join("halo_rt_opence.log"))?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .current_dir(exe.parent().unwrap_or(std::path::Path::new(".")))
+        .env("HALO_BEVY_BRIDGE", "1")
+        .env("HALO_BEVY_BRIDGE_MAP", &scenario)
+        .env("HALO_DATA_ROOT", data_root)
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    if !show {
+        // hidden, and small and windowed so it never takes the display; it
+        // stays vsynced, so its frames (and the poses it shares) come at the
+        // display's rate
+        command
+            .env("HALO_HIDDEN_WINDOW", "1")
+            .env("HALO_DISPLAY_MODE", "windowed")
+            .env("HALO_WINDOW_SIZE", "640x480");
+    }
+    eprintln!("starting OpenCE on {scenario} (data root {})", data_root.display());
+    command.spawn()
+}
+
+/// The game the viewer started; stopped with the viewer.
+#[derive(Resource)]
+pub struct GameProcess(pub std::process::Child);
+
+impl Drop for GameProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Waits for a running game to share a frame, so the viewer knows which map
 /// to load. `None` after `timeout`.
 pub fn wait_for_game(timeout: Duration) -> Option<(Bridge, Snapshot)> {
@@ -147,20 +192,21 @@ fn sync_objects(
     mut transparent_materials: ResMut<Assets<HaloTransparentMaterial>>,
     mut images: ResMut<Assets<Image>>,
     neutral_detail: Res<NeutralDetail>,
+    mut flat_normal: Local<Option<Handle<Image>>>,
 ) {
     let Some(snapshot) = &link.latest else { return };
+    let flat_normal = flat_normal.get_or_insert_with(|| images.add(crate::material::flat_normal_image())).clone();
     let to_bevy = halo_to_bevy_affine();
     let from_bevy = to_bevy.inverse();
-    let mut assets = LevelAssets {
+    let assets = &mut LevelAssets {
         meshes: &mut meshes,
         materials: &mut materials,
         environment_materials: &mut environment_materials,
         transparent_materials: &mut transparent_materials,
         images: &mut images,
         neutral_detail: neutral_detail.0.clone(),
-        flat_normal: Handle::default(),
+        flat_normal,
     };
-    assets.flat_normal = assets.images.add(crate::material::flat_normal_image());
     let BridgeLevel { builder, raster } = &mut *level;
     let raster = *raster;
 
@@ -183,7 +229,7 @@ fn sync_objects(
                 .ok()
                 .flatten()
                 .and_then(|m| m.datum)
-                .and_then(|m| builder.animated_model(m, object.region_permutations, &mut assets));
+                .and_then(|m| builder.animated_model(m, object.region_permutations, assets));
             let Some(model) = model else {
                 objects.modelless.insert(key, ());
                 continue;

@@ -63,6 +63,7 @@ symbols in this file:
 #include "cseries/errors.h"
 #include "render.h"
 #include "render_cameras_internal.h"
+#include "bevy_bridge.h"
 #include "render_particles.h"
 #include "objects.h"
 #include "render_sprite.h"
@@ -611,6 +612,9 @@ void render_frame(
 	parameters.game_time_sec = render_interpolation_game_time_sec(game_time_get());
 	rasterizer_frame_begin(&parameters);
 	rasterizer_windows_begin();
+	/* port: the frame's world for a Bevy renderer, when one is set up
+	(port/linux/game/bevy_bridge.c) */
+	bevy_bridge_export_frame(windoze, window_count);
 
 	for (window_index = 0; window_index < window_count; window_index++)
 	{

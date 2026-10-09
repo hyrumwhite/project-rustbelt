@@ -275,6 +275,10 @@ static const struct config_setting config_settings[] =
 		"as CUSTOM SINGLEPLAYER and CUSTOM MULTIPLAYER. Their tags are checked\n"
 		"as the game's own maps' are before they run; false refuses them\n"
 		"(docs/custom_edition_caches.md)." },
+	{ "game.bevy_bridge", _config_boolean, "false", "HALO_BEVY_BRIDGE", _environment_value, _platform_desktop,
+		"Share each frame's camera and objects with a Bevy renderer\n"
+		"(bevy-rt-test's halo_rt, which draws the game with ray tracing)\n"
+		"through shared memory (port/linux/game/bevy_bridge.c)." },
 
 	{ "paths.data", _config_string, "\"\"", "HALO_DATA_ROOT", _environment_value, _platform_desktop,
 		"The folder holding the game data's maps folder; empty looks in the\n"

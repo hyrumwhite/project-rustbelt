@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 pub const MAXIMUM_LIGHTS: usize = 64;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
@@ -64,6 +64,9 @@ pub struct Object {
     /// The object's change colours A-D (team and armour colours); white for
     /// a model.
     pub change_colors: [[f32; 3]; 4],
+    /// How camouflaged it is (0..1): a unit's active camouflage, shared by
+    /// what it holds.
+    pub active_camouflage: f32,
 }
 
 /// `real_matrix4x3`: a node's world transform.
@@ -217,7 +220,7 @@ struct Shared {
 
 /// The layout is the game's, measured there; keep these in step with
 /// `bevy_bridge_protocol.h`.
-const _: () = assert!(std::mem::size_of::<Object>() == 76);
+const _: () = assert!(std::mem::size_of::<Object>() == 80);
 const _: () = assert!(std::mem::size_of::<Node>() == 52);
 const _: () = assert!(std::mem::size_of::<Camera>() == 40);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);

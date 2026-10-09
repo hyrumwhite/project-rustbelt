@@ -181,6 +181,7 @@ struct Tracked {
     definition: u32,
     permutations: [u8; 8],
     change_colors: [[f32; 3]; 4],
+    camouflaged: bool,
     model: Arc<AnimatedModel>,
     nodes: Vec<Option<Entity>>,
 }
@@ -287,6 +288,7 @@ fn sync_objects(
             t.definition != object.definition_index
                 || t.permutations != object.region_permutations
                 || t.change_colors != object.change_colors
+                || t.camouflaged != camouflaged(object)
         }) {
             let old = objects.tracked.remove(&object.object_index).unwrap();
             commands.entity(old.root).despawn();
@@ -308,7 +310,7 @@ fn sync_objects(
                 objects.modelless.insert(key, ());
                 continue;
             };
-            let (root, nodes) = builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, assets);
+            let (root, nodes) = builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, camouflaged(object), assets);
             objects.tracked.insert(
                 object.object_index,
                 Tracked {
@@ -316,6 +318,7 @@ fn sync_objects(
                     definition: object.definition_index,
                     permutations: object.region_permutations,
                     change_colors: object.change_colors,
+                    camouflaged: camouflaged(object),
                     model,
                     nodes,
                 },
@@ -351,6 +354,12 @@ fn sync_objects(
         }
         keep
     });
+}
+
+/// Whether an object draws as camouflaged (the game's own fades in; this
+/// switches halfway).
+fn camouflaged(object: &halo_bridge::Object) -> bool {
+    object.active_camouflage >= 0.5
 }
 
 /// A node's draw transform in Bevy space: the game's node matrix times the

@@ -201,6 +201,8 @@ pub struct LevelBuilder {
     surfaces: HashMap<Option<u32>, ShaderSurface>,
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
     animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
+    /// The glassy look of an actively camouflaged object.
+    camouflage: Option<Handle<StandardMaterial>>,
     /// Surfaces tinted by a change colour, by shader and colour.
     coloured_surfaces: HashMap<(u32, [u8; 3]), Surface>,
     loaded_bsps: Vec<usize>,
@@ -238,6 +240,7 @@ impl LevelBuilder {
             models: HashMap::default(),
             animated_models: HashMap::default(),
             coloured_surfaces: HashMap::default(),
+            camouflage: None,
             loaded_bsps: Vec::new(),
             bsp_roots: Vec::new(),
             light_proxy: None,
@@ -713,6 +716,7 @@ impl LevelBuilder {
         model: &AnimatedModel,
         raster: bool,
         change_colors: &[[f32; 3]; 4],
+        camouflaged: bool,
         assets: &mut LevelAssets,
     ) -> (Entity, Vec<Option<Entity>>) {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
@@ -721,6 +725,30 @@ impl LevelBuilder {
         let nodes: Vec<Entity> = (0..model.default_inverses.len().max(1))
             .map(|_| commands.spawn((Transform::default(), Visibility::default(), ChildOf(root))).id())
             .collect();
+        // camouflaged: a faint glassy shell for the camera, nothing for the
+        // rays (no shadow): the game's own shimmer refracts the picture
+        // behind, which the overlay doesn't have
+        if camouflaged {
+            if raster {
+                // (drawn even where the game's overlay has the other
+                // transparent surfaces: this one is the viewer's own)
+                let material = self.camouflage_material(assets);
+                for part in &model.skinned {
+                    let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
+                    commands.spawn((
+                        Name::new(format!("{} (camouflaged)", model.name)),
+                        Mesh3d(part.mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        bevy::light::NotShadowCaster,
+                        skin,
+                        bevy::camera::visibility::NoFrustumCulling,
+                        Transform::default(),
+                        ChildOf(root),
+                    ));
+                }
+            }
+            return (root, nodes.into_iter().map(Some).collect());
+        }
         // the rays see the rigid pieces; the camera sees the skinned parts
         for piece in &model.pieces {
             let surface = self.coloured_surface(&piece.surface, piece.shader, change_colors, assets);
@@ -797,6 +825,22 @@ impl LevelBuilder {
             }
         }
         Ok(out)
+    }
+
+    /// The glassy look of an actively camouflaged object: nearly clear,
+    /// smooth, reflecting what is around it.
+    fn camouflage_material(&mut self, assets: &mut LevelAssets) -> Handle<StandardMaterial> {
+        self.camouflage
+            .get_or_insert_with(|| {
+                assets.materials.add(StandardMaterial {
+                    base_color: Color::srgba(0.55, 0.65, 0.8, 0.08),
+                    alpha_mode: AlphaMode::Blend,
+                    perceptual_roughness: 0.15,
+                    reflectance: 0.3,
+                    ..default()
+                })
+            })
+            .clone()
     }
 
     /// A piece's surface with the object's change colour, where its shader

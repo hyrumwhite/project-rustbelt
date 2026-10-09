@@ -131,6 +131,10 @@ fn main() {
                     if first_person { ", first person" } else { "" },
                     snapshot.camera.map(|c| c.position)
                 );
+                let camouflaged = snapshot.objects.iter().filter(|o| o.active_camouflage > 0.0).count();
+                if camouflaged > 0 {
+                    println!("  {camouflaged} camouflaged objects");
+                }
                 if let Some(light) = snapshot.lights.first() {
                     println!("  {} dynamic lights, e.g. {light:?}", snapshot.lights.len());
                 }

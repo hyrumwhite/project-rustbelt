@@ -144,6 +144,9 @@ BOOL platform_sdl_initialize(void)
 }
 
 #ifndef HALO_ANDROID
+
+/* bevy_bridge_input.c */
+void bevy_bridge_input_pump(SDL_Window *window);
 /* ---------- first start without game data (xbox_files.c) */
 
 struct data_extraction
@@ -1377,6 +1380,9 @@ void platform_pump_events(void)
 		scoreboard_pointer_stop();
 	}
 #endif
+	/* a Bevy renderer's forwarded input, as SDL events
+	(bevy_bridge_input.c) */
+	bevy_bridge_input_pump(platform_window);
 	while (SDL_PollEvent(&event))
 	{
 		switch (event.type)

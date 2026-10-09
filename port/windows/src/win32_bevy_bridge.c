@@ -10,6 +10,13 @@ renderer opens by name.
 
 #include "../../linux/game/bevy_bridge_protocol.h"
 
+static void *bevy_bridge_view;
+
+void *bevy_bridge_platform_shared(void)
+{
+	return bevy_bridge_view;
+}
+
 void *bevy_bridge_platform_map(unsigned long size)
 {
 	HANDLE mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, size, BEVY_BRIDGE_MAPPING_NAME);
@@ -25,6 +32,7 @@ void *bevy_bridge_platform_map(unsigned long size)
 	}
 	/* (the mapping lives as long as the game: the handle is never closed) */
 	ZeroMemory(view, size);
+	bevy_bridge_view = view;
 	return view;
 }
 

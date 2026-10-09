@@ -13,6 +13,13 @@ replaces this file with port/windows/src/win32_bevy_bridge.c.
 #include <sys/mman.h>
 #include <unistd.h>
 
+static void *bevy_bridge_view;
+
+void *bevy_bridge_platform_shared(void)
+{
+	return bevy_bridge_view;
+}
+
 void *bevy_bridge_platform_map(unsigned long size)
 {
 	int descriptor = shm_open(BEVY_BRIDGE_POSIX_NAME, O_CREAT | O_RDWR, 0600);
@@ -30,6 +37,7 @@ void *bevy_bridge_platform_map(unsigned long size)
 	if (view == MAP_FAILED)
 		return NULL;
 	memset(view, 0, size);
+	bevy_bridge_view = view;
 	return view;
 }
 

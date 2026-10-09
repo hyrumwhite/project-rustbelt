@@ -16,6 +16,11 @@ the frame is written, so a reader copies a frame, checks that the sequence
 is even and unchanged, and otherwise reads again.
 
 Positions and matrices are the game's: world units, Z up.
+
+The other way, the renderer may forward its window's keyboard and mouse
+(`input`, which only the renderer writes): the platform layer turns its
+changes into the SDL events the game reads (bevy_bridge_input.c), so a
+player can play from the renderer's window.
 */
 
 #ifndef __BEVY_BRIDGE_PROTOCOL_H
@@ -25,7 +30,7 @@ Positions and matrices are the game's: world units, Z up.
 #define BEVY_BRIDGE_MAPPING_NAME "Local\\HaloBevyBridge"
 #define BEVY_BRIDGE_POSIX_NAME "/halo_bevy_bridge"
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 1
+#define BEVY_BRIDGE_VERSION 2
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
 #define BEVY_BRIDGE_FRAMES 2
@@ -89,6 +94,24 @@ struct bevy_bridge_frame
 	struct bevy_bridge_node nodes[BEVY_BRIDGE_MAXIMUM_NODES];
 };
 
+/* what the renderer's window receives, for the game to read as its own */
+struct bevy_bridge_input
+{
+	/* nonzero while the renderer forwards input (its window has the
+	focus and the player is playing, not flying its free camera) */
+	unsigned long active;
+	/* the keys held, a bit per SDL scancode (USB HID usage) */
+	unsigned long keys[16];
+	/* cumulative relative mouse motion (pixels) and wheel steps: the game
+	acts on their change */
+	long mouse_x;
+	long mouse_y;
+	long wheel;
+	/* the mouse buttons held, a bit per SDL button number */
+	unsigned long mouse_buttons;
+	unsigned long reserved[11];
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -99,6 +122,7 @@ struct bevy_bridge_shared
 	unsigned long latest_frame;
 	unsigned long writer_process_id;
 	unsigned long reserved[3];
+	struct bevy_bridge_input input;
 	struct bevy_bridge_frame frames[BEVY_BRIDGE_FRAMES];
 };
 
@@ -106,6 +130,8 @@ struct bevy_bridge_shared
 
 /* the shared memory, created at `size` bytes and zeroed, or NULL */
 void *bevy_bridge_platform_map(unsigned long size);
+/* the memory bevy_bridge_platform_map made, or NULL before then */
+void *bevy_bridge_platform_shared(void);
 unsigned long bevy_bridge_platform_process_id(void);
 
 #endif /* __BEVY_BRIDGE_PROTOCOL_H */

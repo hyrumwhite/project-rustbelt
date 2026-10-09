@@ -282,6 +282,9 @@ static const struct config_setting config_settings[] =
 	{ "game.bevy_bridge_map", _config_string, "\"\"", "HALO_BEVY_BRIDGE_MAP", _environment_value, _platform_desktop,
 		"A level to load at start-up for a Bevy renderer that starts the game\n"
 		"(a scenario name, such as levels\\b30\\b30); empty for the menus." },
+	{ "game.bevy_bridge_name", _config_string, "\"HaloBevyBridge\"", "HALO_BEVY_BRIDGE_NAME", _environment_value, _platform_desktop,
+		"The name of the memory the game shares with a Bevy renderer (letters,\n"
+		"digits, '-' and '_'), so that each of several games has its own." },
 	{ "game.bevy_bridge_overlay", _config_boolean, "false", "HALO_BEVY_BRIDGE_OVERLAY", _environment_value, _platform_desktop,
 		"With game.bevy_bridge: the Bevy renderer draws the opaque world, and\n"
 		"the game shares the rest of its picture (effects, transparent\n"

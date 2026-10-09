@@ -33,10 +33,14 @@ the frames do.
 #define __BEVY_BRIDGE_PROTOCOL_H
 #pragma once
 
-#define BEVY_BRIDGE_MAPPING_NAME "Local\\HaloBevyBridge"
-#define BEVY_BRIDGE_POSIX_NAME "/halo_bevy_bridge"
+/* the shared memory's name (game.bevy_bridge_name; letters, digits, '-' and
+'_'), so that several games can each share with their own renderer: a file
+mapping "Local\\<name>" on Windows, a POSIX shared memory object "/<name>"
+elsewhere */
+#define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
+#define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 4
+#define BEVY_BRIDGE_VERSION 5
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
 #define BEVY_BRIDGE_FRAMES 2
@@ -122,7 +126,13 @@ struct bevy_bridge_input
 	long wheel;
 	/* the mouse buttons held, a bit per SDL button number */
 	unsigned long mouse_buttons;
-	unsigned long reserved[11];
+	/* nonzero while the renderer's camera is its own (flying free), not
+	the game's: the first player hears from it (the game's coordinates) */
+	unsigned long listener_valid;
+	float listener_position[3];
+	float listener_forward[3];
+	float listener_up[3];
+	unsigned long reserved[1];
 };
 
 /* an overlay picture: width x height pixels, RGBA, 8 bits a channel, the
@@ -161,8 +171,9 @@ struct bevy_bridge_shared
 
 /* ---------- prototypes/the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c) */
 
-/* the shared memory, created at `size` bytes and zeroed, or NULL */
-void *bevy_bridge_platform_map(unsigned long size);
+/* the shared memory named `name` (BEVY_BRIDGE_DEFAULT_NAME), created at
+`size` bytes and zeroed, or NULL */
+void *bevy_bridge_platform_map(char const *name, unsigned long size);
 /* the memory bevy_bridge_platform_map made, or NULL before then */
 void *bevy_bridge_platform_shared(void);
 unsigned long bevy_bridge_platform_process_id(void);

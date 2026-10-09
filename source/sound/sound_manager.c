@@ -243,6 +243,7 @@ symbols in this file:
 
 #include <math.h>
 #include <stdio.h>
+#include "bevy_bridge.h"
 
 /* port: a stereo channel's sound in the world panned towards it, muffled
 and reverberated as a 3D channel's is (sound_dsound_xbox.c; update_channels) */
@@ -3913,6 +3914,12 @@ static void refresh_listener(
 				&listener->matrix,
 				&camera->velocity,
 				&listener->velocity);
+			/* port: a Bevy renderer flying its own camera hears from it
+			(port/linux/game/bevy_bridge.c) */
+			if (local_player_index == 0 && bevy_bridge_listener(&listener->matrix))
+			{
+				listener->velocity = *global_zero_vector3d;
+			}
 		}
 		else
 		{

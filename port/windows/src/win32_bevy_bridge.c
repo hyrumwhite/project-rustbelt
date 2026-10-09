@@ -7,6 +7,7 @@ renderer opens by name.
 */
 
 #include <windows.h>
+#include <stdio.h>
 
 #include "../../linux/game/bevy_bridge_protocol.h"
 
@@ -17,11 +18,14 @@ void *bevy_bridge_platform_shared(void)
 	return bevy_bridge_view;
 }
 
-void *bevy_bridge_platform_map(unsigned long size)
+void *bevy_bridge_platform_map(char const *name, unsigned long size)
 {
-	HANDLE mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, size, BEVY_BRIDGE_MAPPING_NAME);
+	char mapping_name[BEVY_BRIDGE_MAXIMUM_NAME_LENGTH + 8];
+	HANDLE mapping;
 	void *view;
 
+	snprintf(mapping_name, sizeof(mapping_name), "Local\\%s", name);
+	mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, size, mapping_name);
 	if (!mapping)
 		return NULL;
 	view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size);

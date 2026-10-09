@@ -23,6 +23,11 @@ void bevy_bridge_record_model(
 	struct real_matrix4x3 const *node_matrices,
 	short node_count);
 
+/* sound_manager.c: the first player's listener, which the renderer may
+move to its own camera; TRUE if it did */
+boolean bevy_bridge_listener(
+	real_matrix4x3 *matrix);
+
 /* with game.bevy_bridge_overlay on: TRUE (the renderer draws the opaque
 world itself, so render_window draws it only into the depth buffer) */
 boolean bevy_bridge_overlay_enabled(void);

@@ -9,6 +9,7 @@ replaces this file with port/windows/src/win32_bevy_bridge.c.
 #include "../game/bevy_bridge_protocol.h"
 
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -20,11 +21,14 @@ void *bevy_bridge_platform_shared(void)
 	return bevy_bridge_view;
 }
 
-void *bevy_bridge_platform_map(unsigned long size)
+void *bevy_bridge_platform_map(char const *name, unsigned long size)
 {
-	int descriptor = shm_open(BEVY_BRIDGE_POSIX_NAME, O_CREAT | O_RDWR, 0600);
+	char object_name[BEVY_BRIDGE_MAXIMUM_NAME_LENGTH + 2];
+	int descriptor;
 	void *view;
 
+	snprintf(object_name, sizeof(object_name), "/%s", name);
+	descriptor = shm_open(object_name, O_CREAT | O_RDWR, 0600);
 	if (descriptor < 0)
 		return NULL;
 	if (ftruncate(descriptor, (off_t)size) != 0)

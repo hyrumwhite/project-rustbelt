@@ -30,6 +30,9 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 
 /* port/linux/src/port_config.c */
 int config_boolean(const char *name);
+const char *config_string(const char *name);
+/* port/linux/src/platform.h */
+void platform_log(const char *format, ...);
 /* render_interpolation.c: this frame's blended node matrices, or NULL */
 real_matrix4x3 *render_interpolation_object_node_matrices(long object_index);
 
@@ -51,10 +54,33 @@ static struct
 } bevy_bridge_recorded[MAXIMUM_RECORDED_MODELS];
 static short bevy_bridge_recorded_count;
 
+/* whether the renderer's camera is the listener (for the log) */
+static boolean bevy_bridge_listening;
+
 /* the overlay buffer being filled, or NONE */
 static long bevy_bridge_overlay_buffer = NONE;
 
 /* ---------- private code */
+
+/* game.bevy_bridge_name, or the default where it is empty or holds more
+than letters, digits, '-' and '_' */
+static char const *bevy_bridge_name(void)
+{
+	char const *name = config_string("game.bevy_bridge_name");
+	size_t length = name ? strlen(name) : 0;
+	size_t index;
+
+	if (!length || length > BEVY_BRIDGE_MAXIMUM_NAME_LENGTH)
+		return BEVY_BRIDGE_DEFAULT_NAME;
+	for (index = 0; index < length; index++)
+	{
+		char c = name[index];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+			return BEVY_BRIDGE_DEFAULT_NAME;
+	}
+	return name;
+}
 
 static struct bevy_bridge_shared *bevy_bridge_get(void)
 {
@@ -65,7 +91,7 @@ static struct bevy_bridge_shared *bevy_bridge_get(void)
 		bevy_bridge_failed = TRUE;
 		return NULL;
 	}
-	bevy_bridge_shared = (struct bevy_bridge_shared *)bevy_bridge_platform_map(sizeof(struct bevy_bridge_shared));
+	bevy_bridge_shared = (struct bevy_bridge_shared *)bevy_bridge_platform_map(bevy_bridge_name(), sizeof(struct bevy_bridge_shared));
 	if (!bevy_bridge_shared)
 	{
 		bevy_bridge_failed = TRUE;
@@ -320,4 +346,41 @@ void bevy_bridge_overlay_commit(void)
 	__atomic_store_n(&overlay->sequence, (overlay->sequence | 1) + 1, __ATOMIC_RELAXED);
 	__atomic_store_n(&shared->latest_overlay, (unsigned long)bevy_bridge_overlay_buffer, __ATOMIC_RELEASE);
 	bevy_bridge_overlay_buffer = NONE;
+}
+
+boolean bevy_bridge_listener(
+	real_matrix4x3 *matrix)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+	struct bevy_bridge_input input;
+	real_point3d position;
+	real_vector3d forward, up;
+
+	if (!shared)
+		return FALSE;
+	/* (the renderer writes the block whole; a torn read is a frame's
+	listener between two cameras, which the next frame corrects) */
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	input = *(struct bevy_bridge_input volatile const *)&shared->input;
+	if ((input.listener_valid != 0) != bevy_bridge_listening)
+	{
+		bevy_bridge_listening = input.listener_valid != 0;
+		platform_log("bevy bridge: the first player hears from %s", bevy_bridge_listening ?
+			"the renderer's camera" : "the game's camera");
+	}
+	if (!input.listener_valid)
+		return FALSE;
+	position.x = input.listener_position[0];
+	position.y = input.listener_position[1];
+	position.z = input.listener_position[2];
+	forward.i = input.listener_forward[0];
+	forward.j = input.listener_forward[1];
+	forward.k = input.listener_forward[2];
+	up.i = input.listener_up[0];
+	up.j = input.listener_up[1];
+	up.k = input.listener_up[2];
+	if (normalize3d(&forward) == 0.0f || normalize3d(&up) == 0.0f)
+		return FALSE;
+	matrix4x3_from_point_and_vectors(matrix, &position, &forward, &up);
+	return TRUE;
 }

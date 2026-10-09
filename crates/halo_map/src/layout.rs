@@ -265,10 +265,14 @@ pub mod shader_transparent_chicago_definition {
 
 pub mod shader_transparent_chicago_map {
     pub const SIZEOF: usize = 0xdc;
+    pub const FLAGS: usize = 0x0;
+    pub const COLOR_FUNCTION: usize = 0x2c;
+    pub const ALPHA_FUNCTION: usize = 0x2e;
     pub const MAP_U_SCALE: usize = 0x54;
     pub const MAP_V_SCALE: usize = 0x58;
     pub const MAP_U_OFFSET: usize = 0x5c;
     pub const MAP_V_OFFSET: usize = 0x60;
+    pub const MAP_ROTATION: usize = 0x64;
     pub const MAP: usize = 0x6c;
 }
 
@@ -279,11 +283,27 @@ pub mod shader_transparent_generic_definition {
 
 pub mod shader_transparent_generic_map {
     pub const SIZEOF: usize = 0x64;
+    pub const FLAGS: usize = 0x0;
     pub const MAP_U_SCALE: usize = 0x4;
     pub const MAP_V_SCALE: usize = 0x8;
     pub const MAP_U_OFFSET: usize = 0xc;
     pub const MAP_V_OFFSET: usize = 0x10;
+    pub const MAP_ROTATION: usize = 0x14;
     pub const MAP: usize = 0x1c;
+}
+
+pub mod shader_transparent_generic_stage {
+    pub const SIZEOF: usize = 0x70;
+    pub const FLAGS: usize = 0x0;
+    pub const CONSTANT_COLOR0_LOWER_BOUND: usize = 0xc;
+    pub const CONSTANT_COLOR0_UPPER_BOUND: usize = 0x1c;
+    pub const COLOR1: usize = 0x2c;
+    pub const COLOR_INPUT_A: usize = 0x3c;
+    pub const COLOR_OUTPUT_AB: usize = 0x4c;
+    pub const COLOR_OUTPUT_MAPPING: usize = 0x56;
+    pub const ALPHA_INPUT_A: usize = 0x58;
+    pub const ALPHA_OUTPUT_A: usize = 0x68;
+    pub const ALPHA_OUTPUT_MAPPING: usize = 0x6e;
 }
 
 pub mod sky_definition {

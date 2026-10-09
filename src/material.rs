@@ -22,7 +22,11 @@ pub struct HaloMaterialsPlugin;
 impl Plugin for HaloMaterialsPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/halo_environment.wesl");
-        app.add_plugins(MaterialPlugin::<HaloEnvironmentMaterial>::default());
+        embedded_asset!(app, "shaders/halo_transparent.wesl");
+        app.add_plugins((
+            MaterialPlugin::<HaloEnvironmentMaterial>::default(),
+            MaterialPlugin::<HaloTransparentMaterial>::default(),
+        ));
         let grey = app.world_mut().resource_mut::<Assets<Image>>().add(neutral_detail_image());
         app.insert_resource(NeutralDetail(grey));
     }
@@ -105,5 +109,89 @@ impl MaterialExtension for HaloEnvironment {
 
     fn deferred_fragment_shader() -> ShaderRef {
         SHADER.into()
+    }
+}
+
+/// `HaloCombiner` in `halo_transparent.wesl`.
+#[derive(ShaderType, Debug, Clone, Default, Reflect)]
+pub struct HaloCombinerParams {
+    pub rgb_inputs: [UVec4; 2],
+    pub rgb_outputs: [UVec4; 2],
+    pub alpha_inputs: [UVec4; 2],
+    pub alpha_outputs: [UVec4; 2],
+    pub constant0: [Vec4; 8],
+    pub constant1: [Vec4; 8],
+    /// Per map: texture coordinate scale (xy) and offset (zw).
+    pub map_transforms: [Vec4; 4],
+    /// Stage count, combiner flags, final ABCD, final EFG.
+    pub program: UVec4,
+    /// Output mode (0 alpha blend, 1 add, 2 multiply, 3 premultiplied),
+    /// maps present (a bit per stage).
+    pub modes: UVec4,
+}
+
+impl HaloCombinerParams {
+    pub fn from_program(program: &halo_map::combiner::CombinerProgram) -> Self {
+        let words = |w: &[u32; 8]| [UVec4::new(w[0], w[1], w[2], w[3]), UVec4::new(w[4], w[5], w[6], w[7])];
+        HaloCombinerParams {
+            rgb_inputs: words(&program.rgb_inputs),
+            rgb_outputs: words(&program.rgb_outputs),
+            alpha_inputs: words(&program.alpha_inputs),
+            alpha_outputs: words(&program.alpha_outputs),
+            constant0: program.constant0.map(Vec4::from),
+            constant1: program.constant1.map(Vec4::from),
+            map_transforms: [Vec4::new(1.0, 1.0, 0.0, 0.0); 4],
+            program: UVec4::new(program.stage_count as u32, program.flags, program.final_abcd, program.final_efg),
+            modes: UVec4::ZERO,
+        }
+    }
+}
+
+/// A transparent chicago or generic shader, evaluated as its Xbox combiner
+/// program (see `halo_transparent.wesl`). Raster only: Solari does not trace
+/// transparent surfaces.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+pub struct HaloTransparentMaterial {
+    #[uniform(0)]
+    pub params: HaloCombinerParams,
+    #[texture(1)]
+    #[sampler(2)]
+    pub map0: Handle<Image>,
+    #[texture(3)]
+    #[sampler(4)]
+    pub map1: Handle<Image>,
+    #[texture(5)]
+    #[sampler(6)]
+    pub map2: Handle<Image>,
+    #[texture(7)]
+    #[sampler(8)]
+    pub map3: Handle<Image>,
+    pub alpha_mode: AlphaMode,
+    /// Draws later (over) other transparent surfaces at the same distance.
+    pub depth_bias: f32,
+}
+
+impl Material for HaloTransparentMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://halo_rt/shaders/halo_transparent.wesl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        self.alpha_mode
+    }
+
+    fn depth_bias(&self) -> f32 {
+        self.depth_bias
+    }
+
+    /// Transparent layers are seen from both sides (skies from inside).
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        Ok(())
     }
 }

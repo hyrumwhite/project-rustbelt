@@ -28,7 +28,7 @@ use halo_map::{
     scenario, CacheFile,
 };
 use level::{EmissiveSurface, LevelAssets, LevelBuilder, LevelStats};
-use material::{HaloEnvironmentMaterial, HaloMaterialsPlugin, NeutralDetail};
+use material::{HaloEnvironmentMaterial, HaloMaterialsPlugin, HaloTransparentMaterial, NeutralDetail};
 use std::path::PathBuf;
 
 #[cfg(feature = "dlss")]
@@ -232,6 +232,7 @@ fn setup_level(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
+    mut transparent_materials: ResMut<Assets<HaloTransparentMaterial>>,
     mut images: ResMut<Assets<Image>>,
     neutral_detail: Res<NeutralDetail>,
 ) {
@@ -240,6 +241,7 @@ fn setup_level(
         meshes: &mut meshes,
         materials: &mut materials,
         environment_materials: &mut environment_materials,
+        transparent_materials: &mut transparent_materials,
         images: &mut images,
         neutral_detail: neutral_detail.0.clone(),
         flat_normal: Handle::default(),
@@ -266,7 +268,7 @@ fn setup_level(
     }
     let stats = builder.stats;
     info!(
-        "{}: {} bsps ({} triangles), {} objects ({} triangles, {} failed), {} fixture lights, {} meshes, {} emissive, {} transparent skipped, {} texture failures ({:.2?})",
+        "{}: {} bsps ({} triangles), {} objects ({} triangles, {} failed), {} fixture lights, {} meshes, {} emissive, {} transparent ({} not drawn), {} texture failures ({:.2?})",
         stats.map_name,
         stats.bsps,
         stats.triangles,
@@ -276,6 +278,7 @@ fn setup_level(
         stats.lights,
         stats.meshes,
         stats.emissive_meshes,
+        stats.transparent_meshes,
         stats.skipped_transparent,
         stats.texture_failures,
         start.elapsed()

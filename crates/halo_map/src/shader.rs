@@ -20,6 +20,11 @@ pub enum ShaderType {
     Other(i16),
 }
 
+/// `shader_base.type` as a [`ShaderType`].
+pub fn shader_type(raw: i16) -> ShaderType {
+    ShaderType::from_raw(raw)
+}
+
 impl ShaderType {
     fn from_raw(raw: i16) -> Self {
         // `_shader_type_*` (shaders.c): screen, effect and decal come first
@@ -83,7 +88,9 @@ pub struct TransparentInfo {
     pub blend: BlendFunction,
     /// 0 for a 2D first map; 1..=3 for the cube map kinds.
     pub first_map_type: i16,
-    pub maps: Vec<TransparentMap>,
+    /// One per stage, in stage order (the combiner names them t0..t3);
+    /// `None` where a stage has no bitmap.
+    pub maps: Vec<Option<TransparentMap>>,
 }
 
 /// `_detail_map_function_*` (rasterizer_xbox_environment.c).
@@ -190,6 +197,7 @@ pub enum SelfIllumination {
 pub struct ShaderInfo {
     pub name: String,
     pub group: u32,
+    pub datum: u32,
     pub shader_type: ShaderType,
     /// Light the surface emits (radiosity `color_of_emitted_light` × `power`,
     /// as the lightmapper used it); zero for most shaders.
@@ -232,6 +240,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
     let mut info = ShaderInfo {
         name: tag.name.clone(),
         group: tag.group,
+        datum,
         shader_type,
         emitted_light: root.vec3(radiosity + layout::shader_radiosity_properties::COLOR_OF_EMITTED_LIGHT)?,
         emitted_power: root.f32(radiosity + layout::shader_radiosity_properties::POWER)?,
@@ -367,7 +376,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         let maps = root
             .block(base + t::MAPS, map_size)?
             .iter()
-            .filter_map(|m| {
+            .map(|m| {
                 let read = || -> Result<Option<TransparentMap>> {
                     let Some(bitmap) = present(m.reference(map)?) else { return Ok(None) };
                     let (u, v) = (m.f32(scale_u)?, m.f32(scale_v)?);
@@ -377,7 +386,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
                         uv_offset: [m.f32(offset_u)?, m.f32(offset_v)?],
                     }))
                 };
-                read().transpose()
+                read()
             })
             .collect::<Result<Vec<_>>>()?;
         info.transparent = Some(TransparentInfo {

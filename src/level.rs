@@ -2,7 +2,9 @@
 //! scenario places.
 
 use crate::{
-    material::{HaloEnvironment, HaloEnvironmentMaterial, HaloEnvironmentParams},
+    material::{
+        HaloCombinerParams, HaloEnvironment, HaloEnvironmentMaterial, HaloEnvironmentParams, HaloTransparentMaterial,
+    },
     textures::TextureCache,
 };
 use bevy::{
@@ -40,6 +42,11 @@ pub struct SkyDome;
 /// Metres per sky model unit. A sky is drawn around the camera at no
 /// particular size; this puts it far beyond any level (skies are ~10⁵ units).
 const SKY_SCALE: f32 = 1.0;
+/// Transparent meshes sort back to front by their bounds' centres plus a
+/// bias. Sky layers are drawn first (behind every transparent surface of the
+/// level), in Halo's part order: each step is larger than the sky is.
+const SKY_BIAS: f32 = -1.0e8;
+const SKY_LAYER_BIAS: f32 = 1.0e6;
 
 /// Light fixtures become small emissive spheres (Solari lights only with
 /// emissive geometry, directional lights and the environment).
@@ -66,8 +73,11 @@ pub struct LevelStats {
     pub object_failures: usize,
     /// Light fixtures turned into emissive proxies.
     pub lights: usize,
-    /// Transparent-shader geometry not drawn yet (glass, water, ...).
+    /// Transparent-shader geometry not drawn (glass, water, ...: the
+    /// shader types the combiner programs do not cover yet).
     pub skipped_transparent: usize,
+    /// Transparent geometry drawn with its combiner program.
+    pub transparent_meshes: usize,
     pub texture_failures: usize,
 }
 
@@ -76,6 +86,7 @@ pub struct LevelAssets<'a> {
     pub meshes: &'a mut Assets<Mesh>,
     pub materials: &'a mut Assets<StandardMaterial>,
     pub environment_materials: &'a mut Assets<HaloEnvironmentMaterial>,
+    pub transparent_materials: &'a mut Assets<HaloTransparentMaterial>,
     pub images: &'a mut Assets<Image>,
     /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
     pub neutral_detail: Handle<Image>,
@@ -85,7 +96,16 @@ pub struct LevelAssets<'a> {
 
 /// How a shader's surfaces are drawn.
 #[derive(Clone)]
-struct Surface {
+enum Surface {
+    /// Ray traced and rasterized.
+    Solid(SolidSurface),
+    /// Rasterized only, blended over the scene (Solari traces opaque
+    /// surfaces only).
+    Transparent(Handle<HaloTransparentMaterial>),
+}
+
+#[derive(Clone)]
+struct SolidSurface {
     /// What the ray tracer sees, and the camera too without `raster`.
     standard: Handle<StandardMaterial>,
     /// A Halo material for the camera where `StandardMaterial` falls short
@@ -98,7 +118,7 @@ struct Surface {
 /// A shader's material and the texture coordinate scale it applies.
 #[derive(Clone)]
 struct ShaderSurface {
-    /// `None`: not drawn yet (transparent shaders without light emission).
+    /// `None`: not drawn (a transparent shader the combiners cannot draw).
     surface: Option<Surface>,
     uv_scale: [f32; 2],
 }
@@ -261,6 +281,27 @@ impl<'a> LevelBuilder<'a> {
             for part in model.geometry(geometry)? {
                 let Some(shader_ref) = model.shaders.get(part.shader_index.max(0) as usize).copied() else { continue };
                 let Some(info) = shader::shader_info(self.cache, shader_ref)? else { continue };
+                let depth_bias = SKY_BIAS + layer as f32 * SKY_LAYER_BIAS;
+                if let Some(material) = self.transparent_material(&info, depth_bias, assets) {
+                    let vertices = part.vertices.iter().map(|v| SourceVertex {
+                        position: v.position.map(|c| c * SKY_SCALE / METERS_PER_WORLD_UNIT),
+                        normal: v.normal,
+                        binormal: v.binormal,
+                        tangent: v.tangent,
+                        texcoord: v.texcoord,
+                    });
+                    let mesh = assets.meshes.add(build_mesh(vertices, &part.indices, [1.0, 1.0]));
+                    commands.spawn((
+                        Name::new(format!("{} layer {layer}", info.name)),
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        NotShadowCaster,
+                        Transform::default(),
+                        ChildOf(dome),
+                    ));
+                    layer += 1;
+                    continue;
+                }
                 let (texture, uv_scale, uv_offset) = match sky_layer_map(&info) {
                     Some(map) => (
                         map.bitmap.datum.and_then(|d| self.textures.get(self.cache, d, 0, true, assets.images)),
@@ -279,8 +320,7 @@ impl<'a> LevelBuilder<'a> {
                     alpha_mode: if additive { AlphaMode::Add } else { AlphaMode::Blend },
                     cull_mode: None,
                     fog_enabled: false,
-                    // keeps Halo's layer order among the transparent sky parts
-                    depth_bias: layer as f32 * 100.0,
+                    depth_bias: SKY_BIAS + layer as f32 * SKY_LAYER_BIAS,
                     ..default()
                 });
                 let vertices = part.vertices.iter().map(|v| SourceVertex {
@@ -352,6 +392,24 @@ impl<'a> LevelBuilder<'a> {
         surface: &Surface,
         raster: bool,
     ) {
+        let surface = match surface {
+            Surface::Solid(solid) => solid,
+            Surface::Transparent(material) => {
+                if raster {
+                    commands.spawn((
+                        Name::new(name),
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material.clone()),
+                        bevy::light::NotShadowCaster,
+                        Transform::default(),
+                        ChildOf(parent),
+                    ));
+                    self.stats.meshes += 1;
+                    self.stats.transparent_meshes += 1;
+                }
+                return;
+            }
+        };
         let mut traced = commands.spawn((
             Name::new(name.clone()),
             RaytracingMesh3d(mesh.clone()),
@@ -478,7 +536,7 @@ impl<'a> LevelBuilder<'a> {
                 perceptual_roughness: 0.9,
                 ..default()
             });
-            return Some(Surface { standard, raster: None, radiance: None });
+            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None }));
         };
         let base_color_texture = info
             .base_map
@@ -488,7 +546,7 @@ impl<'a> LevelBuilder<'a> {
         let emits = info.emitted_power > 0.0 && radiance != Vec3::ZERO;
 
         if info.shader_type.is_transparent() && !emits {
-            return None;
+            return self.transparent_material(info, 0.0, assets).map(Surface::Transparent);
         }
         let self_illumination = info.self_illumination.and_then(|si| match si {
             shader::SelfIllumination::Model { multipurpose_map, color_upper, .. } => {
@@ -551,7 +609,64 @@ impl<'a> LevelBuilder<'a> {
             }
             _ => None,
         };
-        Some(Surface { standard: assets.materials.add(material), raster, radiance })
+        Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance }))
+    }
+
+    /// A transparent chicago or generic shader's combiner material: its maps
+    /// in stage order, their texture transforms, and Bevy's nearest blend
+    /// mode to the shader's framebuffer blend function.
+    fn transparent_material(
+        &mut self,
+        info: &ShaderInfo,
+        depth_bias: f32,
+        assets: &mut LevelAssets,
+    ) -> Option<Handle<HaloTransparentMaterial>> {
+        use shader::BlendFunction;
+        let transparent = info.transparent.as_ref()?;
+        let shader_ref = TagRef { group: info.group, datum: Some(info.datum) };
+        let program = match halo_map::combiner::program(self.cache, shader_ref) {
+            Ok(program) => program?,
+            Err(e) => {
+                warn!("shader {}: {e}", info.name);
+                return None;
+            }
+        };
+        let mut params = HaloCombinerParams::from_program(&program);
+        let mut maps: [Handle<Image>; 4] = std::array::from_fn(|_| assets.neutral_detail.clone());
+        let mut present = 0;
+        for (stage, slot) in transparent.maps.iter().enumerate().take(4) {
+            // a cube map first stage (reflections) is not drawn yet
+            if stage == 0 && transparent.first_map_type != 0 {
+                continue;
+            }
+            let Some(map) = slot else { continue };
+            let Some(image) = map.bitmap.datum.and_then(|d| self.textures.get(self.cache, d, 0, true, assets.images))
+            else {
+                continue;
+            };
+            maps[stage] = image;
+            present |= 1 << stage;
+            params.map_transforms[stage] = Vec4::new(map.uv_scale[0], map.uv_scale[1], map.uv_offset[0], map.uv_offset[1]);
+        }
+        let (alpha_mode, output) = match transparent.blend {
+            BlendFunction::AlphaBlend => (AlphaMode::Blend, 0),
+            BlendFunction::Add | BlendFunction::Subtract | BlendFunction::ComponentMax => (AlphaMode::Add, 1),
+            BlendFunction::Multiply | BlendFunction::DoubleMultiply | BlendFunction::ComponentMin => {
+                (AlphaMode::Multiply, 2)
+            }
+            BlendFunction::AlphaMultiplyAdd => (AlphaMode::Premultiplied, 3),
+        };
+        params.modes = UVec4::new(output, present, 0, 0);
+        let [map0, map1, map2, map3] = maps;
+        Some(assets.transparent_materials.add(HaloTransparentMaterial {
+            params,
+            map0,
+            map1,
+            map2,
+            map3,
+            alpha_mode,
+            depth_bias,
+        }))
     }
 
     /// Roughness and metalness from Halo's reflection settings. Halo has no
@@ -700,6 +815,7 @@ fn sky_layer_map(info: &ShaderInfo) -> Option<shader::TransparentMap> {
         .maps
         .iter()
         .skip(skip)
+        .flatten()
         .rev()
         .min_by(|a, b| (a.uv_scale[0] * a.uv_scale[1]).total_cmp(&(b.uv_scale[0] * b.uv_scale[1])))
         .copied()

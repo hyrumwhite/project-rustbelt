@@ -41,6 +41,51 @@ impl ShaderType {
     }
 }
 
+/// `framebuffer_blend_function` of transparent shaders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendFunction {
+    AlphaBlend,
+    Multiply,
+    DoubleMultiply,
+    Add,
+    Subtract,
+    ComponentMin,
+    ComponentMax,
+    AlphaMultiplyAdd,
+}
+
+impl BlendFunction {
+    fn from_raw(raw: i16) -> Self {
+        match raw {
+            1 => Self::Multiply,
+            2 => Self::DoubleMultiply,
+            3 => Self::Add,
+            4 => Self::Subtract,
+            5 => Self::ComponentMin,
+            6 => Self::ComponentMax,
+            7 => Self::AlphaMultiplyAdd,
+            _ => Self::AlphaBlend,
+        }
+    }
+}
+
+/// A transparent shader's map (one per stage).
+#[derive(Debug, Clone, Copy)]
+pub struct TransparentMap {
+    pub bitmap: TagRef,
+    pub uv_scale: [f32; 2],
+    pub uv_offset: [f32; 2],
+}
+
+/// The parts of a transparent generic or chicago shader the renderer uses.
+#[derive(Debug, Clone)]
+pub struct TransparentInfo {
+    pub blend: BlendFunction,
+    /// 0 for a 2D first map; 1..=3 for the cube map kinds.
+    pub first_map_type: i16,
+    pub maps: Vec<TransparentMap>,
+}
+
 /// What the renderer needs from a shader so far.
 #[derive(Debug, Clone)]
 pub struct ShaderInfo {
@@ -60,6 +105,8 @@ pub struct ShaderInfo {
     /// `shader_environment` alpha-tested flag.
     pub alpha_tested: bool,
     pub uv_scale: [f32; 2],
+    /// For transparent generic and chicago shaders.
+    pub transparent: Option<TransparentInfo>,
 }
 
 fn present(reference: TagRef) -> Option<TagRef> {
@@ -86,6 +133,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         environment_type: None,
         alpha_tested: false,
         uv_scale: [1.0, 1.0],
+        transparent: None,
     };
 
     if tag.group == groups::SHADER_ENVIRONMENT {
@@ -109,6 +157,54 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         info.base_map = present(root.reference(m::BASE_MAP)?);
         let (u, v) = (root.f32(m::MAP_U_SCALE)?, root.f32(m::MAP_V_SCALE)?);
         info.uv_scale = [if u == 0.0 { 1.0 } else { u }, if v == 0.0 { 1.0 } else { v }];
+    }
+
+    if matches!(shader_type, ShaderType::TransparentGeneric | ShaderType::TransparentChicago) {
+        use layout::shader_transparent as t;
+        let (base, map_size, map, scale_u, scale_v, offset_u, offset_v) = if shader_type == ShaderType::TransparentGeneric {
+            use layout::shader_transparent_generic_map as m;
+            (
+                layout::shader_transparent_generic_definition::TRANSPARENT,
+                m::SIZEOF,
+                m::MAP,
+                m::MAP_U_SCALE,
+                m::MAP_V_SCALE,
+                m::MAP_U_OFFSET,
+                m::MAP_V_OFFSET,
+            )
+        } else {
+            use layout::shader_transparent_chicago_map as m;
+            (
+                layout::shader_transparent_chicago_definition::TRANSPARENT,
+                m::SIZEOF,
+                m::MAP,
+                m::MAP_U_SCALE,
+                m::MAP_V_SCALE,
+                m::MAP_U_OFFSET,
+                m::MAP_V_OFFSET,
+            )
+        };
+        let maps = root
+            .block(base + t::MAPS, map_size)?
+            .iter()
+            .filter_map(|m| {
+                let read = || -> Result<Option<TransparentMap>> {
+                    let Some(bitmap) = present(m.reference(map)?) else { return Ok(None) };
+                    let (u, v) = (m.f32(scale_u)?, m.f32(scale_v)?);
+                    Ok(Some(TransparentMap {
+                        bitmap,
+                        uv_scale: [if u == 0.0 { 1.0 } else { u }, if v == 0.0 { 1.0 } else { v }],
+                        uv_offset: [m.f32(offset_u)?, m.f32(offset_v)?],
+                    }))
+                };
+                read().transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        info.transparent = Some(TransparentInfo {
+            blend: BlendFunction::from_raw(root.i16(base + t::FRAMEBUFFER_BLEND_FUNCTION)?),
+            first_map_type: root.i16(base + t::FIRST_MAP_TYPE)?,
+            maps,
+        });
     }
     Ok(Some(info))
 }

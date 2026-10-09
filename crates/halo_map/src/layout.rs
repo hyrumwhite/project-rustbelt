@@ -214,6 +214,41 @@ pub mod shader_radiosity_properties {
     pub const COLOR_OF_EMITTED_LIGHT: usize = 0x8;
 }
 
+pub mod shader_transparent {
+    pub const FLAGS: usize = 0x1;
+    pub const FIRST_MAP_TYPE: usize = 0x2;
+    pub const FRAMEBUFFER_BLEND_FUNCTION: usize = 0x4;
+    pub const EXTRA_LAYERS: usize = 0x20;
+    pub const MAPS: usize = 0x2c;
+}
+
+pub mod shader_transparent_chicago_definition {
+    pub const TRANSPARENT: usize = 0x28;
+}
+
+pub mod shader_transparent_chicago_map {
+    pub const SIZEOF: usize = 0xdc;
+    pub const MAP_U_SCALE: usize = 0x54;
+    pub const MAP_V_SCALE: usize = 0x58;
+    pub const MAP_U_OFFSET: usize = 0x5c;
+    pub const MAP_V_OFFSET: usize = 0x60;
+    pub const MAP: usize = 0x6c;
+}
+
+pub mod shader_transparent_generic_definition {
+    pub const TRANSPARENT: usize = 0x28;
+    pub const STAGES: usize = 0x60;
+}
+
+pub mod shader_transparent_generic_map {
+    pub const SIZEOF: usize = 0x64;
+    pub const MAP_U_SCALE: usize = 0x4;
+    pub const MAP_V_SCALE: usize = 0x8;
+    pub const MAP_U_OFFSET: usize = 0xc;
+    pub const MAP_V_OFFSET: usize = 0x10;
+    pub const MAP: usize = 0x1c;
+}
+
 pub mod sky_definition {
     pub const SIZEOF: usize = 0xd0;
     pub const MODEL: usize = 0x0;

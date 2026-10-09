@@ -144,7 +144,8 @@ fn main() -> AppExit {
         .insert_resource(LevelSky(level_sky))
         .insert_resource(LightingSettings::default())
         .insert_resource(MapFile(Some(cache)))
-        .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain());
+        .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
+        .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate));
 
     if args.screenshot.is_some() {
         app.add_systems(Update, screenshot_and_exit);
@@ -213,6 +214,11 @@ fn setup_level(
         && let Err(e) = builder.spawn_objects(!args.pathtracer, &mut commands, &mut meshes, &mut materials, &mut images)
     {
         error!("placing objects: {e}");
+    }
+    if let Some(model) = halo_map::sky::skies(&cache).ok().and_then(|s| s.into_iter().find_map(|s| s.model)).and_then(|m| m.datum)
+        && let Err(e) = builder.spawn_sky(model, &mut commands, &mut meshes, &mut materials, &mut images)
+    {
+        error!("sky: {e}");
     }
     let stats = builder.stats;
     info!(

@@ -30,6 +30,14 @@ pub struct EmissiveSurface {
 #[derive(Component)]
 pub struct HaloObject;
 
+/// The sky model; it keeps its centre on the camera (see [`follow_camera`]).
+#[derive(Component)]
+pub struct SkyDome;
+
+/// Metres per sky model unit. A sky is drawn around the camera at no
+/// particular size; this puts it far beyond any level (skies are ~10⁵ units).
+const SKY_SCALE: f32 = 1.0;
+
 /// What a loaded level contains, for the overlay.
 #[derive(Resource, Default)]
 pub struct LevelStats {
@@ -183,6 +191,71 @@ impl<'a> LevelBuilder<'a> {
             self.stats.objects += 1;
         }
         self.stats.texture_failures = self.textures.failures;
+        Ok(())
+    }
+
+    /// Spawns a sky model as raster-only, unlit, alpha-blended layers in the
+    /// model's part order. Solari never sees it: the sky's light comes from
+    /// the environment map and the sun.
+    pub fn spawn_sky(
+        &mut self,
+        model_datum: u32,
+        commands: &mut Commands,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) -> halo_map::Result<()> {
+        use bevy::light::NotShadowCaster;
+        let model = Model::load(self.cache, model_datum)?;
+        let dome = commands
+            .spawn((Name::new(model.name.clone()), SkyDome, Transform::default(), Visibility::default()))
+            .id();
+        let mut layer = 0;
+        for geometry in model.geometries_for(&[], model::HIGHEST_DETAIL) {
+            for part in model.geometry(geometry)? {
+                let Some(shader_ref) = model.shaders.get(part.shader_index.max(0) as usize).copied() else { continue };
+                let Some(info) = shader::shader_info(self.cache, shader_ref)? else { continue };
+                let (texture, uv_scale, uv_offset) = match sky_layer_map(&info) {
+                    Some(map) => (
+                        map.bitmap.datum.and_then(|d| self.textures.get(self.cache, d, 0, true, images)),
+                        map.uv_scale,
+                        map.uv_offset,
+                    ),
+                    None => (None, info.uv_scale, [0.0, 0.0]),
+                };
+                let additive = info
+                    .transparent
+                    .as_ref()
+                    .is_some_and(|t| matches!(t.blend, shader::BlendFunction::Add | shader::BlendFunction::AlphaMultiplyAdd));
+                let material = materials.add(StandardMaterial {
+                    base_color_texture: texture,
+                    unlit: true,
+                    alpha_mode: if additive { AlphaMode::Add } else { AlphaMode::Blend },
+                    cull_mode: None,
+                    fog_enabled: false,
+                    // keeps Halo's layer order among the transparent sky parts
+                    depth_bias: layer as f32 * 100.0,
+                    ..default()
+                });
+                let vertices = part.vertices.iter().map(|v| SourceVertex {
+                    position: v.position.map(|c| c * SKY_SCALE / METERS_PER_WORLD_UNIT),
+                    normal: v.normal,
+                    binormal: v.binormal,
+                    tangent: v.tangent,
+                    texcoord: [v.texcoord[0] + uv_offset[0] / uv_scale[0].max(1e-6), v.texcoord[1] + uv_offset[1] / uv_scale[1].max(1e-6)],
+                });
+                let mesh = meshes.add(build_mesh(vertices, &part.indices, uv_scale));
+                commands.spawn((
+                    Name::new(format!("{} layer {layer}", info.name)),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    NotShadowCaster,
+                    Transform::default(),
+                    ChildOf(dome),
+                ));
+                layer += 1;
+            }
+        }
         Ok(())
     }
 
@@ -351,6 +424,33 @@ impl<'a> LevelBuilder<'a> {
         };
         let handle = materials.add(material);
         if emits { Surface::Emissive(handle, radiance) } else { Surface::Opaque(handle) }
+    }
+}
+
+/// The map that carries a sky layer's look: transparent shaders composite
+/// several, so until their combiners are reproduced (ROADMAP phase 3) take the
+/// least-tiled 2D map, the last one on ties (later stages draw over earlier).
+fn sky_layer_map(info: &ShaderInfo) -> Option<shader::TransparentMap> {
+    let transparent = info.transparent.as_ref()?;
+    // a first map of a cube type is a reflection, not the layer's colour
+    let skip = usize::from(transparent.first_map_type != 0);
+    transparent
+        .maps
+        .iter()
+        .skip(skip)
+        .rev()
+        .min_by(|a, b| (a.uv_scale[0] * a.uv_scale[1]).total_cmp(&(b.uv_scale[0] * b.uv_scale[1])))
+        .copied()
+}
+
+/// Keeps the sky centred on the camera.
+pub fn follow_camera(
+    camera: Query<&Transform, (With<Camera3d>, Without<SkyDome>)>,
+    mut domes: Query<&mut Transform, With<SkyDome>>,
+) {
+    let Ok(camera) = camera.single() else { return };
+    for mut dome in &mut domes {
+        dome.translation = camera.translation;
     }
 }
 

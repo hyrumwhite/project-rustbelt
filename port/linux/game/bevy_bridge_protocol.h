@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 5
+#define BEVY_BRIDGE_VERSION 6
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
 #define BEVY_BRIDGE_FRAMES 2
@@ -83,6 +83,10 @@ struct bevy_bridge_object
 	unsigned long flags;
 	/* the permutation shown of each model region */
 	unsigned char region_permutations[8];
+	/* the object's change colours (A-D: team and armour colours), which
+	model shaders tint their base maps with where their multipurpose map's
+	alpha says; white for a model */
+	float change_colors[4][3];
 };
 
 /* real_matrix4x3: a node's world transform */

@@ -532,7 +532,8 @@ void first_person_weapon_draw(
 							model_node_matrices,
 							(short)MIN(model_definition_get(
 								weapon_definition->weapon.interface_definition.first_person_model.index)->nodes.count,
-								MAXIMUM_NODES_PER_ANIMATION));
+								MAXIMUM_NODES_PER_ANIMATION),
+							weapon->object.outgoing_change_colors);
 						render_model(
 							weapon_definition->weapon.interface_definition.first_person_model.index,
 							0.0f,
@@ -562,7 +563,8 @@ void first_person_weapon_draw(
 							first_person_interface->hands.index,
 							model_node_matrices,
 							(short)MIN(model_definition_get(first_person_interface->hands.index)->nodes.count,
-								MAXIMUM_NODES_PER_ANIMATION));
+								MAXIMUM_NODES_PER_ANIMATION),
+							unit->object.outgoing_change_colors);
 						render_model(
 							first_person_interface->hands.index,
 							0.0f,

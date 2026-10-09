@@ -16,12 +16,13 @@ void bevy_bridge_export_frame(
 	struct render_window const *windows,
 	short window_count);
 
-/* a model the game draws by itself, posed (first_person_weapons.c): shared
-with the next frame */
+/* a model the game draws by itself, posed and coloured (its change colours,
+or NULL; first_person_weapons.c): shared with the next frame */
 void bevy_bridge_record_model(
 	long model_index,
 	struct real_matrix4x3 const *node_matrices,
-	short node_count);
+	short node_count,
+	real_rgb_color const *change_colors);
 
 /* sound_manager.c: the first player's listener, which the renderer may
 move to its own camera; TRUE if it did */

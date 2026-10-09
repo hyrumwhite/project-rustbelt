@@ -51,6 +51,7 @@ static struct
 	long model_index;
 	short node_count;
 	real_matrix4x3 nodes[MAXIMUM_RECORDED_MODEL_NODES];
+	real_rgb_color change_colors[4];
 } bevy_bridge_recorded[MAXIMUM_RECORDED_MODELS];
 static short bevy_bridge_recorded_count;
 
@@ -171,8 +172,9 @@ static void bevy_bridge_write_node(struct bevy_bridge_node *node, real_matrix4x3
 
 void bevy_bridge_record_model(
 	long model_index,
-	struct real_matrix4x3 const *node_matrices,
-	short node_count)
+	real_matrix4x3 const *node_matrices,
+	short node_count,
+	real_rgb_color const *change_colors)
 {
 	if (!bevy_bridge_shared || model_index == NONE || bevy_bridge_recorded_count >= MAXIMUM_RECORDED_MODELS)
 		return;
@@ -180,6 +182,16 @@ void bevy_bridge_record_model(
 	bevy_bridge_recorded[bevy_bridge_recorded_count].model_index = model_index;
 	bevy_bridge_recorded[bevy_bridge_recorded_count].node_count = node_count;
 	memcpy(bevy_bridge_recorded[bevy_bridge_recorded_count].nodes, node_matrices, node_count * sizeof(real_matrix4x3));
+	{
+		short color_index;
+
+		/* (white without colours: the model as it is) */
+		for (color_index = 0; color_index < 4; color_index++)
+		{
+			bevy_bridge_recorded[bevy_bridge_recorded_count].change_colors[color_index] =
+				change_colors ? change_colors[color_index] : *global_real_rgb_white;
+		}
+	}
 	bevy_bridge_recorded_count++;
 }
 
@@ -265,6 +277,16 @@ void bevy_bridge_export_frame(
 			out->type = object->object.type;
 			out->flags = bevy_bridge_object_flags(iterator.index, first_person_unit);
 			memcpy(out->region_permutations, object->object.region_permutations, sizeof(out->region_permutations));
+			{
+				short color_index;
+
+				for (color_index = 0; color_index < 4; color_index++)
+				{
+					out->change_colors[color_index][0] = object->object.outgoing_change_colors[color_index].red;
+					out->change_colors[color_index][1] = object->object.outgoing_change_colors[color_index].green;
+					out->change_colors[color_index][2] = object->object.outgoing_change_colors[color_index].blue;
+				}
+			}
 			for (node_index = 0; node_index < node_count; node_index++)
 				bevy_bridge_write_node(&frame->nodes[frame->node_count++], &nodes[node_index]);
 		}
@@ -294,6 +316,16 @@ void bevy_bridge_export_frame(
 			out->node_count = (unsigned short)node_count;
 			out->type = NONE;
 			SET_FLAG(out->flags, _bevy_bridge_object_model_bit, TRUE);
+			{
+				short color_index;
+
+				for (color_index = 0; color_index < 4; color_index++)
+				{
+					out->change_colors[color_index][0] = bevy_bridge_recorded[recorded].change_colors[color_index].red;
+					out->change_colors[color_index][1] = bevy_bridge_recorded[recorded].change_colors[color_index].green;
+					out->change_colors[color_index][2] = bevy_bridge_recorded[recorded].change_colors[color_index].blue;
+				}
+			}
 			for (node_index = 0; node_index < node_count; node_index++)
 				bevy_bridge_write_node(&frame->nodes[frame->node_count++], &bevy_bridge_recorded[recorded].nodes[node_index]);
 		}

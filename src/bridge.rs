@@ -5,7 +5,11 @@
 //! matrices ([`halo_bridge`]). The level's BSPs, sky and lights load from the
 //! map file as usual; the objects come from the game: spawned when they
 //! appear, posed by their node matrices every frame, despawned when they go.
-//! The camera follows the game's (F detaches it into a free camera).
+//! The camera follows the game's (F8 detaches it into a free camera).
+//!
+//! While following, a click grabs the cursor and this window's keyboard and
+//! mouse play the game (forwarded through the bridge; F12 lets go), so the
+//! game's own window can stay in the background.
 
 use crate::level::{halo_affine, halo_to_bevy_affine, AnimatedModel, LevelAssets, LevelBuilder};
 use crate::material::{HaloEnvironmentMaterial, HaloTransparentMaterial, NeutralDetail};
@@ -49,7 +53,9 @@ impl Plugin for BridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BridgeObjects>()
             .init_resource::<FollowGame>()
+            .init_resource::<ForwardInput>()
             .add_systems(First, read_frame)
+            .add_systems(PreUpdate, (grab_cursor, forward_input).chain().after(bevy::input::InputSystems))
             .add_systems(Update, (toggle_follow, sync_objects, sync_camera).chain());
     }
 }
@@ -110,14 +116,14 @@ fn read_frame(mut link: ResMut<BridgeLink>) {
     }
 }
 
-/// F: follow the game's camera, or fly free.
+/// F8: follow the game's camera, or fly free.
 fn toggle_follow(
     keys: Res<ButtonInput<KeyCode>>,
     mut follow: ResMut<FollowGame>,
     camera: Single<Entity, With<Camera3d>>,
     mut commands: Commands,
 ) {
-    if !keys.just_pressed(KeyCode::KeyF) {
+    if !keys.just_pressed(KeyCode::F8) {
         return;
     }
     follow.0 = !follow.0;
@@ -259,4 +265,109 @@ fn sync_camera(
     {
         perspective.fov = game.vertical_field_of_view;
     }
+}
+
+/// Whether this window's keyboard and mouse go to the game: while following
+/// the game's camera with the cursor grabbed (click to grab, F12 releases).
+#[derive(Resource, Default)]
+pub struct ForwardInput {
+    pub active: bool,
+    state: halo_bridge::Input,
+}
+
+/// A run condition: the viewer's own hotkeys work only while input is not
+/// going to the game.
+pub fn not_forwarding(forward: Option<Res<ForwardInput>>) -> bool {
+    forward.is_none_or(|f| !f.active)
+}
+
+/// Keys the viewer keeps for itself even while forwarding.
+const VIEWER_KEYS: [KeyCode; 2] = [KeyCode::F8, KeyCode::F12];
+
+/// Click to play (grab the cursor), F12 to let go.
+fn grab_cursor(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    follow: Res<FollowGame>,
+    window: Single<(&Window, &mut bevy::window::CursorOptions), With<bevy::window::PrimaryWindow>>,
+    mut forward: ResMut<ForwardInput>,
+) {
+    use bevy::window::CursorGrabMode;
+    let (window, mut cursor) = window.into_inner();
+    let grabbed = cursor.grab_mode != CursorGrabMode::None;
+    let release = keys.just_pressed(KeyCode::F12) || !window.focused || !follow.0;
+    if grabbed && release {
+        cursor.grab_mode = CursorGrabMode::None;
+        cursor.visible = true;
+    } else if !grabbed && follow.0 && window.focused && buttons.just_pressed(MouseButton::Left) {
+        cursor.grab_mode = CursorGrabMode::Locked;
+        cursor.visible = false;
+    }
+    forward.active = follow.0 && window.focused && cursor.grab_mode != CursorGrabMode::None;
+}
+
+fn forward_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    motion: Res<bevy::input::mouse::AccumulatedMouseMotion>,
+    scroll: Res<bevy::input::mouse::AccumulatedMouseScroll>,
+    mut forward: ResMut<ForwardInput>,
+    mut link: ResMut<BridgeLink>,
+) {
+    let ForwardInput { active, state } = &mut *forward;
+    state.active = u32::from(*active);
+    state.keys = [0; 16];
+    state.mouse_buttons = 0;
+    if *active {
+        for key in keys.get_pressed().filter(|k| !VIEWER_KEYS.contains(k)) {
+            if let Some(scancode) = scancode(*key) {
+                state.set_key(scancode, true);
+            }
+        }
+        for button in buttons.get_pressed() {
+            let bit = match button {
+                MouseButton::Left => 1,
+                MouseButton::Middle => 2,
+                MouseButton::Right => 3,
+                MouseButton::Back => 4,
+                MouseButton::Forward => 5,
+                MouseButton::Other(n) if *n < 32 => *n as u32,
+                MouseButton::Other(_) => continue,
+            };
+            state.mouse_buttons |= 1 << bit;
+        }
+        state.mouse_x = state.mouse_x.wrapping_add(motion.delta.x.round() as i32);
+        state.mouse_y = state.mouse_y.wrapping_add(motion.delta.y.round() as i32);
+        let steps = match scroll.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => scroll.delta.y,
+            bevy::input::mouse::MouseScrollUnit::Pixel => scroll.delta.y / 100.0,
+        };
+        state.wheel = state.wheel.wrapping_add(steps.round() as i32);
+    }
+    link.bridge.write_input(state);
+}
+
+/// A key's SDL scancode: its USB HID keyboard usage.
+fn scancode(key: KeyCode) -> Option<u32> {
+    use KeyCode::*;
+    Some(match key {
+        KeyA => 4, KeyB => 5, KeyC => 6, KeyD => 7, KeyE => 8, KeyF => 9, KeyG => 10, KeyH => 11, KeyI => 12,
+        KeyJ => 13, KeyK => 14, KeyL => 15, KeyM => 16, KeyN => 17, KeyO => 18, KeyP => 19, KeyQ => 20, KeyR => 21,
+        KeyS => 22, KeyT => 23, KeyU => 24, KeyV => 25, KeyW => 26, KeyX => 27, KeyY => 28, KeyZ => 29,
+        Digit1 => 30, Digit2 => 31, Digit3 => 32, Digit4 => 33, Digit5 => 34, Digit6 => 35, Digit7 => 36,
+        Digit8 => 37, Digit9 => 38, Digit0 => 39,
+        Enter => 40, Escape => 41, Backspace => 42, Tab => 43, Space => 44, Minus => 45, Equal => 46,
+        BracketLeft => 47, BracketRight => 48, Backslash => 49, Semicolon => 51, Quote => 52, Backquote => 53,
+        Comma => 54, Period => 55, Slash => 56, CapsLock => 57,
+        F1 => 58, F2 => 59, F3 => 60, F4 => 61, F5 => 62, F6 => 63, F7 => 64, F8 => 65, F9 => 66, F10 => 67,
+        F11 => 68, F12 => 69,
+        PrintScreen => 70, ScrollLock => 71, Pause => 72, Insert => 73, Home => 74, PageUp => 75, Delete => 76,
+        End => 77, PageDown => 78, ArrowRight => 79, ArrowLeft => 80, ArrowDown => 81, ArrowUp => 82,
+        NumLock => 83, NumpadDivide => 84, NumpadMultiply => 85, NumpadSubtract => 86, NumpadAdd => 87,
+        NumpadEnter => 88, Numpad1 => 89, Numpad2 => 90, Numpad3 => 91, Numpad4 => 92, Numpad5 => 93,
+        Numpad6 => 94, Numpad7 => 95, Numpad8 => 96, Numpad9 => 97, Numpad0 => 98, NumpadDecimal => 99,
+        ControlLeft => 224, ShiftLeft => 225, AltLeft => 226, SuperLeft => 227,
+        ControlRight => 228, ShiftRight => 229, AltRight => 230, SuperRight => 231,
+        _ => return None,
+    })
 }

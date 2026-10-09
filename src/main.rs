@@ -217,10 +217,16 @@ fn main() -> AppExit {
     if args.pathtracer {
         app.add_plugins(PathtracingPlugin);
     } else {
-        app.add_systems(Update, ((adjust_lighting, apply_lighting).chain(), print_camera))
+        app.add_systems(
+            Update,
+            (
+                (adjust_lighting.run_if(bridge::not_forwarding), apply_lighting).chain(),
+                print_camera.run_if(bridge::not_forwarding),
+            ),
+        )
             .add_systems(PostUpdate, (update_control_text, update_performance_text));
         #[cfg(feature = "dlss")]
-        app.add_systems(Update, (toggle_dlss_rr, cycle_dlss_quality));
+        app.add_systems(Update, (toggle_dlss_rr, cycle_dlss_quality).run_if(bridge::not_forwarding));
     }
 
     app.run()
@@ -612,6 +618,7 @@ fn update_control_text(
     link: Option<ResMut<bridge::BridgeLink>>,
     bridged: Option<Res<bridge::BridgeObjects>>,
     follow: Option<Res<bridge::FollowGame>>,
+    forward: Option<Res<bridge::ForwardInput>>,
     time: Res<Time>,
     mut rate: Local<(f32, u32)>,
     #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
@@ -628,13 +635,20 @@ fn update_control_text(
         }
         let game = link.latest.as_ref();
         s += &format!(
-            "OpenCE bridge: {} at tick {}, {} game frames/s, drawing {} of {} objects - F: {}\n",
+            "OpenCE bridge: {} at tick {}, {} game frames/s, drawing {} of {} objects - F8: {}{}\n",
             game.map_or("", |g| g.scenario_name.as_str()),
             game.map_or(0, |g| g.game_tick),
             rate.1,
             bridged.count(),
             game.map_or(0, |g| g.objects.len()),
-            if follow.0 { "free camera" } else { "follow the game's camera" }
+            if follow.0 { "free camera" } else { "follow the game's camera" },
+            if forward.is_some_and(|f| f.active) {
+                " - playing (F12 lets go of the mouse)"
+            } else if follow.0 {
+                " - click to play"
+            } else {
+                ""
+            }
         );
     }
     if let Some(stats) = stats {

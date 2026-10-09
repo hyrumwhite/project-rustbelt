@@ -8,11 +8,15 @@
 //! sequence lock.
 //!
 //! Positions and matrices are the game's: world units, Z up.
+//!
+//! The other way, [`Bridge::write_input`] forwards a window's keyboard and
+//! mouse for the game to read as its own (the game's
+//! `port/linux/src/bevy_bridge_input.c` turns them into SDL events).
 
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;
@@ -72,6 +76,38 @@ struct Frame {
     nodes: [Node; MAXIMUM_NODES],
 }
 
+/// What a renderer's window receives, for the game to read as its own
+/// (`struct bevy_bridge_input`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Input {
+    /// Nonzero while input is forwarded.
+    pub active: u32,
+    /// The keys held, a bit per SDL scancode (USB HID usage).
+    pub keys: [u32; 16],
+    /// Cumulative relative mouse motion (pixels) and wheel steps.
+    pub mouse_x: i32,
+    pub mouse_y: i32,
+    pub wheel: i32,
+    /// The mouse buttons held, a bit per SDL button number (1 left, 2
+    /// middle, 3 right, 4 and 5 the side buttons).
+    pub mouse_buttons: u32,
+    pub reserved: [u32; 11],
+}
+
+impl Input {
+    pub fn set_key(&mut self, scancode: u32, down: bool) {
+        if scancode < 512 {
+            let (word, bit) = ((scancode / 32) as usize, scancode % 32);
+            if down {
+                self.keys[word] |= 1 << bit;
+            } else {
+                self.keys[word] &= !(1 << bit);
+            }
+        }
+    }
+}
+
 #[repr(C)]
 struct Shared {
     magic: u32,
@@ -80,6 +116,7 @@ struct Shared {
     latest_frame: u32,
     writer_process_id: u32,
     reserved: [u32; 3],
+    input: Input,
     frames: [Frame; FRAMES],
 }
 
@@ -88,6 +125,7 @@ struct Shared {
 const _: () = assert!(std::mem::size_of::<Object>() == 28);
 const _: () = assert!(std::mem::size_of::<Node>() == 52);
 const _: () = assert!(std::mem::size_of::<Camera>() == 40);
+const _: () = assert!(std::mem::size_of::<Input>() == 128);
 
 /// One frame of the game's world.
 #[derive(Debug, Clone, Default)]
@@ -132,7 +170,7 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The shared memory, mapped read-only.
+/// The shared memory: frames read, input written.
 pub struct Bridge {
     shared: *const Shared,
     #[cfg(windows)]
@@ -140,7 +178,8 @@ pub struct Bridge {
     last_frame_index: u32,
 }
 
-// The mapping is only read, through volatile reads and a sequence check.
+// Frames are read through volatile reads and a sequence check; the input
+// block is only written by this side.
 unsafe impl Send for Bridge {}
 unsafe impl Sync for Bridge {}
 
@@ -179,6 +218,17 @@ impl Bridge {
             )));
         }
         Ok(())
+    }
+
+    /// Forwards input to the game (see [`Input`]).
+    pub fn write_input(&mut self, input: &Input) {
+        // SAFETY: the view is writable and at least size_of::<Shared>()
+        // bytes; the game only reads this block
+        unsafe {
+            let target = &raw const (*self.shared).input as *mut Input;
+            std::ptr::write_volatile(target, *input);
+        }
+        fence(Ordering::Release);
     }
 
     /// The latest frame, if it is newer than the last one returned.
@@ -230,6 +280,7 @@ mod windows {
     use super::Error;
     use std::ffi::c_void;
 
+    const FILE_MAP_WRITE: u32 = 0x0002;
     const FILE_MAP_READ: u32 = 0x0004;
 
     #[link(name = "kernel32")]
@@ -259,11 +310,11 @@ mod windows {
     pub fn open(name: &[u8], size: usize) -> Result<(Handle, *mut c_void), Error> {
         // SAFETY: `name` is NUL-terminated; the results are checked
         unsafe {
-            let mapping = OpenFileMappingA(FILE_MAP_READ, 0, name.as_ptr());
+            let mapping = OpenFileMappingA(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr());
             if mapping.is_null() {
                 return Err(Error::NotRunning);
             }
-            let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, size);
+            let view = MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size);
             if view.is_null() {
                 CloseHandle(mapping);
                 return Err(Error::NotRunning);

@@ -893,6 +893,38 @@ long light_new_unattached(
 	return light_index;
 }
 
+short lights_port_list(
+	struct lights_port_light *lights,
+	short maximum)
+{
+	long light_index;
+	short count = 0;
+
+	if (!light_data || !light_data->valid)
+		return 0;
+	for (light_index = data_next_index(light_data, NONE);
+		light_index != NONE && count < maximum;
+		light_index = data_next_index(light_data, light_index))
+	{
+		struct light_datum *light = light_get(light_index);
+		struct point_light_definition *definition;
+
+		if (!TEST_FLAG(light->flags, _point_light_dynamic_bit) || light->radius <= 0.0f ||
+			(light->color.red == 0.0f && light->color.green == 0.0f && light->color.blue == 0.0f))
+		{
+			continue;
+		}
+		definition = light_definition_get(light->definition_index);
+		lights[count].position = light->position;
+		lights[count].forward = light->forward;
+		lights[count].color = light->color;
+		lights[count].radius = light->radius;
+		lights[count].cutoff_angle = definition ? definition->cutoff_angle : _pi;
+		count++;
+	}
+	return count;
+}
+
 void lights_preprocess_scene(
 	void)
 {

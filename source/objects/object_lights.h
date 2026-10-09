@@ -16,6 +16,18 @@ header included in hcex build.
 
 struct render_lighting;
 
+/* port: a light lit this frame (lights_port_list) */
+struct lights_port_light
+{
+	real_point3d position;
+	real_vector3d forward;
+	real_rgb_color color;
+	real radius;
+	/* a spotlight's (the flashlight's) cutoff angle, radians; pi or more
+	for a light shining every way */
+	real cutoff_angle;
+};
+
 /* ---------- prototypes/OBJECT_LIGHTS.C */
 
 void lights_initialize(void);
@@ -59,6 +71,12 @@ void lights_reconnect_to_structure_bsp(
 void lights_prepare_for_object_dynamic(
 	long object_index,
 	struct render_lighting *lighting);
+/* port: the dynamic lights lit by the last lights_preprocess_scene (muzzle
+flashes, plasma, explosions, the flashlight), at most `maximum`, for a Bevy
+renderer (port/linux/game/bevy_bridge.c) */
+short lights_port_list(
+	struct lights_port_light *lights,
+	short maximum);
 
 /* ---------- globals */
 

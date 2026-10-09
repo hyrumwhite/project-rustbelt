@@ -40,7 +40,8 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 7
+#define BEVY_BRIDGE_VERSION 8
+#define BEVY_BRIDGE_MAXIMUM_LIGHTS 64
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
 #define BEVY_BRIDGE_FRAMES 2
@@ -99,6 +100,20 @@ struct bevy_bridge_node
 	float position[3];
 };
 
+/* a dynamic light (a muzzle flash, plasma, an explosion, the flashlight),
+as the game lit the frame before */
+struct bevy_bridge_light
+{
+	float position[3];
+	float forward[3];
+	/* 0..1 a channel */
+	float color[3];
+	/* how far it reaches (world units) */
+	float radius;
+	/* a spotlight's cutoff angle (radians); pi or more shines every way */
+	float cutoff_angle;
+};
+
 struct bevy_bridge_frame
 {
 	unsigned long sequence;
@@ -109,6 +124,8 @@ struct bevy_bridge_frame
 	char scenario_name[64];
 	unsigned long camera_valid;
 	struct bevy_bridge_camera camera;
+	unsigned long light_count;
+	struct bevy_bridge_light lights[BEVY_BRIDGE_MAXIMUM_LIGHTS];
 	unsigned long object_count;
 	unsigned long node_count;
 	struct bevy_bridge_object objects[BEVY_BRIDGE_MAXIMUM_OBJECTS];

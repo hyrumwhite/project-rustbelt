@@ -18,6 +18,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "game/game.h"
 #include "game/players.h"
 #include "objects/objects.h"
+#include "objects/object_lights.h"
 #include "render/render_cameras.h"
 #include "render/render_cameras_internal.h"
 #include "scenario/scenario.h"
@@ -245,6 +246,27 @@ void bevy_bridge_export_frame(
 		frame->camera_valid = TRUE;
 		first_person_unit = bevy_bridge_first_person_unit(window->local_player_index);
 		break;
+	}
+
+	/* the dynamic lights */
+	{
+		struct lights_port_light lights[BEVY_BRIDGE_MAXIMUM_LIGHTS];
+		short count = global_scenario_index != NONE ? lights_port_list(lights, BEVY_BRIDGE_MAXIMUM_LIGHTS) : 0;
+		short index;
+
+		for (index = 0; index < count; index++)
+		{
+			struct bevy_bridge_light *out = &frame->lights[index];
+
+			bevy_bridge_point(out->position, &lights[index].position);
+			bevy_bridge_vector(out->forward, &lights[index].forward);
+			out->color[0] = lights[index].color.red;
+			out->color[1] = lights[index].color.green;
+			out->color[2] = lights[index].color.blue;
+			out->radius = lights[index].radius;
+			out->cutoff_angle = lights[index].cutoff_angle;
+		}
+		frame->light_count = (unsigned long)count;
 	}
 
 	frame->object_count = 0;

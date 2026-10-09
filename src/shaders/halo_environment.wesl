@@ -9,6 +9,10 @@
 // with each function one of 2*a*b, a*b or a + 2*b - 1. Textures are sampled
 // as sRGB (linear), taken back to gamma for the combine, and the result
 // returned to linear as the material's base colour. Lighting is Solari's.
+//
+// The bump map (a tangent-space normal map, decoded from the Xbox's vector
+// palette) tiles at its own scale; its alpha is also what alpha-tested
+// shaders cut away (the Xbox alpha-tests the bump map's pass, at 0x7F).
 
 import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -29,9 +33,10 @@ import bevy_pbr::render::{
 struct HaloEnvironment {
     // primary detail scale (xy), secondary detail scale (zw)
     detail_scales: vec4<f32>,
-    // micro detail scale (xy)
+    // micro detail scale (xy), bump map scale (zw)
     micro_scale: vec4<f32>,
-    // x: blend detail by base alpha, y: detail function, z: micro detail function
+    // x: blend detail by base alpha, y: detail function, z: micro detail
+    // function, w: flags (1 bump map, 2 alpha tested)
     modes: vec4<u32>,
 }
 
@@ -44,6 +49,8 @@ struct HaloEnvironment {
 @group(constants::MATERIAL_BIND_GROUP) @binding(106) var secondary_detail_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(107) var micro_detail_map: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(108) var micro_detail_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(109) var bump_map: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(110) var bump_sampler: sampler;
 
 fn to_gamma(c: vec3<f32>) -> vec3<f32> {
     return pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
@@ -80,6 +87,24 @@ fn fragment(
     var colour = saturate(detail_combine(to_gamma(base.rgb), detail, halo.modes.y));
     colour = saturate(detail_combine(colour, to_gamma(micro.rgb), halo.modes.z));
     pbr_input.material.base_color = vec4<f32>(to_linear(colour), pbr_input.material.base_color.a);
+
+    let bump = textureSample(bump_map, bump_sampler, uv * halo.micro_scale.zw);
+    if (halo.modes.w & 2u) != 0u {
+        pbr_input.material.base_color.a = bump.a;
+    }
+@if(VERTEX_TANGENTS) {
+    if (halo.modes.w & 1u) != 0u {
+        let n = normalize(in.world_normal);
+        let t = normalize(in.world_tangent.xyz - n * dot(in.world_tangent.xyz, n));
+        let b = cross(n, t) * in.world_tangent.w;
+        let local = bump.rgb * 2.0 - 1.0;
+        var normal = normalize(t * local.x + b * local.y + n * local.z);
+        if !is_front {
+            normal = -normal;
+        }
+        pbr_input.N = normal;
+    }
+}
 
     pbr_input.material.base_color = alpha_discard(
         pbr_input.material.flags,

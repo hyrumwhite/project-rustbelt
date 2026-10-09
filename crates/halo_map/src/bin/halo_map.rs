@@ -217,7 +217,7 @@ fn all_bitmaps(cache: &CacheFile) -> CliResult {
                 Ok(_) => entry.0 += 1,
                 Err(e) => {
                     entry.1 += 1;
-                    if b.kind == bitmap::Kind::Texture2d && b.format != bitmap::Format::P8Bump {
+                    if b.kind == bitmap::Kind::Texture2d {
                         failures.push(format!("{}[{i}]: {e}", tag.name));
                     }
                 }

@@ -64,6 +64,9 @@ struct Args {
     /// draw the light fixtures' emissive proxy spheres
     #[argh(switch)]
     show_light_proxies: bool,
+    /// ignore Halo's reflection settings (every surface rough and non-metal)
+    #[argh(switch)]
+    matte: bool,
     /// leave out the scenario's objects (BSP geometry only)
     #[argh(switch)]
     no_objects: bool,
@@ -239,12 +242,15 @@ fn setup_level(
         environment_materials: &mut environment_materials,
         images: &mut images,
         neutral_detail: neutral_detail.0.clone(),
+        flat_normal: Handle::default(),
     };
+    assets.flat_normal = assets.images.add(material::flat_normal_image());
     let bc_supported = render_device.features().contains(WgpuFeatures::TEXTURE_COMPRESSION_BC);
     let start = std::time::Instant::now();
     let mut builder = LevelBuilder::new(&cache, bc_supported);
     builder.fixture_lights = !args.no_fixture_lights;
     builder.show_light_proxies = args.show_light_proxies;
+    builder.matte = args.matte;
     if let Err(e) = builder.spawn_bsps(args.bsp, !args.pathtracer, &mut commands, &mut assets) {
         error!("loading {}: {e}", cache.header.name);
     }

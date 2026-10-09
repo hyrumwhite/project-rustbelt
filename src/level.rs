@@ -79,6 +79,8 @@ pub struct LevelAssets<'a> {
     pub images: &'a mut Assets<Image>,
     /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
     pub neutral_detail: Handle<Image>,
+    /// A flat normal map (see [`crate::material::flat_normal_image`]).
+    pub flat_normal: Handle<Image>,
 }
 
 /// How a shader's surfaces are drawn.
@@ -115,6 +117,8 @@ pub struct LevelBuilder<'a> {
     pub fixture_lights: bool,
     /// Rasterize the light proxies too (to see where they are).
     pub show_light_proxies: bool,
+    /// Ignore Halo's reflection settings: every surface a rough dielectric.
+    pub matte: bool,
     pub stats: LevelStats,
 }
 
@@ -138,6 +142,7 @@ impl<'a> LevelBuilder<'a> {
             light_proxy: None,
             fixture_lights: true,
             show_light_proxies: false,
+            matte: false,
             stats: LevelStats { map_name: cache.header.name.clone(), ..default() },
         }
     }
@@ -502,6 +507,7 @@ impl<'a> LevelBuilder<'a> {
                 Some((self.textures.baked(self.cache, bake, assets.images)?, Vec3::ONE))
             }
         });
+        let shine = self.shininess(info, assets);
         let material = StandardMaterial {
             base_color: if base_color_texture.is_some() || !emits {
                 Color::WHITE
@@ -509,11 +515,10 @@ impl<'a> LevelBuilder<'a> {
                 Color::srgb(0.2, 0.2, 0.2)
             },
             base_color_texture: base_color_texture.clone(),
-            // Phase 3 derives these from Halo's specular and reflection
-            // settings; until then, surfaces are rough dielectrics.
-            perceptual_roughness: 0.85,
-            metallic: 0.0,
-            reflectance: 0.4,
+            perceptual_roughness: shine.roughness,
+            metallic: shine.metallic,
+            metallic_roughness_texture: shine.texture,
+            reflectance: 0.5,
             // A surface that lit the lightmaps (radiosity emission) keeps that
             // as its brightness, the real light output; self-illumination
             // otherwise.
@@ -529,6 +534,17 @@ impl<'a> LevelBuilder<'a> {
             Some((_, color)) => Some(*color * SELF_ILLUMINATION_RADIANCE),
             None => None,
         };
+        // the ray-traced surface gets the bump map too, where it tiles as the
+        // base map does (StandardMaterial has one set of texture coordinates)
+        let mut material = material;
+        if let Some(environment) = &info.environment {
+            let base_size = info.base_map.and_then(|b| b.datum).and_then(|d| bitmap_size(self.cache, d));
+            if let Some((normal_map, scale)) = self.bump_map(environment, base_size, assets.images)
+                && scale.abs_diff_eq(Vec2::ONE, 1e-3)
+            {
+                material.normal_map_texture = Some(normal_map);
+            }
+        }
         let raster = match (&info.environment, &base_color_texture) {
             (Some(environment), Some(base_map)) => {
                 Some(self.environment_material(environment, base_map.clone(), &material, info, assets))
@@ -536,6 +552,43 @@ impl<'a> LevelBuilder<'a> {
             _ => None,
         };
         Some(Surface { standard: assets.materials.add(material), raster, radiance })
+    }
+
+    /// Roughness and metalness from Halo's reflection settings. Halo has no
+    /// roughness: a surface reflects its cube map, scaled by a brightness and
+    /// a specular mask. Brighter reflections become smoother and more metallic
+    /// surfaces; the mask (when the shader has one) becomes a texture.
+    fn shininess(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Shininess {
+        use crate::textures::{Bake, MATTE_ROUGHNESS};
+        use shader::SpecularMask;
+        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, texture: None };
+        let Some(reflection) = info.reflection.filter(|_| !self.matte) else { return matte };
+        let r = reflection.perpendicular_brightness.max(reflection.parallel_brightness).clamp(0.0, 1.0);
+        if r < 0.02 || reflection.cube_map.is_none() {
+            return matte;
+        }
+        let roughness = 0.8 - 0.65 * r.sqrt();
+        let metallic = 0.5 * r;
+        let mask = match reflection.mask {
+            // an alpha-tested base map's alpha is its cut-out, not a mask
+            SpecularMask::BaseAlpha if !info.alpha_tested => info.base_map.and_then(|b| b.datum).map(|d| (d, 3)),
+            SpecularMask::MultipurposeRed => info.multipurpose_map.and_then(|m| m.datum).map(|d| (d, 0)),
+            _ => None,
+        };
+        let texture = mask.and_then(|(mask, channel)| {
+            let bake = Bake::MetallicRoughness {
+                mask,
+                channel,
+                roughness: roughness.to_bits(),
+                metallic: metallic.to_bits(),
+            };
+            self.textures.baked(self.cache, bake, assets.images)
+        });
+        match texture {
+            // the texture holds the values; the factors multiply them
+            Some(texture) => Shininess { roughness: 1.0, metallic: 1.0, texture: Some(texture) },
+            None => Shininess { roughness, metallic, texture: None },
+        }
     }
 
     /// A `shader_environment`'s camera material: its detail layers over
@@ -564,13 +617,22 @@ impl<'a> LevelBuilder<'a> {
         let (primary, primary_scale) = layer(environment.primary_detail);
         let (secondary, secondary_scale) = layer(environment.secondary_detail);
         let (micro, micro_scale) = layer(environment.micro_detail);
+        let bump = self.bump_map(environment, base_size, assets.images);
+        let mut flags = 0;
+        if bump.is_some() {
+            flags |= crate::material::ENVIRONMENT_HAS_BUMP_MAP;
+        }
+        if info.alpha_tested && bump.is_some() {
+            flags |= crate::material::ENVIRONMENT_ALPHA_TESTED;
+        }
+        let (bump_map, bump_scale) = bump.unwrap_or((assets.flat_normal.clone(), Vec2::ONE));
         let function = |f: DetailFunction| match f {
             DetailFunction::DoubleBiasedMultiply => 0,
             DetailFunction::Multiply => 1,
             DetailFunction::DoubleBiasedAdd => 2,
         };
         let mut base = standard.clone();
-        if info.alpha_tested {
+        if flags & crate::material::ENVIRONMENT_ALPHA_TESTED != 0 {
             base.alpha_mode = AlphaMode::Mask(0.5);
         }
         assets.environment_materials.add(HaloEnvironmentMaterial {
@@ -578,21 +640,47 @@ impl<'a> LevelBuilder<'a> {
             extension: HaloEnvironment {
                 params: HaloEnvironmentParams {
                     detail_scales: primary_scale.extend(secondary_scale.x).extend(secondary_scale.y),
-                    micro_scale: micro_scale.extend(0.0).extend(0.0),
+                    micro_scale: micro_scale.extend(bump_scale.x).extend(bump_scale.y),
                     modes: UVec4::new(
                         u32::from(environment.kind != EnvironmentType::Normal),
                         function(environment.detail_function),
                         function(environment.micro_detail_function),
-                        0,
+                        flags,
                     ),
                 },
                 base_map,
                 primary_detail_map: primary,
                 secondary_detail_map: secondary,
                 micro_detail_map: micro,
+                bump_map,
             },
         })
     }
+
+    /// An environment shader's bump map as a linear normal map, and how many
+    /// times it repeats across the base map.
+    fn bump_map(
+        &mut self,
+        environment: &shader::EnvironmentDiffuse,
+        base_size: Option<Vec2>,
+        images: &mut Assets<Image>,
+    ) -> Option<(Handle<Image>, Vec2)> {
+        let map = environment.bump_map?;
+        let datum = map.bitmap.datum?;
+        let image = self.textures.get(self.cache, datum, 0, false, images)?;
+        let rescale = match (environment.rescale_bump_map, base_size, bitmap_size(self.cache, datum)) {
+            (true, Some(base), Some(bump)) => base / bump,
+            _ => Vec2::ONE,
+        };
+        Some((image, rescale * map.scale))
+    }
+}
+
+/// StandardMaterial roughness and metalness for a Halo shader.
+struct Shininess {
+    roughness: f32,
+    metallic: f32,
+    texture: Option<Handle<Image>>,
 }
 
 /// A bitmap group's first bitmap's size.

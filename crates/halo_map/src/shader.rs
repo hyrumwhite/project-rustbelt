@@ -140,7 +140,37 @@ pub struct EnvironmentDiffuse {
     /// Detail scales are relative to the base map's size over the detail
     /// map's (`_shader_environment_diffuse_rescale_detail_maps_bit`).
     pub rescale_detail_maps: bool,
+    /// A palettized normal map whose alpha is also the cut-out of
+    /// alpha-tested shaders (the renderer alpha-tests the bump map's pass).
     pub bump_map: Option<DetailMap>,
+    /// The bump scale is relative to the base map's size over the bump
+    /// map's (`_shader_environment_diffuse_rescale_bump_map_bit`).
+    pub rescale_bump_map: bool,
+}
+
+/// Where a shader keeps its specular (shininess) mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecularMask {
+    /// Uniform shininess.
+    None,
+    /// The base map's alpha (`shader_environment` normal and blended base
+    /// specular types; blended types use it to mix detail maps instead).
+    BaseAlpha,
+    /// The multipurpose map's red channel (`shader_model`, Xbox order).
+    MultipurposeRed,
+}
+
+/// How shiny a surface is: Halo's specular and cube-map reflection settings.
+#[derive(Debug, Clone, Copy)]
+pub struct Reflection {
+    /// Reflection brightness seen head-on and at grazing angles.
+    pub perpendicular_brightness: f32,
+    pub parallel_brightness: f32,
+    /// The reflection's tint (model shaders) or specular colour
+    /// (environment shaders) seen head-on.
+    pub tint: [f32; 3],
+    pub cube_map: Option<TagRef>,
+    pub mask: SpecularMask,
 }
 
 /// Light a surface gives off by itself, beyond its radiosity emission.
@@ -181,6 +211,7 @@ pub struct ShaderInfo {
     pub multipurpose_map: Option<TagRef>,
     /// `shader_environment`'s diffuse layers.
     pub environment: Option<EnvironmentDiffuse>,
+    pub reflection: Option<Reflection>,
 }
 
 fn nonzero(v: f32) -> f32 {
@@ -215,6 +246,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         self_illumination: None,
         multipurpose_map: None,
         environment: None,
+        reflection: None,
     };
 
     if tag.group == groups::SHADER_ENVIRONMENT {
@@ -247,8 +279,31 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
             micro_detail_function: DetailFunction::from_raw(root.i16(e::MICRO_DETAIL_MAP_FUNCTION)?),
             micro_detail: detail(e::MICRO_DETAIL_MAP, e::MICRO_DETAIL_MAP_SCALE)?,
             rescale_detail_maps: root.u16(e::DIFFUSE_FLAGS)? & 1 != 0,
+            rescale_bump_map: root.u16(e::DIFFUSE_FLAGS)? & 2 != 0,
             bump_map: detail(e::BUMP_MAP, e::BUMP_MAP_SCALE)?,
         });
+        {
+            use layout::{
+                shader_environment_properties as ep, shader_environment_reflection_properties as r,
+                shader_environment_specular_properties as sp,
+            };
+            // shader_environment_definition is `struct shader` then the
+            // environment properties (rasterizer_xbox_environment.c)
+            let props = layout::shader_base::TYPE + 4;
+            let reflection = props + ep::REFLECTION;
+            let specular = props + ep::SPECULAR;
+            let kind = info.environment.as_ref().map(|e| e.kind);
+            info.reflection = Some(Reflection {
+                perpendicular_brightness: root.f32(reflection + r::VIEW_PERPENDICULAR_BRIGHTNESS)?,
+                parallel_brightness: root.f32(reflection + r::VIEW_PARALLEL_BRIGHTNESS)?,
+                tint: root.vec3(specular + sp::VIEW_PERPENDICULAR_COLOR)?,
+                cube_map: present(root.reference(reflection + r::CUBE_MAP)?),
+                mask: match kind {
+                    Some(EnvironmentType::Blended) => SpecularMask::None,
+                    _ => SpecularMask::BaseAlpha,
+                },
+            });
+        }
         info.self_illumination_map = present(root.reference(e::SELF_ILLUMINATION_MAP)?);
         let colors = [root.vec3(e::PRIMARY_ON_COLOR)?, root.vec3(e::SECONDARY_ON_COLOR)?, root.vec3(e::PLASMA_ON_COLOR)?];
         if let Some(map) = info.self_illumination_map
@@ -273,6 +328,13 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
             info.self_illumination =
                 Some(SelfIllumination::Model { multipurpose_map, color_lower: lower, color_upper: upper });
         }
+        info.reflection = Some(Reflection {
+            perpendicular_brightness: root.f32(m::PERPENDICULAR_BRIGHTNESS)?,
+            parallel_brightness: root.f32(m::PARALLEL_BRIGHTNESS)?,
+            tint: root.vec3(m::PERPENDICULAR_TINT_COLOR)?,
+            cube_map: present(root.reference(m::REFLECTION_CUBE_MAP)?),
+            mask: if info.multipurpose_map.is_some() { SpecularMask::MultipurposeRed } else { SpecularMask::None },
+        });
         let (u, v) = (root.f32(m::MAP_U_SCALE)?, root.f32(m::MAP_V_SCALE)?);
         info.uv_scale = [if u == 0.0 { 1.0 } else { u }, if v == 0.0 { 1.0 } else { v }];
     }

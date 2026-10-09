@@ -131,6 +131,11 @@ LAYOUT_OFFSET(shader_model_definition, map_u_scale)
 LAYOUT_OFFSET(shader_model_definition, map_v_scale)
 LAYOUT_OFFSET(shader_model_definition, base_map)
 LAYOUT_OFFSET(shader_model_definition, multipurpose_map)
+LAYOUT_OFFSET(shader_model_definition, perpendicular_brightness)
+LAYOUT_OFFSET(shader_model_definition, perpendicular_tint_color)
+LAYOUT_OFFSET(shader_model_definition, parallel_brightness)
+LAYOUT_OFFSET(shader_model_definition, parallel_tint_color)
+LAYOUT_OFFSET(shader_model_definition, reflection_cube_map)
 
 /* sky */
 LAYOUT_SIZE(sky_definition)

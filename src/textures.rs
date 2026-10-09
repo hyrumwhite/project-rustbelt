@@ -13,7 +13,7 @@ use halo_map::{bitmap, CacheFile};
 /// share a bitmap share its image.
 #[derive(Default)]
 pub struct TextureCache {
-    images: HashMap<(u32, usize), Option<Handle<Image>>>,
+    images: HashMap<(u32, usize, bool), Option<Handle<Image>>>,
     baked: HashMap<Bake, Option<Handle<Image>>>,
     /// Whether the GPU takes BC (DXT) textures as they are.
     pub bc_supported: bool,
@@ -29,7 +29,15 @@ pub enum Bake {
     /// shader's self-illumination map: Halo adds self-illumination to the
     /// lightmap, so it lights the base map (colours as f32 bits).
     EnvironmentSelfIllumination { base: Option<u32>, map: u32, colors: [[u32; 3]; 3] },
+    /// A StandardMaterial metallic/roughness texture (G roughness, B metallic)
+    /// from a specular mask: `channel` (0..=3) of `mask`'s first bitmap mixes
+    /// from rough dielectric (mask 0) to `roughness`/`metallic` (mask 1), as
+    /// f32 bits.
+    MetallicRoughness { mask: u32, channel: u8, roughness: u32, metallic: u32 },
 }
+
+/// Roughness where a surface's specular mask is zero.
+pub const MATTE_ROUGHNESS: f32 = 0.9;
 
 impl TextureCache {
     pub fn baked(&mut self, cache: &CacheFile, bake: Bake, images: &mut Assets<Image>) -> Option<Handle<Image>> {
@@ -72,7 +80,7 @@ impl TextureCache {
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
         let bc_supported = self.bc_supported;
-        let entry = self.images.entry((datum, index)).or_insert_with(|| {
+        let entry = self.images.entry((datum, index, srgb)).or_insert_with(|| {
             let name = cache.tag(datum).map(|t| t.name.clone()).unwrap_or_default();
             match convert(cache, datum, index, srgb, bc_supported) {
                 Ok(image) => Some(images.add(image)),
@@ -133,6 +141,16 @@ fn rgba8(cache: &CacheFile, datum: u32) -> halo_map::Result<bitmap::Decoded> {
     first.decode_rgba8(cache)
 }
 
+fn metallic_roughness(mask: &bitmap::Decoded, channel: usize, roughness: f32, metallic: f32) -> (u32, u32, Vec<u8>, bool) {
+    let mut out = Vec::with_capacity(mask.data.len());
+    for texel in mask.data.chunks_exact(4) {
+        let m = texel[channel] as f32 / 255.0;
+        let r = MATTE_ROUGHNESS + (roughness - MATTE_ROUGHNESS) * m;
+        out.extend([255, (r * 255.0).round() as u8, (metallic * m * 255.0).round() as u8, 255]);
+    }
+    (mask.width, mask.height, out, false)
+}
+
 /// At the mask's resolution: the base map's nearest texel (sRGB) times the
 /// light `light(mask texel)` gives it, or the light alone without a base map.
 fn modulate_base(
@@ -170,6 +188,10 @@ fn bake_rgba(cache: &CacheFile, bake: Bake) -> halo_map::Result<(u32, u32, Vec<u
             let mask = rgba8(cache, multipurpose)?;
             let base = base.map(|b| rgba8(cache, b)).transpose()?;
             Ok(modulate_base(&mask, base.as_ref(), |texel| [texel[1] as f32 / 255.0; 3]))
+        }
+        Bake::MetallicRoughness { mask, channel, roughness, metallic } => {
+            let mask = rgba8(cache, mask)?;
+            Ok(metallic_roughness(&mask, channel as usize, f32::from_bits(roughness), f32::from_bits(metallic)))
         }
         Bake::EnvironmentSelfIllumination { base, map, colors } => {
             let map = rgba8(cache, map)?;

@@ -174,9 +174,6 @@ impl BitmapInfo {
         if self.kind != Kind::Texture2d {
             return Err(Error::Unsupported(format!("{:?} bitmaps", self.kind)));
         }
-        if self.format == Format::P8Bump {
-            return Err(Error::Unsupported("palettized bump maps".into()));
-        }
         let mut levels = self.levels.min(max_levels.max(1));
         let total: usize = (0..levels).map(|l| self.level_bytes(l)).sum();
         let pixels = cache.file_bytes(self.pixels_offset, total)?;
@@ -298,7 +295,12 @@ fn decode_uncompressed(format: Format, bytes: &[u8], width: u32, height: u32, sw
                 }
                 Format::X8r8g8b8 => [t[2], t[1], t[0], 255],
                 Format::A8r8g8b8 => [t[2], t[1], t[0], t[3]],
-                Format::Dxt1 | Format::Dxt3 | Format::Dxt5 | Format::P8Bump => unreachable!(),
+                // a tangent-space normal from the renderer's vector palette
+                Format::P8Bump => {
+                    let c = crate::palette::VECTOR_PALETTE[t[0] as usize];
+                    [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8]
+                }
+                Format::Dxt1 | Format::Dxt3 | Format::Dxt5 => unreachable!(),
             };
             out.extend_from_slice(&rgba);
         }

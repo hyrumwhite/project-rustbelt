@@ -206,6 +206,26 @@ pub mod shader_environment_definition {
     pub const SELF_ILLUMINATION_MAP: usize = 0x254;
 }
 
+pub mod shader_environment_properties {
+    pub const SPECULAR: usize = 0x254;
+    pub const REFLECTION: usize = 0x2a8;
+}
+
+pub mod shader_environment_reflection_properties {
+    pub const FLAGS: usize = 0x0;
+    pub const TYPE: usize = 0x2;
+    pub const VIEW_PERPENDICULAR_BRIGHTNESS: usize = 0x24;
+    pub const VIEW_PARALLEL_BRIGHTNESS: usize = 0x28;
+    pub const CUBE_MAP: usize = 0x54;
+}
+
+pub mod shader_environment_specular_properties {
+    pub const FLAGS: usize = 0x0;
+    pub const BRIGHTNESS: usize = 0x14;
+    pub const VIEW_PERPENDICULAR_COLOR: usize = 0x2c;
+    pub const VIEW_PARALLEL_COLOR: usize = 0x38;
+}
+
 pub mod shader_model_definition {
     pub const SIZEOF: usize = 0x1b8;
     pub const FLAGS: usize = 0x28;
@@ -218,6 +238,11 @@ pub mod shader_model_definition {
     pub const BASE_MAP: usize = 0xa4;
     pub const MULTIPURPOSE_MAP: usize = 0xbc;
     pub const DETAIL_MAP: usize = 0xdc;
+    pub const PERPENDICULAR_BRIGHTNESS: usize = 0x144;
+    pub const PERPENDICULAR_TINT_COLOR: usize = 0x148;
+    pub const PARALLEL_BRIGHTNESS: usize = 0x154;
+    pub const PARALLEL_TINT_COLOR: usize = 0x158;
+    pub const REFLECTION_CUBE_MAP: usize = 0x164;
 }
 
 pub mod shader_radiosity_properties {

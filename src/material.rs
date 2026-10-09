@@ -28,6 +28,17 @@ impl Plugin for HaloMaterialsPlugin {
     }
 }
 
+/// A flat normal map, for environment materials without a bump map.
+pub fn flat_normal_image() -> Image {
+    Image::new(
+        Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        vec![128, 128, 255, 255],
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
 /// The texture the game draws with when a detail map is missing (its
 /// default detail bitmap): 50% grey, which the double biased functions leave
 /// the base alone with.
@@ -50,10 +61,10 @@ fn neutral_detail_image() -> Image {
 pub struct HaloEnvironmentParams {
     /// Primary detail scale (xy), secondary detail scale (zw).
     pub detail_scales: Vec4,
-    /// Micro detail scale (xy).
+    /// Micro detail scale (xy), bump map scale (zw).
     pub micro_scale: Vec4,
     /// x: detail mixed by base alpha (blended types), y: detail function,
-    /// z: micro detail function (see `halo_environment.wesl`).
+    /// z: micro detail function, w: flags (see `halo_environment.wesl`).
     pub modes: UVec4,
 }
 
@@ -74,7 +85,16 @@ pub struct HaloEnvironment {
     #[texture(107)]
     #[sampler(108)]
     pub micro_detail_map: Handle<Image>,
+    /// A tangent-space normal map (linear), or the flat default.
+    #[texture(109)]
+    #[sampler(110)]
+    pub bump_map: Handle<Image>,
 }
+
+/// `HaloEnvironmentParams::modes.w` bits.
+pub const ENVIRONMENT_HAS_BUMP_MAP: u32 = 1 << 0;
+/// The bump map's alpha cuts the surface out.
+pub const ENVIRONMENT_ALPHA_TESTED: u32 = 1 << 1;
 
 const SHADER: &str = "embedded://halo_rt/shaders/halo_environment.wesl";
 

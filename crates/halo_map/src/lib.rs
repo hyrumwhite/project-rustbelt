@@ -17,6 +17,7 @@ pub mod layout;
 pub mod math;
 pub mod model;
 pub mod objects;
+mod palette;
 pub mod scenario;
 pub mod shader;
 pub mod sky;

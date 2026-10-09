@@ -9,7 +9,11 @@ use crate::{
 };
 use bevy::{
     asset::RenderAssetUsages,
-    mesh::{Indices, PrimitiveTopology},
+    ecs::system::EntityCommands,
+    mesh::{
+        skinning::{SkinnedMesh, SkinnedMeshInverseBindposes},
+        Indices, PrimitiveTopology, VertexAttributeValues,
+    },
     math::Affine3A,
     platform::collections::HashMap,
     prelude::*,
@@ -90,6 +94,7 @@ pub struct LevelAssets<'a> {
     pub environment_materials: &'a mut Assets<HaloEnvironmentMaterial>,
     pub transparent_materials: &'a mut Assets<HaloTransparentMaterial>,
     pub images: &'a mut Assets<Image>,
+    pub inverse_bindposes: &'a mut Assets<SkinnedMeshInverseBindposes>,
     /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
     pub neutral_detail: Handle<Image>,
     /// A flat normal map (see [`crate::material::flat_normal_image`]).
@@ -134,7 +139,13 @@ type ModelMeshes = Vec<(Handle<Mesh>, Surface, usize)>;
 /// [`LevelBuilder::animated_model`]).
 pub struct AnimatedModel {
     pub name: String,
+    /// Split by node and rigid, for the rays (Solari traces no skinned
+    /// meshes); with `skinned`, the camera sees those instead.
     pieces: Vec<ModelPiece>,
+    skinned: Vec<SkinnedPart>,
+    /// Identity, one per node: the nodes' transforms already include their
+    /// default inverse.
+    inverse_bindposes: Handle<SkinnedMeshInverseBindposes>,
     /// Per node, its default inverse matrix (Halo space).
     pub default_inverses: Vec<Affine3A>,
 }
@@ -145,6 +156,28 @@ struct ModelPiece {
     surface: Surface,
     /// Its shader, for change colours.
     shader: Option<u32>,
+}
+
+/// A whole model part as one mesh skinned to the model's nodes (each vertex
+/// to its two, weighted), for the camera.
+struct SkinnedPart {
+    mesh: Handle<Mesh>,
+    surface: Surface,
+    shader: Option<u32>,
+}
+
+/// How far inside a skinned model its rigid ray-traced copy sits (world
+/// units: 2 cm).
+const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
+
+/// What a mesh entity is for.
+enum MeshUse {
+    /// The camera and the rays.
+    Both,
+    /// The rays only.
+    Traced,
+    /// The camera only, skinned to these joints if given.
+    Raster(Option<SkinnedMesh>),
 }
 
 /// A Halo `real_matrix4x3` as an affine transform (Halo space).
@@ -168,9 +201,13 @@ pub struct LevelBuilder {
     surfaces: HashMap<Option<u32>, ShaderSurface>,
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
     animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
+    /// The glassy look of an actively camouflaged object.
+    camouflage: Option<Handle<StandardMaterial>>,
     /// Surfaces tinted by a change colour, by shader and colour.
     coloured_surfaces: HashMap<(u32, [u8; 3]), Surface>,
     loaded_bsps: Vec<usize>,
+    /// Each loaded BSP's root entity, by BSP index.
+    pub bsp_roots: Vec<(usize, Entity)>,
     light_proxy: Option<Handle<Mesh>>,
     /// Whether light fixtures get emissive proxies.
     pub fixture_lights: bool,
@@ -203,7 +240,9 @@ impl LevelBuilder {
             models: HashMap::default(),
             animated_models: HashMap::default(),
             coloured_surfaces: HashMap::default(),
+            camouflage: None,
             loaded_bsps: Vec::new(),
+            bsp_roots: Vec::new(),
             light_proxy: None,
             fixture_lights: true,
             show_light_proxies: false,
@@ -261,6 +300,7 @@ impl LevelBuilder {
                 self.stats.triangles += material.indices.len() / 3;
             }
             self.loaded_bsps.push(reference.index);
+            self.bsp_roots.push((reference.index, level));
             self.stats.bsps += 1;
         }
         self.stats.texture_failures = self.textures.failures;
@@ -313,6 +353,9 @@ impl LevelBuilder {
                     ChildOf(objects_root),
                 ))
                 .id();
+            if placement.on_bsp_flags != 0 {
+                commands.entity(object).insert(OnBsps(placement.on_bsp_flags as u32));
+            }
             for (mesh, surface, triangles) in parts.into_iter().flatten() {
                 self.spawn_mesh(commands, object, name.clone(), mesh, &surface, raster);
                 self.stats.object_triangles += triangles;
@@ -439,6 +482,8 @@ impl LevelBuilder {
         let mut proxy = commands.spawn((
             Name::new("light fixture light"),
             RaytracingMesh3d(mesh.clone()),
+            TracedMesh(mesh.clone()),
+            Visibility::Inherited,
             MeshMaterial3d(material),
             EmissiveSurface { radiance: light * LIGHT_PROXY_RADIANCE },
             // object space is Bevy-converted Halo space: Halo forward (+x) is +x
@@ -461,67 +506,94 @@ impl LevelBuilder {
         surface: &Surface,
         raster: bool,
     ) {
+        let mode = if raster { MeshUse::Both } else { MeshUse::Traced };
+        self.spawn_mesh_as(commands, parent, name, mesh, surface, mode);
+    }
+
+    /// Spawns a mesh for the camera, for the rays, or both (see [`MeshUse`]).
+    fn spawn_mesh_as(
+        &mut self,
+        commands: &mut Commands,
+        parent: Entity,
+        name: String,
+        mesh: Handle<Mesh>,
+        surface: &Surface,
+        mode: MeshUse,
+    ) {
+        let (traced_use, raster_use) = match &mode {
+            MeshUse::Both => (true, true),
+            MeshUse::Traced => (true, false),
+            MeshUse::Raster(_) => (false, true),
+        };
+        let skin = match mode {
+            MeshUse::Raster(skin) => skin,
+            _ => None,
+        };
+        // (a skinned mesh is placed by its joints: its rest-pose bounds
+        // would cull it wrongly)
+        let skinned = |entity: &mut EntityCommands, skin: Option<SkinnedMesh>| {
+            if let Some(skin) = skin {
+                entity.insert((skin, bevy::camera::visibility::NoFrustumCulling));
+            }
+        };
         let surface = match surface {
             Surface::Solid(solid) => solid,
-            Surface::Transparent(material) => {
-                if raster && !self.skip_transparent {
-                    commands.spawn((
+            Surface::Transparent(_) | Surface::Blended(_) => {
+                if raster_use && !self.skip_transparent {
+                    let mut drawn = commands.spawn((
                         Name::new(name),
                         Mesh3d(mesh),
-                        MeshMaterial3d(material.clone()),
                         bevy::light::NotShadowCaster,
                         Transform::default(),
                         ChildOf(parent),
                     ));
-                    self.stats.meshes += 1;
-                    self.stats.transparent_meshes += 1;
-                }
-                return;
-            }
-            Surface::Blended(material) => {
-                if raster && !self.skip_transparent {
-                    commands.spawn((
-                        Name::new(name),
-                        Mesh3d(mesh),
-                        MeshMaterial3d(material.clone()),
-                        bevy::light::NotShadowCaster,
-                        Transform::default(),
-                        ChildOf(parent),
-                    ));
+                    match surface {
+                        Surface::Transparent(material) => drawn.insert(MeshMaterial3d(material.clone())),
+                        Surface::Blended(material) => drawn.insert(MeshMaterial3d(material.clone())),
+                        Surface::Solid(_) => unreachable!(),
+                    };
+                    skinned(&mut drawn, skin);
                     self.stats.meshes += 1;
                     self.stats.transparent_meshes += 1;
                 }
                 return;
             }
         };
-        let mut traced = commands.spawn((
-            Name::new(name.clone()),
-            RaytracingMesh3d(mesh.clone()),
-            MeshMaterial3d(surface.standard.clone()),
-            Transform::default(),
-            ChildOf(parent),
-        ));
-        if let Some(radiance) = surface.radiance {
-            traced.insert(EmissiveSurface { radiance });
-            self.stats.emissive_meshes += 1;
+        let mut traced = None;
+        if traced_use {
+            let mut entity = commands.spawn((
+                Name::new(name.clone()),
+                RaytracingMesh3d(mesh.clone()),
+                TracedMesh(mesh.clone()),
+                Visibility::Inherited,
+                MeshMaterial3d(surface.standard.clone()),
+                Transform::default(),
+                ChildOf(parent),
+            ));
+            if let Some(radiance) = surface.radiance {
+                entity.insert(EmissiveSurface { radiance });
+                self.stats.emissive_meshes += 1;
+            }
+            traced = Some(entity.id());
         }
-        if raster {
-            match &surface.raster {
-                // the camera sees the Halo material; rays see the standard one
-                Some(material) => {
-                    let mut drawn = commands.spawn((
-                        Name::new(name),
-                        Mesh3d(mesh),
-                        MeshMaterial3d(material.clone()),
-                        Transform::default(),
-                        ChildOf(parent),
-                    ));
+        if raster_use {
+            match (&surface.raster, traced) {
+                // the same entity, when the camera sees what the rays do and
+                // nothing moves it differently
+                (None, Some(traced)) if skin.is_none() => {
+                    commands.entity(traced).insert(Mesh3d(mesh));
+                }
+                (raster, _) => {
+                    let mut drawn = commands.spawn((Name::new(name), Mesh3d(mesh), Transform::default(), ChildOf(parent)));
+                    match raster {
+                        // the camera sees the Halo material; rays see the standard one
+                        Some(material) => drawn.insert(MeshMaterial3d(material.clone())),
+                        None => drawn.insert(MeshMaterial3d(surface.standard.clone())),
+                    };
                     if let Some(radiance) = surface.radiance {
                         drawn.insert(EmissiveSurface { radiance });
                     }
-                }
-                None => {
-                    traced.insert(Mesh3d(mesh));
+                    skinned(&mut drawn, skin);
                 }
             }
         }
@@ -564,6 +636,7 @@ impl LevelBuilder {
         let cache = self.cache.clone();
         let model = Model::load(&cache, datum)?;
         let mut pieces = Vec::new();
+        let mut skinned = Vec::new();
         for geometry in model.geometries_for(permutations, model::HIGHEST_DETAIL) {
             for part in model.geometry(geometry)? {
                 if part.indices.is_empty() {
@@ -585,21 +658,54 @@ impl LevelBuilder {
                     let node = if v.node_weights[0] >= v.node_weights[1] { v.nodes[0] } else { v.nodes[1] } as usize;
                     by_node.entry(node.min(model.nodes.len().saturating_sub(1))).or_default().extend_from_slice(triangle);
                 }
-                for (node, indices) in by_node {
-                    let vertices = part.vertices.iter().map(|v| SourceVertex {
+                let source = || {
+                    part.vertices.iter().map(|v| SourceVertex {
                         position: v.position,
                         normal: v.normal,
                         binormal: v.binormal,
                         tangent: v.tangent,
                         texcoord: v.texcoord,
-                    });
-                    let mesh = assets.meshes.add(build_mesh(vertices, &indices, shader.uv_scale));
+                    })
+                };
+                // (the rays' rigid copy sits a little inside the skinned
+                // surface the camera sees: where it bends differently, rays
+                // leaving that surface would otherwise hit it, and the model
+                // would shadow itself in blotches)
+                let inset = |v: SourceVertex| SourceVertex {
+                    position: std::array::from_fn(|i| v.position[i] - v.normal[i] * TRACED_INSET),
+                    ..v
+                };
+                for (node, indices) in by_node {
+                    let mesh = assets.meshes.add(build_mesh(source().map(inset), &indices, shader.uv_scale));
                     pieces.push(ModelPiece { node, mesh, surface: surface.clone(), shader: shader_ref.datum });
                 }
+                // the whole part, skinned: each vertex follows its nodes by
+                // their weights, so joints bend without seams
+                let last_node = model.nodes.len().saturating_sub(1) as u16;
+                let joints: Vec<[u16; 4]> = part
+                    .vertices
+                    .iter()
+                    .map(|v| [(v.nodes[0] as u16).min(last_node), (v.nodes[1] as u16).min(last_node), 0, 0])
+                    .collect();
+                let weights: Vec<[f32; 4]> = part
+                    .vertices
+                    .iter()
+                    .map(|v| {
+                        let (a, b) = (v.node_weights[0].max(0.0), v.node_weights[1].max(0.0));
+                        let total = a + b;
+                        if total > 0.0 { [a / total, b / total, 0.0, 0.0] } else { [1.0, 0.0, 0.0, 0.0] }
+                    })
+                    .collect();
+                let mesh = build_mesh(source(), &part.indices, shader.uv_scale)
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(joints))
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, weights);
+                skinned.push(SkinnedPart { mesh: assets.meshes.add(mesh), surface: surface.clone(), shader: shader_ref.datum });
             }
         }
-        let default_inverses = model.nodes.iter().map(|n| halo_affine(&n.default_inverse)).collect();
-        Ok(AnimatedModel { name: model.name, pieces, default_inverses })
+        let default_inverses: Vec<Affine3A> = model.nodes.iter().map(|n| halo_affine(&n.default_inverse)).collect();
+        let inverse_bindposes =
+            assets.inverse_bindposes.add(SkinnedMeshInverseBindposes::from(vec![Mat4::IDENTITY; default_inverses.len().max(1)]));
+        Ok(AnimatedModel { name: model.name, pieces, skinned, inverse_bindposes, default_inverses })
     }
 
     /// Spawns an animated model: a root, an entity per node it draws (whose
@@ -610,19 +716,53 @@ impl LevelBuilder {
         model: &AnimatedModel,
         raster: bool,
         change_colors: &[[f32; 3]; 4],
+        camouflaged: bool,
         assets: &mut LevelAssets,
     ) -> (Entity, Vec<Option<Entity>>) {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
         self.adopt(commands, root);
-        let mut nodes: Vec<Option<Entity>> = vec![None; model.default_inverses.len().max(1)];
-        for piece in &model.pieces {
-            let node = *nodes[piece.node].get_or_insert_with(|| {
-                commands.spawn((Transform::default(), Visibility::default(), ChildOf(root))).id()
-            });
-            let surface = self.coloured_surface(piece, change_colors, assets);
-            self.spawn_mesh(commands, node, model.name.clone(), piece.mesh.clone(), &surface, raster);
+        // every node, as the skinned parts' joints
+        let nodes: Vec<Entity> = (0..model.default_inverses.len().max(1))
+            .map(|_| commands.spawn((Transform::default(), Visibility::default(), ChildOf(root))).id())
+            .collect();
+        // camouflaged: a faint glassy shell for the camera, nothing for the
+        // rays (no shadow): the game's own shimmer refracts the picture
+        // behind, which the overlay doesn't have
+        if camouflaged {
+            if raster {
+                // (drawn even where the game's overlay has the other
+                // transparent surfaces: this one is the viewer's own)
+                let material = self.camouflage_material(assets);
+                for part in &model.skinned {
+                    let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
+                    commands.spawn((
+                        Name::new(format!("{} (camouflaged)", model.name)),
+                        Mesh3d(part.mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        bevy::light::NotShadowCaster,
+                        skin,
+                        bevy::camera::visibility::NoFrustumCulling,
+                        Transform::default(),
+                        ChildOf(root),
+                    ));
+                }
+            }
+            return (root, nodes.into_iter().map(Some).collect());
         }
-        (root, nodes)
+        // the rays see the rigid pieces; the camera sees the skinned parts
+        for piece in &model.pieces {
+            let surface = self.coloured_surface(&piece.surface, piece.shader, change_colors, assets);
+            let mode = if raster && model.skinned.is_empty() { MeshUse::Both } else { MeshUse::Traced };
+            self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
+        }
+        if raster {
+            for part in &model.skinned {
+                let surface = self.coloured_surface(&part.surface, part.shader, change_colors, assets);
+                let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
+                self.spawn_mesh_as(commands, root, model.name.clone(), part.mesh.clone(), &surface, MeshUse::Raster(Some(skin)));
+            }
+        }
+        (root, nodes.into_iter().map(Some).collect())
     }
 
     /// A model's meshes at the highest level of detail, made once per
@@ -687,20 +827,42 @@ impl LevelBuilder {
         Ok(out)
     }
 
+    /// The glassy look of an actively camouflaged object: nearly clear,
+    /// smooth, reflecting what is around it.
+    fn camouflage_material(&mut self, assets: &mut LevelAssets) -> Handle<StandardMaterial> {
+        self.camouflage
+            .get_or_insert_with(|| {
+                assets.materials.add(StandardMaterial {
+                    base_color: Color::srgba(0.55, 0.65, 0.8, 0.08),
+                    alpha_mode: AlphaMode::Blend,
+                    perceptual_roughness: 0.15,
+                    reflectance: 0.3,
+                    ..default()
+                })
+            })
+            .clone()
+    }
+
     /// A piece's surface with the object's change colour, where its shader
     /// takes one (made once per shader and colour).
-    fn coloured_surface(&mut self, piece: &ModelPiece, change_colors: &[[f32; 3]; 4], assets: &mut LevelAssets) -> Surface {
-        let Surface::Solid(solid) = &piece.surface else { return piece.surface.clone() };
-        let Some(shader) = piece.shader else { return piece.surface.clone() };
+    fn coloured_surface(
+        &mut self,
+        base: &Surface,
+        shader: Option<u32>,
+        change_colors: &[[f32; 3]; 4],
+        assets: &mut LevelAssets,
+    ) -> Surface {
+        let Surface::Solid(solid) = base else { return base.clone() };
+        let Some(shader) = shader else { return base.clone() };
         let info = shader::shader_info(&self.cache, TagRef { group: 0, datum: Some(shader) }).ok().flatten();
         let Some((source, multipurpose)) =
             info.as_ref().and_then(|i| Some((i.change_color?, i.multipurpose_map.and_then(|m| m.datum)?)))
         else {
-            return piece.surface.clone();
+            return base.clone();
         };
         let color = change_colors[source].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
         if color == [255; 3] {
-            return piece.surface.clone();
+            return base.clone();
         }
         if let Some(surface) = self.coloured_surfaces.get(&(shader, color)) {
             return surface.clone();
@@ -715,7 +877,7 @@ impl LevelBuilder {
                 let material = StandardMaterial { base_color_texture: Some(texture), ..material.clone() };
                 Surface::Solid(SolidSurface { standard: assets.materials.add(material), ..solid.clone() })
             }
-            _ => piece.surface.clone(),
+            _ => base.clone(),
         };
         debug!("change colour {color:?} on {}", info.as_ref().map_or("", |i| i.name.as_str()));
         self.coloured_surfaces.insert((shader, color), surface.clone());
@@ -1076,6 +1238,32 @@ fn sky_layer_map(info: &ShaderInfo) -> Option<shader::TransparentMap> {
 }
 
 /// Keeps the sky centred on the camera.
+/// A ray-traced mesh, kept so that it can leave the ray-traced scene while
+/// hidden and come back: Solari traces every `RaytracingMesh3d`, visible or
+/// not.
+#[derive(Component)]
+pub struct TracedMesh(pub Handle<Mesh>);
+
+/// A placed object's BSPs (a bit per BSP index): shown only while one of
+/// them is the active BSP (bridged).
+#[derive(Component)]
+pub struct OnBsps(pub u32);
+
+/// Puts hidden ray-traced meshes out of the ray-traced scene, and shown ones
+/// back.
+pub fn sync_traced_visibility(
+    mut commands: Commands,
+    traced: Query<(Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>), Changed<InheritedVisibility>>,
+) {
+    for (entity, mesh, visibility, in_scene) in &traced {
+        if visibility.get() && !in_scene {
+            commands.entity(entity).insert(RaytracingMesh3d(mesh.0.clone()));
+        } else if !visibility.get() && in_scene {
+            commands.entity(entity).remove::<RaytracingMesh3d>();
+        }
+    }
+}
+
 pub fn follow_camera(
     camera: Query<&Transform, (With<Camera3d>, Without<SkyDome>)>,
     mut domes: Query<&mut Transform, With<SkyDome>>,

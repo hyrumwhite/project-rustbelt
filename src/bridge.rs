@@ -127,8 +127,8 @@ impl Plugin for BridgePlugin {
             .init_resource::<FollowGame>()
             .init_resource::<ForwardInput>()
             .add_systems(First, read_frame.in_set(ReadFrame))
-            .add_systems(PreUpdate, (grab_cursor, forward_input).chain().after(bevy::input::InputSystems))
-            .add_systems(Update, (toggle_follow, sync_objects, sync_camera).chain());
+            .add_systems(PreUpdate, (grab_cursor, forward_input, forward_gamepads).chain().after(bevy::input::InputSystems))
+            .add_systems(Update, (toggle_follow, sync_objects, sync_camera, sync_active_bsp).chain());
     }
 }
 
@@ -181,6 +181,7 @@ struct Tracked {
     definition: u32,
     permutations: [u8; 8],
     change_colors: [[f32; 3]; 4],
+    camouflaged: bool,
     model: Arc<AnimatedModel>,
     nodes: Vec<Option<Entity>>,
 }
@@ -252,6 +253,7 @@ fn sync_objects(
     mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
     mut transparent_materials: ResMut<Assets<HaloTransparentMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
     mut flat_normal: Local<Option<Handle<Image>>>,
 ) {
@@ -265,6 +267,7 @@ fn sync_objects(
         environment_materials: &mut environment_materials,
         transparent_materials: &mut transparent_materials,
         images: &mut images,
+        inverse_bindposes: &mut inverse_bindposes,
         neutral_detail: neutral_detail.0.clone(),
         flat_normal,
     };
@@ -285,6 +288,7 @@ fn sync_objects(
             t.definition != object.definition_index
                 || t.permutations != object.region_permutations
                 || t.change_colors != object.change_colors
+                || t.camouflaged != camouflaged(object)
         }) {
             let old = objects.tracked.remove(&object.object_index).unwrap();
             commands.entity(old.root).despawn();
@@ -306,7 +310,7 @@ fn sync_objects(
                 objects.modelless.insert(key, ());
                 continue;
             };
-            let (root, nodes) = builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, assets);
+            let (root, nodes) = builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, camouflaged(object), assets);
             objects.tracked.insert(
                 object.object_index,
                 Tracked {
@@ -314,6 +318,7 @@ fn sync_objects(
                     definition: object.definition_index,
                     permutations: object.region_permutations,
                     change_colors: object.change_colors,
+                    camouflaged: camouflaged(object),
                     model,
                     nodes,
                 },
@@ -351,6 +356,12 @@ fn sync_objects(
     });
 }
 
+/// Whether an object draws as camouflaged (the game's own fades in; this
+/// switches halfway).
+fn camouflaged(object: &halo_bridge::Object) -> bool {
+    object.active_camouflage >= 0.5
+}
+
 /// A node's draw transform in Bevy space: the game's node matrix times the
 /// node's default inverse (model space to world), conjugated by the Halo to
 /// Bevy change of space (the meshes are already in Bevy space).
@@ -363,6 +374,44 @@ fn node_transform(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy:
         position: node.position,
     });
     Transform::from_matrix(Mat4::from(*to_bevy * world * *default_inverse * *from_bevy))
+}
+
+/// Shows only the BSP the game is in (and the placed light fixtures of it),
+/// as the game draws only that one.
+fn sync_active_bsp(
+    link: Res<BridgeLink>,
+    level: Res<BridgeLevel>,
+    mut visibility: Query<&mut Visibility>,
+    fixtures: Query<(Entity, &crate::level::OnBsps)>,
+    mut shown: Local<Option<usize>>,
+) {
+    let Some(snapshot) = &link.latest else { return };
+    let builder = &level.builder;
+    if builder.bsp_roots.len() < 2 || snapshot.structure_bsp_index < 0 {
+        return;
+    }
+    if !snapshot.map_name().eq_ignore_ascii_case(&builder.stats.map_name) {
+        return;
+    }
+    let active = snapshot.structure_bsp_index as usize;
+    if *shown != Some(active) {
+        info!("the game is in BSP {active}");
+        *shown = Some(active);
+    }
+    let mut show = |entity: Entity, shown: bool| {
+        if let Ok(mut v) = visibility.get_mut(entity) {
+            let wanted = if shown { Visibility::Inherited } else { Visibility::Hidden };
+            if *v != wanted {
+                *v = wanted;
+            }
+        }
+    };
+    for &(index, root) in &builder.bsp_roots {
+        show(root, index == active);
+    }
+    for (entity, bsps) in &fixtures {
+        show(entity, active < 32 && bsps.0 & (1 << active) != 0);
+    }
 }
 
 fn sync_camera(
@@ -478,6 +527,103 @@ fn forward_input(
         state.listener_up = to_halo(*camera.up(), 1.0);
     }
     link.bridge.write_input(state);
+}
+
+/// Forwards the gamepads to the game while it has this window's attention
+/// (focused, following the game's camera, the options closed), and plays
+/// the game's rumble on them.
+fn forward_gamepads(
+    gamepads: Query<(Entity, &bevy::input::gamepad::Gamepad)>,
+    follow: Res<FollowGame>,
+    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+    panel: Option<Res<crate::options::OptionsPanel>>,
+    mut link: ResMut<BridgeLink>,
+    mut rumble_requests: MessageWriter<bevy::input::gamepad::GamepadRumbleRequest>,
+    mut playing: Local<Vec<(Entity, [u16; 2])>>,
+    time: Res<Time>,
+    mut since_refresh: Local<f32>,
+) {
+    use bevy::input::gamepad::{GamepadAxis, GamepadButton, GamepadRumbleIntensity, GamepadRumbleRequest};
+    use halo_bridge::sdl_button as b;
+    const BUTTONS: [(GamepadButton, u32); 15] = [
+        (GamepadButton::South, b::SOUTH),
+        (GamepadButton::East, b::EAST),
+        (GamepadButton::West, b::WEST),
+        (GamepadButton::North, b::NORTH),
+        (GamepadButton::Select, b::BACK),
+        (GamepadButton::Mode, b::GUIDE),
+        (GamepadButton::Start, b::START),
+        (GamepadButton::LeftThumb, b::LEFT_STICK),
+        (GamepadButton::RightThumb, b::RIGHT_STICK),
+        (GamepadButton::LeftTrigger, b::LEFT_SHOULDER),
+        (GamepadButton::RightTrigger, b::RIGHT_SHOULDER),
+        (GamepadButton::DPadUp, b::DPAD_UP),
+        (GamepadButton::DPadDown, b::DPAD_DOWN),
+        (GamepadButton::DPadLeft, b::DPAD_LEFT),
+        (GamepadButton::DPadRight, b::DPAD_RIGHT),
+    ];
+    let attending = window.focused && follow.0 && panel.is_none_or(|p| !p.open);
+    let mut pads = Vec::new();
+    let mut entities = Vec::new();
+    if attending {
+        for (entity, gamepad) in gamepads.iter().take(halo_bridge::GAMEPADS) {
+            let mut pad = halo_bridge::Gamepad::default();
+            for (button, bit) in BUTTONS {
+                if gamepad.pressed(button) {
+                    pad.buttons |= 1 << bit;
+                }
+            }
+            let stick = |v: Option<f32>| (v.unwrap_or(0.0).clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            let trigger = |v: Option<f32>| (v.unwrap_or(0.0).clamp(0.0, 1.0) * 32767.0).round() as i16;
+            // (SDL's y axes point down, Bevy's up)
+            pad.axes = [
+                stick(gamepad.get(GamepadAxis::LeftStickX)),
+                stick(gamepad.get(GamepadAxis::LeftStickY).map(|v| -v)),
+                stick(gamepad.get(GamepadAxis::RightStickX)),
+                stick(gamepad.get(GamepadAxis::RightStickY).map(|v| -v)),
+                trigger(gamepad.get(GamepadButton::LeftTrigger2)),
+                trigger(gamepad.get(GamepadButton::RightTrigger2)),
+            ];
+            pads.push(pad);
+            entities.push(entity);
+        }
+    }
+    link.bridge.write_gamepads(&pads);
+
+    // the game's rumble: started or stopped as it changes, and renewed
+    // while it lasts (each request plays for a second)
+    *since_refresh += time.delta_secs();
+    let refresh = *since_refresh > 0.5;
+    if refresh {
+        *since_refresh = 0.0;
+    }
+    let rumble = link.bridge.rumble();
+    let mut now = Vec::new();
+    for (index, &entity) in entities.iter().enumerate() {
+        let motors = rumble[index];
+        let before = playing.iter().find(|(e, _)| *e == entity).map(|(_, m)| *m).unwrap_or([0, 0]);
+        if motors != before || (refresh && motors != [0, 0]) {
+            rumble_requests.write(GamepadRumbleRequest::Stop { gamepad: entity });
+            if motors != [0, 0] {
+                rumble_requests.write(GamepadRumbleRequest::Add {
+                    gamepad: entity,
+                    duration: Duration::from_secs(1),
+                    intensity: GamepadRumbleIntensity {
+                        strong_motor: motors[0] as f32 / 65535.0,
+                        weak_motor: motors[1] as f32 / 65535.0,
+                    },
+                });
+            }
+        }
+        now.push((entity, motors));
+    }
+    // (pads no longer forwarded stop)
+    for (entity, motors) in playing.iter() {
+        if *motors != [0, 0] && !entities.contains(entity) {
+            rumble_requests.write(GamepadRumbleRequest::Stop { gamepad: *entity });
+        }
+    }
+    *playing = now;
 }
 
 /// A key's SDL scancode: its USB HID keyboard usage.

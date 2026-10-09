@@ -7,7 +7,7 @@ This project ports Halo: Combat Evolved to the **Bevy 0.20** engine and renders 
 
 It's based on the [OpenCE](../OpenCE) decompilation. See [ROADMAP.md](ROADMAP.md) for the architecture and phases.
 
-**Status: Phases 1–5 done; Phase 6 (audio and multiplayer) under way.** With `--opence`, the viewer runs the actual game ([OpenCE](../OpenCE), hidden in the background) and you play it in the ray-traced window, with the game's HUD and effects drawn over it (see *Play*). Without it, the viewer loads a retail Xbox map directly from the `.map` file: its level geometry and every object the scenario places (scenery, vehicles, weapons, devices), with Halo's materials:
+**Status: Phases 1–6 done; Phase 7 (native Rust subsystems) under way: input is the viewer's, gamepads included.** With `--opence`, the viewer runs the actual game ([OpenCE](../OpenCE), hidden in the background) and you play it in the ray-traced window, with the game's HUD and effects drawn over it (see *Play*). Without it, the viewer loads a retail Xbox map directly from the `.map` file: its level geometry and every object the scenario places (scenery, vehicles, weapons, devices), with Halo's materials:
 - detail maps and bump maps on level surfaces;
 - alpha-tested grates and fences;
 - reflections and shininess from Halo's specular settings;
@@ -77,6 +77,7 @@ The game starts hidden on the level (the map's folder's parent is its data root)
 | Key | Action |
 | --- | --- |
 | Click | Play: the mouse and keyboard go to the game (Halo's own bindings) |
+| Gamepad | Plays the game while the viewer has the focus (up to four, with rumble) |
 | F12 | Let go of the mouse |
 | F8 | Leave the game's camera and fly free (WASD/QE, right mouse to look); F8 again follows. While you fly, you hear the game from the flying camera. |
 | F10 | The viewer's options (the mouse is the viewer's while they're open) |

@@ -21,7 +21,8 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 9;
+pub const MAXIMUM_LIGHTS: usize = 64;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;
@@ -63,6 +64,9 @@ pub struct Object {
     /// The object's change colours A-D (team and armour colours); white for
     /// a model.
     pub change_colors: [[f32; 3]; 4],
+    /// How camouflaged it is (0..1): a unit's active camouflage, shared by
+    /// what it holds.
+    pub active_camouflage: f32,
 }
 
 /// `real_matrix4x3`: a node's world transform.
@@ -76,6 +80,21 @@ pub struct Node {
     pub position: [f32; 3],
 }
 
+/// A dynamic light (a muzzle flash, plasma, an explosion, the flashlight),
+/// as the game lit the frame before.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Light {
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    /// 0..1 a channel.
+    pub color: [f32; 3],
+    /// How far it reaches (world units).
+    pub radius: f32,
+    /// A spotlight's cutoff angle (radians); pi or more shines every way.
+    pub cutoff_angle: f32,
+}
+
 #[repr(C)]
 struct Frame {
     sequence: u32,
@@ -85,6 +104,8 @@ struct Frame {
     scenario_name: [u8; 64],
     camera_valid: u32,
     camera: Camera,
+    light_count: u32,
+    lights: [Light; MAXIMUM_LIGHTS],
     object_count: u32,
     node_count: u32,
     objects: [Object; MAXIMUM_OBJECTS],
@@ -129,6 +150,47 @@ impl Input {
     }
 }
 
+/// A gamepad forwarded to the game (`struct bevy_bridge_gamepad`), in SDL's
+/// terms: a bit per `SDL_GamepadButton`, axes in `SDL_GamepadAxis` order
+/// and ranges (sticks -32768..32767 with y down, triggers 0..32767).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Gamepad {
+    pub buttons: u32,
+    pub axes: [i16; 6],
+    /// The game's rumble (low and high frequency motors, 0..65535); only the
+    /// game writes it.
+    pub rumble: [u16; 2],
+}
+
+pub const GAMEPADS: usize = 4;
+
+/// `SDL_GamepadButton`.
+pub mod sdl_button {
+    pub const SOUTH: u32 = 0;
+    pub const EAST: u32 = 1;
+    pub const WEST: u32 = 2;
+    pub const NORTH: u32 = 3;
+    pub const BACK: u32 = 4;
+    pub const GUIDE: u32 = 5;
+    pub const START: u32 = 6;
+    pub const LEFT_STICK: u32 = 7;
+    pub const RIGHT_STICK: u32 = 8;
+    pub const LEFT_SHOULDER: u32 = 9;
+    pub const RIGHT_SHOULDER: u32 = 10;
+    pub const DPAD_UP: u32 = 11;
+    pub const DPAD_DOWN: u32 = 12;
+    pub const DPAD_LEFT: u32 = 13;
+    pub const DPAD_RIGHT: u32 = 14;
+}
+
+#[repr(C)]
+struct Gamepads {
+    active: u32,
+    count: u32,
+    pads: [Gamepad; GAMEPADS],
+}
+
 #[repr(C)]
 struct OverlayHeader {
     sequence: u32,
@@ -147,6 +209,7 @@ struct Shared {
     writer_process_id: u32,
     reserved: [u32; 3],
     input: Input,
+    gamepads: Gamepads,
     frames: [Frame; FRAMES],
     overlay_enabled: u32,
     latest_overlay: u32,
@@ -157,10 +220,11 @@ struct Shared {
 
 /// The layout is the game's, measured there; keep these in step with
 /// `bevy_bridge_protocol.h`.
-const _: () = assert!(std::mem::size_of::<Object>() == 76);
+const _: () = assert!(std::mem::size_of::<Object>() == 80);
 const _: () = assert!(std::mem::size_of::<Node>() == 52);
 const _: () = assert!(std::mem::size_of::<Camera>() == 40);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);
+const _: () = assert!(std::mem::size_of::<Gamepad>() == 20);
 
 /// One frame of the game's world.
 #[derive(Debug, Clone, Default)]
@@ -171,6 +235,7 @@ pub struct Snapshot {
     /// The scenario tag's name, e.g. `levels\b30\b30`.
     pub scenario_name: String,
     pub camera: Option<Camera>,
+    pub lights: Vec<Light>,
     pub objects: Vec<Object>,
     pub nodes: Vec<Node>,
 }
@@ -284,6 +349,37 @@ impl Bridge {
         fence(Ordering::Release);
     }
 
+    /// Forwards gamepads to the game, which then takes them in place of its
+    /// own (the first shares port 0 with the keyboard). Their rumble fields
+    /// are the game's and are left alone.
+    pub fn write_gamepads(&mut self, pads: &[Gamepad]) {
+        let count = pads.len().min(GAMEPADS);
+        // SAFETY: the view is writable and at least size_of::<Shared>()
+        // bytes; the game only reads these fields
+        unsafe {
+            let block = &raw const (*self.shared).gamepads as *mut Gamepads;
+            for (index, pad) in pads.iter().take(count).enumerate() {
+                let target = &raw mut (*block).pads[index];
+                std::ptr::write_volatile(&raw mut (*target).buttons, pad.buttons);
+                std::ptr::write_volatile(&raw mut (*target).axes, pad.axes);
+            }
+            for index in count..GAMEPADS {
+                let target = &raw mut (*block).pads[index];
+                std::ptr::write_volatile(&raw mut (*target).buttons, 0);
+                std::ptr::write_volatile(&raw mut (*target).axes, [0; 6]);
+            }
+            std::ptr::write_volatile(&raw mut (*block).count, count as u32);
+            fence(Ordering::Release);
+            std::ptr::write_volatile(&raw mut (*block).active, 1);
+        }
+    }
+
+    /// The game's rumble for each gamepad (low, high frequency motor).
+    pub fn rumble(&self) -> [[u16; 2]; GAMEPADS] {
+        // SAFETY: as in check()
+        unsafe { std::array::from_fn(|i| std::ptr::read_volatile(&(*self.shared).gamepads.pads[i].rumble)) }
+    }
+
     /// Whether the game shares overlays.
     pub fn overlay_enabled(&self) -> bool {
         // SAFETY: as in check()
@@ -349,6 +445,7 @@ impl Bridge {
                     return None;
                 }
                 let object_count = (std::ptr::read_volatile(&(*frame).object_count) as usize).min(MAXIMUM_OBJECTS);
+                let light_count = (std::ptr::read_volatile(&(*frame).light_count) as usize).min(MAXIMUM_LIGHTS);
                 let node_count = (std::ptr::read_volatile(&(*frame).node_count) as usize).min(MAXIMUM_NODES);
                 let name = std::ptr::read_volatile(&(*frame).scenario_name);
                 let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
@@ -359,6 +456,7 @@ impl Bridge {
                     scenario_name: String::from_utf8_lossy(&name[..end]).into_owned(),
                     camera: (std::ptr::read_volatile(&(*frame).camera_valid) != 0)
                         .then(|| std::ptr::read_volatile(&(*frame).camera)),
+                    lights: (0..light_count).map(|i| std::ptr::read_volatile(&(*frame).lights[i])).collect(),
                     objects: (0..object_count).map(|i| std::ptr::read_volatile(&(*frame).objects[i])).collect(),
                     nodes: (0..node_count).map(|i| std::ptr::read_volatile(&(*frame).nodes[i])).collect(),
                 };

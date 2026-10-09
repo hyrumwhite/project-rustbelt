@@ -10,6 +10,7 @@
 
 mod bridge;
 mod level;
+mod lights;
 mod material;
 mod options;
 mod overlay;
@@ -263,14 +264,17 @@ fn main() -> AppExit {
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
         .add_systems(Update, start_camera)
-        .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate));
+        .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate))
+        .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));
 
     if args.screenshot.is_some() {
         app.add_systems(Update, screenshot_and_exit);
     }
     if let Some(mut link) = link {
         link.sync_to_overlay = overlay;
-        app.insert_resource(link).add_plugins(bridge::BridgePlugin).add_systems(PreUpdate, follow_level);
+        app.insert_resource(link)
+            .add_plugins((bridge::BridgePlugin, lights::DynamicLightsPlugin))
+            .add_systems(PreUpdate, follow_level);
         if overlay {
             app.add_plugins(overlay::OverlayPlugin);
         }
@@ -340,6 +344,7 @@ struct LevelAssetParams<'w> {
     environment_materials: ResMut<'w, Assets<HaloEnvironmentMaterial>>,
     transparent_materials: ResMut<'w, Assets<HaloTransparentMaterial>>,
     images: ResMut<'w, Assets<Image>>,
+    inverse_bindposes: ResMut<'w, Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<'w, NeutralDetail>,
 }
 
@@ -382,6 +387,7 @@ fn load_level(
         environment_materials: &mut params.environment_materials,
         transparent_materials: &mut params.transparent_materials,
         images: &mut params.images,
+        inverse_bindposes: &mut params.inverse_bindposes,
         neutral_detail: params.neutral_detail.0.clone(),
         flat_normal: Handle::default(),
     };

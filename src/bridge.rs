@@ -24,9 +24,15 @@ use std::{sync::Arc, time::Duration};
 
 /// Starts OpenCE on the map at `map_path`: its data root is the folder that
 /// holds the maps folder, the level is the map's scenario, the bridge is on
-/// and (unless `show`) its window is hidden. Its output goes to
-/// `halo_rt_opence.log` in the temporary folder.
-pub fn launch_game(exe: &std::path::Path, map_path: &std::path::Path, show: bool) -> std::io::Result<std::process::Child> {
+/// and (unless `show`) its window is hidden. With `overlay`, it shares its
+/// overlay (`crate::overlay`), drawing at the viewer's window size. Its output
+/// goes to `halo_rt_opence.log` in the temporary folder.
+pub fn launch_game(
+    exe: &std::path::Path,
+    map_path: &std::path::Path,
+    show: bool,
+    overlay: bool,
+) -> std::io::Result<std::process::Child> {
     use std::io::{Error, ErrorKind};
     let cache = halo_map::CacheFile::open(map_path).map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
     let scenario = cache.tag(cache.scenario_datum).map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?.name.clone();
@@ -51,6 +57,10 @@ pub fn launch_game(exe: &std::path::Path, map_path: &std::path::Path, show: bool
             .env("HALO_HIDDEN_WINDOW", "1")
             .env("HALO_DISPLAY_MODE", "windowed")
             .env("HALO_WINDOW_SIZE", "640x480");
+    }
+    if overlay {
+        let (width, height) = crate::overlay::WINDOW_SIZE;
+        command.env("HALO_BEVY_BRIDGE_OVERLAY", "1").env("HALO_WINDOW_SIZE", format!("{width}x{height}"));
     }
     eprintln!("starting OpenCE on {scenario} (data root {})", data_root.display());
     command.spawn()
@@ -94,12 +104,16 @@ pub fn wait_for_game(timeout: Duration) -> Option<(Bridge, Snapshot)> {
 
 pub struct BridgePlugin;
 
+/// Reading the game's latest frame (in `First`).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReadFrame;
+
 impl Plugin for BridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BridgeObjects>()
             .init_resource::<FollowGame>()
             .init_resource::<ForwardInput>()
-            .add_systems(First, read_frame)
+            .add_systems(First, read_frame.in_set(ReadFrame))
             .add_systems(PreUpdate, (grab_cursor, forward_input).chain().after(bevy::input::InputSystems))
             .add_systems(Update, (toggle_follow, sync_objects, sync_camera).chain());
     }
@@ -112,6 +126,24 @@ pub struct BridgeLink {
     pub latest: Option<Snapshot>,
     /// Frames read since the last overlay update (for its rate).
     pub frames: u32,
+    /// With the game's overlay: the frames read but not yet shown, oldest
+    /// first; the overlay shows the one its picture was drawn for.
+    pub pending: std::collections::VecDeque<Snapshot>,
+    pub sync_to_overlay: bool,
+}
+
+impl BridgeLink {
+    pub fn new(bridge: Bridge, snapshot: Snapshot) -> Self {
+        BridgeLink { bridge, latest: Some(snapshot), frames: 0, pending: default(), sync_to_overlay: false }
+    }
+
+    /// Shows the frame `frame_index` (the overlay's) if it was read; the
+    /// frames before it are dropped.
+    pub fn show_frame(&mut self, frame_index: u32) {
+        let Some(position) = self.pending.iter().position(|s| s.frame_index == frame_index) else { return };
+        self.pending.drain(..position);
+        self.latest = self.pending.pop_front();
+    }
 }
 
 /// The level builder, kept to make objects' meshes as the game creates them.
@@ -154,10 +186,19 @@ impl BridgeObjects {
 }
 
 fn read_frame(mut link: ResMut<BridgeLink>) {
-    // only the newest frame matters; older ones were already superseded
     while let Some(snapshot) = link.bridge.read() {
-        link.latest = Some(snapshot);
         link.frames += 1;
+        if link.sync_to_overlay {
+            // (a few frames: the overlay comes at most a frame or two behind)
+            if link.pending.len() >= 8 {
+                link.pending.pop_front();
+            }
+            link.pending.push_back(snapshot);
+        } else {
+            // only the newest frame matters; older ones were already
+            // superseded
+            link.latest = Some(snapshot);
+        }
     }
 }
 

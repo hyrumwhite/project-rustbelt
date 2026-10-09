@@ -11,6 +11,7 @@
 mod bridge;
 mod level;
 mod material;
+mod overlay;
 mod sky;
 mod textures;
 
@@ -93,6 +94,10 @@ struct Args {
     /// with --opence, show the game's own window too
     #[argh(switch)]
     show_game: bool,
+    /// with --opence, leave out the game's overlay (its HUD, effects and
+    /// transparent surfaces) and draw the transparent surfaces here
+    #[argh(switch)]
+    no_overlay: bool,
 }
 
 fn parse_camera(value: &str) -> Result<[f32; 5], String> {
@@ -174,6 +179,7 @@ fn main() -> AppExit {
     let mut args: Args = argh::from_env();
     let mut link = None;
     let mut game_process = None;
+    let mut overlay = false;
     if let Some(exe) = args.opence.clone() {
         args.bridge = true;
         let map_path = match args.map_path() {
@@ -193,7 +199,7 @@ fn main() -> AppExit {
                 return AppExit::error();
             }
         };
-        match bridge::launch_game(&exe, &map_path, args.show_game) {
+        match bridge::launch_game(&exe, &map_path, args.show_game, !args.no_overlay) {
             // (stops the game when the viewer exits, or gives up on it)
             Ok(child) => game_process = Some(bridge::GameProcess(child)),
             Err(e) => {
@@ -209,7 +215,8 @@ fn main() -> AppExit {
         };
         eprintln!("bridged to OpenCE: {} ({} objects)", snapshot.scenario_name, snapshot.objects.len());
         args.map = snapshot.map_name().to_string();
-        link = Some(bridge::BridgeLink { bridge, latest: Some(snapshot), frames: 0 });
+        overlay = bridge.overlay_enabled();
+        link = Some(bridge::BridgeLink::new(bridge, snapshot));
     }
     let path = match args.map_path() {
         Ok(path) => path,
@@ -235,9 +242,10 @@ fn main() -> AppExit {
     #[cfg(feature = "dlss")]
     app.insert_resource(DlssProjectId(bevy::asset::uuid::uuid!("3f1d6a2e-8a4b-4f5e-9c3d-1b2a7e6f0d91")));
 
-    app.add_plugins((default_plugins(&args), SolariPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
+    app.add_plugins((default_plugins(&args, overlay), SolariPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
         .insert_resource(args.clone())
         .insert_resource(LevelSky(level_sky))
+        .insert_resource(overlay::OverlayMode(overlay))
         .insert_resource(LightingSettings::default())
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
@@ -247,8 +255,12 @@ fn main() -> AppExit {
     if args.screenshot.is_some() {
         app.add_systems(Update, screenshot_and_exit);
     }
-    if let Some(link) = link {
+    if let Some(mut link) = link {
+        link.sync_to_overlay = overlay;
         app.insert_resource(link).add_plugins(bridge::BridgePlugin);
+        if overlay {
+            app.add_plugins(overlay::OverlayPlugin);
+        }
     }
     if let Some(game_process) = game_process {
         app.insert_resource(game_process);
@@ -276,14 +288,20 @@ fn main() -> AppExit {
 #[derive(Resource)]
 struct MapFile(Option<CacheFile>);
 
-fn default_plugins(args: &Args) -> impl PluginGroup {
+fn default_plugins(args: &Args, overlay: bool) -> impl PluginGroup {
     use bevy::render::{
         settings::{Backends, WgpuSettings},
         RenderPlugin,
     };
     let title = format!("Halo RT - {}", args.map);
+    let mut window = Window { title, ..default() };
+    if overlay {
+        // the game's overlay is drawn at this shape (overlay::WINDOW_SIZE)
+        window.resolution = overlay::WINDOW_SIZE.into();
+        window.resizable = false;
+    }
     DefaultPlugins
-        .set(WindowPlugin { primary_window: Some(Window { title, ..default() }), ..default() })
+        .set(WindowPlugin { primary_window: Some(window), ..default() })
         .set(RenderPlugin {
             render_creation: WgpuSettings {
                 // DLSS only works on Vulkan; Solari's ray queries are best
@@ -300,6 +318,7 @@ fn setup_level(
     mut commands: Commands,
     mut map: ResMut<MapFile>,
     args: Res<Args>,
+    overlay: Res<overlay::OverlayMode>,
     render_device: Res<RenderDevice>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -325,6 +344,8 @@ fn setup_level(
     builder.fixture_lights = !args.no_fixture_lights;
     builder.show_light_proxies = args.show_light_proxies;
     builder.matte = args.matte;
+    // (the game's overlay has them)
+    builder.skip_transparent = overlay.0;
     if let Err(e) = builder.spawn_bsps(args.bsp, !args.pathtracer, &mut commands, &mut assets) {
         error!("loading {}: {e}", cache.header.name);
     }
@@ -675,6 +696,7 @@ fn update_control_text(
     bridged: Option<Res<bridge::BridgeObjects>>,
     follow: Option<Res<bridge::FollowGame>>,
     forward: Option<Res<bridge::ForwardInput>>,
+    overlay: Option<Res<overlay::OverlayStats>>,
     time: Res<Time>,
     mut rate: Local<(f32, u32)>,
     #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
@@ -706,6 +728,12 @@ fn update_control_text(
                 ""
             }
         );
+        if let Some(overlay) = overlay {
+            s += &format!(
+                "the game's overlay (HUD, effects, transparent surfaces): {}x{}\n",
+                overlay.size.0, overlay.size.1
+            );
+        }
     }
     if let Some(stats) = stats {
         s += &format!(

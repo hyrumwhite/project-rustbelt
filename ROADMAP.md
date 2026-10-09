@@ -68,23 +68,38 @@ Checked on b30 (2 BSPs, 58k triangles), a10 (9 BSPs, 364k triangles) and bloodgu
 - The Xbox build has no `shader_transparent_chicago_extended`, so the shader types run: environment 3, model 4, generic 5, chicago 6, water 7, glass 8, meter 9, plasma 10.
 - Halo's light fixtures are mostly transparent-generic (`sotr`) shaders with radiosity emission. Drawn opaque and emissive, they light interiors on their own.
 
-## Phase 2: World content and real lighting  ← *next*
+## Phase 2: World content and real lighting ✅ (done)
 
-- Scenery, machines, vehicles, weapons and equipment placed from the scenario palettes
-- Models (`mod2`/`mode` on Xbox): compressed model vertices, triangle strips, regions/permutations, LODs (highest only), default-pose node matrices
-- `shader_model`: base map, multipurpose map (specular/self-illum/reflection masks)
-- Sky geometry (the `sky ` tag's model) as the backdrop, and/or captured into the environment cubemap; replaces phase 1's gradient stand-in
-- Emissive surfaces from self-illumination maps (environment shaders' primary/secondary/plasma), not just radiosity emission; physically calibrated light units
-- Lights (`ligh`) attached to objects/markers → emissive proxies or Bevy lights
-- Optional "baked" mode: show the original radiosity lightmaps (`lightmap_group` bitmaps + lightmap UVs) for side-by-side comparison
+Deliverable: levels populated with their scenery, vehicles, weapons and devices; Halo's own sky behind them; light fixtures and self-illuminated surfaces lighting the scene.
 
-## Phase 3: Material fidelity
+- [x] Scenario placements for scenery, bipeds, vehicles, equipment, weapons, machines, controls and light fixtures, filtered as the game does (not-automatic flag, `on_bsp_flags`; multiplayer vehicles with no BSP flags are shown)
+- [x] Models (`mode`): Xbox compressed vertices read through the tag header's D3D vertex buffers, triangle strips unrolled, regions/permutations (the scenario's choice), highest LOD, nodes; meshes made once per (model, permutation) and instanced
+- [x] Object placement: the game's yaw/pitch/roll matrix (`matrix4x3_rotation_from_angles`) converted to Bevy
+- [x] `shader_model` base map with the model's and shader's UV scales
+- [x] Self-illumination: model shaders (multipurpose green mask × base map × colour) and environment shaders (self-illumination map R/G/B × primary/secondary/plasma colours × base map) baked into emissive textures; radiosity emitters keep their radiosity power
+- [x] The sky model as camera-centred, raster-only, unlit, alpha-blended layers in Halo's order (each layer's main map for now)
+- [x] Light fixtures (scenario colour × intensity) as invisible emissive spheres in the ray-traced scene, since Solari has no point lights
+- [x] Tooling: `--camera` / P to reproduce views, `--no-objects`, `--no-fixture-lights`, `--show-light-proxies`; CLI `objects [list]` decodes every placed model
+- [ ] Moved to later phases: sky layers captured into the environment cubemap (phase 3); `ligh` lights on objects and effects (phase 4/5, where they move with objects); the "baked" lightmap comparison mode (optional, phase 3); physically calibrated light units (phase 3)
+
+Checked on b30 (916 objects, 170k triangles), a10 (466 objects, 245k triangles) and bloodgulch. Every placed model decodes, normals are unit length and 99.97% of triangles wind clockwise like the BSPs. GPU time is about 2 ms per frame with DLSS-RR.
+
+### What Phase 2 taught us
+
+- Xbox model parts leave their tag blocks empty. The geometry is reached through `vertex_buffer.hardware_format`, a D3D resource `{Common, Data, Lock}` in the tag header's array whose `Data` is a tag-space address (the game registers it with base `NULL`). `triangle_buffer.base_address` is the strip itself.
+- Model vertices are in model space at the default pose (`render_model` multiplies node matrices by `runtime_default_inverse_matrix`), so static objects need only their object transform.
+- On Xbox the multipurpose map's channels are R specular, G self-illumination, B colour change, A auxiliary. Halo PC moves them, and the port swizzles Custom Edition maps to match.
+- Environment self-illumination adds to the lightmap, so it lights the base map rather than replacing it.
+- Many light fixtures and glowing panels emit radiosity *and* self-illuminate. The radiosity power is their real light output; using the self-illumination colour instead made a10 go dark.
+
+## Phase 3: Material fidelity  ← *next*
 
 - Detail maps (`biased multiply`, `multiply`, `biased add`) baked into or composited onto the base colour
 - Bump maps (height → normal) → `normal_map_texture`
 - Specular masks and cube maps → roughness/metallic heuristics, so Solari gives real reflections
 - Alpha-tested environment shaders → masked materials (Solari support permitting)
-- Transparent shaders (`schi`, `scex`, `sgla`, `swat`, `smet`, `spla`): glass and water through a raster overlay, since Solari is opaque-only
+- Transparent shaders (`schi`, `scex`, `sgla`, `swat`, `smet`, `spla`): glass and water through a raster overlay, since Solari is opaque-only. Includes the generic/chicago stage combiners, which also give the sky layers their real multi-map look
+- Sky layers rendered into the environment cubemap (replacing the gradient stand-in); light units calibrated against the lightmaps; optional baked-lightmap comparison mode
 - Texture animation, Xbox cube-map faces, mip chains, 3D textures
 
 ## Phase 4: Simulation bridge (playable)

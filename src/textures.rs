@@ -14,12 +14,51 @@ use halo_map::{bitmap, CacheFile};
 #[derive(Default)]
 pub struct TextureCache {
     images: HashMap<(u32, usize), Option<Handle<Image>>>,
+    baked: HashMap<Bake, Option<Handle<Image>>>,
     /// Whether the GPU takes BC (DXT) textures as they are.
     pub bc_supported: bool,
     pub failures: usize,
 }
 
+/// An emissive texture made on the CPU from Halo maps.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bake {
+    /// Base map times the multipurpose map's green (self-illumination) channel.
+    ModelSelfIllumination { base: Option<u32>, multipurpose: u32 },
+    /// Base map times (R*primary + G*secondary + B*plasma) of an environment
+    /// shader's self-illumination map: Halo adds self-illumination to the
+    /// lightmap, so it lights the base map (colours as f32 bits).
+    EnvironmentSelfIllumination { base: Option<u32>, map: u32, colors: [[u32; 3]; 3] },
+}
+
 impl TextureCache {
+    pub fn baked(&mut self, cache: &CacheFile, bake: Bake, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        if let Some(cached) = self.baked.get(&bake) {
+            return cached.clone();
+        }
+        let result = match bake_rgba(cache, bake) {
+            Ok((width, height, data, srgb)) => {
+                let format = if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
+                let mut image = Image::new(
+                    Extent3d { width, height, depth_or_array_layers: 1 },
+                    TextureDimension::D2,
+                    data,
+                    format,
+                    RenderAssetUsages::RENDER_WORLD,
+                );
+                image.sampler = repeat_sampler();
+                Some(images.add(image))
+            }
+            Err(e) => {
+                warn!("emissive bake: {e}");
+                self.failures += 1;
+                None
+            }
+        };
+        self.baked.insert(bake, result.clone());
+        result
+    }
+
     pub fn new(bc_supported: bool) -> Self {
         TextureCache { bc_supported, ..default() }
     }
@@ -71,7 +110,12 @@ fn convert(cache: &CacheFile, datum: u32, index: usize, srgb: bool, bc_supported
     let mut image = Image::new_uninit(size, TextureDimension::D2, format, RenderAssetUsages::RENDER_WORLD);
     image.texture_descriptor.mip_level_count = decoded.levels;
     image.data = Some(decoded.data);
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+    image.sampler = repeat_sampler();
+    Ok(image)
+}
+
+fn repeat_sampler() -> ImageSampler {
+    ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
         mag_filter: ImageFilterMode::Linear,
@@ -79,6 +123,62 @@ fn convert(cache: &CacheFile, datum: u32, index: usize, srgb: bool, bc_supported
         mipmap_filter: ImageFilterMode::Linear,
         anisotropy_clamp: 16,
         ..default()
-    });
-    Ok(image)
+    })
+}
+
+/// The first bitmap of a group as RGBA8.
+fn rgba8(cache: &CacheFile, datum: u32) -> halo_map::Result<bitmap::Decoded> {
+    let bitmaps = bitmap::bitmaps(cache, datum)?;
+    let first = bitmaps.first().ok_or_else(|| halo_map::Error::BadTag("bitmap group has no bitmaps".into()))?;
+    first.decode_rgba8(cache)
+}
+
+/// At the mask's resolution: the base map's nearest texel (sRGB) times the
+/// light `light(mask texel)` gives it, or the light alone without a base map.
+fn modulate_base(
+    mask: &bitmap::Decoded,
+    base: Option<&bitmap::Decoded>,
+    light: impl Fn(&[u8]) -> [f32; 3],
+) -> (u32, u32, Vec<u8>, bool) {
+    let (w, h) = (mask.width, mask.height);
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let o = ((y * w + x) * 4) as usize;
+            let l = light(&mask.data[o..o + 4]);
+            let rgb = match base {
+                Some(b) => {
+                    let (bx, by) = (x * b.width / w, y * b.height / h);
+                    let bo = ((by * b.width + bx) * 4) as usize;
+                    [b.data[bo], b.data[bo + 1], b.data[bo + 2]]
+                }
+                None => [255, 255, 255],
+            };
+            for c in 0..3 {
+                out.push((rgb[c] as f32 * l[c].clamp(0.0, 1.0)).round() as u8);
+            }
+            out.push(255);
+        }
+    }
+    (w, h, out, true)
+}
+
+/// (width, height, RGBA8 texels, sRGB-encoded)
+fn bake_rgba(cache: &CacheFile, bake: Bake) -> halo_map::Result<(u32, u32, Vec<u8>, bool)> {
+    match bake {
+        Bake::ModelSelfIllumination { base, multipurpose } => {
+            let mask = rgba8(cache, multipurpose)?;
+            let base = base.map(|b| rgba8(cache, b)).transpose()?;
+            Ok(modulate_base(&mask, base.as_ref(), |texel| [texel[1] as f32 / 255.0; 3]))
+        }
+        Bake::EnvironmentSelfIllumination { base, map, colors } => {
+            let map = rgba8(cache, map)?;
+            let base = base.map(|b| rgba8(cache, b)).transpose()?;
+            let colors = colors.map(|c| c.map(f32::from_bits));
+            Ok(modulate_base(&map, base.as_ref(), |texel| {
+                let weights = [texel[0], texel[1], texel[2]].map(|c| c as f32 / 255.0);
+                std::array::from_fn(|channel| (0..3).map(|i| weights[i] * colors[i][channel]).sum::<f32>())
+            }))
+        }
+    }
 }

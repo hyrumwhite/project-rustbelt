@@ -46,6 +46,9 @@ const LIGHT_PROXY_OFFSET: f32 = 0.3;
 /// Radiance per unit of fixture intensity, relative to shader radiosity
 /// power (a fixture's sphere is far smaller than a glowing panel).
 const LIGHT_PROXY_RADIANCE: f32 = 4000.0;
+/// Radiance of fully self-illuminated texels, relative to radiosity power
+/// (with the default emissive scale and exposure, about display white).
+const SELF_ILLUMINATION_RADIANCE: f32 = 2.5;
 
 /// What a loaded level contains, for the overlay.
 #[derive(Resource, Default)]
@@ -469,6 +472,23 @@ impl<'a> LevelBuilder<'a> {
         if info.shader_type.is_transparent() && !emits {
             return Surface::Skip;
         }
+        let self_illumination = info.self_illumination.and_then(|si| match si {
+            shader::SelfIllumination::Model { multipurpose_map, color_upper, .. } => {
+                let bake = crate::textures::Bake::ModelSelfIllumination {
+                    base: info.base_map.and_then(|b| b.datum),
+                    multipurpose: multipurpose_map.datum?,
+                };
+                Some((self.textures.baked(self.cache, bake, images)?, Vec3::from(color_upper)))
+            }
+            shader::SelfIllumination::Environment { map, primary, secondary, plasma } => {
+                let bake = crate::textures::Bake::EnvironmentSelfIllumination {
+                    base: info.base_map.and_then(|b| b.datum),
+                    map: map.datum?,
+                    colors: [primary, secondary, plasma].map(|c| c.map(f32::to_bits)),
+                };
+                Some((self.textures.baked(self.cache, bake, images)?, Vec3::ONE))
+            }
+        });
         let material = StandardMaterial {
             base_color: if base_color_texture.is_some() || !emits {
                 Color::WHITE
@@ -481,15 +501,22 @@ impl<'a> LevelBuilder<'a> {
             perceptual_roughness: 0.85,
             metallic: 0.0,
             reflectance: 0.4,
-            emissive_texture: if emits && info.shader_type == ShaderType::Environment {
-                base_color_texture
-            } else {
-                None
+            // A surface that lit the lightmaps (radiosity emission) keeps that
+            // as its brightness, the real light output; self-illumination
+            // otherwise.
+            emissive_texture: match &self_illumination {
+                Some((texture, _)) => Some(texture.clone()),
+                None if emits && info.shader_type == ShaderType::Environment => base_color_texture,
+                None => None,
             },
             ..default()
         };
         let handle = materials.add(material);
-        if emits { Surface::Emissive(handle, radiance) } else { Surface::Opaque(handle) }
+        match self_illumination {
+            _ if emits => Surface::Emissive(handle, radiance),
+            Some((_, color)) => Surface::Emissive(handle, color * SELF_ILLUMINATION_RADIANCE),
+            None => Surface::Opaque(handle),
+        }
     }
 }
 

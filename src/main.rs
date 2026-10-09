@@ -1,7 +1,7 @@
 //! Halo: Combat Evolved levels rendered by Bevy Solari (real-time ray
 //! tracing), with DLSS Ray Reconstruction when built with `--features dlss`.
 //!
-//! Phase 1 of ROADMAP.md: the structure BSPs of a retail Xbox map, textured,
+//! Phases 1-2 of ROADMAP.md: a retail Xbox map's structure BSPs and placed objects, textured,
 //! lit by the level's sun and sky and by its light-emitting shaders.
 
 mod level;

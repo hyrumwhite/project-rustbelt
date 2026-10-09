@@ -86,6 +86,18 @@ pub struct TransparentInfo {
     pub maps: Vec<TransparentMap>,
 }
 
+/// Light a surface gives off by itself, beyond its radiosity emission.
+#[derive(Debug, Clone, Copy)]
+pub enum SelfIllumination {
+    /// `shader_model`: the multipurpose map's green channel (Xbox order:
+    /// specular, self-illumination, colour change, auxiliary) masks the base
+    /// map, tinted by a colour animated between two bounds.
+    Model { multipurpose_map: TagRef, color_lower: [f32; 3], color_upper: [f32; 3] },
+    /// `shader_environment`: the self-illumination map's red, green and blue
+    /// channels weight the primary, secondary and plasma "on" colours.
+    Environment { map: TagRef, primary: [f32; 3], secondary: [f32; 3], plasma: [f32; 3] },
+}
+
 /// What the renderer needs from a shader so far.
 #[derive(Debug, Clone)]
 pub struct ShaderInfo {
@@ -107,6 +119,9 @@ pub struct ShaderInfo {
     pub uv_scale: [f32; 2],
     /// For transparent generic and chicago shaders.
     pub transparent: Option<TransparentInfo>,
+    pub self_illumination: Option<SelfIllumination>,
+    /// `shader_model`'s multipurpose map (see [`SelfIllumination::Model`]).
+    pub multipurpose_map: Option<TagRef>,
 }
 
 fn present(reference: TagRef) -> Option<TagRef> {
@@ -134,6 +149,8 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         alpha_tested: false,
         uv_scale: [1.0, 1.0],
         transparent: None,
+        self_illumination: None,
+        multipurpose_map: None,
     };
 
     if tag.group == groups::SHADER_ENVIRONMENT {
@@ -152,9 +169,29 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         }
         info.bump_map = present(root.reference(e::BUMP_MAP)?);
         info.self_illumination_map = present(root.reference(e::SELF_ILLUMINATION_MAP)?);
+        let colors = [root.vec3(e::PRIMARY_ON_COLOR)?, root.vec3(e::SECONDARY_ON_COLOR)?, root.vec3(e::PLASMA_ON_COLOR)?];
+        if let Some(map) = info.self_illumination_map
+            && colors.iter().flatten().any(|&c| c > 0.0)
+        {
+            info.self_illumination = Some(SelfIllumination::Environment {
+                map,
+                primary: colors[0],
+                secondary: colors[1],
+                plasma: colors[2],
+            });
+        }
     } else if tag.group == groups::SHADER_MODEL {
         use layout::shader_model_definition as m;
         info.base_map = present(root.reference(m::BASE_MAP)?);
+        info.multipurpose_map = present(root.reference(m::MULTIPURPOSE_MAP)?);
+        let (lower, upper) =
+            (root.vec3(m::SELF_ILLUMINATION_COLOR_LOWER_BOUND)?, root.vec3(m::SELF_ILLUMINATION_COLOR_UPPER_BOUND)?);
+        if let Some(multipurpose_map) = info.multipurpose_map
+            && lower.iter().chain(&upper).any(|&c| c > 0.0)
+        {
+            info.self_illumination =
+                Some(SelfIllumination::Model { multipurpose_map, color_lower: lower, color_upper: upper });
+        }
         let (u, v) = (root.f32(m::MAP_U_SCALE)?, root.f32(m::MAP_V_SCALE)?);
         info.uv_scale = [if u == 0.0 { 1.0 } else { u }, if v == 0.0 { 1.0 } else { v }];
     }

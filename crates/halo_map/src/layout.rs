@@ -196,16 +196,24 @@ pub mod shader_environment_definition {
     pub const BUMP_MAP: usize = 0x128;
     pub const SELF_ILLUMINATION_FLAGS: usize = 0x180;
     pub const PRIMARY_ON_COLOR: usize = 0x19c;
+    pub const SECONDARY_ON_COLOR: usize = 0x1d8;
+    pub const PLASMA_ON_COLOR: usize = 0x214;
     pub const SELF_ILLUMINATION_MAP_SCALE: usize = 0x250;
     pub const SELF_ILLUMINATION_MAP: usize = 0x254;
 }
 
 pub mod shader_model_definition {
     pub const SIZEOF: usize = 0x1b8;
+    pub const FLAGS: usize = 0x28;
+    pub const SELF_ILLUMINATION_FLAGS: usize = 0x6c;
+    pub const SELF_ILLUMINATION_COLOR_SOURCE: usize = 0x70;
+    pub const SELF_ILLUMINATION_COLOR_LOWER_BOUND: usize = 0x78;
+    pub const SELF_ILLUMINATION_COLOR_UPPER_BOUND: usize = 0x84;
     pub const MAP_U_SCALE: usize = 0x9c;
     pub const MAP_V_SCALE: usize = 0xa0;
     pub const BASE_MAP: usize = 0xa4;
     pub const MULTIPURPOSE_MAP: usize = 0xbc;
+    pub const DETAIL_MAP: usize = 0xdc;
 }
 
 pub mod shader_radiosity_properties {

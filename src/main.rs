@@ -92,17 +92,35 @@ fn halo_camera(position: [f32; 3], yaw: f32, pitch: f32) -> Transform {
 }
 
 impl Args {
-    fn map_path(&self) -> PathBuf {
+    /// The map file: the argument itself if it is a path, else `<name>.map`
+    /// in the first maps folder that has it (see [`Args::map_dirs`]).
+    fn map_path(&self) -> Result<PathBuf, String> {
         let direct = PathBuf::from(&self.map);
         if direct.extension().is_some() || direct.is_file() {
-            return direct;
+            return Ok(direct);
         }
-        let dir = self
-            .maps_dir
-            .clone()
-            .or_else(|| std::env::var_os("HALO_MAPS").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("maps"));
-        dir.join(format!("{}.map", self.map))
+        let file = format!("{}.map", self.map);
+        let dirs = self.map_dirs();
+        dirs.iter().map(|dir| dir.join(&file)).find(|path| path.is_file()).ok_or_else(|| {
+            let tried: Vec<String> = dirs.iter().map(|d| format!("  {}", d.display())).collect();
+            format!("{file} not found in:\n{}", tried.join("\n"))
+        })
+    }
+
+    /// `--maps-dir` alone when given; otherwise $HALO_MAPS, ./maps, a maps
+    /// folder next to the executable, and where OpenCE's Windows build
+    /// extracts the disc's maps (../OpenCE/build/windows/maps).
+    fn map_dirs(&self) -> Vec<PathBuf> {
+        if let Some(dir) = &self.maps_dir {
+            return vec![dir.clone()];
+        }
+        let mut dirs: Vec<PathBuf> = std::env::var_os("HALO_MAPS").map(PathBuf::from).into_iter().collect();
+        dirs.push(PathBuf::from("maps"));
+        if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("maps"))) {
+            dirs.push(exe_dir);
+        }
+        dirs.push(PathBuf::from("../OpenCE/build/windows/maps"));
+        dirs
     }
 }
 
@@ -129,7 +147,15 @@ struct LevelSky(sky::SkyLighting);
 
 fn main() -> AppExit {
     let args: Args = argh::from_env();
-    let path = args.map_path();
+    let path = match args.map_path() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("{e}");
+            eprintln!("pass --maps-dir <folder>, or set HALO_MAPS to the folder holding the Xbox maps, e.g.");
+            eprintln!("  setx HALO_MAPS \"C:\\path\\to\\maps\"   (then open a new terminal)");
+            return AppExit::error();
+        }
+    };
     let cache = match CacheFile::open(&path) {
         Ok(cache) => cache,
         Err(e) => {

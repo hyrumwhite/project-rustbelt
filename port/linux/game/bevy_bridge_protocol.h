@@ -21,6 +21,12 @@ The other way, the renderer may forward its window's keyboard and mouse
 (`input`, which only the renderer writes): the platform layer turns its
 changes into the SDL events the game reads (bevy_bridge_input.c), so a
 player can play from the renderer's window.
+
+With game.bevy_bridge_overlay on, the game also shares its own picture
+without the opaque world: effects, transparent surfaces, the HUD and menus,
+drawn over a clear screen with premultiplied alpha (`overlay`), for the
+renderer to draw over its own picture of the world. Its two buffers work as
+the frames do.
 */
 
 #ifndef __BEVY_BRIDGE_PROTOCOL_H
@@ -30,10 +36,13 @@ player can play from the renderer's window.
 #define BEVY_BRIDGE_MAPPING_NAME "Local\\HaloBevyBridge"
 #define BEVY_BRIDGE_POSIX_NAME "/halo_bevy_bridge"
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 3
+#define BEVY_BRIDGE_VERSION 4
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
 #define BEVY_BRIDGE_FRAMES 2
+/* the largest overlay picture (pixels), and its buffers */
+#define BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS (2560 * 1440)
+#define BEVY_BRIDGE_OVERLAYS 2
 
 /* bevy_bridge_object.flags */
 enum
@@ -53,7 +62,8 @@ struct bevy_bridge_camera
 	float position[3];
 	float forward[3];
 	float up[3];
-	/* radians */
+	/* radians: the vertical extent the picture covers (the frustum's,
+	wider than the camera's own in cinematics), centred */
 	float vertical_field_of_view;
 };
 
@@ -115,6 +125,19 @@ struct bevy_bridge_input
 	unsigned long reserved[11];
 };
 
+/* an overlay picture: width x height pixels, RGBA, 8 bits a channel, the
+top row first; the colours premultiplied by alpha (what covers the world)
+and in the display's encoding (sRGB) */
+struct bevy_bridge_overlay
+{
+	unsigned long sequence;
+	/* the bevy_bridge_frame.frame_index of the frame it shows */
+	unsigned long frame_index;
+	unsigned long width;
+	unsigned long height;
+	unsigned long reserved[4];
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -127,6 +150,13 @@ struct bevy_bridge_shared
 	unsigned long reserved[3];
 	struct bevy_bridge_input input;
 	struct bevy_bridge_frame frames[BEVY_BRIDGE_FRAMES];
+	/* nonzero when the game shares overlays (game.bevy_bridge_overlay) */
+	unsigned long overlay_enabled;
+	/* the overlay buffer last completed */
+	unsigned long latest_overlay;
+	unsigned long overlay_reserved[2];
+	struct bevy_bridge_overlay overlays[BEVY_BRIDGE_OVERLAYS];
+	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 
 /* ---------- prototypes/the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c) */

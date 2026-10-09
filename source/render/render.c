@@ -337,6 +337,10 @@ static void render_window(
 	if (!bink_playback_in_progress())
 	{
 		build_sprite_prepare_for_window();
+		/* port: with the Bevy bridge's overlay, the renderer draws the opaque
+		world, which this draws only into the depth buffer (the decals
+		aside) */
+		halo_screen_overlay_world(TRUE);
 		render_sky();
 		first_person_weapon_render_update();
 		lights_preprocess_scene();
@@ -347,6 +351,7 @@ static void render_window(
 		render_object_shadows();
 		lights_render_diffuse();
 
+		halo_screen_overlay_world(FALSE);
 		rasterizer_decals_begin(_decal_layer_light);
 		for (rendered_cluster_index = 0;
 			rendered_cluster_index < render.rendered_cluster_count;
@@ -355,7 +360,9 @@ static void render_window(
 			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
 		}
 		rasterizer_decals_end();
+		halo_screen_overlay_world(TRUE);
 
+		halo_screen_overlay_world(FALSE);
 		rasterizer_decals_begin(_decal_layer_alpha_tested);
 		for (rendered_cluster_index = 0;
 			rendered_cluster_index < render.rendered_cluster_count;
@@ -364,9 +371,11 @@ static void render_window(
 			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
 		}
 		rasterizer_decals_end();
+		halo_screen_overlay_world(TRUE);
 
 		structure_render_diffuse_texture();
 
+		halo_screen_overlay_world(FALSE);
 		rasterizer_decals_begin(_decal_layer_primary);
 		for (rendered_cluster_index = 0;
 			rendered_cluster_index < render.rendered_cluster_count;
@@ -375,7 +384,9 @@ static void render_window(
 			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
 		}
 		rasterizer_decals_end();
+		halo_screen_overlay_world(TRUE);
 
+		halo_screen_overlay_world(FALSE);
 		rasterizer_decals_begin(_decal_layer_secondary);
 		for (rendered_cluster_index = 0;
 			rendered_cluster_index < render.rendered_cluster_count;
@@ -384,12 +395,14 @@ static void render_window(
 			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
 		}
 		rasterizer_decals_end();
+		halo_screen_overlay_world(TRUE);
 
 		lights_render_specular();
 		structure_render_specular_lightmaps();
 		structure_render_reflection_lightmap_masks();
 		structure_render_reflection_mirrors();
 		structure_render_reflections();
+		halo_screen_overlay_world(FALSE);
 		structure_render_transparent_geometry();
 		structure_render_fog();
 		game_engine_post_rasterize_objects();
@@ -411,11 +424,12 @@ static void render_window(
 		structure_render_detail_objects();
 		rasterizer_transparent_geometry_draw(FALSE);
 		rasterizer_transparent_geometry_stop();
-		structure_render_fog_screen();
+		if (!halo_screen_overlay())
+			structure_render_fog_screen();
 		rasterizer_lens_flares_draw();
 		/* port: the 3D view antialiased (display.anti_aliasing), before the
 		HUD and menus are drawn over it */
-		if (rasterizer_target == _render_target_primary)
+		if (rasterizer_target == _render_target_primary && !halo_screen_overlay())
 		{
 			halo_screen_anti_alias(
 				rasterizer_camera->viewport_bounds.x0,

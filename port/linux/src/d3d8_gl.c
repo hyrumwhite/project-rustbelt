@@ -3154,6 +3154,62 @@ static GLenum stencil_operation(DWORD operation)
 	return operation ? (GLenum)operation : GL_ZERO;
 }
 
+/* ---------- the Bevy bridge's overlay */
+
+/* With game.bevy_bridge_overlay on, a Bevy renderer draws the opaque world
+and this draws the rest over it (port/linux/game/bevy_bridge.c): the opaque
+world only into the depth buffer (render.c brackets it with
+halo_screen_overlay_world), everything after it over a clear screen. The
+back buffer's alpha becomes what covers the world: blends that replace what
+is under them add their coverage, additive blends leave it, so the picture is
+premultiplied. Present shares it. */
+
+#ifndef HALO_ANDROID
+unsigned char bevy_bridge_overlay_enabled(void);
+unsigned char *bevy_bridge_overlay_begin(unsigned long width, unsigned long height);
+void bevy_bridge_overlay_commit(void);
+#endif
+
+/* -1 until first asked */
+static int overlay_mode = -1;
+/* drawing the opaque world: depth only */
+static BOOL overlay_world;
+
+static BOOL overlay_enabled(void)
+{
+#ifndef HALO_ANDROID
+	if (overlay_mode < 0)
+		overlay_mode = bevy_bridge_overlay_enabled() ? 1 : 0;
+	return overlay_mode > 0;
+#else
+	return FALSE;
+#endif
+}
+
+/* drawing (or clearing) the overlay: the back buffer, with the mode on */
+static BOOL overlay_target(void)
+{
+	return overlay_enabled() && device.render_target && device.render_target->Data == device.back_buffer.Data;
+}
+
+/* render.c: around the opaque world's passes */
+void halo_screen_overlay_world(unsigned char world)
+{
+	/* (HALO_BEVY_OVERLAY_DEBUG_WORLD: the world drawn too, to compare) */
+	static int debug_world = -1;
+
+	if (debug_world < 0)
+		debug_world = getenv("HALO_BEVY_OVERLAY_DEBUG_WORLD") != NULL;
+	overlay_world = world && overlay_enabled() && !debug_world;
+}
+
+/* render.c: whether its passes that only finish the opaque world's picture
+(the fog screen, anti-aliasing) are skipped */
+unsigned char halo_screen_overlay(void)
+{
+	return overlay_enabled() ? 1 : 0;
+}
+
 static GLenum blend_equation(DWORD operation)
 {
 	switch (operation)
@@ -3176,6 +3232,7 @@ static void apply_raster_state(BOOL has_depth)
 	float depth_range[2];
 	unsigned char color_mask;
 	BOOL depth_test = has_depth && rs[D3DRS_ZENABLE];
+	BOOL overlay;
 
 	viewport[0] = target_pixel((float)device.viewport.X, 0);
 	viewport[1] = target_pixel((float)device.viewport.Y, 1);
@@ -3255,8 +3312,46 @@ static void apply_raster_state(BOOL has_depth)
 		}
 	}
 
+	overlay = overlay_target();
+	if (overlay)
+	{
+		/* the world: depth only; after it, every colour write also writes
+		coverage, and alpha-only passes (which build masks over the world's
+		picture) are left out */
+		if (overlay_world || !(write & (D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE)))
+			write = 0;
+		else
+			write |= D3DCOLORWRITEENABLE_ALPHA;
+	}
 	state_enable(&gl_state.blend, GL_BLEND, rs[D3DRS_ALPHABLENDENABLE] != 0);
-	if (rs[D3DRS_ALPHABLENDENABLE])
+	if (rs[D3DRS_ALPHABLENDENABLE] && overlay)
+	{
+		GLenum equation = blend_equation(rs[D3DRS_BLENDOP]);
+		GLenum source = (GLenum)rs[D3DRS_SRCBLEND];
+		GLenum destination = (GLenum)rs[D3DRS_DESTBLEND];
+		/* (coverage: kept, for blends that add to or multiply what is under
+		them) */
+		GLenum alpha_source = GL_ZERO, alpha_destination = GL_ONE;
+		float blend_color[4];
+
+		if (equation == GL_FUNC_ADD && (destination == GL_ONE_MINUS_SRC_ALPHA ||
+			(destination == GL_ZERO && source != GL_ZERO && source != GL_DST_COLOR)))
+		{
+			alpha_source = GL_ONE;
+			alpha_destination = destination;
+		}
+		glBlendFuncSeparate(source, destination, alpha_source, alpha_destination);
+		glBlendEquationSeparate(equation, GL_FUNC_ADD);
+		/* (set again when the overlay is not drawn) */
+		gl_state.blend_source = gl_state.blend_destination = gl_state.blend_equation = (GLenum)~0U;
+		color_to_vec4(rs[D3DRS_BLENDCOLOR], blend_color);
+		if (memcmp(gl_state.blend_color, blend_color, sizeof(blend_color)))
+		{
+			memcpy(gl_state.blend_color, blend_color, sizeof(blend_color));
+			glBlendColor(blend_color[0], blend_color[1], blend_color[2], blend_color[3]);
+		}
+	}
+	else if (rs[D3DRS_ALPHABLENDENABLE])
 	{
 		GLenum equation = blend_equation(rs[D3DRS_BLENDOP]);
 		float blend_color[4];
@@ -4631,7 +4726,18 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 			device.depth_stencil ? (unsigned long)device.depth_stencil->Data : 0);
 	stats.clears++;
 	color_to_vec4(color, rgba);
-	if (flags & D3DCLEAR_TARGET)
+	if ((flags & D3DCLEAR_TARGET) && overlay_target())
+	{
+		/* the overlay: clear to nothing covering the world; alpha-only
+		clears (the fog screen's) left out */
+		if (flags & (D3DCLEAR_TARGET_R | D3DCLEAR_TARGET_G | D3DCLEAR_TARGET_B))
+		{
+			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+			glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+			mask |= GL_COLOR_BUFFER_BIT;
+		}
+	}
+	else if (flags & D3DCLEAR_TARGET)
 	{
 		/* the Xbox clears the channels named (D3DCLEAR_TARGET_R, _G, _B, _A):
 		the fog screen clears only alpha, leaving the picture under the fog */
@@ -4895,6 +5001,39 @@ static void visibility_copy_batch(void)
 }
 
 #endif
+
+/* the back buffer, which the overlay is, shared with the Bevy renderer */
+static void overlay_share(struct render_target_entry *target)
+{
+#ifndef HALO_ANDROID
+	GLint framebuffer, pack_buffer, alignment, row_length;
+	unsigned long width = target->target.gl_width;
+	unsigned long height = target->target.gl_height;
+	unsigned char *pixels = bevy_bridge_overlay_begin(width, height);
+
+	if (!pixels)
+		return;
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
+	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+	glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
+	glGetIntegerv(GL_PACK_ROW_LENGTH, &row_length);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(target->target.texture, 0));
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+	/* (row 0 of the render target is the top of the picture, as the
+	overlay's is) */
+	glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
+	glPixelStorei(GL_PACK_ALIGNMENT, alignment);
+	glPixelStorei(GL_PACK_ROW_LENGTH, row_length);
+	bevy_bridge_overlay_commit();
+#else
+	(void)target;
+#endif
+}
+
 void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destination_rectangle,
 	void *unused, void *unused2)
 {
@@ -4919,6 +5058,8 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 #ifndef HALO_ANDROID
 		visibility_copy_batch();
 #endif
+		if (overlay_enabled())
+			overlay_share(back_buffer);
 		if (screenshot_every > 0 && device.frame % (unsigned long)screenshot_every == 0)
 			write_screenshot(back_buffer);
 #ifndef HALO_ANDROID

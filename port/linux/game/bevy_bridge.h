@@ -23,4 +23,15 @@ void bevy_bridge_record_model(
 	struct real_matrix4x3 const *node_matrices,
 	short node_count);
 
+/* with game.bevy_bridge_overlay on: TRUE (the renderer draws the opaque
+world itself, so render_window draws it only into the depth buffer) */
+boolean bevy_bridge_overlay_enabled(void);
+
+/* the overlay buffer to fill with a width x height picture
+(bevy_bridge_protocol.h), or NULL; bevy_bridge_overlay_commit shares it */
+unsigned char *bevy_bridge_overlay_begin(
+	unsigned long width,
+	unsigned long height);
+void bevy_bridge_overlay_commit(void);
+
 #endif /* __BEVY_BRIDGE_H */

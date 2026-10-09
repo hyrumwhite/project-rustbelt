@@ -161,6 +161,8 @@ this list to generate the guest's entry points */
 	X(glStencilMask) \
 	X(glBlendFunc) \
 	X(glBlendEquation) \
+	X(glBlendFuncSeparate) \
+	X(glBlendEquationSeparate) \
 	X(glBlendColor) \
 	X(glCullFace) \
 	X(glFrontFace) \
@@ -391,6 +393,8 @@ pointers, sees the declarations without these aliases */
 #define glStencilMask halo_glStencilMask
 #define glBlendFunc halo_glBlendFunc
 #define glBlendEquation halo_glBlendEquation
+#define glBlendFuncSeparate halo_glBlendFuncSeparate
+#define glBlendEquationSeparate halo_glBlendEquationSeparate
 #define glBlendColor halo_glBlendColor
 #define glCullFace halo_glCullFace
 #define glFrontFace halo_glFrontFace

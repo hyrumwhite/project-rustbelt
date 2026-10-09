@@ -19,6 +19,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "game/players.h"
 #include "objects/objects.h"
 #include "render/render_cameras.h"
+#include "render/render_cameras_internal.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_groups.h"
 #include "bevy_bridge.h"
@@ -50,6 +51,9 @@ static struct
 } bevy_bridge_recorded[MAXIMUM_RECORDED_MODELS];
 static short bevy_bridge_recorded_count;
 
+/* the overlay buffer being filled, or NONE */
+static long bevy_bridge_overlay_buffer = NONE;
+
 /* ---------- private code */
 
 static struct bevy_bridge_shared *bevy_bridge_get(void)
@@ -71,6 +75,7 @@ static struct bevy_bridge_shared *bevy_bridge_get(void)
 	bevy_bridge_shared->version = BEVY_BRIDGE_VERSION;
 	bevy_bridge_shared->writer_process_id = bevy_bridge_platform_process_id();
 	bevy_bridge_shared->latest_frame = 0;
+	bevy_bridge_shared->overlay_enabled = config_boolean("game.bevy_bridge_overlay") != 0;
 	/* last, so a reader that sees the magic sees the rest */
 	__atomic_store_n(&bevy_bridge_shared->magic, BEVY_BRIDGE_MAGIC, __ATOMIC_RELEASE);
 	return bevy_bridge_shared;
@@ -189,7 +194,16 @@ void bevy_bridge_export_frame(
 		bevy_bridge_point(frame->camera.position, &window->render_camera.position);
 		bevy_bridge_vector(frame->camera.forward, &window->render_camera.forward);
 		bevy_bridge_vector(frame->camera.up, &window->render_camera.up);
-		frame->camera.vertical_field_of_view = window->render_camera.vertical_field_of_view;
+		/* the field of view the picture covers: the frustum's, which (with
+		the window's bounds inside the viewport's, as in cinematics) can be
+		wider than the camera's */
+		{
+			real_rectangle2d bounds;
+
+			render_camera_build_frustum_bounds(&window->render_camera, &bounds);
+			frame->camera.vertical_field_of_view = 2.0f * arctangent(
+				tangent(window->render_camera.vertical_field_of_view * 0.5f) * (bounds.y1 - bounds.y0) * 0.5f, 1.0f);
+		}
 		frame->camera_valid = TRUE;
 		first_person_unit = bevy_bridge_first_person_unit(window->local_player_index);
 		break;
@@ -263,4 +277,47 @@ void bevy_bridge_export_frame(
 	__atomic_thread_fence(__ATOMIC_RELEASE);
 	__atomic_store_n(&frame->sequence, (frame->sequence | 1) + 1, __ATOMIC_RELAXED);
 	__atomic_store_n(&shared->latest_frame, buffer, __ATOMIC_RELEASE);
+}
+
+boolean bevy_bridge_overlay_enabled(void)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_get();
+
+	return shared && shared->overlay_enabled;
+}
+
+unsigned char *bevy_bridge_overlay_begin(
+	unsigned long width,
+	unsigned long height)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_get();
+	struct bevy_bridge_overlay *overlay;
+
+	if (!shared || !shared->overlay_enabled || !width || !height ||
+		width * height > BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS)
+	{
+		return NULL;
+	}
+	bevy_bridge_overlay_buffer = (long)((shared->latest_overlay + 1) % BEVY_BRIDGE_OVERLAYS);
+	overlay = &shared->overlays[bevy_bridge_overlay_buffer];
+	__atomic_store_n(&overlay->sequence, overlay->sequence | 1, __ATOMIC_RELAXED);
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	overlay->frame_index = bevy_bridge_frame_index;
+	overlay->width = width;
+	overlay->height = height;
+	return shared->overlay_pixels[bevy_bridge_overlay_buffer];
+}
+
+void bevy_bridge_overlay_commit(void)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+	struct bevy_bridge_overlay *overlay;
+
+	if (!shared || bevy_bridge_overlay_buffer == NONE)
+		return;
+	overlay = &shared->overlays[bevy_bridge_overlay_buffer];
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	__atomic_store_n(&overlay->sequence, (overlay->sequence | 1) + 1, __ATOMIC_RELAXED);
+	__atomic_store_n(&shared->latest_overlay, (unsigned long)bevy_bridge_overlay_buffer, __ATOMIC_RELEASE);
+	bevy_bridge_overlay_buffer = NONE;
 }

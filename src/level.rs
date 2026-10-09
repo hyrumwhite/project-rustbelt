@@ -1,7 +1,10 @@
 //! A Halo level as Bevy entities: its structure BSPs and the objects its
 //! scenario places.
 
-use crate::textures::TextureCache;
+use crate::{
+    material::{HaloEnvironment, HaloEnvironmentMaterial, HaloEnvironmentParams},
+    textures::TextureCache,
+};
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology},
@@ -68,19 +71,33 @@ pub struct LevelStats {
     pub texture_failures: usize,
 }
 
+/// The asset collections a level is built into.
+pub struct LevelAssets<'a> {
+    pub meshes: &'a mut Assets<Mesh>,
+    pub materials: &'a mut Assets<StandardMaterial>,
+    pub environment_materials: &'a mut Assets<HaloEnvironmentMaterial>,
+    pub images: &'a mut Assets<Image>,
+    /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
+    pub neutral_detail: Handle<Image>,
+}
+
 /// How a shader's surfaces are drawn.
 #[derive(Clone)]
-enum Surface {
-    Opaque(Handle<StandardMaterial>),
-    Emissive(Handle<StandardMaterial>, Vec3),
-    /// Not drawn yet (transparent shaders without light emission).
-    Skip,
+struct Surface {
+    /// What the ray tracer sees, and the camera too without `raster`.
+    standard: Handle<StandardMaterial>,
+    /// A Halo material for the camera where `StandardMaterial` falls short
+    /// (see [`crate::material`]).
+    raster: Option<Handle<HaloEnvironmentMaterial>>,
+    /// Emitted light (see [`EmissiveSurface`]).
+    radiance: Option<Vec3>,
 }
 
 /// A shader's material and the texture coordinate scale it applies.
 #[derive(Clone)]
 struct ShaderSurface {
-    surface: Surface,
+    /// `None`: not drawn yet (transparent shaders without light emission).
+    surface: Option<Surface>,
     uv_scale: [f32; 2],
 }
 
@@ -131,9 +148,7 @@ impl<'a> LevelBuilder<'a> {
         only: Option<usize>,
         raster: bool,
         commands: &mut Commands,
-        meshes: &mut Assets<Mesh>,
-        materials: &mut Assets<StandardMaterial>,
-        images: &mut Assets<Image>,
+        assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
         for reference in bsp::references(self.cache)? {
             if only.is_some_and(|i| i != reference.index) {
@@ -147,11 +162,11 @@ impl<'a> LevelBuilder<'a> {
                 if material.indices.is_empty() {
                     continue;
                 }
-                let shader = self.surface(material.shader, materials, images);
-                if matches!(shader.surface, Surface::Skip) {
+                let shader = self.surface(material.shader, assets);
+                let Some(surface) = shader.surface else {
                     self.stats.skipped_transparent += 1;
                     continue;
-                }
+                };
                 let vertices = material.vertices.iter().map(|v| SourceVertex {
                     position: v.position,
                     normal: v.normal,
@@ -159,9 +174,9 @@ impl<'a> LevelBuilder<'a> {
                     tangent: v.tangent,
                     texcoord: v.texcoord,
                 });
-                let mesh = meshes.add(build_mesh(vertices, &material.indices, shader.uv_scale));
+                let mesh = assets.meshes.add(build_mesh(vertices, &material.indices, shader.uv_scale));
                 let name = format!("{} material {material_index}", reference.name);
-                self.spawn_mesh(commands, level, name, mesh, &shader.surface, raster);
+                self.spawn_mesh(commands, level, name, mesh, &surface, raster);
                 self.stats.triangles += material.indices.len() / 3;
             }
             self.loaded_bsps.push(reference.index);
@@ -176,9 +191,7 @@ impl<'a> LevelBuilder<'a> {
         &mut self,
         raster: bool,
         commands: &mut Commands,
-        meshes: &mut Assets<Mesh>,
-        materials: &mut Assets<StandardMaterial>,
-        images: &mut Assets<Image>,
+        assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
         let placements = objects::placements(self.cache)?;
         let objects_root = commands.spawn((Name::new("objects"), Transform::default(), Visibility::default())).id();
@@ -192,7 +205,7 @@ impl<'a> LevelBuilder<'a> {
             // (light fixtures often have no model, only their light)
             let model = objects::object_model(self.cache, placement.definition)?.and_then(|m| m.datum);
             let parts = match model {
-                Some(model) => self.model_meshes(model, placement.region_permutations, meshes, materials, images),
+                Some(model) => self.model_meshes(model, placement.region_permutations, assets),
                 None => None,
             };
             if parts.is_none() && placement.light.is_none() {
@@ -216,7 +229,7 @@ impl<'a> LevelBuilder<'a> {
                 && intensity > 0.0
                 && self.fixture_lights
             {
-                self.spawn_light_proxy(commands, object, Vec3::from(color) * intensity, meshes, materials);
+                self.spawn_light_proxy(commands, object, Vec3::from(color) * intensity, assets);
             }
             self.stats.objects += 1;
         }
@@ -231,9 +244,7 @@ impl<'a> LevelBuilder<'a> {
         &mut self,
         model_datum: u32,
         commands: &mut Commands,
-        meshes: &mut Assets<Mesh>,
-        materials: &mut Assets<StandardMaterial>,
-        images: &mut Assets<Image>,
+        assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
         use bevy::light::NotShadowCaster;
         let model = Model::load(self.cache, model_datum)?;
@@ -247,7 +258,7 @@ impl<'a> LevelBuilder<'a> {
                 let Some(info) = shader::shader_info(self.cache, shader_ref)? else { continue };
                 let (texture, uv_scale, uv_offset) = match sky_layer_map(&info) {
                     Some(map) => (
-                        map.bitmap.datum.and_then(|d| self.textures.get(self.cache, d, 0, true, images)),
+                        map.bitmap.datum.and_then(|d| self.textures.get(self.cache, d, 0, true, assets.images)),
                         map.uv_scale,
                         map.uv_offset,
                     ),
@@ -257,7 +268,7 @@ impl<'a> LevelBuilder<'a> {
                     .transparent
                     .as_ref()
                     .is_some_and(|t| matches!(t.blend, shader::BlendFunction::Add | shader::BlendFunction::AlphaMultiplyAdd));
-                let material = materials.add(StandardMaterial {
+                let material = assets.materials.add(StandardMaterial {
                     base_color_texture: texture,
                     unlit: true,
                     alpha_mode: if additive { AlphaMode::Add } else { AlphaMode::Blend },
@@ -274,7 +285,7 @@ impl<'a> LevelBuilder<'a> {
                     tangent: v.tangent,
                     texcoord: [v.texcoord[0] + uv_offset[0] / uv_scale[0].max(1e-6), v.texcoord[1] + uv_offset[1] / uv_scale[1].max(1e-6)],
                 });
-                let mesh = meshes.add(build_mesh(vertices, &part.indices, uv_scale));
+                let mesh = assets.meshes.add(build_mesh(vertices, &part.indices, uv_scale));
                 commands.spawn((
                     Name::new(format!("{} layer {layer}", info.name)),
                     Mesh3d(mesh),
@@ -296,13 +307,12 @@ impl<'a> LevelBuilder<'a> {
         commands: &mut Commands,
         object: Entity,
         light: Vec3,
-        meshes: &mut Assets<Mesh>,
-        materials: &mut Assets<StandardMaterial>,
+        assets: &mut LevelAssets,
     ) {
         let mesh = self
             .light_proxy
             .get_or_insert_with(|| {
-                meshes.add(
+                assets.meshes.add(
                     Sphere::new(LIGHT_PROXY_RADIUS)
                         .mesh()
                         .build()
@@ -311,7 +321,7 @@ impl<'a> LevelBuilder<'a> {
                 )
             })
             .clone();
-        let material = materials.add(StandardMaterial { base_color: Color::BLACK, ..default() });
+        let material = assets.materials.add(StandardMaterial { base_color: Color::BLACK, ..default() });
         let mut proxy = commands.spawn((
             Name::new("light fixture light"),
             RaytracingMesh3d(mesh.clone()),
@@ -337,24 +347,36 @@ impl<'a> LevelBuilder<'a> {
         surface: &Surface,
         raster: bool,
     ) {
-        let (material, radiance) = match surface {
-            Surface::Opaque(h) => (h.clone(), None),
-            Surface::Emissive(h, radiance) => (h.clone(), Some(*radiance)),
-            Surface::Skip => return,
-        };
-        let mut entity = commands.spawn((
-            Name::new(name),
+        let mut traced = commands.spawn((
+            Name::new(name.clone()),
             RaytracingMesh3d(mesh.clone()),
-            MeshMaterial3d(material),
+            MeshMaterial3d(surface.standard.clone()),
             Transform::default(),
             ChildOf(parent),
         ));
-        if raster {
-            entity.insert(Mesh3d(mesh));
-        }
-        if let Some(radiance) = radiance {
-            entity.insert(EmissiveSurface { radiance });
+        if let Some(radiance) = surface.radiance {
+            traced.insert(EmissiveSurface { radiance });
             self.stats.emissive_meshes += 1;
+        }
+        if raster {
+            match &surface.raster {
+                // the camera sees the Halo material; rays see the standard one
+                Some(material) => {
+                    let mut drawn = commands.spawn((
+                        Name::new(name),
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material.clone()),
+                        Transform::default(),
+                        ChildOf(parent),
+                    ));
+                    if let Some(radiance) = surface.radiance {
+                        drawn.insert(EmissiveSurface { radiance });
+                    }
+                }
+                None => {
+                    traced.insert(Mesh3d(mesh));
+                }
+            }
         }
         self.stats.meshes += 1;
     }
@@ -365,14 +387,12 @@ impl<'a> LevelBuilder<'a> {
         &mut self,
         datum: u32,
         permutations: [u8; 8],
-        meshes: &mut Assets<Mesh>,
-        materials: &mut Assets<StandardMaterial>,
-        images: &mut Assets<Image>,
+        assets: &mut LevelAssets,
     ) -> Option<ModelMeshes> {
         if let Some(cached) = self.models.get(&(datum, permutations)) {
             return cached.clone();
         }
-        let built = match self.build_model(datum, &permutations, meshes, materials, images) {
+        let built = match self.build_model(datum, &permutations, assets) {
             Ok(parts) => Some(parts),
             Err(e) => {
                 let name = self.cache.tag(datum).map(|t| t.name.clone()).unwrap_or_default();
@@ -389,9 +409,7 @@ impl<'a> LevelBuilder<'a> {
         &mut self,
         datum: u32,
         permutations: &[u8],
-        meshes: &mut Assets<Mesh>,
-        materials: &mut Assets<StandardMaterial>,
-        images: &mut Assets<Image>,
+        assets: &mut LevelAssets,
     ) -> halo_map::Result<ModelMeshes> {
         let model = Model::load(self.cache, datum)?;
         let mut out = Vec::new();
@@ -405,11 +423,11 @@ impl<'a> LevelBuilder<'a> {
                     .get(part.shader_index.max(0) as usize)
                     .copied()
                     .unwrap_or(TagRef { group: 0, datum: None });
-                let shader = self.surface(shader_ref, materials, images);
-                if matches!(shader.surface, Surface::Skip) {
+                let shader = self.surface(shader_ref, assets);
+                let Some(surface) = shader.surface else {
                     self.stats.skipped_transparent += 1;
                     continue;
-                }
+                };
                 let vertices = part.vertices.iter().map(|v| SourceVertex {
                     position: v.position,
                     normal: v.normal,
@@ -417,8 +435,8 @@ impl<'a> LevelBuilder<'a> {
                     tangent: v.tangent,
                     texcoord: v.texcoord,
                 });
-                let mesh = meshes.add(build_mesh(vertices, &part.indices, shader.uv_scale));
-                out.push((mesh, shader.surface, part.indices.len() / 3));
+                let mesh = assets.meshes.add(build_mesh(vertices, &part.indices, shader.uv_scale));
+                out.push((mesh, surface, part.indices.len() / 3));
             }
         }
         Ok(out)
@@ -428,8 +446,7 @@ impl<'a> LevelBuilder<'a> {
     fn surface(
         &mut self,
         shader: TagRef,
-        materials: &mut Assets<StandardMaterial>,
-        images: &mut Assets<Image>,
+        assets: &mut LevelAssets,
     ) -> ShaderSurface {
         if let Some(surface) = self.surfaces.get(&shader.datum) {
             return surface.clone();
@@ -442,35 +459,31 @@ impl<'a> LevelBuilder<'a> {
             }
         };
         let surface = ShaderSurface {
-            surface: self.make_surface(info.as_ref(), materials, images),
+            surface: self.make_surface(info.as_ref(), assets),
             uv_scale: info.as_ref().map_or([1.0, 1.0], |i| i.uv_scale),
         };
         self.surfaces.insert(shader.datum, surface.clone());
         surface
     }
 
-    fn make_surface(
-        &mut self,
-        info: Option<&ShaderInfo>,
-        materials: &mut Assets<StandardMaterial>,
-        images: &mut Assets<Image>,
-    ) -> Surface {
+    fn make_surface(&mut self, info: Option<&ShaderInfo>, assets: &mut LevelAssets) -> Option<Surface> {
         let Some(info) = info else {
-            return Surface::Opaque(materials.add(StandardMaterial {
+            let standard = assets.materials.add(StandardMaterial {
                 base_color: Color::srgb(0.5, 0.5, 0.5),
                 perceptual_roughness: 0.9,
                 ..default()
-            }));
+            });
+            return Some(Surface { standard, raster: None, radiance: None });
         };
         let base_color_texture = info
             .base_map
             .and_then(|r| r.datum)
-            .and_then(|datum| self.textures.get(self.cache, datum, 0, true, images));
+            .and_then(|datum| self.textures.get(self.cache, datum, 0, true, assets.images));
         let radiance = Vec3::from(info.emitted_light) * info.emitted_power;
         let emits = info.emitted_power > 0.0 && radiance != Vec3::ZERO;
 
         if info.shader_type.is_transparent() && !emits {
-            return Surface::Skip;
+            return None;
         }
         let self_illumination = info.self_illumination.and_then(|si| match si {
             shader::SelfIllumination::Model { multipurpose_map, color_upper, .. } => {
@@ -478,7 +491,7 @@ impl<'a> LevelBuilder<'a> {
                     base: info.base_map.and_then(|b| b.datum),
                     multipurpose: multipurpose_map.datum?,
                 };
-                Some((self.textures.baked(self.cache, bake, images)?, Vec3::from(color_upper)))
+                Some((self.textures.baked(self.cache, bake, assets.images)?, Vec3::from(color_upper)))
             }
             shader::SelfIllumination::Environment { map, primary, secondary, plasma } => {
                 let bake = crate::textures::Bake::EnvironmentSelfIllumination {
@@ -486,7 +499,7 @@ impl<'a> LevelBuilder<'a> {
                     map: map.datum?,
                     colors: [primary, secondary, plasma].map(|c| c.map(f32::to_bits)),
                 };
-                Some((self.textures.baked(self.cache, bake, images)?, Vec3::ONE))
+                Some((self.textures.baked(self.cache, bake, assets.images)?, Vec3::ONE))
             }
         });
         let material = StandardMaterial {
@@ -506,18 +519,86 @@ impl<'a> LevelBuilder<'a> {
             // otherwise.
             emissive_texture: match &self_illumination {
                 Some((texture, _)) => Some(texture.clone()),
-                None if emits && info.shader_type == ShaderType::Environment => base_color_texture,
+                None if emits && info.shader_type == ShaderType::Environment => base_color_texture.clone(),
                 None => None,
             },
             ..default()
         };
-        let handle = materials.add(material);
-        match self_illumination {
-            _ if emits => Surface::Emissive(handle, radiance),
-            Some((_, color)) => Surface::Emissive(handle, color * SELF_ILLUMINATION_RADIANCE),
-            None => Surface::Opaque(handle),
-        }
+        let radiance = match &self_illumination {
+            _ if emits => Some(radiance),
+            Some((_, color)) => Some(*color * SELF_ILLUMINATION_RADIANCE),
+            None => None,
+        };
+        let raster = match (&info.environment, &base_color_texture) {
+            (Some(environment), Some(base_map)) => {
+                Some(self.environment_material(environment, base_map.clone(), &material, info, assets))
+            }
+            _ => None,
+        };
+        Some(Surface { standard: assets.materials.add(material), raster, radiance })
     }
+
+    /// A `shader_environment`'s camera material: its detail layers over
+    /// `standard` (see `halo_environment.wesl`).
+    fn environment_material(
+        &mut self,
+        environment: &shader::EnvironmentDiffuse,
+        base_map: Handle<Image>,
+        standard: &StandardMaterial,
+        info: &ShaderInfo,
+        assets: &mut LevelAssets,
+    ) -> Handle<HaloEnvironmentMaterial> {
+        use shader::{DetailFunction, EnvironmentType};
+        let base_size = info.base_map.and_then(|b| b.datum).and_then(|d| bitmap_size(self.cache, d));
+        let mut layer = |map: Option<shader::DetailMap>| -> (Handle<Image>, Vec2) {
+            let Some(map) = map else { return (assets.neutral_detail.clone(), Vec2::ONE) };
+            let Some(datum) = map.bitmap.datum else { return (assets.neutral_detail.clone(), Vec2::ONE) };
+            let image = self.textures.get(self.cache, datum, 0, true, assets.images);
+            // rescaled detail maps repeat relative to the base map's size
+            let rescale = match (environment.rescale_detail_maps, base_size, bitmap_size(self.cache, datum)) {
+                (true, Some(base), Some(detail)) => base / detail,
+                _ => Vec2::ONE,
+            };
+            (image.unwrap_or_else(|| assets.neutral_detail.clone()), rescale * map.scale)
+        };
+        let (primary, primary_scale) = layer(environment.primary_detail);
+        let (secondary, secondary_scale) = layer(environment.secondary_detail);
+        let (micro, micro_scale) = layer(environment.micro_detail);
+        let function = |f: DetailFunction| match f {
+            DetailFunction::DoubleBiasedMultiply => 0,
+            DetailFunction::Multiply => 1,
+            DetailFunction::DoubleBiasedAdd => 2,
+        };
+        let mut base = standard.clone();
+        if info.alpha_tested {
+            base.alpha_mode = AlphaMode::Mask(0.5);
+        }
+        assets.environment_materials.add(HaloEnvironmentMaterial {
+            base,
+            extension: HaloEnvironment {
+                params: HaloEnvironmentParams {
+                    detail_scales: primary_scale.extend(secondary_scale.x).extend(secondary_scale.y),
+                    micro_scale: micro_scale.extend(0.0).extend(0.0),
+                    modes: UVec4::new(
+                        u32::from(environment.kind != EnvironmentType::Normal),
+                        function(environment.detail_function),
+                        function(environment.micro_detail_function),
+                        0,
+                    ),
+                },
+                base_map,
+                primary_detail_map: primary,
+                secondary_detail_map: secondary,
+                micro_detail_map: micro,
+            },
+        })
+    }
+}
+
+/// A bitmap group's first bitmap's size.
+fn bitmap_size(cache: &CacheFile, datum: u32) -> Option<Vec2> {
+    let bitmaps = halo_map::bitmap::bitmaps(cache, datum).ok()?;
+    bitmaps.first().map(|b| Vec2::new(b.width as f32, b.height as f32))
 }
 
 /// The map that carries a sky layer's look: transparent shaders composite

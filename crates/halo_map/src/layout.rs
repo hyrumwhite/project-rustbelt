@@ -185,12 +185,16 @@ pub mod shader_environment_definition {
     pub const SIZEOF: usize = 0x344;
     pub const FLAGS: usize = 0x28;
     pub const TYPE: usize = 0x2a;
+    pub const DIFFUSE_FLAGS: usize = 0x6c;
     pub const BASE_MAP: usize = 0x88;
     pub const DETAIL_MAP_FUNCTION: usize = 0xb0;
     pub const PRIMARY_DETAIL_MAP_SCALE: usize = 0xb4;
     pub const PRIMARY_DETAIL_MAP: usize = 0xb8;
     pub const SECONDARY_DETAIL_MAP_SCALE: usize = 0xc8;
     pub const SECONDARY_DETAIL_MAP: usize = 0xcc;
+    pub const MICRO_DETAIL_MAP_FUNCTION: usize = 0xf4;
+    pub const MICRO_DETAIL_MAP_SCALE: usize = 0xf8;
+    pub const MICRO_DETAIL_MAP: usize = 0xfc;
     pub const MATERIAL_COLOR: usize = 0x10c;
     pub const BUMP_MAP_SCALE: usize = 0x124;
     pub const BUMP_MAP: usize = 0x128;

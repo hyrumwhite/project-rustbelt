@@ -86,6 +86,63 @@ pub struct TransparentInfo {
     pub maps: Vec<TransparentMap>,
 }
 
+/// `_detail_map_function_*` (rasterizer_xbox_environment.c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailFunction {
+    /// `2 * base * detail`: a 50% grey detail texel leaves the base alone.
+    DoubleBiasedMultiply,
+    /// `base * detail`.
+    Multiply,
+    /// `base + 2 * detail - 1`.
+    DoubleBiasedAdd,
+}
+
+impl DetailFunction {
+    fn from_raw(raw: i16) -> Self {
+        match raw {
+            1 => Self::Multiply,
+            2 => Self::DoubleBiasedAdd,
+            _ => Self::DoubleBiasedMultiply,
+        }
+    }
+}
+
+/// `_shader_environment_type_*`: which alpha mixes the two detail maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvironmentType {
+    /// The secondary detail map's alpha mixes towards the primary.
+    Normal,
+    /// The base map's alpha mixes towards the primary.
+    Blended,
+    /// As blended; the base map's alpha is also the specular mask.
+    BlendedBaseSpecular,
+}
+
+/// A detail map and how many times it repeats across the base map.
+#[derive(Debug, Clone, Copy)]
+pub struct DetailMap {
+    pub bitmap: TagRef,
+    pub scale: f32,
+}
+
+/// How a `shader_environment` builds its diffuse colour, as the Xbox's
+/// pixel shader combines it (`rasterizer_xbox_environment.c`): base map
+/// (t0), primary and secondary detail maps (t1, t2) mixed by an alpha, then
+/// the micro detail map (t3).
+#[derive(Debug, Clone, Copy)]
+pub struct EnvironmentDiffuse {
+    pub kind: EnvironmentType,
+    pub detail_function: DetailFunction,
+    pub primary_detail: Option<DetailMap>,
+    pub secondary_detail: Option<DetailMap>,
+    pub micro_detail_function: DetailFunction,
+    pub micro_detail: Option<DetailMap>,
+    /// Detail scales are relative to the base map's size over the detail
+    /// map's (`_shader_environment_diffuse_rescale_detail_maps_bit`).
+    pub rescale_detail_maps: bool,
+    pub bump_map: Option<DetailMap>,
+}
+
 /// Light a surface gives off by itself, beyond its radiosity emission.
 #[derive(Debug, Clone, Copy)]
 pub enum SelfIllumination {
@@ -122,6 +179,12 @@ pub struct ShaderInfo {
     pub self_illumination: Option<SelfIllumination>,
     /// `shader_model`'s multipurpose map (see [`SelfIllumination::Model`]).
     pub multipurpose_map: Option<TagRef>,
+    /// `shader_environment`'s diffuse layers.
+    pub environment: Option<EnvironmentDiffuse>,
+}
+
+fn nonzero(v: f32) -> f32 {
+    if v == 0.0 { 1.0 } else { v }
 }
 
 fn present(reference: TagRef) -> Option<TagRef> {
@@ -151,6 +214,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         transparent: None,
         self_illumination: None,
         multipurpose_map: None,
+        environment: None,
     };
 
     if tag.group == groups::SHADER_ENVIRONMENT {
@@ -168,6 +232,23 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
             }
         }
         info.bump_map = present(root.reference(e::BUMP_MAP)?);
+        let detail = |map: usize, scale: usize| -> Result<Option<DetailMap>> {
+            Ok(present(root.reference(map)?).map(|bitmap| DetailMap { bitmap, scale: nonzero(root.f32(scale).unwrap_or(1.0)) }))
+        };
+        info.environment = Some(EnvironmentDiffuse {
+            kind: match root.i16(e::TYPE)? {
+                1 => EnvironmentType::Blended,
+                2 => EnvironmentType::BlendedBaseSpecular,
+                _ => EnvironmentType::Normal,
+            },
+            detail_function: DetailFunction::from_raw(root.i16(e::DETAIL_MAP_FUNCTION)?),
+            primary_detail: detail(e::PRIMARY_DETAIL_MAP, e::PRIMARY_DETAIL_MAP_SCALE)?,
+            secondary_detail: detail(e::SECONDARY_DETAIL_MAP, e::SECONDARY_DETAIL_MAP_SCALE)?,
+            micro_detail_function: DetailFunction::from_raw(root.i16(e::MICRO_DETAIL_MAP_FUNCTION)?),
+            micro_detail: detail(e::MICRO_DETAIL_MAP, e::MICRO_DETAIL_MAP_SCALE)?,
+            rescale_detail_maps: root.u16(e::DIFFUSE_FLAGS)? & 1 != 0,
+            bump_map: detail(e::BUMP_MAP, e::BUMP_MAP_SCALE)?,
+        });
         info.self_illumination_map = present(root.reference(e::SELF_ILLUMINATION_MAP)?);
         let colors = [root.vec3(e::PRIMARY_ON_COLOR)?, root.vec3(e::SECONDARY_ON_COLOR)?, root.vec3(e::PLASMA_ON_COLOR)?];
         if let Some(map) = info.self_illumination_map

@@ -5,6 +5,7 @@
 //! lit by the level's sun and sky and by its light-emitting shaders.
 
 mod level;
+mod material;
 mod sky;
 mod textures;
 
@@ -26,7 +27,8 @@ use halo_map::{
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
     scenario, CacheFile,
 };
-use level::{EmissiveSurface, LevelBuilder, LevelStats};
+use level::{EmissiveSurface, LevelAssets, LevelBuilder, LevelStats};
+use material::{HaloEnvironmentMaterial, HaloMaterialsPlugin, NeutralDetail};
 use std::path::PathBuf;
 
 #[cfg(feature = "dlss")]
@@ -171,7 +173,7 @@ fn main() -> AppExit {
     #[cfg(feature = "dlss")]
     app.insert_resource(DlssProjectId(bevy::asset::uuid::uuid!("3f1d6a2e-8a4b-4f5e-9c3d-1b2a7e6f0d91")));
 
-    app.add_plugins((default_plugins(&args), SolariPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin))
+    app.add_plugins((default_plugins(&args), SolariPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
         .insert_resource(args.clone())
         .insert_resource(LevelSky(level_sky))
         .insert_resource(LightingSettings::default())
@@ -226,31 +228,33 @@ fn setup_level(
     render_device: Res<RenderDevice>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    neutral_detail: Res<NeutralDetail>,
 ) {
     let cache = map.0.take().expect("level loads once");
+    let mut assets = LevelAssets {
+        meshes: &mut meshes,
+        materials: &mut materials,
+        environment_materials: &mut environment_materials,
+        images: &mut images,
+        neutral_detail: neutral_detail.0.clone(),
+    };
     let bc_supported = render_device.features().contains(WgpuFeatures::TEXTURE_COMPRESSION_BC);
     let start = std::time::Instant::now();
     let mut builder = LevelBuilder::new(&cache, bc_supported);
     builder.fixture_lights = !args.no_fixture_lights;
     builder.show_light_proxies = args.show_light_proxies;
-    if let Err(e) = builder.spawn_bsps(
-        args.bsp,
-        !args.pathtracer,
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &mut images,
-    ) {
+    if let Err(e) = builder.spawn_bsps(args.bsp, !args.pathtracer, &mut commands, &mut assets) {
         error!("loading {}: {e}", cache.header.name);
     }
     if !args.no_objects
-        && let Err(e) = builder.spawn_objects(!args.pathtracer, &mut commands, &mut meshes, &mut materials, &mut images)
+        && let Err(e) = builder.spawn_objects(!args.pathtracer, &mut commands, &mut assets)
     {
         error!("placing objects: {e}");
     }
     if let Some(model) = halo_map::sky::skies(&cache).ok().and_then(|s| s.into_iter().find_map(|s| s.model)).and_then(|m| m.datum)
-        && let Err(e) = builder.spawn_sky(model, &mut commands, &mut meshes, &mut materials, &mut images)
+        && let Err(e) = builder.spawn_sky(model, &mut commands, &mut assets)
     {
         error!("sky: {e}");
     }
@@ -401,17 +405,27 @@ fn apply_lighting(
     settings: Res<LightingSettings>,
     level_sky: Res<LevelSky>,
     surfaces: Query<(&EmissiveSurface, &MeshMaterial3d<StandardMaterial>)>,
+    environment_surfaces: Query<(&EmissiveSurface, &MeshMaterial3d<HaloEnvironmentMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
     mut suns: Query<&mut DirectionalLight>,
     mut cameras: Query<(&mut Exposure, Option<&mut EnvironmentMapLight>, Option<&mut Skybox>)>,
 ) {
     if !settings.is_changed() {
         return;
     }
+    let emissive = |surface: &EmissiveSurface| {
+        let radiance = surface.radiance * settings.emissive_scale;
+        LinearRgba::rgb(radiance.x, radiance.y, radiance.z)
+    };
     for (surface, material) in &surfaces {
         if let Some(mut material) = materials.get_mut(&material.0) {
-            let radiance = surface.radiance * settings.emissive_scale;
-            material.emissive = LinearRgba::rgb(radiance.x, radiance.y, radiance.z);
+            material.emissive = emissive(surface);
+        }
+    }
+    for (surface, material) in &environment_surfaces {
+        if let Some(mut material) = environment_materials.get_mut(&material.0) {
+            material.base.emissive = emissive(surface);
         }
     }
     if let Some((_, _, power)) = level_sky.0.sun {
@@ -511,7 +525,15 @@ fn setup_ui(mut commands: Commands) {
         ControlText,
         Text::default(),
         TextFont { font_size: FontSize::Px(12.0), ..default() },
-        Node { position_type: PositionType::Absolute, bottom: px(12.0), left: px(12.0), ..default() },
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(8.0),
+            left: px(8.0),
+            padding: px(4.0).all(),
+            border_radius: BorderRadius::all(px(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.10, 0.10, 0.10, 0.75)),
     ));
     commands.spawn((
         Node {

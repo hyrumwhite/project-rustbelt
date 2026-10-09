@@ -117,6 +117,8 @@ symbols in this file:
 #include "models/models.h"
 #include "networking/network_connection.h"
 #include "objects/objects.h"
+#include "bevy_bridge.h"
+#include "models/model_definitions.h"
 #include "rasterizer/rasterizer_model_types.h"
 #include "render/render.h"
 #include "saved games/game_state.h"
@@ -524,6 +526,13 @@ void first_person_weapon_draw(
 							weapon_definition->weapon.interface_definition.first_person_animations.index,
 							first_person_weapon->node_matrices,
 							first_person_weapon->weapon_node_remapping_table);
+						/* port: and for a Bevy renderer (port/linux/game/bevy_bridge.c) */
+						bevy_bridge_record_model(
+							weapon_definition->weapon.interface_definition.first_person_model.index,
+							model_node_matrices,
+							(short)MIN(model_definition_get(
+								weapon_definition->weapon.interface_definition.first_person_model.index)->nodes.count,
+								MAXIMUM_NODES_PER_ANIMATION));
 						render_model(
 							weapon_definition->weapon.interface_definition.first_person_model.index,
 							0.0f,
@@ -549,6 +558,11 @@ void first_person_weapon_draw(
 							weapon_definition->weapon.interface_definition.first_person_animations.index,
 							first_person_weapon->node_matrices,
 							first_person_weapon->hands_node_remapping_table);
+						bevy_bridge_record_model(
+							first_person_interface->hands.index,
+							model_node_matrices,
+							(short)MIN(model_definition_get(first_person_interface->hands.index)->nodes.count,
+								MAXIMUM_NODES_PER_ANIMATION));
 						render_model(
 							first_person_interface->hands.index,
 							0.0f,

@@ -38,6 +38,18 @@ static struct bevy_bridge_shared *bevy_bridge_shared;
 static boolean bevy_bridge_failed;
 static unsigned long bevy_bridge_frame_index;
 
+/* models drawn outside the object list since the last frame (the
+first-person weapon and hands), shared with the next */
+#define MAXIMUM_RECORDED_MODELS 4
+#define MAXIMUM_RECORDED_MODEL_NODES 64
+static struct
+{
+	long model_index;
+	short node_count;
+	real_matrix4x3 nodes[MAXIMUM_RECORDED_MODEL_NODES];
+} bevy_bridge_recorded[MAXIMUM_RECORDED_MODELS];
+static short bevy_bridge_recorded_count;
+
 /* ---------- private code */
 
 static struct bevy_bridge_shared *bevy_bridge_get(void)
@@ -115,7 +127,30 @@ static void bevy_bridge_point(float *out, real_point3d const *in)
 	out[2] = in->z;
 }
 
+static void bevy_bridge_write_node(struct bevy_bridge_node *node, real_matrix4x3 const *matrix)
+{
+	node->scale = matrix->scale;
+	bevy_bridge_vector(node->forward, &matrix->forward);
+	bevy_bridge_vector(node->left, &matrix->left);
+	bevy_bridge_vector(node->up, &matrix->up);
+	bevy_bridge_point(node->position, &matrix->position);
+}
+
 /* ---------- public code */
+
+void bevy_bridge_record_model(
+	long model_index,
+	struct real_matrix4x3 const *node_matrices,
+	short node_count)
+{
+	if (!bevy_bridge_shared || model_index == NONE || bevy_bridge_recorded_count >= MAXIMUM_RECORDED_MODELS)
+		return;
+	node_count = (short)MIN(node_count, MAXIMUM_RECORDED_MODEL_NODES);
+	bevy_bridge_recorded[bevy_bridge_recorded_count].model_index = model_index;
+	bevy_bridge_recorded[bevy_bridge_recorded_count].node_count = node_count;
+	memcpy(bevy_bridge_recorded[bevy_bridge_recorded_count].nodes, node_matrices, node_count * sizeof(real_matrix4x3));
+	bevy_bridge_recorded_count++;
+}
 
 void bevy_bridge_export_frame(
 	struct render_window const *windows,
@@ -191,16 +226,38 @@ void bevy_bridge_export_frame(
 			out->flags = bevy_bridge_object_flags(iterator.index, first_person_unit);
 			memcpy(out->region_permutations, object->object.region_permutations, sizeof(out->region_permutations));
 			for (node_index = 0; node_index < node_count; node_index++)
-			{
-				struct bevy_bridge_node *node = &frame->nodes[frame->node_count++];
-
-				node->scale = nodes[node_index].scale;
-				bevy_bridge_vector(node->forward, &nodes[node_index].forward);
-				bevy_bridge_vector(node->left, &nodes[node_index].left);
-				bevy_bridge_vector(node->up, &nodes[node_index].up);
-				bevy_bridge_point(node->position, &nodes[node_index].position);
-			}
+				bevy_bridge_write_node(&frame->nodes[frame->node_count++], &nodes[node_index]);
 		}
+	}
+
+	/* the models the last frame drew by themselves */
+	{
+		short recorded;
+
+		for (recorded = 0; recorded < bevy_bridge_recorded_count; recorded++)
+		{
+			struct bevy_bridge_object *out;
+			short node_index;
+			short node_count = bevy_bridge_recorded[recorded].node_count;
+
+			if (frame->object_count >= BEVY_BRIDGE_MAXIMUM_OBJECTS ||
+				frame->node_count + node_count > BEVY_BRIDGE_MAXIMUM_NODES)
+			{
+				break;
+			}
+			out = &frame->objects[frame->object_count++];
+			memset(out, 0, sizeof(*out));
+			/* (a stable identity per slot, outside the datum indices' range) */
+			out->object_index = 0xFFFF0000UL | (unsigned long)recorded;
+			out->definition_index = (unsigned long)bevy_bridge_recorded[recorded].model_index;
+			out->first_node = frame->node_count;
+			out->node_count = (unsigned short)node_count;
+			out->type = NONE;
+			SET_FLAG(out->flags, _bevy_bridge_object_model_bit, TRUE);
+			for (node_index = 0; node_index < node_count; node_index++)
+				bevy_bridge_write_node(&frame->nodes[frame->node_count++], &bevy_bridge_recorded[recorded].nodes[node_index]);
+		}
+		bevy_bridge_recorded_count = 0;
 	}
 
 	__atomic_thread_fence(__ATOMIC_RELEASE);

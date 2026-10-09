@@ -30,7 +30,7 @@ player can play from the renderer's window.
 #define BEVY_BRIDGE_MAPPING_NAME "Local\\HaloBevyBridge"
 #define BEVY_BRIDGE_POSIX_NAME "/halo_bevy_bridge"
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 2
+#define BEVY_BRIDGE_VERSION 3
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
 #define BEVY_BRIDGE_FRAMES 2
@@ -43,6 +43,9 @@ enum
 	_bevy_bridge_object_hidden_bit = 0,
 	/* the camera is this object's first-person view */
 	_bevy_bridge_object_first_person_bit,
+	/* not an object: a model the game draws by itself (the first-person
+	weapon and hands); definition_index is the model tag's datum index */
+	_bevy_bridge_object_model_bit,
 };
 
 struct bevy_bridge_camera

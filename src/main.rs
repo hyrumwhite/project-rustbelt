@@ -10,6 +10,7 @@
 
 mod bridge;
 mod level;
+mod lights;
 mod material;
 mod options;
 mod overlay;
@@ -271,7 +272,9 @@ fn main() -> AppExit {
     }
     if let Some(mut link) = link {
         link.sync_to_overlay = overlay;
-        app.insert_resource(link).add_plugins(bridge::BridgePlugin).add_systems(PreUpdate, follow_level);
+        app.insert_resource(link)
+            .add_plugins((bridge::BridgePlugin, lights::DynamicLightsPlugin))
+            .add_systems(PreUpdate, follow_level);
         if overlay {
             app.add_plugins(overlay::OverlayPlugin);
         }

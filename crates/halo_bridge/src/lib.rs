@@ -21,7 +21,8 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
+pub const MAXIMUM_LIGHTS: usize = 64;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;
@@ -76,6 +77,21 @@ pub struct Node {
     pub position: [f32; 3],
 }
 
+/// A dynamic light (a muzzle flash, plasma, an explosion, the flashlight),
+/// as the game lit the frame before.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Light {
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    /// 0..1 a channel.
+    pub color: [f32; 3],
+    /// How far it reaches (world units).
+    pub radius: f32,
+    /// A spotlight's cutoff angle (radians); pi or more shines every way.
+    pub cutoff_angle: f32,
+}
+
 #[repr(C)]
 struct Frame {
     sequence: u32,
@@ -85,6 +101,8 @@ struct Frame {
     scenario_name: [u8; 64],
     camera_valid: u32,
     camera: Camera,
+    light_count: u32,
+    lights: [Light; MAXIMUM_LIGHTS],
     object_count: u32,
     node_count: u32,
     objects: [Object; MAXIMUM_OBJECTS],
@@ -214,6 +232,7 @@ pub struct Snapshot {
     /// The scenario tag's name, e.g. `levels\b30\b30`.
     pub scenario_name: String,
     pub camera: Option<Camera>,
+    pub lights: Vec<Light>,
     pub objects: Vec<Object>,
     pub nodes: Vec<Node>,
 }
@@ -423,6 +442,7 @@ impl Bridge {
                     return None;
                 }
                 let object_count = (std::ptr::read_volatile(&(*frame).object_count) as usize).min(MAXIMUM_OBJECTS);
+                let light_count = (std::ptr::read_volatile(&(*frame).light_count) as usize).min(MAXIMUM_LIGHTS);
                 let node_count = (std::ptr::read_volatile(&(*frame).node_count) as usize).min(MAXIMUM_NODES);
                 let name = std::ptr::read_volatile(&(*frame).scenario_name);
                 let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
@@ -433,6 +453,7 @@ impl Bridge {
                     scenario_name: String::from_utf8_lossy(&name[..end]).into_owned(),
                     camera: (std::ptr::read_volatile(&(*frame).camera_valid) != 0)
                         .then(|| std::ptr::read_volatile(&(*frame).camera)),
+                    lights: (0..light_count).map(|i| std::ptr::read_volatile(&(*frame).lights[i])).collect(),
                     objects: (0..object_count).map(|i| std::ptr::read_volatile(&(*frame).objects[i])).collect(),
                     nodes: (0..node_count).map(|i| std::ptr::read_volatile(&(*frame).nodes[i])).collect(),
                 };

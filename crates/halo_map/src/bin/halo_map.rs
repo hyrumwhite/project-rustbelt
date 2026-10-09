@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, process::ExitCode, time::Instant};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(command), Some(path)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: halo_map <info|tags|bsp|shaders|sky|bitmap|bitmaps|objects|skypano> <map> [args]");
+        eprintln!("usage: halo_map <info|tags|bsp|shaders|shader|sky|bitmap|bitmaps|objects|skypano> <map> [args]");
         return ExitCode::FAILURE;
     };
     let start = Instant::now();
@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         "tags" => tags(&cache, args.get(2)),
         "bsp" => bsps(&cache),
         "shaders" => shaders(&cache),
+        "shader" => shader(&cache, &args[2..]),
         "sky" => skies(&cache),
         "bitmap" => export_bitmap(&cache, &args[2..]),
         "bitmaps" => all_bitmaps(&cache),
@@ -52,6 +53,23 @@ fn main() -> ExitCode {
 }
 
 type CliResult = Result<(), Box<dyn std::error::Error>>;
+
+/// One shader tag (by name, any shader group): what the renderer reads from
+/// it, and a transparent shader's combiner program.
+fn shader(cache: &CacheFile, args: &[String]) -> CliResult {
+    let name = args.first().ok_or("usage: halo_map shader <map> <tag name>")?;
+    let tag = cache
+        .tags
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(name) && (t.group == halo_map::groups::SHADER || t.parent_groups.contains(&halo_map::groups::SHADER)))
+        .ok_or_else(|| format!("no shader {name}"))?;
+    let reference = halo_map::TagRef { group: tag.group, datum: Some(tag.datum) };
+    println!("{:#?}", halo_map::shader::shader_info(cache, reference)?);
+    if let Some(program) = halo_map::combiner::program(cache, reference)? {
+        println!("{program:#x?}");
+    }
+    Ok(())
+}
 
 fn info(cache: &CacheFile, loaded: std::time::Duration) -> CliResult {
     let h = &cache.header;

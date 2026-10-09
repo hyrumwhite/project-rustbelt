@@ -1,7 +1,7 @@
 //! Prints what a running OpenCE shares through its Bevy bridge, once a second.
 //!
 //! ```text
-//! bridge_probe [seconds] [walk] [listen] [pad] [latency]
+//! bridge_probe [seconds] [walk] [listen] [pad] [latency] [fire]
 //! ```
 //!
 //! `walk` also forwards input: W held (and the mouse turning slowly) for the
@@ -10,6 +10,7 @@
 //! game logs the change). `pad` forwards a gamepad, its left stick pushed
 //! forward for the second half. `latency` turns the view with the mouse twice
 //! a second and reports how long the game's shared camera takes to follow.
+//! `fire` holds the left mouse button for the second half.
 //! `HALO_BEVY_BRIDGE_NAME` names the bridge.
 
 use halo_bridge::{Bridge, OBJECT_FIRST_PERSON, OBJECT_HIDDEN};
@@ -22,6 +23,8 @@ fn main() {
     let listen = std::env::args().any(|a| a == "listen");
     // (a gamepad's left stick pushed forward for the second half)
     let pad = std::env::args().any(|a| a == "pad");
+    // (the left mouse button held for the second half: firing)
+    let fire = std::env::args().any(|a| a == "fire");
     // (turns the view with the mouse every second and reports how long the
     // game's camera takes to follow)
     let latency = std::env::args().any(|a| a == "latency");
@@ -82,6 +85,12 @@ fn main() {
             }
             bridge.write_gamepads(&[gamepad]);
         }
+        if fire {
+            let firing = start.elapsed() > Duration::from_secs(seconds / 2);
+            input.active = u32::from(firing);
+            input.mouse_buttons = if firing { 1 << 1 } else { 0 };
+            bridge.write_input(&input);
+        }
         let fresh = bridge.read();
         if latency && start.elapsed() > Duration::from_secs(3) {
             if let (Some(snapshot), Some((at, forward))) = (&fresh, nudged)
@@ -122,6 +131,9 @@ fn main() {
                     if first_person { ", first person" } else { "" },
                     snapshot.camera.map(|c| c.position)
                 );
+                if let Some(light) = snapshot.lights.first() {
+                    println!("  {} dynamic lights, e.g. {light:?}", snapshot.lights.len());
+                }
                 if let Some(object) = coloured.first() {
                     println!(
                         "  {} objects with change colours, e.g. {:08x}: {:?}",

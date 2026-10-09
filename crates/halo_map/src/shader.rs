@@ -242,6 +242,9 @@ pub struct ShaderInfo {
     pub self_illumination: Option<SelfIllumination>,
     /// `shader_model`'s multipurpose map (see [`SelfIllumination::Model`]).
     pub multipurpose_map: Option<TagRef>,
+    /// `shader_model`: which of the object's change colours (0-3 for A-D)
+    /// tints the base map, where the multipurpose map's alpha says.
+    pub change_color: Option<usize>,
     /// `shader_environment`'s diffuse layers.
     pub environment: Option<EnvironmentDiffuse>,
     pub reflection: Option<Reflection>,
@@ -281,6 +284,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         transparent: None,
         self_illumination: None,
         multipurpose_map: None,
+        change_color: None,
         environment: None,
         reflection: None,
         glass: None,
@@ -358,6 +362,9 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         use layout::shader_model_definition as m;
         info.base_map = present(root.reference(m::BASE_MAP)?);
         info.multipurpose_map = present(root.reference(m::MULTIPURPOSE_MAP)?);
+        // (0 none, 1-4 A-D)
+        let source = root.i16(m::CHANGE_COLOR_SOURCE)?;
+        info.change_color = (1..=4).contains(&source).then(|| source as usize - 1);
         let (lower, upper) =
             (root.vec3(m::SELF_ILLUMINATION_COLOR_LOWER_BOUND)?, root.vec3(m::SELF_ILLUMINATION_COLOR_UPPER_BOUND)?);
         if let Some(multipurpose_map) = info.multipurpose_map

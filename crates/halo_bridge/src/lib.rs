@@ -21,15 +21,16 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 6;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;
 /// The largest overlay picture, in pixels.
 pub const OVERLAY_MAXIMUM_PIXELS: usize = 2560 * 1440;
 const OVERLAYS: usize = 2;
-#[cfg(windows)]
-const MAPPING_NAME: &[u8] = b"Local\\HaloBevyBridge\0";
+/// The game's default bridge name (`game.bevy_bridge_name`). Each game
+/// shares under its own name, so several can run side by side.
+pub const DEFAULT_NAME: &str = "HaloBevyBridge";
 
 pub const OBJECT_HIDDEN: u32 = 1 << 0;
 pub const OBJECT_FIRST_PERSON: u32 = 1 << 1;
@@ -59,6 +60,9 @@ pub struct Object {
     pub kind: i16,
     pub flags: u32,
     pub region_permutations: [u8; 8],
+    /// The object's change colours A-D (team and armour colours); white for
+    /// a model.
+    pub change_colors: [[f32; 3]; 4],
 }
 
 /// `real_matrix4x3`: a node's world transform.
@@ -103,7 +107,13 @@ pub struct Input {
     /// The mouse buttons held, a bit per SDL button number (1 left, 2
     /// middle, 3 right, 4 and 5 the side buttons).
     pub mouse_buttons: u32,
-    pub reserved: [u32; 11],
+    /// Nonzero while the renderer flies its own camera: the first player
+    /// hears from it. The game's coordinates (world units, Z up).
+    pub listener_valid: u32,
+    pub listener_position: [f32; 3],
+    pub listener_forward: [f32; 3],
+    pub listener_up: [f32; 3],
+    pub reserved: [u32; 1],
 }
 
 impl Input {
@@ -147,7 +157,7 @@ struct Shared {
 
 /// The layout is the game's, measured there; keep these in step with
 /// `bevy_bridge_protocol.h`.
-const _: () = assert!(std::mem::size_of::<Object>() == 28);
+const _: () = assert!(std::mem::size_of::<Object>() == 76);
 const _: () = assert!(std::mem::size_of::<Node>() == 52);
 const _: () = assert!(std::mem::size_of::<Camera>() == 40);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);
@@ -219,17 +229,25 @@ unsafe impl Send for Bridge {}
 unsafe impl Sync for Bridge {}
 
 impl Bridge {
-    /// Opens the game's shared memory.
+    /// Opens the shared memory of the game using the default name.
     pub fn open() -> Result<Self, Error> {
+        Self::open_named(DEFAULT_NAME)
+    }
+
+    /// Opens the shared memory of the game started with
+    /// `HALO_BEVY_BRIDGE_NAME=name`.
+    pub fn open_named(name: &str) -> Result<Self, Error> {
         #[cfg(windows)]
         {
-            let (mapping, view) = windows::open(MAPPING_NAME, std::mem::size_of::<Shared>())?;
+            let mapping_name = format!("Local\\{name}\0");
+            let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
             let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None };
             bridge.check()?;
             Ok(bridge)
         }
         #[cfg(not(windows))]
         {
+            let _ = name;
             Err(Error::NotRunning)
         }
     }

@@ -230,6 +230,7 @@ pub mod shader_environment_specular_properties {
 pub mod shader_model_definition {
     pub const SIZEOF: usize = 0x1b8;
     pub const FLAGS: usize = 0x28;
+    pub const CHANGE_COLOR_SOURCE: usize = 0x4c;
     pub const SELF_ILLUMINATION_FLAGS: usize = 0x6c;
     pub const SELF_ILLUMINATION_COLOR_SOURCE: usize = 0x70;
     pub const SELF_ILLUMINATION_COLOR_LOWER_BOUND: usize = 0x78;

@@ -428,6 +428,22 @@ void console_startup(
 		fclose(file);
 	}
 
+	/* port: the level a Bevy renderer that started the game asked for
+	(game.bevy_bridge_map, port/linux/game/bevy_bridge.c) */
+	{
+		extern const char *config_string(const char *name);
+		const char *map = config_string("game.bevy_bridge_map");
+
+		if (map && *map && strlen(map) < NUMBEROF(buffer) - 16)
+		{
+			sprintf(buffer, "map_name %s", map);
+			if (hs_compile_and_evaluate(buffer))
+			{
+				error(_error_log, "bevy bridge: %s", buffer);
+			}
+		}
+	}
+
 	return;
 }
 

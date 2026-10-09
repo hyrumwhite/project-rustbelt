@@ -279,6 +279,9 @@ static const struct config_setting config_settings[] =
 		"Share each frame's camera and objects with a Bevy renderer\n"
 		"(bevy-rt-test's halo_rt, which draws the game with ray tracing)\n"
 		"through shared memory (port/linux/game/bevy_bridge.c)." },
+	{ "game.bevy_bridge_map", _config_string, "\"\"", "HALO_BEVY_BRIDGE_MAP", _environment_value, _platform_desktop,
+		"A level to load at start-up for a Bevy renderer that starts the game\n"
+		"(a scenario name, such as levels\\b30\\b30); empty for the menus." },
 
 	{ "paths.data", _config_string, "\"\"", "HALO_DATA_ROOT", _environment_value, _platform_desktop,
 		"The folder holding the game data's maps folder; empty looks in the\n"

@@ -22,7 +22,8 @@ void bevy_bridge_record_model(
 	long model_index,
 	struct real_matrix4x3 const *node_matrices,
 	short node_count,
-	real_rgb_color const *change_colors);
+	real_rgb_color const *change_colors,
+	real active_camouflage);
 
 /* sound_manager.c: the first player's listener, which the renderer may
 move to its own camera; TRUE if it did */

@@ -503,8 +503,11 @@ void first_person_weapon_draw(
 					struct render_lighting *lighting= object_get_cached_render_lighting(unit_index, FLT_MAX);
 
 					model_effect.modifier_shader= NULL;
-					if (TEST_FLAG(unit->unit.flags, _unit_active_camouflaged_bit) ||
-						unit->unit.active_camouflage>0.0f)
+					/* port: not over the Bevy bridge's overlay, where the
+					shimmer would refract an empty picture: the renderer draws
+					its own */
+					if ((TEST_FLAG(unit->unit.flags, _unit_active_camouflaged_bit) ||
+						unit->unit.active_camouflage>0.0f) && !halo_screen_overlay())
 					{
 						model_effect.type= _render_model_effect_type_active_camouflage;
 						model_effect.intensity= unit->unit.active_camouflage;
@@ -533,7 +536,11 @@ void first_person_weapon_draw(
 							(short)MIN(model_definition_get(
 								weapon_definition->weapon.interface_definition.first_person_model.index)->nodes.count,
 								MAXIMUM_NODES_PER_ANIMATION),
-							weapon->object.outgoing_change_colors);
+							weapon->object.outgoing_change_colors,
+							unit->unit.active_camouflage);
+						/* port: camouflaged, not drawn over the Bevy bridge's
+						overlay (render_objects.c, overlay_camouflaged) */
+						if (!(halo_screen_overlay() && unit->unit.active_camouflage >= 0.5f))
 						render_model(
 							weapon_definition->weapon.interface_definition.first_person_model.index,
 							0.0f,
@@ -564,7 +571,11 @@ void first_person_weapon_draw(
 							model_node_matrices,
 							(short)MIN(model_definition_get(first_person_interface->hands.index)->nodes.count,
 								MAXIMUM_NODES_PER_ANIMATION),
-							unit->object.outgoing_change_colors);
+							unit->object.outgoing_change_colors,
+							unit->unit.active_camouflage);
+						/* port: camouflaged, not drawn over the Bevy bridge's
+						overlay (render_objects.c, overlay_camouflaged) */
+						if (!(halo_screen_overlay() && unit->unit.active_camouflage >= 0.5f))
 						render_model(
 							first_person_interface->hands.index,
 							0.0f,

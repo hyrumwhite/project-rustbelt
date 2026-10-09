@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 8
+#define BEVY_BRIDGE_VERSION 9
 #define BEVY_BRIDGE_MAXIMUM_LIGHTS 64
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
@@ -88,6 +88,9 @@ struct bevy_bridge_object
 	model shaders tint their base maps with where their multipurpose map's
 	alpha says; white for a model */
 	float change_colors[4][3];
+	/* how camouflaged it is (0..1): a unit's active camouflage, which what
+	it holds shares */
+	float active_camouflage;
 };
 
 /* real_matrix4x3: a node's world transform */

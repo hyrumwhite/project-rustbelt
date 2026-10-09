@@ -204,6 +204,27 @@ typedef char render_object_globals_size_assert[
 
 static boolean object_is_first_person_camera(
 	long object_index);
+
+/* port: over the Bevy bridge's overlay a camouflaged unit (and what it
+holds) is not drawn at all: the renderer draws its own camouflage, and a
+depth-only silhouette would hide the effects and fog behind it */
+static boolean overlay_camouflaged(
+	long object_index)
+{
+	short depth;
+
+	if (!halo_screen_overlay())
+		return FALSE;
+	for (depth = 0; depth < 4 && object_index != NONE; depth++)
+	{
+		struct object_datum *object = object_get(object_index);
+
+		if (TEST_FLAG(_object_mask_unit, object->object.type))
+			return unit_get(object_index)->unit.active_camouflage >= 0.5f;
+		object_index = object->object.parent_object_index;
+	}
+	return FALSE;
+}
 static void find_rendered_objects(
 	void);
 static real object_get_level_of_detail_pixels(
@@ -543,7 +564,10 @@ static void render_object_list(
 					{
 						struct unit_datum *unit = unit_get(object_index);
 
-						if (unit->unit.active_camouflage > 0.f)
+						/* port: not over the Bevy bridge's overlay, where the
+						shimmer would refract an empty picture: the renderer
+						draws its own */
+						if (unit->unit.active_camouflage > 0.f && !halo_screen_overlay())
 						{
 							model_effect.type =
 								_render_model_effect_type_active_camouflage;
@@ -603,6 +627,7 @@ static void render_object_list(
 						}
 					}
 
+					if (!overlay_camouflaged(object_index))
 					render_model(
 						definition->object.model.index,
 						level_of_detail_pixels,
@@ -625,6 +650,7 @@ static void render_object_list(
 				}
 				else
 				{
+					if (!overlay_camouflaged(object_index))
 					render_model(
 						definition->object.model.index,
 						level_of_detail_pixels * 0.3f,

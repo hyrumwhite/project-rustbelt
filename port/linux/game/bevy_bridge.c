@@ -18,6 +18,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "game/game.h"
 #include "game/players.h"
 #include "objects/objects.h"
+#include "units/units.h"
 #include "objects/object_lights.h"
 #include "render/render_cameras.h"
 #include "render/render_cameras_internal.h"
@@ -53,6 +54,7 @@ static struct
 	short node_count;
 	real_matrix4x3 nodes[MAXIMUM_RECORDED_MODEL_NODES];
 	real_rgb_color change_colors[4];
+	real active_camouflage;
 } bevy_bridge_recorded[MAXIMUM_RECORDED_MODELS];
 static short bevy_bridge_recorded_count;
 
@@ -63,6 +65,23 @@ static boolean bevy_bridge_listening;
 static long bevy_bridge_overlay_buffer = NONE;
 
 /* ---------- private code */
+
+/* an object's active camouflage: its own as a unit, or that of the unit it
+is attached to (a held weapon) */
+static float bevy_bridge_camouflage(long object_index)
+{
+	short depth;
+
+	for (depth = 0; depth < 4 && object_index != NONE; depth++)
+	{
+		struct object_datum *object = (struct object_datum *)object_get(object_index);
+
+		if (TEST_FLAG(_object_mask_unit, object->object.type))
+			return unit_get(object_index)->unit.active_camouflage;
+		object_index = object->object.parent_object_index;
+	}
+	return 0.0f;
+}
 
 /* game.bevy_bridge_name, or the default where it is empty or holds more
 than letters, digits, '-' and '_' */
@@ -175,7 +194,8 @@ void bevy_bridge_record_model(
 	long model_index,
 	real_matrix4x3 const *node_matrices,
 	short node_count,
-	real_rgb_color const *change_colors)
+	real_rgb_color const *change_colors,
+	real active_camouflage)
 {
 	if (!bevy_bridge_shared || model_index == NONE || bevy_bridge_recorded_count >= MAXIMUM_RECORDED_MODELS)
 		return;
@@ -193,6 +213,7 @@ void bevy_bridge_record_model(
 				change_colors ? change_colors[color_index] : *global_real_rgb_white;
 		}
 	}
+	bevy_bridge_recorded[bevy_bridge_recorded_count].active_camouflage = active_camouflage;
 	bevy_bridge_recorded_count++;
 }
 
@@ -298,6 +319,7 @@ void bevy_bridge_export_frame(
 			out->node_count = (unsigned short)node_count;
 			out->type = object->object.type;
 			out->flags = bevy_bridge_object_flags(iterator.index, first_person_unit);
+			out->active_camouflage = bevy_bridge_camouflage(iterator.index);
 			memcpy(out->region_permutations, object->object.region_permutations, sizeof(out->region_permutations));
 			{
 				short color_index;
@@ -338,6 +360,7 @@ void bevy_bridge_export_frame(
 			out->node_count = (unsigned short)node_count;
 			out->type = NONE;
 			SET_FLAG(out->flags, _bevy_bridge_object_model_bit, TRUE);
+			out->active_camouflage = bevy_bridge_recorded[recorded].active_camouflage;
 			{
 				short color_index;
 

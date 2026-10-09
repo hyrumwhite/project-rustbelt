@@ -92,17 +92,32 @@ Checked on b30 (916 objects, 170k triangles), a10 (466 objects, 245k triangles) 
 - Environment self-illumination adds to the lightmap, so it lights the base map rather than replacing it.
 - Many light fixtures and glowing panels emit radiosity *and* self-illuminate. The radiosity power is their real light output; using the self-illumination colour instead made a10 go dark.
 
-## Phase 3: Material fidelity  ← *next*
+## Phase 3: Material fidelity ✅ (done)
 
-- Detail maps (`biased multiply`, `multiply`, `biased add`) baked into or composited onto the base colour
-- Bump maps (height → normal) → `normal_map_texture`
-- Specular masks and cube maps → roughness/metallic heuristics, so Solari gives real reflections
-- Alpha-tested environment shaders → masked materials (Solari support permitting)
-- Transparent shaders (`schi`, `scex`, `sgla`, `swat`, `smet`, `spla`): glass and water through a raster overlay, since Solari is opaque-only. Includes the generic/chicago stage combiners, which also give the sky layers their real multi-map look
-- Sky layers rendered into the environment cubemap (replacing the gradient stand-in); light units calibrated against the lightmaps; optional baked-lightmap comparison mode
-- Texture animation, Xbox cube-map faces, mip chains, 3D textures
+Deliverable: Halo's materials as the game draws them. Solari lights the surfaces; the camera sees Halo's own shading layers.
 
-## Phase 4: Simulation bridge (playable)
+The architecture: Solari traces rays against `StandardMaterial` only, but takes each pixel's material from the G-buffer the rasterizer writes. So a surface with a Halo material is two entities. A raster-only one carries a material extension or custom material (what the camera sees). A ray-traced-only one carries the plain `StandardMaterial` (what bounces, shadows and reflections see).
+
+- [x] `shader_environment` detail layers: the Xbox pixel shader reproduced in WGSL (primary/secondary detail mixed by secondary or base alpha, the three detail functions, micro detail, gamma-space combine, rescaled detail maps)
+- [x] Bump maps: palettized (P8) bump maps decoded through the renderer's vector palette into tangent-space normal maps, used at their own scale on the camera's surfaces and on the ray-traced ones where the UVs line up
+- [x] Alpha test: environment shaders cut out by the bump map's alpha (the palette's zero-alpha entries), as the Xbox alpha-tests the bump pass
+- [x] Specular and reflection: reflection brightness and specular masks (environment base alpha, model multipurpose red) become roughness and metalness, baked into a metallic-roughness texture where masked (`--matte` turns this off)
+- [x] Transparent chicago and generic shaders: the Xbox preprocessors ported to build each shader's NV2A register combiner program; a WGSL interpreter evaluates it with the port's semantics. Covers holograms, glows, shields, decal-like surfaces, waves and the sky
+- [x] Glass and water: blended, smooth surfaces with their tint and base maps that reflect the sky
+- [x] The sky: its layers composited in order with Halo's combiners, and baked on the CPU (a Rust combiner evaluator plus ray casts) into the environment cubemap that lights the level
+- [ ] Moved later: texture animation (UV scrolling, chicago map animation); reflection cube maps on transparent and environment shaders; meter and plasma shaders; detail maps on model shaders; light-unit calibration and a baked-lightmap comparison mode; 3D textures
+
+On b30, every transparent surface is drawn except one meter and one plasma shader; on a10, all of them are. GPU time is still about 2 ms per frame with DLSS-RR.
+
+### What Phase 3 taught us
+
+- The environment shader's diffuse is `f(base, mix(secondary, primary, w))`, then the micro detail, with `f` one of `2ab`, `ab` or `a + 2b - 1`. A missing detail map is the game's 50% grey default, which is neutral for the "biased" functions.
+- Halo's alpha test isn't the base map's alpha. The Xbox alpha-tests the pass where texture 0 is the bump map, and the P8 vector palette has seven zero-alpha entries for the cut-outs.
+- The combiner programs are small and fully data-driven. Porting the two preprocessors and interpreting NV2A combiners covers every chicago and generic shader at once.
+- Bevy sorts transparent meshes by the centres of their bounds, not their origins. Sky layers need a large negative depth bias (so they draw before the level's transparents) plus a step per layer bigger than the sky.
+- A custom `Material` culls back faces by default. Sky layers are seen from inside, so they must be double-sided.
+
+## Phase 4: Simulation bridge (playable)  ← *next*
 
 - Build OpenCE headless (`HALO_BEVY_BRIDGE`), with the D3D8 rasterizer replaced by a render-state exporter at the `render_*` / `rasterizer_*` scene level
 - Shared-memory protocol (versioned, double-buffered): camera, loaded BSP, visible objects (tag index, node matrices, permutation, colour change, shader parameters), dynamic lights, decals, particles/contrails, weather, first-person model

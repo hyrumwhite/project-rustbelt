@@ -71,9 +71,15 @@ struct SkyLayer {
     /// Positions and texture coordinates per corner.
     triangles: Vec<[([f32; 3], [f32; 2]); 3]>,
     program: crate::combiner::CombinerProgram,
-    /// Per stage: the map's texels, its scale and offset.
-    maps: [Option<(crate::bitmap::Decoded, [f32; 2], [f32; 2])>; 4],
+    /// Per stage (t0-t3).
+    maps: [Option<SkyMap>; 4],
     blend: crate::shader::BlendFunction,
+}
+
+struct SkyMap {
+    texels: crate::bitmap::Decoded,
+    scale: [f32; 2],
+    offset: [f32; 2],
 }
 
 impl SkyRenderer {
@@ -98,7 +104,7 @@ impl SkyRenderer {
                     let Some(map) = slot else { continue };
                     let Some(datum) = map.bitmap.datum else { continue };
                     let decoded = bitmap::bitmaps(cache, datum)?.first().map(|b| b.decode_rgba8(cache)).transpose()?;
-                    maps[stage] = decoded.map(|d| (d, map.uv_scale, map.uv_offset));
+                    maps[stage] = decoded.map(|texels| SkyMap { texels, scale: map.uv_scale, offset: map.uv_offset });
                 }
                 let triangles = part
                     .indices
@@ -128,7 +134,10 @@ impl SkyRenderer {
         for layer in &self.layers {
             let Some(uv) = layer.hit(direction) else { continue };
             let textures = std::array::from_fn(|stage| match &layer.maps[stage] {
-                Some((texels, scale, offset)) => sample_wrapped(texels, [uv[0] * scale[0] + offset[0], uv[1] * scale[1] + offset[1]]),
+                Some(map) => sample_wrapped(
+                    &map.texels,
+                    [uv[0] * map.scale[0] + map.offset[0], uv[1] * map.scale[1] + map.offset[1]],
+                ),
                 None => [0.0; 4],
             });
             let [r, g, b, a] = crate::combiner::evaluate(&layer.program, textures);

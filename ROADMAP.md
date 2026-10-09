@@ -144,14 +144,31 @@ Checked: b30's opening cutscene (Pelicans, the troop bay landing), first-person 
 - Injecting SDL events is the narrowest input seam. Nothing in the game or the port's input code had to change.
 - DLSS creates its feature with GPU work that wgpu doesn't track. If that happens during the window's first surface configure, wgpu's idle wait fails and Bevy quits. Starting the camera 30 frames in avoids the race. Adding DLSS to a camera that's already rendering doesn't work: it stays off.
 
-## Phase 5: Effects, HUD and presentation  ← *next*
+## Phase 5: Effects, HUD and presentation ✅ (done)
 
-- Particles, contrails, decals, lightning and lens flares (raster passes on top of Solari)
-- HUD, menus and text (Bevy UI drawing OpenCE's widget output, or the bridge sending 2D draw lists)
-- Active camouflage, plasma, screen effects, fog, water
-- Cutscenes and cinematic letterboxing
+The approach: the game draws everything that isn't opaque world, and the viewer composites it. With `game.bevy_bridge_overlay` (OpenCE branch `bevy-bridge-overlay`), `render_window` draws the opaque world only into the depth buffer. It draws the rest over a clear screen, keeping coverage in alpha: alpha blends add coverage, additive blends leave it. `Present` reads the picture back into the bridge (protocol 4). The viewer draws it with premultiplied blending, paired with the world frame it was drawn for. Effects are depth-tested against the game's own copy of the world, so they're occluded correctly by the geometry the viewer ray-traces.
 
-## Phase 6: Audio and multiplayer parity
+- [x] The overlay: protocol 4, the depth-only world, coverage alpha, the readback; `src/overlay.rs` composites it and pairs frames; the viewer skips its own transparent surfaces; `--no-overlay` turns it off
+- [x] Through the overlay: the HUD, menus and text; particles, contrails, decals, lens flares, weather; fog and water; transparent surfaces; cinematic letterboxing
+- [x] Fixed on the way: the camera's field of view in cinematics. The game's frustum is wider than its camera's FOV there, because the window bounds sit inside the viewport. The bridge now shares the frustum's FOV, and cutscene objects no longer look 18% too close.
+Carried over, for a later rendering pass (open):
+
+- [ ] Shader animation from object functions (the rifle's ammo digits, which are in an opaque shader), change colours
+- [ ] True two-node skinning (bipeds use a rigid per-node split now)
+- [ ] Showing only the active BSP
+- [ ] Active camouflage and plasma (opaque-world effects the overlay can't carry)
+- [ ] Multiply-blended effects: they darken what's under them, and coverage alpha can't represent that, so they are lost over the viewer's world
+- [ ] Dynamic lights (muzzle flashes, plasma) as Solari lights
+
+Checked: b30's opening cutscene (letterbox, engine glows, water, fog) lined up with the ray-traced Pelicans; b30 gameplay with the full HUD; a10's opening with the Pillar of Autumn's engine glows. 4 of 4 a10 overlay starts were clean.
+
+### What Phase 5 taught us
+
+- Letting the game draw its own effects over a depth-only world is far cheaper than porting each effect system, and it stays faithful: the effects are the game's own.
+- Coverage alpha only works for blends that replace or add to what's under them. Multiplying blends need the world's colour, which the game no longer has.
+- Compare the two renderers directly: a half-strength blend of the game's full picture over the viewer's found the cinematic field-of-view bug in one screenshot.
+
+## Phase 6: Audio and multiplayer parity  ← *next*
 
 - Sound playback from the bridge (or a Rust Xbox ADPCM decoder + Bevy audio), with 3D positioning and sound environments
 - Check that OpenCE's netcode/system link works through the bridge

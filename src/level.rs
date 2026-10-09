@@ -174,6 +174,8 @@ pub struct LevelBuilder {
     pub show_light_proxies: bool,
     /// Ignore Halo's reflection settings: every surface a rough dielectric.
     pub matte: bool,
+    /// Leave out transparent surfaces (the game's overlay draws them).
+    pub skip_transparent: bool,
     pub stats: LevelStats,
 }
 
@@ -198,6 +200,7 @@ impl LevelBuilder {
             fixture_lights: true,
             show_light_proxies: false,
             matte: false,
+            skip_transparent: false,
             stats: LevelStats { map_name: cache.header.name.clone(), ..default() },
             cache,
         }
@@ -442,7 +445,7 @@ impl LevelBuilder {
         let surface = match surface {
             Surface::Solid(solid) => solid,
             Surface::Transparent(material) => {
-                if raster {
+                if raster && !self.skip_transparent {
                     commands.spawn((
                         Name::new(name),
                         Mesh3d(mesh),
@@ -457,7 +460,7 @@ impl LevelBuilder {
                 return;
             }
             Surface::Blended(material) => {
-                if raster {
+                if raster && !self.skip_transparent {
                     commands.spawn((
                         Name::new(name),
                         Mesh3d(mesh),

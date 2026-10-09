@@ -12,14 +12,22 @@
 //! The other way, [`Bridge::write_input`] forwards a window's keyboard and
 //! mouse for the game to read as its own (the game's
 //! `port/linux/src/bevy_bridge_input.c` turns them into SDL events).
+//!
+//! With the game's `game.bevy_bridge_overlay` on, it also shares its own
+//! picture without the opaque world ([`Bridge::read_overlay`]): effects,
+//! transparent surfaces, the HUD and menus, premultiplied, to draw over the
+//! renderer's picture.
 
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;
+/// The largest overlay picture, in pixels.
+pub const OVERLAY_MAXIMUM_PIXELS: usize = 2560 * 1440;
+const OVERLAYS: usize = 2;
 #[cfg(windows)]
 const MAPPING_NAME: &[u8] = b"Local\\HaloBevyBridge\0";
 
@@ -112,6 +120,15 @@ impl Input {
 }
 
 #[repr(C)]
+struct OverlayHeader {
+    sequence: u32,
+    frame_index: u32,
+    width: u32,
+    height: u32,
+    reserved: [u32; 4],
+}
+
+#[repr(C)]
 struct Shared {
     magic: u32,
     version: u32,
@@ -121,6 +138,11 @@ struct Shared {
     reserved: [u32; 3],
     input: Input,
     frames: [Frame; FRAMES],
+    overlay_enabled: u32,
+    latest_overlay: u32,
+    overlay_reserved: [u32; 2],
+    overlays: [OverlayHeader; OVERLAYS],
+    overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
 /// The layout is the game's, measured there; keep these in step with
@@ -155,6 +177,15 @@ impl Snapshot {
     }
 }
 
+/// An overlay picture's size and the frame it shows; its pixels are RGBA,
+/// 8 bits a channel, sRGB, premultiplied, the top row first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Overlay {
+    pub frame_index: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Debug)]
 pub enum Error {
     /// No game is sharing frames (not running, or game.bevy_bridge is off).
@@ -179,6 +210,7 @@ pub struct Bridge {
     #[cfg(windows)]
     _mapping: windows::Handle,
     last_frame_index: u32,
+    last_overlay: Option<(u32, u32)>,
 }
 
 // Frames are read through volatile reads and a sequence check; the input
@@ -192,7 +224,7 @@ impl Bridge {
         #[cfg(windows)]
         {
             let (mapping, view) = windows::open(MAPPING_NAME, std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0 };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -232,6 +264,52 @@ impl Bridge {
             std::ptr::write_volatile(target, *input);
         }
         fence(Ordering::Release);
+    }
+
+    /// Whether the game shares overlays.
+    pub fn overlay_enabled(&self) -> bool {
+        // SAFETY: as in check()
+        unsafe { std::ptr::read_volatile(&(*self.shared).overlay_enabled) != 0 }
+    }
+
+    /// The latest overlay, copied into `pixels`, if it is newer than the last
+    /// one returned.
+    pub fn read_overlay(&mut self, pixels: &mut Vec<u8>) -> Option<Overlay> {
+        for _ in 0..4 {
+            // SAFETY: as in read(); the pixels are copied as bytes and
+            // validated by the sequence afterwards
+            unsafe {
+                let latest = std::ptr::read_volatile(&(*self.shared).latest_overlay) as usize % OVERLAYS;
+                fence(Ordering::Acquire);
+                let header = &(*self.shared).overlays[latest] as *const OverlayHeader;
+                let sequence = std::ptr::read_volatile(&(*header).sequence);
+                if sequence & 1 != 0 || sequence == 0 {
+                    continue;
+                }
+                fence(Ordering::Acquire);
+                if self.last_overlay == Some((latest as u32, sequence)) {
+                    return None;
+                }
+                let overlay = Overlay {
+                    frame_index: std::ptr::read_volatile(&(*header).frame_index),
+                    width: std::ptr::read_volatile(&(*header).width),
+                    height: std::ptr::read_volatile(&(*header).height),
+                };
+                let bytes = overlay.width as usize * overlay.height as usize * 4;
+                if bytes == 0 || bytes > OVERLAY_MAXIMUM_PIXELS * 4 {
+                    return None;
+                }
+                pixels.resize(bytes, 0);
+                std::ptr::copy_nonoverlapping((*self.shared).overlay_pixels[latest].as_ptr(), pixels.as_mut_ptr(), bytes);
+                fence(Ordering::Acquire);
+                if std::ptr::read_volatile(&(*header).sequence) != sequence {
+                    continue;
+                }
+                self.last_overlay = Some((latest as u32, sequence));
+                return Some(overlay);
+            }
+        }
+        None
     }
 
     /// The latest frame, if it is newer than the last one returned.

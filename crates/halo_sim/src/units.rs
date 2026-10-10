@@ -6,6 +6,12 @@
 //! a grenade's release, melee damage, destroying a dead unit, a limp body,
 //! leaving and entering a seat.
 //!
+//! A player's melee step (`biped_update`'s, [`halo_sim_player_melee`]) is
+//! here too: when one starts (timed by the weapon's first-person melee
+//! animation) with the unit's melee action, and the tick its damage lands;
+//! the weapon's reload stopping, the first-person weapon's message and the
+//! damage are the game's ([`MeleeCallbacks`]).
+//!
 //! In check mode the game's own update runs first; Rust then replays it
 //! from the state and random seed it began with, as the probe replays a
 //! recorded one.
@@ -180,4 +186,135 @@ pub unsafe extern "C" fn halo_sim_unit_animation_check(call: *mut UnitAnimationC
     }
     // SAFETY: the caller's call
     run(unsafe { &mut *call }, true)
+}
+
+/// The game's side of a player's melee (halo_sim.c).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MeleeCallbacks {
+    /// A melee started (its action already playing, in `state`): the
+    /// weapon's reload stopped and the first-person weapon told.
+    pub started: unsafe extern "C" fn(biped: u32, weapon: i32, state: *mut UnitAnimationState),
+    /// Its damage lands (`unit_cause_player_melee_damage`).
+    pub damage: unsafe extern "C" fn(biped: u32),
+}
+
+/// What a player's melee step reads, and where it leaves it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MeleeCall {
+    pub biped_index: u32,
+    pub unit_graph_index: i32,
+    pub enhanced_animation: u32,
+    /// A player asking to melee, in a seat, zoomed.
+    pub use_equipment: u32,
+    pub in_seat: u32,
+    pub zoomed: u32,
+    /// Its weapon (NONE for none), the weapon's definition, and whether the
+    /// weapon prevents a melee (`weapon_prevents_melee_attack`).
+    pub weapon_index: i32,
+    pub weapon_definition_index: u32,
+    pub weapon_prevents: u32,
+    /// Its melee counters, and its unit's animation (an action may start).
+    pub ticks: i8,
+    pub attack_tick: i8,
+    pub pad: i16,
+    pub animation: UnitAnimationState,
+    /// In check mode, the random seed the game's step began with.
+    pub random_seed: u32,
+    /// Written: whether a melee started, and whether its damage landed.
+    pub started: u32,
+    pub damaged: u32,
+}
+
+impl crate::Tags {
+    fn melee_weapon(&mut self, definition: u32) -> Option<halo_map::biped_update::MeleeWeapon> {
+        let cache = &self.cache;
+        *self.melee_weapons.entry(definition).or_insert_with(|| halo_map::biped_update::MeleeWeapon::load(cache, definition).ok())
+    }
+}
+
+fn run_melee(call: &mut MeleeCall, check: bool) -> i32 {
+    let Some(host) = crate::world::host() else { return -1 };
+    let (graph, weapon) = {
+        let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tags) = tags.as_mut() else { return -1 };
+        let graph = (call.unit_graph_index != -1).then(|| tags.animation_graph(call.unit_graph_index as u32)).flatten();
+        let weapon = if call.weapon_index == -1 {
+            None
+        } else {
+            let Some(weapon) = tags.melee_weapon(call.weapon_definition_index) else { return -1 };
+            Some((weapon, call.weapon_prevents != 0))
+        };
+        (graph, weapon)
+    };
+    let inputs = halo_map::biped_update::PlayerMeleeInputs {
+        use_equipment: call.use_equipment != 0,
+        in_seat: call.in_seat != 0,
+        zoomed: call.zoomed != 0,
+        weapon,
+    };
+    let (mut ticks, mut attack_tick) = (call.ticks, call.attack_tick);
+    let outcome = halo_map::biped_update::player_melee(&inputs, &mut ticks, &mut attack_tick);
+    let mut state = call.animation;
+    if outcome.started {
+        // (unit_animation_start_action: its melee, a permutation drawn from
+        // the game's random numbers)
+        let mut seed = if check { call.random_seed } else { unsafe { (host.unit_animation.random_seed)() } };
+        if let Some(graph) = &graph {
+            halo_map::unit_animation::unit_animation_start_action(
+                graph,
+                call.enhanced_animation != 0,
+                &mut seed,
+                &mut state,
+                halo_map::unit_animation::action::MELEE,
+            );
+        }
+        if !check {
+            // SAFETY: the game's callbacks
+            unsafe {
+                (host.unit_animation.set_random_seed)(seed);
+                (host.melee.started)(call.biped_index, call.weapon_index, &mut state);
+            }
+        }
+    }
+    if outcome.damaged && !check {
+        // SAFETY: as above
+        unsafe { (host.melee.damage)(call.biped_index) };
+    }
+    call.ticks = ticks;
+    call.attack_tick = attack_tick;
+    call.animation = state;
+    call.started = outcome.started as u32;
+    call.damaged = outcome.damaged as u32;
+    0
+}
+
+/// A player's melee step on the running game, in place of the game's.
+/// Returns 0 (the counters and animation written), or -1 if it can't run
+/// (the game then runs its own; nothing was done).
+///
+/// # Safety
+/// `call` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_player_melee(call: *mut MeleeCall) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_melee(unsafe { &mut *call }, false)
+}
+
+/// The check of a player's melee step the game ran: Rust's replay of it
+/// from the counters, animation and random seed it began with.
+///
+/// # Safety
+/// As [`halo_sim_player_melee`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_player_melee_check(call: *mut MeleeCall) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_melee(unsafe { &mut *call }, true)
 }

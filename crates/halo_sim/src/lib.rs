@@ -29,9 +29,10 @@ use halo_map::pose::{PoseAnimation, PoseModel, PoseObjectDefinition};
 
 pub mod poses;
 pub mod preprocess;
+pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// A level's structure BSP, as the simulation tests it.
 struct Structure {
@@ -59,6 +60,8 @@ struct Tags {
     unit_flags: HashMap<u32, u32>,
     vehicles: HashMap<u32, Option<Arc<halo_map::vehicle_pose::VehiclePoseDefinition>>>,
     devices: HashMap<u32, Option<Arc<halo_map::device_pose::DevicePoseDefinition>>>,
+    collision_models: HashMap<u32, Option<Arc<halo_map::collision::CollisionModel>>>,
+    physics_shapes: HashMap<u32, Option<Arc<halo_map::vehicle_physics::PhysicsShape>>>,
 }
 
 impl Tags {
@@ -111,6 +114,8 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
         unit_flags: HashMap::new(),
         vehicles: HashMap::new(),
         devices: HashMap::new(),
+        collision_models: HashMap::new(),
+        physics_shapes: HashMap::new(),
     });
     count
 }
@@ -255,7 +260,7 @@ pub unsafe extern "C" fn halo_sim_point_physics_update(call: *const PointPhysics
     };
     let mut state =
         PointState { position: call.position, velocity: call.velocity, location_leaf: call.location_leaf, location_cluster: call.location_cluster };
-    let world = World { collision: &structure.collision, clusters: &structure.clusters, objects: &[] };
+    let world = World { collision: &structure.collision, clusters: &structure.clusters, objects: &[], source: None };
     let update = point_physics_update_full(
         &world,
         call.flags,

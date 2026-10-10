@@ -946,6 +946,19 @@ pub struct World<'a> {
     pub collision: &'a CollisionBsp,
     pub clusters: &'a StructureClusters,
     pub objects: &'a [WorldObject],
+    /// The objects as a running game holds them (its clusters' object
+    /// lists, each object's state, its children), in place of `objects`.
+    pub source: Option<&'a dyn ObjectSource>,
+}
+
+/// The objects of a running game, as its broad phase finds them: the
+/// objects registered in a cluster (its collideable cluster partition, in
+/// its order), each object's state, and its children (its first child,
+/// then that child's siblings).
+pub trait ObjectSource {
+    fn cluster_objects(&self, cluster: i16, out: &mut Vec<u32>);
+    fn object(&self, index: u32) -> Option<WorldObject>;
+    fn children(&self, index: u32, out: &mut Vec<u32>);
 }
 
 impl World<'_> {
@@ -1036,6 +1049,25 @@ impl World<'_> {
         if flags & test_flags::OBJECTS != 0 && !leaves.is_empty() {
             if flags & test_flags::ALL_OBJECT_TYPES == 0 {
                 flags |= test_flags::ALL_OBJECT_TYPES;
+            }
+            if let Some(source) = self.source {
+                // (the game's own cluster lists, top-level objects marked once)
+                let mut marked_clusters = std::collections::HashSet::new();
+                let mut marked_objects = std::collections::HashSet::new();
+                let mut in_cluster = Vec::new();
+                for &leaf in &leaves {
+                    let cluster = self.clusters.cluster_from_leaf(leaf);
+                    if cluster < 0 || !marked_clusters.insert(cluster) {
+                        continue;
+                    }
+                    in_cluster.clear();
+                    source.cluster_objects(cluster, &mut in_cluster);
+                    for &index in &in_cluster {
+                        if marked_objects.insert(index) {
+                            self.source_object_test_vector(source, index, flags, bsp_flags, point, vector, ignore_object, &mut t, &mut best, &mut result);
+                        }
+                    }
+                }
             }
             // (who is in which cluster: the game registers each connected
             // object with a collision model in the clusters its bounding
@@ -1132,13 +1164,64 @@ impl World<'_> {
         result: &mut CollisionResult,
     ) {
         let object = &self.objects[index];
+        if !Self::test_object(object, flags, bsp_flags, point, vector, ignore_object, t, best, result) {
+            return;
+        }
+        for (child, candidate) in self.objects.iter().enumerate() {
+            if candidate.parent == object.index {
+                self.object_test_vector(child, flags, bsp_flags, point, vector, ignore_object, t, best, result);
+            }
+        }
+    }
+
+    /// `object_test_vector` on a running game's objects: an object, then (if
+    /// its bounding sphere is reached) its children.
+    #[allow(clippy::too_many_arguments)]
+    fn source_object_test_vector(
+        &self,
+        source: &dyn ObjectSource,
+        index: u32,
+        flags: u32,
+        bsp_flags: u32,
+        point: [f32; 3],
+        vector: [f32; 3],
+        ignore_object: u32,
+        t: &mut f32,
+        best: &mut Option<WorldHit>,
+        result: &mut CollisionResult,
+    ) {
+        let Some(object) = source.object(index) else { return };
+        if !Self::test_object(&object, flags, bsp_flags, point, vector, ignore_object, t, best, result) {
+            return;
+        }
+        let mut children = Vec::new();
+        source.children(index, &mut children);
+        for child in children {
+            self.source_object_test_vector(source, child, flags, bsp_flags, point, vector, ignore_object, t, best, result);
+        }
+    }
+
+    /// One object of `object_test_vector`: whether the test reaches it (and
+    /// so its children), and its hit, if nearer.
+    #[allow(clippy::too_many_arguments)]
+    fn test_object(
+        object: &WorldObject,
+        flags: u32,
+        bsp_flags: u32,
+        point: [f32; 3],
+        vector: [f32; 3],
+        ignore_object: u32,
+        t: &mut f32,
+        best: &mut Option<WorldHit>,
+        result: &mut CollisionResult,
+    ) -> bool {
         if object.index == ignore_object
             || object.flags & OBJECT_INVISIBLE != 0
             || object.kind < 0
             || flags & (1 << (object.kind as u32 + test_flags::FIRST_OBJECT_TYPE)) == 0
             || !vector_intersects_sphere(point, vector, object.bounding_center, object.bounding_radius)
         {
-            return;
+            return false;
         }
         const OBJECT_TYPE_VEHICLE: i16 = 1;
         if object.kind == OBJECT_TYPE_VEHICLE && flags & test_flags::USE_VEHICLE_PHYSICS != 0 {
@@ -1171,11 +1254,7 @@ impl World<'_> {
             let plane = transform_plane(&object.matrices[hit.node], hit.hit.plane);
             result.plane = if hit.hit.plane_designator & SIGN != 0 { negate_plane(plane) } else { plane };
         }
-        for (child, candidate) in self.objects.iter().enumerate() {
-            if candidate.parent == object.index {
-                self.object_test_vector(child, flags, bsp_flags, point, vector, ignore_object, t, best, result);
-            }
-        }
+        true
     }
 }
 

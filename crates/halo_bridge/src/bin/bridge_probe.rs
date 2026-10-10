@@ -614,7 +614,7 @@ impl CollisionCheck {
         // rays at vehicles, tested with their physics shapes
         for test in &snapshot.vehicle_ray_tests {
             use halo_map::collision::{CollisionKind, flags, test_flags};
-            let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects };
+            let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects, source: None };
             let ours = world.test(
                 flags::FRONT_FACING
                     | test_flags::STRUCTURE
@@ -671,7 +671,7 @@ impl CollisionCheck {
             // the game's whole ray test: structure and objects
             {
                 let world_objects = &world_objects;
-                let world = halo_map::collision::World { collision: bsp, clusters, objects: world_objects };
+                let world = halo_map::collision::World { collision: bsp, clusters, objects: world_objects, source: None };
                 let flags = halo_map::collision::flags::FRONT_FACING
                     | halo_map::collision::test_flags::STRUCTURE
                     | halo_map::collision::test_flags::OBJECTS
@@ -711,7 +711,7 @@ impl CollisionCheck {
                     .flatten()
             });
             if let Some(definition) = definition {
-                let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects };
+                let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects, source: None };
                 let length = (test.vector[0] * test.vector[0] + test.vector[1] * test.vector[1] + test.vector[2] * test.vector[2]).sqrt();
                 let mut state = halo_map::physics::PointState {
                     position: test.point,
@@ -939,7 +939,7 @@ impl CollisionCheck {
                     projectile_flags: entry.projectile_flags,
                 });
             }
-            let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects };
+            let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects, source: None };
             let guidance: Vec<halo_map::projectile::Guidance> = record.guidance[..(record.guidance_count as usize).min(4)]
                 .iter()
                 .map(|g| halo_map::projectile::Guidance {
@@ -2030,9 +2030,9 @@ impl CollisionCheck {
             let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
                 return;
             };
-            let suspension_world = halo_map::collision::World { collision: bsp, clusters, objects: &suspension_objects };
+            let suspension_world = halo_map::collision::World { collision: bsp, clusters, objects: &suspension_objects, source: None };
             let physics_collision_world =
-                physics_world.as_ref().map(|(_, objects, _)| halo_map::collision::World { collision: bsp, clusters, objects });
+                physics_world.as_ref().map(|(_, objects, _)| halo_map::collision::World { collision: bsp, clusters, objects, source: None });
             let materials = self.material_physics.as_deref().unwrap_or(&[]);
             let env = vu::VehicleUpdateWorld {
                 physics: match (&physics_world, &physics_collision_world) {
@@ -2209,7 +2209,7 @@ impl CollisionCheck {
             let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
                 return;
             };
-            let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects };
+            let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects, source: None };
             let env = vp::VehiclePhysicsWorld {
                 world: &world,
                 feature_objects: &feature_objects,

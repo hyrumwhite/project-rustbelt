@@ -285,6 +285,10 @@ static const struct config_setting config_settings[] =
 	{ "game.bevy_bridge_name", _config_string, "\"HaloBevyBridge\"", "HALO_BEVY_BRIDGE_NAME", _environment_value, _platform_desktop,
 		"The name of the memory the game shares with a Bevy renderer (letters,\n"
 		"digits, '-' and '_'), so that each of several games has its own." },
+	{ "game.bevy_bridge_ray_tests", _config_boolean, "false", "HALO_BEVY_BRIDGE_RAY_TESTS", _environment_value, _platform_desktop,
+		"With game.bevy_bridge: rays fanned out from the camera each frame,\n"
+		"tested against the level's collision geometry and shared, for the\n"
+		"renderer to check its own collision code against (bridge_probe)." },
 	{ "game.bevy_bridge_overlay", _config_boolean, "false", "HALO_BEVY_BRIDGE_OVERLAY", _environment_value, _platform_desktop,
 		"With game.bevy_bridge: the Bevy renderer draws the opaque world, and\n"
 		"the game shares the rest of its picture (effects, transparent\n"

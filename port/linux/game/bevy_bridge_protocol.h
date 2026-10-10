@@ -40,7 +40,8 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 9
+#define BEVY_BRIDGE_VERSION 10
+#define BEVY_BRIDGE_RAY_TESTS 16
 #define BEVY_BRIDGE_MAXIMUM_LIGHTS 64
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
@@ -117,6 +118,20 @@ struct bevy_bridge_light
 	float cutoff_angle;
 };
 
+/* a ray the game tested against its structure's collision geometry
+(collision_bsp_test_vector, front-facing surfaces), for a renderer to check
+its own collision code against */
+struct bevy_bridge_ray_test
+{
+	float point[3];
+	float vector[3];
+	/* nonzero if it hit; then how far along `vector` (0..1) and which
+	collision surface */
+	unsigned long hit;
+	float t;
+	long surface_index;
+};
+
 struct bevy_bridge_frame
 {
 	unsigned long sequence;
@@ -129,6 +144,9 @@ struct bevy_bridge_frame
 	struct bevy_bridge_camera camera;
 	unsigned long light_count;
 	struct bevy_bridge_light lights[BEVY_BRIDGE_MAXIMUM_LIGHTS];
+	/* rays fanned out from the camera (only with game.bevy_bridge_ray_tests) */
+	unsigned long ray_test_count;
+	struct bevy_bridge_ray_test ray_tests[BEVY_BRIDGE_RAY_TESTS];
 	unsigned long object_count;
 	unsigned long node_count;
 	struct bevy_bridge_object objects[BEVY_BRIDGE_MAXIMUM_OBJECTS];

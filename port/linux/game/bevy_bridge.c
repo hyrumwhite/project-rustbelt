@@ -20,6 +20,8 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "objects/objects.h"
 #include "units/units.h"
 #include "objects/object_lights.h"
+#include "physics/collision_bsp.h"
+#include "physics/collisions.h"
 #include "render/render_cameras.h"
 #include "render/render_cameras_internal.h"
 #include "scenario/scenario.h"
@@ -65,6 +67,54 @@ static boolean bevy_bridge_listening;
 static long bevy_bridge_overlay_buffer = NONE;
 
 /* ---------- private code */
+
+/* game.bevy_bridge_ray_tests: rays fanned out from the camera, tested
+against the structure (a renderer checks its own collision code with them) */
+static unsigned long bevy_bridge_ray_tests(
+	struct bevy_bridge_ray_test *tests,
+	real_point3d const *origin,
+	real_vector3d const *forward,
+	real_vector3d const *up)
+{
+	static int enabled = -1;
+	struct collision_bsp *bsp;
+	real_vector3d right;
+	unsigned long count = 0;
+	short row, column;
+
+	if (enabled < 0)
+		enabled = config_boolean("game.bevy_bridge_ray_tests") != 0;
+	bsp = enabled ? global_collision_bsp_get() : NULL;
+	if (!bsp)
+		return 0;
+	cross_product3d(forward, up, &right);
+	for (row = 0; row < 4; row++)
+	{
+		for (column = 0; column < 4 && count < BEVY_BRIDGE_RAY_TESTS; column++)
+		{
+			struct bevy_bridge_ray_test *test = &tests[count++];
+			struct collision_bsp_test_vector_result result;
+			/* (a 4 by 4 fan, 200 world units long) */
+			real a = -0.6f + 0.4f * column, b = -0.6f + 0.4f * row;
+			real_vector3d vector;
+
+			vector.i = (forward->i + right.i * a + up->i * b) * 200.0f;
+			vector.j = (forward->j + right.j * a + up->j * b) * 200.0f;
+			vector.k = (forward->k + right.k * a + up->k * b) * 200.0f;
+			test->point[0] = origin->x;
+			test->point[1] = origin->y;
+			test->point[2] = origin->z;
+			test->vector[0] = vector.i;
+			test->vector[1] = vector.j;
+			test->vector[2] = vector.k;
+			test->hit = collision_bsp_test_vector(FLAG(_collision_test_front_facing_surfaces_bit), bsp, 0, NULL,
+				origin, &vector, 1.0f, &result);
+			test->t = test->hit ? result.t : 1.0f;
+			test->surface_index = test->hit ? result.surface_index : NONE;
+		}
+	}
+	return count;
+}
 
 /* an object's active camouflage: its own as a unit, or that of the unit it
 is attached to (a held weapon) */
@@ -245,6 +295,7 @@ void bevy_bridge_export_frame(
 
 	/* the first player's view */
 	frame->camera_valid = FALSE;
+	frame->ray_test_count = 0;
 	for (window_index = 0; window_index < window_count; window_index++)
 	{
 		struct render_window const *window = &windows[window_index];
@@ -266,6 +317,8 @@ void bevy_bridge_export_frame(
 		}
 		frame->camera_valid = TRUE;
 		first_person_unit = bevy_bridge_first_person_unit(window->local_player_index);
+		frame->ray_test_count = bevy_bridge_ray_tests(frame->ray_tests, &window->render_camera.position,
+			&window->render_camera.forward, &window->render_camera.up);
 		break;
 	}
 

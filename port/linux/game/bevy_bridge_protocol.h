@@ -40,7 +40,8 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 19
+#define BEVY_BRIDGE_VERSION 20
+#define BEVY_BRIDGE_BIPED_UPDATE_RECORDS 1024
 #define BEVY_BRIDGE_BIPED_MOVING_RECORDS 1024
 #define BEVY_BRIDGE_FEATURE_OBJECTS 16384
 #define BEVY_BRIDGE_FEATURE_MATRICES 65536
@@ -459,6 +460,45 @@ struct bevy_bridge_biped_moving_record
 	struct bevy_bridge_biped_moving_state after;
 };
 
+/* what biped_update changes of an unparented biped before its animation
+updates: its movement state, and its throttle, desired facing, state and
+slipping ticks */
+struct bevy_bridge_biped_update_state
+{
+	struct bevy_bridge_biped_moving_state moving;
+	float throttle[3];
+	float desired_facing_vector[3];
+	char biped_state;
+	char slipping_ticks;
+	short pad;
+};
+
+/* one biped_update of an unparented biped (with
+game.bevy_bridge_ray_tests), up to its animation update: the state before
+and after (taken before its melee, footsteps, falling danger and discard),
+what it reads, the global random seed as its airborne update began (if it
+had one), and the movement record it made (NONE for none) */
+struct bevy_bridge_biped_update_record
+{
+	unsigned long sequence;
+	unsigned long biped_index;
+	unsigned long definition_index;
+	long structure_bsp_index;
+	long moving_record;
+	unsigned long dead;
+	unsigned long control_flags;
+	unsigned long aim_without_turning;
+	char unit_animation_state;
+	char base_seat_index;
+	char enhanced_animation;
+	char limp_body;
+	long player_index;
+	unsigned long airborne_seed_taken;
+	unsigned long airborne_seed;
+	struct bevy_bridge_biped_update_state before;
+	struct bevy_bridge_biped_update_state after;
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -500,6 +540,10 @@ struct bevy_bridge_shared
 	unsigned long biped_moving_record_count;
 	unsigned long biped_moving_pad;
 	struct bevy_bridge_biped_moving_record biped_moving_records[BEVY_BRIDGE_BIPED_MOVING_RECORDS];
+	/* biped updates (a ring, as the projectile records) */
+	unsigned long biped_update_record_count;
+	unsigned long biped_update_pad;
+	struct bevy_bridge_biped_update_record biped_update_records[BEVY_BRIDGE_BIPED_UPDATE_RECORDS];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

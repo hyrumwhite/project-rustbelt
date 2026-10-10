@@ -2117,6 +2117,8 @@ static void biped_update_airborne(
 	struct biped_definition *definition = biped_definition_get(biped->definition_index);
 	boolean flying = FALSE;
 
+	/* port: (bevy_bridge.c) */
+	bevy_bridge_biped_update_airborne();
 	if (biped_flying_through_air(biped_index))
 	{
 		flying = TRUE;
@@ -4273,6 +4275,9 @@ boolean biped_update(
 	}
 	else
 	{
+		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+		if (bevy_bridge_biped_moving_recording())
+			bevy_bridge_biped_update_begin(biped_index, unit_animation_enhanced(biped_index));
 		biped_snap_facing(biped_index);
 		if (TEST_FLAG(biped->object.damage_flags, _object_dead_bit) ||
 			!(definition->biped.flags &
@@ -4445,6 +4450,8 @@ boolean biped_update(
 			--biped->biped.player_melee_ticks;
 		}
 
+		/* port: (bevy_bridge.c) */
+		bevy_bridge_biped_update_end(biped_index, animation.state_desired, animation.crouching);
 		biped_try_to_make_footsteps(biped_index);
 		biped_falling_danger(biped_index);
 		biped_check_discard(biped_index);

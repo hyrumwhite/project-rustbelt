@@ -65,6 +65,12 @@ void bevy_bridge_biped_moving_begin(long biped_index, char state_desired, int cr
 void bevy_bridge_biped_moving_end(long biped_index, char state_desired, int crouching);
 void bevy_bridge_biped_actor_jump(int jumped, float const *velocity);
 void bevy_bridge_biped_aborted_animation(void);
+/* bipeds.c: each biped_update of an unparented biped recorded up to its
+animation update (bevy_bridge_biped_update_record), and the random seed as
+its airborne update begins */
+void bevy_bridge_biped_update_begin(long biped_index, int enhanced_animation);
+void bevy_bridge_biped_update_end(long biped_index, char state_desired, int crouching);
+void bevy_bridge_biped_update_airborne(void);
 
 /* collisions.c: collision_get_features_in_sphere's calls, and each object
 object_get_features_in_sphere visits, during a recorded biped update */

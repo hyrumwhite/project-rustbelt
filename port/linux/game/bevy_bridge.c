@@ -1036,3 +1036,78 @@ void bevy_bridge_biped_aborted_animation(void)
 	if (bevy_bridge_biped_moving.active)
 		bevy_bridge_biped_moving.record.aborted_animation = 1;
 }
+
+/* ---------- biped updates */
+
+static struct
+{
+	boolean active;
+	unsigned long moving_records;
+	struct bevy_bridge_biped_update_record record;
+} bevy_bridge_biped_update;
+
+static void bevy_bridge_biped_update_state(long biped_index, char state_desired, int crouching,
+	struct bevy_bridge_biped_update_state *state)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	bevy_bridge_biped_moving_state(biped_index, state_desired, crouching, &state->moving);
+	bevy_bridge_vector(state->throttle, &biped->unit.throttle);
+	bevy_bridge_vector(state->desired_facing_vector, &biped->unit.desired_facing_vector);
+	state->biped_state = biped->biped.state;
+	state->slipping_ticks = biped->biped.slipping_ticks;
+	state->pad = 0;
+}
+
+void bevy_bridge_biped_update_begin(long biped_index, int enhanced_animation)
+{
+	struct bevy_bridge_biped_update_record *record = &bevy_bridge_biped_update.record;
+	struct biped_datum *biped;
+
+	if (!bevy_bridge_projectile_recording())
+		return;
+	biped = biped_get(biped_index);
+	memset(record, 0, sizeof(*record));
+	record->biped_index = (unsigned long)biped_index;
+	record->definition_index = (unsigned long)biped->definition_index;
+	record->structure_bsp_index = global_structure_bsp_index;
+	record->moving_record = NONE;
+	record->dead = TEST_FLAG(biped->object.damage_flags, _object_dead_bit) ? 1 : 0;
+	record->control_flags = biped->unit.control_flags;
+	record->aim_without_turning = TEST_FLAG(biped->unit.flags, _unit_aim_without_turning_bit) ? 1 : 0;
+	record->unit_animation_state = biped->unit.animation.state;
+	record->base_seat_index = biped->unit.animation.base_seat_index;
+	record->enhanced_animation = enhanced_animation ? 1 : 0;
+	record->limp_body = TEST_FLAG(biped->biped.flags, _biped_limp_body_physics_active_bit) &&
+		biped->biped.limp_body_current_relaxation_iterations < biped->biped.limp_body_max_relaxation_iterations;
+	record->player_index = biped->unit.player_index;
+	/* (the animation update's: idle, not crouching, as biped_update sets it) */
+	bevy_bridge_biped_update_state(biped_index, 0, 0, &record->before);
+	bevy_bridge_biped_update.moving_records = bevy_bridge_shared->biped_moving_record_count;
+	bevy_bridge_biped_update.active = TRUE;
+}
+
+void bevy_bridge_biped_update_end(long biped_index, char state_desired, int crouching)
+{
+	struct bevy_bridge_biped_update_record *record = &bevy_bridge_biped_update.record;
+	unsigned long count;
+
+	if (!bevy_bridge_biped_update.active)
+		return;
+	bevy_bridge_biped_update.active = FALSE;
+	if (bevy_bridge_shared->biped_moving_record_count == bevy_bridge_biped_update.moving_records + 1)
+		record->moving_record = (long)bevy_bridge_biped_update.moving_records;
+	bevy_bridge_biped_update_state(biped_index, state_desired, crouching, &record->after);
+	count = bevy_bridge_shared->biped_update_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->biped_update_records[count % BEVY_BRIDGE_BIPED_UPDATE_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->biped_update_record_count, count + 1, __ATOMIC_RELEASE);
+}
+
+void bevy_bridge_biped_update_airborne(void)
+{
+	if (!bevy_bridge_biped_update.active || bevy_bridge_biped_update.record.airborne_seed_taken)
+		return;
+	bevy_bridge_biped_update.record.airborne_seed_taken = 1;
+	bevy_bridge_biped_update.record.airborne_seed = get_random_seed();
+}

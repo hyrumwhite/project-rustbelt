@@ -27,6 +27,7 @@ enum
 	_halo_sim_player_melee,
 	_halo_sim_unit_update,
 	_halo_sim_biped_rest,
+	_halo_sim_damage,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -80,6 +81,32 @@ enum
 	_unit_update_call_night_vision_active,
 	_unit_update_call_night_vision_effect,
 	_unit_update_call_light_effect,
+};
+
+/* damage's calls of the rest of the game (damage.c's damage_call;
+crates/halo_map's damage::call) */
+enum
+{
+	_damage_call_network_deals = 1,
+	_damage_call_ai_adjust,
+	_damage_call_gametype_multiplier,
+	_damage_call_team_is_enemy,
+	_damage_call_difficulty_enemy_damage,
+	_damage_call_difficulty_team_value,
+	_damage_call_unsuspecting,
+	_damage_call_friendly_damage,
+	_damage_call_transition,
+	_damage_call_player_effect,
+	_damage_call_deplete_body,
+	_damage_call_deplete_shield,
+	_damage_call_destroy,
+	_damage_call_destroy_region,
+	_damage_call_shield_damaged_effect,
+	_damage_call_body_damaged_effect,
+	_damage_call_localized_effect,
+	_damage_call_area_effect,
+	_damage_call_aftermath,
+	_damage_call_player_controlled,
 };
 
 /* the rest of a biped update's calls of the rest of the game (bipeds.c's
@@ -285,5 +312,19 @@ int halo_sim_biped_rest(long biped_index, void *animation, int riding);
 void halo_sim_biped_rest_check(long biped_index, void const *animation);
 void halo_sim_biped_rest_event_begin(long biped_index, long kind, long a, long b);
 void halo_sim_biped_rest_event_end(long biped_index, long result);
+
+/* damage.c's object_cause_damage (the network's authority over it already
+the game's): TRUE when the Rust port dealt it (its calls of the game
+through damage_call); in check mode it notes the objects the game's begins
+with, damage_call records each call (halo_sim_damage_event_begin and _end),
+and halo_sim_object_cause_damage_check compares Rust's replay of it */
+struct damage_data;
+int halo_sim_object_cause_damage(struct damage_data *damage, long object_index, short node_index, short region_index,
+	short material_index, int has_normal, int distributed_damage_authorized, int cheat_omnipotent,
+	int cheat_deathless_player);
+void halo_sim_object_cause_damage_check(struct damage_data const *damage);
+void halo_sim_damage_event_begin(struct damage_data const *damage, long kind, long object_index, long a, long b,
+	float const *f);
+void halo_sim_damage_event_end(struct damage_data const *damage, long object_index, long result, float value);
 
 #endif // __HALO_SIM_H

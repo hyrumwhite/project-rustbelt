@@ -103,6 +103,7 @@ symbols in this file:
 
 #include "cseries.h"
 #include "damage.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 #include "ai/ai.h"
 #include "cseries/errors.h"
 #include "effects/effects.h"
@@ -343,6 +344,9 @@ typedef char object_damage_body_body_destroyed_threshold_offset_assert[
 
 /* ---------- prototypes */
 
+long damage_call(struct damage_data *damage, long kind, long object_index, long a, long b, real const *f, real *out);
+static real damage_maximum_vitality(struct damage_data *damage, long object_index, short which, boolean ignore_difficulty);
+static void object_cause_damage_rider(struct damage_data *damage, long object_index);
 static long get_player_index_from_object_or_parents(
 	long object_index);
 
@@ -831,8 +835,6 @@ static void object_damage_shield(
 	real maximum_shield_vitality;
 	real inverse_maximum_shield_vitality;
 
-	(void)damage;
-
 	if (!game_engine_running() &&
 		damage_definition->category == _damage_category_falling &&
 		object->object.owner_team_index == _game_team_player)
@@ -843,7 +845,7 @@ static void object_damage_shield(
 	if (object->object.shield_vitality > 0.f)
 	{
 		maximum_shield_vitality =
-			object_get_maximum_shield_vitality(object_index, ignore_difficulty);
+			damage_maximum_vitality(damage, object_index, 2, ignore_difficulty);
 		inverse_maximum_shield_vitality = maximum_shield_vitality > 0.f
 			? 1.f / maximum_shield_vitality
 			: 0.f;
@@ -861,10 +863,12 @@ static void object_damage_shield(
 					damage_resistance->shield_failure_threshold &&
 				damage_resistance->shield_failure_threshold > 0.f)
 			{
-				real shield_failure = transition_function_evaluate(
-					damage_resistance->shield_failure_function,
-					object->object.shield_vitality /
-						damage_resistance->shield_failure_threshold);
+				real shield_failure;
+				real f[3] = { 0.f, 0.f, 0.f };
+
+				f[0] = object->object.shield_vitality / damage_resistance->shield_failure_threshold;
+				damage_call(damage, _damage_call_transition, NONE, damage_resistance->shield_failure_function, 0, f,
+					&shield_failure);
 
 				shield_damage *=
 					(1.f - damage_resistance->maximum_shield_failure) *
@@ -896,9 +900,9 @@ static void object_damage_shield(
 					*being_damaged_flags,
 					_object_being_damaged_multiplied_by_difficulty_bit))
 			{
-				real difficulty =
-					game_difficulty_get_value(_game_difficulty_value_enemy_damage);
+				real difficulty;
 
+				damage_call(damage, _damage_call_difficulty_enemy_damage, NONE, 0, 0, NULL, &difficulty);
 				if (difficulty > 0.f)
 					shield_damage /= difficulty;
 			}
@@ -941,7 +945,7 @@ static void object_damage_shield(
 						object->object.damage_flags,
 						_object_shield_depleted_bit))
 				{
-					object_deplete_shield(object_index);
+					damage_call(damage, _damage_call_deplete_shield, object_index, 0, 0, NULL, NULL);
 					SET_FLAG(
 						*being_damaged_flags,
 						_object_being_damaged_shield_depleted_bit,
@@ -963,9 +967,7 @@ static void object_damage_shield(
 					object->object.shield_vitality <
 						damage_resistance->shield_damaged_effect_threshold)
 				{
-					damage_effect_new_on_object(
-						damage_resistance->shield_damaged_effect.index,
-						object_index);
+					damage_call(damage, _damage_call_shield_damaged_effect, object_index, 0, 0, NULL, NULL);
 					SET_FLAG(
 						object->object.damage_flags,
 						_object_passed_shield_damage_threshold_bit,
@@ -1176,7 +1178,7 @@ static void object_damage_body(
 		ignore_difficulty = TRUE;
 	}
 
-	maximum_body_vitality = object_get_maximum_body_vitality(object_index, ignore_difficulty);
+	maximum_body_vitality = damage_maximum_vitality(damage, object_index, 1, ignore_difficulty);
 	if (maximum_body_vitality > 0.f)
 		inverse_maximum_body_vitality = 1.f/maximum_body_vitality;
 	else
@@ -1188,8 +1190,9 @@ static void object_damage_body(
 		actual_damage = (1.f - damage_resistance->friendly_damage_resistance)*damage_amount;
 		if (TEST_FLAG(*being_damaged_flags, _object_being_damaged_multiplied_by_difficulty_bit))
 		{
-			real difficulty = game_difficulty_get_value(_game_difficulty_value_enemy_damage);
+			real difficulty;
 
+			damage_call(damage, _damage_call_difficulty_enemy_damage, NONE, 0, 0, NULL, &difficulty);
 			if (difficulty > 0.f)
 				actual_damage /= difficulty;
 		}
@@ -1272,7 +1275,7 @@ static void object_damage_body(
 		if (region->damage_threshold > 0.f &&
 			object->object.region_damage[region_index]*(1.f/255.f) > region->damage_threshold)
 		{
-			object_destroy_region(object_index, region_index);
+			damage_call(damage, _damage_call_destroy_region, object_index, region_index, 0, NULL, NULL);
 			SET_FLAG(*being_damaged_flags, _object_being_damaged_region_destroyed_bit, TRUE);
 		}
 	}
@@ -1287,45 +1290,22 @@ static void object_damage_body(
 
 	if (cheat.deathless_player && object->object.body_vitality < 0.f)
 	{
-		if (TEST_FLAG(_object_mask_unit, object->object.type))
+		if (TEST_FLAG(_object_mask_unit, object->object.type) &&
+			damage_call(damage, _damage_call_player_controlled, object_index, 0, 0, NULL, NULL))
 		{
-			boolean player_controlled = unit_get(object_index)->unit.player_index != NONE;
-
-			if (!player_controlled && object->object.type == _object_type_vehicle)
-			{
-				long child_object_index = object->object.first_child_object_index;
-
-				while (child_object_index != NONE)
-				{
-					struct object_datum *child_object = object_get(child_object_index);
-
-					if (TEST_FLAG(_object_mask_unit, child_object->object.type))
-					{
-						struct unit_datum *child_unit = (struct unit_datum *)child_object;
-
-						if (child_unit->unit.player_index != NONE)
-						{
-							player_controlled = TRUE;
-							break;
-						}
-					}
-
-					child_object_index = child_object->object.next_object_index;
-				}
-			}
-
-			if (player_controlled)
-				object->object.body_vitality = 0.f;
+			object->object.body_vitality = 0.f;
 		}
 	}
 
 	{
-		real body_vitality = object_get_actual_body_vitality(object_index, FALSE);
+		real body_vitality = object->object.body_vitality;
+
+		body_vitality = damage_maximum_vitality(damage, object_index, 1, FALSE) * body_vitality;
 
 		if (damage_resistance->body_destroyed_threshold < 0.f &&
 			body_vitality < damage_resistance->body_destroyed_threshold)
 		{
-			object_destroy(object_index);
+			damage_call(damage, _damage_call_destroy, object_index, 0, 0, NULL, NULL);
 			*being_damaged_flags |=
 				FLAG(_object_being_damaged_body_depleted_bit) |
 				FLAG(_object_being_damaged_body_destroyed_bit);
@@ -1348,19 +1328,17 @@ static void object_damage_body(
 						struct damage_region);
 
 					if (TEST_FLAG(region->flags, _object_region_dies_when_object_dies_bit))
-						object_destroy_region(object_index, dying_region_index);
+						damage_call(damage, _damage_call_destroy_region, object_index, dying_region_index, 0, NULL, NULL);
 				}
 
-				object_deplete_body(object_index);
+				damage_call(damage, _damage_call_deplete_body, object_index, 0, 0, NULL, NULL);
 				SET_FLAG(*being_damaged_flags, _object_being_damaged_body_depleted_bit, TRUE);
 			}
 		}
 		else if (body_vitality < damage_resistance->body_damaged_effect_threshold &&
 			!TEST_FLAG(object->object.damage_flags, _object_passed_body_damage_threshold_bit))
 		{
-			damage_effect_new_on_object(
-				damage_resistance->body_damaged_effect.index,
-				object_index);
+			damage_call(damage, _damage_call_body_damaged_effect, object_index, 0, 0, NULL, NULL);
 			SET_FLAG(object->object.damage_flags, _object_passed_body_damage_threshold_bit, TRUE);
 		}
 	}
@@ -1368,13 +1346,7 @@ static void object_damage_body(
 	if (TEST_FLAG(damage->flags, _damage_create_localized_effect_bit) &&
 		damage_resistance->localized_damage_effect.index != NONE)
 	{
-		damage_effect_new_at_location(
-			damage_resistance->localized_damage_effect.index,
-			object_index,
-			node_index,
-			&damage->epicenter,
-			&damage->direction,
-			object_normal);
+		damage_call(damage, _damage_call_localized_effect, object_index, node_index, object_normal != NULL, NULL, NULL);
 	}
 
 	if (TEST_FLAG(damage->flags, _damage_area_of_effect_bit) &&
@@ -1382,9 +1354,7 @@ static void object_damage_body(
 		damage_resistance->area_damage_effect.index != NONE &&
 		damage_definition->category != _damage_category_flame)
 	{
-		damage_effect_new_on_object(
-			damage_resistance->area_damage_effect.index,
-			object_index);
+		damage_call(damage, _damage_call_area_effect, object_index, 0, 0, NULL, NULL);
 	}
 
 	*body_damage = damage_amount;
@@ -1393,7 +1363,7 @@ static void object_damage_body(
 	return;
 }
 
-void object_cause_damage(
+static void object_cause_damage_internal(
 	struct damage_data *damage,
 	long object_index,
 	short node_index,
@@ -1416,7 +1386,6 @@ void object_cause_damage(
 	struct object_datum *current_object;
 	struct damage_resistance_material const *damage_material;
 	long current_object_index;
-	long victim_player_index;
 	unsigned long being_damaged_flags;
 	real shield_damage;
 	real body_damage;
@@ -1427,15 +1396,7 @@ void object_cause_damage(
 	/* port: the gametype's friendly fire (game_engine_friendly_damage) */
 	short friendly_damage;
 
-	/* the distributed netcode (port/linux/NETCODE.md): the host deals
-	damage; a client reports its own players' hits instead, and the host
-	deals those (port/linux/game/network_damage.c) */
-	if (!network_damage_deals(damage, object_index, node_index, region_index, material_index, object_normal,
-		distributed_damage_authorized))
-	{
-		return;
-	}
-
+	/* (the network's authority: object_cause_damage's) */
 	damage_effect = damage_effect_definition_get(damage->definition_index);
 	damage_definition = &damage_effect->damage;
 	damage_was_modified = FALSE;
@@ -1463,37 +1424,26 @@ void object_cause_damage(
 
 	if (damage->owner_object_index != NONE)
 	{
-		struct unit_datum *attacker =
-			unit_try_and_get(damage->owner_object_index);
+		real f[3] = { 0.f, 0.f, 0.f };
 
-		if (attacker)
-		{
-			long actor_index;
-
-			if (attacker->unit.gunner_object_index != NONE)
-			{
-				attacker = unit_get(attacker->unit.gunner_object_index);
-			}
-
-			actor_index = attacker->unit.swarm_actor_index != NONE ?
-				attacker->unit.swarm_actor_index :
-				attacker->unit.actor_index;
-
-			if (actor_index != NONE)
-				ai_adjust_damage(actor_index, damage, &total_damage);
-		}
+		f[0] = total_damage;
+		damage_call(damage, _damage_call_ai_adjust, object_index, 0, 0, f, &total_damage);
 	}
 
 	if (game_engine_running())
 	{
-		total_damage *= game_engine_get_damage_multiplier(
-			get_player_index_from_object_or_parents(damage->owner_object_index),
-			get_player_index_from_object_or_parents(object_index));
+		real multiplier;
+
+		damage_call(damage, _damage_call_gametype_multiplier, object_index, 0, 0, NULL, &multiplier);
+		total_damage *= multiplier;
 	}
 	else if (damage->owner_team_index != NONE &&
-		game_team_is_enemy(damage->owner_team_index, _game_team_player))
+		damage_call(damage, _damage_call_team_is_enemy, NONE, damage->owner_team_index, _game_team_player, NULL, NULL))
 	{
-		total_damage *= game_difficulty_get_value(_game_difficulty_value_enemy_damage);
+		real difficulty;
+
+		damage_call(damage, _damage_call_difficulty_enemy_damage, NONE, 0, 0, NULL, &difficulty);
+		total_damage *= difficulty;
 		damage_was_modified = TRUE;
 	}
 
@@ -1599,13 +1549,11 @@ void object_cause_damage(
 							damage->flags,
 							_damage_bypasses_shields_bit,
 							player_index == NONE);
-						object_cause_damage(
+						/* port: a rider's, its network authority a call the
+						Rust port makes too */
+						object_cause_damage_rider(
 							damage,
-							child_object_index,
-							NONE,
-							NONE,
-							NONE,
-							NULL);
+							child_object_index);
 						SET_FLAG(
 							damage->flags,
 							_damage_bypasses_shields_bit,
@@ -1624,34 +1572,12 @@ void object_cause_damage(
 		object_number < damaged_object_count;
 		object_number++)
 	{
-		struct unit_datum *unit = unit_try_and_get(damaged_object_indices[object_number]);
-
-		if (unit)
+		if (unit_try_and_get(damaged_object_indices[object_number]))
 		{
-			long player_index = unit->unit.player_index;
+			real f[3] = { 0.f, 0.f, 0.f };
 
-			if (player_index != NONE)
-			{
-				/* (the host's, for its clients; a client replaying the host's
-				killing blow has had its player effect already) */
-				network_damage_player_effect(player_index, damage, total_damage);
-				if (!network_damage_replaying_kill())
-				player_effect_start(
-					player_index,
-					damage,
-					&damage->direction,
-					damage->scale,
-					total_damage);
-			}
-			else if (cheat.reflexive_damage_effects)
-			{
-				player_effect_start(
-					local_player_get_player_index(0),
-					damage,
-					&damage->direction,
-					damage->scale,
-					total_damage);
-			}
+			f[0] = total_damage;
+			damage_call(damage, _damage_call_player_effect, damaged_object_indices[object_number], 0, 0, f, NULL);
 		}
 	}
 
@@ -1704,18 +1630,17 @@ void object_cause_damage(
 				}
 
 				if (damage->owner_team_index != NONE &&
-					!game_team_is_enemy(
-						current_object->object.owner_team_index,
-						damage->owner_team_index))
+					!damage_call(damage, _damage_call_team_is_enemy, NONE,
+						current_object->object.owner_team_index, damage->owner_team_index, NULL, NULL))
 				{
 					SET_FLAG(
 						being_damaged_flags,
 						_object_being_damaged_by_friendly_bit,
 						TRUE);
-					friendly_damage = game_engine_friendly_damage(damage->owner_player_index, current_object_index,
+					friendly_damage = (short)damage_call(damage, _damage_call_friendly_damage, current_object_index,
 						TEST_FLAG(damage->flags, _damage_area_of_effect_bit) ||
 						damage_definition->category == _damage_category_grenade ||
-						damage_definition->category == _damage_category_highexplosive);
+						damage_definition->category == _damage_category_highexplosive, 0, NULL, NULL);
 				}
 
 				if (damaged_object_count == 0 &&
@@ -1748,7 +1673,7 @@ void object_cause_damage(
 
 				if (damage_definition->side_effect ==
 						_damage_side_effect_lethal_to_the_unsuspecting &&
-					unit_unsuspecting(current_object_index, &damage->epicenter) &&
+					damage_call(damage, _damage_call_unsuspecting, current_object_index, 0, 0, NULL, NULL) &&
 					!TEST_FLAG(
 						current_object->object.damage_flags,
 						_object_cannot_take_damage_bit))
@@ -1765,7 +1690,7 @@ void object_cause_damage(
 					!TEST_FLAG(current_object->object.damage_flags, _object_dead_bit))
 				{
 					current_object->object.body_vitality = 0.f;
-					object_deplete_body(current_object_index);
+					damage_call(damage, _damage_call_deplete_body, current_object_index, 0, 0, NULL, NULL);
 					SET_FLAG(
 						being_damaged_flags,
 						_object_being_damaged_body_depleted_bit,
@@ -1868,39 +1793,15 @@ void object_cause_damage(
 				}
 			}
 
-			/* (the player of the unit, which a killing blow's aftermath
-			takes from it, unit_died) */
+			/* port: the aftermath, a call the Rust port makes too (damage_call) */
 			{
-				struct unit_datum *victim = unit_try_and_get(current_object_index);
+				real f[3];
 
-				victim_player_index = victim ? victim->unit.player_index : NONE;
-			}
-			object_damage_aftermath(
-				current_object_index,
-				damage,
-				being_damaged_flags,
-				shield_damage,
-				body_damage,
-				body_damage_multiplier,
-				body_part);
-			/* (the host's, for its clients) */
-			network_damage_aftermath(
-				current_object_index,
-				damage,
-				being_damaged_flags,
-				shield_damage,
-				body_damage,
-				body_damage_multiplier,
-				body_part,
-				current_object_index == object_index ? node_index : NONE,
-				current_object_index == object_index ? region_index : NONE,
-				current_object_index == object_index ? material_index : NONE,
-				victim_player_index);
-			if (TEST_FLAG(
-				being_damaged_flags,
-				_object_being_damaged_body_destroyed_bit))
-			{
-				object_delete(current_object_index);
+				f[0] = shield_damage;
+				f[1] = body_damage;
+				f[2] = body_damage_multiplier;
+				damage_call(damage, _damage_call_aftermath, current_object_index, (long)being_damaged_flags,
+					((long)(word)body_part << 1) | (current_object_index == object_index ? 1 : 0), f, NULL);
 			}
 		}
 		while (total_damage > 0.f);
@@ -2794,4 +2695,369 @@ void damage_kill_object_for_player(
 	damage.owner_object_index = player->unit_index;
 	damage.owner_team_index = (short)player->team_index;
 	object_cause_damage(&damage, object_index, NONE, NONE, NONE, NULL);
+}
+
+/* ---------- port: the Rust port (halo_sim.c) */
+
+/* the depth of the game's own damage (a vehicle's riders' is nested), and
+the outermost call's hit, which its aftermath and localized effect read */
+static short damage_call_depth;
+static short damage_context_node_index;
+static short damage_context_region_index;
+static short damage_context_material_index;
+static real_vector3d const *damage_context_normal;
+
+void object_cause_damage(
+	struct damage_data *damage,
+	long object_index,
+	short node_index,
+	short region_index,
+	short material_index,
+	real_vector3d const *object_normal)
+{
+	short saved_node_index = damage_context_node_index;
+	short saved_region_index = damage_context_region_index;
+	short saved_material_index = damage_context_material_index;
+	real_vector3d const *saved_normal = damage_context_normal;
+
+	/* the distributed netcode (port/linux/NETCODE.md): the host deals
+	damage; a client reports its own players' hits instead, and the host
+	deals those (port/linux/game/network_damage.c) */
+	if (!network_damage_deals(damage, object_index, node_index, region_index, material_index, object_normal,
+		distributed_damage_authorized))
+	{
+		return;
+	}
+
+	/* the Rust port's in place of the game's, or (in check mode) the state
+	it is checked from; damage dealt from within the game's own (its calls
+	of the rest of the game) is the game's */
+	if (damage_call_depth == 0 &&
+		halo_sim_object_cause_damage(damage, object_index, node_index, region_index, material_index,
+			object_normal != NULL, distributed_damage_authorized, cheat.omnipotent, cheat.deathless_player))
+	{
+		return;
+	}
+	damage_context_node_index = node_index;
+	damage_context_region_index = region_index;
+	damage_context_material_index = material_index;
+	damage_context_normal = object_normal;
+	damage_call_depth++;
+	object_cause_damage_internal(damage, object_index, node_index, region_index, material_index, object_normal);
+	damage_call_depth--;
+	damage_context_node_index = saved_node_index;
+	damage_context_region_index = saved_region_index;
+	damage_context_material_index = saved_material_index;
+	damage_context_normal = saved_normal;
+	if (damage_call_depth == 0)
+		halo_sim_object_cause_damage_check(damage);
+}
+
+/* a vehicle's rider's damage (no hit of its own) */
+static void object_cause_damage_rider(
+	struct damage_data *damage,
+	long object_index)
+{
+	short saved_node_index = damage_context_node_index;
+	short saved_region_index = damage_context_region_index;
+	short saved_material_index = damage_context_material_index;
+	real_vector3d const *saved_normal = damage_context_normal;
+
+	if (!damage_call(damage, _damage_call_network_deals, object_index, 0, 0, NULL, NULL))
+		return;
+	damage_context_node_index = NONE;
+	damage_context_region_index = NONE;
+	damage_context_material_index = NONE;
+	damage_context_normal = NULL;
+	object_cause_damage_internal(damage, object_index, NONE, NONE, NONE, NULL);
+	damage_context_node_index = saved_node_index;
+	damage_context_region_index = saved_region_index;
+	damage_context_material_index = saved_material_index;
+	damage_context_normal = saved_normal;
+}
+
+/* object_get_maximum_shield_vitality (which 2) or body (1), its difficulty
+a call the Rust port makes too */
+static real damage_maximum_vitality(
+	struct damage_data *damage,
+	long object_index,
+	short which,
+	boolean ignore_difficulty)
+{
+	struct object_datum *object = object_get(object_index);
+	real result = which == 2 ? object->object.maximum_shield_vitality : object->object.maximum_body_vitality;
+
+	if (!ignore_difficulty)
+	{
+		real value;
+
+		damage_call(damage, _damage_call_difficulty_team_value, NONE, which, object->object.owner_team_index, NULL, &value);
+		result *= value;
+	}
+
+	return result;
+}
+
+/* the collision model's resistance of an object (none for none) */
+static struct damage_resistance const *damage_object_resistance(
+	long object_index)
+{
+	struct object_definition const *definition = object_definition_get(object_get(object_index)->definition_index);
+
+	if (definition->object.collision_model.index == NONE)
+		return NULL;
+	return &collision_model_definition_get(definition->object.collision_model.index)->resistance;
+}
+
+/* damage's calls of the rest of the game, the game's and the Rust port's
+(crates/halo_map's damage::call) */
+long damage_call(
+	struct damage_data *damage,
+	long kind,
+	long object_index,
+	long a,
+	long b,
+	real const *f,
+	real *out)
+{
+	static real const no_f[3] = { 0.f, 0.f, 0.f };
+	long result = 0;
+	real value = 0.f;
+
+	if (!f)
+		f = no_f;
+	halo_sim_damage_event_begin(damage, kind, object_index, a, b, f);
+	switch (kind)
+	{
+	case _damage_call_network_deals:
+		result = network_damage_deals(damage, object_index, NONE, NONE, NONE, NULL, distributed_damage_authorized);
+		break;
+
+	case _damage_call_ai_adjust:
+		{
+			struct unit_datum *attacker = unit_try_and_get(damage->owner_object_index);
+
+			value = f[0];
+			if (attacker)
+			{
+				long actor_index;
+
+				if (attacker->unit.gunner_object_index != NONE)
+				{
+					attacker = unit_get(attacker->unit.gunner_object_index);
+				}
+
+				actor_index = attacker->unit.swarm_actor_index != NONE ?
+					attacker->unit.swarm_actor_index :
+					attacker->unit.actor_index;
+
+				if (actor_index != NONE)
+					ai_adjust_damage(actor_index, damage, &value);
+			}
+		}
+		break;
+
+	case _damage_call_gametype_multiplier:
+		value = game_engine_get_damage_multiplier(
+			get_player_index_from_object_or_parents(damage->owner_object_index),
+			get_player_index_from_object_or_parents(object_index));
+		break;
+
+	case _damage_call_team_is_enemy:
+		result = game_team_is_enemy((short)a, (short)b);
+		break;
+
+	case _damage_call_difficulty_enemy_damage:
+		value = game_difficulty_get_value(_game_difficulty_value_enemy_damage);
+		break;
+
+	case _damage_call_difficulty_team_value:
+		value = game_difficulty_get_team_value((short)a, (short)b);
+		break;
+
+	case _damage_call_unsuspecting:
+		result = unit_unsuspecting(object_index, &damage->epicenter);
+		break;
+
+	case _damage_call_friendly_damage:
+		result = game_engine_friendly_damage(damage->owner_player_index, object_index, a != 0);
+		break;
+
+	case _damage_call_transition:
+		value = transition_function_evaluate((short)a, f[0]);
+		break;
+
+	case _damage_call_player_effect:
+		{
+			struct unit_datum *unit = unit_try_and_get(object_index);
+			long player_index = unit ? unit->unit.player_index : NONE;
+
+			if (!unit)
+			{
+			}
+			else if (player_index != NONE)
+			{
+				/* (the host's, for its clients; a client replaying the host's
+				killing blow has had its player effect already) */
+				network_damage_player_effect(player_index, damage, f[0]);
+				if (!network_damage_replaying_kill())
+				player_effect_start(
+					player_index,
+					damage,
+					&damage->direction,
+					damage->scale,
+					f[0]);
+			}
+			else if (cheat.reflexive_damage_effects)
+			{
+				player_effect_start(
+					local_player_get_player_index(0),
+					damage,
+					&damage->direction,
+					damage->scale,
+					f[0]);
+			}
+		}
+		break;
+
+	case _damage_call_deplete_body:
+		object_deplete_body(object_index);
+		break;
+
+	case _damage_call_deplete_shield:
+		object_deplete_shield(object_index);
+		break;
+
+	case _damage_call_destroy:
+		object_destroy(object_index);
+		break;
+
+	case _damage_call_destroy_region:
+		object_destroy_region(object_index, (short)a);
+		break;
+
+	case _damage_call_shield_damaged_effect:
+		{
+			struct damage_resistance const *resistance = damage_object_resistance(object_index);
+
+			if (resistance)
+				damage_effect_new_on_object(resistance->shield_damaged_effect.index, object_index);
+		}
+		break;
+
+	case _damage_call_body_damaged_effect:
+		{
+			struct damage_resistance const *resistance = damage_object_resistance(object_index);
+
+			if (resistance)
+				damage_effect_new_on_object(resistance->body_damaged_effect.index, object_index);
+		}
+		break;
+
+	case _damage_call_localized_effect:
+		{
+			struct damage_resistance const *resistance = damage_object_resistance(object_index);
+
+			if (resistance)
+			{
+				damage_effect_new_at_location(
+					resistance->localized_damage_effect.index,
+					object_index,
+					(short)a,
+					&damage->epicenter,
+					&damage->direction,
+					b ? damage_context_normal : NULL);
+			}
+		}
+		break;
+
+	case _damage_call_area_effect:
+		{
+			struct damage_resistance const *resistance = damage_object_resistance(object_index);
+
+			if (resistance)
+				damage_effect_new_on_object(resistance->area_damage_effect.index, object_index);
+		}
+		break;
+
+	case _damage_call_aftermath:
+		{
+			unsigned long being_damaged_flags = (unsigned long)a;
+			short body_part = (short)(word)(b >> 1);
+			boolean outermost = (b & 1) != 0;
+			long victim_player_index;
+
+			/* (the player of the unit, which a killing blow's aftermath
+			takes from it, unit_died) */
+			{
+				struct unit_datum *victim = unit_try_and_get(object_index);
+
+				victim_player_index = victim ? victim->unit.player_index : NONE;
+			}
+			object_damage_aftermath(
+				object_index,
+				damage,
+				being_damaged_flags,
+				f[0],
+				f[1],
+				f[2],
+				body_part);
+			/* (the host's, for its clients) */
+			network_damage_aftermath(
+				object_index,
+				damage,
+				being_damaged_flags,
+				f[0],
+				f[1],
+				f[2],
+				body_part,
+				outermost ? damage_context_node_index : NONE,
+				outermost ? damage_context_region_index : NONE,
+				outermost ? damage_context_material_index : NONE,
+				victim_player_index);
+			if (TEST_FLAG(
+				being_damaged_flags,
+				_object_being_damaged_body_destroyed_bit))
+			{
+				object_delete(object_index);
+			}
+		}
+		break;
+
+	case _damage_call_player_controlled:
+		{
+			struct object_datum *object = object_get(object_index);
+			boolean player_controlled = unit_get(object_index)->unit.player_index != NONE;
+
+			if (!player_controlled && object->object.type == _object_type_vehicle)
+			{
+				long child_object_index = object->object.first_child_object_index;
+
+				while (child_object_index != NONE)
+				{
+					struct object_datum *child_object = object_get(child_object_index);
+
+					if (TEST_FLAG(_object_mask_unit, child_object->object.type))
+					{
+						struct unit_datum *child_unit = (struct unit_datum *)child_object;
+
+						if (child_unit->unit.player_index != NONE)
+						{
+							player_controlled = TRUE;
+							break;
+						}
+					}
+
+					child_object_index = child_object->object.next_object_index;
+				}
+			}
+			result = player_controlled;
+		}
+		break;
+	}
+	if (out)
+		*out = value;
+	halo_sim_damage_event_end(damage, object_index, result, value);
+
+	return result;
 }

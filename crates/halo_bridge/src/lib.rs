@@ -21,8 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 24;
+pub const VERSION: u32 = 25;
 pub const POSE_RECORDS: usize = 2048;
+pub const MELEE_RECORDS: usize = 512;
 pub const POSE_NODES: usize = 65536;
 pub const UNIT_ANIMATION_RECORDS: usize = 1024;
 pub const BIPED_UPDATE_RECORDS: usize = 1024;
@@ -583,6 +584,44 @@ pub struct PoseRecord {
     pub device_power: f32,
 }
 
+/// (Protocol 25) a player biped's melee step in `biped_update`: what it
+/// reads (its melee ticks, whether the player asks to melee, its weapon
+/// (`u32::MAX` for none) and whether the weapon is overcharged, whether it
+/// rides in a seat or zooms, its unit animation's seat, weapon class and
+/// type and action, the random seed), whether it started a melee
+/// (`unit_animation_start_action`: the action, its animation and the random
+/// seed after) or caused its damage, and its melee ticks after.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MeleeRecord {
+    pub sequence: u32,
+    pub biped_index: u32,
+    pub definition_index: u32,
+    pub weapon_definition_index: u32,
+    pub weapon_overcharged: u32,
+    pub use_equipment: u32,
+    pub in_seat: u32,
+    pub zoomed: u32,
+    pub enhanced: u32,
+    pub random_seed_before: u32,
+    pub random_seed_after_start: u32,
+    pub started: u32,
+    pub damaged: u32,
+    pub ticks_before: i8,
+    pub attack_tick_before: i8,
+    pub ticks_after: i8,
+    pub attack_tick_after: i8,
+    pub seat_index: i8,
+    pub weapon_index: i8,
+    pub weapon_type_index: i8,
+    pub action_before: i8,
+    pub action_after: i8,
+    pub pad: [i8; 3],
+    pub action_animation_before: [i16; 2],
+    pub action_animation_after: [i16; 2],
+}
+
+const _: () = assert!(std::mem::size_of::<MeleeRecord>() == 72);
 const _: () = assert!(std::mem::size_of::<PoseNodeRecord>() == 148);
 const _: () = assert!(std::mem::size_of::<PoseRecord>() == 384);
 
@@ -646,6 +685,8 @@ struct Shared {
     pose_node_count: u32,
     pose_records: [PoseRecord; POSE_RECORDS],
     pose_nodes: [PoseNodeRecord; POSE_NODES],
+    melee_record_count: u32,
+    melee_records: [MeleeRecord; MELEE_RECORDS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -722,6 +763,7 @@ pub struct Bridge {
     last_frame_index: u32,
     last_overlay: Option<(u32, u32)>,
     last_projectile_record: Option<u32>,
+    last_melee_record: Option<u32>,
     last_biped_record: Option<u32>,
     last_biped_moving_record: Option<u32>,
     last_biped_update_record: Option<u32>,
@@ -747,7 +789,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None, last_pose_record: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_melee_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None, last_pose_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -842,6 +884,30 @@ impl Bridge {
                 }
             }
             self.last_projectile_record = Some(count);
+            out
+        }
+    }
+
+    /// Players' melee steps the game recorded since the last call (as
+    /// [`Self::read_projectile_records`]).
+    pub fn read_melee_records(&mut self) -> Vec<MeleeRecord> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence number after copying
+        unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).melee_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_melee_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(MELEE_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).melee_records[sequence as usize % MELEE_RECORDS]);
+                if record.sequence == sequence {
+                    out.push(record);
+                }
+            }
+            self.last_melee_record = Some(count);
             out
         }
     }

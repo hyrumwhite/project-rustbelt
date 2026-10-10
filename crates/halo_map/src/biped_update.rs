@@ -6,10 +6,11 @@
 //! airborne and landing updates, ported as they are, in the same
 //! single-precision arithmetic.
 //!
-//! The animation update that follows (`unit_update_animation`, which plays
-//! what this asks for) and a player's melee are not ported yet, nor what
-//! has no bearing on the biped's state (footsteps, the AI's falling danger,
-//! discarding).
+//! A player's melee step ([`player_melee`]: when it starts, timed by the
+//! first-person weapon's melee animation, and the tick its damage lands)
+//! is here too; the animation update that follows is
+//! [`crate::unit_animation`]. What has no bearing on the biped's state
+//! (footsteps, the AI's falling danger, discarding) is not ported.
 
 use crate::biped_moving::{
     self, BipedDefinition, MovingInputs, MovingOutcome, MovingState, PhysicsWorld, PlayerInformation, UNIT_IS_SPECIAL, biped_flags,
@@ -710,4 +711,115 @@ pub fn euler_aiming_update(
         *aiming_velocity = scale3(*aiming_velocity, angle);
         *aiming_vector = end_vector;
     }
+}
+
+// ---------- a player's melee
+
+/// A player's melee with no weapon (the port's: a gametype's loadout of
+/// none), in a weapon's usual time, the hit halfway.
+const UNARMED_MELEE_TICKS: i8 = 16;
+/// `_first_person_weapon_animation_melee`.
+const FIRST_PERSON_WEAPON_ANIMATION_MELEE: usize = 13;
+/// The weapon definition's "prevents melee attack" flag.
+const WEAPON_PREVENTS_MELEE_ATTACK: u32 = 1 << 9;
+
+/// What a player's melee reads of a weapon's definition: whether it
+/// prevents melee, and its first-person melee animation's frame count and
+/// key frame (`weapon_get_first_person_animation_time`, 0 for none).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MeleeWeapon {
+    pub prevents_melee_attack: bool,
+    pub frame_count: i16,
+    pub key_frame_index: i16,
+}
+
+impl MeleeWeapon {
+    pub fn load(cache: &crate::CacheFile, datum: u32) -> crate::Result<Self> {
+        use crate::layout::{
+            _weapon_definition as w, animation as a, animation_graph as g, animation_graph_first_person_weapon_animations as f,
+            weapon_definition, weapon_interface_definition as i,
+        };
+        let root = cache.tag_root(datum, crate::groups::OBJECT)?;
+        let weapon = root.add(weapon_definition::WEAPON);
+        let mut melee = MeleeWeapon { prevents_melee_attack: weapon.u32(w::FLAGS)? & WEAPON_PREVENTS_MELEE_ATTACK != 0, ..Default::default() };
+        let Some(graph_index) = weapon.reference(w::INTERFACE_DEFINITION + i::FIRST_PERSON_ANIMATIONS)?.datum else { return Ok(melee) };
+        let graph = cache.tag_root(graph_index, crate::groups::ANIMATION_GRAPH)?;
+        let Some(first) = graph.block(g::FIRST_PERSON_WEAPON_ANIMATIONS, f::SIZEOF)?.iter().next() else { return Ok(melee) };
+        let Some(animation_index) = first.block(f::ANIMATIONS, 2)?.iter().nth(FIRST_PERSON_WEAPON_ANIMATION_MELEE).map(|p| p.i16(0)).transpose()? else {
+            return Ok(melee);
+        };
+        if animation_index == -1 {
+            return Ok(melee);
+        }
+        if let Some(animation) = graph.block(g::ANIMATIONS, a::SIZEOF)?.get(animation_index as usize) {
+            melee.frame_count = animation.i16(a::FRAME_COUNT)?;
+            melee.key_frame_index = animation.i16(a::PRIVATE_KEY_FRAME_INDEX)?;
+        }
+        Ok(melee)
+    }
+}
+
+/// What a player's melee step reads besides its counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlayerMeleeInputs {
+    /// The player asks to melee (`_unit_control_use_equipment_bit`).
+    pub use_equipment: bool,
+    /// It rides in a seat, and zooms.
+    pub in_seat: bool,
+    pub zoomed: bool,
+    /// Its weapon, and whether the weapon is overcharged (which prevents
+    /// melee too); `None` for no weapon.
+    pub weapon: Option<(MeleeWeapon, bool)>,
+}
+
+/// What a player's melee step did.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlayerMeleeOutcome {
+    /// A melee started: the unit's melee action
+    /// ([`crate::unit_animation::unit_animation_start_action`]), the
+    /// weapon's reload stopped and the first-person weapon told.
+    pub started: bool,
+    /// Its damage landed this tick (`unit_cause_player_melee_damage`).
+    pub damaged: bool,
+}
+
+/// `biped_update`'s player melee step: with no melee under way, a player
+/// asking for one (with a weapon that allows it, or with none outside a
+/// seat; not zoomed) starts one, lasting the first-person melee
+/// animation's frames with the hit at its key frame, both sped up by a
+/// quarter; under way, the damage lands at its tick and the counter runs
+/// down.
+pub fn player_melee(inputs: &PlayerMeleeInputs, ticks: &mut i8, attack_tick: &mut i8) -> PlayerMeleeOutcome {
+    let mut outcome = PlayerMeleeOutcome::default();
+    if *ticks == 0 {
+        if !inputs.use_equipment {
+            return outcome;
+        }
+        let allowed = match inputs.weapon {
+            None => !inputs.in_seat,
+            Some((weapon, overcharged)) => !(weapon.prevents_melee_attack || overcharged),
+        };
+        if allowed && !inputs.zoomed {
+            outcome.started = true;
+            match inputs.weapon {
+                None => {
+                    *ticks = UNARMED_MELEE_TICKS;
+                    *attack_tick = UNARMED_MELEE_TICKS / 2;
+                }
+                Some((weapon, _)) => {
+                    *ticks = weapon.frame_count as i8;
+                    *attack_tick = (*ticks as i32 - weapon.key_frame_index as i32) as i8;
+                }
+            }
+            let speedup = (*ticks as i32) >> 2;
+            *ticks = (*ticks as i32 - speedup) as i8;
+            *attack_tick = (*attack_tick as i32 - speedup) as i8;
+        }
+    } else {
+        if *ticks == *attack_tick {
+            outcome.damaged = true;
+        }
+        *ticks = ticks.wrapping_sub(1);
+    }
+    outcome
 }

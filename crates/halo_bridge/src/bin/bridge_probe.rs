@@ -28,7 +28,8 @@ fn main() {
     // (the left mouse button held for the second half: firing)
     let fire = std::env::args().any(|a| a == "fire");
     // (for the second half: walking forward and strafing, throwing a
-    // grenade (G) every two seconds, jumping and crouching now and then)
+    // grenade (G) and meleeing (F) every two seconds, jumping and crouching
+    // now and then)
     let grenades = std::env::args().any(|a| a == "grenades");
     // (a map file: the game's ray tests checked against halo_map's
     // collision code; the game needs HALO_BEVY_BRIDGE_RAY_TESTS=1)
@@ -110,6 +111,7 @@ fn main() {
             input.set_key(4, active && cycle % 3 == 1); // A
             input.set_key(7, active && cycle % 3 == 2); // D
             input.set_key(10, active && phase < 150); // G
+            input.set_key(9, active && (1000..1100).contains(&phase)); // F (melee)
             input.set_key(44, active && cycle % 4 == 3 && phase < 100); // Space
             input.set_key(224, active && cycle % 5 == 4); // Left Ctrl
             if active {
@@ -162,6 +164,10 @@ fn main() {
             let poses = bridge.read_poses();
             if !poses.is_empty() {
                 check.check_poses(&poses);
+            }
+            let melees = bridge.read_melee_records();
+            if !melees.is_empty() {
+                check.check_melees(&melees);
             }
         }
         if let Some(snapshot) = fresh {
@@ -341,6 +347,11 @@ struct CollisionCheck {
     /// Each type's preprocess (biped, vehicle, weapon, device, other):
     /// compared, agreed, of those changing the pose.
     preprocess_kinds: [[u64; 3]; 5],
+    /// Players' melee steps: compared, agreed; of the agreeing, started
+    /// (with a weapon, without), damage landed, under way.
+    melees: [u64; 6],
+    melees_shown: u32,
+    melee_weapons: std::collections::HashMap<u32, Option<halo_map::biped_update::MeleeWeapon>>,
     /// Of the agreeing vehicles: turning, with a speed, a wheel turned,
     /// with a suspension compressed; devices: with a position, a power.
     vehicle_poses: [u64; 4],
@@ -442,6 +453,9 @@ impl CollisionCheck {
             unit_poses_shown: 0,
             unit_pose_throws: [0; 5],
             preprocess_kinds: [[0; 3]; 5],
+            melees: [0; 6],
+            melees_shown: 0,
+            melee_weapons: Default::default(),
             vehicle_poses: [0; 4],
             device_poses: [0; 2],
             vehicle_pose_definitions: Default::default(),
@@ -1511,6 +1525,90 @@ impl CollisionCheck {
         }
     }
 
+    /// Replays players' melee steps (`biped_update`'s, and the melee action
+    /// they start, `unit_animation_start_action`).
+    fn check_melees(&mut self, records: &[halo_bridge::MeleeRecord]) {
+        use halo_map::biped_moving::BipedDefinition;
+        use halo_map::biped_update::{MeleeWeapon, PlayerMeleeInputs, player_melee};
+        use halo_map::unit_animation::{UnitAnimationState, action, unit_animation_start_action};
+        for record in records {
+            let cache = &self.cache;
+            let definition = self
+                .biped_definitions
+                .entry(record.definition_index)
+                .or_insert_with(|| BipedDefinition::load(cache, record.definition_index).ok())
+                .clone();
+            let Some(definition) = definition else { continue };
+            let Some(graph_index) = definition.animation_graph else { continue };
+            if !self.animation_graphs.contains_key(&graph_index) {
+                self.animation_graphs.insert(graph_index, halo_map::unit_animation::AnimationGraph::load(cache, graph_index).ok());
+            }
+            let weapon = if record.weapon_definition_index == u32::MAX {
+                None
+            } else {
+                let loaded = self
+                    .melee_weapons
+                    .entry(record.weapon_definition_index)
+                    .or_insert_with(|| MeleeWeapon::load(cache, record.weapon_definition_index).ok());
+                let Some(weapon) = *loaded else { continue };
+                Some((weapon, record.weapon_overcharged != 0))
+            };
+            let Some(Some(graph)) = self.animation_graphs.get(&graph_index) else { continue };
+            let inputs = PlayerMeleeInputs {
+                use_equipment: record.use_equipment != 0,
+                in_seat: record.in_seat != 0,
+                zoomed: record.zoomed != 0,
+                weapon,
+            };
+            let (mut ticks, mut attack_tick) = (record.ticks_before, record.attack_tick_before);
+            let outcome = player_melee(&inputs, &mut ticks, &mut attack_tick);
+            let mut state = UnitAnimationState {
+                seat_index: record.seat_index,
+                weapon_index: record.weapon_index,
+                weapon_type_index: record.weapon_type_index,
+                action: record.action_before,
+                action_animation_index: record.action_animation_before[0],
+                action_animation_frame_index: record.action_animation_before[1],
+                ..Default::default()
+            };
+            let mut seed = record.random_seed_before;
+            if outcome.started {
+                unit_animation_start_action(graph, record.enhanced != 0, &mut seed, &mut state, action::MELEE);
+            }
+            self.melees[0] += 1;
+            let same = ticks == record.ticks_after
+                && attack_tick == record.attack_tick_after
+                && outcome.started == (record.started != 0)
+                && outcome.damaged == (record.damaged != 0)
+                && (!outcome.started || seed == record.random_seed_after_start)
+                && state.action == record.action_after
+                && [state.action_animation_index, state.action_animation_frame_index] == record.action_animation_after;
+            if same {
+                let k = &mut self.melees;
+                k[1] += 1;
+                k[2] += (outcome.started && weapon.is_some()) as u64;
+                k[3] += (outcome.started && weapon.is_none()) as u64;
+                k[4] += outcome.damaged as u64;
+                k[5] += (record.ticks_before != 0) as u64;
+            } else if self.melees_shown < 8 {
+                self.melees_shown += 1;
+                println!(
+                    "  melee of {:#x} differs: record {:?}\n    halo_map ticks {} attack {} {:?} seed {:#x} action {} animation {} frame {} (weapon {:?})",
+                    record.biped_index,
+                    record,
+                    ticks,
+                    attack_tick,
+                    outcome,
+                    seed,
+                    state.action,
+                    state.action_animation_index,
+                    state.action_animation_frame_index,
+                    weapon
+                );
+            }
+        }
+    }
+
     /// Loads every animation of a graph for posing.
     fn load_graph_animations(&mut self, graph_index: u32) {
         if !self.unit_pose_graphs.insert(graph_index) {
@@ -1731,6 +1829,11 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        let [compared, agreed, armed, unarmed, damaged, under_way] = self.melees;
+        println!(
+            "bipeds: {} of {} players' melee steps replayed agree with the game ({} melees started with a weapon, {} without; {} hits landed; {} steps under way)",
+            agreed, compared, armed, unarmed, damaged, under_way
+        );
         let [compared, agreed, actions, overlay_actions, soft_pings, seat_overlays, aiming, looking, throws] = self.unit_poses;
         println!(
             "poses: each type's preprocess (biped, vehicle, weapon, device, other: compared, agreed, of those changing the pose) {:?}; vehicles turning, moving, wheels turned, suspensions compressed {:?}; devices with a position, a power {:?}",

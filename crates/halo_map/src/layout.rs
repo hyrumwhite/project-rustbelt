@@ -84,6 +84,12 @@ pub mod _unit_definition {
     pub const STUNNED_MOVEMENT_THRESHOLD: usize = 0xc4;
 }
 
+pub mod _weapon_definition {
+    pub const FLAGS: usize = 0x0;
+    pub const INTERFACE_DEFINITION: usize = 0x154;
+    pub const WEAPON_TYPE: usize = 0x1da;
+}
+
 pub mod animation {
     pub const SIZEOF: usize = 0xb4;
     pub const TYPE: usize = 0x20;
@@ -115,12 +121,18 @@ pub mod animation_graph {
     pub const UNIT_SEATS: usize = 0xc;
     pub const VEHICLE_ANIMATIONS: usize = 0x24;
     pub const DEVICE_ANIMATIONS: usize = 0x30;
+    pub const FIRST_PERSON_WEAPON_ANIMATIONS: usize = 0x48;
     pub const ANIMATIONS: usize = 0x74;
 }
 
 pub mod animation_graph_device_animations {
     pub const SIZEOF: usize = 0x60;
     pub const ANIMATIONS: usize = 0x54;
+}
+
+pub mod animation_graph_first_person_weapon_animations {
+    pub const SIZEOF: usize = 0x1c;
+    pub const ANIMATIONS: usize = 0x10;
 }
 
 pub mod animation_graph_object_overlay {
@@ -149,6 +161,7 @@ pub mod animation_graph_weapon_class {
 pub mod animation_graph_weapon_type {
     pub const SIZEOF: usize = 0x3c;
     pub const LABEL: usize = 0x0;
+    pub const ANIMATIONS: usize = 0x30;
 }
 
 pub mod biped_definition {
@@ -723,4 +736,12 @@ pub mod vertex_buffer {
     pub const OFFSET: usize = 0x8;
     pub const BASE_ADDRESS: usize = 0xc;
     pub const HARDWARE_FORMAT: usize = 0x10;
+}
+
+pub mod weapon_definition {
+    pub const WEAPON: usize = 0x308;
+}
+
+pub mod weapon_interface_definition {
+    pub const FIRST_PERSON_ANIMATIONS: usize = 0x10;
 }

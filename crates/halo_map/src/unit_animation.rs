@@ -38,6 +38,8 @@ pub struct WeaponClass {
     /// Per `_unit_weapon_class_animation`, its animation (NONE for none).
     pub animations: Vec<i16>,
     pub weapon_type_labels: Vec<String>,
+    /// Per weapon type, per `_unit_weapon_type_animation`, its animation.
+    pub weapon_type_animations: Vec<Vec<i16>>,
     pub aiming_screen_bounds: crate::pose::ScreenBounds,
 }
 
@@ -75,10 +77,13 @@ impl AnimationGraph {
             for class in seat.block(s::WEAPON_CLASSES, w::SIZEOF)?.iter() {
                 let weapon_type_labels =
                     class.block(w::WEAPON_TYPES, t::SIZEOF)?.iter().map(|p| label(p.add(t::LABEL))).collect::<Result<_>>()?;
+                let weapon_type_animations =
+                    class.block(w::WEAPON_TYPES, t::SIZEOF)?.iter().map(|p| indices(p, t::ANIMATIONS)).collect::<Result<_>>()?;
                 weapon_classes.push(WeaponClass {
                     label: label(class.add(w::LABEL))?,
                     animations: indices(class, w::ANIMATIONS)?,
                     weapon_type_labels,
+                    weapon_type_animations,
                     aiming_screen_bounds: crate::pose::ScreenBounds::read(class.add(w::AIMING_SCREEN_BOUNDS))?,
                 });
             }
@@ -649,4 +654,95 @@ pub fn unit_update_animation<'g>(
         set_state(unit_graph, unit_graph_index, &mut random, s, desired_state, &mut effects);
     }
     (result, effects)
+}
+
+/// The unit's actions (`_unit_animation_action`).
+pub mod action {
+    pub const NONE: i8 = 0;
+    pub const DISARM: i8 = 1;
+    pub const DROP: i8 = 2;
+    pub const READY: i8 = 3;
+    pub const PUT_AWAY: i8 = 4;
+    pub const PRIMARY_RELOAD: i8 = 5;
+    pub const SECONDARY_RELOAD: i8 = 6;
+    pub const MELEE: i8 = 7;
+    pub const THROW_GRENADE: i8 = 8;
+}
+
+// `_unit_weapon_class_animation`s the actions play
+const WEAPON_CLASS_ANIMATION_THROW_GRENADE: i16 = 20;
+const WEAPON_CLASS_ANIMATION_DISARM: i16 = 21;
+const WEAPON_CLASS_ANIMATION_DROP: i16 = 22;
+const WEAPON_CLASS_ANIMATION_READY: i16 = 23;
+const WEAPON_CLASS_ANIMATION_PUT_AWAY: i16 = 24;
+
+/// The port's `unit_standing_weapon_type_animation`: the standing seat's
+/// animation for the weapon class and type of these labels.
+fn standing_weapon_type_animation(graph: &AnimationGraph, class_label: &str, type_label: &str, weapon_type_animation_index: i16) -> i16 {
+    for seat in graph.unit_seats.iter().filter(|seat| seat.label.eq_ignore_ascii_case("stand")) {
+        for class in seat.weapon_classes.iter().filter(|class| class.label.eq_ignore_ascii_case(class_label)) {
+            for (label, animations) in class.weapon_type_labels.iter().zip(&class.weapon_type_animations) {
+                if label.eq_ignore_ascii_case(type_label) && (weapon_type_animation_index as usize) < animations.len() {
+                    return animations[weapon_type_animation_index as usize];
+                }
+            }
+        }
+    }
+    NONE
+}
+
+/// `unit_animation_start_action`: the action's animation (by the unit's
+/// seat, weapon class and weapon type), a permutation of it drawn from the
+/// game's random numbers, from its first frame; or, for no action, none.
+/// `enhanced` is `unit_animation_enhanced` (a seat with no reload borrows
+/// the standing one's).
+pub fn unit_animation_start_action(graph: &AnimationGraph, enhanced: bool, random_seed: &mut u32, state: &mut UnitAnimationState, action: i8) {
+    if action == action::NONE {
+        state.action = 0;
+        state.action_animation_index = NONE;
+        return;
+    }
+    let Some(seat) = graph.unit_seats.get(state.seat_index as usize) else { return };
+    let Some(class) = seat.weapon_classes.get(state.weapon_index as usize) else { return };
+    let weapon_type = state.weapon_type_index as usize;
+    let (Some(type_label), Some(type_animations)) = (class.weapon_type_labels.get(weapon_type), class.weapon_type_animations.get(weapon_type)) else {
+        return;
+    };
+    let mut weapon_class_animation_index = NONE;
+    let mut weapon_type_animation_index = NONE;
+    let mut animation_index = NONE;
+    match action {
+        action::DISARM => weapon_class_animation_index = WEAPON_CLASS_ANIMATION_DISARM,
+        action::DROP => weapon_class_animation_index = WEAPON_CLASS_ANIMATION_DROP,
+        action::READY => weapon_class_animation_index = WEAPON_CLASS_ANIMATION_READY,
+        action::PUT_AWAY => weapon_class_animation_index = WEAPON_CLASS_ANIMATION_PUT_AWAY,
+        action::THROW_GRENADE => weapon_class_animation_index = WEAPON_CLASS_ANIMATION_THROW_GRENADE,
+        5 | 6 | 7 | 9 => {
+            weapon_type_animation_index = match action {
+                5 => 0,
+                6 => 1,
+                7 => 8,
+                _ => 9,
+            };
+            animation_index = slot(type_animations, weapon_type_animation_index);
+        }
+        _ => {}
+    }
+    if weapon_class_animation_index != NONE {
+        animation_index = slot(&class.animations, weapon_class_animation_index);
+    }
+    if animation_index == NONE && (weapon_type_animation_index == 0 || weapon_type_animation_index == 1) && enhanced {
+        animation_index = standing_weapon_type_animation(graph, &class.label, type_label, weapon_type_animation_index);
+    }
+    let interpolation_frame_count = if action == action::MELEE { 0 } else { 6 };
+    if animation_index != NONE {
+        if interpolation_frame_count > 0 {
+            start_interpolation(state, interpolation_frame_count);
+        }
+        let mut random = Random { seed: *random_seed };
+        state.action_animation_index = choose_random_permutation(graph, &mut random, animation_index);
+        *random_seed = random.seed;
+        state.action_animation_frame_index = 0;
+        state.action = action;
+    }
 }

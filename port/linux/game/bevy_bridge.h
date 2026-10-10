@@ -54,5 +54,9 @@ bipeds.c's struct biped_physics */
 void bevy_bridge_biped_physics_begin(long biped_index, void const *physics, unsigned long size,
 	int stand_test, float stand_height, float stand_radius);
 void bevy_bridge_biped_physics_end(void const *physics, unsigned long size);
+/* collisions.c: collision_get_features_in_sphere's calls, and each object
+object_get_features_in_sphere visits, during a recorded biped update */
+void bevy_bridge_features_call(void);
+void bevy_bridge_feature_object(long object_index);
 
 #endif /* __BEVY_BRIDGE_H */

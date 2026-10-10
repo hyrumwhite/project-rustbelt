@@ -21,6 +21,9 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "units/units.h"
 #include "items/projectiles.h"
 #include "physics/breakable_surfaces.h"
+#include "units/bipeds.h"
+#include "devices/device_definitions.h"
+#include "devices/devices.h"
 #include "objects/object_lights.h"
 #include "physics/collision_bsp.h"
 #include "physics/collisions.h"
@@ -813,6 +816,9 @@ void bevy_bridge_biped_physics_begin(long biped_index, void const *physics, unsi
 	record->stand_radius = stand_radius;
 	memcpy(record->breakable_surfaces, breakable_surface_flags_get(), sizeof(record->breakable_surfaces));
 	memcpy(&record->before, physics, size < sizeof(record->before) ? size : sizeof(record->before));
+	record->first_feature_object = bevy_bridge_shared->feature_object_count;
+	record->feature_object_count = 0;
+	record->feature_calls = 0;
 	bevy_bridge_biped.active = TRUE;
 }
 
@@ -829,4 +835,77 @@ void bevy_bridge_biped_physics_end(void const *physics, unsigned long size)
 	record->sequence = count;
 	bevy_bridge_shared->biped_records[count % BEVY_BRIDGE_BIPED_RECORDS] = *record;
 	__atomic_store_n(&bevy_bridge_shared->biped_record_count, count + 1, __ATOMIC_RELEASE);
+}
+
+void bevy_bridge_features_call(void)
+{
+	if (bevy_bridge_biped.active)
+		bevy_bridge_biped.record.feature_calls++;
+}
+
+void bevy_bridge_feature_object(long object_index)
+{
+	struct bevy_bridge_biped_record *record = &bevy_bridge_biped.record;
+	struct bevy_bridge_feature_object *entry;
+	struct object_datum *object;
+	unsigned long count;
+	long node_count;
+	long node_index;
+	real_matrix4x3 const *matrices;
+
+	if (!bevy_bridge_biped.active)
+		return;
+	object = object_get(object_index);
+	count = bevy_bridge_shared->feature_object_count;
+	entry = &bevy_bridge_shared->feature_objects[count % BEVY_BRIDGE_FEATURE_OBJECTS];
+	memset(entry, 0, sizeof(*entry));
+	entry->object_index = (unsigned long)object_index;
+	entry->definition_index = (unsigned long)object->definition_index;
+	entry->call = record->feature_calls ? record->feature_calls - 1 : 0;
+	entry->type = object->object.type;
+	entry->dead = TEST_FLAG(object->object.damage_flags, _object_dead_bit) ? 1 : 0;
+	entry->flags = object->object.flags;
+	bevy_bridge_point(entry->bounding_center, &object->object.bounding_sphere_center);
+	entry->bounding_radius = object->object.bounding_sphere_radius;
+	entry->parent_object_index = object->object.parent_object_index;
+	bevy_bridge_vector(entry->translational_velocity, &object->object.translational_velocity);
+	entry->player_index = NONE;
+	entry->parent_seat_index = NONE;
+	if (object->object.type == _object_type_machine)
+	{
+		struct machine_definition *machine_definition = machine_definition_get(object->definition_index);
+
+		entry->elevator = TEST_FLAG(machine_definition->machine.flags, _machine_never_appears_locked_bit) &&
+			machine_definition->machine.elevator_node_index != NONE;
+	}
+	if (object->object.type == _object_type_biped)
+	{
+		struct biped_datum *biped = biped_get(object_index);
+		real_point3d base;
+
+		entry->biped_passes_through = TEST_FLAG(biped->biped.flags, _biped_movement_passes_through_bipeds_bit) ? 1 : 0;
+		entry->player_index = biped->unit.player_index;
+		entry->parent_seat_index = biped->unit.parent_seat_index;
+		biped_get_physics_pill(object_index, &base, &entry->pill_height, &entry->pill_width);
+		bevy_bridge_point(entry->pill_base, &base);
+	}
+	memcpy(entry->region_permutations, object->object.region_permutations, sizeof(entry->region_permutations));
+	node_count = object->object.node_matrices.size / (long)sizeof(real_matrix4x3);
+	if (node_count > BEVY_BRIDGE_FEATURE_OBJECT_MAXIMUM_NODES)
+		node_count = BEVY_BRIDGE_FEATURE_OBJECT_MAXIMUM_NODES;
+	if (node_count < 0)
+		node_count = 0;
+	matrices = node_count ? object_get_node_matrices(object_index) : NULL;
+	entry->first_matrix = bevy_bridge_shared->feature_matrix_count;
+	entry->node_count = (unsigned long)node_count;
+	for (node_index = 0; node_index < node_count; node_index++)
+	{
+		float *out = bevy_bridge_shared->feature_matrices[(entry->first_matrix + node_index) % BEVY_BRIDGE_FEATURE_MATRICES];
+
+		memcpy(out, &matrices[node_index], sizeof(float) * 13);
+	}
+	__atomic_store_n(&bevy_bridge_shared->feature_matrix_count, entry->first_matrix + node_count, __ATOMIC_RELEASE);
+	entry->sequence = count;
+	__atomic_store_n(&bevy_bridge_shared->feature_object_count, count + 1, __ATOMIC_RELEASE);
+	record->feature_object_count++;
 }

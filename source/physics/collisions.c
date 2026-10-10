@@ -113,6 +113,7 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "structures/structure_bsp_definitions.h"
 #include "units/bipeds.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 /* port: object_bounds_cache.c's */
 boolean object_bounds_cache_out_of_reach(long object_index, real_point3d const *point, real radius);
 
@@ -883,6 +884,8 @@ boolean collision_get_features_in_sphere(
 {
 	unsigned long structure_flags;
 
+	/* port: counted for a Bevy renderer replaying a biped update (bevy_bridge.c) */
+	bevy_bridge_features_call();
 	collision_features_new(features);
 	structure_flags = flags & FLAG(_collision_test_structure_bit);
 	if (structure_flags ||
@@ -1789,6 +1792,8 @@ static void object_get_features_in_sphere(
 	{
 		struct object_datum *object = object_get(object_index);
 
+		/* port: recorded for a Bevy renderer replaying a biped update (bevy_bridge.c) */
+		bevy_bridge_feature_object(object_index);
 		if (object_index != ignore_object_index &&
 			!TEST_FLAG(object->object.flags, _object_invisible_bit) &&
 			!TEST_FLAG(object->object.flags, _object_no_collisions_bit) &&

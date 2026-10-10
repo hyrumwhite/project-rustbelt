@@ -40,7 +40,10 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 17
+#define BEVY_BRIDGE_VERSION 18
+#define BEVY_BRIDGE_FEATURE_OBJECTS 16384
+#define BEVY_BRIDGE_FEATURE_MATRICES 65536
+#define BEVY_BRIDGE_FEATURE_OBJECT_MAXIMUM_NODES 128
 #define BEVY_BRIDGE_BIPED_RECORDS 1024
 #define BEVY_BRIDGE_PROJECTILE_RECORDS 1024
 #define BEVY_BRIDGE_RANDOM_DIRECTIONS 4096
@@ -320,6 +323,38 @@ struct bevy_bridge_biped_physics
 	unsigned char bytes[0xCC];
 };
 
+/* an object object_get_features_in_sphere visited, as it was then: during
+the call `call` (counted from 0) of collision_get_features_in_sphere in the
+biped update recording it. A biped's pill is biped_get_physics_pill's; an
+object's node matrices (node_count of them from first_matrix, in the
+feature matrix ring) and region permutations are its collision model's;
+`elevator` is whether it is a machine that is an elevator a biped standing
+on it rides */
+struct bevy_bridge_feature_object
+{
+	unsigned long sequence;
+	unsigned long object_index;
+	unsigned long definition_index;
+	unsigned long call;
+	short type;
+	short dead;
+	unsigned long flags;
+	float bounding_center[3];
+	float bounding_radius;
+	long parent_object_index;
+	float translational_velocity[3];
+	unsigned long elevator;
+	unsigned long biped_passes_through;
+	long player_index;
+	long parent_seat_index;
+	float pill_base[3];
+	float pill_height;
+	float pill_width;
+	unsigned char region_permutations[8];
+	unsigned long node_count;
+	unsigned long first_matrix;
+};
+
 /* one biped_update_physics (with game.bevy_bridge_ray_tests): the biped's
 physics before and after, which breakable surfaces stood (bit i of byte
 i / 8), and what the crouching player's stand test reads of the biped's
@@ -333,6 +368,12 @@ struct bevy_bridge_biped_record
 	float stand_height;
 	float stand_radius;
 	unsigned char breakable_surfaces[32];
+	/* the objects collision_get_features_in_sphere visited during the update
+	(feature_object_count of them from first_feature_object, in the feature
+	object ring), and how many times it was called */
+	unsigned long first_feature_object;
+	unsigned long feature_object_count;
+	unsigned long feature_calls;
 	struct bevy_bridge_biped_physics before;
 	struct bevy_bridge_biped_physics after;
 };
@@ -367,6 +408,13 @@ struct bevy_bridge_shared
 	unsigned long biped_record_count;
 	unsigned long biped_pad;
 	struct bevy_bridge_biped_record biped_records[BEVY_BRIDGE_BIPED_RECORDS];
+	/* the objects biped updates' collision features came from (a ring: the
+	object `count` goes in place count % BEVY_BRIDGE_FEATURE_OBJECTS), and
+	their node matrices (a ring of scale, forward, left, up, position) */
+	unsigned long feature_object_count;
+	unsigned long feature_matrix_count;
+	struct bevy_bridge_feature_object feature_objects[BEVY_BRIDGE_FEATURE_OBJECTS];
+	float feature_matrices[BEVY_BRIDGE_FEATURE_MATRICES][13];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

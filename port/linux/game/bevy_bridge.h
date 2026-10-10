@@ -54,6 +54,18 @@ bipeds.c's struct biped_physics */
 void bevy_bridge_biped_physics_begin(long biped_index, void const *physics, unsigned long size,
 	int stand_test, float stand_height, float stand_radius);
 void bevy_bridge_biped_physics_end(void const *physics, unsigned long size);
+/* bipeds.c, with game.bevy_bridge_ray_tests: each biped_update_moving
+recorded for a renderer to replay (bevy_bridge_biped_moving_record), with
+what it asks of the rest of the game; and, during it, what the actor's jump
+aim answered and whether it aborted the unit's animation */
+int bevy_bridge_biped_moving_recording(void);
+void bevy_bridge_biped_moving_begin(long biped_index, char state_desired, int crouching,
+	float const *aiming_vector, float difficulty_infection_forms, float speed_multiplier,
+	int cinematic, int double_speed, int coop_player_collisions, int actor_leaping, int recorded_animation);
+void bevy_bridge_biped_moving_end(long biped_index, char state_desired, int crouching);
+void bevy_bridge_biped_actor_jump(int jumped, float const *velocity);
+void bevy_bridge_biped_aborted_animation(void);
+
 /* collisions.c: collision_get_features_in_sphere's calls, and each object
 object_get_features_in_sphere visits, during a recorded biped update */
 void bevy_bridge_features_call(void);

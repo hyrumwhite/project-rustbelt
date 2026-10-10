@@ -909,3 +909,130 @@ void bevy_bridge_feature_object(long object_index)
 	__atomic_store_n(&bevy_bridge_shared->feature_object_count, count + 1, __ATOMIC_RELEASE);
 	record->feature_object_count++;
 }
+
+/* ---------- biped movement updates */
+
+static struct
+{
+	boolean active;
+	unsigned long physics_records;
+	struct bevy_bridge_biped_moving_record record;
+} bevy_bridge_biped_moving;
+
+int bevy_bridge_biped_moving_recording(void)
+{
+	return bevy_bridge_projectile_recording();
+}
+
+static void bevy_bridge_biped_moving_state(long biped_index, char state_desired, int crouching,
+	struct bevy_bridge_biped_moving_state *state)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	bevy_bridge_point(state->position, &biped->object.position);
+	bevy_bridge_vector(state->forward, &biped->object.forward);
+	bevy_bridge_vector(state->up, &biped->object.up);
+	bevy_bridge_vector(state->translational_velocity, &biped->object.translational_velocity);
+	bevy_bridge_vector(state->angular_velocity, &biped->object.angular_velocity);
+	state->object_flags = biped->object.flags;
+	state->location_leaf = biped->object.location.leaf_index;
+	state->location_cluster = biped->object.location.cluster_index;
+	state->landing = biped->biped.landing;
+	state->biped_flags = biped->biped.flags;
+	state->landing_recovery_counter = biped->biped.landing_recovery_counter;
+	state->landing_recovery_time = biped->biped.landing_recovery_time;
+	state->elevator_ticks = biped->biped.elevator_ticks;
+	state->bump_ticks = biped->biped.bump_ticks;
+	state->jump_recovery_timer = biped->biped.jump_recovery_timer;
+	state->airborne_ticks = biped->biped.airborne_ticks;
+	state->animation_state_desired = state_desired;
+	state->animation_crouching = crouching ? 1 : 0;
+	state->elevator_object_index = biped->biped.elevator_object_index;
+	state->support_surface_index = biped->biped.support_surface_index;
+	state->pathfinding_surface_index = biped->biped.pathfinding_surface_index;
+	bevy_bridge_point(state->pathfinding_point, &biped->biped.pathfinding_point);
+	state->bump_object_index = biped->biped.bump_object_index;
+	state->crouch = biped->biped.crouch;
+	state->bank = biped->biped.bank;
+	state->ground_plane[0] = biped->biped.ground_plane.n.i;
+	state->ground_plane[1] = biped->biped.ground_plane.n.j;
+	state->ground_plane[2] = biped->biped.ground_plane.n.k;
+	state->ground_plane[3] = biped->biped.ground_plane.d;
+}
+
+void bevy_bridge_biped_moving_begin(long biped_index, char state_desired, int crouching,
+	float const *aiming_vector, float difficulty_infection_forms, float speed_multiplier,
+	int cinematic, int double_speed, int coop_player_collisions, int actor_leaping, int recorded_animation)
+{
+	struct bevy_bridge_biped_moving_record *record = &bevy_bridge_biped_moving.record;
+	struct biped_datum *biped;
+
+	if (!bevy_bridge_projectile_recording())
+		return;
+	biped = biped_get(biped_index);
+	memset(record, 0, sizeof(*record));
+	record->biped_index = (unsigned long)biped_index;
+	record->definition_index = (unsigned long)biped->definition_index;
+	record->structure_bsp_index = global_structure_bsp_index;
+	record->physics_record = NONE;
+	record->dead = TEST_FLAG(biped->object.damage_flags, _object_dead_bit) ? 1 : 0;
+	record->ignore_translation = TEST_FLAG(biped->unit.animation.flags, _unit_animation_ignore_translation_bit) ? 1 : 0;
+	record->suspended = TEST_FLAG(biped->unit.flags, _unit_suspended_bit) ? 1 : 0;
+	record->control_flags = biped->unit.control_flags;
+	record->unit_animation_state = biped->unit.animation.state;
+	record->base_seat_index = biped->unit.animation.base_seat_index;
+	record->aiming_speed = biped->unit.aiming_speed;
+	record->actor = (biped->unit.actor_index != NONE || biped->unit.swarm_actor_index != NONE) ? 1 : 0;
+	record->player_index = biped->unit.player_index;
+	bevy_bridge_vector(record->throttle, &biped->unit.throttle);
+	record->body_stun = biped->unit.body_stun;
+	record->recent_body_damage = biped->object.recent_body_damage;
+	bevy_bridge_vector(record->desired_facing_vector, &biped->unit.desired_facing_vector);
+	memcpy(record->aiming_vector, aiming_vector, sizeof(record->aiming_vector));
+	bevy_bridge_point(record->bounding_center, &biped->object.bounding_sphere_center);
+	record->animation_graph_index = biped->object.animation.animation_graph_index;
+	record->animation_index = biped->object.animation.state.index;
+	record->animation_frame_index = biped->object.animation.state.frame_index;
+	record->difficulty_infection_forms = difficulty_infection_forms;
+	record->speed_multiplier = speed_multiplier;
+	record->cinematic = cinematic ? 1 : 0;
+	record->double_speed = double_speed ? 1 : 0;
+	record->coop_player_collisions = coop_player_collisions ? 1 : 0;
+	record->actor_leaping = actor_leaping ? 1 : 0;
+	record->recorded_animation = recorded_animation ? 1 : 0;
+	bevy_bridge_biped_moving_state(biped_index, state_desired, crouching, &record->before);
+	bevy_bridge_biped_moving.physics_records = bevy_bridge_shared->biped_record_count;
+	bevy_bridge_biped_moving.active = TRUE;
+}
+
+void bevy_bridge_biped_moving_end(long biped_index, char state_desired, int crouching)
+{
+	struct bevy_bridge_biped_moving_record *record = &bevy_bridge_biped_moving.record;
+	unsigned long count;
+
+	if (!bevy_bridge_biped_moving.active)
+		return;
+	bevy_bridge_biped_moving.active = FALSE;
+	if (bevy_bridge_shared->biped_record_count == bevy_bridge_biped_moving.physics_records + 1)
+		record->physics_record = (long)bevy_bridge_biped_moving.physics_records;
+	bevy_bridge_biped_moving_state(biped_index, state_desired, crouching, &record->after);
+	count = bevy_bridge_shared->biped_moving_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->biped_moving_records[count % BEVY_BRIDGE_BIPED_MOVING_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->biped_moving_record_count, count + 1, __ATOMIC_RELEASE);
+}
+
+void bevy_bridge_biped_actor_jump(int jumped, float const *velocity)
+{
+	if (!bevy_bridge_biped_moving.active)
+		return;
+	bevy_bridge_biped_moving.record.actor_jump_asked = 1;
+	bevy_bridge_biped_moving.record.actor_jumped = jumped ? 1 : 0;
+	memcpy(bevy_bridge_biped_moving.record.actor_jump_velocity, velocity, sizeof(float) * 3);
+}
+
+void bevy_bridge_biped_aborted_animation(void)
+{
+	if (bevy_bridge_biped_moving.active)
+		bevy_bridge_biped_moving.record.aborted_animation = 1;
+}

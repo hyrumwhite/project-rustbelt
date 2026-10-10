@@ -1912,6 +1912,15 @@ static boolean biped_jump(
 				leap,
 				jump_magnitude,
 				&jump_velocity);
+			/* port: recorded for a Bevy renderer replaying the movement (bevy_bridge.c) */
+			{
+				float velocity[3];
+
+				velocity[0] = jump_velocity.i;
+				velocity[1] = jump_velocity.j;
+				velocity[2] = jump_velocity.k;
+				bevy_bridge_biped_actor_jump(jumped, velocity);
+			}
 		}
 
 		if (jumped)
@@ -3738,6 +3747,7 @@ static void biped_update_moving(
 					{
 						rotated_forward = biped->unit.desired_facing_vector;
 						unit_abort_animation(biped_index);
+						bevy_bridge_biped_aborted_animation(); /* port: (bevy_bridge.c) */
 					}
 				}
 
@@ -4328,7 +4338,32 @@ boolean biped_update(
 			biped_verify_object_vectors(biped_index, "post-turning");
 		}
 
+		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+		if (bevy_bridge_biped_moving_recording())
+		{
+			long actor_index = biped->unit.swarm_actor_index != NONE ? biped->unit.swarm_actor_index : biped->unit.actor_index;
+			real_vector3d aiming;
+			float aiming_vector[3];
+
+			if (TEST_FLAG(definition->unit.flags, _unit_simple_creature_bit))
+				aiming = biped->object.forward;
+			else
+				unit_get_aiming_vector(biped_index, &aiming);
+			aiming_vector[0] = aiming.i;
+			aiming_vector[1] = aiming.j;
+			aiming_vector[2] = aiming.k;
+			bevy_bridge_biped_moving_begin(biped_index, animation.state_desired, animation.crouching,
+				aiming_vector,
+				game_difficulty_get_value(_game_difficulty_value_infection_forms),
+				biped->unit.player_index != NONE ? player_get(biped->unit.player_index)->speed_multiplier : 1.f,
+				cinematic_in_progress(),
+				game_players_are_double_speed(),
+				network_coop_player_collisions(),
+				biped->unit.actor_index != NONE && actor_is_leaping(biped->unit.actor_index),
+				recorded_animation_controlling_unit(biped_index));
+		}
 		biped_update_moving(biped_index, &animation);
+		bevy_bridge_biped_moving_end(biped_index, animation.state_desired, animation.crouching);
 		biped_verify_object_vectors(biped_index, "post-moving");
 
 		if (TEST_FLAG(biped->object.damage_flags, _object_dead_bit))

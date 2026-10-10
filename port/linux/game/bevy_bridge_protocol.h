@@ -40,7 +40,8 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 18
+#define BEVY_BRIDGE_VERSION 19
+#define BEVY_BRIDGE_BIPED_MOVING_RECORDS 1024
 #define BEVY_BRIDGE_FEATURE_OBJECTS 16384
 #define BEVY_BRIDGE_FEATURE_MATRICES 65536
 #define BEVY_BRIDGE_FEATURE_OBJECT_MAXIMUM_NODES 128
@@ -378,6 +379,86 @@ struct bevy_bridge_biped_record
 	struct bevy_bridge_biped_physics after;
 };
 
+/* what biped_update_moving changes of a biped (and of the animation update
+it is given) */
+struct bevy_bridge_biped_moving_state
+{
+	float position[3];
+	float forward[3];
+	float up[3];
+	float translational_velocity[3];
+	float angular_velocity[3];
+	unsigned long object_flags;
+	long location_leaf;
+	short location_cluster;
+	short landing;
+	unsigned long biped_flags;
+	char landing_recovery_counter;
+	char landing_recovery_time;
+	char elevator_ticks;
+	char bump_ticks;
+	char jump_recovery_timer;
+	char airborne_ticks;
+	char animation_state_desired;
+	char animation_crouching;
+	long elevator_object_index;
+	long support_surface_index;
+	long pathfinding_surface_index;
+	float pathfinding_point[3];
+	long bump_object_index;
+	float crouch;
+	float bank;
+	float ground_plane[4];
+};
+
+/* one biped_update_moving (with game.bevy_bridge_ray_tests): the biped's
+movement state before and after, what it reads of the biped, unit and
+animation, what it asks of the rest of the game (the aiming vector, the
+difficulty's infection forms value, the player's speed multiplier, whether
+a cinematic plays, players are double speed, co-op players collide, its
+actor leaps, a recorded animation controls it), what its actor's jump aim
+answered (if asked), whether it aborted the unit's animation, and the biped
+physics record it made (NONE for none) */
+struct bevy_bridge_biped_moving_record
+{
+	unsigned long sequence;
+	unsigned long biped_index;
+	unsigned long definition_index;
+	long structure_bsp_index;
+	long physics_record;
+	unsigned long dead;
+	unsigned long ignore_translation;
+	unsigned long suspended;
+	unsigned long control_flags;
+	char unit_animation_state;
+	char base_seat_index;
+	char aiming_speed;
+	char actor;
+	long player_index;
+	float throttle[3];
+	float body_stun;
+	float recent_body_damage;
+	float desired_facing_vector[3];
+	float aiming_vector[3];
+	float bounding_center[3];
+	long animation_graph_index;
+	short animation_index;
+	short animation_frame_index;
+	float difficulty_infection_forms;
+	float speed_multiplier;
+	unsigned long cinematic;
+	unsigned long double_speed;
+	unsigned long coop_player_collisions;
+	unsigned long actor_leaping;
+	unsigned long recorded_animation;
+	unsigned long actor_jump_asked;
+	unsigned long actor_jumped;
+	float actor_jump_velocity[3];
+	unsigned long aborted_animation;
+	struct bevy_bridge_biped_moving_state before;
+	struct bevy_bridge_biped_moving_state after;
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -415,6 +496,10 @@ struct bevy_bridge_shared
 	unsigned long feature_matrix_count;
 	struct bevy_bridge_feature_object feature_objects[BEVY_BRIDGE_FEATURE_OBJECTS];
 	float feature_matrices[BEVY_BRIDGE_FEATURE_MATRICES][13];
+	/* biped movement updates (a ring, as the projectile records) */
+	unsigned long biped_moving_record_count;
+	unsigned long biped_moving_pad;
+	struct bevy_bridge_biped_moving_record biped_moving_records[BEVY_BRIDGE_BIPED_MOVING_RECORDS];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

@@ -95,10 +95,57 @@ pub struct CollisionBsp {
     pub vertices: Vec<[f32; 3]>,
     /// Per vertex, its first edge.
     pub(crate) vertex_first_edges: Vec<i32>,
-    /// Which breakable surfaces still stand (`breakable_surface_flags_get`:
-    /// bit i of byte i / 8 for breakable surface i), or `None` to count every
-    /// one as standing (a test the game makes with no breakable surfaces).
-    pub breakable_surfaces: Option<[u8; 32]>,
+    /// Which breakable surfaces still stand.
+    pub breakable_surfaces: BreakableSurfaces,
+}
+
+/// Which breakable surfaces still stand (`breakable_surface_flags_get`: bit
+/// i of byte i / 8 for breakable surface i), or unknown to count every one
+/// as standing (a test the game makes with no breakable surfaces). Set
+/// through a shared reference, as the game breaks them (a running game's
+/// surfaces can break between two ray tests of one update).
+#[derive(Debug, Default)]
+pub struct BreakableSurfaces {
+    known: std::sync::atomic::AtomicBool,
+    words: [std::sync::atomic::AtomicU32; 8],
+}
+
+impl BreakableSurfaces {
+    pub fn set(&self, flags: Option<[u8; 32]>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if let Some(flags) = flags {
+            for (index, word) in self.words.iter().enumerate() {
+                word.store(u32::from_le_bytes(flags[index * 4..index * 4 + 4].try_into().unwrap()), Relaxed);
+            }
+        }
+        self.known.store(flags.is_some(), Relaxed);
+    }
+
+    pub fn get(&self) -> Option<[u8; 32]> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.known.load(Relaxed) {
+            return None;
+        }
+        let mut flags = [0u8; 32];
+        for (index, word) in self.words.iter().enumerate() {
+            flags[index * 4..index * 4 + 4].copy_from_slice(&word.load(Relaxed).to_le_bytes());
+        }
+        Some(flags)
+    }
+
+    /// Whether breakable surface `index` stands.
+    pub fn standing(&self, index: usize) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        !self.known.load(Relaxed) || self.words[index / 32 % 8].load(Relaxed) & (1 << (index % 32)) != 0
+    }
+}
+
+impl Clone for BreakableSurfaces {
+    fn clone(&self) -> Self {
+        let clone = BreakableSurfaces::default();
+        clone.set(self.get());
+        clone
+    }
 }
 
 /// What a ray hit.
@@ -112,6 +159,8 @@ pub struct Hit {
     pub plane_designator: i32,
     pub flags: u8,
     pub material: i16,
+    /// The surface's breakable surface index.
+    pub breakable_surface: u8,
 }
 
 impl CollisionBsp {
@@ -320,13 +369,7 @@ impl CollisionBsp {
     /// Whether a surface is there: not a breakable surface that has been
     /// broken.
     pub fn surface_extant(&self, surface: &Surface) -> bool {
-        match &self.breakable_surfaces {
-            Some(bits) if surface.flags & surface_flags::BREAKABLE != 0 => {
-                let index = surface.breakable_surface as usize;
-                bits[index / 8] & (1 << (index % 8)) != 0
-            }
-            _ => true,
-        }
+        surface.flags & surface_flags::BREAKABLE == 0 || self.breakable_surfaces.standing(surface.breakable_surface as usize)
     }
 
     /// `collision_surface_edge_ring_continues`: an edge of the bsp, within
@@ -896,6 +939,14 @@ pub struct CollisionResult {
     pub material_type: i16,
     /// The surface's flags (`collision_surface_flags`).
     pub surface_flags: u8,
+    /// An object hit's region (NONE otherwise, or for a vehicle's physics).
+    pub region: i16,
+    /// The structure's or the collision model's material index hit (NONE
+    /// for none), its plane designator, and the surface's breakable surface
+    /// index.
+    pub material_index: i16,
+    pub plane_designator: i32,
+    pub breakable_surface: u8,
 }
 
 /// `matrix4x3_transform_plane`.
@@ -962,6 +1013,14 @@ pub trait ObjectSource {
 }
 
 impl World<'_> {
+    /// An object as the world holds it.
+    pub fn object(&self, index: u32) -> Option<WorldObject> {
+        match self.source {
+            Some(source) => source.object(index),
+            None => self.objects.iter().find(|o| o.index == index).cloned(),
+        }
+    }
+
     /// Halo's ray test against the structure, objects and water
     /// (`collision_test_vector`): the nearest hit as the game finds it, or
     /// `None`. Broken breakable surfaces are passed through
@@ -992,6 +1051,10 @@ impl World<'_> {
             location_cluster: NONE as i16,
             material_type: NONE as i16,
             surface_flags: 0,
+            region: NONE as i16,
+            material_index: NONE as i16,
+            plane_designator: NONE,
+            breakable_surface: 0,
         };
         // (testing nothing of the environment: the end point, and the
         // location there)
@@ -1012,6 +1075,9 @@ impl World<'_> {
             result.plane = if hit.plane_designator & SIGN != 0 { negate_plane(hit.plane) } else { hit.plane };
             result.material_type = self.clusters.structure_material_type(hit.material);
             result.surface_flags = hit.flags;
+            result.material_index = hit.material;
+            result.plane_designator = hit.plane_designator;
+            result.breakable_surface = hit.breakable_surface;
         }
         if let (Some(&first), Some(&last)) = (leaves.first(), leaves.last()) {
             let _ = first;
@@ -1235,6 +1301,10 @@ impl World<'_> {
                 result.plane = plane;
                 result.material_type = NONE as i16;
                 result.surface_flags = 0;
+                result.region = NONE as i16;
+                result.material_index = NONE as i16;
+                result.plane_designator = NONE;
+                result.breakable_surface = 0;
             }
         } else if let Some(model) = &object.model
             && let Some(hit) = model.test_vector(&object.region_permutations, &object.matrices, bsp_flags, point, vector)
@@ -1251,6 +1321,10 @@ impl World<'_> {
             result.kind = Some(CollisionKind::Object);
             result.material_type = model.material_type(hit.hit.material);
             result.surface_flags = hit.hit.flags;
+            result.region = hit.region;
+            result.material_index = hit.hit.material;
+            result.plane_designator = hit.hit.plane_designator;
+            result.breakable_surface = hit.hit.breakable_surface;
             let plane = transform_plane(&object.matrices[hit.node], hit.hit.plane);
             result.plane = if hit.hit.plane_designator & SIGN != 0 { negate_plane(plane) } else { plane };
         }
@@ -1893,6 +1967,7 @@ impl VectorTest<'_> {
                         plane_designator: surface.plane_designator,
                         flags: surface.flags,
                         material: surface.material,
+                        breakable_surface: surface.breakable_surface,
                     });
                     return true;
                 }

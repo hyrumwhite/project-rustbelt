@@ -4,14 +4,13 @@
 //! moment it is read, and its children. And the game's whole ray test
 //! (`collision_test_vector`) in Rust on it.
 
-use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 use halo_map::collision::{CollisionKind, CollisionModel, ObjectSource, World, WorldObject};
 use halo_map::model::Matrix4x3;
 use halo_map::vehicle_physics::{PhysicsShape, physics_instance_new};
 
-use crate::{LEVEL, TAGS, Tags};
+use crate::{TAGS, Tags};
 
 /// An object as the host reports it.
 #[repr(C)]
@@ -33,6 +32,8 @@ pub struct HostObject {
     pub origin: [f32; 3],
     pub forward: [f32; 3],
     pub up: [f32; 3],
+    /// A projectile's own flags (0 for another object).
+    pub projectile_flags: u32,
 }
 
 /// The host's callbacks into the running game.
@@ -42,6 +43,7 @@ pub struct Host {
     pub cluster_objects: unsafe extern "C" fn(cluster: i16, out: *mut u32, maximum: u32) -> u32,
     pub object: unsafe extern "C" fn(index: u32, out: *mut HostObject) -> i32,
     pub children: unsafe extern "C" fn(index: u32, out: *mut u32, maximum: u32) -> u32,
+    pub projectile: crate::projectiles::ProjectileCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
@@ -59,7 +61,7 @@ pub unsafe extern "C" fn halo_sim_set_host(host: *const Host) -> i32 {
 }
 
 impl Tags {
-    fn collision_model(&mut self, definition: u32) -> Option<Arc<CollisionModel>> {
+    pub(crate) fn collision_model(&mut self, definition: u32) -> Option<Arc<CollisionModel>> {
         let cache = &self.cache;
         self.collision_models
             .entry(definition)
@@ -71,7 +73,7 @@ impl Tags {
             .clone()
     }
 
-    fn physics_shape(&mut self, definition: u32) -> Option<Arc<PhysicsShape>> {
+    pub(crate) fn physics_shape(&mut self, definition: u32) -> Option<Arc<PhysicsShape>> {
         let cache = &self.cache;
         self.physics_shapes
             .entry(definition)
@@ -80,15 +82,20 @@ impl Tags {
     }
 }
 
-/// The running game's objects, through the host.
-pub(crate) struct GameObjects<'a> {
+/// The running game's objects, through the host (the tags locked only to
+/// read an object's collision model and physics).
+pub(crate) struct GameObjects {
     pub(crate) host: Host,
-    pub(crate) tags: RefCell<&'a mut Tags>,
+}
+
+/// The host's callbacks, if the game gave them.
+pub(crate) fn host() -> Option<Host> {
+    *HOST.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 const OBJECT_TYPE_VEHICLE: i16 = 1;
 
-impl ObjectSource for GameObjects<'_> {
+impl ObjectSource for GameObjects {
     fn cluster_objects(&self, cluster: i16, out: &mut Vec<u32>) {
         let mut buffer = [0u32; 1024];
         // SAFETY: the host's callback, with a buffer of its size
@@ -112,13 +119,13 @@ impl ObjectSource for GameObjects<'_> {
                 Matrix4x3 { scale: f[0], forward: [f[1], f[2], f[3]], left: [f[4], f[5], f[6]], up: [f[7], f[8], f[9]], position: [f[10], f[11], f[12]] }
             })
             .collect();
-        let mut tags = self.tags.borrow_mut();
-        let model = tags.collision_model(o.definition_index);
-        let physics = if o.object_type == OBJECT_TYPE_VEHICLE {
-            tags.physics_shape(o.definition_index).map(|shape| physics_instance_new(shape, o.origin, o.forward, o.up))
-        } else {
-            None
+        let (model, shape) = {
+            let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+            let tags = tags.as_mut()?;
+            let shape = if o.object_type == OBJECT_TYPE_VEHICLE { tags.physics_shape(o.definition_index) } else { None };
+            (tags.collision_model(o.definition_index), shape)
         };
+        let physics = shape.map(|shape| physics_instance_new(shape, o.origin, o.forward, o.up));
         Some(WorldObject {
             index: o.object_index,
             kind: o.object_type,
@@ -172,6 +179,10 @@ pub struct CollisionVectorResult {
     pub location_leaf: i32,
     pub location_cluster: i16,
     pub surface_flags: u16,
+    pub region_index: i16,
+    pub material_index: i16,
+    pub plane_designator: i32,
+    pub breakable_surface_index: u32,
 }
 
 /// The game's whole ray test (`collision_test_vector`) on the running
@@ -187,21 +198,9 @@ pub unsafe extern "C" fn halo_sim_collision_test_vector(call: *const CollisionVe
     }
     // SAFETY: the caller's pointers
     let (call, result) = unsafe { (&*call, &mut *result) };
-    let Some(host) = *HOST.lock().unwrap_or_else(|e| e.into_inner()) else { return -1 };
-    let mut level = LEVEL.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(level) = level.as_mut() else { return -1 };
-    let Some(Some(structure)) = usize::try_from(call.structure_bsp_index).ok().and_then(|i| level.structures.get_mut(i)) else {
-        return -1;
-    };
-    structure.collision.breakable_surfaces = if call.breakable_surfaces.is_null() {
-        None
-    } else {
-        // SAFETY: 32 bytes, as above
-        Some(unsafe { *(call.breakable_surfaces as *const [u8; 32]) })
-    };
-    let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(tags) = tags.as_mut() else { return -1 };
-    let source = GameObjects { host, tags: RefCell::new(tags) };
+    let Some(host) = host() else { return -1 };
+    let Some(structure) = crate::structure(call.structure_bsp_index, call.breakable_surfaces) else { return -1 };
+    let source = GameObjects { host };
     let world = World { collision: &structure.collision, clusters: &structure.clusters, objects: &[], source: Some(&source) };
     let r = world.test(call.flags, call.point, call.vector, call.ignore_object_index);
     *result = CollisionVectorResult {
@@ -223,6 +222,10 @@ pub unsafe extern "C" fn halo_sim_collision_test_vector(call: *const CollisionVe
         location_leaf: r.location_leaf,
         location_cluster: r.location_cluster,
         surface_flags: r.surface_flags as u16,
+        region_index: r.region,
+        material_index: r.material_index,
+        plane_designator: r.plane_designator,
+        breakable_surface_index: r.breakable_surface as u32,
     };
     0
 }

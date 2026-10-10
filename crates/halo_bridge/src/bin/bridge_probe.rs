@@ -950,7 +950,7 @@ impl CollisionCheck {
                     game_time: g.game_time,
                 })
                 .collect();
-            let context = halo_map::projectile::ProjectileContext {
+            let mut context = halo_map::projectile::ProjectileContext {
                 projectile_index: record.projectile_index,
                 definition_index: record.definition_index,
                 collision_seeds: &record.collision_seeds[..record.collision_count as usize],
@@ -962,7 +962,7 @@ impl CollisionCheck {
                 wander_table: periodic_tables.map(|t| &t[10]),
             };
             let mut random = halo_map::projectile::Random { seed: record.random_seed, directions };
-            let summary = match halo_map::projectile::projectile_update(&world, definition, &mut state, &mut random, &context) {
+            let summary = match halo_map::projectile::projectile_update(&world, definition, &mut state, &mut random, &mut context) {
                 Ok(summary) => summary,
                 Err(missing) => {
                     self.projectile_skipped[2] += 1;
@@ -1117,14 +1117,14 @@ impl CollisionCheck {
                 self.recent_physics.retain(|&sequence, _| newest.wrapping_sub(sequence) < 4096);
             }
             let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
-            bsp.breakable_surfaces = Some(record.breakable_surfaces);
+            bsp.breakable_surfaces.set(Some(record.breakable_surfaces));
             let mut physics = record.before;
             let stand = (record.stand_test != 0).then_some(halo_map::biped::StandTest {
                 collision_height_standing: record.stand_height,
                 collision_radius: record.stand_radius,
             });
             halo_map::biped::biped_update_physics(bsp, &mut physics, stand, &objects);
-            bsp.breakable_surfaces = None;
+            bsp.breakable_surfaces.set(None);
             self.bipeds_replayed += 1;
             let bytes = |p: &halo_map::biped::BipedPhysics| {
                 // SAFETY: BipedPhysics is repr(C) plain old data of 0xcc bytes
@@ -1265,7 +1265,7 @@ impl CollisionCheck {
                 self.recent_moving.retain(|&sequence, _| newest.wrapping_sub(sequence) < 4096);
             }
             let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
-            bsp.breakable_surfaces = physics_record.as_ref().map(|(p, _)| p.breakable_surfaces);
+            bsp.breakable_surfaces.set(physics_record.as_ref().map(|(p, _)| p.breakable_surfaces));
             let Some(Some(bsp)) = self.bsps.get(&structure_bsp_index) else { return };
             let Some(Some(clusters)) = self.clusters.get(&structure_bsp_index) else { return };
             let world = PhysicsWorld { bsp, clusters, objects };
@@ -1273,7 +1273,7 @@ impl CollisionCheck {
             let outcome =
                 halo_map::biped_moving::biped_update_moving(&world, &definition, &player_information, &inputs, &mut state, stand);
             if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
-                bsp.breakable_surfaces = None;
+                bsp.breakable_surfaces.set(None);
             }
             self.moving_replayed += 1;
 
@@ -1437,7 +1437,7 @@ impl CollisionCheck {
                 None => (&no_objects, None),
             };
             let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
-            bsp.breakable_surfaces = physics_record.as_ref().map(|(p, _)| p.breakable_surfaces);
+            bsp.breakable_surfaces.set(physics_record.as_ref().map(|(p, _)| p.breakable_surfaces));
             let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
                 return;
             };
@@ -1445,7 +1445,7 @@ impl CollisionCheck {
             let mut state = record.before;
             halo_map::biped_update::biped_update(&world, &definition, &player_information, &inputs, &moving_inputs, stand, &[], &mut state);
             if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
-                bsp.breakable_surfaces = None;
+                bsp.breakable_surfaces.set(None);
             }
             self.update_replayed += 1;
             let bytes = |s: &halo_map::biped_update::UpdateState| {
@@ -2026,7 +2026,7 @@ impl CollisionCheck {
             };
             let breakables = physics_update.as_ref().map_or(record.breakable_surfaces, |p| p.record.breakable_surfaces);
             let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
-            bsp.breakable_surfaces = Some(breakables);
+            bsp.breakable_surfaces.set(Some(breakables));
             let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
                 return;
             };
@@ -2045,7 +2045,7 @@ impl CollisionCheck {
             };
             let outcome = vu::vehicle_update(&definition, physics.as_deref(), &mut state, &inputs, &env);
             if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
-                bsp.breakable_surfaces = None;
+                bsp.breakable_surfaces.set(None);
             }
             self.vehicle_updates[1] += 1;
             // the controls handed to the physics
@@ -2205,7 +2205,7 @@ impl CollisionCheck {
                 stuck_mass_point_flags: b.stuck_mass_point_flags,
             };
             let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
-            bsp.breakable_surfaces = Some(record.breakable_surfaces);
+            bsp.breakable_surfaces.set(Some(record.breakable_surfaces));
             let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
                 return;
             };
@@ -2218,7 +2218,7 @@ impl CollisionCheck {
             };
             let outcome = vp::physics_update(&physics, &mut state, &inputs, &env);
             if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
-                bsp.breakable_surfaces = None;
+                bsp.breakable_surfaces.set(None);
             }
             self.vehicle_physics[1] += 1;
             let a = &record.after;

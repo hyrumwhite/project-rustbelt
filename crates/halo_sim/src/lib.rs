@@ -13,10 +13,16 @@
 //! game's own tag cache in its memory (`halo_sim_set_tag_cache`), as the
 //! game holds them, without a copy.
 //!
-//! Systems handed over so far: point physics (`point_physics_update`), and
+//! Systems handed over so far: point physics (`point_physics_update`),
 //! poses (`object_compute_node_matrices`: the orientations from the
 //! animation, overlays and scale, the object types' preprocess, and the
-//! interpolation and node matrices).
+//! interpolation and node matrices), and projectiles (`projectile_update`,
+//! calling the game back for what it does to the world). The game's whole
+//! ray test (`collision_test_vector`) is checked against the game's on its
+//! live objects ([`world`]).
+//!
+//! No lock is held while the game is called back: a callback can reach
+//! game code that calls this DLL again.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
@@ -29,28 +35,45 @@ use halo_map::pose::{PoseAnimation, PoseModel, PoseObjectDefinition};
 
 pub mod poses;
 pub mod preprocess;
+pub mod projectiles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// A level's structure BSP, as the simulation tests it.
-struct Structure {
-    collision: CollisionBsp,
-    clusters: StructureClusters,
+pub(crate) struct Structure {
+    pub(crate) collision: CollisionBsp,
+    pub(crate) clusters: StructureClusters,
 }
 
 /// The loaded level: its map file's path, and its structure BSPs by index.
 struct Level {
     path: String,
-    structures: Vec<Option<Structure>>,
+    structures: Vec<Option<Arc<Structure>>>,
 }
 
 static LEVEL: Mutex<Option<Level>> = Mutex::new(None);
 
+/// A structure BSP of the loaded level, with the breakable surfaces that
+/// stand (`breakable_surfaces`: 32 bytes, or null for every one). The lock
+/// is let go: a call can reach the game, and the game this DLL again.
+fn structure(index: i32, breakable_surfaces: *const u8) -> Option<Arc<Structure>> {
+    let level = LEVEL.lock().unwrap_or_else(|e| e.into_inner());
+    let structure = level.as_ref()?.structures.get(usize::try_from(index).ok()?)?.clone()?;
+    drop(level);
+    structure.collision.breakable_surfaces.set(if breakable_surfaces.is_null() {
+        None
+    } else {
+        // SAFETY: the game's 32 bytes of breakable surface flags
+        Some(unsafe { *(breakable_surfaces as *const [u8; 32]) })
+    });
+    Some(structure)
+}
+
 /// The game's tag cache, and what has been read from it (until the next
 /// level replaces it).
-struct Tags {
+pub(crate) struct Tags {
     cache: CacheFile,
     definitions: HashMap<u32, Option<Arc<PoseObjectDefinition>>>,
     models: HashMap<u32, Option<Arc<PoseModel>>>,
@@ -62,6 +85,7 @@ struct Tags {
     devices: HashMap<u32, Option<Arc<halo_map::device_pose::DevicePoseDefinition>>>,
     collision_models: HashMap<u32, Option<Arc<halo_map::collision::CollisionModel>>>,
     physics_shapes: HashMap<u32, Option<Arc<halo_map::vehicle_physics::PhysicsShape>>>,
+    projectiles: HashMap<u32, Option<Arc<halo_map::projectile::ProjectileDefinition>>>,
 }
 
 impl Tags {
@@ -116,6 +140,7 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
         devices: HashMap::new(),
         collision_models: HashMap::new(),
         physics_shapes: HashMap::new(),
+        projectiles: HashMap::new(),
     });
     count
 }
@@ -149,11 +174,11 @@ pub unsafe extern "C" fn halo_sim_load_map(path: *const c_char) -> i32 {
     let Ok(cache) = CacheFile::open(&path) else { return -1 };
     let Ok(references) = halo_map::bsp::references(&cache) else { return -1 };
     let count = references.iter().map(|r| r.index + 1).max().unwrap_or(0);
-    let mut structures: Vec<Option<Structure>> = (0..count).map(|_| None).collect();
+    let mut structures: Vec<Option<Arc<Structure>>> = (0..count).map(|_| None).collect();
     for reference in &references {
         let Ok(bsp) = halo_map::bsp::Bsp::load(&cache, reference) else { continue };
         let (Ok(collision), Ok(clusters)) = (CollisionBsp::load(&bsp), StructureClusters::load(&cache, &bsp)) else { continue };
-        structures[reference.index] = Some(Structure { collision, clusters });
+        structures[reference.index] = Some(Arc::new(Structure { collision, clusters }));
     }
     drop(cache);
     *level = Some(Level { path, structures });
@@ -236,17 +261,7 @@ pub unsafe extern "C" fn halo_sim_point_physics_update(call: *const PointPhysics
     }
     // SAFETY: as above
     let d = unsafe { &*call.definition };
-    let mut level = LEVEL.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(level) = level.as_mut() else { return -1 };
-    let Some(Some(structure)) = usize::try_from(call.structure_bsp_index).ok().and_then(|i| level.structures.get_mut(i)) else {
-        return -1;
-    };
-    structure.collision.breakable_surfaces = if call.breakable_surfaces.is_null() {
-        None
-    } else {
-        // SAFETY: 32 bytes, as above
-        Some(unsafe { *(call.breakable_surfaces as *const [u8; 32]) })
-    };
+    let Some(structure) = structure(call.structure_bsp_index, call.breakable_surfaces) else { return -1 };
     let definition = PointPhysicsDefinition {
         flags: d.flags,
         runtime_mass_over_radius_cubed: d.runtime_mass_over_radius_cubed,

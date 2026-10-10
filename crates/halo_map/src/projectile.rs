@@ -13,11 +13,13 @@
 //! the hit node's space, and counts the needles already stuck there for a
 //! super-combining explosion.
 //!
-//! What a projectile does to the world is left out: effects, sounds,
-//! damage (the material type an object's damage reports back is an input,
-//! [`ProjectileContext::damage_material_types`], until damage is ported),
-//! breakable surfaces, the AI's notices, detonations, and the other
-//! needles a super-combining hit resets.
+//! What a projectile does to the world is the game's, through a
+//! [`ProjectileHost`], called at the moments the C calls it: its impact
+//! damage (and the material type that reports back), breakable surfaces,
+//! effects, the AI's notices, its moves (with the flyby sound, its
+//! orientation and contrail), sticking to an object, and the other needles
+//! a super-combining hit resets. A recorded update replays through
+//! [`ProjectileContext`]; the running game is a host of its own.
 
 use crate::{
     collision::{self, CollisionKind, World},
@@ -40,6 +42,9 @@ pub struct MaterialResponse {
     pub initial_friction: f32,
     pub parallel_friction: f32,
     pub perpendicular_friction: f32,
+    /// What scales its effects (`_projectile_material_effect_scale_*`:
+    /// damage 0, angle 1).
+    pub scale_effects_by: i16,
 }
 
 /// `default_projectile_material_response`: disappear.
@@ -57,6 +62,7 @@ pub const DEFAULT_MATERIAL_RESPONSE: MaterialResponse = MaterialResponse {
     initial_friction: 0.0,
     parallel_friction: 0.0,
     perpendicular_friction: 0.0,
+    scale_effects_by: 0,
 };
 
 pub const RESPONSE_DISAPPEAR: i16 = 0;
@@ -85,6 +91,10 @@ pub mod object_flags {
     pub const AT_REST: u32 = 1 << 5;
     pub const OUTSIDE_OF_MAP: u32 = 1 << 21;
 }
+
+/// `_projectile_material_effect_scale_*`.
+const SCALE_EFFECTS_BY_DAMAGE: i16 = 0;
+const SCALE_EFFECTS_BY_ANGLE: i16 = 1;
 
 /// `_projectile_definition` flags.
 const DETONATION_MAX_TIME_IF_ATTACHED: u32 = 1 << 2;
@@ -133,6 +143,7 @@ impl ProjectileDefinition {
                 initial_friction: response.f32(r::INITIAL_FRICTION)?,
                 parallel_friction: response.f32(r::PARALLEL_FRICTION)?,
                 perpendicular_friction: response.f32(r::PERPENDICULAR_FRICTION)?,
+                scale_effects_by: response.i16(r::SCALE_EFFECTS_BY)?,
             });
         }
         Ok(ProjectileDefinition {
@@ -156,6 +167,7 @@ impl ProjectileDefinition {
 }
 
 /// What `projectile_update` reads and changes of a projectile.
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ProjectileState {
     pub position: [f32; 3],
@@ -314,6 +326,8 @@ const FAT_COLLISION_FLAGS: u32 = 0x89;
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct UpdateSummary {
     pub collisions: usize,
+    /// The time left of the tick when it stopped (a detonation's).
+    pub time_remaining: f32,
     pub damaged_objects: usize,
     pub attached_to: Option<u32>,
     pub combining_projectiles: usize,
@@ -345,6 +359,136 @@ pub struct Guidance {
     pub game_time: i32,
 }
 
+/// An object's impact damage, as the game reports it back: the material
+/// type it took (NONE for the collision's), and how much that material's
+/// effects scale.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ImpactDamage {
+    pub material_type: i16,
+    pub material_effect_scale: f32,
+}
+
+/// The effects a collision makes: the material response's (its potential
+/// one, or its default), and the detonation starting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionEffect {
+    Response { material_type: i16, potential: bool },
+    DetonationStarted,
+}
+
+/// The rest of the game, as a projectile update calls it, at the moments
+/// the C does. The state is the update's as it stands at each call (a
+/// running game's host writes it to the projectile first, and reads back
+/// what the call changed); `random` is the game's random seed, which the
+/// game's effects and damage draw from as well.
+pub trait ProjectileHost {
+    fn projectile_index(&self) -> u32;
+    fn definition_index(&self) -> u32;
+    /// After the timers (`projectile_export_function_values`).
+    fn timers_updated(&mut self, _state: &mut ProjectileState) {}
+    /// A guided step's inputs (the `step`th of the update).
+    fn guidance(&mut self, state: &mut ProjectileState, step: usize) -> Option<Guidance>;
+    /// The game's wander table (`_periodic_function_wander`).
+    fn wander_table(&self) -> Option<&[u8; 1024]>;
+    /// A collision's response begins.
+    fn collision_begin(&mut self, _state: &mut ProjectileState, _collision_index: usize, _random: &mut Random<'_>) {}
+    /// The impact damage to the object hit (`object_cause_damage`), at the
+    /// damage scale, along the velocity. `None` if it can't be done.
+    #[allow(clippy::too_many_arguments)]
+    fn impact_damage(
+        &mut self,
+        state: &mut ProjectileState,
+        collision_index: usize,
+        collision: &collision::CollisionResult,
+        damage_scale: f32,
+        velocity: [f32; 3],
+        random: &mut Random<'_>,
+    ) -> Option<ImpactDamage>;
+    /// An object as a hit reads it.
+    fn object(&self, index: u32) -> Option<ProjectileObject>;
+    /// An object's children (its first child, then that child's siblings).
+    fn children(&self, index: u32, out: &mut Vec<u32>);
+    /// A breakable surface of the structure hit takes the impact.
+    fn breakable_surface_damage(
+        &mut self,
+        _state: &mut ProjectileState,
+        _collision: &collision::CollisionResult,
+        _velocity: [f32; 3],
+        _random: &mut Random<'_>,
+    ) {
+    }
+    /// An effect at the hit (`projectile_effect_new`), its markers along
+    /// `direction` (the velocity's on impact).
+    #[allow(clippy::too_many_arguments)]
+    fn effect(
+        &mut self,
+        _state: &mut ProjectileState,
+        _effect: CollisionEffect,
+        _collision: &collision::CollisionResult,
+        _direction: [f32; 3],
+        _scale: f32,
+        _material_effect_scale: f32,
+        _random: &mut Random<'_>,
+    ) {
+    }
+    /// A needle already stuck in the object hit restarts its arming and
+    /// detonation timers (a super-combining hit).
+    fn combining_reset(&mut self, _child: u32) {}
+    /// The projectile sticks where it hit (its velocity zero and the flags
+    /// set): moved there, and into the hit node's space if an object. The
+    /// object it stuck to.
+    fn attach(
+        &mut self,
+        world: &World<'_>,
+        state: &mut ProjectileState,
+        collision: &collision::CollisionResult,
+        new_position: [f32; 3],
+        _random: &mut Random<'_>,
+    ) -> std::result::Result<Option<u32>, MissingInput> {
+        attach(world, state, collision, new_position)
+    }
+    /// The AI hears the impact (`ai_handle_spatial_effect`).
+    fn impact_noise(&mut self, _state: &mut ProjectileState, _point: [f32; 3], _random: &mut Random<'_>) {}
+    /// The projectile moves (its odometer already counted): the flyby
+    /// sound, its orientation, `object_translate`, its velocity, and its
+    /// contrail's collision. `ignore_object_index` is the step's.
+    #[allow(clippy::too_many_arguments)]
+    fn moved(
+        &mut self,
+        state: &mut ProjectileState,
+        new_position: [f32; 3],
+        new_velocity: [f32; 3],
+        location: (i32, i16),
+        _time_remaining: f32,
+        _collision_count: usize,
+        _ignore_object_index: i32,
+        _random: &mut Random<'_>,
+    ) {
+        translate(state, new_position, location);
+        state.velocity = new_velocity;
+    }
+}
+
+/// Sticking where it hit, as halo_map keeps it: moved there, and (on an
+/// object) into the hit node's space, the location's cluster none, as a
+/// child's.
+pub fn attach(
+    world: &World<'_>,
+    state: &mut ProjectileState,
+    collision: &collision::CollisionResult,
+    new_position: [f32; 3],
+) -> std::result::Result<Option<u32>, MissingInput> {
+    translate(state, new_position, (collision.location_leaf, collision.location_cluster));
+    let hit_object = if collision.kind == Some(CollisionKind::Object) { collision.object } else { None };
+    let Some(object) = hit_object else { return Ok(None) };
+    let Some(parent) = world.object(object) else { return Err(MissingInput::Object) };
+    let Some(node_matrix) = parent.matrices.get(collision.node.max(0) as usize) else { return Err(MissingInput::Object) };
+    state.position = collision::transform_point(&collision::matrix_inverse(node_matrix), state.position);
+    state.parent_object_index = object as i32;
+    state.location_cluster = -1;
+    Ok(Some(object))
+}
+
 /// What a projectile update reads of the rest of the game.
 pub struct ProjectileContext<'a> {
     /// The projectile's datum index and definition.
@@ -364,6 +508,60 @@ pub struct ProjectileContext<'a> {
     pub guidance: &'a [Guidance],
     /// The game's wander table (`_periodic_function_wander`).
     pub wander_table: Option<&'a [u8; 1024]>,
+}
+
+/// A recorded update's host: the inputs the game recorded, the effects and
+/// the rest left out.
+impl ProjectileHost for ProjectileContext<'_> {
+    fn projectile_index(&self) -> u32 {
+        self.projectile_index
+    }
+
+    fn definition_index(&self) -> u32 {
+        self.definition_index
+    }
+
+    fn guidance(&mut self, _state: &mut ProjectileState, step: usize) -> Option<Guidance> {
+        self.guidance.get(step).copied()
+    }
+
+    fn wander_table(&self) -> Option<&[u8; 1024]> {
+        self.wander_table
+    }
+
+    fn collision_begin(&mut self, _state: &mut ProjectileState, collision_index: usize, random: &mut Random<'_>) {
+        if let Some(&seed) = self.collision_seeds.get(collision_index) {
+            random.seed = seed;
+        }
+    }
+
+    fn impact_damage(
+        &mut self,
+        _state: &mut ProjectileState,
+        collision_index: usize,
+        _collision: &collision::CollisionResult,
+        _damage_scale: f32,
+        _velocity: [f32; 3],
+        random: &mut Random<'_>,
+    ) -> Option<ImpactDamage> {
+        match self.damage_material_types.get(collision_index) {
+            Some(&-2) | None => None,
+            Some(&material_type) => {
+                if let Some(&seed) = self.damage_seeds.get(collision_index) {
+                    random.seed = seed;
+                }
+                Some(ImpactDamage { material_type, material_effect_scale: 0.0 })
+            }
+        }
+    }
+
+    fn object(&self, index: u32) -> Option<ProjectileObject> {
+        self.objects.iter().find(|o| o.index == index).copied()
+    }
+
+    fn children(&self, index: u32, out: &mut Vec<u32>) {
+        out.extend(self.objects.iter().filter(|o| o.parent == index).map(|o| o.index));
+    }
 }
 
 /// Why an update couldn't be replayed: an input the game didn't record.
@@ -469,7 +667,7 @@ pub fn projectile_update(
     definition: &ProjectileDefinition,
     state: &mut ProjectileState,
     random: &mut Random<'_>,
-    context: &ProjectileContext<'_>,
+    host: &mut dyn ProjectileHost,
 ) -> std::result::Result<UpdateSummary, MissingInput> {
     let mut summary = UpdateSummary::default();
     let mut time_remaining = 1.0f32;
@@ -493,6 +691,7 @@ pub fn projectile_update(
             set_action(state, ACTION_DETONATE);
         }
     }
+    host.timers_updated(state);
 
     while time_remaining > 0.0
         && (state.action == ACTION_NONE
@@ -503,11 +702,11 @@ pub fn projectile_update(
     {
         let speed = magnitude3(state.velocity);
         let mut new_velocity = state.velocity;
+        let ignore_object_index = state.ignore_object_index;
         if state.target_object_index != -1 && definition.guided_angular_velocity > 0.0 {
-            let (Some(guidance), Some(table)) = (context.guidance.get(summary.steered), context.wander_table) else {
-                return Err(MissingInput::Guidance);
-            };
-            new_velocity = steer(definition, state, context.projectile_index, guidance, table);
+            let Some(guidance) = host.guidance(state, summary.steered) else { return Err(MissingInput::Guidance) };
+            let Some(table) = host.wander_table() else { return Err(MissingInput::Guidance) };
+            new_velocity = steer(definition, state, host.projectile_index(), &guidance, table);
             summary.steered += 1;
         }
         let mut final_speed = speed;
@@ -591,9 +790,7 @@ pub fn projectile_update(
                     state.flags |= flags::COLLIDED_ONCE;
                 }
                 state.ignore_object_index = -1;
-                if let Some(&seed) = context.collision_seeds.get(collision_count) {
-                    random.seed = seed;
-                }
+                host.collision_begin(state, collision_count, random);
                 projectile_collision(
                     world,
                     definition,
@@ -602,11 +799,12 @@ pub fn projectile_update(
                     &mut new_position,
                     &mut new_velocity,
                     random,
-                    context,
+                    host,
                     collision_count,
                     &mut summary,
                 )?;
                 collision_count += 1;
+                host.impact_noise(state, collision.point, random);
                 if state.flags & flags::ATTACHED != 0 {
                     moved = false;
                 }
@@ -627,11 +825,11 @@ pub fn projectile_update(
                 new_position[2] - state.position[2],
             ];
             state.odometer += magnitude3(movement);
-            translate(state, new_position, location);
-            state.velocity = new_velocity;
+            host.moved(state, new_position, new_velocity, location, time_remaining, collision_count, ignore_object_index, random);
         }
     }
     summary.collisions = collision_count;
+    summary.time_remaining = time_remaining;
     Ok(summary)
 }
 
@@ -692,30 +890,36 @@ fn projectile_collision(
     new_position: &mut [f32; 3],
     new_velocity: &mut [f32; 3],
     random: &mut Random<'_>,
-    context: &ProjectileContext<'_>,
+    host: &mut dyn ProjectileHost,
     collision_index: usize,
     summary: &mut UpdateSummary,
 ) -> std::result::Result<(), MissingInput> {
     let mut material_type = collision.material_type;
+    let mut material_effect_scale = 0.0f32;
     let n = [collision.plane[0], collision.plane[1], collision.plane[2]];
     let hit_object = if collision.kind == Some(CollisionKind::Object) { collision.object } else { None };
+    let mut direction = *new_velocity;
+    let speed = normalize3(&mut direction);
+    if speed == 0.0 {
+        direction = [0.0, 0.0, 1.0];
+    }
+    let damage_scale = if definition.final_velocity != definition.initial_velocity {
+        pin((speed - definition.final_velocity) / (definition.initial_velocity - definition.final_velocity), 0.0, 1.0)
+    } else {
+        1.0
+    };
     // (the object's impact damage, done by the game: the material type it
     // reports back)
     if hit_object.is_some() && definition.has_impact_damage {
-        match context.damage_material_types.get(collision_index) {
-            Some(&-2) | None => return Err(MissingInput::Damage),
-            Some(&damage_material_type) => {
-                if damage_material_type != -1 {
-                    material_type = damage_material_type;
-                }
-                if let Some(&seed) = context.damage_seeds.get(collision_index) {
-                    random.seed = seed;
-                }
-            }
+        let Some(damage) = host.impact_damage(state, collision_index, collision, damage_scale, *new_velocity, random) else {
+            return Err(MissingInput::Damage);
+        };
+        if damage.material_type != -1 {
+            material_type = damage.material_type;
         }
+        material_effect_scale = damage.material_effect_scale;
         summary.damaged_objects += 1;
     }
-    let object_info = |index: u32| context.objects.iter().find(|o| o.index == index);
     state.hit_material_type = material_type;
     let response_definition = if material_type >= 0 && (material_type as usize) < definition.material_responses.len() {
         definition.material_responses[material_type as usize]
@@ -727,18 +931,18 @@ fn projectile_collision(
     let impact_angle =
         angle_between_vectors3d(*new_velocity, n) - std::f32::consts::PI / 2.0 + random.range(-m.angular_noise, m.angular_noise);
     let only_against_units = m.potential_flags & 1 != 0;
-    let mut response = if m.potential_response != 0
+    let potential = m.potential_response != 0
         && (m.potential_angle_upper_bound == 0.0
             || (impact_angle >= m.potential_angle_lower_bound && impact_angle <= m.potential_angle_upper_bound))
         && (m.potential_velocity_upper_bound == 0.0
             || (impact_velocity >= m.potential_velocity_lower_bound && impact_velocity <= m.potential_velocity_upper_bound))
-        && (!only_against_units || hit_object.and_then(object_info).is_some_and(|o| o.kind == 0 || o.kind == 1))
-        && random.real() >= m.potential_skip_fraction
-    {
-        m.potential_response
-    } else {
-        m.default_response
-    };
+        && (!only_against_units || hit_object.and_then(|o| host.object(o)).is_some_and(|o| o.kind == 0 || o.kind == 1))
+        && random.real() >= m.potential_skip_fraction;
+    let mut response = if potential { m.potential_response } else { m.default_response };
+
+    if collision.kind == Some(CollisionKind::Structure) && collision.surface_flags & collision::surface_flags::BREAKABLE != 0 {
+        host.breakable_surface_damage(state, collision, *new_velocity, random);
+    }
 
     *new_position = collision.point;
 
@@ -803,6 +1007,21 @@ fn projectile_collision(
         }
     }
 
+    let effect_scale = match m.scale_effects_by {
+        SCALE_EFFECTS_BY_ANGLE => impact_angle * (2.0 / std::f32::consts::PI),
+        SCALE_EFFECTS_BY_DAMAGE => damage_scale,
+        _ => 1.0,
+    };
+    let effect_scale = pin(effect_scale, 0.0, 1.0);
+    let material_effect_scale = pin(material_effect_scale, 0.0, 1.0);
+    if impact_velocity > 1.0 / 120.0 {
+        let effect = CollisionEffect::Response { material_type, potential };
+        host.effect(state, effect, collision, direction, effect_scale, material_effect_scale, random);
+    }
+    if state.flags & flags::COUNTING_DOWN == 0 && (state.flags & flags::STOPPED_AFTER_COLLISION != 0 || response == RESPONSE_ATTACH) {
+        host.effect(state, CollisionEffect::DetonationStarted, collision, direction, effect_scale, material_effect_scale, random);
+    }
+
     match response {
         RESPONSE_DISAPPEAR => set_action(state, ACTION_DISAPPEAR),
         RESPONSE_DETONATE => set_action(state, ACTION_DETONATE),
@@ -813,9 +1032,13 @@ fn projectile_collision(
                 && definition.flags & SUPER_COMBINING_EXPLOSION != 0
             {
                 let mut combining_projectile_count = 0usize;
-                for child in context.objects.iter().filter(|o| o.parent == object) {
-                    if child.definition_index == context.definition_index && child.projectile_flags & flags::ALREADY_SUPER_EXPLODED == 0 {
-                        // (their arming and detonation timers restart: the game's)
+                let mut children = Vec::new();
+                host.children(object, &mut children);
+                for child_index in children {
+                    let Some(child) = host.object(child_index) else { continue };
+                    if child.definition_index == host.definition_index() && child.projectile_flags & flags::ALREADY_SUPER_EXPLODED == 0 {
+                        // (their arming and detonation timers restart)
+                        host.combining_reset(child.index);
                         combining_projectile_count += 1;
                     }
                     if combining_projectile_count >= MAXIMUM_COMBINING_PROJECTILES {
@@ -828,17 +1051,7 @@ fn projectile_collision(
             state.velocity = [0.0; 3];
             state.flags |= flags::ATTACHED;
             state.object_flags |= object_flags::AT_REST;
-            translate(state, *new_position, (collision.location_leaf, collision.location_cluster));
-            // (object_attach_to_node: into the hit node's space, the
-            // location's cluster none, as a child's)
-            if let Some(object) = hit_object {
-                let Some(parent) = world.objects.iter().find(|o| o.index == object) else { return Err(MissingInput::Object) };
-                let Some(node_matrix) = parent.matrices.get(collision.node.max(0) as usize) else { return Err(MissingInput::Object) };
-                state.position = collision::transform_point(&collision::matrix_inverse(node_matrix), state.position);
-                state.parent_object_index = object as i32;
-                state.location_cluster = -1;
-                summary.attached_to = Some(object);
-            }
+            summary.attached_to = host.attach(world, state, collision, *new_position, random)?;
             if definition.flags & DETONATION_MAX_TIME_IF_ATTACHED != 0 {
                 let detonation_ticks = definition.timer_upper_bound * 30.0;
                 if detonation_ticks >= 1.0 {

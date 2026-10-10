@@ -22,6 +22,7 @@ enum
 	_halo_sim_vehicle_physics,
 	_halo_sim_vehicle_update,
 	_halo_sim_biped_moving,
+	_halo_sim_biped_update,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -178,5 +179,19 @@ int halo_sim_biped_moving_update(long biped_index, void *animation, float const 
 	int coop_player_collisions, int actor_leaping, int recorded_animation);
 void halo_sim_biped_moving_check(long biped_index, void const *animation);
 void halo_sim_biped_actor_jump(int jumped, void const *velocity);
+
+/* bipeds.c's biped_update of an unparented biped, up to its player melee
+(facing, turning, the movement, the dead, airborne, landing and slipping
+updates), with the update's animation data, what the rest of the game
+answers its movement, and unit_animation_enhanced: TRUE when the Rust port
+ran it (what it asks of the game called back); in check mode it notes the
+state the game's update begins with, the game's airborne update notes the
+random seed (halo_sim_biped_update_airborne), and
+halo_sim_biped_update_check compares Rust's replay of it */
+int halo_sim_biped_update(long biped_index, void *animation, float const *aiming_vector,
+	float difficulty_infection_forms, float speed_multiplier, int cinematic, int double_speed,
+	int coop_player_collisions, int actor_leaping, int recorded_animation, int enhanced_animation);
+void halo_sim_biped_update_check(long biped_index, void const *animation);
+void halo_sim_biped_update_airborne(void);
 
 #endif // __HALO_SIM_H

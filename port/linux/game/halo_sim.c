@@ -48,7 +48,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 9
+#define HALO_SIM_VERSION 10
 
 /* ---------- structures */
 
@@ -406,6 +406,48 @@ struct halo_sim_moving_call
 	unsigned long aborted_animation;
 };
 
+/* crates/halo_map's UpdateState (164 bytes) */
+struct halo_sim_update_state
+{
+	struct halo_sim_moving_state moving;
+	real_vector3d throttle;
+	real_vector3d desired_facing_vector;
+	char biped_state;
+	char slipping_ticks;
+	short pad;
+};
+
+typedef char halo_sim_update_state_size_assert[sizeof(struct halo_sim_update_state) == 164 ? 1 : -1];
+
+/* crates/halo_sim's UpdateCall */
+struct halo_sim_update_call
+{
+	struct halo_sim_moving_call moving;
+	struct halo_sim_update_state state;
+	unsigned long dead;
+	unsigned long control_flags;
+	unsigned long aim_without_turning;
+	char unit_animation_state;
+	char base_seat_index;
+	char enhanced_animation;
+	char limp_body;
+	long player_index;
+	unsigned long airborne_seed_taken;
+	unsigned long airborne_seed;
+};
+
+/* crates/halo_sim's UpdateCallbacks */
+struct halo_sim_update_callbacks
+{
+	void (*moving_begins)(unsigned long biped_index, struct halo_sim_update_state *state);
+	void (*moving_ends)(unsigned long biped_index, struct halo_sim_update_state *state);
+	void (*limp_body)(unsigned long biped_index, struct halo_sim_moving_state *state);
+	unsigned long (*random_seed)(void);
+	void (*set_random_seed)(unsigned long seed);
+	void (*landing_footsteps)(unsigned long biped_index, struct halo_sim_moving_state *state);
+	void (*slipping_footsteps)(unsigned long biped_index, struct halo_sim_moving_state *state);
+};
+
 /* crates/halo_sim's MovingCallbacks */
 struct halo_sim_moving_callbacks
 {
@@ -549,6 +591,7 @@ struct halo_sim_host
 	struct halo_sim_vehicle_physics_callbacks vehicle_physics;
 	struct halo_sim_vehicle_update_callbacks vehicle_update;
 	struct halo_sim_moving_callbacks moving;
+	struct halo_sim_update_callbacks biped_update;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -590,6 +633,7 @@ typedef long (*halo_sim_biped_physics_function)(struct halo_sim_biped_physics_ca
 typedef long (*halo_sim_vehicle_physics_function)(struct halo_sim_vehicle_physics_call *call);
 typedef long (*halo_sim_vehicle_update_function)(struct halo_sim_vehicle_update_call *call);
 typedef long (*halo_sim_moving_function)(struct halo_sim_moving_call *call);
+typedef long (*halo_sim_update_function)(struct halo_sim_update_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -624,6 +668,8 @@ static struct
 	halo_sim_vehicle_update_function vehicle_update_check;
 	halo_sim_moving_function biped_moving;
 	halo_sim_moving_function biped_moving_check;
+	halo_sim_update_function biped_update;
+	halo_sim_update_function biped_update_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -648,7 +694,23 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"vehicle_physics",
 	"vehicle_update",
 	"biped_moving",
+	"biped_update",
 };
+
+/* the biped update checks: the update the game's began with, what the
+AI's jump aim and the random seed answered it, and the comparisons */
+static struct
+{
+	boolean recording;
+	long biped_index;
+	struct halo_sim_update_call call;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long dead;
+	unsigned long airborne;
+	unsigned long tumbles;
+} halo_sim_update_checks;
 
 /* the biped movement checks: the update the game's began with, what the
 AI's jump aim answered it, and the comparisons */
@@ -1385,6 +1447,104 @@ static void halo_sim_moving_physics_end(unsigned long biped_index, void const *p
 	bevy_bridge_biped_physics_end(physics, sizeof(struct halo_sim_biped_physics));
 }
 
+/* a biped's update state, from the biped (and the update's animation data) */
+static void halo_sim_update_state_load(long biped_index, struct unit_animation_update_data const *animation,
+	struct halo_sim_update_state *state)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	halo_sim_moving_state_load(biped_index, animation, &state->moving);
+	state->throttle = biped->unit.throttle;
+	state->desired_facing_vector = biped->unit.desired_facing_vector;
+	state->biped_state = biped->biped.state;
+	state->slipping_ticks = biped->biped.slipping_ticks;
+	state->pad = 0;
+}
+
+static void halo_sim_update_state_store(long biped_index, struct unit_animation_update_data *animation,
+	struct halo_sim_update_state const *state)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	halo_sim_moving_state_store(biped_index, animation, &state->moving);
+	biped->unit.throttle = state->throttle;
+	biped->unit.desired_facing_vector = state->desired_facing_vector;
+	biped->biped.state = state->biped_state;
+	biped->biped.slipping_ticks = state->slipping_ticks;
+}
+
+/* what the rest of the game answered the movement, while a biped's update
+runs in Rust (for the bridge's recording of the movement) */
+static struct halo_sim_moving_call const *halo_sim_update_moving_call;
+
+/* bipeds.c's, the game's side of a biped's update */
+void biped_rust_limp_body(long biped_index);
+void biped_rust_landing_footsteps(long biped_index);
+void biped_rust_slipping_footsteps(long biped_index);
+
+static void halo_sim_update_moving_begins(unsigned long biped_index, struct halo_sim_update_state *state)
+{
+	struct halo_sim_moving_call const *call = halo_sim_update_moving_call;
+
+	halo_sim_update_state_store((long)biped_index, halo_sim_moving_animation, state);
+	if (call && bevy_bridge_biped_moving_recording())
+	{
+		float aiming_vector[3];
+
+		aiming_vector[0] = call->aiming_vector.i;
+		aiming_vector[1] = call->aiming_vector.j;
+		aiming_vector[2] = call->aiming_vector.k;
+		bevy_bridge_biped_moving_begin((long)biped_index, halo_sim_moving_animation->state_desired,
+			halo_sim_moving_animation->crouching, aiming_vector, call->difficulty_infection_forms,
+			call->speed_multiplier, call->cinematic, call->double_speed, call->coop_player_collisions,
+			call->actor_leaping, call->recorded_animation);
+	}
+	halo_sim_update_state_load((long)biped_index, halo_sim_moving_animation, state);
+}
+
+static void halo_sim_update_moving_ends(unsigned long biped_index, struct halo_sim_update_state *state)
+{
+	halo_sim_update_state_store((long)biped_index, halo_sim_moving_animation, state);
+	bevy_bridge_biped_moving_end((long)biped_index, halo_sim_moving_animation->state_desired,
+		halo_sim_moving_animation->crouching);
+	halo_sim_update_state_load((long)biped_index, halo_sim_moving_animation, state);
+}
+
+static void halo_sim_update_limp_body(unsigned long biped_index, struct halo_sim_moving_state *state)
+{
+	halo_sim_moving_state_store((long)biped_index, halo_sim_moving_animation, state);
+	biped_rust_limp_body((long)biped_index);
+	halo_sim_moving_state_load((long)biped_index, halo_sim_moving_animation, state);
+}
+
+unsigned long get_random_seed(void);
+unsigned long *get_global_random_seed_address(void);
+
+static unsigned long halo_sim_update_random_seed(void)
+{
+	bevy_bridge_biped_update_airborne();
+	return get_random_seed();
+}
+
+static void halo_sim_update_set_random_seed(unsigned long seed)
+{
+	*get_global_random_seed_address() = seed;
+}
+
+static void halo_sim_update_landing_footsteps(unsigned long biped_index, struct halo_sim_moving_state *state)
+{
+	halo_sim_moving_state_store((long)biped_index, halo_sim_moving_animation, state);
+	biped_rust_landing_footsteps((long)biped_index);
+	halo_sim_moving_state_load((long)biped_index, halo_sim_moving_animation, state);
+}
+
+static void halo_sim_update_slipping_footsteps(unsigned long biped_index, struct halo_sim_moving_state *state)
+{
+	halo_sim_moving_state_store((long)biped_index, halo_sim_moving_animation, state);
+	biped_rust_slipping_footsteps((long)biped_index);
+	halo_sim_moving_state_load((long)biped_index, halo_sim_moving_animation, state);
+}
+
 /* (for the bridge's recording: a gathering of features) */
 static void halo_sim_features_call(void)
 {
@@ -1434,6 +1594,15 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		halo_sim_moving_falling_damage,
 		halo_sim_moving_physics_begin,
 		halo_sim_moving_physics_end,
+	},
+	{
+		halo_sim_update_moving_begins,
+		halo_sim_update_moving_ends,
+		halo_sim_update_limp_body,
+		halo_sim_update_random_seed,
+		halo_sim_update_set_random_seed,
+		halo_sim_update_landing_footsteps,
+		halo_sim_update_slipping_footsteps,
 	},
 };
 
@@ -1485,12 +1654,15 @@ static void halo_sim_initialize(void)
 	halo_sim.vehicle_update_check = (halo_sim_vehicle_update_function)halo_sim_symbol(library, "halo_sim_vehicle_update_check");
 	halo_sim.biped_moving = (halo_sim_moving_function)halo_sim_symbol(library, "halo_sim_biped_moving_update");
 	halo_sim.biped_moving_check = (halo_sim_moving_function)halo_sim_symbol(library, "halo_sim_biped_moving_check");
+	halo_sim.biped_update = (halo_sim_update_function)halo_sim_symbol(library, "halo_sim_biped_update");
+	halo_sim.biped_update_check = (halo_sim_update_function)halo_sim_symbol(library, "halo_sim_biped_update_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
 		!halo_sim.vehicle_physics_update || !halo_sim.vehicle_physics_check ||
 		!halo_sim.vehicle_update || !halo_sim.vehicle_update_check ||
-		!halo_sim.biped_moving || !halo_sim.biped_moving_check)
+		!halo_sim.biped_moving || !halo_sim.biped_moving_check ||
+		!halo_sim.biped_update || !halo_sim.biped_update_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -2802,6 +2974,12 @@ int halo_sim_biped_moving_update(long biped_index, void *animation, float const 
 
 void halo_sim_biped_actor_jump(int jumped, void const *velocity)
 {
+	if (halo_sim_update_checks.recording)
+	{
+		halo_sim_update_checks.call.moving.actor_jump_asked = 1;
+		halo_sim_update_checks.call.moving.actor_jumped = jumped ? 1 : 0;
+		halo_sim_update_checks.call.moving.actor_jump_velocity = *(real_vector3d const *)velocity;
+	}
 	if (!halo_sim_moving_checks.recording)
 		return;
 	halo_sim_moving_checks.call.actor_jump_asked = 1;
@@ -2882,5 +3060,142 @@ void halo_sim_biped_moving_check(long biped_index, void const *animation)
 		platform_log("halo_sim: biped movement: %lu of %lu agree with the game (%lu aborting the animation, %lu asking the AI to jump; %lu left out)",
 			halo_sim_moving_checks.compared - halo_sim_moving_checks.differed, halo_sim_moving_checks.compared,
 			halo_sim_moving_checks.aborted, halo_sim_moving_checks.jumps, halo_sim_moving_checks.skipped);
+	}
+}
+
+/* ---------- biped updates */
+
+static void halo_sim_update_call_new(long biped_index, struct unit_animation_update_data const *animation,
+	float const *aiming_vector, float difficulty_infection_forms, float speed_multiplier, int cinematic, int double_speed,
+	int coop_player_collisions, int actor_leaping, int recorded_animation, int enhanced_animation,
+	struct halo_sim_update_call *call)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	memset(call, 0, sizeof(*call));
+	halo_sim_moving_call_new(biped_index, animation, aiming_vector, difficulty_infection_forms, speed_multiplier, cinematic,
+		double_speed, coop_player_collisions, actor_leaping, recorded_animation, &call->moving);
+	halo_sim_update_state_load(biped_index, animation, &call->state);
+	call->dead = TEST_FLAG(biped->object.damage_flags, _object_dead_bit) ? 1 : 0;
+	call->control_flags = biped->unit.control_flags;
+	call->aim_without_turning = TEST_FLAG(biped->unit.flags, _unit_aim_without_turning_bit) ? 1 : 0;
+	call->unit_animation_state = biped->unit.animation.state;
+	call->base_seat_index = biped->unit.animation.base_seat_index;
+	call->enhanced_animation = enhanced_animation ? 1 : 0;
+	call->limp_body = TEST_FLAG(biped->biped.flags, _biped_limp_body_physics_active_bit) &&
+		biped->biped.limp_body_current_relaxation_iterations < biped->biped.limp_body_max_relaxation_iterations;
+	call->player_index = biped->unit.player_index;
+}
+
+int halo_sim_biped_update(long biped_index, void *animation, float const *aiming_vector,
+	float difficulty_infection_forms, float speed_multiplier, int cinematic, int double_speed,
+	int coop_player_collisions, int actor_leaping, int recorded_animation, int enhanced_animation)
+{
+	short mode = halo_sim_mode(_halo_sim_biped_update);
+	struct unit_animation_update_data *data = (struct unit_animation_update_data *)animation;
+	struct halo_sim_update_call call;
+	long result;
+
+	halo_sim_update_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	halo_sim_update_call_new(biped_index, data, aiming_vector, difficulty_infection_forms, speed_multiplier, cinematic,
+		double_speed, coop_player_collisions, actor_leaping, recorded_animation, enhanced_animation,
+		mode == _halo_sim_mode_check ? &halo_sim_update_checks.call : &call);
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_update_checks.biped_index = biped_index;
+		halo_sim_update_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_moving_animation = data;
+	halo_sim_update_moving_call = &call.moving;
+	halo_sim_biped_physics_updating = TRUE;
+	result = halo_sim.biped_update(&call);
+	halo_sim_biped_physics_updating = FALSE;
+	halo_sim_update_moving_call = NULL;
+	halo_sim_moving_animation = NULL;
+	if (result != 0)
+		return FALSE;
+	halo_sim_update_state_store(biped_index, data, &call.state);
+
+	return TRUE;
+}
+
+void halo_sim_biped_update_airborne(void)
+{
+	if (!halo_sim_update_checks.recording || halo_sim_update_checks.call.airborne_seed_taken)
+		return;
+	halo_sim_update_checks.call.airborne_seed_taken = 1;
+	halo_sim_update_checks.call.airborne_seed = get_random_seed();
+}
+
+void halo_sim_biped_update_check(long biped_index, void const *animation)
+{
+	struct halo_sim_update_call call;
+	struct halo_sim_update_state game;
+	struct halo_sim_update_state const *rust = &call.state;
+	boolean same;
+
+	if (!halo_sim_update_checks.recording)
+		return;
+	halo_sim_update_checks.recording = FALSE;
+	if (halo_sim_update_checks.biped_index != biped_index)
+	{
+		halo_sim_update_checks.skipped++;
+		return;
+	}
+	call = halo_sim_update_checks.call;
+	call.moving.breakable_surfaces = (unsigned char const *)breakable_surface_flags_get();
+	if (halo_sim.biped_update_check(&call) != 0)
+	{
+		halo_sim_update_checks.skipped++;
+		return;
+	}
+
+	halo_sim_update_state_load(biped_index, (struct unit_animation_update_data const *)animation, &game);
+	same = halo_sim_moving_states_agree(&rust->moving, &game.moving) &&
+		rust->moving.animation_state_desired == game.moving.animation_state_desired &&
+		rust->moving.animation_crouching == game.moving.animation_crouching &&
+		memcmp(&rust->throttle, &game.throttle, 2 * sizeof(real_vector3d)) == 0 &&
+		rust->biped_state == game.biped_state &&
+		rust->slipping_ticks == game.slipping_ticks;
+	halo_sim_update_checks.compared++;
+	halo_sim_update_checks.dead += halo_sim_update_checks.call.dead;
+	halo_sim_update_checks.airborne += (game.moving.biped_flags & 1) != 0;
+	halo_sim_update_checks.tumbles += halo_sim_update_checks.call.airborne_seed_taken;
+	if (!same)
+	{
+		halo_sim_update_checks.differed++;
+		if (halo_sim_update_checks.differed <= 8)
+		{
+			struct halo_sim_update_state const *b = &halo_sim_update_checks.call.state;
+
+			platform_log("halo_sim: biped update differs: biped %lx dead %lu from (%f %f %f) forward (%f %f %f) flags %lx/%lx state %d",
+				(unsigned long)biped_index, halo_sim_update_checks.call.dead, b->moving.position.x, b->moving.position.y,
+				b->moving.position.z, b->moving.forward.i, b->moving.forward.j, b->moving.forward.k,
+				b->moving.object_flags, b->moving.biped_flags, halo_sim_update_checks.call.unit_animation_state);
+			platform_log("halo_sim:   game (%f %f %f) forward (%f %f %f) angular (%f %f %f) desired %d crouch %d flags %lx/%lx",
+				game.moving.position.x, game.moving.position.y, game.moving.position.z,
+				game.moving.forward.i, game.moving.forward.j, game.moving.forward.k,
+				game.moving.angular_velocity.i, game.moving.angular_velocity.j, game.moving.angular_velocity.k,
+				game.moving.animation_state_desired, game.moving.animation_crouching,
+				game.moving.object_flags, game.moving.biped_flags);
+			platform_log("halo_sim:   rust (%f %f %f) forward (%f %f %f) angular (%f %f %f) desired %d crouch %d flags %lx/%lx",
+				rust->moving.position.x, rust->moving.position.y, rust->moving.position.z,
+				rust->moving.forward.i, rust->moving.forward.j, rust->moving.forward.k,
+				rust->moving.angular_velocity.i, rust->moving.angular_velocity.j, rust->moving.angular_velocity.k,
+				rust->moving.animation_state_desired, rust->moving.animation_crouching,
+				rust->moving.object_flags, rust->moving.biped_flags);
+		}
+	}
+	if ((halo_sim_update_checks.compared & 0x3fff) == 0 ||
+		(halo_sim_update_checks.compared & (halo_sim_update_checks.compared - 1)) == 0)
+	{
+		platform_log("halo_sim: biped updates: %lu of %lu agree with the game (%lu dead, %lu ending airborne, %lu with an airborne update; %lu left out)",
+			halo_sim_update_checks.compared - halo_sim_update_checks.differed, halo_sim_update_checks.compared,
+			halo_sim_update_checks.dead, halo_sim_update_checks.airborne, halo_sim_update_checks.tumbles,
+			halo_sim_update_checks.skipped);
 	}
 }

@@ -519,6 +519,9 @@ static void biped_melee_impact(
 	long biped_index,
 	real_point3d const *position,
 	real_point3d const *new_position);
+static boolean biped_rust_update(
+	long biped_index,
+	struct unit_animation_update_data *animation);
 static void biped_falling_damage(
 	long biped_index,
 	real collision_velocity);
@@ -2125,6 +2128,7 @@ static void biped_update_airborne(
 
 	/* port: (bevy_bridge.c) */
 	bevy_bridge_biped_update_airborne();
+	halo_sim_biped_update_airborne(); /* port: (halo_sim.c) */
 	if (biped_flying_through_air(biped_index))
 	{
 		flying = TRUE;
@@ -4218,6 +4222,11 @@ boolean biped_update(
 		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
 		if (bevy_bridge_biped_moving_recording())
 			bevy_bridge_biped_update_begin(biped_index, unit_animation_enhanced(biped_index));
+		/* port: the Rust port's update in place of the game's, up to its
+		player melee, or (in check mode) the state it is checked from
+		(halo_sim.c) */
+		if (biped_rust_update(biped_index, &animation))
+			goto biped_update_moved;
 		biped_snap_facing(biped_index);
 		if (TEST_FLAG(biped->object.damage_flags, _object_dead_bit) ||
 			!(definition->biped.flags &
@@ -4359,6 +4368,8 @@ boolean biped_update(
 			biped_update_slipping(biped_index, &animation);
 		}
 
+	biped_update_moved:
+		halo_sim_biped_update_check(biped_index, &animation); /* port: (halo_sim.c) */
 		biped_verify_object_vectors(biped_index, "post-dead/air/land/slip");
 
 		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
@@ -4567,4 +4578,69 @@ void biped_rust_falling_damage(
 	real landing_velocity)
 {
 	biped_falling_damage(biped_index, landing_velocity);
+}
+
+/* the Rust port's biped update, with what the rest of the game answers its
+movement (bevy_bridge_biped_moving_begin's), when it runs or is checked */
+static boolean biped_rust_update(
+	long biped_index,
+	struct unit_animation_update_data *animation)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+	struct biped_definition *definition = biped_definition_get(biped->definition_index);
+	real_vector3d aiming;
+	float aiming_vector[3];
+
+	if (halo_sim_mode(_halo_sim_biped_update) == _halo_sim_mode_c)
+		return FALSE;
+	if (TEST_FLAG(definition->unit.flags, _unit_simple_creature_bit))
+		aiming = biped->object.forward;
+	else
+		unit_get_aiming_vector(biped_index, &aiming);
+	aiming_vector[0] = aiming.i;
+	aiming_vector[1] = aiming.j;
+	aiming_vector[2] = aiming.k;
+	return halo_sim_biped_update(biped_index, animation, aiming_vector,
+		game_difficulty_get_value(_game_difficulty_value_infection_forms),
+		biped->unit.player_index != NONE ? player_get(biped->unit.player_index)->speed_multiplier : 1.f,
+		cinematic_in_progress(),
+		game_players_are_double_speed(),
+		network_coop_player_collisions(),
+		biped->unit.actor_index != NONE && actor_is_leaping(biped->unit.actor_index),
+		recorded_animation_controlling_unit(biped_index),
+		unit_animation_enhanced(biped_index));
+}
+
+/* a limp body relaxing onto the ground */
+void biped_rust_limp_body(
+	long biped_index)
+{
+	if (!debug_biped_limp_body_disable)
+		biped_limp_noodle_relax_nodes_onto_environment(biped_index);
+	biped_verify_object_vectors(biped_index, "post-limp-noodle");
+}
+
+/* a landing's footsteps, as biped_update_landing makes them (after its
+recovery counted) */
+void biped_rust_landing_footsteps(
+	long biped_index)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	if (!cinematic_in_progress() &&
+		(biped->biped.landing_recovery_counter==2 ||
+		(biped->biped.landing==NONE &&
+		biped->biped.landing_recovery_time<2)))
+	{
+		biped_make_footstep(biped_index, _material_effect_biped_jump_land, 0);
+		biped_make_footstep(biped_index, _material_effect_biped_jump_land, 1);
+	}
+}
+
+void biped_rust_slipping_footsteps(
+	long biped_index)
+{
+	struct unit_animation_update_data animation;
+
+	biped_update_slipping(biped_index, &animation);
 }

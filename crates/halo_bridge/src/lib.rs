@@ -1157,34 +1157,30 @@ impl Bridge {
         // SAFETY: as in check(); entries are plain old data, checked by their
         // sequence numbers (and the matrix ring's count) after copying
         unsafe {
-            {
+            let mut objects = Vec::new();
+            let mut complete = true;
+            for i in 0..count {
+                let sequence = first.wrapping_add(i);
+                let entry = std::ptr::read_volatile(&(*self.shared).feature_objects[sequence as usize % FEATURE_OBJECTS]);
+                let matrices: Vec<[f32; 13]> = (0..entry.node_count)
+                    .map(|n| {
+                        std::ptr::read_volatile(
+                            &(*self.shared).feature_matrices[entry.first_matrix.wrapping_add(n) as usize % FEATURE_MATRICES],
+                        )
+                    })
+                    .collect();
+                fence(Ordering::Acquire);
+                let objects_now = std::ptr::read_volatile(&(*self.shared).feature_object_count);
+                let matrices_now = std::ptr::read_volatile(&(*self.shared).feature_matrix_count);
+                if entry.sequence != sequence
+                    || objects_now.wrapping_sub(sequence) as usize > FEATURE_OBJECTS
+                    || matrices_now.wrapping_sub(entry.first_matrix) as usize > FEATURE_MATRICES
                 {
-                    let mut objects = Vec::new();
-                    let mut complete = true;
-                    for i in 0..count {
-                        let sequence = first.wrapping_add(i);
-                        let entry = std::ptr::read_volatile(&(*self.shared).feature_objects[sequence as usize % FEATURE_OBJECTS]);
-                        let matrices: Vec<[f32; 13]> = (0..entry.node_count)
-                            .map(|n| {
-                                std::ptr::read_volatile(
-                                    &(*self.shared).feature_matrices[entry.first_matrix.wrapping_add(n) as usize % FEATURE_MATRICES],
-                                )
-                            })
-                            .collect();
-                        fence(Ordering::Acquire);
-                        let objects_now = std::ptr::read_volatile(&(*self.shared).feature_object_count);
-                        let matrices_now = std::ptr::read_volatile(&(*self.shared).feature_matrix_count);
-                        if entry.sequence != sequence
-                            || objects_now.wrapping_sub(sequence) as usize > FEATURE_OBJECTS
-                            || matrices_now.wrapping_sub(entry.first_matrix) as usize > FEATURE_MATRICES
-                        {
-                            complete = false;
-                        }
-                        objects.push((entry, matrices));
-                    }
-                    (objects, complete)
+                    complete = false;
                 }
+                objects.push((entry, matrices));
             }
+            (objects, complete)
         }
     }
 

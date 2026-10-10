@@ -20,6 +20,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "objects/objects.h"
 #include "units/units.h"
 #include "items/projectiles.h"
+#include "physics/breakable_surfaces.h"
 #include "objects/object_lights.h"
 #include "physics/collision_bsp.h"
 #include "physics/collisions.h"
@@ -787,4 +788,45 @@ void bevy_bridge_projectile_end(long projectile_index)
 	record->sequence = count;
 	bevy_bridge_shared->projectile_records[count % BEVY_BRIDGE_PROJECTILE_RECORDS] = *record;
 	__atomic_store_n(&bevy_bridge_shared->projectile_record_count, count + 1, __ATOMIC_RELEASE);
+}
+
+/* ---------- biped physics updates */
+
+static struct
+{
+	boolean active;
+	struct bevy_bridge_biped_record record;
+} bevy_bridge_biped;
+
+void bevy_bridge_biped_physics_begin(long biped_index, void const *physics, unsigned long size,
+	int stand_test, float stand_height, float stand_radius)
+{
+	struct bevy_bridge_biped_record *record = &bevy_bridge_biped.record;
+
+	if (!bevy_bridge_projectile_recording())
+		return;
+	memset(record, 0, sizeof(*record));
+	record->biped_index = (unsigned long)biped_index;
+	record->structure_bsp_index = global_structure_bsp_index;
+	record->stand_test = stand_test ? 1 : 0;
+	record->stand_height = stand_height;
+	record->stand_radius = stand_radius;
+	memcpy(record->breakable_surfaces, breakable_surface_flags_get(), sizeof(record->breakable_surfaces));
+	memcpy(&record->before, physics, size < sizeof(record->before) ? size : sizeof(record->before));
+	bevy_bridge_biped.active = TRUE;
+}
+
+void bevy_bridge_biped_physics_end(void const *physics, unsigned long size)
+{
+	struct bevy_bridge_biped_record *record = &bevy_bridge_biped.record;
+	unsigned long count;
+
+	if (!bevy_bridge_biped.active)
+		return;
+	bevy_bridge_biped.active = FALSE;
+	memcpy(&record->after, physics, size < sizeof(record->after) ? size : sizeof(record->after));
+	count = bevy_bridge_shared->biped_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->biped_records[count % BEVY_BRIDGE_BIPED_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->biped_record_count, count + 1, __ATOMIC_RELEASE);
 }

@@ -40,7 +40,8 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 16
+#define BEVY_BRIDGE_VERSION 17
+#define BEVY_BRIDGE_BIPED_RECORDS 1024
 #define BEVY_BRIDGE_PROJECTILE_RECORDS 1024
 #define BEVY_BRIDGE_RANDOM_DIRECTIONS 4096
 #define BEVY_BRIDGE_RAY_TESTS 16
@@ -313,6 +314,29 @@ struct bevy_bridge_projectile_record
 	struct bevy_bridge_projectile_state after;
 };
 
+/* bipeds.c's struct biped_physics, as it is laid out (0xCC bytes) */
+struct bevy_bridge_biped_physics
+{
+	unsigned char bytes[0xCC];
+};
+
+/* one biped_update_physics (with game.bevy_bridge_ray_tests): the biped's
+physics before and after, which breakable surfaces stood (bit i of byte
+i / 8), and what the crouching player's stand test reads of the biped's
+definition (stand_test: whether it is made at all) */
+struct bevy_bridge_biped_record
+{
+	unsigned long sequence;
+	unsigned long biped_index;
+	long structure_bsp_index;
+	unsigned long stand_test;
+	float stand_height;
+	float stand_radius;
+	unsigned char breakable_surfaces[32];
+	struct bevy_bridge_biped_physics before;
+	struct bevy_bridge_biped_physics after;
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -339,6 +363,10 @@ struct bevy_bridge_shared
 	unsigned long random_direction_count;
 	struct bevy_bridge_projectile_record projectile_records[BEVY_BRIDGE_PROJECTILE_RECORDS];
 	float random_directions[BEVY_BRIDGE_RANDOM_DIRECTIONS][3];
+	/* biped physics updates (a ring, as the projectile records) */
+	unsigned long biped_record_count;
+	unsigned long biped_pad;
+	struct bevy_bridge_biped_record biped_records[BEVY_BRIDGE_BIPED_RECORDS];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

@@ -48,4 +48,11 @@ void bevy_bridge_projectile_collision(void);
 void bevy_bridge_projectile_touched_object(void);
 void bevy_bridge_projectile_end(long projectile_index);
 
+/* bipeds.c, with game.bevy_bridge_ray_tests: each biped_update_physics
+recorded for a renderer to replay (bevy_bridge_biped_record); `physics` is
+bipeds.c's struct biped_physics */
+void bevy_bridge_biped_physics_begin(long biped_index, void const *physics, unsigned long size,
+	int stand_test, float stand_height, float stand_radius);
+void bevy_bridge_biped_physics_end(void const *physics, unsigned long size);
+
 #endif /* __BEVY_BRIDGE_H */

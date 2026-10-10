@@ -276,6 +276,7 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "structures/structure_bsp_definitions.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 /* port: port/linux/game/network_objects.c's (a client deletes the host's
 objects on the host's word alone) */
@@ -433,6 +434,8 @@ struct biped_physics
 	real landing_velocity;
 	real collision_velocity;
 };
+
+typedef char biped_physics_size_assert[sizeof(struct biped_physics) == 0xCC ? 1 : -1];
 
 struct animation_frame_info_dx_dy
 {
@@ -3982,7 +3985,15 @@ static void biped_update_moving(
 	}
 	physics.in_flags = in_flags;
 
+	/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+	bevy_bridge_biped_physics_begin(biped_index, &physics, sizeof(physics),
+		biped->unit.player_index != NONE &&
+			!TEST_FLAG(definition->biped.flags, _biped_pill_centered_at_origin_bit) &&
+			!TEST_FLAG(definition->biped.flags, _biped_spherical_bit),
+		definition->biped.collision_height_standing,
+		definition->biped.collision_radius);
 	biped_update_physics(&physics);
+	bevy_bridge_biped_physics_end(&physics, sizeof(physics));
 
 	if (physics.elevator_object_index == NONE)
 	{

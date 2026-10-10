@@ -285,6 +285,11 @@ static const struct config_setting config_settings[] =
 	{ "game.bevy_bridge_name", _config_string, "\"HaloBevyBridge\"", "HALO_BEVY_BRIDGE_NAME", _environment_value, _platform_desktop,
 		"The name of the memory the game shares with a Bevy renderer (letters,\n"
 		"digits, '-' and '_'), so that each of several games has its own." },
+	{ "game.rust_simulation", _config_string, "\"\"", "HALO_RUST_SIMULATION", _environment_value, _platform_desktop,
+		"Systems of the game's simulation that run as bevy-rt-test's Rust ports\n"
+		"(halo_sim.dll, or HALO_SIM_DLL), in place of the game's own C, separated\n"
+		"by commas: point_physics. A system followed by \":check\" runs both and\n"
+		"logs where the Rust differs from the game's (which is kept)." },
 	{ "game.bevy_bridge_ray_tests", _config_boolean, "false", "HALO_BEVY_BRIDGE_RAY_TESTS", _environment_value, _platform_desktop,
 		"With game.bevy_bridge: rays fanned out from the camera each frame,\n"
 		"tested against the level's collision geometry and shared, for the\n"

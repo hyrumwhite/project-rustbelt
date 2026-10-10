@@ -14,6 +14,7 @@ POINT_PHYSICS.C
 #include "objects.h"
 #include "render_debug.h"
 #include "scenario.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -127,6 +128,14 @@ unsigned long point_physics_update(
 		else
 		{
 			underwater = scenario_get_current(location, position, &wind_vector, wind_flags);
+		}
+
+		/* port: the rest, run by the Rust port where it takes over
+		(port/linux/game/halo_sim.c) */
+		if (halo_sim_point_physics_update(flags, definition, location, position, translational_velocity,
+			translational_force, &wind_vector, underwater, radius, dt, collision_normal, collision_material_type, &result))
+		{
+			return result;
 		}
 
 		if (underwater)
@@ -245,6 +254,8 @@ unsigned long point_physics_update(
 	{
 		render_debug_point_physics(definition, position, radius);
 	}
+	/* port: (halo_sim.c's check mode) */
+	halo_sim_point_physics_check(result, location, position, translational_velocity, collision_normal, collision_material_type);
 
 	return result;
 }

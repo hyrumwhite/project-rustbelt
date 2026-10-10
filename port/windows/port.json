@@ -9,7 +9,8 @@
     "posix_update.c",
     "posix_upnp.c",
     "posix_trace_marker.c",
-    "posix_bevy_bridge.c"
+    "posix_bevy_bridge.c",
+    "posix_library.c"
   ],
   "libraries": [
     "ws2_32",

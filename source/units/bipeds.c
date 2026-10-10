@@ -277,6 +277,7 @@ symbols in this file:
 #include "structures/structure_bsp_definitions.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
 #include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* port: port/linux/game/network_objects.c's (a client deletes the host's
 objects on the host's word alone) */
@@ -4004,7 +4005,17 @@ static void biped_update_moving(
 			!TEST_FLAG(definition->biped.flags, _biped_spherical_bit),
 		definition->biped.collision_height_standing,
 		definition->biped.collision_radius);
-	biped_update_physics(&physics);
+	/* port: the Rust port's in place of the game's, or checked against it (halo_sim.c) */
+	if (!halo_sim_biped_physics_update(&physics,
+		biped->unit.player_index != NONE &&
+			!TEST_FLAG(definition->biped.flags, _biped_pill_centered_at_origin_bit) &&
+			!TEST_FLAG(definition->biped.flags, _biped_spherical_bit),
+		definition->biped.collision_height_standing,
+		definition->biped.collision_radius))
+	{
+		biped_update_physics(&physics);
+	}
+	halo_sim_biped_physics_check(&physics);
 	bevy_bridge_biped_physics_end(&physics, sizeof(physics));
 
 	if (physics.elevator_object_index == NONE)

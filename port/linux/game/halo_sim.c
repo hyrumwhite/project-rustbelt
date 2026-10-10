@@ -29,6 +29,7 @@ bit for bit; differences are counted and the first few logged.
 #include "physics/point_physics.h"
 #include "physics/collisions.h"
 #include "items/projectiles.h"
+#include "devices/device_definitions.h"
 #include "items/projectiles_callbacks.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_groups.h"
@@ -42,7 +43,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 5
+#define HALO_SIM_VERSION 6
 
 /* ---------- structures */
 
@@ -188,6 +189,55 @@ struct halo_sim_host_object
 	real_vector3d forward;
 	real_vector3d up;
 	unsigned long projectile_flags;
+	unsigned long dead;
+	real_vector3d velocity;
+	unsigned long elevator;
+	unsigned long biped_passes_through;
+	long player_index;
+	long parent_seat_index;
+	real_point3d pill_base;
+	real pill_height;
+	real pill_width;
+};
+
+/* bipeds.c's struct biped_physics (crates/halo_map's BipedPhysics) */
+struct halo_sim_biped_physics
+{
+	long biped_index;
+	unsigned short in_flags;
+	unsigned short pad6;
+	real_point3d position;
+	real_vector3d forward;
+	real_vector3d aiming;
+	real_vector3d velocity;
+	real crouch_velocity;
+	real_vector3d movement_desired;
+	real movement_constants[14]; /* movement_penalty through uphill_velocity_scale */
+	real_plane3d ground_plane;
+	long existing_support_surface_index;
+	real gravity;
+	long bumped_object_index;
+	long elevator_object_index;
+	unsigned short out_flags;
+	unsigned short pad_a2;
+	long support_surface_index;
+	long stick_surface_index;
+	real_point3d new_position;
+	real_vector3d new_velocity;
+	real landing_velocity;
+	real collision_velocity;
+};
+
+typedef char halo_sim_biped_physics_size_assert[sizeof(struct halo_sim_biped_physics) == 0xcc ? 1 : -1];
+
+/* crates/halo_sim's BipedPhysicsCall */
+struct halo_sim_biped_physics_call
+{
+	long structure_bsp_index;
+	unsigned char const *breakable_surfaces;
+	unsigned long stand_test;
+	real collision_height_standing;
+	real collision_radius;
 };
 
 /* crates/halo_map's ProjectileState: what a projectile update reads and
@@ -290,6 +340,7 @@ struct halo_sim_host
 	long (*object)(unsigned long index, struct halo_sim_host_object *out);
 	unsigned long (*children)(unsigned long index, unsigned long *out, unsigned long maximum);
 	struct halo_sim_projectile_callbacks projectile;
+	void (*features_call)(void);
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -327,6 +378,7 @@ struct halo_sim_collision_vector_result
 typedef unsigned long (*halo_sim_version_function)(void);
 typedef long (*halo_sim_set_host_function)(struct halo_sim_host const *host);
 typedef long (*halo_sim_projectile_function)(struct halo_sim_projectile_call *call);
+typedef long (*halo_sim_biped_physics_function)(struct halo_sim_biped_physics_call const *call, void *physics);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -354,6 +406,7 @@ static struct
 	halo_sim_collision_test_vector_function collision_test_vector;
 	halo_sim_projectile_function projectile_update;
 	halo_sim_projectile_function projectile_check;
+	halo_sim_biped_physics_function biped_physics;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -374,7 +427,19 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"poses",
 	"collision",
 	"projectiles",
+	"biped_physics",
 };
+
+/* the biped physics checks: Rust's result, and the comparisons */
+static struct
+{
+	boolean pending;
+	struct halo_sim_biped_physics before;
+	struct halo_sim_biped_physics result;
+	struct halo_sim_biped_physics_call call;
+	unsigned long compared;
+	unsigned long differed;
+} halo_sim_biped_physics_checks;
 
 /* the projectile checks: the state and random seed the game's update began
 with, its calls, and the comparisons */
@@ -464,6 +529,8 @@ static unsigned long halo_sim_host_cluster_objects(short cluster, unsigned long 
 /* whether a projectile update runs in Rust (the objects its ray tests
 visit, recorded for the bridge as the game's own ray tests record them) */
 static boolean halo_sim_projectile_updating;
+/* and a biped's movement physics (the objects its features come from) */
+static boolean halo_sim_biped_physics_updating;
 
 static long halo_sim_host_object(unsigned long index, struct halo_sim_host_object *out)
 {
@@ -472,6 +539,8 @@ static long halo_sim_host_object(unsigned long index, struct halo_sim_host_objec
 
 	if (halo_sim_projectile_updating)
 		bevy_bridge_projectile_object((long)index);
+	if (halo_sim_biped_physics_updating)
+		bevy_bridge_feature_object((long)index);
 
 	out->object_index = index;
 	out->definition_index = (unsigned long)object->definition_index;
@@ -501,6 +570,32 @@ static long halo_sim_host_object(unsigned long index, struct halo_sim_host_objec
 	}
 	out->projectile_flags = object->object.type == _object_type_projectile ?
 		((struct projectile_datum *)object)->projectile.flags : 0;
+	/* (as collision features see it: bevy_bridge.c's bevy_bridge_record_object) */
+	out->dead = TEST_FLAG(object->object.damage_flags, _object_dead_bit) ? 1 : 0;
+	out->velocity = object->object.translational_velocity;
+	out->elevator = 0;
+	out->biped_passes_through = 0;
+	out->player_index = NONE;
+	out->parent_seat_index = NONE;
+	memset(&out->pill_base, 0, sizeof(out->pill_base));
+	out->pill_height = 0.0f;
+	out->pill_width = 0.0f;
+	if (object->object.type == _object_type_machine)
+	{
+		struct machine_definition *machine_definition = machine_definition_get(object->definition_index);
+
+		out->elevator = TEST_FLAG(machine_definition->machine.flags, _machine_never_appears_locked_bit) &&
+			machine_definition->machine.elevator_node_index != NONE;
+	}
+	if (object->object.type == _object_type_biped)
+	{
+		struct biped_datum *biped = biped_get((long)index);
+
+		out->biped_passes_through = TEST_FLAG(biped->biped.flags, _biped_movement_passes_through_bipeds_bit) ? 1 : 0;
+		out->player_index = biped->unit.player_index;
+		out->parent_seat_index = biped->unit.parent_seat_index;
+		biped_get_physics_pill((long)index, &out->pill_base, &out->pill_height, &out->pill_width);
+	}
 
 	return TRUE;
 }
@@ -677,6 +772,13 @@ static void halo_sim_projectile_moved(unsigned long projectile_index, struct hal
 	halo_sim_projectile_state_load((long)projectile_index, state);
 }
 
+/* (for the bridge's recording: a gathering of features) */
+static void halo_sim_features_call(void)
+{
+	if (halo_sim_biped_physics_updating)
+		bevy_bridge_features_call();
+}
+
 static struct halo_sim_host const halo_sim_host_callbacks =
 {
 	halo_sim_host_cluster_objects,
@@ -694,6 +796,7 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		halo_sim_projectile_impact_noise,
 		halo_sim_projectile_moved,
 	},
+	halo_sim_features_call,
 };
 
 static void halo_sim_initialize(void)
@@ -737,9 +840,10 @@ static void halo_sim_initialize(void)
 	halo_sim.collision_test_vector = (halo_sim_collision_test_vector_function)halo_sim_symbol(library, "halo_sim_collision_test_vector");
 	halo_sim.projectile_update = (halo_sim_projectile_function)halo_sim_symbol(library, "halo_sim_projectile_update");
 	halo_sim.projectile_check = (halo_sim_projectile_function)halo_sim_symbol(library, "halo_sim_projectile_check");
+	halo_sim.biped_physics = (halo_sim_biped_physics_function)halo_sim_symbol(library, "halo_sim_biped_physics_update");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
-		!halo_sim.projectile_update || !halo_sim.projectile_check)
+		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -1567,5 +1671,80 @@ void halo_sim_projectile_check(long projectile_index, short collision_count, flo
 			halo_sim_projectile_checks.compared - halo_sim_projectile_checks.differed,
 			halo_sim_projectile_checks.compared, halo_sim_projectile_checks.collisions,
 			halo_sim_projectile_checks.events_compared, halo_sim_projectile_checks.skipped);
+	}
+}
+
+/* ---------- biped physics */
+
+int halo_sim_biped_physics_update(void *physics, int stand_test, float collision_height_standing,
+	float collision_radius)
+{
+	short mode = halo_sim_mode(_halo_sim_biped_physics);
+	struct halo_sim_biped_physics_call call;
+
+	halo_sim_biped_physics_checks.pending = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	call.structure_bsp_index = global_structure_bsp_index;
+	call.breakable_surfaces = (unsigned char const *)breakable_surface_flags_get();
+	call.stand_test = stand_test ? 1 : 0;
+	call.collision_height_standing = collision_height_standing;
+	call.collision_radius = collision_radius;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_biped_physics_checks.before = *(struct halo_sim_biped_physics *)physics;
+		halo_sim_biped_physics_checks.result = *(struct halo_sim_biped_physics *)physics;
+		halo_sim_biped_physics_checks.call = call;
+		if (halo_sim.biped_physics(&call, &halo_sim_biped_physics_checks.result) == 0)
+			halo_sim_biped_physics_checks.pending = TRUE;
+		return FALSE;
+	}
+
+	{
+		long result;
+
+		halo_sim_biped_physics_updating = TRUE;
+		result = halo_sim.biped_physics(&call, physics);
+		halo_sim_biped_physics_updating = FALSE;
+		return result == 0;
+	}
+}
+
+void halo_sim_biped_physics_check(void const *physics)
+{
+	struct halo_sim_biped_physics const *game = (struct halo_sim_biped_physics const *)physics;
+	struct halo_sim_biped_physics const *rust = &halo_sim_biped_physics_checks.result;
+
+	if (!halo_sim_biped_physics_checks.pending)
+		return;
+	halo_sim_biped_physics_checks.pending = FALSE;
+	halo_sim_biped_physics_checks.compared++;
+	if (memcmp(game, rust, sizeof(struct halo_sim_biped_physics)) != 0)
+	{
+		halo_sim_biped_physics_checks.differed++;
+		if (halo_sim_biped_physics_checks.differed <= 8)
+		{
+			struct halo_sim_biped_physics const *b = &halo_sim_biped_physics_checks.before;
+
+			platform_log("halo_sim: biped physics differs: biped %lx in %x stand %lu from (%f %f %f) velocity (%f %f %f)",
+				(unsigned long)b->biped_index, b->in_flags, halo_sim_biped_physics_checks.call.stand_test,
+				b->position.x, b->position.y, b->position.z,
+				b->new_velocity.i, b->new_velocity.j, b->new_velocity.k);
+			platform_log("halo_sim:   game out %x (%f %f %f) velocity (%f %f %f) support %ld bumped %lx elevator %lx",
+				game->out_flags, game->new_position.x, game->new_position.y, game->new_position.z,
+				game->new_velocity.i, game->new_velocity.j, game->new_velocity.k,
+				game->support_surface_index, (unsigned long)game->bumped_object_index, (unsigned long)game->elevator_object_index);
+			platform_log("halo_sim:   rust out %x (%f %f %f) velocity (%f %f %f) support %ld bumped %lx elevator %lx",
+				rust->out_flags, rust->new_position.x, rust->new_position.y, rust->new_position.z,
+				rust->new_velocity.i, rust->new_velocity.j, rust->new_velocity.k,
+				rust->support_surface_index, (unsigned long)rust->bumped_object_index, (unsigned long)rust->elevator_object_index);
+		}
+	}
+	if ((halo_sim_biped_physics_checks.compared & 0x3fff) == 0 ||
+		(halo_sim_biped_physics_checks.compared & (halo_sim_biped_physics_checks.compared - 1)) == 0)
+	{
+		platform_log("halo_sim: biped physics: %lu of %lu agree with the game",
+			halo_sim_biped_physics_checks.compared - halo_sim_biped_physics_checks.differed,
+			halo_sim_biped_physics_checks.compared);
 	}
 }

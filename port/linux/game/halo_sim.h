@@ -18,6 +18,7 @@ enum
 	_halo_sim_poses,
 	_halo_sim_collision,
 	_halo_sim_projectiles,
+	_halo_sim_biped_physics,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -132,5 +133,15 @@ void halo_sim_projectile_event_guidance(void const *projectile_center, void cons
 	void const *target_center_of_mass, float guidance_scale, long game_time);
 /* a move or attaching, and where it left the projectile */
 void halo_sim_projectile_event_state(short kind, unsigned long seed_before, long projectile_index);
+
+/* bipeds.c's biped_update_physics, on its physics (the game's struct
+biped_physics): TRUE when the Rust port moved it (the game's own then
+doesn't run); in check mode it runs on a copy, compared by
+halo_sim_biped_physics_check once the game's own has run. stand_test: the
+crouching player's stand test applies, with the definition's standing
+height and radius */
+int halo_sim_biped_physics_update(void *physics, int stand_test, float collision_height_standing,
+	float collision_radius);
+void halo_sim_biped_physics_check(void const *physics);
 
 #endif // __HALO_SIM_H

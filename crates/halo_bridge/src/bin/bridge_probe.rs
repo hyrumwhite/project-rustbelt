@@ -127,6 +127,10 @@ fn main() {
             if !bipeds.is_empty() {
                 check.check_bipeds(snapshot.structure_bsp_index, &bipeds);
             }
+            let moving = bridge.read_biped_moving_records();
+            if !moving.is_empty() {
+                check.check_biped_moving(snapshot.structure_bsp_index, &moving);
+            }
         }
         if let Some(snapshot) = fresh {
             frames += 1;
@@ -236,6 +240,23 @@ struct CollisionCheck {
     bipeds_seen: std::collections::HashSet<u32>,
     biped_kinds: [u64; 6],
     bipeds_shown: u32,
+    /// Recent biped physics updates by sequence, with the objects their
+    /// features came from, for the movement updates that made them.
+    recent_physics: std::collections::HashMap<u32, (halo_bridge::BipedRecord, Vec<Vec<halo_map::features::FeatureObject>>)>,
+    biped_definitions: std::collections::HashMap<u32, Option<halo_map::biped_moving::BipedDefinition>>,
+    player_information: Option<Option<halo_map::biped_moving::PlayerInformation>>,
+    moving_updates: u64,
+    moving_replayed: u64,
+    moving_agreed: u64,
+    moving_physics_compared: u64,
+    moving_physics_agreed: u64,
+    moving_missing_physics: u64,
+    moving_elsewhere: u64,
+    /// Of the agreeing updates: player physics, animation-driven, flying,
+    /// turned by the animation, jumps, landings started, aborted animations,
+    /// crouch changes.
+    moving_kinds: [u64; 8],
+    moving_shown: u32,
     frames_shown: u32,
     hits: u64,
     largest_t_difference: f32,
@@ -288,6 +309,18 @@ impl CollisionCheck {
             bipeds_seen: Default::default(),
             biped_kinds: [0; 6],
             bipeds_shown: 0,
+            recent_physics: Default::default(),
+            biped_definitions: Default::default(),
+            player_information: None,
+            moving_updates: 0,
+            moving_replayed: 0,
+            moving_agreed: 0,
+            moving_physics_compared: 0,
+            moving_physics_agreed: 0,
+            moving_missing_physics: 0,
+            moving_elsewhere: 0,
+            moving_kinds: [0; 8],
+            moving_shown: 0,
             frames_shown: 0,
             sphere_features: 0,
             hits: 0,
@@ -736,6 +769,11 @@ impl CollisionCheck {
             if record.after.bumped_object_index != -1 || record.after.elevator_object_index != -1 {
                 self.bipeds_touched_objects += 1;
             }
+            self.recent_physics.insert(record.sequence, (*record, objects.clone()));
+            if self.recent_physics.len() > 8192 {
+                let newest = record.sequence;
+                self.recent_physics.retain(|&sequence, _| newest.wrapping_sub(sequence) < 4096);
+            }
             let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
             bsp.breakable_surfaces = Some(record.breakable_surfaces);
             let mut physics = record.before;
@@ -791,7 +829,232 @@ impl CollisionCheck {
         }
     }
 
+    /// Replays the biped movement updates the game recorded with halo_map's
+    /// `biped_update_moving`, from the movement state each began with, what
+    /// it read and asked, and the objects and breakable surfaces its physics
+    /// saw; compares the physics it asks for with the game's, and the state
+    /// it leaves byte for byte.
+    fn check_biped_moving(&mut self, structure_bsp_index: i32, records: &[halo_bridge::BipedMovingRecord]) {
+        use halo_map::biped_moving::{BipedDefinition, MovingInputs, PhysicsWorld, PlayerInformation, biped_flags, state_flags};
+        let cache = &self.cache;
+        if self.player_information.is_none() {
+            self.player_information = Some(PlayerInformation::load(cache).ok());
+        }
+        let Some(Some(player_information)) = self.player_information else { return };
+        if !self.clusters.contains_key(&structure_bsp_index) {
+            let loaded = halo_map::bsp::references(cache)
+                .ok()
+                .and_then(|r| r.into_iter().find(|r| r.index as i32 == structure_bsp_index))
+                .and_then(|r| halo_map::bsp::Bsp::load(cache, &r).ok())
+                .and_then(|b| halo_map::collision::StructureClusters::load(cache, &b).ok());
+            self.clusters.insert(structure_bsp_index, loaded);
+        }
+        for record in records {
+            self.moving_updates += 1;
+            if record.structure_bsp_index != structure_bsp_index {
+                self.moving_elsewhere += 1;
+                continue;
+            }
+            let physics_record = if record.physics_record >= 0 {
+                match self.recent_physics.get(&(record.physics_record as u32)) {
+                    Some(found) => Some(found.clone()),
+                    None => {
+                        self.moving_missing_physics += 1;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let definition = self
+                .biped_definitions
+                .entry(record.definition_index)
+                .or_insert_with(|| BipedDefinition::load(cache, record.definition_index).ok())
+                .clone();
+            let Some(definition) = definition else { continue };
+            let frame_info = (record.animation_index != -1)
+                .then(|| {
+                    halo_map::animation::frame_info(cache, record.animation_graph_index, record.animation_index, record.animation_frame_index)
+                        .ok()
+                        .flatten()
+                })
+                .flatten();
+            let inputs = MovingInputs {
+                biped_index: record.biped_index,
+                dead: record.dead != 0,
+                ignore_translation: record.ignore_translation != 0,
+                suspended: record.suspended != 0,
+                control_flags: record.control_flags,
+                unit_animation_state: record.unit_animation_state,
+                base_seat_index: record.base_seat_index,
+                aiming_speed: record.aiming_speed,
+                actor: record.actor != 0,
+                player_index: record.player_index,
+                throttle: record.throttle,
+                body_stun: record.body_stun,
+                recent_body_damage: record.recent_body_damage,
+                desired_facing_vector: record.desired_facing_vector,
+                aiming_vector: record.aiming_vector,
+                bounding_center: record.bounding_center,
+                frame_info,
+                difficulty_infection_forms: record.difficulty_infection_forms,
+                speed_multiplier: record.speed_multiplier,
+                cinematic: record.cinematic != 0,
+                double_speed: record.double_speed != 0,
+                coop_player_collisions: record.coop_player_collisions != 0,
+                actor_leaping: record.actor_leaping != 0,
+                recorded_animation: record.recorded_animation != 0,
+                actor_jump: (record.actor_jump_asked != 0).then_some((record.actor_jumped != 0, record.actor_jump_velocity)),
+            };
+            let no_objects = Vec::new();
+            let (objects, stand) = match &physics_record {
+                Some((physics, objects)) => (
+                    objects,
+                    (physics.stand_test != 0).then_some(halo_map::biped::StandTest {
+                        collision_height_standing: physics.stand_height,
+                        collision_radius: physics.stand_radius,
+                    }),
+                ),
+                None => (&no_objects, None),
+            };
+            let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
+            bsp.breakable_surfaces = physics_record.as_ref().map(|(p, _)| p.breakable_surfaces);
+            let Some(Some(bsp)) = self.bsps.get(&structure_bsp_index) else { return };
+            let Some(Some(clusters)) = self.clusters.get(&structure_bsp_index) else { return };
+            let world = PhysicsWorld { bsp, clusters, objects };
+            let mut state = record.before;
+            let outcome =
+                halo_map::biped_moving::biped_update_moving(&world, &definition, &player_information, &inputs, &mut state, stand);
+            if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
+                bsp.breakable_surfaces = None;
+            }
+            self.moving_replayed += 1;
+
+            // the physics it asked for: the inputs of the game's (the rest of
+            // the game's struct is uninitialised until the physics fills it)
+            let mut physics_agrees = true;
+            if let (Some(mine), Some((game, _))) = (outcome.physics, &physics_record) {
+                let game = game.before;
+                let bits3 = |v: [f32; 3]| v.map(f32::to_bits);
+                physics_agrees = mine.biped_index == game.biped_index
+                    && mine.in_flags == game.in_flags
+                    && bits3(mine.position) == bits3(game.position)
+                    && bits3(mine.forward) == bits3(game.forward)
+                    && bits3(mine.aiming) == bits3(game.aiming)
+                    && bits3(mine.velocity) == bits3(game.velocity)
+                    && mine.crouch_velocity.to_bits() == game.crouch_velocity.to_bits()
+                    && bits3(mine.movement_desired) == bits3(game.movement_desired)
+                    && [
+                        mine.movement_penalty,
+                        mine.acceleration_maximum,
+                        mine.airborne_acceleration_maximum,
+                        mine.height,
+                        mine.width,
+                        mine.ground_tangential_velocity_max,
+                        mine.ground_tangential_angle,
+                        mine.minimum_normal_k,
+                        mine.downhill_k0,
+                        mine.downhill_k1,
+                        mine.downhill_velocity_scale,
+                        mine.uphill_k0,
+                        mine.uphill_k1,
+                        mine.uphill_velocity_scale,
+                    ]
+                    .map(f32::to_bits)
+                        == [
+                            game.movement_penalty,
+                            game.acceleration_maximum,
+                            game.airborne_acceleration_maximum,
+                            game.height,
+                            game.width,
+                            game.ground_tangential_velocity_max,
+                            game.ground_tangential_angle,
+                            game.minimum_normal_k,
+                            game.downhill_k0,
+                            game.downhill_k1,
+                            game.downhill_velocity_scale,
+                            game.uphill_k0,
+                            game.uphill_k1,
+                            game.uphill_velocity_scale,
+                        ]
+                        .map(f32::to_bits)
+                    && game.ground_plane.map(f32::to_bits) == mine.ground_plane.map(f32::to_bits)
+                    && mine.existing_support_surface_index == game.existing_support_surface_index;
+                self.moving_physics_compared += 1;
+                if physics_agrees {
+                    self.moving_physics_agreed += 1;
+                }
+            } else if outcome.physics.is_some() != physics_record.is_some() {
+                physics_agrees = false;
+            }
+
+            let bytes = |s: &halo_map::biped_moving::MovingState| {
+                // SAFETY: MovingState is repr(C) plain old data of 136 bytes
+                unsafe { std::mem::transmute::<halo_map::biped_moving::MovingState, [u8; 136]>(*s) }
+            };
+            if physics_agrees && bytes(&state) == bytes(&record.after) && outcome.aborted_animation == (record.aborted_animation != 0) {
+                self.moving_agreed += 1;
+                let b = &record.before;
+                let a = &record.after;
+                let k = &mut self.moving_kinds;
+                let flying = definition.flags & biped_flags::FLYING != 0 && !inputs.dead;
+                if flying {
+                    k[2] += 1;
+                } else if definition.flags & biped_flags::USES_PLAYER_PHYSICS != 0 && inputs.unit_animation_state != 28 {
+                    k[0] += 1;
+                } else {
+                    k[1] += 1;
+                }
+                if a.forward != b.forward && frame_info.is_some_and(|f| f.dyaw != 0.0) {
+                    k[3] += 1;
+                }
+                if a.biped_flags & state_flags::AIRBORNE != 0 && a.jump_recovery_timer == 0 && b.biped_flags & state_flags::AIRBORNE == 0 {
+                    k[4] += 1;
+                }
+                if a.landing != b.landing || (a.landing_recovery_counter == 0 && a.landing_recovery_time != b.landing_recovery_time) {
+                    k[5] += 1;
+                }
+                if outcome.aborted_animation {
+                    k[6] += 1;
+                }
+                if a.crouch != b.crouch {
+                    k[7] += 1;
+                }
+            } else if self.moving_shown < 6 {
+                self.moving_shown += 1;
+                println!(
+                    "  biped movement {:#x} differs (physics input agrees: {physics_agrees}; aborted game {} halo_map {}):\n    inputs   {:?}\n    before   {:?}\n    game     {:?}\n    halo_map {:?}",
+                    record.biped_index, record.aborted_animation, outcome.aborted_animation, inputs, record.before, record.after, state
+                );
+                if !physics_agrees
+                    && let (Some(mine), Some((game, _))) = (outcome.physics, &physics_record)
+                {
+                    println!("    physics game     {:?}\n    physics halo_map {:?}", game.before, mine);
+                }
+            }
+        }
+    }
+
     fn report(&self) {
+        let [player, animated, flying, turned, jumps, landings, aborted, crouching] = self.moving_kinds;
+        println!(
+            "bipeds: {} of {} movement updates replayed agree with the game byte for byte ({} of {} physics inputs agree; {} player physics, {} driven by animation, {} flying; {} turned by the animation, {} jumps, {} landings, {} aborted animations, {} crouching or standing); left out: {} whose physics record was lost, {} elsewhere, of {}",
+            self.moving_agreed,
+            self.moving_replayed,
+            self.moving_physics_agreed,
+            self.moving_physics_compared,
+            player,
+            animated,
+            flying,
+            turned,
+            jumps,
+            landings,
+            aborted,
+            crouching,
+            self.moving_missing_physics,
+            self.moving_elsewhere,
+            self.moving_updates
+        );
         println!(
             "bipeds: of the agreeing updates, bumped by type (biped, vehicle, ..., scenery, machine, control) {:?}; {} rode an elevator",
             self.bipeds_bumped_kinds, self.bipeds_on_elevators

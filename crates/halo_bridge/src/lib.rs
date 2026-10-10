@@ -21,7 +21,8 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 18;
+pub const VERSION: u32 = 19;
+pub const BIPED_MOVING_RECORDS: usize = 1024;
 pub const FEATURE_OBJECTS: usize = 16384;
 pub const FEATURE_MATRICES: usize = 65536;
 pub const BIPED_RECORDS: usize = 1024;
@@ -372,6 +373,53 @@ pub struct FeatureObjectRecord {
 
 const _: () = assert!(std::mem::size_of::<FeatureObjectRecord>() == 108);
 
+/// One `biped_update_moving` the game recorded: the biped's movement state
+/// before and after, what it read of the biped and asked of the rest of the
+/// game, what its actor's jump aim answered, whether it aborted the unit's
+/// animation, and the biped physics record it made (-1 for none).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BipedMovingRecord {
+    pub sequence: u32,
+    pub biped_index: u32,
+    pub definition_index: u32,
+    pub structure_bsp_index: i32,
+    pub physics_record: i32,
+    pub dead: u32,
+    pub ignore_translation: u32,
+    pub suspended: u32,
+    pub control_flags: u32,
+    pub unit_animation_state: i8,
+    pub base_seat_index: i8,
+    pub aiming_speed: i8,
+    pub actor: i8,
+    pub player_index: i32,
+    pub throttle: [f32; 3],
+    pub body_stun: f32,
+    pub recent_body_damage: f32,
+    pub desired_facing_vector: [f32; 3],
+    pub aiming_vector: [f32; 3],
+    pub bounding_center: [f32; 3],
+    pub animation_graph_index: u32,
+    pub animation_index: i16,
+    pub animation_frame_index: i16,
+    pub difficulty_infection_forms: f32,
+    pub speed_multiplier: f32,
+    pub cinematic: u32,
+    pub double_speed: u32,
+    pub coop_player_collisions: u32,
+    pub actor_leaping: u32,
+    pub recorded_animation: u32,
+    pub actor_jump_asked: u32,
+    pub actor_jumped: u32,
+    pub actor_jump_velocity: [f32; 3],
+    pub aborted_animation: u32,
+    pub before: halo_map::biped_moving::MovingState,
+    pub after: halo_map::biped_moving::MovingState,
+}
+
+const _: () = assert!(std::mem::size_of::<BipedMovingRecord>() == 432);
+
 /// A recorded biped update with the objects its features came from (each
 /// with its node matrices: scale, forward, left, up, position).
 #[derive(Debug, Clone)]
@@ -419,6 +467,9 @@ struct Shared {
     feature_matrix_count: u32,
     feature_objects: [FeatureObjectRecord; FEATURE_OBJECTS],
     feature_matrices: [[f32; 13]; FEATURE_MATRICES],
+    biped_moving_record_count: u32,
+    biped_moving_pad: u32,
+    biped_moving_records: [BipedMovingRecord; BIPED_MOVING_RECORDS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -496,6 +547,7 @@ pub struct Bridge {
     last_overlay: Option<(u32, u32)>,
     last_projectile_record: Option<u32>,
     last_biped_record: Option<u32>,
+    last_biped_moving_record: Option<u32>,
 }
 
 // Frames are read through volatile reads and a sequence check; the input
@@ -516,7 +568,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None, last_biped_moving_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -635,6 +687,30 @@ impl Bridge {
                 }
             }
             self.last_biped_record = Some(count);
+            out
+        }
+    }
+
+    /// The biped movement updates the game recorded since the last call (as
+    /// [`Self::read_projectile_records`]).
+    pub fn read_biped_moving_records(&mut self) -> Vec<BipedMovingRecord> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence number after copying
+        unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).biped_moving_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_biped_moving_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(BIPED_MOVING_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).biped_moving_records[sequence as usize % BIPED_MOVING_RECORDS]);
+                if record.sequence == sequence {
+                    out.push(record);
+                }
+            }
+            self.last_biped_moving_record = Some(count);
             out
         }
     }

@@ -10,7 +10,9 @@
 //! Struct offsets come from [`layout`], which is generated from OpenCE's C
 //! definitions by `tools/tag_layout`.
 
+pub mod animation;
 pub mod biped;
+pub mod biped_moving;
 pub mod bitmap;
 pub mod bsp;
 pub mod collision;
@@ -56,6 +58,9 @@ pub mod groups {
     pub const FOG: u32 = fourcc(b"fog ");
     pub const POINT_PHYSICS: u32 = fourcc(b"pphy");
     pub const PROJECTILE: u32 = fourcc(b"proj");
+    pub const BIPED: u32 = fourcc(b"bipd");
+    pub const GLOBALS: u32 = fourcc(b"matg");
+    pub const ANIMATION_GRAPH: u32 = fourcc(b"antr");
     pub const SHADER: u32 = fourcc(b"shdr");
     pub const SHADER_ENVIRONMENT: u32 = fourcc(b"senv");
     pub const SHADER_MODEL: u32 = fourcc(b"soso");

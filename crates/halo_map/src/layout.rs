@@ -5,6 +5,33 @@
 
 #![allow(dead_code)]
 
+pub mod _biped_definition {
+    pub const FLAGS: usize = 0x4;
+    pub const FLYING_BANK_AMOUNT: usize = 0x34;
+    pub const FLYING_VELOCITY: usize = 0x44;
+    pub const FLYING_SIDESTEP_VELOCITY: usize = 0x48;
+    pub const FLYING_ACCELERATION: usize = 0x4c;
+    pub const FLYING_DECELERATION: usize = 0x50;
+    pub const FLYING_CROUCH_VELOCITY_MODIFIER: usize = 0x5c;
+    pub const DOWNHILL_VELOCITY_SCALE: usize = 0x74;
+    pub const UPHILL_VELOCITY_SCALE: usize = 0x80;
+    pub const JUMP_VELOCITY: usize = 0xc4;
+    pub const MAXIMUM_SOFT_LANDING_TIME: usize = 0xe4;
+    pub const MAXIMUM_HARD_LANDING_TIME: usize = 0xe8;
+    pub const MINIMUM_SOFT_LANDING_VELOCITY: usize = 0xec;
+    pub const MINIMUM_HARD_LANDING_VELOCITY: usize = 0xf0;
+    pub const MAXIMUM_HARD_LANDING_VELOCITY: usize = 0xf4;
+    pub const COLLISION_HEIGHT_STANDING: usize = 0x134;
+    pub const COLLISION_HEIGHT_CROUCHING: usize = 0x138;
+    pub const COLLISION_RADIUS: usize = 0x13c;
+    pub const RUNTIME_CROUCH_TRANSITION_VELOCITY: usize = 0x1dc;
+    pub const RUNTIME_MINIMUM_NORMAL_K: usize = 0x1e0;
+    pub const RUNTIME_DOWNHILL_K0: usize = 0x1e4;
+    pub const RUNTIME_DOWNHILL_K1: usize = 0x1e8;
+    pub const RUNTIME_UPHILL_K0: usize = 0x1ec;
+    pub const RUNTIME_UPHILL_K1: usize = 0x1f0;
+}
+
 pub mod _object_definition {
     pub const SIZEOF: usize = 0x17c;
     pub const TYPE: usize = 0x0;
@@ -36,6 +63,27 @@ pub mod _projectile_definition {
     pub const GUIDED_ANGULAR_VELOCITY: usize = 0x70;
     pub const IMPACT_DAMAGE: usize = 0xa8;
     pub const MATERIAL_RESPONSES: usize = 0xc4;
+}
+
+pub mod _unit_definition {
+    pub const FLAGS: usize = 0x0;
+    pub const STUNNED_MOVEMENT_THRESHOLD: usize = 0xc4;
+}
+
+pub mod animation {
+    pub const SIZEOF: usize = 0xb4;
+    pub const FRAME_COUNT: usize = 0x22;
+    pub const FRAME_INFO_TYPE: usize = 0x26;
+    pub const FRAME_INFO: usize = 0x48;
+}
+
+pub mod animation_graph {
+    pub const ANIMATIONS: usize = 0x74;
+}
+
+pub mod biped_definition {
+    pub const UNIT: usize = 0x17c;
+    pub const BIPED: usize = 0x2f0;
 }
 
 pub mod bitmap_data {
@@ -123,6 +171,27 @@ pub mod control_placement {
 
 pub mod equipment_placement {
     pub const SIZEOF: usize = 0x28;
+}
+
+pub mod game_globals {
+    pub const PLAYER_INFORMATION: usize = 0x170;
+}
+
+pub mod game_globals_player_information {
+    pub const SIZEOF: usize = 0xf4;
+    pub const WALKING_SPEED: usize = 0x2c;
+    pub const DOUBLE_SPEED_MULTIPLIER: usize = 0x30;
+    pub const RUN_FORWARD_SPEED: usize = 0x34;
+    pub const RUN_BACKWARD_SPEED: usize = 0x38;
+    pub const RUN_SIDEWAYS_SPEED: usize = 0x3c;
+    pub const RUN_ACCELERATION: usize = 0x40;
+    pub const SNEAK_FORWARD_SPEED: usize = 0x44;
+    pub const SNEAK_BACKWARD_SPEED: usize = 0x48;
+    pub const SNEAK_SIDEWAYS_SPEED: usize = 0x4c;
+    pub const SNEAK_ACCELERATION: usize = 0x50;
+    pub const AIRBORNE_ACCELERATION: usize = 0x54;
+    pub const STUN_MOVEMENT_PENALTY: usize = 0x80;
+    pub const STUN_TURNING_PENALTY: usize = 0x84;
 }
 
 pub mod light_fixture_placement {

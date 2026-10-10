@@ -33,6 +33,7 @@ use halo_map::collision::{CollisionBsp, StructureClusters, World};
 use halo_map::physics::{PointPhysicsDefinition, PointState, point_physics_update_full};
 use halo_map::pose::{PoseAnimation, PoseModel, PoseObjectDefinition};
 
+pub mod area_damage;
 pub mod poses;
 pub mod preprocess;
 pub mod bipeds;
@@ -43,7 +44,7 @@ pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 15;
+pub const VERSION: u32 = 16;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {

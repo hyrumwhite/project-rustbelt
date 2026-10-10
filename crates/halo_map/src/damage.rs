@@ -96,12 +96,19 @@ pub struct DamageDefinition {
     pub damage_upper_bound: f32,
     pub vehicle_passthrough_penalty: f32,
     pub material_modifiers: Vec<f32>,
+    /// Its area of effect (`damage_definition`'s core radius, and the
+    /// effect's falloff and cutoff radii and flags).
+    pub area_of_effect_core_radius: f32,
+    pub falloff_radius: f32,
+    pub cutoff_radius: f32,
+    pub effect_flags: u32,
 }
 
 impl DamageDefinition {
     pub fn load(cache: &CacheFile, datum: u32) -> Result<Self> {
         use layout::damage_definition as d;
-        let root = cache.tag_root(datum, crate::groups::DAMAGE_EFFECT)?.add(layout::damage_effect_definition::DAMAGE);
+        let effect = cache.tag_root(datum, crate::groups::DAMAGE_EFFECT)?;
+        let root = effect.add(layout::damage_effect_definition::DAMAGE);
         let mut material_modifiers = Vec::new();
         for index in 0..layout::material_types::COUNT {
             material_modifiers.push(root.f32(d::MATERIAL_MODIFIERS + index * 4)?);
@@ -115,6 +122,10 @@ impl DamageDefinition {
             damage_upper_bound: root.f32(d::DAMAGE_UPPER_BOUND)?,
             vehicle_passthrough_penalty: root.f32(d::VEHICLE_PASSTHROUGH_PENALTY)?,
             material_modifiers,
+            area_of_effect_core_radius: root.f32(d::AREA_OF_EFFECT_CORE_RADIUS)?,
+            falloff_radius: effect.f32(layout::damage_effect_definition::FALLOFF_RADIUS)?,
+            cutoff_radius: effect.f32(layout::damage_effect_definition::CUTOFF_RADIUS)?,
+            effect_flags: effect.u32(layout::damage_effect_definition::FLAGS)?,
         })
     }
 }
@@ -216,6 +227,12 @@ impl DamageResistance {
 pub fn object_collision_model(cache: &CacheFile, definition: u32) -> Result<Option<u32>> {
     let root = cache.tag_root(definition, crate::groups::OBJECT)?;
     Ok(root.reference(layout::_object_definition::COLLISION_MODEL)?.datum)
+}
+
+/// A unit definition's flags (`_unit_definition.flags`).
+pub fn unit_definition_flags(cache: &CacheFile, definition: u32) -> Result<u32> {
+    let root = cache.tag_root(definition, crate::groups::OBJECT)?.add(layout::unit_definition::UNIT);
+    root.u32(layout::_unit_definition::FLAGS)
 }
 
 /// A unit definition's share of damage its riders take.

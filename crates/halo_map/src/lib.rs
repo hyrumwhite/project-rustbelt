@@ -19,6 +19,7 @@ pub mod bitmap;
 pub mod bsp;
 pub mod collision;
 pub mod combiner;
+pub mod area_damage;
 pub mod damage;
 pub mod device_pose;
 pub mod features;

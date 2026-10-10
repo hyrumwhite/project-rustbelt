@@ -22,6 +22,10 @@ const int layout__material_types__COUNT = NUMBER_OF_MATERIAL_TYPES;
 
 /* damage effects */
 LAYOUT_OFFSET(damage_effect_definition, damage)
+LAYOUT_OFFSET(damage_effect_definition, falloff_radius)
+LAYOUT_OFFSET(damage_effect_definition, cutoff_radius)
+LAYOUT_OFFSET(damage_effect_definition, flags)
+LAYOUT_OFFSET(damage_definition, area_of_effect_core_radius)
 LAYOUT_OFFSET(damage_definition, side_effect)
 LAYOUT_OFFSET(damage_definition, category)
 LAYOUT_OFFSET(damage_definition, flags)

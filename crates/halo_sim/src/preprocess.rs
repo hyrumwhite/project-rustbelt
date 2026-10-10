@@ -102,7 +102,7 @@ impl Tags {
         }
     }
 
-    fn unit_flags(&mut self, definition: u32) -> u32 {
+    pub(crate) fn unit_flags(&mut self, definition: u32) -> u32 {
         let cache = &self.cache;
         *self.unit_flags.entry(definition).or_insert_with(|| {
             cache

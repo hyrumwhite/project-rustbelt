@@ -73,12 +73,12 @@ pub struct DamageCallC {
 }
 
 impl crate::Tags {
-    fn damage_definition(&mut self, datum: u32) -> Option<Arc<DamageDefinition>> {
+    pub(crate) fn damage_definition(&mut self, datum: u32) -> Option<Arc<DamageDefinition>> {
         let cache = &self.cache;
         self.damage_definitions.entry(datum).or_insert_with(|| DamageDefinition::load(cache, datum).ok().map(Arc::new)).clone()
     }
 
-    fn damage_resistance(&mut self, object_definition: u32) -> Option<Arc<DamageResistance>> {
+    pub(crate) fn damage_resistance(&mut self, object_definition: u32) -> Option<Arc<DamageResistance>> {
         let cache = &self.cache;
         self.damage_resistances
             .entry(object_definition)

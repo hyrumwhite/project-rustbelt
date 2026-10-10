@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 pub const RAY_TESTS: usize = 16;
 pub const MAXIMUM_LIGHTS: usize = 64;
 pub const MAXIMUM_OBJECTS: usize = 4096;
@@ -114,6 +114,14 @@ pub struct RayTest {
     pub sphere_radius: f32,
     pub sphere_counts: [u16; 4],
     pub sphere_checksum: u32,
+    /// A sphere swept from the ray's start along `pill_vector` and where it
+    /// first touched (`collision_bsp_test_pill`).
+    pub pill_vector: [f32; 3],
+    pub pill_radius: f32,
+    pub pill_hit: u32,
+    pub pill_t: f32,
+    pub pill_normal: [f32; 3],
+    pub pill_surface_index: i32,
 }
 
 /// FNV-1a over 32-bit indices, as the game checksums a sphere test's.

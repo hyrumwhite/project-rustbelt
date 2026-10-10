@@ -197,7 +197,7 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
 
    Each piece is a port of the game's own code, checked against the running game through the bridge before the next one is built on it.
    - [x] Collision BSP and the ray test (`halo_map::collision`, `collision_bsp_test_vector`): 483,000 rays through b30 and a10 agree with the game bit for bit (`bridge_probe <map file>` with `HALO_BEVY_BRIDGE_RAY_TESTS=1`)
-   - [ ] Sphere and pill tests (`collision_bsp_test_sphere`, `_pill`): the features (surfaces, edges, vertices) near a point, which movement collides with
+   - [x] Sphere and pill tests (`collision_bsp_test_sphere`, `collision_bsp_test_pill`): the surfaces, edges and vertices near a point, and where a sweeping sphere first touches the structure, as movement uses them. The same fan of rays checks them: 414,000 spheres (34 million features touched) and 483,000 sweeps in b30 and a10 match the game exactly. Feature lists match in order; sweeps match bit for bit in t, surface and normal. One detail mattered: C's `fabs` is the double one, so the game computes a sweep's plane contact time in double.
    - [ ] Object collision models (`collision_models.c`): rays and spheres against objects' node-posed collision geometry
    - [ ] Point physics (`point_physics.c`): projectiles, grenades, items and particles. This is the first simulation to run in Rust, checked tick by tick against the game's.
    - [ ] Biped movement (`bipeds.c`, `physics.c`): walking, jumping and sliding on the collision geometry

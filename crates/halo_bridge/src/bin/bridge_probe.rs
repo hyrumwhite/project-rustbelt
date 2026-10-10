@@ -177,6 +177,9 @@ struct CollisionCheck {
     agreed: u64,
     spheres: u64,
     spheres_agreed: u64,
+    pills: u64,
+    pills_agreed: u64,
+    pill_hits: u64,
     sphere_features: u64,
     hits: u64,
     largest_t_difference: f32,
@@ -193,6 +196,9 @@ impl CollisionCheck {
             agreed: 0,
             spheres: 0,
             spheres_agreed: 0,
+            pills: 0,
+            pills_agreed: 0,
+            pill_hits: 0,
             sphere_features: 0,
             hits: 0,
             largest_t_difference: 0.0,
@@ -232,6 +238,30 @@ impl CollisionCheck {
             if test.hit != 0 {
                 self.hits += 1;
             }
+            // the swept sphere
+            let pill = bsp.test_pill(test.point, test.pill_vector, test.pill_radius, f32::MAX);
+            self.pills += 1;
+            if test.pill_hit != 0 {
+                self.pill_hits += 1;
+            }
+            let pill_agrees = match pill {
+                Some(hit) => {
+                    test.pill_hit != 0
+                        && hit.t.to_bits() == test.pill_t.to_bits()
+                        && hit.surface == test.pill_surface_index
+                        && [hit.plane[0], hit.plane[1], hit.plane[2]].map(f32::to_bits) == test.pill_normal.map(f32::to_bits)
+                }
+                None => test.pill_hit == 0,
+            };
+            if pill_agrees {
+                self.pills_agreed += 1;
+            } else if self.shown < 10 {
+                self.shown += 1;
+                println!(
+                    "  swept sphere differs (radius {}): game hit {} t {} surface {} normal {:?}; halo_map {:?}",
+                    test.pill_radius, test.pill_hit, test.pill_t, test.pill_surface_index, test.pill_normal, pill
+                );
+            }
             // the sphere
             let features = bsp.test_sphere(test.sphere_center, test.sphere_radius);
             let mut checksum = 2_166_136_261u32;
@@ -264,6 +294,10 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        println!(
+            "collision: {} of {} swept spheres agree with the game bit for bit ({} touched the structure)",
+            self.pills_agreed, self.pills, self.pill_hits
+        );
         println!(
             "collision: {} of {} spheres agree with the game ({} surfaces, edges and vertices touched)",
             self.spheres_agreed, self.spheres, self.sphere_features

@@ -278,6 +278,33 @@ impl CollisionBsp {
                 && leaf.first_reference as i64 <= self.references.len() as i64 - leaf.reference_count as i64)
     }
 
+    /// Halo's swept sphere (`collision_bsp_test_pill`, what `collision_test_pill`
+    /// and so biped movement uses): the first place a sphere of `radius`
+    /// moving from `point` along `vector` touches the structure, up to
+    /// `maximum_t`. Every breakable surface counts as intact.
+    pub fn test_pill(&self, point: [f32; 3], vector: [f32; 3], radius: f32, maximum_t: f32) -> Option<PillHit> {
+        let mut test = PillTest {
+            bsp: self,
+            point,
+            vector,
+            radius,
+            hit: PillHit {
+                t: if maximum_t < 0.0 { 0.0 } else { maximum_t },
+                plane: [0.0; 4],
+                surface: NONE,
+                material: 0,
+            },
+            plane_stack: Vec::with_capacity(MAXIMUM_DEPTH as usize),
+            projection: 0,
+            sign: false,
+            point2d: [0.0; 2],
+            vector2d: [0.0; 2],
+            nodes_left: self.nodes.len() as i64,
+            nodes2d_left: 0,
+        };
+        test.bsp3d(0, 0).then_some(test.hit)
+    }
+
     /// Halo's sphere test (`collision_bsp_test_sphere`): the surfaces, edges
     /// and vertices within `radius` of `center`, each list in the order the
     /// game finds them (at most 256 each). Every breakable surface counts as
@@ -313,6 +340,319 @@ impl SphereFeatures {
     /// Whether the sphere touches a surface or an edge (the test's result).
     pub fn touches(&self) -> bool {
         !self.surfaces.is_empty() || !self.edges.is_empty()
+    }
+}
+
+/// Where a swept sphere first touched the structure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PillHit {
+    /// How far along the sweep.
+    pub t: f32,
+    /// The plane touched; for an edge, the normal from the edge to the
+    /// sphere's centre, with `d` the largest f32.
+    pub plane: [f32; 4],
+    pub surface: i32,
+    pub material: i16,
+}
+
+const BSP3D_TEST_PILL_EPSILON: f32 = 1.0 / 4096.0;
+const BSP2D_TEST_PILL_EPSILON: f32 = 1.0 / 8192.0;
+const REAL_EPSILON: f32 = 0.0001;
+
+/// `PIN(n, 0, 1)`, as the macro compares (a NaN stays a NaN).
+fn pin01(n: f32) -> f32 {
+    if n < 0.0 {
+        0.0
+    } else if n > 1.0 {
+        1.0
+    } else {
+        n
+    }
+}
+
+fn sub3(b: [f32; 3], a: [f32; 3]) -> [f32; 3] {
+    [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// `sphere_test_vector`: when a point moving along `vector` comes within
+/// `radius` of `center`.
+fn sphere_test_vector(center: [f32; 3], radius: f32, point: [f32; 3], vector: [f32; 3]) -> Option<f32> {
+    let delta = sub3(center, point);
+    let outside = dot3(delta, delta) - radius * radius;
+    if outside <= 0.0 {
+        return Some(0.0);
+    }
+    let projection = dot3(delta, vector);
+    if projection > 0.0 {
+        let length_squared = dot3(vector, vector);
+        let discriminant = projection * projection - length_squared * outside;
+        if discriminant >= 0.0 {
+            let hit_t = (projection - discriminant.sqrt()) / length_squared;
+            if hit_t <= 1.0 {
+                return Some(hit_t);
+            }
+        }
+    }
+    None
+}
+
+/// `pill_test_vector`: when a point moving along `vector` comes within
+/// `radius` of the segment from `base` along `edge`: (t, where along the
+/// edge).
+fn pill_test_vector(base: [f32; 3], edge: [f32; 3], radius: f32, point: [f32; 3], vector: [f32; 3]) -> Option<(f32, f32)> {
+    let delta = sub3(point, base);
+    let edge_length_squared = dot3(edge, edge);
+    let edge_dot_vector = dot3(edge, vector);
+    let vector_length_squared = dot3(vector, vector);
+    let denominator = vector_length_squared * edge_length_squared - edge_dot_vector * edge_dot_vector;
+    if denominator == 0.0 {
+        return None;
+    }
+    let delta_dot_edge = dot3(delta, edge);
+    let delta_dot_vector = dot3(delta, vector);
+    let linear = delta_dot_edge * edge_dot_vector - delta_dot_vector * edge_length_squared;
+    let constant = (dot3(delta, delta) - radius * radius) * edge_length_squared - delta_dot_edge * delta_dot_edge;
+    let discriminant = linear * linear - constant * denominator;
+    if discriminant < 0.0 {
+        return None;
+    }
+    let root = discriminant.sqrt();
+    let inverse = 1.0 / denominator;
+    let t0 = -((root + linear) * inverse);
+    if t0 > 1.0 {
+        return None;
+    }
+    let t1 = -((linear - root) * inverse);
+    if t1 < 0.0 {
+        return None;
+    }
+    // (FLOOR(t0, 0))
+    let hit_t = if t0 < 0.0 { 0.0 } else { t0 };
+    let edge_projection = edge_dot_vector * hit_t + delta_dot_edge;
+    if edge_projection < 0.0 {
+        sphere_test_vector(base, radius, point, vector).map(|t| (t, 0.0))
+    } else if edge_projection > edge_length_squared {
+        let end = [base[0] + edge[0], base[1] + edge[1], base[2] + edge[2]];
+        sphere_test_vector(end, radius, point, vector).map(|t| (t, 1.0))
+    } else {
+        Some((hit_t, edge_projection / edge_length_squared))
+    }
+}
+
+struct PillTest<'a> {
+    bsp: &'a CollisionBsp,
+    point: [f32; 3],
+    vector: [f32; 3],
+    radius: f32,
+    hit: PillHit,
+    plane_stack: Vec<i32>,
+    projection: usize,
+    sign: bool,
+    point2d: [f32; 2],
+    vector2d: [f32; 2],
+    nodes_left: i64,
+    nodes2d_left: i64,
+}
+
+impl PillTest<'_> {
+    fn bsp3d(&mut self, child_index: i32, depth: u16) -> bool {
+        let bsp = self.bsp;
+        let mut hit = false;
+        if child_index & SIGN == 0 {
+            // (collision_bsp3d_enter_node)
+            if child_index as usize >= bsp.nodes.len() || depth >= MAXIMUM_DEPTH {
+                return false;
+            }
+            self.nodes_left -= 1;
+            if self.nodes_left < 0 {
+                return false;
+            }
+            let node = bsp.nodes[child_index as usize];
+            let Some(plane) = bsp.plane(node.plane).copied() else { return false };
+            let normal = [plane[0], plane[1], plane[2]];
+            let distance0 = dot3(self.point, normal) - plane[3];
+            let dot = dot3(self.vector, normal);
+            let distance1 = dot + distance0;
+            let r = self.radius;
+            let reaches_back = distance0 <= r + BSP3D_TEST_PILL_EPSILON || distance1 <= r + BSP3D_TEST_PILL_EPSILON;
+            let reaches_front = distance0 >= -r - BSP3D_TEST_PILL_EPSILON || distance1 >= -r - BSP3D_TEST_PILL_EPSILON;
+            if reaches_back && reaches_front {
+                let front = dot > 0.0;
+                self.plane_stack.push(if front { node.plane | SIGN } else { node.plane & i32::MAX });
+                if self.bsp3d(node.children[usize::from(!front)], depth + 1) {
+                    hit = true;
+                }
+                self.plane_stack.pop();
+                if self.bsp3d(node.children[usize::from(front)], depth + 1) {
+                    hit = true;
+                }
+            } else if self.bsp3d(node.children[usize::from(reaches_front)], depth + 1) {
+                hit = true;
+            }
+            return hit;
+        }
+        if child_index == NONE || !bsp.valid_leaf((child_index & i32::MAX) as usize) {
+            return false;
+        }
+        let leaf = bsp.leaves[(child_index & i32::MAX) as usize];
+        let first = leaf.first_reference.max(0) as usize;
+        for reference_index in first..first + leaf.reference_count.max(0) as usize {
+            let reference = bsp.references[reference_index];
+            if !self.plane_stack.contains(&reference.plane_designator) {
+                continue;
+            }
+            let Some(plane) = bsp.planes.get((reference.plane_designator & i32::MAX) as usize).copied() else { continue };
+            let normal = [plane[0], plane[1], plane[2]];
+            let distance0 = dot3(self.point, normal) - plane[3];
+            let dot = dot3(self.vector, normal);
+            let mut t = 0.0f32;
+            if dot != 0.0 {
+                let inverse = 1.0 / dot;
+                // (C's fabs is the double one: the subtraction and the
+                // product with the radius happen in double, rounded once)
+                t = ((-(inverse * distance0)) as f64 - (inverse as f64).abs() * self.radius as f64) as f32;
+                t = pin01(t);
+            }
+            if !(self.hit.t > t) {
+                continue;
+            }
+            let (ai, aj, ak) = (plane[0].abs(), plane[1].abs(), plane[2].abs());
+            self.projection = if ak >= aj && ak >= ai {
+                2
+            } else if aj >= ai {
+                1
+            } else {
+                0
+            };
+            self.sign = (plane[self.projection] > 0.0) != (reference.plane_designator & SIGN != 0);
+            let mut pill_point = [
+                self.vector[0] * t + self.point[0],
+                self.vector[1] * t + self.point[1],
+                self.vector[2] * t + self.point[2],
+            ];
+            let plane_distance = -(dot3(pill_point, normal) - plane[3]);
+            pill_point = [
+                plane[0] * plane_distance + pill_point[0],
+                plane[1] * plane_distance + pill_point[1],
+                plane[2] * plane_distance + pill_point[2],
+            ];
+            let p2d = project(pill_point, self.projection, self.sign);
+            let surface_index = bsp.bsp2d_test_point(p2d, reference.root);
+            if surface_index >= 0
+                && (surface_index as usize) < bsp.surfaces.len()
+                && bsp.surface_test_point(surface_index as usize, self.projection, self.sign, p2d)
+            {
+                let surface = bsp.surfaces[surface_index as usize];
+                self.hit.t = t;
+                self.hit.plane = if reference.plane_designator & SIGN != 0 {
+                    [-plane[0], -plane[1], -plane[2], -plane[3]]
+                } else {
+                    plane
+                };
+                self.hit.surface = surface_index;
+                self.hit.material = surface.material;
+                hit = true;
+            }
+            let negative_distance = -distance0;
+            let start_point = [
+                plane[0] * negative_distance + self.point[0],
+                plane[1] * negative_distance + self.point[1],
+                plane[2] * negative_distance + self.point[2],
+            ];
+            self.point2d = project(start_point, self.projection, self.sign);
+            let negative_dot = -dot;
+            let sweep = [
+                plane[0] * negative_dot + self.vector[0],
+                plane[1] * negative_dot + self.vector[1],
+                plane[2] * negative_dot + self.vector[2],
+            ];
+            self.vector2d = project(sweep, self.projection, self.sign);
+            self.nodes2d_left = bsp.nodes2d.len() as i64;
+            if self.bsp2d(reference.root, 0) {
+                hit = true;
+            }
+        }
+        hit
+    }
+
+    fn bsp2d(&mut self, child_index: i32, depth: u16) -> bool {
+        let bsp = self.bsp;
+        if child_index & SIGN == 0 {
+            // (collision_bsp2d_enter_node)
+            if child_index as usize >= bsp.nodes2d.len() || depth >= MAXIMUM_BSP2D_DEPTH {
+                return false;
+            }
+            self.nodes2d_left -= 1;
+            if self.nodes2d_left < 0 {
+                return false;
+            }
+            let node = bsp.nodes2d[child_index as usize];
+            let distance0 = (node.plane[0] * self.point2d[0] + node.plane[1] * self.point2d[1]) - node.plane[2];
+            let distance1 = node.plane[0] * self.vector2d[0] + node.plane[1] * self.vector2d[1] + distance0;
+            let r = self.radius;
+            let reaches_back = distance0 <= r + BSP2D_TEST_PILL_EPSILON || distance1 <= r + BSP2D_TEST_PILL_EPSILON;
+            let reaches_front = distance0 >= -r - BSP2D_TEST_PILL_EPSILON || distance1 >= -r - BSP2D_TEST_PILL_EPSILON;
+            // (short-circuits as the game's does)
+            return (reaches_back && self.bsp2d(node.children[0], depth + 1))
+                || (reaches_front && self.bsp2d(node.children[1], depth + 1));
+        }
+        self.surface(child_index & i32::MAX)
+    }
+
+    /// `collision_surface_test_pill`: the sphere against a surface's edges.
+    fn surface(&mut self, surface_index: i32) -> bool {
+        let bsp = self.bsp;
+        if surface_index < 0 || surface_index as usize >= bsp.surfaces.len() {
+            return false;
+        }
+        let surface = bsp.surfaces[surface_index as usize];
+        let mut edge_index = surface.first_edge;
+        if !bsp.ring_continues(edge_index, 0) {
+            return false;
+        }
+        let mut hit = false;
+        let mut edge_count = 0;
+        loop {
+            let edge = &bsp.edges[edge_index as usize];
+            let reverse = edge.surfaces[1] == surface_index;
+            let v0 = bsp.vertex(edge.vertices[usize::from(reverse)]);
+            let v1 = bsp.vertex(edge.vertices[usize::from(!reverse)]);
+            let edge_vector = sub3(v1, v0);
+            if let Some((t, edge_t)) = pill_test_vector(v0, edge_vector, self.radius, self.point, self.vector)
+                && self.hit.t > t
+            {
+                self.hit.t = t;
+                let edge_point = [
+                    edge_vector[0] * edge_t + v0[0],
+                    edge_vector[1] * edge_t + v0[1],
+                    edge_vector[2] * edge_t + v0[2],
+                ];
+                let pill_point = [
+                    self.vector[0] * t + self.point[0],
+                    self.vector[1] * t + self.point[1],
+                    self.vector[2] * t + self.point[2],
+                ];
+                let mut normal = sub3(pill_point, edge_point);
+                let magnitude = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+                if !(REAL_EPSILON > magnitude.abs()) {
+                    let inverse = 1.0 / magnitude;
+                    normal = [inverse * normal[0], inverse * normal[1], inverse * normal[2]];
+                }
+                self.hit.plane = [normal[0], normal[1], normal[2], f32::MAX];
+                self.hit.surface = surface_index;
+                self.hit.material = surface.material;
+                hit = true;
+            }
+            edge_index = edge.edges[usize::from(reverse)];
+            edge_count += 1;
+            if edge_index == surface.first_edge || !bsp.ring_continues(edge_index, edge_count) {
+                return hit;
+            }
+        }
     }
 }
 

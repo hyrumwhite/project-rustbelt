@@ -48,7 +48,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 12
+#define HALO_SIM_VERSION 13
 
 /* ---------- structures */
 
@@ -503,6 +503,140 @@ struct halo_sim_unit_animation_callbacks
 	long (*effect)(unsigned long unit_index, struct halo_sim_unit_animation_state *state, unsigned long effect);
 };
 
+/* crates/halo_map's UnitUpdateState and UnitGlobals */
+struct halo_sim_unit_update_state
+{
+	unsigned long flags;
+	unsigned long control_flags;
+	long persistent_control_timer;
+	unsigned long persistent_control_flags;
+	real_vector3d desired_facing_vector;
+	real_vector3d desired_aiming_vector;
+	real_vector3d aiming_vector;
+	real_vector3d aiming_velocity;
+	real_vector3d desired_looking_vector;
+	real_vector3d looking_vector;
+	real_vector3d looking_velocity;
+	real_vector3d throttle;
+	real primary_trigger;
+	short timer;
+	short grenade_throw_ticks;
+	char weapon_drop_delay_ticks;
+	char grenade_throw_state;
+	char current_grenade_index;
+	char desired_grenade_index;
+	char grenade_counts[2];
+	char current_zoom_level;
+	char desired_zoom_level;
+	char gunner_inactive_ticks;
+	unsigned char aiming_change;
+	unsigned char flaming_death_delay;
+	char aiming_speed;
+	short cause_for_camo_regrowth;
+	short body_stun_ticks;
+	short feign_death_timer;
+	short delayed_damage_timer;
+	short last_damage_category;
+	short owner_team_index;
+	real delayed_damage_peak;
+	long delayed_damage_attacker_object_index;
+	real body_stun;
+	real seat_power[2];
+	real integrated_light_power;
+	real integrated_light_battery;
+	real integrated_night_vision_power;
+	real_vector3d seat_acceleration;
+	real_vector3d seat_desired_acceleration;
+	real active_camouflage;
+	real active_camouflage_super_amount;
+	real mouth_aperture;
+	real run_blindly_angle;
+	real run_blindly_angle_delta;
+	short current_weapon_index;
+	short desired_weapon_index;
+	unsigned short animation_flags;
+	char animation_state;
+	unsigned char aiming_with_euler_screen;
+	unsigned char looking_with_euler_screen;
+	unsigned char pad[3];
+	real_rectangle2d aiming_screen_bounds;
+	real_rectangle2d looking_screen_bounds;
+	long player_index;
+	long driver_object_index;
+	long gunner_object_index;
+	long parent_object_index;
+	unsigned long object_flags;
+	unsigned long damage_flags;
+	real body_vitality;
+	short animation_frame_index;
+	char player_melee_ticks;
+	char pad2;
+	real_vector3d forward;
+	real_vector3d up;
+	real_vector3d object_forward;
+};
+
+typedef char halo_sim_unit_update_state_size_assert[sizeof(struct halo_sim_unit_update_state) == 332 ? 1 : -1];
+
+struct halo_sim_unit_globals
+{
+	short next_timer;
+	short highest_timer;
+	unsigned char used_time;
+	unsigned char pad[3];
+};
+
+/* crates/halo_sim's ControllerC, UnitUpdateEventC and UnitUpdateCall */
+struct halo_sim_controller
+{
+	short owner_team_index;
+	short pad;
+	unsigned long controls;
+	unsigned long control_flags;
+	real_vector3d desired_facing_vector;
+	real_vector3d desired_aiming_vector;
+	real_vector3d throttle;
+	real primary_trigger;
+};
+
+struct halo_sim_unit_update_event
+{
+	long kind;
+	long a;
+	real b;
+	long result;
+	unsigned long seed;
+	struct halo_sim_unit_update_state before;
+	struct halo_sim_unit_update_state after;
+};
+
+struct halo_sim_unit_update_call
+{
+	unsigned long unit_index;
+	unsigned long definition_index;
+	struct halo_sim_unit_update_state state;
+	struct halo_sim_unit_globals globals;
+	unsigned long allow_integrated_lights;
+	unsigned long game_engine_running;
+	unsigned long cheat_jetpack;
+	unsigned long cheat_infinite_ammo;
+	unsigned long has_driver;
+	struct halo_sim_controller driver;
+	unsigned long has_gunner;
+	struct halo_sim_controller gunner;
+	unsigned long weapon_definition_index;
+	struct halo_sim_unit_update_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+};
+
+/* crates/halo_sim's UnitUpdateCallbacks */
+struct halo_sim_unit_update_callbacks
+{
+	long (*call)(unsigned long unit_index, struct halo_sim_unit_update_state *state, long kind, long a, real b);
+};
+
 /* crates/halo_sim's MeleeCall and MeleeCallbacks */
 struct halo_sim_melee_call
 {
@@ -688,6 +822,7 @@ struct halo_sim_host
 	struct halo_sim_update_callbacks biped_update;
 	struct halo_sim_unit_animation_callbacks unit_animation;
 	struct halo_sim_melee_callbacks melee;
+	struct halo_sim_unit_update_callbacks unit_update;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -732,6 +867,7 @@ typedef long (*halo_sim_moving_function)(struct halo_sim_moving_call *call);
 typedef long (*halo_sim_update_function)(struct halo_sim_update_call *call);
 typedef long (*halo_sim_unit_animation_function)(struct halo_sim_unit_animation_call *call);
 typedef long (*halo_sim_melee_function)(struct halo_sim_melee_call *call);
+typedef long (*halo_sim_unit_update_function)(struct halo_sim_unit_update_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -772,6 +908,8 @@ static struct
 	halo_sim_unit_animation_function unit_animation_check;
 	halo_sim_melee_function player_melee;
 	halo_sim_melee_function player_melee_check;
+	halo_sim_unit_update_function unit_update;
+	halo_sim_unit_update_function unit_update_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -799,7 +937,27 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"biped_update",
 	"unit_animation",
 	"player_melee",
+	"unit_update",
 };
+
+/* the unit update checks: the update the game's began with, its calls of
+the rest of the game, and the comparisons */
+#define MAXIMUM_HALO_SIM_UNIT_EVENTS 32
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	long unit_index;
+	struct halo_sim_unit_globals *globals;
+	struct halo_sim_unit_update_call call;
+	struct halo_sim_unit_update_event events[MAXIMUM_HALO_SIM_UNIT_EVENTS];
+	unsigned long event_count;
+	struct halo_sim_unit_update_event *open_event;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long calls;
+} halo_sim_unit_update_checks;
 
 /* the player melee checks: the step the game's began with, and the
 comparisons */
@@ -1724,6 +1882,147 @@ static void halo_sim_unit_animation_state_store(long unit_index, struct halo_sim
 	unit->object.animation.animation_graph_index = state->object_animation_graph_index;
 }
 
+/* a unit's update state, from the unit */
+static void halo_sim_unit_update_state_load(long unit_index, struct halo_sim_unit_update_state *state)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+
+	memset(state, 0, sizeof(*state));
+	state->flags = unit->unit.flags;
+	state->control_flags = unit->unit.control_flags;
+	state->persistent_control_timer = unit->unit.persistent_control_timer;
+	state->persistent_control_flags = unit->unit.persistent_control_flags;
+	state->desired_facing_vector = unit->unit.desired_facing_vector;
+	state->desired_aiming_vector = unit->unit.desired_aiming_vector;
+	state->aiming_vector = unit->unit.aiming_vector;
+	state->aiming_velocity = unit->unit.aiming_velocity;
+	state->desired_looking_vector = unit->unit.desired_looking_vector;
+	state->looking_vector = unit->unit.looking_vector;
+	state->looking_velocity = unit->unit.looking_velocity;
+	state->throttle = unit->unit.throttle;
+	state->primary_trigger = unit->unit.primary_trigger;
+	state->timer = unit->unit.timer;
+	state->grenade_throw_ticks = unit->unit.grenade_throw_ticks;
+	state->weapon_drop_delay_ticks = unit->unit.weapon_drop_delay_ticks;
+	state->grenade_throw_state = unit->unit.grenade_throw_state;
+	state->current_grenade_index = unit->unit.current_grenade_index;
+	state->desired_grenade_index = unit->unit.desired_grenade_index;
+	state->grenade_counts[0] = unit->unit.grenade_counts[0];
+	state->grenade_counts[1] = unit->unit.grenade_counts[1];
+	state->current_zoom_level = unit->unit.current_zoom_level;
+	state->desired_zoom_level = unit->unit.desired_zoom_level;
+	state->gunner_inactive_ticks = unit->unit.gunner_inactive_ticks;
+	state->aiming_change = unit->unit.aiming_change;
+	state->flaming_death_delay = unit->unit.flaming_death_delay;
+	state->aiming_speed = unit->unit.aiming_speed;
+	state->cause_for_camo_regrowth = unit->unit.cause_for_camo_regrowth;
+	state->body_stun_ticks = unit->unit.body_stun_ticks;
+	state->feign_death_timer = unit->unit.feign_death_timer;
+	state->delayed_damage_timer = unit->unit.delayed_damage_timer;
+	state->last_damage_category = unit->unit.last_damage_category;
+	state->owner_team_index = unit->object.owner_team_index;
+	state->delayed_damage_peak = unit->unit.delayed_damage_peak;
+	state->delayed_damage_attacker_object_index = unit->unit.delayed_damage_attacker_object_index;
+	state->body_stun = unit->unit.body_stun;
+	state->seat_power[0] = unit->unit.seat_power[0];
+	state->seat_power[1] = unit->unit.seat_power[1];
+	state->integrated_light_power = unit->unit.integrated_light_power;
+	state->integrated_light_battery = unit->unit.integrated_light_battery;
+	state->integrated_night_vision_power = unit->unit.integrated_night_vision_power;
+	state->seat_acceleration = unit->unit.seat_acceleration;
+	state->seat_desired_acceleration = unit->unit.seat_desired_acceleration;
+	state->active_camouflage = unit->unit.active_camouflage;
+	state->active_camouflage_super_amount = unit->unit.active_camouflage_super_amount;
+	state->mouth_aperture = unit->unit.mouth_aperture;
+	state->run_blindly_angle = unit->unit.run_blindly_angle;
+	state->run_blindly_angle_delta = unit->unit.run_blindly_angle_delta;
+	state->current_weapon_index = unit->unit.current_weapon_index;
+	state->desired_weapon_index = unit->unit.desired_weapon_index;
+	state->animation_flags = unit->unit.animation.flags;
+	state->animation_state = unit->unit.animation.state;
+	state->aiming_with_euler_screen = unit->unit.animation.aiming_with_euler_screen ? 1 : 0;
+	state->looking_with_euler_screen = unit->unit.animation.looking_with_euler_screen ? 1 : 0;
+	state->aiming_screen_bounds = unit->unit.animation.aiming_screen_bounds;
+	state->looking_screen_bounds = unit->unit.animation.looking_screen_bounds;
+	state->player_index = unit->unit.player_index;
+	state->driver_object_index = unit->unit.driver_object_index;
+	state->gunner_object_index = unit->unit.gunner_object_index;
+	state->parent_object_index = unit->object.parent_object_index;
+	state->object_flags = unit->object.flags;
+	state->damage_flags = unit->object.damage_flags;
+	state->body_vitality = unit->object.body_vitality;
+	state->animation_frame_index = unit->object.animation.state.frame_index;
+	state->player_melee_ticks = unit->object.type == _object_type_biped ? biped_get(unit_index)->biped.player_melee_ticks : 0;
+	object_get_orientation(unit_index, &state->forward, &state->up);
+	state->object_forward = unit->object.forward;
+}
+
+/* and back to it: what the update changes */
+static void halo_sim_unit_update_state_store(long unit_index, struct halo_sim_unit_update_state const *state)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+
+	unit->unit.flags = state->flags;
+	unit->unit.control_flags = state->control_flags;
+	unit->unit.persistent_control_timer = state->persistent_control_timer;
+	unit->unit.persistent_control_flags = state->persistent_control_flags;
+	unit->unit.desired_facing_vector = state->desired_facing_vector;
+	unit->unit.desired_aiming_vector = state->desired_aiming_vector;
+	unit->unit.aiming_vector = state->aiming_vector;
+	unit->unit.aiming_velocity = state->aiming_velocity;
+	unit->unit.desired_looking_vector = state->desired_looking_vector;
+	unit->unit.looking_vector = state->looking_vector;
+	unit->unit.looking_velocity = state->looking_velocity;
+	unit->unit.throttle = state->throttle;
+	unit->unit.primary_trigger = state->primary_trigger;
+	unit->unit.timer = state->timer;
+	unit->unit.grenade_throw_ticks = state->grenade_throw_ticks;
+	unit->unit.weapon_drop_delay_ticks = state->weapon_drop_delay_ticks;
+	unit->unit.grenade_throw_state = state->grenade_throw_state;
+	unit->unit.current_grenade_index = state->current_grenade_index;
+	unit->unit.desired_grenade_index = state->desired_grenade_index;
+	unit->unit.grenade_counts[0] = state->grenade_counts[0];
+	unit->unit.grenade_counts[1] = state->grenade_counts[1];
+	unit->unit.current_zoom_level = state->current_zoom_level;
+	unit->unit.gunner_inactive_ticks = state->gunner_inactive_ticks;
+	unit->unit.aiming_change = state->aiming_change;
+	unit->unit.flaming_death_delay = state->flaming_death_delay;
+	unit->unit.cause_for_camo_regrowth = state->cause_for_camo_regrowth;
+	unit->unit.body_stun_ticks = state->body_stun_ticks;
+	unit->unit.feign_death_timer = state->feign_death_timer;
+	unit->unit.delayed_damage_timer = state->delayed_damage_timer;
+	unit->unit.last_damage_category = state->last_damage_category;
+	unit->object.owner_team_index = state->owner_team_index;
+	unit->unit.delayed_damage_peak = state->delayed_damage_peak;
+	unit->unit.delayed_damage_attacker_object_index = state->delayed_damage_attacker_object_index;
+	unit->unit.body_stun = state->body_stun;
+	unit->unit.seat_power[0] = state->seat_power[0];
+	unit->unit.seat_power[1] = state->seat_power[1];
+	unit->unit.integrated_light_power = state->integrated_light_power;
+	unit->unit.integrated_light_battery = state->integrated_light_battery;
+	unit->unit.integrated_night_vision_power = state->integrated_night_vision_power;
+	unit->unit.seat_acceleration = state->seat_acceleration;
+	unit->unit.active_camouflage = state->active_camouflage;
+	unit->unit.active_camouflage_super_amount = state->active_camouflage_super_amount;
+	unit->unit.mouth_aperture = state->mouth_aperture;
+	unit->unit.run_blindly_angle = state->run_blindly_angle;
+	unit->unit.run_blindly_angle_delta = state->run_blindly_angle_delta;
+}
+
+/* units.c's, a unit update's call of the rest of the game */
+long unit_update_call(long unit_index, long kind, long a, real b);
+
+static long halo_sim_unit_update_callback(unsigned long unit_index, struct halo_sim_unit_update_state *state, long kind,
+	long a, real b)
+{
+	long result;
+
+	halo_sim_unit_update_state_store((long)unit_index, state);
+	result = unit_update_call((long)unit_index, kind, a, b);
+	halo_sim_unit_update_state_load((long)unit_index, state);
+	return result;
+}
+
 /* bipeds.c's, a player melee's side effects */
 void biped_rust_melee_started(long biped_index, long weapon_index);
 void biped_rust_melee_damage(long biped_index);
@@ -1837,6 +2136,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		halo_sim_melee_started,
 		halo_sim_melee_damage,
 	},
+	{
+		halo_sim_unit_update_callback,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -1893,6 +2195,8 @@ static void halo_sim_initialize(void)
 	halo_sim.unit_animation_check = (halo_sim_unit_animation_function)halo_sim_symbol(library, "halo_sim_unit_animation_check");
 	halo_sim.player_melee = (halo_sim_melee_function)halo_sim_symbol(library, "halo_sim_player_melee");
 	halo_sim.player_melee_check = (halo_sim_melee_function)halo_sim_symbol(library, "halo_sim_player_melee_check");
+	halo_sim.unit_update = (halo_sim_unit_update_function)halo_sim_symbol(library, "halo_sim_unit_update");
+	halo_sim.unit_update_check = (halo_sim_unit_update_function)halo_sim_symbol(library, "halo_sim_unit_update_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -1901,7 +2205,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.biped_moving || !halo_sim.biped_moving_check ||
 		!halo_sim.biped_update || !halo_sim.biped_update_check ||
 		!halo_sim.unit_animation || !halo_sim.unit_animation_check ||
-		!halo_sim.player_melee || !halo_sim.player_melee_check)
+		!halo_sim.player_melee || !halo_sim.player_melee_check ||
+		!halo_sim.unit_update || !halo_sim.unit_update_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -3663,5 +3968,183 @@ void halo_sim_player_melee_check(long biped_index)
 		platform_log("halo_sim: player melee: %lu of %lu agree with the game (%lu started, %lu landing)",
 			halo_sim_melee_checks.compared - halo_sim_melee_checks.differed, halo_sim_melee_checks.compared,
 			halo_sim_melee_checks.started, halo_sim_melee_checks.damaged);
+	}
+}
+
+/* ---------- unit updates */
+
+static void halo_sim_controller_load(long unit_index, boolean gunner, struct halo_sim_controller *controller)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+
+	memset(controller, 0, sizeof(*controller));
+	controller->owner_team_index = unit->object.owner_team_index;
+	controller->controls = unit->unit.player_index != NONE ||
+		(unit->unit.animation.state != _unit_state_exiting_seat && unit->unit.animation.state != _unit_state_entering_seat);
+	controller->control_flags = unit->unit.control_flags;
+	controller->desired_facing_vector = unit->unit.desired_facing_vector;
+	controller->desired_aiming_vector = unit->unit.desired_aiming_vector;
+	controller->throttle = unit->unit.throttle;
+	controller->primary_trigger = unit->unit.primary_trigger;
+}
+
+static void halo_sim_unit_update_call_new(long unit_index, void *unit_globals, int allow_integrated_lights,
+	int game_engine_running, int cheat_jetpack, int cheat_infinite_ammo, struct halo_sim_unit_update_call *call)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+	long weapon_index;
+
+	memset(call, 0, sizeof(*call));
+	call->unit_index = (unsigned long)unit_index;
+	call->definition_index = (unsigned long)unit->definition_index;
+	halo_sim_unit_update_state_load(unit_index, &call->state);
+	call->globals = *(struct halo_sim_unit_globals const *)unit_globals;
+	call->allow_integrated_lights = allow_integrated_lights ? 1 : 0;
+	call->game_engine_running = game_engine_running ? 1 : 0;
+	call->cheat_jetpack = cheat_jetpack ? 1 : 0;
+	call->cheat_infinite_ammo = cheat_infinite_ammo ? 1 : 0;
+	if (unit->unit.driver_object_index != NONE)
+	{
+		call->has_driver = 1;
+		halo_sim_controller_load(unit->unit.driver_object_index, FALSE, &call->driver);
+	}
+	if (unit->unit.gunner_object_index != NONE)
+	{
+		call->has_gunner = 1;
+		halo_sim_controller_load(unit->unit.gunner_object_index, TRUE, &call->gunner);
+	}
+	weapon_index = unit->unit.current_weapon_index != NONE ?
+		unit->unit.weapon_object_indices[unit->unit.current_weapon_index] : NONE;
+	call->weapon_definition_index = weapon_index != NONE ? (unsigned long)object_get(weapon_index)->definition_index : NONE;
+	call->difference_event = NONE;
+}
+
+int halo_sim_unit_update(long unit_index, void *unit_globals, int allow_integrated_lights, int game_engine_running,
+	int cheat_jetpack, int cheat_infinite_ammo)
+{
+	short mode = halo_sim_mode(_halo_sim_unit_update);
+	struct halo_sim_unit_update_call call;
+
+	halo_sim_unit_update_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	halo_sim_unit_update_call_new(unit_index, unit_globals, allow_integrated_lights, game_engine_running, cheat_jetpack,
+		cheat_infinite_ammo, mode == _halo_sim_mode_check ? &halo_sim_unit_update_checks.call : &call);
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_unit_update_checks.unit_index = unit_index;
+		halo_sim_unit_update_checks.globals = (struct halo_sim_unit_globals *)unit_globals;
+		halo_sim_unit_update_checks.event_count = 0;
+		halo_sim_unit_update_checks.open_event = NULL;
+		halo_sim_unit_update_checks.overflow = FALSE;
+		halo_sim_unit_update_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	if (halo_sim.unit_update(&call) != 0)
+		return FALSE;
+	halo_sim_unit_update_state_store(unit_index, &call.state);
+	*(struct halo_sim_unit_globals *)unit_globals = call.globals;
+
+	return TRUE;
+}
+
+void halo_sim_unit_event_begin(long unit_index, long kind, long a, float b)
+{
+	struct halo_sim_unit_update_event *event;
+
+	if (!halo_sim_unit_update_checks.recording || halo_sim_unit_update_checks.unit_index != unit_index ||
+		halo_sim_unit_update_checks.open_event)
+	{
+		return;
+	}
+	if (halo_sim_unit_update_checks.event_count >= MAXIMUM_HALO_SIM_UNIT_EVENTS)
+	{
+		halo_sim_unit_update_checks.overflow = TRUE;
+		return;
+	}
+	event = &halo_sim_unit_update_checks.events[halo_sim_unit_update_checks.event_count++];
+	memset(event, 0, sizeof(*event));
+	event->kind = kind;
+	event->a = a;
+	event->b = b;
+	halo_sim_unit_update_state_load(unit_index, &event->before);
+	halo_sim_unit_update_checks.open_event = event;
+}
+
+void halo_sim_unit_event_end(long unit_index, long result)
+{
+	struct halo_sim_unit_update_event *event = halo_sim_unit_update_checks.open_event;
+
+	if (!event || halo_sim_unit_update_checks.unit_index != unit_index)
+		return;
+	halo_sim_unit_update_checks.open_event = NULL;
+	event->result = result;
+	event->seed = get_random_seed();
+	/* (a call may delete the unit: died, flamed to death) */
+	if (object_try_and_get_and_verify_type(unit_index, _object_mask_unit))
+		halo_sim_unit_update_state_load(unit_index, &event->after);
+	else
+		halo_sim_unit_update_checks.overflow = TRUE;
+}
+
+void halo_sim_unit_update_check(long unit_index)
+{
+	struct halo_sim_unit_update_call call;
+	struct halo_sim_unit_update_state game;
+
+	if (!halo_sim_unit_update_checks.recording)
+		return;
+	halo_sim_unit_update_checks.recording = FALSE;
+	if (halo_sim_unit_update_checks.unit_index != unit_index || halo_sim_unit_update_checks.overflow ||
+		!object_try_and_get_and_verify_type(unit_index, _object_mask_unit))
+	{
+		halo_sim_unit_update_checks.skipped++;
+		return;
+	}
+	call = halo_sim_unit_update_checks.call;
+	call.events = halo_sim_unit_update_checks.events;
+	call.event_count = halo_sim_unit_update_checks.event_count;
+	if (halo_sim.unit_update_check(&call) != 0)
+	{
+		halo_sim_unit_update_checks.skipped++;
+		return;
+	}
+
+	halo_sim_unit_update_state_load(unit_index, &game);
+	halo_sim_unit_update_checks.compared++;
+	halo_sim_unit_update_checks.calls += halo_sim_unit_update_checks.event_count;
+	if (memcmp(&call.state, &game, sizeof(game)) != 0 || call.difference_event != NONE ||
+		memcmp(&call.globals, halo_sim_unit_update_checks.globals, 5) != 0)
+	{
+		halo_sim_unit_update_checks.differed++;
+		if (halo_sim_unit_update_checks.differed <= 8)
+		{
+			unsigned char const *r = (unsigned char const *)&call.state;
+			unsigned char const *g = (unsigned char const *)&game;
+			unsigned long offset = 0;
+
+			while (offset < sizeof(game) && r[offset] == g[offset])
+				offset++;
+			platform_log("halo_sim: unit update differs: unit %lx (definition %lx) call %ld of %lu (kind %ld) reason %ld; first differing byte %lu of %lu; timer game %d rust %d",
+				(unsigned long)unit_index, call.definition_index, call.difference_event, halo_sim_unit_update_checks.event_count,
+				call.difference_event >= 0 && call.difference_event < (long)halo_sim_unit_update_checks.event_count ?
+					halo_sim_unit_update_checks.events[call.difference_event].kind : NONE,
+				call.difference_reason, offset, (unsigned long)sizeof(game), game.timer, call.state.timer);
+			platform_log("halo_sim:   game aiming (%f %f %f) looking (%f %f %f) flags %lx controls %lx",
+				game.aiming_vector.i, game.aiming_vector.j, game.aiming_vector.k,
+				game.looking_vector.i, game.looking_vector.j, game.looking_vector.k, game.flags, game.control_flags);
+			platform_log("halo_sim:   rust aiming (%f %f %f) looking (%f %f %f) flags %lx controls %lx",
+				call.state.aiming_vector.i, call.state.aiming_vector.j, call.state.aiming_vector.k,
+				call.state.looking_vector.i, call.state.looking_vector.j, call.state.looking_vector.k,
+				call.state.flags, call.state.control_flags);
+		}
+	}
+	if ((halo_sim_unit_update_checks.compared & 0x3fff) == 0 ||
+		(halo_sim_unit_update_checks.compared & (halo_sim_unit_update_checks.compared - 1)) == 0)
+	{
+		platform_log("halo_sim: unit updates: %lu of %lu agree with the game (%lu calls of the game; %lu left out)",
+			halo_sim_unit_update_checks.compared - halo_sim_unit_update_checks.differed, halo_sim_unit_update_checks.compared,
+			halo_sim_unit_update_checks.calls, halo_sim_unit_update_checks.skipped);
 	}
 }

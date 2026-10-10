@@ -996,6 +996,7 @@ static void unit_verify_vectors(long unit_index, char const *debugstring);
 static void unit_running_blind(long unit_index, real_vector3d *run_vector);
 
 static boolean unit_integrated_night_vision_is_active(long unit_index);
+long unit_update_call(long unit_index, long kind, long a, real b);
 
 void unit_detach_from_parent(
 	long unit_index);
@@ -5479,6 +5480,15 @@ boolean unit_update(
 
 	profile_enter(unit_update_section);
 
+	/* port: the Rust port's update in place of the game's, or (in check
+	mode) the state it is checked from (halo_sim.c) */
+	if (halo_sim_unit_update(unit_index, unit_globals, allow_integrated_lights, game_engine_running(),
+		cheat.jetpack, cheat.infinite_ammo))
+	{
+		profile_exit(unit_update_section);
+		return TRUE;
+	}
+
 	unit_verify_vectors(unit_index, "unit-update-begin");
 
 	++unit->unit.timer;
@@ -5704,7 +5714,7 @@ boolean unit_update(
 		// Drop weapon when drop delay is done
 		if (unit->unit.weapon_drop_delay_ticks>0 && --unit->unit.weapon_drop_delay_ticks==0)
 		{
-			unit_drop_current_weapon(unit_index, TRUE);
+			unit_update_call(unit_index, _unit_update_call_drop_current_weapon, 0, 0.f);
 		}
 
 		// Update feign death timer
@@ -5718,11 +5728,11 @@ boolean unit_update(
 			{
 				if (unit->object.body_vitality>0.f)
 				{
-					unit_port_resurrect(unit_index);
+					unit_update_call(unit_index, _unit_update_call_resurrect, 0, 0.f);
 				}
 				else
 				{
-					unit_died(unit_index, FALSE);
+					unit_update_call(unit_index, _unit_update_call_died, 0, 0.f);
 				}
 			}
 		}
@@ -5739,23 +5749,19 @@ boolean unit_update(
 		{
 			if (TEST_FLAG(unit->object.damage_flags, _object_cannot_hold_weapon_bit))
 			{
-				unit_drop_current_weapon(unit_index, TRUE);
+				unit_update_call(unit_index, _unit_update_call_drop_current_weapon, 0, 0.f);
 			}
 			else if (unit->unit.desired_weapon_index!=unit->unit.current_weapon_index &&
 				!unit_animation_busy(&unit->unit.animation))
 			{
-				long weapon_index = unit_get_desired_weapon_index(unit_index);
-
-				if (weapon_index!=NONE && unit_can_use_weapon(unit_index, weapon_index))
-				{
-					unit_ready_desired_weapon(unit_index, TRUE);
-				}
+				unit_update_call(unit_index, _unit_update_call_ready_desired_weapon, 0, 0.f);
 			}
 
 			if (unit->unit.desired_grenade_index!=unit->unit.current_grenade_index &&
 				!unit_animation_busy(&unit->unit.animation))
 			{
-				short grenade_index = unit_inventory_next_grenade(unit_index, unit->unit.desired_grenade_index, 0);
+				short grenade_index = (short)unit_update_call(unit_index, _unit_update_call_next_grenade,
+					unit->unit.desired_grenade_index, 0.f);
 
 				if (grenade_index!=NONE)
 				{
@@ -5780,8 +5786,6 @@ boolean unit_update(
 
 			if (unit->unit.desired_zoom_level!=unit->unit.current_zoom_level)
 			{
-				long local_player_index;
-
 				unit->unit.current_zoom_level = unit->unit.desired_zoom_level;
 
 				if (unit->unit.desired_zoom_level==NONE)
@@ -5789,37 +5793,7 @@ boolean unit_update(
 					unit->unit.integrated_night_vision_power = 0.f;
 				}
 
-				if (player_index_from_unit_index(unit_index)!=NONE)
-				{
-					local_player_index = player_get(player_index_from_unit_index(unit_index))->local_player_index;
-				}
-				else
-				{
-					local_player_index = NONE;
-				}
-
-				if (local_player_index!=NONE)
-				{
-					long weapon_index = unit_get_current_weapon_index(unit_index);
-
-					if (weapon_index!=NONE)
-					{
-						struct weapon_datum *weapon = weapon_get(weapon_index);
-						struct weapon_definition *weapon_definition = weapon_definition_get(weapon->definition_index);
-						long sound_index = unit->unit.current_zoom_level==NONE ? weapon_definition->weapon.zoom_out_sound.index : weapon_definition->weapon.zoom_in_sound.index;
-						real scale = 1.f;
-
-						if (unit->unit.current_zoom_level!=NONE && weapon_definition->weapon.zoom_level_count>1)
-						{
-							scale = (real)unit->unit.current_zoom_level/(real)(weapon_definition->weapon.zoom_level_count-1);
-						}
-
-						if (sound_index!=NONE)
-						{
-							unspatialized_impulse_sound_new(sound_index, scale);
-						}
-					}
-				}
+				unit_update_call(unit_index, _unit_update_call_zoom_changed, 0, 0.f);
 			}
 		}
 
@@ -5945,13 +5919,13 @@ boolean unit_update(
 			case _unit_grenade_throw_idle:
 				if (throw_grenade)
 				{
-					unit_throw_grenade_begin(unit_index, NULL);
+					unit_update_call(unit_index, _unit_update_call_grenade_throw_begin, 0, 0.f);
 				}
 				break;
 			case _unit_grenade_throw_wind_up:
 				if (unit->object.animation.state.frame_index>=2)
 				{
-					unit_throw_grenade_move_to_hand(unit_index);
+					unit_update_call(unit_index, _unit_update_call_grenade_move_to_hand, 0, 0.f);
 				}
 				break;
 			case _unit_grenade_throw_ending:
@@ -5964,7 +5938,7 @@ boolean unit_update(
 				++unit->unit.grenade_throw_ticks;
 				if (unit->unit.animation.state!=_unit_state_throw_grenade)
 				{
-					unit_throw_grenade_release(unit_index, TRUE);
+					unit_update_call(unit_index, _unit_update_call_grenade_release, 0, 0.f);
 				}
 				break;
 			default:
@@ -5999,7 +5973,7 @@ boolean unit_update(
 
 				if (TEST_FLAG(unit_definition_get(unit->definition_index)->unit.flags, _unit_integrated_light_controls_weapon_directly_bit))
 				{
-					weapon_set_integrated_light_power(unit_get_current_weapon_index(unit_index), unit->unit.integrated_light_power);
+					unit_update_call(unit_index, _unit_update_call_weapon_light_power, 0, unit->unit.integrated_light_power);
 				}
 
 				if (TEST_FLAG(unit->unit.control_flags, _unit_control_weapon_reload_bit))
@@ -6024,7 +5998,7 @@ boolean unit_update(
 				SET_FLAG(flags, _weapon_control_user_switching_weapons_bit, TRUE);
 			}
 
-			weapon_owner_update(unit_get_current_weapon_index(unit_index), flags, primary_trigger);
+			unit_update_call(unit_index, _unit_update_call_weapon_owner_update, flags, primary_trigger);
 		}
 	}
 
@@ -6049,7 +6023,7 @@ boolean unit_update(
 
 		if (TEST_FLAG(unit->unit.animation.flags, _unit_animation_showing_acceleration_bit))
 		{
-			unit_seat_update(unit_index);
+			unit_update_call(unit_index, _unit_update_call_seat_update, 0, 0.f);
 			unit->unit.seat_acceleration.i = unit->unit.seat_desired_acceleration.i*0.3f + unit->unit.seat_acceleration.i*0.7f;
 			unit->unit.seat_acceleration.j = unit->unit.seat_desired_acceleration.j*0.3f + unit->unit.seat_acceleration.j*0.7f;
 			unit->unit.seat_acceleration.k = unit->unit.seat_desired_acceleration.k*0.3f + unit->unit.seat_acceleration.k*0.7f;
@@ -6108,13 +6082,7 @@ boolean unit_update(
 
 		if (unit->unit.delayed_damage_timer==0)
 		{
-			ai_handle_damage(
-				unit_index,
-				unit->unit.delayed_damage_attacker_object_index,
-				unit->unit.last_damage_category,
-				unit->unit.delayed_damage_peak,
-				NULL,
-				TRUE);
+			unit_update_call(unit_index, _unit_update_call_delayed_damage, 0, 0.f);
 
 			unit->unit.last_damage_category = 0;
 			unit->unit.delayed_damage_attacker_object_index = NONE;
@@ -6122,12 +6090,12 @@ boolean unit_update(
 		}
 	}
 
-	unit_cause_continuous_melee_damage(unit_index);
-	unit_dialogue_update(unit_index);
+	unit_update_call(unit_index, _unit_update_call_continuous_melee_damage, 0, 0.f);
+	unit_update_call(unit_index, _unit_update_call_dialogue_update, 0, 0.f);
 
 	if (used_time || unit->unit.player_index!=NONE)
 	{
-		unit_refresh_illumination(unit_index);
+		unit_update_call(unit_index, _unit_update_call_refresh_illumination, 0, 0.f);
 
 		if (debug_unit_illumination)
 		{
@@ -6153,7 +6121,7 @@ boolean unit_update(
 	{
 		if (--unit->unit.flaming_death_delay==0)
 		{
-			unit_flame_to_death(unit_index);
+			unit_update_call(unit_index, _unit_update_call_flame_to_death, 0, 0.f);
 		}
 	}
 
@@ -6185,33 +6153,11 @@ boolean unit_update(
 		unit->unit.integrated_light_battery <= 0.f ||
 		light_change_state)
 	{
-		boolean const active = unit_integrated_night_vision_is_active(unit_index);
+		boolean const active = (boolean)unit_update_call(unit_index, _unit_update_call_night_vision_active, 0, 0.f);
 
 		if (active && TEST_FLAG(unit->unit.control_flags, _unit_control_integrated_light_bit))
 		{
-			long effect_index;
-			struct game_globals *game_globals;
-			struct game_globals_first_person_interface *game_globals_first_person_interface;
-
-			game_globals = scenario_get_game_globals();
-
-			match_assert("c:\\halo\\SOURCE\\units\\units.c", 1302, game_globals);
-			game_globals_first_person_interface = TAG_BLOCK_GET_ELEMENT(&game_globals->first_person_interface, 0, struct game_globals_first_person_interface);
-			match_assert("c:\\halo\\SOURCE\\units\\units.c", 1304, game_globals_first_person_interface);
-
-			if (TEST_FLAG(unit->unit.flags, _unit_integrated_night_vision_on_bit))
-			{
-				effect_index = game_globals_first_person_interface->night_vision_on_off_effect.index;
-			}
-			else
-			{
-				effect_index = game_globals_first_person_interface->night_vision_off_on_effect.index;
-			}
-
-			if (effect_index!=NONE)
-			{
-				effect_new_from_object(effect_index, unit_index, unit_index, NONE, 0.f, 0.f, NULL, NULL);
-			}
+			unit_update_call(unit_index, _unit_update_call_night_vision_effect, 0, 0.f);
 
 			unit->unit.flags ^= FLAG(_unit_integrated_night_vision_on_bit);
 		}
@@ -6220,7 +6166,7 @@ boolean unit_update(
 			(TEST_FLAG(unit->unit.flags, _unit_integrated_light_on_bit) || unit->unit.integrated_light_battery > 0.2f) &&
 			unit->object.parent_object_index==NONE)
 		{
-			effect_new_from_object(unit_definition->unit.integrated_light_toggle_effect.index, unit_index, unit_index, NONE, 0.f, 0.f, NULL, NULL);
+			unit_update_call(unit_index, _unit_update_call_light_effect, 0, 0.f);
 			unit->unit.flags ^= FLAG(_unit_integrated_light_on_bit);
 		}
 	}
@@ -6267,7 +6213,7 @@ boolean unit_update(
 	
 
 	
-	if (unit_integrated_night_vision_is_active(unit_index))
+	if (unit_update_call(unit_index, _unit_update_call_night_vision_active, 0, 0.f))
 	{
 		if (TEST_FLAG(unit->unit.flags, _unit_integrated_night_vision_on_bit))
 		{
@@ -6293,6 +6239,7 @@ boolean unit_update(
 	}
 
 	unit_verify_vectors(unit_index, "unit-update-end");
+	halo_sim_unit_update_check(unit_index); /* port: (halo_sim.c) */
 	
 	profile_exit(unit_update_section);
 	
@@ -12468,7 +12415,9 @@ static void unit_running_blind(
 	struct unit_datum *unit = unit_get(unit_index);
 	boolean actor_controlled = FALSE;
 	
-	if (unit->unit.actor_index==NONE || !actor_get_running_blind_vector(unit->unit.actor_index, run_vector))
+	/* port: (its actor's blind run, written to run_vector, its desired
+	facing: a call the Rust port makes too) */
+	if (!unit_update_call(unit_index, _unit_update_call_running_blind_vector, 0, 0.f))
 	{
 		*run_vector = *global_forward3d;
 	}
@@ -12666,4 +12615,182 @@ void unit_network_forget_weapon(
 		unit->unit.current_weapon_index = NONE;
 	if (unit->unit.desired_weapon_index == slot || unit->unit.desired_weapon_index == NONE)
 		unit->unit.desired_weapon_index = unit_weapon_next_index(unit_index, NONE, 0);
+}
+
+/* ---------- port: the unit update's calls of the rest of the game, the
+game's and the Rust port's (halo_sim.c; crates/halo_map's
+unit_update::call) */
+
+long unit_update_call(
+	long unit_index,
+	long kind,
+	long a,
+	real b)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+	struct unit_definition *unit_definition = unit_definition_get(unit->definition_index);
+	long result = 0;
+
+	halo_sim_unit_event_begin(unit_index, kind, a, b);
+	switch (kind)
+	{
+	case _unit_update_call_running_blind_vector:
+		result = unit->unit.actor_index!=NONE &&
+			actor_get_running_blind_vector(unit->unit.actor_index, &unit->unit.desired_facing_vector);
+		break;
+
+	case _unit_update_call_drop_current_weapon:
+		unit_drop_current_weapon(unit_index, TRUE);
+		break;
+
+	case _unit_update_call_resurrect:
+		unit_port_resurrect(unit_index);
+		break;
+
+	case _unit_update_call_died:
+		unit_died(unit_index, FALSE);
+		break;
+
+	case _unit_update_call_ready_desired_weapon:
+		{
+			long weapon_index = unit_get_desired_weapon_index(unit_index);
+
+			if (weapon_index!=NONE && unit_can_use_weapon(unit_index, weapon_index))
+			{
+				unit_ready_desired_weapon(unit_index, TRUE);
+			}
+		}
+		break;
+
+	case _unit_update_call_next_grenade:
+		result = unit_inventory_next_grenade(unit_index, (short)a, 0);
+		break;
+
+	case _unit_update_call_zoom_changed:
+		{
+			long local_player_index;
+
+			if (player_index_from_unit_index(unit_index)!=NONE)
+			{
+				local_player_index = player_get(player_index_from_unit_index(unit_index))->local_player_index;
+			}
+			else
+			{
+				local_player_index = NONE;
+			}
+
+			if (local_player_index!=NONE)
+			{
+				long weapon_index = unit_get_current_weapon_index(unit_index);
+
+				if (weapon_index!=NONE)
+				{
+					struct weapon_datum *weapon = weapon_get(weapon_index);
+					struct weapon_definition *weapon_definition = weapon_definition_get(weapon->definition_index);
+					long sound_index = unit->unit.current_zoom_level==NONE ? weapon_definition->weapon.zoom_out_sound.index : weapon_definition->weapon.zoom_in_sound.index;
+					real scale = 1.f;
+
+					if (unit->unit.current_zoom_level!=NONE && weapon_definition->weapon.zoom_level_count>1)
+					{
+						scale = (real)unit->unit.current_zoom_level/(real)(weapon_definition->weapon.zoom_level_count-1);
+					}
+
+					if (sound_index!=NONE)
+					{
+						unspatialized_impulse_sound_new(sound_index, scale);
+					}
+				}
+			}
+		}
+		break;
+
+	case _unit_update_call_grenade_throw_begin:
+		unit_throw_grenade_begin(unit_index, NULL);
+		break;
+
+	case _unit_update_call_grenade_move_to_hand:
+		unit_throw_grenade_move_to_hand(unit_index);
+		break;
+
+	case _unit_update_call_grenade_release:
+		unit_throw_grenade_release(unit_index, TRUE);
+		break;
+
+	case _unit_update_call_weapon_light_power:
+		weapon_set_integrated_light_power(unit_get_current_weapon_index(unit_index), b);
+		break;
+
+	case _unit_update_call_weapon_owner_update:
+		weapon_owner_update(unit_get_current_weapon_index(unit_index), a, b);
+		break;
+
+	case _unit_update_call_seat_update:
+		unit_seat_update(unit_index);
+		break;
+
+	case _unit_update_call_delayed_damage:
+		ai_handle_damage(
+			unit_index,
+			unit->unit.delayed_damage_attacker_object_index,
+			unit->unit.last_damage_category,
+			unit->unit.delayed_damage_peak,
+			NULL,
+			TRUE);
+		break;
+
+	case _unit_update_call_continuous_melee_damage:
+		unit_cause_continuous_melee_damage(unit_index);
+		break;
+
+	case _unit_update_call_dialogue_update:
+		unit_dialogue_update(unit_index);
+		break;
+
+	case _unit_update_call_refresh_illumination:
+		unit_refresh_illumination(unit_index);
+		break;
+
+	case _unit_update_call_flame_to_death:
+		unit_flame_to_death(unit_index);
+		break;
+
+	case _unit_update_call_night_vision_active:
+		result = unit_integrated_night_vision_is_active(unit_index);
+		break;
+
+	case _unit_update_call_night_vision_effect:
+		{
+		long effect_index;
+		struct game_globals *game_globals;
+		struct game_globals_first_person_interface *game_globals_first_person_interface;
+
+		game_globals = scenario_get_game_globals();
+
+		match_assert("c:\\halo\\SOURCE\\units\\units.c", 1302, game_globals);
+		game_globals_first_person_interface = TAG_BLOCK_GET_ELEMENT(&game_globals->first_person_interface, 0, struct game_globals_first_person_interface);
+		match_assert("c:\\halo\\SOURCE\\units\\units.c", 1304, game_globals_first_person_interface);
+
+		if (TEST_FLAG(unit->unit.flags, _unit_integrated_night_vision_on_bit))
+		{
+			effect_index = game_globals_first_person_interface->night_vision_on_off_effect.index;
+		}
+		else
+		{
+			effect_index = game_globals_first_person_interface->night_vision_off_on_effect.index;
+		}
+
+		if (effect_index!=NONE)
+		{
+			effect_new_from_object(effect_index, unit_index, unit_index, NONE, 0.f, 0.f, NULL, NULL);
+		}
+		}
+		break;
+
+	case _unit_update_call_light_effect:
+		effect_new_from_object(unit_definition->unit.integrated_light_toggle_effect.index, unit_index, unit_index, NONE, 0.f, 0.f, NULL, NULL);
+		break;
+	}
+	halo_sim_unit_event_end(unit_index, result);
+
+	return result;
 }

@@ -25,6 +25,7 @@ enum
 	_halo_sim_biped_update,
 	_halo_sim_unit_animation,
 	_halo_sim_player_melee,
+	_halo_sim_unit_update,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -51,6 +52,33 @@ enum
 	_halo_sim_projectile_event_attach,
 	_halo_sim_projectile_event_impact_noise,
 	_halo_sim_projectile_event_moved,
+};
+
+/* a unit update's calls of the rest of the game (units.c's
+unit_update_call; crates/halo_map's unit_update::call) */
+enum
+{
+	_unit_update_call_running_blind_vector = 1,
+	_unit_update_call_drop_current_weapon,
+	_unit_update_call_resurrect,
+	_unit_update_call_died,
+	_unit_update_call_ready_desired_weapon,
+	_unit_update_call_next_grenade,
+	_unit_update_call_zoom_changed,
+	_unit_update_call_grenade_throw_begin,
+	_unit_update_call_grenade_move_to_hand,
+	_unit_update_call_grenade_release,
+	_unit_update_call_weapon_light_power,
+	_unit_update_call_weapon_owner_update,
+	_unit_update_call_seat_update,
+	_unit_update_call_delayed_damage,
+	_unit_update_call_continuous_melee_damage,
+	_unit_update_call_dialogue_update,
+	_unit_update_call_refresh_illumination,
+	_unit_update_call_flame_to_death,
+	_unit_update_call_night_vision_active,
+	_unit_update_call_night_vision_effect,
+	_unit_update_call_light_effect,
 };
 
 /* ---------- prototypes/HALO_SIM.C */
@@ -218,5 +246,17 @@ halo_sim_player_melee_check compares Rust's replay of it */
 int halo_sim_player_melee(long biped_index, long weapon_index, int weapon_prevents, long unit_graph_index,
 	int enhanced_animation);
 void halo_sim_player_melee_check(long biped_index);
+
+/* units.c's unit_update, with its unit globals, whether integrated lights
+are allowed, whether the game engine runs, and the jetpack and infinite
+ammo cheats: TRUE when the Rust port ran it (its calls of the game through
+unit_update_call); in check mode it notes the state the game's update
+begins with, unit_update_call records each call (halo_sim_unit_event_begin
+and _end), and halo_sim_unit_update_check compares Rust's replay of it */
+int halo_sim_unit_update(long unit_index, void *unit_globals, int allow_integrated_lights, int game_engine_running,
+	int cheat_jetpack, int cheat_infinite_ammo);
+void halo_sim_unit_update_check(long unit_index);
+void halo_sim_unit_event_begin(long unit_index, long kind, long a, float b);
+void halo_sim_unit_event_end(long unit_index, long result);
 
 #endif // __HALO_SIM_H

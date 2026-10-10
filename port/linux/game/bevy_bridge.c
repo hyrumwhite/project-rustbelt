@@ -286,6 +286,85 @@ static unsigned long bevy_bridge_ray_tests(
 	return count;
 }
 
+static void bevy_bridge_vector(float *out, real_vector3d const *in);
+static void bevy_bridge_point(float *out, real_point3d const *in);
+
+/* game.bevy_bridge_ray_tests: the vehicles' physics placement, and rays from
+the camera at them tested with their physics shapes
+(_collision_test_use_vehicle_physics_bit, which the game itself sets only
+for debugging) */
+static void bevy_bridge_vehicle_ray_tests(
+	struct bevy_bridge_frame *frame,
+	real_point3d const *origin)
+{
+	static int enabled = -1;
+	struct object_iterator iterator;
+	struct object_datum *object;
+
+	frame->physics_vehicle_count = 0;
+	frame->vehicle_ray_test_count = 0;
+	if (enabled < 0)
+		enabled = config_boolean("game.bevy_bridge_ray_tests") != 0;
+	if (!enabled || !global_collision_bsp_get())
+		return;
+	object_iterator_new(&iterator, _object_mask_vehicle, 0);
+	while ((object = (struct object_datum *)object_iterator_next(&iterator)) != NULL &&
+		frame->physics_vehicle_count < BEVY_BRIDGE_PHYSICS_VEHICLES)
+	{
+		struct bevy_bridge_physics_vehicle *vehicle = &frame->physics_vehicles[frame->physics_vehicle_count++];
+		real_point3d position;
+		real_vector3d forward;
+		real_vector3d up;
+		short ray;
+
+		vehicle->object_index = (unsigned long)iterator.index;
+		object_get_origin(iterator.index, &position);
+		object_get_orientation(iterator.index, &forward, &up);
+		bevy_bridge_point(vehicle->origin, &position);
+		bevy_bridge_vector(vehicle->forward, &forward);
+		bevy_bridge_vector(vehicle->up, &up);
+		for (ray = 0; ray < 2 && frame->vehicle_ray_test_count < BEVY_BRIDGE_VEHICLE_RAY_TESTS; ray++)
+		{
+			struct bevy_bridge_vehicle_ray_test *test = &frame->vehicle_ray_tests[frame->vehicle_ray_test_count++];
+			struct collision_result collision;
+			real_point3d target = object->object.bounding_sphere_center;
+			real_vector3d vector;
+
+			/* (through the centre, and half the radius above it; on past
+			it as far again) */
+			if (ray == 1)
+				target.z += object->object.bounding_sphere_radius * 0.5f;
+			vector.i = (target.x - origin->x) * 2.0f;
+			vector.j = (target.y - origin->y) * 2.0f;
+			vector.k = (target.z - origin->z) * 2.0f;
+			bevy_bridge_point(test->point, origin);
+			bevy_bridge_vector(test->vector, &vector);
+			test->type = NONE;
+			test->node_index = NONE;
+			test->object_index = (unsigned long)NONE;
+			test->t = 1.0f;
+			memset(test->plane, 0, sizeof(test->plane));
+			test->surface_index = NONE;
+			if (collision_test_vector(FLAG(_collision_test_front_facing_surfaces_bit) |
+					FLAG(_collision_test_structure_bit) | FLAG(_collision_test_objects_bit) |
+					_collision_test_objects_all_types_flags | FLAG(_collision_test_use_vehicle_physics_bit),
+					origin, &vector, NONE, &collision))
+			{
+				test->type = collision.type;
+				test->node_index = collision.node_index;
+				test->object_index = collision.type == _collision_result_object ?
+					(unsigned long)collision.object_index : (unsigned long)NONE;
+				test->t = collision.t;
+				test->plane[0] = collision.plane.n.i;
+				test->plane[1] = collision.plane.n.j;
+				test->plane[2] = collision.plane.n.k;
+				test->plane[3] = collision.plane.d;
+				test->surface_index = collision.surface_index;
+			}
+		}
+	}
+}
+
 /* an object's active camouflage: its own as a unit, or that of the unit it
 is attached to (a held weapon) */
 static float bevy_bridge_camouflage(long object_index)
@@ -466,6 +545,8 @@ void bevy_bridge_export_frame(
 	/* the first player's view */
 	frame->camera_valid = FALSE;
 	frame->ray_test_count = 0;
+	frame->physics_vehicle_count = 0;
+	frame->vehicle_ray_test_count = 0;
 	frame->point_physics_definition = (unsigned long)bevy_bridge_point_physics();
 	for (window_index = 0; window_index < window_count; window_index++)
 	{
@@ -490,6 +571,7 @@ void bevy_bridge_export_frame(
 		first_person_unit = bevy_bridge_first_person_unit(window->local_player_index);
 		frame->ray_test_count = bevy_bridge_ray_tests(frame->ray_tests, &window->render_camera.position,
 			&window->render_camera.forward, &window->render_camera.up);
+		bevy_bridge_vehicle_ray_tests(frame, &window->render_camera.position);
 		break;
 	}
 

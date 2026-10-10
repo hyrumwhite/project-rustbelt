@@ -40,7 +40,9 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 25
+#define BEVY_BRIDGE_VERSION 26
+#define BEVY_BRIDGE_PHYSICS_VEHICLES 32
+#define BEVY_BRIDGE_VEHICLE_RAY_TESTS 16
 #define BEVY_BRIDGE_MELEE_RECORDS 512
 #define BEVY_BRIDGE_POSE_RECORDS 2048
 #define BEVY_BRIDGE_POSE_NODES 65536
@@ -193,6 +195,33 @@ struct bevy_bridge_ray_test
 
 #define BEVY_BRIDGE_POINT_PHYSICS_STEPS 90
 
+/* (protocol 26) a vehicle as its physics shape is placed
+(physics_instance_new: object_get_origin and object_get_orientation) */
+struct bevy_bridge_physics_vehicle
+{
+	unsigned long object_index;
+	float origin[3];
+	float forward[3];
+	float up[3];
+};
+
+/* (protocol 26) a ray from the camera at a vehicle (through its bounding
+sphere's centre, and above it), tested as collision_test_vector does with
+_collision_test_use_vehicle_physics_bit (the structure and every object
+type, front-facing surfaces; vehicles by their physics' mass points): the
+result's type (NONE for nothing), object, t, plane, node and surface */
+struct bevy_bridge_vehicle_ray_test
+{
+	float point[3];
+	float vector[3];
+	short type;
+	short node_index;
+	unsigned long object_index;
+	float t;
+	float plane[4];
+	long surface_index;
+};
+
 struct bevy_bridge_frame
 {
 	unsigned long sequence;
@@ -215,6 +244,12 @@ struct bevy_bridge_frame
 	unsigned long node_count;
 	struct bevy_bridge_object objects[BEVY_BRIDGE_MAXIMUM_OBJECTS];
 	struct bevy_bridge_node nodes[BEVY_BRIDGE_MAXIMUM_NODES];
+	/* (protocol 26; only with game.bevy_bridge_ray_tests) the vehicles'
+	physics placement, and rays at them tested with their physics shapes */
+	unsigned long physics_vehicle_count;
+	struct bevy_bridge_physics_vehicle physics_vehicles[BEVY_BRIDGE_PHYSICS_VEHICLES];
+	unsigned long vehicle_ray_test_count;
+	struct bevy_bridge_vehicle_ray_test vehicle_ray_tests[BEVY_BRIDGE_VEHICLE_RAY_TESTS];
 };
 
 /* what the renderer's window receives, for the game to read as its own */

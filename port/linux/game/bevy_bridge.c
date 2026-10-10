@@ -180,6 +180,26 @@ static unsigned long bevy_bridge_ray_tests(
 				test->pill_normal[2] = test->pill_hit ? pill.plane.n.k : 0.0f;
 				test->pill_surface_index = test->pill_hit ? pill.surface_index : NONE;
 			}
+			{
+				struct collision_result collision;
+
+				test->object_index = (unsigned long)NONE;
+				test->object_node_index = NONE;
+				test->object_bsp_index = NONE;
+				test->object_t = 1.0f;
+				test->object_surface_index = NONE;
+				if (collision_test_vector(FLAG(_collision_test_front_facing_surfaces_bit) |
+						FLAG(_collision_test_objects_bit) | _collision_test_objects_all_types_flags,
+						origin, &vector, NONE, &collision) &&
+					collision.object_index != NONE)
+				{
+					test->object_index = (unsigned long)collision.object_index;
+					test->object_node_index = collision.node_index;
+					test->object_bsp_index = collision.bsp_index;
+					test->object_t = collision.t;
+					test->object_surface_index = collision.surface_index;
+				}
+			}
 		}
 	}
 	return count;

@@ -34,6 +34,7 @@ symbols in this file:
 #include "memory/data.h"
 #include "units/bipeds.h"
 #include "units/unit_definitions.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -181,7 +182,11 @@ void machine_try_to_open_with_damage(
 	return;
 }
 
-boolean machine_update(
+long device_call(long device_index, long kind, long object_index, long a, long b, real const *f);
+short device_bipeds_in_sphere(long machine_index, struct location const *location, real_point3d const *center,
+	real radius, long *object_indices, short maximum_count);
+
+static boolean machine_update_internal(
 	long machine_index)
 {
 	boolean activate;
@@ -210,11 +215,13 @@ boolean machine_update(
 		machine->device.flags |= FLAG(_device_position_changed_bit);
 		if (machine->device.position_group_index != NONE)
 		{
-			struct device_group_datum *group = (struct device_group_datum *)datum_get(
-				device_groups_data,
-				machine->device.position_group_index);
+			real value[3];
 
-			group->actual_value = machine->device.position;
+			value[0] = machine->device.position;
+			value[1] = 0.f;
+			value[2] = 0.f;
+			device_call(machine_index, _device_call_set_group_actual, machine_index, machine->device.position_group_index, 0,
+				value);
 		}
 	}
 
@@ -228,9 +235,8 @@ boolean machine_update(
 		automatic_activation_radius = definition->device.automatic_activation_radius < _real_epsilon
 			? machine->object.bounding_sphere_radius
 			: definition->device.automatic_activation_radius;
-		object_count = objects_in_sphere(
-			_object_mask_biped,
-			_object_mask_biped,
+		object_count = device_bipeds_in_sphere(
+			machine_index,
 			&machine->object.location,
 			&machine->object.bounding_sphere_center,
 			automatic_activation_radius,
@@ -256,7 +262,8 @@ boolean machine_update(
 
 				if (!(TEST_FLAG(machine->machine.flags, _machine_one_sided_bit) &&
 					machine->device.position == 0.0f &&
-					!game_team_is_enemy(_game_team_player, unit->object.owner_team_index) &&
+					!device_call(machine_index, _device_call_team_is_enemy, NONE, _game_team_player,
+						unit->object.owner_team_index, NULL) &&
 					dot_product3d(
 						vector_from_points3d(
 							&machine->object.bounding_sphere_center,
@@ -279,7 +286,10 @@ boolean machine_update(
 		{
 			if (machine->device.position_group_index != NONE)
 			{
-				device_group_set_desired_value(machine->device.position_group_index, 1.0f);
+				real value[3] = { 1.0f, 0.f, 0.f };
+
+				device_call(machine_index, _device_call_set_group_desired, machine_index,
+					machine->device.position_group_index, 0, value);
 			}
 			machine->machine.door_open_ticks = -3;
 		}
@@ -293,7 +303,10 @@ boolean machine_update(
 			if (machine->machine.door_open_ticks > definition->machine.runtime_door_open_ticks &&
 				machine->device.position_group_index != NONE)
 			{
-				device_group_set_desired_value(machine->device.position_group_index, 0.0f);
+				real value[3] = { 0.0f, 0.f, 0.f };
+
+				device_call(machine_index, _device_call_set_group_desired, machine_index,
+					machine->device.position_group_index, 0, value);
 			}
 		}
 		else
@@ -315,9 +328,8 @@ boolean machine_update(
 		elevator_offset.k = node_position->z - machine->machine.elevator_position.z;
 		if (elevator_offset.i != 0.0f || elevator_offset.j != 0.0f || elevator_offset.k != 0.0f)
 		{
-			object_count = objects_in_sphere(
-				_object_mask_biped,
-				_object_mask_biped,
+			object_count = device_bipeds_in_sphere(
+				machine_index,
 				&machine->object.location,
 				&machine->object.bounding_sphere_center,
 				machine->object.bounding_sphere_radius,
@@ -337,7 +349,7 @@ boolean machine_update(
 					if (biped->biped.elevator_object_index == machine_index)
 					{
 						add_vectors3d(&elevator_offset, (real_vector3d const *)&biped->object.position, (real_vector3d *)&new_position);
-						object_translate(biped_index, &new_position, NULL);
+						device_call(machine_index, _device_call_translate, biped_index, 0, 0, &new_position.x);
 					}
 
 					elevator_object_index++;
@@ -350,7 +362,7 @@ boolean machine_update(
 
 	if (TEST_FLAG(machine->device.flags, _device_position_changed_bit))
 	{
-		object_translate(machine_index, &machine->object.position, NULL);
+		device_call(machine_index, _device_call_translate, machine_index, 0, 0, &machine->object.position.x);
 		machine->device.flags &= ~FLAG(_device_position_changed_bit);
 	}
 
@@ -358,3 +370,20 @@ boolean machine_update(
 }
 
 /* ---------- private code */
+
+/* ---------- port: machine updates' Rust port (halo_sim.c) */
+
+boolean machine_update(
+	long machine_index)
+{
+	boolean changed;
+
+	/* the Rust port's in place of the game's, or (in check mode) the state
+	it is checked from */
+	if (halo_sim_device_update(machine_index, 1, &changed))
+		return changed;
+	changed = machine_update_internal(machine_index);
+	halo_sim_device_update_check(machine_index, 1, changed);
+
+	return changed;
+}

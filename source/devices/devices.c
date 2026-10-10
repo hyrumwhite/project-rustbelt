@@ -99,6 +99,7 @@ symbols in this file:
 #include "sound/game_sound.h"
 #include "sound/sound_definitions.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -423,7 +424,9 @@ void device_preprocess_node_orientations(
 	return;
 }
 
-boolean device_update(
+long device_call(long device_index, long kind, long object_index, long a, long b, real const *f);
+
+static boolean device_update_internal(
 	long device_index)
 {
 	struct device_datum *device = device_get(device_index);
@@ -482,7 +485,8 @@ boolean device_update(
 			{
 				if (++device->device.delay_ticks == 1)
 				{
-					device_effect_new(device_index, definition->device.delay_effect.index);
+					device_call(device_index, _device_call_effect, device_index, definition->device.delay_effect.index, 0,
+						NULL);
 				}
 			}
 			else
@@ -510,7 +514,7 @@ boolean device_update(
 						? definition->device.positive_stop_effect.index
 						: definition->device.negative_stop_effect.index;
 
-					device_effect_new(device_index, effect_index);
+					device_call(device_index, _device_call_effect, device_index, effect_index, 0, NULL);
 				}
 				else
 				{
@@ -521,7 +525,7 @@ boolean device_update(
 							? definition->device.positive_start_effect.index
 							: definition->device.negative_start_effect.index;
 
-						device_effect_new(device_index, effect_index);
+						device_call(device_index, _device_call_effect, device_index, effect_index, 0, NULL);
 					}
 					changed = TRUE;
 				}
@@ -1162,4 +1166,97 @@ static void device_group_delete(
 	}
 
 	return;
+}
+
+/* ---------- port: device updates' Rust port (halo_sim.c) */
+
+boolean device_update(
+	long device_index)
+{
+	boolean changed;
+
+	/* the Rust port's in place of the game's, or (in check mode) the state
+	it is checked from */
+	if (halo_sim_device_update(device_index, 0, &changed))
+		return changed;
+	changed = device_update_internal(device_index);
+	halo_sim_device_update_check(device_index, 0, changed);
+
+	return changed;
+}
+
+/* a device's update's calls of the rest of the game, the game's and the
+Rust port's (crates/halo_map's devices::call); `f` three reals */
+long device_call(
+	long device_index,
+	long kind,
+	long object_index,
+	long a,
+	long b,
+	real const *f)
+{
+	static real const no_f[3] = { 0.f, 0.f, 0.f };
+	long result = 0;
+
+	if (!f)
+		f = no_f;
+	halo_sim_device_event_begin(device_index, kind, object_index, a, b, f);
+	switch (kind)
+	{
+	case _device_call_effect:
+		device_effect_new(object_index, a);
+		break;
+
+	case _device_call_set_group_actual:
+		{
+			struct device_group_datum *group = (struct device_group_datum *)datum_get(device_groups_data, a);
+
+			group->actual_value = f[0];
+		}
+		break;
+
+	case _device_call_team_is_enemy:
+		result = game_team_is_enemy((short)a, (short)b);
+		break;
+
+	case _device_call_set_group_desired:
+		result = device_group_set_desired_value((short)a, f[0]);
+		break;
+
+	case _device_call_translate:
+		{
+			real_point3d position;
+
+			set_real_point3d(&position, f[0], f[1], f[2]);
+			object_translate(object_index, &position, NULL);
+		}
+		break;
+	}
+	halo_sim_device_event_end(device_index, result);
+
+	return result;
+}
+
+/* the bipeds near a machine (objects_in_sphere's), recorded for the Rust
+port's check */
+short device_bipeds_in_sphere(
+	long machine_index,
+	struct location const *location,
+	real_point3d const *center,
+	real radius,
+	long *object_indices,
+	short maximum_count)
+{
+	short object_count = objects_in_sphere(
+		_object_mask_biped,
+		_object_mask_biped,
+		location,
+		center,
+		radius,
+		object_indices,
+		maximum_count);
+
+	halo_sim_device_bipeds_in_sphere(machine_index, location->cluster_index, center, radius, maximum_count, object_indices,
+		object_count);
+	return object_count;
 }

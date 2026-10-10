@@ -30,6 +30,7 @@ enum
 	_halo_sim_damage,
 	_halo_sim_area_damage,
 	_halo_sim_damage_update,
+	_halo_sim_devices,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -130,6 +131,17 @@ enum
 	_damage_update_call_hud_tick_shield,
 	_damage_update_call_difficulty_enemy_recharge,
 	_damage_update_call_shield_recharging,
+};
+
+/* a device update's calls of the rest of the game (devices.c's
+device_call; crates/halo_map's devices::call) */
+enum
+{
+	_device_call_effect = 1,
+	_device_call_set_group_actual,
+	_device_call_team_is_enemy,
+	_device_call_set_group_desired,
+	_device_call_translate,
 };
 
 /* the rest of a biped update's calls of the rest of the game (bipeds.c's
@@ -371,5 +383,18 @@ int halo_sim_object_damage_update(long object_index);
 void halo_sim_object_damage_update_check(long object_index);
 void halo_sim_damage_update_event_begin(long object_index, long kind, float f);
 void halo_sim_damage_update_event_end(long object_index, long result, float value);
+
+/* devices.c's device_update (part 0) and device_machines.c's
+machine_update (part 1): TRUE when the Rust port ran it (`changed` its
+result; its calls of the game through device_call); in check mode it notes
+the device the game's begins with, device_call records each call
+(halo_sim_device_event_begin and _end) and device_bipeds_in_sphere each
+sphere's bipeds, and halo_sim_device_update_check compares Rust's replay */
+int halo_sim_device_update(long device_index, int part, unsigned char *changed);
+void halo_sim_device_update_check(long device_index, int part, unsigned char changed);
+void halo_sim_device_event_begin(long device_index, long kind, long object_index, long a, long b, float const *f);
+void halo_sim_device_event_end(long device_index, long result);
+void halo_sim_device_bipeds_in_sphere(long machine_index, short cluster, void const *center, float radius,
+	short maximum_count, long const *object_indices, short object_count);
 
 #endif // __HALO_SIM_H

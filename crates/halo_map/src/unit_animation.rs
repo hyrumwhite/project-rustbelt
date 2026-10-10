@@ -15,8 +15,8 @@
 //!
 //! What that sets off elsewhere (a grenade's release, melee damage,
 //! destroying a dead unit, a limp body, seat changes, the sound an
-//! animation plays) is reported as side effects, not done; the poses the
-//! animations give the unit's nodes are not ported yet.
+//! animation plays) is reported as side effects, not done. The poses the
+//! animations give the unit's nodes are in `pose` and `unit_pose`.
 
 use crate::{CacheFile, Result, layout};
 
@@ -38,6 +38,7 @@ pub struct WeaponClass {
     /// Per `_unit_weapon_class_animation`, its animation (NONE for none).
     pub animations: Vec<i16>,
     pub weapon_type_labels: Vec<String>,
+    pub aiming_screen_bounds: crate::pose::ScreenBounds,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -46,6 +47,7 @@ pub struct UnitSeat {
     /// Per `_unit_seat_animation`, its animation (NONE for none).
     pub animations: Vec<i16>,
     pub weapon_classes: Vec<WeaponClass>,
+    pub looking_screen_bounds: crate::pose::ScreenBounds,
 }
 
 /// An animation graph (`antr` tag), what choosing and advancing a unit's
@@ -77,9 +79,15 @@ impl AnimationGraph {
                     label: label(class.add(w::LABEL))?,
                     animations: indices(class, w::ANIMATIONS)?,
                     weapon_type_labels,
+                    aiming_screen_bounds: crate::pose::ScreenBounds::read(class.add(w::AIMING_SCREEN_BOUNDS))?,
                 });
             }
-            graph.unit_seats.push(UnitSeat { label: label(seat.add(s::LABEL))?, animations: indices(seat, s::ANIMATIONS)?, weapon_classes });
+            graph.unit_seats.push(UnitSeat {
+                label: label(seat.add(s::LABEL))?,
+                animations: indices(seat, s::ANIMATIONS)?,
+                weapon_classes,
+                looking_screen_bounds: crate::pose::ScreenBounds::read(seat.add(s::LOOKING_SCREEN_BOUNDS))?,
+            });
         }
         for animation in root.block(g::ANIMATIONS, a::SIZEOF)?.iter() {
             graph.animations.push(GraphAnimation {

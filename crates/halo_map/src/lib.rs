@@ -32,6 +32,7 @@ pub mod scenario;
 pub mod shader;
 pub mod sky;
 pub mod unit_animation;
+pub mod unit_pose;
 
 pub use cache::{Block, CacheFile, Header, Ptr, Space, TagData, TagInstance, TagRef, TAG_CACHE_BASE};
 

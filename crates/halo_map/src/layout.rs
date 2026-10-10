@@ -115,6 +115,7 @@ pub mod animation_graph {
 pub mod animation_graph_unit_seat {
     pub const SIZEOF: usize = 0x64;
     pub const LABEL: usize = 0x0;
+    pub const LOOKING_SCREEN_BOUNDS: usize = 0x20;
     pub const ANIMATIONS: usize = 0x40;
     pub const WEAPON_CLASSES: usize = 0x58;
 }
@@ -122,6 +123,7 @@ pub mod animation_graph_unit_seat {
 pub mod animation_graph_weapon_class {
     pub const SIZEOF: usize = 0xbc;
     pub const LABEL: usize = 0x0;
+    pub const AIMING_SCREEN_BOUNDS: usize = 0x60;
     pub const ANIMATIONS: usize = 0x98;
     pub const WEAPON_TYPES: usize = 0xb0;
 }
@@ -279,6 +281,7 @@ pub mod model_geometry_part {
 
 pub mod model_node {
     pub const SIZEOF: usize = 0x9c;
+    pub const NAME: usize = 0x0;
     pub const NEXT_SIBLING_NODE_INDEX: usize = 0x20;
     pub const FIRST_CHILD_NODE_INDEX: usize = 0x22;
     pub const PARENT_NODE_INDEX: usize = 0x24;

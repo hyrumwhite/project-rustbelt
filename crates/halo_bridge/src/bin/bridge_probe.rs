@@ -1,7 +1,7 @@
 //! Prints what a running OpenCE shares through its Bevy bridge, once a second.
 //!
 //! ```text
-//! bridge_probe [seconds] [walk] [listen] [pad] [latency] [fire] [<map file>]
+//! bridge_probe [seconds] [walk] [listen] [pad] [latency] [fire] [grenades] [<map file>]
 //! ```
 //!
 //! `walk` also forwards input: W held (and the mouse turning slowly) for the
@@ -27,6 +27,9 @@ fn main() {
     let pad = std::env::args().any(|a| a == "pad");
     // (the left mouse button held for the second half: firing)
     let fire = std::env::args().any(|a| a == "fire");
+    // (for the second half: walking forward and strafing, throwing a
+    // grenade (G) every two seconds, jumping and crouching now and then)
+    let grenades = std::env::args().any(|a| a == "grenades");
     // (a map file: the game's ray tests checked against halo_map's
     // collision code; the game needs HALO_BEVY_BRIDGE_RAY_TESTS=1)
     let map = std::env::args().find(|a| a.to_ascii_lowercase().ends_with(".map"));
@@ -95,6 +98,23 @@ fn main() {
             let firing = start.elapsed() > Duration::from_secs(seconds / 2);
             input.active = u32::from(firing);
             input.mouse_buttons = if firing { 1 << 1 } else { 0 };
+            bridge.write_input(&input);
+        }
+        if grenades {
+            let elapsed = start.elapsed();
+            let active = elapsed > Duration::from_secs(seconds / 2);
+            let tick = elapsed.as_millis() as u64;
+            let (cycle, phase) = (tick / 2000, tick % 2000);
+            input.active = u32::from(active);
+            input.set_key(26, active); // W
+            input.set_key(4, active && cycle % 3 == 1); // A
+            input.set_key(7, active && cycle % 3 == 2); // D
+            input.set_key(10, active && phase < 150); // G
+            input.set_key(44, active && cycle % 4 == 3 && phase < 100); // Space
+            input.set_key(224, active && cycle % 5 == 4); // Left Ctrl
+            if active {
+                input.mouse_x += 1;
+            }
             bridge.write_input(&input);
         }
         let fresh = bridge.read();
@@ -306,6 +326,20 @@ struct CollisionCheck {
     pose_matrices: [u64; 4],
     pose_types: [u64; 12],
     pose_shown: u32,
+    /// Bipeds' preprocess: compared, agreed; of the agreeing, with an
+    /// action, an overlay action, a soft ping, an emotion, mouth or
+    /// acceleration overlay, aiming, looking, throwing a grenade (enhanced).
+    unit_poses: [u64; 9],
+    /// Movement and update records whose biped the game erased for falling
+    /// outside the world (not ported).
+    moving_erased: u64,
+    update_erased: u64,
+    unit_poses_shown: u32,
+    /// Of the agreeing grenade throws: moving, airborne, crouched, riding,
+    /// easing their legs' weights.
+    unit_pose_throws: [u64; 5],
+    /// The graphs whose animations are loaded for posing.
+    unit_pose_graphs: std::collections::HashSet<u32>,
     frames_shown: u32,
     hits: u64,
     largest_t_difference: f32,
@@ -393,6 +427,12 @@ impl CollisionCheck {
             pose_matrices: [0; 4],
             pose_types: [0; 12],
             pose_shown: 0,
+            unit_poses: [0; 9],
+            moving_erased: 0,
+            update_erased: 0,
+            unit_poses_shown: 0,
+            unit_pose_throws: [0; 5],
+            unit_pose_graphs: Default::default(),
             frames_shown: 0,
             sphere_features: 0,
             hits: 0,
@@ -1069,6 +1109,12 @@ impl CollisionCheck {
                 // SAFETY: MovingState is repr(C) plain old data of 136 bytes
                 unsafe { std::mem::transmute::<halo_map::biped_moving::MovingState, [u8; 136]>(*s) }
             };
+            // (a biped that fell outside the world, erased by the game's
+            // falling damage, which isn't ported: its object made invisible)
+            if record.after.object_flags & 1 != 0 && record.before.object_flags & 1 == 0 {
+                state.object_flags |= 1;
+                self.moving_erased += 1;
+            }
             if physics_agrees && bytes(&state) == bytes(&record.after) && outcome.aborted_animation == (record.aborted_animation != 0) {
                 self.moving_agreed += 1;
                 let b = &record.before;
@@ -1176,6 +1222,11 @@ impl CollisionCheck {
                 // SAFETY: UpdateState is repr(C) plain old data of 164 bytes
                 unsafe { std::mem::transmute::<halo_map::biped_update::UpdateState, [u8; 164]>(*s) }
             };
+            // (erased by the game for falling outside the world, as above)
+            if record.after.moving.object_flags & 1 != 0 && record.before.moving.object_flags & 1 == 0 {
+                state.moving.object_flags |= 1;
+                self.update_erased += 1;
+            }
             if bytes(&state) == bytes(&record.after) {
                 self.update_agreed += 1;
                 let (b, a) = (&record.before.moving, &record.after.moving);
@@ -1424,10 +1475,142 @@ impl CollisionCheck {
                     first.map(|i| matrices[i])
                 );
             }
+
+            // a biped's preprocess, from the game's animated orientations
+            if record.unit_recorded != 0 {
+                self.check_unit_pose(record, nodes, model_index);
+            }
+        }
+    }
+
+    /// Replays a biped's preprocess (`unit_preprocess_node_orientations`)
+    /// over the orientations the game's animation gave it.
+    fn check_unit_pose(&mut self, record: &halo_bridge::PoseRecord, nodes: &[halo_bridge::PoseNodeRecord], model_index: u32) {
+        use halo_map::biped_moving::BipedDefinition;
+        use halo_map::pose::Orientation;
+        use halo_map::unit_pose::{GrenadeThrowLegs, UnitPoseInputs, unit_preprocess_node_orientations};
+        let cache = &self.cache;
+        let definition = self
+            .biped_definitions
+            .entry(record.definition_index)
+            .or_insert_with(|| BipedDefinition::load(cache, record.definition_index).ok())
+            .clone();
+        let Some(definition) = definition else { return };
+        let Some(graph_index) = definition.animation_graph else { return };
+        if !self.animation_graphs.contains_key(&graph_index) {
+            self.animation_graphs.insert(graph_index, halo_map::unit_animation::AnimationGraph::load(cache, graph_index).ok());
+        }
+        if self.unit_pose_graphs.insert(graph_index) {
+            if let Some(Some(graph)) = self.animation_graphs.get(&graph_index) {
+                for index in 0..graph.animations.len() as i16 {
+                    self.pose_animations
+                        .entry((graph_index, index))
+                        .or_insert_with(|| halo_map::pose::PoseAnimation::load(cache, graph_index, index).ok().flatten());
+                }
+            }
+        }
+        let Some(Some(graph)) = self.animation_graphs.get(&graph_index) else { return };
+        let Some(Some(model)) = self.pose_models.get(&model_index) else { return };
+        let animations = &self.pose_animations;
+        let animation = |index: i16| animations.get(&(graph_index, index)).and_then(|a| a.as_ref());
+        let inputs = UnitPoseInputs {
+            has_no_aiming: definition.unit_flags & (1 << 10) != 0,
+            simple_creature: definition.unit_flags & (1 << 11) != 0,
+            enhanced: record.unit_enhanced != 0,
+            airborne: record.unit_airborne != 0,
+            parented: record.unit_parented != 0,
+            has_weapon: record.unit_has_weapon != 0,
+            player: record.unit_player != 0,
+            game_time: record.game_time,
+            animation_flags: record.unit_animation_flags,
+            aiming_screen_index: record.aiming_screen_index,
+            looking_screen_index: record.looking_screen_index,
+            override_emotion_animation_index: record.override_emotion_animation_index,
+            seat_index: record.seat_index,
+            weapon_index: record.weapon_index,
+            state: record.state,
+            action: record.action,
+            base_seat_index: record.base_seat_index,
+            emotion_index: record.emotion_index,
+            action_animation: (record.action_animation[0], record.action_animation[1]),
+            overlay_action_animation: (record.overlay_action_animation[0], record.overlay_action_animation[1]),
+            soft_ping_animation: (record.soft_ping_animation[0], record.soft_ping_animation[1]),
+            mouth_aperture: record.mouth_aperture,
+            seat_acceleration: record.seat_acceleration,
+            aiming_vector: record.aiming_vector,
+            looking_vector: record.looking_vector,
+            orientation_forward: record.orientation_forward,
+            orientation_up: record.orientation_up,
+            forward: record.forward,
+            up: record.up,
+            translational_velocity: record.translational_velocity,
+        };
+        let mut legs = GrenadeThrowLegs {
+            leg_weight: record.grenade_leg_weight,
+            leg_time: record.grenade_leg_time,
+            air_weight: record.grenade_air_weight,
+            air_time: record.grenade_air_time,
+        };
+        let mut orientations: Vec<Orientation> = nodes.iter().map(|n| Orientation::from_floats(n.animated)).collect();
+        let outputs = unit_preprocess_node_orientations(model, graph, &animation, &inputs, &mut legs, &mut orientations);
+
+        let bits = |f: [f32; 4]| f.map(f32::to_bits);
+        let same_orientations = orientations.iter().zip(nodes).all(|(o, n)| o.to_floats().map(f32::to_bits) == n.preprocessed.map(f32::to_bits));
+        let same_outputs = outputs.aiming_with_euler_screen == (record.aiming_with_euler_screen != 0)
+            && outputs.looking_with_euler_screen == (record.looking_with_euler_screen != 0)
+            && outputs.aiming_screen_bounds.is_none_or(|b| bits(b) == bits(record.aiming_screen_bounds))
+            && outputs.looking_screen_bounds.is_none_or(|b| bits(b) == bits(record.looking_screen_bounds));
+        self.unit_poses[0] += 1;
+        if same_orientations && same_outputs {
+            let k = &mut self.unit_poses;
+            k[1] += 1;
+            k[2] += (inputs.action_animation.0 != -1) as u64;
+            k[3] += (inputs.overlay_action_animation.0 != -1) as u64;
+            k[4] += (inputs.soft_ping_animation.0 != -1) as u64;
+            k[5] += (inputs.emotion_index != -1 || inputs.mouth_aperture > 0.0 || inputs.animation_flags & 2 != 0) as u64;
+            k[6] += outputs.aiming_with_euler_screen as u64;
+            k[7] += outputs.looking_with_euler_screen as u64;
+            if inputs.state == 33 && inputs.enhanced {
+                k[8] += 1;
+                let v = inputs.translational_velocity;
+                let t = &mut self.unit_pose_throws;
+                t[0] += (v[0] != 0.0 || v[1] != 0.0) as u64;
+                t[1] += inputs.airborne as u64;
+                t[2] += (inputs.base_seat_index == 3) as u64;
+                t[3] += inputs.parented as u64;
+                t[4] += (legs != GrenadeThrowLegs {
+                    leg_weight: record.grenade_leg_weight,
+                    leg_time: record.grenade_leg_time,
+                    air_weight: record.grenade_air_weight,
+                    air_time: record.grenade_air_time,
+                }) as u64;
+            }
+        } else if self.unit_poses_shown < 8 {
+            self.unit_poses_shown += 1;
+            let first = orientations.iter().zip(nodes).position(|(o, n)| o.to_floats().map(f32::to_bits) != n.preprocessed.map(f32::to_bits));
+            println!(
+                "  unit pose {:#x} differs at node {first:?} of {} (outputs agree {same_outputs}: halo_map {:?}, game aiming {} {:?} looking {} {:?}):\n    inputs   {:?}\n    animated {:?}\n    game     {:?}\n    halo_map {:?}",
+                record.object_index,
+                nodes.len(),
+                outputs,
+                record.aiming_with_euler_screen,
+                record.aiming_screen_bounds,
+                record.looking_with_euler_screen,
+                record.looking_screen_bounds,
+                inputs,
+                first.map(|i| nodes[i].animated),
+                first.map(|i| nodes[i].preprocessed),
+                first.map(|i| orientations[i].to_floats())
+            );
         }
     }
 
     fn report(&self) {
+        let [compared, agreed, actions, overlay_actions, soft_pings, seat_overlays, aiming, looking, throws] = self.unit_poses;
+        println!(
+            "poses: {} of {} bipeds' preprocessed poses agree with the game bit for bit ({} with an action, {} an overlay action, {} a soft ping, {} an emotion, mouth or acceleration overlay; {} aiming, {} looking; {} throwing a grenade: {:?} moving, airborne, crouched, riding, easing)",
+            agreed, compared, actions, overlay_actions, soft_pings, seat_overlays, aiming, looking, throws, self.unit_pose_throws
+        );
         let [compared, agreed, overlays, compressed, model_pose] = self.pose_animated;
         let [m_compared, m_agreed, interpolating, parented] = self.pose_matrices;
         println!(
@@ -1441,7 +1624,7 @@ impl CollisionCheck {
         );
         let [dead, airborne, landing, flying_turns, moving_turns, standing_turns, tumbling] = self.update_kinds;
         println!(
-            "bipeds: {} of {} biped updates (to the animation) replayed agree with the game byte for byte ({} dead, {} airborne, {} landing; {} flying turns, {} moving turns, {} standing turns asked for, {} tumbling); left out: {} whose movement record was lost, {} elsewhere, of {}",
+            "bipeds: {} of {} biped updates (to the animation) replayed agree with the game byte for byte ({} dead, {} airborne, {} landing; {} flying turns, {} moving turns, {} standing turns asked for, {} tumbling; {} erased by the game for falling outside the world); left out: {} whose movement record was lost, {} elsewhere, of {}",
             self.update_agreed,
             self.update_replayed,
             dead,
@@ -1451,13 +1634,14 @@ impl CollisionCheck {
             moving_turns,
             standing_turns,
             tumbling,
+            self.update_erased,
             self.update_missing,
             self.update_elsewhere,
             self.update_updates
         );
         let [player, animated, flying, turned, jumps, landings, aborted, crouching] = self.moving_kinds;
         println!(
-            "bipeds: {} of {} movement updates replayed agree with the game byte for byte ({} of {} physics inputs agree; {} player physics, {} driven by animation, {} flying; {} turned by the animation, {} jumps, {} landings, {} aborted animations, {} crouching or standing); left out: {} whose physics record was lost, {} elsewhere, of {}",
+            "bipeds: {} of {} movement updates replayed agree with the game byte for byte ({} of {} physics inputs agree; {} player physics, {} driven by animation, {} flying; {} turned by the animation, {} jumps, {} landings, {} aborted animations, {} crouching or standing; {} erased by the game for falling outside the world); left out: {} whose physics record was lost, {} elsewhere, of {}",
             self.moving_agreed,
             self.moving_replayed,
             self.moving_physics_agreed,
@@ -1470,6 +1654,7 @@ impl CollisionCheck {
             landings,
             aborted,
             crouching,
+            self.moving_erased,
             self.moving_missing_physics,
             self.moving_elsewhere,
             self.moving_updates

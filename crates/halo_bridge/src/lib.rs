@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 22;
+pub const VERSION: u32 = 23;
 pub const POSE_RECORDS: usize = 2048;
 pub const POSE_NODES: usize = 65536;
 pub const UNIT_ANIMATION_RECORDS: usize = 1024;
@@ -524,10 +524,54 @@ pub struct PoseRecord {
     pub has_parent: u32,
     pub parent_mirrored: u32,
     pub parent_node_matrix: [f32; 13],
+    /// (Protocol 23) a biped's (`unit_recorded`): what its type's
+    /// preprocess reads (its animation state, emotion, mouth, seat
+    /// acceleration, aiming and looking, its orientation as
+    /// `object_get_orientation` gives it, and for a grenade throw on the
+    /// move whether its animations are enhanced, whether it flies through
+    /// the air, its velocity, the game time and the legs' eased weights
+    /// before) and what it sets (whether it aims and looks with euler
+    /// screens, and their bounds).
+    pub unit_recorded: u32,
+    pub unit_enhanced: u32,
+    pub unit_airborne: u32,
+    pub unit_parented: u32,
+    pub unit_has_weapon: u32,
+    pub unit_player: u32,
+    pub game_time: i32,
+    pub unit_animation_flags: u16,
+    pub aiming_screen_index: i16,
+    pub looking_screen_index: i16,
+    pub override_emotion_animation_index: i16,
+    pub seat_index: i8,
+    pub weapon_index: i8,
+    pub state: i8,
+    pub action: i8,
+    pub base_seat_index: i8,
+    pub emotion_index: i8,
+    pub pad: i16,
+    pub action_animation: [i16; 2],
+    pub overlay_action_animation: [i16; 2],
+    pub soft_ping_animation: [i16; 2],
+    pub mouth_aperture: f32,
+    pub seat_acceleration: [f32; 3],
+    pub aiming_vector: [f32; 3],
+    pub looking_vector: [f32; 3],
+    pub orientation_forward: [f32; 3],
+    pub orientation_up: [f32; 3],
+    pub translational_velocity: [f32; 3],
+    pub grenade_leg_weight: f32,
+    pub grenade_leg_time: i32,
+    pub grenade_air_weight: f32,
+    pub grenade_air_time: i32,
+    pub aiming_with_euler_screen: u32,
+    pub looking_with_euler_screen: u32,
+    pub aiming_screen_bounds: [f32; 4],
+    pub looking_screen_bounds: [f32; 4],
 }
 
 const _: () = assert!(std::mem::size_of::<PoseNodeRecord>() == 148);
-const _: () = assert!(std::mem::size_of::<PoseRecord>() == 156);
+const _: () = assert!(std::mem::size_of::<PoseRecord>() == 344);
 
 /// A recorded biped update with the objects its features came from (each
 /// with its node matrices: scale, forward, left, up, position).

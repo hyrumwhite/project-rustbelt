@@ -8,9 +8,12 @@
 //! mass, origin offset and parent node), ported as they are, in the same
 //! single-precision arithmetic.
 //!
-//! Objects' overlay animations (driven by their function values) and each
-//! type's preprocess (a unit's aiming and looking, its overlays) are not
-//! ported yet.
+//! It also applies animations over a pose, as the types' preprocesses do
+//! (`replacement_animation_apply`, `overlay_animation_apply` and its
+//! scaled and continuous forms, `aiming_screen_apply`); a unit's is in
+//! `unit_pose`. Objects' overlay animations (driven by their function
+//! values) and the other types' preprocesses (vehicles', weapons',
+//! devices') are not ported yet.
 
 use crate::model::Matrix4x3;
 use crate::{CacheFile, Result, layout};
@@ -55,6 +58,7 @@ pub struct PoseNode {
 pub struct PoseModel {
     pub node_list_checksum: i32,
     pub nodes: Vec<PoseNode>,
+    pub node_names: Vec<String>,
 }
 
 impl PoseModel {
@@ -62,7 +66,9 @@ impl PoseModel {
         use layout::{model as m, model_node as n};
         let root = cache.tag_root(datum, crate::groups::MODEL)?;
         let mut nodes = Vec::new();
+        let mut node_names = Vec::new();
         for node in root.block(m::NODES, n::SIZEOF)?.iter() {
+            node_names.push(node.add(n::NAME).c_string(32)?);
             let r = n::DEFAULT_ROTATION;
             nodes.push(PoseNode {
                 next_sibling: node.i16(n::NEXT_SIBLING_NODE_INDEX)?,
@@ -72,7 +78,12 @@ impl PoseModel {
                 default_rotation: [node.f32(r)?, node.f32(r + 4)?, node.f32(r + 8)?, node.f32(r + 12)?],
             });
         }
-        Ok(PoseModel { node_list_checksum: root.i32(m::NODE_LIST_CHECKSUM)?, nodes })
+        Ok(PoseModel { node_list_checksum: root.i32(m::NODE_LIST_CHECKSUM)?, nodes, node_names })
+    }
+
+    /// `model_find_node`: the node with this name.
+    pub fn find_node(&self, name: &str) -> Option<usize> {
+        self.node_names.iter().position(|n| n == name)
     }
 }
 
@@ -121,6 +132,11 @@ impl PoseAnimation {
         self.flags & ANIMATION_COMPRESSED != 0
     }
 
+    /// A base animation (`_animation_base`), which sets every node.
+    pub fn is_base(&self) -> bool {
+        self.kind == ANIMATION_BASE
+    }
+
     pub fn world_relative(&self) -> bool {
         self.flags & ANIMATION_WORLD_RELATIVE != 0
     }
@@ -129,6 +145,8 @@ impl PoseAnimation {
 const ANIMATION_COMPRESSED: u16 = 1 << 0;
 const ANIMATION_WORLD_RELATIVE: u16 = 1 << 1;
 const ANIMATION_BASE: i16 = 0;
+const ANIMATION_OVERLAY: i16 = 1;
+const ANIMATION_REPLACEMENT: i16 = 2;
 const COMPRESSED_QUATERNION_SCALE: f32 = 1.0 / 32767.0;
 const KEYFRAME_COUNT_BITS: u32 = 12;
 /// `offsetof(struct compressed_animation_header, rotation_node_headers)`.
@@ -248,8 +266,9 @@ impl PoseAnimation {
         if self.compressed() { self.compressed_data_offset as i64 } else { frame_index as i64 * self.frame_size as i64 }
     }
 
-    /// `animation_frame_valid`.
-    fn frame_valid(&self, frame_index: i16) -> bool {
+    /// `animation_frame_valid` (whether the frame reads the default data
+    /// too: a base animation's does, the overlays' don't).
+    fn frame_valid(&self, frame_index: i16, reads_default_data: bool) -> bool {
         let frame_offset = self.frame_data_offset(frame_index);
         let node_count = self.node_count;
         if node_count < 0 || node_count as usize > MAXIMUM_NODES {
@@ -274,7 +293,7 @@ impl PoseAnimation {
             let frame_bytes = rotations * 8 + translations * 12 + scales * 4;
             let n = node_count as i64;
             let default_bytes = (n - rotations) * 8 + (n - translations) * 12 + (n - scales) * 4;
-            self.contains(frame_offset, 0, 0, 1, frame_bytes) && default_bytes <= self.default_data.len() as i64
+            self.contains(frame_offset, 0, 0, 1, frame_bytes) && (!reads_default_data || default_bytes <= self.default_data.len() as i64)
         }
     }
 
@@ -461,7 +480,7 @@ pub fn animation_node_orientations(model: &PoseModel, animation: &PoseAnimation,
     let fits = animation.kind == ANIMATION_BASE
         && (animation.node_list_checksum == 0 || animation.node_list_checksum == model.node_list_checksum || model.node_list_checksum == 0)
         && model.nodes.len() == animation.node_count as usize
-        && animation.frame_valid(frame_index);
+        && animation.frame_valid(frame_index, true);
     if !fits {
         return model_node_orientations(model);
     }
@@ -551,6 +570,405 @@ pub fn animation_node_orientations(model: &PoseModel, animation: &PoseAnimation,
         out.push(orientation);
     }
     out
+}
+
+// ---------- applying animations over a pose
+
+/// `quaternions_multiply`: `q0 * q1`, summed in the game's order.
+pub fn quaternions_multiply(q0: [f32; 4], q1: [f32; 4]) -> [f32; 4] {
+    let [i0, j0, k0, w0] = q0;
+    let [i1, j1, k1, w1] = q1;
+    [
+        j0 * k1 + i0 * w1 + w0 * i1 - k0 * j1,
+        w0 * j1 + j0 * w1 + k0 * i1 - i0 * k1,
+        k0 * w1 + i0 * j1 + w0 * k1 - j0 * i1,
+        w0 * w1 - i0 * i1 - j0 * j1 - k0 * k1,
+    ]
+}
+
+/// `quaternions_interpolate` (not normalized).
+pub fn quaternions_interpolate(q0: [f32; 4], q1: [f32; 4], t: f32) -> [f32; 4] {
+    let v = 1.0 - t;
+    let t = if q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3] < 0.0 { -t } else { t };
+    [q0[0] * v + q1[0] * t, q0[1] * v + q1[1] * t, q0[2] * v + q1[2] * t, q0[3] * v + q1[3] * t]
+}
+
+/// `points_interpolate`.
+fn points_interpolate(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    let one_minus_t = 1.0 - t;
+    [one_minus_t * a[0] + t * b[0], one_minus_t * a[1] + t * b[1], one_minus_t * a[2] + t * b[2]]
+}
+
+/// `scalars_interpolate`.
+fn scalars_interpolate(a: f32, b: f32, t: f32) -> f32 {
+    (1.0 - t) * a + b * t
+}
+
+/// Poses blended node by node (the port's `unit_node_orientations_blend`:
+/// rotations interpolated and normalized, translations and scales
+/// interpolated).
+pub fn orientations_blend(from: &[Orientation], to: &[Orientation], fraction: f32, node_count: usize) -> Vec<Orientation> {
+    (0..node_count)
+        .map(|n| Orientation {
+            rotation: quaternions_interpolate_and_normalize(from[n].rotation, to[n].rotation, fraction),
+            translation: points_interpolate(from[n].translation, to[n].translation, fraction),
+            scale: scalars_interpolate(from[n].scale, to[n].scale, fraction),
+        })
+        .collect()
+}
+
+/// An aiming (or looking, or steering) screen's grid: how many frames to
+/// either side in yaw and pitch, and the angle a frame turns
+/// (`animation_aiming_screen_bounds`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ScreenBounds {
+    pub negative_yaw_delta: f32,
+    pub positive_yaw_delta: f32,
+    pub negative_yaw_frame_count: i16,
+    pub positive_yaw_frame_count: i16,
+    pub negative_pitch_delta: f32,
+    pub positive_pitch_delta: f32,
+    pub negative_pitch_frame_count: i16,
+    pub positive_pitch_frame_count: i16,
+}
+
+impl ScreenBounds {
+    pub fn read(ptr: crate::Ptr<'_>) -> Result<Self> {
+        Ok(ScreenBounds {
+            negative_yaw_delta: ptr.f32(0)?,
+            positive_yaw_delta: ptr.f32(4)?,
+            negative_yaw_frame_count: ptr.i16(8)?,
+            positive_yaw_frame_count: ptr.i16(10)?,
+            negative_pitch_delta: ptr.f32(12)?,
+            positive_pitch_delta: ptr.f32(16)?,
+            negative_pitch_frame_count: ptr.i16(20)?,
+            positive_pitch_frame_count: ptr.i16(22)?,
+        })
+    }
+
+    /// The rectangle of angles the screen covers (x0, x1, y0, y1), as a
+    /// unit keeps it.
+    pub fn rectangle(&self) -> [f32; 4] {
+        [
+            -(self.negative_yaw_frame_count as f32 * self.negative_yaw_delta),
+            self.positive_yaw_frame_count as f32 * self.positive_yaw_delta,
+            -(self.negative_pitch_frame_count as f32 * self.negative_pitch_delta),
+            self.positive_pitch_frame_count as f32 * self.positive_pitch_delta,
+        ]
+    }
+}
+
+/// The nodes an animation's frame has data for, in order, each with
+/// whether it has a rotation, a translation and a scale.
+fn animated_nodes(animation: &PoseAnimation) -> impl Iterator<Item = (usize, bool, bool, bool)> + '_ {
+    (0..animation.node_count.max(0) as usize).map(move |node_index| {
+        let (long_index, bit) = (node_index >> 5, node_index & 31);
+        (
+            node_index,
+            animation.rotation_flags[long_index] >> bit & 1 != 0,
+            animation.translation_flags[long_index] >> bit & 1 != 0,
+            animation.scale_flags[long_index] >> bit & 1 != 0,
+        )
+    })
+}
+
+/// `replacement_animation_apply`: the frame's nodes replace the pose's.
+pub fn replacement_animation_apply(animation: &PoseAnimation, frame_index: i16, orientations: &mut [Orientation]) {
+    if animation.kind != ANIMATION_REPLACEMENT || frame_index < 0 || frame_index >= animation.frame_count || !animation.frame_valid(frame_index, false) {
+        return;
+    }
+    let compressed = animation.compressed();
+    let mut data = animation.frame_data_offset(frame_index) as usize;
+    let (mut rotation_index, mut translation_index, mut scale_index) = (0i64, 0i64, 0i64);
+    let real_frame = frame_index as f32;
+    for (node_index, rotates, translates, scales) in animated_nodes(animation) {
+        let orientation = &mut orientations[node_index];
+        if rotates {
+            if compressed {
+                orientation.rotation = keyframe_rotation(animation, real_frame, rotation_index, node_index as i64);
+                rotation_index += 1;
+            } else {
+                orientation.rotation = decompress_8byte(&animation.data, data);
+                data += 8;
+            }
+        }
+        if translates {
+            if compressed {
+                orientation.translation = keyframe_translation(animation, real_frame, translation_index, node_index as i64);
+                translation_index += 1;
+            } else {
+                orientation.translation = vec3_at(&animation.data, data);
+                data += 12;
+            }
+        }
+        if scales {
+            if compressed {
+                orientation.scale = keyframe_scale(animation, real_frame, scale_index);
+                scale_index += 1;
+            } else {
+                orientation.scale = f32_at(&animation.data, data);
+                data += 4;
+            }
+        }
+    }
+}
+
+/// An overlay's frame read node by node: each node's rotation, translation
+/// and scale, those it has.
+fn overlay_frame(animation: &PoseAnimation, frame_index: i16) -> Vec<(usize, Option<[f32; 4]>, Option<[f32; 3]>, Option<f32>)> {
+    let compressed = animation.compressed();
+    let mut data = animation.frame_data_offset(frame_index) as usize;
+    let (mut rotation_index, mut translation_index, mut scale_index) = (0i64, 0i64, 0i64);
+    let real_frame = frame_index as f32;
+    let mut out = Vec::new();
+    for (node_index, rotates, translates, scales) in animated_nodes(animation) {
+        let rotation = rotates.then(|| {
+            if compressed {
+                rotation_index += 1;
+                keyframe_rotation(animation, real_frame, rotation_index - 1, node_index as i64)
+            } else {
+                data += 8;
+                decompress_8byte(&animation.data, data - 8)
+            }
+        });
+        let translation = translates.then(|| {
+            if compressed {
+                translation_index += 1;
+                keyframe_translation(animation, real_frame, translation_index - 1, node_index as i64)
+            } else {
+                data += 12;
+                vec3_at(&animation.data, data - 12)
+            }
+        });
+        let scale = scales.then(|| {
+            if compressed {
+                scale_index += 1;
+                keyframe_scale(animation, real_frame, scale_index - 1)
+            } else {
+                data += 4;
+                f32_at(&animation.data, data - 4)
+            }
+        });
+        out.push((node_index, rotation, translation, scale));
+    }
+    out
+}
+
+/// `overlay_animation_apply`: the frame's rotations turn the pose's, its
+/// translations add to them and its scales multiply them.
+pub fn overlay_animation_apply(animation: &PoseAnimation, frame_index: i16, orientations: &mut [Orientation]) {
+    if animation.kind != ANIMATION_OVERLAY || frame_index < 0 || frame_index >= animation.frame_count || !animation.frame_valid(frame_index, false) {
+        return;
+    }
+    for (node_index, rotation, translation, scale) in overlay_frame(animation, frame_index) {
+        let orientation = &mut orientations[node_index];
+        if let Some(rotation) = rotation {
+            orientation.rotation = quaternions_multiply(rotation, orientation.rotation);
+        }
+        if let Some(t) = translation {
+            orientation.translation[0] += t[0];
+            orientation.translation[1] += t[1];
+            orientation.translation[2] += t[2];
+        }
+        if let Some(scale) = scale {
+            orientation.scale *= scale;
+        }
+    }
+}
+
+/// `overlay_animation_apply_scaled`: an overlay applied `animation_scale`
+/// of the way.
+pub fn overlay_animation_apply_scaled(animation: &PoseAnimation, frame_index: i16, animation_scale: f32, orientations: &mut [Orientation]) {
+    let inverse_animation_scale = 1.0 - animation_scale;
+    if animation.kind != ANIMATION_OVERLAY || frame_index < 0 || frame_index >= animation.frame_count || !animation.frame_valid(frame_index, false) {
+        return;
+    }
+    for (node_index, rotation, translation, scale) in overlay_frame(animation, frame_index) {
+        let orientation = &mut orientations[node_index];
+        if let Some(rotation) = rotation {
+            let rotation = quaternions_interpolate([0.0, 0.0, 0.0, 1.0], rotation, animation_scale);
+            orientation.rotation = quaternions_multiply(rotation, orientation.rotation);
+        }
+        if let Some(t) = translation {
+            orientation.translation[0] += t[0] * animation_scale;
+            orientation.translation[1] += t[1] * animation_scale;
+            orientation.translation[2] += t[2] * animation_scale;
+        }
+        if let Some(scale) = scale {
+            orientation.scale *= scale * animation_scale + inverse_animation_scale;
+        }
+    }
+}
+
+/// `overlay_animation_apply_continuous`: an overlay at a point between two
+/// frames (the last blending into the first). A compressed animation's
+/// rotations are read at the whole frame, as the game's are.
+pub fn overlay_animation_apply_continuous(animation: &PoseAnimation, real_frame_index: f32, orientations: &mut [Orientation]) {
+    if animation.frame_count <= 0 {
+        return;
+    }
+    let mut real_frame_index = real_frame_index;
+    let mut fraction = (real_frame_index as f64 % 1.0) as f32;
+    // (fabs and floor in double, then fast_ftol: rounded to nearest)
+    let whole = (real_frame_index as f64).abs().floor() as f32;
+    let mut frame_index = (whole as f64).round_ties_even() as i32 as i16;
+    if frame_index >= animation.frame_count {
+        frame_index = animation.frame_count - 1;
+        fraction = 1.0;
+        real_frame_index = frame_index as f32;
+    }
+    let next_frame_index = if frame_index == animation.frame_count - 1 { 0 } else { frame_index + 1 };
+    if animation.kind != ANIMATION_OVERLAY || !animation.frame_valid(frame_index, false) || !animation.frame_valid(next_frame_index, false) {
+        return;
+    }
+    let compressed = animation.compressed();
+    let mut data = animation.frame_data_offset(frame_index) as usize;
+    let mut next_data = animation.frame_data_offset(next_frame_index) as usize;
+    let (mut rotation_index, mut translation_index, mut scale_index) = (0i64, 0i64, 0i64);
+    for (node_index, rotates, translates, scales) in animated_nodes(animation) {
+        let orientation = &mut orientations[node_index];
+        if rotates {
+            let rotation = if compressed {
+                rotation_index += 1;
+                keyframe_rotation(animation, frame_index as f32, rotation_index - 1, node_index as i64)
+            } else {
+                let this_rotation = decompress_8byte(&animation.data, data);
+                data += 8;
+                let next_rotation = decompress_8byte(&animation.data, next_data);
+                next_data += 8;
+                quaternions_interpolate_and_normalize(this_rotation, next_rotation, fraction)
+            };
+            orientation.rotation = quaternions_multiply(rotation, orientation.rotation);
+        }
+        if translates {
+            let t = if compressed {
+                translation_index += 1;
+                keyframe_translation(animation, real_frame_index, translation_index - 1, node_index as i64)
+            } else {
+                let this_translation = vec3_at(&animation.data, data);
+                data += 12;
+                let next_translation = vec3_at(&animation.data, next_data);
+                next_data += 12;
+                points_interpolate(this_translation, next_translation, fraction)
+            };
+            orientation.translation[0] += t[0];
+            orientation.translation[1] += t[1];
+            orientation.translation[2] += t[2];
+        }
+        if scales {
+            let scale = if compressed {
+                scale_index += 1;
+                keyframe_scale(animation, real_frame_index, scale_index - 1)
+            } else {
+                let this_scale = f32_at(&animation.data, data);
+                data += 4;
+                let next_scale = f32_at(&animation.data, next_data);
+                next_data += 4;
+                scalars_interpolate(this_scale, next_scale, fraction)
+            };
+            orientation.scale *= scale;
+        }
+    }
+}
+
+/// One axis of an aiming screen: the cell an angle falls in (counted from
+/// the most negative) and how far across it.
+fn screen_cell(angle: f32, negative_delta: f32, positive_delta: f32, negative_frame_count: i16, positive_frame_count: i16) -> (i16, f32) {
+    let delta = if angle < 0.0 { negative_delta } else { positive_delta };
+    let frame = if delta == 0.0 { 0.0 } else { angle / delta };
+    let mut frame_index = frame as i32 as i16;
+    let mut fraction = (frame as f64 % 1.0) as f32;
+    if fraction < 0.0 {
+        fraction += 1.0;
+        frame_index = frame_index.wrapping_sub(1);
+    }
+    if frame_index >= positive_frame_count {
+        frame_index = positive_frame_count.wrapping_sub(1);
+        fraction = 1.0;
+    }
+    if (frame_index as i32) < -(negative_frame_count as i32) {
+        frame_index = (-(negative_frame_count as i32)) as i16;
+        fraction = 0.0;
+    }
+    (frame_index.wrapping_add(negative_frame_count), fraction)
+}
+
+/// `aiming_screen_apply`: the overlay's grid of frames (yaw across, pitch
+/// down) blended at the angles, as rotations turning the pose's and
+/// translations added to it. (It reads no scales, and an uncompressed
+/// frame's scales are not skipped, as the game's aren't.)
+pub fn aiming_screen_apply(animation: &PoseAnimation, bounds: &ScreenBounds, yaw: f32, pitch: f32, orientations: &mut [Orientation]) {
+    let grid_width = bounds.negative_yaw_frame_count as i32 + bounds.positive_yaw_frame_count as i32 + 1;
+    let grid_height = bounds.negative_pitch_frame_count as i32 + bounds.positive_pitch_frame_count as i32 + 1;
+    let (grid_width, grid_height) = (grid_width as i16 as i32, grid_height as i16 as i32);
+    if animation.kind != ANIMATION_OVERLAY || (animation.frame_count as i32) < grid_width * grid_height {
+        return;
+    }
+    let compressed = animation.compressed();
+    let (yaw_frame_index, yaw_fraction) =
+        screen_cell(yaw, bounds.negative_yaw_delta, bounds.positive_yaw_delta, bounds.negative_yaw_frame_count, bounds.positive_yaw_frame_count);
+    let (pitch_frame_index, pitch_fraction) = screen_cell(
+        pitch,
+        bounds.negative_pitch_delta,
+        bounds.positive_pitch_delta,
+        bounds.negative_pitch_frame_count,
+        bounds.positive_pitch_frame_count,
+    );
+    let (yaw_frame_index, pitch_frame_index) = (yaw_frame_index as i32, pitch_frame_index as i32);
+    if pitch_frame_index < 0 || pitch_frame_index >= grid_height || yaw_frame_index < 0 || yaw_frame_index >= grid_width {
+        return;
+    }
+    let next_yaw_cell = if yaw_frame_index + 1 == grid_width { yaw_frame_index } else { yaw_frame_index + 1 };
+    let next_pitch_cell = if pitch_frame_index + 1 == grid_height { pitch_frame_index } else { pitch_frame_index + 1 };
+    let frames = [
+        (yaw_frame_index + pitch_frame_index * grid_width) as i16,
+        (next_yaw_cell + pitch_frame_index * grid_width) as i16,
+        (yaw_frame_index + next_pitch_cell * grid_width) as i16,
+        (next_yaw_cell + next_pitch_cell * grid_width) as i16,
+    ];
+    if frames.iter().any(|&f| !animation.frame_valid(f, false)) {
+        return;
+    }
+    let mut data = frames.map(|f| animation.frame_data_offset(f) as usize);
+    let (mut rotation_index, mut translation_index) = (0i64, 0i64);
+    for (node_index, rotates, translates, _) in animated_nodes(animation) {
+        let orientation = &mut orientations[node_index];
+        if rotates {
+            let r: [[f32; 4]; 4] = if compressed {
+                let r = frames.map(|f| keyframe_rotation(animation, f as f32, rotation_index, node_index as i64));
+                rotation_index += 1;
+                r
+            } else {
+                let r = data.map(|d| decompress_8byte(&animation.data, d));
+                data = data.map(|d| d + 8);
+                r
+            };
+            let yaw_rotation0 = quaternions_interpolate_and_normalize(r[0], r[1], yaw_fraction);
+            let yaw_rotation1 = quaternions_interpolate_and_normalize(r[2], r[3], yaw_fraction);
+            let rotation = quaternions_interpolate_and_normalize(yaw_rotation0, yaw_rotation1, pitch_fraction);
+            orientation.rotation = quaternions_multiply(rotation, orientation.rotation);
+        }
+        if translates {
+            let inverse_yaw_fraction = 1.0 - yaw_fraction;
+            let inverse_pitch_fraction = 1.0 - pitch_fraction;
+            let t: [[f32; 3]; 4] = if compressed {
+                let t = frames.map(|f| keyframe_translation(animation, f as f32, translation_index, node_index as i64));
+                translation_index += 1;
+                t
+            } else {
+                let t = data.map(|d| vec3_at(&animation.data, d));
+                data = data.map(|d| d + 12);
+                t
+            };
+            let (t00, t10, t01, t11) = (t[0], t[1], t[2], t[3]);
+            orientation.translation[0] += (t01[0] * inverse_yaw_fraction + t11[0] * yaw_fraction) * pitch_fraction
+                + (t00[0] * inverse_yaw_fraction + t10[0] * yaw_fraction) * inverse_pitch_fraction;
+            orientation.translation[1] += (t01[1] * inverse_yaw_fraction + t11[1] * yaw_fraction) * pitch_fraction
+                + (t00[1] * inverse_yaw_fraction + t10[1] * yaw_fraction) * inverse_pitch_fraction;
+            orientation.translation[2] += (t00[2] * inverse_yaw_fraction + t10[2] * yaw_fraction) * inverse_pitch_fraction
+                + (t01[2] * inverse_yaw_fraction + t11[2] * yaw_fraction) * pitch_fraction;
+        }
+    }
 }
 
 /// `interpolate_node_orientations`: the pose blended from `original`

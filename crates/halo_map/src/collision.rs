@@ -547,6 +547,50 @@ impl CollisionModel {
     }
 }
 
+impl CollisionModel {
+    /// `collision_model_test_point`: whether a point is inside any node's
+    /// collision BSP for the object's permutation of its region, in the
+    /// node's space.
+    pub fn test_point(&self, region_permutations: &[u8], matrices: &[Matrix4x3], point: [f32; 3]) -> bool {
+        for (node_index, node) in self.nodes.iter().enumerate().take(matrices.len()) {
+            if node.region < 0 || node.region >= MAXIMUM_REGIONS_PER_OBJECT {
+                continue;
+            }
+            let Some(&permutation) = region_permutations.get(node.region as usize) else { continue };
+            if node.bsps.is_empty() {
+                continue;
+            }
+            let bsp = &node.bsps[(permutation as usize).min(node.bsps.len() - 1)];
+            if bsp.nodes.is_empty() {
+                continue;
+            }
+            if bsp.leaf_from_point(inverse_transform_point(&matrices[node_index], point)) == NONE {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// `matrix4x3_inverse_transform_point`.
+pub fn inverse_transform_point(m: &Matrix4x3, p: [f32; 3]) -> [f32; 3] {
+    if m.scale == 0.0 {
+        return [0.0; 3];
+    }
+    let (mut x, mut y, mut z) = (p[0] - m.position[0], p[1] - m.position[1], p[2] - m.position[2]);
+    if m.scale != 1.0 {
+        let scale = 1.0 / m.scale;
+        x *= scale;
+        y *= scale;
+        z *= scale;
+    }
+    [
+        x * m.forward[0] + y * m.forward[1] + z * m.forward[2],
+        x * m.left[0] + y * m.left[1] + z * m.left[2],
+        x * m.up[0] + y * m.up[1] + z * m.up[2],
+    ]
+}
+
 /// `matrix4x3_inverse`, as the game computes it.
 pub fn matrix_inverse(m: &Matrix4x3) -> Matrix4x3 {
     if m.scale == 0.0 {
@@ -1212,6 +1256,95 @@ impl World<'_> {
             }
         }
         result
+    }
+
+    /// `collision_test_point`: whether a point is in the structure's solid
+    /// (in no leaf), or (with the objects bit) inside an object's collision
+    /// model among the collideable objects of the cluster it is in.
+    pub fn test_point(&self, flags: u32, point: [f32; 3], ignore_object: u32) -> bool {
+        if flags & (test_flags::STRUCTURE | test_flags::MEDIA | test_flags::OBJECTS) == 0 {
+            return false;
+        }
+        let leaf = self.collision.leaf_from_point(point);
+        if leaf == NONE {
+            return true;
+        }
+        if flags & test_flags::OBJECTS == 0 {
+            return false;
+        }
+        let cluster = self.clusters.cluster_from_leaf(leaf);
+        if cluster < 0 {
+            return false;
+        }
+        if let Some(source) = self.source {
+            let mut in_cluster = Vec::new();
+            source.cluster_objects(cluster, &mut in_cluster);
+            return in_cluster.into_iter().any(|index| self.source_object_test_point(source, index, flags, point, ignore_object));
+        }
+        self.objects.iter().enumerate().any(|(index, object)| {
+            object.parent == u32::MAX
+                && object.flags & OBJECT_CONNECTED_TO_MAP != 0
+                && object.flags & OBJECT_HAS_COLLISION_MODEL != 0
+                && self
+                    .clusters
+                    .clusters_in_sphere(self.collision, object.location_cluster, object.bounding_center, object.bounding_radius, 64)
+                    .contains(&cluster)
+                && self.object_test_point(index, flags, point, ignore_object)
+        })
+    }
+
+    /// `object_test_point` on a running game's objects: an object, then (if
+    /// the point is in its bounding sphere and not in it) its children.
+    fn source_object_test_point(&self, source: &dyn ObjectSource, index: u32, flags: u32, point: [f32; 3], ignore_object: u32) -> bool {
+        let Some(object) = source.object(index) else { return false };
+        match Self::point_in_object(&object, flags, point, ignore_object) {
+            Some(true) => true,
+            Some(false) => {
+                let mut children = Vec::new();
+                source.children(index, &mut children);
+                children.into_iter().any(|child| self.source_object_test_point(source, child, flags, point, ignore_object))
+            }
+            None => false,
+        }
+    }
+
+    /// `object_test_point` on the objects given.
+    fn object_test_point(&self, index: usize, flags: u32, point: [f32; 3], ignore_object: u32) -> bool {
+        let object = &self.objects[index];
+        match Self::point_in_object(object, flags, point, ignore_object) {
+            Some(true) => true,
+            Some(false) => self
+                .objects
+                .iter()
+                .enumerate()
+                .any(|(child, candidate)| candidate.parent == object.index && self.object_test_point(child, flags, point, ignore_object)),
+            None => false,
+        }
+    }
+
+    /// One object of `object_test_point`: `None` if the test doesn't reach
+    /// it (nor its children), else whether the point is inside it (its
+    /// physics' mass points for a vehicle with
+    /// `test_flags::USE_VEHICLE_PHYSICS`, else its collision model).
+    fn point_in_object(object: &WorldObject, flags: u32, point: [f32; 3], ignore_object: u32) -> Option<bool> {
+        if object.index == ignore_object
+            || object.flags & OBJECT_INVISIBLE != 0
+            || object.kind < 0
+            || flags & (1 << (object.kind as u32 + test_flags::FIRST_OBJECT_TYPE)) == 0
+        {
+            return None;
+        }
+        let d = [point[0] - object.bounding_center[0], point[1] - object.bounding_center[1], point[2] - object.bounding_center[2]];
+        if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > object.bounding_radius * object.bounding_radius {
+            return None;
+        }
+        const OBJECT_TYPE_VEHICLE: i16 = 1;
+        let hit = if object.kind == OBJECT_TYPE_VEHICLE && flags & test_flags::USE_VEHICLE_PHYSICS != 0 {
+            object.physics.as_ref().is_some_and(|physics| physics.test_point(point))
+        } else {
+            object.model.as_ref().is_some_and(|model| model.test_point(&object.region_permutations, &object.matrices, point))
+        };
+        Some(hit)
     }
 
     /// `object_test_vector`: an object, then (if its bounding sphere is

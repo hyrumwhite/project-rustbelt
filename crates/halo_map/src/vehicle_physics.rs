@@ -174,6 +174,15 @@ impl PhysicsInstance {
         }
         best.map(|(t, plane)| (t, crate::collision::transform_plane(&self.world_matrix, plane)))
     }
+
+    /// `physics_test_point`: whether a point is inside any mass point.
+    pub fn test_point(&self, point: [f32; 3]) -> bool {
+        let local_point = inverse_transform_point(&self.world_matrix, point);
+        self.shape.mass_points.iter().any(|m| {
+            let d = [local_point[0] - m.position[0], local_point[1] - m.position[1], local_point[2] - m.position[2]];
+            d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= m.radius * m.radius
+        })
+    }
 }
 
 // ---------- the simulation (physics_update)

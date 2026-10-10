@@ -23,6 +23,8 @@ pub mod area_damage;
 pub mod damage;
 pub mod damage_update;
 pub mod devices;
+pub mod items;
+pub mod markers;
 pub mod device_pose;
 pub mod features;
 mod cache;

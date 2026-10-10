@@ -135,6 +135,10 @@ fn main() {
             if !updates.is_empty() {
                 check.check_biped_updates(snapshot.structure_bsp_index, &updates);
             }
+            let animations = bridge.read_unit_animation_records();
+            if !animations.is_empty() {
+                check.check_unit_animations(&animations);
+            }
         }
         if let Some(snapshot) = fresh {
             frames += 1;
@@ -276,6 +280,15 @@ struct CollisionCheck {
     /// moving turns, standing turns asked for, tumbling.
     update_kinds: [u64; 7],
     update_shown: u32,
+    animation_graphs: std::collections::HashMap<u32, Option<halo_map::unit_animation::AnimationGraph>>,
+    animation_updates: u64,
+    animation_agreed: u64,
+    /// Of the agreeing updates: states entered, seat or weapon changes,
+    /// animations restarted on a new permutation (the seed moved), side
+    /// effects, leaps.
+    animation_kinds: [u64; 5],
+    animation_side_effects: u32,
+    animation_shown: u32,
     frames_shown: u32,
     hits: u64,
     largest_t_difference: f32,
@@ -348,6 +361,12 @@ impl CollisionCheck {
             update_elsewhere: 0,
             update_kinds: [0; 7],
             update_shown: 0,
+            animation_graphs: Default::default(),
+            animation_updates: 0,
+            animation_agreed: 0,
+            animation_kinds: [0; 5],
+            animation_side_effects: 0,
+            animation_shown: 0,
             frames_shown: 0,
             sphere_features: 0,
             hits: 0,
@@ -1163,7 +1182,90 @@ impl CollisionCheck {
         }
     }
 
+    /// Replays the unit animation updates of bipeds the game recorded with
+    /// halo_map's `unit_update_animation`, from the state each began with
+    /// and the random seed then; compares the state, the side effects and
+    /// what it returned.
+    fn check_unit_animations(&mut self, records: &[halo_bridge::UnitAnimationRecord]) {
+        use halo_map::biped_moving::{BipedDefinition, biped_flags};
+        for record in records {
+            self.animation_updates += 1;
+            let cache = &self.cache;
+            let definition = self
+                .biped_definitions
+                .entry(record.definition_index)
+                .or_insert_with(|| BipedDefinition::load(cache, record.definition_index).ok())
+                .clone();
+            let Some(definition) = definition else { continue };
+            let Some(unit_graph_index) = definition.animation_graph else { continue };
+            for index in [unit_graph_index, record.before.object_animation_graph_index] {
+                if index != u32::MAX && !self.animation_graphs.contains_key(&index) {
+                    let loaded = halo_map::unit_animation::AnimationGraph::load(cache, index).ok();
+                    self.animation_graphs.insert(index, loaded);
+                }
+            }
+            let end = record.weapon_label.iter().position(|&b| b == 0).unwrap_or(32);
+            let inputs = halo_map::unit_animation::UnitAnimationInputs {
+                state_desired: record.state_desired,
+                crouching: record.crouching != 0,
+                desired_state: record.desired_state,
+                dead: record.dead != 0,
+                parented: record.parented != 0,
+                player: record.player != 0,
+                force_alert: record.force_alert != 0,
+                flaming: record.flaming != 0,
+                magic_base_seat_index: record.magic_base_seat_index,
+                magic_seat_index: record.magic_seat_index,
+                at_rest: record.at_rest != 0,
+                biped: true,
+                airborne: record.airborne != 0,
+                weapon_label: String::from_utf8_lossy(&record.weapon_label[..end]).into_owned(),
+                random_seed: record.random_seed,
+                destroyed_after_dying: definition.unit_flags & (1 << 1) != 0,
+                has_no_dying_airborne: definition.flags & biped_flags::HAS_NO_DYING_AIRBORNE != 0,
+            };
+            let graphs = &self.animation_graphs;
+            let graph = |index: u32| graphs.get(&index).and_then(Option::as_ref);
+            let mut state = record.before;
+            let (result, effects) = halo_map::unit_animation::unit_update_animation(unit_graph_index, &graph, &inputs, &mut state);
+            // (a destroyed unit's state isn't read after)
+            let compare_state = record.side_effects & halo_map::unit_animation::side_effects::DESTROYED == 0;
+            if (!compare_state || state == record.after) && effects == record.side_effects && result == record.result {
+                self.animation_agreed += 1;
+                let (b, a) = (&record.before, &record.after);
+                let k = &mut self.animation_kinds;
+                if a.state != b.state {
+                    k[0] += 1;
+                }
+                if a.seat_index != b.seat_index || a.weapon_index != b.weapon_index || a.weapon_type_index != b.weapon_type_index {
+                    k[1] += 1;
+                }
+                if a.object_animation_frame_index == 0 && b.object_animation_frame_index != 0 && a.state == b.state {
+                    k[2] += 1;
+                }
+                if effects != 0 {
+                    k[3] += 1;
+                    self.animation_side_effects |= effects;
+                }
+                if result != 0 {
+                    k[4] += 1;
+                }
+            } else if self.animation_shown < 8 {
+                self.animation_shown += 1;
+                println!(
+                    "  unit animation {:#x} differs (effects game {:#x} halo_map {:#x}, result game {} halo_map {}):\n    inputs   {:?}\n    before   {:?}\n    game     {:?}\n    halo_map {:?}",
+                    record.unit_index, record.side_effects, effects, record.result, result, inputs, record.before, record.after, state
+                );
+            }
+        }
+    }
+
     fn report(&self) {
+        let [entered, seats, restarted, with_effects, leaps] = self.animation_kinds;
+        println!(
+            "bipeds: {} of {} unit animation updates replayed agree with the game ({} states entered, {} seat or weapon changes, {} animations restarted, {} with side effects (bits {:#x}), {} leaps)",
+            self.animation_agreed, self.animation_updates, entered, seats, restarted, with_effects, self.animation_side_effects, leaps
+        );
         let [dead, airborne, landing, flying_turns, moving_turns, standing_turns, tumbling] = self.update_kinds;
         println!(
             "bipeds: {} of {} biped updates (to the animation) replayed agree with the game byte for byte ({} dead, {} airborne, {} landing; {} flying turns, {} moving turns, {} standing turns asked for, {} tumbling); left out: {} whose movement record was lost, {} elsewhere, of {}",

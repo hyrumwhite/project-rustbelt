@@ -81,11 +81,39 @@ pub mod animation {
     pub const SIZEOF: usize = 0xb4;
     pub const FRAME_COUNT: usize = 0x22;
     pub const FRAME_INFO_TYPE: usize = 0x26;
+    pub const PRIVATE_LOOP_FRAME_INDEX: usize = 0x2e;
+    pub const PRIVATE_KEY_FRAME_INDEX: usize = 0x34;
+    pub const PRIVATE_SECOND_KEY_FRAME_INDEX: usize = 0x36;
+    pub const NEXT_ANIMATION_INDEX: usize = 0x38;
+    pub const SOUND_INDEX: usize = 0x3c;
+    pub const PRIVATE_SOUND_FRAME_INDEX: usize = 0x3e;
+    pub const RUNTIME_PARENT_ANIMATION_INDEX: usize = 0x42;
+    pub const RUNTIME_NORMALIZED_WEIGHT: usize = 0x44;
     pub const FRAME_INFO: usize = 0x48;
 }
 
 pub mod animation_graph {
+    pub const UNIT_SEATS: usize = 0xc;
     pub const ANIMATIONS: usize = 0x74;
+}
+
+pub mod animation_graph_unit_seat {
+    pub const SIZEOF: usize = 0x64;
+    pub const LABEL: usize = 0x0;
+    pub const ANIMATIONS: usize = 0x40;
+    pub const WEAPON_CLASSES: usize = 0x58;
+}
+
+pub mod animation_graph_weapon_class {
+    pub const SIZEOF: usize = 0xbc;
+    pub const LABEL: usize = 0x0;
+    pub const ANIMATIONS: usize = 0x98;
+    pub const WEAPON_TYPES: usize = 0xb0;
+}
+
+pub mod animation_graph_weapon_type {
+    pub const SIZEOF: usize = 0x3c;
+    pub const LABEL: usize = 0x0;
 }
 
 pub mod biped_definition {

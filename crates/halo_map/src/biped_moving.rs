@@ -91,6 +91,8 @@ const CLIMBING_SNAP_ANGLE: f32 = (10.0 * std::f64::consts::PI / 180.0) as f32;
 /// A biped definition (`bipd` tag), what movement reads.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BipedDefinition {
+    /// Its animation graph (`_object_definition`'s).
+    pub animation_graph: Option<u32>,
     pub unit_flags: u32,
     pub stunned_movement_threshold: f32,
     pub flags: u32,
@@ -133,6 +135,7 @@ impl BipedDefinition {
         let unit = root.add(layout::biped_definition::UNIT);
         let biped = root.add(layout::biped_definition::BIPED);
         Ok(BipedDefinition {
+            animation_graph: root.reference(layout::_object_definition::ANIMATION_GRAPH)?.datum,
             unit_flags: unit.u32(u::FLAGS)?,
             stunned_movement_threshold: unit.f32(u::STUNNED_MOVEMENT_THRESHOLD)?,
             flags: biped.u32(b::FLAGS)?,

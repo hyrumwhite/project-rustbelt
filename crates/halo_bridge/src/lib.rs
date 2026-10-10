@@ -21,7 +21,8 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 20;
+pub const VERSION: u32 = 21;
+pub const UNIT_ANIMATION_RECORDS: usize = 1024;
 pub const BIPED_UPDATE_RECORDS: usize = 1024;
 pub const BIPED_MOVING_RECORDS: usize = 1024;
 pub const FEATURE_OBJECTS: usize = 16384;
@@ -449,6 +450,39 @@ pub struct BipedUpdateRecord {
 
 const _: () = assert!(std::mem::size_of::<BipedUpdateRecord>() == 376);
 
+/// One `unit_update_animation` of a biped: the state before and after,
+/// what it read, its side effects (`halo_map::unit_animation::side_effects`)
+/// and what it returned.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct UnitAnimationRecord {
+    pub sequence: u32,
+    pub unit_index: u32,
+    pub definition_index: u32,
+    pub random_seed: u32,
+    pub state_desired: i8,
+    pub crouching: i8,
+    pub desired_state: i8,
+    pub dead: i8,
+    pub parented: i8,
+    pub player: i8,
+    pub force_alert: i8,
+    pub flaming: i8,
+    pub magic_base_seat_index: i16,
+    pub magic_seat_index: i8,
+    pub at_rest: i8,
+    pub airborne: i8,
+    pub pad: [i8; 3],
+    pub weapon_label: [u8; 32],
+    pub side_effects: u32,
+    pub result: i16,
+    pub pad2: i16,
+    pub before: halo_map::unit_animation::UnitAnimationState,
+    pub after: halo_map::unit_animation::UnitAnimationState,
+}
+
+const _: () = assert!(std::mem::size_of::<UnitAnimationRecord>() == 152);
+
 /// A recorded biped update with the objects its features came from (each
 /// with its node matrices: scale, forward, left, up, position).
 #[derive(Debug, Clone)]
@@ -502,6 +536,9 @@ struct Shared {
     biped_update_record_count: u32,
     biped_update_pad: u32,
     biped_update_records: [BipedUpdateRecord; BIPED_UPDATE_RECORDS],
+    unit_animation_record_count: u32,
+    unit_animation_pad: u32,
+    unit_animation_records: [UnitAnimationRecord; UNIT_ANIMATION_RECORDS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -581,6 +618,7 @@ pub struct Bridge {
     last_biped_record: Option<u32>,
     last_biped_moving_record: Option<u32>,
     last_biped_update_record: Option<u32>,
+    last_unit_animation_record: Option<u32>,
 }
 
 // Frames are read through volatile reads and a sequence check; the input
@@ -601,7 +639,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -768,6 +806,30 @@ impl Bridge {
                 }
             }
             self.last_biped_update_record = Some(count);
+            out
+        }
+    }
+
+    /// The unit animation updates the game recorded since the last call (as
+    /// [`Self::read_projectile_records`]).
+    pub fn read_unit_animation_records(&mut self) -> Vec<UnitAnimationRecord> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence number after copying
+        unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).unit_animation_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_unit_animation_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(UNIT_ANIMATION_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).unit_animation_records[sequence as usize % UNIT_ANIMATION_RECORDS]);
+                if record.sequence == sequence {
+                    out.push(record);
+                }
+            }
+            self.last_unit_animation_record = Some(count);
             out
         }
     }

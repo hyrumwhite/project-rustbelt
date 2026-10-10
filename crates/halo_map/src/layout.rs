@@ -270,8 +270,14 @@ pub mod equipment_placement {
     pub const SIZEOF: usize = 0x28;
 }
 
+pub mod fog_definition {
+    pub const FLAGS: usize = 0x0;
+    pub const PLANE_DISTANCE: usize = 0x74;
+}
+
 pub mod game_globals {
     pub const PLAYER_INFORMATION: usize = 0x170;
+    pub const MATERIALS: usize = 0x194;
 }
 
 pub mod game_globals_player_information {
@@ -301,8 +307,25 @@ pub mod machine_placement {
 
 pub mod mass_point_definition {
     pub const SIZEOF: usize = 0x80;
+    pub const POWERED_MASS_POINT_INDEX: usize = 0x20;
+    pub const MASS: usize = 0x2c;
+    pub const DENSITY: usize = 0x34;
     pub const POSITION: usize = 0x38;
+    pub const FORWARD: usize = 0x44;
+    pub const UP: usize = 0x50;
+    pub const FRICTION_TYPE: usize = 0x5c;
+    pub const FRICTION_PARALLEL_SCALE: usize = 0x60;
+    pub const FRICTION_PERPENDICULAR_SCALE: usize = 0x64;
     pub const RADIUS: usize = 0x68;
+}
+
+pub mod material_definition {
+    pub const SIZEOF: usize = 0x374;
+    pub const PHYSICS_GROUND_FRICTION_SCALE: usize = 0x94;
+    pub const PHYSICS_GROUND_FRICTION_NORMAL_K1_SCALE: usize = 0x98;
+    pub const PHYSICS_GROUND_FRICTION_NORMAL_K0_SCALE: usize = 0x9c;
+    pub const PHYSICS_GROUND_DEPTH_SCALE: usize = 0xa0;
+    pub const PHYSICS_GROUND_DAMP_FRACTION_SCALE: usize = 0xa4;
 }
 
 pub mod model {
@@ -364,7 +387,22 @@ pub mod object_function_definition {
 }
 
 pub mod physics_definition {
+    pub const RADIUS: usize = 0x0;
+    pub const MOMENT: usize = 0x4;
+    pub const MASS: usize = 0x8;
     pub const CENTER_OF_MASS: usize = 0xc;
+    pub const GRAVITY_SCALE: usize = 0x1c;
+    pub const GROUND_FRICTION: usize = 0x20;
+    pub const GROUND_DEPTH: usize = 0x24;
+    pub const GROUND_DAMP_FRACTION: usize = 0x28;
+    pub const GROUND_NORMAL_K1: usize = 0x2c;
+    pub const GROUND_NORMAL_K0: usize = 0x30;
+    pub const WATER_FRICTION: usize = 0x38;
+    pub const WATER_DEPTH: usize = 0x3c;
+    pub const WATER_DENSITY: usize = 0x40;
+    pub const AIR_FRICTION: usize = 0x48;
+    pub const INERTIAL_MATRIX: usize = 0x5c;
+    pub const POWERED_MASS_POINTS: usize = 0x68;
     pub const MASS_POINTS: usize = 0x74;
 }
 
@@ -373,6 +411,16 @@ pub mod player_starting_location {
     pub const POSITION: usize = 0x0;
     pub const FACING: usize = 0xc;
     pub const STRUCTURE_BSP_REFERENCE_INDEX: usize = 0x12;
+}
+
+pub mod powered_mass_point_definition {
+    pub const SIZEOF: usize = 0x80;
+    pub const FLAGS: usize = 0x20;
+    pub const ANTIGRAV_STRENGTH: usize = 0x24;
+    pub const ANTIGRAV_HEIGHT: usize = 0x2c;
+    pub const ANTIGRAV_DAMP_FRACTION: usize = 0x30;
+    pub const ANTIGRAV_NORMAL_K1: usize = 0x34;
+    pub const ANTIGRAV_NORMAL_K0: usize = 0x38;
 }
 
 pub mod projectile_definition {

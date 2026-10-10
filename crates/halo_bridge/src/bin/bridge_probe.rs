@@ -166,6 +166,10 @@ fn main() {
             if !poses.is_empty() {
                 check.check_poses(&poses);
             }
+            let vehicles = bridge.read_vehicle_physics();
+            if !vehicles.is_empty() {
+                check.check_vehicle_physics(snapshot.structure_bsp_index, &vehicles);
+            }
             let melees = bridge.read_melee_records();
             if !melees.is_empty() {
                 check.check_melees(&melees);
@@ -358,6 +362,15 @@ struct CollisionCheck {
     /// Players' melee steps: compared, agreed; of the agreeing, started
     /// (with a weapon, without), damage landed, under way.
     melees: [u64; 6],
+    /// Vehicles' physics updates: recorded, compared, agreed (state and
+    /// mass points), state alone agreed; left out: old physics, rings
+    /// lost, elsewhere; of the agreeing: driven, moved, frozen against the
+    /// world, on the ground, in water, colliding with another vehicle,
+    /// antigraving.
+    vehicle_physics: [u64; 14],
+    vehicle_physics_shown: u32,
+    physics_definitions: std::collections::HashMap<u32, Option<std::sync::Arc<halo_map::vehicle_physics::PhysicsDefinition>>>,
+    material_physics: Option<Vec<halo_map::vehicle_physics::MaterialPhysics>>,
     melees_shown: u32,
     melee_weapons: std::collections::HashMap<u32, Option<halo_map::biped_update::MeleeWeapon>>,
     /// Of the agreeing vehicles: turning, with a speed, a wheel turned,
@@ -465,6 +478,10 @@ impl CollisionCheck {
             unit_pose_throws: [0; 5],
             preprocess_kinds: [[0; 3]; 5],
             melees: [0; 6],
+            vehicle_physics: [0; 14],
+            vehicle_physics_shown: 0,
+            physics_definitions: Default::default(),
+            material_physics: None,
             melees_shown: 0,
             melee_weapons: Default::default(),
             vehicle_poses: [0; 4],
@@ -1775,6 +1792,242 @@ impl CollisionCheck {
         }
     }
 
+    /// An object the game recorded, as collision features see it.
+    fn feature_object(&mut self, entry: &halo_bridge::FeatureObjectRecord, matrices: &[[f32; 13]]) -> halo_map::features::FeatureObject {
+        let cache = &self.cache;
+        let definition = halo_map::TagRef { group: 0, datum: Some(entry.definition_index) };
+        let model = self
+            .models
+            .entry(entry.definition_index)
+            .or_insert_with(|| {
+                let datum = halo_map::objects::object_collision_model(cache, definition).ok()??.datum?;
+                halo_map::collision::CollisionModel::load(cache, datum).ok().map(std::sync::Arc::new)
+            })
+            .clone();
+        halo_map::features::FeatureObject {
+            index: entry.object_index as i32,
+            kind: entry.kind,
+            flags: entry.flags,
+            dead: entry.dead != 0,
+            bounding_center: entry.bounding_center,
+            bounding_radius: entry.bounding_radius,
+            parent: entry.parent_object_index,
+            velocity: entry.translational_velocity,
+            elevator: entry.elevator != 0,
+            biped: (entry.kind == halo_map::features::OBJECT_TYPE_BIPED).then_some(halo_map::features::BipedPill {
+                passes_through_bipeds: entry.biped_passes_through != 0,
+                player: entry.player_index != -1,
+                seated: entry.parent_seat_index != -1,
+                base: entry.pill_base,
+                height: entry.pill_height,
+                width: entry.pill_width,
+            }),
+            model,
+            region_permutations: entry.region_permutations,
+            matrices: matrices
+                .iter()
+                .map(|m| halo_map::model::Matrix4x3 {
+                    scale: m[0],
+                    forward: [m[1], m[2], m[3]],
+                    left: [m[4], m[5], m[6]],
+                    up: [m[7], m[8], m[9]],
+                    position: [m[10], m[11], m[12]],
+                })
+                .collect(),
+        }
+    }
+
+    fn physics_definition(&mut self, definition_index: u32) -> Option<std::sync::Arc<halo_map::vehicle_physics::PhysicsDefinition>> {
+        let cache = &self.cache;
+        self.physics_definitions
+            .entry(definition_index)
+            .or_insert_with(|| {
+                halo_map::vehicle_physics::PhysicsDefinition::load_for_object(cache, definition_index).ok().flatten().map(std::sync::Arc::new)
+            })
+            .clone()
+    }
+
+    /// Replays vehicles' physics updates (`physics_update`) from the state
+    /// each began with, what its vehicle code gave it, and the objects and
+    /// vehicles it met as they were then; compares the state it leaves and
+    /// its mass points byte for byte.
+    fn check_vehicle_physics(&mut self, structure_bsp_index: i32, updates: &[halo_bridge::VehiclePhysicsUpdate]) {
+        use halo_map::vehicle_physics as vp;
+        let cache = &self.cache;
+        fn load(cache: &halo_map::CacheFile, structure_bsp_index: i32) -> Option<halo_map::bsp::Bsp<'_>> {
+            let reference = halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index as i32 == structure_bsp_index)?;
+            halo_map::bsp::Bsp::load(cache, &reference).ok()
+        }
+        if !self.bsps.contains_key(&structure_bsp_index) {
+            let loaded = load(cache, structure_bsp_index).and_then(|b| halo_map::collision::CollisionBsp::load(&b).ok());
+            self.bsps.insert(structure_bsp_index, loaded);
+        }
+        if !self.clusters.contains_key(&structure_bsp_index) {
+            let loaded = load(cache, structure_bsp_index).and_then(|b| halo_map::collision::StructureClusters::load(cache, &b).ok());
+            self.clusters.insert(structure_bsp_index, loaded);
+        }
+        if self.material_physics.is_none() {
+            self.material_physics = Some(vp::load_material_physics(cache).unwrap_or_default());
+        }
+        for update in updates {
+            let record = &update.record;
+            self.vehicle_physics[0] += 1;
+            if record.old_physics != 0 {
+                self.vehicle_physics[4] += 1;
+            }
+            if !update.complete {
+                self.vehicle_physics[5] += 1;
+                continue;
+            }
+            if record.structure_bsp_index != structure_bsp_index {
+                self.vehicle_physics[6] += 1;
+                continue;
+            }
+            let Some(physics) = self.physics_definition(record.definition_index) else { continue };
+            // the objects its tests visited: per features call, and once each
+            let mut feature_objects: Vec<Vec<halo_map::features::FeatureObject>> = vec![Vec::new(); record.feature_calls as usize];
+            let mut seen = std::collections::HashSet::new();
+            let mut world_objects = Vec::new();
+            for (entry, matrices) in &update.objects {
+                let object = self.feature_object(entry, matrices);
+                if let Some(call) = feature_objects.get_mut(entry.call as usize) {
+                    call.push(object.clone());
+                }
+                if seen.insert(entry.object_index) {
+                    world_objects.push(halo_map::collision::WorldObject {
+                        index: entry.object_index,
+                        kind: entry.kind,
+                        flags: entry.flags,
+                        bounding_center: entry.bounding_center,
+                        bounding_radius: entry.bounding_radius,
+                        parent: entry.parent_object_index as u32,
+                        location_cluster: entry.location_cluster,
+                        region_permutations: entry.region_permutations,
+                        matrices: object.matrices.clone(),
+                        model: object.model.clone(),
+                        physics: None,
+                    });
+                }
+            }
+            let mut others = Vec::new();
+            for other in &record.others[..(record.other_count as usize).min(8)] {
+                if let Some(physics) = self.physics_definition(other.definition_index) {
+                    others.push(vp::OtherVehicle {
+                        index: other.object_index,
+                        at_rest: other.at_rest != 0,
+                        physics,
+                        origin: other.origin,
+                        forward: other.forward,
+                        up: other.up,
+                    });
+                }
+            }
+            let powered: Vec<vp::PoweredMassPoint> = record.powered[..(record.powered_count as usize).min(8)]
+                .iter()
+                .map(|p| vp::PoweredMassPoint {
+                    ground_friction_velocity: p.values[0],
+                    water_friction_velocity: p.values[1],
+                    air_friction_velocity: p.values[2],
+                    water_lift_ratio: p.values[3],
+                    air_lift_ratio: p.values[4],
+                    thrust_fraction: p.values[5],
+                    antigrav_fraction: p.values[6],
+                    rotation: p.rotation,
+                })
+                .collect();
+            let driven = record.powered_count > 0;
+            let inputs = vp::VehiclePhysicsInputs {
+                index: record.vehicle_index,
+                powered: driven.then_some(powered.as_slice()),
+                magic: (record.has_magic != 0).then_some((record.magic_force, record.magic_torque)),
+                bounding_center_after: record.after.bounding_center,
+            };
+            let b = &record.before;
+            let mut state = vp::VehiclePhysicsState {
+                position: b.position,
+                forward: b.forward,
+                up: b.up,
+                translational_velocity: b.translational_velocity,
+                angular_velocity: b.angular_velocity,
+                object_flags: b.object_flags,
+                location_leaf: b.location_leaf,
+                location_cluster: b.location_cluster,
+                collision_force: b.collision_force,
+                collision_torque: b.collision_torque,
+                stuck_mass_point_flags: b.stuck_mass_point_flags,
+            };
+            let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
+            bsp.breakable_surfaces = Some(record.breakable_surfaces);
+            let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
+                return;
+            };
+            let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects };
+            let env = vp::VehiclePhysicsWorld {
+                world: &world,
+                feature_objects: &feature_objects,
+                materials: self.material_physics.as_deref().unwrap_or(&[]),
+                others: &others,
+            };
+            let outcome = vp::physics_update(&physics, &mut state, &inputs, &env);
+            if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
+                bsp.breakable_surfaces = None;
+            }
+            self.vehicle_physics[1] += 1;
+            let a = &record.after;
+            let bits = |v: [f32; 3]| v.map(f32::to_bits);
+            let same_state = bits(state.position) == bits(a.position)
+                && bits(state.forward) == bits(a.forward)
+                && bits(state.up) == bits(a.up)
+                && bits(state.translational_velocity) == bits(a.translational_velocity)
+                && bits(state.angular_velocity) == bits(a.angular_velocity)
+                && state.object_flags == a.object_flags
+                && state.location_leaf == a.location_leaf
+                && state.location_cluster == a.location_cluster
+                && bits(state.collision_force) == bits(a.collision_force)
+                && bits(state.collision_torque) == bits(a.collision_torque)
+                && state.stuck_mass_point_flags == a.stuck_mass_point_flags;
+            let point_bytes = |m: &vp::MassPoint| {
+                // SAFETY: MassPoint is repr(C) plain old data of 304 bytes
+                unsafe { std::mem::transmute::<vp::MassPoint, [u8; 304]>(*m) }
+            };
+            let first_point = outcome.mass_points.iter().zip(&update.mass_points).position(|(m, g)| point_bytes(m) != *g);
+            let same_points = outcome.mass_points.len() == update.mass_points.len() && first_point.is_none();
+            if same_state {
+                self.vehicle_physics[3] += 1;
+            }
+            if same_state && same_points {
+                let k = &mut self.vehicle_physics;
+                k[2] += 1;
+                k[7] += driven as u64;
+                k[8] += outcome.moved as u64;
+                k[9] += (outcome.passes > 1 || !outcome.moved) as u64;
+                k[10] += (a.object_flags & vp::object_flags::ON_GROUND != 0) as u64;
+                k[11] += (a.object_flags & vp::object_flags::ON_MEDIA != 0) as u64;
+                k[12] += (outcome.vehicle_collisions > 0) as u64;
+                k[13] += outcome.mass_points.iter().any(|m| m.flags & vp::point_flags::ANTIGRAVING != 0) as u64;
+            } else if self.vehicle_physics_shown < 8 {
+                self.vehicle_physics_shown += 1;
+                println!(
+                    "  vehicle physics {:#x} (definition {:#x}) differs (state agrees {same_state}; first differing mass point {first_point:?} of {}):\n    before   {:?}\n    game     {:?}\n    halo_map {:?}\n    outcome passes {} moved {} collisions {}",
+                    record.vehicle_index,
+                    record.definition_index,
+                    outcome.mass_points.len(),
+                    record.before,
+                    record.after,
+                    state,
+                    outcome.passes,
+                    outcome.moved,
+                    outcome.vehicle_collisions
+                );
+                if let Some(i) = first_point {
+                    // SAFETY: as above, read back
+                    let game: vp::MassPoint = unsafe { std::mem::transmute::<[u8; 304], vp::MassPoint>(update.mass_points[i]) };
+                    println!("    mass point {i}: game {:?}\n                 halo_map {:?}", game, outcome.mass_points[i]);
+                }
+            }
+        }
+    }
+
     /// Loads every animation of a graph for posing.
     fn load_graph_animations(&mut self, graph_index: u32) {
         if !self.unit_pose_graphs.insert(graph_index) {
@@ -1995,6 +2248,12 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        let [recorded, compared, agreed, state_agreed, old, lost, elsewhere, driven, moved, frozen, ground, water, collided, antigrav] =
+            self.vehicle_physics;
+        println!(
+            "vehicles: {} of {} physics updates replayed agree with the game byte for byte, state and mass points ({} the state alone; {} driven, {} moved, {} frozen against the world, {} on the ground, {} in water, {} colliding with another vehicle, {} antigraving); of {} recorded ({} with the old physics), left out: {} whose objects the rings lost, {} elsewhere",
+            agreed, compared, state_agreed, driven, moved, frozen, ground, water, collided, antigrav, recorded, old, lost, elsewhere
+        );
         let [compared, agreed, vehicles, others, structure] = self.vehicle_rays;
         println!(
             "collision: {} of {} rays at vehicles tested with their physics shapes agree with the game bit for bit ({} hit a vehicle's mass points, {} another object, {} the structure)",

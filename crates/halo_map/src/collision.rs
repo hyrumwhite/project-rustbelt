@@ -572,6 +572,8 @@ pub struct StructureClusters {
     /// Per cluster, its water surface (`collision_cluster_fog_plane`), if it
     /// has one.
     pub cluster_water: Vec<Option<WaterPlane>>,
+    /// Per cluster, how `scenario_location_water_depth` finds its water.
+    pub cluster_water_depth: Vec<WaterDepth>,
     /// Per collision material, its material type
     /// (`runtime_physics_material_type`).
     pub collision_material_types: Vec<i16>,
@@ -588,6 +590,18 @@ const NUMBER_OF_MATERIAL_TYPES: i16 = 33;
 pub struct WaterPlane {
     pub plane: [f32; 4],
     pub material_type: i16,
+}
+
+/// How deep a point in a cluster is under water
+/// (`scenario_location_water_depth`): no water, all water (a water fog
+/// with no plane), or below a water fog's plane moved by its plane
+/// distance.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum WaterDepth {
+    #[default]
+    None,
+    Everywhere,
+    Plane { plane: [f32; 4], plane_distance: f32 },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -633,6 +647,34 @@ impl StructureClusters {
             plane_value[3] -= plane_distance;
             Ok(Some(WaterPlane { plane: plane_value, material_type }))
         };
+        // (scenario_location_water_depth: cluster -> fog plane (or a region)
+        // -> region -> palette entry -> a fog that is water)
+        let water_depth = |fog_reference: i16| -> Result<WaterDepth> {
+            if fog_reference == -1 {
+                return Ok(WaterDepth::None);
+            }
+            let reference = fog_reference as u16;
+            let (region, plane) = if reference & 0x8000 != 0 {
+                let Some(plane) = fog_planes.get((reference & 0x7fff) as usize) else { return Ok(WaterDepth::None) };
+                let p = structure_fog_plane::PLANE;
+                (plane.i16(structure_fog_plane::REGION_INDEX)?, Some([plane.f32(p)?, plane.f32(p + 4)?, plane.f32(p + 8)?, plane.f32(p + 12)?]))
+            } else {
+                ((reference & 0x7fff) as i16, None)
+            };
+            // (scenario_fog_region_get_fog_index)
+            let Some(region) = fog_regions.get(region.max(0) as usize).filter(|_| region >= 0) else { return Ok(WaterDepth::None) };
+            let palette = region.i16(structure_fog_region::FOG_PALETTE_INDEX)?;
+            let Some(entry) = fog_palette.get(palette.max(0) as usize).filter(|_| palette >= 0) else { return Ok(WaterDepth::None) };
+            let Some(fog) = entry.reference(structure_fog_palette_entry::FOG)?.datum else { return Ok(WaterDepth::None) };
+            let fog = cache.tag_root(fog, crate::groups::FOG)?;
+            if fog.u8(layout::fog_definition::FLAGS)? & 1 == 0 {
+                return Ok(WaterDepth::None);
+            }
+            Ok(match plane {
+                Some(plane) => WaterDepth::Plane { plane, plane_distance: fog.f32(layout::fog_definition::PLANE_DISTANCE)? },
+                None => WaterDepth::Everywhere,
+            })
+        };
         for leaf in bsp.root.block(s::LEAVES, structure_leaf::SIZEOF)?.iter() {
             out.leaf_clusters.push(leaf.i16(structure_leaf::CLUSTER_INDEX)?);
         }
@@ -641,6 +683,7 @@ impl StructureClusters {
             let portals = cluster.block(0x5c, 2)?.iter().map(|p| p.i16(0)).collect::<Result<Vec<_>>>()?;
             out.cluster_portals.push(portals);
             out.cluster_water.push(water(cluster.i16(structure_cluster::FOG_REFERENCE)?)?);
+            out.cluster_water_depth.push(water_depth(cluster.i16(structure_cluster::FOG_REFERENCE)?)?);
         }
         for material in bsp.root.block(s::COLLISION_MATERIALS, layout::structure_collision_material::SIZEOF)?.iter() {
             out.collision_material_types.push(material.i16(layout::structure_collision_material::RUNTIME_PHYSICS_MATERIAL_TYPE)?);
@@ -667,6 +710,23 @@ impl StructureClusters {
         match self.collision_material_types.get(material_index as usize) {
             Some(&t) if t == NONE as i16 || (0..NUMBER_OF_MATERIAL_TYPES).contains(&t) => t,
             _ => NONE as i16,
+        }
+    }
+
+    /// `scenario_location_water_depth`: how deep a point in a cluster is
+    /// under water (the most negative float for no water).
+    pub fn water_depth(&self, cluster: i16, point: [f32; 3]) -> f32 {
+        if cluster == NONE as i16 {
+            return f32::MIN;
+        }
+        match self.cluster_water_depth.get(cluster as usize).copied().unwrap_or_default() {
+            WaterDepth::None => f32::MIN,
+            WaterDepth::Everywhere => f32::MAX,
+            WaterDepth::Plane { plane, plane_distance } => {
+                // (plane3d_distance_to_point)
+                let distance = point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] - plane[3];
+                -(distance + plane_distance)
+            }
         }
     }
 

@@ -667,6 +667,99 @@ pub fn move_point(
 
 // ---------- the feature tests
 
+/// A point inside a feature: how deep, the feature's plane there, and what
+/// the feature came from (`collision_features_test_point`'s result).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointCollision {
+    pub depth: f32,
+    pub plane: [f32; 4],
+    pub source: FeatureSource,
+}
+
+impl FeatureList {
+    /// `collision_features_test_point`: the feature a point is deepest
+    /// inside (spheres, then cylinders, then prisms; the first of equals).
+    pub fn test_point(&self, point: [f32; 3]) -> Option<PointCollision> {
+        let mut deepest: Option<PointCollision> = None;
+        let mut deepest_depth = f32::MIN;
+        let mut consider = |hit: Option<(f32, [f32; 4])>, source: FeatureSource| {
+            if let Some((depth, plane)) = hit
+                && deepest_depth < depth
+            {
+                deepest_depth = depth;
+                deepest = Some(PointCollision { depth, plane, source });
+            }
+        };
+        for sphere in &self.spheres {
+            consider(sphere_test_point(sphere, point), sphere.source);
+        }
+        for cylinder in &self.cylinders {
+            consider(cylinder_test_point(cylinder, point), cylinder.source);
+        }
+        for prism in &self.prisms {
+            consider(prism_test_point(prism, point), prism.source);
+        }
+        deepest
+    }
+}
+
+/// `collision_sphere_test_point`.
+fn sphere_test_point(sphere: &Sphere, point: [f32; 3]) -> Option<(f32, [f32; 4])> {
+    let w = sub3(point, sphere.center);
+    let distance_squared = magnitude_squared3(w);
+    if !(distance_squared < sphere.radius * sphere.radius) {
+        return None;
+    }
+    let distance = distance_squared.sqrt();
+    let n = if distance > 0.0 { scale3(w, 1.0 / distance) } else { [0.0, 0.0, 1.0] };
+    Some((sphere.radius - distance, [n[0], n[1], n[2], dot3(sphere.center, n) + sphere.radius]))
+}
+
+/// `collision_cylinder_test_point`.
+fn cylinder_test_point(cylinder: &Cylinder, point: [f32; 3]) -> Option<(f32, [f32; 4])> {
+    let w = sub3(point, cylinder.base);
+    let height_distance = dot3(w, cylinder.height);
+    if !(height_distance >= 0.0) {
+        return None;
+    }
+    let height_squared = magnitude_squared3(cylinder.height);
+    if !(height_distance <= height_squared
+        && magnitude_squared3(w) * height_squared - height_distance * height_distance
+            < cylinder.width * cylinder.width * height_squared)
+    {
+        return None;
+    }
+    let mut n = if height_squared > 0.0 { sub3(w, scale3(cylinder.height, height_distance / height_squared)) } else { w };
+    let radial_distance = normalize3(&mut n);
+    if radial_distance == 0.0 {
+        n = [0.0, 0.0, 1.0];
+    }
+    Some((cylinder.width - radial_distance, [n[0], n[1], n[2], dot3(cylinder.base, n) + cylinder.width]))
+}
+
+/// `collision_prism_test_point`.
+fn prism_test_point(prism: &Prism, point: [f32; 3]) -> Option<(f32, [f32; 4])> {
+    let n = normal(prism.plane);
+    let distance = dot3(point, n) - prism.plane[3];
+    if !(distance >= 0.0) || !(distance < prism.height) {
+        return None;
+    }
+    // (point_from_line3d)
+    let on_plane = [n[0] * -distance + point[0], n[1] * -distance + point[1], n[2] * -distance + point[2]];
+    let p = project(on_plane, prism.projection, prism.sign);
+    let count = prism.points.len();
+    for index in 0..count {
+        let next = if index + 1 < count { index + 1 } else { 0 };
+        let v0 = [prism.points[index][0] - p[0], prism.points[index][1] - p[1]];
+        let v1 = [prism.points[next][0] - p[0], prism.points[next][1] - p[1]];
+        // (cross_product2d)
+        if v0[0] * v1[1] - v0[1] * v1[0] < 0.0 {
+            return None;
+        }
+    }
+    Some((prism.height - distance, [n[0], n[1], n[2], prism.plane[3] + prism.height]))
+}
+
 /// `collision_sphere_test_vector`.
 fn sphere_test_vector(sphere: &Sphere, point: [f32; 3], vector: [f32; 3]) -> Option<(f32, [f32; 4])> {
     let w = sub3(sphere.center, point);

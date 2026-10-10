@@ -21,8 +21,10 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 27;
-pub const PHYSICS_VEHICLES: usize = 32;
+pub const VERSION: u32 = 29;
+pub const VEHICLE_PHYSICS_RECORDS: usize = 256;
+pub const MASS_POINTS: usize = 8192;
+pub const PHYSICS_VEHICLES: usize = 128;
 pub const VEHICLE_RAY_TESTS: usize = 16;
 pub const POSE_RECORDS: usize = 2048;
 pub const MELEE_RECORDS: usize = 512;
@@ -701,6 +703,96 @@ pub struct MeleeRecord {
 }
 
 const _: () = assert!(std::mem::size_of::<MeleeRecord>() == 72);
+
+/// (Protocol 28) a vehicle as its physics reads and leaves it: its place,
+/// axes, velocities, flags, location, the collision force and torque other
+/// vehicles gave it, the mass points that stuck, and (after) the bounding
+/// sphere centre its new pose gave it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VehiclePhysicsState {
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    pub up: [f32; 3],
+    pub translational_velocity: [f32; 3],
+    pub angular_velocity: [f32; 3],
+    pub object_flags: u32,
+    pub location_leaf: i32,
+    pub location_cluster: i16,
+    pub pad: i16,
+    pub collision_force: [f32; 3],
+    pub collision_torque: [f32; 3],
+    pub stuck_mass_point_flags: u32,
+    pub bounding_center: [f32; 3],
+}
+
+/// A powered mass point's controls (ground, water and air friction
+/// velocities, water and air lift ratios, thrust and antigrav fractions;
+/// rotation i j k w).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PoweredMassPointRecord {
+    pub values: [f32; 7],
+    pub rotation: [f32; 4],
+}
+
+/// A vehicle the unit collisions considered: its physics placement and
+/// whether it was at rest.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VehiclePhysicsOther {
+    pub object_index: u32,
+    pub definition_index: u32,
+    pub at_rest: u32,
+    pub origin: [f32; 3],
+    pub forward: [f32; 3],
+    pub up: [f32; 3],
+}
+
+/// (Protocol 28) one `physics_update` of a vehicle: its state before and
+/// after, what its vehicle code gave it, which breakable surfaces stood,
+/// its mass points after (in the mass point ring), the objects its
+/// collision tests visited (in the feature object ring), the other
+/// vehicles its unit collisions considered, and whether it took the old
+/// physics.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VehiclePhysicsRecord {
+    pub sequence: u32,
+    pub vehicle_index: u32,
+    pub definition_index: u32,
+    pub structure_bsp_index: i32,
+    pub old_physics: u32,
+    pub powered_count: u32,
+    pub powered: [PoweredMassPointRecord; 8],
+    pub has_magic: u32,
+    pub magic_force: [f32; 3],
+    pub magic_torque: [f32; 3],
+    pub breakable_surfaces: [u8; 32],
+    pub before: VehiclePhysicsState,
+    pub after: VehiclePhysicsState,
+    pub mass_point_count: u32,
+    pub first_mass_point: u32,
+    pub first_object: u32,
+    pub object_count: u32,
+    pub feature_calls: u32,
+    pub other_count: u32,
+    pub others: [VehiclePhysicsOther; 8],
+}
+
+const _: () = assert!(std::mem::size_of::<VehiclePhysicsState>() == 112);
+const _: () = assert!(std::mem::size_of::<VehiclePhysicsRecord>() == 1068);
+
+/// A recorded vehicle physics update with its mass points (each the game's
+/// `mass_point_datum`, 304 bytes) and the objects its tests visited.
+#[derive(Debug, Clone)]
+pub struct VehiclePhysicsUpdate {
+    pub record: VehiclePhysicsRecord,
+    pub mass_points: Vec<[u8; 304]>,
+    pub objects: Vec<(FeatureObjectRecord, Vec<[f32; 13]>)>,
+    /// Whether every mass point and object was still in the rings.
+    pub complete: bool,
+}
 const _: () = assert!(std::mem::size_of::<PoseNodeRecord>() == 148);
 const _: () = assert!(std::mem::size_of::<PoseRecord>() == 384);
 
@@ -768,6 +860,10 @@ struct Shared {
     pose_nodes: [PoseNodeRecord; POSE_NODES],
     melee_record_count: u32,
     melee_records: [MeleeRecord; MELEE_RECORDS],
+    vehicle_physics_record_count: u32,
+    mass_point_count: u32,
+    vehicle_physics_records: [VehiclePhysicsRecord; VEHICLE_PHYSICS_RECORDS],
+    mass_points: [[u8; 304]; MASS_POINTS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -849,6 +945,7 @@ pub struct Bridge {
     last_overlay: Option<(u32, u32)>,
     last_projectile_record: Option<u32>,
     last_melee_record: Option<u32>,
+    last_vehicle_physics_record: Option<u32>,
     last_biped_record: Option<u32>,
     last_biped_moving_record: Option<u32>,
     last_biped_update_record: Option<u32>,
@@ -874,7 +971,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_melee_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None, last_pose_record: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_melee_record: None, last_vehicle_physics_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None, last_pose_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -971,6 +1068,46 @@ impl Bridge {
             self.last_projectile_record = Some(count);
             out
         }
+    }
+
+    /// Vehicles' physics updates the game recorded since the last call,
+    /// with their mass points and the objects their tests visited.
+    pub fn read_vehicle_physics(&mut self) -> Vec<VehiclePhysicsUpdate> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence numbers (and the rings' counts) after copying
+        let records: Vec<VehiclePhysicsRecord> = unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).vehicle_physics_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_vehicle_physics_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(VEHICLE_PHYSICS_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).vehicle_physics_records[sequence as usize % VEHICLE_PHYSICS_RECORDS]);
+                if record.sequence == sequence {
+                    out.push(record);
+                }
+            }
+            self.last_vehicle_physics_record = Some(count);
+            out
+        };
+        records
+            .into_iter()
+            .map(|record| {
+                // SAFETY: as above
+                let (mass_points, mass_points_complete) = unsafe {
+                    let points: Vec<[u8; 304]> = (0..record.mass_point_count)
+                        .map(|i| std::ptr::read_volatile(&(*self.shared).mass_points[record.first_mass_point.wrapping_add(i) as usize % MASS_POINTS]))
+                        .collect();
+                    fence(Ordering::Acquire);
+                    let now = std::ptr::read_volatile(&(*self.shared).mass_point_count);
+                    (points, now.wrapping_sub(record.first_mass_point) as usize <= MASS_POINTS)
+                };
+                let (objects, complete) = self.read_feature_objects(record.first_object, record.object_count);
+                VehiclePhysicsUpdate { record, mass_points, objects, complete: complete && mass_points_complete }
+            })
+            .collect()
     }
 
     /// Players' melee steps the game recorded since the last call (as

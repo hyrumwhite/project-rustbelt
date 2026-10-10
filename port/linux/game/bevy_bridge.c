@@ -68,6 +68,25 @@ static long bevy_bridge_overlay_buffer = NONE;
 
 /* ---------- private code */
 
+/* FNV-1a over 32-bit indices */
+static unsigned long bevy_bridge_checksum(unsigned long hash, long const *indices, long count)
+{
+	long index;
+	short byte_index;
+
+	for (index = 0; index < count; index++)
+	{
+		unsigned long value = (unsigned long)indices[index];
+
+		for (byte_index = 0; byte_index < 4; byte_index++)
+		{
+			hash ^= (value >> (8 * byte_index)) & 0xFF;
+			hash *= 16777619UL;
+		}
+	}
+	return hash;
+}
+
 /* game.bevy_bridge_ray_tests: rays fanned out from the camera, tested
 against the structure (a renderer checks its own collision code with them) */
 static unsigned long bevy_bridge_ray_tests(
@@ -111,6 +130,33 @@ static unsigned long bevy_bridge_ray_tests(
 				origin, &vector, 1.0f, &result);
 			test->t = test->hit ? result.t : 1.0f;
 			test->surface_index = test->hit ? result.surface_index : NONE;
+			{
+				static struct collision_bsp_test_sphere_result sphere;
+				real_point3d center;
+				/* (half its radius short of where the ray hit: touching
+				the geometry there) */
+				real radius = (count & 1) ? 1.0f : 0.25f;
+				real fraction = test->t - 0.5f * radius / magnitude3d(&vector);
+				unsigned long checksum = 2166136261UL;
+
+				center.x = origin->x + vector.i * fraction;
+				center.y = origin->y + vector.j * fraction;
+				center.z = origin->z + vector.k * fraction;
+				test->sphere_center[0] = center.x;
+				test->sphere_center[1] = center.y;
+				test->sphere_center[2] = center.z;
+				test->sphere_radius = radius;
+				collision_bsp_test_sphere(bsp, 0, NULL, &center, test->sphere_radius, &sphere);
+				test->sphere_counts[0] = (unsigned short)sphere.surface_count;
+				test->sphere_counts[1] = (unsigned short)sphere.edge_count;
+				test->sphere_counts[2] = (unsigned short)sphere.vertex_count;
+				test->sphere_counts[3] = (unsigned short)sphere.leaf_count;
+				checksum = bevy_bridge_checksum(checksum, sphere.surface_indices, sphere.surface_count);
+				checksum = bevy_bridge_checksum(checksum, sphere.edge_indices, sphere.edge_count);
+				checksum = bevy_bridge_checksum(checksum, sphere.vertex_indices, sphere.vertex_count);
+				checksum = bevy_bridge_checksum(checksum, sphere.leaf_indices, sphere.leaf_count);
+				test->sphere_checksum = checksum;
+			}
 		}
 	}
 	return count;

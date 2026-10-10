@@ -274,6 +274,7 @@ struct vehicle_suspension
 #include "physics/mass_point_datum.h"
 
 #include "physics/powered_mass_point_datum.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 struct scenario_object_permutation;
 struct scenario_unit;
@@ -2461,6 +2462,8 @@ boolean vehicle_update(
 	definition = vehicle_specific_definition_get(vehicle->definition_index);
 
 	profile_enter(vehicle_update_section);
+	/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+	bevy_bridge_vehicle_update_begin(vehicle_index);
 
 	if (vehicle->object.parent_object_index!=NONE)
 	{
@@ -2731,6 +2734,7 @@ boolean vehicle_update(
 	}
 
 animate:
+	bevy_bridge_vehicle_update_end(vehicle_index); /* port: (bevy_bridge.c) */
 	if (definition->unit.object.animation_graph.index!=NONE)
 	{
 		struct unit_animation_update_data data;

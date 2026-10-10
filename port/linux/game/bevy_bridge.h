@@ -100,6 +100,10 @@ mass points */
 void bevy_bridge_vehicle_physics_begin(long vehicle_index, void const *powered_mass_points, short powered_count,
 	void const *magic_force, void const *magic_torque, int old_physics);
 void bevy_bridge_vehicle_physics_other(long object_index);
+/* vehicles.c: a vehicle_update recorded (bevy_bridge_vehicle_update_record),
+to its animation */
+void bevy_bridge_vehicle_update_begin(long vehicle_index);
+void bevy_bridge_vehicle_update_end(long vehicle_index);
 void bevy_bridge_vehicle_physics_end(long vehicle_index, void const *mass_points, short mass_point_count);
 void bevy_bridge_melee_event(long biped_index, unsigned long event);
 void bevy_bridge_melee_end(long biped_index);

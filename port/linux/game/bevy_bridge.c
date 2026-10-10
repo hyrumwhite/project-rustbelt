@@ -955,6 +955,12 @@ static struct
 	struct bevy_bridge_vehicle_physics_record record;
 } bevy_bridge_vehicle_physics;
 
+static struct
+{
+	boolean active;
+	struct bevy_bridge_vehicle_update_record record;
+} bevy_bridge_vehicle_update;
+
 void bevy_bridge_features_call(void)
 {
 	if (bevy_bridge_biped.active)
@@ -1067,6 +1073,16 @@ void bevy_bridge_projectile_object(long object_index)
 	{
 		/* (a ray test's object: no features call) */
 		bevy_bridge_vehicle_physics_object(object_index, (unsigned long)NONE);
+		return;
+	}
+	if (!bevy_bridge_projectile.active && bevy_bridge_vehicle_update.active)
+	{
+		struct bevy_bridge_vehicle_update_record *update = &bevy_bridge_vehicle_update.record;
+
+		if (!update->object_count)
+			update->first_object = bevy_bridge_shared->feature_object_count;
+		bevy_bridge_record_object(object_index, (unsigned long)NONE);
+		update->object_count++;
 		return;
 	}
 	if (!bevy_bridge_projectile.active)
@@ -1773,6 +1789,71 @@ void bevy_bridge_vehicle_physics_end(long vehicle_index, void const *mass_points
 	__atomic_store_n(&bevy_bridge_shared->mass_point_count, record->first_mass_point + record->mass_point_count, __ATOMIC_RELEASE);
 	count = bevy_bridge_shared->vehicle_physics_record_count;
 	record->sequence = count;
+	if (bevy_bridge_vehicle_update.active && bevy_bridge_vehicle_update.record.vehicle_index == (unsigned long)vehicle_index)
+		bevy_bridge_vehicle_update.record.physics_record = count + 1;
 	bevy_bridge_shared->vehicle_physics_records[count % BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS] = *record;
 	__atomic_store_n(&bevy_bridge_shared->vehicle_physics_record_count, count + 1, __ATOMIC_RELEASE);
+}
+
+/* ---------- vehicle updates */
+
+typedef char bevy_bridge_vehicle_datum_size_assert[sizeof(struct _vehicle_datum) == 88 ? 1 : -1];
+
+boolean unit_driven_by_ai(long unit_index); /* units.c */
+
+static void bevy_bridge_vehicle_update_state(long vehicle_index, struct bevy_bridge_vehicle_update_state *state)
+{
+	struct vehicle_datum *vehicle = vehicle_datum_get(vehicle_index);
+
+	bevy_bridge_point(state->position, &vehicle->object.position);
+	bevy_bridge_vector(state->forward, &vehicle->object.forward);
+	bevy_bridge_vector(state->up, &vehicle->object.up);
+	bevy_bridge_vector(state->translational_velocity, &vehicle->object.translational_velocity);
+	bevy_bridge_vector(state->angular_velocity, &vehicle->object.angular_velocity);
+	state->object_flags = vehicle->object.flags;
+	state->location_leaf = vehicle->object.location.leaf_index;
+	state->location_cluster = vehicle->object.location.cluster_index;
+	state->pad = 0;
+	bevy_bridge_point(state->bounding_center, &vehicle->object.bounding_sphere_center);
+	memcpy(state->vehicle, &vehicle->vehicle, sizeof(state->vehicle));
+}
+
+void bevy_bridge_vehicle_update_begin(long vehicle_index)
+{
+	struct bevy_bridge_vehicle_update_record *record = &bevy_bridge_vehicle_update.record;
+	struct vehicle_datum *vehicle;
+
+	bevy_bridge_vehicle_update.active = FALSE;
+	if (!bevy_bridge_projectile_recording())
+		return;
+	vehicle = vehicle_datum_get(vehicle_index);
+	memset(record, 0, sizeof(*record));
+	record->vehicle_index = (unsigned long)vehicle_index;
+	record->definition_index = (unsigned long)vehicle->definition_index;
+	record->structure_bsp_index = global_structure_bsp_index;
+	bevy_bridge_vector(record->throttle, &vehicle->unit.throttle);
+	record->control_flags = vehicle->unit.control_flags;
+	bevy_bridge_vector(record->desired_facing, &vehicle->unit.desired_facing_vector);
+	record->seat_power[0] = vehicle->unit.seat_power[0];
+	record->seat_power[1] = vehicle->unit.seat_power[1];
+	record->driven_by_ai = unit_driven_by_ai(vehicle_index) ? 1 : 0;
+	record->parented = vehicle->object.parent_object_index != NONE;
+	memcpy(record->breakable_surfaces, breakable_surface_flags_get(), sizeof(record->breakable_surfaces));
+	bevy_bridge_vehicle_update_state(vehicle_index, &record->before);
+	bevy_bridge_vehicle_update.active = TRUE;
+}
+
+void bevy_bridge_vehicle_update_end(long vehicle_index)
+{
+	struct bevy_bridge_vehicle_update_record *record = &bevy_bridge_vehicle_update.record;
+	unsigned long count;
+
+	if (!bevy_bridge_vehicle_update.active || record->vehicle_index != (unsigned long)vehicle_index)
+		return;
+	bevy_bridge_vehicle_update.active = FALSE;
+	bevy_bridge_vehicle_update_state(vehicle_index, &record->after);
+	count = bevy_bridge_shared->vehicle_update_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->vehicle_update_records[count % BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->vehicle_update_record_count, count + 1, __ATOMIC_RELEASE);
 }

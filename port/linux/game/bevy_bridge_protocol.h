@@ -40,7 +40,8 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 29
+#define BEVY_BRIDGE_VERSION 30
+#define BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS 512
 #define BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS 256
 #define BEVY_BRIDGE_MASS_POINTS 8192
 #define BEVY_BRIDGE_PHYSICS_VEHICLES 128
@@ -853,6 +854,53 @@ struct bevy_bridge_vehicle_physics_record
 	struct bevy_bridge_vehicle_physics_other others[8];
 };
 
+/* (protocol 30) a vehicle as vehicle_update reads and leaves it: its
+place, axes, velocities, flags, location, the bounding sphere centre its
+pose gave it, and its vehicle datum (vehicles.c's _vehicle_datum, 88
+bytes: flags, stop time, airborne, upending and on-ground ticks, speed,
+slide, turn, wheel, treads, hover, thrust, suspensions, hover position,
+collision force and torque, stuck mass points) */
+struct bevy_bridge_vehicle_update_state
+{
+	float position[3];
+	float forward[3];
+	float up[3];
+	float translational_velocity[3];
+	float angular_velocity[3];
+	unsigned long object_flags;
+	long location_leaf;
+	short location_cluster;
+	short pad;
+	float bounding_center[3];
+	unsigned char vehicle[88];
+};
+
+/* (protocol 30) one vehicle_update, up to its animation (with
+game.bevy_bridge_ray_tests): its state before and after, its driver's
+controls (throttle, control flags, desired facing, seat power, whether an
+AI drives), whether it has a parent, the physics record it made (its
+sequence + 1, 0 for none), which breakable surfaces stood, and the objects
+its other ray tests visited (in the feature object ring) */
+struct bevy_bridge_vehicle_update_record
+{
+	unsigned long sequence;
+	unsigned long vehicle_index;
+	unsigned long definition_index;
+	long structure_bsp_index;
+	float throttle[3];
+	unsigned long control_flags;
+	float desired_facing[3];
+	float seat_power[2];
+	unsigned long driven_by_ai;
+	unsigned long parented;
+	unsigned long physics_record;
+	unsigned char breakable_surfaces[32];
+	struct bevy_bridge_vehicle_update_state before;
+	struct bevy_bridge_vehicle_update_state after;
+	unsigned long first_object;
+	unsigned long object_count;
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -920,6 +968,9 @@ struct bevy_bridge_shared
 	unsigned long mass_point_count;
 	struct bevy_bridge_vehicle_physics_record vehicle_physics_records[BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS];
 	struct bevy_bridge_mass_point mass_points[BEVY_BRIDGE_MASS_POINTS];
+	/* vehicle updates (a ring, as the projectiles) */
+	unsigned long vehicle_update_record_count;
+	struct bevy_bridge_vehicle_update_record vehicle_update_records[BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

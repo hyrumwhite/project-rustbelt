@@ -21,7 +21,8 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 29;
+pub const VERSION: u32 = 30;
+pub const VEHICLE_UPDATE_RECORDS: usize = 512;
 pub const VEHICLE_PHYSICS_RECORDS: usize = 256;
 pub const MASS_POINTS: usize = 8192;
 pub const PHYSICS_VEHICLES: usize = 128;
@@ -783,6 +784,61 @@ pub struct VehiclePhysicsRecord {
 const _: () = assert!(std::mem::size_of::<VehiclePhysicsState>() == 112);
 const _: () = assert!(std::mem::size_of::<VehiclePhysicsRecord>() == 1068);
 
+/// (Protocol 30) a vehicle as `vehicle_update` reads and leaves it: its
+/// place, axes, velocities, flags, location, the bounding sphere centre its
+/// pose gave it, and its vehicle datum (`_vehicle_datum`, 88 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VehicleUpdateState {
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    pub up: [f32; 3],
+    pub translational_velocity: [f32; 3],
+    pub angular_velocity: [f32; 3],
+    pub object_flags: u32,
+    pub location_leaf: i32,
+    pub location_cluster: i16,
+    pub pad: i16,
+    pub bounding_center: [f32; 3],
+    pub vehicle: [u8; 88],
+}
+
+/// (Protocol 30) one `vehicle_update`, up to its animation: its state
+/// before and after, its driver's controls, whether it has a parent, the
+/// physics record it made (its sequence + 1, 0 for none), which breakable
+/// surfaces stood, and the objects its other ray tests visited.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct VehicleUpdateRecord {
+    pub sequence: u32,
+    pub vehicle_index: u32,
+    pub definition_index: u32,
+    pub structure_bsp_index: i32,
+    pub throttle: [f32; 3],
+    pub control_flags: u32,
+    pub desired_facing: [f32; 3],
+    pub seat_power: [f32; 2],
+    pub driven_by_ai: u32,
+    pub parented: u32,
+    pub physics_record: u32,
+    pub breakable_surfaces: [u8; 32],
+    pub before: VehicleUpdateState,
+    pub after: VehicleUpdateState,
+    pub first_object: u32,
+    pub object_count: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<VehicleUpdateState>() == 172);
+const _: () = assert!(std::mem::size_of::<VehicleUpdateRecord>() == 448);
+
+/// A recorded vehicle update with the objects its ray tests visited.
+#[derive(Debug, Clone)]
+pub struct VehicleUpdate {
+    pub record: VehicleUpdateRecord,
+    pub objects: Vec<(FeatureObjectRecord, Vec<[f32; 13]>)>,
+    pub complete: bool,
+}
+
 /// A recorded vehicle physics update with its mass points (each the game's
 /// `mass_point_datum`, 304 bytes) and the objects its tests visited.
 #[derive(Debug, Clone)]
@@ -864,6 +920,8 @@ struct Shared {
     mass_point_count: u32,
     vehicle_physics_records: [VehiclePhysicsRecord; VEHICLE_PHYSICS_RECORDS],
     mass_points: [[u8; 304]; MASS_POINTS],
+    vehicle_update_record_count: u32,
+    vehicle_update_records: [VehicleUpdateRecord; VEHICLE_UPDATE_RECORDS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -946,6 +1004,7 @@ pub struct Bridge {
     last_projectile_record: Option<u32>,
     last_melee_record: Option<u32>,
     last_vehicle_physics_record: Option<u32>,
+    last_vehicle_update_record: Option<u32>,
     last_biped_record: Option<u32>,
     last_biped_moving_record: Option<u32>,
     last_biped_update_record: Option<u32>,
@@ -971,7 +1030,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_melee_record: None, last_vehicle_physics_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None, last_pose_record: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_melee_record: None, last_vehicle_physics_record: None, last_vehicle_update_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None, last_pose_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -1106,6 +1165,37 @@ impl Bridge {
                 };
                 let (objects, complete) = self.read_feature_objects(record.first_object, record.object_count);
                 VehiclePhysicsUpdate { record, mass_points, objects, complete: complete && mass_points_complete }
+            })
+            .collect()
+    }
+
+    /// Vehicle updates the game recorded since the last call, with the
+    /// objects their ray tests visited.
+    pub fn read_vehicle_updates(&mut self) -> Vec<VehicleUpdate> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence numbers after copying
+        let records: Vec<VehicleUpdateRecord> = unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).vehicle_update_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_vehicle_update_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(VEHICLE_UPDATE_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).vehicle_update_records[sequence as usize % VEHICLE_UPDATE_RECORDS]);
+                if record.sequence == sequence {
+                    out.push(record);
+                }
+            }
+            self.last_vehicle_update_record = Some(count);
+            out
+        };
+        records
+            .into_iter()
+            .map(|record| {
+                let (objects, complete) = self.read_feature_objects(record.first_object, record.object_count);
+                VehicleUpdate { record, objects, complete }
             })
             .collect()
     }

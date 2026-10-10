@@ -401,6 +401,9 @@ pub mod physics_definition {
     pub const WATER_DEPTH: usize = 0x3c;
     pub const WATER_DENSITY: usize = 0x40;
     pub const AIR_FRICTION: usize = 0x48;
+    pub const XX_MOMENT: usize = 0x50;
+    pub const YY_MOMENT: usize = 0x54;
+    pub const ZZ_MOMENT: usize = 0x58;
     pub const INERTIAL_MATRIX: usize = 0x5c;
     pub const POWERED_MASS_POINTS: usize = 0x68;
     pub const MASS_POINTS: usize = 0x74;
@@ -677,6 +680,8 @@ pub mod sky_light {
 pub mod structure_bsp {
     pub const SIZEOF: usize = 0x288;
     pub const LIGHTMAP_GROUP: usize = 0x0;
+    pub const VEHICLE_FLOOR: usize = 0x10;
+    pub const VEHICLE_CEILING: usize = 0x14;
     pub const COLLISION_MATERIALS: usize = 0xa4;
     pub const COLLISION_BSP: usize = 0xb0;
     pub const WORLD_BOUNDS: usize = 0xc8;
@@ -784,14 +789,29 @@ pub mod vehicle_animation {
 }
 
 pub mod vehicle_definition {
+    pub const FLAGS: usize = 0x2f0;
+    pub const VEHICLE_TYPE: usize = 0x2f4;
     pub const UNKNOWN2F8: usize = 0x2f8;
     pub const UNKNOWN2FC: usize = 0x2fc;
+    pub const UNKNOWN300: usize = 0x300;
+    pub const UNKNOWN304: usize = 0x304;
+    pub const UNKNOWN308: usize = 0x308;
+    pub const UNKNOWN30C: usize = 0x30c;
     pub const WHEEL_CIRCUMFERENCE: usize = 0x310;
+    pub const UNKNOWN314: usize = 0x314;
+    pub const UNKNOWN318: usize = 0x318;
+    pub const UNKNOWN330: usize = 0x330;
+    pub const UNKNOWN340: usize = 0x340;
+    pub const UNKNOWN344: usize = 0x344;
+    pub const UNKNOWN364: usize = 0x364;
 }
 
 pub mod vehicle_suspension {
     pub const SIZEOF: usize = 0x14;
+    pub const MASS_POINT_INDEX: usize = 0x0;
     pub const ANIMATION_INDEX: usize = 0x2;
+    pub const UNKNOWN4: usize = 0x4;
+    pub const UNKNOWN8: usize = 0x8;
 }
 
 pub mod vertex_buffer {

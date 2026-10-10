@@ -9,6 +9,7 @@ vehicle and device preprocesses of a pose read.
 #include "units/unit_definitions.h"
 #include "devices/device_definitions.h"
 #include "models/model_animation_definitions.h"
+#include "structures/structure_bsp_definitions.h"
 
 #include <stddef.h>
 
@@ -29,6 +30,17 @@ struct vehicle_definition
 	real unknown308;
 	real unknown30c;
 	real wheel_circumference;
+	real unknown314;
+	real unknown318;
+	short function_modes[4];
+	byte unknown324[0xc];
+	real unknown330;
+	real unknown334;
+	byte unused338[8];
+	real unknown340;
+	real unknown344;
+	byte unused348[0x1c];
+	real unknown364;
 };
 
 struct vehicle_animation
@@ -69,6 +81,23 @@ LAYOUT_OFFSET(animation_graph_object_overlay, mode)
 LAYOUT_OFFSET(vehicle_definition, unknown2f8)
 LAYOUT_OFFSET(vehicle_definition, unknown2fc)
 LAYOUT_OFFSET(vehicle_definition, wheel_circumference)
+LAYOUT_OFFSET(vehicle_definition, flags)
+LAYOUT_OFFSET(vehicle_definition, vehicle_type)
+LAYOUT_OFFSET(vehicle_definition, unknown300)
+LAYOUT_OFFSET(vehicle_definition, unknown304)
+LAYOUT_OFFSET(vehicle_definition, unknown308)
+LAYOUT_OFFSET(vehicle_definition, unknown30c)
+LAYOUT_OFFSET(vehicle_definition, unknown314)
+LAYOUT_OFFSET(vehicle_definition, unknown318)
+LAYOUT_OFFSET(vehicle_definition, unknown330)
+LAYOUT_OFFSET(vehicle_definition, unknown340)
+LAYOUT_OFFSET(vehicle_definition, unknown344)
+LAYOUT_OFFSET(vehicle_definition, unknown364)
+LAYOUT_OFFSET(vehicle_suspension, mass_point_index)
+LAYOUT_OFFSET(vehicle_suspension, unknown4)
+LAYOUT_OFFSET(vehicle_suspension, unknown8)
+LAYOUT_OFFSET(structure_bsp, vehicle_floor)
+LAYOUT_OFFSET(structure_bsp, vehicle_ceiling)
 LAYOUT_SIZE(vehicle_animation)
 LAYOUT_OFFSET(vehicle_animation, steering_screen_bounds)
 LAYOUT_OFFSET(vehicle_animation, animations)

@@ -36,6 +36,7 @@ pub mod unit_animation;
 pub mod unit_pose;
 pub mod vehicle_physics;
 pub mod vehicle_pose;
+pub mod vehicle_update;
 
 pub use cache::{Block, CacheFile, Header, Ptr, Space, TagData, TagInstance, TagRef, TAG_CACHE_BASE};
 

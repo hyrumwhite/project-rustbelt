@@ -170,6 +170,10 @@ fn main() {
             if !vehicles.is_empty() {
                 check.check_vehicle_physics(snapshot.structure_bsp_index, &vehicles);
             }
+            let vehicle_updates = bridge.read_vehicle_updates();
+            if !vehicle_updates.is_empty() {
+                check.check_vehicle_updates(snapshot.structure_bsp_index, &vehicle_updates);
+            }
             let melees = bridge.read_melee_records();
             if !melees.is_empty() {
                 check.check_melees(&melees);
@@ -369,6 +373,15 @@ struct CollisionCheck {
     /// antigraving.
     vehicle_physics: [u64; 14],
     vehicle_physics_shown: u32,
+    recent_vehicle_physics: std::collections::HashMap<u32, halo_bridge::VehiclePhysicsUpdate>,
+    /// Vehicle updates: recorded, compared, agreed; left out elsewhere,
+    /// missing their physics record; controls agreed; of the agreeing:
+    /// with physics, coasting, riding a parent, righting, with a throttle.
+    vehicle_updates: [u64; 11],
+    vehicle_update_types: [u64; 7],
+    vehicle_updates_shown: u32,
+    vehicle_definitions: std::collections::HashMap<u32, Option<std::sync::Arc<halo_map::vehicle_update::VehicleDefinition>>>,
+    vehicle_bounds: std::collections::HashMap<i32, Option<(f32, f32)>>,
     physics_definitions: std::collections::HashMap<u32, Option<std::sync::Arc<halo_map::vehicle_physics::PhysicsDefinition>>>,
     material_physics: Option<Vec<halo_map::vehicle_physics::MaterialPhysics>>,
     melees_shown: u32,
@@ -480,6 +493,12 @@ impl CollisionCheck {
             melees: [0; 6],
             vehicle_physics: [0; 14],
             vehicle_physics_shown: 0,
+            recent_vehicle_physics: Default::default(),
+            vehicle_updates: [0; 11],
+            vehicle_update_types: [0; 7],
+            vehicle_updates_shown: 0,
+            vehicle_definitions: Default::default(),
+            vehicle_bounds: Default::default(),
             physics_definitions: Default::default(),
             material_physics: None,
             melees_shown: 0,
@@ -1847,6 +1866,267 @@ impl CollisionCheck {
             .clone()
     }
 
+    /// The world a recorded vehicle physics update met: the objects each
+    /// features call visited, the objects once each, the other vehicles.
+    #[allow(clippy::type_complexity)]
+    fn vehicle_physics_objects(
+        &mut self,
+        update: &halo_bridge::VehiclePhysicsUpdate,
+    ) -> (Vec<Vec<halo_map::features::FeatureObject>>, Vec<halo_map::collision::WorldObject>, Vec<halo_map::vehicle_physics::OtherVehicle>) {
+        let record = &update.record;
+        let mut feature_objects: Vec<Vec<halo_map::features::FeatureObject>> = vec![Vec::new(); record.feature_calls as usize];
+        let world_objects = self.world_objects(&update.objects, Some(&mut feature_objects));
+        let mut others = Vec::new();
+        for other in &record.others[..(record.other_count as usize).min(8)] {
+            if let Some(physics) = self.physics_definition(other.definition_index) {
+                others.push(halo_map::vehicle_physics::OtherVehicle {
+                    index: other.object_index,
+                    at_rest: other.at_rest != 0,
+                    physics,
+                    origin: other.origin,
+                    forward: other.forward,
+                    up: other.up,
+                });
+            }
+        }
+        (feature_objects, world_objects, others)
+    }
+
+    /// Recorded objects for the broad phase (each once, as first seen),
+    /// and, given, each into its features call's list.
+    fn world_objects(
+        &mut self,
+        objects: &[(halo_bridge::FeatureObjectRecord, Vec<[f32; 13]>)],
+        mut feature_objects: Option<&mut Vec<Vec<halo_map::features::FeatureObject>>>,
+    ) -> Vec<halo_map::collision::WorldObject> {
+        let mut seen = std::collections::HashSet::new();
+        let mut world_objects = Vec::new();
+        for (entry, matrices) in objects {
+            let object = self.feature_object(entry, matrices);
+            if let Some(calls) = feature_objects.as_deref_mut()
+                && let Some(call) = calls.get_mut(entry.call as usize)
+            {
+                call.push(object.clone());
+            }
+            if seen.insert(entry.object_index) {
+                world_objects.push(halo_map::collision::WorldObject {
+                    index: entry.object_index,
+                    kind: entry.kind,
+                    flags: entry.flags,
+                    bounding_center: entry.bounding_center,
+                    bounding_radius: entry.bounding_radius,
+                    parent: entry.parent_object_index as u32,
+                    location_cluster: entry.location_cluster,
+                    region_permutations: entry.region_permutations,
+                    matrices: object.matrices,
+                    model: object.model,
+                    physics: None,
+                });
+            }
+        }
+        world_objects
+    }
+
+    /// Replays vehicle updates (`vehicle_update`, to its animation): the
+    /// control code from the driver's controls, the physics it hands them to
+    /// (with the world its nested physics record met), the suspensions and
+    /// the ticks; compares the controls handed to the physics and the state
+    /// it leaves byte for byte.
+    fn check_vehicle_updates(&mut self, structure_bsp_index: i32, updates: &[halo_bridge::VehicleUpdate]) {
+        use halo_map::vehicle_physics as vp;
+        use halo_map::vehicle_update as vu;
+        let cache = &self.cache;
+        if !self.vehicle_bounds.contains_key(&structure_bsp_index) {
+            let bounds = halo_map::bsp::references(cache)
+                .ok()
+                .and_then(|r| r.into_iter().find(|r| r.index as i32 == structure_bsp_index))
+                .and_then(|reference| halo_map::bsp::Bsp::load(cache, &reference).ok())
+                .and_then(|bsp| vu::structure_vehicle_bounds(&bsp).ok());
+            self.vehicle_bounds.insert(structure_bsp_index, bounds);
+        }
+        let Some(Some((floor, ceiling))) = self.vehicle_bounds.get(&structure_bsp_index).copied() else { return };
+        for update in updates {
+            let record = &update.record;
+            self.vehicle_updates[0] += 1;
+            if record.structure_bsp_index != structure_bsp_index {
+                self.vehicle_updates[3] += 1;
+                continue;
+            }
+            let physics_update = if record.physics_record != 0 {
+                match self.recent_vehicle_physics.get(&(record.physics_record - 1)) {
+                    Some(p) => Some(p.clone()),
+                    None => {
+                        self.vehicle_updates[4] += 1;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            if !update.complete || physics_update.as_ref().is_some_and(|p| !p.complete) {
+                self.vehicle_updates[4] += 1;
+                continue;
+            }
+            let cache = &self.cache;
+            let definition = self
+                .vehicle_definitions
+                .entry(record.definition_index)
+                .or_insert_with(|| vu::VehicleDefinition::load(cache, record.definition_index).ok().map(std::sync::Arc::new))
+                .clone();
+            let Some(definition) = definition else { continue };
+            let physics = self.physics_definition(record.definition_index);
+            let suspension_objects = self.world_objects(&update.objects, None);
+            let physics_world = physics_update.as_ref().map(|p| self.vehicle_physics_objects(p));
+            let powered_base: Vec<vp::PoweredMassPoint> = physics_update
+                .as_ref()
+                .map(|p| {
+                    p.record.powered[..(p.record.powered_count as usize).min(8)]
+                        .iter()
+                        .map(|q| vp::PoweredMassPoint {
+                            ground_friction_velocity: q.values[0],
+                            water_friction_velocity: q.values[1],
+                            air_friction_velocity: q.values[2],
+                            water_lift_ratio: q.values[3],
+                            air_lift_ratio: q.values[4],
+                            thrust_fraction: q.values[5],
+                            antigrav_fraction: q.values[6],
+                            rotation: q.rotation,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let inputs = vu::VehicleUpdateInputs {
+                index: record.vehicle_index,
+                parented: record.parented != 0,
+                throttle: record.throttle,
+                control_flags: record.control_flags,
+                desired_facing: record.desired_facing,
+                seat_power: record.seat_power,
+                driven_by_ai: record.driven_by_ai != 0,
+                vehicle_floor: floor,
+                vehicle_ceiling: ceiling,
+                bounding_center_after: physics_update.as_ref().map_or(record.after.bounding_center, |p| p.record.after.bounding_center),
+                powered_base: &powered_base,
+            };
+            let datum = |bytes: &[u8; 88]| {
+                // SAFETY: VehicleDatum is repr(C) plain old data of 88 bytes
+                unsafe { std::mem::transmute::<[u8; 88], vu::VehicleDatum>(*bytes) }
+            };
+            let b = &record.before;
+            let mut state = vu::VehicleUpdateState {
+                position: b.position,
+                forward: b.forward,
+                up: b.up,
+                translational_velocity: b.translational_velocity,
+                angular_velocity: b.angular_velocity,
+                object_flags: b.object_flags,
+                location_leaf: b.location_leaf,
+                location_cluster: b.location_cluster,
+                vehicle: datum(&b.vehicle),
+            };
+            let breakables = physics_update.as_ref().map_or(record.breakable_surfaces, |p| p.record.breakable_surfaces);
+            let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
+            bsp.breakable_surfaces = Some(breakables);
+            let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
+                return;
+            };
+            let suspension_world = halo_map::collision::World { collision: bsp, clusters, objects: &suspension_objects };
+            let physics_collision_world =
+                physics_world.as_ref().map(|(_, objects, _)| halo_map::collision::World { collision: bsp, clusters, objects });
+            let materials = self.material_physics.as_deref().unwrap_or(&[]);
+            let env = vu::VehicleUpdateWorld {
+                physics: match (&physics_world, &physics_collision_world) {
+                    (Some((feature_objects, _, others)), Some(world)) => {
+                        Some(vp::VehiclePhysicsWorld { world, feature_objects, materials, others })
+                    }
+                    _ => None,
+                },
+                world: &suspension_world,
+            };
+            let outcome = vu::vehicle_update(&definition, physics.as_deref(), &mut state, &inputs, &env);
+            if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
+                bsp.breakable_surfaces = None;
+            }
+            self.vehicle_updates[1] += 1;
+            // the controls handed to the physics
+            let bits = |v: [f32; 3]| v.map(f32::to_bits);
+            let controls_agree = match &physics_update {
+                None => !outcome.physics_ran,
+                Some(p) => {
+                    let r = &p.record;
+                    let powered_agree = match &outcome.powered {
+                        None => r.powered_count == 0,
+                        Some(ours) => {
+                            ours.len() == r.powered_count as usize
+                                && ours.iter().zip(&r.powered).all(|(o, g)| {
+                                    let values = [
+                                        o.ground_friction_velocity,
+                                        o.water_friction_velocity,
+                                        o.air_friction_velocity,
+                                        o.water_lift_ratio,
+                                        o.air_lift_ratio,
+                                        o.thrust_fraction,
+                                        o.antigrav_fraction,
+                                    ];
+                                    values.map(f32::to_bits) == g.values.map(f32::to_bits) && o.rotation.map(f32::to_bits) == g.rotation.map(f32::to_bits)
+                                })
+                        }
+                    };
+                    let magic_agree = match outcome.magic {
+                        None => r.has_magic == 0,
+                        Some((force, torque)) => r.has_magic != 0 && bits(force) == bits(r.magic_force) && bits(torque) == bits(r.magic_torque),
+                    };
+                    outcome.physics_ran && powered_agree && magic_agree
+                }
+            };
+            let a = &record.after;
+            let datum_bytes = |d: &vu::VehicleDatum| {
+                // SAFETY: as above
+                unsafe { std::mem::transmute::<vu::VehicleDatum, [u8; 88]>(*d) }
+            };
+            let same = bits(state.position) == bits(a.position)
+                && bits(state.forward) == bits(a.forward)
+                && bits(state.up) == bits(a.up)
+                && bits(state.translational_velocity) == bits(a.translational_velocity)
+                && bits(state.angular_velocity) == bits(a.angular_velocity)
+                && state.object_flags == a.object_flags
+                && state.location_leaf == a.location_leaf
+                && state.location_cluster == a.location_cluster
+                && datum_bytes(&state.vehicle) == a.vehicle;
+            if controls_agree {
+                self.vehicle_updates[5] += 1;
+            }
+            if same && controls_agree {
+                let k = &mut self.vehicle_updates;
+                k[2] += 1;
+                k[6] += outcome.physics_ran as u64;
+                k[7] += outcome.stopping as u64;
+                k[8] += (record.parented != 0) as u64;
+                k[9] += outcome.upended as u64;
+                k[10] += (record.throttle != [0.0; 3]) as u64;
+                if let Some(count) = self.vehicle_update_types.get_mut(definition.vehicle_type.max(0) as usize) {
+                    *count += 1;
+                }
+            } else if self.vehicle_updates_shown < 8 {
+                self.vehicle_updates_shown += 1;
+                println!(
+                    "  vehicle update {:#x} (type {}, definition {:#x}) differs (controls agree {controls_agree}; physics ran {}):\n    game     {:?} {:?}\n    halo_map {:?}\n    powered {:?} magic {:?}\n    game powered {:?} magic {:?}",
+                    record.vehicle_index,
+                    definition.vehicle_type,
+                    record.definition_index,
+                    outcome.physics_ran,
+                    datum(&a.vehicle),
+                    (a.position, a.translational_velocity, a.object_flags),
+                    (state.vehicle, state.position, state.translational_velocity, state.object_flags),
+                    outcome.powered,
+                    outcome.magic,
+                    physics_update.as_ref().map(|p| p.record.powered[..(p.record.powered_count as usize).min(8)].to_vec()),
+                    physics_update.as_ref().map(|p| (p.record.has_magic, p.record.magic_force, p.record.magic_torque)),
+                );
+            }
+        }
+    }
+
     /// Replays vehicles' physics updates (`physics_update`) from the state
     /// each began with, what its vehicle code gave it, and the objects and
     /// vehicles it met as they were then; compares the state it leaves and
@@ -1884,43 +2164,11 @@ impl CollisionCheck {
                 continue;
             }
             let Some(physics) = self.physics_definition(record.definition_index) else { continue };
-            // the objects its tests visited: per features call, and once each
-            let mut feature_objects: Vec<Vec<halo_map::features::FeatureObject>> = vec![Vec::new(); record.feature_calls as usize];
-            let mut seen = std::collections::HashSet::new();
-            let mut world_objects = Vec::new();
-            for (entry, matrices) in &update.objects {
-                let object = self.feature_object(entry, matrices);
-                if let Some(call) = feature_objects.get_mut(entry.call as usize) {
-                    call.push(object.clone());
-                }
-                if seen.insert(entry.object_index) {
-                    world_objects.push(halo_map::collision::WorldObject {
-                        index: entry.object_index,
-                        kind: entry.kind,
-                        flags: entry.flags,
-                        bounding_center: entry.bounding_center,
-                        bounding_radius: entry.bounding_radius,
-                        parent: entry.parent_object_index as u32,
-                        location_cluster: entry.location_cluster,
-                        region_permutations: entry.region_permutations,
-                        matrices: object.matrices.clone(),
-                        model: object.model.clone(),
-                        physics: None,
-                    });
-                }
-            }
-            let mut others = Vec::new();
-            for other in &record.others[..(record.other_count as usize).min(8)] {
-                if let Some(physics) = self.physics_definition(other.definition_index) {
-                    others.push(vp::OtherVehicle {
-                        index: other.object_index,
-                        at_rest: other.at_rest != 0,
-                        physics,
-                        origin: other.origin,
-                        forward: other.forward,
-                        up: other.up,
-                    });
-                }
+            let (feature_objects, world_objects, others) = self.vehicle_physics_objects(update);
+            self.recent_vehicle_physics.insert(record.sequence, update.clone());
+            if self.recent_vehicle_physics.len() > 1024 {
+                let newest = record.sequence;
+                self.recent_vehicle_physics.retain(|&sequence, _| newest.wrapping_sub(sequence) < 512);
             }
             let powered: Vec<vp::PoweredMassPoint> = record.powered[..(record.powered_count as usize).min(8)]
                 .iter()
@@ -2248,6 +2496,11 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        let [recorded, compared, agreed, elsewhere, missing, controls, with_physics, coasting, riding, righting, throttled] = self.vehicle_updates;
+        println!(
+            "vehicles: {} of {} vehicle updates replayed agree with the game byte for byte, with the controls handed to their physics ({} the controls alone; {} with physics, {} coasting, {} riding a parent, {} righting, {} with a throttle; by type tank/jeep/boat/plane/scout/fighter/turret {:?}); of {} recorded, left out: {} missing their physics record or objects, {} elsewhere",
+            agreed, compared, controls, with_physics, coasting, riding, righting, throttled, self.vehicle_update_types, recorded, missing, elsewhere
+        );
         let [recorded, compared, agreed, state_agreed, old, lost, elsewhere, driven, moved, frozen, ground, water, collided, antigrav] =
             self.vehicle_physics;
         println!(

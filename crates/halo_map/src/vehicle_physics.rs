@@ -266,6 +266,9 @@ pub struct PhysicsDefinition {
     pub water_depth: f32,
     pub water_density: f32,
     pub air_friction: f32,
+    pub xx_moment: f32,
+    pub yy_moment: f32,
+    pub zz_moment: f32,
     /// The inertia and inverse inertia matrices (forward, left, up rows).
     pub inertial_matrices: Vec<[[f32; 3]; 3]>,
     pub powered_mass_points: Vec<PoweredMassPointDefinition>,
@@ -330,6 +333,9 @@ impl PhysicsDefinition {
             water_depth: root.f32(p::WATER_DEPTH)?,
             water_density: root.f32(p::WATER_DENSITY)?,
             air_friction: root.f32(p::AIR_FRICTION)?,
+            xx_moment: root.f32(p::XX_MOMENT)?,
+            yy_moment: root.f32(p::YY_MOMENT)?,
+            zz_moment: root.f32(p::ZZ_MOMENT)?,
             inertial_matrices,
             powered_mass_points,
             mass_points,
@@ -867,7 +873,18 @@ fn rotate_by_angular_velocity(forward: [f32; 3], up: [f32; 3], angular_velocity:
     }
     let sine = (magnitude as f64).sin() as f32;
     let cosine = (magnitude as f64).cos() as f32;
-    // (matrix4x3_rotation_from_axis_and_angle)
+    let rotation = rotation_from_axis_and_angle(axis, sine, cosine);
+    let mut rotated_forward = crate::collision::transform_vector(&rotation, forward);
+    let mut rotated_up = crate::collision::transform_vector(&rotation, up);
+    normalize3(&mut rotated_forward);
+    let dot = -dot3(rotated_up, rotated_forward);
+    rotated_up = [dot * rotated_forward[0] + rotated_up[0], dot * rotated_forward[1] + rotated_up[1], dot * rotated_forward[2] + rotated_up[2]];
+    normalize3(&mut rotated_up);
+    (rotated_forward, rotated_up)
+}
+
+/// `matrix4x3_rotation_from_axis_and_angle`.
+pub fn rotation_from_axis_and_angle(axis: [f32; 3], sine: f32, cosine: f32) -> Matrix4x3 {
     let squared = [axis[0] * axis[0], axis[1] * axis[1], axis[2] * axis[2]];
     let scaled = [sine * axis[0], sine * axis[1], sine * axis[2]];
     let mut n = [[0.0f32; 3]; 3];
@@ -884,14 +901,7 @@ fn rotate_by_angular_velocity(forward: [f32; 3], up: [f32; 3], angular_velocity:
     n[1][2] = axis[2] * axis[1] * omc;
     n[2][1] = n[1][2] - scaled[0];
     n[1][2] = scaled[0] + n[1][2];
-    let rotation = Matrix4x3 { scale: 1.0, forward: n[0], left: n[1], up: n[2], position: [0.0; 3] };
-    let mut rotated_forward = crate::collision::transform_vector(&rotation, forward);
-    let mut rotated_up = crate::collision::transform_vector(&rotation, up);
-    normalize3(&mut rotated_forward);
-    let dot = -dot3(rotated_up, rotated_forward);
-    rotated_up = [dot * rotated_forward[0] + rotated_up[0], dot * rotated_forward[1] + rotated_up[1], dot * rotated_forward[2] + rotated_up[2]];
-    normalize3(&mut rotated_up);
-    (rotated_forward, rotated_up)
+    Matrix4x3 { scale: 1.0, forward: n[0], left: n[1], up: n[2], position: [0.0; 3] }
 }
 
 type Matrix3 = [[f32; 3]; 3];

@@ -21,7 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 15;
+pub const VERSION: u32 = 16;
+pub const PROJECTILE_RECORDS: usize = 1024;
+pub const RANDOM_DIRECTIONS: usize = 4096;
 /// The steps of each ray test's point physics.
 pub const POINT_PHYSICS_STEPS: usize = 90;
 pub const RAY_TESTS: usize = 16;
@@ -266,6 +268,55 @@ struct Gamepads {
     pads: [Gamepad; GAMEPADS],
 }
 
+/// A projectile's state, as `projectile_update` reads and leaves it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ProjectileState {
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub projectile_flags: u32,
+    pub object_flags: u32,
+    pub action: i16,
+    pub hit_material_type: i16,
+    pub ignore_object_index: i32,
+    pub target_object_index: i32,
+    pub parent_object_index: i32,
+    pub detonation_timer: f32,
+    pub detonation_timer_delta: f32,
+    pub arming_time: f32,
+    pub arming_time_delta: f32,
+    pub odometer: f32,
+    pub deceleration_timer: f32,
+    pub deceleration_timer_delta: f32,
+    pub deceleration: f32,
+    pub maximum_damage_distance: f32,
+    pub location_leaf: i32,
+    pub location_cluster: i16,
+    pub pad: i16,
+}
+
+/// One `projectile_update` the game recorded (with
+/// `game.bevy_bridge_ray_tests` on): the state before and after, the
+/// global random seed as it began and as each collision response began,
+/// and whether a collision touched an object.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ProjectileRecord {
+    pub sequence: u32,
+    pub projectile_index: u32,
+    pub definition_index: u32,
+    pub structure_bsp_index: i32,
+    pub random_seed: u32,
+    pub collision_count: u32,
+    pub collision_seeds: [u32; 4],
+    pub touched_object: u32,
+    pub before: ProjectileState,
+    pub after: ProjectileState,
+}
+
+const _: () = assert!(std::mem::size_of::<ProjectileState>() == 92);
+const _: () = assert!(std::mem::size_of::<ProjectileRecord>() == 228);
+
 #[repr(C)]
 struct OverlayHeader {
     sequence: u32,
@@ -290,6 +341,10 @@ struct Shared {
     latest_overlay: u32,
     overlay_reserved: [u32; 2],
     overlays: [OverlayHeader; OVERLAYS],
+    projectile_record_count: u32,
+    random_direction_count: u32,
+    projectile_records: [ProjectileRecord; PROJECTILE_RECORDS],
+    random_directions: [[f32; 3]; RANDOM_DIRECTIONS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -365,6 +420,7 @@ pub struct Bridge {
     _mapping: windows::Handle,
     last_frame_index: u32,
     last_overlay: Option<(u32, u32)>,
+    last_projectile_record: Option<u32>,
 }
 
 // Frames are read through volatile reads and a sequence check; the input
@@ -385,7 +441,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -457,6 +513,42 @@ impl Bridge {
     pub fn rumble(&self) -> [[u16; 2]; GAMEPADS] {
         // SAFETY: as in check()
         unsafe { std::array::from_fn(|i| std::ptr::read_volatile(&(*self.shared).gamepads.pads[i].rumble)) }
+    }
+
+    /// The projectile updates the game recorded since the last call (the
+    /// first call starts from now). Records the ring overwrote meanwhile
+    /// are skipped.
+    pub fn read_projectile_records(&mut self) -> Vec<ProjectileRecord> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence number after copying
+        unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).projectile_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_projectile_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(PROJECTILE_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).projectile_records[sequence as usize % PROJECTILE_RECORDS]);
+                if record.sequence == sequence {
+                    out.push(record);
+                }
+            }
+            self.last_projectile_record = Some(count);
+            out
+        }
+    }
+
+    /// The game's random direction table (`random_vector_in_cone3d`), once
+    /// a projectile has been recorded.
+    pub fn random_directions(&self) -> Vec<[f32; 3]> {
+        // SAFETY: as in check()
+        unsafe {
+            let count = (std::ptr::read_volatile(&(*self.shared).random_direction_count) as usize).min(RANDOM_DIRECTIONS);
+            fence(Ordering::Acquire);
+            (0..count).map(|i| std::ptr::read_volatile(&(*self.shared).random_directions[i])).collect()
+        }
     }
 
     /// Whether the game shares overlays.

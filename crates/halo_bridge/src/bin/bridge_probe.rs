@@ -118,6 +118,11 @@ fn main() {
         }
         if let (Some(check), Some(snapshot)) = (collision.as_mut(), &fresh) {
             check.check(snapshot);
+            let records = bridge.read_projectile_records();
+            if !records.is_empty() {
+                let directions = bridge.random_directions();
+                check.check_projectiles(snapshot.structure_bsp_index, &records, &directions);
+            }
         }
         if let Some(snapshot) = fresh {
             frames += 1;
@@ -204,9 +209,19 @@ struct CollisionCheck {
     clusters: std::collections::HashMap<i32, Option<halo_map::collision::StructureClusters>>,
     models: std::collections::HashMap<u32, Option<std::sync::Arc<halo_map::collision::CollisionModel>>>,
     sphere_features: u64,
+    projectile_updates: u64,
+    projectiles_replayed: u64,
+    projectiles_agreed: u64,
+    projectile_collisions: u64,
+    projectile_skipped: [u64; 4],
+    projectile_definitions: std::collections::HashMap<u32, Option<halo_map::projectile::ProjectileDefinition>>,
+    projectiles_seen: std::collections::HashSet<u32>,
+    projectile_actions: [u64; 3],
+    projectiles_shown: u32,
+    frames_shown: u32,
     hits: u64,
     largest_t_difference: f32,
-    shown: u32,
+    shown: [u32; 5],
 }
 
 impl CollisionCheck {
@@ -234,14 +249,43 @@ impl CollisionCheck {
             point_definitions: Default::default(),
             clusters: Default::default(),
             models: Default::default(),
+            projectile_updates: 0,
+            projectiles_replayed: 0,
+            projectiles_agreed: 0,
+            projectile_collisions: 0,
+            projectile_skipped: [0; 4],
+            projectile_definitions: Default::default(),
+            projectiles_seen: Default::default(),
+            projectile_actions: [0; 3],
+            projectiles_shown: 0,
+            frames_shown: 0,
             sphere_features: 0,
             hits: 0,
             largest_t_difference: 0.0,
-            shown: 0,
+            shown: [0; 5],
         }
     }
 
     fn check(&mut self, snapshot: &halo_bridge::Snapshot) {
+        let before = self.rays + self.spheres + self.pills + self.whole_tests + self.points
+            - (self.agreed + self.spheres_agreed + self.pills_agreed + self.whole_agreed + self.points_agreed);
+        self.check_frame(snapshot);
+        let after = self.rays + self.spheres + self.pills + self.whole_tests + self.points
+            - (self.agreed + self.spheres_agreed + self.pills_agreed + self.whole_agreed + self.points_agreed);
+        if after != before && self.frames_shown < 40 {
+            self.frames_shown += 1;
+            println!(
+                "  frame {} tick {} bsp {} camera {:?}: {} differ",
+                snapshot.frame_index,
+                snapshot.game_tick,
+                snapshot.structure_bsp_index,
+                snapshot.camera.map(|c| c.position),
+                after - before
+            );
+        }
+    }
+
+    fn check_frame(&mut self, snapshot: &halo_bridge::Snapshot) {
         if snapshot.ray_tests.is_empty() {
             return;
         }
@@ -346,8 +390,8 @@ impl CollisionCheck {
                     if test.object_index != u32::MAX {
                         self.object_hits_agreed += 1;
                     }
-                } else if self.shown < 10 {
-                    self.shown += 1;
+                } else if self.shown[0] < 10 {
+                    self.shown[0] += 1;
                     println!(
                         "  whole test differs: game object {:08x} node {} bsp {} t {} surface {}; halo_map {:?}",
                         test.object_index, test.object_node_index, test.object_bsp_index, test.object_t, test.object_surface_index, ours
@@ -400,8 +444,8 @@ impl CollisionCheck {
                     && collisions == test.point_collisions
                 {
                     self.points_agreed += 1;
-                } else if self.shown < 10 {
-                    self.shown += 1;
+                } else if self.shown[1] < 10 {
+                    self.shown[1] += 1;
                     println!(
                         "  point differs: game {:?} {:?} flags {} collisions {}; halo_map {:?} {:?} flags {result_flags} collisions {collisions}",
                         test.point_position, test.point_velocity, test.point_result_flags, test.point_collisions, state.position, state.velocity
@@ -425,8 +469,8 @@ impl CollisionCheck {
             };
             if pill_agrees {
                 self.pills_agreed += 1;
-            } else if self.shown < 10 {
-                self.shown += 1;
+            } else if self.shown[2] < 10 {
+                self.shown[2] += 1;
                 println!(
                     "  swept sphere differs (radius {}): game hit {} t {} surface {} normal {:?}; halo_map {:?}",
                     test.pill_radius, test.pill_hit, test.pill_t, test.pill_surface_index, test.pill_normal, pill
@@ -444,8 +488,8 @@ impl CollisionCheck {
             self.sphere_features += (features.surfaces.len() + features.edges.len() + features.vertices.len()) as u64;
             if counts == test.sphere_counts && checksum == test.sphere_checksum {
                 self.spheres_agreed += 1;
-            } else if self.shown < 10 {
-                self.shown += 1;
+            } else if self.shown[3] < 10 {
+                self.shown[3] += 1;
                 println!(
                     "  sphere differs (radius {}): game counts {:?}; halo_map {:?}",
                     test.sphere_radius, test.sphere_counts, counts
@@ -453,8 +497,8 @@ impl CollisionCheck {
             }
             if agree {
                 self.agreed += 1;
-            } else if self.shown < 5 {
-                self.shown += 1;
+            } else if self.shown[4] < 5 {
+                self.shown[4] += 1;
                 println!(
                     "  ray differs: game hit {} t {} surface {}; halo_map {:?}",
                     test.hit, test.t, test.surface_index, ours.map(|h| (h.t, h.surface))
@@ -463,7 +507,136 @@ impl CollisionCheck {
         }
     }
 
+    /// Replays the projectile updates the game recorded with halo_map's
+    /// `projectile_update`, from the state each began with and the random
+    /// seeds the game had, and compares the states they leave bit for bit.
+    /// Updates that hit an object and guided ones are left out (halo_map
+    /// doesn't port them), as are ones with more collisions than the game
+    /// records seeds for.
+    fn check_projectiles(&mut self, structure_bsp_index: i32, records: &[halo_bridge::ProjectileRecord], directions: &[[f32; 3]]) {
+        let cache = &self.cache;
+        fn load(cache: &halo_map::CacheFile, structure_bsp_index: i32) -> Option<halo_map::bsp::Bsp<'_>> {
+            let reference =
+                halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index as i32 == structure_bsp_index)?;
+            halo_map::bsp::Bsp::load(cache, &reference).ok()
+        }
+        if !self.bsps.contains_key(&structure_bsp_index) {
+            let loaded = load(cache, structure_bsp_index).and_then(|b| halo_map::collision::CollisionBsp::load(&b).ok());
+            self.bsps.insert(structure_bsp_index, loaded);
+        }
+        if !self.clusters.contains_key(&structure_bsp_index) {
+            let loaded = load(cache, structure_bsp_index).and_then(|b| halo_map::collision::StructureClusters::load(cache, &b).ok());
+            self.clusters.insert(structure_bsp_index, loaded);
+        }
+        let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
+            return;
+        };
+        let world = halo_map::collision::World { collision: bsp, clusters, objects: &[] };
+        for record in records {
+            self.projectile_updates += 1;
+            self.projectiles_seen.insert(record.projectile_index);
+            let skip = if record.structure_bsp_index != structure_bsp_index {
+                Some(0)
+            } else if record.touched_object != 0 {
+                Some(1)
+            } else if record.collision_count as usize > record.collision_seeds.len() {
+                Some(3)
+            } else {
+                None
+            };
+            if let Some(reason) = skip {
+                self.projectile_skipped[reason] += 1;
+                continue;
+            }
+            let definition = self
+                .projectile_definitions
+                .entry(record.definition_index)
+                .or_insert_with(|| halo_map::projectile::ProjectileDefinition::load(cache, record.definition_index).ok());
+            let Some(definition) = definition.as_ref() else {
+                self.projectile_skipped[0] += 1;
+                continue;
+            };
+            let b = &record.before;
+            let mut state = halo_map::projectile::ProjectileState {
+                position: b.position,
+                velocity: b.velocity,
+                flags: b.projectile_flags,
+                object_flags: b.object_flags,
+                action: b.action,
+                hit_material_type: b.hit_material_type,
+                ignore_object_index: b.ignore_object_index,
+                target_object_index: b.target_object_index,
+                parent_object_index: b.parent_object_index,
+                detonation_timer: b.detonation_timer,
+                detonation_timer_delta: b.detonation_timer_delta,
+                arming_time: b.arming_time,
+                arming_time_delta: b.arming_time_delta,
+                odometer: b.odometer,
+                deceleration_timer: b.deceleration_timer,
+                deceleration_timer_delta: b.deceleration_timer_delta,
+                deceleration: b.deceleration,
+                maximum_damage_distance: b.maximum_damage_distance,
+                location_leaf: b.location_leaf,
+                location_cluster: b.location_cluster,
+            };
+            let mut random = halo_map::projectile::Random { seed: record.random_seed, directions };
+            let seeds = &record.collision_seeds[..record.collision_count as usize];
+            let Some(summary) = halo_map::projectile::projectile_update(&world, definition, &mut state, &mut random, seeds) else {
+                self.projectile_skipped[2] += 1;
+                continue;
+            };
+            self.projectiles_replayed += 1;
+            self.projectile_collisions += record.collision_count as u64;
+            let a = &record.after;
+            let bits3 = |v: [f32; 3]| v.map(f32::to_bits);
+            let same = bits3(state.position) == bits3(a.position)
+                && bits3(state.velocity) == bits3(a.velocity)
+                && state.flags == a.projectile_flags
+                && state.object_flags == a.object_flags
+                && state.action == a.action
+                && state.hit_material_type == a.hit_material_type
+                && state.ignore_object_index == a.ignore_object_index
+                && state.detonation_timer.to_bits() == a.detonation_timer.to_bits()
+                && state.detonation_timer_delta.to_bits() == a.detonation_timer_delta.to_bits()
+                && state.arming_time.to_bits() == a.arming_time.to_bits()
+                && state.odometer.to_bits() == a.odometer.to_bits()
+                && state.deceleration_timer.to_bits() == a.deceleration_timer.to_bits()
+                && state.deceleration_timer_delta.to_bits() == a.deceleration_timer_delta.to_bits()
+                && state.deceleration.to_bits() == a.deceleration.to_bits()
+                && state.maximum_damage_distance.to_bits() == a.maximum_damage_distance.to_bits()
+                && state.location_leaf == a.location_leaf
+                && state.location_cluster == a.location_cluster
+                && summary.collisions == record.collision_count as usize;
+            if same {
+                self.projectiles_agreed += 1;
+                if let Some(count) = self.projectile_actions.get_mut(a.action as usize) {
+                    *count += 1;
+                }
+            } else if self.projectiles_shown < 10 {
+                self.projectiles_shown += 1;
+                println!(
+                    "  projectile {:#x} (definition {:#x}) differs after {} collisions (halo_map {}):\n    before {:?}\n    game   {:?}\n    halo_map {:?}",
+                    record.projectile_index, record.definition_index, record.collision_count, summary.collisions, record.before, record.after, state
+                );
+            }
+        }
+    }
+
     fn report(&self) {
+        let [other_bsp, touched_object, guided, many_collisions] = self.projectile_skipped;
+        println!(
+            "projectiles: {} of {} updates replayed agree with the game bit for bit ({} collisions; {} projectiles; ended none/detonate/disappear {:?}); of {} recorded, left out: {} hit an object, {} guided, {} with over 4 collisions, {} elsewhere",
+            self.projectiles_agreed,
+            self.projectiles_replayed,
+            self.projectile_collisions,
+            self.projectiles_seen.len(),
+            self.projectile_actions,
+            self.projectile_updates,
+            touched_object,
+            guided,
+            many_collisions,
+            other_bsp
+        );
         println!(
             "physics: {} of {} points agree with the game bit for bit after {} steps of point physics ({} collisions; {} points hit water; definition flags {:#x})",
             self.points_agreed, self.points, halo_bridge::POINT_PHYSICS_STEPS, self.point_collisions, self.points_in_water, self.point_definition_flags

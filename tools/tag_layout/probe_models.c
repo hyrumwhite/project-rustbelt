@@ -7,6 +7,7 @@ defined in the port's tag schema for models.
 #include "tag_schema_models.c"
 #include "physics/collision_bsp_definitions.h"
 #include "physics/collision_model_definitions.h"
+#include "items/projectile_definitions.h"
 
 #include <stddef.h>
 
@@ -66,3 +67,42 @@ LAYOUT_OFFSET(collision_model, nodes)
 LAYOUT_SIZE(collision_node)
 LAYOUT_OFFSET(collision_node, region_index)
 LAYOUT_OFFSET(collision_node, bsps)
+
+/* projectiles (projectiles.c) */
+LAYOUT_OFFSET(projectile_definition, projectile)
+LAYOUT_OFFSET(_projectile_definition, flags)
+LAYOUT_OFFSET(_projectile_definition, detonation_timer_starts)
+LAYOUT_OFFSET(_projectile_definition, collision_radius)
+LAYOUT_OFFSET(_projectile_definition, arming_time)
+LAYOUT_OFFSET(_projectile_definition, timer_lower_bound)
+LAYOUT_OFFSET(_projectile_definition, timer_upper_bound)
+LAYOUT_OFFSET(_projectile_definition, minimum_velocity)
+LAYOUT_OFFSET(_projectile_definition, maximum_range)
+LAYOUT_OFFSET(_projectile_definition, air_gravity_scale)
+LAYOUT_OFFSET(_projectile_definition, air_damage_range_lower_bound)
+LAYOUT_OFFSET(_projectile_definition, air_damage_range_upper_bound)
+LAYOUT_OFFSET(_projectile_definition, water_gravity_scale)
+LAYOUT_OFFSET(_projectile_definition, water_damage_range_lower_bound)
+LAYOUT_OFFSET(_projectile_definition, water_damage_range_upper_bound)
+LAYOUT_OFFSET(_projectile_definition, initial_velocity)
+LAYOUT_OFFSET(_projectile_definition, final_velocity)
+LAYOUT_OFFSET(_projectile_definition, guided_angular_velocity)
+LAYOUT_OFFSET(_projectile_definition, impact_damage)
+LAYOUT_OFFSET(_projectile_definition, material_responses)
+LAYOUT_SIZE(projectile_material_response_definition)
+LAYOUT_OFFSET(projectile_material_response_definition, flags)
+LAYOUT_OFFSET(projectile_material_response_definition, default_response)
+LAYOUT_OFFSET(projectile_material_response_definition, potential_response)
+LAYOUT_OFFSET(projectile_material_response_definition, potential_flags)
+LAYOUT_OFFSET(projectile_material_response_definition, potential_skip_fraction)
+LAYOUT_OFFSET(projectile_material_response_definition, potential_angle_lower_bound)
+LAYOUT_OFFSET(projectile_material_response_definition, potential_angle_upper_bound)
+LAYOUT_OFFSET(projectile_material_response_definition, potential_velocity_lower_bound)
+LAYOUT_OFFSET(projectile_material_response_definition, potential_velocity_upper_bound)
+LAYOUT_OFFSET(projectile_material_response_definition, scale_effects_by)
+LAYOUT_OFFSET(projectile_material_response_definition, angular_noise)
+LAYOUT_OFFSET(projectile_material_response_definition, velocity_noise)
+LAYOUT_OFFSET(projectile_material_response_definition, initial_friction)
+LAYOUT_OFFSET(projectile_material_response_definition, maximum_distance)
+LAYOUT_OFFSET(projectile_material_response_definition, parallel_friction)
+LAYOUT_OFFSET(projectile_material_response_definition, perpendicular_friction)

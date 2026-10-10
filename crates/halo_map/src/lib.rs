@@ -20,6 +20,7 @@ pub mod math;
 pub mod model;
 pub mod objects;
 pub mod physics;
+pub mod projectile;
 mod palette;
 pub mod scenario;
 pub mod shader;
@@ -52,6 +53,7 @@ pub mod groups {
     pub const COLLISION_MODEL: u32 = fourcc(b"coll");
     pub const FOG: u32 = fourcc(b"fog ");
     pub const POINT_PHYSICS: u32 = fourcc(b"pphy");
+    pub const PROJECTILE: u32 = fourcc(b"proj");
     pub const SHADER: u32 = fourcc(b"shdr");
     pub const SHADER_ENVIRONMENT: u32 = fourcc(b"senv");
     pub const SHADER_MODEL: u32 = fourcc(b"soso");

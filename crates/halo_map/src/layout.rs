@@ -16,6 +16,28 @@ pub mod _object_definition {
     pub const CHANGE_COLORS: usize = 0x164;
 }
 
+pub mod _projectile_definition {
+    pub const FLAGS: usize = 0x0;
+    pub const DETONATION_TIMER_STARTS: usize = 0x4;
+    pub const COLLISION_RADIUS: usize = 0x24;
+    pub const ARMING_TIME: usize = 0x28;
+    pub const TIMER_LOWER_BOUND: usize = 0x40;
+    pub const TIMER_UPPER_BOUND: usize = 0x44;
+    pub const MINIMUM_VELOCITY: usize = 0x48;
+    pub const MAXIMUM_RANGE: usize = 0x4c;
+    pub const AIR_GRAVITY_SCALE: usize = 0x50;
+    pub const AIR_DAMAGE_RANGE_LOWER_BOUND: usize = 0x54;
+    pub const AIR_DAMAGE_RANGE_UPPER_BOUND: usize = 0x58;
+    pub const WATER_GRAVITY_SCALE: usize = 0x5c;
+    pub const WATER_DAMAGE_RANGE_LOWER_BOUND: usize = 0x60;
+    pub const WATER_DAMAGE_RANGE_UPPER_BOUND: usize = 0x64;
+    pub const INITIAL_VELOCITY: usize = 0x68;
+    pub const FINAL_VELOCITY: usize = 0x6c;
+    pub const GUIDED_ANGULAR_VELOCITY: usize = 0x70;
+    pub const IMPACT_DAMAGE: usize = 0xa8;
+    pub const MATERIAL_RESPONSES: usize = 0xc4;
+}
+
 pub mod bitmap_data {
     pub const SIZEOF: usize = 0x30;
     pub const SIGNATURE: usize = 0x0;
@@ -167,6 +189,30 @@ pub mod player_starting_location {
     pub const POSITION: usize = 0x0;
     pub const FACING: usize = 0xc;
     pub const STRUCTURE_BSP_REFERENCE_INDEX: usize = 0x12;
+}
+
+pub mod projectile_definition {
+    pub const PROJECTILE: usize = 0x17c;
+}
+
+pub mod projectile_material_response_definition {
+    pub const SIZEOF: usize = 0xa0;
+    pub const FLAGS: usize = 0x0;
+    pub const DEFAULT_RESPONSE: usize = 0x2;
+    pub const POTENTIAL_RESPONSE: usize = 0x24;
+    pub const POTENTIAL_FLAGS: usize = 0x26;
+    pub const POTENTIAL_SKIP_FRACTION: usize = 0x28;
+    pub const POTENTIAL_ANGLE_LOWER_BOUND: usize = 0x2c;
+    pub const POTENTIAL_ANGLE_UPPER_BOUND: usize = 0x30;
+    pub const POTENTIAL_VELOCITY_LOWER_BOUND: usize = 0x34;
+    pub const POTENTIAL_VELOCITY_UPPER_BOUND: usize = 0x38;
+    pub const SCALE_EFFECTS_BY: usize = 0x5c;
+    pub const ANGULAR_NOISE: usize = 0x60;
+    pub const VELOCITY_NOISE: usize = 0x64;
+    pub const INITIAL_FRICTION: usize = 0x90;
+    pub const MAXIMUM_DISTANCE: usize = 0x94;
+    pub const PARALLEL_FRICTION: usize = 0x98;
+    pub const PERPENDICULAR_FRICTION: usize = 0x9c;
 }
 
 pub mod scenario {
@@ -399,6 +445,7 @@ pub mod sky_light {
 pub mod structure_bsp {
     pub const SIZEOF: usize = 0x288;
     pub const LIGHTMAP_GROUP: usize = 0x0;
+    pub const COLLISION_MATERIALS: usize = 0xa4;
     pub const COLLISION_BSP: usize = 0xb0;
     pub const WORLD_BOUNDS: usize = 0xc8;
     pub const LEAVES: usize = 0xe0;
@@ -414,6 +461,11 @@ pub mod structure_bsp {
 pub mod structure_cluster {
     pub const SIZEOF: usize = 0x68;
     pub const FOG_REFERENCE: usize = 0x2;
+}
+
+pub mod structure_collision_material {
+    pub const SIZEOF: usize = 0x14;
+    pub const RUNTIME_PHYSICS_MATERIAL_TYPE: usize = 0x12;
 }
 
 pub mod structure_fog_palette_entry {

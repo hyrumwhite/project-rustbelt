@@ -526,7 +526,15 @@ pub struct StructureClusters {
     /// Per cluster, its water surface (`collision_cluster_fog_plane`), if it
     /// has one.
     pub cluster_water: Vec<Option<WaterPlane>>,
+    /// Per collision material, its material type
+    /// (`runtime_physics_material_type`).
+    pub collision_material_types: Vec<i16>,
 }
+
+/// `_material_water`.
+pub const MATERIAL_WATER: i16 = 28;
+/// `NUMBER_OF_MATERIAL_TYPES`.
+const NUMBER_OF_MATERIAL_TYPES: i16 = 33;
 
 /// A cluster's water surface: its fog plane, moved by the fog's plane
 /// distance, and the material type of its top.
@@ -588,6 +596,9 @@ impl StructureClusters {
             out.cluster_portals.push(portals);
             out.cluster_water.push(water(cluster.i16(structure_cluster::FOG_REFERENCE)?)?);
         }
+        for material in bsp.root.block(s::COLLISION_MATERIALS, layout::structure_collision_material::SIZEOF)?.iter() {
+            out.collision_material_types.push(material.i16(layout::structure_collision_material::RUNTIME_PHYSICS_MATERIAL_TYPE)?);
+        }
         // (structure_cluster_portal, 0x40 bytes: its vertices at 0x34)
         for portal in bsp.root.block(s::CLUSTER_PORTALS, 0x40)?.iter() {
             out.portals.push(Portal {
@@ -599,6 +610,30 @@ impl StructureClusters {
             });
         }
         Ok(out)
+    }
+
+    /// `collision_structure_material_type`: NONE for no material, one the
+    /// structure doesn't have, or a type that is none.
+    pub fn structure_material_type(&self, material_index: i16) -> i16 {
+        if material_index < 0 {
+            return NONE as i16;
+        }
+        match self.collision_material_types.get(material_index as usize) {
+            Some(&t) if t == NONE as i16 || (0..NUMBER_OF_MATERIAL_TYPES).contains(&t) => t,
+            _ => NONE as i16,
+        }
+    }
+
+    /// `scenario_location_from_point`: the leaf and cluster a point is in.
+    pub fn location_from_point(&self, collision: &CollisionBsp, point: [f32; 3]) -> (i32, i16) {
+        let leaf = collision.leaf_from_point(point);
+        if leaf == NONE {
+            return (NONE, NONE as i16);
+        }
+        match self.leaf_clusters.get((leaf & i32::MAX) as usize) {
+            Some(&cluster) => (leaf, cluster),
+            None => (NONE, NONE as i16),
+        }
     }
 
     /// `collision_cluster_index_from_leaf`.
@@ -748,6 +783,10 @@ pub struct CollisionResult {
     /// The leaf and cluster the ray ended in (NONE outside the world).
     pub location_leaf: i32,
     pub location_cluster: i16,
+    /// The material type hit (NONE for none).
+    pub material_type: i16,
+    /// The surface's flags (`collision_surface_flags`).
+    pub surface_flags: u8,
 }
 
 /// `matrix4x3_transform_plane`.
@@ -786,6 +825,7 @@ pub mod test_flags {
     pub const STRUCTURE: u32 = 1 << 5;
     pub const MEDIA: u32 = 1 << 6;
     pub const OBJECTS: u32 = 1 << 7;
+    pub const TRY_TO_KEEP_LOCATION_VALID: u32 = 1 << 20;
     pub const FIRST_OBJECT_TYPE: u32 = 8;
     pub const ALL_OBJECT_TYPES: u32 = ((1 << 12) - 1) << FIRST_OBJECT_TYPE;
 }
@@ -825,6 +865,8 @@ impl World<'_> {
             surface: NONE,
             location_leaf: NONE,
             location_cluster: NONE as i16,
+            material_type: NONE as i16,
+            surface_flags: 0,
         };
         let mut best: Option<WorldHit> = None;
         let mut t = 1.0f32;
@@ -836,6 +878,8 @@ impl World<'_> {
             best = Some(WorldHit { t, object: None, node: NONE as i16, bsp: NONE as i16, surface: hit.surface as i32 });
             result.kind = Some(CollisionKind::Structure);
             result.plane = if hit.plane_designator & SIGN != 0 { negate_plane(hit.plane) } else { hit.plane };
+            result.material_type = self.clusters.structure_material_type(hit.material);
+            result.surface_flags = hit.flags;
         }
         if let (Some(&first), Some(&last)) = (leaves.first(), leaves.last()) {
             let _ = first;
@@ -859,6 +903,13 @@ impl World<'_> {
                     t = water_t;
                     result.kind = Some(CollisionKind::Media);
                     result.plane = if point_distance < 0.0 { negate_plane(plane) } else { plane };
+                    result.material_type = if point_distance < 0.0 {
+                        MATERIAL_WATER
+                    } else if (0..NUMBER_OF_MATERIAL_TYPES).contains(&water.material_type) {
+                        water.material_type
+                    } else {
+                        NONE as i16
+                    };
                     best = Some(WorldHit { t, object: None, node: NONE as i16, bsp: NONE as i16, surface: NONE });
                 }
             }
@@ -916,11 +967,33 @@ impl World<'_> {
             }
         }
         // (COLLISION_POINT_FROM_LINE3D)
-        result.point = [
-            vector[0] * result.t + point[0],
-            vector[1] * result.t + point[1],
-            vector[2] * result.t + point[2],
-        ];
+        let point_at = |t: f32| [vector[0] * t + point[0], vector[1] * t + point[1], vector[2] * t + point[2]];
+        result.point = point_at(result.t);
+        // (the hit point in the leaf the ray found, if it can be)
+        if flags & test_flags::TRY_TO_KEEP_LOCATION_VALID != 0
+            && result.kind.is_some()
+            && result.location_leaf != NONE
+            && self.collision.leaf_from_point(result.point) != result.location_leaf
+        {
+            const NUDGE: f32 = 0.00024414062;
+            let n = [result.plane[0], result.plane[1], result.plane[2]];
+            result.point = [n[0] * NUDGE + result.point[0], n[1] * NUDGE + result.point[1], n[2] * NUDGE + result.point[2]];
+            (result.location_leaf, result.location_cluster) = self.clusters.location_from_point(self.collision, result.point);
+            if result.location_leaf == NONE {
+                let vector_dot = dot3(vector, n);
+                // (C's fabs is the double one)
+                let step = if vector_dot != 0.0 { (NUDGE as f64 / (vector_dot as f64).abs()) as f32 } else { 0.03125 };
+                loop {
+                    let t = result.t - step;
+                    result.t = if t < 0.0 { 0.0 } else { t };
+                    result.point = point_at(result.t);
+                    (result.location_leaf, result.location_cluster) = self.clusters.location_from_point(self.collision, result.point);
+                    if result.t <= 0.0 || result.location_leaf != NONE {
+                        break;
+                    }
+                }
+            }
+        }
         result
     }
 

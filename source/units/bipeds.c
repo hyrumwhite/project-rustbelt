@@ -522,6 +522,8 @@ static void biped_melee_impact(
 static boolean biped_rust_update(
 	long biped_index,
 	struct unit_animation_update_data *animation);
+static boolean biped_rust_player_melee(
+	long biped_index);
 static void biped_falling_damage(
 	long biped_index,
 	real collision_velocity);
@@ -4375,7 +4377,13 @@ boolean biped_update(
 		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
 		bevy_bridge_melee_begin(biped_index, biped->unit.player_index != NONE ?
 			unit_inventory_get_weapon(biped_index, unit_get(biped_index)->unit.current_weapon_index) : NONE);
-		if (!biped->biped.player_melee_ticks)
+		/* port: the Rust port's step in place of the game's, or (in check
+		mode) checked against it (halo_sim.c) */
+		if (halo_sim_mode(_halo_sim_player_melee) != _halo_sim_mode_c &&
+			biped_rust_player_melee(biped_index))
+		{
+		}
+		else if (!biped->biped.player_melee_ticks)
 		{
 			if (biped->unit.player_index!=NONE &&
 				TEST_FLAG(biped->unit.control_flags, _unit_control_use_equipment_bit))
@@ -4438,6 +4446,7 @@ boolean biped_update(
 			}
 			--biped->biped.player_melee_ticks;
 		}
+		halo_sim_player_melee_check(biped_index); /* port: (halo_sim.c) */
 		bevy_bridge_melee_end(biped_index); /* port: (bevy_bridge.c) */
 
 		/* port: (bevy_bridge.c) */
@@ -4643,4 +4652,42 @@ void biped_rust_slipping_footsteps(
 	struct unit_animation_update_data animation;
 
 	biped_update_slipping(biped_index, &animation);
+}
+
+/* the Rust port's player melee step, with its weapon, when it runs or is
+checked */
+static boolean biped_rust_player_melee(
+	long biped_index)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+	struct unit_definition *unit_definition = unit_definition_get(biped->definition_index);
+	long weapon_index = unit_inventory_get_weapon(biped_index, unit_get(biped_index)->unit.current_weapon_index);
+
+	return halo_sim_player_melee(biped_index, weapon_index,
+		weapon_index != NONE && weapon_prevents_melee_attack(weapon_index),
+		unit_definition->object.animation_graph.index,
+		unit_animation_enhanced(biped_index));
+}
+
+/* a player melee started (its action already playing): the weapon's
+reload stopped and the first-person weapon told */
+void biped_rust_melee_started(
+	long biped_index,
+	long weapon_index)
+{
+	bevy_bridge_melee_event(biped_index, 1);
+	if (weapon_index != NONE)
+	{
+		weapon_stop_reload(weapon_index);
+		first_person_weapon_message_from_unit(
+			biped_index,
+			_first_person_weapon_message_melee);
+	}
+}
+
+void biped_rust_melee_damage(
+	long biped_index)
+{
+	bevy_bridge_melee_event(biped_index, 2);
+	unit_cause_player_melee_damage(biped_index);
 }

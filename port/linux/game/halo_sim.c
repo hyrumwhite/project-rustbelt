@@ -48,7 +48,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 11
+#define HALO_SIM_VERSION 12
 
 /* ---------- structures */
 
@@ -503,6 +503,33 @@ struct halo_sim_unit_animation_callbacks
 	long (*effect)(unsigned long unit_index, struct halo_sim_unit_animation_state *state, unsigned long effect);
 };
 
+/* crates/halo_sim's MeleeCall and MeleeCallbacks */
+struct halo_sim_melee_call
+{
+	unsigned long biped_index;
+	long unit_graph_index;
+	unsigned long enhanced_animation;
+	unsigned long use_equipment;
+	unsigned long in_seat;
+	unsigned long zoomed;
+	long weapon_index;
+	unsigned long weapon_definition_index;
+	unsigned long weapon_prevents;
+	char ticks;
+	char attack_tick;
+	short pad;
+	struct halo_sim_unit_animation_state animation;
+	unsigned long random_seed;
+	unsigned long started;
+	unsigned long damaged;
+};
+
+struct halo_sim_melee_callbacks
+{
+	void (*started)(unsigned long biped_index, long weapon_index, struct halo_sim_unit_animation_state *state);
+	void (*damage)(unsigned long biped_index);
+};
+
 /* crates/halo_sim's UpdateCallbacks */
 struct halo_sim_update_callbacks
 {
@@ -660,6 +687,7 @@ struct halo_sim_host
 	struct halo_sim_moving_callbacks moving;
 	struct halo_sim_update_callbacks biped_update;
 	struct halo_sim_unit_animation_callbacks unit_animation;
+	struct halo_sim_melee_callbacks melee;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -703,6 +731,7 @@ typedef long (*halo_sim_vehicle_update_function)(struct halo_sim_vehicle_update_
 typedef long (*halo_sim_moving_function)(struct halo_sim_moving_call *call);
 typedef long (*halo_sim_update_function)(struct halo_sim_update_call *call);
 typedef long (*halo_sim_unit_animation_function)(struct halo_sim_unit_animation_call *call);
+typedef long (*halo_sim_melee_function)(struct halo_sim_melee_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -741,6 +770,8 @@ static struct
 	halo_sim_update_function biped_update_check;
 	halo_sim_unit_animation_function unit_animation;
 	halo_sim_unit_animation_function unit_animation_check;
+	halo_sim_melee_function player_melee;
+	halo_sim_melee_function player_melee_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -767,7 +798,21 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"biped_moving",
 	"biped_update",
 	"unit_animation",
+	"player_melee",
 };
+
+/* the player melee checks: the step the game's began with, and the
+comparisons */
+static struct
+{
+	boolean recording;
+	long biped_index;
+	struct halo_sim_melee_call call;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long started;
+	unsigned long damaged;
+} halo_sim_melee_checks;
 
 /* the unit animation checks: the update the game's began with, and the
 comparisons */
@@ -1679,6 +1724,22 @@ static void halo_sim_unit_animation_state_store(long unit_index, struct halo_sim
 	unit->object.animation.animation_graph_index = state->object_animation_graph_index;
 }
 
+/* bipeds.c's, a player melee's side effects */
+void biped_rust_melee_started(long biped_index, long weapon_index);
+void biped_rust_melee_damage(long biped_index);
+
+static void halo_sim_melee_started(unsigned long biped_index, long weapon_index, struct halo_sim_unit_animation_state *state)
+{
+	halo_sim_unit_animation_state_store((long)biped_index, state);
+	biped_rust_melee_started((long)biped_index, weapon_index);
+	halo_sim_unit_animation_state_load((long)biped_index, state);
+}
+
+static void halo_sim_melee_damage(unsigned long biped_index)
+{
+	biped_rust_melee_damage((long)biped_index);
+}
+
 /* units.c's, a unit animation's side effect */
 void unit_rust_animation_effect(long unit_index, unsigned long effect);
 
@@ -1772,6 +1833,10 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		halo_sim_update_set_random_seed,
 		halo_sim_unit_animation_effect,
 	},
+	{
+		halo_sim_melee_started,
+		halo_sim_melee_damage,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -1826,6 +1891,8 @@ static void halo_sim_initialize(void)
 	halo_sim.biped_update_check = (halo_sim_update_function)halo_sim_symbol(library, "halo_sim_biped_update_check");
 	halo_sim.unit_animation = (halo_sim_unit_animation_function)halo_sim_symbol(library, "halo_sim_unit_animation_update");
 	halo_sim.unit_animation_check = (halo_sim_unit_animation_function)halo_sim_symbol(library, "halo_sim_unit_animation_check");
+	halo_sim.player_melee = (halo_sim_melee_function)halo_sim_symbol(library, "halo_sim_player_melee");
+	halo_sim.player_melee_check = (halo_sim_melee_function)halo_sim_symbol(library, "halo_sim_player_melee_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -1833,7 +1900,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.vehicle_update || !halo_sim.vehicle_update_check ||
 		!halo_sim.biped_moving || !halo_sim.biped_moving_check ||
 		!halo_sim.biped_update || !halo_sim.biped_update_check ||
-		!halo_sim.unit_animation || !halo_sim.unit_animation_check)
+		!halo_sim.unit_animation || !halo_sim.unit_animation_check ||
+		!halo_sim.player_melee || !halo_sim.player_melee_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -3499,5 +3567,101 @@ void halo_sim_unit_animation_check(long unit_index, short result)
 			halo_sim_unit_animation_checks.compared - halo_sim_unit_animation_checks.differed,
 			halo_sim_unit_animation_checks.compared, halo_sim_unit_animation_checks.effects,
 			halo_sim_unit_animation_checks.skipped);
+	}
+}
+
+/* ---------- player melee */
+
+static void halo_sim_melee_call_new(long biped_index, long weapon_index, int weapon_prevents, long unit_graph_index,
+	int enhanced_animation, struct halo_sim_melee_call *call)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	memset(call, 0, sizeof(*call));
+	call->biped_index = (unsigned long)biped_index;
+	call->unit_graph_index = unit_graph_index;
+	call->enhanced_animation = enhanced_animation ? 1 : 0;
+	call->use_equipment = biped->unit.player_index != NONE &&
+		TEST_FLAG(biped->unit.control_flags, _unit_control_use_equipment_bit);
+	call->in_seat = biped->unit.parent_seat_index != NONE;
+	call->zoomed = biped->unit.current_zoom_level != NONE;
+	call->weapon_index = weapon_index;
+	call->weapon_definition_index = weapon_index != NONE ? (unsigned long)object_get(weapon_index)->definition_index : NONE;
+	call->weapon_prevents = weapon_prevents ? 1 : 0;
+	call->ticks = biped->biped.player_melee_ticks;
+	call->attack_tick = biped->biped.player_melee_attack_tick;
+	halo_sim_unit_animation_state_load(biped_index, &call->animation);
+	call->random_seed = get_random_seed();
+}
+
+int halo_sim_player_melee(long biped_index, long weapon_index, int weapon_prevents, long unit_graph_index,
+	int enhanced_animation)
+{
+	short mode = halo_sim_mode(_halo_sim_player_melee);
+	struct halo_sim_melee_call call;
+	struct biped_datum *biped;
+
+	halo_sim_melee_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	halo_sim_melee_call_new(biped_index, weapon_index, weapon_prevents, unit_graph_index, enhanced_animation,
+		mode == _halo_sim_mode_check ? &halo_sim_melee_checks.call : &call);
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_melee_checks.biped_index = biped_index;
+		halo_sim_melee_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	if (halo_sim.player_melee(&call) != 0)
+		return FALSE;
+	biped = biped_get(biped_index);
+	biped->biped.player_melee_ticks = call.ticks;
+	biped->biped.player_melee_attack_tick = call.attack_tick;
+	halo_sim_unit_animation_state_store(biped_index, &call.animation);
+
+	return TRUE;
+}
+
+void halo_sim_player_melee_check(long biped_index)
+{
+	struct halo_sim_melee_call call;
+	struct halo_sim_unit_animation_state game;
+	struct biped_datum *biped;
+
+	if (!halo_sim_melee_checks.recording)
+		return;
+	halo_sim_melee_checks.recording = FALSE;
+	if (halo_sim_melee_checks.biped_index != biped_index)
+		return;
+	call = halo_sim_melee_checks.call;
+	if (halo_sim.player_melee_check(&call) != 0)
+		return;
+
+	biped = biped_get(biped_index);
+	halo_sim_unit_animation_state_load(biped_index, &game);
+	halo_sim_melee_checks.compared++;
+	halo_sim_melee_checks.started += call.started;
+	halo_sim_melee_checks.damaged += call.damaged;
+	if (call.ticks != biped->biped.player_melee_ticks || call.attack_tick != biped->biped.player_melee_attack_tick ||
+		memcmp(&call.animation, &game, sizeof(game)) != 0)
+	{
+		halo_sim_melee_checks.differed++;
+		if (halo_sim_melee_checks.differed <= 8)
+		{
+			platform_log("halo_sim: player melee differs: biped %lx weapon %lx from ticks %d/%d: game %d/%d action %d/%d, rust %d/%d action %d/%d (started %lu)",
+				(unsigned long)biped_index, (unsigned long)halo_sim_melee_checks.call.weapon_index,
+				halo_sim_melee_checks.call.ticks, halo_sim_melee_checks.call.attack_tick,
+				biped->biped.player_melee_ticks, biped->biped.player_melee_attack_tick,
+				game.action, game.action_animation_index, call.ticks, call.attack_tick,
+				call.animation.action, call.animation.action_animation_index, call.started);
+		}
+	}
+	if ((halo_sim_melee_checks.compared & 0x3fff) == 0 ||
+		(halo_sim_melee_checks.compared & (halo_sim_melee_checks.compared - 1)) == 0)
+	{
+		platform_log("halo_sim: player melee: %lu of %lu agree with the game (%lu started, %lu landing)",
+			halo_sim_melee_checks.compared - halo_sim_melee_checks.differed, halo_sim_melee_checks.compared,
+			halo_sim_melee_checks.started, halo_sim_melee_checks.damaged);
 	}
 }

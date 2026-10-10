@@ -24,6 +24,7 @@ enum
 	_halo_sim_biped_moving,
 	_halo_sim_biped_update,
 	_halo_sim_unit_animation,
+	_halo_sim_player_melee,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -207,5 +208,15 @@ int halo_sim_unit_animation_update(long unit_index, void *animation, char const 
 	short magic_base_seat_index, long unit_graph_index, int destroyed_after_dying, int has_no_dying_airborne,
 	short *result);
 void halo_sim_unit_animation_check(long unit_index, short result);
+
+/* bipeds.c's player melee step, with its weapon (NONE for none) and whether
+the weapon prevents a melee, the unit definition's graph and
+unit_animation_enhanced: TRUE when the Rust port ran it (the reload's
+stopping, the first-person message and the damage the game's, called
+back); in check mode it notes what the game's step begins with, and
+halo_sim_player_melee_check compares Rust's replay of it */
+int halo_sim_player_melee(long biped_index, long weapon_index, int weapon_prevents, long unit_graph_index,
+	int enhanced_animation);
+void halo_sim_player_melee_check(long biped_index);
 
 #endif // __HALO_SIM_H

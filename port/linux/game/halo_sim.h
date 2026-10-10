@@ -15,6 +15,7 @@ C one system at a time (the object simulation handing off to Rust).
 enum
 {
 	_halo_sim_point_physics = 0,
+	_halo_sim_poses,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -60,5 +61,22 @@ void halo_sim_point_physics_check(
 	void const *velocity,
 	void const *collision_normal,
 	short const *collision_material_type);
+
+/* objects.c's object_compute_node_matrices: a pose's orientations (the
+animation's frame or the model's pose, the object's overlays and scale).
+TRUE when the Rust port wrote them (and world_relative and frame_index); in
+check mode it runs and keeps its result for halo_sim_pose_orientations_check */
+int halo_sim_pose_orientations(long object_index, short node_count, void *orientations,
+	int *world_relative, short *frame_index);
+void halo_sim_pose_orientations_check(long object_index, short node_count, void const *orientations,
+	int world_relative);
+/* and its interpolation and node matrices, from the orientations the object
+type's preprocess left: TRUE when the Rust port wrote them (the orientations
+interpolated in place); in check mode it runs on copies, compared by
+halo_sim_pose_matrices_check once the game's own have run */
+int halo_sim_pose_matrices(long object_index, short node_count, int world_relative,
+	void const *parent_node_matrix, void *orientations, void *matrices);
+void halo_sim_pose_matrices_check(long object_index, short node_count, void const *orientations,
+	void const *matrices);
 
 #endif // __HALO_SIM_H

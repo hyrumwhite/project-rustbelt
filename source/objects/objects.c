@@ -54,6 +54,7 @@ OBJECTS.C
 #include "structures/structure_bsp_definitions.h"
 #include "units/units.h"
 #include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 /* port: object_bounds_cache.c's */
 void object_bounds_cache_update(long object_index, real_point3d const *center, real radius);
 
@@ -2502,6 +2503,11 @@ void object_compute_node_matrices(
 
 		world_relative = FALSE;
 
+		/* port: run by the Rust port where it takes over
+		(port/linux/game/halo_sim.c) */
+		if (!halo_sim_pose_orientations(object_index, model_node_count, node_orientations, &world_relative,
+			&bevy_bridge_frame_index))
+		{
 		if (object->object.animation.animation_graph_index!=NONE)
 		{
 			if (object->object.animation.state.index!=NONE)
@@ -2615,6 +2621,9 @@ void object_compute_node_matrices(
 			node_orientations[0].translation.y*= object->object.scale;
 			node_orientations[0].translation.z*= object->object.scale;
 		}
+		}
+		/* port: (halo_sim.c's check mode) */
+		halo_sim_pose_orientations_check(object_index, model_node_count, node_orientations, world_relative);
 
 
 		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
@@ -2625,6 +2634,13 @@ void object_compute_node_matrices(
 			object_type_preprocess_node_orientations(object_index, node_orientations);
 		}
 		bevy_bridge_pose_preprocessed(object_index, node_orientations);
+
+		/* port: run by the Rust port where it takes over (halo_sim.c) */
+		if (halo_sim_pose_matrices(object_index, model_node_count, world_relative, object_node_matrix,
+			node_orientations, object_nodes))
+		{
+			goto pose_matrices_done;
+		}
 
 		if (object->object.animation.interpolation_frame_count>0)
 		{
@@ -2931,6 +2947,9 @@ void object_compute_node_matrices(
 				break;
 			}
 		}
+		/* port: (halo_sim.c's check mode) */
+		halo_sim_pose_matrices_check(object_index, model_node_count, node_orientations, object_nodes);
+	pose_matrices_done:;
 	}
 	else
 	{

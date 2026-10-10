@@ -19,6 +19,7 @@ pub mod layout;
 pub mod math;
 pub mod model;
 pub mod objects;
+pub mod physics;
 mod palette;
 pub mod scenario;
 pub mod shader;
@@ -49,6 +50,8 @@ pub mod groups {
     pub const STRUCTURE_BSP: u32 = fourcc(b"sbsp");
     pub const BITMAP: u32 = fourcc(b"bitm");
     pub const COLLISION_MODEL: u32 = fourcc(b"coll");
+    pub const FOG: u32 = fourcc(b"fog ");
+    pub const POINT_PHYSICS: u32 = fourcc(b"pphy");
     pub const SHADER: u32 = fourcc(b"shdr");
     pub const SHADER_ENVIRONMENT: u32 = fourcc(b"senv");
     pub const SHADER_MODEL: u32 = fourcc(b"soso");

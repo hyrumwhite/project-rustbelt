@@ -406,10 +406,31 @@ pub mod structure_bsp {
     pub const LIGHTMAPS: usize = 0x104;
     pub const CLUSTERS: usize = 0x134;
     pub const CLUSTER_PORTALS: usize = 0x154;
+    pub const FOG_PLANES: usize = 0x178;
+    pub const FOG_REGIONS: usize = 0x184;
+    pub const FOG_PALETTE: usize = 0x190;
 }
 
 pub mod structure_cluster {
     pub const SIZEOF: usize = 0x68;
+    pub const FOG_REFERENCE: usize = 0x2;
+}
+
+pub mod structure_fog_palette_entry {
+    pub const SIZEOF: usize = 0x88;
+    pub const FOG: usize = 0x20;
+}
+
+pub mod structure_fog_plane {
+    pub const SIZEOF: usize = 0x20;
+    pub const REGION_INDEX: usize = 0x0;
+    pub const RUNTIME_MATERIAL_TYPE: usize = 0x2;
+    pub const PLANE: usize = 0x4;
+}
+
+pub mod structure_fog_region {
+    pub const SIZEOF: usize = 0x28;
+    pub const FOG_PALETTE_INDEX: usize = 0x24;
 }
 
 pub mod structure_leaf {

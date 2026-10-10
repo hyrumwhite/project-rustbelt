@@ -168,6 +168,17 @@ fn main() {
     }
 }
 
+/// `normalize3d` then `scale_vector3d(v, scale)`, as the game does them.
+fn normalize_and_scale(v: [f32; 3], length: f32, scale: f32) -> [f32; 3] {
+    let normalized = if length.abs() < 0.0001 {
+        v
+    } else {
+        let inverse = 1.0 / length;
+        [v[0] * inverse, v[1] * inverse, v[2] * inverse]
+    };
+    [normalized[0] * scale, normalized[1] * scale, normalized[2] * scale]
+}
+
 /// The game's ray tests against halo_map's collision code: how many agree
 /// (hit or miss, the surface, and t to within a millionth).
 struct CollisionCheck {
@@ -184,6 +195,12 @@ struct CollisionCheck {
     object_hits_agreed: u64,
     whole_tests: u64,
     whole_agreed: u64,
+    points: u64,
+    points_agreed: u64,
+    point_collisions: u64,
+    points_in_water: u64,
+    point_definition_flags: u32,
+    point_definitions: std::collections::HashMap<u32, Option<halo_map::physics::PointPhysicsDefinition>>,
     clusters: std::collections::HashMap<i32, Option<halo_map::collision::StructureClusters>>,
     models: std::collections::HashMap<u32, Option<std::sync::Arc<halo_map::collision::CollisionModel>>>,
     sphere_features: u64,
@@ -209,6 +226,12 @@ impl CollisionCheck {
             object_hits_agreed: 0,
             whole_tests: 0,
             whole_agreed: 0,
+            points: 0,
+            points_agreed: 0,
+            point_collisions: 0,
+            points_in_water: 0,
+            point_definition_flags: 0,
+            point_definitions: Default::default(),
             clusters: Default::default(),
             models: Default::default(),
             sphere_features: 0,
@@ -245,7 +268,7 @@ impl CollisionCheck {
                     .into_iter()
                     .find(|r| r.index as i32 == snapshot.structure_bsp_index)?;
                 let loaded = halo_map::bsp::Bsp::load(cache, &reference).ok()?;
-                halo_map::collision::StructureClusters::load(&loaded).ok()
+                halo_map::collision::StructureClusters::load(cache, &loaded).ok()
             })
             .as_ref();
         let Some(clusters) = clusters else { return };
@@ -331,6 +354,60 @@ impl CollisionCheck {
                     );
                 }
             }
+            // the point physics
+            let definition = *self.point_definitions.entry(snapshot.point_physics_definition).or_insert_with(|| {
+                (snapshot.point_physics_definition != u32::MAX)
+                    .then(|| halo_map::physics::PointPhysicsDefinition::load(cache, snapshot.point_physics_definition).ok())
+                    .flatten()
+            });
+            if let Some(definition) = definition {
+                let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects };
+                let length = (test.vector[0] * test.vector[0] + test.vector[1] * test.vector[1] + test.vector[2] * test.vector[2]).sqrt();
+                let mut state = halo_map::physics::PointState {
+                    position: test.point,
+                    velocity: normalize_and_scale(test.vector, length, 15.0),
+                    location_leaf: -1,
+                    location_cluster: -1,
+                };
+                let mut result_flags = 0;
+                let mut collisions = 0;
+                for _ in 0..halo_bridge::POINT_PHYSICS_STEPS {
+                    let (result, _) = halo_map::physics::point_physics_update(
+                        &world,
+                        0,
+                        &definition,
+                        &mut state,
+                        [0.0; 3],
+                        test.point_underwater != 0,
+                        None,
+                        test.point_radius,
+                        1.0 / 30.0,
+                    );
+                    result_flags |= result;
+                    if result & (halo_map::physics::result_flags::COLLIDED_WITH_STRUCTURE | halo_map::physics::result_flags::COLLIDED_WITH_WATER) != 0 {
+                        collisions += 1;
+                    }
+                }
+                self.points += 1;
+                self.point_collisions += collisions as u64;
+                self.point_definition_flags = definition.flags;
+                if test.point_result_flags & halo_map::physics::result_flags::COLLIDED_WITH_WATER != 0 {
+                    self.points_in_water += 1;
+                }
+                if state.position.map(f32::to_bits) == test.point_position.map(f32::to_bits)
+                    && state.velocity.map(f32::to_bits) == test.point_velocity.map(f32::to_bits)
+                    && result_flags == test.point_result_flags
+                    && collisions == test.point_collisions
+                {
+                    self.points_agreed += 1;
+                } else if self.shown < 10 {
+                    self.shown += 1;
+                    println!(
+                        "  point differs: game {:?} {:?} flags {} collisions {}; halo_map {:?} {:?} flags {result_flags} collisions {collisions}",
+                        test.point_position, test.point_velocity, test.point_result_flags, test.point_collisions, state.position, state.velocity
+                    );
+                }
+            }
             // the swept sphere
             let pill = bsp.test_pill(test.point, test.pill_vector, test.pill_radius, f32::MAX);
             self.pills += 1;
@@ -387,6 +464,10 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        println!(
+            "physics: {} of {} points agree with the game bit for bit after {} steps of point physics ({} collisions; {} points hit water; definition flags {:#x})",
+            self.points_agreed, self.points, halo_bridge::POINT_PHYSICS_STEPS, self.point_collisions, self.points_in_water, self.point_definition_flags
+        );
         println!(
             "collision: {} of {} whole ray tests (structure and objects, the broad phase in Rust) agree with the game bit for bit; {} of {} that hit an object",
             self.whole_agreed, self.whole_tests, self.object_hits_agreed, self.object_hits

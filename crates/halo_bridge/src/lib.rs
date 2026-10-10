@@ -21,7 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 14;
+pub const VERSION: u32 = 15;
+/// The steps of each ray test's point physics.
+pub const POINT_PHYSICS_STEPS: usize = 90;
 pub const RAY_TESTS: usize = 16;
 pub const MAXIMUM_LIGHTS: usize = 64;
 pub const MAXIMUM_OBJECTS: usize = 4096;
@@ -141,6 +143,17 @@ pub struct RayTest {
     pub object_bsp_index: i16,
     pub object_t: f32,
     pub object_surface_index: i32,
+    /// A point launched from the ray's start along it at 15 world units a
+    /// second (`point_physics_update`, no wind, under water if
+    /// `point_underwater`): where it was after [`POINT_PHYSICS_STEPS`]
+    /// steps of 1/30 s, its velocity, the steps' result flags or'd, and how
+    /// many steps collided.
+    pub point_radius: f32,
+    pub point_underwater: u32,
+    pub point_position: [f32; 3],
+    pub point_velocity: [f32; 3],
+    pub point_result_flags: u32,
+    pub point_collisions: u32,
 }
 
 /// FNV-1a over 32-bit indices, as the game checksums a sphere test's.
@@ -167,6 +180,7 @@ struct Frame {
     lights: [Light; MAXIMUM_LIGHTS],
     ray_test_count: u32,
     ray_tests: [RayTest; RAY_TESTS],
+    point_physics_definition: u32,
     object_count: u32,
     node_count: u32,
     objects: [Object; MAXIMUM_OBJECTS],
@@ -298,6 +312,9 @@ pub struct Snapshot {
     pub camera: Option<Camera>,
     pub lights: Vec<Light>,
     pub ray_tests: Vec<RayTest>,
+    /// The point physics definition the ray tests' points use (`u32::MAX`
+    /// for none).
+    pub point_physics_definition: u32,
     pub objects: Vec<Object>,
     pub nodes: Vec<Node>,
 }
@@ -521,6 +538,7 @@ impl Bridge {
                         .then(|| std::ptr::read_volatile(&(*frame).camera)),
                     lights: (0..light_count).map(|i| std::ptr::read_volatile(&(*frame).lights[i])).collect(),
                     ray_tests: (0..ray_test_count).map(|i| std::ptr::read_volatile(&(*frame).ray_tests[i])).collect(),
+                    point_physics_definition: std::ptr::read_volatile(&(*frame).point_physics_definition),
                     objects: (0..object_count).map(|i| std::ptr::read_volatile(&(*frame).objects[i])).collect(),
                     nodes: (0..node_count).map(|i| std::ptr::read_volatile(&(*frame).nodes[i])).collect(),
                 };

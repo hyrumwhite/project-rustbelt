@@ -523,6 +523,17 @@ pub struct StructureClusters {
     /// Per cluster, its portals.
     pub cluster_portals: Vec<Vec<i16>>,
     pub portals: Vec<Portal>,
+    /// Per cluster, its water surface (`collision_cluster_fog_plane`), if it
+    /// has one.
+    pub cluster_water: Vec<Option<WaterPlane>>,
+}
+
+/// A cluster's water surface: its fog plane, moved by the fog's plane
+/// distance, and the material type of its top.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WaterPlane {
+    pub plane: [f32; 4],
+    pub material_type: i16,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -540,9 +551,34 @@ const MAXIMUM_VERTICES_PER_CLUSTER_PORTAL: usize = 128;
 const MAXIMUM_CLUSTERS_PER_STRUCTURE: usize = 512;
 
 impl StructureClusters {
-    pub fn load(bsp: &Bsp<'_>) -> Result<Self> {
-        use layout::{structure_bsp as s, structure_cluster, structure_leaf};
+    pub fn load(cache: &CacheFile, bsp: &Bsp<'_>) -> Result<Self> {
+        use layout::{structure_bsp as s, structure_cluster, structure_fog_palette_entry, structure_fog_plane, structure_fog_region, structure_leaf};
         let mut out = StructureClusters::default();
+        // water: cluster -> fog plane -> region -> palette entry -> fog
+        let fog_planes = bsp.root.block(s::FOG_PLANES, structure_fog_plane::SIZEOF)?;
+        let fog_regions = bsp.root.block(s::FOG_REGIONS, structure_fog_region::SIZEOF)?;
+        let fog_palette = bsp.root.block(s::FOG_PALETTE, structure_fog_palette_entry::SIZEOF)?;
+        let water = |fog_reference: i16| -> Result<Option<WaterPlane>> {
+            if fog_reference == -1 || fog_reference as u16 & 0x8000 == 0 {
+                return Ok(None);
+            }
+            let Some(plane) = fog_planes.get((fog_reference as u16 & 0x7fff) as usize) else { return Ok(None) };
+            let material_type = plane.i16(structure_fog_plane::RUNTIME_MATERIAL_TYPE)?;
+            if material_type == -1 {
+                return Ok(None);
+            }
+            let region = plane.i16(structure_fog_plane::REGION_INDEX)?;
+            let Some(region) = fog_regions.get(region.max(0) as usize).filter(|_| region >= 0) else { return Ok(None) };
+            let palette = region.i16(structure_fog_region::FOG_PALETTE_INDEX)?;
+            let Some(entry) = fog_palette.get(palette.max(0) as usize).filter(|_| palette >= 0) else { return Ok(None) };
+            let Some(fog) = entry.reference(structure_fog_palette_entry::FOG)?.datum else { return Ok(None) };
+            // (fog_definition.plane_distance)
+            let plane_distance = cache.tag_root(fog, crate::groups::FOG)?.f32(0x74)?;
+            let p = structure_fog_plane::PLANE;
+            let mut plane_value = [plane.f32(p)?, plane.f32(p + 4)?, plane.f32(p + 8)?, plane.f32(p + 12)?];
+            plane_value[3] -= plane_distance;
+            Ok(Some(WaterPlane { plane: plane_value, material_type }))
+        };
         for leaf in bsp.root.block(s::LEAVES, structure_leaf::SIZEOF)?.iter() {
             out.leaf_clusters.push(leaf.i16(structure_leaf::CLUSTER_INDEX)?);
         }
@@ -550,6 +586,7 @@ impl StructureClusters {
         for cluster in bsp.root.block(s::CLUSTERS, structure_cluster::SIZEOF)?.iter() {
             let portals = cluster.block(0x5c, 2)?.iter().map(|p| p.i16(0)).collect::<Result<Vec<_>>>()?;
             out.cluster_portals.push(portals);
+            out.cluster_water.push(water(cluster.i16(structure_cluster::FOG_REFERENCE)?)?);
         }
         // (structure_cluster_portal, 0x40 bytes: its vertices at 0x34)
         for portal in bsp.root.block(s::CLUSTER_PORTALS, 0x40)?.iter() {
@@ -685,6 +722,51 @@ pub struct WorldObject {
     pub model: Option<std::sync::Arc<CollisionModel>>,
 }
 
+/// What a full ray test hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionKind {
+    Structure,
+    Media,
+    Object,
+}
+
+/// `collision_result`: what the game's full ray test reports.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CollisionResult {
+    /// What it hit, if anything.
+    pub kind: Option<CollisionKind>,
+    /// How far along the vector (1 for no hit).
+    pub t: f32,
+    /// Where (the vector's end for no hit).
+    pub point: [f32; 3],
+    /// The plane hit, facing the ray's start.
+    pub plane: [f32; 4],
+    pub object: Option<u32>,
+    pub node: i16,
+    pub bsp: i16,
+    pub surface: i32,
+    /// The leaf and cluster the ray ended in (NONE outside the world).
+    pub location_leaf: i32,
+    pub location_cluster: i16,
+}
+
+/// `matrix4x3_transform_plane`.
+pub fn transform_plane(m: &Matrix4x3, plane: [f32; 4]) -> [f32; 4] {
+    let [i, j, k] = [plane[0], plane[1], plane[2]];
+    let n = [
+        i * m.forward[0] + j * m.left[0] + k * m.up[0],
+        i * m.forward[1] + j * m.left[1] + k * m.up[1],
+        i * m.forward[2] + j * m.left[2] + k * m.up[2],
+    ];
+    let d = plane[3] * m.scale + dot3(m.position, n);
+    [n[0], n[1], n[2], d]
+}
+
+/// `plane3d_negate`.
+fn negate_plane(p: [f32; 4]) -> [f32; 4] {
+    [-p[0], -p[1], -p[2], -p[3]]
+}
+
 /// What the game's full ray test found (`collision_test_vector`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WorldHit {
@@ -702,6 +784,7 @@ const OBJECT_HAS_COLLISION_MODEL: u32 = 1 << 25;
 /// `collision_test_flags`: the structure and objects, and each object type.
 pub mod test_flags {
     pub const STRUCTURE: u32 = 1 << 5;
+    pub const MEDIA: u32 = 1 << 6;
     pub const OBJECTS: u32 = 1 << 7;
     pub const FIRST_OBJECT_TYPE: u32 = 8;
     pub const ALL_OBJECT_TYPES: u32 = ((1 << 12) - 1) << FIRST_OBJECT_TYPE;
@@ -715,15 +798,34 @@ pub struct World<'a> {
 }
 
 impl World<'_> {
-    /// Halo's ray test against the structure and objects
-    /// (`collision_test_vector`, with no water): the nearest hit as the game
-    /// finds it, or `None`. Every breakable surface counts as intact.
-    pub fn test_vector(&self, mut flags: u32, point: [f32; 3], vector: [f32; 3], ignore_object: u32) -> Option<WorldHit> {
+    /// Halo's ray test against the structure, objects and water
+    /// (`collision_test_vector`): the nearest hit as the game finds it, or
+    /// `None`. Every breakable surface counts as intact.
+    pub fn test_vector(&self, flags: u32, point: [f32; 3], vector: [f32; 3], ignore_object: u32) -> Option<WorldHit> {
+        let result = self.test(flags, point, vector, ignore_object);
+        result.kind.map(|_| WorldHit { t: result.t, object: result.object, node: result.node, bsp: result.bsp, surface: result.surface })
+    }
+
+    /// The whole of `collision_test_vector`'s result (no
+    /// `_collision_test_try_to_keep_location_valid_bit`).
+    pub fn test(&self, mut flags: u32, point: [f32; 3], vector: [f32; 3], ignore_object: u32) -> CollisionResult {
         if flags & (flags::FRONT_FACING | flags::BACK_FACING) == 0 {
             flags |= flags::FRONT_FACING | flags::BACK_FACING;
         }
         let bsp_flags =
             flags & (flags::FRONT_FACING | flags::BACK_FACING | flags::IGNORE_TWO_SIDED | flags::IGNORE_INVISIBLE | flags::IGNORE_BREAKABLE);
+        let mut result = CollisionResult {
+            kind: None,
+            t: 1.0,
+            point: [0.0; 3],
+            plane: [0.0; 4],
+            object: None,
+            node: NONE as i16,
+            bsp: NONE as i16,
+            surface: NONE,
+            location_leaf: NONE,
+            location_cluster: NONE as i16,
+        };
         let mut best: Option<WorldHit> = None;
         let mut t = 1.0f32;
         let (structure_hit, leaves) = self.collision.test_vector_leaves(bsp_flags, point, vector, f32::MAX);
@@ -732,6 +834,34 @@ impl World<'_> {
         {
             t = hit.t;
             best = Some(WorldHit { t, object: None, node: NONE as i16, bsp: NONE as i16, surface: hit.surface as i32 });
+            result.kind = Some(CollisionKind::Structure);
+            result.plane = if hit.plane_designator & SIGN != 0 { negate_plane(hit.plane) } else { hit.plane };
+        }
+        if let (Some(&first), Some(&last)) = (leaves.first(), leaves.last()) {
+            let _ = first;
+            result.location_leaf = last;
+            result.location_cluster = self.clusters.cluster_from_leaf(last);
+        }
+        // water, in the cluster the ray ended in
+        if flags & test_flags::MEDIA != 0
+            && result.location_cluster >= 0
+            && let Some(Some(water)) = self.clusters.cluster_water.get(result.location_cluster as usize)
+        {
+            let plane = water.plane;
+            let point_distance = point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] - plane[3];
+            let vector_dot = plane[0] * vector[0] + plane[1] * vector[1] + plane[2] * vector[2];
+            if (point_distance > 0.0) != (vector_dot > 0.0)
+                && point_distance.abs() < vector_dot.abs()
+                && vector_dot.abs() >= REAL_EPSILON
+            {
+                let water_t = -(point_distance / vector_dot);
+                if water_t < t {
+                    t = water_t;
+                    result.kind = Some(CollisionKind::Media);
+                    result.plane = if point_distance < 0.0 { negate_plane(plane) } else { plane };
+                    best = Some(WorldHit { t, object: None, node: NONE as i16, bsp: NONE as i16, surface: NONE });
+                }
+            }
         }
         if flags & test_flags::OBJECTS != 0 && !leaves.is_empty() {
             if flags & test_flags::ALL_OBJECT_TYPES == 0 {
@@ -767,12 +897,31 @@ impl World<'_> {
                 }
                 for &index in members.get(&cluster).map(Vec::as_slice).unwrap_or(&[]) {
                     if marked_objects.insert(index) {
-                        self.object_test_vector(index, flags, bsp_flags, point, vector, ignore_object, &mut t, &mut best);
+                        self.object_test_vector(index, flags, bsp_flags, point, vector, ignore_object, &mut t, &mut best, &mut result);
                     }
                 }
             }
         }
-        best
+        match best {
+            Some(hit) => {
+                result.t = hit.t;
+                result.object = hit.object;
+                result.node = hit.node;
+                result.bsp = hit.bsp;
+                result.surface = hit.surface;
+            }
+            None => {
+                result.kind = None;
+                result.t = 1.0;
+            }
+        }
+        // (COLLISION_POINT_FROM_LINE3D)
+        result.point = [
+            vector[0] * result.t + point[0],
+            vector[1] * result.t + point[1],
+            vector[2] * result.t + point[2],
+        ];
+        result
     }
 
     /// `object_test_vector`: an object, then (if its bounding sphere is
@@ -788,6 +937,7 @@ impl World<'_> {
         ignore_object: u32,
         t: &mut f32,
         best: &mut Option<WorldHit>,
+        result: &mut CollisionResult,
     ) {
         let object = &self.objects[index];
         if object.index == ignore_object
@@ -810,10 +960,13 @@ impl World<'_> {
                 bsp: hit.bsp as i16,
                 surface: hit.hit.surface as i32,
             });
+            result.kind = Some(CollisionKind::Object);
+            let plane = transform_plane(&object.matrices[hit.node], hit.hit.plane);
+            result.plane = if hit.hit.plane_designator & SIGN != 0 { negate_plane(plane) } else { plane };
         }
         for (child, candidate) in self.objects.iter().enumerate() {
             if candidate.parent == object.index {
-                self.object_test_vector(child, flags, bsp_flags, point, vector, ignore_object, t, best);
+                self.object_test_vector(child, flags, bsp_flags, point, vector, ignore_object, t, best, result);
             }
         }
     }

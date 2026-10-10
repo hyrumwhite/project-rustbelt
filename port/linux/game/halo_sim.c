@@ -27,6 +27,7 @@ bit for bit; differences are counted and the first few logged.
 #include "units/vehicle_datum.h"
 #include "devices/devices.h"
 #include "physics/point_physics.h"
+#include "physics/collisions.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_groups.h"
 #include "halo_sim.h"
@@ -38,7 +39,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 3
+#define HALO_SIM_VERSION 4
 
 /* ---------- structures */
 
@@ -165,7 +166,65 @@ struct halo_sim_pose_preprocess_call
 	real device_power;
 };
 
+/* crates/halo_sim's HostObject and Host: the running game's objects, as
+Rust's ray test reads them */
+struct halo_sim_host_object
+{
+	unsigned long object_index;
+	unsigned long definition_index;
+	short object_type;
+	short location_cluster;
+	unsigned long flags;
+	real_point3d bounding_center;
+	real bounding_radius;
+	unsigned long parent;
+	unsigned char region_permutations[8];
+	unsigned long node_count;
+	real_matrix4x3 const *matrices;
+	real_point3d origin;
+	real_vector3d forward;
+	real_vector3d up;
+};
+
+struct halo_sim_host
+{
+	unsigned long (*cluster_objects)(short cluster, unsigned long *out, unsigned long maximum);
+	long (*object)(unsigned long index, struct halo_sim_host_object *out);
+	unsigned long (*children)(unsigned long index, unsigned long *out, unsigned long maximum);
+};
+
+/* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
+struct halo_sim_collision_vector_call
+{
+	long structure_bsp_index;
+	unsigned long flags;
+	unsigned char const *breakable_surfaces;
+	real_point3d point;
+	real_vector3d vector;
+	unsigned long ignore_object_index;
+};
+
+struct halo_sim_collision_vector_result
+{
+	long hit;
+	short type;
+	short node_index;
+	real t;
+	real_point3d point;
+	real_plane3d plane;
+	unsigned long object_index;
+	short bsp_index;
+	short material_type;
+	long surface_index;
+	long location_leaf;
+	short location_cluster;
+	unsigned short surface_flags;
+};
+
 typedef unsigned long (*halo_sim_version_function)(void);
+typedef long (*halo_sim_set_host_function)(struct halo_sim_host const *host);
+typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
+	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
 typedef long (*halo_sim_set_tag_cache_function)(void const *memory, unsigned long size, unsigned long base);
 typedef long (*halo_sim_pose_orientations_function)(struct halo_sim_pose_orientations_call *call);
@@ -187,6 +246,8 @@ static struct
 	halo_sim_pose_orientations_function pose_orientations;
 	halo_sim_pose_matrices_function pose_matrices;
 	halo_sim_pose_preprocess_function pose_preprocess;
+	halo_sim_set_host_function set_host;
+	halo_sim_collision_test_vector_function collision_test_vector;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -205,7 +266,20 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 {
 	"point_physics",
 	"poses",
+	"collision",
 };
+
+/* the collision checks' comparisons */
+static struct
+{
+	unsigned long compared;
+	unsigned long differed;
+	/* what the game's hit: the structure, media, objects (vehicles' physics) */
+	unsigned long structure_hits;
+	unsigned long media_hits;
+	unsigned long object_hits;
+	unsigned long vehicle_physics_hits;
+} halo_sim_collision_checks;
 
 /* the pose checks: Rust's result, and the comparisons */
 static struct
@@ -241,6 +315,85 @@ static void *halo_sim_symbol(void *library, char const *name)
 {
 	return platform_library_symbol(library, name);
 }
+
+/* the host's callbacks: the running game's objects */
+static unsigned long halo_sim_host_cluster_objects(short cluster, unsigned long *out, unsigned long maximum)
+{
+	unsigned long count = 0;
+	long reference_index;
+	long object_index;
+
+	for (object_index = cluster_get_first_collideable_object(&reference_index, cluster);
+		object_index != NONE;
+		object_index = cluster_get_next_collideable_object(&reference_index))
+	{
+		if (count < maximum)
+			out[count] = (unsigned long)object_index;
+		count++;
+	}
+
+	return count;
+}
+
+static long halo_sim_host_object(unsigned long index, struct halo_sim_host_object *out)
+{
+	struct object_datum *object = object_get((long)index);
+	short region;
+
+	out->object_index = index;
+	out->definition_index = (unsigned long)object->definition_index;
+	out->object_type = object->object.type;
+	out->location_cluster = object->object.location.cluster_index;
+	out->flags = object->object.flags;
+	out->bounding_center = object->object.bounding_sphere_center;
+	out->bounding_radius = object->object.bounding_sphere_radius;
+	out->parent = (unsigned long)object->object.parent_object_index;
+	for (region = 0; region < 8; region++)
+	{
+		out->region_permutations[region] = region < (short)sizeof(object->object.region_permutations) ?
+			object->object.region_permutations[region] : 0;
+	}
+	out->node_count = (unsigned long)(object->object.node_matrices.size / (long)sizeof(real_matrix4x3));
+	out->matrices = object_get_node_matrices((long)index);
+	if (object->object.type == _object_type_vehicle)
+	{
+		object_get_origin((long)index, &out->origin);
+		object_get_orientation((long)index, &out->forward, &out->up);
+	}
+	else
+	{
+		memset(&out->origin, 0, sizeof(out->origin));
+		memset(&out->forward, 0, sizeof(out->forward));
+		memset(&out->up, 0, sizeof(out->up));
+	}
+
+	return TRUE;
+}
+
+/* an object's children: its first child, then that child's siblings */
+static unsigned long halo_sim_host_children(unsigned long index, unsigned long *out, unsigned long maximum)
+{
+	unsigned long count = 0;
+	long child_index;
+
+	for (child_index = object_get((long)index)->object.first_child_object_index;
+		child_index != NONE;
+		child_index = object_get(child_index)->object.next_object_index)
+	{
+		if (count < maximum)
+			out[count] = (unsigned long)child_index;
+		count++;
+	}
+
+	return count;
+}
+
+static struct halo_sim_host const halo_sim_host_callbacks =
+{
+	halo_sim_host_cluster_objects,
+	halo_sim_host_object,
+	halo_sim_host_children,
+};
 
 static void halo_sim_initialize(void)
 {
@@ -279,13 +432,16 @@ static void halo_sim_initialize(void)
 	halo_sim.pose_orientations = (halo_sim_pose_orientations_function)halo_sim_symbol(library, "halo_sim_pose_orientations");
 	halo_sim.pose_matrices = (halo_sim_pose_matrices_function)halo_sim_symbol(library, "halo_sim_pose_matrices");
 	halo_sim.pose_preprocess = (halo_sim_pose_preprocess_function)halo_sim_symbol(library, "halo_sim_pose_preprocess");
+	halo_sim.set_host = (halo_sim_set_host_function)halo_sim_symbol(library, "halo_sim_set_host");
+	halo_sim.collision_test_vector = (halo_sim_collision_test_vector_function)halo_sim_symbol(library, "halo_sim_collision_test_vector");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
-		!halo_sim.pose_matrices || !halo_sim.pose_preprocess)
+		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
 	}
 	halo_sim.loaded = TRUE;
+	halo_sim.set_host(&halo_sim_host_callbacks);
 
 	for (system = 0; system < NUMBER_OF_HALO_SIM_SYSTEMS; system++)
 	{
@@ -766,13 +922,7 @@ void halo_sim_pose_preprocess_check(long object_index, short node_count, void co
 	boolean same;
 
 	if (!halo_sim_pose_checks.preprocess_pending || halo_sim_pose_checks.preprocess_object != object_index)
-	{
-		static long misses = 0;
-
-		if (misses++ < 5)
-			platform_log("halo_sim: preprocess check missed (pending %d)", halo_sim_pose_checks.preprocess_pending);
 		return;
-	}
 	halo_sim_pose_checks.preprocess_pending = FALSE;
 	for (node_index = 0; node_index < node_count; node_index++)
 	{
@@ -799,4 +949,92 @@ void halo_sim_pose_preprocess_check(long object_index, short node_count, void co
 	if (!same)
 		halo_sim_pose_report(2, object_index, node_count, node_index);
 	halo_sim_pose_tally(2);
+}
+
+/* ---------- collision */
+
+void halo_sim_collision_test_vector_check(unsigned long flags, void const *point, void const *vector,
+	long ignore_object_index, int hit, void const *collision)
+{
+	struct collision_result const *game = (struct collision_result const *)collision;
+	struct halo_sim_collision_vector_call call;
+	struct halo_sim_collision_vector_result rust;
+	boolean same;
+
+	if (halo_sim_mode(_halo_sim_collision) == _halo_sim_mode_c)
+		return;
+	call.structure_bsp_index = global_structure_bsp_index;
+	call.flags = flags;
+	call.breakable_surfaces = (unsigned char const *)breakable_surface_flags_get();
+	call.point = *(real_point3d const *)point;
+	call.vector = *(real_vector3d const *)vector;
+	call.ignore_object_index = (unsigned long)ignore_object_index;
+	if (halo_sim.collision_test_vector(&call, &rust) != 0)
+		return;
+
+	same = (rust.hit != 0) == (hit != 0) &&
+		rust.type == game->type &&
+		memcmp(&rust.t, &game->t, sizeof(real)) == 0 &&
+		memcmp(&rust.point, &game->point, sizeof(real_point3d)) == 0 &&
+		rust.location_leaf == game->location.leaf_index &&
+		rust.location_cluster == game->location.cluster_index;
+	if (same && hit)
+	{
+		same = memcmp(&rust.plane, &game->plane, sizeof(real_plane3d)) == 0 &&
+			rust.material_type == game->material_type;
+		if (game->type == _collision_result_structure || game->type == _collision_result_object)
+		{
+			same = same && rust.surface_index == game->surface_index &&
+				rust.surface_flags == game->flags;
+		}
+		if (game->type == _collision_result_object)
+		{
+			same = same && rust.object_index == (unsigned long)game->object_index &&
+				rust.node_index == game->node_index &&
+				rust.bsp_index == game->bsp_index;
+		}
+	}
+	halo_sim_collision_checks.compared++;
+	if (hit)
+	{
+		if (game->type == _collision_result_structure)
+			halo_sim_collision_checks.structure_hits++;
+		else if (game->type == _collision_result_media)
+			halo_sim_collision_checks.media_hits++;
+		else if (game->type == _collision_result_object)
+		{
+			halo_sim_collision_checks.object_hits++;
+			if (game->node_index == NONE)
+				halo_sim_collision_checks.vehicle_physics_hits++;
+		}
+	}
+	if (!same)
+	{
+		halo_sim_collision_checks.differed++;
+		if (halo_sim_collision_checks.differed <= 8)
+		{
+			platform_log("halo_sim: collision differs: flags %lx point %08lx %08lx %08lx vector %08lx %08lx %08lx ignore %lx",
+				flags,
+				*(unsigned long const *)&call.point.x, *(unsigned long const *)&call.point.y, *(unsigned long const *)&call.point.z,
+				*(unsigned long const *)&call.vector.i, *(unsigned long const *)&call.vector.j, *(unsigned long const *)&call.vector.k,
+				(unsigned long)ignore_object_index);
+			platform_log("halo_sim:   game %d type %d t %08lx object %lx node %d bsp %d surface %ld material %d flags %x leaf %ld",
+				hit, game->type, *(unsigned long const *)&game->t,
+				hit && game->type == _collision_result_object ? (unsigned long)game->object_index : 0xfffffffful,
+				game->node_index, game->bsp_index, game->surface_index, game->material_type, game->flags,
+				game->location.leaf_index);
+			platform_log("halo_sim:   rust %ld type %d t %08lx object %lx node %d bsp %d surface %ld material %d flags %x leaf %ld",
+				rust.hit, rust.type, *(unsigned long const *)&rust.t, rust.object_index,
+				rust.node_index, rust.bsp_index, rust.surface_index, rust.material_type, rust.surface_flags,
+				rust.location_leaf);
+		}
+	}
+	if ((halo_sim_collision_checks.compared & 0xffff) == 0)
+	{
+		platform_log("halo_sim: collision: %lu of %lu agree with the game (hits: %lu structure, %lu media, %lu objects, %lu of them vehicles' physics)",
+			halo_sim_collision_checks.compared - halo_sim_collision_checks.differed,
+			halo_sim_collision_checks.compared,
+			halo_sim_collision_checks.structure_hits, halo_sim_collision_checks.media_hits,
+			halo_sim_collision_checks.object_hits, halo_sim_collision_checks.vehicle_physics_hits);
+	}
 }

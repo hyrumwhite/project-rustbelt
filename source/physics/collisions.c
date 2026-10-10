@@ -119,6 +119,8 @@ boolean object_bounds_cache_out_of_reach(long object_index, real_point3d const *
 
 #undef REAL_MATH_EXTERNAL_POINT_FROM_LINE3D
 
+#include "halo_sim.h" /* port: (port/linux/game) */
+
 /* ---------- constants */
 
 /* ---------- macros */
@@ -484,6 +486,7 @@ boolean collision_test_vector(
 	struct collision_result *collision)
 {
 	boolean hit = FALSE;
+	unsigned long caller_flags = flags; /* port: (halo_sim.c) */
 	boolean test_environment = TEST_FLAG(flags, _collision_test_structure_bit) ||
 		TEST_FLAG(flags, _collision_test_media_bit) ||
 		TEST_FLAG(flags, _collision_test_objects_bit);
@@ -731,6 +734,9 @@ boolean collision_test_vector(
 			(real_vector3d *)&collision->point);
 		scenario_location_from_point(&collision->location, &collision->point);
 	}
+
+	/* port: Rust's ray test, checked against the game's (halo_sim.c) */
+	halo_sim_collision_test_vector_check(caller_flags, point, vector, ignore_object_index, hit, collision);
 
 	return hit;
 }

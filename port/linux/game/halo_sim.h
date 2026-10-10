@@ -16,6 +16,7 @@ enum
 {
 	_halo_sim_point_physics = 0,
 	_halo_sim_poses,
+	_halo_sim_collision,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -86,5 +87,12 @@ check mode it runs on a copy, compared by halo_sim_pose_preprocess_check
 once the game's own has run */
 int halo_sim_pose_preprocess(long object_index, short node_count, void *orientations);
 void halo_sim_pose_preprocess_check(long object_index, short node_count, void const *orientations);
+
+/* collisions.c's collision_test_vector, once the game's has run: in check
+mode the Rust port's ray test, on the running game's objects (through the
+host's callbacks), compared with the game's result (flags as the caller
+passed them) */
+void halo_sim_collision_test_vector_check(unsigned long flags, void const *point, void const *vector,
+	long ignore_object_index, int hit, void const *collision);
 
 #endif // __HALO_SIM_H

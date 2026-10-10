@@ -4390,6 +4390,9 @@ boolean biped_update(
 
 		biped_verify_object_vectors(biped_index, "post-dead/air/land/slip");
 
+		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+		bevy_bridge_melee_begin(biped_index, biped->unit.player_index != NONE ?
+			unit_inventory_get_weapon(biped_index, unit_get(biped_index)->unit.current_weapon_index) : NONE);
 		if (!biped->biped.player_melee_ticks)
 		{
 			if (biped->unit.player_index!=NONE &&
@@ -4409,6 +4412,7 @@ boolean biped_update(
 					short melee_speedup_ticks;
 
 					unit_animation_start_action(biped_index, _unit_animation_action_melee);
+					bevy_bridge_melee_event(biped_index, 1); /* port: (bevy_bridge.c) */
 					/* port: a player with no weapon (a gametype's loadout of
 					none) melees too: in a weapon's usual time, the hit
 					halfway (the Xbox game read the timing from the weapon's
@@ -4446,9 +4450,13 @@ boolean biped_update(
 		else
 		{
 			if (biped->biped.player_melee_ticks==biped->biped.player_melee_attack_tick)
+			{
+				bevy_bridge_melee_event(biped_index, 2); /* port: (bevy_bridge.c) */
 				unit_cause_player_melee_damage(biped_index);
+			}
 			--biped->biped.player_melee_ticks;
 		}
+		bevy_bridge_melee_end(biped_index); /* port: (bevy_bridge.c) */
 
 		/* port: (bevy_bridge.c) */
 		bevy_bridge_biped_update_end(biped_index, animation.state_desired, animation.crouching);

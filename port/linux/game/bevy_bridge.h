@@ -84,6 +84,12 @@ void bevy_bridge_pose_begin(long object_index, void const *node_orientations, sh
 	short frame_index, int world_relative, void const *parent_node_matrix);
 void bevy_bridge_pose_preprocessed(long object_index, void const *node_orientations);
 void bevy_bridge_pose_end(long object_index, void const *node_matrices);
+/* bipeds.c: a player's melee step recorded (bevy_bridge_melee_record):
+begun with its weapon (NONE for none), a melee started or its damage caused
+(1, 2), and ended */
+void bevy_bridge_melee_begin(long biped_index, long weapon_index);
+void bevy_bridge_melee_event(long biped_index, unsigned long event);
+void bevy_bridge_melee_end(long biped_index);
 
 /* collisions.c: collision_get_features_in_sphere's calls, and each object
 object_get_features_in_sphere visits, during a recorded biped update */

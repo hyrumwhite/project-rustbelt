@@ -40,7 +40,8 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 24
+#define BEVY_BRIDGE_VERSION 25
+#define BEVY_BRIDGE_MELEE_RECORDS 512
 #define BEVY_BRIDGE_POSE_RECORDS 2048
 #define BEVY_BRIDGE_POSE_NODES 65536
 #define BEVY_BRIDGE_UNIT_ANIMATION_RECORDS 1024
@@ -666,6 +667,43 @@ struct bevy_bridge_pose_record
 	float device_power;
 };
 
+/* (protocol 25) a player biped's melee step in biped_update (with
+game.bevy_bridge_ray_tests): what it reads (its melee ticks, whether the
+player asks to melee, its weapon (NONE for none) and whether the weapon is
+overcharged, whether it rides in a seat or zooms, its unit animation's
+seat, weapon class and type and action, the random seed), whether it
+started a melee (unit_animation_start_action: the action, its animation
+and the random seed after) or caused its damage, and its melee ticks
+after */
+struct bevy_bridge_melee_record
+{
+	unsigned long sequence;
+	unsigned long biped_index;
+	unsigned long definition_index;
+	unsigned long weapon_definition_index;
+	unsigned long weapon_overcharged;
+	unsigned long use_equipment;
+	unsigned long in_seat;
+	unsigned long zoomed;
+	unsigned long enhanced;
+	unsigned long random_seed_before;
+	unsigned long random_seed_after_start;
+	unsigned long started;
+	unsigned long damaged;
+	char ticks_before;
+	char attack_tick_before;
+	char ticks_after;
+	char attack_tick_after;
+	char seat_index;
+	char weapon_index;
+	char weapon_type_index;
+	char action_before;
+	char action_after;
+	char pad[3];
+	short action_animation_before[2];
+	short action_animation_after[2];
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -720,6 +758,9 @@ struct bevy_bridge_shared
 	unsigned long pose_node_count;
 	struct bevy_bridge_pose_record pose_records[BEVY_BRIDGE_POSE_RECORDS];
 	struct bevy_bridge_pose_node pose_nodes[BEVY_BRIDGE_POSE_NODES];
+	/* players' melee steps (a ring, as the projectiles) */
+	unsigned long melee_record_count;
+	struct bevy_bridge_melee_record melee_records[BEVY_BRIDGE_MELEE_RECORDS];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

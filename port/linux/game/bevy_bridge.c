@@ -20,6 +20,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "objects/objects.h"
 #include "units/units.h"
 #include "items/projectiles.h"
+#include "items/weapons.h"
 #include "physics/breakable_surfaces.h"
 #include "units/bipeds.h"
 #include "units/vehicle_datum.h"
@@ -1398,4 +1399,84 @@ void bevy_bridge_pose_end(long object_index, void const *node_matrices)
 	record->sequence = count;
 	bevy_bridge_shared->pose_records[count % BEVY_BRIDGE_POSE_RECORDS] = *record;
 	__atomic_store_n(&bevy_bridge_shared->pose_record_count, count + 1, __ATOMIC_RELEASE);
+}
+
+/* ---------- melee */
+
+static struct
+{
+	boolean active;
+	struct bevy_bridge_melee_record record;
+} bevy_bridge_melee;
+
+void bevy_bridge_melee_begin(long biped_index, long weapon_index)
+{
+	struct bevy_bridge_melee_record *record = &bevy_bridge_melee.record;
+	struct biped_datum *biped;
+
+	bevy_bridge_melee.active = FALSE;
+	if (!bevy_bridge_projectile_recording())
+		return;
+	biped = biped_get(biped_index);
+	if (biped->unit.player_index == NONE)
+		return;
+	memset(record, 0, sizeof(*record));
+	record->biped_index = (unsigned long)biped_index;
+	record->definition_index = (unsigned long)biped->definition_index;
+	record->weapon_definition_index = weapon_index == NONE ? (unsigned long)NONE : (unsigned long)object_get(weapon_index)->definition_index;
+	record->weapon_overcharged = weapon_index != NONE && weapon_overcharged(weapon_index);
+	record->use_equipment = TEST_FLAG(biped->unit.control_flags, _unit_control_use_equipment_bit) ? 1 : 0;
+	record->in_seat = biped->unit.parent_seat_index != NONE;
+	record->zoomed = biped->unit.current_zoom_level != NONE;
+	record->enhanced = unit_animation_enhanced(biped_index) ? 1 : 0;
+	record->random_seed_before = get_random_seed();
+	record->ticks_before = biped->biped.player_melee_ticks;
+	record->attack_tick_before = biped->biped.player_melee_attack_tick;
+	record->seat_index = biped->unit.animation.seat_index;
+	record->weapon_index = biped->unit.animation.weapon_index;
+	record->weapon_type_index = biped->unit.animation.weapon_type_index;
+	record->action_before = biped->unit.animation.action;
+	record->action_animation_before[0] = biped->unit.animation.action_animation.index;
+	record->action_animation_before[1] = biped->unit.animation.action_animation.frame_index;
+	bevy_bridge_melee.active = TRUE;
+}
+
+void bevy_bridge_melee_event(long biped_index, unsigned long event)
+{
+	struct bevy_bridge_melee_record *record = &bevy_bridge_melee.record;
+	struct biped_datum *biped;
+
+	if (!bevy_bridge_melee.active || record->biped_index != (unsigned long)biped_index)
+		return;
+	biped = biped_get(biped_index);
+	if (event == 1)
+	{
+		record->started = 1;
+		record->random_seed_after_start = get_random_seed();
+	}
+	else if (event == 2)
+	{
+		record->damaged = 1;
+	}
+}
+
+void bevy_bridge_melee_end(long biped_index)
+{
+	struct bevy_bridge_melee_record *record = &bevy_bridge_melee.record;
+	struct biped_datum *biped;
+	unsigned long count;
+
+	if (!bevy_bridge_melee.active || record->biped_index != (unsigned long)biped_index)
+		return;
+	bevy_bridge_melee.active = FALSE;
+	biped = biped_get(biped_index);
+	record->ticks_after = biped->biped.player_melee_ticks;
+	record->attack_tick_after = biped->biped.player_melee_attack_tick;
+	record->action_after = biped->unit.animation.action;
+	record->action_animation_after[0] = biped->unit.animation.action_animation.index;
+	record->action_animation_after[1] = biped->unit.animation.action_animation.frame_index;
+	count = bevy_bridge_shared->melee_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->melee_records[count % BEVY_BRIDGE_MELEE_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->melee_record_count, count + 1, __ATOMIC_RELEASE);
 }

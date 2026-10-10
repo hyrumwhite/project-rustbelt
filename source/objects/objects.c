@@ -53,6 +53,7 @@ OBJECTS.C
 #include "sound/game_sound.h"
 #include "structures/structure_bsp_definitions.h"
 #include "units/units.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 /* port: object_bounds_cache.c's */
 void object_bounds_cache_update(long object_index, real_point3d const *center, real radius);
 
@@ -2481,6 +2482,8 @@ void object_compute_node_matrices(
 		short node_count;
 		short node_index;
 		long unknown_var;
+		/* port: the frame the pose is from, for a Bevy renderer (bevy_bridge.c) */
+		short bevy_bridge_frame_index = NONE;
 
 		struct object_type_definition *object_type_definition = object_type_definition_get(object->object.type);
 		
@@ -2525,6 +2528,7 @@ void object_compute_node_matrices(
 				}
 
 				animation_get_node_orientations(model, animation, frame_index, node_orientations);
+				bevy_bridge_frame_index = frame_index;
 				world_relative = TEST_FLAG(animation->flags, _animation_world_relative_bit);
 			}
 			else
@@ -2613,10 +2617,14 @@ void object_compute_node_matrices(
 		}
 
 
+		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+		bevy_bridge_pose_begin(object_index, node_orientations, model_node_count, bevy_bridge_frame_index,
+			world_relative, object_node_matrix);
 		if (object_definition->object.animation_graph.index!=NONE)
 		{
 			object_type_preprocess_node_orientations(object_index, node_orientations);
 		}
+		bevy_bridge_pose_preprocessed(object_index, node_orientations);
 
 		if (object->object.animation.interpolation_frame_count>0)
 		{
@@ -2933,6 +2941,7 @@ void object_compute_node_matrices(
 		object_nodes[0].position = object->object.position;
 	}
 
+	bevy_bridge_pose_end(object_index, object_nodes); /* port: (bevy_bridge.c) */
 	matrix4x3_transform_point(object_nodes, &object_definition->object.bounding_offset, &object->object.bounding_sphere_center);
 	object->object.bounding_sphere_radius = object_definition->object.bounding_radius;
 	

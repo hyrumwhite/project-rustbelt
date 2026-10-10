@@ -40,7 +40,9 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 21
+#define BEVY_BRIDGE_VERSION 22
+#define BEVY_BRIDGE_POSE_RECORDS 2048
+#define BEVY_BRIDGE_POSE_NODES 65536
 #define BEVY_BRIDGE_UNIT_ANIMATION_RECORDS 1024
 #define BEVY_BRIDGE_BIPED_UPDATE_RECORDS 1024
 #define BEVY_BRIDGE_BIPED_MOVING_RECORDS 1024
@@ -563,6 +565,49 @@ struct bevy_bridge_unit_animation_record
 	struct bevy_bridge_unit_animation_state after;
 };
 
+/* a node of a recorded pose: its orientation (rotation i j k w,
+translation, scale) as the animation, overlays and scale left it, after
+its object type's preprocess, the original it interpolates from, and its
+matrix (scale, forward, left, up, position) */
+struct bevy_bridge_pose_node
+{
+	float animated[8];
+	float preprocessed[8];
+	float original[8];
+	float matrix[13];
+};
+
+/* one object_compute_node_matrices (with game.bevy_bridge_ray_tests; a
+sample: objects whose index plus the game time is a multiple of 8): what it
+reads (the animation frame it used, NONE for the model's pose, its world
+relative flag, the object's place, scale, flags, interpolation, outgoing
+function values and parent node matrix) and its nodes (node_count from
+first_node in the pose node ring) */
+struct bevy_bridge_pose_record
+{
+	unsigned long sequence;
+	unsigned long object_index;
+	unsigned long definition_index;
+	short type;
+	short node_count;
+	unsigned long first_node;
+	unsigned long object_flags;
+	long animation_graph_index;
+	short animation_index;
+	short frame_index;
+	short interpolation_frame_index;
+	short interpolation_frame_count;
+	unsigned long world_relative;
+	float scale;
+	float position[3];
+	float forward[3];
+	float up[3];
+	float function_values[4];
+	unsigned long has_parent;
+	unsigned long parent_mirrored;
+	float parent_node_matrix[13];
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -612,6 +657,11 @@ struct bevy_bridge_shared
 	unsigned long unit_animation_record_count;
 	unsigned long unit_animation_pad;
 	struct bevy_bridge_unit_animation_record unit_animation_records[BEVY_BRIDGE_UNIT_ANIMATION_RECORDS];
+	/* sampled poses (rings, as the feature objects) */
+	unsigned long pose_record_count;
+	unsigned long pose_node_count;
+	struct bevy_bridge_pose_record pose_records[BEVY_BRIDGE_POSE_RECORDS];
+	struct bevy_bridge_pose_node pose_nodes[BEVY_BRIDGE_POSE_NODES];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

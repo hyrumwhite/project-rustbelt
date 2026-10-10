@@ -24,6 +24,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "units/bipeds.h"
 #include "devices/device_definitions.h"
 #include "devices/devices.h"
+#include "models/model_definitions.h"
 #include "objects/object_lights.h"
 #include "physics/collision_bsp.h"
 #include "physics/collisions.h"
@@ -1207,4 +1208,123 @@ void bevy_bridge_unit_animation_side_effect(unsigned long effect)
 {
 	if (bevy_bridge_unit_animation.active)
 		bevy_bridge_unit_animation.record.side_effects |= effect;
+}
+
+/* ---------- poses */
+
+static struct
+{
+	boolean active;
+	struct bevy_bridge_pose_record record;
+} bevy_bridge_pose;
+
+static void bevy_bridge_pose_orientation(float *out, real_orientation const *orientation)
+{
+	out[0] = orientation->rotation.v.i;
+	out[1] = orientation->rotation.v.j;
+	out[2] = orientation->rotation.v.k;
+	out[3] = orientation->rotation.w;
+	out[4] = orientation->translation.x;
+	out[5] = orientation->translation.y;
+	out[6] = orientation->translation.z;
+	out[7] = orientation->scale;
+}
+
+static struct bevy_bridge_pose_node *bevy_bridge_pose_node(unsigned long node_index)
+{
+	return &bevy_bridge_shared->pose_nodes[(bevy_bridge_pose.record.first_node + node_index) % BEVY_BRIDGE_POSE_NODES];
+}
+
+void bevy_bridge_pose_begin(long object_index, void const *node_orientations, short node_count,
+	short frame_index, int world_relative, void const *parent_node_matrix)
+{
+	struct bevy_bridge_pose_record *record = &bevy_bridge_pose.record;
+	struct object_datum *object;
+	real_orientation const *orientations = (real_orientation const *)node_orientations;
+	short node_index;
+
+	bevy_bridge_pose.active = FALSE;
+	if (!bevy_bridge_projectile_recording() || ((unsigned long)(object_index + game_time_get()) & 7) != 0 ||
+		node_count <= 0 || node_count > MAXIMUM_NODES_PER_MODEL)
+	{
+		return;
+	}
+	object = object_get(object_index);
+	memset(record, 0, sizeof(*record));
+	record->object_index = (unsigned long)object_index;
+	record->definition_index = (unsigned long)object->definition_index;
+	record->type = object->object.type;
+	record->node_count = node_count;
+	record->first_node = bevy_bridge_shared->pose_node_count;
+	record->object_flags = object->object.flags;
+	record->animation_graph_index = object->object.animation.animation_graph_index;
+	record->animation_index = object->object.animation.state.index;
+	record->frame_index = frame_index;
+	record->interpolation_frame_index = object->object.animation.interpolation_frame_index;
+	record->interpolation_frame_count = object->object.animation.interpolation_frame_count;
+	record->world_relative = world_relative ? 1 : 0;
+	record->scale = object->object.scale;
+	bevy_bridge_point(record->position, &object->object.position);
+	bevy_bridge_vector(record->forward, &object->object.forward);
+	bevy_bridge_vector(record->up, &object->object.up);
+	memcpy(record->function_values, object->object.outgoing_function_values, sizeof(record->function_values));
+	if (parent_node_matrix)
+	{
+		record->has_parent = 1;
+		record->parent_mirrored = TEST_FLAG(object_get(object->object.parent_object_index)->object.flags, _object_mirrored_bit) ? 1 : 0;
+		memcpy(record->parent_node_matrix, parent_node_matrix, sizeof(record->parent_node_matrix));
+	}
+	for (node_index = 0; node_index < node_count; node_index++)
+	{
+		struct bevy_bridge_pose_node *node = bevy_bridge_pose_node(node_index);
+
+		memset(node, 0, sizeof(*node));
+		bevy_bridge_pose_orientation(node->animated, &orientations[node_index]);
+	}
+	bevy_bridge_pose.active = TRUE;
+}
+
+void bevy_bridge_pose_preprocessed(long object_index, void const *node_orientations)
+{
+	struct bevy_bridge_pose_record *record = &bevy_bridge_pose.record;
+	struct object_datum *object;
+	real_orientation const *orientations = (real_orientation const *)node_orientations;
+	real_orientation const *originals = NULL;
+	short node_index;
+
+	if (!bevy_bridge_pose.active || record->object_index != (unsigned long)object_index)
+		return;
+	object = object_get(object_index);
+	if (object->object.animation.interpolation_frame_count > 0)
+	{
+		originals = (real_orientation const *)object_header_block_get(object_index, &object->object.original_node_orientations);
+	}
+	for (node_index = 0; node_index < record->node_count; node_index++)
+	{
+		struct bevy_bridge_pose_node *node = bevy_bridge_pose_node(node_index);
+
+		bevy_bridge_pose_orientation(node->preprocessed, &orientations[node_index]);
+		if (originals)
+			bevy_bridge_pose_orientation(node->original, &originals[node_index]);
+	}
+}
+
+void bevy_bridge_pose_end(long object_index, void const *node_matrices)
+{
+	struct bevy_bridge_pose_record *record = &bevy_bridge_pose.record;
+	unsigned long count;
+	short node_index;
+
+	if (!bevy_bridge_pose.active || record->object_index != (unsigned long)object_index)
+		return;
+	bevy_bridge_pose.active = FALSE;
+	for (node_index = 0; node_index < record->node_count; node_index++)
+	{
+		memcpy(bevy_bridge_pose_node(node_index)->matrix, (real_matrix4x3 const *)node_matrices + node_index, sizeof(float) * 13);
+	}
+	__atomic_store_n(&bevy_bridge_shared->pose_node_count, record->first_node + record->node_count, __ATOMIC_RELEASE);
+	count = bevy_bridge_shared->pose_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->pose_records[count % BEVY_BRIDGE_POSE_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->pose_record_count, count + 1, __ATOMIC_RELEASE);
 }

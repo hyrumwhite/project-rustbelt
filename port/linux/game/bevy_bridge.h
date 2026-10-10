@@ -77,6 +77,13 @@ void bevy_bridge_unit_animation_begin(long unit_index, char state_desired, int c
 	short magic_base_seat_index, char const *weapon_label);
 void bevy_bridge_unit_animation_end(long unit_index, short result);
 void bevy_bridge_unit_animation_side_effect(unsigned long effect);
+/* objects.c: a sample of object_compute_node_matrices recorded
+(bevy_bridge_pose_record): the orientations before and after the object
+type's preprocess, and the matrices */
+void bevy_bridge_pose_begin(long object_index, void const *node_orientations, short node_count,
+	short frame_index, int world_relative, void const *parent_node_matrix);
+void bevy_bridge_pose_preprocessed(long object_index, void const *node_orientations);
+void bevy_bridge_pose_end(long object_index, void const *node_matrices);
 
 /* collisions.c: collision_get_features_in_sphere's calls, and each object
 object_get_features_in_sphere visits, during a recorded biped update */

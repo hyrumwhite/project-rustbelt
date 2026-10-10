@@ -338,6 +338,15 @@ struct CollisionCheck {
     /// Of the agreeing grenade throws: moving, airborne, crouched, riding,
     /// easing their legs' weights.
     unit_pose_throws: [u64; 5],
+    /// Each type's preprocess (biped, vehicle, weapon, device, other):
+    /// compared, agreed, of those changing the pose.
+    preprocess_kinds: [[u64; 3]; 5],
+    /// Of the agreeing vehicles: turning, with a speed, a wheel turned,
+    /// with a suspension compressed; devices: with a position, a power.
+    vehicle_poses: [u64; 4],
+    device_poses: [u64; 2],
+    vehicle_pose_definitions: std::collections::HashMap<u32, Option<halo_map::vehicle_pose::VehiclePoseDefinition>>,
+    device_pose_definitions: std::collections::HashMap<u32, Option<halo_map::device_pose::DevicePoseDefinition>>,
     /// The graphs whose animations are loaded for posing.
     unit_pose_graphs: std::collections::HashSet<u32>,
     frames_shown: u32,
@@ -432,6 +441,11 @@ impl CollisionCheck {
             update_erased: 0,
             unit_poses_shown: 0,
             unit_pose_throws: [0; 5],
+            preprocess_kinds: [[0; 3]; 5],
+            vehicle_poses: [0; 4],
+            device_poses: [0; 2],
+            vehicle_pose_definitions: Default::default(),
+            device_pose_definitions: Default::default(),
             unit_pose_graphs: Default::default(),
             frames_shown: 0,
             sphere_features: 0,
@@ -1358,6 +1372,10 @@ impl CollisionCheck {
                 .clone();
             let Some(definition) = definition else { continue };
             let Some(model_index) = definition.model else { continue };
+            if let Some(graph_index) = definition.animation_graph {
+                self.load_graph_animations(graph_index);
+            }
+            let cache = &self.cache;
             if !self.pose_models.contains_key(&model_index) {
                 self.pose_models.insert(model_index, pose::PoseModel::load(cache, model_index).ok());
             }
@@ -1371,27 +1389,39 @@ impl CollisionCheck {
             }
 
             // the orientations from the animation (or the model) and scale
-            let animation = (record.frame_index != -1 && record.animation_graph_index != u32::MAX && record.animation_index != -1)
-                .then(|| {
-                    self.pose_animations
-                        .entry((record.animation_graph_index, record.animation_index))
-                        .or_insert_with(|| pose::PoseAnimation::load(cache, record.animation_graph_index, record.animation_index).ok().flatten())
-                        .as_ref()
-                })
-                .flatten();
+            let animated = record.frame_index != -1 && record.animation_graph_index != u32::MAX && record.animation_index != -1;
+            if animated {
+                self.pose_animations
+                    .entry((record.animation_graph_index, record.animation_index))
+                    .or_insert_with(|| pose::PoseAnimation::load(cache, record.animation_graph_index, record.animation_index).ok().flatten());
+            }
+            let animation = animated.then(|| self.pose_animations.get(&(record.animation_graph_index, record.animation_index))).flatten().and_then(|a| a.as_ref());
             let mut orientations = match animation {
                 Some(animation) => pose::animation_node_orientations(model, animation, record.frame_index),
                 None => pose::model_node_orientations(model),
             };
+            if let Some(graph_index) = definition.animation_graph {
+                let animations = &self.pose_animations;
+                let animation = |index: i16| animations.get(&(graph_index, index)).and_then(|a| a.as_ref());
+                pose::object_overlays_apply(
+                    &definition,
+                    &animation,
+                    node_count,
+                    record.function_values,
+                    record.object_index.wrapping_add(record.game_time as u32),
+                    &mut orientations,
+                );
+            }
             if record.scale > 0.0 && !orientations.is_empty() {
                 let o = &mut orientations[0];
                 o.scale *= record.scale;
                 o.translation = [o.translation[0] * record.scale, o.translation[1] * record.scale, o.translation[2] * record.scale];
             }
-            if definition.has_overlays {
-                self.pose_animated[2] += 1;
-            } else {
+            {
                 self.pose_animated[0] += 1;
+                if !definition.overlays.is_empty() {
+                    self.pose_animated[2] += 1;
+                }
                 let same = orientations.len() == node_count
                     && orientations.iter().zip(nodes).all(|(o, n)| o.to_floats().map(f32::to_bits) == n.animated.map(f32::to_bits));
                 if same {
@@ -1476,145 +1506,244 @@ impl CollisionCheck {
                 );
             }
 
-            // a biped's preprocess, from the game's animated orientations
-            if record.unit_recorded != 0 {
-                self.check_unit_pose(record, nodes, model_index);
+            // the type's preprocess, from the game's animated orientations
+            self.check_preprocess(record, nodes, model_index, &definition);
+        }
+    }
+
+    /// Loads every animation of a graph for posing.
+    fn load_graph_animations(&mut self, graph_index: u32) {
+        if !self.unit_pose_graphs.insert(graph_index) {
+            return;
+        }
+        let cache = &self.cache;
+        for index in 0..i16::MAX {
+            match halo_map::pose::PoseAnimation::load(cache, graph_index, index) {
+                Ok(Some(animation)) => {
+                    self.pose_animations.insert((graph_index, index), Some(animation));
+                }
+                _ => break,
             }
         }
     }
 
-    /// Replays a biped's preprocess (`unit_preprocess_node_orientations`)
-    /// over the orientations the game's animation gave it.
-    fn check_unit_pose(&mut self, record: &halo_bridge::PoseRecord, nodes: &[halo_bridge::PoseNodeRecord], model_index: u32) {
-        use halo_map::biped_moving::BipedDefinition;
+    /// Replays an object type's preprocess of its pose (a unit's
+    /// `unit_preprocess_node_orientations`, then a vehicle's; a device's;
+    /// for the other types and objects without a graph, none) over the
+    /// orientations the game's animation and overlays gave it.
+    fn check_preprocess(
+        &mut self,
+        record: &halo_bridge::PoseRecord,
+        nodes: &[halo_bridge::PoseNodeRecord],
+        model_index: u32,
+        object: &halo_map::pose::PoseObjectDefinition,
+    ) {
         use halo_map::pose::Orientation;
         use halo_map::unit_pose::{GrenadeThrowLegs, UnitPoseInputs, unit_preprocess_node_orientations};
-        let cache = &self.cache;
-        let definition = self
-            .biped_definitions
-            .entry(record.definition_index)
-            .or_insert_with(|| BipedDefinition::load(cache, record.definition_index).ok())
-            .clone();
-        let Some(definition) = definition else { return };
-        let Some(graph_index) = definition.animation_graph else { return };
-        if !self.animation_graphs.contains_key(&graph_index) {
-            self.animation_graphs.insert(graph_index, halo_map::unit_animation::AnimationGraph::load(cache, graph_index).ok());
-        }
-        if self.unit_pose_graphs.insert(graph_index) {
-            if let Some(Some(graph)) = self.animation_graphs.get(&graph_index) {
-                for index in 0..graph.animations.len() as i16 {
-                    self.pose_animations
-                        .entry((graph_index, index))
-                        .or_insert_with(|| halo_map::pose::PoseAnimation::load(cache, graph_index, index).ok().flatten());
-                }
-            }
-        }
-        let Some(Some(graph)) = self.animation_graphs.get(&graph_index) else { return };
-        let Some(Some(model)) = self.pose_models.get(&model_index) else { return };
-        let animations = &self.pose_animations;
-        let animation = |index: i16| animations.get(&(graph_index, index)).and_then(|a| a.as_ref());
-        let inputs = UnitPoseInputs {
-            has_no_aiming: definition.unit_flags & (1 << 10) != 0,
-            simple_creature: definition.unit_flags & (1 << 11) != 0,
-            enhanced: record.unit_enhanced != 0,
-            airborne: record.unit_airborne != 0,
-            parented: record.unit_parented != 0,
-            has_weapon: record.unit_has_weapon != 0,
-            player: record.unit_player != 0,
-            game_time: record.game_time,
-            animation_flags: record.unit_animation_flags,
-            aiming_screen_index: record.aiming_screen_index,
-            looking_screen_index: record.looking_screen_index,
-            override_emotion_animation_index: record.override_emotion_animation_index,
-            seat_index: record.seat_index,
-            weapon_index: record.weapon_index,
-            state: record.state,
-            action: record.action,
-            base_seat_index: record.base_seat_index,
-            emotion_index: record.emotion_index,
-            action_animation: (record.action_animation[0], record.action_animation[1]),
-            overlay_action_animation: (record.overlay_action_animation[0], record.overlay_action_animation[1]),
-            soft_ping_animation: (record.soft_ping_animation[0], record.soft_ping_animation[1]),
-            mouth_aperture: record.mouth_aperture,
-            seat_acceleration: record.seat_acceleration,
-            aiming_vector: record.aiming_vector,
-            looking_vector: record.looking_vector,
-            orientation_forward: record.orientation_forward,
-            orientation_up: record.orientation_up,
-            forward: record.forward,
-            up: record.up,
-            translational_velocity: record.translational_velocity,
-        };
-        let mut legs = GrenadeThrowLegs {
-            leg_weight: record.grenade_leg_weight,
-            leg_time: record.grenade_leg_time,
-            air_weight: record.grenade_air_weight,
-            air_time: record.grenade_air_time,
+        let kind = match record.kind {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            7..=9 => 3,
+            _ => 4,
         };
         let mut orientations: Vec<Orientation> = nodes.iter().map(|n| Orientation::from_floats(n.animated)).collect();
-        let outputs = unit_preprocess_node_orientations(model, graph, &animation, &inputs, &mut legs, &mut orientations);
-
-        let bits = |f: [f32; 4]| f.map(f32::to_bits);
-        let same_orientations = orientations.iter().zip(nodes).all(|(o, n)| o.to_floats().map(f32::to_bits) == n.preprocessed.map(f32::to_bits));
-        let same_outputs = outputs.aiming_with_euler_screen == (record.aiming_with_euler_screen != 0)
-            && outputs.looking_with_euler_screen == (record.looking_with_euler_screen != 0)
-            && outputs.aiming_screen_bounds.is_none_or(|b| bits(b) == bits(record.aiming_screen_bounds))
-            && outputs.looking_screen_bounds.is_none_or(|b| bits(b) == bits(record.looking_screen_bounds));
-        self.unit_poses[0] += 1;
-        if same_orientations && same_outputs {
-            let k = &mut self.unit_poses;
-            k[1] += 1;
-            k[2] += (inputs.action_animation.0 != -1) as u64;
-            k[3] += (inputs.overlay_action_animation.0 != -1) as u64;
-            k[4] += (inputs.soft_ping_animation.0 != -1) as u64;
-            k[5] += (inputs.emotion_index != -1 || inputs.mouth_aperture > 0.0 || inputs.animation_flags & 2 != 0) as u64;
-            k[6] += outputs.aiming_with_euler_screen as u64;
-            k[7] += outputs.looking_with_euler_screen as u64;
-            if inputs.state == 33 && inputs.enhanced {
-                k[8] += 1;
-                let v = inputs.translational_velocity;
-                let t = &mut self.unit_pose_throws;
-                t[0] += (v[0] != 0.0 || v[1] != 0.0) as u64;
-                t[1] += inputs.airborne as u64;
-                t[2] += (inputs.base_seat_index == 3) as u64;
-                t[3] += inputs.parented as u64;
-                t[4] += (legs != GrenadeThrowLegs {
+        let mut unit_outputs = None;
+        let mut unit_details = None;
+        if let Some(graph_index) = object.animation_graph {
+            let cache = &self.cache;
+            if record.unit_recorded != 0 && !self.animation_graphs.contains_key(&graph_index) {
+                self.animation_graphs.insert(graph_index, halo_map::unit_animation::AnimationGraph::load(cache, graph_index).ok());
+            }
+            if record.vehicle_recorded != 0 && !self.vehicle_pose_definitions.contains_key(&record.definition_index) {
+                let loaded = halo_map::vehicle_pose::VehiclePoseDefinition::load(cache, record.definition_index).ok();
+                self.vehicle_pose_definitions.insert(record.definition_index, loaded);
+            }
+            if record.device_recorded != 0 && !self.device_pose_definitions.contains_key(&record.definition_index) {
+                let loaded = halo_map::device_pose::DevicePoseDefinition::load(cache, record.definition_index).ok();
+                self.device_pose_definitions.insert(record.definition_index, loaded);
+            }
+            let Some(Some(model)) = self.pose_models.get(&model_index) else { return };
+            let animations = &self.pose_animations;
+            let animation = |index: i16| animations.get(&(graph_index, index)).and_then(|a| a.as_ref());
+            if record.unit_recorded != 0 {
+                let Some(Some(graph)) = self.animation_graphs.get(&graph_index) else { return };
+                // (the unit definition's flags, after the object's)
+                let Ok(unit_flags) = cache
+                    .tag_root(record.definition_index, halo_map::groups::OBJECT)
+                    .and_then(|root| root.u32(halo_map::layout::biped_definition::UNIT + halo_map::layout::_unit_definition::FLAGS))
+                else {
+                    return;
+                };
+                let inputs = UnitPoseInputs {
+                has_no_aiming: unit_flags & (1 << 10) != 0,
+                simple_creature: unit_flags & (1 << 11) != 0,
+                enhanced: record.unit_enhanced != 0,
+                airborne: record.unit_airborne != 0,
+                parented: record.unit_parented != 0,
+                has_weapon: record.unit_has_weapon != 0,
+                player: record.unit_player != 0,
+                game_time: record.game_time,
+                animation_flags: record.unit_animation_flags,
+                aiming_screen_index: record.aiming_screen_index,
+                looking_screen_index: record.looking_screen_index,
+                override_emotion_animation_index: record.override_emotion_animation_index,
+                seat_index: record.seat_index,
+                weapon_index: record.weapon_index,
+                state: record.state,
+                action: record.action,
+                base_seat_index: record.base_seat_index,
+                emotion_index: record.emotion_index,
+                action_animation: (record.action_animation[0], record.action_animation[1]),
+                overlay_action_animation: (record.overlay_action_animation[0], record.overlay_action_animation[1]),
+                soft_ping_animation: (record.soft_ping_animation[0], record.soft_ping_animation[1]),
+                mouth_aperture: record.mouth_aperture,
+                seat_acceleration: record.seat_acceleration,
+                aiming_vector: record.aiming_vector,
+                looking_vector: record.looking_vector,
+                orientation_forward: record.orientation_forward,
+                orientation_up: record.orientation_up,
+                forward: record.forward,
+                up: record.up,
+                translational_velocity: record.translational_velocity,
+            };
+                let mut legs = GrenadeThrowLegs {
                     leg_weight: record.grenade_leg_weight,
                     leg_time: record.grenade_leg_time,
                     air_weight: record.grenade_air_weight,
                     air_time: record.grenade_air_time,
-                }) as u64;
+                };
+                let outputs = unit_preprocess_node_orientations(model, graph, &animation, &inputs, &mut legs, &mut orientations);
+                unit_outputs = Some(outputs);
+                unit_details = Some((inputs, legs));
+            }
+            if record.vehicle_recorded != 0 {
+                let Some(Some(definition)) = self.vehicle_pose_definitions.get(&record.definition_index) else { return };
+                let inputs = halo_map::vehicle_pose::VehiclePoseInputs {
+                    turn: record.vehicle_turn,
+                    speed: record.vehicle_speed,
+                    wheel: record.vehicle_wheel,
+                    suspension: record.vehicle_suspension,
+                    forward: record.forward,
+                    up: record.up,
+                    translational_velocity: record.translational_velocity,
+                };
+                halo_map::vehicle_pose::vehicle_preprocess_node_orientations(definition, &animation, nodes.len(), &inputs, &mut orientations);
+            }
+            if record.device_recorded != 0 {
+                let Some(Some(definition)) = self.device_pose_definitions.get(&record.definition_index) else { return };
+                halo_map::device_pose::device_preprocess_node_orientations(
+                    definition,
+                    &animation,
+                    record.device_flags,
+                    record.device_position,
+                    record.device_power,
+                    &mut orientations,
+                );
+            }
+        }
+
+        let bits = |f: [f32; 4]| f.map(f32::to_bits);
+        let same_orientations = orientations.iter().zip(nodes).all(|(o, n)| o.to_floats().map(f32::to_bits) == n.preprocessed.map(f32::to_bits));
+        let same_outputs = unit_outputs.is_none_or(|outputs| {
+            outputs.aiming_with_euler_screen == (record.aiming_with_euler_screen != 0)
+                && outputs.looking_with_euler_screen == (record.looking_with_euler_screen != 0)
+                && outputs.aiming_screen_bounds.is_none_or(|b| bits(b) == bits(record.aiming_screen_bounds))
+                && outputs.looking_screen_bounds.is_none_or(|b| bits(b) == bits(record.looking_screen_bounds))
+        });
+        let changed = nodes.iter().any(|n| n.animated.map(f32::to_bits) != n.preprocessed.map(f32::to_bits));
+        self.preprocess_kinds[kind][0] += 1;
+        if same_orientations && same_outputs {
+            self.preprocess_kinds[kind][1] += 1;
+            self.preprocess_kinds[kind][2] += changed as u64;
+            if record.vehicle_recorded != 0 {
+                let t = &mut self.vehicle_poses;
+                t[0] += (record.vehicle_turn != 0.0) as u64;
+                t[1] += (record.vehicle_speed != 0.0) as u64;
+                t[2] += (record.vehicle_wheel != 0.0) as u64;
+                t[3] += record.vehicle_suspension.iter().any(|&c| c != 0) as u64;
+            }
+            if record.device_recorded != 0 {
+                let t = &mut self.device_poses;
+                t[0] += (record.device_position != 0.0) as u64;
+                t[1] += (record.device_power != 0.0) as u64;
+            }
+            if let (Some(outputs), Some((inputs, legs))) = (unit_outputs, &unit_details) {
+                let k = &mut self.unit_poses;
+                k[0] += 1;
+                k[1] += 1;
+                k[2] += (inputs.action_animation.0 != -1) as u64;
+                k[3] += (inputs.overlay_action_animation.0 != -1) as u64;
+                k[4] += (inputs.soft_ping_animation.0 != -1) as u64;
+                k[5] += (inputs.emotion_index != -1 || inputs.mouth_aperture > 0.0 || inputs.animation_flags & 2 != 0) as u64;
+                k[6] += outputs.aiming_with_euler_screen as u64;
+                k[7] += outputs.looking_with_euler_screen as u64;
+                if inputs.state == 33 && inputs.enhanced {
+                    k[8] += 1;
+                    let v = inputs.translational_velocity;
+                    let t = &mut self.unit_pose_throws;
+                    t[0] += (v[0] != 0.0 || v[1] != 0.0) as u64;
+                    t[1] += inputs.airborne as u64;
+                    t[2] += (inputs.base_seat_index == 3) as u64;
+                    t[3] += inputs.parented as u64;
+                    t[4] += (*legs != GrenadeThrowLegs {
+                        leg_weight: record.grenade_leg_weight,
+                        leg_time: record.grenade_leg_time,
+                        air_weight: record.grenade_air_weight,
+                        air_time: record.grenade_air_time,
+                    }) as u64;
+                }
             }
         } else if self.unit_poses_shown < 8 {
             self.unit_poses_shown += 1;
+            if unit_outputs.is_some() {
+                self.unit_poses[0] += 1;
+            }
             let first = orientations.iter().zip(nodes).position(|(o, n)| o.to_floats().map(f32::to_bits) != n.preprocessed.map(f32::to_bits));
             println!(
-                "  unit pose {:#x} differs at node {first:?} of {} (outputs agree {same_outputs}: halo_map {:?}, game aiming {} {:?} looking {} {:?}):\n    inputs   {:?}\n    animated {:?}\n    game     {:?}\n    halo_map {:?}",
+                "  preprocess of {:#x} (type {}, definition {:#x}) differs at node {first:?} of {} (unit outputs agree {same_outputs}: halo_map {:?}, game aiming {} {:?} looking {} {:?}; vehicle {} turn {} speed {} wheel {} suspension {:?}; device {} flags {:#x} position {} power {}):\n    unit     {:?}\n    animated {:?}\n    game     {:?}\n    halo_map {:?}",
                 record.object_index,
+                record.kind,
+                record.definition_index,
                 nodes.len(),
-                outputs,
+                unit_outputs,
                 record.aiming_with_euler_screen,
                 record.aiming_screen_bounds,
                 record.looking_with_euler_screen,
                 record.looking_screen_bounds,
-                inputs,
+                record.vehicle_recorded,
+                record.vehicle_turn,
+                record.vehicle_speed,
+                record.vehicle_wheel,
+                record.vehicle_suspension,
+                record.device_recorded,
+                record.device_flags,
+                record.device_position,
+                record.device_power,
+                unit_details.as_ref().map(|(inputs, _)| inputs),
                 first.map(|i| nodes[i].animated),
                 first.map(|i| nodes[i].preprocessed),
                 first.map(|i| orientations[i].to_floats())
             );
+        } else if unit_outputs.is_some() {
+            self.unit_poses[0] += 1;
         }
     }
 
     fn report(&self) {
         let [compared, agreed, actions, overlay_actions, soft_pings, seat_overlays, aiming, looking, throws] = self.unit_poses;
         println!(
-            "poses: {} of {} bipeds' preprocessed poses agree with the game bit for bit ({} with an action, {} an overlay action, {} a soft ping, {} an emotion, mouth or acceleration overlay; {} aiming, {} looking; {} throwing a grenade: {:?} moving, airborne, crouched, riding, easing)",
+            "poses: each type's preprocess (biped, vehicle, weapon, device, other: compared, agreed, of those changing the pose) {:?}; vehicles turning, moving, wheels turned, suspensions compressed {:?}; devices with a position, a power {:?}",
+            self.preprocess_kinds, self.vehicle_poses, self.device_poses
+        );
+        println!(
+            "poses: {} of {} units' preprocessed poses agree with the game bit for bit ({} with an action, {} an overlay action, {} a soft ping, {} an emotion, mouth or acceleration overlay; {} aiming, {} looking; {} throwing a grenade: {:?} moving, airborne, crouched, riding, easing)",
             agreed, compared, actions, overlay_actions, soft_pings, seat_overlays, aiming, looking, throws, self.unit_pose_throws
         );
         let [compared, agreed, overlays, compressed, model_pose] = self.pose_animated;
         let [m_compared, m_agreed, interpolating, parented] = self.pose_matrices;
         println!(
-            "poses: {} of {} sampled poses' orientations agree with the game bit for bit ({} from compressed animations, {} the model's pose; {} left out for overlays); {} of {} poses' node matrices agree ({} interpolating, {} hanging from a parent); by type {:?}; {} of {} lost from the ring",
+            "poses: {} of {} sampled poses' orientations agree with the game bit for bit ({} from compressed animations, {} the model's pose, {} with object overlays); {} of {} poses' node matrices agree ({} interpolating, {} hanging from a parent); by type {:?}; {} of {} lost from the ring",
             agreed, compared, compressed, model_pose, overlays, m_agreed, m_compared, interpolating, parented, self.pose_types, self.poses_incomplete, self.poses
         );
         let [entered, seats, restarted, with_effects, leaps] = self.animation_kinds;

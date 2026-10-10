@@ -39,6 +39,10 @@ pub mod _biped_definition {
     pub const RUNTIME_UPHILL_K1: usize = 0x1f0;
 }
 
+pub mod _device_definition {
+    pub const FLAGS: usize = 0x0;
+}
+
 pub mod _object_definition {
     pub const SIZEOF: usize = 0x17c;
     pub const TYPE: usize = 0x0;
@@ -109,7 +113,21 @@ pub mod animation {
 pub mod animation_graph {
     pub const OBJECT_OVERLAYS: usize = 0x0;
     pub const UNIT_SEATS: usize = 0xc;
+    pub const VEHICLE_ANIMATIONS: usize = 0x24;
+    pub const DEVICE_ANIMATIONS: usize = 0x30;
     pub const ANIMATIONS: usize = 0x74;
+}
+
+pub mod animation_graph_device_animations {
+    pub const SIZEOF: usize = 0x60;
+    pub const ANIMATIONS: usize = 0x54;
+}
+
+pub mod animation_graph_object_overlay {
+    pub const SIZEOF: usize = 0x14;
+    pub const ANIMATION_INDEX: usize = 0x0;
+    pub const FUNCTION_INDEX: usize = 0x2;
+    pub const MODE: usize = 0x4;
 }
 
 pub mod animation_graph_unit_seat {
@@ -221,6 +239,10 @@ pub mod control_placement {
     pub const SIZEOF: usize = 0x40;
 }
 
+pub mod device_definition {
+    pub const DEVICE: usize = 0x17c;
+}
+
 pub mod equipment_placement {
     pub const SIZEOF: usize = 0x28;
 }
@@ -305,6 +327,11 @@ pub mod model_shader_reference {
     pub const SIZEOF: usize = 0x20;
     pub const SHADER: usize = 0x0;
     pub const PERMUTATION_INDEX: usize = 0x10;
+}
+
+pub mod object_function_definition {
+    pub const SIZEOF: usize = 0x168;
+    pub const FLAGS: usize = 0x0;
 }
 
 pub mod physics_definition {
@@ -669,6 +696,24 @@ pub mod triangle_buffer {
 pub mod unit_placement {
     pub const SIZEOF: usize = 0x78;
     pub const PERMUTATION: usize = 0x28;
+}
+
+pub mod vehicle_animation {
+    pub const SIZEOF: usize = 0x74;
+    pub const STEERING_SCREEN_BOUNDS: usize = 0x0;
+    pub const ANIMATIONS: usize = 0x5c;
+    pub const SUSPENSIONS: usize = 0x68;
+}
+
+pub mod vehicle_definition {
+    pub const UNKNOWN2F8: usize = 0x2f8;
+    pub const UNKNOWN2FC: usize = 0x2fc;
+    pub const WHEEL_CIRCUMFERENCE: usize = 0x310;
+}
+
+pub mod vehicle_suspension {
+    pub const SIZEOF: usize = 0x14;
+    pub const ANIMATION_INDEX: usize = 0x2;
 }
 
 pub mod vertex_buffer {

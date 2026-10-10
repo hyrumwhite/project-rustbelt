@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 23;
+pub const VERSION: u32 = 24;
 pub const POSE_RECORDS: usize = 2048;
 pub const POSE_NODES: usize = 65536;
 pub const UNIT_ANIMATION_RECORDS: usize = 1024;
@@ -568,10 +568,23 @@ pub struct PoseRecord {
     pub looking_with_euler_screen: u32,
     pub aiming_screen_bounds: [f32; 4],
     pub looking_screen_bounds: [f32; 4],
+    /// (Protocol 24; the game time is every pose's, for its overlays, and
+    /// the unit fields every unit's.) A vehicle's (`vehicle_recorded`):
+    /// its turn, speed, wheel and suspensions; a device's
+    /// (`device_recorded`): its flags, position and power.
+    pub vehicle_recorded: u32,
+    pub vehicle_turn: f32,
+    pub vehicle_speed: f32,
+    pub vehicle_wheel: f32,
+    pub vehicle_suspension: [u8; 8],
+    pub device_recorded: u32,
+    pub device_flags: u32,
+    pub device_position: f32,
+    pub device_power: f32,
 }
 
 const _: () = assert!(std::mem::size_of::<PoseNodeRecord>() == 148);
-const _: () = assert!(std::mem::size_of::<PoseRecord>() == 344);
+const _: () = assert!(std::mem::size_of::<PoseRecord>() == 384);
 
 /// A recorded biped update with the objects its features came from (each
 /// with its node matrices: scale, forward, left, up, position).

@@ -11,9 +11,9 @@
 //! It also applies animations over a pose, as the types' preprocesses do
 //! (`replacement_animation_apply`, `overlay_animation_apply` and its
 //! scaled and continuous forms, `aiming_screen_apply`); a unit's is in
-//! `unit_pose`. Objects' overlay animations (driven by their function
-//! values) and the other types' preprocesses (vehicles', weapons',
-//! devices') are not ported yet.
+//! `unit_pose`, a vehicle's in `vehicle_pose` and a device's in
+//! `device_pose`. Objects' overlay animations, driven by their function
+//! values, are `object_overlays_apply`.
 
 use crate::model::Matrix4x3;
 use crate::{CacheFile, Result, layout};
@@ -682,7 +682,10 @@ pub fn replacement_animation_apply(animation: &PoseAnimation, frame_index: i16, 
     let (mut rotation_index, mut translation_index, mut scale_index) = (0i64, 0i64, 0i64);
     let real_frame = frame_index as f32;
     for (node_index, rotates, translates, scales) in animated_nodes(animation) {
-        let orientation = &mut orientations[node_index];
+        // (past the orientations, as an animation with more nodes than the
+        // model writes past them: read, and dropped)
+        let mut spare = Orientation::default();
+        let orientation = orientations.get_mut(node_index).unwrap_or(&mut spare);
         if rotates {
             if compressed {
                 orientation.rotation = keyframe_rotation(animation, real_frame, rotation_index, node_index as i64);
@@ -761,7 +764,10 @@ pub fn overlay_animation_apply(animation: &PoseAnimation, frame_index: i16, orie
         return;
     }
     for (node_index, rotation, translation, scale) in overlay_frame(animation, frame_index) {
-        let orientation = &mut orientations[node_index];
+        // (past the orientations, as an animation with more nodes than the
+        // model writes past them: read, and dropped)
+        let mut spare = Orientation::default();
+        let orientation = orientations.get_mut(node_index).unwrap_or(&mut spare);
         if let Some(rotation) = rotation {
             orientation.rotation = quaternions_multiply(rotation, orientation.rotation);
         }
@@ -784,7 +790,10 @@ pub fn overlay_animation_apply_scaled(animation: &PoseAnimation, frame_index: i1
         return;
     }
     for (node_index, rotation, translation, scale) in overlay_frame(animation, frame_index) {
-        let orientation = &mut orientations[node_index];
+        // (past the orientations, as an animation with more nodes than the
+        // model writes past them: read, and dropped)
+        let mut spare = Orientation::default();
+        let orientation = orientations.get_mut(node_index).unwrap_or(&mut spare);
         if let Some(rotation) = rotation {
             let rotation = quaternions_interpolate([0.0, 0.0, 0.0, 1.0], rotation, animation_scale);
             orientation.rotation = quaternions_multiply(rotation, orientation.rotation);
@@ -826,7 +835,10 @@ pub fn overlay_animation_apply_continuous(animation: &PoseAnimation, real_frame_
     let mut next_data = animation.frame_data_offset(next_frame_index) as usize;
     let (mut rotation_index, mut translation_index, mut scale_index) = (0i64, 0i64, 0i64);
     for (node_index, rotates, translates, scales) in animated_nodes(animation) {
-        let orientation = &mut orientations[node_index];
+        // (past the orientations, as an animation with more nodes than the
+        // model writes past them: read, and dropped)
+        let mut spare = Orientation::default();
+        let orientation = orientations.get_mut(node_index).unwrap_or(&mut spare);
         if rotates {
             let rotation = if compressed {
                 rotation_index += 1;
@@ -932,7 +944,10 @@ pub fn aiming_screen_apply(animation: &PoseAnimation, bounds: &ScreenBounds, yaw
     let mut data = frames.map(|f| animation.frame_data_offset(f) as usize);
     let (mut rotation_index, mut translation_index) = (0i64, 0i64);
     for (node_index, rotates, translates, _) in animated_nodes(animation) {
-        let orientation = &mut orientations[node_index];
+        // (past the orientations, as an animation with more nodes than the
+        // model writes past them: read, and dropped)
+        let mut spare = Orientation::default();
+        let orientation = orientations.get_mut(node_index).unwrap_or(&mut spare);
         if rotates {
             let r: [[f32; 4]; 4] = if compressed {
                 let r = frames.map(|f| keyframe_rotation(animation, f as f32, rotation_index, node_index as i64));
@@ -1125,8 +1140,63 @@ pub struct PoseObjectDefinition {
     pub animation_graph: Option<u32>,
     pub origin_offset: [f32; 3],
     pub center_of_mass: Option<[f32; 3]>,
-    /// Whether its graph has object overlays (not ported).
-    pub has_overlays: bool,
+    /// Its graph's object overlays.
+    pub overlays: Vec<ObjectOverlay>,
+    /// Its functions' flags (`object_function_definition`).
+    pub function_flags: Vec<u32>,
+}
+
+/// An animation an object's function value drives
+/// (`animation_graph_object_overlay`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ObjectOverlay {
+    pub animation_index: i16,
+    pub function_index: i16,
+    /// `_object_overlay_mode_frame` (the value picks the frame) or
+    /// `_object_overlay_mode_scale` (the value scales a frame the time
+    /// picks).
+    pub mode: i16,
+}
+
+const OBJECT_OVERLAY_MODE_FRAME: i16 = 0;
+const OBJECT_OVERLAY_MODE_SCALE: i16 = 1;
+const OBJECT_FUNCTION_ADDITIVE: u32 = 1 << 1;
+/// `NUMBER_OF_OUTGOING_OBJECT_FUNCTIONS`.
+const OUTGOING_FUNCTIONS: usize = 4;
+
+/// `object_compute_node_matrices`' object overlays: each the graph has,
+/// driven by one of the object's outgoing function values, applied over
+/// the pose. `animation` gives the graph's animation of an index (`None`
+/// for one it doesn't have); those with more nodes than the model are
+/// skipped. `frame_time` is the object's index plus the game time
+/// (`OBJECT_FRAME_INDEX_GET`).
+pub fn object_overlays_apply<'a>(
+    definition: &PoseObjectDefinition,
+    animation: &dyn Fn(i16) -> Option<&'a PoseAnimation>,
+    model_node_count: usize,
+    function_values: [f32; 4],
+    frame_time: u32,
+    orientations: &mut [Orientation],
+) {
+    let function_count = definition.function_flags.len().min(OUTGOING_FUNCTIONS);
+    for overlay in &definition.overlays {
+        let Some(a) = animation(overlay.animation_index) else { continue };
+        if overlay.function_index < 0 || overlay.function_index as usize >= function_count {
+            continue;
+        }
+        let flags = definition.function_flags[overlay.function_index as usize];
+        let value = function_values[overlay.function_index as usize];
+        if a.node_count as i32 > model_node_count as i32 {
+            continue;
+        } else if overlay.mode == OBJECT_OVERLAY_MODE_FRAME {
+            let frame_index =
+                if flags & OBJECT_FUNCTION_ADDITIVE != 0 { a.frame_count as f32 * value } else { (a.frame_count as i32 - 1) as f32 * value };
+            overlay_animation_apply_continuous(a, frame_index, orientations);
+        } else if overlay.mode == OBJECT_OVERLAY_MODE_SCALE && a.frame_count > 0 {
+            let frame_index = (frame_time % a.frame_count as u32) as i16;
+            overlay_animation_apply_scaled(a, frame_index, value, orientations);
+        }
+    }
 }
 
 impl PoseObjectDefinition {
@@ -1139,16 +1209,27 @@ impl PoseObjectDefinition {
             None => None,
         };
         let animation_graph = root.reference(o::ANIMATION_GRAPH)?.datum;
-        let has_overlays = match animation_graph {
-            Some(g) => cache.tag_root(g, crate::groups::ANIMATION_GRAPH)?.block(layout::animation_graph::OBJECT_OVERLAYS, 1)?.count > 0,
-            None => false,
-        };
+        let mut overlays = Vec::new();
+        if let Some(g) = animation_graph {
+            use layout::animation_graph_object_overlay as v;
+            let graph = cache.tag_root(g, crate::groups::ANIMATION_GRAPH)?;
+            for overlay in graph.block(layout::animation_graph::OBJECT_OVERLAYS, v::SIZEOF)?.iter() {
+                overlays.push(ObjectOverlay {
+                    animation_index: overlay.i16(v::ANIMATION_INDEX)?,
+                    function_index: overlay.i16(v::FUNCTION_INDEX)?,
+                    mode: overlay.i16(v::MODE)?,
+                });
+            }
+        }
+        use layout::object_function_definition as f;
+        let function_flags = root.block(o::FUNCTIONS, f::SIZEOF)?.iter().map(|p| p.u32(f::FLAGS)).collect::<Result<_>>()?;
         Ok(PoseObjectDefinition {
             model: root.reference(o::MODEL)?.datum,
             animation_graph,
             origin_offset: root.vec3(o::ORIGIN_OFFSET)?,
             center_of_mass,
-            has_overlays,
+            overlays,
+            function_flags,
         })
     }
 }

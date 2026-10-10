@@ -25,6 +25,7 @@ pub mod damage_update;
 pub mod devices;
 pub mod items;
 pub mod markers;
+pub mod weapons;
 pub mod device_pose;
 pub mod features;
 mod cache;

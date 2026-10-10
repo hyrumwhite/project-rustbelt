@@ -313,6 +313,16 @@ fn choose_random_permutation(graph: &AnimationGraph, random: &mut Random, animat
     animation_index
 }
 
+/// `animation_update_internal` affecting the game's state (its random
+/// numbers the global seed's): a frame further, and what that came to
+/// (`update_result`).
+pub fn animation_update(graph: Option<&AnimationGraph>, seed: &mut u32, index: &mut i16, frame_index: &mut i16) -> i16 {
+    let mut random = Random { seed: *seed };
+    let result = update_internal(graph, &mut random, index, frame_index);
+    *seed = random.seed;
+    result
+}
+
 /// `animation_update_internal`: a frame further, and what that came to.
 fn update_internal(graph: Option<&AnimationGraph>, random: &mut Random, index: &mut i16, frame_index: &mut i16) -> i16 {
     let Some(graph) = graph else { return update_result::RUNNING };

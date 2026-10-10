@@ -80,7 +80,7 @@ pub struct UnitAnimationCall {
 }
 
 impl crate::Tags {
-    fn animation_graph(&mut self, datum: u32) -> Option<Arc<AnimationGraph>> {
+    pub(crate) fn animation_graph(&mut self, datum: u32) -> Option<Arc<AnimationGraph>> {
         let cache = &self.cache;
         self.unit_graphs.entry(datum).or_insert_with(|| AnimationGraph::load(cache, datum).ok().map(Arc::new)).clone()
     }

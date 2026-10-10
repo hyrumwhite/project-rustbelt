@@ -53,7 +53,7 @@ const CHILDREN_TAKE_AREA_DAMAGE: u32 = 1 << 3;
 // object flags
 const OBJECT_INVISIBLE: u32 = 1 << 0;
 // unit definition flags
-const UNIT_IS_INCONSEQUENTIAL: u32 = 1 << 12;
+const UNIT_IS_INCONSEQUENTIAL: u32 = 1 << 19;
 // object types (bipeds and vehicles are units)
 const OBJECT_MASK_UNIT: u32 = (1 << 0) | (1 << 1);
 

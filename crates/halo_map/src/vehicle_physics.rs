@@ -514,6 +514,10 @@ pub trait VehiclePhysicsHost {
     /// `physics_compute_unit_collisions`: the collision forces between it
     /// and the bipeds and vehicles it hits.
     fn unit_collisions(&self, state: &mut VehiclePhysicsState);
+    /// An update begins, with what its vehicle code handed it, and ends,
+    /// with its mass points (for the game's recording of it).
+    fn begin(&self, _state: &mut VehiclePhysicsState, _inputs: &VehiclePhysicsInputs<'_>, _old: bool) {}
+    fn end(&self, _state: &mut VehiclePhysicsState, _mass_points: &[MassPoint]) {}
 }
 
 /// What an update reads besides its state: the vehicle's index, the
@@ -987,8 +991,15 @@ pub fn physics_update(
     env: &VehiclePhysicsWorld<'_>,
 ) -> VehiclePhysicsOutcome {
     let mut outcome = VehiclePhysicsOutcome::default();
+    if let Some(host) = env.host {
+        host.begin(state, inputs, physics.radius > 0.0);
+    }
     if physics.radius > 0.0 {
-        return physics_update_old(physics, state, inputs, env);
+        let outcome = physics_update_old(physics, state, inputs, env);
+        if let Some(host) = env.host {
+            host.end(state, &outcome.mass_points);
+        }
+        return outcome;
     }
     let world_matrix = instance_matrix(state.position, state.forward, state.up, physics.center_of_mass);
     let gravity = physics.gravity_scale * GLOBAL_GRAVITY;
@@ -1107,6 +1118,7 @@ pub fn physics_update(
     // other vehicles)
     if let Some(host) = env.host {
         host.unit_collisions(state);
+        host.end(state, &mass_points);
         outcome.mass_points = mass_points;
         return outcome;
     }

@@ -247,7 +247,7 @@ impl crate::Tags {
 fn projectile_object(objects: &GameObjects, index: u32) -> Option<ProjectileObject> {
     let mut o = std::mem::MaybeUninit::<HostObject>::uninit();
     // SAFETY: the host's callback fills the object
-    if unsafe { (objects.host.object)(index, o.as_mut_ptr()) } == 0 {
+    if unsafe { (objects.host.object)(index, o.as_mut_ptr(), crate::world::purpose::OTHER) } == 0 {
         return None;
     }
     // SAFETY: filled above

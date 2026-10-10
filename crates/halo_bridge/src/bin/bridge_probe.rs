@@ -2048,6 +2048,7 @@ impl CollisionCheck {
                     _ => None,
                 },
                 world: &suspension_world,
+                host: None,
             };
             let outcome = vu::vehicle_update(&definition, physics.as_deref(), &mut state, &inputs, &env);
             if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {

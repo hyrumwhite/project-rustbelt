@@ -13,9 +13,11 @@
 //! fighters are held between the structure's floor and ceiling. A vehicle
 //! at rest coasts to a stop instead.
 //!
-//! What has no bearing on its state is left out: its effects (slipping,
-//! crashing, the Ghost's and Pelican's thrusters), its suspension sound,
-//! falling damage to what it carries, its animation and its blur region.
+//! What has no bearing on its state is the game's, through a
+//! [`VehicleUpdateHost`] in a running game (none when replaying): its
+//! effects (slipping, crashing, the Ghost's and Pelican's thrusters), its
+//! suspension sound, and the move of a vehicle coasting to a stop. Falling
+//! damage to what it carries, its animation and its blur region follow.
 
 use crate::collision::{World, transform_point, transform_vector};
 use crate::features::{cross3, dot3};
@@ -169,6 +171,7 @@ pub struct VehicleDatum {
 const _: () = assert!(std::mem::size_of::<VehicleDatum>() == 88);
 
 /// What a vehicle update reads and changes of the vehicle.
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct VehicleUpdateState {
     pub position: [f32; 3],
@@ -204,10 +207,30 @@ pub struct VehicleUpdateInputs<'a> {
 }
 
 /// The world a vehicle update tests: its physics' world (the objects and
-/// vehicles its physics met) and the world its suspensions test.
+/// vehicles its physics met) and the world its suspensions test; and, in a
+/// running game, the host that makes its effects and sounds.
 pub struct VehicleUpdateWorld<'a> {
     pub physics: Option<VehiclePhysicsWorld<'a>>,
     pub world: &'a World<'a>,
+    pub host: Option<&'a dyn VehicleUpdateHost>,
+}
+
+/// A running game, as a vehicle update calls it. The state is the update's
+/// as it stands (the host writes it to the vehicle first and reads back
+/// what the call changed).
+pub trait VehicleUpdateHost {
+    /// A vehicle coasting to a stop moves (`object_set_position`).
+    fn set_position(&self, state: &mut VehicleUpdateState, position: [f32; 3], forward: [f32; 3], up: [f32; 3]);
+    /// Its suspensions moved, the most by `maximum_shift`
+    /// (`update_suspension`'s sound): whether the sound played.
+    fn suspension_shift(&self, state: &mut VehicleUpdateState, maximum_shift: f32) -> bool;
+    /// `create_slipping_effects` from its mass points.
+    fn slipping_effects(&self, state: &mut VehicleUpdateState, mass_points: &[MassPoint]);
+    /// `create_crashing_effects`: its velocity's change since
+    /// `previous_velocity`, where its mass points touch the ground.
+    fn crashing_effects(&self, state: &mut VehicleUpdateState, previous_velocity: [f32; 3], mass_points: &[MassPoint]);
+    /// Its thrusters' effect (`create_pelican_effect`, `create_ghost_effect`).
+    fn thruster_effect(&self, state: &mut VehicleUpdateState, pelican: bool);
 }
 
 /// What the control code handed the physics, and what came of it.
@@ -626,6 +649,7 @@ pub fn vehicle_update(
 
     let fits = physics.is_some_and(|p| p.mass_points.len() <= 32 && p.powered_mass_points.len() <= 32);
     if let Some(physics) = physics.filter(|_| definition.has_physics && state.object_flags & OBJECT_AT_REST == 0 && fits) {
+        let previous_velocity = state.translational_velocity;
         let mut mass_points: Option<Vec<MassPoint>> = None;
         let powered_count = physics.powered_mass_points.len();
         let base = |count: usize| -> Vec<PoweredMassPoint> {
@@ -693,6 +717,9 @@ pub fn vehicle_update(
                     let call = plane_control(definition, physics, state, inputs);
                     run(&mut mass_points, physics, inputs, env, state, call, &mut outcome);
                 }
+                if let Some(host) = env.host {
+                    host.thruster_effect(state, true);
+                }
             }
             SCOUT => {
                 let water_depth = env.world.clusters.water_depth(state.location_cluster, state.position);
@@ -719,6 +746,9 @@ pub fn vehicle_update(
                     target = hover - 0.1;
                 }
                 state.vehicle.hover = target;
+                if let Some(host) = env.host {
+                    host.thruster_effect(state, false);
+                }
             }
             FIGHTER => {
                 let call = if powered_count != 2 {
@@ -729,13 +759,24 @@ pub fn vehicle_update(
                     fighter_control_new(definition, physics, state, inputs, base(2))
                 };
                 run(&mut mass_points, physics, inputs, env, state, call, &mut outcome);
+                if let Some(host) = env.host {
+                    host.thruster_effect(state, false);
+                }
             }
             TURRET => run(&mut mass_points, physics, inputs, env, state, none, &mut outcome),
             _ => {}
         }
         let mass_points = mass_points.unwrap_or_default();
 
-        update_suspension(definition, Some(physics), state, inputs.index, env.world);
+        if let Some(host) = env.host {
+            host.slipping_effects(state, &mass_points);
+        }
+        let maximum_shift = update_suspension(definition, Some(physics), state, inputs.index, env.world);
+        if let Some(host) = env.host
+            && !host.suspension_shift(state, maximum_shift)
+        {
+            host.crashing_effects(state, previous_velocity, &mass_points);
+        }
         compute_airborne_ticks(physics, &mut state.vehicle, &mass_points);
         if state.object_flags & OBJECT_AT_REST != 0 {
             state.vehicle.stop_time = 15;
@@ -754,8 +795,11 @@ pub fn vehicle_update(
         outcome.mass_points = mass_points;
     } else if state.vehicle.stop_time > 0 {
         outcome.stopping = true;
-        slowly_stop(state, inputs, env.world);
-        update_suspension(definition, physics, state, inputs.index, env.world);
+        slowly_stop(state, inputs, env);
+        let maximum_shift = update_suspension(definition, physics, state, inputs.index, env.world);
+        if let Some(host) = env.host {
+            host.suspension_shift(state, maximum_shift);
+        }
     }
     outcome
 }
@@ -827,7 +871,8 @@ fn compute_airborne_ticks(physics: &PhysicsDefinition, v: &mut VehicleDatum, mas
 }
 
 /// `slowly_stop_vehicle`: a vehicle at rest coasting to a stop.
-fn slowly_stop(state: &mut VehicleUpdateState, inputs: &VehicleUpdateInputs<'_>, world: &World<'_>) {
+fn slowly_stop(state: &mut VehicleUpdateState, inputs: &VehicleUpdateInputs<'_>, env: &VehicleUpdateWorld<'_>) {
+    let world = env.world;
     state.vehicle.stop_time -= 1;
     state.translational_velocity = state.translational_velocity.map(|c| c * 0.835);
     state.angular_velocity = state.angular_velocity.map(|c| c * 0.835);
@@ -843,6 +888,10 @@ fn slowly_stop(state: &mut VehicleUpdateState, inputs: &VehicleUpdateInputs<'_>,
     if state.vehicle.stop_time == 0 {
         state.translational_velocity = [0.0; 3];
         state.angular_velocity = [0.0; 3];
+    }
+    if let Some(host) = env.host {
+        host.set_position(state, position, forward, up);
+        return;
     }
     // (object_set_position: its location from the new pose's bounding
     // sphere centre, else its position)
@@ -862,9 +911,17 @@ fn slowly_stop(state: &mut VehicleUpdateState, inputs: &VehicleUpdateInputs<'_>,
 }
 
 /// `update_suspension`: each suspension's travel, from a ray along its
-/// mass point's up from the top of its travel.
-fn update_suspension(definition: &VehicleDefinition, physics: Option<&PhysicsDefinition>, state: &mut VehicleUpdateState, vehicle_index: u32, world: &World<'_>) {
-    let (Some(suspensions), Some(physics)) = (&definition.suspensions, physics) else { return };
+/// mass point's up from the top of its travel. Returns the most one moved
+/// (what its sound is played at).
+fn update_suspension(
+    definition: &VehicleDefinition,
+    physics: Option<&PhysicsDefinition>,
+    state: &mut VehicleUpdateState,
+    vehicle_index: u32,
+    world: &World<'_>,
+) -> f32 {
+    let mut maximum_shift = 0.0f32;
+    let (Some(suspensions), Some(physics)) = (&definition.suspensions, physics) else { return maximum_shift };
     let matrix = Matrix4x3 { scale: 1.0, forward: state.forward, left: cross3(state.up, state.forward), up: state.up, position: state.position };
     for (index, suspension) in suspensions.iter().take(8).enumerate() {
         if suspension.mass_point_index < 0 || suspension.mass_point_index as usize >= physics.mass_points.len() || suspension.animation_index == -1 {
@@ -882,9 +939,13 @@ fn update_suspension(definition: &VehicleDefinition, physics: Option<&PhysicsDef
         let vector = scale3(normal, extent + extent);
         let collision = world.test(0xc0a0, start, vector, vehicle_index);
         let shift = pin((1.0 - collision.t) + (1.0 - collision.t), 0.0, 1.0);
+        if shift - current > maximum_shift {
+            maximum_shift = shift - current;
+        }
         // (quantize_real_to_byte_lower_bound(0, 1, ...))
         state.vehicle.suspension[index] = (((shift + current) * 0.5 / 1.0) * 255.0) as i32 as u8;
     }
+    maximum_shift
 }
 
 /// `update_human_boat_physics`' controls: the rudder, its water lift, and

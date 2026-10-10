@@ -54,12 +54,15 @@ pub struct HostObject {
 #[derive(Debug, Clone, Copy)]
 pub struct Host {
     pub cluster_objects: unsafe extern "C" fn(cluster: i16, out: *mut u32, maximum: u32) -> u32,
-    pub object: unsafe extern "C" fn(index: u32, out: *mut HostObject) -> i32,
+    /// `purpose`: [`purpose`]'s, what the object is read for (the game's
+    /// recording of the visits follows the game's own).
+    pub object: unsafe extern "C" fn(index: u32, out: *mut HostObject, purpose: u32) -> i32,
     pub children: unsafe extern "C" fn(index: u32, out: *mut u32, maximum: u32) -> u32,
     pub projectile: crate::projectiles::ProjectileCallbacks,
     /// A gathering of collision features begins (the bridge counts them).
     pub features_call: unsafe extern "C" fn(),
     pub vehicle_physics: crate::vehicles::VehiclePhysicsCallbacks,
+    pub vehicle_update: crate::vehicles::VehicleUpdateCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);
@@ -111,12 +114,21 @@ pub(crate) fn host() -> Option<Host> {
 
 const OBJECT_TYPE_VEHICLE: i16 = 1;
 
+/// What an object is read for.
+pub mod purpose {
+    pub const OTHER: u32 = 0;
+    /// A ray test's broad phase visits it.
+    pub const RAY_TEST: u32 = 1;
+    /// A gathering of collision features visits it.
+    pub const FEATURES: u32 = 2;
+}
+
 impl GameObjects {
     /// An object as the host reports it.
-    pub(crate) fn host_object(&self, index: u32) -> Option<HostObject> {
+    pub(crate) fn host_object(&self, index: u32, purpose: u32) -> Option<HostObject> {
         let mut o = std::mem::MaybeUninit::<HostObject>::uninit();
         // SAFETY: the host's callback fills the object
-        if unsafe { (self.host.object)(index, o.as_mut_ptr()) } == 0 {
+        if unsafe { (self.host.object)(index, o.as_mut_ptr(), purpose) } == 0 {
             return None;
         }
         // SAFETY: filled above
@@ -147,7 +159,7 @@ impl halo_map::features::FeatureObjectSource for GameObjects {
     }
 
     fn feature_object(&self, index: u32) -> Option<halo_map::features::FeatureObject> {
-        let o = self.host_object(index)?;
+        let o = self.host_object(index, purpose::FEATURES)?;
         let model = {
             let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
             tags.as_mut()?.collision_model(o.definition_index)
@@ -190,7 +202,7 @@ impl ObjectSource for GameObjects {
     }
 
     fn object(&self, index: u32) -> Option<WorldObject> {
-        let o = self.host_object(index)?;
+        let o = self.host_object(index, purpose::RAY_TEST)?;
         let matrices = (0..o.node_count as usize)
             .map(|n| {
                 let mut f = [0.0f32; 13];

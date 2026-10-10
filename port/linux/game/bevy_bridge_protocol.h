@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 23
+#define BEVY_BRIDGE_VERSION 24
 #define BEVY_BRIDGE_POSE_RECORDS 2048
 #define BEVY_BRIDGE_POSE_NODES 65536
 #define BEVY_BRIDGE_UNIT_ANIMATION_RECORDS 1024
@@ -649,6 +649,21 @@ struct bevy_bridge_pose_record
 	unsigned long looking_with_euler_screen;
 	float aiming_screen_bounds[4];
 	float looking_screen_bounds[4];
+	/* (protocol 24; the game time above is every pose's, for its overlays,
+	and the unit's fields every unit's) a vehicle's (vehicle_recorded): its
+	turn, speed, wheel and suspensions (vehicle_preprocess_node_orientations
+	reads them with its velocity and axes above); a device's
+	(device_recorded): its flags, position and power
+	(device_preprocess_node_orientations) */
+	unsigned long vehicle_recorded;
+	float vehicle_turn;
+	float vehicle_speed;
+	float vehicle_wheel;
+	unsigned char vehicle_suspension[8];
+	unsigned long device_recorded;
+	unsigned long device_flags;
+	float device_position;
+	float device_power;
 };
 
 struct bevy_bridge_shared

@@ -22,6 +22,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "items/projectiles.h"
 #include "physics/breakable_surfaces.h"
 #include "units/bipeds.h"
+#include "units/vehicle_datum.h"
 #include "devices/device_definitions.h"
 #include "devices/devices.h"
 #include "models/model_definitions.h"
@@ -1276,7 +1277,8 @@ void bevy_bridge_pose_begin(long object_index, void const *node_orientations, sh
 		record->parent_mirrored = TEST_FLAG(object_get(object->object.parent_object_index)->object.flags, _object_mirrored_bit) ? 1 : 0;
 		memcpy(record->parent_node_matrix, parent_node_matrix, sizeof(record->parent_node_matrix));
 	}
-	if (object->object.type == _object_type_biped)
+	record->game_time = game_time_get();
+	if (TEST_FLAG(_object_mask_unit, object->object.type))
 	{
 		struct unit_datum *unit = unit_get(object_index);
 		real_vector3d forward;
@@ -1288,7 +1290,6 @@ void bevy_bridge_pose_begin(long object_index, void const *node_orientations, sh
 		record->unit_parented = object->object.parent_object_index != NONE;
 		record->unit_has_weapon = unit->unit.current_weapon_index != NONE;
 		record->unit_player = unit->unit.player_index != NONE;
-		record->game_time = game_time_get();
 		record->unit_animation_flags = unit->unit.animation.flags;
 		record->aiming_screen_index = unit->unit.animation.aiming_screen_index;
 		record->looking_screen_index = unit->unit.animation.looking_screen_index;
@@ -1315,6 +1316,25 @@ void bevy_bridge_pose_begin(long object_index, void const *node_orientations, sh
 		bevy_bridge_vector(record->translational_velocity, &object->object.translational_velocity);
 		unit_grenade_throw_leg_weights(object_index, &record->grenade_leg_weight, &record->grenade_leg_time,
 			&record->grenade_air_weight, &record->grenade_air_time);
+	}
+	if (object->object.type == _object_type_vehicle)
+	{
+		struct vehicle_datum *vehicle = vehicle_datum_get(object_index);
+
+		record->vehicle_recorded = 1;
+		record->vehicle_turn = vehicle->vehicle.turn;
+		record->vehicle_speed = vehicle->vehicle.speed;
+		record->vehicle_wheel = vehicle->vehicle.wheel;
+		memcpy(record->vehicle_suspension, vehicle->vehicle.suspension, sizeof(record->vehicle_suspension));
+	}
+	if (TEST_FLAG(_object_mask_device, object->object.type))
+	{
+		struct device_datum *device = device_get(object_index);
+
+		record->device_recorded = 1;
+		record->device_flags = device->device.flags;
+		record->device_position = device->device.position;
+		record->device_power = device->device.power;
 	}
 	for (node_index = 0; node_index < node_count; node_index++)
 	{

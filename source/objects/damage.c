@@ -347,6 +347,9 @@ typedef char object_damage_body_body_destroyed_threshold_offset_assert[
 long damage_call(struct damage_data *damage, long kind, long object_index, long a, long b, real const *f, real *out);
 static real damage_maximum_vitality(struct damage_data *damage, long object_index, short which, boolean ignore_difficulty);
 static void object_cause_damage_rider(struct damage_data *damage, long object_index);
+long area_damage_call(struct damage_data *damage, long kind, long object_index, long a, long b, real const *f, real *out);
+static boolean area_damage_ray_test(struct damage_data *damage, real_point3d const *point, real_vector3d const *vector,
+	long ignore_object_index, struct collision_result *collision);
 static long get_player_index_from_object_or_parents(
 	long object_index);
 
@@ -1810,9 +1813,8 @@ static void object_cause_damage_internal(
 	return;
 }
 
-void area_of_effect_cause_damage(
-	struct damage_data *damage,
-	long unused_object_index)
+static void area_of_effect_cause_damage_internal(
+	struct damage_data *damage)
 {
 	struct damage_effect_definition *definition =
 		damage_effect_definition_get(damage->definition_index);
@@ -1842,7 +1844,7 @@ void area_of_effect_cause_damage(
 		}
 	}
 
-	breakable_surface_damage_area_of_effect(damage);
+	area_damage_call(damage, _area_damage_call_breakable_surfaces, NONE, 0, 0, NULL, NULL);
 	return;
 }
 
@@ -2340,16 +2342,16 @@ static void area_of_effect_cause_damage_to_object(
 				break;
 			}
 
-			collision_test_vector(
-				_damage_area_of_effect_collision_flags,
+			area_damage_ray_test(
+				damage,
 				epicenter,
 				&collision_vector,
 				object_get_ultimate_parent(object_index),
 				&spread_collision);
 			offset_point = spread_collision.point;
 			ultimate_parent_index = object_get_ultimate_parent(object_index);
-			if (!collision_test_vector(
-				_damage_area_of_effect_collision_flags,
+			if (!area_damage_ray_test(
+				damage,
 				&offset_point,
 				vector_from_points3d(
 					&offset_point,
@@ -2368,8 +2370,8 @@ static void area_of_effect_cause_damage_to_object(
 
 		ultimate_parent_index = object_get_ultimate_parent(object_index);
 		epicenter = &damage->epicenter;
-		collision_blocked = collision_test_vector(
-			_damage_area_of_effect_collision_flags,
+		collision_blocked = area_damage_ray_test(
+			damage,
 			epicenter,
 			vector_from_points3d(
 				epicenter,
@@ -2395,7 +2397,8 @@ static void area_of_effect_cause_damage_to_object(
 	}
 
 	if (TEST_FLAG(damage_effect->damage.flags, _damage_does_not_hurt_friends_bit) &&
-		!game_team_is_enemy(object->object.owner_team_index, damage->owner_team_index))
+		!area_damage_call(damage, _area_damage_call_team_is_enemy, NONE, object->object.owner_team_index,
+			damage->owner_team_index, NULL, NULL))
 	{
 		can_damage = FALSE;
 	}
@@ -2410,8 +2413,11 @@ static void area_of_effect_cause_damage_to_object(
 				_unit_is_inconsequential_bit) &&
 			object_index != damage->owner_object_index)
 		{
-			real infection_form_toughness = game_difficulty_get_value(
-				_game_difficulty_value_infection_forms);
+			real infection_form_toughness;
+			real out[3];
+
+			area_damage_call(damage, _area_damage_call_difficulty_infection_forms, NONE, 0, 0, NULL, out);
+			infection_form_toughness = out[0];
 
 			can_damage = TRUE;
 			if (infection_form_toughness > 0.f ||
@@ -2470,13 +2476,7 @@ static void area_of_effect_cause_damage_to_object(
 
 		if (scale > 0.f)
 		{
-			object_cause_damage(
-				damage,
-				object_index,
-				NONE,
-				NONE,
-				NONE,
-				NULL);
+			area_damage_call(damage, _area_damage_call_cause_damage, object_index, 0, 0, NULL, NULL);
 				did_damage = TRUE;
 		}
 
@@ -3058,6 +3058,131 @@ long damage_call(
 	if (out)
 		*out = value;
 	halo_sim_damage_event_end(damage, object_index, result, value);
+
+	return result;
+}
+
+/* ---------- port: area damage's Rust port (halo_sim.c) */
+
+/* the depth of the game's own area damage (damage it deals can detonate) */
+static short area_damage_depth;
+
+void area_of_effect_cause_damage(
+	struct damage_data *damage,
+	long unused_object_index)
+{
+	(void)unused_object_index;
+
+	/* the Rust port's in place of the game's, or (in check mode) the state
+	it is checked from */
+	if (area_damage_depth == 0 && halo_sim_area_of_effect_cause_damage(damage))
+		return;
+	area_damage_depth++;
+	area_of_effect_cause_damage_internal(damage);
+	area_damage_depth--;
+	if (area_damage_depth == 0)
+		halo_sim_area_of_effect_cause_damage_check(damage);
+}
+
+/* a ray of area damage: the game's, recorded for the Rust port's check (in
+Rust, the port's own) */
+static boolean area_damage_ray_test(
+	struct damage_data *damage,
+	real_point3d const *point,
+	real_vector3d const *vector,
+	long ignore_object_index,
+	struct collision_result *collision)
+{
+	real f[6];
+	boolean hit;
+
+	f[0] = point->x;
+	f[1] = point->y;
+	f[2] = point->z;
+	f[3] = vector->i;
+	f[4] = vector->j;
+	f[5] = vector->k;
+	halo_sim_area_damage_event_begin(damage, _area_damage_call_ray_test, ignore_object_index,
+		_damage_area_of_effect_collision_flags, 0, f);
+	hit = collision_test_vector(_damage_area_of_effect_collision_flags, point, vector, ignore_object_index, collision);
+	f[0] = collision->point.x;
+	f[1] = collision->point.y;
+	f[2] = collision->point.z;
+	halo_sim_area_damage_event_end(damage, hit, f);
+
+	return hit;
+}
+
+/* area damage's calls of the rest of the game, the game's and the Rust
+port's (crates/halo_map's area_damage::call); `out` three reals */
+long area_damage_call(
+	struct damage_data *damage,
+	long kind,
+	long object_index,
+	long a,
+	long b,
+	real const *f,
+	real *out)
+{
+	static real const no_f[6] = { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f };
+	real values[3] = { 0.f, 0.f, 0.f };
+	long result = 0;
+
+	if (!f)
+		f = no_f;
+	switch (kind)
+	{
+	case _area_damage_call_ray_test:
+		{
+			struct collision_result collision;
+			real_point3d point;
+			real_vector3d vector;
+
+			set_real_point3d(&point, f[0], f[1], f[2]);
+			set_real_vector3d(&vector, f[3], f[4], f[5]);
+			result = area_damage_ray_test(damage, &point, &vector, object_index, &collision);
+			values[0] = collision.point.x;
+			values[1] = collision.point.y;
+			values[2] = collision.point.z;
+		}
+		if (out)
+		{
+			out[0] = values[0];
+			out[1] = values[1];
+			out[2] = values[2];
+		}
+		return result;
+
+	default:
+		break;
+	}
+
+	halo_sim_area_damage_event_begin(damage, kind, object_index, a, b, f);
+	switch (kind)
+	{
+	case _area_damage_call_team_is_enemy:
+		result = game_team_is_enemy((short)a, (short)b);
+		break;
+
+	case _area_damage_call_difficulty_infection_forms:
+		values[0] = game_difficulty_get_value(_game_difficulty_value_infection_forms);
+		break;
+
+	case _area_damage_call_cause_damage:
+		object_cause_damage(damage, object_index, NONE, NONE, NONE, NULL);
+		break;
+
+	case _area_damage_call_breakable_surfaces:
+		breakable_surface_damage_area_of_effect(damage);
+		break;
+	}
+	if (out)
+	{
+		out[0] = values[0];
+		out[1] = values[1];
+		out[2] = values[2];
+	}
+	halo_sim_area_damage_event_end(damage, result, values);
 
 	return result;
 }

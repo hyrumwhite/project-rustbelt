@@ -28,6 +28,7 @@ enum
 	_halo_sim_unit_update,
 	_halo_sim_biped_rest,
 	_halo_sim_damage,
+	_halo_sim_area_damage,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -107,6 +108,17 @@ enum
 	_damage_call_area_effect,
 	_damage_call_aftermath,
 	_damage_call_player_controlled,
+};
+
+/* area damage's calls of the rest of the game (damage.c's
+area_damage_call; crates/halo_map's area_damage::call) */
+enum
+{
+	_area_damage_call_ray_test = 1,
+	_area_damage_call_team_is_enemy,
+	_area_damage_call_difficulty_infection_forms,
+	_area_damage_call_cause_damage,
+	_area_damage_call_breakable_surfaces,
 };
 
 /* the rest of a biped update's calls of the rest of the game (bipeds.c's
@@ -326,5 +338,17 @@ void halo_sim_object_cause_damage_check(struct damage_data const *damage);
 void halo_sim_damage_event_begin(struct damage_data const *damage, long kind, long object_index, long a, long b,
 	float const *f);
 void halo_sim_damage_event_end(struct damage_data const *damage, long object_index, long result, float value);
+
+/* damage.c's area_of_effect_cause_damage: TRUE when the Rust port dealt it
+(its calls of the game through area_damage_call, its rays its own); in
+check mode it notes the clusters the sphere reaches with their objects and
+the objects, area_damage_call records each call (rays included) with what a
+dealing of damage changed (halo_sim_area_damage_event_begin and _end), and
+halo_sim_area_of_effect_cause_damage_check compares Rust's replay of it */
+int halo_sim_area_of_effect_cause_damage(struct damage_data *damage);
+void halo_sim_area_of_effect_cause_damage_check(struct damage_data const *damage);
+void halo_sim_area_damage_event_begin(struct damage_data const *damage, long kind, long object_index, long a, long b,
+	float const *f);
+void halo_sim_area_damage_event_end(struct damage_data const *damage, long result, float const *out);
 
 #endif // __HALO_SIM_H

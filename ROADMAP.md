@@ -193,7 +193,15 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
 1. Camera and input ✅ (OpenCE branch `bevy-bridge-native-input`, protocol 7)
    - [x] Input is the viewer's: keyboard and mouse (phase 4), and now gamepads. Bevy reads the controllers and the bridge forwards up to four in SDL's layout. While the viewer owns them, the game's XInput layer takes them instead of physical pads, which a hidden window never receives. The game's rumble comes back and plays on the controller.
    - [x] Camera: measured, and kept in the game. The game's shared camera follows the mouse within one frame (median 7.5 ms, at most 9.1 ms, at 144 frames a second; `bridge_probe latency`). A Rust camera predicting the aim could save only that. It would also put the game's world-anchored overlay (water, effects, decals, drawn with the game's camera) out of step with the scene on fast turns.
-2. Objects and physics
+2. Objects and physics  ← *in progress* (branch `phase-7-collision`, OpenCE `bevy-bridge-collision`, protocol 10)
+
+   Each piece is a port of the game's own code, checked against the running game through the bridge before the next one is built on it.
+   - [x] Collision BSP and the ray test (`halo_map::collision`, `collision_bsp_test_vector`): 483,000 rays through b30 and a10 agree with the game bit for bit (`bridge_probe <map file>` with `HALO_BEVY_BRIDGE_RAY_TESTS=1`)
+   - [ ] Sphere and pill tests (`collision_bsp_test_sphere`, `_pill`): the features (surfaces, edges, vertices) near a point, which movement collides with
+   - [ ] Object collision models (`collision_models.c`): rays and spheres against objects' node-posed collision geometry
+   - [ ] Point physics (`point_physics.c`): projectiles, grenades, items and particles. This is the first simulation to run in Rust, checked tick by tick against the game's.
+   - [ ] Biped movement (`bipeds.c`, `physics.c`): walking, jumping and sliding on the collision geometry
+   - [ ] Vehicles (`physics.c` mass points), then the object simulation handing off from the game to Rust
 3. Effects
 4. Scripts (`hs`)
 5. AI

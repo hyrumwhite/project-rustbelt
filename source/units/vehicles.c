@@ -275,6 +275,7 @@ struct vehicle_suspension
 
 #include "physics/powered_mass_point_datum.h"
 #include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 struct scenario_object_permutation;
 struct scenario_unit;
@@ -2479,6 +2480,12 @@ boolean vehicle_update(
 		goto animate;
 	}
 
+	/* port: the Rust port's update in place of the game's, up to its
+	falling damage, or (in check mode) the state it is checked from
+	(halo_sim.c) */
+	if (halo_sim_vehicle_update(vehicle_index))
+		goto vehicle_update_falling_damage;
+
 	SET_FLAG(vehicle->vehicle.flags, 2,
 		TEST_FLAG(vehicle->unit.control_flags, _unit_control_crouch_modifier_bit));
 
@@ -2711,6 +2718,7 @@ boolean vehicle_update(
 		global_current_collision_user_depth > 1);
 	--global_current_collision_user_depth;
 
+vehicle_update_falling_damage:
 	if (TEST_FLAG(definition->flags, 6))
 	{
 		struct game_globals_falling_damage *falling_damage = TAG_BLOCK_GET_ELEMENT(
@@ -2734,6 +2742,7 @@ boolean vehicle_update(
 	}
 
 animate:
+	halo_sim_vehicle_update_check(vehicle_index); /* port: (halo_sim.c) */
 	bevy_bridge_vehicle_update_end(vehicle_index); /* port: (bevy_bridge.c) */
 	if (definition->unit.object.animation_graph.index!=NONE)
 	{
@@ -2757,4 +2766,51 @@ animate:
 	profile_exit(vehicle_update_section);
 
 	return TRUE;
+}
+
+/* ---------- port: the Rust port's callbacks (halo_sim.c) */
+
+/* update_suspension's sound, at how far its suspensions moved: whether it
+played */
+boolean vehicle_rust_suspension_sound(
+	long vehicle_index,
+	real maximum_shift)
+{
+	struct vehicle_datum *vehicle = vehicle_datum_get(vehicle_index);
+	struct vehicle_definition *definition = vehicle_specific_definition_get(vehicle->definition_index);
+
+	if (definition->suspension_sound.index!=NONE && maximum_shift>0.3f)
+	{
+		object_impulse_sound_new(vehicle_index, definition->suspension_sound.index, NONE,
+			global_origin3d, global_forward3d,
+			PIN((maximum_shift-0.3f)*(1.0f/(0.9f-0.3f)), 0.0f, 1.0f));
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+void vehicle_rust_slipping_effects(
+	long vehicle_index,
+	struct mass_point_datum const *mass_points)
+{
+	create_slipping_effects(vehicle_index, NULL, (struct mass_point_datum *)mass_points);
+}
+
+void vehicle_rust_crashing_effects(
+	long vehicle_index,
+	real_vector3d const *previous_velocity,
+	struct mass_point_datum const *mass_points)
+{
+	create_crashing_effects(vehicle_index, previous_velocity, (struct mass_point_datum *)mass_points);
+}
+
+void vehicle_rust_thruster_effect(
+	long vehicle_index,
+	boolean pelican)
+{
+	if (pelican)
+		create_pelican_effect(vehicle_index);
+	else
+		create_ghost_effect(vehicle_index);
 }

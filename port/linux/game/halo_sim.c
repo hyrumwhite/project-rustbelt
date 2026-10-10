@@ -26,6 +26,7 @@ bit for bit; differences are counted and the first few logged.
 #include "units/bipeds.h"
 #include "units/vehicle_datum.h"
 #include "physics/physics.h"
+#include "structures/structure_bsp_definitions.h"
 #include "physics/mass_point_datum.h"
 #include "physics/powered_mass_point_datum.h"
 #include "devices/devices.h"
@@ -46,7 +47,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 7
+#define HALO_SIM_VERSION 8
 
 /* ---------- structures */
 
@@ -282,6 +283,56 @@ struct halo_sim_vehicle_physics_call
 	unsigned long mass_point_count;
 };
 
+/* crates/halo_map's VehicleUpdateState */
+struct halo_sim_vehicle_update_state
+{
+	real_point3d position;
+	real_vector3d forward;
+	real_vector3d up;
+	real_vector3d translational_velocity;
+	real_vector3d angular_velocity;
+	unsigned long object_flags;
+	long location_leaf;
+	short location_cluster;
+	short pad;
+	struct _vehicle_datum vehicle;
+};
+
+/* crates/halo_sim's VehicleUpdateCall */
+struct halo_sim_vehicle_update_call
+{
+	unsigned long vehicle_index;
+	unsigned long definition_index;
+	long structure_bsp_index;
+	unsigned char const *breakable_surfaces;
+	struct halo_sim_vehicle_update_state state;
+	real_vector3d throttle;
+	unsigned long control_flags;
+	real_vector3d desired_facing;
+	real seat_power[2];
+	unsigned long driven_by_ai;
+	real vehicle_floor;
+	real vehicle_ceiling;
+	real_point3d bounding_center_after;
+	struct powered_mass_point_datum const *powered_base;
+	long powered_base_count;
+	struct halo_sim_other_vehicle const *others;
+	unsigned long other_count;
+};
+
+/* crates/halo_sim's VehicleUpdateCallbacks */
+struct halo_sim_vehicle_update_callbacks
+{
+	void (*set_position)(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state,
+		real_point3d const *position, real_vector3d const *forward, real_vector3d const *up);
+	long (*suspension_shift)(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state, real maximum_shift);
+	void (*slipping_effects)(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state,
+		struct mass_point_datum const *mass_points, unsigned long count);
+	void (*crashing_effects)(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state,
+		real_vector3d const *previous_velocity, struct mass_point_datum const *mass_points, unsigned long count);
+	void (*thruster_effect)(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state, long pelican);
+};
+
 /* crates/halo_sim's VehiclePhysicsCallbacks */
 struct halo_sim_vehicle_physics_callbacks
 {
@@ -289,6 +340,10 @@ struct halo_sim_vehicle_physics_callbacks
 		real_point3d const *position, real_vector3d const *forward, real_vector3d const *up);
 	void (*translate)(unsigned long vehicle_index, struct halo_sim_vehicle_physics_state *state, real_point3d const *new_position);
 	void (*unit_collisions)(unsigned long vehicle_index, struct halo_sim_vehicle_physics_state *state);
+	void (*begin)(unsigned long vehicle_index, struct halo_sim_vehicle_physics_state *state,
+		struct powered_mass_point_datum const *powered, long powered_count, real_vector3d const *magic, long old);
+	void (*end)(unsigned long vehicle_index, struct halo_sim_vehicle_physics_state *state,
+		struct mass_point_datum const *mass_points, unsigned long count);
 };
 
 /* crates/halo_sim's BipedPhysicsCall */
@@ -398,11 +453,12 @@ struct halo_sim_projectile_callbacks
 struct halo_sim_host
 {
 	unsigned long (*cluster_objects)(short cluster, unsigned long *out, unsigned long maximum);
-	long (*object)(unsigned long index, struct halo_sim_host_object *out);
+	long (*object)(unsigned long index, struct halo_sim_host_object *out, unsigned long purpose);
 	unsigned long (*children)(unsigned long index, unsigned long *out, unsigned long maximum);
 	struct halo_sim_projectile_callbacks projectile;
 	void (*features_call)(void);
 	struct halo_sim_vehicle_physics_callbacks vehicle_physics;
+	struct halo_sim_vehicle_update_callbacks vehicle_update;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -442,6 +498,7 @@ typedef long (*halo_sim_set_host_function)(struct halo_sim_host const *host);
 typedef long (*halo_sim_projectile_function)(struct halo_sim_projectile_call *call);
 typedef long (*halo_sim_biped_physics_function)(struct halo_sim_biped_physics_call const *call, void *physics);
 typedef long (*halo_sim_vehicle_physics_function)(struct halo_sim_vehicle_physics_call *call);
+typedef long (*halo_sim_vehicle_update_function)(struct halo_sim_vehicle_update_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -472,6 +529,8 @@ static struct
 	halo_sim_biped_physics_function biped_physics;
 	halo_sim_vehicle_physics_function vehicle_physics_update;
 	halo_sim_vehicle_physics_function vehicle_physics_check;
+	halo_sim_vehicle_update_function vehicle_update;
+	halo_sim_vehicle_update_function vehicle_update_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -494,7 +553,25 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"projectiles",
 	"biped_physics",
 	"vehicle_physics",
+	"vehicle_update",
 };
+
+/* the vehicle update checks: the state and inputs the game's update began
+with, what its physics was handed and met, and the comparisons */
+static struct
+{
+	boolean recording;
+	long vehicle_index;
+	struct halo_sim_vehicle_update_call call;
+	struct powered_mass_point_datum powered[8];
+	long powered_count;
+	struct halo_sim_other_vehicle others[MAXIMUM_HALO_SIM_OTHER_VEHICLES];
+	unsigned long other_count;
+	boolean overflow;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+} halo_sim_vehicle_update_checks;
 
 /* the vehicle physics checks: the state and inputs the game's update began
 with, the vehicles its unit collisions considered, and the comparisons */
@@ -622,14 +699,24 @@ static boolean halo_sim_biped_physics_updating;
 /* and a vehicle's (its features' objects, and its ray tests') */
 static boolean halo_sim_vehicle_physics_updating;
 
-static long halo_sim_host_object(unsigned long index, struct halo_sim_host_object *out)
+/* what the Rust port reads an object for (crates/halo_sim's purpose) */
+enum
+{
+	_halo_sim_object_other = 0,
+	_halo_sim_object_ray_test,
+	_halo_sim_object_features,
+};
+
+static long halo_sim_host_object(unsigned long index, struct halo_sim_host_object *out, unsigned long purpose)
 {
 	struct object_datum *object = object_get((long)index);
 	short region;
 
-	if (halo_sim_projectile_updating)
+	/* (recorded for the bridge as the game's own ray tests and feature
+	gatherings record what they visit) */
+	if (purpose == _halo_sim_object_ray_test && (halo_sim_projectile_updating || halo_sim_vehicle_physics_updating))
 		bevy_bridge_projectile_object((long)index);
-	if (halo_sim_biped_physics_updating || halo_sim_vehicle_physics_updating)
+	if (purpose == _halo_sim_object_features && (halo_sim_biped_physics_updating || halo_sim_vehicle_physics_updating))
 		bevy_bridge_feature_object((long)index);
 
 	out->object_index = index;
@@ -929,6 +1016,110 @@ static void halo_sim_vehicle_physics_unit_collisions(unsigned long vehicle_index
 	halo_sim_vehicle_physics_state_load((long)vehicle_index, state);
 }
 
+/* whether a vehicle's update runs in Rust (its physics, recorded for the
+bridge by Rust's calls; the game's own physics_update records itself) */
+static boolean halo_sim_vehicle_update_running;
+
+static void halo_sim_vehicle_physics_begin(unsigned long vehicle_index, struct halo_sim_vehicle_physics_state *state,
+	struct powered_mass_point_datum const *powered, long powered_count, real_vector3d const *magic, long old)
+{
+	if (!halo_sim_vehicle_update_running)
+		return;
+	halo_sim_vehicle_physics_state_store((long)vehicle_index, state);
+	bevy_bridge_vehicle_physics_begin((long)vehicle_index, powered, (short)powered_count,
+		magic, magic ? magic + 1 : NULL, old != 0);
+}
+
+static void halo_sim_vehicle_physics_end(unsigned long vehicle_index, struct halo_sim_vehicle_physics_state *state,
+	struct mass_point_datum const *mass_points, unsigned long count)
+{
+	if (!halo_sim_vehicle_update_running)
+		return;
+	halo_sim_vehicle_physics_state_store((long)vehicle_index, state);
+	bevy_bridge_vehicle_physics_end((long)vehicle_index, mass_points, (short)count);
+}
+
+/* a vehicle's update state, from the vehicle */
+static void halo_sim_vehicle_update_state_load(long vehicle_index, struct halo_sim_vehicle_update_state *state)
+{
+	struct vehicle_datum *vehicle = vehicle_datum_get(vehicle_index);
+
+	state->position = vehicle->object.position;
+	state->forward = vehicle->object.forward;
+	state->up = vehicle->object.up;
+	state->translational_velocity = vehicle->object.translational_velocity;
+	state->angular_velocity = vehicle->object.angular_velocity;
+	state->object_flags = vehicle->object.flags;
+	state->location_leaf = vehicle->object.location.leaf_index;
+	state->location_cluster = vehicle->object.location.cluster_index;
+	state->pad = 0;
+	state->vehicle = vehicle->vehicle;
+}
+
+/* and back to it: all but its position and location, which only the
+game's moves change */
+static void halo_sim_vehicle_update_state_store(long vehicle_index, struct halo_sim_vehicle_update_state const *state)
+{
+	struct vehicle_datum *vehicle = vehicle_datum_get(vehicle_index);
+
+	vehicle->object.forward = state->forward;
+	vehicle->object.up = state->up;
+	vehicle->object.translational_velocity = state->translational_velocity;
+	vehicle->object.angular_velocity = state->angular_velocity;
+	vehicle->object.flags = state->object_flags;
+	vehicle->vehicle = state->vehicle;
+}
+
+/* vehicles.c's, the game's side of a vehicle update */
+boolean vehicle_rust_suspension_sound(long vehicle_index, real maximum_shift);
+void vehicle_rust_slipping_effects(long vehicle_index, struct mass_point_datum const *mass_points);
+void vehicle_rust_crashing_effects(long vehicle_index, real_vector3d const *previous_velocity,
+	struct mass_point_datum const *mass_points);
+void vehicle_rust_thruster_effect(long vehicle_index, boolean pelican);
+
+static void halo_sim_vehicle_update_set_position(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state,
+	real_point3d const *position, real_vector3d const *forward, real_vector3d const *up)
+{
+	halo_sim_vehicle_update_state_store((long)vehicle_index, state);
+	object_set_position((long)vehicle_index, position, forward, up);
+	halo_sim_vehicle_update_state_load((long)vehicle_index, state);
+}
+
+static long halo_sim_vehicle_update_suspension_shift(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state,
+	real maximum_shift)
+{
+	boolean played;
+
+	halo_sim_vehicle_update_state_store((long)vehicle_index, state);
+	played = vehicle_rust_suspension_sound((long)vehicle_index, maximum_shift);
+	halo_sim_vehicle_update_state_load((long)vehicle_index, state);
+	return played ? 1 : 0;
+}
+
+static void halo_sim_vehicle_update_slipping_effects(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state,
+	struct mass_point_datum const *mass_points, unsigned long count)
+{
+	halo_sim_vehicle_update_state_store((long)vehicle_index, state);
+	vehicle_rust_slipping_effects((long)vehicle_index, mass_points);
+	halo_sim_vehicle_update_state_load((long)vehicle_index, state);
+}
+
+static void halo_sim_vehicle_update_crashing_effects(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state,
+	real_vector3d const *previous_velocity, struct mass_point_datum const *mass_points, unsigned long count)
+{
+	halo_sim_vehicle_update_state_store((long)vehicle_index, state);
+	vehicle_rust_crashing_effects((long)vehicle_index, previous_velocity, mass_points);
+	halo_sim_vehicle_update_state_load((long)vehicle_index, state);
+}
+
+static void halo_sim_vehicle_update_thruster_effect(unsigned long vehicle_index, struct halo_sim_vehicle_update_state *state,
+	long pelican)
+{
+	halo_sim_vehicle_update_state_store((long)vehicle_index, state);
+	vehicle_rust_thruster_effect((long)vehicle_index, pelican != 0);
+	halo_sim_vehicle_update_state_load((long)vehicle_index, state);
+}
+
 /* (for the bridge's recording: a gathering of features) */
 static void halo_sim_features_call(void)
 {
@@ -958,6 +1149,15 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		halo_sim_vehicle_physics_set_position,
 		halo_sim_vehicle_physics_translate,
 		halo_sim_vehicle_physics_unit_collisions,
+		halo_sim_vehicle_physics_begin,
+		halo_sim_vehicle_physics_end,
+	},
+	{
+		halo_sim_vehicle_update_set_position,
+		halo_sim_vehicle_update_suspension_shift,
+		halo_sim_vehicle_update_slipping_effects,
+		halo_sim_vehicle_update_crashing_effects,
+		halo_sim_vehicle_update_thruster_effect,
 	},
 };
 
@@ -1005,10 +1205,13 @@ static void halo_sim_initialize(void)
 	halo_sim.biped_physics = (halo_sim_biped_physics_function)halo_sim_symbol(library, "halo_sim_biped_physics_update");
 	halo_sim.vehicle_physics_update = (halo_sim_vehicle_physics_function)halo_sim_symbol(library, "halo_sim_vehicle_physics_update");
 	halo_sim.vehicle_physics_check = (halo_sim_vehicle_physics_function)halo_sim_symbol(library, "halo_sim_vehicle_physics_check");
+	halo_sim.vehicle_update = (halo_sim_vehicle_update_function)halo_sim_symbol(library, "halo_sim_vehicle_update");
+	halo_sim.vehicle_update_check = (halo_sim_vehicle_update_function)halo_sim_symbol(library, "halo_sim_vehicle_update_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
-		!halo_sim.vehicle_physics_update || !halo_sim.vehicle_physics_check)
+		!halo_sim.vehicle_physics_update || !halo_sim.vehicle_physics_check ||
+		!halo_sim.vehicle_update || !halo_sim.vehicle_update_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -1934,6 +2137,17 @@ int halo_sim_vehicle_physics_update(long vehicle_index, void *powered_mass_point
 	long result;
 
 	halo_sim_vehicle_physics_checks.recording = FALSE;
+	/* (the vehicle update check's: what its control code handed the physics) */
+	if (halo_sim_vehicle_update_checks.recording && halo_sim_vehicle_update_checks.vehicle_index == vehicle_index)
+	{
+		short index;
+
+		for (index = 0; powered_mass_points && index < powered_count && index < 8; index++)
+			halo_sim_vehicle_update_checks.powered[index] = ((struct powered_mass_point_datum const *)powered_mass_points)[index];
+		halo_sim_vehicle_update_checks.powered_count = powered_mass_points ? index : 0;
+		if (powered_mass_points && powered_count > 8)
+			halo_sim_vehicle_update_checks.overflow = TRUE;
+	}
 	if (mode == _halo_sim_mode_c)
 		return FALSE;
 	if (mode == _halo_sim_mode_check)
@@ -1985,6 +2199,23 @@ void halo_sim_vehicle_physics_other(long object_index)
 	struct halo_sim_other_vehicle *other;
 	struct object_datum *object;
 
+	if (halo_sim_vehicle_update_checks.recording)
+	{
+		if (halo_sim_vehicle_update_checks.other_count >= MAXIMUM_HALO_SIM_OTHER_VEHICLES)
+		{
+			halo_sim_vehicle_update_checks.overflow = TRUE;
+		}
+		else
+		{
+			other = &halo_sim_vehicle_update_checks.others[halo_sim_vehicle_update_checks.other_count++];
+			object = object_get(object_index);
+			other->object_index = (unsigned long)object_index;
+			other->definition_index = (unsigned long)object->definition_index;
+			other->at_rest = TEST_FLAG(object->object.flags, _object_at_rest_bit) ? 1 : 0;
+			object_get_origin(object_index, &other->origin);
+			object_get_orientation(object_index, &other->forward, &other->up);
+		}
+	}
 	if (!halo_sim_vehicle_physics_checks.recording)
 		return;
 	if (halo_sim_vehicle_physics_checks.other_count >= MAXIMUM_HALO_SIM_OTHER_VEHICLES)
@@ -2084,5 +2315,131 @@ void halo_sim_vehicle_physics_check(long vehicle_index, void const *mass_points,
 			halo_sim_vehicle_physics_checks.compared - halo_sim_vehicle_physics_checks.differed,
 			halo_sim_vehicle_physics_checks.compared,
 			halo_sim_vehicle_physics_checks.collided, halo_sim_vehicle_physics_checks.skipped);
+	}
+}
+
+/* ---------- vehicle updates */
+
+boolean unit_driven_by_ai(long unit_index); /* units.c */
+
+static void halo_sim_vehicle_update_call_new(long vehicle_index, struct halo_sim_vehicle_update_call *call)
+{
+	struct vehicle_datum *vehicle = vehicle_datum_get(vehicle_index);
+
+	memset(call, 0, sizeof(*call));
+	call->vehicle_index = (unsigned long)vehicle_index;
+	call->definition_index = (unsigned long)vehicle->definition_index;
+	call->structure_bsp_index = global_structure_bsp_index;
+	call->breakable_surfaces = (unsigned char const *)breakable_surface_flags_get();
+	halo_sim_vehicle_update_state_load(vehicle_index, &call->state);
+	call->throttle = vehicle->unit.throttle;
+	call->control_flags = vehicle->unit.control_flags;
+	call->desired_facing = vehicle->unit.desired_facing_vector;
+	call->seat_power[0] = vehicle->unit.seat_power[0];
+	call->seat_power[1] = vehicle->unit.seat_power[1];
+	call->driven_by_ai = unit_driven_by_ai(vehicle_index) ? 1 : 0;
+	call->vehicle_floor = global_structure_bsp_get()->vehicle_floor;
+	call->vehicle_ceiling = global_structure_bsp_get()->vehicle_ceiling;
+}
+
+int halo_sim_vehicle_update(long vehicle_index)
+{
+	short mode = halo_sim_mode(_halo_sim_vehicle_update);
+	struct halo_sim_vehicle_update_call call;
+	long result;
+
+	halo_sim_vehicle_update_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_vehicle_update_call_new(vehicle_index, &halo_sim_vehicle_update_checks.call);
+		halo_sim_vehicle_update_checks.vehicle_index = vehicle_index;
+		halo_sim_vehicle_update_checks.powered_count = 0;
+		halo_sim_vehicle_update_checks.other_count = 0;
+		halo_sim_vehicle_update_checks.overflow = FALSE;
+		halo_sim_vehicle_update_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_vehicle_update_call_new(vehicle_index, &call);
+	halo_sim_vehicle_physics_updating = TRUE;
+	halo_sim_vehicle_update_running = TRUE;
+	result = halo_sim.vehicle_update(&call);
+	halo_sim_vehicle_update_running = FALSE;
+	halo_sim_vehicle_physics_updating = FALSE;
+	if (result != 0)
+		return FALSE;
+	halo_sim_vehicle_update_state_store(vehicle_index, &call.state);
+
+	return TRUE;
+}
+
+void halo_sim_vehicle_update_check(long vehicle_index)
+{
+	struct halo_sim_vehicle_update_call call;
+	struct halo_sim_vehicle_update_state game;
+	struct halo_sim_vehicle_update_state const *rust = &call.state;
+	boolean same;
+
+	if (!halo_sim_vehicle_update_checks.recording)
+		return;
+	halo_sim_vehicle_update_checks.recording = FALSE;
+	if (halo_sim_vehicle_update_checks.vehicle_index != vehicle_index || halo_sim_vehicle_update_checks.overflow)
+	{
+		halo_sim_vehicle_update_checks.skipped++;
+		return;
+	}
+
+	call = halo_sim_vehicle_update_checks.call;
+	call.breakable_surfaces = (unsigned char const *)breakable_surface_flags_get();
+	call.bounding_center_after = object_get(vehicle_index)->object.bounding_sphere_center;
+	call.powered_base = halo_sim_vehicle_update_checks.powered;
+	call.powered_base_count = halo_sim_vehicle_update_checks.powered_count;
+	call.others = halo_sim_vehicle_update_checks.others;
+	call.other_count = halo_sim_vehicle_update_checks.other_count;
+	if (halo_sim.vehicle_update_check(&call) != 0)
+	{
+		halo_sim_vehicle_update_checks.skipped++;
+		return;
+	}
+
+	halo_sim_vehicle_update_state_load(vehicle_index, &game);
+	same = memcmp(&rust->position, &game.position, 5 * sizeof(real_vector3d)) == 0 &&
+		rust->object_flags == game.object_flags &&
+		rust->location_leaf == game.location_leaf &&
+		rust->location_cluster == game.location_cluster &&
+		memcmp(&rust->vehicle, &game.vehicle, sizeof(game.vehicle)) == 0;
+	halo_sim_vehicle_update_checks.compared++;
+	if (!same)
+	{
+		halo_sim_vehicle_update_checks.differed++;
+		if (halo_sim_vehicle_update_checks.differed <= 8)
+		{
+			struct halo_sim_vehicle_update_state const *b = &halo_sim_vehicle_update_checks.call.state;
+
+			platform_log("halo_sim: vehicle update differs: vehicle %lx from (%f %f %f) velocity (%f %f %f) flags %lx speed %f turn %f; %ld powered, %lu others",
+				(unsigned long)vehicle_index, b->position.x, b->position.y, b->position.z,
+				b->translational_velocity.i, b->translational_velocity.j, b->translational_velocity.k, b->object_flags,
+				b->vehicle.speed, b->vehicle.turn, halo_sim_vehicle_update_checks.powered_count,
+				halo_sim_vehicle_update_checks.other_count);
+			platform_log("halo_sim:   game (%f %f %f) velocity (%f %f %f) flags %lx leaf %ld speed %f turn %f stop %d airborne %d",
+				game.position.x, game.position.y, game.position.z,
+				game.translational_velocity.i, game.translational_velocity.j, game.translational_velocity.k,
+				game.object_flags, game.location_leaf, game.vehicle.speed, game.vehicle.turn, game.vehicle.stop_time,
+				game.vehicle.airborne_ticks);
+			platform_log("halo_sim:   rust (%f %f %f) velocity (%f %f %f) flags %lx leaf %ld speed %f turn %f stop %d airborne %d",
+				rust->position.x, rust->position.y, rust->position.z,
+				rust->translational_velocity.i, rust->translational_velocity.j, rust->translational_velocity.k,
+				rust->object_flags, rust->location_leaf, rust->vehicle.speed, rust->vehicle.turn, rust->vehicle.stop_time,
+				rust->vehicle.airborne_ticks);
+		}
+	}
+	if ((halo_sim_vehicle_update_checks.compared & 0x3fff) == 0 ||
+		(halo_sim_vehicle_update_checks.compared & (halo_sim_vehicle_update_checks.compared - 1)) == 0)
+	{
+		platform_log("halo_sim: vehicle updates: %lu of %lu agree with the game (%lu left out)",
+			halo_sim_vehicle_update_checks.compared - halo_sim_vehicle_update_checks.differed,
+			halo_sim_vehicle_update_checks.compared, halo_sim_vehicle_update_checks.skipped);
 	}
 }

@@ -20,6 +20,7 @@ enum
 	_halo_sim_projectiles,
 	_halo_sim_biped_physics,
 	_halo_sim_vehicle_physics,
+	_halo_sim_vehicle_update,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -155,5 +156,14 @@ int halo_sim_vehicle_physics_update(long vehicle_index, void *powered_mass_point
 	void *mass_points, short mass_point_count, void const *magic_force, void const *magic_torque);
 void halo_sim_vehicle_physics_other(long object_index);
 void halo_sim_vehicle_physics_check(long vehicle_index, void const *mass_points, short mass_point_count);
+
+/* vehicles.c's vehicle_update, once a vehicle not riding a parent is
+past its parent check: TRUE when the Rust port ran it up to its falling
+damage (its physics, effects and sounds the game's, called back); in check
+mode it notes the state the game's update begins with, and
+halo_sim_vehicle_update_check, before its animation, compares Rust's
+replay of it */
+int halo_sim_vehicle_update(long vehicle_index);
+void halo_sim_vehicle_update_check(long vehicle_index);
 
 #endif // __HALO_SIM_H

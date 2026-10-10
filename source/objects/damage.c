@@ -347,6 +347,7 @@ typedef char object_damage_body_body_destroyed_threshold_offset_assert[
 long damage_call(struct damage_data *damage, long kind, long object_index, long a, long b, real const *f, real *out);
 static real damage_maximum_vitality(struct damage_data *damage, long object_index, short which, boolean ignore_difficulty);
 static void object_cause_damage_rider(struct damage_data *damage, long object_index);
+long damage_update_call(long object_index, long kind, real f, real *out);
 long area_damage_call(struct damage_data *damage, long kind, long object_index, long a, long b, real const *f, real *out);
 static boolean area_damage_ray_test(struct damage_data *damage, real_point3d const *point, real_vector3d const *vector,
 	long ignore_object_index, struct collision_result *collision);
@@ -1848,7 +1849,7 @@ static void area_of_effect_cause_damage_internal(
 	return;
 }
 
-void object_damage_update(
+static void object_damage_update_internal(
 	long object_index)
 {
 	struct object_datum *object = object_get(object_index);
@@ -1873,44 +1874,7 @@ void object_damage_update(
 	{
 		if (!TEST_FLAG(damage_flags, _object_dead_bit))
 		{
-			struct game_globals_falling_damage *falling_damage =
-				TAG_BLOCK_GET_ELEMENT(
-					&scenario_get_game_globals()->falling_damage,
-					0,
-					struct game_globals_falling_damage);
-			long damage_effect_index = falling_damage->falling_damage.index;
-
-			if (damage_effect_index != NONE)
-			{
-				struct damage_data damage;
-
-				damage_data_new(&damage, damage_effect_index);
-				damage.scale = 1.f;
-				SET_FLAG(damage.flags, _damage_kill_instantly_bit, TRUE);
-				if (TEST_FLAG(
-					object->object.damage_flags,
-					_object_die_act_of_god_silent_bit))
-				{
-					SET_FLAG(damage.flags, _damage_silent_bit, TRUE);
-				}
-
-				if (TEST_FLAG(
-					object->object.damage_flags,
-					_object_die_act_of_god_no_statistics_bit))
-				{
-					SET_FLAG(damage.flags, _damage_no_statistics_bit, TRUE);
-				}
-
-				distributed_damage_authorized = TRUE;
-				object_cause_damage(
-					&damage,
-					object_index,
-					NONE,
-					NONE,
-					NONE,
-					NULL);
-				distributed_damage_authorized = FALSE;
-			}
+			damage_update_call(object_index, _damage_update_call_act_of_god, 0.f, NULL);
 		}
 
 		object->object.damage_flags &=
@@ -1949,18 +1913,19 @@ void object_damage_update(
 		}
 		else if (object->object.shield_vitality > 1.f && game_engine_running())
 		{
-			long player_index = player_index_from_unit_index(object_index);
+			long player_index = NONE;
 			real overcharge = object->object.shield_vitality - 1.f;
 
+			(void)player_index;
 			if (0.00074074074f > overcharge)
 			{
 				object->object.shield_vitality = 1.f;
-				hud_tick_shield(player_index, overcharge);
+				damage_update_call(object_index, _damage_update_call_hud_tick_shield, overcharge, NULL);
 			}
 			else
 			{
 				object->object.shield_vitality -= 0.00074074074f;
-				hud_tick_shield(player_index, 0.00074074074f);
+				damage_update_call(object_index, _damage_update_call_hud_tick_shield, 0.00074074074f, NULL);
 			}
 		}
 		else if (object->object.shield_vitality < 1.f)
@@ -1969,23 +1934,20 @@ void object_damage_update(
 			{
 				real shield_recharge =
 					collision_model->resistance.runtime_shield_recharge_velocity;
+				real difficulty;
 
-				shield_recharge *= game_difficulty_get_team_value(
-						_game_difficulty_value_enemy_recharge,
-						object->object.owner_team_index);
+				damage_update_call(object_index, _damage_update_call_difficulty_enemy_recharge, 0.f, &difficulty);
+				shield_recharge *= difficulty;
 
 				if (TEST_FLAG(
 					object->object.damage_flags,
 					_object_shield_depleted_bit))
 				{
-					damage_effect_new_on_object(
-						collision_model->resistance.shield_recharging_effect.index,
-						object_index);
+					damage_update_call(object_index, _damage_update_call_shield_recharging, 0.f, NULL);
 					SET_FLAG(
 						object->object.damage_flags,
 						_object_shield_depleted_bit,
 						FALSE);
-					object_permutation_shield_regions(object_index, TRUE);
 				}
 
 				SET_FLAG(
@@ -3183,6 +3145,116 @@ long area_damage_call(
 		out[2] = values[2];
 	}
 	halo_sim_area_damage_event_end(damage, result, values);
+
+	return result;
+}
+
+/* ---------- port: the damage update's Rust port (halo_sim.c) */
+
+void object_damage_update(
+	long object_index)
+{
+	struct object_datum *object = object_get(object_index);
+	struct object_definition *object_definition = object_definition_get(object->definition_index);
+
+	if (object_definition->object.collision_model.index == NONE ||
+		!collision_model_definition_get(object_definition->object.collision_model.index))
+	{
+		return;
+	}
+	/* the Rust port's in place of the game's, or (in check mode) the state
+	it is checked from */
+	if (halo_sim_object_damage_update(object_index))
+		return;
+	object_damage_update_internal(object_index);
+	halo_sim_object_damage_update_check(object_index);
+}
+
+/* the damage update's calls of the rest of the game, the game's and the
+Rust port's (crates/halo_map's damage_update::call): -1 if the object is
+gone after */
+long damage_update_call(
+	long object_index,
+	long kind,
+	real f,
+	real *out)
+{
+	struct object_datum *object = object_get(object_index);
+	struct collision_model *collision_model = collision_model_definition_get(
+		object_definition_get(object->definition_index)->object.collision_model.index);
+	real value = 0.f;
+	long result = 0;
+
+	halo_sim_damage_update_event_begin(object_index, kind, f);
+	switch (kind)
+	{
+	case _damage_update_call_act_of_god:
+		{
+			word damage_flags = object->object.damage_flags;
+
+				if (!TEST_FLAG(damage_flags, _object_dead_bit))
+				{
+					struct game_globals_falling_damage *falling_damage =
+						TAG_BLOCK_GET_ELEMENT(
+							&scenario_get_game_globals()->falling_damage,
+							0,
+							struct game_globals_falling_damage);
+					long damage_effect_index = falling_damage->falling_damage.index;
+
+					if (damage_effect_index != NONE)
+					{
+						struct damage_data damage;
+
+						damage_data_new(&damage, damage_effect_index);
+						damage.scale = 1.f;
+						SET_FLAG(damage.flags, _damage_kill_instantly_bit, TRUE);
+						if (TEST_FLAG(
+							object->object.damage_flags,
+							_object_die_act_of_god_silent_bit))
+						{
+							SET_FLAG(damage.flags, _damage_silent_bit, TRUE);
+						}
+
+						if (TEST_FLAG(
+							object->object.damage_flags,
+							_object_die_act_of_god_no_statistics_bit))
+						{
+							SET_FLAG(damage.flags, _damage_no_statistics_bit, TRUE);
+						}
+
+						distributed_damage_authorized = TRUE;
+						object_cause_damage(
+							&damage,
+							object_index,
+							NONE,
+							NONE,
+							NONE,
+							NULL);
+						distributed_damage_authorized = FALSE;
+					}
+				}
+
+		}
+		break;
+
+	case _damage_update_call_hud_tick_shield:
+		hud_tick_shield(player_index_from_unit_index(object_index), f);
+		break;
+
+	case _damage_update_call_difficulty_enemy_recharge:
+		value = game_difficulty_get_team_value(_game_difficulty_value_enemy_recharge, object->object.owner_team_index);
+		break;
+
+	case _damage_update_call_shield_recharging:
+		damage_effect_new_on_object(collision_model->resistance.shield_recharging_effect.index, object_index);
+		object_permutation_shield_regions(object_index, TRUE);
+		break;
+	}
+	if (out)
+		*out = value;
+	if (!object_try_and_get(object_index))
+		result = -1;
+	halo_sim_damage_update_event_end(object_index, result, value);
 
 	return result;
 }

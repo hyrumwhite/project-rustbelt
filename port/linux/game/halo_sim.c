@@ -38,6 +38,7 @@ bit for bit; differences are counted and the first few logged.
 #include "items/projectiles_callbacks.h"
 #include "objects/damage.h"
 #include "game/game_globals.h"
+#include "networking/network_game_globals.h"
 #include "objects/damage_effect_definitions.h"
 #include "structures/structures.h"
 #include "scenario/scenario.h"
@@ -52,7 +53,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 16
+#define HALO_SIM_VERSION 17
 
 /* ---------- structures */
 
@@ -870,6 +871,35 @@ struct halo_sim_area_damage_callbacks
 	long (*call)(struct halo_sim_damage_data *damage, struct halo_sim_area_call *call);
 };
 
+/* crates/halo_sim's DamageUpdateEventC, DamageUpdateCallC and
+DamageUpdateCallbacks */
+struct halo_sim_damage_update_event
+{
+	long kind;
+	real f;
+	long result;
+	real out;
+	struct halo_sim_object_damage_state before;
+	struct halo_sim_object_damage_state after;
+};
+
+struct halo_sim_damage_update_call
+{
+	struct halo_sim_object_damage_state state;
+	unsigned long update_shields;
+	unsigned long game_engine_running;
+	struct halo_sim_damage_update_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+	unsigned long still_there;
+};
+
+struct halo_sim_damage_update_callbacks
+{
+	long (*call)(struct halo_sim_object_damage_state *state, long kind, real f, real *out);
+};
+
 struct halo_sim_damage_callbacks
 {
 	long (*object)(unsigned long index, struct halo_sim_object_damage_state *out);
@@ -1072,6 +1102,7 @@ struct halo_sim_host
 	struct halo_sim_rest_callbacks rest;
 	struct halo_sim_damage_callbacks damage;
 	struct halo_sim_area_damage_callbacks area_damage;
+	struct halo_sim_damage_update_callbacks damage_update;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -1120,6 +1151,7 @@ typedef long (*halo_sim_unit_update_function)(struct halo_sim_unit_update_call *
 typedef long (*halo_sim_rest_function)(struct halo_sim_rest_call *call);
 typedef long (*halo_sim_damage_function)(struct halo_sim_damage_call_c *call);
 typedef long (*halo_sim_area_damage_function)(struct halo_sim_area_call_c *call);
+typedef long (*halo_sim_damage_update_function)(struct halo_sim_damage_update_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -1168,6 +1200,8 @@ static struct
 	halo_sim_damage_function object_cause_damage_check;
 	halo_sim_area_damage_function area_damage;
 	halo_sim_area_damage_function area_damage_check;
+	halo_sim_damage_update_function damage_update;
+	halo_sim_damage_update_function damage_update_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1199,6 +1233,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"biped_rest",
 	"damage",
 	"area_damage",
+	"damage_update",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -1273,6 +1308,26 @@ static struct
 	unsigned long dealt;
 	unsigned long infection_forms;
 } halo_sim_area_checks;
+
+/* the damage update checks: the object the game's began with, its calls,
+and the comparisons */
+#define MAXIMUM_HALO_SIM_DAMAGE_UPDATE_EVENTS 8
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	long object_index;
+	struct halo_sim_damage_update_call call;
+	struct halo_sim_damage_update_event events[MAXIMUM_HALO_SIM_DAMAGE_UPDATE_EVENTS];
+	unsigned long event_count;
+	struct halo_sim_damage_update_event *open_event;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long calls;
+	unsigned long recharging;
+	unsigned long decaying;
+} halo_sim_damage_update_checks;
 
 /* the unit update checks: the update the game's began with, its calls of
 the rest of the game, and the comparisons */
@@ -2643,6 +2698,21 @@ static long halo_sim_area_call_callback(struct halo_sim_damage_data *damage, str
 	return result;
 }
 
+/* damage.c's, the damage update's call of the rest of the game */
+long damage_update_call(long object_index, long kind, real f, real *out);
+
+static long halo_sim_damage_update_callback(struct halo_sim_object_damage_state *state, long kind, real f, real *out)
+{
+	long object_index = (long)state->object_index;
+	long result;
+
+	halo_sim_object_damage_state_store(state);
+	result = damage_update_call(object_index, kind, f, out);
+	if (!halo_sim_object_damage_state_load(object_index, state))
+		return -1;
+	return result;
+}
+
 /* bipeds.c's, a player melee's side effects */
 void biped_rust_melee_started(long biped_index, long weapon_index);
 void biped_rust_melee_damage(long biped_index);
@@ -2771,6 +2841,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		halo_sim_area_object_callback,
 		halo_sim_area_call_callback,
 	},
+	{
+		halo_sim_damage_update_callback,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -2835,6 +2908,8 @@ static void halo_sim_initialize(void)
 	halo_sim.object_cause_damage_check = (halo_sim_damage_function)halo_sim_symbol(library, "halo_sim_object_cause_damage_check");
 	halo_sim.area_damage = (halo_sim_area_damage_function)halo_sim_symbol(library, "halo_sim_area_of_effect_cause_damage");
 	halo_sim.area_damage_check = (halo_sim_area_damage_function)halo_sim_symbol(library, "halo_sim_area_of_effect_cause_damage_check");
+	halo_sim.damage_update = (halo_sim_damage_update_function)halo_sim_symbol(library, "halo_sim_object_damage_update");
+	halo_sim.damage_update_check = (halo_sim_damage_update_function)halo_sim_symbol(library, "halo_sim_object_damage_update_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -2847,7 +2922,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.unit_update || !halo_sim.unit_update_check ||
 		!halo_sim.biped_rest || !halo_sim.biped_rest_check ||
 		!halo_sim.object_cause_damage || !halo_sim.object_cause_damage_check ||
-		!halo_sim.area_damage || !halo_sim.area_damage_check)
+		!halo_sim.area_damage || !halo_sim.area_damage_check ||
+		!halo_sim.damage_update || !halo_sim.damage_update_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -5407,6 +5483,139 @@ void halo_sim_area_of_effect_cause_damage_check(struct damage_data const *damage
 			platform_log("halo_sim: area damage: %lu of %lu agree with the game (%lu calls of the game: %lu rays, %lu objects damaged, %lu infection forms popped at; %lu left out)",
 				compared - halo_sim_area_checks.differed, compared, halo_sim_area_checks.calls, halo_sim_area_checks.rays,
 				halo_sim_area_checks.dealt, halo_sim_area_checks.infection_forms, halo_sim_area_checks.skipped);
+		}
+	}
+}
+
+/* ---------- damage updates */
+
+static void halo_sim_damage_update_call_new(long object_index, struct halo_sim_damage_update_call *call)
+{
+	memset(call, 0, sizeof(*call));
+	halo_sim_object_damage_state_load(object_index, &call->state);
+	call->update_shields = network_game_distributed_client() ? 0 : 1;
+	call->game_engine_running = game_engine_running() ? 1 : 0;
+	call->difference_event = NONE;
+}
+
+int halo_sim_object_damage_update(long object_index)
+{
+	short mode = halo_sim_mode(_halo_sim_damage_update);
+	struct halo_sim_damage_update_call call;
+	long result;
+
+	halo_sim_damage_update_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_damage_update_call_new(object_index, &halo_sim_damage_update_checks.call);
+		halo_sim_damage_update_checks.object_index = object_index;
+		halo_sim_damage_update_checks.event_count = 0;
+		halo_sim_damage_update_checks.open_event = NULL;
+		halo_sim_damage_update_checks.overflow = FALSE;
+		halo_sim_damage_update_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_damage_update_call_new(object_index, &call);
+	result = halo_sim.damage_update(&call);
+	if (result != 0)
+		return FALSE;
+	if (call.still_there)
+		halo_sim_object_damage_state_store(&call.state);
+
+	return TRUE;
+}
+
+void halo_sim_damage_update_event_begin(long object_index, long kind, float f)
+{
+	struct halo_sim_damage_update_event *event;
+
+	if (!halo_sim_damage_update_checks.recording || halo_sim_damage_update_checks.object_index != object_index ||
+		halo_sim_damage_update_checks.open_event)
+	{
+		return;
+	}
+	if (halo_sim_damage_update_checks.event_count >= MAXIMUM_HALO_SIM_DAMAGE_UPDATE_EVENTS)
+	{
+		halo_sim_damage_update_checks.overflow = TRUE;
+		return;
+	}
+	event = &halo_sim_damage_update_checks.events[halo_sim_damage_update_checks.event_count++];
+	memset(event, 0, sizeof(*event));
+	event->kind = kind;
+	event->f = f;
+	halo_sim_object_damage_state_load(object_index, &event->before);
+	halo_sim_damage_update_checks.open_event = event;
+}
+
+void halo_sim_damage_update_event_end(long object_index, long result, float value)
+{
+	struct halo_sim_damage_update_event *event = halo_sim_damage_update_checks.open_event;
+
+	if (!event || halo_sim_damage_update_checks.object_index != object_index)
+		return;
+	halo_sim_damage_update_checks.open_event = NULL;
+	event->result = result;
+	event->out = value;
+	if (!halo_sim_object_damage_state_load(object_index, &event->after))
+		halo_sim_damage_update_checks.overflow = TRUE;
+}
+
+void halo_sim_object_damage_update_check(long object_index)
+{
+	struct halo_sim_damage_update_call call;
+	struct halo_sim_object_damage_state game;
+
+	if (!halo_sim_damage_update_checks.recording)
+		return;
+	halo_sim_damage_update_checks.recording = FALSE;
+	if (halo_sim_damage_update_checks.object_index != object_index || halo_sim_damage_update_checks.overflow ||
+		!halo_sim_object_damage_state_load(object_index, &game))
+	{
+		halo_sim_damage_update_checks.skipped++;
+		return;
+	}
+	call = halo_sim_damage_update_checks.call;
+	call.events = halo_sim_damage_update_checks.events;
+	call.event_count = halo_sim_damage_update_checks.event_count;
+	if (halo_sim.damage_update_check(&call) != 0)
+	{
+		halo_sim_damage_update_checks.skipped++;
+		return;
+	}
+
+	halo_sim_damage_update_checks.compared++;
+	halo_sim_damage_update_checks.calls += halo_sim_damage_update_checks.event_count;
+	if (halo_sim_damage_update_checks.call.state.shield_vitality != game.shield_vitality)
+		halo_sim_damage_update_checks.recharging++;
+	if (halo_sim_damage_update_checks.call.state.body_damage_decay_timer != NONE ||
+		halo_sim_damage_update_checks.call.state.shield_damage_decay_timer != NONE)
+	{
+		halo_sim_damage_update_checks.decaying++;
+	}
+	if (memcmp(&call.state, &game, sizeof(game)) != 0 || call.difference_event != NONE)
+	{
+		halo_sim_damage_update_checks.differed++;
+		if (halo_sim_damage_update_checks.differed <= 8)
+		{
+			platform_log("halo_sim: damage update differs: object %lx call %ld of %lu reason %ld; shield game %f rust %f; flags game %x rust %x; body decay game %ld rust %ld",
+				(unsigned long)object_index, call.difference_event, halo_sim_damage_update_checks.event_count,
+				call.difference_reason, (double)game.shield_vitality, (double)call.state.shield_vitality,
+				game.damage_flags, call.state.damage_flags, game.body_damage_decay_timer,
+				call.state.body_damage_decay_timer);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_damage_update_checks.compared;
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: damage update: %lu of %lu agree with the game (%lu with the shield changing, %lu decaying; %lu calls of the game; %lu left out)",
+				compared - halo_sim_damage_update_checks.differed, compared, halo_sim_damage_update_checks.recharging,
+				halo_sim_damage_update_checks.decaying, halo_sim_damage_update_checks.calls,
+				halo_sim_damage_update_checks.skipped);
 		}
 	}
 }

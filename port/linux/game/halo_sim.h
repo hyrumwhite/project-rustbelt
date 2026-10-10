@@ -29,6 +29,7 @@ enum
 	_halo_sim_biped_rest,
 	_halo_sim_damage,
 	_halo_sim_area_damage,
+	_halo_sim_damage_update,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -119,6 +120,16 @@ enum
 	_area_damage_call_difficulty_infection_forms,
 	_area_damage_call_cause_damage,
 	_area_damage_call_breakable_surfaces,
+};
+
+/* the damage update's calls of the rest of the game (damage.c's
+damage_update_call; crates/halo_map's damage_update::call) */
+enum
+{
+	_damage_update_call_act_of_god = 1,
+	_damage_update_call_hud_tick_shield,
+	_damage_update_call_difficulty_enemy_recharge,
+	_damage_update_call_shield_recharging,
 };
 
 /* the rest of a biped update's calls of the rest of the game (bipeds.c's
@@ -350,5 +361,15 @@ void halo_sim_area_of_effect_cause_damage_check(struct damage_data const *damage
 void halo_sim_area_damage_event_begin(struct damage_data const *damage, long kind, long object_index, long a, long b,
 	float const *f);
 void halo_sim_area_damage_event_end(struct damage_data const *damage, long result, float const *out);
+
+/* damage.c's object_damage_update, for an object with a collision model:
+TRUE when the Rust port ran it (its calls of the game through
+damage_update_call); in check mode it notes the object the game's begins
+with, damage_update_call records each call (halo_sim_damage_update_event_begin
+and _end), and halo_sim_object_damage_update_check compares Rust's replay */
+int halo_sim_object_damage_update(long object_index);
+void halo_sim_object_damage_update_check(long object_index);
+void halo_sim_damage_update_event_begin(long object_index, long kind, float f);
+void halo_sim_damage_update_event_end(long object_index, long result, float value);
 
 #endif // __HALO_SIM_H

@@ -22,6 +22,10 @@ bit for bit; differences are counted and the first few logged.
 #include "game/game.h"
 #include "models/model_definitions.h"
 #include "objects/objects.h"
+#include "units/units.h"
+#include "units/bipeds.h"
+#include "units/vehicle_datum.h"
+#include "devices/devices.h"
 #include "physics/point_physics.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_groups.h"
@@ -34,7 +38,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 2
+#define HALO_SIM_VERSION 3
 
 /* ---------- structures */
 
@@ -105,7 +109,64 @@ struct halo_sim_pose_matrices_call
 	real_matrix4x3 *matrices;
 };
 
+/* crates/halo_sim's PosePreprocessCall */
+struct halo_sim_pose_preprocess_call
+{
+	unsigned long object_index;
+	unsigned long definition_index;
+	short object_type;
+	short node_count;
+	real_orientation *orientations;
+	unsigned long enhanced;
+	unsigned long airborne;
+	unsigned long parented;
+	unsigned long has_weapon;
+	unsigned long player;
+	long game_time;
+	unsigned short unit_animation_flags;
+	short aiming_screen_index;
+	short looking_screen_index;
+	short override_emotion_animation_index;
+	char seat_index;
+	char weapon_index;
+	char state;
+	char action;
+	char base_seat_index;
+	char emotion_index;
+	short pad;
+	short action_animation[2];
+	short overlay_action_animation[2];
+	short soft_ping_animation[2];
+	real mouth_aperture;
+	real_vector3d seat_acceleration;
+	real_vector3d aiming_vector;
+	real_vector3d looking_vector;
+	real_vector3d orientation_forward;
+	real_vector3d orientation_up;
+	real_vector3d forward;
+	real_vector3d up;
+	real_vector3d translational_velocity;
+	real leg_weight;
+	long leg_time;
+	real air_weight;
+	long air_time;
+	unsigned long aiming_with_euler_screen;
+	unsigned long looking_with_euler_screen;
+	unsigned long aiming_bounds_set;
+	unsigned long looking_bounds_set;
+	real_rectangle2d aiming_screen_bounds;
+	real_rectangle2d looking_screen_bounds;
+	real vehicle_turn;
+	real vehicle_speed;
+	real vehicle_wheel;
+	unsigned char vehicle_suspension[8];
+	unsigned long device_flags;
+	real device_position;
+	real device_power;
+};
+
 typedef unsigned long (*halo_sim_version_function)(void);
+typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
 typedef long (*halo_sim_set_tag_cache_function)(void const *memory, unsigned long size, unsigned long base);
 typedef long (*halo_sim_pose_orientations_function)(struct halo_sim_pose_orientations_call *call);
 typedef long (*halo_sim_pose_matrices_function)(struct halo_sim_pose_matrices_call const *call);
@@ -125,6 +186,7 @@ static struct
 	halo_sim_set_tag_cache_function set_tag_cache;
 	halo_sim_pose_orientations_function pose_orientations;
 	halo_sim_pose_matrices_function pose_matrices;
+	halo_sim_pose_preprocess_function pose_preprocess;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -156,8 +218,12 @@ static struct
 	long matrices_object;
 	real_orientation interpolated[MAXIMUM_NODES_PER_MODEL];
 	real_matrix4x3 matrices[MAXIMUM_NODES_PER_MODEL];
-	unsigned long compared[2];
-	unsigned long differed[2];
+	boolean preprocess_pending;
+	long preprocess_object;
+	struct halo_sim_pose_preprocess_call preprocess;
+	real_orientation preprocessed[MAXIMUM_NODES_PER_MODEL];
+	unsigned long compared[3];
+	unsigned long differed[3];
 } halo_sim_pose_checks;
 
 /* the platform layer's (port/linux/src) */
@@ -212,8 +278,9 @@ static void halo_sim_initialize(void)
 	halo_sim.set_tag_cache = (halo_sim_set_tag_cache_function)halo_sim_symbol(library, "halo_sim_set_tag_cache");
 	halo_sim.pose_orientations = (halo_sim_pose_orientations_function)halo_sim_symbol(library, "halo_sim_pose_orientations");
 	halo_sim.pose_matrices = (halo_sim_pose_matrices_function)halo_sim_symbol(library, "halo_sim_pose_matrices");
+	halo_sim.pose_preprocess = (halo_sim_pose_preprocess_function)halo_sim_symbol(library, "halo_sim_pose_preprocess");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
-		!halo_sim.pose_matrices)
+		!halo_sim.pose_matrices || !halo_sim.pose_preprocess)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -454,13 +521,15 @@ int halo_sim_pose_orientations(long object_index, short node_count, void *orient
 	return TRUE;
 }
 
+static char const *const halo_sim_pose_stage_names[3] = { "orientations", "matrices", "preprocess" };
+
 static void halo_sim_pose_report(short stage, long object_index, short node_count, short node_index)
 {
 	halo_sim_pose_checks.differed[stage]++;
 	if (halo_sim_pose_checks.differed[stage] <= 8)
 	{
 		platform_log("halo_sim: pose %s of %s (object %08lx) differs at node %d of %d",
-			stage ? "matrices" : "orientations", tag_get_name(object_get(object_index)->definition_index),
+			halo_sim_pose_stage_names[stage], tag_get_name(object_get(object_index)->definition_index),
 			(unsigned long)object_index, node_index, node_count);
 	}
 }
@@ -468,9 +537,9 @@ static void halo_sim_pose_report(short stage, long object_index, short node_coun
 static void halo_sim_pose_tally(short stage)
 {
 	halo_sim_pose_checks.compared[stage]++;
-	if ((halo_sim_pose_checks.compared[stage] & 0x3fff) == 0)
+	if ((halo_sim_pose_checks.compared[stage] & 0x3fff) == 0 || halo_sim_pose_checks.compared[stage] == 1)
 	{
-		platform_log("halo_sim: pose %s: %lu of %lu agree with the game", stage ? "matrices" : "orientations",
+		platform_log("halo_sim: pose %s: %lu of %lu agree with the game", halo_sim_pose_stage_names[stage],
 			halo_sim_pose_checks.compared[stage] - halo_sim_pose_checks.differed[stage], halo_sim_pose_checks.compared[stage]);
 	}
 }
@@ -568,4 +637,166 @@ void halo_sim_pose_matrices_check(long object_index, short node_count, void cons
 	if (node_index < node_count)
 		halo_sim_pose_report(1, object_index, node_count, node_index);
 	halo_sim_pose_tally(1);
+}
+
+/* ---------- the object types' preprocess */
+
+boolean unit_animation_enhanced(long unit_index); /* units.c */
+
+static void halo_sim_pose_preprocess_gather(long object_index, short node_count, struct halo_sim_pose_preprocess_call *call)
+{
+	struct object_datum *object = object_get(object_index);
+
+	memset(call, 0, sizeof(*call));
+	call->object_index = (unsigned long)object_index;
+	call->definition_index = (unsigned long)object->definition_index;
+	call->object_type = object->object.type;
+	call->node_count = node_count;
+	call->forward = object->object.forward;
+	call->up = object->object.up;
+	call->translational_velocity = object->object.translational_velocity;
+	call->game_time = game_time_get();
+	if (TEST_FLAG(_object_mask_unit, object->object.type))
+	{
+		struct unit_datum *unit = unit_get(object_index);
+
+		call->enhanced = unit_animation_enhanced(object_index) ? 1 : 0;
+		call->airborne = unit_flying_through_air(object_index) ? 1 : 0;
+		call->parented = object->object.parent_object_index != NONE;
+		call->has_weapon = unit->unit.current_weapon_index != NONE;
+		call->player = unit->unit.player_index != NONE;
+		call->unit_animation_flags = unit->unit.animation.flags;
+		call->aiming_screen_index = unit->unit.animation.aiming_screen_index;
+		call->looking_screen_index = unit->unit.animation.looking_screen_index;
+		call->override_emotion_animation_index = unit->unit.override_emotion_animation_index;
+		call->seat_index = unit->unit.animation.seat_index;
+		call->weapon_index = unit->unit.animation.weapon_index;
+		call->state = unit->unit.animation.state;
+		call->action = unit->unit.animation.action;
+		call->base_seat_index = unit->unit.animation.base_seat_index;
+		call->emotion_index = unit->unit.animation.emotion_index;
+		call->action_animation[0] = unit->unit.animation.action_animation.index;
+		call->action_animation[1] = unit->unit.animation.action_animation.frame_index;
+		call->overlay_action_animation[0] = unit->unit.animation.overlay_action_animation.index;
+		call->overlay_action_animation[1] = unit->unit.animation.overlay_action_animation.frame_index;
+		call->soft_ping_animation[0] = unit->unit.animation.soft_ping_animation.index;
+		call->soft_ping_animation[1] = unit->unit.animation.soft_ping_animation.frame_index;
+		call->mouth_aperture = unit->unit.mouth_aperture;
+		call->seat_acceleration = unit->unit.seat_acceleration;
+		call->aiming_vector = unit->unit.aiming_vector;
+		call->looking_vector = unit->unit.looking_vector;
+		object_get_orientation(object_index, &call->orientation_forward, &call->orientation_up);
+		unit_grenade_throw_leg_weights(object_index, &call->leg_weight, &call->leg_time, &call->air_weight, &call->air_time);
+	}
+	if (object->object.type == _object_type_vehicle)
+	{
+		struct vehicle_datum *vehicle = vehicle_datum_get(object_index);
+
+		call->vehicle_turn = vehicle->vehicle.turn;
+		call->vehicle_speed = vehicle->vehicle.speed;
+		call->vehicle_wheel = vehicle->vehicle.wheel;
+		memcpy(call->vehicle_suspension, vehicle->vehicle.suspension, sizeof(call->vehicle_suspension));
+	}
+	if (TEST_FLAG(_object_mask_device, object->object.type))
+	{
+		struct device_datum *device = device_get(object_index);
+
+		call->device_flags = device->device.flags;
+		call->device_position = device->device.position;
+		call->device_power = device->device.power;
+	}
+}
+
+int halo_sim_pose_preprocess(long object_index, short node_count, void *orientations)
+{
+	short mode = halo_sim_mode(_halo_sim_poses);
+	struct halo_sim_pose_preprocess_call *call = &halo_sim_pose_checks.preprocess;
+
+	halo_sim_pose_checks.preprocess_pending = FALSE;
+	if (mode == _halo_sim_mode_c || node_count <= 0 || node_count > MAXIMUM_NODES_PER_MODEL)
+		return FALSE;
+	halo_sim_pose_preprocess_gather(object_index, node_count, call);
+	if (mode == _halo_sim_mode_check)
+	{
+		memcpy(halo_sim_pose_checks.preprocessed, orientations, sizeof(real_orientation) * node_count);
+		call->orientations = halo_sim_pose_checks.preprocessed;
+	}
+	else
+	{
+		call->orientations = (real_orientation *)orientations;
+	}
+	if (halo_sim.pose_preprocess(call) != 0)
+	{
+		static long failures = 0;
+
+		if (failures++ < 5)
+		{
+			platform_log("halo_sim: the preprocess of %s (type %d) couldn't run in Rust",
+				tag_get_name(object_get(object_index)->definition_index), call->object_type);
+		}
+		return FALSE;
+	}
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_pose_checks.preprocess_pending = TRUE;
+		halo_sim_pose_checks.preprocess_object = object_index;
+		return FALSE;
+	}
+	if (TEST_FLAG(_object_mask_unit, call->object_type))
+	{
+		struct unit_datum *unit = unit_get(object_index);
+
+		unit->unit.animation.aiming_with_euler_screen = call->aiming_with_euler_screen ? TRUE : FALSE;
+		unit->unit.animation.looking_with_euler_screen = call->looking_with_euler_screen ? TRUE : FALSE;
+		if (call->aiming_bounds_set)
+			unit->unit.animation.aiming_screen_bounds = call->aiming_screen_bounds;
+		if (call->looking_bounds_set)
+			unit->unit.animation.looking_screen_bounds = call->looking_screen_bounds;
+		unit_grenade_throw_set_leg_weights(object_index, call->leg_weight, call->leg_time, call->air_weight, call->air_time);
+	}
+
+	return TRUE;
+}
+
+void halo_sim_pose_preprocess_check(long object_index, short node_count, void const *orientations)
+{
+	struct halo_sim_pose_preprocess_call const *call = &halo_sim_pose_checks.preprocess;
+	real_orientation const *game = (real_orientation const *)orientations;
+	short node_index;
+	boolean same;
+
+	if (!halo_sim_pose_checks.preprocess_pending || halo_sim_pose_checks.preprocess_object != object_index)
+	{
+		static long misses = 0;
+
+		if (misses++ < 5)
+			platform_log("halo_sim: preprocess check missed (pending %d)", halo_sim_pose_checks.preprocess_pending);
+		return;
+	}
+	halo_sim_pose_checks.preprocess_pending = FALSE;
+	for (node_index = 0; node_index < node_count; node_index++)
+	{
+		if (memcmp(&game[node_index], &halo_sim_pose_checks.preprocessed[node_index], sizeof(real_orientation)) != 0)
+			break;
+	}
+	same = node_index == node_count;
+	if (same && TEST_FLAG(_object_mask_unit, call->object_type))
+	{
+		struct unit_datum *unit = unit_get(object_index);
+		real leg_weight, air_weight;
+		long leg_time, air_time;
+
+		unit_grenade_throw_leg_weights(object_index, &leg_weight, &leg_time, &air_weight, &air_time);
+		same = (unit->unit.animation.aiming_with_euler_screen != 0) == (call->aiming_with_euler_screen != 0) &&
+			(unit->unit.animation.looking_with_euler_screen != 0) == (call->looking_with_euler_screen != 0) &&
+			(!call->aiming_bounds_set ||
+				memcmp(&unit->unit.animation.aiming_screen_bounds, &call->aiming_screen_bounds, sizeof(real_rectangle2d)) == 0) &&
+			(!call->looking_bounds_set ||
+				memcmp(&unit->unit.animation.looking_screen_bounds, &call->looking_screen_bounds, sizeof(real_rectangle2d)) == 0) &&
+			memcmp(&leg_weight, &call->leg_weight, sizeof(real)) == 0 && leg_time == call->leg_time &&
+			memcmp(&air_weight, &call->air_weight, sizeof(real)) == 0 && air_time == call->air_time;
+	}
+	if (!same)
+		halo_sim_pose_report(2, object_index, node_count, node_index);
+	halo_sim_pose_tally(2);
 }

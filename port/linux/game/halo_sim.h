@@ -79,4 +79,12 @@ int halo_sim_pose_matrices(long object_index, short node_count, int world_relati
 void halo_sim_pose_matrices_check(long object_index, short node_count, void const *orientations,
 	void const *matrices);
 
+/* and the object type's preprocess between them (a unit's, then a
+vehicle's; a device's): TRUE when the Rust port ran it (the orientations
+changed in place, the unit's euler screens and grenade throw legs set); in
+check mode it runs on a copy, compared by halo_sim_pose_preprocess_check
+once the game's own has run */
+int halo_sim_pose_preprocess(long object_index, short node_count, void *orientations);
+void halo_sim_pose_preprocess_check(long object_index, short node_count, void const *orientations);
+
 #endif // __HALO_SIM_H

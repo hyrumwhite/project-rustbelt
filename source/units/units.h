@@ -981,6 +981,8 @@ void unit_scripting_enter_vehicle(
 the game times they were eased at (for a Bevy renderer, bevy_bridge.c) */
 void unit_grenade_throw_leg_weights(long unit_index, real *leg_weight, long *leg_time,
 	real *air_weight, long *air_time);
+void unit_grenade_throw_set_leg_weights(long unit_index, real leg_weight, long leg_time,
+	real air_weight, long air_time);
 void unit_preprocess_node_orientations(
 	long unit_index,
 	struct real_orientation *node_orientations);

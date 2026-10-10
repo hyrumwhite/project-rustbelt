@@ -2629,9 +2629,12 @@ void object_compute_node_matrices(
 		/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
 		bevy_bridge_pose_begin(object_index, node_orientations, model_node_count, bevy_bridge_frame_index,
 			world_relative, object_node_matrix);
-		if (object_definition->object.animation_graph.index!=NONE)
+		/* port: run by the Rust port where it takes over (halo_sim.c) */
+		if (object_definition->object.animation_graph.index!=NONE &&
+			!halo_sim_pose_preprocess(object_index, model_node_count, node_orientations))
 		{
 			object_type_preprocess_node_orientations(object_index, node_orientations);
+			halo_sim_pose_preprocess_check(object_index, model_node_count, node_orientations);
 		}
 		bevy_bridge_pose_preprocessed(object_index, node_orientations);
 

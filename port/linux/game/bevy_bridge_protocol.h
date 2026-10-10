@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 11
+#define BEVY_BRIDGE_VERSION 12
 #define BEVY_BRIDGE_RAY_TESTS 16
 #define BEVY_BRIDGE_MAXIMUM_LIGHTS 64
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
@@ -137,6 +137,15 @@ struct bevy_bridge_ray_test
 	float sphere_radius;
 	unsigned short sphere_counts[4];
 	unsigned long sphere_checksum;
+	/* and a sphere swept from the ray's start (collision_bsp_test_pill,
+	as collision_test_pill calls it): along `pill_vector`, and where it
+	first touched */
+	float pill_vector[3];
+	float pill_radius;
+	unsigned long pill_hit;
+	float pill_t;
+	float pill_normal[3];
+	long pill_surface_index;
 };
 
 struct bevy_bridge_frame

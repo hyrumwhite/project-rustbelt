@@ -157,6 +157,29 @@ static unsigned long bevy_bridge_ray_tests(
 				checksum = bevy_bridge_checksum(checksum, sphere.leaf_indices, sphere.leaf_count);
 				test->sphere_checksum = checksum;
 			}
+			{
+				static struct collision_bsp_test_pill_result pill;
+				/* (half the full ray, half just past where it hit) */
+				real length = (count & 4) ? 1.0f : test->t * 1.02f;
+
+				test->pill_radius = (count & 2) ? 0.6f : 0.2f;
+				test->pill_vector[0] = vector.i * length;
+				test->pill_vector[1] = vector.j * length;
+				test->pill_vector[2] = vector.k * length;
+				{
+					real_vector3d pill_vector;
+
+					pill_vector.i = test->pill_vector[0];
+					pill_vector.j = test->pill_vector[1];
+					pill_vector.k = test->pill_vector[2];
+					test->pill_hit = collision_bsp_test_pill(bsp, origin, &pill_vector, test->pill_radius, REAL_MAX, &pill);
+				}
+				test->pill_t = test->pill_hit ? pill.t : 0.0f;
+				test->pill_normal[0] = test->pill_hit ? pill.plane.n.i : 0.0f;
+				test->pill_normal[1] = test->pill_hit ? pill.plane.n.j : 0.0f;
+				test->pill_normal[2] = test->pill_hit ? pill.plane.n.k : 0.0f;
+				test->pill_surface_index = test->pill_hit ? pill.surface_index : NONE;
+			}
 		}
 	}
 	return count;

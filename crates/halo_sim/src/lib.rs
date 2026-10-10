@@ -9,17 +9,28 @@
 //! collision geometry and clusters, then lets the rest go (the game's
 //! 32-bit address space holds its own copy of the map).
 //!
-//! Systems handed over so far: point physics (`point_physics_update`).
+//! The tags (models, animations, object definitions) are read from the
+//! game's own tag cache in its memory (`halo_sim_set_tag_cache`), as the
+//! game holds them, without a copy.
+//!
+//! Systems handed over so far: point physics (`point_physics_update`), and
+//! poses (`object_compute_node_matrices`: the orientations from the
+//! animation, overlays and scale, and the interpolation and node matrices;
+//! the object types' preprocess between them is still the game's).
 
+use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use halo_map::CacheFile;
 use halo_map::collision::{CollisionBsp, StructureClusters, World};
 use halo_map::physics::{PointPhysicsDefinition, PointState, point_physics_update_full};
+use halo_map::pose::{PoseAnimation, PoseModel, PoseObjectDefinition};
+
+pub mod poses;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// A level's structure BSP, as the simulation tests it.
 struct Structure {
@@ -34,6 +45,59 @@ struct Level {
 }
 
 static LEVEL: Mutex<Option<Level>> = Mutex::new(None);
+
+/// The game's tag cache, and what has been read from it (until the next
+/// level replaces it).
+struct Tags {
+    cache: CacheFile,
+    definitions: HashMap<u32, Option<Arc<PoseObjectDefinition>>>,
+    models: HashMap<u32, Option<Arc<PoseModel>>>,
+    animations: HashMap<(u32, i16), Option<Arc<PoseAnimation>>>,
+}
+
+impl Tags {
+    fn definition(&mut self, datum: u32) -> Option<Arc<PoseObjectDefinition>> {
+        let cache = &self.cache;
+        self.definitions.entry(datum).or_insert_with(|| PoseObjectDefinition::load(cache, datum).ok().map(Arc::new)).clone()
+    }
+    fn model(&mut self, datum: u32) -> Option<Arc<PoseModel>> {
+        let cache = &self.cache;
+        self.models.entry(datum).or_insert_with(|| PoseModel::load(cache, datum).ok().map(Arc::new)).clone()
+    }
+    fn animation(&mut self, graph: u32, index: i16) -> Option<Arc<PoseAnimation>> {
+        let cache = &self.cache;
+        self.animations
+            .entry((graph, index))
+            .or_insert_with(|| PoseAnimation::load(cache, graph, index).ok().flatten().map(Arc::new))
+            .clone()
+    }
+}
+
+static TAGS: Mutex<Option<Tags>> = Mutex::new(None);
+
+/// Takes the game's tag cache: `size` bytes at `memory`, which the game's
+/// tag pointers address from `base`. Called at each level's load, after the
+/// game read its tags. Returns the tag count, or -1 if the tags can't be
+/// read.
+///
+/// # Safety
+/// `memory` must point to `size` bytes that stay mapped while the game
+/// runs, and hold the level's tags until the next call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, base: u32) -> i32 {
+    let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+    *tags = None;
+    if memory.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's memory, mapped while the game runs
+    let bytes: &'static [u8] = unsafe { std::slice::from_raw_parts(memory, size as usize) };
+    // SAFETY: as above
+    let Ok(cache) = (unsafe { CacheFile::from_memory(bytes, base) }) else { return -1 };
+    let count = cache.tags.len() as i32;
+    *tags = Some(Tags { cache, definitions: HashMap::new(), models: HashMap::new(), animations: HashMap::new() });
+    count
+}
 
 /// The interface's version ([`VERSION`]).
 #[unsafe(no_mangle)]

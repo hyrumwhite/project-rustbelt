@@ -72,9 +72,26 @@ pub struct TagRef {
     pub datum: Option<u32>,
 }
 
+/// A cache file's bytes: an inflated file, or a game's tag cache in its
+/// own memory (`CacheFile::from_memory`).
+enum Storage {
+    Owned(Vec<u8>),
+    Borrowed(&'static [u8]),
+}
+
+impl std::ops::Deref for Storage {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Storage::Owned(bytes) => bytes,
+            Storage::Borrowed(bytes) => bytes,
+        }
+    }
+}
+
 /// The inflated cache file and its tag index.
 pub struct CacheFile {
-    data: Vec<u8>,
+    data: Storage,
     pub header: Header,
     pub tags: Vec<TagInstance>,
     pub scenario_datum: u32,
@@ -117,7 +134,32 @@ impl CacheFile {
             return Err(Error::Format("tag data leaves the file".into()));
         }
 
-        let mut cache = CacheFile { data, header, tags: Vec::new(), scenario_datum: 0, tag_space };
+        let mut cache = CacheFile { data: Storage::Owned(data), header, tags: Vec::new(), scenario_datum: 0, tag_space };
+        cache.read_tag_index()?;
+        Ok(cache)
+    }
+
+    /// A game's tag cache as it holds it in memory (the tag data, and the
+    /// structure BSP it loaded after it), where the game's tag pointers
+    /// address it from `base` ([`TAG_CACHE_BASE`]). Only the tag data is
+    /// there: data the tags locate by file offset (bitmap pixels, sound
+    /// samples) is not.
+    ///
+    /// # Safety
+    /// `memory` must stay mapped and unchanged while the cache is used (the
+    /// game's tag cache, until its next level loads).
+    pub unsafe fn from_memory(memory: &'static [u8], base: u32) -> Result<Self> {
+        let header = Header {
+            version: XBOX_VERSION,
+            file_length: memory.len(),
+            tag_data_offset: 0,
+            tag_data_size: memory.len(),
+            name: String::new(),
+            build: String::new(),
+            checksum: 0,
+        };
+        let tag_space = Space { base, file_offset: 0, size: memory.len() };
+        let mut cache = CacheFile { data: Storage::Borrowed(memory), header, tags: Vec::new(), scenario_datum: 0, tag_space };
         cache.read_tag_index()?;
         Ok(cache)
     }

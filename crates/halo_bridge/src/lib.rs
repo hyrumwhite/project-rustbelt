@@ -21,7 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 17;
+pub const VERSION: u32 = 18;
+pub const FEATURE_OBJECTS: usize = 16384;
+pub const FEATURE_MATRICES: usize = 65536;
 pub const BIPED_RECORDS: usize = 1024;
 pub const PROJECTILE_RECORDS: usize = 1024;
 pub const RANDOM_DIRECTIONS: usize = 4096;
@@ -329,11 +331,56 @@ pub struct BipedRecord {
     pub stand_height: f32,
     pub stand_radius: f32,
     pub breakable_surfaces: [u8; 32],
+    /// The objects the broad phase visited during the update (in the
+    /// feature object ring), and how many times features were gathered.
+    pub first_feature_object: u32,
+    pub feature_object_count: u32,
+    pub feature_calls: u32,
     pub before: halo_map::biped::BipedPhysics,
     pub after: halo_map::biped::BipedPhysics,
 }
 
-const _: () = assert!(std::mem::size_of::<BipedRecord>() == 464);
+const _: () = assert!(std::mem::size_of::<BipedRecord>() == 476);
+
+/// An object the broad phase visited while a biped update gathered
+/// collision features, as it was then (`call`: which gathering, from 0).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FeatureObjectRecord {
+    pub sequence: u32,
+    pub object_index: u32,
+    pub definition_index: u32,
+    pub call: u32,
+    pub kind: i16,
+    pub dead: i16,
+    pub flags: u32,
+    pub bounding_center: [f32; 3],
+    pub bounding_radius: f32,
+    pub parent_object_index: i32,
+    pub translational_velocity: [f32; 3],
+    pub elevator: u32,
+    pub biped_passes_through: u32,
+    pub player_index: i32,
+    pub parent_seat_index: i32,
+    pub pill_base: [f32; 3],
+    pub pill_height: f32,
+    pub pill_width: f32,
+    pub region_permutations: [u8; 8],
+    pub node_count: u32,
+    pub first_matrix: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<FeatureObjectRecord>() == 108);
+
+/// A recorded biped update with the objects its features came from (each
+/// with its node matrices: scale, forward, left, up, position).
+#[derive(Debug, Clone)]
+pub struct BipedUpdate {
+    pub record: BipedRecord,
+    pub objects: Vec<(FeatureObjectRecord, Vec<[f32; 13]>)>,
+    /// Whether every object (and matrix) was still in the rings.
+    pub complete: bool,
+}
 const _: () = assert!(std::mem::size_of::<ProjectileState>() == 92);
 const _: () = assert!(std::mem::size_of::<ProjectileRecord>() == 228);
 
@@ -368,6 +415,10 @@ struct Shared {
     biped_record_count: u32,
     biped_pad: u32,
     biped_records: [BipedRecord; BIPED_RECORDS],
+    feature_object_count: u32,
+    feature_matrix_count: u32,
+    feature_objects: [FeatureObjectRecord; FEATURE_OBJECTS],
+    feature_matrices: [[f32; 13]; FEATURE_MATRICES],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -585,6 +636,45 @@ impl Bridge {
             }
             self.last_biped_record = Some(count);
             out
+        }
+    }
+
+    /// The biped physics updates recorded since the last call, each with
+    /// the objects its collision features came from.
+    pub fn read_biped_updates(&mut self) -> Vec<BipedUpdate> {
+        let records = self.read_biped_records();
+        // SAFETY: as in check(); entries are plain old data, checked by their
+        // sequence numbers (and the matrix ring's count) after copying
+        unsafe {
+            records
+                .into_iter()
+                .map(|record| {
+                    let mut objects = Vec::new();
+                    let mut complete = true;
+                    for i in 0..record.feature_object_count {
+                        let sequence = record.first_feature_object.wrapping_add(i);
+                        let entry = std::ptr::read_volatile(&(*self.shared).feature_objects[sequence as usize % FEATURE_OBJECTS]);
+                        let matrices: Vec<[f32; 13]> = (0..entry.node_count)
+                            .map(|n| {
+                                std::ptr::read_volatile(
+                                    &(*self.shared).feature_matrices[entry.first_matrix.wrapping_add(n) as usize % FEATURE_MATRICES],
+                                )
+                            })
+                            .collect();
+                        fence(Ordering::Acquire);
+                        let objects_now = std::ptr::read_volatile(&(*self.shared).feature_object_count);
+                        let matrices_now = std::ptr::read_volatile(&(*self.shared).feature_matrix_count);
+                        if entry.sequence != sequence
+                            || objects_now.wrapping_sub(sequence) as usize > FEATURE_OBJECTS
+                            || matrices_now.wrapping_sub(entry.first_matrix) as usize > FEATURE_MATRICES
+                        {
+                            complete = false;
+                        }
+                        objects.push((entry, matrices));
+                    }
+                    BipedUpdate { record, objects, complete }
+                })
+                .collect()
         }
     }
 

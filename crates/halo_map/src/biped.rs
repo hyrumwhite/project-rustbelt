@@ -9,12 +9,13 @@
 //! the structure, sticking to climbable ledges, and finds what it now
 //! stands on.
 //!
-//! Collisions with objects (other bipeds, vehicles, scenery, elevators)
-//! are not ported yet: only the structure is collided with.
+//! Objects are collided with as the broad phase hands them over (the
+//! objects it visits, as they were then): other bipeds' pills, and
+//! vehicles', scenery's, machines' and controls' collision models.
 
 use crate::collision::{CollisionBsp, surface_flags};
 use crate::features::{
-    self, CollisionPlane, cross3, dot3, magnitude3, magnitude_squared3, normalize3, plane_from_designator, scale3, sub3,
+    self, CollisionPlane, FeatureObject, OBJECT_TYPE_SCENERY, OBJECT_TYPE_VEHICLE, cross3, dot3, magnitude3, magnitude_squared3, normalize3, plane_from_designator, scale3, sub3,
     valid_surface,
 };
 
@@ -124,9 +125,18 @@ fn flying_axes(forward: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     (left, up)
 }
 
-/// `biped_update_physics`, against the structure only. `stand_test` is
-/// what the stand test needs, for a player's biped it applies to.
-pub fn biped_update_physics(bsp: &CollisionBsp, physics: &mut BipedPhysics, stand_test: Option<StandTest>) {
+/// `biped_update_physics`. `stand_test` is what the stand test needs, for a
+/// player's biped it applies to; `objects` are, for each time it gathers
+/// collision features (moving, then the stand test), the objects the broad
+/// phase visits.
+pub fn biped_update_physics(
+    bsp: &CollisionBsp,
+    physics: &mut BipedPhysics,
+    stand_test: Option<StandTest>,
+    objects: &[Vec<FeatureObject>],
+) {
+    let visited = |call: usize| objects.get(call).map(Vec::as_slice).unwrap_or(&[]);
+    let object = |index: i32| objects.iter().flatten().find(|o| o.index == index);
     let mut facing = [0.0f32; 2];
     let climbing = physics.in_flags & in_flags::CLIMB_ANYTHING != 0;
     let in_flags = physics.in_flags;
@@ -284,7 +294,17 @@ pub fn biped_update_physics(bsp: &CollisionBsp, physics: &mut BipedPhysics, stan
     let mut velocity = physics.new_velocity;
     velocity[2] += physics.crouch_velocity;
     let (mut clipped_position, mut clipped_velocity, mut collisions) =
-        features::move_pill(bsp, collision_flags, position, velocity, physics.height, physics.width, MAXIMUM_COLLISIONS);
+        features::move_pill(
+            bsp,
+            collision_flags,
+            position,
+            velocity,
+            physics.height,
+            physics.width,
+            physics.biped_index,
+            visited(0),
+            MAXIMUM_COLLISIONS,
+        );
 
     if collisions.len() >= MAXIMUM_COLLISIONS {
         physics.out_flags |= out_flags::SPLATTER;
@@ -336,8 +356,10 @@ pub fn biped_update_physics(bsp: &CollisionBsp, physics: &mut BipedPhysics, stan
                 best_stuck = stuck;
                 best_normal_k = n[2];
             }
-            // (and objects other than scenery: not ported)
-            if physics.out_flags & out_flags::VOLATILE_COLLISION == 0 && collision.source.flags & surface_flags::BREAKABLE != 0 {
+            if physics.out_flags & out_flags::VOLATILE_COLLISION == 0
+                && (collision.source.flags & surface_flags::BREAKABLE != 0
+                    || (collision.source.object != NONE && object(collision.source.object).is_none_or(|o| o.kind != OBJECT_TYPE_SCENERY)))
+            {
                 physics.out_flags |= out_flags::VOLATILE_COLLISION;
             }
         }
@@ -382,9 +404,35 @@ pub fn biped_update_physics(bsp: &CollisionBsp, physics: &mut BipedPhysics, stan
         }
     }
 
-    // (what it bumped, and the elevator it stands on: objects, not ported)
-    physics.bumped_object_index = NONE;
+    // what it bumped: a vehicle before anything else, then the fastest
+    let mut bumped: Option<(i32, i16, f32)> = None;
+    for collision in &collisions {
+        let index = collision.source.object;
+        if index == NONE {
+            continue;
+        }
+        let Some(o) = object(index) else { continue };
+        let relative = sub3(o.velocity, clipped_velocity);
+        let speed_squared = magnitude_squared3(relative);
+        let bump = match bumped {
+            None => true,
+            Some((_, OBJECT_TYPE_VEHICLE, bumped_speed_squared)) => o.kind == OBJECT_TYPE_VEHICLE && speed_squared > bumped_speed_squared,
+            Some((_, _, bumped_speed_squared)) => o.kind == OBJECT_TYPE_VEHICLE || speed_squared > bumped_speed_squared,
+        };
+        if bump {
+            bumped = Some((index, o.kind, speed_squared));
+        }
+    }
+    physics.bumped_object_index = bumped.map_or(NONE, |(index, _, _)| index);
+
+    // the elevator it rides (the last it touched)
     physics.elevator_object_index = NONE;
+    for collision in &collisions {
+        let index = collision.source.object;
+        if index != NONE && object(index).is_some_and(|o| o.elevator) {
+            physics.elevator_object_index = index;
+        }
+    }
 
     physics.new_position = clipped_position;
     physics.new_velocity = clipped_velocity;
@@ -399,7 +447,8 @@ pub fn biped_update_physics(bsp: &CollisionBsp, physics: &mut BipedPhysics, stan
         let mut center = physics.new_position;
         center[2] += radius;
         let flags = if physics.in_flags & in_flags::DEAD != 0 { COLLISION_FLAGS_DEAD } else { COLLISION_FLAGS_LIVING };
-        let features = features::features_in_sphere(bsp, flags, center, radius, 0.0, stand.collision_radius);
+        let features =
+            features::features_in_sphere(bsp, flags, center, radius, 0.0, stand.collision_radius, physics.biped_index, visited(1));
         if !features.is_empty() {
             let standing_vector = scale3(UP, stand.collision_height_standing - 2.0 * stand.collision_radius);
             if features.test_vector(physics.new_position, standing_vector).0 {

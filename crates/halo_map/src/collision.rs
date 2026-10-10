@@ -311,6 +311,12 @@ impl CollisionBsp {
         }
     }
 
+    /// Whether its 3D BSP has nodes (a collision model's empty ones are
+    /// never tested).
+    pub fn has_nodes(&self) -> bool {
+        !self.nodes.is_empty()
+    }
+
     /// Whether a surface is there: not a breakable surface that has been
     /// broken.
     pub fn surface_extant(&self, surface: &Surface) -> bool {

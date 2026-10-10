@@ -123,7 +123,7 @@ fn main() {
                 let directions = bridge.random_directions();
                 check.check_projectiles(snapshot.structure_bsp_index, &records, &directions);
             }
-            let bipeds = bridge.read_biped_records();
+            let bipeds = bridge.read_biped_updates();
             if !bipeds.is_empty() {
                 check.check_bipeds(snapshot.structure_bsp_index, &bipeds);
             }
@@ -226,6 +226,12 @@ struct CollisionCheck {
     bipeds_replayed: u64,
     bipeds_agreed: u64,
     bipeds_touched_objects: u64,
+    bipeds_incomplete: u64,
+    biped_object_features: u64,
+    /// Agreeing updates by the type of object bumped (0 biped ... 8
+    /// control), and those riding an elevator.
+    bipeds_bumped_kinds: [u64; 12],
+    bipeds_on_elevators: u64,
     bipeds_elsewhere: u64,
     bipeds_seen: std::collections::HashSet<u32>,
     biped_kinds: [u64; 6],
@@ -274,6 +280,10 @@ impl CollisionCheck {
             bipeds_replayed: 0,
             bipeds_agreed: 0,
             bipeds_touched_objects: 0,
+            bipeds_incomplete: 0,
+            biped_object_features: 0,
+            bipeds_bumped_kinds: [0; 12],
+            bipeds_on_elevators: 0,
             bipeds_elsewhere: 0,
             bipeds_seen: Default::default(),
             biped_kinds: [0; 6],
@@ -644,10 +654,11 @@ impl CollisionCheck {
 
     /// Replays the biped physics updates the game recorded with halo_map's
     /// `biped_update_physics`, from the physics each began with and the
-    /// breakable surfaces standing then, and compares what they leave byte
-    /// for byte. Updates that touched an object (one bumped, or an
-    /// elevator) are left out: objects' collisions aren't ported.
-    fn check_bipeds(&mut self, structure_bsp_index: i32, records: &[halo_bridge::BipedRecord]) {
+    /// breakable surfaces standing then, with the objects the game's broad
+    /// phase visited as they were then, and compares what they leave byte
+    /// for byte. `biped_kinds[3]`-style counts are of agreeing updates;
+    /// `bipeds_touched_objects` counts those that bumped an object.
+    fn check_bipeds(&mut self, structure_bsp_index: i32, updates: &[halo_bridge::BipedUpdate]) {
         use halo_map::biped::{in_flags, out_flags};
         let cache = &self.cache;
         fn load(cache: &halo_map::CacheFile, structure_bsp_index: i32) -> Option<halo_map::bsp::Bsp<'_>> {
@@ -659,25 +670,80 @@ impl CollisionCheck {
             let loaded = load(cache, structure_bsp_index).and_then(|b| halo_map::collision::CollisionBsp::load(&b).ok());
             self.bsps.insert(structure_bsp_index, loaded);
         }
-        let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
-        for record in records {
+        if !matches!(self.bsps.get(&structure_bsp_index), Some(Some(_))) {
+            return;
+        }
+        for update in updates {
+            let record = &update.record;
             self.biped_updates += 1;
             self.bipeds_seen.insert(record.biped_index);
             if record.structure_bsp_index != structure_bsp_index {
                 self.bipeds_elsewhere += 1;
                 continue;
             }
-            if record.after.bumped_object_index != -1 || record.after.elevator_object_index != -1 {
-                self.bipeds_touched_objects += 1;
+            if !update.complete {
+                self.bipeds_incomplete += 1;
                 continue;
             }
+            // the objects visited, per gathering of features
+            let mut objects: Vec<Vec<halo_map::features::FeatureObject>> = vec![Vec::new(); record.feature_calls as usize];
+            for (entry, matrices) in &update.objects {
+                let definition = halo_map::TagRef { group: 0, datum: Some(entry.definition_index) };
+                let model = self
+                    .models
+                    .entry(entry.definition_index)
+                    .or_insert_with(|| {
+                        let datum = halo_map::objects::object_collision_model(cache, definition).ok()??.datum?;
+                        halo_map::collision::CollisionModel::load(cache, datum).ok().map(std::sync::Arc::new)
+                    })
+                    .clone();
+                let object = halo_map::features::FeatureObject {
+                    index: entry.object_index as i32,
+                    kind: entry.kind,
+                    flags: entry.flags,
+                    dead: entry.dead != 0,
+                    bounding_center: entry.bounding_center,
+                    bounding_radius: entry.bounding_radius,
+                    parent: entry.parent_object_index,
+                    velocity: entry.translational_velocity,
+                    elevator: entry.elevator != 0,
+                    biped: (entry.kind == halo_map::features::OBJECT_TYPE_BIPED).then_some(halo_map::features::BipedPill {
+                        passes_through_bipeds: entry.biped_passes_through != 0,
+                        player: entry.player_index != -1,
+                        seated: entry.parent_seat_index != -1,
+                        base: entry.pill_base,
+                        height: entry.pill_height,
+                        width: entry.pill_width,
+                    }),
+                    model,
+                    region_permutations: entry.region_permutations,
+                    matrices: matrices
+                        .iter()
+                        .map(|m| halo_map::model::Matrix4x3 {
+                            scale: m[0],
+                            forward: [m[1], m[2], m[3]],
+                            left: [m[4], m[5], m[6]],
+                            up: [m[7], m[8], m[9]],
+                            position: [m[10], m[11], m[12]],
+                        })
+                        .collect(),
+                };
+                if let Some(call) = objects.get_mut(entry.call as usize) {
+                    call.push(object);
+                }
+            }
+            self.biped_object_features += update.objects.len() as u64;
+            if record.after.bumped_object_index != -1 || record.after.elevator_object_index != -1 {
+                self.bipeds_touched_objects += 1;
+            }
+            let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
             bsp.breakable_surfaces = Some(record.breakable_surfaces);
             let mut physics = record.before;
             let stand = (record.stand_test != 0).then_some(halo_map::biped::StandTest {
                 collision_height_standing: record.stand_height,
                 collision_radius: record.stand_radius,
             });
-            halo_map::biped::biped_update_physics(bsp, &mut physics, stand);
+            halo_map::biped::biped_update_physics(bsp, &mut physics, stand, &objects);
             bsp.breakable_surfaces = None;
             self.bipeds_replayed += 1;
             let bytes = |p: &halo_map::biped::BipedPhysics| {
@@ -705,6 +771,16 @@ impl CollisionCheck {
                 if o & out_flags::CANNOT_STAND != 0 {
                     self.biped_kinds[5] += 1;
                 }
+                let bumped = record.after.bumped_object_index;
+                if bumped != -1
+                    && let Some((entry, _)) = update.objects.iter().find(|(e, _)| e.object_index as i32 == bumped)
+                    && let Some(count) = self.bipeds_bumped_kinds.get_mut(entry.kind as usize)
+                {
+                    *count += 1;
+                }
+                if record.after.elevator_object_index != -1 {
+                    self.bipeds_on_elevators += 1;
+                }
             } else if self.bipeds_shown < 6 {
                 self.bipeds_shown += 1;
                 println!(
@@ -716,9 +792,13 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        println!(
+            "bipeds: of the agreeing updates, bumped by type (biped, vehicle, ..., scenery, machine, control) {:?}; {} rode an elevator",
+            self.bipeds_bumped_kinds, self.bipeds_on_elevators
+        );
         let [flying, airborne, walking, supported, stuck, cannot_stand] = self.biped_kinds;
         println!(
-            "bipeds: {} of {} physics updates replayed agree with the game byte for byte ({} bipeds; {} walking, {} airborne, {} flying; {} ended on the ground, {} held to a ledge, {} could not stand); of {} recorded, left out: {} touched an object, {} elsewhere",
+            "bipeds: {} of {} physics updates replayed agree with the game byte for byte ({} bipeds; {} walking, {} airborne, {} flying; {} ended on the ground, {} held to a ledge, {} could not stand; {} bumped an object or rode an elevator; {} objects visited); of {} recorded, left out: {} whose objects the rings lost, {} elsewhere",
             self.bipeds_agreed,
             self.bipeds_replayed,
             self.bipeds_seen.len(),
@@ -728,8 +808,10 @@ impl CollisionCheck {
             supported,
             stuck,
             cannot_stand,
-            self.biped_updates,
             self.bipeds_touched_objects,
+            self.biped_object_features,
+            self.biped_updates,
+            self.bipeds_incomplete,
             self.bipeds_elsewhere
         );
         let [other_bsp, touched_object, guided, many_collisions] = self.projectile_skipped;

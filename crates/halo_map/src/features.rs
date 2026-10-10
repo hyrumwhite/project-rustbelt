@@ -10,10 +10,16 @@
 //! movement is clipped against what it hits, sliding along up to three
 //! planes at once.
 //!
-//! Only the structure's features are gathered here; objects' (other bipeds,
-//! vehicles, scenery) are not ported yet.
+//! Objects add theirs: a biped its pill (spheres and a cylinder), scenery,
+//! machines, controls and vehicles their collision models' features in
+//! their nodes' space. (A vehicle's physics shapes, which a test asking for
+//! them would use instead, are not ported yet.)
 
-use crate::collision::{CollisionBsp, SphereFeatures, test_flags, transform_plane, transform_point, transform_vector};
+use std::sync::Arc;
+
+use crate::collision::{
+    CollisionBsp, CollisionModel, SphereFeatures, matrix_inverse, test_flags, transform_plane, transform_point, transform_vector,
+};
 use crate::model::Matrix4x3;
 
 /// `MAXIMUM_COLLISION_FEATURES_PER_TEST`.
@@ -333,24 +339,156 @@ impl FeatureList {
     }
 }
 
-/// `collision_get_features_in_sphere`, for the structure: the features
-/// within `radius` of `center` grown by a pill of `height` and `width`.
-/// (Objects' features are not ported yet.)
-pub fn features_in_sphere(bsp: &CollisionBsp, flags: u32, center: [f32; 3], radius: f32, height: f32, width: f32) -> FeatureList {
+/// An object as `object_get_features_in_sphere` sees it.
+#[derive(Debug, Clone)]
+pub struct FeatureObject {
+    pub index: i32,
+    /// `object_type` (0 biped, 1 vehicle, 6 scenery, 7 machine, 8 control).
+    pub kind: i16,
+    /// The object's `flags` (bit 0 invisible, 24 no collisions).
+    pub flags: u32,
+    pub dead: bool,
+    pub bounding_center: [f32; 3],
+    pub bounding_radius: f32,
+    pub parent: i32,
+    pub velocity: [f32; 3],
+    /// A machine that is an elevator.
+    pub elevator: bool,
+    /// A biped's: whether it passes through bipeds, is a player's, sits in a
+    /// seat, and its physics pill (`biped_get_physics_pill`).
+    pub biped: Option<BipedPill>,
+    pub model: Option<Arc<CollisionModel>>,
+    pub region_permutations: [u8; 8],
+    pub matrices: Vec<Matrix4x3>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BipedPill {
+    pub passes_through_bipeds: bool,
+    pub player: bool,
+    pub seated: bool,
+    pub base: [f32; 3],
+    pub height: f32,
+    pub width: f32,
+}
+
+pub const OBJECT_TYPE_BIPED: i16 = 0;
+pub const OBJECT_TYPE_VEHICLE: i16 = 1;
+pub const OBJECT_TYPE_SCENERY: i16 = 6;
+pub const OBJECT_TYPE_MACHINE: i16 = 7;
+pub const OBJECT_TYPE_CONTROL: i16 = 8;
+const OBJECT_INVISIBLE: u32 = 1 << 0;
+const OBJECT_NO_COLLISIONS: u32 = 1 << 24;
+const SKIP_PASSTHROUGH_BIPEDS: u32 = 1 << 21;
+const USE_VEHICLE_PHYSICS: u32 = 1 << 22;
+const SKIP_PLAYER_BIPEDS: u32 = 1 << 23;
+
+/// `collision_get_features_in_sphere`: the features within `radius` of
+/// `center` grown by a pill of `height` and `width`, the structure's and
+/// then those of `objects`, the objects the broad phase visits (from the
+/// clusters the sphere reaches, each with its children), in the order it
+/// visits them.
+#[allow(clippy::too_many_arguments)]
+pub fn features_in_sphere(
+    bsp: &CollisionBsp,
+    mut flags: u32,
+    center: [f32; 3],
+    radius: f32,
+    height: f32,
+    width: f32,
+    ignore_object: i32,
+    objects: &[FeatureObject],
+) -> FeatureList {
     let mut features = FeatureList::default();
     if flags & (test_flags::STRUCTURE | test_flags::MEDIA | test_flags::OBJECTS) != 0 {
-        let result = bsp.test_sphere(center, radius + 0.0625);
+        let radius = radius + 0.0625;
+        let result = bsp.test_sphere(center, radius);
         if result.touches() && flags & test_flags::STRUCTURE != 0 {
             features.from_sphere_test(bsp, &result, None, height, width, NONE);
         }
+        if flags & test_flags::OBJECTS != 0 && !result.leaves.is_empty() {
+            if flags & test_flags::ALL_OBJECT_TYPES == 0 {
+                flags |= test_flags::ALL_OBJECT_TYPES;
+            }
+            for object in objects {
+                features.from_object(flags, object, center, radius, height, width, ignore_object);
+            }
+        }
     }
     features
+}
+
+impl FeatureList {
+    /// `object_get_features_in_sphere`, for one object.
+    #[allow(clippy::too_many_arguments)]
+    fn from_object(&mut self, flags: u32, object: &FeatureObject, center: [f32; 3], radius: f32, height: f32, width: f32, ignore_object: i32) {
+        if object.index == ignore_object
+            || object.flags & OBJECT_INVISIBLE != 0
+            || object.flags & OBJECT_NO_COLLISIONS != 0
+            || (object.dead && object.kind == OBJECT_TYPE_BIPED)
+        {
+            return;
+        }
+        let reach = object.bounding_radius + radius;
+        if !(magnitude_squared3(sub3(object.bounding_center, center)) <= reach * reach) {
+            return;
+        }
+        if object.kind < 0 || flags & (1 << (object.kind as u32 + test_flags::FIRST_OBJECT_TYPE)) == 0 {
+            return;
+        }
+        match object.kind {
+            OBJECT_TYPE_BIPED => {
+                if let Some(pill) = object.biped
+                    && (flags & SKIP_PASSTHROUGH_BIPEDS == 0 || !pill.passes_through_bipeds)
+                    && (flags & SKIP_PLAYER_BIPEDS == 0 || !pill.player)
+                    && (object.parent == NONE || !pill.seated)
+                {
+                    let base = [pill.base[0], pill.base[1], pill.base[2] + pill.height];
+                    let source = FeatureSource { object: object.index, surface: NONE, flags: 0, breakable_surface: 0xff, material: NONE as i16 };
+                    self.from_point(base, pill.height + height, pill.width + width, source);
+                }
+            }
+            OBJECT_TYPE_VEHICLE | OBJECT_TYPE_SCENERY | OBJECT_TYPE_MACHINE | OBJECT_TYPE_CONTROL => {
+                if object.kind == OBJECT_TYPE_VEHICLE && flags & USE_VEHICLE_PHYSICS != 0 {
+                    // (physics_get_features_in_sphere: not ported)
+                } else if let Some(model) = &object.model {
+                    self.from_collision_model(model, object, center, radius, height, width);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `collision_model_get_features_in_sphere`: each node's collision BSP
+    /// for the object's permutation of its region, tested in the node's
+    /// space, its features brought back out.
+    fn from_collision_model(&mut self, model: &CollisionModel, object: &FeatureObject, center: [f32; 3], radius: f32, height: f32, width: f32) {
+        for (node_index, node) in model.nodes.iter().enumerate().take(object.matrices.len()) {
+            if node.region < 0 || node.region >= 8 || node.bsps.is_empty() {
+                continue;
+            }
+            let permutation = (object.region_permutations[node.region as usize] as usize).min(node.bsps.len() - 1);
+            let bsp = &node.bsps[permutation];
+            if !bsp.has_nodes() {
+                continue;
+            }
+            let matrix = &object.matrices[node_index];
+            let inverse = matrix_inverse(matrix);
+            let local_center = transform_point(&inverse, center);
+            let scaled_radius = inverse.scale * radius;
+            let result = bsp.test_sphere(local_center, scaled_radius);
+            if result.touches() {
+                self.from_sphere_test(bsp, &result, Some(matrix), height, width, object.index);
+            }
+        }
+    }
 }
 
 /// `collision_move_pill`: a pill of `height` and `radius` standing at
 /// `position` moved by `velocity` through the structure. Returns where it
 /// ends, its velocity after sliding, and the planes it met (at most
 /// `maximum_collision_count`).
+#[allow(clippy::too_many_arguments)]
 pub fn move_pill(
     bsp: &CollisionBsp,
     flags: u32,
@@ -358,6 +496,8 @@ pub fn move_pill(
     velocity: [f32; 3],
     height: f32,
     radius: f32,
+    ignore_object: i32,
+    objects: &[FeatureObject],
     maximum_collision_count: usize,
 ) -> ([f32; 3], [f32; 3], Vec<CollisionPlane>) {
     let center = [
@@ -366,7 +506,7 @@ pub fn move_pill(
         height * 0.5 + (position[2] + velocity[2] * 0.5),
     ];
     let enclosing = magnitude3(velocity) * 0.5 + height * 0.5 + radius;
-    let features = features_in_sphere(bsp, flags, center, enclosing, height, radius);
+    let features = features_in_sphere(bsp, flags, center, enclosing, height, radius, ignore_object, objects);
     if !features.is_empty() {
         move_point(position, velocity, &features, maximum_collision_count)
     } else {

@@ -31,6 +31,7 @@ bit for bit; differences are counted and the first few logged.
 #include "physics/mass_point_datum.h"
 #include "physics/powered_mass_point_datum.h"
 #include "devices/devices.h"
+#include "items/items.h"
 #include "units/unit_definitions.h"
 #include "physics/point_physics.h"
 #include "physics/collisions.h"
@@ -41,6 +42,8 @@ bit for bit; differences are counted and the first few logged.
 #include "devices/devices.h"
 #include "units/unit_definitions.h"
 #include "game/game_globals.h"
+#include "game/game_engine.h"
+#include "ai/actors.h"
 #include "networking/network_game_globals.h"
 #include "objects/damage_effect_definitions.h"
 #include "structures/structures.h"
@@ -56,7 +59,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 18
+#define HALO_SIM_VERSION 19
 
 /* ---------- structures */
 
@@ -987,6 +990,76 @@ struct halo_sim_device_callbacks
 	long (*biped)(unsigned long index, struct halo_sim_device_biped *out);
 };
 
+/* crates/halo_map's ItemState and ItemCall, crates/halo_sim's ItemEventC,
+ItemCallC and ItemCallbacks */
+struct halo_sim_item_state
+{
+	unsigned long object_index;
+	unsigned long definition_index;
+	unsigned long object_flags;
+	long owner_player_index;
+	long parent_object_index;
+	real_point3d position;
+	real_vector3d forward;
+	real_vector3d up;
+	real_vector3d translational_velocity;
+	real_vector3d angular_velocity;
+	byte region_permutations[8];
+	unsigned long item_flags;
+	short detonation_ticks;
+	short rested_surface_index;
+	short bsp_index;
+	short pad;
+	long ignore_object_index;
+	long last_owned_time;
+	long item_on_rest_object_index;
+	real_point3d item_rest_object_offset;
+	real_vector3d rotation_axis;
+	real rotation_sine;
+	real rotation_cosine;
+};
+
+typedef char halo_sim_item_state_size_assert[sizeof(struct halo_sim_item_state) == 144 ? 1 : -1];
+
+struct halo_sim_item_call
+{
+	long kind;
+	long a;
+	long b;
+	long c;
+	real f[10];
+};
+
+struct halo_sim_item_event
+{
+	struct halo_sim_item_call call;
+	long result;
+	struct halo_sim_item_state before;
+	struct halo_sim_item_state after;
+};
+
+struct halo_sim_item_call_c
+{
+	struct halo_sim_item_state state;
+	long structure_bsp_index;
+	unsigned char const *breakable_surfaces;
+	real global_gravity;
+	unsigned long game_engine_running;
+	long game_time;
+	real const *node_matrices;
+	unsigned long node_count;
+	struct halo_sim_item_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+	unsigned long still_there;
+};
+
+struct halo_sim_item_callbacks
+{
+	long (*call)(struct halo_sim_item_state *state, struct halo_sim_item_call const *call);
+};
+
 struct halo_sim_damage_callbacks
 {
 	long (*object)(unsigned long index, struct halo_sim_object_damage_state *out);
@@ -1191,6 +1264,7 @@ struct halo_sim_host
 	struct halo_sim_area_damage_callbacks area_damage;
 	struct halo_sim_damage_update_callbacks damage_update;
 	struct halo_sim_device_callbacks devices;
+	struct halo_sim_item_callbacks items;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -1241,6 +1315,7 @@ typedef long (*halo_sim_damage_function)(struct halo_sim_damage_call_c *call);
 typedef long (*halo_sim_area_damage_function)(struct halo_sim_area_call_c *call);
 typedef long (*halo_sim_damage_update_function)(struct halo_sim_damage_update_call *call);
 typedef long (*halo_sim_device_function)(struct halo_sim_device_call_c *call);
+typedef long (*halo_sim_item_function)(struct halo_sim_item_call_c *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -1293,6 +1368,8 @@ static struct
 	halo_sim_damage_update_function damage_update_check;
 	halo_sim_device_function device_update;
 	halo_sim_device_function device_update_check;
+	halo_sim_item_function item_update;
+	halo_sim_item_function item_update_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1326,6 +1403,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"area_damage",
 	"damage_update",
 	"devices",
+	"items",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -1446,6 +1524,28 @@ static struct
 	unsigned long desired;
 	unsigned long carried;
 } halo_sim_device_checks;
+
+/* the item update checks: the item the game's began with, its calls, and
+the comparisons */
+#define MAXIMUM_HALO_SIM_ITEM_EVENTS 8
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	long item_index;
+	struct halo_sim_item_call_c call;
+	struct halo_sim_item_event events[MAXIMUM_HALO_SIM_ITEM_EVENTS];
+	unsigned long event_count;
+	struct halo_sim_item_event *open_event;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long calls;
+	unsigned long moving;
+	unsigned long impacts;
+	unsigned long rested;
+	unsigned long spinning;
+} halo_sim_item_checks;
 
 /* the unit update checks: the update the game's began with, its calls of
 the rest of the game, and the comparisons */
@@ -2933,6 +3033,81 @@ static long halo_sim_device_biped_callback(unsigned long index, struct halo_sim_
 	return halo_sim_device_biped_load((long)index, out) ? 1 : 0;
 }
 
+/* items.c's, an item update's call of the rest of the game */
+long item_call(long item_index, long kind, long a, long b, long c, real const *f);
+
+/* an item's state, from the item: FALSE if it is gone */
+static boolean halo_sim_item_state_load(long item_index, struct halo_sim_item_state *state)
+{
+	struct item_datum *item = item_try_and_get(item_index);
+
+	memset(state, 0, sizeof(*state));
+	state->object_index = (unsigned long)item_index;
+	if (!item)
+		return FALSE;
+	state->definition_index = (unsigned long)item->definition_index;
+	state->object_flags = item->object.flags;
+	state->owner_player_index = item->object.owner_player_index;
+	state->parent_object_index = item->object.parent_object_index;
+	state->position = item->object.position;
+	state->forward = item->object.forward;
+	state->up = item->object.up;
+	state->translational_velocity = item->object.translational_velocity;
+	state->angular_velocity = item->object.angular_velocity;
+	memcpy(state->region_permutations, item->object.region_permutations, sizeof(state->region_permutations));
+	state->item_flags = item->item.flags;
+	state->detonation_ticks = item->item.detonation_ticks;
+	state->rested_surface_index = item->item.rested_surface_index;
+	state->bsp_index = item->item.bsp_index;
+	state->ignore_object_index = item->item.ignore_object_index;
+	state->last_owned_time = item->item.last_owned_time;
+	state->item_on_rest_object_index = item->item.item_on_rest_object_index;
+	state->item_rest_object_offset = item->item.item_rest_object_offset;
+	state->rotation_axis = item->item.rotation_axis;
+	state->rotation_sine = item->item.rotation_sine;
+	state->rotation_cosine = item->item.rotation_cosine;
+
+	return TRUE;
+}
+
+/* and back to it: what its update changes */
+static void halo_sim_item_state_store(struct halo_sim_item_state const *state)
+{
+	struct item_datum *item = item_try_and_get((long)state->object_index);
+
+	if (!item)
+		return;
+	item->object.flags = state->object_flags;
+	item->object.position = state->position;
+	item->object.forward = state->forward;
+	item->object.up = state->up;
+	item->object.translational_velocity = state->translational_velocity;
+	item->object.angular_velocity = state->angular_velocity;
+	item->item.flags = state->item_flags;
+	item->item.detonation_ticks = state->detonation_ticks;
+	item->item.rested_surface_index = state->rested_surface_index;
+	item->item.bsp_index = state->bsp_index;
+	item->item.ignore_object_index = state->ignore_object_index;
+	item->item.last_owned_time = state->last_owned_time;
+	item->item.item_on_rest_object_index = state->item_on_rest_object_index;
+	item->item.item_rest_object_offset = state->item_rest_object_offset;
+	item->item.rotation_axis = state->rotation_axis;
+	item->item.rotation_sine = state->rotation_sine;
+	item->item.rotation_cosine = state->rotation_cosine;
+}
+
+static long halo_sim_item_call_callback(struct halo_sim_item_state *state, struct halo_sim_item_call const *call)
+{
+	long item_index = (long)state->object_index;
+	long result;
+
+	halo_sim_item_state_store(state);
+	result = item_call(item_index, call->kind, call->a, call->b, call->c, call->f);
+	if (result)
+		halo_sim_item_state_load(item_index, state);
+	return result;
+}
+
 /* bipeds.c's, a player melee's side effects */
 void biped_rust_melee_started(long biped_index, long weapon_index);
 void biped_rust_melee_damage(long biped_index);
@@ -3068,6 +3243,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		halo_sim_device_call_callback,
 		halo_sim_device_biped_callback,
 	},
+	{
+		halo_sim_item_call_callback,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -3136,6 +3314,8 @@ static void halo_sim_initialize(void)
 	halo_sim.damage_update_check = (halo_sim_damage_update_function)halo_sim_symbol(library, "halo_sim_object_damage_update_check");
 	halo_sim.device_update = (halo_sim_device_function)halo_sim_symbol(library, "halo_sim_device_update");
 	halo_sim.device_update_check = (halo_sim_device_function)halo_sim_symbol(library, "halo_sim_device_update_check");
+	halo_sim.item_update = (halo_sim_item_function)halo_sim_symbol(library, "halo_sim_item_update");
+	halo_sim.item_update_check = (halo_sim_item_function)halo_sim_symbol(library, "halo_sim_item_update_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -3150,7 +3330,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.object_cause_damage || !halo_sim.object_cause_damage_check ||
 		!halo_sim.area_damage || !halo_sim.area_damage_check ||
 		!halo_sim.damage_update || !halo_sim.damage_update_check ||
-		!halo_sim.device_update || !halo_sim.device_update_check)
+		!halo_sim.device_update || !halo_sim.device_update_check ||
+		!halo_sim.item_update || !halo_sim.item_update_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -6048,6 +6229,163 @@ void halo_sim_device_update_check(long device_index, int part, unsigned char cha
 				halo_sim_device_checks.moving, halo_sim_device_checks.calls, halo_sim_device_checks.effects,
 				halo_sim_device_checks.desired, halo_sim_device_checks.carried, halo_sim_device_checks.spheres,
 				halo_sim_device_checks.skipped);
+		}
+	}
+}
+
+/* ---------- item updates */
+
+extern real global_gravity; /* physics.c */
+
+static void halo_sim_item_call_new(long item_index, struct halo_sim_item_call_c *call)
+{
+	struct object_datum *object = object_get(item_index);
+
+	memset(call, 0, sizeof(*call));
+	halo_sim_item_state_load(item_index, &call->state);
+	call->structure_bsp_index = global_structure_bsp_index;
+	call->breakable_surfaces = (unsigned char const *)breakable_surface_flags_get();
+	call->global_gravity = global_gravity;
+	call->game_engine_running = game_engine_running() ? 1 : 0;
+	call->game_time = game_time_get();
+	call->node_matrices = (real const *)object_get_node_matrices(item_index);
+	call->node_count = (unsigned long)(object->object.node_matrices.size / (long)sizeof(real_matrix4x3));
+	call->difference_event = NONE;}
+
+int halo_sim_item_update(long item_index)
+{
+	short mode = halo_sim_mode(_halo_sim_items);
+	struct halo_sim_item_call_c call;
+	long result;
+
+	halo_sim_item_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_item_call_new(item_index, &halo_sim_item_checks.call);
+		halo_sim_item_checks.item_index = item_index;
+		halo_sim_item_checks.event_count = 0;
+		halo_sim_item_checks.open_event = NULL;
+		halo_sim_item_checks.overflow = FALSE;
+		halo_sim_item_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_item_call_new(item_index, &call);
+	result = halo_sim.item_update(&call);
+	if (result != 0)
+		return FALSE;
+	if (call.still_there)
+		halo_sim_item_state_store(&call.state);
+
+	return TRUE;
+}
+
+void halo_sim_item_event_begin(long item_index, long kind, long a, long b, long c, float const *f)
+{
+	struct halo_sim_item_event *event;
+
+	if (!halo_sim_item_checks.recording || halo_sim_item_checks.item_index != item_index ||
+		halo_sim_item_checks.open_event)
+	{
+		return;
+	}
+	if (halo_sim_item_checks.event_count >= MAXIMUM_HALO_SIM_ITEM_EVENTS)
+	{
+		halo_sim_item_checks.overflow = TRUE;
+		return;
+	}
+	event = &halo_sim_item_checks.events[halo_sim_item_checks.event_count++];
+	memset(event, 0, sizeof(*event));
+	event->call.kind = kind;
+	event->call.a = a;
+	event->call.b = b;
+	event->call.c = c;
+	memcpy(event->call.f, f, sizeof(event->call.f));
+	halo_sim_item_state_load(item_index, &event->before);
+	halo_sim_item_checks.open_event = event;
+}
+
+void halo_sim_item_event_end(long item_index, long result)
+{
+	struct halo_sim_item_event *event = halo_sim_item_checks.open_event;
+
+	if (!event || halo_sim_item_checks.item_index != item_index)
+		return;
+	halo_sim_item_checks.open_event = NULL;
+	event->result = result;
+	if (result)
+		halo_sim_item_state_load(item_index, &event->after);
+	else
+		event->after = event->before;
+}
+
+void halo_sim_item_update_check(long item_index)
+{
+	struct halo_sim_item_call_c call;
+	struct halo_sim_item_state game;
+	boolean still_there;
+	unsigned long event_number;
+
+	if (!halo_sim_item_checks.recording)
+		return;
+	halo_sim_item_checks.recording = FALSE;
+	still_there = halo_sim_item_state_load(item_index, &game);
+	if (halo_sim_item_checks.item_index != item_index || halo_sim_item_checks.overflow)
+	{
+		halo_sim_item_checks.skipped++;
+		return;
+	}
+	call = halo_sim_item_checks.call;
+	call.events = halo_sim_item_checks.events;
+	call.event_count = halo_sim_item_checks.event_count;
+	if (halo_sim.item_update_check(&call) != 0)
+	{
+		halo_sim_item_checks.skipped++;
+		return;
+	}
+
+	halo_sim_item_checks.compared++;
+	halo_sim_item_checks.calls += halo_sim_item_checks.event_count;
+	for (event_number = 0; event_number < halo_sim_item_checks.event_count; event_number++)
+	{
+		long kind = halo_sim_item_checks.events[event_number].call.kind;
+
+		if (kind == _item_call_impact)
+			halo_sim_item_checks.impacts++;
+		else if (kind == _item_call_translate)
+			halo_sim_item_checks.moving++;
+	}
+	if (still_there && TEST_FLAG(game.object_flags, _object_at_rest_bit) &&
+		!TEST_FLAG(halo_sim_item_checks.call.state.object_flags, _object_at_rest_bit))
+	{
+		halo_sim_item_checks.rested++;
+	}
+	if (TEST_FLAG(halo_sim_item_checks.call.state.item_flags, 2))
+		halo_sim_item_checks.spinning++;
+	/* (an item gone is compared by its calls alone) */
+	if ((still_there && memcmp(&call.state, &game, sizeof(game)) != 0) || call.difference_event != NONE)
+	{
+		halo_sim_item_checks.differed++;
+		if (halo_sim_item_checks.differed <= 8)
+		{
+			platform_log("halo_sim: item update differs: item %lx call %ld of %lu reason %ld; position game %f %f %f rust %f %f %f; flags game %lx/%lx rust %lx/%lx",
+				(unsigned long)item_index, call.difference_event, halo_sim_item_checks.event_count, call.difference_reason,
+				(double)game.position.x, (double)game.position.y, (double)game.position.z, (double)call.state.position.x,
+				(double)call.state.position.y, (double)call.state.position.z, game.object_flags, game.item_flags,
+				call.state.object_flags, call.state.item_flags);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_item_checks.compared;
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: item update: %lu of %lu agree with the game (%lu moving, %lu impacts, %lu came to rest, %lu spinning; %lu calls of the game; %lu left out)",
+				compared - halo_sim_item_checks.differed, compared, halo_sim_item_checks.moving, halo_sim_item_checks.impacts,
+				halo_sim_item_checks.rested, halo_sim_item_checks.spinning, halo_sim_item_checks.calls,
+				halo_sim_item_checks.skipped);
 		}
 	}
 }

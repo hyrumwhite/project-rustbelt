@@ -31,6 +31,7 @@ enum
 	_halo_sim_area_damage,
 	_halo_sim_damage_update,
 	_halo_sim_devices,
+	_halo_sim_items,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -142,6 +143,17 @@ enum
 	_device_call_team_is_enemy,
 	_device_call_set_group_desired,
 	_device_call_translate,
+};
+
+/* an item update's calls of the rest of the game (items.c's item_call;
+crates/halo_map's items::call) */
+enum
+{
+	_item_call_impact = 1,
+	_item_call_set_garbage,
+	_item_call_translate,
+	_item_call_accelerate,
+	_item_call_detonate,
 };
 
 /* the rest of a biped update's calls of the rest of the game (bipeds.c's
@@ -396,5 +408,14 @@ void halo_sim_device_event_begin(long device_index, long kind, long object_index
 void halo_sim_device_event_end(long device_index, long result);
 void halo_sim_device_bipeds_in_sphere(long machine_index, short cluster, void const *center, float radius,
 	short maximum_count, long const *object_indices, short object_count);
+
+/* items.c's item_update: TRUE when the Rust port ran it (its calls of the
+game through item_call); in check mode it notes the item the game's begins
+with, item_call records each call (halo_sim_item_event_begin and _end), and
+halo_sim_item_update_check compares Rust's replay */
+int halo_sim_item_update(long item_index);
+void halo_sim_item_update_check(long item_index);
+void halo_sim_item_event_begin(long item_index, long kind, long a, long b, long c, float const *f);
+void halo_sim_item_event_end(long item_index, long result);
 
 #endif // __HALO_SIM_H

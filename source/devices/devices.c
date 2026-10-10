@@ -99,6 +99,7 @@ symbols in this file:
 #include "sound/game_sound.h"
 #include "sound/sound_definitions.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "game/game_allegiance.h"
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */

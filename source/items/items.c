@@ -68,6 +68,7 @@ symbols in this file:
 #include "game/game_engine.h"
 #include "items/item_definitions.h"
 #include "items.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 #include "physics/breakable_surfaces.h"
 #include "physics/collision_bsp_definitions.h"
 #include "physics/collision_usage.h"
@@ -531,7 +532,9 @@ static void item_align_to_normal_and_point(
 	return;
 }
 
-boolean item_update(
+long item_call(long item_index, long kind, long a, long b, long c, real const *f);
+
+static boolean item_update_internal(
 	long item_index)
 {
 	struct item_datum *item;
@@ -618,32 +621,23 @@ boolean item_update(
 					impact_scale = 1.f;
 				}
 
-				if (definition->item.material_effects.index != NONE &&
-					material_effect_visible(&collision.point))
+				/* port: the impact's effect and sound (item_call, which the Rust
+				port calls too) */
 				{
-					material_effect_new(
-						definition->item.material_effects.index,
-						8,
-						collision.material_type,
-						&collision.point,
-						&collision.plane.n,
-						&collision.location,
-						impact_scale);
-				}
+					real f[10];
 
-				impulse_sound_index = definition->item.collision_sound.index;
-				if (impulse_sound_index != NONE)
-				{
-					struct sound_location location;
-
-					location.position = new_position;
-					location.forward = collision.plane.n;
-					location.translational_velocity = *global_zero_vector3d;
-					location.game_location = item->object.location;
-					unattached_impulse_sound_new(
-						impulse_sound_index,
-						&location,
-						impact_scale);
+					f[0] = collision.point.x;
+					f[1] = collision.point.y;
+					f[2] = collision.point.z;
+					f[3] = collision.plane.n.i;
+					f[4] = collision.plane.n.j;
+					f[5] = collision.plane.n.k;
+					f[6] = new_position.x;
+					f[7] = new_position.y;
+					f[8] = new_position.z;
+					f[9] = impact_scale;
+					item_call(item_index, _item_call_impact, collision.material_type, collision.location.leaf_index,
+						collision.location.cluster_index, f);
 				}
 
 				if ((collision.type == _collision_result_structure ||
@@ -671,7 +665,7 @@ boolean item_update(
 					if (!game_engine_running() &&
 						item->object.owner_player_index == NONE)
 					{
-						object_set_garbage(item_index, TRUE);
+						item_call(item_index, _item_call_set_garbage, TRUE, 0, 0, NULL);
 					}
 
 					SET_FLAG(item->object.flags, _object_at_rest_bit, TRUE);
@@ -748,10 +742,15 @@ boolean item_update(
 			}
 
 			item->object.translational_velocity = new_velocity;
-			object_translate(
-				item_index,
-				&new_position,
-				&collision.location);
+			{
+				real f[10] = { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f };
+
+				f[0] = new_position.x;
+				f[1] = new_position.y;
+				f[2] = new_position.z;
+				item_call(item_index, _item_call_translate, 0, collision.location.leaf_index,
+					collision.location.cluster_index, f);
+			}
 		}
 		else if (!TEST_FLAG(
 			definition->item.flags,
@@ -789,10 +788,7 @@ boolean item_update(
 						&gravity);
 					SET_FLAG(item->item.flags, _item_on_structure_bit, FALSE);
 					item->item.rested_surface_index = NONE;
-					item_accelerate(
-						item_index,
-						&gravity,
-						FALSE);
+					item_call(item_index, _item_call_accelerate, 0, 0, 0, &gravity.i);
 				}
 			}
 			else if (TEST_FLAG(item->item.flags, _item_on_object_bit))
@@ -824,10 +820,7 @@ boolean item_update(
 						global_gravity,
 						&gravity);
 					SET_FLAG(item->item.flags, _item_on_object_bit, FALSE);
-					item_accelerate(
-						item_index,
-						&gravity,
-						FALSE);
+					item_call(item_index, _item_call_accelerate, 0, 0, 0, &gravity.i);
 				}
 			}
 
@@ -912,16 +905,7 @@ boolean item_update(
 		--item->item.detonation_ticks;
 		if (item->item.detonation_ticks == 0)
 		{
-			effect_new_from_object(
-				definition->item.detonation_effect.index,
-				item_index,
-				item_index,
-				NONE,
-				0.f,
-				0.f,
-				NULL,
-				NULL);
-			object_delete(item_index);
+			item_call(item_index, _item_call_detonate, 0, 0, 0, NULL);
 		}
 	}
 
@@ -938,4 +922,127 @@ boolean item_update(
 	profile_exit(item_update_section);
 
 	return TRUE;
+}
+
+/* ---------- port: item updates' Rust port (halo_sim.c) */
+
+boolean item_update(
+	long item_index)
+{
+	/* the Rust port's in place of the game's, or (in check mode) the state
+	it is checked from */
+	if (halo_sim_item_update(item_index))
+		return TRUE;
+	item_update_internal(item_index);
+	halo_sim_item_update_check(item_index);
+
+	return TRUE;
+}
+
+/* an item update's calls of the rest of the game, the game's and the Rust
+port's (crates/halo_map's items::call); `f` ten reals: TRUE if the item is
+still there after */
+long item_call(
+	long item_index,
+	long kind,
+	long a,
+	long b,
+	long c,
+	real const *f)
+{
+	static real const no_f[10] = { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f };
+	struct item_datum *item = item_get(item_index);
+	struct item_definition *definition = item_definition_get(item->definition_index);
+	long result;
+
+	if (!f)
+		f = no_f;
+	halo_sim_item_event_begin(item_index, kind, a, b, c, f);
+	switch (kind)
+	{
+	case _item_call_impact:
+		{
+			struct collision_result collision;
+			real_point3d new_position;
+			real impact_scale = f[9];
+			long impulse_sound_index;
+
+			set_real_point3d(&collision.point, f[0], f[1], f[2]);
+			set_real_vector3d(&collision.plane.n, f[3], f[4], f[5]);
+			set_real_point3d(&new_position, f[6], f[7], f[8]);
+			collision.material_type = (short)a;
+			collision.location.leaf_index = b;
+			collision.location.cluster_index = (short)c;
+	if (definition->item.material_effects.index != NONE &&
+			material_effect_visible(&collision.point))
+		{
+			material_effect_new(
+				definition->item.material_effects.index,
+				8,
+				collision.material_type,
+				&collision.point,
+				&collision.plane.n,
+				&collision.location,
+				impact_scale);
+		}
+
+		impulse_sound_index = definition->item.collision_sound.index;
+		if (impulse_sound_index != NONE)
+		{
+			struct sound_location location;
+
+			location.position = new_position;
+			location.forward = collision.plane.n;
+			location.translational_velocity = *global_zero_vector3d;
+			location.game_location = item->object.location;
+			unattached_impulse_sound_new(
+				impulse_sound_index,
+				&location,
+				impact_scale);
+		}
+		}
+		break;
+
+	case _item_call_set_garbage:
+		object_set_garbage(item_index, (boolean)a);
+		break;
+
+	case _item_call_translate:
+		{
+			real_point3d position;
+			struct location location;
+
+			set_real_point3d(&position, f[0], f[1], f[2]);
+			location.leaf_index = b;
+			location.cluster_index = (short)c;
+			object_translate(item_index, &position, &location);
+		}
+		break;
+
+	case _item_call_accelerate:
+		{
+			real_vector3d acceleration;
+
+			set_real_vector3d(&acceleration, f[0], f[1], f[2]);
+			item_accelerate(item_index, &acceleration, FALSE);
+		}
+		break;
+
+	case _item_call_detonate:
+		effect_new_from_object(
+			definition->item.detonation_effect.index,
+			item_index,
+			item_index,
+			NONE,
+			0.f,
+			0.f,
+			NULL,
+			NULL);
+		object_delete(item_index);
+		break;
+	}
+	result = item_try_and_get(item_index) ? TRUE : FALSE;
+	halo_sim_item_event_end(item_index, result);
+
+	return result;
 }

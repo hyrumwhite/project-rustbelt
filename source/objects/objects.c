@@ -2451,6 +2451,23 @@ if (!valid_real_matrix4x3(matrix)) \
 	ocnm_parent_matrix_internal(file, line, matrix, string); \
 }
 
+/* port: halo_sim_pose_orientations' world-relative result, an int, into
+the boolean object_compute_node_matrices keeps it in */
+static int object_pose_orientations_rust(
+	long object_index,
+	short node_count,
+	void *node_orientations,
+	boolean *world_relative,
+	short *frame_index)
+{
+	int rust_world_relative = *world_relative;
+	int result = halo_sim_pose_orientations(object_index, node_count, node_orientations, &rust_world_relative,
+		frame_index);
+
+	*world_relative = rust_world_relative ? TRUE : FALSE;
+	return result;
+}
+
 void object_compute_node_matrices(
 	long object_index)
 {
@@ -2505,7 +2522,7 @@ void object_compute_node_matrices(
 
 		/* port: run by the Rust port where it takes over
 		(port/linux/game/halo_sim.c) */
-		if (!halo_sim_pose_orientations(object_index, model_node_count, node_orientations, &world_relative,
+		if (!object_pose_orientations_rust(object_index, model_node_count, node_orientations, &world_relative,
 			&bevy_bridge_frame_index))
 		{
 		if (object->object.animation.animation_graph_index!=NONE)

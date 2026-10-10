@@ -230,6 +230,7 @@ symbols in this file:
 #include "sound/sound_definitions.h"
 #include "units/unit_definitions.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* port/linux/game/pal_tags.c's */
 short pal_tags_first_person_frames(long graph_index, short animation_index, short frames);
@@ -489,6 +490,8 @@ static void weapon_trigger_release_charge(
 static void weapon_trigger_overcharged(
 	long weapon_index,
 	short trigger_index);
+
+long weapon_update_call(long weapon_index, long kind, long a, long b);
 
 /* ---------- globals */
 
@@ -2949,7 +2952,7 @@ static void weapon_trigger_overcharged(
 	return;
 }
 
-boolean weapon_update(
+static boolean weapon_update_internal(
 	long weapon_index)
 {
 	struct weapon_datum *weapon= weapon_get(weapon_index);
@@ -2970,18 +2973,18 @@ boolean weapon_update(
 		switch (animation_update_internal(TRUE, weapon_definition->object.animation_graph.index, &weapon->object.animation.state, NULL))
 		{
 		case _animation_key_frame:
-			weapon_state_key_frame(weapon_index);
+			weapon_update_call(weapon_index, _weapon_update_call_state_key_frame, 0, 0);
 			break;
 
 		case _animation_will_restart_on_next_frame:
-			weapon_state_next(weapon_index);
+			weapon_update_call(weapon_index, _weapon_update_call_state_next, 0, 0);
 			break;
 		}
 	}
 
 	if (TEST_FLAG(weapon_definition->weapon.flags, _weapon_detonates_when_dropped_bit) && weapon->object.parent_object_index==NONE)
 	{
-		item_detonate(weapon_index);
+		weapon_update_call(weapon_index, _weapon_update_call_detonate, 0, 0);
 	}
 
 	if (weapon->weapon.integrated_light_power>0.0f)
@@ -3006,16 +3009,19 @@ boolean weapon_update(
 		if (weapon->weapon.heat>=weapon_definition->weapon.heat_overheated_threshold && !TEST_FLAG(weapon->weapon.flags, _weapon_overheated_bit))
 		{
 			SET_FLAG(weapon->weapon.flags, _weapon_overheated_bit, TRUE);
+			long message;
+
 			if (weapon_definition->weapon.weapon_type==_weapon_type_plasma_pistol && TEST_FLAG(weapon->weapon.flags, _weapon_overheat_recoil_bit))
 			{
 				SET_FLAG(weapon->weapon.flags, _weapon_overheat_recoil_bit, FALSE);
-				first_person_weapon_message_from_weapon(weapon_index, _first_person_weapon_message_overheating_super_recoil);
+				message= _first_person_weapon_message_overheating_super_recoil;
 			}
 			else
 			{
-				first_person_weapon_message_from_weapon(weapon_index, _first_person_weapon_message_overheating);
+				message= _first_person_weapon_message_overheating;
 			}
-			weapon->weapon.overheated_effect_index= weapon_effect_looping_new(weapon_index, weapon_definition->weapon.overheated_effect.index);
+			/* port: the message and the looping effect (weapon_update_call) */
+			weapon_update_call(weapon_index, _weapon_update_call_overheated, message, 0);
 		}
 
 		if (weapon->weapon.overcharged==0.0f)
@@ -3046,7 +3052,7 @@ boolean weapon_update(
 			weapon->weapon.flags&= ~(FLAG(_weapon_overheated_bit)|FLAG(_weapon_overheated_exit_bit));
 			if (weapon->weapon.overheated_effect_index!=NONE)
 			{
-				effect_stop(weapon->weapon.overheated_effect_index, TRUE);
+				weapon_update_call(weapon_index, _weapon_update_call_effect_stop, weapon->weapon.overheated_effect_index, 0);
 			}
 		}
 	}
@@ -3091,7 +3097,7 @@ boolean weapon_update(
 	}
 	if (TEST_FLAG(weapon->weapon.flags, _weapon_needs_to_reload_bit))
 	{
-		weapon_magazine_start_reload(weapon_index, 0, TRUE);
+		weapon_update_call(weapon_index, _weapon_update_call_magazine_start_reload, 0, TRUE);
 	}
 
 	for (magazine_index= 0; magazine_index<weapon_magazine_count(weapon_definition); magazine_index++)
@@ -3132,18 +3138,18 @@ boolean weapon_update(
 		case _magazine_reloading:
 			if (magazine->state_timer-1<=0)
 			{
-				weapon_magazine_finish_reload(weapon_index, magazine_index);
+				weapon_update_call(weapon_index, _weapon_update_call_magazine_finish_reload, magazine_index, 0);
 			}
 			break;
 
 		case _magazine_unchambered:
-			weapon_magazine_start_chamber(weapon_index, magazine_index);
+			weapon_update_call(weapon_index, _weapon_update_call_magazine_start_chamber, magazine_index, 0);
 			break;
 
 		case _magazine_chambering:
 			if (!magazine->state_timer)
 			{
-				weapon_magazine_finish_chamber(weapon_index, magazine_index);
+				weapon_update_call(weapon_index, _weapon_update_call_magazine_finish_chamber, magazine_index, 0);
 			}
 			break;
 		}
@@ -3221,13 +3227,13 @@ boolean weapon_update(
 					magazine->rounds_loaded<trigger_definition->minimum_rounds_loaded_per_shot ||
 					magazine->rounds_loaded==0))
 				{
-					weapon_magazine_start_reload(weapon_index, trigger_definition->magazine_index, TRUE);
+					weapon_update_call(weapon_index, _weapon_update_call_magazine_start_reload, trigger_definition->magazine_index, TRUE);
 				}
 			}
 
 			if (triggers_down[trigger_index] && weapon_trigger_can_fire_again(weapon_index, trigger_index))
 			{
-				weapon_trigger_begin_firing(weapon_index, trigger_index, FALSE);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_begin_firing, trigger_index, FALSE);
 			}
 			else if (trigger->idle_ticks<127)
 			{
@@ -3238,22 +3244,22 @@ boolean weapon_update(
 		case _trigger_spewing:
 			if (trigger->state_timer)
 			{
-				weapon_trigger_begin_firing(weapon_index, trigger_index, TRUE);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_begin_firing, trigger_index, TRUE);
 			}
 			else
 			{
-				weapon_trigger_recover(weapon_index, trigger_index);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_recover, trigger_index, 0);
 			}
 			break;
 
 		case _trigger_overloading:
 			if (!triggers_down[trigger_index])
 			{
-				weapon_trigger_begin_firing(weapon_index, trigger_index, TRUE);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_begin_firing, trigger_index, TRUE);
 			}
 			else if (!trigger->state_timer && weapon->weapon.alternate_shots_loaded<weapon_definition->weapon.maximum_alternate_shots_loaded)
 			{
-				weapon_trigger_overload(weapon_index, trigger_index);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_overload, trigger_index, 0);
 			}
 			break;
 
@@ -3264,23 +3270,23 @@ boolean weapon_update(
 				{
 					if (trigger_index==0 && weapon_definition->weapon.triggers.count>1 && !TEST_FLAG(trigger->flags, _weapon_trigger_fired_before_charging_bit))
 					{
-						weapon_trigger_begin_firing(weapon_index, trigger_index, TRUE);
+						weapon_update_call(weapon_index, _weapon_update_call_trigger_begin_firing, trigger_index, TRUE);
 					}
 					else
 					{
-						weapon_trigger_idle(weapon_index, trigger_index);
+						weapon_update_call(weapon_index, _weapon_update_call_trigger_idle, trigger_index, 0);
 					}
 
 					if (trigger->charging_effect_index!=NONE)
 					{
-						effect_stop(trigger->charging_effect_index, TRUE);
+						weapon_update_call(weapon_index, _weapon_update_call_effect_stop, trigger->charging_effect_index, 0);
 						trigger->charging_effect_index= NONE;
 					}
 				}
 			}
 			else
 			{
-				weapon_trigger_fully_charged(weapon_index, trigger_index);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_fully_charged, trigger_index, 0);
 			}
 			break;
 
@@ -3302,17 +3308,17 @@ boolean weapon_update(
 					if (magazine &&
 						magazine->rounds_loaded<trigger_definition->rounds_per_shot && !TEST_FLAG(trigger_definition->flags, _weapon_trigger_can_fire_with_partial_ammunition_bit))
 					{
-						weapon_trigger_release_charge(weapon_index, trigger_index);
+						weapon_update_call(weapon_index, _weapon_update_call_trigger_release_charge, trigger_index, 0);
 					}
 				}
 				else
 				{
-					weapon_trigger_overcharged(weapon_index, trigger_index);
+					weapon_update_call(weapon_index, _weapon_update_call_trigger_overcharged, trigger_index, 0);
 				}
 			}
 			else
 			{
-				weapon_trigger_release_charge(weapon_index, trigger_index);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_release_charge, trigger_index, 0);
 			}
 			break;
 
@@ -3323,11 +3329,11 @@ boolean weapon_update(
 					TEST_FLAG(weapon->item.flags, _item_belongs_to_player_bit) &&
 					!TEST_FLAG(trigger->flags, _weapon_trigger_released_since_last_shot_bit))
 				{
-					weapon_trigger_locked(weapon_index, trigger_index);
+					weapon_update_call(weapon_index, _weapon_update_call_trigger_locked, trigger_index, 0);
 				}
 				else
 				{
-					weapon_trigger_idle(weapon_index, trigger_index);
+					weapon_update_call(weapon_index, _weapon_update_call_trigger_idle, trigger_index, 0);
 				}
 			}
 			break;
@@ -3335,21 +3341,21 @@ boolean weapon_update(
 		case _trigger_tracking:
 			if (!triggers_down[trigger_index] || weapon->weapon.tracked_object_index==NONE)
 			{
-				weapon_trigger_finish_tracking(weapon_index, trigger_index);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_finish_tracking, trigger_index, 0);
 			}
 			break;
 
 		case _trigger_locked:
 			if (!triggers_down[trigger_index])
 			{
-				weapon_trigger_idle(weapon_index, trigger_index);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_idle, trigger_index, 0);
 			}
 			break;
 
 		case _trigger_uninitialized:
 			if (!trigger->state_timer)
 			{
-				weapon_trigger_idle(weapon_index, trigger_index);
+				weapon_update_call(weapon_index, _weapon_update_call_trigger_idle, trigger_index, 0);
 			}
 			break;
 
@@ -3370,7 +3376,7 @@ boolean weapon_update(
 				!TEST_FLAG(trigger->flags, _weapon_trigger_blurred_bit) &&
 				trigger->rate_of_fire>trigger_definition->blurred_rate_of_fire)
 			{
-				object_permute_region(weapon_get_effect_object_index(weapon_index), data_00307140.blurred_permutation_names[trigger_index], NONE, TRUE);
+				weapon_update_call(weapon_index, _weapon_update_call_permute_blurred, trigger_index, TRUE);
 				SET_FLAG(trigger->flags, _weapon_trigger_blurred_bit, TRUE);
 			}
 		}
@@ -3384,7 +3390,7 @@ boolean weapon_update(
 
 			if (TEST_FLAG(trigger->flags, _weapon_trigger_blurred_bit) && trigger->rate_of_fire<trigger_definition->blurred_rate_of_fire)
 			{
-				object_permute_region(weapon_get_effect_object_index(weapon_index), data_00307140.blurred_permutation_names[trigger_index], NONE, FALSE);
+				weapon_update_call(weapon_index, _weapon_update_call_permute_blurred, trigger_index, FALSE);
 				SET_FLAG(trigger->flags, _weapon_trigger_blurred_bit, FALSE);
 			}
 		}
@@ -3410,4 +3416,119 @@ boolean weapon_update(
 	profile_exit(data_00307140.update_profile);
 
 	return TRUE;
+}
+
+/* ---------- port: weapon updates' Rust port (halo_sim.c) */
+
+boolean weapon_update(
+	long weapon_index)
+{
+	/* the Rust port's in place of the game's, or (in check mode) the state
+	it is checked from */
+	if (halo_sim_weapon_update(weapon_index))
+		return TRUE;
+	weapon_update_internal(weapon_index);
+	halo_sim_weapon_update_check(weapon_index);
+
+	return TRUE;
+}
+
+/* a weapon update's calls of its helpers and the rest of the game, the
+game's and the Rust port's (crates/halo_map's weapons::call): TRUE if the
+weapon is still there after */
+long weapon_update_call(
+	long weapon_index,
+	long kind,
+	long a,
+	long b)
+{
+	struct weapon_datum *weapon= weapon_get(weapon_index);
+	struct weapon_definition *weapon_definition= weapon_definition_get(weapon->definition_index);
+	long result;
+
+	halo_sim_weapon_event_begin(weapon_index, kind, a, b);
+	switch (kind)
+	{
+	case _weapon_update_call_state_key_frame:
+		weapon_state_key_frame(weapon_index);
+		break;
+
+	case _weapon_update_call_state_next:
+		weapon_state_next(weapon_index);
+		break;
+
+	case _weapon_update_call_detonate:
+		item_detonate(weapon_index);
+		break;
+
+	case _weapon_update_call_overheated:
+		first_person_weapon_message_from_weapon(weapon_index, (short)a);
+		weapon->weapon.overheated_effect_index= weapon_effect_looping_new(weapon_index, weapon_definition->weapon.overheated_effect.index);
+		break;
+
+	case _weapon_update_call_effect_stop:
+		effect_stop(a, TRUE);
+		break;
+
+	case _weapon_update_call_magazine_start_reload:
+		weapon_magazine_start_reload(weapon_index, (short)a, (boolean)b);
+		break;
+
+	case _weapon_update_call_magazine_finish_reload:
+		weapon_magazine_finish_reload(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_magazine_start_chamber:
+		weapon_magazine_start_chamber(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_magazine_finish_chamber:
+		weapon_magazine_finish_chamber(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_trigger_begin_firing:
+		weapon_trigger_begin_firing(weapon_index, (short)a, (boolean)b);
+		break;
+
+	case _weapon_update_call_trigger_recover:
+		weapon_trigger_recover(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_trigger_overload:
+		weapon_trigger_overload(weapon_index, a);
+		break;
+
+	case _weapon_update_call_trigger_idle:
+		weapon_trigger_idle(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_trigger_fully_charged:
+		weapon_trigger_fully_charged(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_trigger_release_charge:
+		weapon_trigger_release_charge(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_trigger_overcharged:
+		weapon_trigger_overcharged(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_trigger_locked:
+		weapon_trigger_locked(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_trigger_finish_tracking:
+		weapon_trigger_finish_tracking(weapon_index, (short)a);
+		break;
+
+	case _weapon_update_call_permute_blurred:
+		object_permute_region(weapon_get_effect_object_index(weapon_index), data_00307140.blurred_permutation_names[a], NONE,
+			(boolean)b);
+		break;
+	}
+	result= weapon_try_and_get(weapon_index) ? TRUE : FALSE;
+	halo_sim_weapon_event_end(weapon_index, result);
+
+	return result;
 }

@@ -38,13 +38,14 @@ pub mod poses;
 pub mod preprocess;
 pub mod bipeds;
 pub mod damage;
+pub mod damage_update;
 pub mod projectiles;
 pub mod units;
 pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 16;
+pub const VERSION: u32 = 17;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {

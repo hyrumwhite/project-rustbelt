@@ -21,6 +21,7 @@ pub mod collision;
 pub mod combiner;
 pub mod area_damage;
 pub mod damage;
+pub mod damage_update;
 pub mod device_pose;
 pub mod features;
 mod cache;

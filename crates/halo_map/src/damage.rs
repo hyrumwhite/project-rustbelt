@@ -165,6 +165,8 @@ pub struct DamageResistance {
     pub minimum_shield_stun_damage: f32,
     pub shield_stun_time: f32,
     pub shield_damaged_effect_threshold: f32,
+    /// The shield's recharge a tick (`runtime_shield_recharge_velocity`).
+    pub runtime_shield_recharge_velocity: f32,
     pub materials: Vec<ResistanceMaterial>,
     pub regions: Vec<DamageRegion>,
     /// Each node's `runtime_damage_part`.
@@ -216,6 +218,7 @@ impl DamageResistance {
             minimum_shield_stun_damage: root.f32(r::MINIMUM_SHIELD_STUN_DAMAGE)?,
             shield_stun_time: root.f32(r::SHIELD_STUN_TIME)?,
             shield_damaged_effect_threshold: root.f32(r::SHIELD_DAMAGED_EFFECT_THRESHOLD)?,
+            runtime_shield_recharge_velocity: root.f32(r::RUNTIME_SHIELD_RECHARGE_VELOCITY)?,
             materials,
             regions,
             node_damage_parts,

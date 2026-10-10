@@ -37,6 +37,8 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "bevy_bridge.h"
 #include "bevy_bridge_protocol.h"
 
+boolean unit_animation_enhanced(long unit_index); /* units.c */
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -1274,6 +1276,46 @@ void bevy_bridge_pose_begin(long object_index, void const *node_orientations, sh
 		record->parent_mirrored = TEST_FLAG(object_get(object->object.parent_object_index)->object.flags, _object_mirrored_bit) ? 1 : 0;
 		memcpy(record->parent_node_matrix, parent_node_matrix, sizeof(record->parent_node_matrix));
 	}
+	if (object->object.type == _object_type_biped)
+	{
+		struct unit_datum *unit = unit_get(object_index);
+		real_vector3d forward;
+		real_vector3d up;
+
+		record->unit_recorded = 1;
+		record->unit_enhanced = unit_animation_enhanced(object_index) ? 1 : 0;
+		record->unit_airborne = unit_flying_through_air(object_index) ? 1 : 0;
+		record->unit_parented = object->object.parent_object_index != NONE;
+		record->unit_has_weapon = unit->unit.current_weapon_index != NONE;
+		record->unit_player = unit->unit.player_index != NONE;
+		record->game_time = game_time_get();
+		record->unit_animation_flags = unit->unit.animation.flags;
+		record->aiming_screen_index = unit->unit.animation.aiming_screen_index;
+		record->looking_screen_index = unit->unit.animation.looking_screen_index;
+		record->override_emotion_animation_index = unit->unit.override_emotion_animation_index;
+		record->seat_index = unit->unit.animation.seat_index;
+		record->weapon_index = unit->unit.animation.weapon_index;
+		record->state = unit->unit.animation.state;
+		record->action = unit->unit.animation.action;
+		record->base_seat_index = unit->unit.animation.base_seat_index;
+		record->emotion_index = unit->unit.animation.emotion_index;
+		record->action_animation[0] = unit->unit.animation.action_animation.index;
+		record->action_animation[1] = unit->unit.animation.action_animation.frame_index;
+		record->overlay_action_animation[0] = unit->unit.animation.overlay_action_animation.index;
+		record->overlay_action_animation[1] = unit->unit.animation.overlay_action_animation.frame_index;
+		record->soft_ping_animation[0] = unit->unit.animation.soft_ping_animation.index;
+		record->soft_ping_animation[1] = unit->unit.animation.soft_ping_animation.frame_index;
+		record->mouth_aperture = unit->unit.mouth_aperture;
+		bevy_bridge_vector(record->seat_acceleration, &unit->unit.seat_acceleration);
+		bevy_bridge_vector(record->aiming_vector, &unit->unit.aiming_vector);
+		bevy_bridge_vector(record->looking_vector, &unit->unit.looking_vector);
+		object_get_orientation(object_index, &forward, &up);
+		bevy_bridge_vector(record->orientation_forward, &forward);
+		bevy_bridge_vector(record->orientation_up, &up);
+		bevy_bridge_vector(record->translational_velocity, &object->object.translational_velocity);
+		unit_grenade_throw_leg_weights(object_index, &record->grenade_leg_weight, &record->grenade_leg_time,
+			&record->grenade_air_weight, &record->grenade_air_time);
+	}
 	for (node_index = 0; node_index < node_count; node_index++)
 	{
 		struct bevy_bridge_pose_node *node = bevy_bridge_pose_node(node_index);
@@ -1306,6 +1348,15 @@ void bevy_bridge_pose_preprocessed(long object_index, void const *node_orientati
 		bevy_bridge_pose_orientation(node->preprocessed, &orientations[node_index]);
 		if (originals)
 			bevy_bridge_pose_orientation(node->original, &originals[node_index]);
+	}
+	if (record->unit_recorded)
+	{
+		struct unit_datum *unit = unit_get(object_index);
+
+		record->aiming_with_euler_screen = unit->unit.animation.aiming_with_euler_screen ? 1 : 0;
+		record->looking_with_euler_screen = unit->unit.animation.looking_with_euler_screen ? 1 : 0;
+		memcpy(record->aiming_screen_bounds, &unit->unit.animation.aiming_screen_bounds, sizeof(record->aiming_screen_bounds));
+		memcpy(record->looking_screen_bounds, &unit->unit.animation.looking_screen_bounds, sizeof(record->looking_screen_bounds));
 	}
 }
 

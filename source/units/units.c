@@ -10931,6 +10931,30 @@ static real unit_grenade_throw_ease(
 	return weight;
 }
 
+void unit_grenade_throw_leg_weights(
+	long unit_index,
+	real *leg_weight,
+	long *leg_time,
+	real *air_weight,
+	long *air_time)
+{
+	long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(unit_index);
+
+	*leg_weight = 0.f;
+	*leg_time = 0;
+	*air_weight = 0.f;
+	*air_time = 0;
+	if (absolute_index >= 0 && absolute_index < GRENADE_THROW_MAXIMUM_TRACKED_UNITS)
+	{
+		*leg_weight = grenade_throw_leg_weights[absolute_index];
+		*leg_time = grenade_throw_leg_weight_times[absolute_index];
+		*air_weight = grenade_throw_air_weights[absolute_index];
+		*air_time = grenade_throw_air_weight_times[absolute_index];
+	}
+
+	return;
+}
+
 /* port: a rider's hands leave the vehicle's grips while throwing a grenade
 or playing an action (a reload, readying or putting away a weapon, a
 melee), and through the interpolation back to the seat after it, which the

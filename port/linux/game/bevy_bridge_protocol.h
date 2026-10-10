@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 22
+#define BEVY_BRIDGE_VERSION 23
 #define BEVY_BRIDGE_POSE_RECORDS 2048
 #define BEVY_BRIDGE_POSE_NODES 65536
 #define BEVY_BRIDGE_UNIT_ANIMATION_RECORDS 1024
@@ -606,6 +606,49 @@ struct bevy_bridge_pose_record
 	unsigned long has_parent;
 	unsigned long parent_mirrored;
 	float parent_node_matrix[13];
+	/* (protocol 23) a unit's (unit_recorded): what its type's preprocess
+	reads (unit_preprocess_node_orientations: its animation state, its
+	emotion, mouth, seat acceleration, aiming and looking, its orientation
+	as object_get_orientation gives it, and for a grenade throw on the move
+	unit_animation_enhanced, unit_flying_through_air, its velocity, the game
+	time and the legs' eased weights before), and what it sets (whether it
+	aims and looks with euler screens, and their bounds) */
+	unsigned long unit_recorded;
+	unsigned long unit_enhanced;
+	unsigned long unit_airborne;
+	unsigned long unit_parented;
+	unsigned long unit_has_weapon;
+	unsigned long unit_player;
+	long game_time;
+	unsigned short unit_animation_flags;
+	short aiming_screen_index;
+	short looking_screen_index;
+	short override_emotion_animation_index;
+	char seat_index;
+	char weapon_index;
+	char state;
+	char action;
+	char base_seat_index;
+	char emotion_index;
+	short pad;
+	short action_animation[2];
+	short overlay_action_animation[2];
+	short soft_ping_animation[2];
+	float mouth_aperture;
+	float seat_acceleration[3];
+	float aiming_vector[3];
+	float looking_vector[3];
+	float orientation_forward[3];
+	float orientation_up[3];
+	float translational_velocity[3];
+	float grenade_leg_weight;
+	long grenade_leg_time;
+	float grenade_air_weight;
+	long grenade_air_time;
+	unsigned long aiming_with_euler_screen;
+	unsigned long looking_with_euler_screen;
+	float aiming_screen_bounds[4];
+	float looking_screen_bounds[4];
 };
 
 struct bevy_bridge_shared

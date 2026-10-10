@@ -12,6 +12,7 @@
 
 pub mod bitmap;
 pub mod bsp;
+pub mod collision;
 pub mod combiner;
 mod cache;
 pub mod layout;

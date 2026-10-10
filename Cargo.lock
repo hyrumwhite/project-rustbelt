@@ -3170,6 +3170,9 @@ dependencies = [
 [[package]]
 name = "halo_bridge"
 version = "0.1.0"
+dependencies = [
+ "halo_map",
+]
 
 [[package]]
 name = "halo_map"

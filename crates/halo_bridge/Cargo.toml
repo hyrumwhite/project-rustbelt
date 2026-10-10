@@ -7,6 +7,8 @@ publish = false
 description = "Reads the frames OpenCE shares with a renderer (its bevy_bridge): camera and object node matrices"
 
 [dependencies]
+# (bridge_probe's collision check only)
+halo_map = { path = "../halo_map" }
 
 [[bin]]
 name = "bridge_probe"

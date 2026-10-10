@@ -21,7 +21,8 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
+pub const RAY_TESTS: usize = 16;
 pub const MAXIMUM_LIGHTS: usize = 64;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
@@ -95,6 +96,19 @@ pub struct Light {
     pub cutoff_angle: f32,
 }
 
+/// A ray the game tested against its structure's collision geometry
+/// (front-facing surfaces), with `game.bevy_bridge_ray_tests` on.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RayTest {
+    pub point: [f32; 3],
+    pub vector: [f32; 3],
+    pub hit: u32,
+    /// How far along `vector` (0..1).
+    pub t: f32,
+    pub surface_index: i32,
+}
+
 #[repr(C)]
 struct Frame {
     sequence: u32,
@@ -106,6 +120,8 @@ struct Frame {
     camera: Camera,
     light_count: u32,
     lights: [Light; MAXIMUM_LIGHTS],
+    ray_test_count: u32,
+    ray_tests: [RayTest; RAY_TESTS],
     object_count: u32,
     node_count: u32,
     objects: [Object; MAXIMUM_OBJECTS],
@@ -236,6 +252,7 @@ pub struct Snapshot {
     pub scenario_name: String,
     pub camera: Option<Camera>,
     pub lights: Vec<Light>,
+    pub ray_tests: Vec<RayTest>,
     pub objects: Vec<Object>,
     pub nodes: Vec<Node>,
 }
@@ -446,6 +463,7 @@ impl Bridge {
                 }
                 let object_count = (std::ptr::read_volatile(&(*frame).object_count) as usize).min(MAXIMUM_OBJECTS);
                 let light_count = (std::ptr::read_volatile(&(*frame).light_count) as usize).min(MAXIMUM_LIGHTS);
+                let ray_test_count = (std::ptr::read_volatile(&(*frame).ray_test_count) as usize).min(RAY_TESTS);
                 let node_count = (std::ptr::read_volatile(&(*frame).node_count) as usize).min(MAXIMUM_NODES);
                 let name = std::ptr::read_volatile(&(*frame).scenario_name);
                 let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
@@ -457,6 +475,7 @@ impl Bridge {
                     camera: (std::ptr::read_volatile(&(*frame).camera_valid) != 0)
                         .then(|| std::ptr::read_volatile(&(*frame).camera)),
                     lights: (0..light_count).map(|i| std::ptr::read_volatile(&(*frame).lights[i])).collect(),
+                    ray_tests: (0..ray_test_count).map(|i| std::ptr::read_volatile(&(*frame).ray_tests[i])).collect(),
                     objects: (0..object_count).map(|i| std::ptr::read_volatile(&(*frame).objects[i])).collect(),
                     nodes: (0..node_count).map(|i| std::ptr::read_volatile(&(*frame).nodes[i])).collect(),
                 };

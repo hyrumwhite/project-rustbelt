@@ -1,7 +1,7 @@
 //! Prints what a running OpenCE shares through its Bevy bridge, once a second.
 //!
 //! ```text
-//! bridge_probe [seconds] [walk] [listen] [pad] [latency] [fire]
+//! bridge_probe [seconds] [walk] [listen] [pad] [latency] [fire] [<map file>]
 //! ```
 //!
 //! `walk` also forwards input: W held (and the mouse turning slowly) for the
@@ -10,7 +10,9 @@
 //! game logs the change). `pad` forwards a gamepad, its left stick pushed
 //! forward for the second half. `latency` turns the view with the mouse twice
 //! a second and reports how long the game's shared camera takes to follow.
-//! `fire` holds the left mouse button for the second half.
+//! `fire` holds the left mouse button for the second half. A map file
+//! checks halo_map's collision code against the rays the game tests
+//! (start the game with HALO_BEVY_BRIDGE_RAY_TESTS=1).
 //! `HALO_BEVY_BRIDGE_NAME` names the bridge.
 
 use halo_bridge::{Bridge, OBJECT_FIRST_PERSON, OBJECT_HIDDEN};
@@ -25,6 +27,10 @@ fn main() {
     let pad = std::env::args().any(|a| a == "pad");
     // (the left mouse button held for the second half: firing)
     let fire = std::env::args().any(|a| a == "fire");
+    // (a map file: the game's ray tests checked against halo_map's
+    // collision code; the game needs HALO_BEVY_BRIDGE_RAY_TESTS=1)
+    let map = std::env::args().find(|a| a.to_ascii_lowercase().ends_with(".map"));
+    let mut collision = map.map(|path| CollisionCheck::new(&path));
     // (turns the view with the mouse every second and reports how long the
     // game's camera takes to follow)
     let latency = std::env::args().any(|a| a == "latency");
@@ -110,6 +116,9 @@ fn main() {
                 last_nudge = Instant::now();
             }
         }
+        if let (Some(check), Some(snapshot)) = (collision.as_mut(), &fresh) {
+            check.check(snapshot);
+        }
         if let Some(snapshot) = fresh {
             frames += 1;
             if last_report.elapsed() >= Duration::from_secs(1) {
@@ -154,4 +163,85 @@ fn main() {
         }
     }
     report_latency(&samples);
+    if let Some(check) = &collision {
+        check.report();
+    }
+}
+
+/// The game's ray tests against halo_map's collision code: how many agree
+/// (hit or miss, the surface, and t to within a millionth).
+struct CollisionCheck {
+    cache: halo_map::CacheFile,
+    bsps: std::collections::HashMap<i32, Option<halo_map::collision::CollisionBsp>>,
+    rays: u64,
+    agreed: u64,
+    hits: u64,
+    largest_t_difference: f32,
+    shown: u32,
+}
+
+impl CollisionCheck {
+    fn new(path: &str) -> Self {
+        let cache = halo_map::CacheFile::open(std::path::Path::new(path)).expect("the map opens");
+        CollisionCheck {
+            cache,
+            bsps: Default::default(),
+            rays: 0,
+            agreed: 0,
+            hits: 0,
+            largest_t_difference: 0.0,
+            shown: 0,
+        }
+    }
+
+    fn check(&mut self, snapshot: &halo_bridge::Snapshot) {
+        if snapshot.ray_tests.is_empty() {
+            return;
+        }
+        let cache = &self.cache;
+        let bsp = self
+            .bsps
+            .entry(snapshot.structure_bsp_index)
+            .or_insert_with(|| {
+                let reference = halo_map::bsp::references(cache)
+                    .ok()?
+                    .into_iter()
+                    .find(|r| r.index as i32 == snapshot.structure_bsp_index)?;
+                let loaded = halo_map::bsp::Bsp::load(cache, &reference).ok()?;
+                halo_map::collision::CollisionBsp::load(&loaded).ok()
+            })
+            .as_ref();
+        let Some(bsp) = bsp else { return };
+        for test in &snapshot.ray_tests {
+            let ours = bsp.test_vector(halo_map::collision::flags::FRONT_FACING, test.point, test.vector, 1.0);
+            self.rays += 1;
+            let agree = match ours {
+                Some(hit) => {
+                    let difference = (hit.t - test.t).abs();
+                    self.largest_t_difference = self.largest_t_difference.max(difference);
+                    test.hit != 0 && hit.surface as i32 == test.surface_index && difference <= 1e-6
+                }
+                None => test.hit == 0,
+            };
+            if test.hit != 0 {
+                self.hits += 1;
+            }
+            if agree {
+                self.agreed += 1;
+            } else if self.shown < 5 {
+                self.shown += 1;
+                println!(
+                    "  ray differs: game hit {} t {} surface {}; halo_map {:?}",
+                    test.hit, test.t, test.surface_index, ours.map(|h| (h.t, h.surface))
+                );
+            }
+        }
+    }
+
+    fn report(&self) {
+        println!(
+            "collision: {} of {} rays agree with the game ({} hit the structure); largest t difference {}",
+            self.agreed, self.rays, self.hits, self.largest_t_difference
+        );
+    }
 }

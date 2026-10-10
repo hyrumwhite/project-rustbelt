@@ -10,6 +10,7 @@ field to Rust.
 #include "cseries.h"
 #include "tag_files/tag_groups.h"
 #include "structures/structure_bsp_definitions.h"
+#include "physics/collision_bsp_definitions.h"
 #include "scenario/scenario_definitions.h"
 #include "bitmaps/bitmap_group.h"
 #include "models/model_definitions.h"
@@ -55,6 +56,34 @@ LAYOUT_OFFSET(scenario_structure_bsp_reference, structure_bsp)
 /* structure bsp */
 LAYOUT_SIZE(structure_bsp)
 LAYOUT_OFFSET(structure_bsp, lightmap_group)
+LAYOUT_OFFSET(structure_bsp, collision_bsp)
+
+/* collision bsps (the structure's, collision_bsp.c) */
+LAYOUT_SIZE(collision_bsp)
+LAYOUT_OFFSET(collision_bsp, bsp3d)
+LAYOUT_OFFSET(collision_bsp, leaves)
+LAYOUT_OFFSET(collision_bsp, bsp2d_references)
+LAYOUT_OFFSET(collision_bsp, bsp2d)
+LAYOUT_OFFSET(collision_bsp, surfaces)
+LAYOUT_OFFSET(collision_bsp, edges)
+LAYOUT_OFFSET(collision_bsp, vertices)
+LAYOUT_OFFSET(bsp3d, nodes)
+LAYOUT_OFFSET(bsp3d, planes)
+LAYOUT_SIZE(bsp3d_node)
+LAYOUT_OFFSET(bsp2d, nodes)
+LAYOUT_SIZE(bsp2d_node)
+LAYOUT_OFFSET(bsp2d_node, plane)
+LAYOUT_OFFSET(bsp2d_node, child_indices)
+LAYOUT_SIZE(collision_surface)
+LAYOUT_OFFSET(collision_surface, plane_designator)
+LAYOUT_OFFSET(collision_surface, first_edge_index)
+LAYOUT_OFFSET(collision_surface, flags)
+LAYOUT_OFFSET(collision_surface, material_index)
+LAYOUT_SIZE(collision_edge)
+LAYOUT_OFFSET(collision_edge, vertex_indices)
+LAYOUT_OFFSET(collision_edge, edge_indices)
+LAYOUT_OFFSET(collision_edge, surface_indices)
+LAYOUT_SIZE(collision_vertex)
 LAYOUT_OFFSET(structure_bsp, world_bounds)
 LAYOUT_OFFSET(structure_bsp, surfaces)
 LAYOUT_OFFSET(structure_bsp, lightmaps)

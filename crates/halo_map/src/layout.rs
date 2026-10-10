@@ -34,6 +34,55 @@ pub mod bitmap_group {
     pub const BITMAPS: usize = 0x60;
 }
 
+pub mod bsp2d {
+    pub const NODES: usize = 0x0;
+}
+
+pub mod bsp2d_node {
+    pub const SIZEOF: usize = 0x14;
+    pub const PLANE: usize = 0x0;
+    pub const CHILD_INDICES: usize = 0xc;
+}
+
+pub mod bsp3d {
+    pub const NODES: usize = 0x0;
+    pub const PLANES: usize = 0xc;
+}
+
+pub mod bsp3d_node {
+    pub const SIZEOF: usize = 0xc;
+}
+
+pub mod collision_bsp {
+    pub const SIZEOF: usize = 0x60;
+    pub const BSP3D: usize = 0x0;
+    pub const LEAVES: usize = 0x18;
+    pub const BSP2D_REFERENCES: usize = 0x24;
+    pub const BSP2D: usize = 0x30;
+    pub const SURFACES: usize = 0x3c;
+    pub const EDGES: usize = 0x48;
+    pub const VERTICES: usize = 0x54;
+}
+
+pub mod collision_edge {
+    pub const SIZEOF: usize = 0x18;
+    pub const VERTEX_INDICES: usize = 0x0;
+    pub const EDGE_INDICES: usize = 0x8;
+    pub const SURFACE_INDICES: usize = 0x10;
+}
+
+pub mod collision_surface {
+    pub const SIZEOF: usize = 0xc;
+    pub const PLANE_DESIGNATOR: usize = 0x0;
+    pub const FIRST_EDGE_INDEX: usize = 0x4;
+    pub const FLAGS: usize = 0x8;
+    pub const MATERIAL_INDEX: usize = 0xa;
+}
+
+pub mod collision_vertex {
+    pub const SIZEOF: usize = 0x10;
+}
+
 pub mod control_placement {
     pub const SIZEOF: usize = 0x40;
 }
@@ -338,6 +387,7 @@ pub mod sky_light {
 pub mod structure_bsp {
     pub const SIZEOF: usize = 0x288;
     pub const LIGHTMAP_GROUP: usize = 0x0;
+    pub const COLLISION_BSP: usize = 0xb0;
     pub const WORLD_BOUNDS: usize = 0xc8;
     pub const SURFACES: usize = 0xf8;
     pub const LIGHTMAPS: usize = 0x104;

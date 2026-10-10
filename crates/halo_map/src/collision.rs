@@ -780,6 +780,9 @@ pub struct WorldObject {
     pub matrices: Vec<Matrix4x3>,
     /// Its collision model, if it has one.
     pub model: Option<std::sync::Arc<CollisionModel>>,
+    /// A vehicle's physics shape where it is, if it has one (tested
+    /// instead of its collision model with `test_flags::USE_VEHICLE_PHYSICS`).
+    pub physics: Option<crate::vehicle_physics::PhysicsInstance>,
 }
 
 /// What a full ray test hit.
@@ -851,6 +854,8 @@ pub mod test_flags {
     pub const MEDIA: u32 = 1 << 6;
     pub const OBJECTS: u32 = 1 << 7;
     pub const TRY_TO_KEEP_LOCATION_VALID: u32 = 1 << 20;
+    /// Vehicles by their physics' mass points, not their collision models.
+    pub const USE_VEHICLE_PHYSICS: u32 = 1 << 22;
     pub const FIRST_OBJECT_TYPE: u32 = 8;
     pub const ALL_OBJECT_TYPES: u32 = ((1 << 12) - 1) << FIRST_OBJECT_TYPE;
 }
@@ -1047,7 +1052,20 @@ impl World<'_> {
         {
             return;
         }
-        if let Some(model) = &object.model
+        const OBJECT_TYPE_VEHICLE: i16 = 1;
+        if object.kind == OBJECT_TYPE_VEHICLE && flags & test_flags::USE_VEHICLE_PHYSICS != 0 {
+            if let Some(physics) = &object.physics
+                && let Some((hit_t, plane)) = physics.test_vector(point, vector)
+                && *t > hit_t
+            {
+                *t = hit_t;
+                *best = Some(WorldHit { t: hit_t, object: Some(object.index), node: NONE as i16, bsp: NONE as i16, surface: NONE });
+                result.kind = Some(CollisionKind::Object);
+                result.plane = plane;
+                result.material_type = NONE as i16;
+                result.surface_flags = 0;
+            }
+        } else if let Some(model) = &object.model
             && let Some(hit) = model.test_vector(&object.region_permutations, &object.matrices, bsp_flags, point, vector)
             && *t > hit.hit.t
         {

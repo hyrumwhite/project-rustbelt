@@ -289,6 +289,12 @@ pub mod machine_placement {
     pub const SIZEOF: usize = 0x40;
 }
 
+pub mod mass_point_definition {
+    pub const SIZEOF: usize = 0x80;
+    pub const POSITION: usize = 0x38;
+    pub const RADIUS: usize = 0x68;
+}
+
 pub mod model {
     pub const SIZEOF: usize = 0xe8;
     pub const FLAGS: usize = 0x0;
@@ -349,6 +355,7 @@ pub mod object_function_definition {
 
 pub mod physics_definition {
     pub const CENTER_OF_MASS: usize = 0xc;
+    pub const MASS_POINTS: usize = 0x74;
 }
 
 pub mod player_starting_location {

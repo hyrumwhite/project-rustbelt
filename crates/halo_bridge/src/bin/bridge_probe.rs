@@ -332,6 +332,10 @@ struct CollisionCheck {
     pose_matrices: [u64; 4],
     pose_types: [u64; 12],
     pose_shown: u32,
+    /// Rays at vehicles tested with their physics shapes: compared, agreed;
+    /// of the agreeing, hitting a vehicle, another object, the structure.
+    vehicle_rays: [u64; 5],
+    physics_shapes: std::collections::HashMap<u32, Option<std::sync::Arc<halo_map::vehicle_physics::PhysicsShape>>>,
     /// Bipeds' preprocess: compared, agreed; of the agreeing, with an
     /// action, an overlay action, a soft ping, an emotion, mouth or
     /// acceleration overlay, aiming, looking, throwing a grenade (enhanced).
@@ -447,6 +451,8 @@ impl CollisionCheck {
             pose_matrices: [0; 4],
             pose_types: [0; 12],
             pose_shown: 0,
+            vehicle_rays: [0; 5],
+            physics_shapes: Default::default(),
             unit_poses: [0; 9],
             moving_erased: 0,
             update_erased: 0,
@@ -534,6 +540,18 @@ impl CollisionCheck {
                     halo_map::collision::CollisionModel::load(cache, datum).ok().map(std::sync::Arc::new)
                 })
                 .clone();
+            // (a vehicle's physics shape, placed as the game recorded it)
+            let physics = match snapshot.physics_vehicles.iter().find(|v| v.object_index == object.object_index) {
+                Some(vehicle) if object.kind == 1 => self
+                    .physics_shapes
+                    .entry(object.definition_index)
+                    .or_insert_with(|| {
+                        halo_map::vehicle_physics::PhysicsShape::load_for_object(cache, object.definition_index).ok().flatten().map(std::sync::Arc::new)
+                    })
+                    .clone()
+                    .map(|shape| halo_map::vehicle_physics::physics_instance_new(shape, vehicle.origin, vehicle.forward, vehicle.up)),
+                _ => None,
+            };
             world_objects.push(halo_map::collision::WorldObject {
                 index: object.object_index,
                 kind: object.kind,
@@ -549,7 +567,51 @@ impl CollisionCheck {
                     .map(|n| halo_map::model::Matrix4x3 { scale: n.scale, forward: n.forward, left: n.left, up: n.up, position: n.position })
                     .collect(),
                 model,
+                physics,
             });
+        }
+        // rays at vehicles, tested with their physics shapes
+        for test in &snapshot.vehicle_ray_tests {
+            use halo_map::collision::{CollisionKind, flags, test_flags};
+            let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects };
+            let ours = world.test(
+                flags::FRONT_FACING
+                    | test_flags::STRUCTURE
+                    | test_flags::OBJECTS
+                    | test_flags::ALL_OBJECT_TYPES
+                    | test_flags::USE_VEHICLE_PHYSICS,
+                test.point,
+                test.vector,
+                u32::MAX,
+            );
+            let kind = match ours.kind {
+                None => -1,
+                Some(CollisionKind::Media) => 0,
+                Some(CollisionKind::Structure) => 2,
+                Some(CollisionKind::Object) => 3,
+            };
+            let bits = |p: [f32; 4]| p.map(f32::to_bits);
+            let agrees = kind == test.kind
+                && ours.t.to_bits() == test.t.to_bits()
+                && (kind == -1 || bits(ours.plane) == bits(test.plane))
+                && ours.object.unwrap_or(u32::MAX) == test.object_index
+                // (a structure hit leaves the node as it was)
+                && (kind == -1 || ours.surface == test.surface_index)
+                && (kind != 3 || ours.node == test.node_index);
+            self.vehicle_rays[0] += 1;
+            if agrees {
+                self.vehicle_rays[1] += 1;
+                let vehicle = test.kind == 3 && snapshot.objects.iter().any(|o| o.object_index == test.object_index && o.kind == 1);
+                self.vehicle_rays[2] += vehicle as u64;
+                self.vehicle_rays[3] += (test.kind == 3 && !vehicle) as u64;
+                self.vehicle_rays[4] += (test.kind == 2) as u64;
+            } else if self.shown[0] < 10 {
+                self.shown[0] += 1;
+                println!(
+                    "  vehicle ray differs: game type {} object {:08x} node {} t {} plane {:?} surface {}; halo_map {:?}",
+                    test.kind, test.object_index, test.node_index, test.t, test.plane, test.surface_index, ours
+                );
+            }
         }
         for test in &snapshot.ray_tests {
             let ours = bsp.test_vector(halo_map::collision::flags::FRONT_FACING, test.point, test.vector, 1.0);
@@ -1829,6 +1891,11 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        let [compared, agreed, vehicles, others, structure] = self.vehicle_rays;
+        println!(
+            "collision: {} of {} rays at vehicles tested with their physics shapes agree with the game bit for bit ({} hit a vehicle's mass points, {} another object, {} the structure)",
+            agreed, compared, vehicles, others, structure
+        );
         let [compared, agreed, armed, unarmed, damaged, under_way] = self.melees;
         println!(
             "bipeds: {} of {} players' melee steps replayed agree with the game ({} melees started with a weapon, {} without; {} hits landed; {} steps under way)",

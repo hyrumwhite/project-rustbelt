@@ -98,6 +98,10 @@ LAYOUT_OFFSET(animation_graph, object_overlays)
 
 /* physics: an object's centre of mass */
 LAYOUT_OFFSET(physics_definition, center_of_mass)
+LAYOUT_OFFSET(physics_definition, mass_points)
+LAYOUT_SIZE(mass_point_definition)
+LAYOUT_OFFSET(mass_point_definition, position)
+LAYOUT_OFFSET(mass_point_definition, radius)
 
 /* animation graphs: which animation a unit plays */
 LAYOUT_SIZE(animation_graph_unit_seat)

@@ -21,7 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 25;
+pub const VERSION: u32 = 26;
+pub const PHYSICS_VEHICLES: usize = 32;
+pub const VEHICLE_RAY_TESTS: usize = 16;
 pub const POSE_RECORDS: usize = 2048;
 pub const MELEE_RECORDS: usize = 512;
 pub const POSE_NODES: usize = 65536;
@@ -196,7 +198,43 @@ struct Frame {
     node_count: u32,
     objects: [Object; MAXIMUM_OBJECTS],
     nodes: [Node; MAXIMUM_NODES],
+    physics_vehicle_count: u32,
+    physics_vehicles: [PhysicsVehicle; PHYSICS_VEHICLES],
+    vehicle_ray_test_count: u32,
+    vehicle_ray_tests: [VehicleRayTest; VEHICLE_RAY_TESTS],
 }
+
+/// (Protocol 26) a vehicle as its physics shape is placed
+/// (`physics_instance_new`: `object_get_origin`, `object_get_orientation`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PhysicsVehicle {
+    pub object_index: u32,
+    pub origin: [f32; 3],
+    pub forward: [f32; 3],
+    pub up: [f32; 3],
+}
+
+/// (Protocol 26) a ray from the camera at a vehicle (through its bounding
+/// sphere's centre, and above it), tested as `collision_test_vector` does
+/// with `_collision_test_use_vehicle_physics_bit` (the structure and every
+/// object type, front-facing; vehicles by their physics' mass points): the
+/// result's type (-1 for nothing), object, t, plane, node and surface.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VehicleRayTest {
+    pub point: [f32; 3],
+    pub vector: [f32; 3],
+    pub kind: i16,
+    pub node_index: i16,
+    pub object_index: u32,
+    pub t: f32,
+    pub plane: [f32; 4],
+    pub surface_index: i32,
+}
+
+const _: () = assert!(std::mem::size_of::<PhysicsVehicle>() == 40);
+const _: () = assert!(std::mem::size_of::<VehicleRayTest>() == 56);
 
 /// What a renderer's window receives, for the game to read as its own
 /// (`struct bevy_bridge_input`).
@@ -714,6 +752,10 @@ pub struct Snapshot {
     pub point_physics_definition: u32,
     pub objects: Vec<Object>,
     pub nodes: Vec<Node>,
+    /// The vehicles' physics placement and rays at them tested with their
+    /// physics shapes (with `game.bevy_bridge_ray_tests` on).
+    pub physics_vehicles: Vec<PhysicsVehicle>,
+    pub vehicle_ray_tests: Vec<VehicleRayTest>,
 }
 
 impl Snapshot {
@@ -1171,6 +1213,12 @@ impl Bridge {
                     point_physics_definition: std::ptr::read_volatile(&(*frame).point_physics_definition),
                     objects: (0..object_count).map(|i| std::ptr::read_volatile(&(*frame).objects[i])).collect(),
                     nodes: (0..node_count).map(|i| std::ptr::read_volatile(&(*frame).nodes[i])).collect(),
+                    physics_vehicles: (0..(std::ptr::read_volatile(&(*frame).physics_vehicle_count) as usize).min(PHYSICS_VEHICLES))
+                        .map(|i| std::ptr::read_volatile(&(*frame).physics_vehicles[i]))
+                        .collect(),
+                    vehicle_ray_tests: (0..(std::ptr::read_volatile(&(*frame).vehicle_ray_test_count) as usize).min(VEHICLE_RAY_TESTS))
+                        .map(|i| std::ptr::read_volatile(&(*frame).vehicle_ray_tests[i]))
+                        .collect(),
                 };
                 fence(Ordering::Acquire);
                 if std::ptr::read_volatile(&(*frame).sequence) != sequence {

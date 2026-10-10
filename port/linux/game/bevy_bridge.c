@@ -189,13 +189,14 @@ static unsigned long bevy_bridge_ray_tests(
 				test->object_t = 1.0f;
 				test->object_surface_index = NONE;
 				if (collision_test_vector(FLAG(_collision_test_front_facing_surfaces_bit) |
-						FLAG(_collision_test_objects_bit) | _collision_test_objects_all_types_flags,
-						origin, &vector, NONE, &collision) &&
-					collision.object_index != NONE)
+						FLAG(_collision_test_structure_bit) | FLAG(_collision_test_objects_bit) |
+						_collision_test_objects_all_types_flags,
+						origin, &vector, NONE, &collision))
 				{
-					test->object_index = (unsigned long)collision.object_index;
-					test->object_node_index = collision.node_index;
-					test->object_bsp_index = collision.bsp_index;
+					test->object_index = collision.type == _collision_result_object ?
+						(unsigned long)collision.object_index : (unsigned long)NONE;
+					test->object_node_index = collision.type == _collision_result_object ? collision.node_index : NONE;
+					test->object_bsp_index = collision.type == _collision_result_object ? collision.bsp_index : NONE;
 					test->object_t = collision.t;
 					test->object_surface_index = collision.surface_index;
 				}
@@ -462,6 +463,12 @@ void bevy_bridge_export_frame(
 			out->type = object->object.type;
 			out->flags = bevy_bridge_object_flags(iterator.index, first_person_unit);
 			out->active_camouflage = bevy_bridge_camouflage(iterator.index);
+			bevy_bridge_point(out->bounding_center, &object->object.bounding_sphere_center);
+			out->bounding_radius = object->object.bounding_sphere_radius;
+			out->object_flags = object->object.flags;
+			out->parent_index = (unsigned long)object->object.parent_object_index;
+			out->location_cluster = object->object.location.cluster_index;
+			out->pad = 0;
 			memcpy(out->region_permutations, object->object.region_permutations, sizeof(out->region_permutations));
 			{
 				short color_index;

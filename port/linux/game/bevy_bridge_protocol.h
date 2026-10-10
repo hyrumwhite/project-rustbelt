@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 13
+#define BEVY_BRIDGE_VERSION 14
 #define BEVY_BRIDGE_RAY_TESTS 16
 #define BEVY_BRIDGE_MAXIMUM_LIGHTS 64
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
@@ -92,6 +92,16 @@ struct bevy_bridge_object
 	/* how camouflaged it is (0..1): a unit's active camouflage, which what
 	it holds shares */
 	float active_camouflage;
+	/* the state the collision broad phase reads: the bounding sphere (as
+	of the last tick), the object's flags (bit 0 invisible, 11 connected
+	to the map, 25 with a collision model), its parent's object index (all
+	ones for none) and its location's cluster (NONE outside the map) */
+	float bounding_center[3];
+	float bounding_radius;
+	unsigned long object_flags;
+	unsigned long parent_index;
+	short location_cluster;
+	short pad;
 };
 
 /* real_matrix4x3: a node's world transform */
@@ -146,9 +156,10 @@ struct bevy_bridge_ray_test
 	float pill_t;
 	float pill_normal[3];
 	long pill_surface_index;
-	/* and the ray against the objects (collision_test_vector, every object
-	type, front-facing surfaces): the object it hit first, the collision
-	node, bsp and surface, and how far along `vector` */
+	/* and the game's whole ray test (collision_test_vector: the structure
+	and every object type, front-facing surfaces): what it hit (object_index
+	all ones for the structure or nothing, surface_index NONE for nothing),
+	the collision node, bsp and surface, and how far along `vector` */
 	unsigned long object_index;
 	short object_node_index;
 	short object_bsp_index;

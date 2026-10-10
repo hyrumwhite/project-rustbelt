@@ -515,6 +515,10 @@ static void biped_bumped_object(
 	long biped_index,
 	long object_index,
 	real_vector3d const *old_velocity);
+static void biped_melee_impact(
+	long biped_index,
+	real_point3d const *position,
+	real_point3d const *new_position);
 static void biped_falling_damage(
 	long biped_index,
 	real collision_velocity);
@@ -1921,6 +1925,7 @@ static boolean biped_jump(
 				velocity[1] = jump_velocity.j;
 				velocity[2] = jump_velocity.k;
 				bevy_bridge_biped_actor_jump(jumped, velocity);
+				halo_sim_biped_actor_jump(jumped, &jump_velocity); /* port: (halo_sim.c) */
 			}
 		}
 
@@ -4082,84 +4087,8 @@ static void biped_update_moving(
 		if (!TEST_FLAG(out_flags, _biped_physics_out_cannot_stand_bit))
 			biped_update_jumping(biped_index, animation);
 
-		if (biped->unit.melee_attack_state == _unit_melee_attack_impact &&
-			biped->biped.impact_target_object_index != NONE)
-		{
-			struct object_datum *target = object_get(
-				biped->biped.impact_target_object_index);
-			real_vector3d melee_vector;
-
-			match_assert(
-				"c:\\halo\\SOURCE\\units\\bipeds.c",
-				0x87A,
-				global_current_collision_user_depth <
-					MAXIMUM_COLLISION_USER_STACK_DEPTH);
-			global_current_collision_users[global_current_collision_user_depth++] =
-				_collision_user_bipeds;
-
-			vector_from_points3d(
-				&physics.position,
-				&physics.new_position,
-				&melee_vector);
-			if (fast_vector_intersects_sphere(
-				&physics.position,
-				&melee_vector,
-				&target->object.bounding_sphere_center,
-				target->object.bounding_sphere_radius))
-			{
-				struct collision_model_instance instance;
-				struct collision_model_test_vector_result vector_result;
-				struct collision_result collision;
-
-				if (collision_model_instance_new(
-					&instance,
-					biped->biped.impact_target_object_index) &&
-					collision_model_test_vector(
-						&instance,
-						FLAG(_collision_test_front_facing_surfaces_bit) |
-							FLAG(_collision_test_back_facing_surfaces_bit),
-						&physics.position,
-						&melee_vector,
-						&vector_result) &&
-					!collision_test_vector(
-						_collision_test_for_bipeds_passthrough_living_flags,
-						&physics.position,
-						&melee_vector,
-						biped_index,
-						&collision))
-				{
-					real_point3d collision_point;
-					real_plane3d collision_plane;
-
-					point_from_line3d(
-						&physics.position,
-						&melee_vector,
-						vector_result.bsp_result.t,
-						&collision_point);
-					matrix4x3_transform_plane(
-						&instance.matrices[vector_result.node_index],
-						vector_result.bsp_result.plane,
-						&collision_plane);
-					if (vector_result.bsp_result.plane_designator < 0)
-						plane3d_negate(&collision_plane, &collision_plane);
-					unit_impact_melee_damage(
-						biped_index,
-						biped->biped.impact_target_object_index,
-						vector_result.node_index,
-						vector_result.region_index,
-						vector_result.bsp_result.material_index,
-						&collision_point,
-						&collision_plane.n,
-						&collision.location);
-				}
-			}
-
-			match_assert(
-				"c:\\halo\\SOURCE\\units\\bipeds.c",
-				0x8A5,
-				global_current_collision_user_depth > 1);
-			--global_current_collision_user_depth;
-		}
+		/* port: (its own function, which the Rust port calls back) */
+		biped_melee_impact(biped_index, &physics.position, &physics.new_position);
 
 		biped_bumped_object(
 			biped_index,
@@ -4378,7 +4307,38 @@ boolean biped_update(
 				biped->unit.actor_index != NONE && actor_is_leaping(biped->unit.actor_index),
 				recorded_animation_controlling_unit(biped_index));
 		}
-		biped_update_moving(biped_index, &animation);
+		/* port: the Rust port's in place of the game's, or checked against it (halo_sim.c) */
+		if (halo_sim_mode(_halo_sim_biped_moving) == _halo_sim_mode_c)
+		{
+			biped_update_moving(biped_index, &animation);
+		}
+		else
+		{
+			long actor_index = biped->unit.swarm_actor_index != NONE ? biped->unit.swarm_actor_index : biped->unit.actor_index;
+			real_vector3d aiming;
+			float aiming_vector[3];
+
+			(void)actor_index;
+			if (TEST_FLAG(definition->unit.flags, _unit_simple_creature_bit))
+				aiming = biped->object.forward;
+			else
+				unit_get_aiming_vector(biped_index, &aiming);
+			aiming_vector[0] = aiming.i;
+			aiming_vector[1] = aiming.j;
+			aiming_vector[2] = aiming.k;
+			if (!halo_sim_biped_moving_update(biped_index, &animation, aiming_vector,
+				game_difficulty_get_value(_game_difficulty_value_infection_forms),
+				biped->unit.player_index != NONE ? player_get(biped->unit.player_index)->speed_multiplier : 1.f,
+				cinematic_in_progress(),
+				game_players_are_double_speed(),
+				network_coop_player_collisions(),
+				biped->unit.actor_index != NONE && actor_is_leaping(biped->unit.actor_index),
+				recorded_animation_controlling_unit(biped_index)))
+			{
+				biped_update_moving(biped_index, &animation);
+			}
+			halo_sim_biped_moving_check(biped_index, &animation);
+		}
 		bevy_bridge_biped_moving_end(biped_index, animation.state_desired, animation.crouching);
 		biped_verify_object_vectors(biped_index, "post-moving");
 
@@ -4493,4 +4453,118 @@ boolean biped_update(
 	profile_exit(biped_update_section);
 
 	return TRUE;
+}
+
+/* ---------- port: the Rust port's callbacks (halo_sim.c) */
+
+/* a melee attack's impact along a biped's move: the target's damage, if
+the move reaches it unblocked */
+static void biped_melee_impact(
+	long biped_index,
+	real_point3d const *position,
+	real_point3d const *new_position)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	if (biped->unit.melee_attack_state == _unit_melee_attack_impact &&
+		biped->biped.impact_target_object_index != NONE)
+	{
+		struct object_datum *target = object_get(
+			biped->biped.impact_target_object_index);
+		real_vector3d melee_vector;
+
+		match_assert(
+			"c:\\halo\\SOURCE\\units\\bipeds.c",
+			0x87A,
+			global_current_collision_user_depth <
+				MAXIMUM_COLLISION_USER_STACK_DEPTH);
+		global_current_collision_users[global_current_collision_user_depth++] =
+			_collision_user_bipeds;
+
+		vector_from_points3d(
+			position,
+			new_position,
+			&melee_vector);
+		if (fast_vector_intersects_sphere(
+			position,
+			&melee_vector,
+			&target->object.bounding_sphere_center,
+			target->object.bounding_sphere_radius))
+		{
+			struct collision_model_instance instance;
+			struct collision_model_test_vector_result vector_result;
+			struct collision_result collision;
+
+			if (collision_model_instance_new(
+				&instance,
+				biped->biped.impact_target_object_index) &&
+				collision_model_test_vector(
+					&instance,
+					FLAG(_collision_test_front_facing_surfaces_bit) |
+						FLAG(_collision_test_back_facing_surfaces_bit),
+					position,
+					&melee_vector,
+					&vector_result) &&
+				!collision_test_vector(
+					_collision_test_for_bipeds_passthrough_living_flags,
+					position,
+					&melee_vector,
+					biped_index,
+					&collision))
+			{
+				real_point3d collision_point;
+				real_plane3d collision_plane;
+
+				point_from_line3d(
+					position,
+					&melee_vector,
+					vector_result.bsp_result.t,
+					&collision_point);
+				matrix4x3_transform_plane(
+					&instance.matrices[vector_result.node_index],
+					vector_result.bsp_result.plane,
+					&collision_plane);
+				if (vector_result.bsp_result.plane_designator < 0)
+					plane3d_negate(&collision_plane, &collision_plane);
+				unit_impact_melee_damage(
+					biped_index,
+					biped->biped.impact_target_object_index,
+					vector_result.node_index,
+					vector_result.region_index,
+					vector_result.bsp_result.material_index,
+					&collision_point,
+					&collision_plane.n,
+					&collision.location);
+			}
+		}
+
+		match_assert(
+			"c:\\halo\\SOURCE\\units\\bipeds.c",
+			0x8A5,
+			global_current_collision_user_depth > 1);
+		--global_current_collision_user_depth;
+	}
+}
+
+/* its jump's footsteps */
+void biped_rust_jumped(
+	long biped_index)
+{
+	biped_make_footstep(biped_index, _material_effect_biped_jump, 0);
+	biped_make_footstep(biped_index, _material_effect_biped_jump, 1);
+}
+
+void biped_rust_melee_impact(
+	long biped_index,
+	real_point3d const *position,
+	real_point3d const *new_position)
+{
+	biped_melee_impact(biped_index, position, new_position);
+}
+
+void biped_rust_falling_damage(
+	long biped_index,
+	real landing_velocity)
+{
+	biped_falling_damage(biped_index, landing_velocity);
 }

@@ -21,6 +21,7 @@ enum
 	_halo_sim_biped_physics,
 	_halo_sim_vehicle_physics,
 	_halo_sim_vehicle_update,
+	_halo_sim_biped_moving,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -165,5 +166,17 @@ halo_sim_vehicle_update_check, before its animation, compares Rust's
 replay of it */
 int halo_sim_vehicle_update(long vehicle_index);
 void halo_sim_vehicle_update_check(long vehicle_index);
+
+/* bipeds.c's biped_update_moving, with the update's animation data and
+what the rest of the game answers it (bevy_bridge_biped_moving_begin's):
+TRUE when the Rust port moved the biped (what it asks of the game called
+back); in check mode it notes the state the game's update begins with, the
+game's jump notes the AI's answer (halo_sim_biped_actor_jump), and
+halo_sim_biped_moving_check compares Rust's replay of it */
+int halo_sim_biped_moving_update(long biped_index, void *animation, float const *aiming_vector,
+	float difficulty_infection_forms, float speed_multiplier, int cinematic, int double_speed,
+	int coop_player_collisions, int actor_leaping, int recorded_animation);
+void halo_sim_biped_moving_check(long biped_index, void const *animation);
+void halo_sim_biped_actor_jump(int jumped, void const *velocity);
 
 #endif // __HALO_SIM_H

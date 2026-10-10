@@ -5,6 +5,8 @@ defined in the port's tag schema for models.
 
 #include "cseries.h"
 #include "tag_schema_models.c"
+#include "physics/collision_bsp_definitions.h"
+#include "physics/collision_model_definitions.h"
 
 #include <stddef.h>
 
@@ -15,6 +17,7 @@ defined in the port's tag schema for models.
 LAYOUT_SIZE(_object_definition)
 LAYOUT_OFFSET(_object_definition, type)
 LAYOUT_OFFSET(_object_definition, model)
+LAYOUT_OFFSET(_object_definition, collision_model)
 LAYOUT_OFFSET(_object_definition, animation_graph)
 LAYOUT_OFFSET(_object_definition, modifier_shader)
 LAYOUT_OFFSET(_object_definition, attachments)
@@ -56,3 +59,10 @@ LAYOUT_OFFSET(triangle_buffer, type)
 LAYOUT_OFFSET(triangle_buffer, count)
 LAYOUT_OFFSET(triangle_buffer, base_address)
 LAYOUT_OFFSET(triangle_buffer, hardware_format)
+
+/* collision models (collision_models.c) */
+LAYOUT_SIZE(collision_model)
+LAYOUT_OFFSET(collision_model, nodes)
+LAYOUT_SIZE(collision_node)
+LAYOUT_OFFSET(collision_node, region_index)
+LAYOUT_OFFSET(collision_node, bsps)

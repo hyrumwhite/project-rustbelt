@@ -10,6 +10,7 @@ pub mod _object_definition {
     pub const TYPE: usize = 0x0;
     pub const MODEL: usize = 0x28;
     pub const ANIMATION_GRAPH: usize = 0x38;
+    pub const COLLISION_MODEL: usize = 0x70;
     pub const MODIFIER_SHADER: usize = 0x90;
     pub const ATTACHMENTS: usize = 0x140;
     pub const CHANGE_COLORS: usize = 0x164;
@@ -69,6 +70,17 @@ pub mod collision_edge {
     pub const VERTEX_INDICES: usize = 0x0;
     pub const EDGE_INDICES: usize = 0x8;
     pub const SURFACE_INDICES: usize = 0x10;
+}
+
+pub mod collision_model {
+    pub const SIZEOF: usize = 0x298;
+    pub const NODES: usize = 0x28c;
+}
+
+pub mod collision_node {
+    pub const SIZEOF: usize = 0x40;
+    pub const REGION_INDEX: usize = 0x20;
+    pub const BSPS: usize = 0x34;
 }
 
 pub mod collision_surface {

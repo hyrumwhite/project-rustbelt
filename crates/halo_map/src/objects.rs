@@ -162,3 +162,11 @@ pub fn object_model(cache: &CacheFile, definition: TagRef) -> Result<Option<TagR
     let model = root.reference(layout::_object_definition::MODEL)?;
     Ok(model.datum.map(|_| model))
 }
+
+/// The collision model of an object definition tag (any object group).
+pub fn object_collision_model(cache: &CacheFile, definition: TagRef) -> Result<Option<TagRef>> {
+    let Some(datum) = definition.datum else { return Ok(None) };
+    let root = cache.tag_root(datum, crate::groups::OBJECT)?;
+    let model = root.reference(layout::_object_definition::COLLISION_MODEL)?;
+    Ok(model.datum.map(|_| model))
+}

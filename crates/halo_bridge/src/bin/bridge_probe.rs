@@ -180,6 +180,9 @@ struct CollisionCheck {
     pills: u64,
     pills_agreed: u64,
     pill_hits: u64,
+    object_hits: u64,
+    object_hits_agreed: u64,
+    models: std::collections::HashMap<u32, Option<halo_map::collision::CollisionModel>>,
     sphere_features: u64,
     hits: u64,
     largest_t_difference: f32,
@@ -199,6 +202,9 @@ impl CollisionCheck {
             pills: 0,
             pills_agreed: 0,
             pill_hits: 0,
+            object_hits: 0,
+            object_hits_agreed: 0,
+            models: Default::default(),
             sphere_features: 0,
             hits: 0,
             largest_t_difference: 0.0,
@@ -237,6 +243,60 @@ impl CollisionCheck {
             };
             if test.hit != 0 {
                 self.hits += 1;
+            }
+            // the object it hit, if any
+            if test.object_index != u32::MAX {
+                self.object_hits += 1;
+                let object = snapshot.objects.iter().find(|o| o.object_index == test.object_index);
+                let ours = object.and_then(|object| {
+                    let definition = halo_map::TagRef { group: 0, datum: Some(object.definition_index) };
+                    let model = self
+                        .models
+                        .entry(object.definition_index)
+                        .or_insert_with(|| {
+                            let datum = halo_map::objects::object_collision_model(cache, definition).ok()??.datum?;
+                            halo_map::collision::CollisionModel::load(cache, datum).ok()
+                        })
+                        .as_ref()?;
+                    let matrices: Vec<halo_map::model::Matrix4x3> = snapshot
+                        .object_nodes(object)
+                        .iter()
+                        .map(|n| halo_map::model::Matrix4x3 {
+                            scale: n.scale,
+                            forward: n.forward,
+                            left: n.left,
+                            up: n.up,
+                            position: n.position,
+                        })
+                        .collect();
+                    model.test_vector(
+                        &object.region_permutations,
+                        &matrices,
+                        halo_map::collision::flags::FRONT_FACING,
+                        test.point,
+                        test.vector,
+                    )
+                });
+                let agrees = ours.is_some_and(|hit| {
+                    hit.hit.t.to_bits() == test.object_t.to_bits()
+                        && hit.node as i16 == test.object_node_index
+                        && hit.bsp as i16 == test.object_bsp_index
+                        && hit.hit.surface as i32 == test.object_surface_index
+                });
+                if agrees {
+                    self.object_hits_agreed += 1;
+                } else if self.shown < 10 {
+                    self.shown += 1;
+                    println!(
+                        "  object hit differs: game object {:08x} node {} bsp {} t {} surface {}; halo_map {:?}",
+                        test.object_index,
+                        test.object_node_index,
+                        test.object_bsp_index,
+                        test.object_t,
+                        test.object_surface_index,
+                        ours.map(|h| (h.node, h.bsp, h.hit.t, h.hit.surface))
+                    );
+                }
             }
             // the swept sphere
             let pill = bsp.test_pill(test.point, test.pill_vector, test.pill_radius, f32::MAX);
@@ -294,6 +354,10 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        println!(
+            "collision: {} of {} rays that hit an object agree with the game bit for bit (object, node, bsp, surface and t)",
+            self.object_hits_agreed, self.object_hits
+        );
         println!(
             "collision: {} of {} swept spheres agree with the game bit for bit ({} touched the structure)",
             self.pills_agreed, self.pills, self.pill_hits

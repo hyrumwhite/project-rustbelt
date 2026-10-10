@@ -12,7 +12,7 @@
 //!
 //! Points and vectors are the game's: world units, Z up.
 
-use crate::{bsp::Bsp, layout, Error, Result};
+use crate::{bsp::Bsp, layout, model::Matrix4x3, CacheFile, Error, Ptr, Result};
 
 /// `collision_test_flags` (collisions.h): which surfaces a test hits.
 pub mod flags {
@@ -111,9 +111,14 @@ pub struct Hit {
 impl CollisionBsp {
     /// The collision geometry of a loaded structure BSP.
     pub fn load(bsp: &Bsp<'_>) -> Result<Self> {
-        use layout::{bsp2d, bsp2d_node, bsp3d, bsp3d_node, collision_bsp as c, collision_edge, collision_surface, collision_vertex};
-        let blocks = bsp.root.block(layout::structure_bsp::COLLISION_BSP, c::SIZEOF)?;
+        let blocks = bsp.root.block(layout::structure_bsp::COLLISION_BSP, layout::collision_bsp::SIZEOF)?;
         let root = blocks.get(0).ok_or_else(|| Error::Format("the bsp has no collision bsp".into()))?;
+        Self::from_root(root)
+    }
+
+    /// A `collision_bsp` structure's geometry.
+    pub fn from_root(root: Ptr<'_>) -> Result<Self> {
+        use layout::{bsp2d, bsp2d_node, bsp3d, bsp3d_node, collision_bsp as c, collision_edge, collision_surface, collision_vertex};
         let mut out = CollisionBsp::default();
         for node in root.block(c::BSP3D + bsp3d::NODES, bsp3d_node::SIZEOF)?.iter() {
             out.nodes.push(Node3d { plane: node.i32(0)?, children: [node.i32(4)?, node.i32(8)?] });
@@ -325,6 +330,146 @@ impl CollisionBsp {
         test.bsp3d(0, 0);
         test.result
     }
+}
+
+/// An object's collision geometry (a `coll` tag): per node, its region and
+/// a collision BSP per permutation.
+#[derive(Debug, Clone, Default)]
+pub struct CollisionModel {
+    pub nodes: Vec<CollisionNode>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CollisionNode {
+    /// Its region (NONE: never tested).
+    pub region: i16,
+    pub bsps: Vec<CollisionBsp>,
+}
+
+/// What a ray hit of an object.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelHit {
+    pub hit: Hit,
+    pub node: usize,
+    pub region: i16,
+    pub bsp: usize,
+}
+
+/// The most regions an object has (`MAXIMUM_REGIONS_PER_OBJECT`).
+const MAXIMUM_REGIONS_PER_OBJECT: i16 = 8;
+
+impl CollisionModel {
+    /// A collision model tag.
+    pub fn load(cache: &CacheFile, datum: u32) -> Result<Self> {
+        use layout::{collision_model as m, collision_node as n};
+        let root = cache.tag_root(datum, crate::groups::COLLISION_MODEL)?;
+        let mut nodes = Vec::new();
+        for node in root.block(m::NODES, n::SIZEOF)?.iter() {
+            let bsps = node
+                .block(n::BSPS, layout::collision_bsp::SIZEOF)?
+                .iter()
+                .map(CollisionBsp::from_root)
+                .collect::<Result<Vec<_>>>()?;
+            nodes.push(CollisionNode { region: node.i16(n::REGION_INDEX)?, bsps });
+        }
+        Ok(CollisionModel { nodes })
+    }
+
+    /// Halo's ray test against an object (`collision_model_test_vector`):
+    /// each node's collision BSP for the object's permutation of its
+    /// region, in the node's space (`matrices`: the object's node matrices),
+    /// the nearest hit winning.
+    pub fn test_vector(
+        &self,
+        region_permutations: &[u8],
+        matrices: &[Matrix4x3],
+        flags: u32,
+        point: [f32; 3],
+        vector: [f32; 3],
+    ) -> Option<ModelHit> {
+        let mut best: Option<ModelHit> = None;
+        let mut best_t = f32::MAX;
+        // (no more nodes than the object has matrices)
+        for (node_index, node) in self.nodes.iter().enumerate().take(matrices.len()) {
+            if node.region < 0 || node.region >= MAXIMUM_REGIONS_PER_OBJECT {
+                continue;
+            }
+            let Some(&permutation) = region_permutations.get(node.region as usize) else { continue };
+            if node.bsps.is_empty() {
+                continue;
+            }
+            let permutation = (permutation as usize).min(node.bsps.len() - 1);
+            let bsp = &node.bsps[permutation];
+            if bsp.nodes.is_empty() {
+                continue;
+            }
+            let inverse = matrix_inverse(&matrices[node_index]);
+            let local_point = transform_point(&inverse, point);
+            let local_vector = transform_vector(&inverse, vector);
+            if let Some(hit) = bsp.test_vector(flags, local_point, local_vector, best_t) {
+                best_t = hit.t;
+                best = Some(ModelHit { hit, node: node_index, region: node.region, bsp: permutation });
+            }
+        }
+        best
+    }
+}
+
+/// `matrix4x3_inverse`, as the game computes it.
+pub fn matrix_inverse(m: &Matrix4x3) -> Matrix4x3 {
+    if m.scale == 0.0 {
+        return Matrix4x3 { scale: 0.0, forward: [0.0; 3], left: [0.0; 3], up: [0.0; 3], position: [0.0; 3] };
+    }
+    let (mut x, mut y, mut z) = (-m.position[0], -m.position[1], -m.position[2]);
+    let scale = if m.scale != 1.0 {
+        let scale = 1.0 / m.scale;
+        x *= scale;
+        y *= scale;
+        z *= scale;
+        scale
+    } else {
+        1.0
+    };
+    // (the rotation transposed: n[0] forward, n[1] left, n[2] up)
+    let forward = [m.forward[0], m.left[0], m.up[0]];
+    let left = [m.forward[1], m.left[1], m.up[1]];
+    let up = [m.forward[2], m.left[2], m.up[2]];
+    let position = [
+        (x * forward[0]) + y * left[0] + (z * up[0]),
+        (x * forward[1]) + y * left[1] + (z * up[1]),
+        (x * forward[2]) + y * left[2] + (z * up[2]),
+    ];
+    Matrix4x3 { scale, forward, left, up, position }
+}
+
+/// `matrix4x3_transform_point`.
+pub fn transform_point(m: &Matrix4x3, p: [f32; 3]) -> [f32; 3] {
+    let [mut x, mut y, mut z] = p;
+    if m.scale != 1.0 {
+        x *= m.scale;
+        y *= m.scale;
+        z *= m.scale;
+    }
+    [
+        m.up[0] * z + m.left[0] * y + m.forward[0] * x + m.position[0],
+        m.up[1] * z + m.left[1] * y + m.forward[1] * x + m.position[1],
+        m.up[2] * z + m.left[2] * y + m.forward[2] * x + m.position[2],
+    ]
+}
+
+/// `matrix4x3_transform_vector`.
+pub fn transform_vector(m: &Matrix4x3, v: [f32; 3]) -> [f32; 3] {
+    let [mut i, mut j, mut k] = v;
+    if m.scale != 1.0 {
+        i *= m.scale;
+        j *= m.scale;
+        k *= m.scale;
+    }
+    [
+        i * m.forward[0] + j * m.left[0] + k * m.up[0],
+        i * m.forward[1] + j * m.left[1] + k * m.up[1],
+        i * m.forward[2] + j * m.left[2] + k * m.up[2],
+    ]
 }
 
 /// What a sphere test found (`collision_bsp_test_sphere_result`).

@@ -48,6 +48,7 @@ pub mod groups {
     pub const SCENARIO: u32 = fourcc(b"scnr");
     pub const STRUCTURE_BSP: u32 = fourcc(b"sbsp");
     pub const BITMAP: u32 = fourcc(b"bitm");
+    pub const COLLISION_MODEL: u32 = fourcc(b"coll");
     pub const SHADER: u32 = fourcc(b"shdr");
     pub const SHADER_ENVIRONMENT: u32 = fourcc(b"senv");
     pub const SHADER_MODEL: u32 = fourcc(b"soso");

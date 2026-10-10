@@ -1443,7 +1443,7 @@ impl CollisionCheck {
             };
             let world = PhysicsWorld { bsp, clusters, objects: halo_map::biped::BipedObjects::Visited(objects), host: None };
             let mut state = record.before;
-            halo_map::biped_update::biped_update(&world, &definition, &player_information, &inputs, &moving_inputs, stand, &[], &mut state);
+            halo_map::biped_update::biped_update(&world, &definition, &player_information, &inputs, &moving_inputs, stand, &[], &mut state, None);
             if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
                 bsp.breakable_surfaces.set(None);
             }

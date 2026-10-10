@@ -7,6 +7,12 @@
 //! the move, the AI's jump aim and the jump's footsteps, a melee impact,
 //! the AI's notice of a bump, and falling damage.
 //!
+//! The biped update up to its animation (`biped_update`: facing, turning,
+//! the movement as above, and the dead, airborne and landing updates)
+//! runs in Rust too ([`halo_sim_biped_update`]); a limp body's relaxing,
+//! footsteps and the game's random seed (which a tumble draws from) are the
+//! game's ([`UpdateCallbacks`]).
+//!
 //! In check mode the game's own update runs first; Rust then replays it
 //! from the state it began with, on the live world, with what the AI's jump
 //! aim answered the game, as the probe replays a recorded one.
@@ -17,6 +23,7 @@ use halo_map::biped::{BipedObjects, BipedPhysics, StandTest};
 use halo_map::biped_moving::{
     BipedDefinition, MovingHost, MovingInputs, MovingState, PhysicsWorld, PlayerInformation, biped_flags, biped_update_moving,
 };
+use halo_map::biped_update::{UpdateHost, UpdateInputs, UpdateState, biped_update};
 
 use crate::TAGS;
 use crate::world::GameObjects;
@@ -155,14 +162,13 @@ impl MovingHost for LiveHost {
     }
 }
 
-fn run(call: &mut MovingCall, check: bool) -> i32 {
-    let Some(host) = crate::world::host() else { return -1 };
-    let Some(structure) = crate::structure(call.structure_bsp_index, call.breakable_surfaces) else { return -1 };
+/// What the movement reads and its stand test, from the call.
+fn moving_inputs(call: &MovingCall, check: bool) -> Option<(Arc<BipedDefinition>, PlayerInformation, MovingInputs, Option<StandTest>)> {
     let (definition, player_information, frame_info) = {
         let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(tags) = tags.as_mut() else { return -1 };
-        let Some(definition) = tags.biped_definition(call.definition_index) else { return -1 };
-        let Some(player_information) = tags.player_information() else { return -1 };
+        let tags = tags.as_mut()?;
+        let definition = tags.biped_definition(call.definition_index)?;
+        let player_information = tags.player_information()?;
         let frame_info = (call.animation_graph_index != -1 && call.animation_index != -1)
             .then(|| {
                 halo_map::animation::frame_info(&tags.cache, call.animation_graph_index as u32, call.animation_index, call.animation_frame_index)
@@ -207,6 +213,13 @@ fn run(call: &mut MovingCall, check: bool) -> i32 {
             collision_height_standing: definition.collision_height_standing,
             collision_radius: definition.collision_radius,
         });
+    Some((definition, player_information, inputs, stand_test))
+}
+
+fn run(call: &mut MovingCall, check: bool) -> i32 {
+    let Some(host) = crate::world::host() else { return -1 };
+    let Some(structure) = crate::structure(call.structure_bsp_index, call.breakable_surfaces) else { return -1 };
+    let Some((definition, player_information, inputs, stand_test)) = moving_inputs(call, check) else { return -1 };
     let source = GameObjects { host };
     let live = LiveHost { callbacks: host.moving, biped_index: call.biped_index };
     let world = PhysicsWorld {
@@ -249,4 +262,152 @@ pub unsafe extern "C" fn halo_sim_biped_moving_check(call: *mut MovingCall) -> i
     }
     // SAFETY: the caller's call
     run(unsafe { &mut *call }, true)
+}
+
+/// The game's side of a biped's update (halo_sim.c, which writes the state
+/// to the biped first and reads it back after).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct UpdateCallbacks {
+    pub moving_begins: unsafe extern "C" fn(biped: u32, state: *mut UpdateState),
+    pub moving_ends: unsafe extern "C" fn(biped: u32, state: *mut UpdateState),
+    pub limp_body: unsafe extern "C" fn(biped: u32, state: *mut MovingState),
+    pub random_seed: unsafe extern "C" fn() -> u32,
+    pub set_random_seed: unsafe extern "C" fn(seed: u32),
+    pub landing_footsteps: unsafe extern "C" fn(biped: u32, state: *mut MovingState),
+    pub slipping_footsteps: unsafe extern "C" fn(biped: u32, state: *mut MovingState),
+}
+
+/// What a biped's update reads (up to its animation), and where it leaves
+/// it: the movement's inputs (`moving`, whose state is unused), the
+/// update's state, and what it reads of the biped besides.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct UpdateCall {
+    pub moving: MovingCall,
+    pub state: UpdateState,
+    pub dead: u32,
+    pub control_flags: u32,
+    pub aim_without_turning: u32,
+    pub unit_animation_state: i8,
+    pub base_seat_index: i8,
+    pub enhanced_animation: i8,
+    pub limp_body: i8,
+    pub player_index: i32,
+    /// In check mode: the game's random seed as its airborne update began.
+    pub airborne_seed_taken: u32,
+    pub airborne_seed: u32,
+}
+
+/// The running game, as a biped's update calls it.
+struct LiveUpdateHost {
+    callbacks: UpdateCallbacks,
+    biped_index: u32,
+}
+
+impl UpdateHost for LiveUpdateHost {
+    fn moving_begins(&self, state: &mut UpdateState) {
+        // SAFETY: the game's callback, with the update's state
+        unsafe { (self.callbacks.moving_begins)(self.biped_index, state) };
+    }
+
+    fn moving_ends(&self, state: &mut UpdateState) {
+        // SAFETY: as above
+        unsafe { (self.callbacks.moving_ends)(self.biped_index, state) };
+    }
+
+    fn limp_body(&self, state: &mut MovingState) {
+        // SAFETY: as above
+        unsafe { (self.callbacks.limp_body)(self.biped_index, state) };
+    }
+
+    fn random_seed(&self) -> u32 {
+        // SAFETY: as above
+        unsafe { (self.callbacks.random_seed)() }
+    }
+
+    fn set_random_seed(&self, seed: u32) {
+        // SAFETY: as above
+        unsafe { (self.callbacks.set_random_seed)(seed) };
+    }
+
+    fn landing_footsteps(&self, state: &mut MovingState) {
+        // SAFETY: as above
+        unsafe { (self.callbacks.landing_footsteps)(self.biped_index, state) };
+    }
+
+    fn slipping_footsteps(&self, state: &mut MovingState) {
+        // SAFETY: as above
+        unsafe { (self.callbacks.slipping_footsteps)(self.biped_index, state) };
+    }
+}
+
+fn run_update(call: &mut UpdateCall, check: bool) -> i32 {
+    let Some(host) = crate::world::host() else { return -1 };
+    let Some(structure) = crate::structure(call.moving.structure_bsp_index, call.moving.breakable_surfaces) else { return -1 };
+    let Some((definition, player_information, moving, stand_test)) = moving_inputs(&call.moving, check) else { return -1 };
+    let inputs = UpdateInputs {
+        dead: call.dead != 0,
+        control_flags: call.control_flags,
+        aim_without_turning: call.aim_without_turning != 0,
+        unit_animation_state: call.unit_animation_state,
+        base_seat_index: call.base_seat_index,
+        enhanced_animation: call.enhanced_animation != 0,
+        limp_body: call.limp_body != 0,
+        player_index: call.player_index,
+        airborne_seed: (check && call.airborne_seed_taken != 0).then_some(call.airborne_seed),
+    };
+    let source = GameObjects { host };
+    let live = LiveHost { callbacks: host.moving, biped_index: call.moving.biped_index };
+    let live_update = LiveUpdateHost { callbacks: host.biped_update, biped_index: call.moving.biped_index };
+    let world = PhysicsWorld {
+        bsp: &structure.collision,
+        clusters: &structure.clusters,
+        objects: BipedObjects::Live { clusters: &structure.clusters, source: &source },
+        host: if check { None } else { Some(&live) },
+    };
+    let mut state = call.state;
+    let outcome = biped_update(
+        &world,
+        &definition,
+        &player_information,
+        &inputs,
+        &moving,
+        stand_test,
+        &[],
+        &mut state,
+        if check { None } else { Some(&live_update) },
+    );
+    call.state = state;
+    call.moving.aborted_animation = outcome.aborted_animation as u32;
+    0
+}
+
+/// A biped's update on the running game, up to its animation, in place of
+/// the game's. Returns 0 (the state written), or -1 if it can't run (the
+/// game then runs its own; nothing was done).
+///
+/// # Safety
+/// `call` must be valid, its pointers the game's as described.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_biped_update(call: *mut UpdateCall) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_update(unsafe { &mut *call }, false)
+}
+
+/// The check of a biped's update the game ran: Rust's replay of it from the
+/// state it began with. Returns 0 (the state written), or -1.
+///
+/// # Safety
+/// As [`halo_sim_biped_update`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_biped_update_check(call: *mut UpdateCall) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_update(unsafe { &mut *call }, true)
 }

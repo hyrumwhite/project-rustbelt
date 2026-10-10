@@ -10,7 +10,9 @@
 //! first-person weapon's melee animation, and the tick its damage lands)
 //! is here too; the animation update that follows is
 //! [`crate::unit_animation`]. What has no bearing on the biped's state
-//! (footsteps, the AI's falling danger, discarding) is not ported.
+//! (footsteps, a limp body's relaxing onto the ground) is the game's,
+//! through an [`UpdateHost`] in a running game (as is its random seed, which
+//! a tumble draws from); the AI's falling danger and discarding follow.
 
 use crate::biped_moving::{
     self, BipedDefinition, MovingInputs, MovingOutcome, MovingState, PhysicsWorld, PlayerInformation, UNIT_IS_SPECIAL, biped_flags,
@@ -48,6 +50,24 @@ pub struct UpdateInputs {
     pub player_index: i32,
     /// The global random seed as its airborne update begins.
     pub airborne_seed: Option<u32>,
+}
+
+/// A running game, as a biped's update calls it. The state is the update's
+/// as it stands (the host writes it to the biped first, and reads back what
+/// the call changed).
+pub trait UpdateHost {
+    /// Its movement begins (the update's own state written to the biped,
+    /// which the movement's calls may read) and ends.
+    fn moving_begins(&self, state: &mut UpdateState);
+    fn moving_ends(&self, state: &mut UpdateState);
+    /// `biped_limp_noodle_relax_nodes_onto_environment`.
+    fn limp_body(&self, state: &mut MovingState);
+    /// The game's random seed as a tumble draws from it, and after.
+    fn random_seed(&self) -> u32;
+    fn set_random_seed(&self, seed: u32);
+    /// Its landing's and slipping's footsteps (as their time comes).
+    fn landing_footsteps(&self, state: &mut MovingState);
+    fn slipping_footsteps(&self, state: &mut MovingState);
 }
 
 /// `biped_state`.
@@ -89,6 +109,7 @@ pub fn biped_update(
     stand_test: Option<crate::biped::StandTest>,
     directions: &[[f32; 3]],
     state: &mut UpdateState,
+    host: Option<&dyn UpdateHost>,
 ) -> MovingOutcome {
     let flags = definition.flags;
     let mut moving_inputs = *moving;
@@ -137,16 +158,28 @@ pub fn biped_update(
 
     moving_inputs.throttle = state.throttle;
     moving_inputs.desired_facing_vector = state.desired_facing_vector;
+    if let Some(host) = host {
+        host.moving_begins(state);
+    }
     let outcome = biped_moving::biped_update_moving(world, definition, player_information, &moving_inputs, &mut state.moving, stand_test);
+    if let Some(host) = host {
+        host.moving_ends(state);
+    }
 
     if inputs.dead {
-        update_dead(definition, inputs, &moving_inputs, &mut state.moving);
+        update_dead(definition, inputs, &moving_inputs, &mut state.moving, host);
     } else if state.moving.biped_flags & state_flags::AIRBORNE != 0 {
-        update_airborne(definition, inputs, directions, &mut state.moving);
+        update_airborne(definition, inputs, directions, &mut state.moving, host);
     } else if state.moving.landing != NONE as i16 {
         update_landing(&mut state.moving);
+        if let Some(host) = host {
+            host.landing_footsteps(&mut state.moving);
+        }
+    } else if state.moving.biped_flags & state_flags::SLIPPING != 0
+        && let Some(host) = host
+    {
+        host.slipping_footsteps(&mut state.moving);
     }
-    // (slipping: footsteps only)
     outcome
 }
 
@@ -337,9 +370,11 @@ fn apply_rotation(state: &mut MovingState) {
 }
 
 /// `biped_update_dead`: tumbling through the air, then lying dying.
-fn update_dead(definition: &BipedDefinition, inputs: &UpdateInputs, moving: &MovingInputs, state: &mut MovingState) {
+fn update_dead(definition: &BipedDefinition, inputs: &UpdateInputs, moving: &MovingInputs, state: &mut MovingState, host: Option<&dyn UpdateHost>) {
     if inputs.limp_body {
-        // (biped_limp_noodle_relax_nodes_onto_environment: not ported)
+        if let Some(host) = host {
+            host.limp_body(state);
+        }
         state.animation_crouching = 0;
         return;
     }
@@ -358,7 +393,13 @@ fn update_dead(definition: &BipedDefinition, inputs: &UpdateInputs, moving: &Mov
 }
 
 /// `biped_update_airborne`: a biped thrown through the air may tumble.
-fn update_airborne(definition: &BipedDefinition, inputs: &UpdateInputs, directions: &[[f32; 3]], state: &mut MovingState) {
+fn update_airborne(
+    definition: &BipedDefinition,
+    inputs: &UpdateInputs,
+    directions: &[[f32; 3]],
+    state: &mut MovingState,
+    host: Option<&dyn UpdateHost>,
+) {
     let _ = directions;
     let mut flying = false;
     // (biped_flying_through_air)
@@ -366,7 +407,7 @@ fn update_airborne(definition: &BipedDefinition, inputs: &UpdateInputs, directio
         flying = true;
         if definition.flags & biped_flags::ROTATE_WHILE_AIRBORNE != 0 {
             if inputs.unit_animation_state != STATE_MELEE_AIRBORNE && inputs.unit_animation_state != STATE_LEAP_MELEE {
-                let mut seed = inputs.airborne_seed.unwrap_or(0);
+                let mut seed = host.map_or(inputs.airborne_seed.unwrap_or(0), |h| h.random_seed());
                 let mut real_random = || {
                     seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     (seed >> 16) as f32 / 65535.0
@@ -387,6 +428,9 @@ fn update_airborne(definition: &BipedDefinition, inputs: &UpdateInputs, directio
                 }
                 let v = state.angular_velocity;
                 state.angular_velocity = [axis[0] * impulse + v[0], axis[1] * impulse + v[1], axis[2] * impulse + v[2]];
+                if let Some(host) = host {
+                    host.set_random_seed(seed);
+                }
             }
             apply_rotation(state);
         }

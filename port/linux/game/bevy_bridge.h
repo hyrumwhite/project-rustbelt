@@ -71,6 +71,12 @@ its airborne update begins */
 void bevy_bridge_biped_update_begin(long biped_index, int enhanced_animation);
 void bevy_bridge_biped_update_end(long biped_index, char state_desired, int crouching);
 void bevy_bridge_biped_update_airborne(void);
+/* units.c: each unit_update_animation of a biped recorded
+(bevy_bridge_unit_animation_record), with the side effects it had */
+void bevy_bridge_unit_animation_begin(long unit_index, char state_desired, int crouching,
+	short magic_base_seat_index, char const *weapon_label);
+void bevy_bridge_unit_animation_end(long unit_index, short result);
+void bevy_bridge_unit_animation_side_effect(unsigned long effect);
 
 /* collisions.c: collision_get_features_in_sphere's calls, and each object
 object_get_features_in_sphere visits, during a recorded biped update */

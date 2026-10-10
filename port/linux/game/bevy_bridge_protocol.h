@@ -40,7 +40,8 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 20
+#define BEVY_BRIDGE_VERSION 21
+#define BEVY_BRIDGE_UNIT_ANIMATION_RECORDS 1024
 #define BEVY_BRIDGE_BIPED_UPDATE_RECORDS 1024
 #define BEVY_BRIDGE_BIPED_MOVING_RECORDS 1024
 #define BEVY_BRIDGE_FEATURE_OBJECTS 16384
@@ -499,6 +500,69 @@ struct bevy_bridge_biped_update_record
 	struct bevy_bridge_biped_update_state after;
 };
 
+/* what unit_update_animation changes of a unit: its unit animation, and its
+object animation and interpolation */
+struct bevy_bridge_unit_animation_state
+{
+	unsigned short flags;
+	short aiming_screen_index;
+	short looking_screen_index;
+	short action_animation_index;
+	short action_animation_frame_index;
+	short overlay_action_animation_index;
+	short overlay_action_animation_frame_index;
+	short soft_ping_animation_index;
+	short soft_ping_animation_frame_index;
+	short object_animation_index;
+	short object_animation_frame_index;
+	short interpolation_frame_index;
+	short interpolation_frame_count;
+	char seat_index;
+	char weapon_index;
+	char weapon_type_index;
+	char state;
+	char action;
+	char overlay_action;
+	char base_seat_index;
+	char pad;
+	short pad2;
+	long object_animation_graph_index;
+};
+
+/* one unit_update_animation of a biped (with game.bevy_bridge_ray_tests):
+the state before and after, what it reads (the animation update it is
+given, the AI's animation state, the magic seats, force alert, flaming, the
+current weapon's label, the global random seed), the side effects it had
+(bits: 1 grenade released, 2 melee damage, 4 destroyed, 8 limp body
+started, 16 seat exited, 32 seat entered, 64 grenade released on changing
+state) and what it returned */
+struct bevy_bridge_unit_animation_record
+{
+	unsigned long sequence;
+	unsigned long unit_index;
+	unsigned long definition_index;
+	unsigned long random_seed;
+	char state_desired;
+	char crouching;
+	char desired_state;
+	char dead;
+	char parented;
+	char player;
+	char force_alert;
+	char flaming;
+	short magic_base_seat_index;
+	char magic_seat_index;
+	char at_rest;
+	char airborne;
+	char pad[3];
+	char weapon_label[32];
+	unsigned long side_effects;
+	short result;
+	short pad2;
+	struct bevy_bridge_unit_animation_state before;
+	struct bevy_bridge_unit_animation_state after;
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -544,6 +608,10 @@ struct bevy_bridge_shared
 	unsigned long biped_update_record_count;
 	unsigned long biped_update_pad;
 	struct bevy_bridge_biped_update_record biped_update_records[BEVY_BRIDGE_BIPED_UPDATE_RECORDS];
+	/* unit animation updates (a ring, as the projectile records) */
+	unsigned long unit_animation_record_count;
+	unsigned long unit_animation_pad;
+	struct bevy_bridge_unit_animation_record unit_animation_records[BEVY_BRIDGE_UNIT_ANIMATION_RECORDS];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

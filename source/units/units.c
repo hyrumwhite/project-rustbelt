@@ -695,6 +695,7 @@ symbols in this file:
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
 #include "coop_scripts.h" /* port: port/linux/game/coop_scripts.c */
 #include "coop_enemies.h" /* port: port/linux/game/coop_enemies.c */
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 /* port: the control and animation impulses the host's actors give their
 units go to the clients' copies (port/linux/game/network_actors.c) */
@@ -10181,6 +10182,9 @@ short unit_update_animation(
 	desired_state = data->state_desired;
 	result = 0;
 	apply_state = FALSE;
+	/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+	bevy_bridge_unit_animation_begin(unit_index, data->state_desired, data->crouching,
+		magic_base_animation_seat_index, unit_get_current_weapon_label(unit_index));
 
 	match_assert(
 		"c:\\halo\\SOURCE\\units\\units.c",
@@ -10295,11 +10299,13 @@ short unit_update_animation(
 			switch (unit->unit.animation.state)
 			{
 			case _unit_state_throw_grenade:
+				bevy_bridge_unit_animation_side_effect(1); /* port: (bevy_bridge.c) */
 				unit_throw_grenade_release(unit_index, FALSE);
 				break;
 			case _unit_state_melee_attack:
 			case _unit_state_melee_airborne:
 			case _unit_state_leap_melee:
+				bevy_bridge_unit_animation_side_effect(2); /* port: (bevy_bridge.c) */
 				unit_cause_melee_damage(
 					unit_index,
 					FALSE,
@@ -10345,6 +10351,7 @@ short unit_update_animation(
 							_biped_has_no_dying_airborne_bit))
 					{
 	destroy_unit:
+						bevy_bridge_unit_animation_side_effect(4); /* port: (bevy_bridge.c) */
 						unit_destroy(unit_index);
 						goto finish_dying_animation;
 					}
@@ -10352,6 +10359,7 @@ short unit_update_animation(
 
 				if (unit->object.type==_object_type_biped)
 				{
+					bevy_bridge_unit_animation_side_effect(8); /* port: (bevy_bridge.c) */
 					biped_start_limp_body_physics(unit_index);
 				}
 
@@ -10383,6 +10391,7 @@ short unit_update_animation(
 					object_get_world_matrix(unit_index, &old_world_matrix),
 					&exit_velocity,
 					&exit_velocity);
+				bevy_bridge_unit_animation_side_effect(16); /* port: (bevy_bridge.c) */
 				unit_exit_seat_end(unit_index);
 				add_vectors3d(
 					&unit->object.translational_velocity,
@@ -10396,6 +10405,7 @@ short unit_update_animation(
 				break;
 
 			case _unit_state_entering_seat:
+				bevy_bridge_unit_animation_side_effect(32); /* port: (bevy_bridge.c) */
 				parent_unit = unit_get(unit->object.parent_object_index);
 				parent_definition = unit_definition_get(parent_unit->definition_index);
 				seat = TAG_BLOCK_GET_ELEMENT(
@@ -10469,6 +10479,7 @@ short unit_update_animation(
 		unit_animation_set_state(unit_index, desired_state);
 	}
 
+	bevy_bridge_unit_animation_end(unit_index, result); /* port: (bevy_bridge.c) */
 	return result;
 }
 
@@ -10517,6 +10528,7 @@ static boolean unit_animation_set_state(
 		if (unit->unit.animation.state ==
 			_unit_state_throw_grenade)
 		{
+			bevy_bridge_unit_animation_side_effect(64); /* port: (bevy_bridge.c) */
 			unit_throw_grenade_release(unit_index, TRUE);
 		}
 

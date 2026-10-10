@@ -1111,3 +1111,100 @@ void bevy_bridge_biped_update_airborne(void)
 	bevy_bridge_biped_update.record.airborne_seed_taken = 1;
 	bevy_bridge_biped_update.record.airborne_seed = get_random_seed();
 }
+
+/* ---------- unit animation updates */
+
+static struct
+{
+	boolean active;
+	struct bevy_bridge_unit_animation_record record;
+} bevy_bridge_unit_animation;
+
+static void bevy_bridge_unit_animation_state(long unit_index, struct bevy_bridge_unit_animation_state *state)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+
+	memset(state, 0, sizeof(*state));
+	state->flags = unit->unit.animation.flags;
+	state->aiming_screen_index = unit->unit.animation.aiming_screen_index;
+	state->looking_screen_index = unit->unit.animation.looking_screen_index;
+	state->action_animation_index = unit->unit.animation.action_animation.index;
+	state->action_animation_frame_index = unit->unit.animation.action_animation.frame_index;
+	state->overlay_action_animation_index = unit->unit.animation.overlay_action_animation.index;
+	state->overlay_action_animation_frame_index = unit->unit.animation.overlay_action_animation.frame_index;
+	state->soft_ping_animation_index = unit->unit.animation.soft_ping_animation.index;
+	state->soft_ping_animation_frame_index = unit->unit.animation.soft_ping_animation.frame_index;
+	state->object_animation_index = unit->object.animation.state.index;
+	state->object_animation_frame_index = unit->object.animation.state.frame_index;
+	state->interpolation_frame_index = unit->object.animation.interpolation_frame_index;
+	state->interpolation_frame_count = unit->object.animation.interpolation_frame_count;
+	state->seat_index = unit->unit.animation.seat_index;
+	state->weapon_index = unit->unit.animation.weapon_index;
+	state->weapon_type_index = unit->unit.animation.weapon_type_index;
+	state->state = unit->unit.animation.state;
+	state->action = unit->unit.animation.action;
+	state->overlay_action = unit->unit.animation.overlay_action;
+	state->base_seat_index = unit->unit.animation.base_seat_index;
+	state->object_animation_graph_index = unit->object.animation.animation_graph_index;
+}
+
+void bevy_bridge_unit_animation_begin(long unit_index, char state_desired, int crouching,
+	short magic_base_seat_index, char const *weapon_label)
+{
+	struct bevy_bridge_unit_animation_record *record = &bevy_bridge_unit_animation.record;
+	struct unit_datum *unit;
+
+	if (!bevy_bridge_projectile_recording())
+		return;
+	unit = unit_get(unit_index);
+	if (unit->object.type != _object_type_biped)
+		return;
+	memset(record, 0, sizeof(*record));
+	record->unit_index = (unsigned long)unit_index;
+	record->definition_index = (unsigned long)unit->definition_index;
+	record->random_seed = get_random_seed();
+	record->state_desired = state_desired;
+	record->crouching = crouching ? 1 : 0;
+	record->desired_state = unit->unit.animation.desired_state;
+	record->dead = TEST_FLAG(unit->object.damage_flags, _object_dead_bit) ? 1 : 0;
+	record->parented = unit->object.parent_object_index != NONE;
+	record->player = unit->unit.player_index != NONE;
+	record->force_alert = TEST_FLAG(unit->unit.control_flags, _unit_control_force_alert_bit) ? 1 : 0;
+	record->flaming = unit->unit.flaming_death_delay > 0;
+	record->magic_base_seat_index = magic_base_seat_index;
+	record->magic_seat_index = unit->unit.magic_seat_index;
+	record->at_rest = TEST_FLAG(unit->object.flags, _object_at_rest_bit) ? 1 : 0;
+	record->airborne = TEST_FLAG(biped_get(unit_index)->biped.flags, _biped_airborne_bit) ? 1 : 0;
+	if (weapon_label)
+	{
+		strncpy(record->weapon_label, weapon_label, sizeof(record->weapon_label) - 1);
+	}
+	bevy_bridge_unit_animation_state(unit_index, &record->before);
+	bevy_bridge_unit_animation.active = TRUE;
+}
+
+void bevy_bridge_unit_animation_end(long unit_index, short result)
+{
+	struct bevy_bridge_unit_animation_record *record = &bevy_bridge_unit_animation.record;
+	unsigned long count;
+
+	if (!bevy_bridge_unit_animation.active)
+		return;
+	bevy_bridge_unit_animation.active = FALSE;
+	record->result = result;
+	/* (a destroyed unit may be gone) */
+	if (record->side_effects & 4)
+		record->after = record->before;
+	else
+		bevy_bridge_unit_animation_state(unit_index, &record->after);
+	count = bevy_bridge_shared->unit_animation_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->unit_animation_records[count % BEVY_BRIDGE_UNIT_ANIMATION_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->unit_animation_record_count, count + 1, __ATOMIC_RELEASE);
+}
+
+void bevy_bridge_unit_animation_side_effect(unsigned long effect)
+{
+	if (bevy_bridge_unit_animation.active)
+		bevy_bridge_unit_animation.record.side_effects |= effect;
+}

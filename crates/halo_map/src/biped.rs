@@ -135,6 +135,24 @@ pub enum BipedObjects<'a> {
     Live { clusters: &'a crate::collision::StructureClusters, source: &'a dyn features::FeatureObjectSource },
 }
 
+impl<'a> BipedObjects<'a> {
+    /// The objects the `call`th gathering of features visits.
+    pub fn visited(&self, call: usize) -> features::Objects<'a> {
+        match *self {
+            BipedObjects::Visited(objects) => features::Objects::Visited(objects.get(call).map(Vec::as_slice).unwrap_or(&[])),
+            BipedObjects::Live { clusters, source } => features::Objects::Live { clusters, source },
+        }
+    }
+
+    /// An object, as the broad phase sees it.
+    pub fn object(&self, index: i32) -> Option<FeatureObject> {
+        match self {
+            BipedObjects::Visited(objects) => objects.iter().flatten().find(|o| o.index == index).cloned(),
+            BipedObjects::Live { source, .. } => source.feature_object(index as u32),
+        }
+    }
+}
+
 /// `biped_update_physics`. `stand_test` is what the stand test needs, for a
 /// player's biped it applies to.
 pub fn biped_update_physics(
@@ -143,14 +161,8 @@ pub fn biped_update_physics(
     stand_test: Option<StandTest>,
     objects: BipedObjects<'_>,
 ) {
-    let visited = |call: usize| match objects {
-        BipedObjects::Visited(objects) => features::Objects::Visited(objects.get(call).map(Vec::as_slice).unwrap_or(&[])),
-        BipedObjects::Live { clusters, source } => features::Objects::Live { clusters, source },
-    };
-    let object = |index: i32| match objects {
-        BipedObjects::Visited(objects) => objects.iter().flatten().find(|o| o.index == index).cloned(),
-        BipedObjects::Live { source, .. } => source.feature_object(index as u32),
-    };
+    let visited = |call: usize| objects.visited(call);
+    let object = |index: i32| objects.object(index);
     let mut facing = [0.0f32; 2];
     let climbing = physics.in_flags & in_flags::CLIMB_ANYTHING != 0;
     let in_flags = physics.in_flags;

@@ -59,6 +59,7 @@ pub struct Host {
     pub projectile: crate::projectiles::ProjectileCallbacks,
     /// A gathering of collision features begins (the bridge counts them).
     pub features_call: unsafe extern "C" fn(),
+    pub vehicle_physics: crate::vehicles::VehiclePhysicsCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);

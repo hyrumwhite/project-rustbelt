@@ -2037,7 +2037,13 @@ impl CollisionCheck {
             let env = vu::VehicleUpdateWorld {
                 physics: match (&physics_world, &physics_collision_world) {
                     (Some((feature_objects, _, others)), Some(world)) => {
-                        Some(vp::VehiclePhysicsWorld { world, feature_objects, materials, others })
+                        Some(vp::VehiclePhysicsWorld {
+                            world,
+                            feature_objects: halo_map::biped::BipedObjects::Visited(feature_objects),
+                            materials,
+                            others,
+                            host: None,
+                        })
                     }
                     _ => None,
                 },
@@ -2212,9 +2218,10 @@ impl CollisionCheck {
             let world = halo_map::collision::World { collision: bsp, clusters, objects: &world_objects, source: None };
             let env = vp::VehiclePhysicsWorld {
                 world: &world,
-                feature_objects: &feature_objects,
+                feature_objects: halo_map::biped::BipedObjects::Visited(&feature_objects),
                 materials: self.material_physics.as_deref().unwrap_or(&[]),
                 others: &others,
+                host: None,
             };
             let outcome = vp::physics_update(&physics, &mut state, &inputs, &env);
             if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {

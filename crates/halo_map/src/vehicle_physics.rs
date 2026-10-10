@@ -459,6 +459,7 @@ pub struct MassPoint {
 const _: () = assert!(std::mem::size_of::<MassPoint>() == 304);
 
 /// What a vehicle's simulation reads and changes of it.
+#[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct VehiclePhysicsState {
     pub position: [f32; 3],
@@ -488,14 +489,31 @@ pub struct OtherVehicle {
 }
 
 /// The world a vehicle's simulation tests: the structure and objects, the
-/// objects each `collision_get_features_in_sphere` call visited (its first
-/// mass points' ground planes), the materials' physics, and the vehicles
-/// its unit collisions consider.
+/// objects each `collision_get_features_in_sphere` call visits (its mass
+/// points' ground planes), the materials' physics, and the vehicles its
+/// unit collisions consider; and, in a running game, the host that moves it.
 pub struct VehiclePhysicsWorld<'a> {
     pub world: &'a crate::collision::World<'a>,
-    pub feature_objects: &'a [Vec<crate::features::FeatureObject>],
+    pub feature_objects: crate::biped::BipedObjects<'a>,
     pub materials: &'a [MaterialPhysics],
     pub others: &'a [OtherVehicle],
+    pub host: Option<&'a dyn VehiclePhysicsHost>,
+}
+
+/// A running game, as a vehicle's simulation calls it: what moves the
+/// vehicle, and what its unit collisions do to it and the objects it hits.
+/// The state is the update's as it stands (the host writes it to the
+/// vehicle first and reads back what the call changed).
+pub trait VehiclePhysicsHost {
+    /// The new physics' move (`object_set_position`): to `position`, facing
+    /// `forward` and `up`, its location found from its new pose.
+    fn set_position(&self, state: &mut VehiclePhysicsState, position: [f32; 3], forward: [f32; 3], up: [f32; 3]);
+    /// The old physics' move (`object_translate`) along its velocity, its
+    /// location found along the line.
+    fn translate(&self, state: &mut VehiclePhysicsState, new_position: [f32; 3]);
+    /// `physics_compute_unit_collisions`: the collision forces between it
+    /// and the bipeds and vehicles it hits.
+    fn unit_collisions(&self, state: &mut VehiclePhysicsState);
 }
 
 /// What an update reads besides its state: the vehicle's index, the
@@ -667,7 +685,7 @@ fn compute(
         let p = mass_point.position;
         let plane = mass_point.ground_plane;
         mass_point.ground_depth = definition.radius - (p[0] * plane[0] + p[1] * plane[1] + p[2] * plane[2] - plane[3]);
-        let objects = env.feature_objects.get(index).map(Vec::as_slice).unwrap_or(&[]);
+        let objects = env.feature_objects.visited(index);
         let features = crate::features::features_in_sphere(
             collision,
             COLLISION_TEST_FOR_BIPEDS_DEAD,
@@ -676,18 +694,18 @@ fn compute(
             0.0,
             definition.radius,
             vehicle_index as i32,
-            crate::features::Objects::Visited(objects),
+            objects,
         );
         if !features.is_empty()
             && let Some(hit) = features.test_point(mass_point.position)
         {
             mass_point.ground_plane = hit.plane;
             mass_point.ground_depth = hit.depth;
-            let object = (hit.source.object != -1).then(|| objects.iter().find(|o| o.index == hit.source.object)).flatten();
+            let object = (hit.source.object != -1).then(|| objects.object(hit.source.object)).flatten();
             mass_point.ground_material_type = if hit.source.material == NONE {
                 NONE
             } else if hit.source.object != -1 {
-                object.and_then(|o| o.model.as_ref()).map_or(NONE, |m| m.material_type(hit.source.material))
+                object.as_ref().and_then(|o| o.model.as_ref()).map_or(NONE, |m| m.material_type(hit.source.material))
             } else {
                 clusters.structure_material_type(hit.source.material)
             };
@@ -1022,6 +1040,11 @@ pub fn physics_update(
             }
         }
         let Some((worst_delta, worst_collision)) = worst else {
+            outcome.moved = true;
+            if let Some(host) = env.host {
+                host.set_position(state, position, forward, up);
+                break;
+            }
             // (object_set_position: its location from the new pose's
             // bounding sphere centre, else its position)
             state.position = position;
@@ -1082,6 +1105,11 @@ pub fn physics_update(
 
     // (physics_compute_unit_collisions: its own collision force against
     // other vehicles)
+    if let Some(host) = env.host {
+        host.unit_collisions(state);
+        outcome.mass_points = mass_points;
+        return outcome;
+    }
     let self_matrix = instance_matrix(state.position, state.forward, state.up, physics.center_of_mass);
     let self_absolute = inputs.index & 0xffff;
     for other in env.others {
@@ -1154,13 +1182,17 @@ fn physics_update_old(
 
     // (scenario_location_from_line: the end point's; object_translate)
     let new_position = add3(state.position, state.translational_velocity);
-    let location = env.world.clusters.location_from_point(env.world.collision, new_position);
-    state.position = new_position;
-    if location.1 != NONE {
-        (state.location_leaf, state.location_cluster) = location;
-        state.object_flags &= !object_flags::OUTSIDE_OF_MAP;
+    if let Some(host) = env.host {
+        host.translate(state, new_position);
     } else {
-        state.object_flags |= object_flags::OUTSIDE_OF_MAP;
+        let location = env.world.clusters.location_from_point(env.world.collision, new_position);
+        state.position = new_position;
+        if location.1 != NONE {
+            (state.location_leaf, state.location_cluster) = location;
+            state.object_flags &= !object_flags::OUTSIDE_OF_MAP;
+        } else {
+            state.object_flags |= object_flags::OUTSIDE_OF_MAP;
+        }
     }
     outcome.moved = true;
     let mut rotation_axis = state.angular_velocity;

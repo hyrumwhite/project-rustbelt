@@ -780,7 +780,7 @@ pub fn biped_update_moving(
     physics.in_flags = flags_in;
     outcome.physics = Some(physics);
 
-    crate::biped::biped_update_physics(world.bsp, &mut physics, stand_test, world.objects);
+    crate::biped::biped_update_physics(world.bsp, &mut physics, stand_test, crate::biped::BipedObjects::Visited(world.objects));
 
     if physics.elevator_object_index == NONE {
         if state.elevator_ticks <= 0 {

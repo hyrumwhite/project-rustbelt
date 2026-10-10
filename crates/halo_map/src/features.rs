@@ -21,6 +21,7 @@ use crate::collision::{
     CollisionBsp, CollisionModel, SphereFeatures, matrix_inverse, test_flags, transform_plane, transform_point, transform_vector,
 };
 use crate::model::Matrix4x3;
+use crate::collision::StructureClusters;
 
 /// `MAXIMUM_COLLISION_FEATURES_PER_TEST`.
 pub const MAXIMUM_FEATURES: usize = 256;
@@ -383,11 +384,42 @@ const SKIP_PASSTHROUGH_BIPEDS: u32 = 1 << 21;
 const USE_VEHICLE_PHYSICS: u32 = 1 << 22;
 const SKIP_PLAYER_BIPEDS: u32 = 1 << 23;
 
+/// The objects a feature gathering's broad phase visits.
+#[derive(Clone, Copy)]
+pub enum Objects<'a> {
+    /// As the game recorded them, in the order it visited them.
+    Visited(&'a [FeatureObject]),
+    /// A running game's: the collideable objects of the clusters the sphere
+    /// reaches (each once), and the children of those it reaches.
+    Live { clusters: &'a StructureClusters, source: &'a dyn FeatureObjectSource },
+}
+
+impl<'a> Objects<'a> {
+    /// An object, as the broad phase sees it.
+    pub fn object(&self, index: i32) -> Option<FeatureObject> {
+        match self {
+            Objects::Visited(objects) => objects.iter().find(|o| o.index == index).cloned(),
+            Objects::Live { source, .. } => source.feature_object(index as u32),
+        }
+    }
+}
+
+/// The objects of a running game as feature gathering finds them: the
+/// objects registered in a cluster (its collideable cluster partition, in
+/// its order), each object's state, and its children (its first child,
+/// then that child's siblings).
+pub trait FeatureObjectSource {
+    /// A gathering of features begins (for the game's recording of it).
+    fn features_call(&self) {}
+    fn cluster_objects(&self, cluster: i16, out: &mut Vec<u32>);
+    fn feature_object(&self, index: u32) -> Option<FeatureObject>;
+    fn children(&self, index: u32, out: &mut Vec<u32>);
+}
+
 /// `collision_get_features_in_sphere`: the features within `radius` of
 /// `center` grown by a pill of `height` and `width`, the structure's and
-/// then those of `objects`, the objects the broad phase visits (from the
-/// clusters the sphere reaches, each with its children), in the order it
-/// visits them.
+/// then those of the objects the broad phase visits (from the clusters the
+/// sphere reaches, each with its children), in the order it visits them.
 #[allow(clippy::too_many_arguments)]
 pub fn features_in_sphere(
     bsp: &CollisionBsp,
@@ -397,9 +429,12 @@ pub fn features_in_sphere(
     height: f32,
     width: f32,
     ignore_object: i32,
-    objects: &[FeatureObject],
+    objects: Objects<'_>,
 ) -> FeatureList {
     let mut features = FeatureList::default();
+    if let Objects::Live { source, .. } = objects {
+        source.features_call();
+    }
     if flags & (test_flags::STRUCTURE | test_flags::MEDIA | test_flags::OBJECTS) != 0 {
         let radius = radius + 0.0625;
         let result = bsp.test_sphere(center, radius);
@@ -410,8 +445,33 @@ pub fn features_in_sphere(
             if flags & test_flags::ALL_OBJECT_TYPES == 0 {
                 flags |= test_flags::ALL_OBJECT_TYPES;
             }
-            for object in objects {
-                features.from_object(flags, object, center, radius, height, width, ignore_object);
+            match objects {
+                Objects::Visited(objects) => {
+                    for object in objects {
+                        if features.object_reached(object, center, radius, ignore_object) {
+                            features.from_object(flags, object, center, radius, height, width);
+                        }
+                    }
+                }
+                Objects::Live { clusters, source } => {
+                    // (the game's own cluster lists, top-level objects marked once)
+                    let mut marked_clusters = std::collections::HashSet::new();
+                    let mut marked_objects = std::collections::HashSet::new();
+                    let mut in_cluster = Vec::new();
+                    for &leaf in &result.leaves {
+                        let cluster = clusters.cluster_from_leaf(leaf);
+                        if cluster < 0 || !marked_clusters.insert(cluster) {
+                            continue;
+                        }
+                        in_cluster.clear();
+                        source.cluster_objects(cluster, &mut in_cluster);
+                        for &index in &in_cluster {
+                            if marked_objects.insert(index) {
+                                features.from_live_object(flags, source, index, center, radius, height, width, ignore_object);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -419,20 +479,49 @@ pub fn features_in_sphere(
 }
 
 impl FeatureList {
-    /// `object_get_features_in_sphere`, for one object.
+    /// `object_get_features_in_sphere` on a running game's object: its
+    /// features, then (if the sphere reaches it) its children's.
     #[allow(clippy::too_many_arguments)]
-    fn from_object(&mut self, flags: u32, object: &FeatureObject, center: [f32; 3], radius: f32, height: f32, width: f32, ignore_object: i32) {
+    fn from_live_object(
+        &mut self,
+        flags: u32,
+        source: &dyn FeatureObjectSource,
+        index: u32,
+        center: [f32; 3],
+        radius: f32,
+        height: f32,
+        width: f32,
+        ignore_object: i32,
+    ) {
+        let Some(object) = source.feature_object(index) else { return };
+        if !self.object_reached(&object, center, radius, ignore_object) {
+            return;
+        }
+        self.from_object(flags, &object, center, radius, height, width);
+        let mut children = Vec::new();
+        source.children(index, &mut children);
+        for child in children {
+            self.from_live_object(flags, source, child, center, radius, height, width, ignore_object);
+        }
+    }
+
+    /// Whether `object_get_features_in_sphere` reaches an object (and so
+    /// its features, if of a type tested, and its children).
+    fn object_reached(&self, object: &FeatureObject, center: [f32; 3], radius: f32, ignore_object: i32) -> bool {
         if object.index == ignore_object
             || object.flags & OBJECT_INVISIBLE != 0
             || object.flags & OBJECT_NO_COLLISIONS != 0
             || (object.dead && object.kind == OBJECT_TYPE_BIPED)
         {
-            return;
+            return false;
         }
         let reach = object.bounding_radius + radius;
-        if !(magnitude_squared3(sub3(object.bounding_center, center)) <= reach * reach) {
-            return;
-        }
+        magnitude_squared3(sub3(object.bounding_center, center)) <= reach * reach
+    }
+
+    /// `object_get_features_in_sphere`'s features of an object it reaches.
+    #[allow(clippy::too_many_arguments)]
+    fn from_object(&mut self, flags: u32, object: &FeatureObject, center: [f32; 3], radius: f32, height: f32, width: f32) {
         if object.kind < 0 || flags & (1 << (object.kind as u32 + test_flags::FIRST_OBJECT_TYPE)) == 0 {
             return;
         }
@@ -497,7 +586,7 @@ pub fn move_pill(
     height: f32,
     radius: f32,
     ignore_object: i32,
-    objects: &[FeatureObject],
+    objects: Objects<'_>,
     maximum_collision_count: usize,
 ) -> ([f32; 3], [f32; 3], Vec<CollisionPlane>) {
     let center = [

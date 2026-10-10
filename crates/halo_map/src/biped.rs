@@ -125,18 +125,32 @@ fn flying_axes(forward: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     (left, up)
 }
 
+/// The objects a biped's physics collides with.
+#[derive(Clone, Copy)]
+pub enum BipedObjects<'a> {
+    /// For each time it gathers collision features (moving, then the stand
+    /// test), the objects the game's broad phase visited.
+    Visited(&'a [Vec<FeatureObject>]),
+    /// A running game's, found by the broad phase.
+    Live { clusters: &'a crate::collision::StructureClusters, source: &'a dyn features::FeatureObjectSource },
+}
+
 /// `biped_update_physics`. `stand_test` is what the stand test needs, for a
-/// player's biped it applies to; `objects` are, for each time it gathers
-/// collision features (moving, then the stand test), the objects the broad
-/// phase visits.
+/// player's biped it applies to.
 pub fn biped_update_physics(
     bsp: &CollisionBsp,
     physics: &mut BipedPhysics,
     stand_test: Option<StandTest>,
-    objects: &[Vec<FeatureObject>],
+    objects: BipedObjects<'_>,
 ) {
-    let visited = |call: usize| objects.get(call).map(Vec::as_slice).unwrap_or(&[]);
-    let object = |index: i32| objects.iter().flatten().find(|o| o.index == index);
+    let visited = |call: usize| match objects {
+        BipedObjects::Visited(objects) => features::Objects::Visited(objects.get(call).map(Vec::as_slice).unwrap_or(&[])),
+        BipedObjects::Live { clusters, source } => features::Objects::Live { clusters, source },
+    };
+    let object = |index: i32| match objects {
+        BipedObjects::Visited(objects) => objects.iter().flatten().find(|o| o.index == index).cloned(),
+        BipedObjects::Live { source, .. } => source.feature_object(index as u32),
+    };
     let mut facing = [0.0f32; 2];
     let climbing = physics.in_flags & in_flags::CLIMB_ANYTHING != 0;
     let in_flags = physics.in_flags;

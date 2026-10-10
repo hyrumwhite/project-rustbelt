@@ -1123,7 +1123,7 @@ impl CollisionCheck {
                 collision_height_standing: record.stand_height,
                 collision_radius: record.stand_radius,
             });
-            halo_map::biped::biped_update_physics(bsp, &mut physics, stand, &objects);
+            halo_map::biped::biped_update_physics(bsp, &mut physics, stand, halo_map::biped::BipedObjects::Visited(&objects));
             bsp.breakable_surfaces.set(None);
             self.bipeds_replayed += 1;
             let bytes = |p: &halo_map::biped::BipedPhysics| {

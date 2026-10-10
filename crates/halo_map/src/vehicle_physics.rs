@@ -676,7 +676,7 @@ fn compute(
             0.0,
             definition.radius,
             vehicle_index as i32,
-            objects,
+            crate::features::Objects::Visited(objects),
         );
         if !features.is_empty()
             && let Some(hit) = features.test_point(mass_point.position)

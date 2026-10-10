@@ -182,7 +182,10 @@ struct CollisionCheck {
     pill_hits: u64,
     object_hits: u64,
     object_hits_agreed: u64,
-    models: std::collections::HashMap<u32, Option<halo_map::collision::CollisionModel>>,
+    whole_tests: u64,
+    whole_agreed: u64,
+    clusters: std::collections::HashMap<i32, Option<halo_map::collision::StructureClusters>>,
+    models: std::collections::HashMap<u32, Option<std::sync::Arc<halo_map::collision::CollisionModel>>>,
     sphere_features: u64,
     hits: u64,
     largest_t_difference: f32,
@@ -204,6 +207,9 @@ impl CollisionCheck {
             pill_hits: 0,
             object_hits: 0,
             object_hits_agreed: 0,
+            whole_tests: 0,
+            whole_agreed: 0,
+            clusters: Default::default(),
             models: Default::default(),
             sphere_features: 0,
             hits: 0,
@@ -230,6 +236,51 @@ impl CollisionCheck {
             })
             .as_ref();
         let Some(bsp) = bsp else { return };
+        let clusters = self
+            .clusters
+            .entry(snapshot.structure_bsp_index)
+            .or_insert_with(|| {
+                let reference = halo_map::bsp::references(cache)
+                    .ok()?
+                    .into_iter()
+                    .find(|r| r.index as i32 == snapshot.structure_bsp_index)?;
+                let loaded = halo_map::bsp::Bsp::load(cache, &reference).ok()?;
+                halo_map::collision::StructureClusters::load(&loaded).ok()
+            })
+            .as_ref();
+        let Some(clusters) = clusters else { return };
+        // the objects as the broad phase sees them
+        let mut world_objects = Vec::new();
+        for object in &snapshot.objects {
+            if object.flags & halo_bridge::OBJECT_MODEL != 0 {
+                continue;
+            }
+            let definition = halo_map::TagRef { group: 0, datum: Some(object.definition_index) };
+            let model = self
+                .models
+                .entry(object.definition_index)
+                .or_insert_with(|| {
+                    let datum = halo_map::objects::object_collision_model(cache, definition).ok()??.datum?;
+                    halo_map::collision::CollisionModel::load(cache, datum).ok().map(std::sync::Arc::new)
+                })
+                .clone();
+            world_objects.push(halo_map::collision::WorldObject {
+                index: object.object_index,
+                kind: object.kind,
+                flags: object.object_flags,
+                bounding_center: object.bounding_center,
+                bounding_radius: object.bounding_radius,
+                parent: object.parent_index,
+                location_cluster: object.location_cluster,
+                region_permutations: object.region_permutations,
+                matrices: snapshot
+                    .object_nodes(object)
+                    .iter()
+                    .map(|n| halo_map::model::Matrix4x3 { scale: n.scale, forward: n.forward, left: n.left, up: n.up, position: n.position })
+                    .collect(),
+                model,
+            });
+        }
         for test in &snapshot.ray_tests {
             let ours = bsp.test_vector(halo_map::collision::flags::FRONT_FACING, test.point, test.vector, 1.0);
             self.rays += 1;
@@ -244,57 +295,39 @@ impl CollisionCheck {
             if test.hit != 0 {
                 self.hits += 1;
             }
-            // the object it hit, if any
-            if test.object_index != u32::MAX {
-                self.object_hits += 1;
-                let object = snapshot.objects.iter().find(|o| o.object_index == test.object_index);
-                let ours = object.and_then(|object| {
-                    let definition = halo_map::TagRef { group: 0, datum: Some(object.definition_index) };
-                    let model = self
-                        .models
-                        .entry(object.definition_index)
-                        .or_insert_with(|| {
-                            let datum = halo_map::objects::object_collision_model(cache, definition).ok()??.datum?;
-                            halo_map::collision::CollisionModel::load(cache, datum).ok()
-                        })
-                        .as_ref()?;
-                    let matrices: Vec<halo_map::model::Matrix4x3> = snapshot
-                        .object_nodes(object)
-                        .iter()
-                        .map(|n| halo_map::model::Matrix4x3 {
-                            scale: n.scale,
-                            forward: n.forward,
-                            left: n.left,
-                            up: n.up,
-                            position: n.position,
-                        })
-                        .collect();
-                    model.test_vector(
-                        &object.region_permutations,
-                        &matrices,
-                        halo_map::collision::flags::FRONT_FACING,
-                        test.point,
-                        test.vector,
-                    )
-                });
-                let agrees = ours.is_some_and(|hit| {
-                    hit.hit.t.to_bits() == test.object_t.to_bits()
-                        && hit.node as i16 == test.object_node_index
-                        && hit.bsp as i16 == test.object_bsp_index
-                        && hit.hit.surface as i32 == test.object_surface_index
-                });
+            // the game's whole ray test: structure and objects
+            {
+                let world_objects = &world_objects;
+                let world = halo_map::collision::World { collision: bsp, clusters, objects: world_objects };
+                let flags = halo_map::collision::flags::FRONT_FACING
+                    | halo_map::collision::test_flags::STRUCTURE
+                    | halo_map::collision::test_flags::OBJECTS
+                    | halo_map::collision::test_flags::ALL_OBJECT_TYPES;
+                let ours = world.test_vector(flags, test.point, test.vector, u32::MAX);
+                if test.object_index != u32::MAX {
+                    self.object_hits += 1;
+                }
+                let agrees = match ours {
+                    Some(hit) => {
+                        hit.t.to_bits() == test.object_t.to_bits()
+                            && hit.object.unwrap_or(u32::MAX) == test.object_index
+                            && hit.surface == test.object_surface_index
+                            && (hit.object.is_none()
+                                || (hit.node == test.object_node_index && hit.bsp == test.object_bsp_index))
+                    }
+                    None => test.object_surface_index == -1 && test.object_index == u32::MAX,
+                };
+                self.whole_tests += 1;
                 if agrees {
-                    self.object_hits_agreed += 1;
+                    self.whole_agreed += 1;
+                    if test.object_index != u32::MAX {
+                        self.object_hits_agreed += 1;
+                    }
                 } else if self.shown < 10 {
                     self.shown += 1;
                     println!(
-                        "  object hit differs: game object {:08x} node {} bsp {} t {} surface {}; halo_map {:?}",
-                        test.object_index,
-                        test.object_node_index,
-                        test.object_bsp_index,
-                        test.object_t,
-                        test.object_surface_index,
-                        ours.map(|h| (h.node, h.bsp, h.hit.t, h.hit.surface))
+                        "  whole test differs: game object {:08x} node {} bsp {} t {} surface {}; halo_map {:?}",
+                        test.object_index, test.object_node_index, test.object_bsp_index, test.object_t, test.object_surface_index, ours
                     );
                 }
             }
@@ -355,8 +388,8 @@ impl CollisionCheck {
 
     fn report(&self) {
         println!(
-            "collision: {} of {} rays that hit an object agree with the game bit for bit (object, node, bsp, surface and t)",
-            self.object_hits_agreed, self.object_hits
+            "collision: {} of {} whole ray tests (structure and objects, the broad phase in Rust) agree with the game bit for bit; {} of {} that hit an object",
+            self.whole_agreed, self.whole_tests, self.object_hits_agreed, self.object_hits
         );
         println!(
             "collision: {} of {} swept spheres agree with the game bit for bit ({} touched the structure)",

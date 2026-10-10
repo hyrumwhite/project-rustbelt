@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 14;
 pub const RAY_TESTS: usize = 16;
 pub const MAXIMUM_LIGHTS: usize = 64;
 pub const MAXIMUM_OBJECTS: usize = 4096;
@@ -68,6 +68,16 @@ pub struct Object {
     /// How camouflaged it is (0..1): a unit's active camouflage, shared by
     /// what it holds.
     pub active_camouflage: f32,
+    /// The collision broad phase's state: the bounding sphere (as of the
+    /// last tick), the object's flags (bit 0 invisible, 11 connected to the
+    /// map, 25 with a collision model), its parent (`u32::MAX` for none) and
+    /// its location's cluster (-1 outside the map).
+    pub bounding_center: [f32; 3],
+    pub bounding_radius: f32,
+    pub object_flags: u32,
+    pub parent_index: u32,
+    pub location_cluster: i16,
+    pub pad: i16,
 }
 
 /// `real_matrix4x3`: a node's world transform.
@@ -122,9 +132,10 @@ pub struct RayTest {
     pub pill_t: f32,
     pub pill_normal: [f32; 3],
     pub pill_surface_index: i32,
-    /// The ray against the objects (`collision_test_vector`): the object it
-    /// hit first (`u32::MAX` for none), the collision node, bsp and surface,
-    /// and how far along `vector`.
+    /// The game's whole ray test (`collision_test_vector`, the structure and
+    /// every object type): the object it hit (`u32::MAX` for the structure
+    /// or nothing; `object_surface_index` -1 for nothing), the collision
+    /// node, bsp and surface, and how far along `vector`.
     pub object_index: u32,
     pub object_node_index: i16,
     pub object_bsp_index: i16,
@@ -270,7 +281,7 @@ struct Shared {
 
 /// The layout is the game's, measured there; keep these in step with
 /// `bevy_bridge_protocol.h`.
-const _: () = assert!(std::mem::size_of::<Object>() == 80);
+const _: () = assert!(std::mem::size_of::<Object>() == 108);
 const _: () = assert!(std::mem::size_of::<Node>() == 52);
 const _: () = assert!(std::mem::size_of::<Camera>() == 40);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);

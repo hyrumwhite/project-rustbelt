@@ -401,8 +401,20 @@ pub mod structure_bsp {
     pub const LIGHTMAP_GROUP: usize = 0x0;
     pub const COLLISION_BSP: usize = 0xb0;
     pub const WORLD_BOUNDS: usize = 0xc8;
+    pub const LEAVES: usize = 0xe0;
     pub const SURFACES: usize = 0xf8;
     pub const LIGHTMAPS: usize = 0x104;
+    pub const CLUSTERS: usize = 0x134;
+    pub const CLUSTER_PORTALS: usize = 0x154;
+}
+
+pub mod structure_cluster {
+    pub const SIZEOF: usize = 0x68;
+}
+
+pub mod structure_leaf {
+    pub const SIZEOF: usize = 0x10;
+    pub const CLUSTER_INDEX: usize = 0x8;
 }
 
 pub mod structure_lightmap {

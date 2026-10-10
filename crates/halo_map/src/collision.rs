@@ -179,10 +179,53 @@ impl CollisionBsp {
             last_contents: Contents::Unknown,
             last_plane: NONE,
             nodes_left: self.nodes.len() as i64,
+            leaves: None,
         };
         let t1 = maximum_t.clamp(0.0, 1.0);
         test.recurse(0, 0.0, t1, 0);
         test.hit
+    }
+
+    /// [`Self::test_vector`], and the leaves the ray passed through up to
+    /// the hit, in order (at most 256, the last kept in the 256th place),
+    /// as the game records them.
+    pub fn test_vector_leaves(&self, flags: u32, point: [f32; 3], vector: [f32; 3], maximum_t: f32) -> (Option<Hit>, Vec<i32>) {
+        let mut test = VectorTest {
+            bsp: self,
+            flags,
+            point,
+            vector,
+            best_t: maximum_t.max(0.0),
+            hit: None,
+            last_leaf: NONE,
+            last_contents: Contents::Unknown,
+            last_plane: NONE,
+            nodes_left: self.nodes.len() as i64,
+            leaves: Some(Vec::new()),
+        };
+        let t1 = maximum_t.clamp(0.0, 1.0);
+        test.recurse(0, 0.0, t1, 0);
+        (test.hit, test.leaves.unwrap_or_default())
+    }
+
+    /// The leaf a point is in (`bsp3d_test_point`), NONE outside the world.
+    pub fn leaf_from_point(&self, point: [f32; 3]) -> i32 {
+        let mut node_index = 0i32;
+        let mut depth = 0u16;
+        loop {
+            if node_index < 0 || node_index as usize >= self.nodes.len() || depth >= MAXIMUM_DEPTH {
+                return NONE;
+            }
+            depth += 1;
+            let node = self.nodes[node_index as usize];
+            let Some(plane) = self.plane(node.plane) else { return NONE };
+            let distance = point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] - plane[3];
+            node_index = node.children[usize::from(distance >= 0.0)];
+            if node_index & SIGN != 0 {
+                break;
+            }
+        }
+        if node_index != NONE { node_index & i32::MAX } else { NONE }
     }
 
     fn plane(&self, index: i32) -> Option<&[f32; 4]> {
@@ -470,6 +513,310 @@ pub fn transform_vector(m: &Matrix4x3, v: [f32; 3]) -> [f32; 3] {
         i * m.forward[1] + j * m.left[1] + k * m.up[1],
         i * m.forward[2] + j * m.left[2] + k * m.up[2],
     ]
+}
+
+/// A structure BSP's clusters: each leaf's cluster, and the portals between
+/// clusters, which the game's broad phase walks.
+#[derive(Debug, Clone, Default)]
+pub struct StructureClusters {
+    pub leaf_clusters: Vec<i16>,
+    /// Per cluster, its portals.
+    pub cluster_portals: Vec<Vec<i16>>,
+    pub portals: Vec<Portal>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Portal {
+    pub clusters: [i16; 2],
+    pub plane: i32,
+    pub centroid: [f32; 3],
+    pub bounding_radius: f32,
+    pub vertices: Vec<[f32; 3]>,
+}
+
+/// `MAXIMUM_VERTICES_PER_CLUSTER_PORTAL`.
+const MAXIMUM_VERTICES_PER_CLUSTER_PORTAL: usize = 128;
+/// `MAXIMUM_CLUSTERS_PER_STRUCTURE`.
+const MAXIMUM_CLUSTERS_PER_STRUCTURE: usize = 512;
+
+impl StructureClusters {
+    pub fn load(bsp: &Bsp<'_>) -> Result<Self> {
+        use layout::{structure_bsp as s, structure_cluster, structure_leaf};
+        let mut out = StructureClusters::default();
+        for leaf in bsp.root.block(s::LEAVES, structure_leaf::SIZEOF)?.iter() {
+            out.leaf_clusters.push(leaf.i16(structure_leaf::CLUSTER_INDEX)?);
+        }
+        // (structure_cluster_graph: its portal indices at 0x5c)
+        for cluster in bsp.root.block(s::CLUSTERS, structure_cluster::SIZEOF)?.iter() {
+            let portals = cluster.block(0x5c, 2)?.iter().map(|p| p.i16(0)).collect::<Result<Vec<_>>>()?;
+            out.cluster_portals.push(portals);
+        }
+        // (structure_cluster_portal, 0x40 bytes: its vertices at 0x34)
+        for portal in bsp.root.block(s::CLUSTER_PORTALS, 0x40)?.iter() {
+            out.portals.push(Portal {
+                clusters: [portal.i16(0)?, portal.i16(2)?],
+                plane: portal.i32(4)?,
+                centroid: portal.vec3(8)?,
+                bounding_radius: portal.f32(0x14)?,
+                vertices: portal.block(0x34, 12)?.iter().map(|v| v.vec3(0)).collect::<Result<Vec<_>>>()?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// `collision_cluster_index_from_leaf`.
+    pub fn cluster_from_leaf(&self, leaf: i32) -> i16 {
+        if leaf == NONE {
+            return NONE as i16;
+        }
+        self.leaf_clusters.get((leaf & i32::MAX) as usize).copied().unwrap_or(NONE as i16)
+    }
+
+    /// `structure_clusters_in_sphere`: the clusters a sphere reaches from
+    /// `cluster` through portals, in the order the game finds them (at most
+    /// `maximum`).
+    pub fn clusters_in_sphere(&self, collision: &CollisionBsp, cluster: i16, center: [f32; 3], radius: f32, maximum: usize) -> Vec<i16> {
+        let mut out = Vec::new();
+        if cluster < 0 || cluster as usize >= self.cluster_portals.len() || cluster as usize >= MAXIMUM_CLUSTERS_PER_STRUCTURE {
+            return out;
+        }
+        if radius > 0.0 {
+            let mut marked = vec![false; self.cluster_portals.len()];
+            self.flood(collision, cluster, center, radius, maximum, &mut marked, &mut out);
+        } else if maximum > 0 {
+            out.push(cluster);
+        }
+        out
+    }
+
+    fn flood(&self, collision: &CollisionBsp, cluster: i16, center: [f32; 3], radius: f32, maximum: usize, marked: &mut [bool], out: &mut Vec<i16>) {
+        if out.len() < maximum {
+            out.push(cluster);
+        }
+        marked[cluster as usize] = true;
+        for &portal_index in &self.cluster_portals[cluster as usize] {
+            if portal_index < 0 || portal_index as usize >= self.portals.len() {
+                continue;
+            }
+            let portal = &self.portals[portal_index as usize];
+            let adjacent = if portal.clusters[0] == cluster { portal.clusters[1] } else { portal.clusters[0] };
+            if (adjacent as usize) < self.cluster_portals.len()
+                && adjacent >= 0
+                && !marked[adjacent as usize]
+                && self.sphere_intersects_portal(collision, portal, center, radius)
+            {
+                self.flood(collision, adjacent, center, radius, maximum, marked, out);
+            }
+        }
+    }
+
+    /// `sphere_intersects_cluster_portal`.
+    fn sphere_intersects_portal(&self, collision: &CollisionBsp, portal: &Portal, point: [f32; 3], radius: f32) -> bool {
+        if portal.plane < 0 || portal.plane as usize >= collision.planes.len() {
+            return false;
+        }
+        if portal.vertices.len() > MAXIMUM_VERTICES_PER_CLUSTER_PORTAL {
+            return false;
+        }
+        let plane = collision.planes[portal.plane as usize];
+        let plane_distance = point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] - plane[3];
+        let d = sub3(point, portal.centroid);
+        let reach = portal.bounding_radius + radius;
+        if !(plane_distance.abs() < radius && dot3(d, d) < reach * reach) {
+            return false;
+        }
+        let normal = [plane[0], plane[1], plane[2]];
+        let (ai, aj, ak) = (normal[0].abs(), normal[1].abs(), normal[2].abs());
+        let projection = if ak >= aj && ak >= ai {
+            2
+        } else if aj >= ai {
+            1
+        } else {
+            0
+        };
+        let sign = normal[projection] > 0.0;
+        let t = -plane_distance;
+        let projected = [normal[0] * t + point[0], normal[1] * t + point[1], normal[2] * t + point[2]];
+        let center2d = project(projected, projection, sign);
+        let points: Vec<[f32; 2]> = portal.vertices.iter().map(|&v| project(v, projection, sign)).collect();
+        convex_hull2d_test_circle(&points, center2d, (radius * radius - plane_distance * plane_distance).sqrt())
+    }
+}
+
+/// `convex_hull2d_test_circle`: whether a circle is inside or touches every
+/// edge's inner side of a convex polygon.
+fn convex_hull2d_test_circle(points: &[[f32; 2]], center: [f32; 2], radius: f32) -> bool {
+    let radius_squared = radius * radius;
+    let count = points.len();
+    for index in 0..count {
+        let next = if index + 1 < count { index + 1 } else { 0 };
+        let edge = [points[next][0] - points[index][0], points[next][1] - points[index][1]];
+        let offset = [center[0] - points[index][0], center[1] - points[index][1]];
+        let mut edge_length_squared = edge[0] * edge[0];
+        edge_length_squared += edge[1] * edge[1];
+        if edge_length_squared != 0.0 {
+            let cross = offset[0] * edge[1] - offset[1] * edge[0];
+            if cross > 0.0 && cross * cross > edge_length_squared * radius_squared {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// An object as the broad phase sees it (the game's runtime state).
+#[derive(Debug, Clone)]
+pub struct WorldObject {
+    pub index: u32,
+    /// `object_type` (0 biped ... 11 placeholder).
+    pub kind: i16,
+    /// The object's `flags` (bit 0 invisible, 11 connected to the map, 25
+    /// has a collision model).
+    pub flags: u32,
+    pub bounding_center: [f32; 3],
+    pub bounding_radius: f32,
+    /// Its parent (`u32::MAX` for none).
+    pub parent: u32,
+    /// Its location's cluster (NONE outside the map).
+    pub location_cluster: i16,
+    pub region_permutations: [u8; 8],
+    pub matrices: Vec<Matrix4x3>,
+    /// Its collision model, if it has one.
+    pub model: Option<std::sync::Arc<CollisionModel>>,
+}
+
+/// What the game's full ray test found (`collision_test_vector`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorldHit {
+    pub t: f32,
+    /// The object hit, or `None` for the structure.
+    pub object: Option<u32>,
+    pub node: i16,
+    pub bsp: i16,
+    pub surface: i32,
+}
+
+const OBJECT_INVISIBLE: u32 = 1 << 0;
+const OBJECT_CONNECTED_TO_MAP: u32 = 1 << 11;
+const OBJECT_HAS_COLLISION_MODEL: u32 = 1 << 25;
+/// `collision_test_flags`: the structure and objects, and each object type.
+pub mod test_flags {
+    pub const STRUCTURE: u32 = 1 << 5;
+    pub const OBJECTS: u32 = 1 << 7;
+    pub const FIRST_OBJECT_TYPE: u32 = 8;
+    pub const ALL_OBJECT_TYPES: u32 = ((1 << 12) - 1) << FIRST_OBJECT_TYPE;
+}
+
+/// The structure and the objects in it, for the game's full ray test.
+pub struct World<'a> {
+    pub collision: &'a CollisionBsp,
+    pub clusters: &'a StructureClusters,
+    pub objects: &'a [WorldObject],
+}
+
+impl World<'_> {
+    /// Halo's ray test against the structure and objects
+    /// (`collision_test_vector`, with no water): the nearest hit as the game
+    /// finds it, or `None`. Every breakable surface counts as intact.
+    pub fn test_vector(&self, mut flags: u32, point: [f32; 3], vector: [f32; 3], ignore_object: u32) -> Option<WorldHit> {
+        if flags & (flags::FRONT_FACING | flags::BACK_FACING) == 0 {
+            flags |= flags::FRONT_FACING | flags::BACK_FACING;
+        }
+        let bsp_flags =
+            flags & (flags::FRONT_FACING | flags::BACK_FACING | flags::IGNORE_TWO_SIDED | flags::IGNORE_INVISIBLE | flags::IGNORE_BREAKABLE);
+        let mut best: Option<WorldHit> = None;
+        let mut t = 1.0f32;
+        let (structure_hit, leaves) = self.collision.test_vector_leaves(bsp_flags, point, vector, f32::MAX);
+        if let Some(hit) = structure_hit
+            && flags & test_flags::STRUCTURE != 0
+        {
+            t = hit.t;
+            best = Some(WorldHit { t, object: None, node: NONE as i16, bsp: NONE as i16, surface: hit.surface as i32 });
+        }
+        if flags & test_flags::OBJECTS != 0 && !leaves.is_empty() {
+            if flags & test_flags::ALL_OBJECT_TYPES == 0 {
+                flags |= test_flags::ALL_OBJECT_TYPES;
+            }
+            // (who is in which cluster: the game registers each connected
+            // object with a collision model in the clusters its bounding
+            // sphere reaches)
+            let mut members: std::collections::HashMap<i16, Vec<usize>> = Default::default();
+            for (index, object) in self.objects.iter().enumerate() {
+                if object.parent != u32::MAX
+                    || object.flags & OBJECT_CONNECTED_TO_MAP == 0
+                    || object.flags & OBJECT_HAS_COLLISION_MODEL == 0
+                {
+                    continue;
+                }
+                for cluster in self.clusters.clusters_in_sphere(
+                    self.collision,
+                    object.location_cluster,
+                    object.bounding_center,
+                    object.bounding_radius,
+                    64,
+                ) {
+                    members.entry(cluster).or_default().push(index);
+                }
+            }
+            let mut marked_clusters = std::collections::HashSet::new();
+            let mut marked_objects = std::collections::HashSet::new();
+            for &leaf in &leaves {
+                let cluster = self.clusters.cluster_from_leaf(leaf);
+                if cluster < 0 || !marked_clusters.insert(cluster) {
+                    continue;
+                }
+                for &index in members.get(&cluster).map(Vec::as_slice).unwrap_or(&[]) {
+                    if marked_objects.insert(index) {
+                        self.object_test_vector(index, flags, bsp_flags, point, vector, ignore_object, &mut t, &mut best);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// `object_test_vector`: an object, then (if its bounding sphere is
+    /// reached) its children.
+    #[allow(clippy::too_many_arguments)]
+    fn object_test_vector(
+        &self,
+        index: usize,
+        flags: u32,
+        bsp_flags: u32,
+        point: [f32; 3],
+        vector: [f32; 3],
+        ignore_object: u32,
+        t: &mut f32,
+        best: &mut Option<WorldHit>,
+    ) {
+        let object = &self.objects[index];
+        if object.index == ignore_object
+            || object.flags & OBJECT_INVISIBLE != 0
+            || object.kind < 0
+            || flags & (1 << (object.kind as u32 + test_flags::FIRST_OBJECT_TYPE)) == 0
+            || !vector_intersects_sphere(point, vector, object.bounding_center, object.bounding_radius)
+        {
+            return;
+        }
+        if let Some(model) = &object.model
+            && let Some(hit) = model.test_vector(&object.region_permutations, &object.matrices, bsp_flags, point, vector)
+            && *t > hit.hit.t
+        {
+            *t = hit.hit.t;
+            *best = Some(WorldHit {
+                t: hit.hit.t,
+                object: Some(object.index),
+                node: hit.node as i16,
+                bsp: hit.bsp as i16,
+                surface: hit.hit.surface as i32,
+            });
+        }
+        for (child, candidate) in self.objects.iter().enumerate() {
+            if candidate.parent == object.index {
+                self.object_test_vector(child, flags, bsp_flags, point, vector, ignore_object, t, best);
+            }
+        }
+    }
 }
 
 /// What a sphere test found (`collision_bsp_test_sphere_result`).
@@ -1025,6 +1372,8 @@ struct VectorTest<'a> {
     last_contents: Contents,
     last_plane: i32,
     nodes_left: i64,
+    /// The leaves passed, when wanted.
+    leaves: Option<Vec<i32>>,
 }
 
 impl VectorTest<'_> {
@@ -1108,6 +1457,15 @@ impl VectorTest<'_> {
                     });
                     return true;
                 }
+            }
+        }
+        if leaf_index != NONE
+            && let Some(leaves) = &mut self.leaves
+        {
+            if leaves.len() < 256 {
+                leaves.push(leaf_index);
+            } else {
+                leaves[255] = leaf_index;
             }
         }
         self.last_leaf = leaf_index;

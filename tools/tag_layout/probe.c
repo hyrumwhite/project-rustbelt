@@ -57,6 +57,12 @@ LAYOUT_OFFSET(scenario_structure_bsp_reference, structure_bsp)
 LAYOUT_SIZE(structure_bsp)
 LAYOUT_OFFSET(structure_bsp, lightmap_group)
 LAYOUT_OFFSET(structure_bsp, collision_bsp)
+LAYOUT_OFFSET(structure_bsp, leaves)
+LAYOUT_OFFSET(structure_bsp, clusters)
+LAYOUT_OFFSET(structure_bsp, cluster_portals)
+LAYOUT_SIZE(structure_leaf)
+LAYOUT_OFFSET(structure_leaf, cluster_index)
+LAYOUT_SIZE(structure_cluster)
 
 /* collision bsps (the structure's, collision_bsp.c) */
 LAYOUT_SIZE(collision_bsp)

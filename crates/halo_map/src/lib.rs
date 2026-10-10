@@ -19,6 +19,7 @@ pub mod bitmap;
 pub mod bsp;
 pub mod collision;
 pub mod combiner;
+pub mod damage;
 pub mod device_pose;
 pub mod features;
 mod cache;
@@ -79,6 +80,7 @@ pub mod groups {
     pub const MODEL: u32 = fourcc(b"mode");
     /// The parent of every object group (`scen`, `vehi`, `weap`, ...).
     pub const OBJECT: u32 = fourcc(b"obje");
+    pub const DAMAGE_EFFECT: u32 = fourcc(b"jpt!");
 }
 
 #[derive(Debug)]

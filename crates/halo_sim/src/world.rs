@@ -69,6 +69,7 @@ pub struct Host {
     pub melee: crate::units::MeleeCallbacks,
     pub unit_update: crate::units::UnitUpdateCallbacks,
     pub rest: crate::bipeds::RestCallbacks,
+    pub damage: crate::damage::DamageCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);

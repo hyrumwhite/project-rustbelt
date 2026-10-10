@@ -36,13 +36,14 @@ use halo_map::pose::{PoseAnimation, PoseModel, PoseObjectDefinition};
 pub mod poses;
 pub mod preprocess;
 pub mod bipeds;
+pub mod damage;
 pub mod projectiles;
 pub mod units;
 pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 14;
+pub const VERSION: u32 = 15;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {
@@ -98,6 +99,9 @@ pub(crate) struct Tags {
     melee_weapons: HashMap<u32, Option<halo_map::biped_update::MeleeWeapon>>,
     unit_update_definitions: HashMap<u32, Option<Arc<halo_map::unit_update::UnitUpdateDefinition>>>,
     weapon_camo_rates: HashMap<u32, f32>,
+    damage_definitions: HashMap<u32, Option<Arc<halo_map::damage::DamageDefinition>>>,
+    damage_resistances: HashMap<u32, Option<Arc<halo_map::damage::DamageResistance>>>,
+    child_damage_fractions: HashMap<u32, f32>,
 }
 
 impl Tags {
@@ -162,6 +166,9 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
         melee_weapons: HashMap::new(),
         unit_update_definitions: HashMap::new(),
         weapon_camo_rates: HashMap::new(),
+        damage_definitions: HashMap::new(),
+        damage_resistances: HashMap::new(),
+        child_damage_fractions: HashMap::new(),
     });
     count
 }

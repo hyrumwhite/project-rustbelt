@@ -10,10 +10,12 @@
 //! Struct offsets come from [`layout`], which is generated from OpenCE's C
 //! definitions by `tools/tag_layout`.
 
+pub mod biped;
 pub mod bitmap;
 pub mod bsp;
 pub mod collision;
 pub mod combiner;
+pub mod features;
 mod cache;
 pub mod layout;
 pub mod math;

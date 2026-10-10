@@ -75,10 +75,10 @@ pub struct Surface {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Edge {
-    vertices: [i32; 2],
-    edges: [i32; 2],
-    surfaces: [i32; 2],
+pub(crate) struct Edge {
+    pub(crate) vertices: [i32; 2],
+    pub(crate) edges: [i32; 2],
+    pub(crate) surfaces: [i32; 2],
 }
 
 /// A structure BSP's collision geometry, copied out of the map.
@@ -91,8 +91,14 @@ pub struct CollisionBsp {
     references: Vec<Reference2d>,
     nodes2d: Vec<Node2d>,
     pub surfaces: Vec<Surface>,
-    edges: Vec<Edge>,
+    pub(crate) edges: Vec<Edge>,
     pub vertices: Vec<[f32; 3]>,
+    /// Per vertex, its first edge.
+    pub(crate) vertex_first_edges: Vec<i32>,
+    /// Which breakable surfaces still stand (`breakable_surface_flags_get`:
+    /// bit i of byte i / 8 for breakable surface i), or `None` to count every
+    /// one as standing (a test the game makes with no breakable surfaces).
+    pub breakable_surfaces: Option<[u8; 32]>,
 }
 
 /// What a ray hit.
@@ -160,13 +166,14 @@ impl CollisionBsp {
         }
         for vertex in root.block(c::VERTICES, collision_vertex::SIZEOF)?.iter() {
             out.vertices.push(vertex.vec3(0)?);
+            out.vertex_first_edges.push(vertex.i32(12)?);
         }
         Ok(out)
     }
 
     /// Halo's ray test: the first surface (by `flags`) the ray from `point`
-    /// along `vector` hits, up to `maximum_t` (in units of `vector`). Every
-    /// breakable surface counts as intact.
+    /// along `vector` hits, up to `maximum_t` (in units of `vector`). Broken
+    /// breakable surfaces are passed through ([`Self::breakable_surfaces`]).
     pub fn test_vector(&self, flags: u32, point: [f32; 3], vector: [f32; 3], maximum_t: f32) -> Option<Hit> {
         let mut test = VectorTest {
             bsp: self,
@@ -278,10 +285,10 @@ impl CollisionBsp {
     }
 
     /// Whether a projected point is inside a surface's edge ring
-    /// (`collision_surface_test_point`; every breakable surface intact).
+    /// (`collision_surface_test_point`; a broken one has none).
     fn surface_test_point(&self, surface_index: usize, projection: usize, sign: bool, point: [f32; 2]) -> bool {
         let surface = &self.surfaces[surface_index];
-        if !self.ring_continues(surface.first_edge, 0) {
+        if !self.ring_continues(surface.first_edge, 0) || !self.surface_extant(surface) {
             return false;
         }
         let mut edge_index = surface.first_edge;
@@ -304,15 +311,27 @@ impl CollisionBsp {
         }
     }
 
+    /// Whether a surface is there: not a breakable surface that has been
+    /// broken.
+    pub fn surface_extant(&self, surface: &Surface) -> bool {
+        match &self.breakable_surfaces {
+            Some(bits) if surface.flags & surface_flags::BREAKABLE != 0 => {
+                let index = surface.breakable_surface as usize;
+                bits[index / 8] & (1 << (index % 8)) != 0
+            }
+            _ => true,
+        }
+    }
+
     /// `collision_surface_edge_ring_continues`: an edge of the bsp, within
     /// the most edges a surface has.
-    fn ring_continues(&self, edge_index: i32, edge_count: usize) -> bool {
+    pub(crate) fn ring_continues(&self, edge_index: i32, edge_count: usize) -> bool {
         edge_index >= 0 && (edge_index as usize) < self.edges.len() && edge_count < MAXIMUM_EDGES_PER_SURFACE
     }
 
     /// A vertex (the origin for one that isn't the bsp's: the game reads
     /// whatever is there; the retail maps have none).
-    fn vertex(&self, index: i32) -> [f32; 3] {
+    pub(crate) fn vertex(&self, index: i32) -> [f32; 3] {
         self.vertices.get(index as usize).copied().unwrap_or_default()
     }
 
@@ -355,8 +374,8 @@ impl CollisionBsp {
 
     /// Halo's sphere test (`collision_bsp_test_sphere`): the surfaces, edges
     /// and vertices within `radius` of `center`, each list in the order the
-    /// game finds them (at most 256 each). Every breakable surface counts as
-    /// intact.
+    /// game finds them (at most 256 each). Broken breakable surfaces are
+    /// passed over ([`Self::breakable_surfaces`]).
     pub fn test_sphere(&self, center: [f32; 3], radius: f32) -> SphereFeatures {
         let mut test = SphereTest {
             bsp: self,
@@ -840,7 +859,8 @@ pub struct World<'a> {
 impl World<'_> {
     /// Halo's ray test against the structure, objects and water
     /// (`collision_test_vector`): the nearest hit as the game finds it, or
-    /// `None`. Every breakable surface counts as intact.
+    /// `None`. Broken breakable surfaces are passed through
+    /// ([`CollisionBsp::breakable_surfaces`]).
     pub fn test_vector(&self, flags: u32, point: [f32; 3], vector: [f32; 3], ignore_object: u32) -> Option<WorldHit> {
         let result = self.test(flags, point, vector, ignore_object);
         result.kind.map(|_| WorldHit { t: result.t, object: result.object, node: result.node, bsp: result.bsp, surface: result.surface })
@@ -1511,7 +1531,7 @@ impl SphereTest<'_> {
             return;
         }
         let surface = bsp.surfaces[surface_index as usize];
-        if !bsp.ring_continues(surface.first_edge, 0) {
+        if !bsp.ring_continues(surface.first_edge, 0) || !bsp.surface_extant(&surface) {
             return;
         }
         let ring = || {

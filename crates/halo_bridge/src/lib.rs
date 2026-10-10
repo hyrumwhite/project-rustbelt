@@ -21,7 +21,8 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 16;
+pub const VERSION: u32 = 17;
+pub const BIPED_RECORDS: usize = 1024;
 pub const PROJECTILE_RECORDS: usize = 1024;
 pub const RANDOM_DIRECTIONS: usize = 4096;
 /// The steps of each ray test's point physics.
@@ -314,6 +315,25 @@ pub struct ProjectileRecord {
     pub after: ProjectileState,
 }
 
+/// One `biped_update_physics` the game recorded (with
+/// `game.bevy_bridge_ray_tests` on): the biped's physics before and after,
+/// which breakable surfaces stood (bit i of byte i / 8), and what the
+/// crouching player's stand test reads (`stand_test`: whether it is made).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BipedRecord {
+    pub sequence: u32,
+    pub biped_index: u32,
+    pub structure_bsp_index: i32,
+    pub stand_test: u32,
+    pub stand_height: f32,
+    pub stand_radius: f32,
+    pub breakable_surfaces: [u8; 32],
+    pub before: halo_map::biped::BipedPhysics,
+    pub after: halo_map::biped::BipedPhysics,
+}
+
+const _: () = assert!(std::mem::size_of::<BipedRecord>() == 464);
 const _: () = assert!(std::mem::size_of::<ProjectileState>() == 92);
 const _: () = assert!(std::mem::size_of::<ProjectileRecord>() == 228);
 
@@ -345,6 +365,9 @@ struct Shared {
     random_direction_count: u32,
     projectile_records: [ProjectileRecord; PROJECTILE_RECORDS],
     random_directions: [[f32; 3]; RANDOM_DIRECTIONS],
+    biped_record_count: u32,
+    biped_pad: u32,
+    biped_records: [BipedRecord; BIPED_RECORDS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -421,6 +444,7 @@ pub struct Bridge {
     last_frame_index: u32,
     last_overlay: Option<(u32, u32)>,
     last_projectile_record: Option<u32>,
+    last_biped_record: Option<u32>,
 }
 
 // Frames are read through volatile reads and a sequence check; the input
@@ -441,7 +465,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -536,6 +560,30 @@ impl Bridge {
                 }
             }
             self.last_projectile_record = Some(count);
+            out
+        }
+    }
+
+    /// The biped physics updates the game recorded since the last call (as
+    /// [`Self::read_projectile_records`]).
+    pub fn read_biped_records(&mut self) -> Vec<BipedRecord> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence number after copying
+        unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).biped_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_biped_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(BIPED_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).biped_records[sequence as usize % BIPED_RECORDS]);
+                if record.sequence == sequence {
+                    out.push(record);
+                }
+            }
+            self.last_biped_record = Some(count);
             out
         }
     }

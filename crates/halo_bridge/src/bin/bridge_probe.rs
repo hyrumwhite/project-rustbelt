@@ -123,6 +123,10 @@ fn main() {
                 let directions = bridge.random_directions();
                 check.check_projectiles(snapshot.structure_bsp_index, &records, &directions);
             }
+            let bipeds = bridge.read_biped_records();
+            if !bipeds.is_empty() {
+                check.check_bipeds(snapshot.structure_bsp_index, &bipeds);
+            }
         }
         if let Some(snapshot) = fresh {
             frames += 1;
@@ -218,6 +222,14 @@ struct CollisionCheck {
     projectiles_seen: std::collections::HashSet<u32>,
     projectile_actions: [u64; 3],
     projectiles_shown: u32,
+    biped_updates: u64,
+    bipeds_replayed: u64,
+    bipeds_agreed: u64,
+    bipeds_touched_objects: u64,
+    bipeds_elsewhere: u64,
+    bipeds_seen: std::collections::HashSet<u32>,
+    biped_kinds: [u64; 6],
+    bipeds_shown: u32,
     frames_shown: u32,
     hits: u64,
     largest_t_difference: f32,
@@ -258,6 +270,14 @@ impl CollisionCheck {
             projectiles_seen: Default::default(),
             projectile_actions: [0; 3],
             projectiles_shown: 0,
+            biped_updates: 0,
+            bipeds_replayed: 0,
+            bipeds_agreed: 0,
+            bipeds_touched_objects: 0,
+            bipeds_elsewhere: 0,
+            bipeds_seen: Default::default(),
+            biped_kinds: [0; 6],
+            bipeds_shown: 0,
             frames_shown: 0,
             sphere_features: 0,
             hits: 0,
@@ -622,7 +642,96 @@ impl CollisionCheck {
         }
     }
 
+    /// Replays the biped physics updates the game recorded with halo_map's
+    /// `biped_update_physics`, from the physics each began with and the
+    /// breakable surfaces standing then, and compares what they leave byte
+    /// for byte. Updates that touched an object (one bumped, or an
+    /// elevator) are left out: objects' collisions aren't ported.
+    fn check_bipeds(&mut self, structure_bsp_index: i32, records: &[halo_bridge::BipedRecord]) {
+        use halo_map::biped::{in_flags, out_flags};
+        let cache = &self.cache;
+        fn load(cache: &halo_map::CacheFile, structure_bsp_index: i32) -> Option<halo_map::bsp::Bsp<'_>> {
+            let reference =
+                halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index as i32 == structure_bsp_index)?;
+            halo_map::bsp::Bsp::load(cache, &reference).ok()
+        }
+        if !self.bsps.contains_key(&structure_bsp_index) {
+            let loaded = load(cache, structure_bsp_index).and_then(|b| halo_map::collision::CollisionBsp::load(&b).ok());
+            self.bsps.insert(structure_bsp_index, loaded);
+        }
+        let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
+        for record in records {
+            self.biped_updates += 1;
+            self.bipeds_seen.insert(record.biped_index);
+            if record.structure_bsp_index != structure_bsp_index {
+                self.bipeds_elsewhere += 1;
+                continue;
+            }
+            if record.after.bumped_object_index != -1 || record.after.elevator_object_index != -1 {
+                self.bipeds_touched_objects += 1;
+                continue;
+            }
+            bsp.breakable_surfaces = Some(record.breakable_surfaces);
+            let mut physics = record.before;
+            let stand = (record.stand_test != 0).then_some(halo_map::biped::StandTest {
+                collision_height_standing: record.stand_height,
+                collision_radius: record.stand_radius,
+            });
+            halo_map::biped::biped_update_physics(bsp, &mut physics, stand);
+            bsp.breakable_surfaces = None;
+            self.bipeds_replayed += 1;
+            let bytes = |p: &halo_map::biped::BipedPhysics| {
+                // SAFETY: BipedPhysics is repr(C) plain old data of 0xcc bytes
+                unsafe { std::mem::transmute::<halo_map::biped::BipedPhysics, [u8; 0xcc]>(*p) }
+            };
+            if bytes(&physics) == bytes(&record.after) {
+                self.bipeds_agreed += 1;
+                let i = record.before.in_flags;
+                let o = record.after.out_flags;
+                let kind = if i & in_flags::FLYING != 0 {
+                    0
+                } else if i & in_flags::AIRBORNE != 0 {
+                    1
+                } else {
+                    2
+                };
+                self.biped_kinds[kind] += 1;
+                if o & out_flags::AIRBORNE == 0 {
+                    self.biped_kinds[3] += 1;
+                }
+                if record.after.stick_surface_index != -1 {
+                    self.biped_kinds[4] += 1;
+                }
+                if o & out_flags::CANNOT_STAND != 0 {
+                    self.biped_kinds[5] += 1;
+                }
+            } else if self.bipeds_shown < 6 {
+                self.bipeds_shown += 1;
+                println!(
+                    "  biped {:#x} differs:\n    before   {:?}\n    game     {:?}\n    halo_map {:?}",
+                    record.biped_index, record.before, record.after, physics
+                );
+            }
+        }
+    }
+
     fn report(&self) {
+        let [flying, airborne, walking, supported, stuck, cannot_stand] = self.biped_kinds;
+        println!(
+            "bipeds: {} of {} physics updates replayed agree with the game byte for byte ({} bipeds; {} walking, {} airborne, {} flying; {} ended on the ground, {} held to a ledge, {} could not stand); of {} recorded, left out: {} touched an object, {} elsewhere",
+            self.bipeds_agreed,
+            self.bipeds_replayed,
+            self.bipeds_seen.len(),
+            walking,
+            airborne,
+            flying,
+            supported,
+            stuck,
+            cannot_stand,
+            self.biped_updates,
+            self.bipeds_touched_objects,
+            self.bipeds_elsewhere
+        );
         let [other_bsp, touched_object, guided, many_collisions] = self.projectile_skipped;
         println!(
             "projectiles: {} of {} updates replayed agree with the game bit for bit ({} collisions; {} projectiles; ended none/detonate/disappear {:?}); of {} recorded, left out: {} hit an object, {} guided, {} with over 4 collisions, {} elsewhere",

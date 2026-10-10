@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 14
+#define BEVY_BRIDGE_VERSION 15
 #define BEVY_BRIDGE_RAY_TESTS 16
 #define BEVY_BRIDGE_MAXIMUM_LIGHTS 64
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
@@ -165,7 +165,21 @@ struct bevy_bridge_ray_test
 	short object_bsp_index;
 	float object_t;
 	long object_surface_index;
+	/* and a point (point_physics_update, the map's first point physics with
+	structure collisions) launched from the ray's start along it at 15
+	world units a second, with no wind, under water every fourth, of radius
+	`point_radius`: where it was after POINT_PHYSICS_STEPS steps of 1/30
+	of a second, its velocity, every step's result flags or'd, and how many
+	steps collided */
+	float point_radius;
+	unsigned long point_underwater;
+	float point_position[3];
+	float point_velocity[3];
+	unsigned long point_result_flags;
+	unsigned long point_collisions;
 };
+
+#define BEVY_BRIDGE_POINT_PHYSICS_STEPS 90
 
 struct bevy_bridge_frame
 {
@@ -182,6 +196,9 @@ struct bevy_bridge_frame
 	/* rays fanned out from the camera (only with game.bevy_bridge_ray_tests) */
 	unsigned long ray_test_count;
 	struct bevy_bridge_ray_test ray_tests[BEVY_BRIDGE_RAY_TESTS];
+	/* the point physics definition the ray tests' points use (its datum
+	index; all ones for none) */
+	unsigned long point_physics_definition;
 	unsigned long object_count;
 	unsigned long node_count;
 	struct bevy_bridge_object objects[BEVY_BRIDGE_MAXIMUM_OBJECTS];

@@ -22,6 +22,8 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "objects/object_lights.h"
 #include "physics/collision_bsp.h"
 #include "physics/collisions.h"
+#include "physics/point_physics.h"
+#include "cache/cache_files.h"
 #include "render/render_cameras.h"
 #include "render/render_cameras_internal.h"
 #include "scenario/scenario.h"
@@ -85,6 +87,38 @@ static unsigned long bevy_bridge_checksum(unsigned long hash, long const *indice
 		}
 	}
 	return hash;
+}
+
+/* the map's first point physics with structure collisions (preferring one
+that collides with water too), NONE for none */
+static long bevy_bridge_point_physics(void)
+{
+	static long scenario = NONE - 1;
+	static long chosen = NONE;
+	struct tag_iterator iterator;
+	long tag_index;
+
+	if (scenario == global_scenario_index)
+		return chosen;
+	scenario = global_scenario_index;
+	chosen = NONE;
+	tag_iterator_new(&iterator, POINT_PHYSICS_DEFINITION_TAG);
+	for (tag_index = tag_iterator_next(&iterator); tag_index != NONE; tag_index = tag_iterator_next(&iterator))
+	{
+		struct point_physics_definition *definition = point_physics_definition_get(tag_index);
+
+		if (TEST_FLAG(definition->flags, _point_physics_structure_collisions_bit))
+		{
+			if (chosen == NONE)
+				chosen = tag_index;
+			if (TEST_FLAG(definition->flags, _point_physics_water_collisions_bit))
+			{
+				chosen = tag_index;
+				break;
+			}
+		}
+	}
+	return chosen;
 }
 
 /* game.bevy_bridge_ray_tests: rays fanned out from the camera, tested
@@ -199,6 +233,42 @@ static unsigned long bevy_bridge_ray_tests(
 					test->object_bsp_index = collision.type == _collision_result_object ? collision.bsp_index : NONE;
 					test->object_t = collision.t;
 					test->object_surface_index = collision.surface_index;
+				}
+			}
+			{
+				long definition_index = bevy_bridge_point_physics();
+
+				test->point_radius = (count & 2) ? 0.2f : 0.05f;
+				test->point_underwater = (count & 3) == 3;
+				test->point_result_flags = 0;
+				test->point_collisions = 0;
+				if (definition_index != NONE)
+				{
+					struct point_physics_definition const *definition = point_physics_definition_get(definition_index);
+					struct location location = { NONE, NONE };
+					real_point3d position = *origin;
+					real_vector3d velocity = vector;
+					unsigned long update_flags = FLAG(_point_physics_ignore_position_bit) |
+						(test->point_underwater ? FLAG(_point_physics_ignore_position_under_water_bit) : 0);
+					short step;
+
+					normalize3d(&velocity);
+					scale_vector3d(&velocity, 15.0f, &velocity);
+					for (step = 0; step < BEVY_BRIDGE_POINT_PHYSICS_STEPS; step++)
+					{
+						unsigned long result = point_physics_update(update_flags, definition, &location, NONE,
+							&position, &velocity, NULL, NULL, NULL, test->point_radius, 1.0f / 30.0f);
+
+						test->point_result_flags |= result;
+						if (result & (FLAG(_point_physics_collided_with_structure_bit) | FLAG(_point_physics_collided_with_water_bit)))
+							test->point_collisions++;
+					}
+					test->point_position[0] = position.x;
+					test->point_position[1] = position.y;
+					test->point_position[2] = position.z;
+					test->point_velocity[0] = velocity.i;
+					test->point_velocity[1] = velocity.j;
+					test->point_velocity[2] = velocity.k;
 				}
 			}
 		}
@@ -386,6 +456,7 @@ void bevy_bridge_export_frame(
 	/* the first player's view */
 	frame->camera_valid = FALSE;
 	frame->ray_test_count = 0;
+	frame->point_physics_definition = (unsigned long)bevy_bridge_point_physics();
 	for (window_index = 0; window_index < window_count; window_index++)
 	{
 		struct render_window const *window = &windows[window_index];

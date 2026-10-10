@@ -13,6 +13,7 @@
 pub mod animation;
 pub mod biped;
 pub mod biped_moving;
+pub mod biped_rest;
 pub mod biped_update;
 pub mod bitmap;
 pub mod bsp;

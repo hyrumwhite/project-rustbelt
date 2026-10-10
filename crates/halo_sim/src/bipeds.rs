@@ -13,6 +13,11 @@
 //! footsteps and the game's random seed (which a tumble draws from) are the
 //! game's ([`UpdateCallbacks`]).
 //!
+//! The rest of a biped's update runs in Rust too ([`halo_sim_biped_rest`]):
+//! riding a vehicle or biped, and its footsteps, the AI's notice of a
+//! dangerous fall and its erasing after the update, the game called through
+//! bipeds.c's `biped_rest_call` ([`RestCallbacks`]).
+//!
 //! In check mode the game's own update runs first; Rust then replays it
 //! from the state it began with, on the live world, with what the AI's jump
 //! aim answered the game, as the probe replays a recorded one.
@@ -23,6 +28,7 @@ use halo_map::biped::{BipedObjects, BipedPhysics, StandTest};
 use halo_map::biped_moving::{
     BipedDefinition, MovingHost, MovingInputs, MovingState, PhysicsWorld, PlayerInformation, biped_flags, biped_update_moving,
 };
+use halo_map::biped_rest::{Parent, RestHost, RestInputs, RestState, biped_after_update, biped_riding};
 use halo_map::biped_update::{UpdateHost, UpdateInputs, UpdateState, biped_update};
 
 use crate::TAGS;
@@ -410,4 +416,184 @@ pub unsafe extern "C" fn halo_sim_biped_update_check(call: *mut UpdateCall) -> i
     }
     // SAFETY: the caller's call
     run_update(unsafe { &mut *call }, true)
+}
+
+/// The game's side of the rest of a biped's update (halo_sim.c, which
+/// writes the state to the biped first and reads it back after; bipeds.c's
+/// `biped_rest_call`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RestCallbacks {
+    pub call: unsafe extern "C" fn(biped: u32, state: *mut RestState, kind: i32, a: i32, b: i32) -> i32,
+}
+
+/// A call of the game's, recorded in check mode: its kind, what it was
+/// given and gave back, and the biped before and after.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RestEventC {
+    pub kind: i32,
+    pub a: i32,
+    pub b: i32,
+    pub result: i32,
+    pub before: RestState,
+    pub after: RestState,
+}
+
+/// What the rest of a biped's update reads, and where it leaves it:
+/// `riding`, the parented branch; otherwise what follows the update.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RestCall {
+    pub biped_index: u32,
+    pub definition_index: u32,
+    pub riding: u32,
+    pub state: RestState,
+    pub game_time: i32,
+    pub game_engine_running: u32,
+    pub maximum_damage_velocity: f32,
+    /// What it rides: 0 nothing, 1 a vehicle, 2 a biped, 3 another object.
+    pub parent_kind: i32,
+    pub vehicle_up_k: f32,
+    pub vehicle_on_ground: u32,
+    pub parent_dead: u32,
+    pub rider_ejection: u32,
+    /// In check mode, the game's calls.
+    pub events: *const RestEventC,
+    pub event_count: u32,
+    /// In check mode: the first call that differs (-1 for none) and why
+    /// (1 its kind, 2 what it was given, 3 the biped before it, 4 more calls
+    /// than the game's, 5 fewer).
+    pub difference_event: i32,
+    pub difference_reason: i32,
+    /// Written: whether the biped is still there.
+    pub still_there: u32,
+}
+
+struct LiveRestHost {
+    callbacks: RestCallbacks,
+    biped_index: u32,
+}
+
+impl RestHost for LiveRestHost {
+    fn call(&self, state: &mut RestState, kind: i32, a: i32, b: i32) -> i32 {
+        // SAFETY: the game's callback, with the state as it stands
+        unsafe { (self.callbacks.call)(self.biped_index, state, kind, a, b) }
+    }
+}
+
+struct CheckRestHost<'a> {
+    events: &'a [RestEventC],
+    next: std::cell::Cell<usize>,
+    difference: std::cell::Cell<Option<(usize, i32)>>,
+}
+
+impl CheckRestHost<'_> {
+    fn differ(&self, event: usize, reason: i32) {
+        if self.difference.get().is_none() {
+            self.difference.set(Some((event, reason)));
+        }
+    }
+}
+
+impl RestHost for CheckRestHost<'_> {
+    fn call(&self, state: &mut RestState, kind: i32, a: i32, b: i32) -> i32 {
+        let index = self.next.get();
+        let Some(event) = self.events.get(index) else {
+            self.differ(index, 4);
+            return 0;
+        };
+        self.next.set(index + 1);
+        if event.kind != kind {
+            self.differ(index, 1);
+        } else if event.a != a || event.b != b {
+            self.differ(index, 2);
+        } else if event.before != *state {
+            self.differ(index, 3);
+        }
+        *state = event.after;
+        event.result
+    }
+}
+
+fn run_rest(call: &mut RestCall, check: bool) -> i32 {
+    let Some(host) = crate::world::host() else { return -1 };
+    let (definition, feet) = {
+        let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tags) = tags.as_mut() else { return -1 };
+        let Some(definition) = tags.biped_definition(call.definition_index) else { return -1 };
+        let feet = (call.riding == 0 && call.state.animation_index != -1 && call.state.animation_graph_index != u32::MAX)
+            .then(|| halo_map::biped_rest::foot_frames(&tags.cache, call.state.animation_graph_index, call.state.animation_index).ok())
+            .flatten();
+        (definition, feet)
+    };
+    let inputs = RestInputs {
+        definition_flags: definition.flags,
+        game_time: call.game_time,
+        game_engine_running: call.game_engine_running != 0,
+        maximum_damage_velocity: call.maximum_damage_velocity,
+        parent: match call.parent_kind {
+            1 => Some(Parent::Vehicle { up_k: call.vehicle_up_k, on_ground: call.vehicle_on_ground != 0 }),
+            2 => Some(Parent::Biped { dead: call.parent_dead != 0 }),
+            3 => Some(Parent::Other),
+            _ => None,
+        },
+        rider_ejection: call.rider_ejection != 0,
+    };
+    let mut state = call.state;
+    call.difference_event = -1;
+    call.difference_reason = 0;
+    let events: &[RestEventC] = if !check || call.events.is_null() {
+        &[]
+    } else {
+        // SAFETY: the game's recording, `event_count` of them
+        unsafe { std::slice::from_raw_parts(call.events, call.event_count as usize) }
+    };
+    let checker = CheckRestHost { events, next: std::cell::Cell::new(0), difference: std::cell::Cell::new(None) };
+    let live = LiveRestHost { callbacks: host.rest, biped_index: call.biped_index };
+    let rest_host: &dyn RestHost = if check { &checker } else { &live };
+    let still_there = if call.riding != 0 {
+        biped_riding(&inputs, &mut state, Some(rest_host));
+        true
+    } else {
+        biped_after_update(&inputs, feet, &mut state, Some(rest_host))
+    };
+    if check {
+        if checker.difference.get().is_none() && checker.next.get() < events.len() {
+            checker.differ(checker.next.get(), 5);
+        }
+        (call.difference_event, call.difference_reason) = checker.difference.get().map_or((-1, 0), |(e, r)| (e as i32, r));
+    }
+    call.state = state;
+    call.still_there = still_there as u32;
+    0
+}
+
+/// The rest of a biped's update on the running game, in place of the game's.
+/// Returns 0 (the state written, and whether it is still there), or -1 if
+/// it can't run (the game then runs its own; nothing was done).
+///
+/// # Safety
+/// `call` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_biped_rest(call: *mut RestCall) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_rest(unsafe { &mut *call }, false)
+}
+
+/// Its check: Rust's replay of the game's, each call answered from its
+/// recording. Returns 0, or -1.
+///
+/// # Safety
+/// As [`halo_sim_biped_rest`]; `call.events` holds `call.event_count`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_biped_rest_check(call: *mut RestCall) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_rest(unsafe { &mut *call }, true)
 }

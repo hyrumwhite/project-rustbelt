@@ -1,11 +1,12 @@
 /*
-Unit and weapon definition layouts (see probe.c): what a unit's update
-reads (units.c's unit_update).
+Unit, weapon and animation layouts (see probe.c): what a unit's update
+reads (units.c's unit_update), and a biped's footsteps.
 */
 
 #include "cseries.h"
 #include "units/unit_definitions.h"
 #include "items/weapon_definitions.h"
+#include "models/model_animation_definitions.h"
 
 #include <stddef.h>
 
@@ -27,3 +28,7 @@ LAYOUT_OFFSET(powered_seat_definition, powerdown_time)
 
 /* weapons: what a camouflaged unit's firing regrows */
 LAYOUT_OFFSET(_weapon_definition, active_camo_regrowth_rate)
+
+/* animations: a walk's footsteps */
+LAYOUT_OFFSET(animation, private_left_foot_frame_index)
+LAYOUT_OFFSET(animation, private_right_foot_frame_index)

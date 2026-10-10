@@ -23,6 +23,7 @@ enum
 	_halo_sim_vehicle_update,
 	_halo_sim_biped_moving,
 	_halo_sim_biped_update,
+	_halo_sim_unit_animation,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -193,5 +194,18 @@ int halo_sim_biped_update(long biped_index, void *animation, float const *aiming
 	int coop_player_collisions, int actor_leaping, int recorded_animation, int enhanced_animation);
 void halo_sim_biped_update_check(long biped_index, void const *animation);
 void halo_sim_biped_update_airborne(void);
+
+/* units.c's unit_update_animation, with its animation update data, the
+current weapon's label, the magic base seat, the unit definition's graph
+and "destroyed after dying" flag, and the biped definition's "has no dying
+airborne" flag: TRUE when the Rust port ran it (its side effects the
+game's, called back: units.c's unit_rust_animation_effect) and left what
+it returns in *result; in check mode it notes the state and random seed
+the game's update begins with, and halo_sim_unit_animation_check compares
+Rust's replay of it */
+int halo_sim_unit_animation_update(long unit_index, void *animation, char const *weapon_label,
+	short magic_base_seat_index, long unit_graph_index, int destroyed_after_dying, int has_no_dying_airborne,
+	short *result);
+void halo_sim_unit_animation_check(long unit_index, short result);
 
 #endif // __HALO_SIM_H

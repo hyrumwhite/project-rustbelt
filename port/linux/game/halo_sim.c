@@ -48,7 +48,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 10
+#define HALO_SIM_VERSION 11
 
 /* ---------- structures */
 
@@ -436,6 +436,73 @@ struct halo_sim_update_call
 	unsigned long airborne_seed;
 };
 
+/* crates/halo_map's UnitAnimationState (40 bytes) */
+struct halo_sim_unit_animation_state
+{
+	unsigned short flags;
+	short aiming_screen_index;
+	short looking_screen_index;
+	short action_animation_index;
+	short action_animation_frame_index;
+	short overlay_action_animation_index;
+	short overlay_action_animation_frame_index;
+	short soft_ping_animation_index;
+	short soft_ping_animation_frame_index;
+	short object_animation_index;
+	short object_animation_frame_index;
+	short interpolation_frame_index;
+	short interpolation_frame_count;
+	char seat_index;
+	char weapon_index;
+	char weapon_type_index;
+	char state;
+	char action;
+	char overlay_action;
+	char base_seat_index;
+	char pad;
+	short pad2;
+	unsigned long object_animation_graph_index;
+};
+
+typedef char halo_sim_unit_animation_state_size_assert[sizeof(struct halo_sim_unit_animation_state) == 40 ? 1 : -1];
+
+/* crates/halo_sim's UnitAnimationCall */
+struct halo_sim_unit_animation_call
+{
+	unsigned long unit_index;
+	long unit_graph_index;
+	struct halo_sim_unit_animation_state state;
+	char state_desired;
+	char crouching;
+	char desired_state;
+	char magic_seat_index;
+	unsigned long dead;
+	unsigned long parented;
+	unsigned long player;
+	unsigned long force_alert;
+	unsigned long flaming;
+	short magic_base_seat_index;
+	short pad;
+	unsigned long at_rest;
+	unsigned long biped;
+	unsigned long airborne;
+	unsigned long destroyed_after_dying;
+	unsigned long has_no_dying_airborne;
+	char const *weapon_label;
+	unsigned long random_seed;
+	short result;
+	short pad2;
+	unsigned long effects;
+};
+
+/* crates/halo_sim's UnitAnimationCallbacks */
+struct halo_sim_unit_animation_callbacks
+{
+	unsigned long (*random_seed)(void);
+	void (*set_random_seed)(unsigned long seed);
+	long (*effect)(unsigned long unit_index, struct halo_sim_unit_animation_state *state, unsigned long effect);
+};
+
 /* crates/halo_sim's UpdateCallbacks */
 struct halo_sim_update_callbacks
 {
@@ -592,6 +659,7 @@ struct halo_sim_host
 	struct halo_sim_vehicle_update_callbacks vehicle_update;
 	struct halo_sim_moving_callbacks moving;
 	struct halo_sim_update_callbacks biped_update;
+	struct halo_sim_unit_animation_callbacks unit_animation;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -634,6 +702,7 @@ typedef long (*halo_sim_vehicle_physics_function)(struct halo_sim_vehicle_physic
 typedef long (*halo_sim_vehicle_update_function)(struct halo_sim_vehicle_update_call *call);
 typedef long (*halo_sim_moving_function)(struct halo_sim_moving_call *call);
 typedef long (*halo_sim_update_function)(struct halo_sim_update_call *call);
+typedef long (*halo_sim_unit_animation_function)(struct halo_sim_unit_animation_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -670,6 +739,8 @@ static struct
 	halo_sim_moving_function biped_moving_check;
 	halo_sim_update_function biped_update;
 	halo_sim_update_function biped_update_check;
+	halo_sim_unit_animation_function unit_animation;
+	halo_sim_unit_animation_function unit_animation_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -695,7 +766,22 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"vehicle_update",
 	"biped_moving",
 	"biped_update",
+	"unit_animation",
 };
+
+/* the unit animation checks: the update the game's began with, and the
+comparisons */
+static struct
+{
+	boolean recording;
+	long unit_index;
+	struct halo_sim_unit_animation_call call;
+	char weapon_label[64];
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long effects;
+} halo_sim_unit_animation_checks;
 
 /* the biped update checks: the update the game's began with, what the
 AI's jump aim and the random seed answered it, and the comparisons */
@@ -1531,6 +1617,83 @@ static void halo_sim_update_set_random_seed(unsigned long seed)
 	*get_global_random_seed_address() = seed;
 }
 
+static unsigned long halo_sim_update_random_seed_plain(void)
+{
+	return get_random_seed();
+}
+
+/* a unit's animation state, from the unit */
+static void halo_sim_unit_animation_state_load(long unit_index, struct halo_sim_unit_animation_state *state)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+
+	memset(state, 0, sizeof(*state));
+	state->flags = unit->unit.animation.flags;
+	state->aiming_screen_index = unit->unit.animation.aiming_screen_index;
+	state->looking_screen_index = unit->unit.animation.looking_screen_index;
+	state->action_animation_index = unit->unit.animation.action_animation.index;
+	state->action_animation_frame_index = unit->unit.animation.action_animation.frame_index;
+	state->overlay_action_animation_index = unit->unit.animation.overlay_action_animation.index;
+	state->overlay_action_animation_frame_index = unit->unit.animation.overlay_action_animation.frame_index;
+	state->soft_ping_animation_index = unit->unit.animation.soft_ping_animation.index;
+	state->soft_ping_animation_frame_index = unit->unit.animation.soft_ping_animation.frame_index;
+	state->object_animation_index = unit->object.animation.state.index;
+	state->object_animation_frame_index = unit->object.animation.state.frame_index;
+	state->interpolation_frame_index = unit->object.animation.interpolation_frame_index;
+	state->interpolation_frame_count = unit->object.animation.interpolation_frame_count;
+	state->seat_index = unit->unit.animation.seat_index;
+	state->weapon_index = unit->unit.animation.weapon_index;
+	state->weapon_type_index = unit->unit.animation.weapon_type_index;
+	state->state = unit->unit.animation.state;
+	state->action = unit->unit.animation.action;
+	state->overlay_action = unit->unit.animation.overlay_action;
+	state->base_seat_index = unit->unit.animation.base_seat_index;
+	state->object_animation_graph_index = unit->object.animation.animation_graph_index;
+}
+
+/* and back to it */
+static void halo_sim_unit_animation_state_store(long unit_index, struct halo_sim_unit_animation_state const *state)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+
+	unit->unit.animation.flags = state->flags;
+	unit->unit.animation.aiming_screen_index = state->aiming_screen_index;
+	unit->unit.animation.looking_screen_index = state->looking_screen_index;
+	unit->unit.animation.action_animation.index = state->action_animation_index;
+	unit->unit.animation.action_animation.frame_index = state->action_animation_frame_index;
+	unit->unit.animation.overlay_action_animation.index = state->overlay_action_animation_index;
+	unit->unit.animation.overlay_action_animation.frame_index = state->overlay_action_animation_frame_index;
+	unit->unit.animation.soft_ping_animation.index = state->soft_ping_animation_index;
+	unit->unit.animation.soft_ping_animation.frame_index = state->soft_ping_animation_frame_index;
+	unit->object.animation.state.index = state->object_animation_index;
+	unit->object.animation.state.frame_index = state->object_animation_frame_index;
+	unit->object.animation.interpolation_frame_index = state->interpolation_frame_index;
+	unit->object.animation.interpolation_frame_count = state->interpolation_frame_count;
+	unit->unit.animation.seat_index = state->seat_index;
+	unit->unit.animation.weapon_index = state->weapon_index;
+	unit->unit.animation.weapon_type_index = state->weapon_type_index;
+	unit->unit.animation.state = state->state;
+	unit->unit.animation.action = state->action;
+	unit->unit.animation.overlay_action = state->overlay_action;
+	unit->unit.animation.base_seat_index = state->base_seat_index;
+	unit->object.animation.animation_graph_index = state->object_animation_graph_index;
+}
+
+/* units.c's, a unit animation's side effect */
+void unit_rust_animation_effect(long unit_index, unsigned long effect);
+
+static long halo_sim_unit_animation_effect(unsigned long unit_index, struct halo_sim_unit_animation_state *state,
+	unsigned long effect)
+{
+	halo_sim_unit_animation_state_store((long)unit_index, state);
+	unit_rust_animation_effect((long)unit_index, effect);
+	/* (destroying a dead unit deletes it) */
+	if (!object_try_and_get_and_verify_type((long)unit_index, _object_mask_unit))
+		return 0;
+	halo_sim_unit_animation_state_load((long)unit_index, state);
+	return 1;
+}
+
 static void halo_sim_update_landing_footsteps(unsigned long biped_index, struct halo_sim_moving_state *state)
 {
 	halo_sim_moving_state_store((long)biped_index, halo_sim_moving_animation, state);
@@ -1604,6 +1767,11 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		halo_sim_update_landing_footsteps,
 		halo_sim_update_slipping_footsteps,
 	},
+	{
+		halo_sim_update_random_seed_plain,
+		halo_sim_update_set_random_seed,
+		halo_sim_unit_animation_effect,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -1656,13 +1824,16 @@ static void halo_sim_initialize(void)
 	halo_sim.biped_moving_check = (halo_sim_moving_function)halo_sim_symbol(library, "halo_sim_biped_moving_check");
 	halo_sim.biped_update = (halo_sim_update_function)halo_sim_symbol(library, "halo_sim_biped_update");
 	halo_sim.biped_update_check = (halo_sim_update_function)halo_sim_symbol(library, "halo_sim_biped_update_check");
+	halo_sim.unit_animation = (halo_sim_unit_animation_function)halo_sim_symbol(library, "halo_sim_unit_animation_update");
+	halo_sim.unit_animation_check = (halo_sim_unit_animation_function)halo_sim_symbol(library, "halo_sim_unit_animation_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
 		!halo_sim.vehicle_physics_update || !halo_sim.vehicle_physics_check ||
 		!halo_sim.vehicle_update || !halo_sim.vehicle_update_check ||
 		!halo_sim.biped_moving || !halo_sim.biped_moving_check ||
-		!halo_sim.biped_update || !halo_sim.biped_update_check)
+		!halo_sim.biped_update || !halo_sim.biped_update_check ||
+		!halo_sim.unit_animation || !halo_sim.unit_animation_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -3197,5 +3368,136 @@ void halo_sim_biped_update_check(long biped_index, void const *animation)
 			halo_sim_update_checks.compared - halo_sim_update_checks.differed, halo_sim_update_checks.compared,
 			halo_sim_update_checks.dead, halo_sim_update_checks.airborne, halo_sim_update_checks.tumbles,
 			halo_sim_update_checks.skipped);
+	}
+}
+
+/* ---------- unit animation */
+
+static void halo_sim_unit_animation_call_new(long unit_index, struct unit_animation_update_data const *data,
+	char const *weapon_label, short magic_base_seat_index, long unit_graph_index, int destroyed_after_dying,
+	int has_no_dying_airborne, struct halo_sim_unit_animation_call *call)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+
+	memset(call, 0, sizeof(*call));
+	call->unit_index = (unsigned long)unit_index;
+	call->unit_graph_index = unit_graph_index;
+	halo_sim_unit_animation_state_load(unit_index, &call->state);
+	call->state_desired = data->state_desired;
+	call->crouching = data->crouching ? 1 : 0;
+	call->desired_state = unit->unit.animation.desired_state;
+	call->magic_seat_index = unit->unit.magic_seat_index;
+	call->dead = TEST_FLAG(unit->object.damage_flags, _object_dead_bit) ? 1 : 0;
+	call->parented = unit->object.parent_object_index != NONE;
+	call->player = unit->unit.player_index != NONE;
+	call->force_alert = TEST_FLAG(unit->unit.control_flags, _unit_control_force_alert_bit) ? 1 : 0;
+	call->flaming = unit->unit.flaming_death_delay > 0;
+	call->magic_base_seat_index = magic_base_seat_index;
+	call->at_rest = TEST_FLAG(unit->object.flags, _object_at_rest_bit) ? 1 : 0;
+	call->biped = unit->object.type == _object_type_biped;
+	call->airborne = call->biped && TEST_FLAG(biped_get(unit_index)->biped.flags, _biped_airborne_bit) ? 1 : 0;
+	call->destroyed_after_dying = destroyed_after_dying ? 1 : 0;
+	call->has_no_dying_airborne = has_no_dying_airborne ? 1 : 0;
+	call->weapon_label = weapon_label;
+	call->random_seed = get_random_seed();
+}
+
+int halo_sim_unit_animation_update(long unit_index, void *animation, char const *weapon_label,
+	short magic_base_seat_index, long unit_graph_index, int destroyed_after_dying, int has_no_dying_airborne,
+	short *result)
+{
+	short mode = halo_sim_mode(_halo_sim_unit_animation);
+	struct unit_animation_update_data *data = (struct unit_animation_update_data *)animation;
+	struct halo_sim_unit_animation_call call;
+
+	halo_sim_unit_animation_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		struct halo_sim_unit_animation_call *recorded = &halo_sim_unit_animation_checks.call;
+
+		halo_sim_unit_animation_call_new(unit_index, data, weapon_label, magic_base_seat_index, unit_graph_index,
+			destroyed_after_dying, has_no_dying_airborne, recorded);
+		/* (the label kept: the game's may change) */
+		halo_sim_unit_animation_checks.weapon_label[0] = 0;
+		if (weapon_label)
+		{
+			strncpy(halo_sim_unit_animation_checks.weapon_label, weapon_label,
+				sizeof(halo_sim_unit_animation_checks.weapon_label) - 1);
+			halo_sim_unit_animation_checks.weapon_label[sizeof(halo_sim_unit_animation_checks.weapon_label) - 1] = 0;
+		}
+		recorded->weapon_label = weapon_label ? halo_sim_unit_animation_checks.weapon_label : NULL;
+		halo_sim_unit_animation_checks.unit_index = unit_index;
+		halo_sim_unit_animation_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_unit_animation_call_new(unit_index, data, weapon_label, magic_base_seat_index, unit_graph_index,
+		destroyed_after_dying, has_no_dying_airborne, &call);
+	if (halo_sim.unit_animation(&call) != 0)
+		return FALSE;
+	/* (a destroyed unit is gone) */
+	if (object_try_and_get_and_verify_type(unit_index, _object_mask_unit))
+		halo_sim_unit_animation_state_store(unit_index, &call.state);
+	*result = call.result;
+
+	return TRUE;
+}
+
+void halo_sim_unit_animation_check(long unit_index, short result)
+{
+	struct halo_sim_unit_animation_call call;
+	struct halo_sim_unit_animation_state game;
+
+	if (!halo_sim_unit_animation_checks.recording)
+		return;
+	halo_sim_unit_animation_checks.recording = FALSE;
+	if (halo_sim_unit_animation_checks.unit_index != unit_index ||
+		!object_try_and_get_and_verify_type(unit_index, _object_mask_unit))
+	{
+		halo_sim_unit_animation_checks.skipped++;
+		return;
+	}
+	call = halo_sim_unit_animation_checks.call;
+	if (halo_sim.unit_animation_check(&call) != 0)
+	{
+		halo_sim_unit_animation_checks.skipped++;
+		return;
+	}
+
+	halo_sim_unit_animation_state_load(unit_index, &game);
+	halo_sim_unit_animation_checks.compared++;
+	halo_sim_unit_animation_checks.effects += call.effects != 0;
+	if (memcmp(&call.state, &game, sizeof(game)) != 0 || call.result != result)
+	{
+		halo_sim_unit_animation_checks.differed++;
+		if (halo_sim_unit_animation_checks.differed <= 8)
+		{
+			struct halo_sim_unit_animation_state const *b = &halo_sim_unit_animation_checks.call.state;
+
+			platform_log("halo_sim: unit animation differs: unit %lx state %d desired %d (seat %d weapon %d animation %d/%d) effects %lx result game %d rust %d",
+				(unsigned long)unit_index, b->state, halo_sim_unit_animation_checks.call.state_desired, b->seat_index,
+				b->weapon_index, b->object_animation_index, b->object_animation_frame_index, call.effects, result, call.result);
+			platform_log("halo_sim:   game state %d seat %d/%d animation %d/%d action %d/%d overlay %d/%d ping %d/%d interpolation %d/%d flags %x",
+				game.state, game.seat_index, game.base_seat_index, game.object_animation_index, game.object_animation_frame_index,
+				game.action_animation_index, game.action_animation_frame_index, game.overlay_action_animation_index,
+				game.overlay_action_animation_frame_index, game.soft_ping_animation_index, game.soft_ping_animation_frame_index,
+				game.interpolation_frame_index, game.interpolation_frame_count, game.flags);
+			platform_log("halo_sim:   rust state %d seat %d/%d animation %d/%d action %d/%d overlay %d/%d ping %d/%d interpolation %d/%d flags %x",
+				call.state.state, call.state.seat_index, call.state.base_seat_index, call.state.object_animation_index,
+				call.state.object_animation_frame_index, call.state.action_animation_index, call.state.action_animation_frame_index,
+				call.state.overlay_action_animation_index, call.state.overlay_action_animation_frame_index,
+				call.state.soft_ping_animation_index, call.state.soft_ping_animation_frame_index,
+				call.state.interpolation_frame_index, call.state.interpolation_frame_count, call.state.flags);
+		}
+	}
+	if ((halo_sim_unit_animation_checks.compared & 0x3fff) == 0 ||
+		(halo_sim_unit_animation_checks.compared & (halo_sim_unit_animation_checks.compared - 1)) == 0)
+	{
+		platform_log("halo_sim: unit animation: %lu of %lu agree with the game (%lu with side effects; %lu left out)",
+			halo_sim_unit_animation_checks.compared - halo_sim_unit_animation_checks.differed,
+			halo_sim_unit_animation_checks.compared, halo_sim_unit_animation_checks.effects,
+			halo_sim_unit_animation_checks.skipped);
 	}
 }

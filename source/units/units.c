@@ -696,6 +696,7 @@ symbols in this file:
 #include "coop_scripts.h" /* port: port/linux/game/coop_scripts.c */
 #include "coop_enemies.h" /* port: port/linux/game/coop_enemies.c */
 #include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* port: the control and animation impulses the host's actors give their
 units go to the clients' copies (port/linux/game/network_actors.c) */
@@ -10185,6 +10186,22 @@ short unit_update_animation(
 	/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
 	bevy_bridge_unit_animation_begin(unit_index, data->state_desired, data->crouching,
 		magic_base_animation_seat_index, unit_get_current_weapon_label(unit_index));
+	/* port: the Rust port's update in place of the game's, or (in check
+	mode) the state it is checked from (halo_sim.c) */
+	{
+		short rust_result;
+
+		if (halo_sim_unit_animation_update(unit_index, data, unit_get_current_weapon_label(unit_index),
+			magic_base_animation_seat_index, unit_definition->object.animation_graph.index,
+			TEST_FLAG(unit_definition->unit.flags, _unit_is_destroyed_after_dying_bit),
+			unit->object.type == _object_type_biped &&
+				TEST_FLAG(biped_definition_get(unit->definition_index)->biped.flags, _biped_has_no_dying_airborne_bit),
+			&rust_result))
+		{
+			bevy_bridge_unit_animation_end(unit_index, rust_result);
+			return rust_result;
+		}
+	}
 
 	match_assert(
 		"c:\\halo\\SOURCE\\units\\units.c",
@@ -10479,8 +10496,92 @@ short unit_update_animation(
 		unit_animation_set_state(unit_index, desired_state);
 	}
 
+	halo_sim_unit_animation_check(unit_index, result); /* port: (halo_sim.c) */
 	bevy_bridge_unit_animation_end(unit_index, result); /* port: (bevy_bridge.c) */
 	return result;
+}
+
+/* port: a unit animation's side effect (crates/halo_map's
+unit_animation::side_effects' bit), as unit_update_animation and
+unit_animation_set_state do it, for the Rust port's callback (halo_sim.c) */
+void unit_rust_animation_effect(
+	long unit_index,
+	unsigned long effect)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+	struct unit_definition *unit_definition = unit_definition_get(unit->definition_index);
+
+	bevy_bridge_unit_animation_side_effect(effect);
+	switch (effect)
+	{
+	case 1:
+		unit_throw_grenade_release(unit_index, FALSE);
+		break;
+
+	case 2:
+		unit_cause_melee_damage(unit_index, FALSE, NONE, NONE, NONE, NONE, FALSE);
+		break;
+
+	case 4:
+		unit_destroy(unit_index);
+		break;
+
+	case 8:
+		biped_start_limp_body_physics(unit_index);
+		break;
+
+	case 16:
+		{
+			struct model *model = model_definition_get(unit_definition->object.model.index);
+			struct animation_graph *animation_graph = animation_graph_definition_get(
+				unit->object.animation.animation_graph_index);
+			struct animation *animation = TAG_BLOCK_GET_ELEMENT(
+				&animation_graph->animations,
+				unit->object.animation.state.index,
+				struct animation);
+			real_vector3d exit_velocity;
+			real_matrix4x3 old_world_matrix;
+
+			animation_get_root_velocity(
+				model,
+				animation,
+				unit->object.animation.state.frame_index,
+				&exit_velocity);
+			matrix4x3_transform_vector(
+				object_get_world_matrix(unit_index, &old_world_matrix),
+				&exit_velocity,
+				&exit_velocity);
+			unit_exit_seat_end(unit_index);
+			add_vectors3d(
+				&unit->object.translational_velocity,
+				&exit_velocity,
+				&unit->object.translational_velocity);
+		}
+		break;
+
+	case 32:
+		{
+			struct unit_datum *parent_unit = unit_get(unit->object.parent_object_index);
+			struct unit_definition *parent_definition = unit_definition_get(parent_unit->definition_index);
+			struct unit_seat *seat = TAG_BLOCK_GET_ELEMENT(
+				&parent_definition->unit.seats,
+				unit->unit.parent_seat_index,
+				struct unit_seat);
+
+			object_set_visibility(
+				unit_index,
+				!TEST_FLAG(seat->flags, _unit_seat_invisible_bit));
+			if (parent_unit->unit.driver_object_index==unit_index)
+			{
+				unit_close(unit->object.parent_object_index);
+			}
+		}
+		break;
+
+	case 64:
+		unit_throw_grenade_release(unit_index, TRUE);
+		break;
+	}
 }
 
 static boolean unit_animation_set_state(

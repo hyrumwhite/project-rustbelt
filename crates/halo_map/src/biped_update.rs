@@ -673,9 +673,59 @@ pub fn euler_aiming_update(
     angular_velocity_limit: f32,
     angular_acceleration_limit: f32,
 ) {
+    euler_aiming_update_oriented(
+        None,
+        aiming_vector,
+        desired_aiming_vector,
+        aiming_velocity,
+        aiming_bounds,
+        angular_velocity_limit,
+        angular_acceleration_limit,
+    );
+}
+
+/// `matrix4x3_transform_normal` and its inverse, for a rotation.
+fn transform_normal(m: &crate::model::Matrix4x3, n: [f32; 3]) -> [f32; 3] {
+    let [i, j, k] = n;
+    [
+        i * m.forward[0] + j * m.left[0] + k * m.up[0],
+        i * m.forward[1] + j * m.left[1] + k * m.up[1],
+        i * m.forward[2] + j * m.left[2] + k * m.up[2],
+    ]
+}
+fn inverse_transform_normal(m: &crate::model::Matrix4x3, n: [f32; 3]) -> [f32; 3] {
+    let [i, j, k] = n;
+    [
+        i * m.forward[0] + j * m.forward[1] + k * m.forward[2],
+        i * m.left[0] + j * m.left[1] + k * m.left[2],
+        i * m.up[0] + j * m.up[1] + k * m.up[2],
+    ]
+}
+
+/// `unit_euler_aiming_update` in an orientation's space (the vectors into
+/// it; the clamped desired vector and the new one out of it, normalized).
+pub fn euler_aiming_update_oriented(
+    orientation: Option<&crate::model::Matrix4x3>,
+    aiming_vector: &mut [f32; 3],
+    desired_aiming_vector: [f32; 3],
+    aiming_velocity: &mut [f32; 3],
+    aiming_bounds: [f32; 4],
+    angular_velocity_limit: f32,
+    angular_acceleration_limit: f32,
+) {
     let [x0, x1, y0, y1] = aiming_bounds;
-    let local_aiming_vector = *aiming_vector;
-    let local_desired_aiming_vector = desired_aiming_vector;
+    let (local_aiming_vector, local_desired_aiming_vector) = match orientation {
+        Some(m) => (inverse_transform_normal(m, *aiming_vector), inverse_transform_normal(m, desired_aiming_vector)),
+        None => (*aiming_vector, desired_aiming_vector),
+    };
+    let out = |v: [f32; 3]| match orientation {
+        Some(m) => {
+            let mut v = transform_normal(m, v);
+            normalize3(&mut v);
+            v
+        }
+        None => v,
+    };
     let yaw_wraps = (x1 - x0) - 2.0 * PI > -EPSILON;
     let aiming_angles = euler_from_vector(local_aiming_vector);
     let mut desired_angles = euler_from_vector(local_desired_aiming_vector);
@@ -696,14 +746,14 @@ pub fn euler_aiming_update(
     }
     let clamped_desired = if desired_angles[1] < y0 {
         desired_angles[1] = y0;
-        vector_from_euler(desired_angles)
+        out(vector_from_euler(desired_angles))
     } else if desired_angles[1] > y1 {
         desired_angles[1] = y1;
-        vector_from_euler(desired_angles)
+        out(vector_from_euler(desired_angles))
     } else if yaw_in_bounds {
         desired_aiming_vector
     } else {
-        vector_from_euler(desired_angles)
+        out(vector_from_euler(desired_angles))
     };
 
     let mut velocity_axis = *aiming_velocity;
@@ -753,7 +803,7 @@ pub fn euler_aiming_update(
         normalize3(aiming_velocity);
         let angle = min((dot as f64).acos() as f32, angular_velocity_limit);
         *aiming_velocity = scale3(*aiming_velocity, angle);
-        *aiming_vector = end_vector;
+        *aiming_vector = out(end_vector);
     }
 }
 

@@ -34,6 +34,7 @@ pub mod shader;
 pub mod sky;
 pub mod unit_animation;
 pub mod unit_pose;
+pub mod unit_update;
 pub mod vehicle_physics;
 pub mod vehicle_pose;
 pub mod vehicle_update;

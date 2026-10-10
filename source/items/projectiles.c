@@ -142,6 +142,7 @@ symbols in this file:
 #include "units/bipeds.h"
 #include "units/units.h"
 #include "bevy_bridge.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -321,10 +322,47 @@ static void projectile_collision(
 	real_point3d *new_position,
 	real_vector3d *new_velocity,
 	real time_left);
+/* port: projectile_update's and projectile_collision's side effects, each
+its own function, for the C and the Rust port's callbacks (halo_sim.c) to
+share */
+static void projectile_move(
+	long projectile_index,
+	real_point3d const *new_position,
+	real_vector3d const *new_velocity,
+	struct location const *new_location,
+	real time_remaining,
+	short collision_count,
+	long ignore_object_index,
+	boolean *flyby_sound_played);
+static void projectile_impact_damage(
+	long projectile_index,
+	struct collision_result const *collision,
+	real damage_scale,
+	real_vector3d const *new_velocity,
+	short *material_type,
+	real *material_effect_scale);
+static void projectile_breakable_surface_damage(
+	long projectile_index,
+	struct collision_result const *collision,
+	real_vector3d const *new_velocity);
+static void projectile_collision_effect(
+	long projectile_index,
+	long effect_definition_index,
+	struct collision_result const *collision,
+	real_vector3d const *direction,
+	real effect_scale,
+	real material_effect_scale);
+static void projectile_attach(
+	long projectile_index,
+	real_point3d const *new_position,
+	struct collision_result const *collision);
 
 /* ---------- globals */
 
 static real const seconds_per_tick = 1.0f / TICKS_PER_SECOND;
+
+/* port: whether the Rust port's update played the flyby sound (halo_sim.c) */
+static boolean projectile_rust_flyby_sound_played;
 
 static struct profile_section projectile_update_section = {"projectile_update", NONE, TRUE};
 
@@ -696,6 +734,12 @@ boolean projectile_update(
 		projectile->projectile.tracer_attachment_index = NONE;
 	}
 
+	/* port: the Rust port's update in place of the C's below, or (in check
+	mode) the state it is checked from (halo_sim.c) */
+	projectile_rust_flyby_sound_played = FALSE;
+	if (halo_sim_projectile_update(projectile_index, &collision_count, &time_remaining))
+		goto projectile_update_flown;
+
 	projectile->projectile.arming_time += projectile->projectile.arming_time_delta;
 	projectile->projectile.deceleration_timer += projectile->projectile.deceleration_timer_delta;
 
@@ -796,6 +840,15 @@ boolean projectile_update(
 			unit_get_center_of_mass(projectile->projectile.target_object_index, &target_point);
 			/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
 			bevy_bridge_projectile_guidance(projectile_index, projectile->projectile.target_object_index, &target_point);
+			/* port: and for the Rust port's check (halo_sim.c) */
+			halo_sim_projectile_event_guidance(
+				&projectile->object.bounding_sphere_center,
+				&target->object.bounding_sphere_center,
+				&target_point,
+				(TEST_FLAG(_object_mask_unit, target->object.type) &&
+					unit_get(projectile->projectile.target_object_index)->unit.player_index != NONE) ?
+					game_difficulty_get_value(_game_difficulty_value_guidance_vs_player) : 1.0f,
+				game_time_get());
 
 			set_real_euler_angles2d(
 				&wander_angles,
@@ -952,12 +1005,17 @@ boolean projectile_update(
 				&new_velocity,
 				time_remaining);
 			collision_count++;
-			ai_handle_spatial_effect(
-				projectile_index,
-				&collision.point,
-				_ai_spatial_effect_weapon_impact,
-				definition->projectile.impact_noise,
-				1);
+			{
+				unsigned long seed = halo_sim_projectile_seed(); /* port: (halo_sim.c) */
+
+				ai_handle_spatial_effect(
+					projectile_index,
+					&collision.point,
+					_ai_spatial_effect_weapon_impact,
+					definition->projectile.impact_noise,
+					1);
+				halo_sim_projectile_event(_halo_sim_projectile_event_impact_noise, seed, NONE, NONE, 0, 0.0f, 0.0f);
+			}
 
 			if (TEST_FLAG(projectile->projectile.flags, _projectile_attached_bit))
 				moved = FALSE;
@@ -982,104 +1040,12 @@ boolean projectile_update(
 			vector_from_points3d(&projectile->object.position, &new_position, &movement);
 			projectile->projectile.odometer += magnitude3d(&movement);
 
-			if (!flyby_sound_played &&
-				definition->projectile.flyby_sound.index != NONE)
 			{
-				short local_player_index;
+				unsigned long seed = halo_sim_projectile_seed(); /* port: (halo_sim.c) */
 
-				for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
-				{
-					if (local_player_get_player_index(local_player_index) != NONE)
-					{
-						long unit_index = player_get(local_player_get_player_index(local_player_index))->unit_index;
-
-						if (unit_index != NONE && unit_index != ignore_object_index)
-						{
-							real_point3d const *listener_position = &object_get(unit_index)->object.bounding_sphere_center;
-							real maximum_distance = sound_definition_get_maximum_distance(definition->projectile.flyby_sound.index);
-							real_vector3d listener_vector;
-							real_vector3d parallel;
-							real_vector3d perpendicular;
-							real distance_along_path;
-
-							listener_vector.i = listener_position->x - projectile->object.position.x;
-							listener_vector.j = listener_position->y - projectile->object.position.y;
-							listener_vector.k = listener_position->z - projectile->object.position.z;
-							component_vectors_from_direction3d(&listener_vector, &movement, &parallel, &perpendicular);
-							distance_along_path = dot_product3d(&parallel, &movement);
-							if (distance_along_path >= 0.0f &&
-								distance_along_path < magnitude_squared3d(&movement) &&
-								magnitude_squared3d(&perpendicular) < maximum_distance * maximum_distance)
-							{
-								struct sound_location location;
-
-								point_from_line3d(listener_position, &perpendicular, -1.0f, &location.position);
-								location.forward = movement;
-								normalize3d(&location.forward);
-								location.translational_velocity = *global_zero_vector3d;
-								location.game_location = collision.location;
-								unattached_impulse_sound_new(definition->projectile.flyby_sound.index, &location, 1.0f);
-								flyby_sound_played = TRUE;
-							}
-						}
-					}
-				}
-			}
-
-			if (TEST_FLAG(definition->projectile.flags, _projectile_oriented_along_velocity_bit) &&
-				(projectile->object.translational_velocity.i != 0.0f || projectile->object.translational_velocity.j != 0.0f || projectile->object.translational_velocity.k != 0.0f))
-			{
-				real_vector3d forward = projectile->object.translational_velocity;
-
-				if (normalize3d(&forward) > 0.0f)
-				{
-					real_vector3d left;
-
-					projectile->object.forward = forward;
-					cross_product3d(&projectile->object.up, &projectile->object.forward, &left);
-					if (normalize3d(cross_product3d(&projectile->object.forward, &left, &projectile->object.up)) == 0.0f)
-						normalize3d(perpendicular3d(&projectile->object.forward, &projectile->object.up));
-				}
-
-				rotate_vector_about_axis(
-					&projectile->object.up,
-					&projectile->object.forward,
-					projectile->projectile.rotation_sine,
-					projectile->projectile.rotation_cosine);
-			}
-			else if (TEST_FLAG(projectile->projectile.flags, _projectile_has_nonzero_angular_velocity_bit))
-			{
-				real_vector3d left;
-
-				rotate_vector_about_axis(
-					&projectile->object.forward,
-					&projectile->projectile.rotation_axis,
-					projectile->projectile.rotation_sine,
-					projectile->projectile.rotation_cosine);
-				rotate_vector_about_axis(
-					&projectile->object.up,
-					&projectile->projectile.rotation_axis,
-					projectile->projectile.rotation_sine,
-					projectile->projectile.rotation_cosine);
-				normalize3d(&projectile->object.forward);
-				cross_product3d(&projectile->object.up, &projectile->object.forward, &left);
-				cross_product3d(&projectile->object.forward, &left, &projectile->object.up);
-				normalize3d(&projectile->object.up);
-			}
-
-			object_translate(projectile_index, &new_position, &collision.location);
-			projectile->object.translational_velocity = new_velocity;
-
-			if (time_remaining != 0.0f &&
-				collision_count != 0 &&
-				projectile->projectile.tracer_attachment_index != NONE &&
-				projectile->object.attachment_indices[projectile->projectile.tracer_attachment_index] != NONE)
-			{
-				object_compute_node_matrices(projectile_index);
-				contrail_owner_collision(
-					projectile->object.attachment_indices[projectile->projectile.tracer_attachment_index],
-					FALSE,
-					(1.0f - time_remaining) * seconds_per_tick);
+				projectile_move(projectile_index, &new_position, &new_velocity, &collision.location,
+					time_remaining, collision_count, ignore_object_index, &flyby_sound_played);
+				halo_sim_projectile_event_state(_halo_sim_projectile_event_moved, seed, projectile_index);
 			}
 		}
 
@@ -1089,6 +1055,9 @@ boolean projectile_update(
 			&projectile->object.translational_velocity);
 	}
 
+projectile_update_flown:
+	/* port: the Rust port's check, from the state the C began with (halo_sim.c) */
+	halo_sim_projectile_check(projectile_index, collision_count, time_remaining);
 	/* port: (before it detonates or disappears) */
 	bevy_bridge_projectile_end(projectile_index);
 
@@ -1535,9 +1504,11 @@ static void projectile_collision(
 	long effect_definition_index;
 	short material_type;
 	short response;
+	boolean potential = FALSE; /* port: (halo_sim.c) */
 
 	/* port: the random seed this response begins with (bevy_bridge.c) */
 	bevy_bridge_projectile_collision();
+	halo_sim_projectile_event(_halo_sim_projectile_event_collision, halo_sim_projectile_seed(), NONE, NONE, 0, 0.0f, 0.0f);
 	projectile = projectile_get(projectile_index);
 	definition = projectile_definition_get(projectile->definition_index);
 	material_type = collision->material_type;
@@ -1563,35 +1534,20 @@ static void projectile_collision(
 	if (collision->type == _collision_result_object &&
 		definition->projectile.impact_damage.index != NONE)
 	{
-		struct damage_data damage;
+		short damage_material_type;
+		unsigned long seed = halo_sim_projectile_seed(); /* port: (halo_sim.c) */
 
 		match_assert(
 			"c:\\halo\\SOURCE\\items\\projectiles.c",
 			1148,
 			collision->object_index!=NONE);
 
-		damage_data_new(&damage, definition->projectile.impact_damage.index);
-		SET_FLAG(damage.flags, _damage_from_weapon_bit, TRUE);
-		damage.scale = damage_scale;
-		damage.owner_player_index = projectile->object.owner_player_index;
-		damage.owner_object_index = projectile->object.owner_object_index;
-		damage.owner_team_index = projectile->object.owner_team_index;
-		damage.epicenter = collision->point;
-		damage.origin = collision->point;
-		damage.direction = *new_velocity;
-		normalize3d(&damage.direction);
-		object_cause_damage(
-			&damage,
-			collision->object_index,
-			collision->node_index,
-			collision->region_index,
-			collision->material_index,
-			&collision->plane.n);
-
-		bevy_bridge_projectile_damage(damage.material_type); /* port: (bevy_bridge.c) */
-		if (damage.material_type != NONE)
-			material_type = damage.material_type;
-		material_effect_scale = damage.material_effect_scale;
+		projectile_impact_damage(projectile_index, collision, damage_scale, new_velocity,
+			&damage_material_type, &material_effect_scale);
+		halo_sim_projectile_event(_halo_sim_projectile_event_impact_damage, seed, collision->object_index,
+			damage_material_type, 0, damage_scale, material_effect_scale);
+		if (damage_material_type != NONE)
+			material_type = damage_material_type;
 	}
 
 	projectile->projectile.hit_material_type = material_type;
@@ -1625,6 +1581,7 @@ static void projectile_collision(
 	{
 		response = material_response->potential_response;
 		effect_definition_index = material_response->potential_effect.index;
+		potential = TRUE;
 	}
 	else
 	{
@@ -1635,28 +1592,11 @@ static void projectile_collision(
 	if (collision->type == _collision_result_structure &&
 		TEST_FLAG(collision->flags, _collision_surface_breakable_bit))
 	{
-		struct damage_data damage;
+		unsigned long seed = halo_sim_projectile_seed(); /* port: (halo_sim.c) */
 
-		damage_data_new(&damage, definition->projectile.impact_damage.index);
-		SET_FLAG(damage.flags, _damage_from_weapon_bit, TRUE);
-		damage.epicenter = collision->point;
-		damage.origin = collision->point;
-		damage.direction = *new_velocity;
-		normalize3d(&damage.direction);
-		damage.material_type = collision->material_type;
-		if (VALID_INDEX(damage.material_type, definition->projectile.material_responses.count))
-		{
-			damage.material_response = TAG_BLOCK_GET_ELEMENT(
-				&definition->projectile.material_responses,
-				damage.material_type,
-				struct projectile_material_response_definition);
-		}
-		else
-		{
-			damage.material_response = &default_projectile_material_response;
-		}
-		damage.location = collision->location;
-		breakable_surface_damage(collision->breakable_surface_index, &damage, collision->surface_index);
+		projectile_breakable_surface_damage(projectile_index, collision, new_velocity);
+		halo_sim_projectile_event(_halo_sim_projectile_event_breakable_surface, seed, NONE,
+			collision->breakable_surface_index, 0, 0.0f, 0.0f);
 	}
 
 	*new_position = collision->point;
@@ -1762,44 +1702,26 @@ static void projectile_collision(
 	effect_scale = PIN(effect_scale, 0.0f, 1.0f);
 	material_effect_scale = PIN(material_effect_scale, 0.0f, 1.0f);
 
+	if (impact_velocity > 1.0f / 120.0f)
 	{
-		real_point3d marker_points[NUMBER_OF_EFFECT_MARKERS];
-		real_vector3d marker_forwards[NUMBER_OF_EFFECT_MARKERS];
-		short marker_index;
+		unsigned long seed = halo_sim_projectile_seed(); /* port: (halo_sim.c) */
 
-		scale_vector3d(&direction, -1.0f, &marker_forwards[_effect_vector_incident]);
-		marker_forwards[_effect_vector_negative_incident] = direction;
-		marker_forwards[_effect_vector_gravity] = *global_down3d;
-		marker_forwards[_effect_vector_normal] = collision->plane.n;
-		reflect_vector3d(&direction, &collision->plane.n, &marker_forwards[_effect_vector_reflected]);
-		for (marker_index = 0; marker_index < NUMBER_OF_EFFECT_MARKERS; marker_index++)
-			marker_points[marker_index] = collision->point;
+		projectile_collision_effect(projectile_index, effect_definition_index, collision, &direction,
+			effect_scale, material_effect_scale);
+		halo_sim_projectile_event(_halo_sim_projectile_event_effect, seed, NONE, material_type, potential,
+			effect_scale, material_effect_scale);
+	}
 
-		if (impact_velocity > 1.0f / 120.0f)
-		{
-			projectile_effect_new(
-				projectile_index,
-				effect_definition_index,
-				collision,
-				marker_points,
-				marker_forwards,
-				effect_scale,
-				material_effect_scale);
-		}
+	if (!TEST_FLAG(projectile->projectile.flags, _projectile_counting_down_bit) &&
+		(TEST_FLAG(projectile->projectile.flags, _projectile_stopped_after_collision_bit) ||
+			response == _projectile_material_response_attach))
+	{
+		unsigned long seed = halo_sim_projectile_seed(); /* port: (halo_sim.c) */
 
-		if (!TEST_FLAG(projectile->projectile.flags, _projectile_counting_down_bit) &&
-			(TEST_FLAG(projectile->projectile.flags, _projectile_stopped_after_collision_bit) ||
-				response == _projectile_material_response_attach))
-		{
-			projectile_effect_new(
-				projectile_index,
-				definition->projectile.detonation_started.index,
-				collision,
-				marker_points,
-				marker_forwards,
-				effect_scale,
-				material_effect_scale);
-		}
+		projectile_collision_effect(projectile_index, definition->projectile.detonation_started.index, collision,
+			&direction, effect_scale, material_effect_scale);
+		halo_sim_projectile_event(_halo_sim_projectile_event_detonation_started, seed, NONE, NONE, 0,
+			effect_scale, material_effect_scale);
 	}
 
 	switch (response)
@@ -1835,6 +1757,8 @@ static void projectile_collision(
 					child_projectile->projectile.arming_time = 0.0f;
 					child_projectile->projectile.detonation_timer = 0.0f;
 					combining_projectile_count++;
+					halo_sim_projectile_event(_halo_sim_projectile_event_combining_reset, halo_sim_projectile_seed(),
+						child_index, NONE, 0, 0.0f, 0.0f); /* port: (halo_sim.c) */
 				}
 
 				if (combining_projectile_count >= MAXIMUM_COMBINING_PROJECTILES)
@@ -1848,12 +1772,14 @@ static void projectile_collision(
 		}
 
 		projectile->object.translational_velocity = *global_zero_vector3d;
-		projectile->object.angular_velocity = *global_zero_vector3d;
 		SET_FLAG(projectile->projectile.flags, _projectile_attached_bit, TRUE);
 		SET_FLAG(projectile->object.flags, _object_at_rest_bit, TRUE);
-		object_translate(projectile_index, new_position, &collision->location);
-		if (collision->type == _collision_result_object)
-			object_attach_to_node(collision->object_index, projectile_index, collision->node_index);
+		{
+			unsigned long seed = halo_sim_projectile_seed(); /* port: (halo_sim.c) */
+
+			projectile_attach(projectile_index, new_position, collision);
+			halo_sim_projectile_event_state(_halo_sim_projectile_event_attach, seed, projectile_index);
+		}
 
 		if (TEST_FLAG(definition->projectile.flags, _projectile_detonation_max_time_if_attached_bit))
 		{
@@ -2138,4 +2064,368 @@ boolean projectile_aim(
 	}
 
 	return result;
+}
+
+/* port: a projectile's move (its odometer already counted): the flyby
+sound, its orientation, the move, its velocity and its contrail */
+static void projectile_move(
+	long projectile_index,
+	real_point3d const *new_position,
+	real_vector3d const *new_velocity,
+	struct location const *new_location,
+	real time_remaining,
+	short collision_count,
+	long ignore_object_index,
+	boolean *flyby_sound_played)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+	struct projectile_definition const *definition = projectile_definition_get(projectile->definition_index);
+	real_vector3d movement;
+
+	vector_from_points3d(&projectile->object.position, new_position, &movement);
+	if (!*flyby_sound_played &&
+		definition->projectile.flyby_sound.index != NONE)
+	{
+		short local_player_index;
+
+		for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
+		{
+			if (local_player_get_player_index(local_player_index) != NONE)
+			{
+				long unit_index = player_get(local_player_get_player_index(local_player_index))->unit_index;
+
+				if (unit_index != NONE && unit_index != ignore_object_index)
+				{
+					real_point3d const *listener_position = &object_get(unit_index)->object.bounding_sphere_center;
+					real maximum_distance = sound_definition_get_maximum_distance(definition->projectile.flyby_sound.index);
+					real_vector3d listener_vector;
+					real_vector3d parallel;
+					real_vector3d perpendicular;
+					real distance_along_path;
+
+					listener_vector.i = listener_position->x - projectile->object.position.x;
+					listener_vector.j = listener_position->y - projectile->object.position.y;
+					listener_vector.k = listener_position->z - projectile->object.position.z;
+					component_vectors_from_direction3d(&listener_vector, &movement, &parallel, &perpendicular);
+					distance_along_path = dot_product3d(&parallel, &movement);
+					if (distance_along_path >= 0.0f &&
+						distance_along_path < magnitude_squared3d(&movement) &&
+						magnitude_squared3d(&perpendicular) < maximum_distance * maximum_distance)
+					{
+						struct sound_location location;
+
+						point_from_line3d(listener_position, &perpendicular, -1.0f, &location.position);
+						location.forward = movement;
+						normalize3d(&location.forward);
+						location.translational_velocity = *global_zero_vector3d;
+						location.game_location = *new_location;
+						unattached_impulse_sound_new(definition->projectile.flyby_sound.index, &location, 1.0f);
+						*flyby_sound_played = TRUE;
+					}
+				}
+			}
+		}
+	}
+
+	if (TEST_FLAG(definition->projectile.flags, _projectile_oriented_along_velocity_bit) &&
+		(projectile->object.translational_velocity.i != 0.0f || projectile->object.translational_velocity.j != 0.0f || projectile->object.translational_velocity.k != 0.0f))
+	{
+		real_vector3d forward = projectile->object.translational_velocity;
+
+		if (normalize3d(&forward) > 0.0f)
+		{
+			real_vector3d left;
+
+			projectile->object.forward = forward;
+			cross_product3d(&projectile->object.up, &projectile->object.forward, &left);
+			if (normalize3d(cross_product3d(&projectile->object.forward, &left, &projectile->object.up)) == 0.0f)
+				normalize3d(perpendicular3d(&projectile->object.forward, &projectile->object.up));
+		}
+
+		rotate_vector_about_axis(
+			&projectile->object.up,
+			&projectile->object.forward,
+			projectile->projectile.rotation_sine,
+			projectile->projectile.rotation_cosine);
+	}
+	else if (TEST_FLAG(projectile->projectile.flags, _projectile_has_nonzero_angular_velocity_bit))
+	{
+		real_vector3d left;
+
+		rotate_vector_about_axis(
+			&projectile->object.forward,
+			&projectile->projectile.rotation_axis,
+			projectile->projectile.rotation_sine,
+			projectile->projectile.rotation_cosine);
+		rotate_vector_about_axis(
+			&projectile->object.up,
+			&projectile->projectile.rotation_axis,
+			projectile->projectile.rotation_sine,
+			projectile->projectile.rotation_cosine);
+		normalize3d(&projectile->object.forward);
+		cross_product3d(&projectile->object.up, &projectile->object.forward, &left);
+		cross_product3d(&projectile->object.forward, &left, &projectile->object.up);
+		normalize3d(&projectile->object.up);
+	}
+
+	object_translate(projectile_index, new_position, new_location);
+	projectile->object.translational_velocity = *new_velocity;
+
+	if (time_remaining != 0.0f &&
+		collision_count != 0 &&
+		projectile->projectile.tracer_attachment_index != NONE &&
+		projectile->object.attachment_indices[projectile->projectile.tracer_attachment_index] != NONE)
+	{
+		object_compute_node_matrices(projectile_index);
+		contrail_owner_collision(
+			projectile->object.attachment_indices[projectile->projectile.tracer_attachment_index],
+			FALSE,
+			(1.0f - time_remaining) * seconds_per_tick);
+	}
+}
+
+/* port: the impact damage to the object a projectile hit: the material
+type it took and how much its effects scale */
+static void projectile_impact_damage(
+	long projectile_index,
+	struct collision_result const *collision,
+	real damage_scale,
+	real_vector3d const *new_velocity,
+	short *material_type,
+	real *material_effect_scale)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+	struct projectile_definition const *definition = projectile_definition_get(projectile->definition_index);
+	struct damage_data damage;
+
+	damage_data_new(&damage, definition->projectile.impact_damage.index);
+	SET_FLAG(damage.flags, _damage_from_weapon_bit, TRUE);
+	damage.scale = damage_scale;
+	damage.owner_player_index = projectile->object.owner_player_index;
+	damage.owner_object_index = projectile->object.owner_object_index;
+	damage.owner_team_index = projectile->object.owner_team_index;
+	damage.epicenter = collision->point;
+	damage.origin = collision->point;
+	damage.direction = *new_velocity;
+	normalize3d(&damage.direction);
+	object_cause_damage(
+		&damage,
+		collision->object_index,
+		collision->node_index,
+		collision->region_index,
+		collision->material_index,
+		&collision->plane.n);
+
+	bevy_bridge_projectile_damage(damage.material_type); /* port: (bevy_bridge.c) */
+	*material_type = damage.material_type;
+	*material_effect_scale = damage.material_effect_scale;
+}
+
+/* port: a breakable surface of the structure takes a projectile's impact */
+static void projectile_breakable_surface_damage(
+	long projectile_index,
+	struct collision_result const *collision,
+	real_vector3d const *new_velocity)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+	struct projectile_definition const *definition = projectile_definition_get(projectile->definition_index);
+	struct damage_data damage;
+
+	damage_data_new(&damage, definition->projectile.impact_damage.index);
+	SET_FLAG(damage.flags, _damage_from_weapon_bit, TRUE);
+	damage.epicenter = collision->point;
+	damage.origin = collision->point;
+	damage.direction = *new_velocity;
+	normalize3d(&damage.direction);
+	damage.material_type = collision->material_type;
+	if (VALID_INDEX(damage.material_type, definition->projectile.material_responses.count))
+	{
+		damage.material_response = TAG_BLOCK_GET_ELEMENT(
+			&definition->projectile.material_responses,
+			damage.material_type,
+			struct projectile_material_response_definition);
+	}
+	else
+	{
+		damage.material_response = &default_projectile_material_response;
+	}
+	damage.location = collision->location;
+	breakable_surface_damage(collision->breakable_surface_index, &damage, collision->surface_index);
+}
+
+/* port: an effect at a projectile's hit, its markers along the direction
+it hit in */
+static void projectile_collision_effect(
+	long projectile_index,
+	long effect_definition_index,
+	struct collision_result const *collision,
+	real_vector3d const *direction,
+	real effect_scale,
+	real material_effect_scale)
+{
+	real_point3d marker_points[NUMBER_OF_EFFECT_MARKERS];
+	real_vector3d marker_forwards[NUMBER_OF_EFFECT_MARKERS];
+	short marker_index;
+
+	scale_vector3d(direction, -1.0f, &marker_forwards[_effect_vector_incident]);
+	marker_forwards[_effect_vector_negative_incident] = *direction;
+	marker_forwards[_effect_vector_gravity] = *global_down3d;
+	marker_forwards[_effect_vector_normal] = collision->plane.n;
+	reflect_vector3d(direction, &collision->plane.n, &marker_forwards[_effect_vector_reflected]);
+	for (marker_index = 0; marker_index < NUMBER_OF_EFFECT_MARKERS; marker_index++)
+		marker_points[marker_index] = collision->point;
+
+	projectile_effect_new(
+		projectile_index,
+		effect_definition_index,
+		collision,
+		marker_points,
+		marker_forwards,
+		effect_scale,
+		material_effect_scale);
+}
+
+/* port: a projectile sticks where it hit (its velocity and flags already
+set): its spin stopped, moved there, and onto the hit node of an object */
+static void projectile_attach(
+	long projectile_index,
+	real_point3d const *new_position,
+	struct collision_result const *collision)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+
+	projectile->object.angular_velocity = *global_zero_vector3d;
+	object_translate(projectile_index, new_position, &collision->location);
+	if (collision->type == _collision_result_object)
+		object_attach_to_node(collision->object_index, projectile_index, collision->node_index);
+}
+
+/* ---------- port: the Rust port's callbacks (halo_sim.c) */
+
+void projectile_rust_guidance(
+	long projectile_index,
+	real_point3d *projectile_center,
+	real_point3d *target_center,
+	real_point3d *target_center_of_mass,
+	real *guidance_scale)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+	struct object_datum *target = object_get(projectile->projectile.target_object_index);
+
+	*guidance_scale = 1.0f;
+	if (TEST_FLAG(_object_mask_unit, target->object.type) &&
+		unit_get(projectile->projectile.target_object_index)->unit.player_index != NONE)
+	{
+		*guidance_scale = game_difficulty_get_value(_game_difficulty_value_guidance_vs_player);
+	}
+	*projectile_center = projectile->object.bounding_sphere_center;
+	*target_center = target->object.bounding_sphere_center;
+	unit_get_center_of_mass(projectile->projectile.target_object_index, target_center_of_mass);
+	/* (recorded for a Bevy renderer to replay, bevy_bridge.c) */
+	bevy_bridge_projectile_guidance(projectile_index, projectile->projectile.target_object_index, target_center_of_mass);
+}
+
+void projectile_rust_impact_damage(
+	long projectile_index,
+	struct collision_result const *collision,
+	real damage_scale,
+	real_vector3d const *new_velocity,
+	short *material_type,
+	real *material_effect_scale)
+{
+	projectile_impact_damage(projectile_index, collision, damage_scale, new_velocity, material_type, material_effect_scale);
+}
+
+void projectile_rust_breakable_surface_damage(
+	long projectile_index,
+	struct collision_result const *collision,
+	real_vector3d const *new_velocity)
+{
+	projectile_breakable_surface_damage(projectile_index, collision, new_velocity);
+}
+
+/* effect: 0 the material response's (potential or default), 1 the
+detonation starting */
+void projectile_rust_effect(
+	long projectile_index,
+	short effect,
+	short material_type,
+	boolean potential,
+	struct collision_result const *collision,
+	real_vector3d const *direction,
+	real effect_scale,
+	real material_effect_scale)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+	struct projectile_definition const *definition = projectile_definition_get(projectile->definition_index);
+	long effect_definition_index;
+
+	if (effect == 0)
+	{
+		struct projectile_material_response_definition const *material_response;
+
+		if (VALID_INDEX(material_type, definition->projectile.material_responses.count))
+		{
+			material_response = TAG_BLOCK_GET_ELEMENT(
+				&definition->projectile.material_responses,
+				material_type,
+				struct projectile_material_response_definition);
+		}
+		else
+		{
+			material_response = &default_projectile_material_response;
+		}
+		effect_definition_index = potential ? material_response->potential_effect.index : material_response->default_effect.index;
+	}
+	else
+	{
+		effect_definition_index = definition->projectile.detonation_started.index;
+	}
+	projectile_collision_effect(projectile_index, effect_definition_index, collision, direction,
+		effect_scale, material_effect_scale);
+}
+
+void projectile_rust_combining_reset(
+	long child_index)
+{
+	struct projectile_datum *child_projectile = projectile_get(child_index);
+
+	child_projectile->projectile.arming_time = 0.0f;
+	child_projectile->projectile.detonation_timer = 0.0f;
+}
+
+void projectile_rust_attach(
+	long projectile_index,
+	real_point3d const *new_position,
+	struct collision_result const *collision)
+{
+	projectile_attach(projectile_index, new_position, collision);
+}
+
+void projectile_rust_impact_noise(
+	long projectile_index,
+	real_point3d const *point)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+	struct projectile_definition const *definition = projectile_definition_get(projectile->definition_index);
+
+	ai_handle_spatial_effect(
+		projectile_index,
+		point,
+		_ai_spatial_effect_weapon_impact,
+		definition->projectile.impact_noise,
+		1);
+}
+
+void projectile_rust_moved(
+	long projectile_index,
+	real_point3d const *new_position,
+	real_vector3d const *new_velocity,
+	struct location const *location,
+	real time_remaining,
+	short collision_count,
+	long ignore_object_index)
+{
+	projectile_move(projectile_index, new_position, new_velocity, location, time_remaining, collision_count,
+		ignore_object_index, &projectile_rust_flyby_sound_played);
 }

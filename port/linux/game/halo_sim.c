@@ -28,8 +28,11 @@ bit for bit; differences are counted and the first few logged.
 #include "devices/devices.h"
 #include "physics/point_physics.h"
 #include "physics/collisions.h"
+#include "items/projectiles.h"
+#include "items/projectiles_callbacks.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_groups.h"
+#include "bevy_bridge.h"
 #include "halo_sim.h"
 
 #include <stdio.h>
@@ -39,7 +42,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 4
+#define HALO_SIM_VERSION 5
 
 /* ---------- structures */
 
@@ -184,6 +187,101 @@ struct halo_sim_host_object
 	real_point3d origin;
 	real_vector3d forward;
 	real_vector3d up;
+	unsigned long projectile_flags;
+};
+
+/* crates/halo_map's ProjectileState: what a projectile update reads and
+changes of a projectile */
+struct halo_sim_projectile_state
+{
+	real_point3d position;
+	real_vector3d velocity;
+	unsigned long flags;
+	unsigned long object_flags;
+	short action;
+	short hit_material_type;
+	long ignore_object_index;
+	long target_object_index;
+	long parent_object_index;
+	real detonation_timer;
+	real detonation_timer_delta;
+	real arming_time;
+	real arming_time_delta;
+	real odometer;
+	real deceleration_timer;
+	real deceleration_timer_delta;
+	real deceleration;
+	real maximum_damage_distance;
+	long location_leaf;
+	short location_cluster;
+	short pad;
+};
+
+/* crates/halo_sim's GuidanceC, ProjectileEventC and ProjectileUpdateCall */
+struct halo_sim_guidance
+{
+	real_point3d projectile_center;
+	real_point3d target_center;
+	real_point3d target_center_of_mass;
+	real guidance_scale;
+};
+
+struct halo_sim_projectile_event
+{
+	short kind;
+	short material_type;
+	unsigned long seed_before;
+	unsigned long seed_after;
+	long object_index;
+	long potential;
+	real scale;
+	real material_effect_scale;
+	struct halo_sim_guidance guidance;
+	long game_time;
+	struct halo_sim_projectile_state state;
+};
+
+struct halo_sim_projectile_call
+{
+	unsigned long projectile_index;
+	unsigned long definition_index;
+	long structure_bsp_index;
+	unsigned char const *breakable_surfaces;
+	struct halo_sim_projectile_state state;
+	unsigned long *random_seed;
+	real_vector3d const *directions;
+	long direction_count;
+	unsigned char const *wander_table;
+	long game_time;
+	struct halo_sim_projectile_event const *events;
+	unsigned long event_count;
+	long collision_count;
+	real time_remaining;
+	long difference_event;
+	long difference_reason;
+};
+
+/* crates/halo_sim's ProjectileCallbacks */
+struct halo_sim_projectile_callbacks
+{
+	void (*timers_updated)(unsigned long projectile_index, struct halo_sim_projectile_state *state);
+	void (*guidance)(unsigned long projectile_index, struct halo_sim_projectile_state *state, struct halo_sim_guidance *out);
+	void (*collision_begin)(unsigned long projectile_index, struct halo_sim_projectile_state *state);
+	void (*impact_damage)(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+		struct collision_result const *collision, real damage_scale, real_vector3d const *velocity,
+		short *material_type, real *material_effect_scale);
+	void (*breakable_surface_damage)(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+		struct collision_result const *collision, real_vector3d const *velocity);
+	void (*effect)(unsigned long projectile_index, struct halo_sim_projectile_state *state, long effect,
+		long material_type, long potential, struct collision_result const *collision, real_vector3d const *direction,
+		real scale, real material_effect_scale);
+	void (*combining_reset)(unsigned long child_index);
+	void (*attach)(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+		real_point3d const *new_position, struct collision_result const *collision);
+	void (*impact_noise)(unsigned long projectile_index, struct halo_sim_projectile_state *state, real_point3d const *point);
+	void (*moved)(unsigned long projectile_index, struct halo_sim_projectile_state *state, real_point3d const *new_position,
+		real_vector3d const *new_velocity, long location_leaf, long location_cluster, real time_remaining,
+		long collision_count, long ignore_object_index);
 };
 
 struct halo_sim_host
@@ -191,6 +289,7 @@ struct halo_sim_host
 	unsigned long (*cluster_objects)(short cluster, unsigned long *out, unsigned long maximum);
 	long (*object)(unsigned long index, struct halo_sim_host_object *out);
 	unsigned long (*children)(unsigned long index, unsigned long *out, unsigned long maximum);
+	struct halo_sim_projectile_callbacks projectile;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -219,10 +318,15 @@ struct halo_sim_collision_vector_result
 	long location_leaf;
 	short location_cluster;
 	unsigned short surface_flags;
+	short region_index;
+	short material_index;
+	long plane_designator;
+	unsigned long breakable_surface_index;
 };
 
 typedef unsigned long (*halo_sim_version_function)(void);
 typedef long (*halo_sim_set_host_function)(struct halo_sim_host const *host);
+typedef long (*halo_sim_projectile_function)(struct halo_sim_projectile_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -248,6 +352,8 @@ static struct
 	halo_sim_pose_preprocess_function pose_preprocess;
 	halo_sim_set_host_function set_host;
 	halo_sim_collision_test_vector_function collision_test_vector;
+	halo_sim_projectile_function projectile_update;
+	halo_sim_projectile_function projectile_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -267,7 +373,27 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"point_physics",
 	"poses",
 	"collision",
+	"projectiles",
 };
+
+/* the projectile checks: the state and random seed the game's update began
+with, its calls, and the comparisons */
+#define MAXIMUM_HALO_SIM_PROJECTILE_EVENTS 256
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	long projectile_index;
+	unsigned long seed;
+	struct halo_sim_projectile_state before;
+	unsigned long event_count;
+	struct halo_sim_projectile_event events[MAXIMUM_HALO_SIM_PROJECTILE_EVENTS];
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long collisions;
+	unsigned long events_compared;
+} halo_sim_projectile_checks;
 
 /* the collision checks' comparisons */
 static struct
@@ -335,10 +461,17 @@ static unsigned long halo_sim_host_cluster_objects(short cluster, unsigned long 
 	return count;
 }
 
+/* whether a projectile update runs in Rust (the objects its ray tests
+visit, recorded for the bridge as the game's own ray tests record them) */
+static boolean halo_sim_projectile_updating;
+
 static long halo_sim_host_object(unsigned long index, struct halo_sim_host_object *out)
 {
 	struct object_datum *object = object_get((long)index);
 	short region;
+
+	if (halo_sim_projectile_updating)
+		bevy_bridge_projectile_object((long)index);
 
 	out->object_index = index;
 	out->definition_index = (unsigned long)object->definition_index;
@@ -366,6 +499,8 @@ static long halo_sim_host_object(unsigned long index, struct halo_sim_host_objec
 		memset(&out->forward, 0, sizeof(out->forward));
 		memset(&out->up, 0, sizeof(out->up));
 	}
+	out->projectile_flags = object->object.type == _object_type_projectile ?
+		((struct projectile_datum *)object)->projectile.flags : 0;
 
 	return TRUE;
 }
@@ -388,11 +523,177 @@ static unsigned long halo_sim_host_children(unsigned long index, unsigned long *
 	return count;
 }
 
+/* a projectile's state, from the projectile */
+static void halo_sim_projectile_state_load(long projectile_index, struct halo_sim_projectile_state *state)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+
+	state->position = projectile->object.position;
+	state->velocity = projectile->object.translational_velocity;
+	state->flags = projectile->projectile.flags;
+	state->object_flags = projectile->object.flags;
+	state->action = projectile->projectile.action;
+	state->hit_material_type = projectile->projectile.hit_material_type;
+	state->ignore_object_index = projectile->projectile.ignore_object_index;
+	state->target_object_index = projectile->projectile.target_object_index;
+	state->parent_object_index = projectile->object.parent_object_index;
+	state->detonation_timer = projectile->projectile.detonation_timer;
+	state->detonation_timer_delta = projectile->projectile.detonation_timer_delta;
+	state->arming_time = projectile->projectile.arming_time;
+	state->arming_time_delta = projectile->projectile.arming_time_delta;
+	state->odometer = projectile->projectile.odometer;
+	state->deceleration_timer = projectile->projectile.deceleration_timer;
+	state->deceleration_timer_delta = projectile->projectile.deceleration_timer_delta;
+	state->deceleration = projectile->projectile.deceleration;
+	state->maximum_damage_distance = projectile->projectile.maximum_damage_distance;
+	state->location_leaf = projectile->object.location.leaf_index;
+	state->location_cluster = projectile->object.location.cluster_index;
+	state->pad = 0;
+}
+
+/* and back to it: all but its place (position, location, parent), which
+only the game's moves change */
+static void halo_sim_projectile_state_store(long projectile_index, struct halo_sim_projectile_state const *state)
+{
+	struct projectile_datum *projectile = projectile_get(projectile_index);
+
+	projectile->object.translational_velocity = state->velocity;
+	projectile->projectile.flags = state->flags;
+	projectile->object.flags = state->object_flags;
+	projectile->projectile.action = state->action;
+	projectile->projectile.hit_material_type = state->hit_material_type;
+	projectile->projectile.ignore_object_index = state->ignore_object_index;
+	projectile->projectile.target_object_index = state->target_object_index;
+	projectile->projectile.detonation_timer = state->detonation_timer;
+	projectile->projectile.detonation_timer_delta = state->detonation_timer_delta;
+	projectile->projectile.arming_time = state->arming_time;
+	projectile->projectile.arming_time_delta = state->arming_time_delta;
+	projectile->projectile.odometer = state->odometer;
+	projectile->projectile.deceleration_timer = state->deceleration_timer;
+	projectile->projectile.deceleration_timer_delta = state->deceleration_timer_delta;
+	projectile->projectile.deceleration = state->deceleration;
+	projectile->projectile.maximum_damage_distance = state->maximum_damage_distance;
+}
+
+/* projectiles.c's, the game's side of a projectile update */
+void projectile_rust_guidance(long projectile_index, real_point3d *projectile_center, real_point3d *target_center,
+	real_point3d *target_center_of_mass, real *guidance_scale);
+void projectile_rust_impact_damage(long projectile_index, struct collision_result const *collision, real damage_scale,
+	real_vector3d const *new_velocity, short *material_type, real *material_effect_scale);
+void projectile_rust_breakable_surface_damage(long projectile_index, struct collision_result const *collision,
+	real_vector3d const *new_velocity);
+void projectile_rust_effect(long projectile_index, short effect, short material_type, boolean potential,
+	struct collision_result const *collision, real_vector3d const *direction, real effect_scale, real material_effect_scale);
+void projectile_rust_combining_reset(long child_index);
+void projectile_rust_attach(long projectile_index, real_point3d const *new_position, struct collision_result const *collision);
+void projectile_rust_impact_noise(long projectile_index, real_point3d const *point);
+void projectile_rust_moved(long projectile_index, real_point3d const *new_position, real_vector3d const *new_velocity,
+	struct location const *location, real time_remaining, short collision_count, long ignore_object_index);
+
+/* the Rust port's callbacks: the update's state written to the projectile,
+the game's call, and the state read back */
+static void halo_sim_projectile_timers_updated(unsigned long projectile_index, struct halo_sim_projectile_state *state)
+{
+	halo_sim_projectile_state_store((long)projectile_index, state);
+	projectile_export_function_values((long)projectile_index);
+	halo_sim_projectile_state_load((long)projectile_index, state);
+}
+
+static void halo_sim_projectile_guidance(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+	struct halo_sim_guidance *out)
+{
+	halo_sim_projectile_state_store((long)projectile_index, state);
+	projectile_rust_guidance((long)projectile_index, &out->projectile_center, &out->target_center,
+		&out->target_center_of_mass, &out->guidance_scale);
+	halo_sim_projectile_state_load((long)projectile_index, state);
+}
+
+/* (for the bridge's recording: the seed a response begins with) */
+static void halo_sim_projectile_collision_begin(unsigned long projectile_index, struct halo_sim_projectile_state *state)
+{
+	bevy_bridge_projectile_collision();
+}
+
+static void halo_sim_projectile_impact_damage(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+	struct collision_result const *collision, real damage_scale, real_vector3d const *velocity,
+	short *material_type, real *material_effect_scale)
+{
+	halo_sim_projectile_state_store((long)projectile_index, state);
+	projectile_rust_impact_damage((long)projectile_index, collision, damage_scale, velocity, material_type, material_effect_scale);
+	halo_sim_projectile_state_load((long)projectile_index, state);
+}
+
+static void halo_sim_projectile_breakable_surface_damage(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+	struct collision_result const *collision, real_vector3d const *velocity)
+{
+	halo_sim_projectile_state_store((long)projectile_index, state);
+	projectile_rust_breakable_surface_damage((long)projectile_index, collision, velocity);
+	halo_sim_projectile_state_load((long)projectile_index, state);
+}
+
+static void halo_sim_projectile_effect(unsigned long projectile_index, struct halo_sim_projectile_state *state, long effect,
+	long material_type, long potential, struct collision_result const *collision, real_vector3d const *direction,
+	real scale, real material_effect_scale)
+{
+	halo_sim_projectile_state_store((long)projectile_index, state);
+	projectile_rust_effect((long)projectile_index, (short)effect, (short)material_type, potential != 0, collision, direction,
+		scale, material_effect_scale);
+	halo_sim_projectile_state_load((long)projectile_index, state);
+}
+
+static void halo_sim_projectile_combining_reset(unsigned long child_index)
+{
+	projectile_rust_combining_reset((long)child_index);
+}
+
+static void halo_sim_projectile_attach(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+	real_point3d const *new_position, struct collision_result const *collision)
+{
+	halo_sim_projectile_state_store((long)projectile_index, state);
+	projectile_rust_attach((long)projectile_index, new_position, collision);
+	halo_sim_projectile_state_load((long)projectile_index, state);
+}
+
+static void halo_sim_projectile_impact_noise(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+	real_point3d const *point)
+{
+	halo_sim_projectile_state_store((long)projectile_index, state);
+	projectile_rust_impact_noise((long)projectile_index, point);
+	halo_sim_projectile_state_load((long)projectile_index, state);
+}
+
+static void halo_sim_projectile_moved(unsigned long projectile_index, struct halo_sim_projectile_state *state,
+	real_point3d const *new_position, real_vector3d const *new_velocity, long location_leaf, long location_cluster,
+	real time_remaining, long collision_count, long ignore_object_index)
+{
+	struct location location;
+
+	location.leaf_index = location_leaf;
+	location.cluster_index = (short)location_cluster;
+	location.bonus = 0;
+	halo_sim_projectile_state_store((long)projectile_index, state);
+	projectile_rust_moved((long)projectile_index, new_position, new_velocity, &location, time_remaining,
+		(short)collision_count, ignore_object_index);
+	halo_sim_projectile_state_load((long)projectile_index, state);
+}
+
 static struct halo_sim_host const halo_sim_host_callbacks =
 {
 	halo_sim_host_cluster_objects,
 	halo_sim_host_object,
 	halo_sim_host_children,
+	{
+		halo_sim_projectile_timers_updated,
+		halo_sim_projectile_guidance,
+		halo_sim_projectile_collision_begin,
+		halo_sim_projectile_impact_damage,
+		halo_sim_projectile_breakable_surface_damage,
+		halo_sim_projectile_effect,
+		halo_sim_projectile_combining_reset,
+		halo_sim_projectile_attach,
+		halo_sim_projectile_impact_noise,
+		halo_sim_projectile_moved,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -434,8 +735,11 @@ static void halo_sim_initialize(void)
 	halo_sim.pose_preprocess = (halo_sim_pose_preprocess_function)halo_sim_symbol(library, "halo_sim_pose_preprocess");
 	halo_sim.set_host = (halo_sim_set_host_function)halo_sim_symbol(library, "halo_sim_set_host");
 	halo_sim.collision_test_vector = (halo_sim_collision_test_vector_function)halo_sim_symbol(library, "halo_sim_collision_test_vector");
+	halo_sim.projectile_update = (halo_sim_projectile_function)halo_sim_symbol(library, "halo_sim_projectile_update");
+	halo_sim.projectile_check = (halo_sim_projectile_function)halo_sim_symbol(library, "halo_sim_projectile_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
-		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector)
+		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
+		!halo_sim.projectile_update || !halo_sim.projectile_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -985,13 +1289,17 @@ void halo_sim_collision_test_vector_check(unsigned long flags, void const *point
 		if (game->type == _collision_result_structure || game->type == _collision_result_object)
 		{
 			same = same && rust.surface_index == game->surface_index &&
-				rust.surface_flags == game->flags;
+				rust.surface_flags == game->flags &&
+				rust.material_index == game->material_index &&
+				rust.plane_designator == game->plane_designator &&
+				rust.breakable_surface_index == game->breakable_surface_index;
 		}
 		if (game->type == _collision_result_object)
 		{
 			same = same && rust.object_index == (unsigned long)game->object_index &&
 				rust.node_index == game->node_index &&
-				rust.bsp_index == game->bsp_index;
+				rust.bsp_index == game->bsp_index &&
+				rust.region_index == game->region_index;
 		}
 	}
 	halo_sim_collision_checks.compared++;
@@ -1036,5 +1344,228 @@ void halo_sim_collision_test_vector_check(unsigned long flags, void const *point
 			halo_sim_collision_checks.compared,
 			halo_sim_collision_checks.structure_hits, halo_sim_collision_checks.media_hits,
 			halo_sim_collision_checks.object_hits, halo_sim_collision_checks.vehicle_physics_hits);
+	}
+}
+
+/* ---------- projectiles */
+
+/* random_math.c's and periodic_functions.c's */
+unsigned long get_random_seed(void);
+unsigned long *get_global_random_seed_address(void);
+short random_direction_table_get(real_vector3d const **table);
+unsigned char const *periodic_function_table_get(short function_type);
+
+/* projectiles.c's _periodic_function_wander */
+#define HALO_SIM_PERIODIC_FUNCTION_WANDER 10
+
+static void halo_sim_projectile_call_new(long projectile_index, struct halo_sim_projectile_call *call, unsigned long *random_seed)
+{
+	real_vector3d const *directions = NULL;
+
+	memset(call, 0, sizeof(*call));
+	call->projectile_index = (unsigned long)projectile_index;
+	call->definition_index = (unsigned long)object_get(projectile_index)->definition_index;
+	call->structure_bsp_index = global_structure_bsp_index;
+	call->breakable_surfaces = (unsigned char const *)breakable_surface_flags_get();
+	halo_sim_projectile_state_load(projectile_index, &call->state);
+	call->random_seed = random_seed;
+	call->direction_count = random_direction_table_get(&directions);
+	call->directions = directions;
+	call->wander_table = periodic_function_table_get(HALO_SIM_PERIODIC_FUNCTION_WANDER);
+	call->game_time = game_time_get();
+	call->difference_event = NONE;
+}
+
+int halo_sim_projectile_update(long projectile_index, short *collision_count, float *time_remaining)
+{
+	short mode = halo_sim_mode(_halo_sim_projectiles);
+	struct halo_sim_projectile_call call;
+	long result;
+
+	halo_sim_projectile_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_projectile_state_load(projectile_index, &halo_sim_projectile_checks.before);
+		halo_sim_projectile_checks.seed = get_random_seed();
+		halo_sim_projectile_checks.projectile_index = projectile_index;
+		halo_sim_projectile_checks.event_count = 0;
+		halo_sim_projectile_checks.overflow = FALSE;
+		halo_sim_projectile_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_projectile_call_new(projectile_index, &call, get_global_random_seed_address());
+	halo_sim_projectile_updating = TRUE;
+	result = halo_sim.projectile_update(&call);
+	halo_sim_projectile_updating = FALSE;
+	if (result == -1)
+		return FALSE;
+	halo_sim_projectile_state_store(projectile_index, &call.state);
+	if (result != 0)
+	{
+		static long stops = 0;
+
+		if (stops++ < 8)
+			platform_log("halo_sim: projectile %lx's update stopped for an input it couldn't have", (unsigned long)projectile_index);
+	}
+	*collision_count = (short)call.collision_count;
+	*time_remaining = call.time_remaining;
+
+	return TRUE;
+}
+
+unsigned long halo_sim_projectile_seed(void)
+{
+	return halo_sim_projectile_checks.recording ? get_random_seed() : 0;
+}
+
+static struct halo_sim_projectile_event *halo_sim_projectile_event_new(short kind, unsigned long seed_before)
+{
+	struct halo_sim_projectile_event *event;
+
+	if (!halo_sim_projectile_checks.recording)
+		return NULL;
+	if (halo_sim_projectile_checks.event_count >= MAXIMUM_HALO_SIM_PROJECTILE_EVENTS)
+	{
+		halo_sim_projectile_checks.overflow = TRUE;
+		return NULL;
+	}
+	event = &halo_sim_projectile_checks.events[halo_sim_projectile_checks.event_count++];
+	memset(event, 0, sizeof(*event));
+	event->kind = kind;
+	event->seed_before = seed_before;
+	event->seed_after = get_random_seed();
+	event->object_index = NONE;
+	event->material_type = NONE;
+
+	return event;
+}
+
+void halo_sim_projectile_event(short kind, unsigned long seed_before, long object_index, short material_type,
+	int potential, float scale, float material_effect_scale)
+{
+	struct halo_sim_projectile_event *event = halo_sim_projectile_event_new(kind, seed_before);
+
+	if (!event)
+		return;
+	event->object_index = object_index;
+	event->material_type = material_type;
+	event->potential = potential ? 1 : 0;
+	event->scale = scale;
+	event->material_effect_scale = material_effect_scale;
+}
+
+void halo_sim_projectile_event_guidance(void const *projectile_center, void const *target_center,
+	void const *target_center_of_mass, float guidance_scale, long game_time)
+{
+	struct halo_sim_projectile_event *event = halo_sim_projectile_event_new(_halo_sim_projectile_event_guidance,
+		halo_sim_projectile_seed());
+
+	if (!event)
+		return;
+	event->guidance.projectile_center = *(real_point3d const *)projectile_center;
+	event->guidance.target_center = *(real_point3d const *)target_center;
+	event->guidance.target_center_of_mass = *(real_point3d const *)target_center_of_mass;
+	event->guidance.guidance_scale = guidance_scale;
+	event->game_time = game_time;
+}
+
+void halo_sim_projectile_event_state(short kind, unsigned long seed_before, long projectile_index)
+{
+	struct halo_sim_projectile_event *event = halo_sim_projectile_event_new(kind, seed_before);
+
+	if (event)
+		halo_sim_projectile_state_load(projectile_index, &event->state);
+}
+
+static boolean halo_sim_projectile_states_agree(struct halo_sim_projectile_state const *a, struct halo_sim_projectile_state const *b)
+{
+	return memcmp(&a->position, &b->position, sizeof(a->position)) == 0 &&
+		memcmp(&a->velocity, &b->velocity, sizeof(a->velocity)) == 0 &&
+		a->flags == b->flags &&
+		a->object_flags == b->object_flags &&
+		a->action == b->action &&
+		a->hit_material_type == b->hit_material_type &&
+		a->ignore_object_index == b->ignore_object_index &&
+		a->target_object_index == b->target_object_index &&
+		a->parent_object_index == b->parent_object_index &&
+		memcmp(&a->detonation_timer, &b->detonation_timer, 9 * sizeof(real)) == 0 &&
+		a->location_leaf == b->location_leaf &&
+		a->location_cluster == b->location_cluster;
+}
+
+void halo_sim_projectile_check(long projectile_index, short collision_count, float time_remaining)
+{
+	struct halo_sim_projectile_call call;
+	struct halo_sim_projectile_state game;
+	unsigned long seed;
+	boolean same;
+
+	if (!halo_sim_projectile_checks.recording)
+		return;
+	halo_sim_projectile_checks.recording = FALSE;
+	if (halo_sim_projectile_checks.projectile_index != projectile_index || halo_sim_projectile_checks.overflow)
+	{
+		halo_sim_projectile_checks.skipped++;
+		return;
+	}
+
+	seed = halo_sim_projectile_checks.seed;
+	halo_sim_projectile_call_new(projectile_index, &call, &seed);
+	call.state = halo_sim_projectile_checks.before;
+	call.events = halo_sim_projectile_checks.events;
+	call.event_count = halo_sim_projectile_checks.event_count;
+	if (halo_sim.projectile_check(&call) != 0)
+	{
+		halo_sim_projectile_checks.skipped++;
+		return;
+	}
+
+	halo_sim_projectile_state_load(projectile_index, &game);
+	same = halo_sim_projectile_states_agree(&call.state, &game) &&
+		call.collision_count == collision_count &&
+		memcmp(&call.time_remaining, &time_remaining, sizeof(real)) == 0 &&
+		call.difference_event == NONE &&
+		seed == get_random_seed();
+	halo_sim_projectile_checks.compared++;
+	halo_sim_projectile_checks.collisions += (unsigned long)collision_count;
+	halo_sim_projectile_checks.events_compared += halo_sim_projectile_checks.event_count;
+	if (!same)
+	{
+		halo_sim_projectile_checks.differed++;
+		if (halo_sim_projectile_checks.differed <= 8)
+		{
+			struct halo_sim_projectile_state const *b = &halo_sim_projectile_checks.before;
+
+			platform_log("halo_sim: projectile %lx (definition %lx) differs: call %ld of %lu (kind %d) reason %ld; collisions game %d rust %ld; time %08lx %08lx; seed game %08lx rust %08lx",
+				(unsigned long)projectile_index, call.definition_index, call.difference_event,
+				halo_sim_projectile_checks.event_count,
+				call.difference_event >= 0 && call.difference_event < (long)halo_sim_projectile_checks.event_count ?
+					halo_sim_projectile_checks.events[call.difference_event].kind : -1,
+				call.difference_reason, collision_count, call.collision_count,
+				*(unsigned long const *)&time_remaining, *(unsigned long const *)&call.time_remaining,
+				get_random_seed(), seed);
+			platform_log("halo_sim:   from (%f %f %f) velocity (%f %f %f) flags %lx action %d target %lx",
+				b->position.x, b->position.y, b->position.z, b->velocity.i, b->velocity.j, b->velocity.k,
+				b->flags, b->action, (unsigned long)b->target_object_index);
+			platform_log("halo_sim:   game (%f %f %f) velocity (%f %f %f) flags %lx/%lx action %d leaf %ld parent %lx",
+				game.position.x, game.position.y, game.position.z, game.velocity.i, game.velocity.j, game.velocity.k,
+				game.flags, game.object_flags, game.action, game.location_leaf, (unsigned long)game.parent_object_index);
+			platform_log("halo_sim:   rust (%f %f %f) velocity (%f %f %f) flags %lx/%lx action %d leaf %ld parent %lx",
+				call.state.position.x, call.state.position.y, call.state.position.z,
+				call.state.velocity.i, call.state.velocity.j, call.state.velocity.k,
+				call.state.flags, call.state.object_flags, call.state.action, call.state.location_leaf,
+				(unsigned long)call.state.parent_object_index);
+		}
+	}
+	if ((halo_sim_projectile_checks.compared & 0x3ff) == 0 ||
+		(halo_sim_projectile_checks.compared & (halo_sim_projectile_checks.compared - 1)) == 0)
+	{
+		platform_log("halo_sim: projectiles: %lu of %lu updates agree with the game (%lu collisions, %lu calls of the game; %lu left out)",
+			halo_sim_projectile_checks.compared - halo_sim_projectile_checks.differed,
+			halo_sim_projectile_checks.compared, halo_sim_projectile_checks.collisions,
+			halo_sim_projectile_checks.events_compared, halo_sim_projectile_checks.skipped);
 	}
 }

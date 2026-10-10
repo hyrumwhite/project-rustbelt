@@ -17,6 +17,7 @@ enum
 	_halo_sim_point_physics = 0,
 	_halo_sim_poses,
 	_halo_sim_collision,
+	_halo_sim_projectiles,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -27,6 +28,22 @@ enum
 	_halo_sim_mode_c = 0,
 	_halo_sim_mode_rust,
 	_halo_sim_mode_check,
+};
+
+/* a projectile update's calls of the rest of the game, recorded for the
+check (crates/halo_sim's projectiles::event) */
+enum
+{
+	_halo_sim_projectile_event_guidance = 1,
+	_halo_sim_projectile_event_collision,
+	_halo_sim_projectile_event_impact_damage,
+	_halo_sim_projectile_event_breakable_surface,
+	_halo_sim_projectile_event_effect,
+	_halo_sim_projectile_event_detonation_started,
+	_halo_sim_projectile_event_combining_reset,
+	_halo_sim_projectile_event_attach,
+	_halo_sim_projectile_event_impact_noise,
+	_halo_sim_projectile_event_moved,
 };
 
 /* ---------- prototypes/HALO_SIM.C */
@@ -94,5 +111,26 @@ host's callbacks), compared with the game's result (flags as the caller
 passed them) */
 void halo_sim_collision_test_vector_check(unsigned long flags, void const *point, void const *vector,
 	long ignore_object_index, int hit, void const *collision);
+
+/* projectiles.c's projectile_update, after its tracer: TRUE when the Rust
+port ran the update in its place (its timers, flight and collisions, the
+game called back for what it does to the world) and left the collision
+count and time remaining; in check mode it notes the state the game's
+update begins with, and the game's update records its calls */
+int halo_sim_projectile_update(long projectile_index, short *collision_count, float *time_remaining);
+/* and before it detonates or disappears, in check mode: the Rust port's
+replay of the game's update, compared with where the game left it */
+void halo_sim_projectile_check(long projectile_index, short collision_count, float time_remaining);
+/* the game's random seed, as a recorded call begins */
+unsigned long halo_sim_projectile_seed(void);
+/* a call of the game's update, recorded in check mode: what it was given
+(the object; the material type, or breakable surface; whether the potential
+response; the scales) and gave back, and the seed it began with */
+void halo_sim_projectile_event(short kind, unsigned long seed_before, long object_index, short material_type,
+	int potential, float scale, float material_effect_scale);
+void halo_sim_projectile_event_guidance(void const *projectile_center, void const *target_center,
+	void const *target_center_of_mass, float guidance_scale, long game_time);
+/* a move or attaching, and where it left the projectile */
+void halo_sim_projectile_event_state(short kind, unsigned long seed_before, long projectile_index);
 
 #endif // __HALO_SIM_H

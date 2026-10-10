@@ -1268,7 +1268,7 @@ impl CollisionCheck {
             bsp.breakable_surfaces.set(physics_record.as_ref().map(|(p, _)| p.breakable_surfaces));
             let Some(Some(bsp)) = self.bsps.get(&structure_bsp_index) else { return };
             let Some(Some(clusters)) = self.clusters.get(&structure_bsp_index) else { return };
-            let world = PhysicsWorld { bsp, clusters, objects };
+            let world = PhysicsWorld { bsp, clusters, objects: halo_map::biped::BipedObjects::Visited(objects), host: None };
             let mut state = record.before;
             let outcome =
                 halo_map::biped_moving::biped_update_moving(&world, &definition, &player_information, &inputs, &mut state, stand);
@@ -1441,7 +1441,7 @@ impl CollisionCheck {
             let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
                 return;
             };
-            let world = PhysicsWorld { bsp, clusters, objects };
+            let world = PhysicsWorld { bsp, clusters, objects: halo_map::biped::BipedObjects::Visited(objects), host: None };
             let mut state = record.before;
             halo_map::biped_update::biped_update(&world, &definition, &player_information, &inputs, &moving_inputs, stand, &[], &mut state);
             if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {

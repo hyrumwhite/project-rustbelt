@@ -63,6 +63,7 @@ pub struct Host {
     pub features_call: unsafe extern "C" fn(),
     pub vehicle_physics: crate::vehicles::VehiclePhysicsCallbacks,
     pub vehicle_update: crate::vehicles::VehicleUpdateCallbacks,
+    pub moving: crate::bipeds::MovingCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);

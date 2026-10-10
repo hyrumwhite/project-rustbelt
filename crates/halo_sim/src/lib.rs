@@ -35,12 +35,13 @@ use halo_map::pose::{PoseAnimation, PoseModel, PoseObjectDefinition};
 
 pub mod poses;
 pub mod preprocess;
+pub mod bipeds;
 pub mod projectiles;
 pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {
@@ -90,6 +91,8 @@ pub(crate) struct Tags {
     physics_definitions: HashMap<u32, Option<Arc<halo_map::vehicle_physics::PhysicsDefinition>>>,
     material_physics: Option<Arc<Vec<halo_map::vehicle_physics::MaterialPhysics>>>,
     vehicle_definitions: HashMap<u32, Option<Arc<halo_map::vehicle_update::VehicleDefinition>>>,
+    biped_definitions: HashMap<u32, Option<Arc<halo_map::biped_moving::BipedDefinition>>>,
+    player_information: Option<Option<halo_map::biped_moving::PlayerInformation>>,
 }
 
 impl Tags {
@@ -148,6 +151,8 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
         physics_definitions: HashMap::new(),
         material_physics: None,
         vehicle_definitions: HashMap::new(),
+        biped_definitions: HashMap::new(),
+        player_information: None,
     });
     count
 }

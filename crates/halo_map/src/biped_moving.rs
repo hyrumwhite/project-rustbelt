@@ -13,14 +13,17 @@
 //! After the physics it moves the biped, keeps what it stands on, starts a
 //! landing, jumps, and counts the bumps.
 //!
-//! What the rest of the game answers (the AI's jump aim and leaping, the
-//! difficulty, cinematics, the aiming vector) comes in as [`MovingInputs`];
-//! damage (falling, melee impacts), effects and the AI's notices are not
-//! ported.
+//! What the rest of the game answers (the AI's leaping, the difficulty,
+//! cinematics, the aiming vector) comes in as [`MovingInputs`]. In a
+//! running game, what the update asks of the game goes through a
+//! [`MovingHost`], at the moments the C asks it: aborting the animation,
+//! the move, the AI's jump aim and the jump's footsteps, a melee impact's
+//! damage, the AI's notice of a bump, and falling damage. A recorded
+//! update replays with none (the AI's answer to its jump aim an input).
 
 use crate::biped::{BipedPhysics, in_flags, out_flags};
 use crate::collision::{CollisionBsp, StructureClusters};
-use crate::features::{FeatureObject, cross3, dot3, magnitude_squared3, magnitude3, normalize3, scale3};
+use crate::features::{cross3, dot3, magnitude_squared3, magnitude3, normalize3, scale3};
 use crate::{CacheFile, Result, animation::FrameInfo, layout};
 
 /// `_biped_definition` flags.
@@ -292,12 +295,39 @@ pub struct MovingInputs {
     pub actor_jump: Option<(bool, [f32; 3])>,
 }
 
-/// The physics' world for this update: the structure, and the objects its
-/// broad phase visits each time it gathers features.
+/// The physics' world for this update: the structure, the objects its
+/// broad phase visits each time it gathers features, and in a running game
+/// the host that answers it.
 pub struct PhysicsWorld<'a> {
     pub bsp: &'a CollisionBsp,
     pub clusters: &'a StructureClusters,
-    pub objects: &'a [Vec<FeatureObject>],
+    pub objects: crate::biped::BipedObjects<'a>,
+    pub host: Option<&'a dyn MovingHost>,
+}
+
+/// A running game, as a biped's movement asks it. The state is the
+/// update's as it stands (the host writes it to the biped first, and reads
+/// back what the call changed).
+pub trait MovingHost {
+    /// `unit_abort_animation`: the turn reached its facing.
+    fn abort_animation(&self, state: &mut MovingState);
+    /// `object_translate`, with no location (found from where it ends).
+    fn translate(&self, state: &mut MovingState, position: [f32; 3]);
+    /// `actor_aim_jump`: whether its actor jumps, and how fast, from the
+    /// jump it would make.
+    fn actor_aim_jump(&self, state: &mut MovingState, magnitude: f32, velocity: [f32; 3]) -> (bool, [f32; 3]);
+    /// It jumped (its footsteps).
+    fn jumped(&self, state: &mut MovingState);
+    /// A melee attack's impact along its move (the target's damage, if the
+    /// move reaches it).
+    fn melee_impact(&self, state: &mut MovingState, position: [f32; 3], new_position: [f32; 3]);
+    /// `ai_handle_bump`: it bumped `object_index`, moving at `velocity`.
+    fn bump_notice(&self, state: &mut MovingState, object_index: i32, velocity: [f32; 3]);
+    /// `biped_falling_damage` at its landing velocity.
+    fn falling_damage(&self, state: &mut MovingState, landing_velocity: f32);
+    /// Its physics begins and ends (for the game's recording of it).
+    fn physics_begin(&self, _physics: &BipedPhysics, _stand_test: Option<crate::biped::StandTest>) {}
+    fn physics_end(&self, _physics: &BipedPhysics) {}
 }
 
 /// What an update did besides the state: the physics it asked for (`None`
@@ -458,7 +488,13 @@ fn start_landing(definition: &BipedDefinition, state: &mut MovingState, landing_
 }
 
 /// `biped_jump`.
-fn jump(definition: &BipedDefinition, player_information: &PlayerInformation, inputs: &MovingInputs, state: &mut MovingState) -> bool {
+fn jump(
+    world: &PhysicsWorld<'_>,
+    definition: &BipedDefinition,
+    player_information: &PlayerInformation,
+    inputs: &MovingInputs,
+    state: &mut MovingState,
+) -> bool {
     if state.biped_flags & state_flags::AIRBORNE != 0 || state.landing == 1 {
         return false;
     }
@@ -476,41 +512,61 @@ fn jump(definition: &BipedDefinition, player_information: &PlayerInformation, in
         jump_velocity[1] += up[1] * velocity_delta;
         jump_velocity[2] += up[2] * velocity_delta;
     }
-    if inputs.actor
-        && let Some((actor_jumped, actor_velocity)) = inputs.actor_jump
-    {
-        jumped = actor_jumped;
-        jump_velocity = actor_velocity;
+    if inputs.actor {
+        let answer = match world.host {
+            Some(host) => Some(host.actor_aim_jump(state, jump_magnitude, jump_velocity)),
+            None => inputs.actor_jump,
+        };
+        if let Some((actor_jumped, actor_velocity)) = answer {
+            jumped = actor_jumped;
+            jump_velocity = actor_velocity;
+        }
     }
     if jumped {
         state.translational_velocity = jump_velocity;
         state.biped_flags |= state_flags::AIRBORNE;
         state.jump_recovery_timer = 0;
         state.support_surface_index = NONE;
+        if let Some(host) = world.host {
+            host.jumped(state);
+        }
     }
     jumped
 }
 
 /// `biped_update_jumping`: on the ground, the jump control jumps once the
 /// last jump has had five ticks to recover.
-fn update_jumping(definition: &BipedDefinition, player_information: &PlayerInformation, inputs: &MovingInputs, state: &mut MovingState) {
+fn update_jumping(
+    world: &PhysicsWorld<'_>,
+    definition: &BipedDefinition,
+    player_information: &PlayerInformation,
+    inputs: &MovingInputs,
+    state: &mut MovingState,
+) {
     if state.biped_flags & state_flags::AIRBORNE == 0 && state.landing != 1 {
         if state.jump_recovery_timer < i8::MAX {
             state.jump_recovery_timer += 1;
         }
         if inputs.control_flags & control_flags::JUMP != 0 && state.jump_recovery_timer > 5 {
-            jump(definition, player_information, inputs, state);
+            jump(world, definition, player_information, inputs, state);
         }
     }
 }
 
 /// `biped_bumped_object`: a player's biped pushing the same object for
 /// more than three ticks stops counting for half a second.
-fn bumped_object(inputs: &MovingInputs, state: &mut MovingState, object_index: i32) {
+fn bumped_object(world: &PhysicsWorld<'_>, inputs: &MovingInputs, state: &mut MovingState, object_index: i32, velocity: [f32; 3]) {
     let bump_ticks = state.bump_ticks;
     if bump_ticks < 0 {
         state.bump_ticks = if object_index == NONE { bump_ticks + 1 } else { -15 };
-    } else if object_index != NONE && (inputs.player_index != NONE || inputs.recorded_animation) {
+        return;
+    }
+    if object_index != NONE
+        && let Some(host) = world.host
+    {
+        host.bump_notice(state, object_index, velocity);
+    }
+    if object_index != NONE && (inputs.player_index != NONE || inputs.recorded_animation) {
         if state.bump_object_index != object_index {
             state.bump_object_index = object_index;
             state.bump_ticks = 0;
@@ -633,6 +689,9 @@ pub fn biped_update_moving(
                     if dot3(old_cross, state.up) * dot3(new_cross, state.up) <= 0.0 {
                         rotated_forward = inputs.desired_facing_vector;
                         outcome.aborted_animation = true;
+                        if let Some(host) = world.host {
+                            host.abort_animation(state);
+                        }
                     }
                 }
                 state.forward = rotated_forward;
@@ -780,7 +839,13 @@ pub fn biped_update_moving(
     physics.in_flags = flags_in;
     outcome.physics = Some(physics);
 
-    crate::biped::biped_update_physics(world.bsp, &mut physics, stand_test, crate::biped::BipedObjects::Visited(world.objects));
+    if let Some(host) = world.host {
+        host.physics_begin(&physics, stand_test);
+    }
+    crate::biped::biped_update_physics(world.bsp, &mut physics, stand_test, world.objects);
+    if let Some(host) = world.host {
+        host.physics_end(&physics);
+    }
 
     if physics.elevator_object_index == NONE {
         if state.elevator_ticks <= 0 {
@@ -805,7 +870,10 @@ pub fn biped_update_moving(
     if flags & biped_flags::PILL_CENTERED_AT_ORIGIN == 0 {
         new_biped_position[2] -= physics.width;
     }
-    translate(world, inputs, state, new_biped_position);
+    match world.host {
+        Some(host) => host.translate(state, new_biped_position),
+        None => translate(world, inputs, state, new_biped_position),
+    }
 
     state.support_surface_index = physics.support_surface_index;
     state.pathfinding_point = new_biped_position;
@@ -822,11 +890,15 @@ pub fn biped_update_moving(
         start_landing(definition, state, physics.landing_velocity);
     }
     if out & out_flags::CANNOT_STAND == 0 {
-        update_jumping(definition, player_information, inputs, state);
+        update_jumping(world, definition, player_information, inputs, state);
     }
-    // (a melee impact's damage, and the AI's notice of a bump: not ported)
-    bumped_object(inputs, state, physics.bumped_object_index);
-    // (falling damage: not ported)
+    if let Some(host) = world.host {
+        host.melee_impact(state, physics.position, physics.new_position);
+    }
+    bumped_object(world, inputs, state, physics.bumped_object_index, physics.velocity);
+    if let Some(host) = world.host {
+        host.falling_damage(state, physics.landing_velocity);
+    }
 
     let flying_in = physics.in_flags & in_flags::FLYING != 0;
     let airborne = state.biped_flags & state_flags::AIRBORNE != 0;

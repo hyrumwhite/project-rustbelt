@@ -1,0 +1,13 @@
+[package]
+name = "halo_sim"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+description = "halo_map's simulation ports as a 32-bit DLL OpenCE calls in place of its own C"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+halo_map = { path = "../halo_map", default-features = false }

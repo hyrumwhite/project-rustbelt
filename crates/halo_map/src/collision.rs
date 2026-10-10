@@ -980,6 +980,13 @@ impl World<'_> {
             material_type: NONE as i16,
             surface_flags: 0,
         };
+        // (testing nothing of the environment: the end point, and the
+        // location there)
+        if flags & (test_flags::STRUCTURE | test_flags::MEDIA | test_flags::OBJECTS) == 0 {
+            result.point = [point[0] + vector[0], point[1] + vector[1], point[2] + vector[2]];
+            (result.location_leaf, result.location_cluster) = self.clusters.location_from_point(self.collision, result.point);
+            return result;
+        }
         let mut best: Option<WorldHit> = None;
         let mut t = 1.0f32;
         let (structure_hit, leaves) = self.collision.test_vector_leaves(bsp_flags, point, vector, f32::MAX);

@@ -98,14 +98,47 @@ pub fn point_physics_update(
     underwater: bool,
     force: Option<[f32; 3]>,
     radius: f32,
-    mut dt: f32,
+    dt: f32,
 ) -> (u32, Option<[f32; 3]>) {
+    let update = point_physics_update_full(world, flags, definition, state, current, underwater, force, radius, dt);
+    (update.flags, update.collision.map(|c| c.normal))
+}
+
+/// The last collision of a point physics update: its normal and material
+/// type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointCollision {
+    pub normal: [f32; 3],
+    pub material_type: i16,
+}
+
+/// What a point physics update did: its result flags and its last
+/// collision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointUpdate {
+    pub flags: u32,
+    pub collision: Option<PointCollision>,
+}
+
+/// [`point_physics_update`], with the last collision's material type.
+#[allow(clippy::too_many_arguments)]
+pub fn point_physics_update_full(
+    world: &World<'_>,
+    flags: u32,
+    definition: &PointPhysicsDefinition,
+    state: &mut PointState,
+    current: [f32; 3],
+    underwater: bool,
+    force: Option<[f32; 3]>,
+    radius: f32,
+    mut dt: f32,
+) -> PointUpdate {
     let mut result = 0u32;
-    let mut collision_normal = None;
+    let mut last_collision = None;
     // (a radius below zero is none)
     let radius = if radius >= 0.0 { radius } else { 0.0 };
     if dt == 0.0 {
-        return (result, collision_normal);
+        return PointUpdate { flags: result, collision: last_collision };
     }
     let radius_squared = radius * radius;
     let radius_cubed = radius_squared * radius;
@@ -186,7 +219,7 @@ pub fn point_physics_update(
             _ => {}
         }
         let n = [collision.plane[0], collision.plane[1], collision.plane[2]];
-        collision_normal = Some(n);
+        last_collision = Some(PointCollision { normal: n, material_type: collision.material_type });
         // (component_vectors_from_normal3d)
         let vn = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
         let parallel = [n[0] * vn, n[1] * vn, n[2] * vn];
@@ -208,5 +241,5 @@ pub fn point_physics_update(
         ];
         dt -= collision.t * dt;
     }
-    (result, collision_normal)
+    PointUpdate { flags: result, collision: last_collision }
 }

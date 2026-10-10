@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/halo_map", "crates/halo_bridge"]
+members = ["crates/halo_map", "crates/halo_bridge", "crates/halo_sim"]
 
 [package]
 name = "halo_rt"

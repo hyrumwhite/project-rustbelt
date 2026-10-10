@@ -15,8 +15,8 @@
 //!
 //! Systems handed over so far: point physics (`point_physics_update`), and
 //! poses (`object_compute_node_matrices`: the orientations from the
-//! animation, overlays and scale, and the interpolation and node matrices;
-//! the object types' preprocess between them is still the game's).
+//! animation, overlays and scale, the object types' preprocess, and the
+//! interpolation and node matrices).
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
@@ -28,9 +28,10 @@ use halo_map::physics::{PointPhysicsDefinition, PointState, point_physics_update
 use halo_map::pose::{PoseAnimation, PoseModel, PoseObjectDefinition};
 
 pub mod poses;
+pub mod preprocess;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// A level's structure BSP, as the simulation tests it.
 struct Structure {
@@ -53,6 +54,11 @@ struct Tags {
     definitions: HashMap<u32, Option<Arc<PoseObjectDefinition>>>,
     models: HashMap<u32, Option<Arc<PoseModel>>>,
     animations: HashMap<(u32, i16), Option<Arc<PoseAnimation>>>,
+    graphs: HashMap<u32, Option<Arc<halo_map::unit_animation::AnimationGraph>>>,
+    graphs_loaded: std::collections::HashSet<u32>,
+    unit_flags: HashMap<u32, u32>,
+    vehicles: HashMap<u32, Option<Arc<halo_map::vehicle_pose::VehiclePoseDefinition>>>,
+    devices: HashMap<u32, Option<Arc<halo_map::device_pose::DevicePoseDefinition>>>,
 }
 
 impl Tags {
@@ -95,7 +101,17 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
     // SAFETY: as above
     let Ok(cache) = (unsafe { CacheFile::from_memory(bytes, base) }) else { return -1 };
     let count = cache.tags.len() as i32;
-    *tags = Some(Tags { cache, definitions: HashMap::new(), models: HashMap::new(), animations: HashMap::new() });
+    *tags = Some(Tags {
+        cache,
+        definitions: HashMap::new(),
+        models: HashMap::new(),
+        animations: HashMap::new(),
+        graphs: HashMap::new(),
+        graphs_loaded: Default::default(),
+        unit_flags: HashMap::new(),
+        vehicles: HashMap::new(),
+        devices: HashMap::new(),
+    });
     count
 }
 

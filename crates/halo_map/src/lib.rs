@@ -25,6 +25,7 @@ pub mod math;
 pub mod model;
 pub mod objects;
 pub mod physics;
+pub mod pose;
 pub mod projectile;
 mod palette;
 pub mod scenario;
@@ -59,6 +60,7 @@ pub mod groups {
     pub const COLLISION_MODEL: u32 = fourcc(b"coll");
     pub const FOG: u32 = fourcc(b"fog ");
     pub const POINT_PHYSICS: u32 = fourcc(b"pphy");
+    pub const PHYSICS: u32 = fourcc(b"phys");
     pub const PROJECTILE: u32 = fourcc(b"proj");
     pub const BIPED: u32 = fourcc(b"bipd");
     pub const GLOBALS: u32 = fourcc(b"matg");

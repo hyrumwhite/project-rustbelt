@@ -139,6 +139,10 @@ fn main() {
             if !animations.is_empty() {
                 check.check_unit_animations(&animations);
             }
+            let poses = bridge.read_poses();
+            if !poses.is_empty() {
+                check.check_poses(&poses);
+            }
         }
         if let Some(snapshot) = fresh {
             frames += 1;
@@ -289,6 +293,19 @@ struct CollisionCheck {
     animation_kinds: [u64; 5],
     animation_side_effects: u32,
     animation_shown: u32,
+    pose_definitions: std::collections::HashMap<u32, Option<halo_map::pose::PoseObjectDefinition>>,
+    pose_models: std::collections::HashMap<u32, Option<halo_map::pose::PoseModel>>,
+    pose_animations: std::collections::HashMap<(u32, i16), Option<halo_map::pose::PoseAnimation>>,
+    poses: u64,
+    poses_incomplete: u64,
+    /// Orientations from the animation: compared, agreed, left out for
+    /// overlays; and of the agreeing, from compressed animations, from the
+    /// model's pose.
+    pose_animated: [u64; 5],
+    /// Matrices: compared, agreed, of those interpolating, with a parent.
+    pose_matrices: [u64; 4],
+    pose_types: [u64; 12],
+    pose_shown: u32,
     frames_shown: u32,
     hits: u64,
     largest_t_difference: f32,
@@ -367,6 +384,15 @@ impl CollisionCheck {
             animation_kinds: [0; 5],
             animation_side_effects: 0,
             animation_shown: 0,
+            pose_definitions: Default::default(),
+            pose_models: Default::default(),
+            pose_animations: Default::default(),
+            poses: 0,
+            poses_incomplete: 0,
+            pose_animated: [0; 5],
+            pose_matrices: [0; 4],
+            pose_types: [0; 12],
+            pose_shown: 0,
             frames_shown: 0,
             sphere_features: 0,
             hits: 0,
@@ -1260,7 +1286,154 @@ impl CollisionCheck {
         }
     }
 
+    /// Replays the sampled poses the game recorded with halo_map's posing:
+    /// the orientations from the animation's frame (or the model's pose)
+    /// and the object's scale, compared before the object type's preprocess;
+    /// and, from the game's preprocessed orientations, the interpolation and
+    /// the node matrices.
+    fn check_poses(&mut self, poses: &[(halo_bridge::PoseRecord, Vec<halo_bridge::PoseNodeRecord>, bool)]) {
+        use halo_map::pose::{self, Orientation, Placement};
+        for (record, nodes, complete) in poses {
+            self.poses += 1;
+            if !complete {
+                self.poses_incomplete += 1;
+                continue;
+            }
+            let cache = &self.cache;
+            let definition = self
+                .pose_definitions
+                .entry(record.definition_index)
+                .or_insert_with(|| pose::PoseObjectDefinition::load(cache, record.definition_index).ok())
+                .clone();
+            let Some(definition) = definition else { continue };
+            let Some(model_index) = definition.model else { continue };
+            if !self.pose_models.contains_key(&model_index) {
+                self.pose_models.insert(model_index, pose::PoseModel::load(cache, model_index).ok());
+            }
+            let Some(Some(model)) = self.pose_models.get(&model_index) else { continue };
+            let node_count = record.node_count as usize;
+            if nodes.len() != node_count || model.nodes.len().min(pose::MAXIMUM_NODES) != node_count {
+                continue;
+            }
+            if let Some(count) = self.pose_types.get_mut(record.kind as usize) {
+                *count += 1;
+            }
+
+            // the orientations from the animation (or the model) and scale
+            let animation = (record.frame_index != -1 && record.animation_graph_index != u32::MAX && record.animation_index != -1)
+                .then(|| {
+                    self.pose_animations
+                        .entry((record.animation_graph_index, record.animation_index))
+                        .or_insert_with(|| pose::PoseAnimation::load(cache, record.animation_graph_index, record.animation_index).ok().flatten())
+                        .as_ref()
+                })
+                .flatten();
+            let mut orientations = match animation {
+                Some(animation) => pose::animation_node_orientations(model, animation, record.frame_index),
+                None => pose::model_node_orientations(model),
+            };
+            if record.scale > 0.0 && !orientations.is_empty() {
+                let o = &mut orientations[0];
+                o.scale *= record.scale;
+                o.translation = [o.translation[0] * record.scale, o.translation[1] * record.scale, o.translation[2] * record.scale];
+            }
+            if definition.has_overlays {
+                self.pose_animated[2] += 1;
+            } else {
+                self.pose_animated[0] += 1;
+                let same = orientations.len() == node_count
+                    && orientations.iter().zip(nodes).all(|(o, n)| o.to_floats().map(f32::to_bits) == n.animated.map(f32::to_bits));
+                if same {
+                    self.pose_animated[1] += 1;
+                    match animation {
+                        Some(a) if a.flags & 1 != 0 => self.pose_animated[3] += 1,
+                        None => self.pose_animated[4] += 1,
+                        _ => {}
+                    }
+                } else if self.pose_shown < 6 {
+                    self.pose_shown += 1;
+                    let first = orientations.iter().zip(nodes).position(|(o, n)| o.to_floats().map(f32::to_bits) != n.animated.map(f32::to_bits));
+                    println!(
+                        "  pose {:#x} (type {}, definition {:#x}) orientations differ at node {first:?} of {}: frame {} of animation {} (compressed {:?}); game {:?}; halo_map {:?}",
+                        record.object_index,
+                        record.kind,
+                        record.definition_index,
+                        node_count,
+                        record.frame_index,
+                        record.animation_index,
+                        animation.map(|a| a.flags & 1 != 0),
+                        first.map(|i| nodes[i].animated),
+                        first.map(|i| orientations[i].to_floats())
+                    );
+                }
+            }
+
+            // the matrices, from the game's preprocessed orientations
+            let mut target: Vec<Orientation> = nodes.iter().map(|n| Orientation::from_floats(n.preprocessed)).collect();
+            if record.interpolation_frame_count > 0 {
+                let original: Vec<Orientation> = nodes.iter().map(|n| Orientation::from_floats(n.original)).collect();
+                pose::interpolate_node_orientations(&original, &mut target, record.interpolation_frame_index, record.interpolation_frame_count);
+            }
+            let m = |f: [f32; 13]| halo_map::model::Matrix4x3 {
+                scale: f[0],
+                forward: [f[1], f[2], f[3]],
+                left: [f[4], f[5], f[6]],
+                up: [f[7], f[8], f[9]],
+                position: [f[10], f[11], f[12]],
+            };
+            let placement = Placement {
+                position: record.position,
+                forward: record.forward,
+                up: record.up,
+                mirrored: record.object_flags & (1 << 12) != 0,
+                world_relative: record.world_relative != 0,
+                center_of_mass: definition.center_of_mass,
+                origin_offset: definition.origin_offset,
+                parent: (record.has_parent != 0).then(|| (m(record.parent_node_matrix), record.parent_mirrored != 0)),
+            };
+            let matrices = pose::node_matrices(model, &target, &placement);
+            let bits = |x: &halo_map::model::Matrix4x3| {
+                [
+                    x.scale, x.forward[0], x.forward[1], x.forward[2], x.left[0], x.left[1], x.left[2], x.up[0], x.up[1], x.up[2], x.position[0],
+                    x.position[1], x.position[2],
+                ]
+                .map(f32::to_bits)
+            };
+            self.pose_matrices[0] += 1;
+            let same = matrices.iter().zip(nodes).all(|(x, n)| bits(x) == n.matrix.map(f32::to_bits));
+            if same {
+                self.pose_matrices[1] += 1;
+                if record.interpolation_frame_count > 0 {
+                    self.pose_matrices[2] += 1;
+                }
+                if record.has_parent != 0 {
+                    self.pose_matrices[3] += 1;
+                }
+            } else if self.pose_shown < 12 {
+                self.pose_shown += 1;
+                let first = matrices.iter().zip(nodes).position(|(x, n)| bits(x) != n.matrix.map(f32::to_bits));
+                println!(
+                    "  pose {:#x} (type {}) matrices differ at node {first:?} of {} (interpolating {}/{}, parent {}): game {:?}; halo_map {:?}",
+                    record.object_index,
+                    record.kind,
+                    node_count,
+                    record.interpolation_frame_index,
+                    record.interpolation_frame_count,
+                    record.has_parent,
+                    first.map(|i| nodes[i].matrix),
+                    first.map(|i| matrices[i])
+                );
+            }
+        }
+    }
+
     fn report(&self) {
+        let [compared, agreed, overlays, compressed, model_pose] = self.pose_animated;
+        let [m_compared, m_agreed, interpolating, parented] = self.pose_matrices;
+        println!(
+            "poses: {} of {} sampled poses' orientations agree with the game bit for bit ({} from compressed animations, {} the model's pose; {} left out for overlays); {} of {} poses' node matrices agree ({} interpolating, {} hanging from a parent); by type {:?}; {} of {} lost from the ring",
+            agreed, compared, compressed, model_pose, overlays, m_agreed, m_compared, interpolating, parented, self.pose_types, self.poses_incomplete, self.poses
+        );
         let [entered, seats, restarted, with_effects, leaps] = self.animation_kinds;
         println!(
             "bipeds: {} of {} unit animation updates replayed agree with the game ({} states entered, {} seat or weapon changes, {} animations restarted, {} with side effects (bits {:#x}), {} leaps)",

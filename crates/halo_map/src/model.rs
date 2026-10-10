@@ -27,7 +27,7 @@ pub const LEVELS_OF_DETAIL: usize = 5;
 pub const HIGHEST_DETAIL: usize = LEVELS_OF_DETAIL - 1;
 
 /// `real_matrix4x3`: `position + scale * (x * forward + y * left + z * up)`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Matrix4x3 {
     pub scale: f32,
     pub forward: [f32; 3],

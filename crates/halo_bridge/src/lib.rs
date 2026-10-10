@@ -21,7 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 21;
+pub const VERSION: u32 = 22;
+pub const POSE_RECORDS: usize = 2048;
+pub const POSE_NODES: usize = 65536;
 pub const UNIT_ANIMATION_RECORDS: usize = 1024;
 pub const BIPED_UPDATE_RECORDS: usize = 1024;
 pub const BIPED_MOVING_RECORDS: usize = 1024;
@@ -483,6 +485,50 @@ pub struct UnitAnimationRecord {
 
 const _: () = assert!(std::mem::size_of::<UnitAnimationRecord>() == 152);
 
+/// A node of a recorded pose: its orientation (rotation i j k w,
+/// translation, scale) from the animation, overlays and scale, after its
+/// object type's preprocess, the original it interpolates from, and its
+/// matrix (scale, forward, left, up, position).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PoseNodeRecord {
+    pub animated: [f32; 8],
+    pub preprocessed: [f32; 8],
+    pub original: [f32; 8],
+    pub matrix: [f32; 13],
+}
+
+/// One sampled `object_compute_node_matrices`: what it read, and where its
+/// nodes are in the pose node ring.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PoseRecord {
+    pub sequence: u32,
+    pub object_index: u32,
+    pub definition_index: u32,
+    pub kind: i16,
+    pub node_count: i16,
+    pub first_node: u32,
+    pub object_flags: u32,
+    pub animation_graph_index: u32,
+    pub animation_index: i16,
+    pub frame_index: i16,
+    pub interpolation_frame_index: i16,
+    pub interpolation_frame_count: i16,
+    pub world_relative: u32,
+    pub scale: f32,
+    pub position: [f32; 3],
+    pub forward: [f32; 3],
+    pub up: [f32; 3],
+    pub function_values: [f32; 4],
+    pub has_parent: u32,
+    pub parent_mirrored: u32,
+    pub parent_node_matrix: [f32; 13],
+}
+
+const _: () = assert!(std::mem::size_of::<PoseNodeRecord>() == 148);
+const _: () = assert!(std::mem::size_of::<PoseRecord>() == 156);
+
 /// A recorded biped update with the objects its features came from (each
 /// with its node matrices: scale, forward, left, up, position).
 #[derive(Debug, Clone)]
@@ -539,6 +585,10 @@ struct Shared {
     unit_animation_record_count: u32,
     unit_animation_pad: u32,
     unit_animation_records: [UnitAnimationRecord; UNIT_ANIMATION_RECORDS],
+    pose_record_count: u32,
+    pose_node_count: u32,
+    pose_records: [PoseRecord; POSE_RECORDS],
+    pose_nodes: [PoseNodeRecord; POSE_NODES],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -619,6 +669,7 @@ pub struct Bridge {
     last_biped_moving_record: Option<u32>,
     last_biped_update_record: Option<u32>,
     last_unit_animation_record: Option<u32>,
+    last_pose_record: Option<u32>,
 }
 
 // Frames are read through volatile reads and a sequence check; the input
@@ -639,7 +690,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None, last_unit_animation_record: None, last_pose_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -830,6 +881,37 @@ impl Bridge {
                 }
             }
             self.last_unit_animation_record = Some(count);
+            out
+        }
+    }
+
+    /// The poses the game recorded since the last call, each with its nodes
+    /// and whether they were all still in the ring.
+    pub fn read_poses(&mut self) -> Vec<(PoseRecord, Vec<PoseNodeRecord>, bool)> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence numbers (and the node ring's count) after copying
+        unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).pose_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_pose_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(POSE_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).pose_records[sequence as usize % POSE_RECORDS]);
+                if record.sequence != sequence {
+                    continue;
+                }
+                let nodes: Vec<PoseNodeRecord> = (0..record.node_count.max(0) as u32)
+                    .map(|n| std::ptr::read_volatile(&(*self.shared).pose_nodes[record.first_node.wrapping_add(n) as usize % POSE_NODES]))
+                    .collect();
+                fence(Ordering::Acquire);
+                let nodes_now = std::ptr::read_volatile(&(*self.shared).pose_node_count);
+                let complete = (nodes_now.wrapping_sub(record.first_node) as usize) <= POSE_NODES;
+                out.push((record, nodes, complete));
+            }
+            self.last_pose_record = Some(count);
             out
         }
     }

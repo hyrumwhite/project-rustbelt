@@ -7,6 +7,7 @@ movement reads (bipeds.c's biped_update_moving).
 #include "units/biped_definitions.h"
 #include "game/game_globals.h"
 #include "models/model_animation_definitions.h"
+#include "physics/physics_definitions.h"
 
 #include <stddef.h>
 
@@ -82,6 +83,21 @@ LAYOUT_OFFSET(animation, sound_index)
 LAYOUT_OFFSET(animation, private_sound_frame_index)
 LAYOUT_OFFSET(animation, runtime_parent_animation_index)
 LAYOUT_OFFSET(animation, runtime_normalized_weight)
+LAYOUT_OFFSET(animation, type)
+LAYOUT_OFFSET(animation, frame_size)
+LAYOUT_OFFSET(animation, node_list_checksum)
+LAYOUT_OFFSET(animation, node_count)
+LAYOUT_OFFSET(animation, flags)
+LAYOUT_OFFSET(animation, nodes_with_translation_flags)
+LAYOUT_OFFSET(animation, nodes_with_rotation_flags)
+LAYOUT_OFFSET(animation, nodes_with_scale_flags)
+LAYOUT_OFFSET(animation, compressed_data_offset)
+LAYOUT_OFFSET(animation, default_data)
+LAYOUT_OFFSET(animation, data)
+LAYOUT_OFFSET(animation_graph, object_overlays)
+
+/* physics: an object's centre of mass */
+LAYOUT_OFFSET(physics_definition, center_of_mass)
 
 /* animation graphs: which animation a unit plays */
 LAYOUT_SIZE(animation_graph_unit_seat)

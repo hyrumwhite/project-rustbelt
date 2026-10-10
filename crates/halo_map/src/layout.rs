@@ -42,11 +42,14 @@ pub mod _biped_definition {
 pub mod _object_definition {
     pub const SIZEOF: usize = 0x17c;
     pub const TYPE: usize = 0x0;
+    pub const ORIGIN_OFFSET: usize = 0x14;
     pub const MODEL: usize = 0x28;
     pub const ANIMATION_GRAPH: usize = 0x38;
     pub const COLLISION_MODEL: usize = 0x70;
+    pub const PHYSICS: usize = 0x80;
     pub const MODIFIER_SHADER: usize = 0x90;
     pub const ATTACHMENTS: usize = 0x140;
+    pub const FUNCTIONS: usize = 0x158;
     pub const CHANGE_COLORS: usize = 0x164;
 }
 
@@ -79,20 +82,32 @@ pub mod _unit_definition {
 
 pub mod animation {
     pub const SIZEOF: usize = 0xb4;
+    pub const TYPE: usize = 0x20;
     pub const FRAME_COUNT: usize = 0x22;
+    pub const FRAME_SIZE: usize = 0x24;
     pub const FRAME_INFO_TYPE: usize = 0x26;
+    pub const NODE_LIST_CHECKSUM: usize = 0x28;
+    pub const NODE_COUNT: usize = 0x2c;
     pub const PRIVATE_LOOP_FRAME_INDEX: usize = 0x2e;
     pub const PRIVATE_KEY_FRAME_INDEX: usize = 0x34;
     pub const PRIVATE_SECOND_KEY_FRAME_INDEX: usize = 0x36;
     pub const NEXT_ANIMATION_INDEX: usize = 0x38;
+    pub const FLAGS: usize = 0x3a;
     pub const SOUND_INDEX: usize = 0x3c;
     pub const PRIVATE_SOUND_FRAME_INDEX: usize = 0x3e;
     pub const RUNTIME_PARENT_ANIMATION_INDEX: usize = 0x42;
     pub const RUNTIME_NORMALIZED_WEIGHT: usize = 0x44;
     pub const FRAME_INFO: usize = 0x48;
+    pub const NODES_WITH_TRANSLATION_FLAGS: usize = 0x5c;
+    pub const NODES_WITH_ROTATION_FLAGS: usize = 0x6c;
+    pub const NODES_WITH_SCALE_FLAGS: usize = 0x7c;
+    pub const COMPRESSED_DATA_OFFSET: usize = 0x88;
+    pub const DEFAULT_DATA: usize = 0x8c;
+    pub const DATA: usize = 0xa0;
 }
 
 pub mod animation_graph {
+    pub const OBJECT_OVERLAYS: usize = 0x0;
     pub const UNIT_SEATS: usize = 0xc;
     pub const ANIMATIONS: usize = 0x74;
 }
@@ -240,6 +255,7 @@ pub mod machine_placement {
 pub mod model {
     pub const SIZEOF: usize = 0xe8;
     pub const FLAGS: usize = 0x0;
+    pub const NODE_LIST_CHECKSUM: usize = 0x4;
     pub const BASE_MAP_SCALE: usize = 0x30;
     pub const MARKERS: usize = 0xac;
     pub const NODES: usize = 0xb8;
@@ -286,6 +302,10 @@ pub mod model_shader_reference {
     pub const SIZEOF: usize = 0x20;
     pub const SHADER: usize = 0x0;
     pub const PERMUTATION_INDEX: usize = 0x10;
+}
+
+pub mod physics_definition {
+    pub const CENTER_OF_MASS: usize = 0xc;
 }
 
 pub mod player_starting_location {

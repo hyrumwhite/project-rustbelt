@@ -41,4 +41,11 @@ unsigned char *bevy_bridge_overlay_begin(
 	unsigned long height);
 void bevy_bridge_overlay_commit(void);
 
+/* projectiles.c, with game.bevy_bridge_ray_tests: each projectile_update
+recorded for a renderer to replay (bevy_bridge_projectile_record) */
+void bevy_bridge_projectile_begin(long projectile_index);
+void bevy_bridge_projectile_collision(void);
+void bevy_bridge_projectile_touched_object(void);
+void bevy_bridge_projectile_end(long projectile_index);
+
 #endif /* __BEVY_BRIDGE_H */

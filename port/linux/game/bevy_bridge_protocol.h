@@ -40,7 +40,9 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 15
+#define BEVY_BRIDGE_VERSION 16
+#define BEVY_BRIDGE_PROJECTILE_RECORDS 1024
+#define BEVY_BRIDGE_RANDOM_DIRECTIONS 4096
 #define BEVY_BRIDGE_RAY_TESTS 16
 #define BEVY_BRIDGE_MAXIMUM_LIGHTS 64
 #define BEVY_BRIDGE_MAXIMUM_OBJECTS 4096
@@ -267,6 +269,50 @@ struct bevy_bridge_gamepads
 	struct bevy_bridge_gamepad pads[BEVY_BRIDGE_GAMEPADS];
 };
 
+/* a projectile's state, as projectile_update reads and leaves it */
+struct bevy_bridge_projectile_state
+{
+	float position[3];
+	float velocity[3];
+	unsigned long projectile_flags;
+	unsigned long object_flags;
+	short action;
+	short hit_material_type;
+	long ignore_object_index;
+	long target_object_index;
+	long parent_object_index;
+	float detonation_timer;
+	float detonation_timer_delta;
+	float arming_time;
+	float arming_time_delta;
+	float odometer;
+	float deceleration_timer;
+	float deceleration_timer_delta;
+	float deceleration;
+	float maximum_damage_distance;
+	long location_leaf;
+	short location_cluster;
+	short pad;
+};
+
+/* one projectile_update (with game.bevy_bridge_ray_tests): the state
+before and after (before it detonates or disappears), the global random
+seed as the update began and as each collision response began, and
+whether a collision touched an object */
+struct bevy_bridge_projectile_record
+{
+	unsigned long sequence;
+	unsigned long projectile_index;
+	unsigned long definition_index;
+	long structure_bsp_index;
+	unsigned long random_seed;
+	unsigned long collision_count;
+	unsigned long collision_seeds[4];
+	unsigned long touched_object;
+	struct bevy_bridge_projectile_state before;
+	struct bevy_bridge_projectile_state after;
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -286,6 +332,13 @@ struct bevy_bridge_shared
 	unsigned long latest_overlay;
 	unsigned long overlay_reserved[2];
 	struct bevy_bridge_overlay overlays[BEVY_BRIDGE_OVERLAYS];
+	/* projectile updates (a ring: the record `count` goes in place
+	count % BEVY_BRIDGE_PROJECTILE_RECORDS), and the random direction table
+	random_vector_in_cone3d draws from */
+	unsigned long projectile_record_count;
+	unsigned long random_direction_count;
+	struct bevy_bridge_projectile_record projectile_records[BEVY_BRIDGE_PROJECTILE_RECORDS];
+	float random_directions[BEVY_BRIDGE_RANDOM_DIRECTIONS][3];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

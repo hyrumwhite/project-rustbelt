@@ -19,6 +19,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "game/players.h"
 #include "objects/objects.h"
 #include "units/units.h"
+#include "items/projectiles.h"
 #include "objects/object_lights.h"
 #include "physics/collision_bsp.h"
 #include "physics/collisions.h"
@@ -680,4 +681,110 @@ boolean bevy_bridge_listener(
 		return FALSE;
 	matrix4x3_from_point_and_vectors(matrix, &position, &forward, &up);
 	return TRUE;
+}
+
+/* ---------- projectile updates */
+
+/* random_math.c: its direction table */
+short random_direction_table_get(real_vector3d const **table);
+unsigned long get_random_seed(void);
+
+static struct
+{
+	boolean active;
+	struct bevy_bridge_projectile_record record;
+} bevy_bridge_projectile;
+
+static boolean bevy_bridge_projectile_recording(void)
+{
+	static int enabled = -1;
+
+	if (enabled < 0)
+		enabled = config_boolean("game.bevy_bridge_ray_tests") != 0;
+	return enabled && bevy_bridge_shared;
+}
+
+static void bevy_bridge_projectile_state(long projectile_index, struct bevy_bridge_projectile_state *state)
+{
+	struct projectile_datum *projectile = (struct projectile_datum *)object_get(projectile_index);
+
+	bevy_bridge_point(state->position, &projectile->object.position);
+	bevy_bridge_vector(state->velocity, &projectile->object.translational_velocity);
+	state->projectile_flags = projectile->projectile.flags;
+	state->object_flags = projectile->object.flags;
+	state->action = projectile->projectile.action;
+	state->hit_material_type = projectile->projectile.hit_material_type;
+	state->ignore_object_index = projectile->projectile.ignore_object_index;
+	state->target_object_index = projectile->projectile.target_object_index;
+	state->parent_object_index = projectile->object.parent_object_index;
+	state->detonation_timer = projectile->projectile.detonation_timer;
+	state->detonation_timer_delta = projectile->projectile.detonation_timer_delta;
+	state->arming_time = projectile->projectile.arming_time;
+	state->arming_time_delta = projectile->projectile.arming_time_delta;
+	state->odometer = projectile->projectile.odometer;
+	state->deceleration_timer = projectile->projectile.deceleration_timer;
+	state->deceleration_timer_delta = projectile->projectile.deceleration_timer_delta;
+	state->deceleration = projectile->projectile.deceleration;
+	state->maximum_damage_distance = projectile->projectile.maximum_damage_distance;
+	state->location_leaf = projectile->object.location.leaf_index;
+	state->location_cluster = projectile->object.location.cluster_index;
+	state->pad = 0;
+}
+
+void bevy_bridge_projectile_begin(long projectile_index)
+{
+	struct bevy_bridge_projectile_record *record = &bevy_bridge_projectile.record;
+
+	if (!bevy_bridge_projectile_recording())
+		return;
+	/* (the random directions, once) */
+	if (!bevy_bridge_shared->random_direction_count)
+	{
+		real_vector3d const *table;
+		short count = random_direction_table_get(&table);
+		short index;
+
+		for (index = 0; index < count && index < BEVY_BRIDGE_RANDOM_DIRECTIONS; index++)
+			bevy_bridge_vector(bevy_bridge_shared->random_directions[index], &table[index]);
+		__atomic_store_n(&bevy_bridge_shared->random_direction_count, (unsigned long)index, __ATOMIC_RELEASE);
+	}
+	memset(record, 0, sizeof(*record));
+	record->projectile_index = (unsigned long)projectile_index;
+	record->definition_index = (unsigned long)object_get(projectile_index)->definition_index;
+	record->structure_bsp_index = global_structure_bsp_index;
+	record->random_seed = get_random_seed();
+	bevy_bridge_projectile_state(projectile_index, &record->before);
+	bevy_bridge_projectile.active = TRUE;
+}
+
+void bevy_bridge_projectile_collision(void)
+{
+	struct bevy_bridge_projectile_record *record = &bevy_bridge_projectile.record;
+
+	if (!bevy_bridge_projectile.active)
+		return;
+	if (record->collision_count < 4)
+		record->collision_seeds[record->collision_count] = get_random_seed();
+	record->collision_count++;
+}
+
+void bevy_bridge_projectile_touched_object(void)
+{
+	if (bevy_bridge_projectile.active)
+		bevy_bridge_projectile.record.touched_object = TRUE;
+}
+
+void bevy_bridge_projectile_end(long projectile_index)
+{
+	struct bevy_bridge_projectile_record *record = &bevy_bridge_projectile.record;
+	unsigned long count;
+
+	if (!bevy_bridge_projectile.active)
+		return;
+	bevy_bridge_projectile.active = FALSE;
+	bevy_bridge_projectile_state(projectile_index, &record->after);
+	count = bevy_bridge_shared->projectile_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->projectile_records[count % BEVY_BRIDGE_PROJECTILE_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->projectile_record_count, count + 1, __ATOMIC_RELEASE);
 }

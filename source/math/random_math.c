@@ -192,6 +192,15 @@ random_math_dispose(
 	return;
 }
 
+/* port: the direction table, for a Bevy renderer to draw from as the game
+does (port/linux/game/bevy_bridge.c) */
+short random_direction_table_get(
+	real_vector3d const **table)
+{
+	*table = random_math_globals.random_direction_table;
+	return random_math_globals.random_direction_table_size;
+}
+
 unsigned short seed_random(
 	unsigned long *seed)
 {

@@ -141,6 +141,7 @@ symbols in this file:
 #include "sound/sound_definitions.h"
 #include "units/bipeds.h"
 #include "units/units.h"
+#include "bevy_bridge.h"
 
 /* ---------- constants */
 
@@ -681,6 +682,8 @@ boolean projectile_update(
 	time_remaining = 1.0f;
 	collision_count = 0;
 	flyby_sound_played = FALSE;
+	/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+	bevy_bridge_projectile_begin(projectile_index);
 
 	profile_enter(projectile_update_section);
 
@@ -936,6 +939,8 @@ boolean projectile_update(
 
 			if (collision.plane.n.k > 0.3f)
 				SET_FLAG(projectile->projectile.flags, _projectile_collided_once_bit, TRUE);
+			if (collision.type == _collision_result_object)
+				bevy_bridge_projectile_touched_object();
 
 			projectile->projectile.ignore_object_index = NONE;
 			projectile_collision(
@@ -1081,6 +1086,9 @@ boolean projectile_update(
 			672,
 			&projectile->object.translational_velocity);
 	}
+
+	/* port: (before it detonates or disappears) */
+	bevy_bridge_projectile_end(projectile_index);
 
 	switch (projectile->projectile.action)
 	{
@@ -1526,6 +1534,8 @@ static void projectile_collision(
 	short material_type;
 	short response;
 
+	/* port: the random seed this response begins with (bevy_bridge.c) */
+	bevy_bridge_projectile_collision();
 	projectile = projectile_get(projectile_index);
 	definition = projectile_definition_get(projectile->definition_index);
 	material_type = collision->material_type;

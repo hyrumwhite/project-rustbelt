@@ -131,6 +131,10 @@ fn main() {
             if !moving.is_empty() {
                 check.check_biped_moving(snapshot.structure_bsp_index, &moving);
             }
+            let updates = bridge.read_biped_update_records();
+            if !updates.is_empty() {
+                check.check_biped_updates(snapshot.structure_bsp_index, &updates);
+            }
         }
         if let Some(snapshot) = fresh {
             frames += 1;
@@ -257,6 +261,21 @@ struct CollisionCheck {
     /// crouch changes.
     moving_kinds: [u64; 8],
     moving_shown: u32,
+    /// Recent movement updates by sequence: what they read, and their
+    /// physics' world.
+    recent_moving: std::collections::HashMap<
+        u32,
+        (halo_map::biped_moving::MovingInputs, Option<(halo_bridge::BipedRecord, Vec<Vec<halo_map::features::FeatureObject>>)>),
+    >,
+    update_updates: u64,
+    update_replayed: u64,
+    update_agreed: u64,
+    update_missing: u64,
+    update_elsewhere: u64,
+    /// Of the agreeing updates: dead, airborne, landing, flying turns,
+    /// moving turns, standing turns asked for, tumbling.
+    update_kinds: [u64; 7],
+    update_shown: u32,
     frames_shown: u32,
     hits: u64,
     largest_t_difference: f32,
@@ -321,6 +340,14 @@ impl CollisionCheck {
             moving_elsewhere: 0,
             moving_kinds: [0; 8],
             moving_shown: 0,
+            recent_moving: Default::default(),
+            update_updates: 0,
+            update_replayed: 0,
+            update_agreed: 0,
+            update_missing: 0,
+            update_elsewhere: 0,
+            update_kinds: [0; 7],
+            update_shown: 0,
             frames_shown: 0,
             sphere_features: 0,
             hits: 0,
@@ -917,6 +944,11 @@ impl CollisionCheck {
                 ),
                 None => (&no_objects, None),
             };
+            self.recent_moving.insert(record.sequence, (inputs, physics_record.clone()));
+            if self.recent_moving.len() > 8192 {
+                let newest = record.sequence;
+                self.recent_moving.retain(|&sequence, _| newest.wrapping_sub(sequence) < 4096);
+            }
             let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
             bsp.breakable_surfaces = physics_record.as_ref().map(|(p, _)| p.breakable_surfaces);
             let Some(Some(bsp)) = self.bsps.get(&structure_bsp_index) else { return };
@@ -1035,7 +1067,119 @@ impl CollisionCheck {
         }
     }
 
+    /// Replays the biped updates the game recorded (an unparented biped's,
+    /// up to its animation update) with halo_map's `biped_update`: turning,
+    /// the movement (with what its movement record read), and the dead,
+    /// airborne and landing updates; compares the state byte for byte.
+    fn check_biped_updates(&mut self, structure_bsp_index: i32, records: &[halo_bridge::BipedUpdateRecord]) {
+        use halo_map::biped_moving::{BipedDefinition, PhysicsWorld, biped_flags, state_flags};
+        let Some(Some(player_information)) = self.player_information else { return };
+        for record in records {
+            self.update_updates += 1;
+            if record.structure_bsp_index != structure_bsp_index {
+                self.update_elsewhere += 1;
+                continue;
+            }
+            let Some((moving_inputs, physics_record)) =
+                (record.moving_record >= 0).then(|| self.recent_moving.get(&(record.moving_record as u32)).cloned()).flatten()
+            else {
+                self.update_missing += 1;
+                continue;
+            };
+            let cache = &self.cache;
+            let definition = self
+                .biped_definitions
+                .entry(record.definition_index)
+                .or_insert_with(|| BipedDefinition::load(cache, record.definition_index).ok())
+                .clone();
+            let Some(definition) = definition else { continue };
+            let inputs = halo_map::biped_update::UpdateInputs {
+                dead: record.dead != 0,
+                control_flags: record.control_flags,
+                aim_without_turning: record.aim_without_turning != 0,
+                unit_animation_state: record.unit_animation_state,
+                base_seat_index: record.base_seat_index,
+                enhanced_animation: record.enhanced_animation != 0,
+                limp_body: record.limp_body != 0,
+                player_index: record.player_index,
+                airborne_seed: (record.airborne_seed_taken != 0).then_some(record.airborne_seed),
+            };
+            let no_objects = Vec::new();
+            let (objects, stand) = match &physics_record {
+                Some((physics, objects)) => (
+                    objects,
+                    (physics.stand_test != 0).then_some(halo_map::biped::StandTest {
+                        collision_height_standing: physics.stand_height,
+                        collision_radius: physics.stand_radius,
+                    }),
+                ),
+                None => (&no_objects, None),
+            };
+            let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) else { return };
+            bsp.breakable_surfaces = physics_record.as_ref().map(|(p, _)| p.breakable_surfaces);
+            let (Some(Some(bsp)), Some(Some(clusters))) = (self.bsps.get(&structure_bsp_index), self.clusters.get(&structure_bsp_index)) else {
+                return;
+            };
+            let world = PhysicsWorld { bsp, clusters, objects };
+            let mut state = record.before;
+            halo_map::biped_update::biped_update(&world, &definition, &player_information, &inputs, &moving_inputs, stand, &[], &mut state);
+            if let Some(Some(bsp)) = self.bsps.get_mut(&structure_bsp_index) {
+                bsp.breakable_surfaces = None;
+            }
+            self.update_replayed += 1;
+            let bytes = |s: &halo_map::biped_update::UpdateState| {
+                // SAFETY: UpdateState is repr(C) plain old data of 164 bytes
+                unsafe { std::mem::transmute::<halo_map::biped_update::UpdateState, [u8; 164]>(*s) }
+            };
+            if bytes(&state) == bytes(&record.after) {
+                self.update_agreed += 1;
+                let (b, a) = (&record.before.moving, &record.after.moving);
+                let k = &mut self.update_kinds;
+                if inputs.dead {
+                    k[0] += 1;
+                } else if a.biped_flags & state_flags::AIRBORNE != 0 {
+                    k[1] += 1;
+                } else if b.landing != -1 {
+                    k[2] += 1;
+                }
+                if definition.flags & biped_flags::FLYING != 0 && !inputs.dead {
+                    k[3] += 1;
+                } else if record.after.biped_state == 1 && a.forward != b.forward {
+                    k[4] += 1;
+                }
+                if a.animation_state_desired == 2 || a.animation_state_desired == 3 {
+                    k[5] += 1;
+                }
+                if inputs.airborne_seed.is_some() && a.angular_velocity != b.angular_velocity {
+                    k[6] += 1;
+                }
+            } else if self.update_shown < 6 {
+                self.update_shown += 1;
+                println!(
+                    "  biped update {:#x} differs:\n    inputs   {:?}\n    moving   {:?}\n    before   {:?}\n    game     {:?}\n    halo_map {:?}",
+                    record.biped_index, inputs, moving_inputs, record.before, record.after, state
+                );
+            }
+        }
+    }
+
     fn report(&self) {
+        let [dead, airborne, landing, flying_turns, moving_turns, standing_turns, tumbling] = self.update_kinds;
+        println!(
+            "bipeds: {} of {} biped updates (to the animation) replayed agree with the game byte for byte ({} dead, {} airborne, {} landing; {} flying turns, {} moving turns, {} standing turns asked for, {} tumbling); left out: {} whose movement record was lost, {} elsewhere, of {}",
+            self.update_agreed,
+            self.update_replayed,
+            dead,
+            airborne,
+            landing,
+            flying_turns,
+            moving_turns,
+            standing_turns,
+            tumbling,
+            self.update_missing,
+            self.update_elsewhere,
+            self.update_updates
+        );
         let [player, animated, flying, turned, jumps, landings, aborted, crouching] = self.moving_kinds;
         println!(
             "bipeds: {} of {} movement updates replayed agree with the game byte for byte ({} of {} physics inputs agree; {} player physics, {} driven by animation, {} flying; {} turned by the animation, {} jumps, {} landings, {} aborted animations, {} crouching or standing); left out: {} whose physics record was lost, {} elsewhere, of {}",

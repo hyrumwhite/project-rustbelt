@@ -958,7 +958,7 @@ fn normal(plane: [f32; 4]) -> [f32; 3] {
 
 /// `MIN`, as the macro compares.
 fn min(a: f32, b: f32) -> f32 {
-    if a < b { a } else { b }
+    if a > b { b } else { a }
 }
 
 pub(crate) fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {

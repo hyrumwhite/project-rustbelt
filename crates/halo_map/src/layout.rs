@@ -6,12 +6,18 @@
 #![allow(dead_code)]
 
 pub mod _biped_definition {
+    pub const MOVING_TURNING_SPEED: usize = 0x0;
     pub const FLAGS: usize = 0x4;
     pub const FLYING_BANK_AMOUNT: usize = 0x34;
+    pub const FLYING_BANK_APPLY_TIME: usize = 0x38;
+    pub const FLYING_BANK_DECAY_TIME: usize = 0x3c;
+    pub const FLYING_PITCH_AMOUNT: usize = 0x40;
     pub const FLYING_VELOCITY: usize = 0x44;
     pub const FLYING_SIDESTEP_VELOCITY: usize = 0x48;
     pub const FLYING_ACCELERATION: usize = 0x4c;
     pub const FLYING_DECELERATION: usize = 0x50;
+    pub const FLYING_ANGULAR_VELOCITY: usize = 0x54;
+    pub const FLYING_ANGULAR_ACCELERATION: usize = 0x58;
     pub const FLYING_CROUCH_VELOCITY_MODIFIER: usize = 0x5c;
     pub const DOWNHILL_VELOCITY_SCALE: usize = 0x74;
     pub const UPHILL_VELOCITY_SCALE: usize = 0x80;
@@ -24,6 +30,7 @@ pub mod _biped_definition {
     pub const COLLISION_HEIGHT_STANDING: usize = 0x134;
     pub const COLLISION_HEIGHT_CROUCHING: usize = 0x138;
     pub const COLLISION_RADIUS: usize = 0x13c;
+    pub const RUNTIME_COSINE_STATIONARY_TURNING_THRESHOLD: usize = 0x1d8;
     pub const RUNTIME_CROUCH_TRANSITION_VELOCITY: usize = 0x1dc;
     pub const RUNTIME_MINIMUM_NORMAL_K: usize = 0x1e0;
     pub const RUNTIME_DOWNHILL_K0: usize = 0x1e4;

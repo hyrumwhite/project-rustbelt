@@ -25,18 +25,22 @@ use crate::{CacheFile, Result, animation::FrameInfo, layout};
 
 /// `_biped_definition` flags.
 pub mod biped_flags {
+    pub const TURNS_WITHOUT_ANIMATING: u32 = 1 << 0;
     pub const USES_PLAYER_PHYSICS: u32 = 1 << 1;
     pub const FLYING: u32 = 1 << 2;
     pub const PILL_CENTERED_AT_ORIGIN: u32 = 1 << 3;
     pub const SPHERICAL: u32 = 1 << 4;
     pub const PASSES_THROUGH_BIPEDS: u32 = 1 << 5;
     pub const CLIMBS_ANYTHING: u32 = 1 << 6;
+    pub const ROTATE_WHILE_AIRBORNE: u32 = 1 << 8;
+    pub const HAS_NO_DYING_AIRBORNE: u32 = 1 << 10;
     pub const RANDOM_SPEED_INCREASE: u32 = 1 << 11;
     pub const USES_OLD_PLAYER_PHYSICS: u32 = 1 << 12;
 }
 
 /// `_unit_definition` flags.
-const UNIT_SIMPLE_CREATURE: u32 = 1 << 11;
+pub(crate) const UNIT_SIMPLE_CREATURE: u32 = 1 << 11;
+pub(crate) const UNIT_IS_SPECIAL: u32 = 1 << 20;
 
 /// `_biped_datum` flags.
 pub mod state_flags {
@@ -90,6 +94,14 @@ pub struct BipedDefinition {
     pub unit_flags: u32,
     pub stunned_movement_threshold: f32,
     pub flags: u32,
+    pub moving_turning_speed: f32,
+    pub flying_bank_amount: f32,
+    pub flying_bank_apply_time: f32,
+    pub flying_bank_decay_time: f32,
+    pub flying_pitch_amount: f32,
+    pub flying_angular_velocity: f32,
+    pub flying_angular_acceleration: f32,
+    pub runtime_cosine_stationary_turning_threshold: f32,
     pub flying_velocity: f32,
     pub flying_sidestep_velocity: f32,
     pub flying_acceleration: f32,
@@ -124,6 +136,14 @@ impl BipedDefinition {
             unit_flags: unit.u32(u::FLAGS)?,
             stunned_movement_threshold: unit.f32(u::STUNNED_MOVEMENT_THRESHOLD)?,
             flags: biped.u32(b::FLAGS)?,
+            moving_turning_speed: biped.f32(b::MOVING_TURNING_SPEED)?,
+            flying_bank_amount: biped.f32(b::FLYING_BANK_AMOUNT)?,
+            flying_bank_apply_time: biped.f32(b::FLYING_BANK_APPLY_TIME)?,
+            flying_bank_decay_time: biped.f32(b::FLYING_BANK_DECAY_TIME)?,
+            flying_pitch_amount: biped.f32(b::FLYING_PITCH_AMOUNT)?,
+            flying_angular_velocity: biped.f32(b::FLYING_ANGULAR_VELOCITY)?,
+            flying_angular_acceleration: biped.f32(b::FLYING_ANGULAR_ACCELERATION)?,
+            runtime_cosine_stationary_turning_threshold: biped.f32(b::RUNTIME_COSINE_STATIONARY_TURNING_THRESHOLD)?,
             flying_velocity: biped.f32(b::FLYING_VELOCITY)?,
             flying_sidestep_velocity: biped.f32(b::FLYING_SIDESTEP_VELOCITY)?,
             flying_acceleration: biped.f32(b::FLYING_ACCELERATION)?,
@@ -303,7 +323,7 @@ pub fn physics_pill(definition: &BipedDefinition, state: &MovingState, player: b
 }
 
 /// `rotate_vector_about_axis`.
-fn rotate_vector_about_axis(v: [f32; 3], n: [f32; 3], sine: f32, cosine: f32) -> [f32; 3] {
+pub(crate) fn rotate_vector_about_axis(v: [f32; 3], n: [f32; 3], sine: f32, cosine: f32) -> [f32; 3] {
     let one_minus_cosine_times_v_dot_n = dot3(n, v) * (1.0 - cosine);
     let v_cross_n = [n[2] * v[1] - v[2] * n[1], n[0] * v[2] - v[0] * n[2], n[1] * v[0] - v[1] * n[0]];
     [
@@ -314,10 +334,10 @@ fn rotate_vector_about_axis(v: [f32; 3], n: [f32; 3], sine: f32, cosine: f32) ->
 }
 
 /// The C library's double functions, as floats.
-fn sin(a: f32) -> f32 {
+pub(crate) fn sin(a: f32) -> f32 {
     (a as f64).sin() as f32
 }
-fn cos(a: f32) -> f32 {
+pub(crate) fn cos(a: f32) -> f32 {
     (a as f64).cos() as f32
 }
 

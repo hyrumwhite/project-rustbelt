@@ -21,7 +21,8 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 19;
+pub const VERSION: u32 = 20;
+pub const BIPED_UPDATE_RECORDS: usize = 1024;
 pub const BIPED_MOVING_RECORDS: usize = 1024;
 pub const FEATURE_OBJECTS: usize = 16384;
 pub const FEATURE_MATRICES: usize = 65536;
@@ -420,6 +421,34 @@ pub struct BipedMovingRecord {
 
 const _: () = assert!(std::mem::size_of::<BipedMovingRecord>() == 432);
 
+/// One `biped_update` of an unparented biped up to its animation update:
+/// the state before and after, what it read, the global random seed as its
+/// airborne update began (if it had one), and its movement record (-1 for
+/// none).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BipedUpdateRecord {
+    pub sequence: u32,
+    pub biped_index: u32,
+    pub definition_index: u32,
+    pub structure_bsp_index: i32,
+    pub moving_record: i32,
+    pub dead: u32,
+    pub control_flags: u32,
+    pub aim_without_turning: u32,
+    pub unit_animation_state: i8,
+    pub base_seat_index: i8,
+    pub enhanced_animation: i8,
+    pub limp_body: i8,
+    pub player_index: i32,
+    pub airborne_seed_taken: u32,
+    pub airborne_seed: u32,
+    pub before: halo_map::biped_update::UpdateState,
+    pub after: halo_map::biped_update::UpdateState,
+}
+
+const _: () = assert!(std::mem::size_of::<BipedUpdateRecord>() == 376);
+
 /// A recorded biped update with the objects its features came from (each
 /// with its node matrices: scale, forward, left, up, position).
 #[derive(Debug, Clone)]
@@ -470,6 +499,9 @@ struct Shared {
     biped_moving_record_count: u32,
     biped_moving_pad: u32,
     biped_moving_records: [BipedMovingRecord; BIPED_MOVING_RECORDS],
+    biped_update_record_count: u32,
+    biped_update_pad: u32,
+    biped_update_records: [BipedUpdateRecord; BIPED_UPDATE_RECORDS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
 }
 
@@ -548,6 +580,7 @@ pub struct Bridge {
     last_projectile_record: Option<u32>,
     last_biped_record: Option<u32>,
     last_biped_moving_record: Option<u32>,
+    last_biped_update_record: Option<u32>,
 }
 
 // Frames are read through volatile reads and a sequence check; the input
@@ -568,7 +601,7 @@ impl Bridge {
         {
             let mapping_name = format!("Local\\{name}\0");
             let (mapping, view) = windows::open(mapping_name.as_bytes(), std::mem::size_of::<Shared>())?;
-            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None, last_biped_moving_record: None };
+            let bridge = Bridge { shared: view as *const Shared, _mapping: mapping, last_frame_index: 0, last_overlay: None, last_projectile_record: None, last_biped_record: None, last_biped_moving_record: None, last_biped_update_record: None };
             bridge.check()?;
             Ok(bridge)
         }
@@ -711,6 +744,30 @@ impl Bridge {
                 }
             }
             self.last_biped_moving_record = Some(count);
+            out
+        }
+    }
+
+    /// The biped updates the game recorded since the last call (as
+    /// [`Self::read_projectile_records`]).
+    pub fn read_biped_update_records(&mut self) -> Vec<BipedUpdateRecord> {
+        // SAFETY: as in check(); records are plain old data, checked by their
+        // sequence number after copying
+        unsafe {
+            let count = std::ptr::read_volatile(&(*self.shared).biped_update_record_count);
+            fence(Ordering::Acquire);
+            let first = match self.last_biped_update_record {
+                None => count,
+                Some(last) => last.max(count.saturating_sub(BIPED_UPDATE_RECORDS as u32 / 2)),
+            };
+            let mut out = Vec::new();
+            for sequence in first..count {
+                let record = std::ptr::read_volatile(&(*self.shared).biped_update_records[sequence as usize % BIPED_UPDATE_RECORDS]);
+                if record.sequence == sequence {
+                    out.push(record);
+                }
+            }
+            self.last_biped_update_record = Some(count);
             out
         }
     }

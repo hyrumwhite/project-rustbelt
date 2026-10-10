@@ -176,14 +176,47 @@ pub fn objects_in_sphere(
     maximum: usize,
 ) -> Vec<u32> {
     let clusters = host.clusters_in_sphere(cluster, center, radius, MAXIMUM_CLUSTERS_PER_STRUCTURE);
-    // (objects_in_clusters_by_indices: each object once, the marker's)
+    objects_in_clusters_in_sphere(
+        0,
+        0,
+        &clusters,
+        &mut |cluster, partition, out| host.cluster_objects(cluster, partition, out),
+        &mut |index| host.object(index).map(|o| (o.object_type, o.bounding_center, o.bounding_radius)),
+        center,
+        radius,
+        maximum,
+    )
+}
+
+/// `objects_in_sphere` past its clusters: `class_flags` the partitions
+/// (bit 0 collideable, 1 noncollideable; 0 for both) and `type_flags` the
+/// object types (0 for all), each object once in the clusters' order (the
+/// marker's, `objects_in_clusters_by_indices`), then those whose bounding
+/// spheres the sphere touches. `object` gives an object's type and bounding
+/// sphere (`None` if it is gone).
+#[allow(clippy::too_many_arguments)]
+pub fn objects_in_clusters_in_sphere(
+    class_flags: u32,
+    type_flags: u32,
+    clusters: &[i16],
+    cluster_objects: &mut dyn FnMut(i16, u32, &mut Vec<u32>),
+    object: &mut dyn FnMut(u32) -> Option<(i16, [f32; 3], f32)>,
+    center: [f32; 3],
+    radius: f32,
+    maximum: usize,
+) -> Vec<u32> {
+    let class_flags = if class_flags == 0 { u32::MAX } else { class_flags };
+    let type_flags = if type_flags == 0 { u32::MAX } else { type_flags };
     let mut in_clusters: Vec<u32> = Vec::new();
     let mut marked = std::collections::HashSet::new();
     let mut partition = Vec::new();
-    'clusters: for &cluster in &clusters {
+    'clusters: for &cluster in clusters {
         for kind in 0..2 {
+            if class_flags & (1 << kind) == 0 {
+                continue;
+            }
             partition.clear();
-            host.cluster_objects(cluster, kind, &mut partition);
+            cluster_objects(cluster, kind, &mut partition);
             for &index in &partition {
                 if marked.insert(index) {
                     if in_clusters.len() >= MAXIMUM_OBJECTS_PER_MAP {
@@ -199,9 +232,9 @@ pub fn objects_in_sphere(
         if result.len() >= maximum {
             break;
         }
-        let Some(object) = host.object(index) else { continue };
-        let reach = object.bounding_radius + radius;
-        if distance_squared3(center, object.bounding_center) <= reach * reach {
+        let Some((object_type, bounding_center, bounding_radius)) = object(index) else { continue };
+        let reach = bounding_radius + radius;
+        if type_flags & (1u32 << (object_type as u32 & 31)) != 0 && distance_squared3(center, bounding_center) <= reach * reach {
             result.push(index);
         }
     }

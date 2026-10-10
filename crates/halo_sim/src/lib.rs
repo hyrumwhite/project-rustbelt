@@ -39,13 +39,14 @@ pub mod preprocess;
 pub mod bipeds;
 pub mod damage;
 pub mod damage_update;
+pub mod devices;
 pub mod projectiles;
 pub mod units;
 pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 17;
+pub const VERSION: u32 = 18;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {
@@ -104,6 +105,7 @@ pub(crate) struct Tags {
     damage_definitions: HashMap<u32, Option<Arc<halo_map::damage::DamageDefinition>>>,
     damage_resistances: HashMap<u32, Option<Arc<halo_map::damage::DamageResistance>>>,
     child_damage_fractions: HashMap<u32, f32>,
+    device_definitions: HashMap<(u32, bool), Option<Arc<halo_map::devices::DeviceDefinition>>>,
 }
 
 impl Tags {
@@ -171,6 +173,7 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
         damage_definitions: HashMap::new(),
         damage_resistances: HashMap::new(),
         child_damage_fractions: HashMap::new(),
+        device_definitions: HashMap::new(),
     });
     count
 }

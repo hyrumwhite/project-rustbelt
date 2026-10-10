@@ -1534,7 +1534,7 @@ impl CollisionCheck {
             let graphs = &self.animation_graphs;
             let graph = |index: u32| graphs.get(&index).and_then(Option::as_ref);
             let mut state = record.before;
-            let (result, effects) = halo_map::unit_animation::unit_update_animation(unit_graph_index, &graph, &inputs, &mut state);
+            let (result, effects) = halo_map::unit_animation::unit_update_animation(unit_graph_index, &graph, &inputs, &mut state, None);
             // (a destroyed unit's state isn't read after)
             let compare_state = record.side_effects & halo_map::unit_animation::side_effects::DESTROYED == 0;
             if (!compare_state || state == record.after) && effects == record.side_effects && result == record.result {

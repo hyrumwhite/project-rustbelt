@@ -15,7 +15,9 @@
 //!
 //! What that sets off elsewhere (a grenade's release, melee damage,
 //! destroying a dead unit, a limp body, seat changes, the sound an
-//! animation plays) is reported as side effects, not done. The poses the
+//! animation plays) is reported as side effects; in a running game an
+//! [`UnitAnimationHost`] does them at the moments the C does, the game's
+//! random seed the update's at each. The poses the
 //! animations give the unit's nodes are in `pose` and `unit_pose`.
 
 use crate::{CacheFile, Result, layout};
@@ -168,6 +170,38 @@ pub struct UnitAnimationInputs {
     pub destroyed_after_dying: bool,
     /// The biped definition's "has no dying airborne" flag.
     pub has_no_dying_airborne: bool,
+}
+
+/// A running game, as a unit's animation update calls it: the game's
+/// random seed (which the permutations draw from, as do the effects), and
+/// each side effect ([`side_effects`]'s bit) as it happens, with the
+/// update's state (the host writes it to the unit first, and reads back what
+/// the effect changed). An effect returns whether the unit is still there
+/// (destroying a dead one deletes it).
+pub trait UnitAnimationHost {
+    fn random_seed(&self) -> u32;
+    fn set_random_seed(&self, seed: u32);
+    fn effect(&self, state: &mut UnitAnimationState, effect: u32) -> bool;
+}
+
+/// The host as an update calls it: no more calls once the unit is gone.
+struct Effects<'a> {
+    host: Option<&'a dyn UnitAnimationHost>,
+    flags: u32,
+}
+
+impl Effects<'_> {
+    fn raise(&mut self, effect: u32, random: &mut Random, state: &mut UnitAnimationState) {
+        self.flags |= effect;
+        if let Some(host) = self.host {
+            host.set_random_seed(random.seed);
+            let there = host.effect(state, effect);
+            random.seed = host.random_seed();
+            if !there {
+                self.host = None;
+            }
+        }
+    }
 }
 
 /// `unit_update_animation`'s side effects (the bridge's bits).
@@ -470,7 +504,7 @@ fn set_state(
     random: &mut Random,
     s: &mut UnitAnimationState,
     new_state: i8,
-    effects: &mut u32,
+    effects: &mut Effects<'_>,
 ) -> bool {
     let empty_seat = UnitSeat::default();
     let empty_class = WeaponClass::default();
@@ -482,7 +516,7 @@ fn set_state(
 
     if old_state_is_none || new_state != s.state {
         if s.state == state::THROW_GRENADE {
-            *effects |= side_effects::GRENADE_RELEASED_CHANGING_STATE;
+            effects.raise(side_effects::GRENADE_RELEASED_CHANGING_STATE, random, s);
         }
         let (class_slot, seat_slot) = state_animation_slots(new_state);
         let animation_index = if class_slot != NONE {
@@ -531,10 +565,11 @@ pub fn unit_update_animation<'g>(
     graph: &dyn Fn(u32) -> Option<&'g AnimationGraph>,
     inputs: &UnitAnimationInputs,
     s: &mut UnitAnimationState,
+    host: Option<&dyn UnitAnimationHost>,
 ) -> (i16, u32) {
     let unit_graph = graph(unit_graph_index);
-    let mut random = Random { seed: inputs.random_seed };
-    let mut effects = 0u32;
+    let mut random = Random { seed: host.map_or(inputs.random_seed, |h| h.random_seed()) };
+    let mut effects = Effects { host, flags: 0 };
     let mut desired_state = inputs.state_desired;
     let mut result = 0i16;
     let mut apply_state = false;
@@ -592,8 +627,10 @@ pub fn unit_update_animation<'g>(
         );
         if r == update_result::KEY_FRAME {
             match s.state {
-                state::THROW_GRENADE => effects |= side_effects::GRENADE_RELEASED,
-                state::MELEE_ATTACK | state::MELEE_AIRBORNE | state::LEAP_MELEE => effects |= side_effects::MELEE_DAMAGE,
+                state::THROW_GRENADE => effects.raise(side_effects::GRENADE_RELEASED, &mut random, s),
+                state::MELEE_ATTACK | state::MELEE_AIRBORNE | state::LEAP_MELEE => {
+                    effects.raise(side_effects::MELEE_DAMAGE, &mut random, s)
+                }
                 _ => {}
             }
         } else if r == update_result::WILL_RESTART_ON_NEXT_FRAME {
@@ -606,18 +643,18 @@ pub fn unit_update_animation<'g>(
                     let destroy = inputs.destroyed_after_dying
                         && (inputs.at_rest || (inputs.biped && (!inputs.airborne || inputs.has_no_dying_airborne)));
                     if destroy {
-                        effects |= side_effects::DESTROYED;
+                        effects.raise(side_effects::DESTROYED, &mut random, s);
                     } else {
                         if inputs.biped {
-                            effects |= side_effects::LIMP_BODY;
+                            effects.raise(side_effects::LIMP_BODY, &mut random, s);
                         }
                         s.flags |= UNIT_ANIMATION_IGNORE_TRANSLATION;
                         s.object_animation_frame_index -= 1;
                     }
                 }
-                state::EXITING_SEAT => effects |= side_effects::SEAT_EXITED,
+                state::EXITING_SEAT => effects.raise(side_effects::SEAT_EXITED, &mut random, s),
                 state::OPENING | state::CLOSING => s.object_animation_frame_index -= 1,
-                state::ENTERING_SEAT => effects |= side_effects::SEAT_ENTERED,
+                state::ENTERING_SEAT => effects.raise(side_effects::SEAT_ENTERED, &mut random, s),
                 _ => {}
             }
             if !state_loops(s.state) {
@@ -653,7 +690,10 @@ pub fn unit_update_animation<'g>(
     {
         set_state(unit_graph, unit_graph_index, &mut random, s, desired_state, &mut effects);
     }
-    (result, effects)
+    if let Some(host) = effects.host {
+        host.set_random_seed(random.seed);
+    }
+    (result, effects.flags)
 }
 
 /// The unit's actions (`_unit_animation_action`).

@@ -37,11 +37,12 @@ pub mod poses;
 pub mod preprocess;
 pub mod bipeds;
 pub mod projectiles;
+pub mod units;
 pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {
@@ -93,6 +94,7 @@ pub(crate) struct Tags {
     vehicle_definitions: HashMap<u32, Option<Arc<halo_map::vehicle_update::VehicleDefinition>>>,
     biped_definitions: HashMap<u32, Option<Arc<halo_map::biped_moving::BipedDefinition>>>,
     player_information: Option<Option<halo_map::biped_moving::PlayerInformation>>,
+    unit_graphs: HashMap<u32, Option<Arc<halo_map::unit_animation::AnimationGraph>>>,
 }
 
 impl Tags {
@@ -153,6 +155,7 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
         vehicle_definitions: HashMap::new(),
         biped_definitions: HashMap::new(),
         player_information: None,
+        unit_graphs: HashMap::new(),
     });
     count
 }

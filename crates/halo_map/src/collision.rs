@@ -405,6 +405,8 @@ impl CollisionBsp {
 #[derive(Debug, Clone, Default)]
 pub struct CollisionModel {
     pub nodes: Vec<CollisionNode>,
+    /// Its damage materials' material types (`damage_resistance_material`).
+    pub material_types: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -440,7 +442,26 @@ impl CollisionModel {
                 .collect::<Result<Vec<_>>>()?;
             nodes.push(CollisionNode { region: node.i16(n::REGION_INDEX)?, bsps });
         }
-        Ok(CollisionModel { nodes })
+        use layout::{damage_resistance as r, damage_resistance_material as d};
+        let material_types = root
+            .add(m::RESISTANCE)
+            .block(r::MATERIALS, d::SIZEOF)?
+            .iter()
+            .map(|material| material.i16(d::MATERIAL_TYPE))
+            .collect::<Result<_>>()?;
+        Ok(CollisionModel { nodes, material_types })
+    }
+
+    /// `collision_model_get_material_type`: NONE for no material, one the
+    /// model doesn't have, or a type that is none.
+    pub fn material_type(&self, material_index: i16) -> i16 {
+        if material_index < 0 {
+            return NONE as i16;
+        }
+        match self.material_types.get(material_index as usize) {
+            Some(&t) if t == NONE as i16 || (0..NUMBER_OF_MATERIAL_TYPES).contains(&t) => t,
+            _ => NONE as i16,
+        }
     }
 
     /// Halo's ray test against an object (`collision_model_test_vector`):
@@ -1078,6 +1099,8 @@ impl World<'_> {
                 surface: hit.hit.surface as i32,
             });
             result.kind = Some(CollisionKind::Object);
+            result.material_type = model.material_type(hit.hit.material);
+            result.surface_flags = hit.hit.flags;
             let plane = transform_plane(&object.matrices[hit.node], hit.hit.plane);
             result.plane = if hit.hit.plane_designator & SIGN != 0 { negate_plane(plane) } else { plane };
         }

@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 26;
+pub const VERSION: u32 = 27;
 pub const PHYSICS_VEHICLES: usize = 32;
 pub const VEHICLE_RAY_TESTS: usize = 16;
 pub const POSE_RECORDS: usize = 2048;
@@ -359,6 +359,17 @@ pub struct ProjectileRecord {
     pub touched_object: u32,
     pub before: ProjectileState,
     pub after: ProjectileState,
+    /// (Protocol 27) the objects its ray tests visited (`object_count` from
+    /// `first_object` in the feature object ring), what each collision's
+    /// impact damage reported (`object_cause_damage`'s material type, -2 for
+    /// no damage done), and its guided steering, step by step.
+    pub first_object: u32,
+    pub object_count: u32,
+    pub damage_material_types: [i16; 4],
+    /// And the random seed the damage left (the response draws from it).
+    pub damage_seeds: [u32; 4],
+    pub guidance_count: u32,
+    pub guidance: [ProjectileGuidance; 4],
 }
 
 /// One `biped_update_physics` the game recorded (with
@@ -412,9 +423,39 @@ pub struct FeatureObjectRecord {
     pub region_permutations: [u8; 8],
     pub node_count: u32,
     pub first_matrix: u32,
+    /// (Protocol 27) its location, where the broad phase registers it.
+    pub location_leaf: i32,
+    pub location_cluster: i16,
+    pub pad: i16,
+    /// A projectile's own flags, 0 for other objects.
+    pub projectile_flags: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<FeatureObjectRecord>() == 108);
+const _: () = assert!(std::mem::size_of::<FeatureObjectRecord>() == 120);
+
+/// (Protocol 27) a guided projectile's steering in an update's step: its
+/// bounding sphere's centre, its target's and the target's centre of mass
+/// (`unit_get_center_of_mass`), the difficulty's guidance scale when the
+/// target is a player's unit (1 otherwise), and the game time.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ProjectileGuidance {
+    pub projectile_center: [f32; 3],
+    pub target_center: [f32; 3],
+    pub target_center_of_mass: [f32; 3],
+    pub guidance_scale: f32,
+    pub game_time: i32,
+}
+
+/// A recorded projectile update with the objects its ray tests visited (each
+/// with its node matrices).
+#[derive(Debug, Clone)]
+pub struct ProjectileUpdate {
+    pub record: ProjectileRecord,
+    pub objects: Vec<(FeatureObjectRecord, Vec<[f32; 13]>)>,
+    /// Whether every object (and matrix) was still in the rings.
+    pub complete: bool,
+}
 
 /// One `biped_update_moving` the game recorded: the biped's movement state
 /// before and after, what it read of the biped and asked of the rest of the
@@ -673,7 +714,7 @@ pub struct BipedUpdate {
     pub complete: bool,
 }
 const _: () = assert!(std::mem::size_of::<ProjectileState>() == 92);
-const _: () = assert!(std::mem::size_of::<ProjectileRecord>() == 228);
+const _: () = assert!(std::mem::size_of::<ProjectileRecord>() == 228 + 16 + 16 + 4 + 44 * 4);
 
 #[repr(C)]
 struct OverlayHeader {
@@ -702,6 +743,8 @@ struct Shared {
     projectile_record_count: u32,
     random_direction_count: u32,
     projectile_records: [ProjectileRecord; PROJECTILE_RECORDS],
+    periodic_tables_valid: u32,
+    periodic_tables: [[u8; 1024]; 12],
     random_directions: [[f32; 3]; RANDOM_DIRECTIONS],
     biped_record_count: u32,
     biped_pad: u32,
@@ -1085,16 +1128,41 @@ impl Bridge {
     /// the objects its collision features came from.
     pub fn read_biped_updates(&mut self) -> Vec<BipedUpdate> {
         let records = self.read_biped_records();
+        records
+            .into_iter()
+            .map(|record| {
+                let (objects, complete) = self.read_feature_objects(record.first_feature_object, record.feature_object_count);
+                BipedUpdate { record, objects, complete }
+            })
+            .collect()
+    }
+
+    /// The projectile updates the game recorded since the last call, with
+    /// the objects their ray tests visited.
+    pub fn read_projectile_updates(&mut self) -> Vec<ProjectileUpdate> {
+        let records = self.read_projectile_records();
+        records
+            .into_iter()
+            .map(|record| {
+                let (objects, complete) = self.read_feature_objects(record.first_object, record.object_count);
+                ProjectileUpdate { record, objects, complete }
+            })
+            .collect()
+    }
+
+    /// Objects in the feature object ring, with their node matrices, and
+    /// whether all were still there.
+    #[allow(clippy::type_complexity)]
+    fn read_feature_objects(&self, first: u32, count: u32) -> (Vec<(FeatureObjectRecord, Vec<[f32; 13]>)>, bool) {
         // SAFETY: as in check(); entries are plain old data, checked by their
         // sequence numbers (and the matrix ring's count) after copying
         unsafe {
-            records
-                .into_iter()
-                .map(|record| {
+            {
+                {
                     let mut objects = Vec::new();
                     let mut complete = true;
-                    for i in 0..record.feature_object_count {
-                        let sequence = record.first_feature_object.wrapping_add(i);
+                    for i in 0..count {
+                        let sequence = first.wrapping_add(i);
                         let entry = std::ptr::read_volatile(&(*self.shared).feature_objects[sequence as usize % FEATURE_OBJECTS]);
                         let matrices: Vec<[f32; 13]> = (0..entry.node_count)
                             .map(|n| {
@@ -1114,9 +1182,22 @@ impl Bridge {
                         }
                         objects.push((entry, matrices));
                     }
-                    BipedUpdate { record, objects, complete }
-                })
-                .collect()
+                    (objects, complete)
+                }
+            }
+        }
+    }
+
+    /// The periodic function tables the game built at startup, by function
+    /// type, once a projectile has been recorded.
+    pub fn periodic_tables(&self) -> Option<Box<[[u8; 1024]; 12]>> {
+        // SAFETY: as in check()
+        unsafe {
+            if std::ptr::read_volatile(&(*self.shared).periodic_tables_valid) == 0 {
+                return None;
+            }
+            fence(Ordering::Acquire);
+            Some(Box::new(std::ptr::read_volatile(&(*self.shared).periodic_tables)))
         }
     }
 

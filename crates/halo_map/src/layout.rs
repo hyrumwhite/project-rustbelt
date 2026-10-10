@@ -227,6 +227,7 @@ pub mod collision_edge {
 
 pub mod collision_model {
     pub const SIZEOF: usize = 0x298;
+    pub const RESISTANCE: usize = 0x0;
     pub const NODES: usize = 0x28c;
 }
 
@@ -250,6 +251,15 @@ pub mod collision_vertex {
 
 pub mod control_placement {
     pub const SIZEOF: usize = 0x40;
+}
+
+pub mod damage_resistance {
+    pub const MATERIALS: usize = 0x234;
+}
+
+pub mod damage_resistance_material {
+    pub const SIZEOF: usize = 0x48;
+    pub const MATERIAL_TYPE: usize = 0x24;
 }
 
 pub mod device_definition {

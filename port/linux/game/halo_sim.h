@@ -19,6 +19,7 @@ enum
 	_halo_sim_collision,
 	_halo_sim_projectiles,
 	_halo_sim_biped_physics,
+	_halo_sim_vehicle_physics,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -143,5 +144,16 @@ height and radius */
 int halo_sim_biped_physics_update(void *physics, int stand_test, float collision_height_standing,
 	float collision_radius);
 void halo_sim_biped_physics_check(void const *physics);
+
+/* physics.c's physics_update: TRUE when the Rust port ran it (the vehicle
+moved and its unit collisions done by the game, called back; its mass
+points written); in check mode it notes the state the game's update begins
+with, the game's unit collisions note the vehicles they consider
+(halo_sim_vehicle_physics_other), and halo_sim_vehicle_physics_check, once
+the game's update is done, compares Rust's replay of it */
+int halo_sim_vehicle_physics_update(long vehicle_index, void *powered_mass_points, short powered_count,
+	void *mass_points, short mass_point_count, void const *magic_force, void const *magic_torque);
+void halo_sim_vehicle_physics_other(long object_index);
+void halo_sim_vehicle_physics_check(long vehicle_index, void const *mass_points, short mass_point_count);
 
 #endif // __HALO_SIM_H

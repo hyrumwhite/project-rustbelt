@@ -26,6 +26,7 @@ enum
 	_halo_sim_unit_animation,
 	_halo_sim_player_melee,
 	_halo_sim_unit_update,
+	_halo_sim_biped_rest,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -79,6 +80,20 @@ enum
 	_unit_update_call_night_vision_active,
 	_unit_update_call_night_vision_effect,
 	_unit_update_call_light_effect,
+};
+
+/* the rest of a biped update's calls of the rest of the game (bipeds.c's
+biped_rest_call; crates/halo_map's biped_rest::call) */
+enum
+{
+	_biped_rest_call_footstep_shuffle = 1,
+	_biped_rest_call_footstep,
+	_biped_rest_call_find_ground,
+	_biped_rest_call_scream,
+	_biped_rest_call_discard,
+	_biped_rest_call_vehicle_speech,
+	_biped_rest_call_try_to_exit_seat,
+	_biped_rest_call_exit_seat_end,
 };
 
 /* ---------- prototypes/HALO_SIM.C */
@@ -258,5 +273,17 @@ int halo_sim_unit_update(long unit_index, void *unit_globals, int allow_integrat
 void halo_sim_unit_update_check(long unit_index);
 void halo_sim_unit_event_begin(long unit_index, long kind, long a, float b);
 void halo_sim_unit_event_end(long unit_index, long result);
+
+/* bipeds.c's biped_update: the rest of a biped's update, riding (the
+parented branch) or after the update (footsteps, falling danger,
+discarding), with the update's animation data: TRUE when the Rust port ran
+it (its calls of the game through biped_rest_call); in check mode it notes
+the state the game's begins with, biped_rest_call records each call
+(halo_sim_biped_rest_event_begin and _end), and halo_sim_biped_rest_check
+compares Rust's replay of it */
+int halo_sim_biped_rest(long biped_index, void *animation, int riding);
+void halo_sim_biped_rest_check(long biped_index, void const *animation);
+void halo_sim_biped_rest_event_begin(long biped_index, long kind, long a, long b);
+void halo_sim_biped_rest_event_end(long biped_index, long result);
 
 #endif // __HALO_SIM_H

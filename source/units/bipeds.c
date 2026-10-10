@@ -522,6 +522,13 @@ static void biped_melee_impact(
 static boolean biped_rust_update(
 	long biped_index,
 	struct unit_animation_update_data *animation);
+long biped_rest_call(
+	long biped_index,
+	long kind,
+	long a,
+	long b);
+real biped_rust_ground_z(
+	void);
 static boolean biped_rust_player_melee(
 	long biped_index);
 static void biped_falling_damage(
@@ -1738,13 +1745,10 @@ static void biped_falling_danger(
 			real_point3d ground_point;
 
 			biped->biped.last_falling_communication_time = game_time;
-			if (biped_find_ground_surface(
-				biped_index,
-				global_down3d,
-				6.f,
-				&ground_point,
-				NULL)!=NONE)
+			/* port: (a call the Rust port makes too: biped_rest_call) */
+			if (biped_rest_call(biped_index, _biped_rest_call_find_ground, 0, 0))
 			{
+				ground_point.z = biped_rust_ground_z();
 				real_point3d origin;
 
 				object_get_origin(biped_index, &origin);
@@ -1760,7 +1764,7 @@ static void biped_falling_danger(
 			}
 
 			if (dangerous)
-				unit_scream(biped_index, _unit_scream_falling);
+				biped_rest_call(biped_index, _biped_rest_call_scream, 0, 0);
 		}
 	}
 
@@ -2068,8 +2072,8 @@ static void biped_try_to_make_footsteps(
 		{
 			if (biped->object.animation.state.frame_index==0)
 			{
-				biped_make_footstep(biped_index, _material_effect_biped_shuffle, 0);
-				biped_make_footstep(biped_index, _material_effect_biped_shuffle, 1);
+				biped_rest_call(biped_index, _biped_rest_call_footstep_shuffle, 0, 0);
+				biped_rest_call(biped_index, _biped_rest_call_footstep_shuffle, 1, 0);
 			}
 		}
 		else if (moving &&
@@ -2086,8 +2090,9 @@ static void biped_try_to_make_footsteps(
 			else
 				goto no_footstep;
 
-			biped_make_footstep(
+			biped_rest_call(
 				biped_index,
+				_biped_rest_call_footstep,
 				biped->unit.animation.base_seat_index==_unit_base_seat_stand,
 				right_foot!=FALSE);
 		}
@@ -2101,8 +2106,8 @@ no_footstep:
 		{
 			if (++biped->biped.stop_ticks>3)
 			{
-				biped_make_footstep(biped_index, _material_effect_biped_shuffle, 0);
-				biped_make_footstep(biped_index, _material_effect_biped_shuffle, 1);
+				biped_rest_call(biped_index, _biped_rest_call_footstep_shuffle, 0, 0);
+				biped_rest_call(biped_index, _biped_rest_call_footstep_shuffle, 1, 0);
 				biped->biped.stop_ticks = 0;
 			}
 		}
@@ -4154,25 +4159,7 @@ static boolean biped_check_discard(
 		biped->object.location.cluster_index==NONE) &&
 		biped->object.position.z<-2000.f)
 	{
-		long actor_index = biped->unit.swarm_actor_index;
-
-		if (actor_index==NONE)
-			actor_index = biped->unit.actor_index;
-
-		error(
-			_error_silent,
-			"WARNING: biped %s (%s) is in a bad place (%.1f %.1f %.1f), erasing",
-			tag_name_strip_path(tag_get_name(biped->definition_index)),
-			ai_debug_describe_actor(
-				actor_index,
-				biped_index,
-				TRUE,
-				temporary,
-				256),
-			biped->object.position.x,
-			biped->object.position.y,
-			biped->object.position.z);
-		object_delete(biped_index);
+		biped_rest_call(biped_index, _biped_rest_call_discard, 0, 0);
 	}
 
 	return FALSE;
@@ -4198,19 +4185,24 @@ boolean biped_update(
 	{
 		struct object_datum *parent = object_get(biped->object.parent_object_index);
 
-		if (parent->object.type==_object_type_vehicle)
+		/* port: the Rust port's in place of the game's, or (in check mode)
+		the state it is checked from (halo_sim.c) */
+		if (halo_sim_biped_rest(biped_index, &animation, TRUE))
+		{
+		}
+		else if (parent->object.type==_object_type_vehicle)
 		{
 			struct unit_datum *vehicle = vehicle_get(biped->object.parent_object_index);
 
-			biped_vehicle_speech(biped_index);
+			biped_rest_call(biped_index, _biped_rest_call_vehicle_speech, 0, 0);
 			if (TEST_FLAG(biped->unit.control_flags, _unit_control_action_bit))
-				unit_try_and_exit_seat(biped_index);
+				biped_rest_call(biped_index, _biped_rest_call_try_to_exit_seat, 0, 0);
 
 			if (rider_ejection &&
 				vehicle->object.up.k<0.f &&
 				TEST_FLAG(vehicle->object.flags, _object_on_ground_bit))
 			{
-				unit_exit_seat_end(biped_index);
+				biped_rest_call(biped_index, _biped_rest_call_exit_seat_end, 0, 0);
 			}
 		}
 		else if (parent->object.type==_object_type_biped)
@@ -4218,6 +4210,7 @@ boolean biped_update(
 			animation.state_desired =
 				(char)((parent->object.damage_flags & FLAG(_object_dead_bit)) | 0x20);
 		}
+		halo_sim_biped_rest_check(biped_index, &animation); /* port: (halo_sim.c) */
 	}
 	else
 	{
@@ -4451,9 +4444,15 @@ boolean biped_update(
 
 		/* port: (bevy_bridge.c) */
 		bevy_bridge_biped_update_end(biped_index, animation.state_desired, animation.crouching);
-		biped_try_to_make_footsteps(biped_index);
-		biped_falling_danger(biped_index);
-		biped_check_discard(biped_index);
+		/* port: the Rust port's in place of the game's, or checked against
+		it (halo_sim.c) */
+		if (!halo_sim_biped_rest(biped_index, &animation, FALSE))
+		{
+			biped_try_to_make_footsteps(biped_index);
+			biped_falling_danger(biped_index);
+			biped_check_discard(biped_index);
+		}
+		halo_sim_biped_rest_check(biped_index, &animation);
 	}
 
 	if (unit_update_animation(biped_index, &animation)==1)
@@ -4690,4 +4689,102 @@ void biped_rust_melee_damage(
 {
 	bevy_bridge_melee_event(biped_index, 2);
 	unit_cause_player_melee_damage(biped_index);
+}
+
+/* the ground a falling biped's call found */
+static real biped_rest_ground_z;
+
+real biped_rust_ground_z(
+	void)
+{
+	return biped_rest_ground_z;
+}
+
+/* the falling damage's speed that kills */
+real biped_rust_maximum_damage_velocity(
+	void)
+{
+	struct game_globals_falling_damage *falling_damage = TAG_BLOCK_GET_ELEMENT(
+		&scenario_get_game_globals()->falling_damage,
+		0,
+		struct game_globals_falling_damage);
+
+	return falling_damage->runtime_maximum_damage_velocity;
+}
+
+/* the rest of a biped update's calls of the rest of the game, the game's
+and the Rust port's (halo_sim.c; crates/halo_map's biped_rest::call) */
+long biped_rest_call(
+	long biped_index,
+	long kind,
+	long a,
+	long b)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+	long result = 0;
+
+	halo_sim_biped_rest_event_begin(biped_index, kind, a, b);
+	switch (kind)
+	{
+	case _biped_rest_call_footstep_shuffle:
+		biped_make_footstep(biped_index, _material_effect_biped_shuffle, (short)a);
+		break;
+
+	case _biped_rest_call_footstep:
+		biped_make_footstep(biped_index, (short)a, b != 0);
+		break;
+
+	case _biped_rest_call_find_ground:
+		{
+			real_point3d ground_point;
+
+			result = biped_find_ground_surface(biped_index, global_down3d, 6.f, &ground_point, NULL) != NONE;
+			if (result)
+				biped_rest_ground_z = ground_point.z;
+		}
+		break;
+
+	case _biped_rest_call_scream:
+		unit_scream(biped_index, _unit_scream_falling);
+		break;
+
+	case _biped_rest_call_discard:
+		{
+		long actor_index = biped->unit.swarm_actor_index;
+
+		if (actor_index==NONE)
+			actor_index = biped->unit.actor_index;
+
+		error(
+			_error_silent,
+			"WARNING: biped %s (%s) is in a bad place (%.1f %.1f %.1f), erasing",
+			tag_name_strip_path(tag_get_name(biped->definition_index)),
+			ai_debug_describe_actor(
+				actor_index,
+				biped_index,
+				TRUE,
+				temporary,
+				256),
+			biped->object.position.x,
+			biped->object.position.y,
+			biped->object.position.z);
+		object_delete(biped_index);
+		}
+		break;
+
+	case _biped_rest_call_vehicle_speech:
+		biped_vehicle_speech(biped_index);
+		break;
+
+	case _biped_rest_call_try_to_exit_seat:
+		unit_try_and_exit_seat(biped_index);
+		break;
+
+	case _biped_rest_call_exit_seat_end:
+		unit_exit_seat_end(biped_index);
+		break;
+	}
+	halo_sim_biped_rest_event_end(biped_index, result);
+
+	return result;
 }

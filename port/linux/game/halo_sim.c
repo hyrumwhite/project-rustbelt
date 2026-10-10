@@ -48,7 +48,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 13
+#define HALO_SIM_VERSION 14
 
 /* ---------- structures */
 
@@ -631,6 +631,72 @@ struct halo_sim_unit_update_call
 	long difference_reason;
 };
 
+/* crates/halo_map's RestState */
+struct halo_sim_rest_state
+{
+	real_vector3d throttle;
+	real_vector3d translational_velocity;
+	real_point3d position;
+	real_point3d origin;
+	unsigned long control_flags;
+	unsigned long unit_flags;
+	unsigned long object_flags;
+	unsigned long damage_flags;
+	long actor_index;
+	long parent_object_index;
+	long last_falling_communication_time;
+	unsigned long animation_graph_index;
+	short animation_index;
+	short animation_frame_index;
+	short location_cluster;
+	char stop_ticks;
+	char biped_state;
+	char animation_state;
+	char base_seat_index;
+	char airborne_ticks;
+	char state_desired;
+	real ground_z;
+};
+
+typedef char halo_sim_rest_state_size_assert[sizeof(struct halo_sim_rest_state) == 96 ? 1 : -1];
+
+/* crates/halo_sim's RestEventC, RestCall and RestCallbacks */
+struct halo_sim_rest_event
+{
+	long kind;
+	long a;
+	long b;
+	long result;
+	struct halo_sim_rest_state before;
+	struct halo_sim_rest_state after;
+};
+
+struct halo_sim_rest_call
+{
+	unsigned long biped_index;
+	unsigned long definition_index;
+	unsigned long riding;
+	struct halo_sim_rest_state state;
+	long game_time;
+	unsigned long game_engine_running;
+	real maximum_damage_velocity;
+	long parent_kind;
+	real vehicle_up_k;
+	unsigned long vehicle_on_ground;
+	unsigned long parent_dead;
+	unsigned long rider_ejection;
+	struct halo_sim_rest_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+	unsigned long still_there;
+};
+
+struct halo_sim_rest_callbacks
+{
+	long (*call)(unsigned long biped_index, struct halo_sim_rest_state *state, long kind, long a, long b);
+};
+
 /* crates/halo_sim's UnitUpdateCallbacks */
 struct halo_sim_unit_update_callbacks
 {
@@ -823,6 +889,7 @@ struct halo_sim_host
 	struct halo_sim_unit_animation_callbacks unit_animation;
 	struct halo_sim_melee_callbacks melee;
 	struct halo_sim_unit_update_callbacks unit_update;
+	struct halo_sim_rest_callbacks rest;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -868,6 +935,7 @@ typedef long (*halo_sim_update_function)(struct halo_sim_update_call *call);
 typedef long (*halo_sim_unit_animation_function)(struct halo_sim_unit_animation_call *call);
 typedef long (*halo_sim_melee_function)(struct halo_sim_melee_call *call);
 typedef long (*halo_sim_unit_update_function)(struct halo_sim_unit_update_call *call);
+typedef long (*halo_sim_rest_function)(struct halo_sim_rest_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -910,6 +978,8 @@ static struct
 	halo_sim_melee_function player_melee_check;
 	halo_sim_unit_update_function unit_update;
 	halo_sim_unit_update_function unit_update_check;
+	halo_sim_rest_function biped_rest;
+	halo_sim_rest_function biped_rest_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -938,7 +1008,27 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"unit_animation",
 	"player_melee",
 	"unit_update",
+	"biped_rest",
 };
+
+/* the biped rest checks: what the game's began with, its calls, and the
+comparisons */
+#define MAXIMUM_HALO_SIM_REST_EVENTS 16
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	long biped_index;
+	struct halo_sim_rest_call call;
+	struct halo_sim_rest_event events[MAXIMUM_HALO_SIM_REST_EVENTS];
+	unsigned long event_count;
+	struct halo_sim_rest_event *open_event;
+	struct unit_animation_update_data const *animation;
+	unsigned long compared[2];
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long calls;
+} halo_sim_rest_checks;
 
 /* the unit update checks: the update the game's began with, its calls of
 the rest of the game, and the comparisons */
@@ -2023,6 +2113,70 @@ static long halo_sim_unit_update_callback(unsigned long unit_index, struct halo_
 	return result;
 }
 
+/* bipeds.c's: the ground a falling biped found, the falling damage's speed
+that kills, and a call of the rest of the game */
+real biped_rust_ground_z(void);
+real biped_rust_maximum_damage_velocity(void);
+long biped_rest_call(long biped_index, long kind, long a, long b);
+
+/* the update's animation data, while the rest of a biped's update runs */
+static struct unit_animation_update_data *halo_sim_rest_animation;
+
+/* the rest of a biped's update's state, from the biped (and its update's
+animation data) */
+static void halo_sim_rest_state_load(long biped_index, struct unit_animation_update_data const *animation,
+	struct halo_sim_rest_state *state)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	memset(state, 0, sizeof(*state));
+	state->throttle = biped->unit.throttle;
+	state->translational_velocity = biped->object.translational_velocity;
+	state->position = biped->object.position;
+	object_get_origin(biped_index, &state->origin);
+	state->control_flags = biped->unit.control_flags;
+	state->unit_flags = biped->unit.flags;
+	state->object_flags = biped->object.flags;
+	state->damage_flags = biped->object.damage_flags;
+	state->actor_index = biped->unit.actor_index;
+	state->parent_object_index = biped->object.parent_object_index;
+	state->last_falling_communication_time = biped->biped.last_falling_communication_time;
+	state->animation_graph_index = biped->object.animation.animation_graph_index;
+	state->animation_index = biped->object.animation.state.index;
+	state->animation_frame_index = biped->object.animation.state.frame_index;
+	state->location_cluster = biped->object.location.cluster_index;
+	state->stop_ticks = biped->biped.stop_ticks;
+	state->biped_state = biped->biped.state;
+	state->animation_state = biped->unit.animation.state;
+	state->base_seat_index = biped->unit.animation.base_seat_index;
+	state->airborne_ticks = biped->biped.airborne_ticks;
+	state->state_desired = animation ? animation->state_desired : 0;
+	state->ground_z = biped_rust_ground_z();
+}
+
+/* and back to it: what these change */
+static void halo_sim_rest_state_store(long biped_index, struct unit_animation_update_data *animation,
+	struct halo_sim_rest_state const *state)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	biped->biped.last_falling_communication_time = state->last_falling_communication_time;
+	biped->biped.stop_ticks = state->stop_ticks;
+	if (animation)
+		animation->state_desired = state->state_desired;
+}
+
+static long halo_sim_rest_callback(unsigned long biped_index, struct halo_sim_rest_state *state, long kind, long a, long b)
+{
+	long result;
+
+	halo_sim_rest_state_store((long)biped_index, halo_sim_rest_animation, state);
+	result = biped_rest_call((long)biped_index, kind, a, b);
+	if (object_try_and_get_and_verify_type((long)biped_index, _object_mask_biped))
+		halo_sim_rest_state_load((long)biped_index, halo_sim_rest_animation, state);
+	return result;
+}
+
 /* bipeds.c's, a player melee's side effects */
 void biped_rust_melee_started(long biped_index, long weapon_index);
 void biped_rust_melee_damage(long biped_index);
@@ -2139,6 +2293,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	{
 		halo_sim_unit_update_callback,
 	},
+	{
+		halo_sim_rest_callback,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -2197,6 +2354,8 @@ static void halo_sim_initialize(void)
 	halo_sim.player_melee_check = (halo_sim_melee_function)halo_sim_symbol(library, "halo_sim_player_melee_check");
 	halo_sim.unit_update = (halo_sim_unit_update_function)halo_sim_symbol(library, "halo_sim_unit_update");
 	halo_sim.unit_update_check = (halo_sim_unit_update_function)halo_sim_symbol(library, "halo_sim_unit_update_check");
+	halo_sim.biped_rest = (halo_sim_rest_function)halo_sim_symbol(library, "halo_sim_biped_rest");
+	halo_sim.biped_rest_check = (halo_sim_rest_function)halo_sim_symbol(library, "halo_sim_biped_rest_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -2206,7 +2365,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.biped_update || !halo_sim.biped_update_check ||
 		!halo_sim.unit_animation || !halo_sim.unit_animation_check ||
 		!halo_sim.player_melee || !halo_sim.player_melee_check ||
-		!halo_sim.unit_update || !halo_sim.unit_update_check)
+		!halo_sim.unit_update || !halo_sim.unit_update_check ||
+		!halo_sim.biped_rest || !halo_sim.biped_rest_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -4146,5 +4306,164 @@ void halo_sim_unit_update_check(long unit_index)
 		platform_log("halo_sim: unit updates: %lu of %lu agree with the game (%lu calls of the game; %lu left out)",
 			halo_sim_unit_update_checks.compared - halo_sim_unit_update_checks.differed, halo_sim_unit_update_checks.compared,
 			halo_sim_unit_update_checks.calls, halo_sim_unit_update_checks.skipped);
+	}
+}
+
+/* ---------- the rest of biped updates */
+
+extern boolean rider_ejection; /* bipeds.c */
+
+static void halo_sim_rest_call_new(long biped_index, struct unit_animation_update_data const *animation, int riding,
+	struct halo_sim_rest_call *call)
+{
+	struct biped_datum *biped = biped_get(biped_index);
+
+	memset(call, 0, sizeof(*call));
+	call->biped_index = (unsigned long)biped_index;
+	call->definition_index = (unsigned long)biped->definition_index;
+	call->riding = riding ? 1 : 0;
+	halo_sim_rest_state_load(biped_index, animation, &call->state);
+	call->game_time = game_time_get();
+	call->game_engine_running = game_engine_running() ? 1 : 0;
+	call->maximum_damage_velocity = biped_rust_maximum_damage_velocity();
+	call->rider_ejection = rider_ejection ? 1 : 0;
+	if (biped->object.parent_object_index != NONE)
+	{
+		struct object_datum *parent = object_get(biped->object.parent_object_index);
+
+		if (parent->object.type == _object_type_vehicle)
+		{
+			call->parent_kind = 1;
+			call->vehicle_up_k = parent->object.up.k;
+			call->vehicle_on_ground = TEST_FLAG(parent->object.flags, _object_on_ground_bit) ? 1 : 0;
+		}
+		else if (parent->object.type == _object_type_biped)
+		{
+			call->parent_kind = 2;
+			call->parent_dead = TEST_FLAG(parent->object.damage_flags, _object_dead_bit) ? 1 : 0;
+		}
+		else
+		{
+			call->parent_kind = 3;
+		}
+	}
+	call->difference_event = NONE;
+}
+
+int halo_sim_biped_rest(long biped_index, void *animation, int riding)
+{
+	short mode = halo_sim_mode(_halo_sim_biped_rest);
+	struct unit_animation_update_data *data = (struct unit_animation_update_data *)animation;
+	struct halo_sim_rest_call call;
+	long result;
+
+	halo_sim_rest_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	halo_sim_rest_call_new(biped_index, data, riding, mode == _halo_sim_mode_check ? &halo_sim_rest_checks.call : &call);
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_rest_checks.biped_index = biped_index;
+		halo_sim_rest_checks.animation = data;
+		halo_sim_rest_checks.event_count = 0;
+		halo_sim_rest_checks.open_event = NULL;
+		halo_sim_rest_checks.overflow = FALSE;
+		halo_sim_rest_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_rest_animation = data;
+	result = halo_sim.biped_rest(&call);
+	halo_sim_rest_animation = NULL;
+	if (result != 0)
+		return FALSE;
+	if (call.still_there && object_try_and_get_and_verify_type(biped_index, _object_mask_biped))
+		halo_sim_rest_state_store(biped_index, data, &call.state);
+
+	return TRUE;
+}
+
+void halo_sim_biped_rest_event_begin(long biped_index, long kind, long a, long b)
+{
+	struct halo_sim_rest_event *event;
+
+	if (!halo_sim_rest_checks.recording || halo_sim_rest_checks.biped_index != biped_index || halo_sim_rest_checks.open_event)
+		return;
+	if (halo_sim_rest_checks.event_count >= MAXIMUM_HALO_SIM_REST_EVENTS)
+	{
+		halo_sim_rest_checks.overflow = TRUE;
+		return;
+	}
+	event = &halo_sim_rest_checks.events[halo_sim_rest_checks.event_count++];
+	memset(event, 0, sizeof(*event));
+	event->kind = kind;
+	event->a = a;
+	event->b = b;
+	halo_sim_rest_state_load(biped_index, halo_sim_rest_checks.animation, &event->before);
+	halo_sim_rest_checks.open_event = event;
+}
+
+void halo_sim_biped_rest_event_end(long biped_index, long result)
+{
+	struct halo_sim_rest_event *event = halo_sim_rest_checks.open_event;
+
+	if (!event || halo_sim_rest_checks.biped_index != biped_index)
+		return;
+	halo_sim_rest_checks.open_event = NULL;
+	event->result = result;
+	if (object_try_and_get_and_verify_type(biped_index, _object_mask_biped))
+		halo_sim_rest_state_load(biped_index, halo_sim_rest_checks.animation, &event->after);
+	else
+		halo_sim_rest_checks.overflow = TRUE;
+}
+
+void halo_sim_biped_rest_check(long biped_index, void const *animation)
+{
+	struct halo_sim_rest_call call;
+	struct halo_sim_rest_state game;
+
+	if (!halo_sim_rest_checks.recording)
+		return;
+	halo_sim_rest_checks.recording = FALSE;
+	if (halo_sim_rest_checks.biped_index != biped_index || halo_sim_rest_checks.overflow ||
+		!object_try_and_get_and_verify_type(biped_index, _object_mask_biped))
+	{
+		halo_sim_rest_checks.skipped++;
+		return;
+	}
+	call = halo_sim_rest_checks.call;
+	call.events = halo_sim_rest_checks.events;
+	call.event_count = halo_sim_rest_checks.event_count;
+	if (halo_sim.biped_rest_check(&call) != 0)
+	{
+		halo_sim_rest_checks.skipped++;
+		return;
+	}
+
+	halo_sim_rest_state_load(biped_index, (struct unit_animation_update_data const *)animation, &game);
+	halo_sim_rest_checks.compared[call.riding ? 1 : 0]++;
+	halo_sim_rest_checks.calls += halo_sim_rest_checks.event_count;
+	if (memcmp(&call.state, &game, sizeof(game)) != 0 || call.difference_event != NONE)
+	{
+		halo_sim_rest_checks.differed++;
+		if (halo_sim_rest_checks.differed <= 8)
+		{
+			platform_log("halo_sim: biped rest differs: biped %lx riding %lu call %ld of %lu (kind %ld) reason %ld; stop ticks game %d rust %d; falling time game %ld rust %ld; desired game %d rust %d",
+				(unsigned long)biped_index, call.riding, call.difference_event, halo_sim_rest_checks.event_count,
+				call.difference_event >= 0 && call.difference_event < (long)halo_sim_rest_checks.event_count ?
+					halo_sim_rest_checks.events[call.difference_event].kind : NONE,
+				call.difference_reason, game.stop_ticks, call.state.stop_ticks, game.last_falling_communication_time,
+				call.state.last_falling_communication_time, game.state_desired, call.state.state_desired);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_rest_checks.compared[0] + halo_sim_rest_checks.compared[1];
+
+		if ((compared & 0x3fff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: biped rest: %lu of %lu agree with the game (%lu riding; %lu calls of the game; %lu left out)",
+				compared - halo_sim_rest_checks.differed, compared, halo_sim_rest_checks.compared[1],
+				halo_sim_rest_checks.calls, halo_sim_rest_checks.skipped);
+		}
 	}
 }

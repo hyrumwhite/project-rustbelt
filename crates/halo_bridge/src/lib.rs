@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 pub const RAY_TESTS: usize = 16;
 pub const MAXIMUM_LIGHTS: usize = 64;
 pub const MAXIMUM_OBJECTS: usize = 4096;
@@ -107,6 +107,24 @@ pub struct RayTest {
     /// How far along `vector` (0..1).
     pub t: f32,
     pub surface_index: i32,
+    /// A sphere tested half its radius short of the hit: what it touched
+    /// (surfaces, edges, vertices, leaves) and an FNV-1a checksum of their
+    /// indices in the order found.
+    pub sphere_center: [f32; 3],
+    pub sphere_radius: f32,
+    pub sphere_counts: [u16; 4],
+    pub sphere_checksum: u32,
+}
+
+/// FNV-1a over 32-bit indices, as the game checksums a sphere test's.
+pub fn feature_checksum(mut hash: u32, indices: &[i32]) -> u32 {
+    for &index in indices {
+        for byte in (index as u32).to_le_bytes() {
+            hash ^= byte as u32;
+            hash = hash.wrapping_mul(16_777_619);
+        }
+    }
+    hash
 }
 
 #[repr(C)]

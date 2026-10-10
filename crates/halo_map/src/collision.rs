@@ -229,33 +229,287 @@ impl CollisionBsp {
         NONE
     }
 
-    /// Whether a projected point is inside a surface's edge ring.
+    /// Whether a projected point is inside a surface's edge ring
+    /// (`collision_surface_test_point`; every breakable surface intact).
     fn surface_test_point(&self, surface_index: usize, projection: usize, sign: bool, point: [f32; 2]) -> bool {
         let surface = &self.surfaces[surface_index];
+        if !self.ring_continues(surface.first_edge, 0) {
+            return false;
+        }
         let mut edge_index = surface.first_edge;
-        for _ in 0..=MAXIMUM_EDGES_PER_SURFACE {
-            let Some(edge) = self.edges.get(edge_index.max(0) as usize).filter(|_| edge_index >= 0) else { return false };
+        let mut edge_count = 0;
+        loop {
+            let edge = &self.edges[edge_index as usize];
             let reverse = edge.surfaces[1] == surface_index as i32;
-            let (Some(v0), Some(v1)) = (
-                self.vertices.get(edge.vertices[usize::from(reverse)] as usize),
-                self.vertices.get(edge.vertices[usize::from(!reverse)] as usize),
-            ) else {
-                return false;
-            };
-            let p0 = project(*v0, projection, sign);
-            let p1 = project(*v1, projection, sign);
+            let p0 = project(self.vertex(edge.vertices[usize::from(reverse)]), projection, sign);
+            let p1 = project(self.vertex(edge.vertices[usize::from(!reverse)]), projection, sign);
             let to_point = [point[0] - p0[0], point[1] - p0[1]];
             let along = [p1[0] - p0[0], p1[1] - p0[1]];
             if to_point[0] * along[1] - to_point[1] * along[0] > 0.0 {
                 return false;
             }
             edge_index = edge.edges[usize::from(reverse)];
-            if edge_index == surface.first_edge {
+            edge_count += 1;
+            if edge_index == surface.first_edge || !self.ring_continues(edge_index, edge_count) {
                 return true;
             }
         }
-        // (an edge ring that doesn't close)
-        false
+    }
+
+    /// `collision_surface_edge_ring_continues`: an edge of the bsp, within
+    /// the most edges a surface has.
+    fn ring_continues(&self, edge_index: i32, edge_count: usize) -> bool {
+        edge_index >= 0 && (edge_index as usize) < self.edges.len() && edge_count < MAXIMUM_EDGES_PER_SURFACE
+    }
+
+    /// A vertex (the origin for one that isn't the bsp's: the game reads
+    /// whatever is there; the retail maps have none).
+    fn vertex(&self, index: i32) -> [f32; 3] {
+        self.vertices.get(index as usize).copied().unwrap_or_default()
+    }
+
+    /// `collision_bsp_valid_leaf`: a leaf of the bsp whose references are
+    /// all the bsp's.
+    fn valid_leaf(&self, index: usize) -> bool {
+        let Some(leaf) = self.leaves.get(index) else { return false };
+        leaf.reference_count == 0
+            || (leaf.first_reference >= 0
+                && leaf.reference_count > 0
+                && leaf.first_reference as i64 <= self.references.len() as i64 - leaf.reference_count as i64)
+    }
+
+    /// Halo's sphere test (`collision_bsp_test_sphere`): the surfaces, edges
+    /// and vertices within `radius` of `center`, each list in the order the
+    /// game finds them (at most 256 each). Every breakable surface counts as
+    /// intact.
+    pub fn test_sphere(&self, center: [f32; 3], radius: f32) -> SphereFeatures {
+        let mut test = SphereTest {
+            bsp: self,
+            center,
+            radius,
+            result: SphereFeatures::default(),
+            plane_stack: Vec::with_capacity(MAXIMUM_DEPTH as usize),
+            projection: 0,
+            sign: false,
+            center2d: [0.0; 2],
+            nodes_left: self.nodes.len() as i64,
+            nodes2d_left: 0,
+        };
+        test.bsp3d(0, 0);
+        test.result
+    }
+}
+
+/// What a sphere test found (`collision_bsp_test_sphere_result`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SphereFeatures {
+    pub surfaces: Vec<i32>,
+    pub edges: Vec<i32>,
+    pub vertices: Vec<i32>,
+    pub leaves: Vec<i32>,
+}
+
+impl SphereFeatures {
+    /// Whether the sphere touches a surface or an edge (the test's result).
+    pub fn touches(&self) -> bool {
+        !self.surfaces.is_empty() || !self.edges.is_empty()
+    }
+}
+
+/// `add_feature`: once each, at most 256.
+fn add_feature(list: &mut Vec<i32>, index: i32) {
+    if !list.contains(&index) && list.len() < 256 {
+        list.push(index);
+    }
+}
+
+/// `fast_vector_intersects_sphere`: whether the segment from `point` along
+/// `vector` passes within `radius` of `center`.
+fn vector_intersects_sphere(point: [f32; 3], vector: [f32; 3], center: [f32; 3], radius: f32) -> bool {
+    let p = [point[0] - center[0], point[1] - center[1], point[2] - center[2]];
+    let c = (p[0] * p[0]) + (p[1] * p[1]) + (p[2] * p[2]) - (radius * radius);
+    if c < 0.0 {
+        return true;
+    }
+    let b = vector[0] * p[0] + vector[1] * p[1] + vector[2] * p[2];
+    if b >= 0.0 {
+        return false;
+    }
+    let a = vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];
+    let disc = b * b - a * c;
+    if disc <= 0.0 {
+        return false;
+    }
+    let neg_a_minus_b = -a - b;
+    if neg_a_minus_b < 0.0 {
+        return true;
+    }
+    neg_a_minus_b * neg_a_minus_b < disc
+}
+
+struct SphereTest<'a> {
+    bsp: &'a CollisionBsp,
+    center: [f32; 3],
+    radius: f32,
+    result: SphereFeatures,
+    plane_stack: Vec<i32>,
+    projection: usize,
+    sign: bool,
+    center2d: [f32; 2],
+    nodes_left: i64,
+    nodes2d_left: i64,
+}
+
+impl SphereTest<'_> {
+    fn bsp3d(&mut self, mut node_index: i32, mut depth: u16) {
+        while node_index & SIGN == 0 {
+            // (collision_bsp3d_enter_node)
+            self.nodes_left -= 1;
+            if node_index as usize >= self.bsp.nodes.len() || depth >= MAXIMUM_DEPTH || self.nodes_left < 0 {
+                return;
+            }
+            depth += 1;
+            let node = self.bsp.nodes[node_index as usize];
+            let Some(plane) = self.bsp.plane(node.plane).copied() else { return };
+            let c = self.center;
+            let distance = plane[0] * c[0] + plane[1] * c[1] + plane[2] * c[2] - plane[3];
+            let reaches_second_child = distance < self.radius;
+            let child_index = distance > -self.radius;
+            if child_index && reaches_second_child {
+                self.plane_stack.push(node.plane | SIGN);
+                self.bsp3d(node.children[0], depth);
+                self.plane_stack.pop();
+                self.plane_stack.push(node.plane & i32::MAX);
+                self.bsp3d(node.children[1], depth);
+                self.plane_stack.pop();
+                return;
+            }
+            node_index = node.children[usize::from(child_index)];
+        }
+        if node_index == NONE || !self.bsp.valid_leaf((node_index & i32::MAX) as usize) {
+            return;
+        }
+        let leaf_index = node_index & i32::MAX;
+        let leaf = self.bsp.leaves[leaf_index as usize];
+        if self.result.leaves.len() < 256 {
+            self.result.leaves.push(leaf_index);
+        }
+        let first = leaf.first_reference.max(0) as usize;
+        for reference_index in first..first + leaf.reference_count.max(0) as usize {
+            let reference = self.bsp.references[reference_index];
+            if !self.plane_stack.contains(&reference.plane_designator) {
+                continue;
+            }
+            let Some(plane) = self.bsp.planes.get((reference.plane_designator & i32::MAX) as usize).copied() else { continue };
+            let c = self.center;
+            let plane_distance = -(plane[0] * c[0] + plane[1] * c[1] + plane[2] * c[2] - plane[3]);
+            let projected = [
+                plane[0] * plane_distance + c[0],
+                plane[1] * plane_distance + c[1],
+                plane[2] * plane_distance + c[2],
+            ];
+            let (ai, aj, ak) = (plane[0].abs(), plane[1].abs(), plane[2].abs());
+            self.projection = if ak >= aj && ak >= ai {
+                2
+            } else if aj >= ai {
+                1
+            } else {
+                0
+            };
+            self.sign = (plane[self.projection] > 0.0) != (reference.plane_designator & SIGN != 0);
+            self.center2d = project(projected, self.projection, self.sign);
+            self.nodes2d_left = self.bsp.nodes2d.len() as i64;
+            self.bsp2d(reference.root, 0);
+        }
+    }
+
+    fn bsp2d(&mut self, mut child_index: i32, mut depth: u16) {
+        while child_index & SIGN == 0 {
+            // (collision_bsp2d_enter_node)
+            self.nodes2d_left -= 1;
+            if child_index as usize >= self.bsp.nodes2d.len() || depth >= MAXIMUM_BSP2D_DEPTH || self.nodes2d_left < 0 {
+                return;
+            }
+            depth += 1;
+            let node = self.bsp.nodes2d[child_index as usize];
+            let distance = (node.plane[0] * self.center2d[0] + node.plane[1] * self.center2d[1]) - node.plane[2];
+            let reaches_first_child = distance <= self.radius;
+            let reaches_second_child = distance >= -self.radius;
+            if reaches_first_child {
+                self.bsp2d(node.children[0], depth);
+            }
+            if !reaches_second_child {
+                return;
+            }
+            child_index = node.children[1];
+        }
+        self.surface(child_index & i32::MAX);
+    }
+
+    /// `collision_surface_test_sphere`.
+    fn surface(&mut self, surface_index: i32) {
+        let bsp = self.bsp;
+        if surface_index < 0 || surface_index as usize >= bsp.surfaces.len() {
+            return;
+        }
+        let surface = bsp.surfaces[surface_index as usize];
+        if !bsp.ring_continues(surface.first_edge, 0) {
+            return;
+        }
+        let ring = || {
+            let mut edges = Vec::new();
+            let mut edge_index = surface.first_edge;
+            let mut edge_count = 0;
+            loop {
+                edges.push(edge_index);
+                let edge = &bsp.edges[edge_index as usize];
+                let reverse = edge.surfaces[1] == surface_index;
+                edge_index = edge.edges[usize::from(reverse)];
+                edge_count += 1;
+                if edge_index == surface.first_edge || !bsp.ring_continues(edge_index, edge_count) {
+                    return edges;
+                }
+            }
+        };
+        let edges = ring();
+        let radius_squared = self.radius * self.radius;
+        let mut hit_feature = false;
+        for &edge_index in &edges {
+            let edge = &bsp.edges[edge_index as usize];
+            let reverse = edge.surfaces[1] == surface_index;
+            let vertex_index = edge.vertices[usize::from(reverse)];
+            let v = bsp.vertex(vertex_index);
+            let (dx, dy, dz) = (v[0] - self.center[0], v[1] - self.center[1], v[2] - self.center[2]);
+            if dx * dx + dy * dy + dz * dz <= radius_squared {
+                add_feature(&mut self.result.vertices, vertex_index);
+                hit_feature = true;
+            }
+        }
+        for &edge_index in &edges {
+            let edge = &bsp.edges[edge_index as usize];
+            let reverse = edge.surfaces[1] == surface_index;
+            let v0 = bsp.vertex(edge.vertices[usize::from(reverse)]);
+            let v1 = bsp.vertex(edge.vertices[usize::from(!reverse)]);
+            let vector = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+            if vector_intersects_sphere(v0, vector, self.center, self.radius) {
+                add_feature(&mut self.result.edges, edge_index);
+                hit_feature = true;
+            }
+        }
+        if !hit_feature {
+            for &edge_index in &edges {
+                let edge = &bsp.edges[edge_index as usize];
+                let reverse = edge.surfaces[1] == surface_index;
+                let p0 = project(bsp.vertex(edge.vertices[usize::from(reverse)]), self.projection, self.sign);
+                let p1 = project(bsp.vertex(edge.vertices[usize::from(!reverse)]), self.projection, self.sign);
+                let v0 = [p0[0] - self.center2d[0], p0[1] - self.center2d[1]];
+                let v1 = [p1[0] - self.center2d[0], p1[1] - self.center2d[1]];
+                if v0[0] * v1[1] - v0[1] * v1[0] < 0.0 {
+                    return;
+                }
+            }
+        }
+        add_feature(&mut self.result.surfaces, surface_index);
     }
 }
 
@@ -327,6 +581,7 @@ impl VectorTest<'_> {
         let mut leaf_index = NONE;
         let mut contents = Contents::Solid;
         if node_index != NONE
+            && self.bsp.valid_leaf((node_index & i32::MAX) as usize)
             && let Some(leaf) = self.bsp.leaves.get((node_index & i32::MAX) as usize)
         {
             leaf_index = node_index & i32::MAX;

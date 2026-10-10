@@ -175,6 +175,9 @@ struct CollisionCheck {
     bsps: std::collections::HashMap<i32, Option<halo_map::collision::CollisionBsp>>,
     rays: u64,
     agreed: u64,
+    spheres: u64,
+    spheres_agreed: u64,
+    sphere_features: u64,
     hits: u64,
     largest_t_difference: f32,
     shown: u32,
@@ -188,6 +191,9 @@ impl CollisionCheck {
             bsps: Default::default(),
             rays: 0,
             agreed: 0,
+            spheres: 0,
+            spheres_agreed: 0,
+            sphere_features: 0,
             hits: 0,
             largest_t_difference: 0.0,
             shown: 0,
@@ -226,6 +232,25 @@ impl CollisionCheck {
             if test.hit != 0 {
                 self.hits += 1;
             }
+            // the sphere
+            let features = bsp.test_sphere(test.sphere_center, test.sphere_radius);
+            let mut checksum = 2_166_136_261u32;
+            for list in [&features.surfaces, &features.edges, &features.vertices, &features.leaves] {
+                checksum = halo_bridge::feature_checksum(checksum, list);
+            }
+            let counts = [features.surfaces.len(), features.edges.len(), features.vertices.len(), features.leaves.len()]
+                .map(|c| c as u16);
+            self.spheres += 1;
+            self.sphere_features += (features.surfaces.len() + features.edges.len() + features.vertices.len()) as u64;
+            if counts == test.sphere_counts && checksum == test.sphere_checksum {
+                self.spheres_agreed += 1;
+            } else if self.shown < 10 {
+                self.shown += 1;
+                println!(
+                    "  sphere differs (radius {}): game counts {:?}; halo_map {:?}",
+                    test.sphere_radius, test.sphere_counts, counts
+                );
+            }
             if agree {
                 self.agreed += 1;
             } else if self.shown < 5 {
@@ -239,6 +264,10 @@ impl CollisionCheck {
     }
 
     fn report(&self) {
+        println!(
+            "collision: {} of {} spheres agree with the game ({} surfaces, edges and vertices touched)",
+            self.spheres_agreed, self.spheres, self.sphere_features
+        );
         println!(
             "collision: {} of {} rays agree with the game ({} hit the structure); largest t difference {}",
             self.agreed, self.rays, self.hits, self.largest_t_difference

@@ -16,6 +16,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "cseries.h"
 #include "camera/director.h"
 #include "game/game.h"
+#include "game/game_globals.h"
 #include "game/players.h"
 #include "objects/objects.h"
 #include "units/units.h"
@@ -778,6 +779,8 @@ boolean bevy_bridge_listener(
 
 /* random_math.c: its direction table */
 short random_direction_table_get(real_vector3d const **table);
+/* periodic_functions.c: a function's table */
+unsigned char const *periodic_function_table_get(short function_type);
 unsigned long get_random_seed(void);
 
 static struct
@@ -839,7 +842,26 @@ void bevy_bridge_projectile_begin(long projectile_index)
 			bevy_bridge_vector(bevy_bridge_shared->random_directions[index], &table[index]);
 		__atomic_store_n(&bevy_bridge_shared->random_direction_count, (unsigned long)index, __ATOMIC_RELEASE);
 	}
+	/* (and the periodic function tables, once) */
+	if (!bevy_bridge_shared->periodic_tables_valid)
+	{
+		short function_type;
+		boolean valid = TRUE;
+
+		for (function_type = 0; function_type < 12; function_type++)
+		{
+			unsigned char const *table = periodic_function_table_get(function_type);
+
+			if (table)
+				memcpy(bevy_bridge_shared->periodic_tables[function_type], table, 1024);
+			else
+				valid = FALSE;
+		}
+		__atomic_store_n(&bevy_bridge_shared->periodic_tables_valid, valid ? 1UL : 0UL, __ATOMIC_RELEASE);
+	}
 	memset(record, 0, sizeof(*record));
+	record->damage_material_types[0] = record->damage_material_types[1] =
+		record->damage_material_types[2] = record->damage_material_types[3] = -2;
 	record->projectile_index = (unsigned long)projectile_index;
 	record->definition_index = (unsigned long)object_get(projectile_index)->definition_index;
 	record->structure_bsp_index = global_structure_bsp_index;
@@ -930,9 +952,10 @@ void bevy_bridge_features_call(void)
 		bevy_bridge_biped.record.feature_calls++;
 }
 
-void bevy_bridge_feature_object(long object_index)
+/* an object as collision features or ray tests see it, into the feature
+object ring */
+static void bevy_bridge_record_object(long object_index, unsigned long call)
 {
-	struct bevy_bridge_biped_record *record = &bevy_bridge_biped.record;
 	struct bevy_bridge_feature_object *entry;
 	struct object_datum *object;
 	unsigned long count;
@@ -940,15 +963,13 @@ void bevy_bridge_feature_object(long object_index)
 	long node_index;
 	real_matrix4x3 const *matrices;
 
-	if (!bevy_bridge_biped.active)
-		return;
 	object = object_get(object_index);
 	count = bevy_bridge_shared->feature_object_count;
 	entry = &bevy_bridge_shared->feature_objects[count % BEVY_BRIDGE_FEATURE_OBJECTS];
 	memset(entry, 0, sizeof(*entry));
 	entry->object_index = (unsigned long)object_index;
 	entry->definition_index = (unsigned long)object->definition_index;
-	entry->call = record->feature_calls ? record->feature_calls - 1 : 0;
+	entry->call = call;
 	entry->type = object->object.type;
 	entry->dead = TEST_FLAG(object->object.damage_flags, _object_dead_bit) ? 1 : 0;
 	entry->flags = object->object.flags;
@@ -958,6 +979,10 @@ void bevy_bridge_feature_object(long object_index)
 	bevy_bridge_vector(entry->translational_velocity, &object->object.translational_velocity);
 	entry->player_index = NONE;
 	entry->parent_seat_index = NONE;
+	entry->location_leaf = object->object.location.leaf_index;
+	entry->location_cluster = object->object.location.cluster_index;
+	if (object->object.type == _object_type_projectile)
+		entry->projectile_flags = ((struct projectile_datum *)object)->projectile.flags;
 	if (object->object.type == _object_type_machine)
 	{
 		struct machine_definition *machine_definition = machine_definition_get(object->definition_index);
@@ -994,7 +1019,57 @@ void bevy_bridge_feature_object(long object_index)
 	__atomic_store_n(&bevy_bridge_shared->feature_matrix_count, entry->first_matrix + node_count, __ATOMIC_RELEASE);
 	entry->sequence = count;
 	__atomic_store_n(&bevy_bridge_shared->feature_object_count, count + 1, __ATOMIC_RELEASE);
+}
+
+void bevy_bridge_feature_object(long object_index)
+{
+	struct bevy_bridge_biped_record *record = &bevy_bridge_biped.record;
+
+	if (!bevy_bridge_biped.active)
+		return;
+	bevy_bridge_record_object(object_index, record->feature_calls ? record->feature_calls - 1 : 0);
 	record->feature_object_count++;
+}
+
+void bevy_bridge_projectile_object(long object_index)
+{
+	struct bevy_bridge_projectile_record *record = &bevy_bridge_projectile.record;
+
+	if (!bevy_bridge_projectile.active)
+		return;
+	if (!record->object_count)
+		record->first_object = bevy_bridge_shared->feature_object_count;
+	bevy_bridge_record_object(object_index, 0);
+	record->object_count++;
+}
+
+void bevy_bridge_projectile_damage(short material_type)
+{
+	struct bevy_bridge_projectile_record *record = &bevy_bridge_projectile.record;
+
+	if (!bevy_bridge_projectile.active || record->collision_count == 0 || record->collision_count > 4)
+		return;
+	record->damage_material_types[record->collision_count - 1] = material_type;
+	record->damage_seeds[record->collision_count - 1] = get_random_seed();
+}
+
+void bevy_bridge_projectile_guidance(long projectile_index, long target_index, void const *target_center_of_mass)
+{
+	struct bevy_bridge_projectile_record *record = &bevy_bridge_projectile.record;
+	struct bevy_bridge_projectile_guidance *guidance;
+	struct object_datum *target;
+
+	if (!bevy_bridge_projectile.active || record->guidance_count >= 4)
+		return;
+	guidance = &record->guidance[record->guidance_count++];
+	target = object_get(target_index);
+	bevy_bridge_point(guidance->projectile_center, &object_get(projectile_index)->object.bounding_sphere_center);
+	bevy_bridge_point(guidance->target_center, &target->object.bounding_sphere_center);
+	bevy_bridge_point(guidance->target_center_of_mass, (real_point3d const *)target_center_of_mass);
+	guidance->guidance_scale = 1.0f;
+	if (TEST_FLAG(_object_mask_unit, target->object.type) && unit_get(target_index)->unit.player_index != NONE)
+		guidance->guidance_scale = game_difficulty_get_value(_game_difficulty_value_guidance_vs_player);
+	guidance->game_time = game_time_get();
 }
 
 /* ---------- biped movement updates */

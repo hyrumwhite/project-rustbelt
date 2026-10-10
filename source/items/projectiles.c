@@ -794,6 +794,8 @@ boolean projectile_update(
 			}
 
 			unit_get_center_of_mass(projectile->projectile.target_object_index, &target_point);
+			/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+			bevy_bridge_projectile_guidance(projectile_index, projectile->projectile.target_object_index, &target_point);
 
 			set_real_euler_angles2d(
 				&wander_angles,
@@ -1586,6 +1588,7 @@ static void projectile_collision(
 			collision->material_index,
 			&collision->plane.n);
 
+		bevy_bridge_projectile_damage(damage.material_type); /* port: (bevy_bridge.c) */
 		if (damage.material_type != NONE)
 			material_type = damage.material_type;
 		material_effect_scale = damage.material_effect_scale;

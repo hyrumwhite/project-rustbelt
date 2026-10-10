@@ -224,6 +224,16 @@ void periodic_functions_dispose(
 	return;
 }
 
+/* port: a function's table (1024 bytes), NULL before the tables are built
+(for a Bevy renderer, port/linux/game/bevy_bridge.c) */
+unsigned char const *periodic_function_table_get(
+	short function_type)
+{
+	if (!function_tables_initialized || !VALID_INDEX(function_type, NUMBER_OF_PERIODIC_FUNCTIONS))
+		return NULL;
+	return periodic_function_tables[function_type];
+}
+
 real periodic_function_evaluate(
 	short function_type,
 	real time)

@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 26
+#define BEVY_BRIDGE_VERSION 27
 #define BEVY_BRIDGE_PHYSICS_VEHICLES 32
 #define BEVY_BRIDGE_VEHICLE_RAY_TESTS 16
 #define BEVY_BRIDGE_MELEE_RECORDS 512
@@ -340,6 +340,19 @@ struct bevy_bridge_projectile_state
 	short pad;
 };
 
+/* (protocol 27) a guided projectile's steering in an update's step: its
+bounding sphere's centre, its target's and the target's centre of mass
+(unit_get_center_of_mass), and the difficulty's guidance scale when the
+target is a player's unit (1 otherwise) */
+struct bevy_bridge_projectile_guidance
+{
+	float projectile_center[3];
+	float target_center[3];
+	float target_center_of_mass[3];
+	float guidance_scale;
+	long game_time;
+};
+
 /* one projectile_update (with game.bevy_bridge_ray_tests): the state
 before and after (before it detonates or disappears), the global random
 seed as the update began and as each collision response began, and
@@ -356,6 +369,18 @@ struct bevy_bridge_projectile_record
 	unsigned long touched_object;
 	struct bevy_bridge_projectile_state before;
 	struct bevy_bridge_projectile_state after;
+	/* (protocol 27) the objects its ray tests visited, as they were then
+	(object_count from first_object in the feature object ring); what each
+	collision's impact damage reported (object_cause_damage's material
+	type, -2 for no damage done) and the random seed it left; and its
+	guided steering, step by step */
+	unsigned long first_object;
+	unsigned long object_count;
+	short damage_material_types[4];
+	/* and the random seed the damage left (the response draws from it) */
+	unsigned long damage_seeds[4];
+	unsigned long guidance_count;
+	struct bevy_bridge_projectile_guidance guidance[4];
 };
 
 /* bipeds.c's struct biped_physics, as it is laid out (0xCC bytes) */
@@ -394,7 +419,14 @@ struct bevy_bridge_feature_object
 	unsigned char region_permutations[8];
 	unsigned long node_count;
 	unsigned long first_matrix;
+	/* (protocol 27) its location, where the broad phase registers it */
+	long location_leaf;
+	short location_cluster;
+	short pad;
+	/* a projectile's own flags (projectile_flags), 0 for other objects */
+	unsigned long projectile_flags;
 };
+
 
 /* one biped_update_physics (with game.bevy_bridge_ray_tests): the biped's
 physics before and after, which breakable surfaces stood (bit i of byte
@@ -764,6 +796,11 @@ struct bevy_bridge_shared
 	unsigned long projectile_record_count;
 	unsigned long random_direction_count;
 	struct bevy_bridge_projectile_record projectile_records[BEVY_BRIDGE_PROJECTILE_RECORDS];
+	/* (protocol 27) the periodic function tables the game built at startup
+	(periodic_functions.c: 1024 bytes each, by function type), once a
+	projectile has been recorded; nonzero once written */
+	unsigned long periodic_tables_valid;
+	unsigned char periodic_tables[12][1024];
 	float random_directions[BEVY_BRIDGE_RANDOM_DIRECTIONS][3];
 	/* biped physics updates (a ring, as the projectile records) */
 	unsigned long biped_record_count;

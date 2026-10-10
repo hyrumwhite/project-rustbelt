@@ -46,6 +46,11 @@ recorded for a renderer to replay (bevy_bridge_projectile_record) */
 void bevy_bridge_projectile_begin(long projectile_index);
 void bevy_bridge_projectile_collision(void);
 void bevy_bridge_projectile_touched_object(void);
+/* collisions.c: an object a projectile's ray test visited; projectiles.c:
+what its impact damage reported, and its guided steering */
+void bevy_bridge_projectile_object(long object_index);
+void bevy_bridge_projectile_damage(short material_type);
+void bevy_bridge_projectile_guidance(long projectile_index, long target_index, void const *target_center_of_mass);
 void bevy_bridge_projectile_end(long projectile_index);
 
 /* bipeds.c, with game.bevy_bridge_ray_tests: each biped_update_physics

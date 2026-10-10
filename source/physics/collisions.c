@@ -1686,6 +1686,7 @@ static boolean object_test_vector(
 	{
 		struct object_datum const *object = object_get(object_index);
 
+		bevy_bridge_projectile_object(object_index); /* port: (bevy_bridge.c) */
 		if (object_index != ignore_object_index &&
 			!TEST_FLAG(object->object.flags, _object_invisible_bit) &&
 			TEST_FLAG(flags, object->object.type + _collision_test_objects_first_type_bit) &&

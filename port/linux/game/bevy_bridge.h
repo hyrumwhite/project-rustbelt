@@ -93,6 +93,14 @@ void bevy_bridge_pose_end(long object_index, void const *node_matrices);
 begun with its weapon (NONE for none), a melee started or its damage caused
 (1, 2), and ended */
 void bevy_bridge_melee_begin(long biped_index, long weapon_index);
+/* physics.c: a vehicle's physics_update recorded
+(bevy_bridge_vehicle_physics_record): begun with what its vehicle code gave
+it, each other vehicle its unit collisions consider, and ended with its
+mass points */
+void bevy_bridge_vehicle_physics_begin(long vehicle_index, void const *powered_mass_points, short powered_count,
+	void const *magic_force, void const *magic_torque, int old_physics);
+void bevy_bridge_vehicle_physics_other(long object_index);
+void bevy_bridge_vehicle_physics_end(long vehicle_index, void const *mass_points, short mass_point_count);
 void bevy_bridge_melee_event(long biped_index, unsigned long event);
 void bevy_bridge_melee_end(long biped_index);
 

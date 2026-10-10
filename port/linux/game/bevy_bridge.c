@@ -25,6 +25,9 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "physics/breakable_surfaces.h"
 #include "units/bipeds.h"
 #include "units/vehicle_datum.h"
+#include "physics/powered_mass_point_datum.h"
+#include "physics/friction_datum.h"
+#include "physics/mass_point_datum.h"
 #include "devices/device_definitions.h"
 #include "devices/devices.h"
 #include "models/model_definitions.h"
@@ -946,10 +949,18 @@ void bevy_bridge_biped_physics_end(void const *physics, unsigned long size)
 	__atomic_store_n(&bevy_bridge_shared->biped_record_count, count + 1, __ATOMIC_RELEASE);
 }
 
+static struct
+{
+	boolean active;
+	struct bevy_bridge_vehicle_physics_record record;
+} bevy_bridge_vehicle_physics;
+
 void bevy_bridge_features_call(void)
 {
 	if (bevy_bridge_biped.active)
 		bevy_bridge_biped.record.feature_calls++;
+	else if (bevy_bridge_vehicle_physics.active)
+		bevy_bridge_vehicle_physics.record.feature_calls++;
 }
 
 /* an object as collision features or ray tests see it, into the feature
@@ -1021,10 +1032,27 @@ static void bevy_bridge_record_object(long object_index, unsigned long call)
 	__atomic_store_n(&bevy_bridge_shared->feature_object_count, count + 1, __ATOMIC_RELEASE);
 }
 
+static void bevy_bridge_vehicle_physics_object(long object_index, unsigned long call)
+{
+	struct bevy_bridge_vehicle_physics_record *record = &bevy_bridge_vehicle_physics.record;
+
+	if (!record->object_count)
+		record->first_object = bevy_bridge_shared->feature_object_count;
+	bevy_bridge_record_object(object_index, call);
+	record->object_count++;
+}
+
 void bevy_bridge_feature_object(long object_index)
 {
 	struct bevy_bridge_biped_record *record = &bevy_bridge_biped.record;
 
+	if (!bevy_bridge_biped.active && bevy_bridge_vehicle_physics.active)
+	{
+		unsigned long calls = bevy_bridge_vehicle_physics.record.feature_calls;
+
+		bevy_bridge_vehicle_physics_object(object_index, calls ? calls - 1 : 0);
+		return;
+	}
 	if (!bevy_bridge_biped.active)
 		return;
 	bevy_bridge_record_object(object_index, record->feature_calls ? record->feature_calls - 1 : 0);
@@ -1035,6 +1063,12 @@ void bevy_bridge_projectile_object(long object_index)
 {
 	struct bevy_bridge_projectile_record *record = &bevy_bridge_projectile.record;
 
+	if (!bevy_bridge_projectile.active && bevy_bridge_vehicle_physics.active)
+	{
+		/* (a ray test's object: no features call) */
+		bevy_bridge_vehicle_physics_object(object_index, (unsigned long)NONE);
+		return;
+	}
 	if (!bevy_bridge_projectile.active)
 		return;
 	if (!record->object_count)
@@ -1636,4 +1670,109 @@ void bevy_bridge_melee_end(long biped_index)
 	record->sequence = count;
 	bevy_bridge_shared->melee_records[count % BEVY_BRIDGE_MELEE_RECORDS] = *record;
 	__atomic_store_n(&bevy_bridge_shared->melee_record_count, count + 1, __ATOMIC_RELEASE);
+}
+
+/* ---------- vehicle physics */
+
+typedef char bevy_bridge_mass_point_size_assert[sizeof(struct mass_point_datum) == 304 ? 1 : -1];
+
+static void bevy_bridge_vehicle_physics_state(long vehicle_index, struct bevy_bridge_vehicle_physics_state *state)
+{
+	struct vehicle_datum *vehicle = vehicle_datum_get(vehicle_index);
+
+	bevy_bridge_point(state->position, &vehicle->object.position);
+	bevy_bridge_vector(state->forward, &vehicle->object.forward);
+	bevy_bridge_vector(state->up, &vehicle->object.up);
+	bevy_bridge_vector(state->translational_velocity, &vehicle->object.translational_velocity);
+	bevy_bridge_vector(state->angular_velocity, &vehicle->object.angular_velocity);
+	state->object_flags = vehicle->object.flags;
+	state->location_leaf = vehicle->object.location.leaf_index;
+	state->location_cluster = vehicle->object.location.cluster_index;
+	state->pad = 0;
+	bevy_bridge_vector(state->collision_force, &vehicle->vehicle.collision_force);
+	bevy_bridge_vector(state->collision_torque, &vehicle->vehicle.collision_torque);
+	state->stuck_mass_point_flags = vehicle->vehicle.stuck_mass_point_flags;
+	bevy_bridge_point(state->bounding_center, &vehicle->object.bounding_sphere_center);
+}
+
+void bevy_bridge_vehicle_physics_begin(long vehicle_index, void const *powered_mass_points, short powered_count,
+	void const *magic_force, void const *magic_torque, int old_physics)
+{
+	struct bevy_bridge_vehicle_physics_record *record = &bevy_bridge_vehicle_physics.record;
+	struct powered_mass_point_datum const *powered = (struct powered_mass_point_datum const *)powered_mass_points;
+	short index;
+
+	bevy_bridge_vehicle_physics.active = FALSE;
+	if (!bevy_bridge_projectile_recording())
+		return;
+	memset(record, 0, sizeof(*record));
+	record->vehicle_index = (unsigned long)vehicle_index;
+	record->definition_index = (unsigned long)object_get(vehicle_index)->definition_index;
+	record->structure_bsp_index = global_structure_bsp_index;
+	record->old_physics = old_physics ? 1 : 0;
+	record->powered_count = powered ? (unsigned long)powered_count : 0;
+	for (index = 0; powered && index < powered_count && index < 8; index++)
+	{
+		memcpy(record->powered[index].values, &powered[index], sizeof(record->powered[index].values));
+		record->powered[index].rotation[0] = powered[index].rotation.v.i;
+		record->powered[index].rotation[1] = powered[index].rotation.v.j;
+		record->powered[index].rotation[2] = powered[index].rotation.v.k;
+		record->powered[index].rotation[3] = powered[index].rotation.w;
+	}
+	if (magic_force && magic_torque)
+	{
+		record->has_magic = 1;
+		bevy_bridge_vector(record->magic_force, (real_vector3d const *)magic_force);
+		bevy_bridge_vector(record->magic_torque, (real_vector3d const *)magic_torque);
+	}
+	memcpy(record->breakable_surfaces, breakable_surface_flags_get(), sizeof(record->breakable_surfaces));
+	bevy_bridge_vehicle_physics_state(vehicle_index, &record->before);
+	bevy_bridge_vehicle_physics.active = TRUE;
+}
+
+void bevy_bridge_vehicle_physics_other(long object_index)
+{
+	struct bevy_bridge_vehicle_physics_record *record = &bevy_bridge_vehicle_physics.record;
+	struct bevy_bridge_vehicle_physics_other *other;
+	struct object_datum *object;
+	real_point3d origin;
+	real_vector3d forward;
+	real_vector3d up;
+
+	if (!bevy_bridge_vehicle_physics.active || record->other_count >= 8)
+		return;
+	other = &record->others[record->other_count++];
+	object = object_get(object_index);
+	other->object_index = (unsigned long)object_index;
+	other->definition_index = (unsigned long)object->definition_index;
+	other->at_rest = TEST_FLAG(object->object.flags, _object_at_rest_bit) ? 1 : 0;
+	object_get_origin(object_index, &origin);
+	object_get_orientation(object_index, &forward, &up);
+	bevy_bridge_point(other->origin, &origin);
+	bevy_bridge_vector(other->forward, &forward);
+	bevy_bridge_vector(other->up, &up);
+}
+
+void bevy_bridge_vehicle_physics_end(long vehicle_index, void const *mass_points, short mass_point_count)
+{
+	struct bevy_bridge_vehicle_physics_record *record = &bevy_bridge_vehicle_physics.record;
+	unsigned long count;
+	short index;
+
+	if (!bevy_bridge_vehicle_physics.active || record->vehicle_index != (unsigned long)vehicle_index)
+		return;
+	bevy_bridge_vehicle_physics.active = FALSE;
+	bevy_bridge_vehicle_physics_state(vehicle_index, &record->after);
+	record->first_mass_point = bevy_bridge_shared->mass_point_count;
+	record->mass_point_count = mass_points ? (unsigned long)mass_point_count : 0;
+	for (index = 0; index < (short)record->mass_point_count; index++)
+	{
+		memcpy(bevy_bridge_shared->mass_points[(record->first_mass_point + index) % BEVY_BRIDGE_MASS_POINTS].bytes,
+			(unsigned char const *)mass_points + index * 304, 304);
+	}
+	__atomic_store_n(&bevy_bridge_shared->mass_point_count, record->first_mass_point + record->mass_point_count, __ATOMIC_RELEASE);
+	count = bevy_bridge_shared->vehicle_physics_record_count;
+	record->sequence = count;
+	bevy_bridge_shared->vehicle_physics_records[count % BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS] = *record;
+	__atomic_store_n(&bevy_bridge_shared->vehicle_physics_record_count, count + 1, __ATOMIC_RELEASE);
 }

@@ -40,8 +40,10 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 27
-#define BEVY_BRIDGE_PHYSICS_VEHICLES 32
+#define BEVY_BRIDGE_VERSION 29
+#define BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS 256
+#define BEVY_BRIDGE_MASS_POINTS 8192
+#define BEVY_BRIDGE_PHYSICS_VEHICLES 128
 #define BEVY_BRIDGE_VEHICLE_RAY_TESTS 16
 #define BEVY_BRIDGE_MELEE_RECORDS 512
 #define BEVY_BRIDGE_POSE_RECORDS 2048
@@ -771,6 +773,86 @@ struct bevy_bridge_melee_record
 	short action_animation_after[2];
 };
 
+/* (protocol 28) a vehicle as its physics reads and leaves it: its place,
+axes, velocities, flags, location, the collision force and torque other
+vehicles gave it, the mass points that stuck, and (after) the bounding
+sphere centre its new pose gave it (object_compute_node_matrices) */
+struct bevy_bridge_vehicle_physics_state
+{
+	float position[3];
+	float forward[3];
+	float up[3];
+	float translational_velocity[3];
+	float angular_velocity[3];
+	unsigned long object_flags;
+	long location_leaf;
+	short location_cluster;
+	short pad;
+	float collision_force[3];
+	float collision_torque[3];
+	unsigned long stuck_mass_point_flags;
+	float bounding_center[3];
+};
+
+/* a powered mass point's controls (powered_mass_point_datum: ground, water
+and air friction velocities, water and air lift ratios, thrust and antigrav
+fractions, rotation i j k w) */
+struct bevy_bridge_powered_mass_point
+{
+	float values[7];
+	float rotation[4];
+};
+
+/* a vehicle the unit collisions considered (objects_in_sphere): its
+physics placement and whether it was at rest */
+struct bevy_bridge_vehicle_physics_other
+{
+	unsigned long object_index;
+	unsigned long definition_index;
+	unsigned long at_rest;
+	float origin[3];
+	float forward[3];
+	float up[3];
+};
+
+/* a mass point as physics_compute_new left it (mass_point_datum) */
+struct bevy_bridge_mass_point
+{
+	unsigned char bytes[304];
+};
+
+/* (protocol 28) one physics_update of a vehicle (with
+game.bevy_bridge_ray_tests): its state before and after, what its vehicle
+code gave it (powered mass points, the magic force and torque), which
+breakable surfaces stood, its mass points after (mass_point_count from
+first_mass_point in the mass point ring), the objects its collision tests
+visited (in the feature object ring, feature_calls calls of
+collision_get_features_in_sphere), the other vehicles its unit collisions
+considered, and whether it took the old physics (physics radius > 0) */
+struct bevy_bridge_vehicle_physics_record
+{
+	unsigned long sequence;
+	unsigned long vehicle_index;
+	unsigned long definition_index;
+	long structure_bsp_index;
+	unsigned long old_physics;
+	unsigned long powered_count;
+	struct bevy_bridge_powered_mass_point powered[8];
+	unsigned long has_magic;
+	float magic_force[3];
+	float magic_torque[3];
+	unsigned char breakable_surfaces[32];
+	struct bevy_bridge_vehicle_physics_state before;
+	struct bevy_bridge_vehicle_physics_state after;
+	unsigned long mass_point_count;
+	unsigned long first_mass_point;
+	unsigned long first_object;
+	unsigned long object_count;
+	unsigned long feature_calls;
+	unsigned long other_count;
+	struct bevy_bridge_vehicle_physics_other others[8];
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -833,6 +915,11 @@ struct bevy_bridge_shared
 	/* players' melee steps (a ring, as the projectiles) */
 	unsigned long melee_record_count;
 	struct bevy_bridge_melee_record melee_records[BEVY_BRIDGE_MELEE_RECORDS];
+	/* vehicles' physics updates (rings, as the poses) */
+	unsigned long vehicle_physics_record_count;
+	unsigned long mass_point_count;
+	struct bevy_bridge_vehicle_physics_record vehicle_physics_records[BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS];
+	struct bevy_bridge_mass_point mass_points[BEVY_BRIDGE_MASS_POINTS];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
 };
 

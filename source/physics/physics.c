@@ -199,6 +199,7 @@ struct powered_mass_point_definition
 #include "mass_point_datum.h"
 
 #include "units/vehicle_datum.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 /* TU-local copy: no shared header declares the game globals falling-damage
  * block yet; identical complete copies live in objects/damage.c and
@@ -1347,6 +1348,7 @@ static void physics_compute_unit_collisions(
 			{
 				struct physics_instance other_physics;
 
+				bevy_bridge_vehicle_physics_other(object_index); /* port: (bevy_bridge.c) */
 				if (physics_instance_new(&other_physics, object_index))
 				{
 					struct unit_datum *other_vehicle = vehicle_get(object_index);
@@ -2245,6 +2247,9 @@ void physics_update(
 	real_vector3d total_torque;
 	short powered_mass_point_index;
 
+	/* port: recorded for a Bevy renderer to replay (bevy_bridge.c) */
+	bevy_bridge_vehicle_physics_begin(object_index, powered_mass_points, physics_powered_mass_point_count(physics),
+		magic_force, magic_torque, physics->radius > 0.0f);
 	if (physics->radius > 0.0f)
 	{
 		physics_update_old(
@@ -2253,6 +2258,7 @@ void physics_update(
 			mass_points,
 			magic_force,
 			magic_torque);
+		bevy_bridge_vehicle_physics_end(object_index, mass_points, physics_mass_point_count(physics));
 		return;
 	}
 
@@ -2326,6 +2332,7 @@ void physics_update(
 		&total_force,
 		&total_torque);
 	physics_compute_unit_collisions(object_index);
+	bevy_bridge_vehicle_physics_end(object_index, mass_points, physics_mass_point_count(physics)); /* port: (bevy_bridge.c) */
 
 	return;
 }

@@ -32,7 +32,6 @@ symbols in this file:
 #include "actions.h"
 #include "props.h"
 #include "units/units.h"
-#include "actor_type_port.h" /* port: the handlers through actor_type_call */
 
 /* ---------- constants */
 

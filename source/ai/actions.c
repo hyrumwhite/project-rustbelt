@@ -1655,6 +1655,45 @@ void actions_port_handler_call(
 			actor_action_try_to_throw_grenade(actor_index, (boolean)call->a);
 			break;
 
+		case _actions_port_handler_call_allowed_to_enter_vehicle:
+			call->result = actor_action_allowed_to_enter_vehicle(actor_index, call->a) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_vehicle_driver:
+		{
+			struct unit_datum *vehicle = vehicle_try_and_get(call->a);
+
+			call->result = vehicle != NULL;
+			call->result2 = vehicle ? vehicle->unit.driver_object_index : NONE;
+			break;
+		}
+
+		case _actions_port_handler_call_object_origin:
+			object_get_origin(call->a, (real_point3d *)call->output);
+			break;
+
+		case _actions_port_handler_call_enterable_vehicles:
+			call->result = (long)&ai_globals->enterable_vehicle_count;
+			call->result2 = (long)ai_globals->enterable_vehicles;
+			break;
+
+		case _actions_port_handler_call_vehicle_exists:
+			call->result = vehicle_try_and_get(call->a) != NULL;
+			break;
+
+		case _actions_port_handler_call_vehicle_setup:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_vehicle_setup_impromptu(actor_index, call->a, call->input[0], call->input[1], &state.vehicle))
+			{
+				actor_action_change(actor_index, _actor_action_vehicle, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
 		case _actions_port_handler_call_avoid:
 		{
 			struct action_state_data state;
@@ -4292,7 +4331,6 @@ boolean actor_action_handle_vehicle_entry(
 	long best_vehicle_index;
 	real attempt_distance;
 	real continue_distance;
-	struct action_state_data new_state_data;
 
 	if (actor->state.action == _actor_action_flee &&
 		actor->state.action_data.flee.panic_type > _actor_panic_none)
@@ -4334,18 +4372,27 @@ boolean actor_action_handle_vehicle_entry(
 				prop->player &&
 				!prop->enemy &&
 				prop->vehicle_index != NONE &&
-				actor_action_allowed_to_enter_vehicle(actor_index, prop->vehicle_index))
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_allowed_to_enter_vehicle,
+					prop->vehicle_index))
 			{
-				struct unit_datum *vehicle =
-					vehicle_try_and_get(prop->vehicle_index);
+				struct halo_sim_ai_call driver;
 
-				if (vehicle &&
-					vehicle->unit.driver_object_index == prop->unit_index)
+				memset(&driver, 0, sizeof(driver));
+				driver.kind = _actions_port_handler_call_vehicle_driver;
+				driver.actor = actor_index;
+				driver.a = prop->vehicle_index;
+				actions_port_handler_call(&driver);
+
+				if (driver.result &&
+					driver.result2 == prop->unit_index)
 				{
 					real_point3d vehicle_origin;
 					real distance_squared;
+					real origin[6];
 
-					object_get_origin(prop->vehicle_index, &vehicle_origin);
+					actions_port_handler(actor_index, _actions_port_handler_call_object_origin,
+						prop->vehicle_index, 0, NULL, 0, origin);
+					memcpy(&vehicle_origin, origin, sizeof(vehicle_origin));
 					distance_squared = distance_squared3d(
 						&actor->input.position.body_position,
 						&vehicle_origin);
@@ -4374,6 +4421,7 @@ boolean actor_action_handle_vehicle_entry(
 	{
 		long slot = 0;
 
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_enterable_vehicles, 0);
 		if (0 >= ai_globals->enterable_vehicle_count)
 			return FALSE;
 
@@ -4388,13 +4436,21 @@ boolean actor_action_handle_vehicle_entry(
 			short team_bitmask;
 			short actor_type_bitmask;
 
-			if (!vehicle_try_and_get(enterable->vehicle_index) ||
-				!actor_action_allowed_to_enter_vehicle(actor_index, enterable->vehicle_index))
+			if (!actions_port_handler_simple(actor_index, _actions_port_handler_call_vehicle_exists,
+					enterable->vehicle_index) ||
+				!actions_port_handler_simple(actor_index, _actions_port_handler_call_allowed_to_enter_vehicle,
+					enterable->vehicle_index))
 			{
 				continue;
 			}
 
-			object_get_origin(enterable->vehicle_index, &position);
+			{
+				real origin[6];
+
+				actions_port_handler(actor_index, _actions_port_handler_call_object_origin,
+					enterable->vehicle_index, 0, NULL, 0, origin);
+				memcpy(&position, origin, sizeof(position));
+			}
 			distance_squared = distance_squared3d(
 				&position,
 				&actor->input.position.body_position);
@@ -4473,17 +4529,15 @@ boolean actor_action_handle_vehicle_entry(
 		return FALSE;
 
 setup_entry:
-	if (action_vehicle_setup_impromptu(
-		actor_index,
-		best_vehicle_index,
-		attempt_distance,
-		continue_distance,
-		&new_state_data.vehicle))
 	{
-		actor_action_change(actor_index, _actor_action_vehicle, &new_state_data);
-		result = TRUE;
+		real distances[2];
+
+		distances[0] = attempt_distance;
+		distances[1] = continue_distance;
+		result = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_vehicle_setup,
+			best_vehicle_index, 0, distances, 2, NULL);
 	}
-	else
+	if (!result)
 	{
 		return FALSE;
 	}

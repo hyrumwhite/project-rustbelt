@@ -2158,9 +2158,9 @@ void actor_dispatch_call(
 {
 	int opened;
 
-	if (call->kind >= 0x1000)
+	if (call->kind >= _actions_port_handler_call_set_default_state)
 	{
-		actor_type_call(call);
+		actions_port_handler_call(call);
 		return;
 	}
 	if (call->kind >= 0x100)
@@ -2351,8 +2351,8 @@ static void actor_decision_loop_game(
 		iteration++;
 		history_index = (history_index + 1) % NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES;
 		actor->state.action_changed = FALSE;
-		/* port: the type decides directly, as Rust's does (its handlers through
-		actor_type_call) */
+		/* port: the type decides directly, as Rust's does (its handlers ask
+		through actions.c's actions_port_handler_call) */
 		actor_type_decide_action(actor_index);
 		actor_dispatch_call_simple(actor_index, _actor_dispatch_call_stimulus_clear);
 

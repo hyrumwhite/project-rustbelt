@@ -15,7 +15,6 @@ symbols in this file:
 #include "cseries.h"
 #include "actors.h"
 #include "actor_types.h"
-#include "actor_type_port.h" /* port: the handlers through actor_type_call */
 
 /* ---------- constants */
 

@@ -8,170 +8,185 @@
 //! (actions.c's `actions_port_handler_call`, shared with the C).
 
 use crate::actions::dot;
-use crate::actor_types::{call as handler, pursuit_settings};
+use crate::actor_types::{handler, pursuit_settings};
 use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE, PropIterator, prop_get};
 use crate::layout::{
-    actor_datum as a, actor_debug_info as debug, actor_definition as d, actor_variant_definition as var, ai_values as v,
-    prop_datum as p,
+    actor_datum as a, actor_debug_info as debug, actor_definition as d, actor_variant_definition as var,
+    ai_values as v, ai_vehicle_enterable as enterable, prop_datum as p,
 };
 
 /// What the handlers ask (halo_sim.h's `_actions_port_handler_call_*`).
 pub mod call {
     const BASE: i32 = 0x1040;
     /// `actor_action_set_default_state(actor, NONE)`, the result.
-    pub const SET_DEFAULT_STATE: i32 = BASE | 1;
+    pub const SET_DEFAULT_STATE: i32 = BASE + 1;
     /// `action_obey_command_list_setup` of the command list `a` and, if it
     /// sets up, `actor_action_change` to obey: whether it did, the result.
-    pub const OBEY_COMMAND_LIST: i32 = BASE | 2;
+    pub const OBEY_COMMAND_LIST: i32 = BASE + 2;
     /// Whether the game's local and `ai_debug.flee_always` is set, the
     /// result.
-    pub const FLEE_ALWAYS: i32 = BASE | 3;
+    pub const FLEE_ALWAYS: i32 = BASE + 3;
     /// `actor_perception_find_recent_damaging_prop_index(actor, TRUE)`, the
     /// result.
-    pub const RECENT_DAMAGING_PROP: i32 = BASE | 4;
+    pub const RECENT_DAMAGING_PROP: i32 = BASE + 4;
     /// The actor's prop of the unit responsible for its delayed attached
     /// projectile (or NONE), the result.
-    pub const ATTACHED_PROJECTILE_PROP: i32 = BASE | 5;
+    pub const ATTACHED_PROJECTILE_PROP: i32 = BASE + 5;
     /// The actor's prop of the unit responsible for its unit's flaming
     /// death (or NONE), the result.
-    pub const BURNING_PROP: i32 = BASE | 6;
+    pub const BURNING_PROP: i32 = BASE + 6;
     /// Whether the actor's squad's delay timer runs, the result.
-    pub const SQUAD_DELAYED: i32 = BASE | 7;
+    pub const SQUAD_DELAYED: i32 = BASE + 7;
     /// `encounter_squad_timer_expire` of the actor's squad.
-    pub const SQUAD_TIMER_EXPIRE: i32 = BASE | 8;
+    pub const SQUAD_TIMER_EXPIRE: i32 = BASE + 8;
     /// The flags of the conversation `a`'s definition, the result.
-    pub const CONVERSATION_FLAGS: i32 = BASE | 9;
+    pub const CONVERSATION_FLAGS: i32 = BASE + 9;
     /// `actor_move_animation_impulse(actor, a, input[0..2])`.
-    pub const ANIMATION_IMPULSE: i32 = BASE | 10;
+    pub const ANIMATION_IMPULSE: i32 = BASE + 10;
     /// `ai_communication_event(a, unit, b, input[0], NONE, NONE, NULL)`.
-    pub const COMMUNICATION: i32 = BASE | 11;
+    pub const COMMUNICATION: i32 = BASE + 11;
     /// `actor_combat_fire_wildly(actor, a)`.
-    pub const FIRE_WILDLY: i32 = BASE | 12;
+    pub const FIRE_WILDLY: i32 = BASE + 12;
     /// `actor_combat_disable_bursts(actor, a)`.
-    pub const DISABLE_BURSTS: i32 = BASE | 13;
+    pub const DISABLE_BURSTS: i32 = BASE + 13;
     /// `actor_stimulus_was_surprised(actor)`.
-    pub const WAS_SURPRISED: i32 = BASE | 14;
+    pub const WAS_SURPRISED: i32 = BASE + 14;
     /// `actor_situation_try_new_target(actor, a)`.
-    pub const TRY_NEW_TARGET: i32 = BASE | 15;
+    pub const TRY_NEW_TARGET: i32 = BASE + 15;
     /// `actor_combat_get_firing_variant_definition(actor)`, its address the
     /// result.
-    pub const FIRING_VARIANT: i32 = BASE | 16;
+    pub const FIRING_VARIANT: i32 = BASE + 16;
     /// `real_seed_random(global seed)`, in `output[0]`.
-    pub const RANDOM: i32 = BASE | 17;
+    pub const RANDOM: i32 = BASE + 17;
     /// `actor_action_try_to_panic(actor, a, b, input[0])`, the result.
-    pub const TRY_TO_PANIC: i32 = BASE | 18;
+    pub const TRY_TO_PANIC: i32 = BASE + 18;
     /// `actor_action_handle_combat_selection(actor)`, the result.
-    pub const COMBAT_SELECTION: i32 = BASE | 19;
+    pub const COMBAT_SELECTION: i32 = BASE + 19;
     /// `actor_action_handle_lost_contact(actor)`, the result.
-    pub const LOST_CONTACT: i32 = BASE | 20;
+    pub const LOST_CONTACT: i32 = BASE + 20;
     /// `action_guard_setup_from_fleeing` and `actor_action_change` to guard.
-    pub const GUARD_FROM_FLEEING: i32 = BASE | 21;
+    pub const GUARD_FROM_FLEEING: i32 = BASE + 21;
     /// `actor_berserk(actor, TRUE)`.
-    pub const BERSERK: i32 = BASE | 22;
+    pub const BERSERK: i32 = BASE + 22;
     /// `action_guard_setup_from_combat_transition` and, if it sets up,
     /// `actor_action_change` to guard: whether it did, the result.
-    pub const GUARD_FROM_COMBAT_TRANSITION: i32 = BASE | 23;
+    pub const GUARD_FROM_COMBAT_TRANSITION: i32 = BASE + 23;
     /// `actor_perception_tried_to_uncover(actor, a)`.
-    pub const TRIED_TO_UNCOVER: i32 = BASE | 24;
+    pub const TRIED_TO_UNCOVER: i32 = BASE + 24;
     /// `actor_perception_tried_to_search(actor, a)`.
-    pub const TRIED_TO_SEARCH: i32 = BASE | 25;
+    pub const TRIED_TO_SEARCH: i32 = BASE + 25;
     /// `actor_perception_abandoned_search(actor, a)`.
-    pub const ABANDONED_SEARCH: i32 = BASE | 26;
+    pub const ABANDONED_SEARCH: i32 = BASE + 26;
     /// `actor_action_try_to_seek_cover(actor, a, b)`, the result.
-    pub const TRY_TO_SEEK_COVER: i32 = BASE | 27;
+    pub const TRY_TO_SEEK_COVER: i32 = BASE + 27;
     /// `actor_has_ranged_weapon(actor)`, the result.
-    pub const HAS_RANGED_WEAPON: i32 = BASE | 28;
+    pub const HAS_RANGED_WEAPON: i32 = BASE + 28;
     /// The game's difficulty value `a` (the melee delay's scale, 0, or its
     /// base, 1), in `output[0]`.
-    pub const DIFFICULTY: i32 = BASE | 29;
+    pub const DIFFICULTY: i32 = BASE + 29;
     /// `action_charge_setup` for the goal `a` and, if it sets up,
     /// `actor_action_change` to charge: whether it did, the result.
-    pub const CHARGE: i32 = BASE | 30;
+    pub const CHARGE: i32 = BASE + 30;
     /// The definition of the actor's vehicle, its address the result.
-    pub const VEHICLE_DEFINITION: i32 = BASE | 31;
+    pub const VEHICLE_DEFINITION: i32 = BASE + 31;
     /// `action_fight_setup` and `actor_action_change` to fight.
-    pub const FIGHT: i32 = BASE | 32;
+    pub const FIGHT: i32 = BASE + 32;
     /// Whether the actor's encounter is standing down, the result.
-    pub const ENCOUNTER_STAND_DOWN: i32 = BASE | 33;
+    pub const ENCOUNTER_STAND_DOWN: i32 = BASE + 33;
     /// `encounter_modify_pursuit_desires` of the actor's squad: in `input`
     /// and `output`, whether to pursue tenaciously, the group's restriction,
     /// whether it controls the group's pursuit, and the desires to search at
     /// the target, to pursue and to search the pursuit.
-    pub const PURSUIT_DESIRES: i32 = BASE | 34;
+    pub const PURSUIT_DESIRES: i32 = BASE + 34;
     /// `encounter_determine_pursuit_availability` (`a` the group's
     /// restriction, `b` whether it controls the pursuit): its eight flags in
     /// `input` and, by bit, the result.
-    pub const PURSUIT_AVAILABILITY: i32 = BASE | 35;
+    pub const PURSUIT_AVAILABILITY: i32 = BASE + 35;
     /// `actor_perception_find_prop_pathfinding_location(actor, a)`.
-    pub const FIND_PROP_PATHFINDING_LOCATION: i32 = BASE | 36;
+    pub const FIND_PROP_PATHFINDING_LOCATION: i32 = BASE + 36;
     /// `actor_nearby_firing_positions` around the prop `a`'s pathfinding
     /// point, for searching: the result.
-    pub const NEARBY_FIRING_POSITIONS: i32 = BASE | 37;
+    pub const NEARBY_FIRING_POSITIONS: i32 = BASE + 37;
     /// `action_uncover_setup_target(actor, a)` and, if it sets up,
     /// `actor_action_change` to uncover: whether it did, the result.
-    pub const UNCOVER_TARGET: i32 = BASE | 38;
+    pub const UNCOVER_TARGET: i32 = BASE + 38;
     /// `action_search_setup_target(actor, a)` and the change to search: the
     /// result.
-    pub const SEARCH_TARGET: i32 = BASE | 39;
+    pub const SEARCH_TARGET: i32 = BASE + 39;
     /// `actor_target_unit_index(actor)`, the result.
-    pub const TARGET_UNIT: i32 = BASE | 40;
+    pub const TARGET_UNIT: i32 = BASE + 40;
     /// `action_search_setup_undirected(actor, a)` and the change to search:
     /// the result.
-    pub const SEARCH_UNDIRECTED: i32 = BASE | 41;
+    pub const SEARCH_UNDIRECTED: i32 = BASE + 41;
     /// `actor_select_firing_position` of a pursuit position (`a` tenacious,
     /// `b` the orphan's last perceived time): its index, the result.
-    pub const SELECT_PURSUIT_POSITION: i32 = BASE | 42;
+    pub const SELECT_PURSUIT_POSITION: i32 = BASE + 42;
     /// `action_uncover_setup_pursuit(actor, a)` and the change to uncover:
     /// the result.
-    pub const UNCOVER_PURSUIT: i32 = BASE | 43;
+    pub const UNCOVER_PURSUIT: i32 = BASE + 43;
     /// `action_search_setup_pursuit(actor, a, b)` and the change to search:
     /// the result.
-    pub const SEARCH_PURSUIT: i32 = BASE | 44;
+    pub const SEARCH_PURSUIT: i32 = BASE + 44;
     /// `encounter_mark_examined_pursuit_position(encounter, actor, a, b)`,
     /// the result.
-    pub const MARK_EXAMINED: i32 = BASE | 45;
+    pub const MARK_EXAMINED: i32 = BASE + 45;
     /// `action_wait_setup(actor, a)` and the change to wait: the result.
-    pub const WAIT: i32 = BASE | 46;
+    pub const WAIT: i32 = BASE + 46;
     /// `action_guard_setup_postcombat` and the change to guard: the result.
-    pub const GUARD_POSTCOMBAT: i32 = BASE | 47;
+    pub const GUARD_POSTCOMBAT: i32 = BASE + 47;
     /// `action_guard_setup_find_position(actor, a)` and the change to guard.
-    pub const GUARD_FIND_POSITION: i32 = BASE | 48;
+    pub const GUARD_FIND_POSITION: i32 = BASE + 48;
     /// `actor_action_allow_cover_seeking(actor, a)`, the result.
-    pub const ALLOW_COVER_SEEKING: i32 = BASE | 49;
+    pub const ALLOW_COVER_SEEKING: i32 = BASE + 49;
     /// `unit_try_and_exit_seat` of the actor's unit, the result.
-    pub const EXIT_SEAT: i32 = BASE | 50;
+    pub const EXIT_SEAT: i32 = BASE + 50;
     /// `actor_action_consider_grenade(actor)`, the result.
-    pub const CONSIDER_GRENADE: i32 = BASE | 51;
+    pub const CONSIDER_GRENADE: i32 = BASE + 51;
     /// `actor_action_try_to_evade(actor)`, the result.
-    pub const TRY_TO_EVADE: i32 = BASE | 52;
+    pub const TRY_TO_EVADE: i32 = BASE + 52;
     /// `actor_move_animation_busy(actor)`, the result.
-    pub const ANIMATION_BUSY: i32 = BASE | 53;
+    pub const ANIMATION_BUSY: i32 = BASE + 53;
     /// `actor_path_has_path(actor)`, the result.
-    pub const HAS_PATH: i32 = BASE | 54;
+    pub const HAS_PATH: i32 = BASE + 54;
     /// `actor_discard_firing_position(actor, a, TRUE)`.
-    pub const DISCARD_FIRING_POSITION: i32 = BASE | 55;
+    pub const DISCARD_FIRING_POSITION: i32 = BASE + 55;
     /// `actor_action_find_escape_from_danger(actor)`: whether it found one,
     /// the result; in `output`, the escape's direction, distance, alignment
     /// (two) and whether it's a ledge.
-    pub const FIND_ESCAPE: i32 = BASE | 56;
+    pub const FIND_ESCAPE: i32 = BASE + 56;
     /// `actor_action_try_to_dive(actor, a, input[0], input[1..3], input[3])`,
     /// the result.
-    pub const TRY_TO_DIVE: i32 = BASE | 57;
+    pub const TRY_TO_DIVE: i32 = BASE + 57;
     /// `actor_path_at_destination(actor)`, the result.
-    pub const AT_DESTINATION: i32 = BASE | 58;
+    pub const AT_DESTINATION: i32 = BASE + 58;
     /// `action_avoid_setup` and, if it sets up, the change to avoid: the
     /// result.
-    pub const AVOID: i32 = BASE | 59;
+    pub const AVOID: i32 = BASE + 59;
     /// Whether the AI may throw grenades (`ai_globals->grenades_enabled`),
     /// the result.
-    pub const GRENADES_ENABLED: i32 = BASE | 60;
+    pub const GRENADES_ENABLED: i32 = BASE + 60;
     /// The difficulty's grenade chance scale for the actor's team, in
     /// `output[0]`.
-    pub const GRENADE_CHANCE_SCALE: i32 = BASE | 61;
+    pub const GRENADE_CHANCE_SCALE: i32 = BASE + 61;
     /// `actor_action_test_grenade(actor)`, the result.
-    pub const TEST_GRENADE: i32 = BASE | 62;
+    pub const TEST_GRENADE: i32 = BASE + 62;
     /// `actor_action_try_to_throw_grenade(actor, a)`.
-    pub const TRY_TO_THROW_GRENADE: i32 = BASE | 63;
+    pub const TRY_TO_THROW_GRENADE: i32 = BASE + 63;
+    /// `actor_action_allowed_to_enter_vehicle(actor, a)`, the result.
+    pub const ALLOWED_TO_ENTER_VEHICLE: i32 = BASE + 64;
+    /// Whether the vehicle `a` is one, the result, and its driver, `result2`.
+    pub const VEHICLE_DRIVER: i32 = BASE + 65;
+    /// `object_get_origin(a)`, in `output`.
+    pub const OBJECT_ORIGIN: i32 = BASE + 66;
+    /// The AI's enterable vehicles: the address of their count, the result,
+    /// and of the first, `result2`.
+    pub const ENTERABLE_VEHICLES: i32 = BASE + 67;
+    /// Whether the vehicle `a` is one, the result.
+    pub const VEHICLE_EXISTS: i32 = BASE + 68;
+    /// `action_vehicle_setup_impromptu` of the vehicle `a` (`input` the
+    /// attempt's and continuing's distances) and, if it sets up, the change to
+    /// the vehicle action: the result.
+    pub const VEHICLE_SETUP: i32 = BASE + 69;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -244,10 +259,10 @@ fn normalize2(v: &mut [f32; 2]) -> f32 {
     }
 }
 
-/// The handlers ported, by the types' call ([`crate::actor_types::call`]):
-/// what one returns, or None for a handler that's still the game's.
-pub fn run(kind: i32, a: i32, b: i32, c: i32, context: &AiStepContext, host: &impl AiHost) -> Option<bool> {
-    Some(match kind {
+/// The handler `kind` ([`crate::actor_types::handler`]), with its arguments:
+/// what it returns.
+pub fn run(kind: i32, a: i32, b: i32, c: i32, context: &AiStepContext, host: &impl AiHost) -> bool {
+    match kind {
         handler::INITIAL_ACTION => handle_initial_action(context, host),
         handler::PENDING_COMMAND_LIST => handle_pending_command_list(context, host),
         handler::SURPRISE => handle_surprise(context, host, a as i16),
@@ -276,8 +291,9 @@ pub fn run(kind: i32, a: i32, b: i32, c: i32, context: &AiStepContext, host: &im
         handler::DANGER_AVOIDANCE => handle_danger_avoidance(context, host),
         handler::GRENADE_THROWING => handle_grenade_throwing(context, host),
         handler::CONSIDER_GRENADE => consider_grenade(context, host),
-        _ => return None,
-    })
+        handler::VEHICLE_ENTRY => handle_vehicle_entry(context, host),
+        _ => unreachable!("handler {kind}"),
+    }
 }
 
 /// `actor_action_handle_initial_action`: an actor with no action takes its
@@ -2089,4 +2105,144 @@ pub fn consider_grenade(context: &AiStepContext, host: &impl AiHost) -> bool {
         }
     }
     result
+}
+
+/// actions.c's AI index scopes (`_ai_index_*`).
+const AI_INDEX_PLATOON: u32 = 1;
+const AI_INDEX_SQUAD: u32 = 2;
+
+/// `actor_action_handle_vehicle_entry`: at most every second and a half, an
+/// actor (not obeying or fleeing in a panic) that helps players gets into
+/// the vehicle of a friendly player driving within ten units; else one in
+/// combat for two seconds takes the nearest enterable vehicle (the AI's
+/// list: within its radius, and for its team, type and encounter, platoon
+/// or squad).
+pub fn handle_vehicle_entry(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let current_time = context.game_time;
+    let action = m.i16(at(a::STATE_ACTION));
+    if action == ACTION_FLEE && m.i16(at(a::STATE_FLEE_PANIC_TYPE)) > PANIC_NONE {
+        return false;
+    }
+    if action == ACTION_OBEY {
+        return false;
+    }
+    let last_check_time = m.i32(at(a::EMOTIONS_LAST_VEHICLE_CHECK_TIME));
+    if last_check_time != NONE && last_check_time.wrapping_add(45) >= current_time {
+        return false;
+    }
+    m.w32(at(a::EMOTIONS_LAST_VEHICLE_CHECK_TIME), current_time as u32);
+
+    let mut best_distance_squared = f32::MAX;
+    let mut attempt_distance = f32::MAX;
+    let mut continue_distance = f32::MAX;
+    let mut best_vehicle_index = NONE;
+    let allowed = |vehicle_index: i32| call_simple(context, host, call::ALLOWED_TO_ENTER_VEHICLE, vehicle_index) != 0;
+    let origin = |object_index: i32| call_full(context, host, call::OBJECT_ORIGIN, object_index, 0, &[]).vector();
+
+    if m.r32(context.definition + d::FLAGS as u32) & (1 << v::_ACTOR_DEFINITION_HELPS_PLAYERS_IN_VEHICLES_BIT) != 0 {
+        let mut iterator = PropIterator::new(m, context);
+        while let Some(prop) = iterator.next(m, context) {
+            let state = m.i16(prop + p::STATE as u32);
+            let vehicle_index = m.i32(prop + p::VEHICLE_INDEX as u32);
+            if state >= v::_PROP_STATE_BECOMING_UNACKNOWLEDGED as i16
+                && state <= v::_PROP_STATE_ACKNOWLEDGED as i16
+                && m.bool(prop + p::PLAYER as u32)
+                && !m.bool(prop + p::ENEMY as u32)
+                && vehicle_index != NONE
+                && allowed(vehicle_index)
+            {
+                let driver = call_full(context, host, call::VEHICLE_DRIVER, vehicle_index, 0, &[]);
+                if driver.result != 0 && driver.result2 == m.i32(prop + p::UNIT_INDEX as u32) {
+                    let vehicle_origin = origin(vehicle_index);
+                    let distance_squared =
+                        magnitude_squared(vector_from_points(m.vector(at(a::INPUT_BODY_POSITION)), vehicle_origin));
+                    if distance_squared < 100.0 && distance_squared < best_distance_squared {
+                        let distance = m.f32(prop + p::DISTANCE as u32);
+                        best_distance_squared = distance * distance;
+                        best_vehicle_index = vehicle_index;
+                        attempt_distance = 8.0;
+                        continue_distance = 10.0;
+                    }
+                }
+            }
+        }
+    }
+
+    if best_vehicle_index == NONE {
+        if m.i32(at(a::STATE_CERTAIN_COMBAT_TIMER)) < 60 {
+            return false;
+        }
+        let vehicles = call_full(context, host, call::ENTERABLE_VEHICLES, 0, 0, &[]);
+        let count = || m.i16(vehicles.result as u32);
+        if 0 >= count() {
+            return false;
+        }
+        let mut slot: i16 = 0;
+        while slot < count() {
+            let vehicle = vehicles.result2 as u32 + slot as u32 * enterable::SIZEOF as u32;
+            slot = slot.wrapping_add(1);
+            let field = |offset: usize| vehicle + offset as u32;
+            let vehicle_index = m.i32(field(enterable::VEHICLE_INDEX));
+            if call_simple(context, host, call::VEHICLE_EXISTS, vehicle_index) == 0 || !allowed(vehicle_index) {
+                continue;
+            }
+            let position = origin(vehicle_index);
+            let distance_squared = magnitude_squared(vector_from_points(position, m.vector(at(a::INPUT_BODY_POSITION))));
+            let radius = m.f32(field(enterable::RADIUS));
+            if !(distance_squared < best_distance_squared) || (radius != f32::MAX && distance_squared > radius * radius) {
+                continue;
+            }
+            let team_bitmask = m.i16(field(enterable::TEAM_BITMASK));
+            let team_index = m.i16(at(a::META_TEAM_INDEX));
+            if team_bitmask > 0
+                && (team_index == NONE as i16 || (team_bitmask as i32) & 1i32.wrapping_shl(team_index as u32) == 0)
+            {
+                continue;
+            }
+            let actor_type_bitmask = m.i16(field(enterable::ACTOR_TYPE_BITMASK));
+            if actor_type_bitmask > 0
+                && (actor_type_bitmask as i32) & 1i32.wrapping_shl(m.i16(at(a::META_TYPE)) as u32) == 0
+            {
+                continue;
+            }
+            let ai_indices_count = m.i16(field(enterable::AI_INDICES_COUNT));
+            if ai_indices_count > 0 {
+                let mut matched = false;
+                let mut index: i16 = 0;
+                while index < ai_indices_count {
+                    let ai_index = m.i32(field(enterable::AI_INDICES) + index as u32 * 4);
+                    index = index.wrapping_add(1);
+                    if ai_index == NONE {
+                        continue;
+                    }
+                    matched = (m.i32(at(a::META_ENCOUNTER_INDEX)) ^ ai_index) & 0xFFFF == 0;
+                    if matched {
+                        let sub_index = (ai_index as u32 >> 16) & 0xFF;
+                        match ai_index as u32 >> 30 {
+                            AI_INDEX_PLATOON => matched = m.i16(at(a::META_PLATOON_INDEX)) as i32 as u32 == sub_index,
+                            AI_INDEX_SQUAD => matched = m.i16(at(a::META_SQUAD_INDEX)) as i32 as u32 == sub_index,
+                            _ => {}
+                        }
+                    }
+                    if matched {
+                        break;
+                    }
+                }
+                if !matched {
+                    continue;
+                }
+            }
+            best_vehicle_index = vehicle_index;
+            best_distance_squared = distance_squared;
+            attempt_distance = radius + 3.0;
+            continue_distance = radius + 6.0;
+        }
+        if best_vehicle_index == NONE {
+            return false;
+        }
+    }
+
+    call_full(context, host, call::VEHICLE_SETUP, best_vehicle_index, 0, &[attempt_distance, continue_distance]).result != 0
 }

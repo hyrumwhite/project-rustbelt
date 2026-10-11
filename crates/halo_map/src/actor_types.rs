@@ -2,57 +2,55 @@
 //! and each actor_type_*.c's `*_decide_action`, which choose an actor's
 //! action from its situation by actions.c's transition handlers.
 //!
-//! The handlers ported to Rust ([`crate::actor_transitions`]) run here; the
-//! rest are still the game's: each goes through [`AiHost::call`]
-//! (actor_types.c's `actor_type_call`, shared with the C).
+//! The handlers are Rust's too ([`crate::actor_transitions`]); what they ask
+//! of the rest of the game goes through [`AiHost::call`].
 
 use crate::actions::flee_blind_panic;
 use crate::actor_transitions;
-use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE};
+use crate::ai_actor::{AiHost, AiMemoryExt, AiStepContext, NONE};
 use crate::layout::{actor_datum as a, actor_definition as d};
 
-/// The types' calls (halo_sim.h's `_actor_type_call_*`): actions.c's
-/// handlers, each with the actor, its arguments in `a`, `b` and `input[0]`,
-/// and what it returns in the result.
-pub mod call {
-    const BASE: i32 = 0x1000;
-    pub const INITIAL_ACTION: i32 = BASE | 1;
-    pub const PENDING_COMMAND_LIST: i32 = BASE | 2;
+/// actions.c's handlers the types decide by, as
+/// [`crate::actor_transitions::run`] takes them (their arguments in `a`, `b`
+/// and `c`).
+pub mod handler {
+    pub const INITIAL_ACTION: i32 = 1;
+    pub const PENDING_COMMAND_LIST: i32 = 2;
     /// `a` the surprise level.
-    pub const SURPRISE: i32 = BASE | 3;
-    pub const DENY_TRANSITION: i32 = BASE | 4;
-    pub const PANIC_FROM_SURPRISE: i32 = BASE | 5;
-    pub const PANIC_FROM_DAMAGE: i32 = BASE | 6;
-    pub const PANIC_FROM_ATTACHED_PROJECTILES: i32 = BASE | 7;
-    pub const PANIC_FROM_ATTACHED_MELEE_ATTACKERS: i32 = BASE | 8;
-    pub const PANIC_FROM_BURNING_TO_DEATH: i32 = BASE | 9;
+    pub const SURPRISE: i32 = 3;
+    pub const DENY_TRANSITION: i32 = 4;
+    pub const PANIC_FROM_SURPRISE: i32 = 5;
+    pub const PANIC_FROM_DAMAGE: i32 = 6;
+    pub const PANIC_FROM_ATTACHED_PROJECTILES: i32 = 7;
+    pub const PANIC_FROM_ATTACHED_MELEE_ATTACKERS: i32 = 8;
+    pub const PANIC_FROM_BURNING_TO_DEATH: i32 = 9;
     /// `a` the minimum panic type, `b` whether to communicate the failure,
     /// `input[0]` the forced panic type.
-    pub const PANIC_TRANSITION: i32 = BASE | 10;
-    pub const COMBAT_TRANSITION: i32 = BASE | 11;
-    pub const VEHICLE_ENTRY: i32 = BASE | 12;
-    pub const VEHICLE_EXIT: i32 = BASE | 13;
-    pub const GRENADE_THROWING: i32 = BASE | 14;
-    pub const DANGER_AVOIDANCE: i32 = BASE | 15;
+    pub const PANIC_TRANSITION: i32 = 10;
+    pub const COMBAT_TRANSITION: i32 = 11;
+    pub const VEHICLE_ENTRY: i32 = 12;
+    pub const VEHICLE_EXIT: i32 = 13;
+    pub const GRENADE_THROWING: i32 = 14;
+    pub const DANGER_AVOIDANCE: i32 = 15;
     /// `a` whether initiative is allowed, `b` whether to force a decision.
-    pub const COMBAT_STATUS: i32 = BASE | 16;
-    pub const COMBAT_FAILURE: i32 = BASE | 17;
-    pub const EVASION: i32 = BASE | 18;
+    pub const COMBAT_STATUS: i32 = 16;
+    pub const COMBAT_FAILURE: i32 = 17;
+    pub const EVASION: i32 = 18;
     /// `a` the guard's investigate threshold, `b` the cower's.
-    pub const CAN_STOP_GUARDING: i32 = BASE | 19;
-    pub const DONE_FLEEING: i32 = BASE | 20;
-    pub const CONSIDER_GRENADE: i32 = BASE | 21;
-    pub const EXIT_PURSUIT: i32 = BASE | 22;
-    pub const CAN_STOP_CONVERSING: i32 = BASE | 23;
-    pub const BERSERKING_FROM_ATTACKING_MODE: i32 = BASE | 24;
-    pub const BERSERKING_FROM_DAMAGE: i32 = BASE | 25;
-    pub const BERSERKING_FROM_PROXIMITY: i32 = BASE | 26;
+    pub const CAN_STOP_GUARDING: i32 = 19;
+    pub const DONE_FLEEING: i32 = 20;
+    pub const CONSIDER_GRENADE: i32 = 21;
+    pub const EXIT_PURSUIT: i32 = 22;
+    pub const CAN_STOP_CONVERSING: i32 = 23;
+    pub const BERSERKING_FROM_ATTACKING_MODE: i32 = 24;
+    pub const BERSERKING_FROM_DAMAGE: i32 = 25;
+    pub const BERSERKING_FROM_PROXIMITY: i32 = 26;
     /// `a` the berserk level.
-    pub const BERSERK_TRANSITION: i32 = BASE | 27;
-    pub const BERSERKING_FROM_ATTACHED_PROJECTILES: i32 = BASE | 28;
+    pub const BERSERK_TRANSITION: i32 = 27;
+    pub const BERSERKING_FROM_ATTACHED_PROJECTILES: i32 = 28;
     /// `a` whether defensive cover is allowed, `b` whether to force the flee
     /// transition.
-    pub const ACTIVE_COVER_SEEKING: i32 = BASE | 29;
+    pub const ACTIVE_COVER_SEEKING: i32 = 29;
 }
 
 /// The actor types (actor_types.h's `_actor_*`).
@@ -88,7 +86,7 @@ mod action {
     pub const AVOID: i16 = 13;
 }
 
-/// The decisions of an actor of one type: its handlers through the game.
+/// The decisions of an actor of one type.
 struct Decide<'a, H: AiHost> {
     context: &'a AiStepContext,
     host: &'a H,
@@ -96,13 +94,7 @@ struct Decide<'a, H: AiHost> {
 
 impl<H: AiHost> Decide<'_, H> {
     fn handle3(&self, kind: i32, a: i32, b: i32, c: i32) -> bool {
-        if let Some(result) = actor_transitions::run(kind, a, b, c, self.context, self.host) {
-            return result;
-        }
-        let mut call = AiCall { kind, actor: self.context.actor_index, a, b, ..AiCall::default() };
-        call.input[0] = c as f32;
-        self.host.call(&mut call);
-        call.result != 0
+        actor_transitions::run(kind, a, b, c, self.context, self.host)
     }
 
     fn handle2(&self, kind: i32, a: i32, b: i32) -> bool {
@@ -126,11 +118,11 @@ impl<H: AiHost> Decide<'_, H> {
     }
 
     fn combat_status(&self, allow_initiative: bool, force_decision: bool) -> bool {
-        self.handle2(call::COMBAT_STATUS, allow_initiative as i32, force_decision as i32)
+        self.handle2(handler::COMBAT_STATUS, allow_initiative as i32, force_decision as i32)
     }
 
     fn can_stop_guarding(&self) -> bool {
-        self.handle2(call::CAN_STOP_GUARDING, action::FIGHT as i32, action::GUARD as i32)
+        self.handle2(handler::CAN_STOP_GUARDING, action::FIGHT as i32, action::GUARD as i32)
     }
 
     fn unable_to_flee(&self) -> bool {
@@ -152,7 +144,7 @@ impl<H: AiHost> Decide<'_, H> {
     /// The combat status of a conversing actor.
     fn converse(&self) {
         let m = self.host.memory();
-        let can_stop = self.handle(call::CAN_STOP_CONVERSING);
+        let can_stop = self.handle(handler::CAN_STOP_CONVERSING);
         let force = m.bool(self.at(a::STATE_CONVERSE_FAILED)) || m.i32(self.at(a::EXTERNAL_ORDERS_CONVERSATION_INDEX)) == NONE;
         self.combat_status(can_stop, force);
     }
@@ -167,8 +159,8 @@ impl<H: AiHost> Decide<'_, H> {
     /// Fighting or charging: the combat status, else its failure, else
     /// evasion.
     fn fight(&self) {
-        if !self.combat_status(true, false) && !self.handle(call::COMBAT_FAILURE) {
-            self.handle(call::EVASION);
+        if !self.combat_status(true, false) && !self.handle(handler::COMBAT_FAILURE) {
+            self.handle(handler::EVASION);
         }
     }
 
@@ -177,7 +169,7 @@ impl<H: AiHost> Decide<'_, H> {
         if self.unable_to_flee() {
             self.combat_status(true, true);
         } else {
-            self.handle(call::DONE_FLEEING);
+            self.handle(handler::DONE_FLEEING);
         }
     }
 
@@ -185,7 +177,7 @@ impl<H: AiHost> Decide<'_, H> {
     /// pursuit's exit.
     fn pursue(&self) {
         if !self.combat_status(true, false) {
-            self.handle(call::EXIT_PURSUIT);
+            self.handle(handler::EXIT_PURSUIT);
         }
     }
 
@@ -213,21 +205,21 @@ impl<H: AiHost> Decide<'_, H> {
     /// attached projectiles and melee attackers, and burning to death.
     fn panics(&self, from_surprise: bool) {
         if from_surprise {
-            self.handle(call::PANIC_FROM_SURPRISE);
+            self.handle(handler::PANIC_FROM_SURPRISE);
         }
-        self.handle(call::PANIC_FROM_DAMAGE);
-        self.handle(call::PANIC_FROM_ATTACHED_PROJECTILES);
-        self.handle(call::PANIC_FROM_ATTACHED_MELEE_ATTACKERS);
-        self.handle(call::PANIC_FROM_BURNING_TO_DEATH);
+        self.handle(handler::PANIC_FROM_DAMAGE);
+        self.handle(handler::PANIC_FROM_ATTACHED_PROJECTILES);
+        self.handle(handler::PANIC_FROM_ATTACHED_MELEE_ATTACKERS);
+        self.handle(handler::PANIC_FROM_BURNING_TO_DEATH);
     }
 
     /// The decisions every type starts with: its initial action, a pending
     /// command list and (for most) surprise.
     fn begin(&self, surprise_level: Option<i32>) {
-        self.handle(call::INITIAL_ACTION);
-        self.handle(call::PENDING_COMMAND_LIST);
+        self.handle(handler::INITIAL_ACTION);
+        self.handle(handler::PENDING_COMMAND_LIST);
         if let Some(level) = surprise_level {
-            self.handle1(call::SURPRISE, level);
+            self.handle1(handler::SURPRISE, level);
         }
     }
 
@@ -238,20 +230,20 @@ impl<H: AiHost> Decide<'_, H> {
         let nearby_elite_close = m.i8(self.at(a::SITUATION_CLOSE_FRIENDS_BY_TYPE) + actor_type::ELITE as u32) > 0;
 
         self.begin(Some(1));
-        if !self.handle(call::DENY_TRANSITION) {
+        if !self.handle(handler::DENY_TRANSITION) {
             self.panics(true);
-            self.handle3(call::PANIC_TRANSITION, 1, nearby_elite as i32, 7);
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle(call::VEHICLE_ENTRY);
-            self.handle(call::VEHICLE_EXIT);
-            self.handle(call::GRENADE_THROWING);
-            self.handle(call::DANGER_AVOIDANCE);
+            self.handle3(handler::PANIC_TRANSITION, 1, nearby_elite as i32, 7);
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle(handler::VEHICLE_ENTRY);
+            self.handle(handler::VEHICLE_EXIT);
+            self.handle(handler::GRENADE_THROWING);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
 
         match self.action() {
             action::FIGHT | action::CHARGE => self.fight(),
             action::GUARD => {
-                let can_stop = self.handle2(call::CAN_STOP_GUARDING, action::FIGHT as i32, 6);
+                let can_stop = self.handle2(handler::CAN_STOP_GUARDING, action::FIGHT as i32, 6);
                 self.combat_status(can_stop, false);
             }
             action::FLEE => {
@@ -263,10 +255,10 @@ impl<H: AiHost> Decide<'_, H> {
                     self.combat_status(true, true);
                     return;
                 }
-                if self.handle(call::DONE_FLEEING) || m.i16(panic_type) != 0 || m.i16(self.at(a::STATE_COMBAT_STATUS)) < 5 {
+                if self.handle(handler::DONE_FLEEING) || m.i16(panic_type) != 0 || m.i16(self.at(a::STATE_COMBAT_STATUS)) < 5 {
                     return;
                 }
-                self.handle(call::CONSIDER_GRENADE);
+                self.handle(handler::CONSIDER_GRENADE);
             }
             action::UNCOVER | action::SEARCH | action::WAIT => self.pursue(),
             action::VEHICLE => {
@@ -285,23 +277,23 @@ impl<H: AiHost> Decide<'_, H> {
     fn elite(&self) {
         let m = self.host.memory();
         self.begin(Some(4));
-        if !self.handle(call::DENY_TRANSITION) {
-            self.handle(call::BERSERKING_FROM_ATTACKING_MODE);
-            self.handle(call::BERSERKING_FROM_DAMAGE);
-            self.handle(call::BERSERKING_FROM_PROXIMITY);
-            self.handle(call::BERSERKING_FROM_ATTACHED_PROJECTILES);
-            self.handle1(call::BERSERK_TRANSITION, 1);
+        if !self.handle(handler::DENY_TRANSITION) {
+            self.handle(handler::BERSERKING_FROM_ATTACKING_MODE);
+            self.handle(handler::BERSERKING_FROM_DAMAGE);
+            self.handle(handler::BERSERKING_FROM_PROXIMITY);
+            self.handle(handler::BERSERKING_FROM_ATTACHED_PROJECTILES);
+            self.handle1(handler::BERSERK_TRANSITION, 1);
             if !m.bool(self.at(a::EMOTIONS_BERSERK)) {
-                self.handle(call::PANIC_FROM_ATTACHED_PROJECTILES);
-                self.handle(call::PANIC_FROM_ATTACHED_MELEE_ATTACKERS);
-                self.handle3(call::PANIC_TRANSITION, 9, 0, 11);
+                self.handle(handler::PANIC_FROM_ATTACHED_PROJECTILES);
+                self.handle(handler::PANIC_FROM_ATTACHED_MELEE_ATTACKERS);
+                self.handle3(handler::PANIC_TRANSITION, 9, 0, 11);
             }
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle2(call::ACTIVE_COVER_SEEKING, 0, 0);
-            self.handle(call::VEHICLE_ENTRY);
-            self.handle(call::VEHICLE_EXIT);
-            self.handle(call::GRENADE_THROWING);
-            self.handle(call::DANGER_AVOIDANCE);
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle2(handler::ACTIVE_COVER_SEEKING, 0, 0);
+            self.handle(handler::VEHICLE_ENTRY);
+            self.handle(handler::VEHICLE_EXIT);
+            self.handle(handler::GRENADE_THROWING);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
 
         match self.action() {
@@ -328,14 +320,14 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_jackal.c's `jackal_decide_action`.
     fn jackal(&self) {
         self.begin(Some(1));
-        if !self.handle(call::DENY_TRANSITION) {
+        if !self.handle(handler::DENY_TRANSITION) {
             self.panics(true);
-            self.handle3(call::PANIC_TRANSITION, 1, 0, 4);
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle2(call::ACTIVE_COVER_SEEKING, 1, 1);
-            self.handle(call::VEHICLE_ENTRY);
-            self.handle(call::VEHICLE_EXIT);
-            self.handle(call::DANGER_AVOIDANCE);
+            self.handle3(handler::PANIC_TRANSITION, 1, 0, 4);
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle2(handler::ACTIVE_COVER_SEEKING, 1, 1);
+            self.handle(handler::VEHICLE_ENTRY);
+            self.handle(handler::VEHICLE_EXIT);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
 
         match self.action() {
@@ -357,18 +349,18 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_hunter.c's `hunter_decide_action`.
     fn hunter(&self) {
         self.begin(None);
-        if !self.handle(call::DENY_TRANSITION) {
-            self.handle(call::BERSERKING_FROM_DAMAGE);
-            self.handle(call::BERSERKING_FROM_ATTACHED_PROJECTILES);
-            self.handle1(call::BERSERK_TRANSITION, 3);
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle(call::DANGER_AVOIDANCE);
+        if !self.handle(handler::DENY_TRANSITION) {
+            self.handle(handler::BERSERKING_FROM_DAMAGE);
+            self.handle(handler::BERSERKING_FROM_ATTACHED_PROJECTILES);
+            self.handle1(handler::BERSERK_TRANSITION, 3);
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
 
         match self.action() {
             action::FIGHT | action::FLEE | action::GUARD | action::CHARGE => {
                 if !self.combat_status(true, false) {
-                    self.handle(call::COMBAT_FAILURE);
+                    self.handle(handler::COMBAT_FAILURE);
                 }
             }
             action::UNCOVER | action::SEARCH | action::WAIT => self.pursue(),
@@ -382,12 +374,12 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_engineer.c's `engineer_decide_action`.
     fn engineer(&self) {
         self.begin(Some(1));
-        if !self.handle(call::DENY_TRANSITION) {
+        if !self.handle(handler::DENY_TRANSITION) {
             self.panics(false);
-            self.handle3(call::PANIC_TRANSITION, 1, 0, 9);
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle(call::GRENADE_THROWING);
-            self.handle(call::DANGER_AVOIDANCE);
+            self.handle3(handler::PANIC_TRANSITION, 1, 0, 9);
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle(handler::GRENADE_THROWING);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
         self.infantry_actions();
     }
@@ -419,17 +411,17 @@ impl<H: AiHost> Decide<'_, H> {
     fn marine(&self) {
         let m = self.host.memory();
         self.begin(Some(1));
-        if !self.handle(call::DENY_TRANSITION) {
+        if !self.handle(handler::DENY_TRANSITION) {
             self.panics(false);
-            self.handle3(call::PANIC_TRANSITION, 1, 0, 14);
-            self.handle(call::BERSERKING_FROM_DAMAGE);
+            self.handle3(handler::PANIC_TRANSITION, 1, 0, 14);
+            self.handle(handler::BERSERKING_FROM_DAMAGE);
             let marines = m.i8(self.at(a::SITUATION_AREA_FRIENDS_BY_TYPE) + actor_type::MARINE as u32);
-            self.handle1(call::BERSERK_TRANSITION, if marines > 2 { 5 } else { 3 });
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle(call::VEHICLE_ENTRY);
-            self.handle(call::VEHICLE_EXIT);
-            self.handle(call::GRENADE_THROWING);
-            self.handle(call::DANGER_AVOIDANCE);
+            self.handle1(handler::BERSERK_TRANSITION, if marines > 2 { 5 } else { 3 });
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle(handler::VEHICLE_ENTRY);
+            self.handle(handler::VEHICLE_EXIT);
+            self.handle(handler::GRENADE_THROWING);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
         self.infantry_actions();
     }
@@ -437,11 +429,11 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_crew.c's `crew_decide_action`.
     fn crew(&self) {
         self.begin(Some(1));
-        if !self.handle(call::DENY_TRANSITION) {
+        if !self.handle(handler::DENY_TRANSITION) {
             self.panics(true);
-            self.handle3(call::PANIC_TRANSITION, 1, 0, 9);
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle(call::DANGER_AVOIDANCE);
+            self.handle3(handler::PANIC_TRANSITION, 1, 0, 9);
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
         self.infantry_actions();
     }
@@ -449,11 +441,11 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_flood.c's `flood_decide_action`.
     fn flood(&self) {
         self.begin(Some(4));
-        if !self.handle(call::DENY_TRANSITION) {
-            self.handle(call::BERSERKING_FROM_DAMAGE);
-            self.handle1(call::BERSERK_TRANSITION, 3);
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle(call::DANGER_AVOIDANCE);
+        if !self.handle(handler::DENY_TRANSITION) {
+            self.handle(handler::BERSERKING_FROM_DAMAGE);
+            self.handle1(handler::BERSERK_TRANSITION, 3);
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
 
         match self.action() {
@@ -473,14 +465,14 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_infection.c's `infection_decide_action`.
     fn infection(&self) {
         self.begin(None);
-        if !self.handle(call::DENY_TRANSITION) {
-            self.handle(call::COMBAT_TRANSITION);
+        if !self.handle(handler::DENY_TRANSITION) {
+            self.handle(handler::COMBAT_TRANSITION);
         }
 
         match self.action() {
             action::FIGHT | action::CHARGE => {
                 if !self.combat_status(true, false) {
-                    self.handle(call::COMBAT_FAILURE);
+                    self.handle(handler::COMBAT_FAILURE);
                 }
             }
             action::FLEE => self.flee(),
@@ -497,12 +489,12 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_carrier.c's `carrier_decide_action`.
     fn carrier(&self) {
         self.begin(Some(4));
-        if !self.handle(call::DENY_TRANSITION) {
-            self.handle(call::BERSERKING_FROM_ATTACKING_MODE);
-            self.handle(call::BERSERKING_FROM_DAMAGE);
-            self.handle(call::BERSERKING_FROM_PROXIMITY);
-            self.handle1(call::BERSERK_TRANSITION, 1);
-            self.handle(call::COMBAT_TRANSITION);
+        if !self.handle(handler::DENY_TRANSITION) {
+            self.handle(handler::BERSERKING_FROM_ATTACKING_MODE);
+            self.handle(handler::BERSERKING_FROM_DAMAGE);
+            self.handle(handler::BERSERKING_FROM_PROXIMITY);
+            self.handle1(handler::BERSERK_TRANSITION, 1);
+            self.handle(handler::COMBAT_TRANSITION);
         }
 
         match self.action() {
@@ -521,9 +513,9 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_sentinel.c's `sentinel_decide_action`.
     fn sentinel(&self) {
         self.begin(Some(1));
-        if !self.handle(call::DENY_TRANSITION) {
-            self.handle(call::COMBAT_TRANSITION);
-            self.handle(call::DANGER_AVOIDANCE);
+        if !self.handle(handler::DENY_TRANSITION) {
+            self.handle(handler::COMBAT_TRANSITION);
+            self.handle(handler::DANGER_AVOIDANCE);
         }
 
         match self.action() {
@@ -544,14 +536,14 @@ impl<H: AiHost> Decide<'_, H> {
     /// actor_type_mounted_weapon.c's `mounted_weapon_decide_action`.
     fn mounted_weapon(&self) {
         self.begin(None);
-        if !self.handle(call::DENY_TRANSITION) {
-            self.handle(call::COMBAT_TRANSITION);
+        if !self.handle(handler::DENY_TRANSITION) {
+            self.handle(handler::COMBAT_TRANSITION);
         }
 
         match self.action() {
             action::FIGHT | action::FLEE | action::GUARD | action::CHARGE => {
                 if !self.combat_status(true, false) {
-                    self.handle(call::COMBAT_FAILURE);
+                    self.handle(handler::COMBAT_FAILURE);
                 }
             }
             action::UNCOVER | action::SEARCH | action::WAIT => self.pursue(),

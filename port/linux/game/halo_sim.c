@@ -61,6 +61,7 @@ bit for bit; differences are counted and the first few logged.
 #include "objects/damage_effect_definitions.h"
 #include "render/render_cameras.h"
 #include "main/console.h"
+#include "hs/hs.h"
 #include "memory/data.h"
 unsigned char const *transition_function_table_get(short function_type); /* periodic_functions.c */
 #include "render/render.h"
@@ -75,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 35
+#define HALO_SIM_VERSION 36
 
 /* ---------- structures */
 
@@ -1779,6 +1780,9 @@ struct halo_sim_hs_update_call
 	unsigned long event_count;
 	long difference_event;
 	long difference_reason;
+	long operation;
+	long expression;
+	long result;
 };
 
 struct halo_sim_hs_callbacks
@@ -2376,11 +2380,23 @@ static struct
 	struct halo_sim_hs_event events[MAXIMUM_HALO_SIM_HS_EVENTS];
 	unsigned long event_count;
 	struct halo_sim_hs_event *open_event;
-	unsigned long compared;
-	unsigned long differed;
-	unsigned long skipped;
-	unsigned long externals;
+	short open_count;
+	short open_actual_count;
+	long operation;
+	long expression;
+	unsigned long compared[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
+	unsigned long differed[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
+	unsigned long skipped[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
+	unsigned long externals[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
+	boolean command_run;
 } halo_sim_hs_checks;
+
+static char const *const halo_sim_hs_operation_names[NUMBER_OF_HALO_SIM_HS_OPERATIONS] =
+{
+	"script update",
+	"script level start",
+	"script command",
+};
 
 /* the object update loop checks: the game's calls and what they read, and
 the comparisons (and garbage's and scenery's) */
@@ -9105,18 +9121,44 @@ static void halo_sim_hs_snapshot_restore(struct halo_sim_hs_context const *conte
 	memcpy((void *)context->runtime_globals, snapshot->runtime_globals, sizeof(snapshot->runtime_globals));
 }
 
-int halo_sim_hs_update(int *checking)
+int halo_sim_hs_begin(long operation, long expression, long *result, int *checking)
 {
 	short mode = halo_sim_mode(_halo_sim_hs);
 	struct halo_sim_hs_update_call call;
 
 	*checking = FALSE;
+	/* (for testing a console command's evaluation: HALO_SIM_HS_COMMAND, run
+	once at the update of the tick HALO_SIM_HS_COMMAND_TIME, 300 if not
+	given) */
+	if (operation == _halo_sim_hs_update && !halo_sim_hs_checks.command_run)
+	{
+		char const *command = getenv("HALO_SIM_HS_COMMAND");
+		char const *time = getenv("HALO_SIM_HS_COMMAND_TIME");
+
+		if (!command)
+		{
+			halo_sim_hs_checks.command_run = TRUE;
+		}
+		else if (game_time_get() >= (time ? atol(time) : 300))
+		{
+			halo_sim_hs_checks.command_run = TRUE;
+			platform_log("halo_sim: evaluating the command %s: %s", command,
+				hs_compile_and_evaluate(command) ? "compiled" : "didn't compile");
+		}
+	}
 	if (mode == _halo_sim_mode_c)
 		return FALSE;
 	if (mode == _halo_sim_mode_check)
 	{
+		/* (an operation within one the game is running, as a library
+		function's level start: the replay can't follow it) */
 		if (halo_sim_hs_checks.recording)
+		{
+			halo_sim_hs_checks.overflow = TRUE;
 			return FALSE;
+		}
+		halo_sim_hs_checks.operation = operation;
+		halo_sim_hs_checks.expression = expression;
 		hs_runtime_port_context(&halo_sim_hs_checks.context);
 		if (!halo_sim_hs_checks.context.thread_data || !halo_sim_hs_checks.context.global_data)
 			return FALSE;
@@ -9133,8 +9175,13 @@ int halo_sim_hs_update(int *checking)
 	hs_runtime_port_context(&call.context);
 	if (!call.context.thread_data || !call.context.global_data)
 		return FALSE;
+	call.operation = operation;
+	call.expression = expression;
+	if (halo_sim.hs_update(&call) != 0)
+		return FALSE;
+	*result = call.result;
 
-	return halo_sim.hs_update(&call) == 0;
+	return TRUE;
 }
 
 int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call)
@@ -9143,11 +9190,8 @@ int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call)
 
 	if (!halo_sim_hs_checks.recording || halo_sim_hs_checks.open_event)
 		return FALSE;
-	if (halo_sim_hs_checks.event_count >= MAXIMUM_HALO_SIM_HS_EVENTS ||
-		call->kind == _hs_runtime_call_thread_delete)
+	if (halo_sim_hs_checks.event_count >= MAXIMUM_HALO_SIM_HS_EVENTS)
 	{
-		/* (a console command's thread deleted changes the thread array: the
-		replay doesn't follow it) */
 		halo_sim_hs_checks.overflow = TRUE;
 		return FALSE;
 	}
@@ -9160,6 +9204,8 @@ int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call)
 		long *destination;
 
 		hs_runtime_port_thread(call->b, &thread, &destination);
+		halo_sim_hs_checks.open_count = ((struct data_array const *)halo_sim_hs_checks.context.thread_data)->count;
+		halo_sim_hs_checks.open_actual_count = ((struct data_array const *)halo_sim_hs_checks.context.thread_data)->actual_count;
 		event->thread = (unsigned long)thread;
 		event->destination = (unsigned long)destination;
 		memcpy(event->before, thread, sizeof(event->before));
@@ -9186,16 +9232,17 @@ void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened)
 		event->initialized_after = *(unsigned char const *)halo_sim_hs_checks.context.runtime_globals;
 		/* (a library function that changes the thread array or the globals'
 		makes the update one the replay can't follow) */
-		if (threads->count != halo_sim_hs_checks.before.thread_header.count ||
-			threads->actual_count != halo_sim_hs_checks.before.thread_header.actual_count)
+		if (threads->count != halo_sim_hs_checks.open_count ||
+			threads->actual_count != halo_sim_hs_checks.open_actual_count)
 		{
 			halo_sim_hs_checks.overflow = TRUE;
 		}
 	}
 }
 
-void halo_sim_hs_update_check(void)
+void halo_sim_hs_check(long result)
 {
+	long operation = halo_sim_hs_checks.operation;
 	struct halo_sim_hs_update_call call;
 	struct halo_sim_hs_context *context = &halo_sim_hs_checks.context;
 	struct data_array const *threads = (struct data_array const *)context->thread_data;
@@ -9211,7 +9258,7 @@ void halo_sim_hs_update_check(void)
 	halo_sim_hs_checks.recording = FALSE;
 	if (halo_sim_hs_checks.overflow)
 	{
-		halo_sim_hs_checks.skipped++;
+		halo_sim_hs_checks.skipped[operation]++;
 		return;
 	}
 	halo_sim_hs_snapshot_take(context, &halo_sim_hs_checks.after);
@@ -9220,10 +9267,12 @@ void halo_sim_hs_update_check(void)
 	call.context = *context;
 	call.events = halo_sim_hs_checks.events;
 	call.event_count = halo_sim_hs_checks.event_count;
+	call.operation = operation;
+	call.expression = halo_sim_hs_checks.expression;
 	if (halo_sim.hs_update_check(&call) != 0)
 	{
 		halo_sim_hs_snapshot_restore(context, &halo_sim_hs_checks.after);
-		halo_sim_hs_checks.skipped++;
+		halo_sim_hs_checks.skipped[operation]++;
 		return;
 	}
 	/* (Rust's left in the memory: taken into the before snapshot's room,
@@ -9231,20 +9280,21 @@ void halo_sim_hs_update_check(void)
 	halo_sim_hs_snapshot_take(context, rust);
 	halo_sim_hs_snapshot_restore(context, &halo_sim_hs_checks.after);
 
-	halo_sim_hs_checks.compared++;
+	halo_sim_hs_checks.compared[operation]++;
 	for (event_number = 0; event_number < halo_sim_hs_checks.event_count; event_number++)
 	{
 		if (halo_sim_hs_checks.events[event_number].call.kind == _hs_runtime_call_external)
-			halo_sim_hs_checks.externals++;
+			halo_sim_hs_checks.externals[operation]++;
 	}
-	differs = memcmp(rust->threads, halo_sim_hs_checks.after.threads, thread_bytes) != 0 ||
+	differs = call.result != result ||
+		memcmp(rust->threads, halo_sim_hs_checks.after.threads, thread_bytes) != 0 ||
 		memcmp(rust->globals, halo_sim_hs_checks.after.globals, global_bytes) != 0 ||
 		rust->random_seed != halo_sim_hs_checks.after.random_seed ||
 		memcmp(rust->runtime_globals, halo_sim_hs_checks.after.runtime_globals, sizeof(rust->runtime_globals)) != 0;
 	if (differs || call.difference_event != NONE)
 	{
-		halo_sim_hs_checks.differed++;
-		if (halo_sim_hs_checks.differed <= 8)
+		halo_sim_hs_checks.differed[operation]++;
+		if (halo_sim_hs_checks.differed[operation] <= 8)
 		{
 			long offset = 0;
 			long global_offset = 0;
@@ -9255,19 +9305,21 @@ void halo_sim_hs_update_check(void)
 				offset++;
 			while (global_offset < global_bytes && rust->globals[global_offset] == halo_sim_hs_checks.after.globals[global_offset])
 				global_offset++;
-			platform_log("halo_sim: script update differs: call %ld of %lu (kind %ld) reason %ld; threads first differ at byte %ld (thread %ld, +%ld) of %ld; globals at byte %ld of %ld; seed game %lx rust %lx",
+			platform_log("halo_sim: %s differs: value game %lx rust %lx; call %ld of %lu (kind %ld) reason %ld; threads first differ at byte %ld (thread %ld, +%ld) of %ld; globals at byte %ld of %ld; seed game %lx rust %lx",
+				halo_sim_hs_operation_names[operation], (unsigned long)result, (unsigned long)call.result,
 				call.difference_event, halo_sim_hs_checks.event_count, kind, call.difference_reason, offset,
 				offset / HALO_SIM_HS_THREAD_DATUM_SIZE, offset % HALO_SIM_HS_THREAD_DATUM_SIZE, thread_bytes, global_offset,
 				global_bytes, halo_sim_hs_checks.after.random_seed, rust->random_seed);
 		}
 	}
 	{
-		unsigned long compared = halo_sim_hs_checks.compared;
+		unsigned long compared = halo_sim_hs_checks.compared[operation];
 
 		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
 		{
-			platform_log("halo_sim: script update: %lu of %lu agree with the game (%lu library calls; %lu left out)",
-				compared - halo_sim_hs_checks.differed, compared, halo_sim_hs_checks.externals, halo_sim_hs_checks.skipped);
+			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu library calls; %lu left out)",
+				halo_sim_hs_operation_names[operation], compared - halo_sim_hs_checks.differed[operation], compared,
+				halo_sim_hs_checks.externals[operation], halo_sim_hs_checks.skipped[operation]);
 		}
 	}
 }

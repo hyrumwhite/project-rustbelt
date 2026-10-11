@@ -705,7 +705,17 @@ enum
 	_hs_runtime_call_unused12,
 	_hs_runtime_call_object_list_gc,
 	_hs_runtime_call_node_gc,
-	_hs_runtime_call_thread_delete,
+	_hs_runtime_call_unused15, /* (a console command's thread deleted: the runtime's own now) */
+	_hs_runtime_call_global_initializer_disabled,
+};
+
+/* the runtime's operations the Rust port can run */
+enum
+{
+	_halo_sim_hs_update,
+	_halo_sim_hs_initialize_for_new_map,
+	_halo_sim_hs_evaluate,
+	NUMBER_OF_HALO_SIM_HS_OPERATIONS
 };
 
 /* the runtime's messages */
@@ -715,6 +725,9 @@ enum
 	_hs_runtime_error_syntax,
 	_hs_runtime_error_unexpected_parameters,
 	_hs_runtime_error_object_cast,
+	_hs_runtime_error_out_of_script_threads,
+	_hs_runtime_error_out_of_command_threads,
+	_hs_runtime_error_global_initialization_slept,
 };
 
 /* crates/halo_map's HsCall */
@@ -746,6 +759,7 @@ struct halo_sim_hs_context
 	unsigned long random_seed;
 	long game_time;
 	unsigned long string_default;
+	long scenario_loaded;
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1252,13 +1266,14 @@ void halo_sim_game_tick_check(void);
 void halo_sim_game_tick_note(long kind, float f, long result);
 long game_tick_call(long kind, float f);
 
-/* hs_runtime.c's hs_runtime_update: TRUE when the Rust port ran it; in check
+/* hs_runtime.c's update, level start and evaluation (the operation, with its
+expression): TRUE when the Rust port ran it (`result` its value); in check
 mode `checking` is set, hs_runtime_call records each call
-(halo_sim_hs_event_begin and _end), and halo_sim_hs_update_check puts the
-script memory back as the update began, runs Rust's replay on it, compares,
-and leaves the game's */
-int halo_sim_hs_update(int *checking);
-void halo_sim_hs_update_check(void);
+(halo_sim_hs_event_begin and _end), and halo_sim_hs_check (with the game's
+value) puts the script memory back as the operation began, runs Rust's
+replay on it, compares, and leaves the game's */
+int halo_sim_hs_begin(long operation, long expression, long *result, int *checking);
+void halo_sim_hs_check(long result);
 int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call);
 void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened);
 void hs_runtime_call(struct halo_sim_hs_call *call);

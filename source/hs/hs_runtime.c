@@ -775,7 +775,31 @@ void hs_runtime_initialize(
 	return;
 }
 
+static void hs_runtime_initialize_for_new_map_game(
+	void);
+
+/* port: the Rust port's level start in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 void hs_runtime_initialize_for_new_map(
+	void)
+{
+	int checking = FALSE;
+	long result = NONE;
+
+	if (!halo_sim_hs_begin(_halo_sim_hs_initialize_for_new_map, NONE, &result, &checking))
+	{
+		hs_runtime_initialize_for_new_map_game();
+		if (checking)
+			halo_sim_hs_check(NONE);
+	}
+
+	csmemset(hs_debug_data, 0,
+		BIT_VECTOR_SIZE_IN_BYTES(MAXIMUM_TRIGGER_VOLUMES_PER_SCENARIO));
+
+	return;
+}
+
+static void hs_runtime_initialize_for_new_map_game(
 	void)
 {
 	long internal_thread_index;
@@ -822,7 +846,7 @@ void hs_runtime_initialize_for_new_map(
 			/* port: an initializer that calls a function a map's scripts
 			may not isn't evaluated: the global starts at its type's
 			default (hs_scenario_functions_check) */
-			if (hs_scenario_global_initializer_disabled(global_index))
+			if (hs_runtime_call_simple(_hs_runtime_call_global_initializer_disabled, global_index))
 			{
 				global_datum->value = hs_type_default_value(global->type);
 			}
@@ -838,10 +862,18 @@ void hs_runtime_initialize_for_new_map(
 			{
 				hs_thread_main(internal_thread_index);
 				if (global->type==_hs_type_object_list)
-					object_list_add_reference(hs_global_evaluate(global_index));
-				match_hs_assert("c:\\halo\\SOURCE\\hs\\hs_runtime.c", 0xe7, internal_thread_index,
-					internal_thread->sleep_until==0,
-					"a global initialization attempted to sleep.");
+					hs_runtime_call_simple(_hs_runtime_call_object_list_add_reference,
+						hs_global_evaluate(global_index));
+				if (internal_thread->sleep_until!=0)
+				{
+					struct halo_sim_hs_call call;
+
+					memset(&call, 0, sizeof(call));
+					call.kind = _hs_runtime_call_error;
+					call.a = _hs_runtime_error_global_initialization_slept;
+					call.b = internal_thread_index;
+					hs_runtime_call(&call);
+				}
 			}
 			hs_global_reconcile_write(global_index);
 		}
@@ -861,16 +893,13 @@ void hs_runtime_initialize_for_new_map(
 			scripts may not (hs_scenario_functions_check) */
 			if (script->script_type!=_hs_script_static &&
 				script->script_type!=_hs_script_stub &&
-				!hs_scenario_script_disabled(script_index))
+				!hs_runtime_call_simple(_hs_runtime_call_script_disabled, script_index))
 			{
 				if (hs_thread_new(_hs_thread_type_script, script_index)==NONE)
-					error(_error_immediate, "ran out of script threads.");
+					hs_runtime_call_simple(_hs_runtime_call_error, _hs_runtime_error_out_of_script_threads);
 			}
 		}
 	}
-
-	csmemset(hs_debug_data, 0,
-		BIT_VECTOR_SIZE_IN_BYTES(MAXIMUM_TRIGGER_VOLUMES_PER_SCENARIO));
 
 	return;
 }
@@ -1212,11 +1241,13 @@ void hs_runtime_update(
 {
 	int checking = FALSE;
 
-	if (halo_sim_hs_update(&checking))
+	long result = NONE;
+
+	if (halo_sim_hs_begin(_halo_sim_hs_update, NONE, &result, &checking))
 		return;
 	hs_runtime_update_game();
 	if (checking)
-		halo_sim_hs_update_check();
+		halo_sim_hs_check(NONE);
 
 	return;
 }
@@ -1250,7 +1281,28 @@ static void hs_runtime_update_game(
 	return;
 }
 
+static long hs_runtime_evaluate_game(
+	long expression_index);
+
+/* port: the Rust port's evaluation in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 long hs_runtime_evaluate(
+	long expression_index)
+{
+	int checking = FALSE;
+	long result = NONE;
+
+	if (!halo_sim_hs_begin(_halo_sim_hs_evaluate, expression_index, &result, &checking))
+	{
+		result = hs_runtime_evaluate_game(expression_index);
+		if (checking)
+			halo_sim_hs_check(result);
+	}
+
+	return result;
+}
+
+static long hs_runtime_evaluate_game(
 	long expression_index)
 {
 	long result = NONE;
@@ -1284,7 +1336,7 @@ long hs_runtime_evaluate(
 			return thread->result;
 		}
 
-		error(_error_silent, "there are not enough threads to execute that command.");
+		hs_runtime_call_simple(_hs_runtime_call_error, _hs_runtime_error_out_of_command_threads);
 	}
 
 	return result;
@@ -2878,7 +2930,7 @@ static void hs_thread_main(
 		}
 		else if (thread->type==_hs_thread_type_console_command)
 		{
-			hs_runtime_call_simple(_hs_runtime_call_thread_delete, thread_index);
+			hs_thread_delete(thread_index);
 		}
 	}
 
@@ -3618,6 +3670,20 @@ void hs_runtime_call(
 						tag_get_name(object_get(call->c)->definition_index),
 						hs_type_names[call->b]);
 					break;
+
+				case _hs_runtime_error_out_of_script_threads:
+					error(_error_immediate, "ran out of script threads.");
+					break;
+
+				case _hs_runtime_error_out_of_command_threads:
+					error(_error_silent, "there are not enough threads to execute that command.");
+					break;
+
+				case _hs_runtime_error_global_initialization_slept:
+					match_hs_assert("c:\\halo\\SOURCE\\hs\\hs_runtime.c", 0xe7, call->b,
+						FALSE,
+						"a global initialization attempted to sleep.");
+					break;
 			}
 			break;
 
@@ -3646,8 +3712,8 @@ void hs_runtime_call(
 			hs_node_gc();
 			break;
 
-		case _hs_runtime_call_thread_delete:
-			hs_thread_delete(call->a);
+		case _hs_runtime_call_global_initializer_disabled:
+			call->result = hs_scenario_global_initializer_disabled((short)call->a) ? 1 : 0;
 			break;
 	}
 	halo_sim_hs_event_end(call, opened);
@@ -3679,6 +3745,7 @@ void hs_runtime_port_context(
 			: 0;
 	}
 	context->runtime_globals = (unsigned long)&hs_runtime_globals;
+	context->scenario_loaded = scenario!=NULL;
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

@@ -57,6 +57,7 @@ enum
 	_halo_sim_actor_destination,
 	_halo_sim_actor_unit_control,
 	_halo_sim_actor_perception,
+	_halo_sim_actor_look,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -863,6 +864,7 @@ enum
 	_halo_sim_ai_step_destination,
 	_halo_sim_ai_step_unit_control,
 	_halo_sim_ai_step_perception,
+	_halo_sim_ai_step_look,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
@@ -1037,6 +1039,33 @@ enum
 	_actor_perception_call_in_combat,
 	_actor_perception_call_is_fighting,
 	_actor_perception_call_profile,
+};
+
+/* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's
+actor_looking::call), and the directions it decodes */
+enum
+{
+	_actor_look_call_has_weapon = 1,
+	_actor_look_call_firing_burst,
+	_actor_look_call_decode,
+	_actor_look_call_action_class,
+	_actor_look_call_look_timer_expired,
+	_actor_look_call_move_force_stop,
+	_actor_look_call_idle_timer,
+	_actor_look_call_idle_new_major,
+	_actor_look_call_idle_new_minor,
+	_actor_look_call_unit_is_busy,
+	_actor_look_call_abandon_stationary_facing,
+	_actor_look_call_exact_facing,
+};
+
+enum
+{
+	_actor_look_direction_target = 0,
+	_actor_look_direction_primary,
+	_actor_look_direction_secondary,
+	_actor_look_direction_idle_major,
+	_actor_look_direction_idle_minor,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1590,6 +1619,7 @@ void actor_conversation_call(struct halo_sim_ai_call *call);
 void actor_destination_call(struct halo_sim_ai_call *call);
 void actor_unit_control_call(struct halo_sim_ai_call *call);
 void actor_perception_call(struct halo_sim_ai_call *call);
+void actor_look_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

@@ -1354,7 +1354,184 @@ static void actor_look_idle_new_minor_direction(
 	return;
 }
 
+/* port: what an actor's look update asks of the rest of the game, shared by
+the game's update and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_look_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _actor_look_call_has_weapon:
+			call->result = actor_get_weapon(actor_index) != NONE;
+			break;
+
+		case _actor_look_call_firing_burst:
+			call->result = actor_combat_currently_firing_burst(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_look_call_decode:
+		{
+			/* port: the burst's target direction starts from zeros (the
+			game's left its union as the stack's leftovers; a target's
+			decoding doesn't read it) */
+			struct direction_specification target_direction;
+			struct direction_specification *direction;
+
+			memset(&target_direction, 0, sizeof(target_direction));
+			target_direction.type = _direction_specification_target;
+			switch (call->a)
+			{
+				case _actor_look_direction_primary: direction = &actor->orders.look.primary_direction; break;
+				case _actor_look_direction_secondary: direction = &actor->control.secondary_look_direction; break;
+				case _actor_look_direction_idle_major: direction = &actor->control.idle_major_direction; break;
+				case _actor_look_direction_idle_minor: direction = &actor->control.idle_minor_direction; break;
+				default: direction = &target_direction; break;
+			}
+			call->result = actor_look_decode_direction(actor_index, direction, (real_vector3d *)call->output) ? 1 : 0;
+			break;
+		}
+
+		case _actor_look_call_action_class:
+			call->result = actor_action_class(actor_index);
+			break;
+
+		case _actor_look_call_look_timer_expired:
+			if (ACTOR_LOOKING_DEBUG_PRINTING_ENABLED())
+			{
+				console_printf(
+					FALSE,
+					"%s: look timer expire",
+					ai_debug_describe_actor(
+						actor_index,
+						NONE,
+						FALSE,
+						temporary,
+						NUMBEROF(temporary)));
+			}
+			break;
+
+		case _actor_look_call_move_force_stop:
+			call->result = actor_move_force_stop(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_look_call_idle_timer:
+			call->result = actor_look_idle_timer(
+				actor_index,
+				actor_look_get_looking_definition(actor_index),
+				(short)call->a,
+				(boolean)call->b);
+			break;
+
+		case _actor_look_call_idle_new_major:
+			call->result = (byte)actor_look_idle_new_major_direction(
+				actor_index,
+				actor_look_get_looking_definition(actor_index),
+				call->a ? &actor->control.desired_facing_vector : &actor->control.desired_aiming_vector,
+				(call->b & 1) != 0,
+				(boolean)call->a,
+				(call->b & 2) != 0);
+			break;
+
+		case _actor_look_call_idle_new_minor:
+			actor_look_idle_new_minor_direction(
+				actor_index,
+				actor_look_get_looking_definition(actor_index),
+				(real_vector3d const *)call->input);
+			break;
+
+		case _actor_look_call_unit_is_busy:
+			call->result = unit_is_busy(actor->meta.unit_index) ? 1 : 0;
+			break;
+
+		case _actor_look_call_abandon_stationary_facing:
+			actor_stimulus_abandon_stationary_facing(actor_index);
+			break;
+
+		case _actor_look_call_exact_facing:
+			actor_unit_control_exact_facing(actor_index, actor->control.face_exactly);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_look_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	actor_look_call(&call);
+
+	return call.result;
+}
+
+static boolean actor_look_call_decode(
+	long actor_index,
+	long direction,
+	real_vector3d *vector)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _actor_look_call_decode;
+	call.actor = actor_index;
+	call.a = direction;
+	actor_look_call(&call);
+	if (call.result)
+		memcpy(vector, call.output, sizeof(*vector));
+
+	return call.result != 0;
+}
+
+static void actor_look_call_new_minor(
+	long actor_index,
+	real_vector3d const *base_vector)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _actor_look_call_idle_new_minor;
+	call.actor = actor_index;
+	memcpy(call.input, base_vector, sizeof(*base_vector));
+	actor_look_call(&call);
+}
+
+static void actor_look_update_game(
+	long actor_index);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 void actor_look_update(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_look, actor_index, &checking))
+		return;
+	actor_look_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_look, 0);
+
+	return;
+}
+
+/* the game's look update, what it asks of the rest of the game through
+actor_look_call */
+static void actor_look_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -1379,7 +1556,7 @@ void actor_look_update(
 	else if (actor->output.movement_type == _actor_movement_type_alert ||
 		actor->output.movement_type == _actor_movement_type_combat)
 	{
-		can_look = actor_get_weapon(actor_index) != NONE;
+		can_look = (boolean)actor_look_call_simple(actor_index, _actor_look_call_has_weapon, 0, 0);
 	}
 	else
 	{
@@ -1429,13 +1606,10 @@ void actor_look_update(
 			look_delta_deviations[1] = cosine(definition->looking.noncombat_looking_delta_angles[1]);
 		}
 
-		if (actor_combat_currently_firing_burst(actor_index) &&
+		if (actor_look_call_simple(actor_index, _actor_look_call_firing_burst, 0, 0) &&
 			!actor->orders.combat.abort_burst)
 		{
-			struct direction_specification temporary_direction;
-
-			temporary_direction.type = _direction_specification_target;
-			if (actor_look_decode_direction(actor_index, &temporary_direction, &primary_vector))
+			if (actor_look_call_decode(actor_index, _actor_look_direction_target, &primary_vector))
 			{
 				primary_priority = _primary_priority_locked_aiming;
 				aiming_at_target = TRUE;
@@ -1449,7 +1623,7 @@ void actor_look_update(
 			if (primary_priority != _primary_priority_none &&
 				primary_priority != _primary_priority_face_360)
 			{
-				if (actor_look_decode_direction(actor_index, &actor->orders.look.primary_direction, &primary_vector))
+				if (actor_look_call_decode(actor_index, _actor_look_direction_primary, &primary_vector))
 				{
 					aiming_at_target = actor->orders.look.primary_direction.type == _direction_specification_target;
 				}
@@ -1463,13 +1637,13 @@ void actor_look_update(
 		secondary_priority = _secondary_look_priority_none;
 		if (actor->control.secondary_look_type >= _secondary_look_none &&
 			actor->control.secondary_look_timer > 0 &&
-			actor_look_decode_direction(actor_index, &actor->control.secondary_look_direction, &secondary_vector))
+			actor_look_call_decode(actor_index, _actor_look_direction_secondary, &secondary_vector))
 		{
 			secondary_priority = actor->control.secondary_look_priority;
 		}
 
 		if (actor->control.moving &&
-			actor_action_class(actor_index) == _action_class_transitory)
+			actor_look_call_simple(actor_index, _actor_look_call_action_class, 0, 0) == _action_class_transitory)
 		{
 			secondary_priority = MIN(secondary_priority, _secondary_look_priority_turn_and_aim);
 		}
@@ -1488,18 +1662,7 @@ void actor_look_update(
 		if (actor->control.secondary_look_timer > 0 &&
 			--actor->control.secondary_look_timer == 0)
 		{
-			if (ACTOR_LOOKING_DEBUG_PRINTING_ENABLED())
-			{
-				console_printf(
-					FALSE,
-					"%s: look timer expire",
-					ai_debug_describe_actor(
-						actor_index,
-						NONE,
-						FALSE,
-						temporary,
-						NUMBEROF(temporary)));
-			}
+			actor_look_call_simple(actor_index, _actor_look_call_look_timer_expired, 0, 0);
 
 			actor->control.secondary_look_type = _secondary_look_none;
 			actor->control.secondary_look_priority = _secondary_look_priority_none;
@@ -1563,7 +1726,7 @@ void actor_look_update(
 				boolean secondary_aim_valid = actor_look_valid_aim_vector(aiming_cosine, &actor->control.desired_facing_vector, &secondary_vector);
 
 				if (!facing_locked && !looking_locked &&
-					((secondary_priority >= _secondary_look_priority_stop_and_aim && actor_move_force_stop(actor_index)) ||
+					((secondary_priority >= _secondary_look_priority_stop_and_aim && actor_look_call_simple(actor_index, _actor_look_call_move_force_stop, 0, 0)) ||
 					(secondary_priority >= _secondary_look_priority_turn_and_aim && (facing_optional || actor->control.free_facing_vector)) ||
 					(secondary_priority >= _secondary_look_priority_aim && !secondary_aim_valid && facing_free && aiming_free)))
 				{
@@ -1624,7 +1787,7 @@ void actor_look_update(
 				{
 					succeeded = TRUE;
 				}
-				else if (actor_move_force_stop(actor_index))
+				else if (actor_look_call_simple(actor_index, _actor_look_call_move_force_stop, 0, 0))
 				{
 					face_exactly = TRUE;
 					change_facing = TRUE;
@@ -1689,7 +1852,7 @@ void actor_look_update(
 					!aiming_free)
 				{
 					actor->control.idle_major_active = TRUE;
-					actor->control.idle_major_timer = actor_look_idle_timer(actor_index, looking_definition, _idle_timer_looking, TRUE);
+					actor->control.idle_major_timer = actor_look_call_simple(actor_index, _actor_look_call_idle_timer, _idle_timer_looking, TRUE);
 					actor->control.idle_major_direction.type = _direction_specification_vector;
 					actor->control.idle_major_direction.vector = actor->control.desired_aiming_vector;
 				}
@@ -1707,13 +1870,11 @@ void actor_look_update(
 
 					if (major_possible)
 					{
-						actor->control.idle_major_direction_is_interesting = actor_look_idle_new_major_direction(
+						actor->control.idle_major_direction_is_interesting = (boolean)actor_look_call_simple(
 							actor_index,
-							looking_definition,
-							major_is_aiming ? &actor->control.desired_facing_vector : &actor->control.desired_aiming_vector,
-							free_facing,
+							_actor_look_call_idle_new_major,
 							major_is_aiming,
-							major_is_aiming && looking_free && idle_looking);
+							(free_facing ? 1 : 0) | ((major_is_aiming && looking_free && idle_looking) ? 2 : 0));
 						match_assert(
 							"c:\\halo\\SOURCE\\ai\\actor_looking.c",
 							1501,
@@ -1725,7 +1886,7 @@ void actor_look_update(
 				if (actor->control.idle_major_active)
 				{
 					actor->control.idle_major_timer--;
-					if (actor_look_decode_direction(actor_index, &actor->control.idle_major_direction, &idle_major_vector))
+					if (actor_look_call_decode(actor_index, _actor_look_direction_idle_major, &idle_major_vector))
 					{
 						match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actor_looking.c", 1512, &idle_major_vector);
 
@@ -1764,17 +1925,17 @@ void actor_look_update(
 					if (new_major && idle_looking)
 					{
 						actor->control.idle_minor_active = TRUE;
-						actor->control.idle_minor_timer = actor_look_idle_timer(
+						actor->control.idle_minor_timer = actor_look_call_simple(
 							actor_index,
-							looking_definition,
+							_actor_look_call_idle_timer,
 							_idle_timer_looking,
 							actor->control.idle_major_direction_is_interesting);
 						actor->control.idle_minor_direction = actor->control.idle_major_direction;
 						if (free_facing)
 						{
-							actor->control.idle_facing_timer = actor_look_idle_timer(
+							actor->control.idle_facing_timer = actor_look_call_simple(
 								actor_index,
-								looking_definition,
+								_actor_look_call_idle_timer,
 								_idle_timer_facing,
 								actor->control.idle_major_direction_is_interesting);
 						}
@@ -1791,7 +1952,7 @@ void actor_look_update(
 				{
 					if (!actor->control.idle_minor_timer)
 					{
-						actor_look_idle_new_minor_direction(actor_index, looking_definition, &idle_major_vector);
+						actor_look_call_new_minor(actor_index, &idle_major_vector);
 						match_assert(
 							"c:\\halo\\SOURCE\\ai\\actor_looking.c",
 							1581,
@@ -1803,7 +1964,7 @@ void actor_look_update(
 					{
 						real_vector3d idle_minor_vector;
 
-						if (actor_look_decode_direction(actor_index, &actor->control.idle_minor_direction, &idle_minor_vector) &&
+						if (actor_look_call_decode(actor_index, _actor_look_direction_idle_minor, &idle_minor_vector) &&
 							(aiming_variation ?
 								actor_look_valid_aim_vector(aiming_cosine, &actor->control.desired_facing_vector, &idle_minor_vector) :
 								actor_look_valid_look_vector(looking_cosine, look_delta_deviations, &actor->control.desired_facing_vector, &actor->control.desired_aiming_vector, &idle_minor_vector)))
@@ -1835,7 +1996,7 @@ void actor_look_update(
 
 		if (!actor->control.moving &&
 			!actor->control.moving_forced_by_aiming &&
-			!unit_is_busy(actor->meta.unit_index) &&
+			!actor_look_call_simple(actor_index, _actor_look_call_unit_is_busy, 0, 0) &&
 			actor->input.vehicle_index == NONE)
 		{
 			if ((actor_look_valid_aim_vector(aiming_cosine, &actor->control.desired_facing_vector, &actor->control.desired_aiming_vector) &&
@@ -1918,7 +2079,7 @@ update_facing:
 			if (!valid)
 			{
 				actor->control.fixed_stationary_facing = FALSE;
-				actor_stimulus_abandon_stationary_facing(actor_index);
+				actor_look_call_simple(actor_index, _actor_look_call_abandon_stationary_facing, 0, 0);
 			}
 		}
 	}
@@ -1930,7 +2091,7 @@ update_facing:
 	actor->output.facing_vector = actor->control.desired_facing_vector;
 	actor->output.aiming_vector = actor->control.desired_aiming_vector;
 	actor->output.looking_vector = actor->control.desired_looking_vector;
-	actor_unit_control_exact_facing(actor_index, actor->control.face_exactly);
+	actor_look_call_simple(actor_index, _actor_look_call_exact_facing, 0, 0);
 
 	match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actor_looking.c", 1736, &actor->output.facing_vector);
 	match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actor_looking.c", 1737, &actor->output.aiming_vector);

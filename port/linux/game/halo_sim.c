@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 48
+#define HALO_SIM_VERSION 49
 
 /* ---------- structures */
 
@@ -1854,6 +1854,7 @@ struct halo_sim_ai_step_callbacks
 	void (*destination)(struct halo_sim_ai_call *call);
 	void (*unit_control)(struct halo_sim_ai_call *call);
 	void (*perception)(struct halo_sim_ai_call *call);
+	void (*look)(struct halo_sim_ai_call *call);
 };
 
 struct halo_sim_effect_callbacks
@@ -2115,6 +2116,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"actor_destination",
 	"actor_unit_control",
 	"actor_perception",
+	"actor_look",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2493,6 +2495,7 @@ static short const halo_sim_ai_step_systems[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	_halo_sim_actor_destination,
 	_halo_sim_actor_unit_control,
 	_halo_sim_actor_perception,
+	_halo_sim_actor_look,
 };
 
 static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
@@ -2510,6 +2513,7 @@ static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	"actor destination update",
 	"actor unit control",
 	"actor perception update",
+	"actor look update",
 };
 
 /* the steps that write the actor's props: their check puts them back too,
@@ -2528,6 +2532,7 @@ static boolean const halo_sim_ai_step_props[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	FALSE,
 	FALSE,
 	FALSE,
+	TRUE,
 	TRUE,
 };
 
@@ -4584,6 +4589,7 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		actor_destination_call,
 		actor_unit_control_call,
 		actor_perception_call,
+		actor_look_call,
 	},
 };
 

@@ -433,6 +433,19 @@ static void particle_system_next_particle_state_index(
 	return;
 }
 
+static long particle_system_new_unattached_game(
+	long definition_index,
+	real_point3d const *position,
+	real_vector3d const *velocity,
+	real_argb_color const *color,
+	real scale);
+static long particle_system_new_attached_game(
+	long definition_index,
+	long object_index,
+	short attachment_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
 long particle_system_new_unattached(
 	long definition_index,
 	real_point3d const *position,
@@ -440,29 +453,17 @@ long particle_system_new_unattached(
 	real_argb_color const *color,
 	real scale)
 {
-	long system_index = datum_new(particle_systems);
+	int checking = FALSE;
+	long system_index;
 
-	if (system_index != NONE)
+	if (halo_sim_particle_system_new(FALSE, definition_index, position, velocity, color, scale, NONE, NONE,
+		&system_index, &checking))
 	{
-		struct particle_system_datum *system = particle_system_get(system_index);
-		real_rgb_color diffuse;
-
-		system->definition_index = definition_index;
-		system->object_index = NONE;
-		system->position = *position;
-		system->velocity = *velocity;
-		system->color = *color;
-		system->scale = scale;
-		SET_FLAG(system->flags, _particle_system_active_bit, TRUE);
-
-		light_particle(&system->position, &system->lighting, &diffuse, FALSE);
-
-		if (!particle_system_initialize(system_index))
-		{
-			datum_delete(particle_systems, system_index);
-			return NONE;
-		}
+		return system_index;
 	}
+	system_index = particle_system_new_unattached_game(definition_index, position, velocity, color, scale);
+	if (checking)
+		halo_sim_particle_system_new_check(system_index);
 
 	return system_index;
 }
@@ -472,72 +473,155 @@ long particle_system_new_attached(
 	long object_index,
 	short attachment_index)
 {
-	long system_index = datum_new(particle_systems);
+	int checking = FALSE;
+	long system_index;
+
+	if (halo_sim_particle_system_new(TRUE, definition_index, NULL, NULL, NULL, 0.0f, object_index, attachment_index,
+		&system_index, &checking))
+	{
+		return system_index;
+	}
+	system_index = particle_system_new_attached_game(definition_index, object_index, attachment_index);
+	if (checking)
+		halo_sim_particle_system_new_check(system_index);
+
+	return system_index;
+}
+
+/* port: the new datum, through particle_system_call */
+static long particle_system_call_new_datum(
+	void)
+{
+	struct halo_sim_particle_system_call call;
+
+	particle_system_call_new(&call, _particle_system_call_new);
+	particle_system_call(NONE, &call);
+	return call.result;
+}
+
+/* port: datum_delete of a new system that failed, through
+particle_system_call */
+static void particle_system_call_delete_datum(
+	long system_index)
+{
+	struct halo_sim_particle_system_call call;
+
+	particle_system_call_new(&call, _particle_system_call_datum_delete);
+	call.a = system_index;
+	particle_system_call(system_index, &call);
+}
+
+static long particle_system_new_unattached_game(
+	long definition_index,
+	real_point3d const *position,
+	real_vector3d const *velocity,
+	real_argb_color const *color,
+	real scale)
+{
+	long system_index = particle_system_call_new_datum();
 
 	if (system_index != NONE)
 	{
 		struct particle_system_datum *system = particle_system_get(system_index);
-		struct object_datum *object = object_get(object_index);
-		struct object_attachment_definition *attachment = TAG_BLOCK_GET_ELEMENT(
-			&object_definition_get(object->definition_index)->object.attachments,
-			attachment_index,
-			struct object_attachment_definition);
-		struct object_marker marker;
+		struct halo_sim_particle_system_call call;
+
+		system->definition_index = definition_index;
+		system->object_index = NONE;
+		system->position = *position;
+		system->velocity = *velocity;
+		system->color = *color;
+		system->scale = scale;
+		SET_FLAG(system->flags, _particle_system_active_bit, TRUE);
+
+		/* port: light_particle, through particle_system_call */
+		particle_system_call_new(&call, _particle_system_call_light);
+		call.f[0] = system->position.x;
+		call.f[1] = system->position.y;
+		call.f[2] = system->position.z;
+		particle_system_call(system_index, &call);
+		system->lighting.red = call.out[0];
+		system->lighting.green = call.out[1];
+		system->lighting.blue = call.out[2];
+
+		if (!particle_system_initialize(system_index))
+		{
+			particle_system_call_delete_datum(system_index);
+			return NONE;
+		}
+	}
+
+	return system_index;
+}
+
+static long particle_system_new_attached_game(
+	long definition_index,
+	long object_index,
+	short attachment_index)
+{
+	long system_index = particle_system_call_new_datum();
+
+	if (system_index != NONE)
+	{
+		struct particle_system_datum *system = particle_system_get(system_index);
+		struct halo_sim_particle_system_call call;
+		real_vector3d object_velocity;
 
 		system->definition_index = definition_index;
 		system->object_index = object_index;
 		system->attachment_index = attachment_index;
-		system->function_index = attachment->primary_scale_function_reference - 1;
 
-		/* port: and a change color the object has (the reference is the
-		map's, and indexes the colors as it is; retail particle systems are
-		never attached with one). Any other is white, said once. */
-		if (attachment->change_color_reference &&
-			!VALID_INDEX(attachment->change_color_reference, NUMBER_OF_OBJECT_CHANGE_COLORS))
-		{
-			static boolean bad_change_color_reported = FALSE;
+		/* port: the attachment's function and colour (an index the object
+		has no change colour for is white, said once) and the object's
+		velocity, through particle_system_call */
+		particle_system_call_new(&call, _particle_system_call_attachment);
+		call.a = object_index;
+		call.b = attachment_index;
+		particle_system_call(system_index, &call);
+		system->function_index = (short)call.result;
+		system->color.alpha = call.out[0];
+		system->color.red = call.out[1];
+		system->color.green = call.out[2];
+		system->color.blue = call.out[3];
+		object_velocity.i = call.out[4];
+		object_velocity.j = call.out[5];
+		object_velocity.k = call.out[6];
 
-			if (!bad_change_color_reported)
-			{
-				bad_change_color_reported = TRUE;
-				error(
-					_error_silent,
-					"particle system %s is attached with change color %d (of %d)",
-					tag_get_name(definition_index),
-					attachment->change_color_reference,
-					NUMBER_OF_OBJECT_CHANGE_COLORS);
-			}
-		}
-		if (attachment->change_color_reference &&
-			VALID_INDEX(attachment->change_color_reference, NUMBER_OF_OBJECT_CHANGE_COLORS))
+		/* port: the first marker, through particle_system_call (none: zeros,
+		where the C's was the stack's leftover) */
+		particle_system_call_new(&call, _particle_system_call_markers);
+		call.a = object_index;
+		call.b = attachment_index;
+		call.c = 0;
+		particle_system_call(system_index, &call);
+		if (call.result > 0)
 		{
-			system->color.rgb = object->object.outgoing_change_colors[attachment->change_color_reference];
-			system->color.alpha = 1.0f;
+			system->position.x = call.out[0];
+			system->position.y = call.out[1];
+			system->position.z = call.out[2];
 		}
 		else
 		{
-			system->color = *global_real_argb_white;
+			system->position = *global_origin3d;
 		}
-
-		object_get_marker_by_name(object_index, attachment->marker_name, &marker, 1);
-		system->position = marker.matrix.position;
-		object_get_velocities(object_index, &system->velocity, NULL);
+		system->velocity = object_velocity;
 		system->velocity.i *= TICKS_PER_SECOND;
 		system->velocity.j *= TICKS_PER_SECOND;
 		system->velocity.k *= TICKS_PER_SECOND;
 
 		system->lighting = *global_real_rgb_white;
-		SET_FLAG(
-			system->flags,
-			_particle_system_active_bit,
-			object_get_function_value(object_index, system->function_index, &system->scale));
+		particle_system_call_new(&call, _particle_system_call_function_value);
+		call.a = object_index;
+		call.b = system->function_index;
+		call.f[0] = system->scale;
+		particle_system_call(system_index, &call);
+		system->scale = call.out[0];
+		SET_FLAG(system->flags, _particle_system_active_bit, call.result != 0);
 
 		if (!particle_system_initialize(system_index))
 		{
-			datum_delete(particle_systems, system_index);
+			particle_system_call_delete_datum(system_index);
 			system_index = NONE;
 		}
-
 	}
 
 	return system_index;
@@ -580,7 +664,18 @@ static boolean particle_system_initialize(
 	boolean success = TRUE;
 	short type_index;
 
-	scenario_location_from_point(&system->location, &system->position);
+	/* port: the location, through particle_system_call */
+	{
+		struct halo_sim_particle_system_call call;
+
+		particle_system_call_new(&call, _particle_system_call_location_from_point);
+		particle_system_call_location(&call, &system->location);
+		call.f[0] = system->position.x;
+		call.f[1] = system->position.y;
+		call.f[2] = system->position.z;
+		particle_system_call(system_index, &call);
+		particle_system_call_out_location(&call, &system->location);
+	}
 	SET_FLAG(system->flags, _particle_system_initializing_bit, TRUE);
 
 	/* port: no more types than the system holds. A tag with more is cut to
@@ -2029,6 +2124,91 @@ void particle_system_call(
 		case _particle_system_call_delete:
 			particle_system_delete(system_index);
 			break;
+
+		case _particle_system_call_new:
+			call->result = datum_new(particle_systems);
+			break;
+
+		case _particle_system_call_datum_delete:
+			datum_delete(particle_systems, call->a);
+			break;
+
+		case _particle_system_call_light:
+		{
+			real_point3d point;
+			real_rgb_color light;
+			real_rgb_color diffuse;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			light_particle(&point, &light, &diffuse, FALSE);
+			call->out[0] = light.red;
+			call->out[1] = light.green;
+			call->out[2] = light.blue;
+			break;
+		}
+
+		case _particle_system_call_attachment:
+		{
+			struct object_datum *object = object_get(call->a);
+			struct object_attachment_definition *attachment = TAG_BLOCK_GET_ELEMENT(
+				&object_definition_get(object->definition_index)->object.attachments,
+				call->b,
+				struct object_attachment_definition);
+			real_vector3d velocity;
+
+			call->result = attachment->primary_scale_function_reference - 1;
+			/* port: and a change color the object has (the reference is the
+			map's, and indexes the colors as it is; retail particle systems are
+			never attached with one). Any other is white, said once. */
+			if (attachment->change_color_reference &&
+				!VALID_INDEX(attachment->change_color_reference, NUMBER_OF_OBJECT_CHANGE_COLORS))
+			{
+				static boolean bad_change_color_reported = FALSE;
+
+				if (!bad_change_color_reported)
+				{
+					bad_change_color_reported = TRUE;
+					error(
+						_error_silent,
+						"particle system is attached with change color %d (of %d)",
+						attachment->change_color_reference,
+						NUMBER_OF_OBJECT_CHANGE_COLORS);
+				}
+			}
+			if (attachment->change_color_reference &&
+				VALID_INDEX(attachment->change_color_reference, NUMBER_OF_OBJECT_CHANGE_COLORS))
+			{
+				real_rgb_color const *rgb = &object->object.outgoing_change_colors[attachment->change_color_reference];
+
+				call->out[0] = 1.0f;
+				call->out[1] = rgb->red;
+				call->out[2] = rgb->green;
+				call->out[3] = rgb->blue;
+			}
+			else
+			{
+				call->out[0] = global_real_argb_white->alpha;
+				call->out[1] = global_real_argb_white->red;
+				call->out[2] = global_real_argb_white->green;
+				call->out[3] = global_real_argb_white->blue;
+			}
+			object_get_velocities(call->a, &velocity, NULL);
+			call->out[4] = velocity.i;
+			call->out[5] = velocity.j;
+			call->out[6] = velocity.k;
+			break;
+		}
+
+		case _particle_system_call_function_value:
+		{
+			real value = call->f[0];
+
+			call->result = object_get_function_value(call->a, (short)call->b, &value);
+			call->out[0] = value;
+			break;
+		}
 	}
 	halo_sim_particle_system_event_end(system_index, call, opened);
 
@@ -2068,6 +2248,7 @@ int particle_system_halo_sim_load(
 	memcpy(state->position, &system->position, sizeof(state->position));
 	memcpy(state->velocity, &system->velocity, sizeof(state->velocity));
 	memcpy(state->color, &system->color, sizeof(state->color));
+	memcpy(state->lighting, &system->lighting, sizeof(state->lighting));
 	state->grounded = system->physics_state.explosion.grounded ? 1 : 0;
 	memset(state->pad, 0, sizeof(state->pad));
 	memcpy(state->types, system->types, sizeof(state->types));
@@ -2126,6 +2307,12 @@ void particle_system_halo_sim_store(
 	if (!system)
 		return;
 	system->flags = state->flags;
+	system->definition_index = (long)state->definition_index;
+	system->object_index = state->object_index;
+	system->attachment_index = state->attachment_index;
+	system->function_index = state->function_index;
+	memcpy(&system->color, state->color, sizeof(state->color));
+	memcpy(&system->lighting, state->lighting, sizeof(state->lighting));
 	system->scale = state->scale;
 	system->location.leaf_index = state->location_leaf;
 	system->location.cluster_index = state->location_cluster;

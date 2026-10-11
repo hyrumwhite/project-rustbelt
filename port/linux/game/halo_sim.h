@@ -426,6 +426,7 @@ enum
 	_contrail_call_location_from_line,
 	_contrail_call_physics,
 	_contrail_call_delete,
+	_contrail_call_new,
 };
 
 /* crates/halo_map's ContrailCall: a contrail's call of the game, and its
@@ -500,6 +501,11 @@ enum
 	_particle_system_call_particle_delete,
 	_particle_system_call_particle_physics,
 	_particle_system_call_delete,
+	_particle_system_call_new,
+	_particle_system_call_datum_delete,
+	_particle_system_call_light,
+	_particle_system_call_attachment,
+	_particle_system_call_function_value,
 };
 
 /* crates/halo_map's ParticleSystemCall: a particle system's call of the
@@ -551,6 +557,7 @@ struct halo_sim_particle_system_state
 	float position[3];
 	float velocity[3];
 	float color[4];
+	float lighting[3];
 	unsigned char grounded;
 	unsigned char pad[3];
 	struct halo_sim_particle_type types[4];
@@ -1020,6 +1027,12 @@ void halo_sim_contrail_update_check(long contrail_index);
 int halo_sim_contrail_event_begin(long contrail_index, struct halo_sim_contrail_call const *call);
 void halo_sim_contrail_event_end(long contrail_index, struct halo_sim_contrail_call const *call, int opened);
 void contrail_call(long contrail_index, struct halo_sim_contrail_call *call);
+/* contrails.c's contrail_new: TRUE when the Rust port made the contrail
+(`contrail_index`); in check mode `checking` is set when this one is
+checked, and halo_sim_contrail_new_check compares Rust's replay */
+int halo_sim_contrail_new(long definition_index, long object_index, short attachment_index, long *contrail_index,
+	int *checking);
+void halo_sim_contrail_new_check(long contrail_index);
 /* contrails.c's: a contrail and its points in the order its lists walk
 (FALSE if it is gone, or they don't fit: the seed is still read), and back
 (the seed always) */
@@ -1040,6 +1053,14 @@ int halo_sim_particle_system_event_begin(long system_index, struct halo_sim_part
 void halo_sim_particle_system_event_end(long system_index, struct halo_sim_particle_system_call const *call,
 	int opened);
 void particle_system_call(long system_index, struct halo_sim_particle_system_call *call);
+/* particle_systems.c's particle_system_new_unattached (`attached` FALSE) and
+_attached: TRUE when the Rust port made the system (`system_index`); in
+check mode `checking` is set when this one is checked, and
+halo_sim_particle_system_new_check compares Rust's replay */
+int halo_sim_particle_system_new(int attached, long definition_index, real_point3d const *position,
+	real_vector3d const *velocity, real_argb_color const *color, float scale, long object_index,
+	short attachment_index, long *system_index, int *checking);
+void halo_sim_particle_system_new_check(long system_index);
 /* particle_systems.c's: a system and its particles in the order its lists
 walk (FALSE if it is gone, or they don't fit: the seed is still read), and
 back (the seed always) */

@@ -335,12 +335,37 @@ void contrails_reconnect_to_structure_bsp(
 	return;
 }
 
+static long contrail_new_game(
+	long definition_index,
+	long object_index,
+	short attachment_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
 long contrail_new(
 	long definition_index,
 	long object_index,
 	short attachment_index)
 {
+	int checking = FALSE;
+	long contrail_index;
+
+	if (halo_sim_contrail_new(definition_index, object_index, attachment_index, &contrail_index, &checking))
+		return contrail_index;
+	contrail_index = contrail_new_game(definition_index, object_index, attachment_index);
+	if (checking)
+		halo_sim_contrail_new_check(contrail_index);
+
+	return contrail_index;
+}
+
+static long contrail_new_game(
+	long definition_index,
+	long object_index,
+	short attachment_index)
+{
 	long contrail_index = NONE;
+	struct halo_sim_contrail_call call;
 
 	match_assert(
 		"c:\\halo\\SOURCE\\effects\\contrails.c",
@@ -355,21 +380,23 @@ long contrail_new(
 	{
 		struct contrail_definition *definition = contrail_definition_get(definition_index);
 
-		contrail_index = datum_new(contrail_data);
+		/* port: the datum and the attachment's function, through
+		contrail_call */
+		contrail_call_new(&call, _contrail_call_new);
+		call.a = object_index;
+		call.b = attachment_index;
+		contrail_call(NONE, &call);
+		contrail_index = call.result;
 		if (contrail_index != NONE)
 		{
 			struct contrail_datum *contrail = contrail_get(contrail_index);
-			struct object_datum *object = object_get(object_index);
 			short instance_index;
 
 			contrail->flags = 0;
 			contrail->definition_index = definition_index;
 			contrail->object_index = object_index;
 			contrail->attachment_index = attachment_index;
-			contrail->density_function_index = (short)(TAG_BLOCK_GET_ELEMENT(
-				&object_definition_get(object->definition_index)->object.attachments,
-				attachment_index,
-				struct object_attachment_definition)->primary_scale_function_reference - 1);
+			contrail->density_function_index = (short)call.out_location_leaf;
 			contrail->sequence_index = NONE;
 			contrail_next_frame(contrail);
 			contrail->texture_offset_u = 0.0f;
@@ -383,10 +410,13 @@ long contrail_new(
 				contrail->first_contrail_point_indices[instance_index] = NONE;
 			}
 
-			if (object_get_function_value(
-				contrail->object_index,
-				contrail->density_function_index,
-				&contrail->density))
+			contrail_call_new(&call, _contrail_call_function_value);
+			call.a = contrail->object_index;
+			call.b = contrail->density_function_index;
+			call.f[0] = contrail->density;
+			contrail_call(contrail_index, &call);
+			contrail->density = call.out[0];
+			if (call.result)
 			{
 				SET_FLAG(contrail->flags, _contrail_active_bit, TRUE);
 				contrail_add_points(contrail_index, 1, TRUE);
@@ -1203,6 +1233,18 @@ void contrail_call(
 		case _contrail_call_delete:
 			contrail_delete(contrail_index);
 			break;
+
+		case _contrail_call_new:
+		{
+			struct object_datum *object = object_get(call->a);
+
+			call->result = datum_new(contrail_data);
+			call->out_location_leaf = TAG_BLOCK_GET_ELEMENT(
+				&object_definition_get(object->definition_index)->object.attachments,
+				call->b,
+				struct object_attachment_definition)->primary_scale_function_reference - 1;
+			break;
+		}
 	}
 	halo_sim_contrail_event_end(contrail_index, call, opened);
 
@@ -1291,6 +1333,10 @@ void contrail_halo_sim_store(
 	if (!contrail)
 		return;
 	contrail->flags = state->flags;
+	contrail->definition_index = (long)state->definition_index;
+	contrail->object_index = state->object_index;
+	contrail->attachment_index = state->attachment_index;
+	contrail->density_function_index = state->density_function_index;
 	contrail->sequence_index = state->sequence_index;
 	contrail->frame_index = state->frame_index;
 	contrail->density = state->density;

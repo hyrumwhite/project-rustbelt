@@ -1215,6 +1215,396 @@ void action_obey_call(
 		case _action_obey_call_look_secondary_stop:
 			actor_look_secondary_stop(actor_index);
 			break;
+
+		case _action_obey_call_move_to_destination:
+			call->result = actor_move_to_point(
+				actor_index,
+				&state_data->complex_control.destination_point,
+				state_data->complex_control.destination_surface_index,
+				NONE) ? 1 : 0;
+			break;
+
+		case _action_obey_call_keep_moving:
+			actor_move_keep_moving_past_destination(actor_index);
+			break;
+
+		case _action_obey_call_random_range_short:
+			call->result = random_range((short)call->a, (short)call->b);
+			break;
+
+		case _action_obey_call_random_range:
+			call->output[0] = real_random_range(call->input[0], call->input[1]);
+			break;
+
+		case _action_obey_call_nearest_player_unit:
+		{
+			struct data_iterator player_iterator;
+			struct player_datum *player;
+			real closest_player_distance_squared = REAL_MAX;
+
+			call->result = NONE;
+			data_iterator_new(&player_iterator, player_data);
+			while (player = data_iterator_next(&player_iterator))
+			{
+				if (player->unit_index != NONE)
+				{
+					real_point3d head_position;
+					real distance_squared;
+
+					unit_get_head_position(player->unit_index, &head_position);
+					distance_squared = distance_squared3d(&head_position, &actor->input.position.head_position);
+					if (distance_squared < closest_player_distance_squared)
+					{
+						call->result = player->unit_index;
+						closest_player_distance_squared = distance_squared;
+					}
+				}
+			}
+			break;
+		}
+
+		case _action_obey_call_object_unit:
+		{
+			struct scenario *scenario = global_scenario_get();
+
+			call->result = NONE;
+			if (call->a >= 0 && call->a < scenario->object_names.count)
+			{
+				long object_index = object_index_from_name_index((short)call->a);
+
+				if (unit_try_and_get(object_index))
+					call->result = object_index;
+			}
+			break;
+		}
+
+		case _action_obey_call_active_prop:
+			call->result = prop_get_active_by_unit_index(actor_index, call->a);
+			break;
+
+		case _action_obey_call_head_position:
+			unit_get_head_position(call->a, (real_point3d *)call->output);
+			break;
+
+		case _action_obey_call_look_secondary:
+		{
+			/* port: the direction starts from zeros (the game's left the rest
+			of a prop direction's union as the stack's leftovers) */
+			struct direction_specification direction;
+
+			memset(&direction, 0, sizeof(direction));
+			direction.type = (short)(call->a & 0xFF);
+			if (direction.type == _direction_specification_prop)
+				direction.prop_index = call->b;
+			else
+				memcpy(&direction.point, call->input, sizeof(direction.point));
+			actor_look_secondary(actor_index, _secondary_look_scripted, (short)(call->a >> 8), &direction);
+			break;
+		}
+
+		case _action_obey_call_add_grenade:
+			unit_add_grenade_type_to_inventory(actor->meta.unit_index, (short)call->a, 1);
+			break;
+
+		case _action_obey_call_enter_vehicle:
+		{
+			struct ai_command_list_definition *command_list = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_command_lists,
+				state_data->command_list_index,
+				struct ai_command_list_definition);
+			struct ai_command_definition *command = TAG_BLOCK_GET_ELEMENT(
+				&command_list->commands,
+				state_data->simple_control.current_command_index,
+				struct ai_command_definition);
+			struct vehicle_possibility possibilities[16];
+			struct object_iterator iterator;
+			short possibility_count = 0;
+			short seat_desire_type = NONE;
+			short possibility_index;
+
+			call->result = FALSE;
+			object_iterator_new(&iterator, _object_mask_vehicle, 0);
+			while (object_iterator_next(&iterator))
+			{
+				real_point3d vehicle_origin;
+				real distance_squared;
+
+				object_get_origin(iterator.index, &vehicle_origin);
+				distance_squared = distance_squared3d(&actor->input.position.body_position, &vehicle_origin);
+				if (command->parameter1 == 0.0f ||
+					distance_squared < command->parameter1 * command->parameter1)
+				{
+					possibilities[possibility_count].distance_squared = distance_squared;
+					possibilities[possibility_count].vehicle_index = iterator.index;
+					possibility_count++;
+					if (possibility_count >= NUMBEROF(possibilities))
+					{
+						break;
+					}
+				}
+			}
+			if (possibility_count > 1)
+			{
+				qsort(possibilities, possibility_count, sizeof(struct vehicle_possibility), vehicle_possibility_qsort);
+			}
+			if (command->atom_modifier >= _ai_atom_vehicle_modifier_any_non_driver &&
+				command->atom_modifier < NUMBER_OF_AI_ATOM_VEHICLE_MODIFIERS)
+			{
+				seat_desire_type = command->atom_modifier;
+			}
+			for (possibility_index = 0; possibility_index < possibility_count; possibility_index++)
+			{
+				if (actor_action_try_to_enter_vehicle(
+					actor_index,
+					possibilities[possibility_index].vehicle_index,
+					"",
+					seat_desire_type,
+					0,
+					NULL))
+				{
+					call->result = TRUE;
+					break;
+				}
+			}
+			break;
+		}
+
+		case _action_obey_call_animate:
+		{
+			struct ai_animation_reference_definition *animation_reference = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_animation_references,
+				(short)call->a,
+				struct ai_animation_reference_definition);
+			long unit_index = actor->meta.unit_index;
+			long animation_graph_index = animation_reference->animation_graph.index;
+			boolean absolute_movement = FALSE;
+			boolean no_collision = FALSE;
+			boolean interpolate = TRUE;
+
+			if (animation_graph_index == NONE)
+			{
+				animation_graph_index = unit_definition_get(unit_get(unit_index)->definition_index)->object.animation_graph.index;
+			}
+			switch ((short)call->b)
+			{
+			case _ai_atom_animate_modifier_absolute_movement:
+				absolute_movement = TRUE;
+				break;
+			case _ai_atom_animate_modifier_absolute_movement_no_collision:
+				no_collision = TRUE;
+				absolute_movement = TRUE;
+				break;
+			case _ai_atom_animate_modifier_no_interpolation_relative_movement:
+				interpolate = FALSE;
+				break;
+			case _ai_atom_animate_modifier_no_interpolation_absolute_movement:
+				interpolate = FALSE;
+				absolute_movement = TRUE;
+				break;
+			case _ai_atom_animate_modifier_no_interpolation_absolute_movement_no_collision:
+				interpolate = FALSE;
+				no_collision = TRUE;
+				absolute_movement = TRUE;
+				break;
+			}
+			call->result = FALSE;
+			if (unit_start_user_animation(unit_index, animation_graph_index, animation_reference->animation_name, interpolate))
+			{
+				struct biped_datum *biped = biped_try_and_get(unit_index);
+
+				if (biped)
+				{
+					SET_FLAG(biped->biped.flags, _biped_absolute_movement_bit, absolute_movement);
+					SET_FLAG(biped->biped.flags, _biped_no_collision_bit, no_collision);
+				}
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _action_obey_call_play_recording:
+			call->result = FALSE;
+			if (call->a >= 0 && call->a < global_scenario_get()->ai_recording_references.count)
+			{
+				struct ai_recording_reference_definition *recording_reference = TAG_BLOCK_GET_ELEMENT(
+					&global_scenario_get()->ai_recording_references,
+					call->a,
+					struct ai_recording_reference_definition);
+				short recorded_animation_index = scenario_get_animation_by_name(
+					global_scenario_get(),
+					recording_reference->recording_name);
+
+				if (recorded_animation_index != NONE)
+				{
+					call->result = recorded_animation_play(actor->meta.unit_index, recorded_animation_index) ? 1 : 0;
+				}
+			}
+			break;
+
+		case _action_obey_call_wake_script:
+			call->result = FALSE;
+			if (call->a >= 0 && call->a < global_scenario_get()->ai_script_references.count)
+			{
+				call->result = hs_wake_by_name(TAG_BLOCK_GET_ELEMENT(
+					&global_scenario_get()->ai_script_references,
+					call->a,
+					struct ai_script_reference_definition)->script_name) ? 1 : 0;
+			}
+			break;
+
+		case _action_obey_call_die:
+		{
+			struct unit_datum *unit = unit_get(actor->meta.unit_index);
+
+			if ((short)call->a == _ai_atom_die_modifier_silent)
+				SET_FLAG(unit->object.damage_flags, _object_die_act_of_god_silent_bit, TRUE);
+			else
+				SET_FLAG(unit->object.damage_flags, _object_die_act_of_god_bit, TRUE);
+			break;
+		}
+
+		case _action_obey_call_vocalize:
+		{
+			long unit_index = actor->meta.unit_index;
+			short modifier = (short)call->a;
+
+			call->result = FALSE;
+			if (modifier == NONE || VALID_INDEX(modifier, NUMBER_OF_DIALOGUE_VOCALIZATION_TYPES))
+			{
+				short vocalization_type = modifier;
+				long sound_definition_index = NONE;
+				short speech_type = unit_test_speech(
+					unit_index,
+					_unit_speech_scripted,
+					TRUE,
+					TRUE,
+					NULL,
+					&vocalization_type,
+					&sound_definition_index);
+
+				if (speech_type > 0)
+				{
+					struct unit_speech_item speech_item;
+
+					csmemset(&speech_item, 0, sizeof(speech_item));
+					speech_item.vocalization_type = vocalization_type;
+					speech_item.sound_definition_index = sound_definition_index;
+					speech_item.priority = _unit_speech_scripted;
+					ai_communication_packet_new(&speech_item.ai);
+					unit_speak(unit_index, speech_type, &speech_item);
+					call->result = TRUE;
+				}
+			}
+			else
+			{
+				static boolean reported = FALSE;
+
+				if (!reported)
+				{
+					struct ai_command_list_definition *command_list = TAG_BLOCK_GET_ELEMENT(
+						&global_scenario_get()->ai_command_lists,
+						state_data->command_list_index,
+						struct ai_command_list_definition);
+
+					error(_error_silent, "command list %s vocalizes #%d (there are %d)",
+						command_list->name,
+						modifier,
+						NUMBER_OF_DIALOGUE_VOCALIZATION_TYPES);
+					reported = TRUE;
+				}
+			}
+			break;
+		}
+
+		case _action_obey_call_teleport:
+		{
+			struct ai_command_list_definition *command_list = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_command_lists,
+				state_data->command_list_index,
+				struct ai_command_list_definition);
+			struct ai_command_point_definition *position_point = TAG_BLOCK_GET_ELEMENT(
+				&command_list->points,
+				(short)call->a,
+				struct ai_command_point_definition);
+			long unit_index = actor->meta.unit_index;
+			short point2_index = (short)call->b;
+			real_vector3d facing;
+
+			unit_get_facing_vector(unit_index, &facing);
+			if (point2_index >= 0 && point2_index < command_list->points.count)
+			{
+				struct ai_command_point_definition *facing_point = TAG_BLOCK_GET_ELEMENT(
+					&command_list->points,
+					point2_index,
+					struct ai_command_point_definition);
+				struct biped_datum *biped = biped_try_and_get(unit_index);
+				struct biped_definition *biped_definition = !biped ? NULL : biped_definition_get(biped->definition_index);
+
+				vector_from_points3d(&position_point->position, &facing_point->position, &facing);
+				if (biped_definition &&
+					(TEST_FLAG(biped_definition->biped.flags, _biped_flying_bit) ||
+					TEST_FLAG(biped_definition->biped.flags, _biped_climbs_anything_bit)))
+				{
+					if (normalize3d(&facing) == 0.0f)
+						unit_get_facing_vector(unit_index, &facing);
+				}
+				else
+				{
+					facing.k = 0.0f;
+					if (normalize2d((real_vector2d *)&facing) == 0.0f)
+						unit_get_facing_vector(unit_index, &facing);
+				}
+			}
+			object_set_position(unit_index, &position_point->position, &facing, NULL);
+			object_reset(unit_index);
+			object_compute_node_matrices_recursive(unit_index);
+			actor_input_sample_position(actor_index, actor->meta.unit_index, &actor->input.position);
+			actor_move_halt(actor_index);
+			call->result = TRUE;
+			break;
+		}
+
+		case _action_obey_call_debug_command:
+			if (ai_debug.print_command_lists)
+			{
+				struct ai_command_list_definition *command_list = TAG_BLOCK_GET_ELEMENT(
+					&global_scenario_get()->ai_command_lists,
+					state_data->command_list_index,
+					struct ai_command_list_definition);
+				struct ai_command_definition *command = TAG_BLOCK_GET_ELEMENT(
+					&command_list->commands,
+					state_data->simple_control.current_command_index,
+					struct ai_command_definition);
+				char actor_description[256];
+
+				if (actor->meta.encounter_index == NONE)
+				{
+					csstrcpy(actor_description, "<no encounter>");
+				}
+				else
+				{
+					struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
+						&global_scenario_get()->ai_encounters,
+						DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
+						struct encounter_definition);
+					struct squad_definition *squad = TAG_BLOCK_GET_ELEMENT(
+						&encounter->squads,
+						actor->meta.squad_index,
+						struct squad_definition);
+
+					sprintf(actor_description, "%s/%s", encounter->name, squad->name);
+				}
+				action_obey_describe_command(global_scenario_get(), command, temporary, NUMBEROF(temporary));
+				error(
+					_error_silent,
+					"%s: %s #%d%s: %s",
+					actor_description,
+					command_list->name,
+					state_data->simple_control.current_command_index + 1,
+					call->a ? "" : " FAILED",
+					temporary);
+			}
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -1235,6 +1625,441 @@ static long action_obey_call_simple(
 	action_obey_call(&call);
 
 	return call.result;
+}
+
+/* port: the actor's own unit's command begin (action_obey_command_begin's,
+what it asks of the rest of the game through action_obey_call, as the Rust
+port's does); a swarm's components keep the game's */
+static long action_obey_call_full(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real const *input,
+	short input_count,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	if (input)
+		memcpy(call.input, input, input_count * sizeof(real));
+	action_obey_call(&call);
+	if (output)
+		memcpy(output, call.output, sizeof(call.output));
+
+	return call.result;
+}
+
+static boolean action_obey_command_begin_actor(
+	long actor_index,
+	struct obey_state_data *state_data)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct actor_definition *actor_definition = actor_definition_get(actor->meta.definition_index);
+	struct actor_variant_definition *actor_variant_definition = actor_variant_definition_get(actor->meta.variant_definition_index);
+	struct ai_command_list_definition *command_list = TAG_BLOCK_GET_ELEMENT(
+		&global_scenario_get()->ai_command_lists,
+		state_data->command_list_index,
+		struct ai_command_list_definition);
+	struct obey_individual_simple_control *simple_control = &state_data->simple_control;
+	struct obey_individual_complex_control *complex_control = &state_data->complex_control;
+	struct ai_command_definition *command;
+	boolean result = FALSE;
+
+	if (simple_control->current_command_index >= command_list->commands.count)
+		return FALSE;
+	command = TAG_BLOCK_GET_ELEMENT(
+		&command_list->commands,
+		simple_control->current_command_index,
+		struct ai_command_definition);
+
+#define VALID_POINT(index) ((index) >= 0 && (index) < command_list->points.count)
+#define POINT(index) (TAG_BLOCK_GET_ELEMENT(&command_list->points, (index), struct ai_command_point_definition))
+
+	switch (command->atom_type)
+	{
+	case _ai_atom_pause:
+		simple_control->pause_timer = (short)(command->parameter1 * TICKS_PER_SECOND);
+		result = TRUE;
+		break;
+
+	case _ai_atom_go_to:
+	case _ai_atom_go_to_and_face:
+		if (VALID_POINT(command->point1_index))
+		{
+			struct ai_command_point_definition *destination_point = POINT(command->point1_index);
+
+			simple_control->pause_timer = 0;
+			complex_control->destination_valid = TRUE;
+			complex_control->destination_keep_moving = command->atom_modifier == _ai_atom_go_to_modifier_keep_moving;
+			complex_control->destination_point = destination_point->position;
+			complex_control->destination_surface_index = destination_point->surface_index;
+			result = (boolean)action_obey_call_full(actor_index, _action_obey_call_move_to_destination, 0, 0, NULL, 0, NULL);
+			if (result)
+			{
+				if (complex_control->destination_keep_moving)
+					action_obey_call_full(actor_index, _action_obey_call_keep_moving, 0, 0, NULL, 0, NULL);
+				if (command->atom_type == _ai_atom_go_to_and_face && VALID_POINT(command->point2_index))
+				{
+					complex_control->destination_facing = TRUE;
+					complex_control->destination_facing_point = POINT(command->point2_index)->position;
+				}
+			}
+		}
+		break;
+
+	case _ai_atom_look:
+	case _ai_atom_look_random:
+	case _ai_atom_look_player:
+	case _ai_atom_look_object:
+	{
+		short look_point_index = NONE;
+		long look_prop_index = NONE;
+		long look_unit_index = NONE;
+		real look_duration = command->parameter1;
+
+		if (command->atom_type == _ai_atom_look)
+		{
+			if (VALID_POINT(command->point1_index))
+			{
+				look_point_index = command->point1_index;
+				look_duration = command->parameter1;
+			}
+		}
+		else if (command->atom_type == _ai_atom_look_random)
+		{
+			if (VALID_POINT(command->point1_index) && VALID_POINT(command->point2_index))
+			{
+				real bounds[2];
+				real output[6];
+
+				look_point_index = (short)action_obey_call_full(actor_index, _action_obey_call_random_range_short,
+					command->point1_index, command->point2_index + 1, NULL, 0, NULL);
+				if (command->parameter1 == 0.0f && command->parameter2 == 0.0f)
+				{
+					bounds[0] = actor_definition->looking.idle_look_noncombat.idle_look_time_lower_bound;
+					bounds[1] = actor_definition->looking.idle_look_noncombat.idle_look_time_upper_bound;
+				}
+				else
+				{
+					bounds[0] = command->parameter1;
+					bounds[1] = command->parameter2;
+				}
+				action_obey_call_full(actor_index, _action_obey_call_random_range, 0, 0, bounds, 2, output);
+				look_duration = output[0];
+			}
+		}
+		else if (command->atom_type == _ai_atom_look_player)
+		{
+			struct prop_iterator prop_iterator;
+			struct prop_datum *prop;
+			real closest_prop_distance = REAL_MAX;
+
+			prop_iterator_new(&prop_iterator, actor_index);
+			while (prop = prop_iterator_next(&prop_iterator))
+			{
+				if (prop->state >= _prop_state_becoming_unacknowledged &&
+					prop->state <= _prop_state_acknowledged &&
+					prop->player &&
+					prop->distance < closest_prop_distance)
+				{
+					look_prop_index = prop_iterator.index;
+					closest_prop_distance = prop->distance;
+				}
+			}
+			if (look_prop_index == NONE)
+			{
+				look_unit_index = action_obey_call_full(actor_index, _action_obey_call_nearest_player_unit, 0, 0, NULL, 0, NULL);
+			}
+		}
+		else
+		{
+			long unit_index = action_obey_call_full(actor_index, _action_obey_call_object_unit,
+				command->object_name_index, 0, NULL, 0, NULL);
+
+			if (unit_index != NONE)
+			{
+				look_prop_index = action_obey_call_full(actor_index, _action_obey_call_active_prop, unit_index, 0, NULL, 0, NULL);
+				look_unit_index = unit_index;
+			}
+		}
+
+		if (look_duration > 0.0f &&
+			(look_prop_index != NONE || look_unit_index != NONE || VALID_POINT(look_point_index)))
+		{
+			short priority = _secondary_look_priority_default;
+			real point[3] = { 0.0f, 0.0f, 0.0f };
+			short direction_type;
+			long prop_argument = 0;
+
+			if (command->atom_modifier == _ai_atom_look_modifier_idle_turn_around)
+				priority = _secondary_look_priority_turn_and_aim;
+			else if (command->atom_modifier == _ai_atom_look_modifier_idle_look)
+				priority = _secondary_look_priority_idle_look;
+			else if (command->atom_modifier == _ai_atom_look_modifier_force_aim_weapon)
+				priority = _secondary_look_priority_override;
+			else if (command->atom_modifier == _ai_atom_look_modifier_force_facing)
+				priority = _secondary_look_priority_override_exact_facing;
+
+			if (look_prop_index != NONE)
+			{
+				direction_type = _direction_specification_prop;
+				prop_argument = look_prop_index;
+			}
+			else if (look_unit_index != NONE)
+			{
+				real output[6];
+
+				direction_type = _direction_specification_point;
+				action_obey_call_full(actor_index, _action_obey_call_head_position, look_unit_index, 0, NULL, 0, output);
+				memcpy(point, output, sizeof(point));
+			}
+			else
+			{
+				direction_type = _direction_specification_point;
+				memcpy(point, &POINT(look_point_index)->position, sizeof(point));
+			}
+			action_obey_call_full(actor_index, _action_obey_call_look_secondary,
+				direction_type | (priority << 8), prop_argument, point, 3, NULL);
+			simple_control->pause_timer = (short)(look_duration * TICKS_PER_SECOND);
+			result = TRUE;
+		}
+		break;
+	}
+
+	case _ai_atom_move_direction:
+		simple_control->directmovement.start_position = actor->input.position.body_position;
+		if (VALID_POINT(command->point1_index))
+		{
+			vector_from_points3d(
+				&simple_control->directmovement.start_position,
+				&POINT(command->point1_index)->position,
+				&simple_control->directmovement.vector);
+			result = normalize3d(&simple_control->directmovement.vector) > 0.0f;
+		}
+		else if (command->parameter2 >= 0.0f && command->parameter2 < 360.0f)
+		{
+			vector3d_from_angle(&simple_control->directmovement.vector, DEGREES_TO_RADIANS(command->parameter2));
+			result = TRUE;
+		}
+		if (result)
+		{
+			if (command->atom_modifier >= _ai_atom_move_facing_forwards &&
+				command->atom_modifier <= _ai_atom_move_facing_right)
+				simple_control->directmovement.facing = command->atom_modifier;
+			else
+				simple_control->directmovement.facing = NONE;
+			action_obey_call_full(actor_index, _action_obey_call_move_halt, 0, 0, NULL, 0, NULL);
+			SET_FLAG(simple_control->simple_control_flags, _obey_simple_directmovement_update_continuously_bit, FALSE);
+			SET_FLAG(simple_control->simple_control_flags, _obey_simple_directmovement_bit, TRUE);
+		}
+		break;
+
+	case _ai_atom_move_immediate:
+		if (command->atom_modifier >= _ai_atom_move_facing_forwards &&
+			command->atom_modifier <= _ai_atom_move_facing_right)
+			simple_control->directmovement.facing = command->atom_modifier;
+		else
+			simple_control->directmovement.facing = _ai_atom_move_facing_forwards;
+		action_obey_directmovement_update_facing(actor_index, actor->meta.unit_index, simple_control);
+		simple_control->pause_timer = (short)(command->parameter1 * TICKS_PER_SECOND);
+		SET_FLAG(simple_control->simple_control_flags, _obey_simple_directmovement_bit, TRUE);
+		SET_FLAG(simple_control->simple_control_flags, _obey_simple_directmovement_update_continuously_bit, TRUE);
+		result = TRUE;
+		break;
+
+	case _ai_atom_running_jump:
+	case _ai_atom_targeted_jump:
+		if (actor->input.vehicle_index == NONE)
+		{
+			boolean targeted = command->atom_type == _ai_atom_targeted_jump;
+
+			SET_FLAG(simple_control->simple_control_flags, _obey_simple_jump_bit, TRUE);
+			SET_FLAG(simple_control->simple_control_flags, _obey_simple_jump_jumped_bit, FALSE);
+			SET_FLAG(simple_control->simple_control_flags, _obey_simple_jump_targeted_bit, targeted);
+			if (targeted)
+			{
+				simple_control->jump.delay_ticks = 0;
+				simple_control->jump.target_horizontal_vel = command->parameter1;
+				simple_control->jump.target_vertical_vel = command->parameter2;
+			}
+			else
+			{
+				boolean moving_forward = actor->control.moving &&
+					actor->control.moving_facing_direction == _ai_atom_move_facing_forwards;
+
+				simple_control->jump.delay_ticks = moving_forward ? 0 : 10;
+			}
+			simple_control->pause_timer = 2 * TICKS_PER_SECOND;
+			result = TRUE;
+		}
+		break;
+
+	case _ai_atom_animation_mode:
+		if (command->atom_modifier >= _ai_atom_animation_mode_modifier_noncombat &&
+			command->atom_modifier < NUMBER_OF_AI_ATOM_ANIMATION_MODE_MODIFIERS)
+		{
+			complex_control->override_movement_type = command->atom_modifier;
+			result = TRUE;
+		}
+		break;
+
+	case _ai_atom_crouch:
+		complex_control->override_crouch = command->atom_modifier == _ai_atom_crouch_modifier_enable;
+		result = TRUE;
+		break;
+
+	case _ai_atom_targeting:
+		SET_FLAG(simple_control->metadata_flags, _obey_metadata_targeting_bit,
+			command->atom_modifier == _ai_atom_targeting_modifier_enable);
+		result = TRUE;
+		break;
+
+	case _ai_atom_initiative:
+		state_data->initiative = command->atom_modifier == _ai_atom_initiative_modifier_enable;
+		result = TRUE;
+		break;
+
+	case _ai_atom_set_radius:
+		if (command->parameter1 > 0.0f)
+		{
+			complex_control->destination_radius_valid = TRUE;
+			complex_control->destination_radius = command->parameter1;
+			result = TRUE;
+		}
+		break;
+
+	case _ai_atom_action:
+	{
+		static short const impulses[NUMBER_OF_AI_ATOM_ACTION_MODIFIERS] =
+		{
+			_unit_animation_impulse_berserk,
+			_unit_animation_impulse_surprise_front,
+			_unit_animation_impulse_surprise_back,
+			_unit_animation_impulse_evade_left,
+			_unit_animation_impulse_evade_right,
+			_unit_animation_impulse_dive_front,
+			_unit_animation_impulse_dive_back,
+			_unit_animation_impulse_dive_left,
+			_unit_animation_impulse_dive_right,
+			NONE,
+			NONE,
+		};
+		static short const communications[NUMBER_OF_AI_ATOM_ACTION_MODIFIERS] =
+		{
+			_ai_communication_berserk,
+			_ai_communication_surprise,
+			_ai_communication_surprise,
+			NONE,
+			NONE,
+			_ai_communication_dive,
+			_ai_communication_dive,
+			_ai_communication_dive,
+			_ai_communication_dive,
+			_ai_communication_vehicle_woohoo,
+			_ai_communication_vehicle_scared,
+		};
+
+		complex_control->play_action = FALSE;
+		if (command->atom_modifier >= 0 && command->atom_modifier < NUMBER_OF_AI_ATOM_ACTION_MODIFIERS)
+		{
+			complex_control->play_action = TRUE;
+			complex_control->action_animation_impulse = impulses[command->atom_modifier];
+			complex_control->action_communication_type = communications[command->atom_modifier];
+		}
+		result = complex_control->play_action;
+		break;
+	}
+
+	case _ai_atom_shoot:
+		if (VALID_POINT(command->point1_index))
+		{
+			complex_control->shoot_at_target = TRUE;
+			complex_control->shoot_target = POINT(command->point1_index)->position;
+			complex_control->shoot_burst_length = command->parameter1;
+			result = TRUE;
+		}
+		break;
+
+	case _ai_atom_grenade:
+		if (actor_variant_definition->grenade_combat.grenade_type != NONE &&
+			VALID_POINT(command->point1_index))
+		{
+			action_obey_call_full(actor_index, _action_obey_call_add_grenade,
+				actor_variant_definition->grenade_combat.grenade_type, 0, NULL, 0, NULL);
+			complex_control->grenade_throw_started = FALSE;
+			complex_control->grenade_throw_depress_trigger = FALSE;
+			complex_control->grenade_target = POINT(command->point1_index)->position;
+			complex_control->grenade_throw_trajectory_type = _actor_atom_grenade_modifier_toss;
+			if (command->atom_modifier >= _actor_atom_grenade_modifier_toss &&
+				command->atom_modifier < NUMBER_OF_AI_ATOM_GRENADE_MODIFIERS)
+			{
+				complex_control->grenade_throw_trajectory_type = command->atom_modifier;
+			}
+			simple_control->pause_timer = 2 * TICKS_PER_SECOND;
+			result = TRUE;
+		}
+		break;
+
+	case _ai_atom_vehicle:
+		result = (boolean)action_obey_call_full(actor_index, _action_obey_call_enter_vehicle, 0, 0, NULL, 0, NULL);
+		if (result)
+			SET_FLAG(simple_control->metadata_flags, _obey_metadata_action_changed_bit, TRUE);
+		break;
+
+	case _ai_atom_animate:
+		result = command->animation_reference_index != NONE &&
+			action_obey_call_full(actor_index, _action_obey_call_animate,
+				command->animation_reference_index, command->atom_modifier, NULL, 0, NULL);
+		break;
+
+	case _ai_atom_recording:
+		result = (boolean)action_obey_call_full(actor_index, _action_obey_call_play_recording,
+			command->recording_reference_index, 0, NULL, 0, NULL);
+		break;
+
+	case _ai_atom_script:
+		result = (boolean)action_obey_call_full(actor_index, _action_obey_call_wake_script,
+			command->script_reference_index, 0, NULL, 0, NULL);
+		break;
+
+	case _ai_atom_loop:
+		result = command->command_index >= 0 &&
+			command->command_index < command_list->commands.count &&
+			command->command_index != simple_control->current_command_index;
+		break;
+
+	case _ai_atom_die:
+		action_obey_call_full(actor_index, _action_obey_call_die, command->atom_modifier, 0, NULL, 0, NULL);
+		result = TRUE;
+		break;
+
+	case _ai_atom_vocalize:
+		result = (boolean)action_obey_call_full(actor_index, _action_obey_call_vocalize, command->atom_modifier, 0, NULL, 0, NULL);
+		break;
+
+	case _ai_atom_teleport:
+		result = VALID_POINT(command->point1_index) &&
+			action_obey_call_full(actor_index, _action_obey_call_teleport,
+				command->point1_index, command->point2_index, NULL, 0, NULL);
+		break;
+
+	case _ai_atom_wait:
+		result = TRUE;
+		break;
+	}
+
+#undef VALID_POINT
+#undef POINT
+
+	action_obey_call_full(actor_index, _action_obey_call_debug_command, result, 0, NULL, 0, NULL);
+
+	return result;
 }
 
 /* port: the actor's own individual perform (action_obey_individual_perform's,
@@ -1286,7 +2111,7 @@ static void action_obey_individual_perform_actor(
 			}
 
 			simple_control->current_command_index = next_command_index;
-			command_valid = (boolean)action_obey_call_simple(actor_index, _action_obey_call_command_begin, 0);
+			command_valid = action_obey_command_begin_actor(actor_index, state_data);
 		}
 		while (!TEST_FLAG(simple_control->metadata_flags, _obey_metadata_action_changed_bit));
 	}

@@ -50,6 +50,7 @@ enum
 	_halo_sim_actor_situation,
 	_halo_sim_actor_upkeep,
 	_halo_sim_actor_input,
+	_halo_sim_actor_general,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -849,6 +850,7 @@ enum
 	_halo_sim_ai_step_clear_orders,
 	_halo_sim_ai_step_clear_output,
 	_halo_sim_ai_step_input,
+	_halo_sim_ai_step_general,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
@@ -927,6 +929,19 @@ enum
 	_actor_input_call_firing_position_type,
 	_actor_input_call_team_is_enemy,
 	_actor_input_call_facing,
+};
+
+/* the general update's calls (actors.c's actor_general_call; crates/halo_map's
+actor_general::call) */
+enum
+{
+	_actor_general_call_profile = 1,
+	_actor_general_call_erase,
+	_actor_general_call_encounter_force_active,
+	_actor_general_call_set_dormant,
+	_actor_general_call_action_class,
+	_actor_general_call_has_path,
+	_actor_general_call_encounter_follows_players,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1464,7 +1479,8 @@ check mode `checking` is set, the step's call function records each call
 actor back as the step began, runs Rust's replay on it, compares, and leaves
 the game's */
 int halo_sim_ai_step_begin(long step, long actor_index, int *checking);
-void halo_sim_ai_step_check(long step);
+long halo_sim_ai_step_result(void);
+void halo_sim_ai_step_check(long step, long result);
 int halo_sim_ai_event_begin(struct halo_sim_ai_call const *call);
 void halo_sim_ai_event_end(struct halo_sim_ai_call const *call, int opened);
 void actors_port_step_context(long actor_index, struct halo_sim_ai_step_context *context);
@@ -1472,6 +1488,7 @@ void actor_emotion_call(struct halo_sim_ai_call *call);
 void actor_situation_call(struct halo_sim_ai_call *call);
 void actor_upkeep_call(struct halo_sim_ai_call *call);
 void actor_input_call(struct halo_sim_ai_call *call);
+void actor_general_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

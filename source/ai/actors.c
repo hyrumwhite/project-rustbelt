@@ -1447,10 +1447,10 @@ static boolean actor_get_timeslice(
 	boolean result;
 
 	if (halo_sim_ai_step_begin(_halo_sim_ai_step_timeslice, actor_index, &checking))
-		return actor_get(actor_index)->meta.timeslice;
+		return (boolean)halo_sim_ai_step_result();
 	result = actor_get_timeslice_game(actor_index);
 	if (checking)
-		halo_sim_ai_step_check(_halo_sim_ai_step_timeslice);
+		halo_sim_ai_step_check(_halo_sim_ai_step_timeslice, result);
 
 	return result;
 }
@@ -1509,7 +1509,7 @@ static void actor_clear_output(
 		return;
 	actor_clear_output_game(actor_index);
 	if (checking)
-		halo_sim_ai_step_check(_halo_sim_ai_step_clear_output);
+		halo_sim_ai_step_check(_halo_sim_ai_step_clear_output, 0);
 
 	return;
 }
@@ -1816,7 +1816,7 @@ static void actor_input_update(
 		return;
 	actor_input_update_game(actor_index);
 	if (checking)
-		halo_sim_ai_step_check(_halo_sim_ai_step_input);
+		halo_sim_ai_step_check(_halo_sim_ai_step_input, 0);
 
 	return;
 }
@@ -2131,7 +2131,7 @@ static void actor_clear_orders(
 		return;
 	actor_clear_orders_game(actor_index);
 	if (checking)
-		halo_sim_ai_step_check(_halo_sim_ai_step_clear_orders);
+		halo_sim_ai_step_check(_halo_sim_ai_step_clear_orders, 0);
 
 	return;
 }
@@ -4105,52 +4105,134 @@ void actor_erase(
 	return;
 }
 
+/* port: what an actor's general update asks of the rest of the game, shared
+by the game's update and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_general_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _actor_general_call_profile:
+			ai_profile.meters[_ai_meter_actors_updated].accumulator++;
+			if (!actor->meta.dormant)
+			{
+				ai_profile.meters[_ai_meter_actors_active].accumulator++;
+			}
+
+			if (actor->meta.swarm)
+			{
+				ai_profile.meters[_ai_meter_units_updated].accumulator += actor->meta.swarm_unit_count;
+				if (!actor->meta.dormant)
+				{
+					ai_profile.meters[_ai_meter_units_active].accumulator += actor->meta.swarm_unit_count;
+				}
+			}
+			else
+			{
+				ai_profile.meters[_ai_meter_units_updated].accumulator++;
+				if (!actor->meta.dormant)
+				{
+					ai_profile.meters[_ai_meter_units_active].accumulator++;
+				}
+			}
+			break;
+
+		case _actor_general_call_erase:
+			match_vwarn(
+				"c:\\halo\\SOURCE\\ai\\actors.c",
+				2733,
+				FALSE,
+				csprintf(
+					temporary,
+					"tried to update a swarm actor without a swarm cache, erasing %d units",
+					actor->meta.swarm_unit_count));
+			actor_erase(actor_index, FALSE);
+			break;
+
+		case _actor_general_call_encounter_force_active:
+			call->result = (byte)encounter_get(call->a)->force_active;
+			break;
+
+		case _actor_general_call_set_dormant:
+			actor_set_dormant(actor_index, (boolean)call->a);
+			break;
+
+		case _actor_general_call_action_class:
+			call->result = actor_action_class(actor_index);
+			break;
+
+		case _actor_general_call_has_path:
+			call->result = actor_path_has_path(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_general_call_encounter_follows_players:
+			call->result = encounter_get(call->a)->follow_target_type == _follow_target_players;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_general_call_simple(
+	long actor_index,
+	long kind,
+	long a)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	actor_general_call(&call);
+
+	return call.result;
+}
+
+static boolean actor_general_update_game(
+	long actor_index);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 static boolean actor_general_update(
+	long actor_index)
+{
+	int checking = FALSE;
+	boolean result;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_general, actor_index, &checking))
+		return (boolean)halo_sim_ai_step_result();
+	result = actor_general_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_general, result);
+
+	return result;
+}
+
+/* the game's general update, what it asks of the rest of the game through
+actor_general_call */
+static boolean actor_general_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
 	boolean result = TRUE;
 
-	ai_profile.meters[_ai_meter_actors_updated].accumulator++;
-	if (!actor->meta.dormant)
-	{
-		ai_profile.meters[_ai_meter_actors_active].accumulator++;
-	}
-
-	if (actor->meta.swarm)
-	{
-		ai_profile.meters[_ai_meter_units_updated].accumulator += actor->meta.swarm_unit_count;
-		if (!actor->meta.dormant)
-		{
-			ai_profile.meters[_ai_meter_units_active].accumulator += actor->meta.swarm_unit_count;
-		}
-	}
-	else
-	{
-		ai_profile.meters[_ai_meter_units_updated].accumulator++;
-		if (!actor->meta.dormant)
-		{
-			ai_profile.meters[_ai_meter_units_active].accumulator++;
-		}
-	}
+	actor_general_call_simple(actor_index, _actor_general_call_profile, 0);
 
 	if (actor->meta.swarm && actor->meta.swarm_cache_index == NONE)
 	{
-		match_vwarn(
-			"c:\\halo\\SOURCE\\ai\\actors.c",
-			2733,
-			FALSE,
-			csprintf(
-				temporary,
-				"tried to update a swarm actor without a swarm cache, erasing %d units",
-				actor->meta.swarm_unit_count));
-		actor_erase(actor_index, FALSE);
+		actor_general_call_simple(actor_index, _actor_general_call_erase, 0);
 		result = FALSE;
 	}
 
 	if (result)
 	{
-		struct encounter_datum *encounter;
 		boolean force_active;
 
 		actor->control.path.refreshed_this_tick = FALSE;
@@ -4169,28 +4251,20 @@ static boolean actor_general_update(
 			actor->state.command_list_delay_timer--;
 		}
 
+		force_active = actor->meta.force_active;
 		if (actor->meta.encounter_index != NONE)
 		{
-			encounter = encounter_get(actor->meta.encounter_index);
-		}
-		else
-		{
-			encounter = NULL;
-		}
-
-		force_active = actor->meta.force_active;
-		if (encounter)
-		{
-			force_active |= encounter->force_active;
+			force_active |= (boolean)actor_general_call_simple(actor_index,
+				_actor_general_call_encounter_force_active, actor->meta.encounter_index);
 		}
 
 		if (!actor->meta.dormant_desire || force_active)
 		{
-			actor_set_dormant(actor_index, FALSE);
+			actor_general_call_simple(actor_index, _actor_general_call_set_dormant, FALSE);
 		}
 		else if (!actor->meta.dormant)
 		{
-			short action_class = actor_action_class(actor_index);
+			short action_class = (short)actor_general_call_simple(actor_index, _actor_general_call_action_class, 0);
 			boolean can_become_dormant = TRUE;
 
 			if (action_class == _action_class_transitory)
@@ -4212,13 +4286,14 @@ static boolean actor_general_update(
 				}
 			}
 
-			if (can_become_dormant && actor_path_has_path(actor_index))
+			if (can_become_dormant && actor_general_call_simple(actor_index, _actor_general_call_has_path, 0))
 			{
 				switch (actor->control.path.destination_orders.destination_type)
 				{
 				case _destination_firing_position:
 					if (actor->state.action == _actor_action_guard &&
-						encounter->follow_target_type == _follow_target_players)
+						actor_general_call_simple(actor_index, _actor_general_call_encounter_follows_players,
+							actor->meta.encounter_index))
 					{
 						can_become_dormant = FALSE;
 					}
@@ -4238,7 +4313,7 @@ static boolean actor_general_update(
 				actor->meta.become_dormant_timer++;
 				if (actor->meta.become_dormant_timer >= 60)
 				{
-					actor_set_dormant(actor_index, TRUE);
+					actor_general_call_simple(actor_index, _actor_general_call_set_dormant, TRUE);
 				}
 			}
 		}

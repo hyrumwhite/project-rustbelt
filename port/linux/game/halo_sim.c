@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 41
+#define HALO_SIM_VERSION 42
 
 /* ---------- structures */
 
@@ -1819,6 +1819,7 @@ struct halo_sim_ai_step_c
 	unsigned long event_count;
 	long difference_event;
 	long difference_reason;
+	long result;
 };
 
 struct halo_sim_ai_step_callbacks
@@ -1827,6 +1828,7 @@ struct halo_sim_ai_step_callbacks
 	void (*situation)(struct halo_sim_ai_call *call);
 	void (*upkeep)(struct halo_sim_ai_call *call);
 	void (*input)(struct halo_sim_ai_call *call);
+	void (*general)(struct halo_sim_ai_call *call);
 };
 
 struct halo_sim_effect_callbacks
@@ -2081,6 +2083,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"actor_situation",
 	"actor_upkeep",
 	"actor_input",
+	"actor_general",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2443,6 +2446,7 @@ static short const halo_sim_ai_step_systems[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	_halo_sim_actor_upkeep,
 	_halo_sim_actor_upkeep,
 	_halo_sim_actor_input,
+	_halo_sim_actor_general,
 };
 
 static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
@@ -2453,6 +2457,7 @@ static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	"actor orders' clearing",
 	"actor output's clearing",
 	"actor input update",
+	"actor general update",
 };
 
 /* the steps that write the actor's props: their check puts them back too,
@@ -2461,6 +2466,7 @@ static boolean const halo_sim_ai_step_props[NUMBER_OF_HALO_SIM_AI_STEPS] =
 {
 	FALSE,
 	TRUE,
+	FALSE,
 	FALSE,
 	FALSE,
 	FALSE,
@@ -4513,6 +4519,7 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		actor_situation_call,
 		actor_upkeep_call,
 		actor_input_call,
+		actor_general_call,
 	},
 };
 
@@ -9235,6 +9242,9 @@ void halo_sim_game_tick_check(void)
 
 /* ---------- the AI's steps of an actor */
 
+/* what the last step Rust ran returned */
+static long halo_sim_ai_step_last_result;
+
 int halo_sim_ai_step_begin(long step, long actor_index, int *checking)
 {
 	short mode = halo_sim_mode(halo_sim_ai_step_systems[step]);
@@ -9278,8 +9288,16 @@ int halo_sim_ai_step_begin(long step, long actor_index, int *checking)
 	}
 	memset(&call, 0, sizeof(call));
 	actors_port_step_context(actor_index, &call.context);
+	if (halo_sim.ai_step(step, &call) != 0)
+		return FALSE;
+	halo_sim_ai_step_last_result = call.result;
 
-	return halo_sim.ai_step(step, &call) == 0;
+	return TRUE;
+}
+
+long halo_sim_ai_step_result(void)
+{
+	return halo_sim_ai_step_last_result;
 }
 
 /* the actor's props in and out of the AI step check's copies (copy 0 their
@@ -9332,7 +9350,7 @@ void halo_sim_ai_event_end(struct halo_sim_ai_call const *call, int opened)
 	memcpy(event->after, (void const *)halo_sim_ai_step_checks.context.actor, HALO_SIM_ACTOR_DATUM_SIZE);
 }
 
-void halo_sim_ai_step_check(long step)
+void halo_sim_ai_step_check(long step, long result)
 {
 	struct halo_sim_ai_step_c call;
 	boolean prop_differs;
@@ -9402,11 +9420,11 @@ void halo_sim_ai_step_check(long step)
 		}
 	}
 	if (memcmp(halo_sim_ai_step_checks.before, halo_sim_ai_step_checks.after, HALO_SIM_ACTOR_DATUM_SIZE) != 0 ||
-		call.difference_event != NONE || prop_differs)
+		call.difference_event != NONE || prop_differs || call.result != result)
 	{
 		halo_sim_ai_step_checks.differed[step]++;
 		if (halo_sim_ai_step_checks.differed[step] <= 8 &&
-			(call.difference_event != NONE ||
+			(call.difference_event != NONE || call.result != result ||
 				memcmp(halo_sim_ai_step_checks.before, halo_sim_ai_step_checks.after, HALO_SIM_ACTOR_DATUM_SIZE) != 0))
 		{
 			long offset = 0;
@@ -9418,8 +9436,9 @@ void halo_sim_ai_step_check(long step)
 			{
 				offset++;
 			}
-			platform_log("halo_sim: %s differs (actor %lx): call %ld of %lu (kind %ld) reason %ld; the actor first differs at byte %lx (game %02x rust %02x)",
+			platform_log("halo_sim: %s differs (actor %lx; it returned %ld, rust %ld): call %ld of %lu (kind %ld) reason %ld; the actor first differs at byte %lx (game %02x rust %02x)",
 				halo_sim_ai_step_names[step], (unsigned long)halo_sim_ai_step_checks.context.actor_index,
+				result, call.result,
 				call.difference_event, halo_sim_ai_step_checks.event_count, kind, call.difference_reason, offset,
 				offset < HALO_SIM_ACTOR_DATUM_SIZE ? halo_sim_ai_step_checks.after[offset] : 0,
 				offset < HALO_SIM_ACTOR_DATUM_SIZE ? halo_sim_ai_step_checks.before[offset] : 0);

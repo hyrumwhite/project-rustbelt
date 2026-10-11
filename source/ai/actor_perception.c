@@ -1654,7 +1654,7 @@ void actor_situation_update(
 		return;
 	actor_situation_update_game(actor_index);
 	if (checking)
-		halo_sim_ai_step_check(_halo_sim_ai_step_situation);
+		halo_sim_ai_step_check(_halo_sim_ai_step_situation, 0);
 
 	return;
 }
@@ -3518,7 +3518,7 @@ void actor_emotion_update(
 		return;
 	actor_emotion_update_game(actor_index);
 	if (checking)
-		halo_sim_ai_step_check(_halo_sim_ai_step_emotion);
+		halo_sim_ai_step_check(_halo_sim_ai_step_emotion, 0);
 
 	return;
 }

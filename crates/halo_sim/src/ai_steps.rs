@@ -11,6 +11,7 @@
 use std::cell::Cell;
 
 use halo_map::actor_emotions::actor_emotion_update;
+use halo_map::actor_situation::actor_situation_update;
 use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext};
 
 /// `sizeof(struct actor_datum)`.
@@ -22,6 +23,8 @@ pub const ACTOR_DATUM_SIZE: usize = halo_map::layout::actor_datum::SIZEOF;
 pub struct AiStepCallbacks {
     /// actor_perception.c's `actor_emotion_call`.
     pub emotion: unsafe extern "C" fn(call: *mut AiCall),
+    /// actor_perception.c's `actor_situation_call`.
+    pub situation: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -140,10 +143,12 @@ impl AiHost for CheckHost<'_> {
 
 /// The steps the port runs (halo_sim.h's `_halo_sim_ai_step_*`).
 const STEP_EMOTION: i32 = 0;
+const STEP_SITUATION: i32 = 1;
 
 fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> bool {
     match step {
         STEP_EMOTION => actor_emotion_update(context, host),
+        STEP_SITUATION => actor_situation_update(context, host),
         _ => return false,
     }
     true
@@ -152,6 +157,7 @@ fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> bool {
 fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" fn(*mut AiCall)> {
     match step {
         STEP_EMOTION => Some(callbacks.emotion),
+        STEP_SITUATION => Some(callbacks.situation),
         _ => None,
     }
 }

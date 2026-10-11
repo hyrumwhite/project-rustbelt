@@ -11,6 +11,7 @@
 //! definitions by `tools/tag_layout`.
 
 pub mod actor_emotions;
+pub mod actor_situation;
 pub mod ai_actor;
 pub mod ai_update;
 pub mod animation;

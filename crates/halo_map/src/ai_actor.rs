@@ -88,6 +88,8 @@ pub struct AiStepContext {
     /// `prop_data` (its `struct data_array`).
     pub prop_data: u32,
     pub game_time: i32,
+    /// `actor_data` (its `struct data_array`).
+    pub actor_data: u32,
 }
 
 /// `datum_get`: the datum's address (None for one unused or changed).

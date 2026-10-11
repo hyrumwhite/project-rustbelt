@@ -491,7 +491,8 @@ static void weapon_trigger_overcharged(
 	long weapon_index,
 	short trigger_index);
 
-long weapon_update_call(long weapon_index, long kind, long a, long b);
+long weapon_game(long weapon_index, long kind, long a, long b, long c, long d, real const *f, real *out);
+static long weapon_effect_new_game(long weapon_index, long effect_index, real effect_scale, real effect_error);
 
 /* ---------- globals */
 
@@ -1574,9 +1575,7 @@ static void weapon_trigger_fully_charged(
 		weapon_index,
 		(short)(_weapon_state_primary_charged + trigger_index),
 		TRUE);
-	first_person_weapon_message_from_weapon(
-		weapon_index,
-		_first_person_weapon_message_charged);
+	weapon_game(weapon_index, _weapon_call_message, _first_person_weapon_message_charged, 0, 0, 0, NULL, NULL);
 
 	return;
 }
@@ -1674,7 +1673,7 @@ static void weapon_magazine_start_reload(
 
 				weapon_set_state(weapon_index, (short)(_weapon_state_primary_reload+magazine_index), FALSE);
 				weapon_effect_new(weapon_index, magazine_definition->reloading_effect.index, 0.0f, 0.0f);
-				first_person_weapon_message_from_weapon(weapon_index, (short)(9+(magazine->rounds_loaded!=0)));
+				weapon_game(weapon_index, _weapon_call_message, 9+(magazine->rounds_loaded!=0), 0, 0, 0, NULL, NULL);
 
 				if (weapon_definition->weapon.weapon_type==1)
 				{
@@ -1685,7 +1684,8 @@ static void weapon_magazine_start_reload(
 				}
 
 				magazine->state = _magazine_reloading;
-				magazine->original_time = magazine->state_timer = weapon_get_first_person_animation_time(weapon_index, 0, _first_person_weapon_animation_reload_while_empty, reload_type);
+				magazine->original_time = magazine->state_timer =
+					(short)weapon_game(weapon_index, _weapon_call_animation_time, reload_type, 0, 0, 0, NULL, NULL);
 			}
 
 			weapon->weapon.flags &= ~FLAG(3);
@@ -1975,7 +1975,7 @@ static void weapon_detonate(
 		weapon_definition->weapon.detonation_effect.index,
 		0.0f,
 		0.0f);
-	object_delete(weapon_index);
+	weapon_game(weapon_index, _weapon_call_delete, 0, 0, 0, 0, NULL, NULL);
 
 	return;
 }
@@ -2077,6 +2077,22 @@ static boolean weapon_magazine_state_interruptable(
 }
 
 static long weapon_effect_new(
+	long weapon_index,
+	long effect_index,
+	real effect_scale,
+	real effect_error)
+{
+	real f[2];
+
+	if (effect_index==NONE)
+		return NONE;
+	/* port: the game's half through weapon_game (which the Rust port calls too) */
+	f[0] = effect_scale;
+	f[1] = effect_error;
+	return weapon_game(weapon_index, _weapon_call_effect, effect_index, 0, 0, 0, f, NULL);
+}
+
+static long weapon_effect_new_game(
 	long weapon_index,
 	long effect_index,
 	real effect_scale,
@@ -2248,7 +2264,7 @@ skip_animation:;
 		owner_object_index = weapon_get_owner_object_index(weapon_index);
 		if (unit_try_and_get(owner_object_index))
 		{
-			unit_handle_weapon_state_change(owner_object_index, new_state);
+			weapon_game(weapon_index, _weapon_call_weapon_state_change, new_state, 0, 0, 0, NULL, NULL);
 		}
 
 		busy = TRUE;
@@ -2372,7 +2388,7 @@ static void trigger_create_projectiles(
 
 			adjust_origin= TEST_FLAG(unit_definition->unit.flags, _unit_fires_from_camera_bit);
 			use_aiming_vector= TRUE;
-			if (actor_index!=NONE && actor_firing_blindly(actor_index))
+			if (actor_index!=NONE && weapon_game(weapon_index, _weapon_call_firing_blindly, actor_index, 0, 0, 0, NULL, NULL))
 			{
 				use_aiming_vector= FALSE;
 			}
@@ -2381,7 +2397,21 @@ static void trigger_create_projectiles(
 				use_aiming_vector= FALSE;
 			}
 
-			unit_adjust_projectile_ray(owner_object_index, &origin, &forward, &velocity, adjust_origin, use_aiming_vector);
+			{
+				real f[6];
+				real out[8];
+
+				f[0] = origin.x;
+				f[1] = origin.y;
+				f[2] = origin.z;
+				f[3] = forward.i;
+				f[4] = forward.j;
+				f[5] = forward.k;
+				weapon_game(weapon_index, _weapon_call_projectile_ray, adjust_origin, use_aiming_vector, 0, 0, f, out);
+				set_real_point3d(&origin, out[0], out[1], out[2]);
+				set_real_vector3d(&forward, out[3], out[4], out[5]);
+				velocity = out[6];
+			}
 
 			if (player_index!=NONE)
 			{
@@ -2412,11 +2442,37 @@ static void trigger_create_projectiles(
 					trigger_definition->first_person_weapon_offset.z,
 					&origin);
 
-				target_object_index= player_aim_projectile(player_index, &origin, &forward);
+				{
+					real f[6];
+					real out[8];
+
+					f[0] = origin.x;
+					f[1] = origin.y;
+					f[2] = origin.z;
+					f[3] = forward.i;
+					f[4] = forward.j;
+					f[5] = forward.k;
+					target_object_index= weapon_game(weapon_index, _weapon_call_player_aim, player_index, 0, 0, 0, f, out);
+					set_real_vector3d(&forward, out[3], out[4], out[5]);
+				}
 			}
 			else if (actor_index!=NONE)
 			{
-				target_object_index= actor_aim_projectile(actor_index, &origin, &forward, &error);
+				{
+					real f[7];
+					real out[8];
+
+					f[0] = origin.x;
+					f[1] = origin.y;
+					f[2] = origin.z;
+					f[3] = forward.i;
+					f[4] = forward.j;
+					f[5] = forward.k;
+					f[6] = error;
+					target_object_index= weapon_game(weapon_index, _weapon_call_actor_aim, actor_index, 0, 0, 0, f, out);
+					set_real_vector3d(&forward, out[3], out[4], out[5]);
+					error = out[6];
+				}
 			}
 		}
 
@@ -2496,29 +2552,27 @@ static void trigger_create_projectiles(
 				scale_vector3d(&data.forward, velocity, &data.translational_velocity);
 
 				inside_bsp= unit && unit->unit.player_index!=NONE;
-				if (inside_bsp)
+				/* port: the projectile made through weapon_game (which the Rust
+				port calls too) */
 				{
-					SET_FLAG(data.flags, _new_object_never_automatically_delete_bit, TRUE);
-				}
+					real f[12];
 
-				projectile_object_index= object_new(&data);
-				if (projectile_object_index!=NONE)
-				{
-					if (inside_bsp)
-					{
-						real_point3d camera_position;
-
-						unit_get_camera_position(owner_object_index, &camera_position);
-						object_force_inside_bsp(projectile_object_index, &camera_position);
-					}
-					if (target_object_index!=NONE)
-					{
-						projectile_set_target_object_index(projectile_object_index, target_object_index);
-					}
-					if (!tracer)
-					{
-						projectile_kill_tracer(projectile_object_index);
-					}
+					f[0] = data.position.x;
+					f[1] = data.position.y;
+					f[2] = data.position.z;
+					f[3] = data.forward.i;
+					f[4] = data.forward.j;
+					f[5] = data.forward.k;
+					f[6] = data.up.i;
+					f[7] = data.up.j;
+					f[8] = data.up.k;
+					f[9] = data.translational_velocity.i;
+					f[10] = data.translational_velocity.j;
+					f[11] = data.translational_velocity.k;
+					projectile_object_index= weapon_game(weapon_index, _weapon_call_new_projectile,
+						trigger_definition->projectile.index, projectile_owner_object_index, target_object_index,
+						(tracer ? 1 : 0) | (inside_bsp ? 2 : 0), f, NULL);
+					(void)projectile_object_index;
 				}
 			}
 		}
@@ -2695,19 +2749,14 @@ static void weapon_trigger_fire(
 	{
 		if (TEST_FLAG(weapon->item.flags, _item_belongs_to_player_bit) && game_engine_running())
 		{
-			long player_index= player_index_from_unit_index(owner_object_index);
-
-			if (player_index!=NONE)
-			{
-				game_engine_weapon_fired(player_index);
-			}
+			weapon_game(weapon_index, _weapon_call_weapon_fired, owner_object_index, 0, 0, 0, NULL, NULL);
 		}
 
 		weapon->weapon.game_time_last_fired= game_time_get();
 
-		first_person_weapon_message_from_weapon(weapon_index, misfired ?
+		weapon_game(weapon_index, _weapon_call_message, misfired ?
 			(trigger_index ? _first_person_weapon_message_secondary_misfire : _first_person_weapon_message_primary_misfire) :
-			(trigger_index ? _first_person_weapon_message_secondary_fire : _first_person_weapon_message_primary_fire));
+			(trigger_index ? _first_person_weapon_message_secondary_fire : _first_person_weapon_message_primary_fire), 0, 0, 0, NULL, NULL);
 		weapon_trigger_start_ejection_port(weapon_index, trigger_index, FALSE);
 
 		if (trigger_definition->illumination_recovery_time>0.0f)
@@ -2749,21 +2798,13 @@ static void weapon_trigger_fire(
 			else
 			{
 				trigger_create_projectiles(weapon_index, trigger_index);
-				ai_handle_unit_effect(owner_object_index, _ai_unit_effect_shooting, trigger_definition->firing_noise);
+				weapon_game(weapon_index, _weapon_call_ai_shooting, trigger_definition->firing_noise, 0, 0, 0, NULL, NULL);
 			}
 		}
 
 		if (owner_object_index!=NONE && damage_effect_index!=NONE)
 		{
-			struct unit_datum *unit= unit_get(owner_object_index);
-			struct damage_data damage;
-
-			damage_data_new(&damage, damage_effect_index);
-			SET_FLAG(damage.flags, _damage_from_weapon_bit, TRUE);
-			negate_vector3d(&unit->unit.aiming_vector, &damage.direction);
-			damage.epicenter= unit->object.bounding_sphere_center;
-			damage.origin= damage.epicenter;
-			object_cause_damage(&damage, owner_object_index, NONE, NONE, NONE, NULL);
+			weapon_game(weapon_index, _weapon_call_self_damage, damage_effect_index, 0, 0, 0, NULL, NULL);
 		}
 
 		if (weapon_definition->weapon.weapon_type==_weapon_type_plasma_pistol && trigger_index==1)
@@ -2835,7 +2876,7 @@ static void weapon_trigger_begin_firing(
 		can_fire= FALSE;
 	}
 
-	if (scenario_location_underwater(&weapon->object.location, &weapon->object.position, NULL))
+	if (weapon_game(weapon_index, _weapon_call_underwater, 0, 0, 0, 0, NULL, NULL))
 	{
 		can_fire= FALSE;
 	}
@@ -2973,18 +3014,18 @@ static boolean weapon_update_internal(
 		switch (animation_update_internal(TRUE, weapon_definition->object.animation_graph.index, &weapon->object.animation.state, NULL))
 		{
 		case _animation_key_frame:
-			weapon_update_call(weapon_index, _weapon_update_call_state_key_frame, 0, 0);
+			weapon_state_key_frame(weapon_index);
 			break;
 
 		case _animation_will_restart_on_next_frame:
-			weapon_update_call(weapon_index, _weapon_update_call_state_next, 0, 0);
+			weapon_state_next(weapon_index);
 			break;
 		}
 	}
 
 	if (TEST_FLAG(weapon_definition->weapon.flags, _weapon_detonates_when_dropped_bit) && weapon->object.parent_object_index==NONE)
 	{
-		weapon_update_call(weapon_index, _weapon_update_call_detonate, 0, 0);
+		weapon_game(weapon_index, _weapon_call_detonate_item, 0, 0, 0, 0, NULL, NULL);
 	}
 
 	if (weapon->weapon.integrated_light_power>0.0f)
@@ -3020,8 +3061,10 @@ static boolean weapon_update_internal(
 			{
 				message= _first_person_weapon_message_overheating;
 			}
-			/* port: the message and the looping effect (weapon_update_call) */
-			weapon_update_call(weapon_index, _weapon_update_call_overheated, message, 0);
+			/* port: the message and the looping effect (weapon_game) */
+			weapon_game(weapon_index, _weapon_call_message, message, 0, 0, 0, NULL, NULL);
+			weapon->weapon.overheated_effect_index= weapon_game(weapon_index, _weapon_call_looping_effect,
+				weapon_definition->weapon.overheated_effect.index, 0, 0, 0, NULL, NULL);
 		}
 
 		if (weapon->weapon.overcharged==0.0f)
@@ -3052,7 +3095,7 @@ static boolean weapon_update_internal(
 			weapon->weapon.flags&= ~(FLAG(_weapon_overheated_bit)|FLAG(_weapon_overheated_exit_bit));
 			if (weapon->weapon.overheated_effect_index!=NONE)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_effect_stop, weapon->weapon.overheated_effect_index, 0);
+				weapon_game(weapon_index, _weapon_call_effect_stop, weapon->weapon.overheated_effect_index, 0, 0, 0, NULL, NULL);
 			}
 		}
 	}
@@ -3097,7 +3140,7 @@ static boolean weapon_update_internal(
 	}
 	if (TEST_FLAG(weapon->weapon.flags, _weapon_needs_to_reload_bit))
 	{
-		weapon_update_call(weapon_index, _weapon_update_call_magazine_start_reload, 0, TRUE);
+		weapon_magazine_start_reload(weapon_index, 0, TRUE);
 	}
 
 	for (magazine_index= 0; magazine_index<weapon_magazine_count(weapon_definition); magazine_index++)
@@ -3138,18 +3181,18 @@ static boolean weapon_update_internal(
 		case _magazine_reloading:
 			if (magazine->state_timer-1<=0)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_magazine_finish_reload, magazine_index, 0);
+				weapon_magazine_finish_reload(weapon_index, magazine_index);
 			}
 			break;
 
 		case _magazine_unchambered:
-			weapon_update_call(weapon_index, _weapon_update_call_magazine_start_chamber, magazine_index, 0);
+			weapon_magazine_start_chamber(weapon_index, magazine_index);
 			break;
 
 		case _magazine_chambering:
 			if (!magazine->state_timer)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_magazine_finish_chamber, magazine_index, 0);
+				weapon_magazine_finish_chamber(weapon_index, magazine_index);
 			}
 			break;
 		}
@@ -3227,13 +3270,13 @@ static boolean weapon_update_internal(
 					magazine->rounds_loaded<trigger_definition->minimum_rounds_loaded_per_shot ||
 					magazine->rounds_loaded==0))
 				{
-					weapon_update_call(weapon_index, _weapon_update_call_magazine_start_reload, trigger_definition->magazine_index, TRUE);
+					weapon_magazine_start_reload(weapon_index, trigger_definition->magazine_index, TRUE);
 				}
 			}
 
 			if (triggers_down[trigger_index] && weapon_trigger_can_fire_again(weapon_index, trigger_index))
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_begin_firing, trigger_index, FALSE);
+				weapon_trigger_begin_firing(weapon_index, trigger_index, FALSE);
 			}
 			else if (trigger->idle_ticks<127)
 			{
@@ -3244,22 +3287,22 @@ static boolean weapon_update_internal(
 		case _trigger_spewing:
 			if (trigger->state_timer)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_begin_firing, trigger_index, TRUE);
+				weapon_trigger_begin_firing(weapon_index, trigger_index, TRUE);
 			}
 			else
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_recover, trigger_index, 0);
+				weapon_trigger_recover(weapon_index, trigger_index);
 			}
 			break;
 
 		case _trigger_overloading:
 			if (!triggers_down[trigger_index])
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_begin_firing, trigger_index, TRUE);
+				weapon_trigger_begin_firing(weapon_index, trigger_index, TRUE);
 			}
 			else if (!trigger->state_timer && weapon->weapon.alternate_shots_loaded<weapon_definition->weapon.maximum_alternate_shots_loaded)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_overload, trigger_index, 0);
+				weapon_trigger_overload(weapon_index, trigger_index);
 			}
 			break;
 
@@ -3270,23 +3313,23 @@ static boolean weapon_update_internal(
 				{
 					if (trigger_index==0 && weapon_definition->weapon.triggers.count>1 && !TEST_FLAG(trigger->flags, _weapon_trigger_fired_before_charging_bit))
 					{
-						weapon_update_call(weapon_index, _weapon_update_call_trigger_begin_firing, trigger_index, TRUE);
+						weapon_trigger_begin_firing(weapon_index, trigger_index, TRUE);
 					}
 					else
 					{
-						weapon_update_call(weapon_index, _weapon_update_call_trigger_idle, trigger_index, 0);
+						weapon_trigger_idle(weapon_index, trigger_index);
 					}
 
 					if (trigger->charging_effect_index!=NONE)
 					{
-						weapon_update_call(weapon_index, _weapon_update_call_effect_stop, trigger->charging_effect_index, 0);
+						weapon_game(weapon_index, _weapon_call_effect_stop, trigger->charging_effect_index, 0, 0, 0, NULL, NULL);
 						trigger->charging_effect_index= NONE;
 					}
 				}
 			}
 			else
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_fully_charged, trigger_index, 0);
+				weapon_trigger_fully_charged(weapon_index, trigger_index);
 			}
 			break;
 
@@ -3308,17 +3351,17 @@ static boolean weapon_update_internal(
 					if (magazine &&
 						magazine->rounds_loaded<trigger_definition->rounds_per_shot && !TEST_FLAG(trigger_definition->flags, _weapon_trigger_can_fire_with_partial_ammunition_bit))
 					{
-						weapon_update_call(weapon_index, _weapon_update_call_trigger_release_charge, trigger_index, 0);
+						weapon_trigger_release_charge(weapon_index, trigger_index);
 					}
 				}
 				else
 				{
-					weapon_update_call(weapon_index, _weapon_update_call_trigger_overcharged, trigger_index, 0);
+					weapon_trigger_overcharged(weapon_index, trigger_index);
 				}
 			}
 			else
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_release_charge, trigger_index, 0);
+				weapon_trigger_release_charge(weapon_index, trigger_index);
 			}
 			break;
 
@@ -3329,11 +3372,11 @@ static boolean weapon_update_internal(
 					TEST_FLAG(weapon->item.flags, _item_belongs_to_player_bit) &&
 					!TEST_FLAG(trigger->flags, _weapon_trigger_released_since_last_shot_bit))
 				{
-					weapon_update_call(weapon_index, _weapon_update_call_trigger_locked, trigger_index, 0);
+					weapon_trigger_locked(weapon_index, trigger_index);
 				}
 				else
 				{
-					weapon_update_call(weapon_index, _weapon_update_call_trigger_idle, trigger_index, 0);
+					weapon_trigger_idle(weapon_index, trigger_index);
 				}
 			}
 			break;
@@ -3341,21 +3384,21 @@ static boolean weapon_update_internal(
 		case _trigger_tracking:
 			if (!triggers_down[trigger_index] || weapon->weapon.tracked_object_index==NONE)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_finish_tracking, trigger_index, 0);
+				weapon_trigger_finish_tracking(weapon_index, trigger_index);
 			}
 			break;
 
 		case _trigger_locked:
 			if (!triggers_down[trigger_index])
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_idle, trigger_index, 0);
+				weapon_trigger_idle(weapon_index, trigger_index);
 			}
 			break;
 
 		case _trigger_uninitialized:
 			if (!trigger->state_timer)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_trigger_idle, trigger_index, 0);
+				weapon_trigger_idle(weapon_index, trigger_index);
 			}
 			break;
 
@@ -3376,7 +3419,7 @@ static boolean weapon_update_internal(
 				!TEST_FLAG(trigger->flags, _weapon_trigger_blurred_bit) &&
 				trigger->rate_of_fire>trigger_definition->blurred_rate_of_fire)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_permute_blurred, trigger_index, TRUE);
+				weapon_game(weapon_index, _weapon_call_permute_blurred, trigger_index, TRUE, 0, 0, NULL, NULL);
 				SET_FLAG(trigger->flags, _weapon_trigger_blurred_bit, TRUE);
 			}
 		}
@@ -3390,7 +3433,7 @@ static boolean weapon_update_internal(
 
 			if (TEST_FLAG(trigger->flags, _weapon_trigger_blurred_bit) && trigger->rate_of_fire<trigger_definition->blurred_rate_of_fire)
 			{
-				weapon_update_call(weapon_index, _weapon_update_call_permute_blurred, trigger_index, FALSE);
+				weapon_game(weapon_index, _weapon_call_permute_blurred, trigger_index, FALSE, 0, 0, NULL, NULL);
 				SET_FLAG(trigger->flags, _weapon_trigger_blurred_bit, FALSE);
 			}
 		}
@@ -3433,102 +3476,236 @@ boolean weapon_update(
 	return TRUE;
 }
 
-/* a weapon update's calls of its helpers and the rest of the game, the
-game's and the Rust port's (crates/halo_map's weapons::call): TRUE if the
-weapon is still there after */
-long weapon_update_call(
+
+/* ---------- port: a weapon's calls of the rest of the game (halo_sim.c's
+Rust port calls them too: crates/halo_map's weapons::call) */
+
+long weapon_game_call(
 	long weapon_index,
-	long kind,
-	long a,
-	long b)
+	struct halo_sim_weapon_game_call *call)
 {
 	struct weapon_datum *weapon= weapon_get(weapon_index);
 	struct weapon_definition *weapon_definition= weapon_definition_get(weapon->definition_index);
-	long result;
+	long owner_object_index= weapon_get_owner_object_index(weapon_index);
+	long result= 0;
+	long still_there;
+	short i;
 
-	halo_sim_weapon_event_begin(weapon_index, kind, a, b);
-	switch (kind)
+	(void)weapon_definition;
+	halo_sim_weapon_event_begin(weapon_index, call);
+	for (i= 0; i<8; i++)
+		call->out[i]= 0.0f;
+	switch (call->kind)
 	{
-	case _weapon_update_call_state_key_frame:
-		weapon_state_key_frame(weapon_index);
-		break;
-
-	case _weapon_update_call_state_next:
-		weapon_state_next(weapon_index);
-		break;
-
-	case _weapon_update_call_detonate:
+	case _weapon_call_detonate_item:
 		item_detonate(weapon_index);
 		break;
 
-	case _weapon_update_call_overheated:
-		first_person_weapon_message_from_weapon(weapon_index, (short)a);
-		weapon->weapon.overheated_effect_index= weapon_effect_looping_new(weapon_index, weapon_definition->weapon.overheated_effect.index);
+	case _weapon_call_message:
+		first_person_weapon_message_from_weapon(weapon_index, (short)call->a);
 		break;
 
-	case _weapon_update_call_effect_stop:
-		effect_stop(a, TRUE);
+	case _weapon_call_looping_effect:
+		result= weapon_effect_looping_new(weapon_index, call->a);
 		break;
 
-	case _weapon_update_call_magazine_start_reload:
-		weapon_magazine_start_reload(weapon_index, (short)a, (boolean)b);
+	case _weapon_call_effect_stop:
+		effect_stop(call->a, TRUE);
 		break;
 
-	case _weapon_update_call_magazine_finish_reload:
-		weapon_magazine_finish_reload(weapon_index, (short)a);
+	case _weapon_call_permute_blurred:
+		object_permute_region(weapon_get_effect_object_index(weapon_index), data_00307140.blurred_permutation_names[call->a], NONE,
+			(boolean)call->b);
 		break;
 
-	case _weapon_update_call_magazine_start_chamber:
-		weapon_magazine_start_chamber(weapon_index, (short)a);
+	case _weapon_call_effect:
+		result= weapon_effect_new_game(weapon_index, call->a, call->f[0], call->f[1]);
 		break;
 
-	case _weapon_update_call_magazine_finish_chamber:
-		weapon_magazine_finish_chamber(weapon_index, (short)a);
+	case _weapon_call_underwater:
+		result= scenario_location_underwater(&weapon->object.location, &weapon->object.position, NULL) ? 1 : 0;
 		break;
 
-	case _weapon_update_call_trigger_begin_firing:
-		weapon_trigger_begin_firing(weapon_index, (short)a, (boolean)b);
+	case _weapon_call_animation_time:
+		result= weapon_get_first_person_animation_time(weapon_index, 0, _first_person_weapon_animation_reload_while_empty, (short)call->a);
 		break;
 
-	case _weapon_update_call_trigger_recover:
-		weapon_trigger_recover(weapon_index, (short)a);
+	case _weapon_call_weapon_state_change:
+		unit_handle_weapon_state_change(owner_object_index, (short)call->a);
 		break;
 
-	case _weapon_update_call_trigger_overload:
-		weapon_trigger_overload(weapon_index, a);
+	case _weapon_call_weapon_fired:
+		{
+			long player_index= player_index_from_unit_index(call->a);
+
+			if (player_index!=NONE)
+			{
+				game_engine_weapon_fired(player_index);
+			}
+		}
 		break;
 
-	case _weapon_update_call_trigger_idle:
-		weapon_trigger_idle(weapon_index, (short)a);
+	case _weapon_call_ai_shooting:
+		ai_handle_unit_effect(owner_object_index, _ai_unit_effect_shooting, (short)call->a);
 		break;
 
-	case _weapon_update_call_trigger_fully_charged:
-		weapon_trigger_fully_charged(weapon_index, (short)a);
+	case _weapon_call_self_damage:
+		{
+			long damage_effect_index= call->a;
+
+				{
+				struct unit_datum *unit= unit_get(owner_object_index);
+				struct damage_data damage;
+
+				damage_data_new(&damage, damage_effect_index);
+				SET_FLAG(damage.flags, _damage_from_weapon_bit, TRUE);
+				negate_vector3d(&unit->unit.aiming_vector, &damage.direction);
+				damage.epicenter= unit->object.bounding_sphere_center;
+				damage.origin= damage.epicenter;
+				object_cause_damage(&damage, owner_object_index, NONE, NONE, NONE, NULL);
+			}
+
+		}
 		break;
 
-	case _weapon_update_call_trigger_release_charge:
-		weapon_trigger_release_charge(weapon_index, (short)a);
+	case _weapon_call_delete:
+		object_delete(weapon_index);
 		break;
 
-	case _weapon_update_call_trigger_overcharged:
-		weapon_trigger_overcharged(weapon_index, (short)a);
+	case _weapon_call_firing_blindly:
+		result= actor_firing_blindly(call->a) ? 1 : 0;
 		break;
 
-	case _weapon_update_call_trigger_locked:
-		weapon_trigger_locked(weapon_index, (short)a);
+	case _weapon_call_projectile_ray:
+		{
+			real_point3d origin;
+			real_vector3d forward;
+			real velocity= 0.0f;
+
+			set_real_point3d(&origin, call->f[0], call->f[1], call->f[2]);
+			set_real_vector3d(&forward, call->f[3], call->f[4], call->f[5]);
+			unit_adjust_projectile_ray(owner_object_index, &origin, &forward, &velocity, (boolean)call->a, (boolean)call->b);
+			call->out[0]= origin.x;
+			call->out[1]= origin.y;
+			call->out[2]= origin.z;
+			call->out[3]= forward.i;
+			call->out[4]= forward.j;
+			call->out[5]= forward.k;
+			call->out[6]= velocity;
+		}
 		break;
 
-	case _weapon_update_call_trigger_finish_tracking:
-		weapon_trigger_finish_tracking(weapon_index, (short)a);
+	case _weapon_call_player_aim:
+		{
+			real_point3d origin;
+			real_vector3d forward;
+
+			set_real_point3d(&origin, call->f[0], call->f[1], call->f[2]);
+			set_real_vector3d(&forward, call->f[3], call->f[4], call->f[5]);
+			result= player_aim_projectile(call->a, &origin, &forward);
+			call->out[3]= forward.i;
+			call->out[4]= forward.j;
+			call->out[5]= forward.k;
+		}
 		break;
 
-	case _weapon_update_call_permute_blurred:
-		object_permute_region(weapon_get_effect_object_index(weapon_index), data_00307140.blurred_permutation_names[a], NONE,
-			(boolean)b);
+	case _weapon_call_actor_aim:
+		{
+			real_point3d origin;
+			real_vector3d forward;
+			real error= call->f[6];
+
+			set_real_point3d(&origin, call->f[0], call->f[1], call->f[2]);
+			set_real_vector3d(&forward, call->f[3], call->f[4], call->f[5]);
+			result= actor_aim_projectile(call->a, &origin, &forward, &error);
+			call->out[3]= forward.i;
+			call->out[4]= forward.j;
+			call->out[5]= forward.k;
+			call->out[6]= error;
+		}
+		break;
+
+	case _weapon_call_new_projectile:
+		{
+			struct object_placement_data data;
+			boolean tracer= (call->d & 1)!=0;
+			boolean inside_bsp= (call->d & 2)!=0;
+			long target_object_index= call->c;
+			long projectile_object_index;
+
+			object_placement_data_new(&data, call->a, call->b);
+			set_real_point3d(&data.position, call->f[0], call->f[1], call->f[2]);
+			set_real_vector3d(&data.forward, call->f[3], call->f[4], call->f[5]);
+			set_real_vector3d(&data.up, call->f[6], call->f[7], call->f[8]);
+			set_real_vector3d(&data.translational_velocity, call->f[9], call->f[10], call->f[11]);
+			if (inside_bsp)
+			{
+				SET_FLAG(data.flags, _new_object_never_automatically_delete_bit, TRUE);
+			}
+
+			projectile_object_index= object_new(&data);
+			if (projectile_object_index!=NONE)
+			{
+				if (inside_bsp)
+				{
+					real_point3d camera_position;
+
+					unit_get_camera_position(owner_object_index, &camera_position);
+					object_force_inside_bsp(projectile_object_index, &camera_position);
+				}
+				if (target_object_index!=NONE)
+				{
+					projectile_set_target_object_index(projectile_object_index, target_object_index);
+				}
+				if (!tracer)
+				{
+					projectile_kill_tracer(projectile_object_index);
+				}
+			}
+			result= projectile_object_index;
+		}
 		break;
 	}
-	result= weapon_try_and_get(weapon_index) ? TRUE : FALSE;
-	halo_sim_weapon_event_end(weapon_index, result);
+	call->result= result;
+	still_there= weapon_try_and_get(weapon_index) ? TRUE : FALSE;
+	halo_sim_weapon_event_end(weapon_index, call, still_there);
 
-	return result;
+	return still_there;
+}
+
+long weapon_game(
+	long weapon_index,
+	long kind,
+	long a,
+	long b,
+	long c,
+	long d,
+	real const *f,
+	real *out)
+{
+	struct halo_sim_weapon_game_call call;
+	short i;
+
+	memset(&call, 0, sizeof(call));
+	call.kind= kind;
+	call.a= a;
+	call.b= b;
+	call.c= c;
+	call.d= d;
+	if (f)
+	{
+		short count= kind==_weapon_call_new_projectile ? 12 : kind==_weapon_call_actor_aim ? 7 :
+			(kind==_weapon_call_projectile_ray || kind==_weapon_call_player_aim) ? 6 : 2;
+
+		for (i= 0; i<count; i++)
+			call.f[i]= f[i];
+	}
+	weapon_game_call(weapon_index, &call);
+	if (out)
+	{
+		for (i= 0; i<8; i++)
+			out[i]= call.out[i];
+	}
+
+	return call.result;
 }

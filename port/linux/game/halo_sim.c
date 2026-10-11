@@ -48,6 +48,7 @@ bit for bit; differences are counted and the first few logged.
 #include "units/unit_definitions.h"
 #include "game/game_globals.h"
 #include "game/game_engine.h"
+#include "game/cheats.h"
 #include "ai/actors.h"
 #include "networking/network_game_globals.h"
 #include "objects/damage_effect_definitions.h"
@@ -64,7 +65,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 24
+#define HALO_SIM_VERSION 25
 
 /* ---------- structures */
 
@@ -1092,17 +1093,18 @@ struct halo_sim_weapon_state
 	struct weapon_trigger triggers[2];
 	struct weapon_magazine magazines[2];
 	long overheated_effect_index;
+	unsigned long object_flags;
+	long game_time_last_fired;
 };
 
 typedef char halo_sim_weapon_trigger_size_assert[sizeof(struct weapon_trigger) == 36 ? 1 : -1];
 typedef char halo_sim_weapon_magazine_size_assert[sizeof(struct weapon_magazine) == 12 ? 1 : -1];
-typedef char halo_sim_weapon_state_size_assert[sizeof(struct halo_sim_weapon_state) == 160 ? 1 : -1];
+typedef char halo_sim_weapon_state_size_assert[sizeof(struct halo_sim_weapon_state) == 168 ? 1 : -1];
+typedef char halo_sim_weapon_game_call_size_assert[sizeof(struct halo_sim_weapon_game_call) == 104 ? 1 : -1];
 
 struct halo_sim_weapon_event
 {
-	long kind;
-	long a;
-	long b;
+	struct halo_sim_weapon_game_call call;
 	unsigned long seed;
 	struct halo_sim_weapon_state before;
 	struct halo_sim_weapon_state after;
@@ -1111,6 +1113,12 @@ struct halo_sim_weapon_event
 struct halo_sim_weapon_call
 {
 	struct halo_sim_weapon_state state;
+	long game_time;
+	unsigned long game_engine_running;
+	unsigned long bottomless_clip;
+	unsigned long infinite_ammo;
+	real_vector3d const *directions;
+	unsigned long direction_count;
 	unsigned long random_seed;
 	struct halo_sim_weapon_event const *events;
 	unsigned long event_count;
@@ -1119,9 +1127,22 @@ struct halo_sim_weapon_call
 	unsigned long still_there;
 };
 
+/* crates/halo_sim's OwnerUnitC */
+struct halo_sim_owner_unit
+{
+	unsigned long definition_index;
+	unsigned long dead;
+	long player_index;
+	long actor_index;
+	long gunner_object_index;
+	long gunner_player_index;
+	long gunner_actor_index;
+};
+
 struct halo_sim_weapon_callbacks
 {
-	long (*call)(struct halo_sim_weapon_state *state, long kind, long a, long b);
+	long (*call)(struct halo_sim_weapon_state *state, struct halo_sim_weapon_game_call *call);
+	long (*owner_unit)(unsigned long index, struct halo_sim_owner_unit *out);
 };
 
 typedef char halo_sim_objects_call_size_assert[sizeof(struct halo_sim_objects_call) == 64 ? 1 : -1];
@@ -1809,7 +1830,7 @@ static struct
 
 /* the weapon update checks: the weapon and seed the game's began with, its
 calls, and the comparisons */
-#define MAXIMUM_HALO_SIM_WEAPON_EVENTS 16
+#define MAXIMUM_HALO_SIM_WEAPON_EVENTS 128
 static struct
 {
 	boolean recording;
@@ -3459,8 +3480,6 @@ static long halo_sim_item_call_callback(struct halo_sim_item_state *state, struc
 	return result;
 }
 
-/* weapons.c's, a weapon update's call of its helpers */
-long weapon_update_call(long weapon_index, long kind, long a, long b);
 
 /* a weapon's state, from the weapon: FALSE if it is gone */
 static boolean halo_sim_weapon_state_load(long weapon_index, struct halo_sim_weapon_state *state)
@@ -3490,6 +3509,8 @@ static boolean halo_sim_weapon_state_load(long weapon_index, struct halo_sim_wea
 	memcpy(state->triggers, weapon->weapon.triggers, sizeof(state->triggers));
 	memcpy(state->magazines, weapon->weapon.magazines, sizeof(state->magazines));
 	state->overheated_effect_index = weapon->weapon.overheated_effect_index;
+	state->object_flags = weapon->object.flags;
+	state->game_time_last_fired = weapon->weapon.game_time_last_fired;
 
 	return TRUE;
 }
@@ -3502,8 +3523,13 @@ static void halo_sim_weapon_state_store(struct halo_sim_weapon_state const *stat
 	if (!weapon)
 		return;
 	weapon->weapon.flags = state->flags;
+	weapon->weapon.state = state->state;
 	weapon->weapon.state_timer = state->state_timer;
 	weapon->weapon.heat = state->heat;
+	weapon->weapon.age = state->age;
+	weapon->weapon.alternate_shots_loaded = state->alternate_shots_loaded;
+	weapon->weapon.overheated_effect_index = state->overheated_effect_index;
+	weapon->weapon.game_time_last_fired = state->game_time_last_fired;
 	weapon->weapon.overcharged = state->overcharged;
 	weapon->weapon.integrated_light_power = state->integrated_light_power;
 	weapon->weapon.tracked_object_index = state->tracked_object_index;
@@ -3513,16 +3539,41 @@ static void halo_sim_weapon_state_store(struct halo_sim_weapon_state const *stat
 	memcpy(weapon->weapon.magazines, state->magazines, sizeof(state->magazines));
 }
 
-static long halo_sim_weapon_call_callback(struct halo_sim_weapon_state *state, long kind, long a, long b)
+static long halo_sim_weapon_call_callback(struct halo_sim_weapon_state *state, struct halo_sim_weapon_game_call *call)
 {
 	long weapon_index = (long)state->object_index;
-	long result;
+	long still_there;
 
 	halo_sim_weapon_state_store(state);
-	result = weapon_update_call(weapon_index, kind, a, b);
-	if (result)
+	still_there = weapon_game_call(weapon_index, call);
+	if (still_there)
 		halo_sim_weapon_state_load(weapon_index, state);
-	return result;
+	return still_there;
+}
+
+/* a unit as firing reads it: FALSE if it is no unit */
+static long halo_sim_owner_unit_callback(unsigned long index, struct halo_sim_owner_unit *out)
+{
+	struct unit_datum *unit = unit_try_and_get((long)index);
+
+	memset(out, 0, sizeof(*out));
+	if (!unit)
+		return 0;
+	out->definition_index = (unsigned long)unit->definition_index;
+	out->dead = TEST_FLAG(unit->object.damage_flags, _object_dead_bit) ? 1 : 0;
+	out->player_index = unit->unit.player_index;
+	out->actor_index = unit->unit.actor_index;
+	out->gunner_object_index = unit->unit.gunner_object_index;
+	out->gunner_player_index = NONE;
+	out->gunner_actor_index = NONE;
+	if (unit->unit.gunner_object_index != NONE)
+	{
+		struct unit_datum *gunner = unit_get(unit->unit.gunner_object_index);
+
+		out->gunner_player_index = gunner->unit.player_index;
+		out->gunner_actor_index = gunner->unit.actor_index;
+	}
+	return 1;
 }
 
 static long halo_sim_objects_call_callback(struct halo_sim_objects_call *call)
@@ -3679,6 +3730,7 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	},
 	{
 		halo_sim_weapon_call_callback,
+		halo_sim_owner_unit_callback,
 	},
 	{
 		halo_sim_objects_call_callback,
@@ -6847,6 +6899,20 @@ void halo_sim_item_update_check(long item_index)
 
 /* ---------- weapon updates */
 
+static void halo_sim_weapon_call_new(long weapon_index, struct halo_sim_weapon_call *call)
+{
+	real_vector3d const *directions = NULL;
+
+	memset(call, 0, sizeof(*call));
+	halo_sim_weapon_state_load(weapon_index, &call->state);
+	call->game_time = game_time_get();
+	call->game_engine_running = game_engine_running() ? 1 : 0;
+	call->bottomless_clip = cheat.bottomless_clip ? 1 : 0;
+	call->infinite_ammo = cheat.infinite_ammo ? 1 : 0;
+	call->direction_count = random_direction_table_get(&directions);
+	call->directions = directions;
+}
+
 int halo_sim_weapon_update(long weapon_index)
 {
 	short mode = halo_sim_mode(_halo_sim_weapons);
@@ -6858,8 +6924,7 @@ int halo_sim_weapon_update(long weapon_index)
 		return FALSE;
 	if (mode == _halo_sim_mode_check)
 	{
-		memset(&halo_sim_weapon_checks.call, 0, sizeof(halo_sim_weapon_checks.call));
-		halo_sim_weapon_state_load(weapon_index, &halo_sim_weapon_checks.call.state);
+		halo_sim_weapon_call_new(weapon_index, &halo_sim_weapon_checks.call);
 		halo_sim_weapon_checks.call.random_seed = get_random_seed();
 		halo_sim_weapon_checks.weapon_index = weapon_index;
 		halo_sim_weapon_checks.event_count = 0;
@@ -6869,8 +6934,7 @@ int halo_sim_weapon_update(long weapon_index)
 		return FALSE;
 	}
 
-	memset(&call, 0, sizeof(call));
-	halo_sim_weapon_state_load(weapon_index, &call.state);
+	halo_sim_weapon_call_new(weapon_index, &call);
 	result = halo_sim.weapon_update(&call);
 	if (result != 0)
 		return FALSE;
@@ -6880,7 +6944,7 @@ int halo_sim_weapon_update(long weapon_index)
 	return TRUE;
 }
 
-void halo_sim_weapon_event_begin(long weapon_index, long kind, long a, long b)
+void halo_sim_weapon_event_begin(long weapon_index, struct halo_sim_weapon_game_call const *call)
 {
 	struct halo_sim_weapon_event *event;
 
@@ -6896,22 +6960,22 @@ void halo_sim_weapon_event_begin(long weapon_index, long kind, long a, long b)
 	}
 	event = &halo_sim_weapon_checks.events[halo_sim_weapon_checks.event_count++];
 	memset(event, 0, sizeof(*event));
-	event->kind = kind;
-	event->a = a;
-	event->b = b;
+	event->call = *call;
 	halo_sim_weapon_state_load(weapon_index, &event->before);
 	halo_sim_weapon_checks.open_event = event;
 }
 
-void halo_sim_weapon_event_end(long weapon_index, long result)
+void halo_sim_weapon_event_end(long weapon_index, struct halo_sim_weapon_game_call const *call, long still_there)
 {
 	struct halo_sim_weapon_event *event = halo_sim_weapon_checks.open_event;
 
 	if (!event || halo_sim_weapon_checks.weapon_index != weapon_index)
 		return;
 	halo_sim_weapon_checks.open_event = NULL;
+	event->call.result = call->result;
+	memcpy(event->call.out, call->out, sizeof(event->call.out));
 	event->seed = get_random_seed();
-	if (result)
+	if (still_there)
 		halo_sim_weapon_state_load(weapon_index, &event->after);
 	else
 		halo_sim_weapon_checks.overflow = TRUE;
@@ -6945,11 +7009,11 @@ void halo_sim_weapon_update_check(long weapon_index)
 	halo_sim_weapon_checks.calls += halo_sim_weapon_checks.event_count;
 	for (event_number = 0; event_number < halo_sim_weapon_checks.event_count; event_number++)
 	{
-		long kind = halo_sim_weapon_checks.events[event_number].kind;
+		long kind = halo_sim_weapon_checks.events[event_number].call.kind;
 
-		if (kind == _weapon_update_call_trigger_begin_firing)
+		if (kind == _weapon_call_new_projectile)
 			halo_sim_weapon_checks.firing++;
-		else if (kind == _weapon_update_call_magazine_start_reload || kind == _weapon_update_call_magazine_finish_reload)
+		else if (kind == _weapon_call_animation_time)
 			halo_sim_weapon_checks.reloading++;
 	}
 	if (halo_sim_weapon_checks.call.state.heat > 0.f)
@@ -6960,7 +7024,7 @@ void halo_sim_weapon_update_check(long weapon_index)
 		if (halo_sim_weapon_checks.differed <= 8)
 		{
 			long kind = call.difference_event >= 0 && call.difference_event < (long)halo_sim_weapon_checks.event_count ?
-				halo_sim_weapon_checks.events[call.difference_event].kind : NONE;
+				halo_sim_weapon_checks.events[call.difference_event].call.kind : NONE;
 
 			platform_log("halo_sim: weapon update differs: weapon %lx call %ld of %lu (kind %ld) reason %ld; heat game %f rust %f; flags game %lx rust %lx; rate of fire game %f rust %f",
 				(unsigned long)weapon_index, call.difference_event, halo_sim_weapon_checks.event_count, kind,
@@ -6973,7 +7037,7 @@ void halo_sim_weapon_update_check(long weapon_index)
 
 		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
 		{
-			platform_log("halo_sim: weapon update: %lu of %lu agree with the game (%lu triggers fired, %lu reloads, %lu with heat; %lu calls of the game; %lu left out)",
+			platform_log("halo_sim: weapon update: %lu of %lu agree with the game (%lu projectiles made, %lu reloads, %lu with heat; %lu calls of the game; %lu left out)",
 				compared - halo_sim_weapon_checks.differed, compared, halo_sim_weapon_checks.firing,
 				halo_sim_weapon_checks.reloading, halo_sim_weapon_checks.heating, halo_sim_weapon_checks.calls,
 				halo_sim_weapon_checks.skipped);

@@ -162,29 +162,41 @@ enum
 	_item_call_detonate,
 };
 
-/* a weapon update's calls of its helpers (weapons.c's weapon_update_call;
+/* a weapon's calls of the rest of the game (weapons.c's weapon_game_call;
 crates/halo_map's weapons::call) */
 enum
 {
-	_weapon_update_call_state_key_frame = 1,
-	_weapon_update_call_state_next,
-	_weapon_update_call_detonate,
-	_weapon_update_call_overheated,
-	_weapon_update_call_effect_stop,
-	_weapon_update_call_magazine_start_reload,
-	_weapon_update_call_magazine_finish_reload,
-	_weapon_update_call_magazine_start_chamber,
-	_weapon_update_call_magazine_finish_chamber,
-	_weapon_update_call_trigger_begin_firing,
-	_weapon_update_call_trigger_recover,
-	_weapon_update_call_trigger_overload,
-	_weapon_update_call_trigger_idle,
-	_weapon_update_call_trigger_fully_charged,
-	_weapon_update_call_trigger_release_charge,
-	_weapon_update_call_trigger_overcharged,
-	_weapon_update_call_trigger_locked,
-	_weapon_update_call_trigger_finish_tracking,
-	_weapon_update_call_permute_blurred,
+	_weapon_call_detonate_item = 1,
+	_weapon_call_message,
+	_weapon_call_looping_effect,
+	_weapon_call_effect_stop,
+	_weapon_call_permute_blurred,
+	_weapon_call_effect,
+	_weapon_call_underwater,
+	_weapon_call_animation_time,
+	_weapon_call_weapon_state_change,
+	_weapon_call_weapon_fired,
+	_weapon_call_ai_shooting,
+	_weapon_call_self_damage,
+	_weapon_call_delete,
+	_weapon_call_firing_blindly,
+	_weapon_call_projectile_ray,
+	_weapon_call_player_aim,
+	_weapon_call_actor_aim,
+	_weapon_call_new_projectile,
+};
+
+/* crates/halo_map's WeaponCall: a weapon's call of the game, and its answer */
+struct halo_sim_weapon_game_call
+{
+	long kind;
+	long a;
+	long b;
+	long c;
+	long d;
+	float f[12];
+	long result;
+	float out[8];
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -511,14 +523,15 @@ void halo_sim_item_event_begin(long item_index, long kind, long a, long b, long 
 void halo_sim_item_event_end(long item_index, long result);
 
 /* weapons.c's weapon_update: TRUE when the Rust port ran it (its calls of
-the weapon's helpers through weapon_update_call); in check mode it notes the
-weapon and random seed the game's begins with, weapon_update_call records
-each call (halo_sim_weapon_event_begin and _end), and
+the game through weapon_game_call); in check mode it notes the weapon and
+random seed the game's begins with, weapon_game_call records each call
+(halo_sim_weapon_event_begin and _end), and
 halo_sim_weapon_update_check compares Rust's replay */
 int halo_sim_weapon_update(long weapon_index);
 void halo_sim_weapon_update_check(long weapon_index);
-void halo_sim_weapon_event_begin(long weapon_index, long kind, long a, long b);
-void halo_sim_weapon_event_end(long weapon_index, long result);
+void halo_sim_weapon_event_begin(long weapon_index, struct halo_sim_weapon_game_call const *call);
+void halo_sim_weapon_event_end(long weapon_index, struct halo_sim_weapon_game_call const *call, long still_there);
+long weapon_game_call(long weapon_index, struct halo_sim_weapon_game_call *call);
 
 /* objects.c's objects_update: TRUE when the Rust port ran the tick's loop
 (its calls through objects_update_call); in check mode objects_update_call

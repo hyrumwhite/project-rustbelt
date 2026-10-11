@@ -90,6 +90,7 @@ symbols in this file:
 #include "saved games/game_state.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_files.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -174,6 +175,34 @@ static void randomize_particle_variables(
 	struct particle_system_type *type_definition,
 	struct particle_system_type_particle_state_interpolated_randomized_variables *variables,
 	short state_index);
+
+/* port: the system whose update makes the calls (particle_system_call) */
+static long particle_system_call_system_index = NONE;
+
+static void particle_system_call_new(
+	struct halo_sim_particle_system_call *call,
+	long kind)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+}
+
+static void particle_system_call_location(
+	struct halo_sim_particle_system_call *call,
+	struct location const *location)
+{
+	call->c = location->leaf_index;
+	call->d = (long)((unsigned long)(unsigned short)location->cluster_index | ((unsigned long)location->bonus << 16));
+}
+
+static void particle_system_call_out_location(
+	struct halo_sim_particle_system_call const *call,
+	struct location *location)
+{
+	location->leaf_index = call->out_location_leaf;
+	location->cluster_index = call->out_location_cluster;
+	location->bonus = call->out_location_bonus;
+}
 
 /* ---------- globals */
 
@@ -617,18 +646,28 @@ static void particle_system_update_default(
 
 	if (system->object_index == NONE && definition->system_update_point_physics.index != NONE)
 	{
-		point_physics_update(
-			0,
-			point_physics_definition_get(definition->system_update_point_physics.index),
-			&system->location,
-			NONE,
-			&system->position,
-			&system->velocity,
-			NULL,
-			NULL,
-			NULL,
-			1.0f,
-			delta_time);
+		/* port: point_physics_update, through particle_system_call */
+		struct halo_sim_particle_system_call call;
+
+		particle_system_call_new(&call, _particle_system_call_system_physics);
+		call.a = definition->system_update_point_physics.index;
+		particle_system_call_location(&call, &system->location);
+		call.f[0] = system->position.x;
+		call.f[1] = system->position.y;
+		call.f[2] = system->position.z;
+		call.f[3] = system->velocity.i;
+		call.f[4] = system->velocity.j;
+		call.f[5] = system->velocity.k;
+		call.f[6] = 1.0f;
+		call.f[7] = delta_time;
+		particle_system_call(particle_system_call_system_index, &call);
+		system->position.x = call.out[0];
+		system->position.y = call.out[1];
+		system->position.z = call.out[2];
+		system->velocity.i = call.out[3];
+		system->velocity.j = call.out[4];
+		system->velocity.k = call.out[5];
+		particle_system_call_out_location(&call, &system->location);
 	}
 
 	return;
@@ -654,6 +693,17 @@ static void particle_system_update_explosion(
 	particle_system_update_default(system, delta_time);
 
 	return;
+}
+
+/* port: datum_delete of a particle, through particle_system_call */
+static void particle_system_call_particle_delete(
+	long particle_index)
+{
+	struct halo_sim_particle_system_call call;
+
+	particle_system_call_new(&call, _particle_system_call_particle_delete);
+	call.a = particle_index;
+	particle_system_call(particle_system_call_system_index, &call);
 }
 
 static void particle_system_new_particles(
@@ -707,17 +757,38 @@ static void particle_system_new_particles(
 	{
 		if (system->object_index != NONE)
 		{
-			struct object_datum *object = object_get(system->object_index);
+			/* port: the attachment's markers, one by one, and the object's
+			location, through particle_system_call */
+			struct halo_sim_particle_system_call call;
+			short marker_index;
 
-			marker_count = object_get_marker_by_name(
-				system->object_index,
-				TAG_BLOCK_GET_ELEMENT(
-					&object_definition_get(object->definition_index)->object.attachments,
-					system->attachment_index,
-					struct object_attachment_definition)->marker_name,
-				markers,
-				NUMBEROF(markers));
-			object_get_location(system->object_index, &system->location);
+			marker_count = 1;
+			for (marker_index = 0;
+				marker_index < marker_count && marker_index < (short)NUMBEROF(markers);
+				marker_index++)
+			{
+				particle_system_call_new(&call, _particle_system_call_markers);
+				call.a = system->object_index;
+				call.b = system->attachment_index;
+				call.c = marker_index;
+				particle_system_call(particle_system_call_system_index, &call);
+				marker_count = (short)call.result;
+				if (marker_index < marker_count)
+				{
+					markers[marker_index].matrix.position.x = call.out[0];
+					markers[marker_index].matrix.position.y = call.out[1];
+					markers[marker_index].matrix.position.z = call.out[2];
+					markers[marker_index].matrix.forward.i = call.out[3];
+					markers[marker_index].matrix.forward.j = call.out[4];
+					markers[marker_index].matrix.forward.k = call.out[5];
+				}
+			}
+			if (marker_count > (short)NUMBEROF(markers))
+				marker_count = (short)NUMBEROF(markers);
+			particle_system_call_new(&call, _particle_system_call_object_location);
+			call.a = system->object_index;
+			particle_system_call(particle_system_call_system_index, &call);
+			particle_system_call_out_location(&call, &system->location);
 		}
 		else
 		{
@@ -737,7 +808,13 @@ static void particle_system_new_particles(
 				if (!marker_count || particles_created >= 128)
 					break;
 
-				particle_index = datum_new(system_particles);
+				{
+					struct halo_sim_particle_system_call call;
+
+					particle_system_call_new(&call, _particle_system_call_particle_new);
+					particle_system_call(particle_system_call_system_index, &call);
+					particle_index = call.result;
+				}
 
 				if (particle_index == NONE)
 					break;
@@ -795,7 +872,17 @@ static void particle_system_new_particles(
 						particle,
 						&markers[marker_index]);
 
-					scenario_location_from_point(&particle->location, &particle->position);
+					{
+						struct halo_sim_particle_system_call call;
+
+						particle_system_call_new(&call, _particle_system_call_location_from_point);
+						particle_system_call_location(&call, &particle->location);
+						call.f[0] = particle->position.x;
+						call.f[1] = particle->position.y;
+						call.f[2] = particle->position.z;
+						particle_system_call(particle_system_call_system_index, &call);
+						particle_system_call_out_location(&call, &particle->location);
+					}
 
 					if (particle->location.cluster_index != NONE)
 					{
@@ -805,7 +892,7 @@ static void particle_system_new_particles(
 					}
 					else
 					{
-						datum_delete(system_particles, particle_index);
+						particle_system_call_particle_delete(particle_index);
 					}
 				}
 
@@ -839,7 +926,15 @@ void particle_systems_update(
 		system_index != NONE;
 		system_index = data_next_index(particle_systems, system_index))
 	{
+		/* port: the Rust port's update in place of the game's when asked
+		(halo_sim.c); in check mode the game's runs and is compared */
+		int checking = FALSE;
+
+		if (halo_sim_particle_system_update(system_index, delta_time, &checking))
+			continue;
 		particle_system_update(delta_time, system_index);
+		if (checking)
+			halo_sim_particle_system_update_check(system_index);
 	}
 
 	return;
@@ -881,7 +976,7 @@ static void particle_system_update_particle_default(
 		{
 			*variable = *type_variable * *multiplier * *state_variable;
 		}
-		physics = point_physics_definition_get(state_definition->point_physics.index);
+		physics = NULL;
 	}
 	else
 	{
@@ -913,25 +1008,56 @@ static void particle_system_update_particle_default(
 		{
 			*variable = *type_variable * *multiplier * (*state_variable*t + *transition_state_variable*inverse_t);
 		}
-		physics = point_physics_definition_interpolate(
-			point_physics_definition_get(state_definition->point_physics.index),
-			point_physics_definition_get(transition_state_definition->point_physics.index),
-			t,
-			&interpolated_physics);
+		/* (the call interpolates them) */
+		physics = NULL;
 	}
 
-	collision_flags = point_physics_update(
-		0,
-		physics,
-		&particle->location,
-		NONE,
-		&particle->position,
-		&particle->velocity,
-		NULL,
-		NULL,
-		NULL,
-		variables.radius,
-		delta_time);
+	/* port: point_physics_update (and the interpolation), through
+	particle_system_call */
+	{
+		struct halo_sim_particle_system_call call;
+
+		particle_system_call_new(&call, _particle_system_call_particle_physics);
+		call.a = state_definition->point_physics.index;
+		if (particle->transition_state_index == NONE)
+		{
+			call.b = NONE;
+			call.f[0] = -1.0f;
+		}
+		else
+		{
+			real t = particle->time_left_in_state/particle->state_length;
+
+			if (t < 0.0f)
+				t = 0.0f;
+			else if (t > 1.0f)
+				t = 1.0f;
+			call.b = TAG_BLOCK_GET_ELEMENT(
+				&type_definition->particle_states,
+				particle->transition_state_index,
+				struct particle_system_type_particle_state)->point_physics.index;
+			call.f[0] = t;
+		}
+		particle_system_call_location(&call, &particle->location);
+		call.f[1] = particle->position.x;
+		call.f[2] = particle->position.y;
+		call.f[3] = particle->position.z;
+		call.f[4] = particle->velocity.i;
+		call.f[5] = particle->velocity.j;
+		call.f[6] = particle->velocity.k;
+		call.f[7] = variables.radius;
+		call.f[8] = delta_time;
+		particle_system_call(particle_system_call_system_index, &call);
+		collision_flags = (unsigned long)call.result;
+		particle->position.x = call.out[0];
+		particle->position.y = call.out[1];
+		particle->position.z = call.out[2];
+		particle->velocity.i = call.out[3];
+		particle->velocity.j = call.out[4];
+		particle->velocity.k = call.out[5];
+		particle_system_call_out_location(&call, &particle->location);
+		(void)physics;
+	}
 
 	if ((TEST_FLAG(collision_flags, _point_physics_in_air_bit) &&
 			TEST_FLAG(type_definition->flags, _particle_system_type_dies_in_air_bit)) ||
@@ -1091,22 +1217,25 @@ static void particle_system_update(
 	short live_type_count = 0;
 	short type_index;
 
+	particle_system_call_system_index = system_index;
 	if (system->object_index != NONE)
 	{
-		struct object_datum *object = object_get(system->object_index);
+		/* port: the object, through particle_system_call */
+		struct halo_sim_particle_system_call call;
 
-		if (TEST_FLAG(object->object.flags, _object_connected_to_map_bit) &&
-			object_get_function_value(system->object_index, system->function_index, &system->scale))
-		{
-			SET_FLAG(system->flags, _particle_system_active_bit, TRUE);
-		}
-		else
-		{
-			SET_FLAG(system->flags, _particle_system_active_bit, FALSE);
-		}
-
-		object_get_origin(system->object_index, &system->position);
-		object_get_velocities(system->object_index, &system->velocity, NULL);
+		particle_system_call_new(&call, _particle_system_call_object);
+		call.a = system->object_index;
+		call.b = system->function_index;
+		call.f[0] = system->scale;
+		particle_system_call(system_index, &call);
+		system->scale = call.out[0];
+		SET_FLAG(system->flags, _particle_system_active_bit, call.result != 0);
+		system->position.x = call.out[1];
+		system->position.y = call.out[2];
+		system->position.z = call.out[3];
+		system->velocity.i = call.out[4];
+		system->velocity.j = call.out[5];
+		system->velocity.k = call.out[6];
 		system->velocity.i *= TICKS_PER_SECOND;
 		system->velocity.j *= TICKS_PER_SECOND;
 		system->velocity.k *= TICKS_PER_SECOND;
@@ -1337,7 +1466,7 @@ static void particle_system_update(
 					else
 						type->first_particle_index = particle->next_particle_index;
 
-					datum_delete(system_particles, particle_index);
+					particle_system_call_particle_delete(particle_index);
 					particle_index = (short)particle->next_particle_index;
 					type->particle_count--;
 				}
@@ -1419,7 +1548,12 @@ static void particle_system_update(
 	SET_FLAG(system->flags, _particle_system_initializing_bit, FALSE);
 
 	if (live_type_count == 0 && system->object_index == NONE)
-		particle_system_delete(system_index);
+	{
+		struct halo_sim_particle_system_call call;
+
+		particle_system_call_new(&call, _particle_system_call_delete);
+		particle_system_call(system_index, &call);
+	}
 
 	return;
 }
@@ -1735,4 +1869,294 @@ void particle_systems_render(
 	}
 
 	return;
+}
+
+/* ---------- port: particle_system_call */
+
+/* a particle system update's call of the rest of the game, shared by the
+C's update and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void particle_system_call(
+	long system_index,
+	struct halo_sim_particle_system_call *call)
+{
+	int opened = halo_sim_particle_system_event_begin(system_index, call);
+
+	switch (call->kind)
+	{
+		case _particle_system_call_object:
+		{
+			struct object_datum *object = object_get(call->a);
+			real scale = call->f[0];
+			real_point3d origin;
+			real_vector3d velocity;
+
+			call->result = TEST_FLAG(object->object.flags, _object_connected_to_map_bit) &&
+				object_get_function_value(call->a, (short)call->b, &scale);
+			object_get_origin(call->a, &origin);
+			object_get_velocities(call->a, &velocity, NULL);
+			call->out[0] = scale;
+			call->out[1] = origin.x;
+			call->out[2] = origin.y;
+			call->out[3] = origin.z;
+			call->out[4] = velocity.i;
+			call->out[5] = velocity.j;
+			call->out[6] = velocity.k;
+			break;
+		}
+
+		case _particle_system_call_system_physics:
+		case _particle_system_call_particle_physics:
+		{
+			boolean particle = call->kind == _particle_system_call_particle_physics;
+			float const *f = particle ? &call->f[1] : &call->f[0];
+			struct point_physics_definition interpolated_physics;
+			struct point_physics_definition *physics;
+			struct location location;
+			real_point3d position;
+			real_vector3d velocity;
+
+			/* (a transition's t is pinned, never negative; a NaN one
+			interpolates, as the C's does) */
+			if (particle && !(call->f[0] < 0.0f))
+			{
+				physics = point_physics_definition_interpolate(
+					point_physics_definition_get(call->a),
+					point_physics_definition_get(call->b),
+					call->f[0],
+					&interpolated_physics);
+			}
+			else
+			{
+				physics = point_physics_definition_get(call->a);
+			}
+			location.leaf_index = call->c;
+			location.cluster_index = (short)(call->d & 0xffff);
+			location.bonus = (word)((unsigned long)call->d >> 16);
+			position.x = f[0];
+			position.y = f[1];
+			position.z = f[2];
+			velocity.i = f[3];
+			velocity.j = f[4];
+			velocity.k = f[5];
+			call->result = (long)point_physics_update(
+				0,
+				physics,
+				&location,
+				NONE,
+				&position,
+				&velocity,
+				NULL,
+				NULL,
+				NULL,
+				f[6],
+				f[7]);
+			call->out[0] = position.x;
+			call->out[1] = position.y;
+			call->out[2] = position.z;
+			call->out[3] = velocity.i;
+			call->out[4] = velocity.j;
+			call->out[5] = velocity.k;
+			call->out_location_leaf = location.leaf_index;
+			call->out_location_cluster = location.cluster_index;
+			call->out_location_bonus = location.bonus;
+			break;
+		}
+
+		case _particle_system_call_markers:
+		{
+			struct object_datum *object = object_get(call->a);
+			struct object_marker markers[8];
+			short marker_count = object_get_marker_by_name(
+				call->a,
+				TAG_BLOCK_GET_ELEMENT(
+					&object_definition_get(object->definition_index)->object.attachments,
+					call->b,
+					struct object_attachment_definition)->marker_name,
+				markers,
+				NUMBEROF(markers));
+
+			call->result = marker_count;
+			if (call->c >= 0 && call->c < marker_count)
+			{
+				call->out[0] = markers[call->c].matrix.position.x;
+				call->out[1] = markers[call->c].matrix.position.y;
+				call->out[2] = markers[call->c].matrix.position.z;
+				call->out[3] = markers[call->c].matrix.forward.i;
+				call->out[4] = markers[call->c].matrix.forward.j;
+				call->out[5] = markers[call->c].matrix.forward.k;
+			}
+			break;
+		}
+
+		case _particle_system_call_object_location:
+		{
+			struct location location;
+
+			object_get_location(call->a, &location);
+			call->out_location_leaf = location.leaf_index;
+			call->out_location_cluster = location.cluster_index;
+			call->out_location_bonus = location.bonus;
+			break;
+		}
+
+		case _particle_system_call_particle_new:
+			call->result = datum_new(system_particles);
+			break;
+
+		case _particle_system_call_location_from_point:
+		{
+			struct location location;
+			real_point3d point;
+
+			location.leaf_index = call->c;
+			location.cluster_index = (short)(call->d & 0xffff);
+			location.bonus = (word)((unsigned long)call->d >> 16);
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			scenario_location_from_point(&location, &point);
+			call->out_location_leaf = location.leaf_index;
+			call->out_location_cluster = location.cluster_index;
+			call->out_location_bonus = location.bonus;
+			break;
+		}
+
+		case _particle_system_call_particle_delete:
+			datum_delete(system_particles, call->a);
+			break;
+
+		case _particle_system_call_delete:
+			particle_system_delete(system_index);
+			break;
+	}
+	halo_sim_particle_system_event_end(system_index, call, opened);
+
+	return;
+}
+
+/* ---------- port: the system and its particles for halo_sim.c */
+
+int particle_system_halo_sim_load(
+	long system_index,
+	struct halo_sim_particle_system_state *state,
+	struct halo_sim_system_particle *particles,
+	unsigned long maximum_particle_count,
+	unsigned long *particle_count)
+{
+	struct particle_system_datum *system =
+		(struct particle_system_datum *)datum_try_and_get(particle_systems, system_index);
+	struct particle_system_definition *definition;
+	unsigned long count = 0;
+	short type_index;
+
+	*particle_count = 0;
+	state->local_random_seed = *get_global_local_random_seed_address();
+	if (!system)
+		return FALSE;
+	definition = particle_system_definition_get(system->definition_index);
+	state->system_index = (unsigned long)system_index;
+	state->definition_index = (unsigned long)system->definition_index;
+	state->flags = system->flags;
+	state->object_index = system->object_index;
+	state->attachment_index = system->attachment_index;
+	state->function_index = system->function_index;
+	state->scale = system->scale;
+	state->location_leaf = system->location.leaf_index;
+	state->location_cluster = system->location.cluster_index;
+	state->location_bonus = system->location.bonus;
+	memcpy(state->position, &system->position, sizeof(state->position));
+	memcpy(state->velocity, &system->velocity, sizeof(state->velocity));
+	memcpy(state->color, &system->color, sizeof(state->color));
+	state->grounded = system->physics_state.explosion.grounded ? 1 : 0;
+	memset(state->pad, 0, sizeof(state->pad));
+	memcpy(state->types, system->types, sizeof(state->types));
+	for (type_index = 0;
+		type_index < definition->types.count && type_index < MAXIMUM_PARTICLE_SYSTEM_TYPES_PER_SYSTEM;
+		type_index++)
+	{
+		long particle_index = system->types[type_index].first_particle_index;
+
+		while (particle_index != NONE)
+		{
+			struct ps_particle_datum *particle = ps_particle_get(particle_index);
+			struct halo_sim_system_particle *out;
+
+			if (count >= maximum_particle_count)
+				return FALSE;
+			out = &particles[count++];
+			out->index = particle_index;
+			out->states_moving_forward = particle->states_moving_forward ? 1 : 0;
+			out->valid = particle->valid ? 1 : 0;
+			out->pad = 0;
+			out->next = particle->next_particle_index;
+			out->state_index = particle->state_index;
+			out->transition_state_index = particle->transition_state_index;
+			out->time_left_in_state = particle->time_left_in_state;
+			out->state_length = particle->state_length;
+			out->location_leaf = particle->location.leaf_index;
+			out->location_cluster = particle->location.cluster_index;
+			out->location_bonus = particle->location.bonus;
+			memcpy(out->position, &particle->position, sizeof(out->position));
+			memcpy(out->velocity, &particle->velocity, sizeof(out->velocity));
+			memcpy(out->axis, &particle->axis, sizeof(out->axis));
+			out->rotation = particle->rotation;
+			out->sprite_index = particle->sprite_index;
+			memcpy(out->randomized_variables, &particle->randomized_variables, sizeof(out->randomized_variables));
+			memcpy(out->transition_randomized_variables, &particle->transition_randomized_variables,
+				sizeof(out->transition_randomized_variables));
+			particle_index = particle->next_particle_index;
+		}
+	}
+	*particle_count = count;
+
+	return TRUE;
+}
+
+void particle_system_halo_sim_store(
+	struct halo_sim_particle_system_state const *state,
+	struct halo_sim_system_particle const *particles,
+	unsigned long particle_count)
+{
+	struct particle_system_datum *system =
+		(struct particle_system_datum *)datum_try_and_get(particle_systems, (long)state->system_index);
+	unsigned long particle_number;
+
+	*get_global_local_random_seed_address() = state->local_random_seed;
+	if (!system)
+		return;
+	system->flags = state->flags;
+	system->scale = state->scale;
+	system->location.leaf_index = state->location_leaf;
+	system->location.cluster_index = state->location_cluster;
+	system->location.bonus = state->location_bonus;
+	memcpy(&system->position, state->position, sizeof(state->position));
+	memcpy(&system->velocity, state->velocity, sizeof(state->velocity));
+	memcpy(system->types, state->types, sizeof(system->types));
+	for (particle_number = 0; particle_number < particle_count; particle_number++)
+	{
+		struct halo_sim_system_particle const *in = &particles[particle_number];
+		struct ps_particle_datum *particle = (struct ps_particle_datum *)datum_try_and_get(system_particles, in->index);
+
+		if (!particle)
+			continue;
+		particle->states_moving_forward = in->states_moving_forward;
+		particle->valid = in->valid;
+		particle->next_particle_index = in->next;
+		particle->state_index = in->state_index;
+		particle->transition_state_index = in->transition_state_index;
+		particle->time_left_in_state = in->time_left_in_state;
+		particle->state_length = in->state_length;
+		particle->location.leaf_index = in->location_leaf;
+		particle->location.cluster_index = in->location_cluster;
+		particle->location.bonus = in->location_bonus;
+		memcpy(&particle->position, in->position, sizeof(in->position));
+		memcpy(&particle->velocity, in->velocity, sizeof(in->velocity));
+		memcpy(&particle->axis, in->axis, sizeof(in->axis));
+		particle->rotation = in->rotation;
+		particle->sprite_index = in->sprite_index;
+		memcpy(&particle->randomized_variables, in->randomized_variables, sizeof(in->randomized_variables));
+		memcpy(&particle->transition_randomized_variables, in->transition_randomized_variables,
+			sizeof(in->transition_randomized_variables));
+	}
 }

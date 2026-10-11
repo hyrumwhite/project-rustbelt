@@ -41,6 +41,7 @@ enum
 	_halo_sim_effects,
 	_halo_sim_particles,
 	_halo_sim_contrails,
+	_halo_sim_particle_systems,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -473,6 +474,99 @@ struct halo_sim_contrail_point
 	unsigned short location_bonus;
 	float position[3];
 	float velocity[3];
+};
+
+/* a particle system's calls of the rest of the game (particle_systems.c's
+particle_system_call; crates/halo_map's particle_systems::call) */
+enum
+{
+	_particle_system_call_object = 1,
+	_particle_system_call_system_physics,
+	_particle_system_call_markers,
+	_particle_system_call_object_location,
+	_particle_system_call_particle_new,
+	_particle_system_call_location_from_point,
+	_particle_system_call_particle_delete,
+	_particle_system_call_particle_physics,
+	_particle_system_call_delete,
+};
+
+/* crates/halo_map's ParticleSystemCall: a particle system's call of the
+game, and its answer */
+struct halo_sim_particle_system_call
+{
+	long kind;
+	long a;
+	long b;
+	long c;
+	long d;
+	float f[9];
+	long result;
+	float out[9];
+	long out_location_leaf;
+	short out_location_cluster;
+	unsigned short out_location_bonus;
+};
+
+/* crates/halo_map's ParticleType, ParticleSystemState and SystemParticle:
+what a particle system's update changes of the system and its particles,
+and the game's local random seed */
+struct halo_sim_particle_type
+{
+	short state_index;
+	short transition_state_index;
+	float time_left_in_state;
+	float state_length;
+	float variables[10];
+	float fractional_particle_count;
+	unsigned char states_moving_forward;
+	unsigned char reserved;
+	short particle_count;
+	long first_particle_index;
+};
+
+struct halo_sim_particle_system_state
+{
+	unsigned long system_index;
+	unsigned long definition_index;
+	unsigned long flags;
+	long object_index;
+	short attachment_index;
+	short function_index;
+	float scale;
+	long location_leaf;
+	short location_cluster;
+	unsigned short location_bonus;
+	float position[3];
+	float velocity[3];
+	float color[4];
+	unsigned char grounded;
+	unsigned char pad[3];
+	struct halo_sim_particle_type types[4];
+	unsigned long local_random_seed;
+};
+
+struct halo_sim_system_particle
+{
+	long index;
+	unsigned char states_moving_forward;
+	unsigned char valid;
+	unsigned short pad;
+	long next;
+	short state_index;
+	short transition_state_index;
+	float time_left_in_state;
+	float state_length;
+	long location_leaf;
+	short location_cluster;
+	unsigned short location_bonus;
+	float position[3];
+	float velocity[3];
+	float axis[3];
+	float rotation;
+	float sprite_index;
+	float randomized_variables[7];
+	float transition_randomized_variables[7];
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -915,5 +1009,25 @@ int contrail_halo_sim_load(long contrail_index, struct halo_sim_contrail_state *
 	struct halo_sim_contrail_point *points, unsigned long maximum_point_count, unsigned long *point_count);
 void contrail_halo_sim_store(struct halo_sim_contrail_state const *state, struct halo_sim_contrail_point const *points,
 	unsigned long point_count);
+
+/* particle_systems.c's particle_systems_update, each system's: TRUE when
+the Rust port ran it (its calls of the game through particle_system_call);
+in check mode `checking` is set, particle_system_call records each call
+(halo_sim_particle_system_event_begin and _end), and
+halo_sim_particle_system_update_check compares Rust's replay with the system
+and particles the game's left */
+int halo_sim_particle_system_update(long system_index, float dt, int *checking);
+void halo_sim_particle_system_update_check(long system_index);
+int halo_sim_particle_system_event_begin(long system_index, struct halo_sim_particle_system_call const *call);
+void halo_sim_particle_system_event_end(long system_index, struct halo_sim_particle_system_call const *call,
+	int opened);
+void particle_system_call(long system_index, struct halo_sim_particle_system_call *call);
+/* particle_systems.c's: a system and its particles in the order its lists
+walk (FALSE if it is gone, or they don't fit: the seed is still read), and
+back (the seed always) */
+int particle_system_halo_sim_load(long system_index, struct halo_sim_particle_system_state *state,
+	struct halo_sim_system_particle *particles, unsigned long maximum_particle_count, unsigned long *particle_count);
+void particle_system_halo_sim_store(struct halo_sim_particle_system_state const *state,
+	struct halo_sim_system_particle const *particles, unsigned long particle_count);
 
 #endif // __HALO_SIM_H

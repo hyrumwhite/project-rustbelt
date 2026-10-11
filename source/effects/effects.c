@@ -486,6 +486,7 @@ static long effect_allocate(
 
 // impulse_effect_initialize: effect is passed in ecx, color in eax, impulse_field in ebx
 static void impulse_effect_initialize(
+	long effect_index,
 	struct effect_datum *effect,
 	real scale_a,
 	real scale_b,
@@ -581,24 +582,33 @@ static real effect_evaluate_function_integral(
 	short function_index,
 	real fraction);
 
-// effect_build_location: marker is passed in eax
-static long effect_build_location(
-	struct effect_datum *effect,
-	struct object_marker const *marker,
-	short location_index,
-	boolean first_person_weapon);
+/* port: where effect_build_locations takes its markers (January passes the
+getter itself) */
+enum
+{
+	_effect_markers_object = 0,
+	_effect_markers_first_person_weapon,
+	_effect_markers_list,
+};
 
 // effect_build_locations: effect is passed in ebx
 static void effect_build_locations(
+	long effect_index,
 	struct effect_datum *effect,
-	short (*get_markers_by_name)(
-		long object_index,
-		char const *name,
-		struct object_marker *markers,
-		short maximum_marker_count));
+	short source);
 
 static unsigned long *effect_get_random_seed(
 	long definition_index);
+
+/* port: an effect's calls of the game (effect_call) */
+static void effect_call_new(
+	struct halo_sim_effect_call *call,
+	long kind);
+static void effect_call_vector(
+	float *f,
+	real const *v);
+/* random_math.c's (as halo_sim.c declares it) */
+short random_direction_table_get(real_vector3d const **table);
 static void effect_set_event(
 	long effect_index,
 	short event_index);
@@ -701,7 +711,270 @@ void effect_delete(
 	return;
 }
 
+/* port: an effect_new_*'s arguments for the Rust port (halo_sim.c), which
+runs it in place of the game's when asked; in check mode the game's runs
+and is compared */
+static void effect_new_call_new(
+	struct halo_sim_effect_new_call *call,
+	long kind,
+	long definition_index,
+	long owner_object_index,
+	long object_index,
+	real scale_a,
+	real scale_b,
+	real_rgb_color const *color,
+	struct effect_vector_field const *impulse_field)
+{
+	real_vector3d const *directions = NULL;
+
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+	call->definition_index = definition_index;
+	call->owner_object_index = owner_object_index;
+	call->object_index = object_index;
+	call->node_index = NONE;
+	call->force_local_player_index = NONE;
+	call->scale_a_function_index = NONE;
+	call->scale_b_function_index = NONE;
+	call->change_color_index = NONE;
+	call->scale_a = scale_a;
+	call->scale_b = scale_b;
+	if (color)
+	{
+		call->has_color = TRUE;
+		call->color[0] = color->red;
+		call->color[1] = color->green;
+		call->color[2] = color->blue;
+	}
+	call->impulse_field = (unsigned long)impulse_field;
+	call->can_be_deterministic = TRUE;
+	call->game_in_editor = game_in_editor() ? 1 : 0;
+	call->corpse_nonviolent = effects_corpse_nonviolent ? 1 : 0;
+	call->local_player_count = local_player_count();
+	call->direction_count = random_direction_table_get(&directions);
+	call->directions = directions;
+	call->state.effect_index = (unsigned long)NONE;
+	effect_halo_sim_state_load(NONE, &call->state);
+	call->result = NONE;
+}
+
+static void effect_new_call_markers(
+	struct halo_sim_effect_new_call *call,
+	short marker_count,
+	char const **marker_names,
+	real_point3d const *marker_points,
+	real_vector3d const *marker_forwards)
+{
+	call->marker_count = marker_count;
+	call->marker_names = marker_names;
+	call->marker_points = (float const *)marker_points;
+	call->marker_forwards = (float const *)marker_forwards;
+}
+
+static long effect_new_attached_from_markers_game(
+	long definition_index,
+	long owner_object_index,
+	long object_index,
+	short node_index,
+	short marker_count,
+	char const **marker_names,
+	real_point3d const *marker_points,
+	real_vector3d const *marker_forwards,
+	real scale_a,
+	real scale_b,
+	real_rgb_color const *color,
+	struct effect_vector_field const *impulse_field);
+static long effect_new_unattached_from_markers_game(
+	long definition_index,
+	long owner_object_index,
+	real_vector3d const *translational_velocity,
+	short marker_count,
+	char const **marker_names,
+	real_point3d const *marker_points,
+	real_vector3d const *marker_forwards,
+	real scale_a,
+	real scale_b,
+	real_rgb_color const *color,
+	struct effect_vector_field const *impulse_field,
+	boolean can_be_deterministic);
+static long effect_new_from_object_game(
+	long definition_index,
+	long owner_object_index,
+	long object_index,
+	short force_local_player_index,
+	real scale_a,
+	real scale_b,
+	real_rgb_color const *color,
+	struct effect_vector_field const *impulse_field);
+static long effect_new_looping_game(
+	long definition_index,
+	long object_index,
+	short scale_a_function_index,
+	short scale_b_function_index,
+	short change_color_index);
+
 long effect_new_attached_from_markers(
+	long definition_index,
+	long owner_object_index,
+	long object_index,
+	short node_index,
+	short marker_count,
+	char const **marker_names,
+	real_point3d const *marker_points,
+	real_vector3d const *marker_forwards,
+	real scale_a,
+	real scale_b,
+	real_rgb_color const *color,
+	struct effect_vector_field const *impulse_field)
+{
+	struct halo_sim_effect_new_call call;
+	int checking = FALSE;
+	long effect_index;
+
+	effect_new_call_new(&call, _effect_new_attached_from_markers, definition_index, owner_object_index,
+		object_index, scale_a, scale_b, color, impulse_field);
+	call.node_index = node_index;
+	effect_new_call_markers(&call, marker_count, marker_names, marker_points, marker_forwards);
+	if (!debug_effects_nonviolent && halo_sim_effect_new(&call, &checking))
+		return call.result;
+	effect_index = effect_new_attached_from_markers_game(definition_index, owner_object_index, object_index,
+		node_index, marker_count, marker_names, marker_points, marker_forwards, scale_a, scale_b, color,
+		impulse_field);
+	if (checking)
+		halo_sim_effect_new_check(effect_index);
+
+	return effect_index;
+}
+
+long effect_new_unattached_from_markers(
+	long definition_index,
+	long owner_object_index,
+	real_vector3d const *translational_velocity,
+	short marker_count,
+	char const **marker_names,
+	real_point3d const *marker_points,
+	real_vector3d const *marker_forwards,
+	real scale_a,
+	real scale_b,
+	real_rgb_color const *color,
+	struct effect_vector_field const *impulse_field,
+	boolean can_be_deterministic)
+{
+	struct halo_sim_effect_new_call call;
+	int checking = FALSE;
+	long effect_index;
+
+	effect_new_call_new(&call, _effect_new_unattached_from_markers, definition_index, owner_object_index, NONE,
+		scale_a, scale_b, color, impulse_field);
+	if (translational_velocity)
+	{
+		call.has_velocity = TRUE;
+		call.velocity[0] = translational_velocity->i;
+		call.velocity[1] = translational_velocity->j;
+		call.velocity[2] = translational_velocity->k;
+	}
+	call.can_be_deterministic = can_be_deterministic ? 1 : 0;
+	effect_new_call_markers(&call, marker_count, marker_names, marker_points, marker_forwards);
+	if (!debug_effects_nonviolent && halo_sim_effect_new(&call, &checking))
+		return call.result;
+	effect_index = effect_new_unattached_from_markers_game(definition_index, owner_object_index,
+		translational_velocity, marker_count, marker_names, marker_points, marker_forwards, scale_a, scale_b,
+		color, impulse_field, can_be_deterministic);
+	if (checking)
+		halo_sim_effect_new_check(effect_index);
+
+	return effect_index;
+}
+
+long effect_new_from_object(
+	long definition_index,
+	long owner_object_index,
+	long object_index,
+	short force_local_player_index,
+	real scale_a,
+	real scale_b,
+	real_rgb_color const *color,
+	struct effect_vector_field const *impulse_field)
+{
+	struct halo_sim_effect_new_call call;
+	int checking = FALSE;
+	long effect_index;
+
+	effect_new_call_new(&call, _effect_new_from_object, definition_index, owner_object_index, object_index,
+		scale_a, scale_b, color, impulse_field);
+	call.force_local_player_index = force_local_player_index;
+	if (!debug_effects_nonviolent && halo_sim_effect_new(&call, &checking))
+		return call.result;
+	effect_index = effect_new_from_object_game(definition_index, owner_object_index, object_index,
+		force_local_player_index, scale_a, scale_b, color, impulse_field);
+	if (checking)
+		halo_sim_effect_new_check(effect_index);
+
+	return effect_index;
+}
+
+long effect_new_looping(
+	long definition_index,
+	long object_index,
+	short scale_a_function_index,
+	short scale_b_function_index,
+	short change_color_index)
+{
+	struct halo_sim_effect_new_call call;
+	int checking = FALSE;
+	long effect_index;
+
+	effect_new_call_new(&call, _effect_new_looping, definition_index, object_index, object_index, 0.0f, 0.0f,
+		NULL, NULL);
+	call.scale_a_function_index = scale_a_function_index;
+	call.scale_b_function_index = scale_b_function_index;
+	call.change_color_index = change_color_index;
+	if (!debug_effects_nonviolent && halo_sim_effect_new(&call, &checking))
+		return call.result;
+	effect_index = effect_new_looping_game(definition_index, object_index, scale_a_function_index,
+		scale_b_function_index, change_color_index);
+	if (checking)
+		halo_sim_effect_new_check(effect_index);
+
+	return effect_index;
+}
+
+/* port: effects_object_is_corpse, through effect_call */
+static boolean effect_call_corpse(
+	long effect_index,
+	long object_index)
+{
+	struct halo_sim_effect_call call;
+
+	effect_call_new(&call, _effect_call_corpse);
+	call.a = object_index;
+	effect_call(effect_index, &call);
+	return call.result != 0;
+}
+
+/* port: first_person_weapon_get_local_index, through effect_call */
+static short effect_call_local_index(
+	long effect_index,
+	long object_index)
+{
+	struct halo_sim_effect_call call;
+
+	effect_call_new(&call, _effect_call_local_index);
+	call.a = object_index;
+	effect_call(effect_index, &call);
+	return (short)call.result;
+}
+
+static void effect_call_clear_locations(
+	long effect_index)
+{
+	struct halo_sim_effect_call call;
+
+	effect_call_new(&call, _effect_call_clear_locations);
+	effect_call(effect_index, &call);
+}
+
+static long effect_new_attached_from_markers_game(
 	long definition_index,
 	long owner_object_index,
 	long object_index,
@@ -749,13 +1022,15 @@ long effect_new_attached_from_markers(
 	{
 		struct effect_datum *effect = effect_get(effect_index);
 		struct effect_marker_list marker_list;
+		struct halo_sim_effect_call call;
+		real_matrix4x3 node_matrix;
 
-		impulse_effect_initialize(effect, scale_a, scale_b, color, impulse_field);
+		impulse_effect_initialize(effect_index, effect, scale_a, scale_b, color, impulse_field);
 
 		effect->object_index = object_index;
 
 		if (effects_corpse_nonviolent &&
-			effects_object_is_corpse(effect->object_index))
+			effect_call_corpse(effect_index, effect->object_index))
 		{
 			SET_FLAG(effect->header.flags, _effect_nonviolent_bit, TRUE);
 		}
@@ -780,15 +1055,16 @@ long effect_new_attached_from_markers(
 		marker_list.points = marker_points;
 		marker_list.forwards = marker_forwards;
 		marker_list.node_index = node_index != NONE ? node_index : 0;
-		marker_list.node_matrix =
-			object_get_node_matrix(object_index, marker_list.node_index);
+		effect_call_new(&call, _effect_call_object_node_matrix);
+		call.a = object_index;
+		call.b = marker_list.node_index;
+		effect_call(effect_index, &call);
+		memcpy(&node_matrix, call.out, sizeof(node_matrix));
+		marker_list.node_matrix = &node_matrix;
 
 		global_effect_marker_list = &marker_list;
-		csmemset(
-			effect->location_datum_indices,
-			NONE,
-			sizeof(effect->location_datum_indices));
-		effect_build_locations(effect, effect_marker_list_get_markers_by_name);
+		effect_call_clear_locations(effect_index);
+		effect_build_locations(effect_index, effect, _effect_markers_list);
 
 		effect_update(effect_index, 0.0f);
 	}
@@ -796,7 +1072,7 @@ long effect_new_attached_from_markers(
 	return effect_index;
 }
 
-long effect_new_unattached_from_markers(
+static long effect_new_unattached_from_markers_game(
 	long definition_index,
 	long owner_object_index,
 	real_vector3d const *translational_velocity,
@@ -847,8 +1123,9 @@ long effect_new_unattached_from_markers(
 	{
 		struct effect_datum *effect = effect_get(effect_index);
 		struct effect_marker_list marker_list;
+		struct halo_sim_effect_call call;
 
-		impulse_effect_initialize(effect, scale_a, scale_b, color, impulse_field);
+		impulse_effect_initialize(effect_index, effect, scale_a, scale_b, color, impulse_field);
 
 		effect->object_index = NONE;
 
@@ -859,18 +1136,20 @@ long effect_new_unattached_from_markers(
 		marker_list.node_index = NONE;
 		marker_list.node_matrix = NULL;
 
-		scenario_location_from_point(&effect->location, marker_points);
+		effect_call_new(&call, _effect_call_location_from_point);
+		effect_call_vector(&call.f[0], &marker_points->x);
+		effect_call(effect_index, &call);
+		effect->location.leaf_index = call.out_location_leaf;
+		effect->location.cluster_index = call.out_location_cluster;
+		effect->location.bonus = call.out_location_bonus;
 
 		effect->velocity = translational_velocity
 			? *translational_velocity
 			: *global_zero_vector3d;
 
 		global_effect_marker_list = &marker_list;
-		csmemset(
-			effect->location_datum_indices,
-			NONE,
-			sizeof(effect->location_datum_indices));
-		effect_build_locations(effect, effect_marker_list_get_markers_by_name);
+		effect_call_clear_locations(effect_index);
+		effect_build_locations(effect_index, effect, _effect_markers_list);
 
 		effect_update(effect_index, 0.0f);
 	}
@@ -878,7 +1157,7 @@ long effect_new_unattached_from_markers(
 	return effect_index;
 }
 
-long effect_new_from_object(
+static long effect_new_from_object_game(
 	long definition_index,
 	long owner_object_index,
 	long object_index,
@@ -910,14 +1189,13 @@ long effect_new_from_object(
 	{
 		struct effect_datum *effect = effect_get(effect_index);
 
-		impulse_effect_initialize(effect, scale_a, scale_b, color, impulse_field);
+		impulse_effect_initialize(effect_index, effect, scale_a, scale_b, color, impulse_field);
 
 		effect->object_index = object_index;
-		effect->local_player_index =
-			first_person_weapon_get_local_index(object_index);
+		effect->local_player_index = effect_call_local_index(effect_index, object_index);
 
 		if (effects_corpse_nonviolent &&
-			effects_object_is_corpse(effect->object_index))
+			effect_call_corpse(effect_index, effect->object_index))
 		{
 			SET_FLAG(effect->header.flags, _effect_nonviolent_bit, TRUE);
 		}
@@ -937,14 +1215,11 @@ long effect_new_from_object(
 						tag_get_name(object->definition_index)));
 		}
 
-		csmemset(
-			effect->location_datum_indices,
-			NONE,
-			sizeof(effect->location_datum_indices));
+		effect_call_clear_locations(effect_index);
 
-		effect_build_locations(effect, object_get_marker_by_name);
+		effect_build_locations(effect_index, effect, _effect_markers_object);
 		if (effect->local_player_index != NONE)
-			effect_build_locations(effect, first_person_weapon_get_marker_by_name);
+			effect_build_locations(effect_index, effect, _effect_markers_first_person_weapon);
 
 		if (force_local_player_index != NONE)
 			effect->local_player_index = force_local_player_index;
@@ -955,7 +1230,7 @@ long effect_new_from_object(
 	return effect_index;
 }
 
-long effect_new_looping(
+static long effect_new_looping_game(
 	long definition_index,
 	long object_index,
 	short scale_a_function_index,
@@ -973,10 +1248,10 @@ long effect_new_looping(
 	if (effect_index != NONE)
 	{
 		struct effect_datum *effect = effect_get(effect_index);
+		struct halo_sim_effect_call call;
 
 		effect->object_index = object_index;
-		effect->local_player_index =
-			first_person_weapon_get_local_index(object_index);
+		effect->local_player_index = effect_call_local_index(effect_index, object_index);
 		effect->scale_a_function_index = scale_a_function_index;
 		effect->scale_b_function_index = scale_b_function_index;
 		/* port: the index is the map's attachment's (its change color less
@@ -1000,21 +1275,19 @@ long effect_new_looping(
 			change_color_index = NONE;
 		}
 		effect->change_color_index = change_color_index;
-		effect->impulse_field.translational_function = NULL;
-		effect->impulse_field.angular_function = NULL;
+		effect_call_new(&call, _effect_call_impulse_field);
+		call.a = 0;
+		effect_call(effect_index, &call);
 
 		if (change_color_index == NONE)
 			effect->color = *global_real_rgb_white;
 
 		SET_FLAG(effect->header.flags, _effect_loop_bit, TRUE);
-		csmemset(
-			effect->location_datum_indices,
-			NONE,
-			sizeof(effect->location_datum_indices));
+		effect_call_clear_locations(effect_index);
 
-		effect_build_locations(effect, object_get_marker_by_name);
+		effect_build_locations(effect_index, effect, _effect_markers_object);
 		if (effect->local_player_index != NONE)
-			effect_build_locations(effect, first_person_weapon_get_marker_by_name);
+			effect_build_locations(effect_index, effect, _effect_markers_first_person_weapon);
 
 		effect_update(effect_index, 0.0f);
 	}
@@ -1064,8 +1337,9 @@ void effects_start_on_first_person_weapon(
 
 			effect->local_player_index = local_player_index;
 			effect_build_locations(
+				effect_index,
 				effect,
-				first_person_weapon_get_marker_by_name);
+				_effect_markers_first_person_weapon);
 		}
 	}
 
@@ -1504,55 +1778,74 @@ static long effect_allocate(
 
 	if (!game_in_editor() && definition_index != NONE)
 	{
-		struct effect_definition *definition =
-			effect_definition_get(definition_index);
+		struct halo_sim_effect_call call;
 
-		if (!can_be_deterministic && TEST_FLAG(
+		/* port: the definition's test and the datum, through effect_call */
+		effect_call_new(&call, _effect_call_allocate);
+		call.a = definition_index;
+		call.b = owner_object_index;
+		call.c = can_be_deterministic ? 1 : 0;
+		effect_call(NONE, &call);
+		effect_index = call.result;
+
+		if (effect_index != NONE)
+		{
+			struct effect_datum *effect = effect_get(effect_index);
+
+			effect->definition_index = definition_index;
+			effect->owner_object_index = owner_object_index;
+			effect->local_player_index = NONE;
+			effect->header.flags = 0;
+
+			effect_set_event(effect_index, 0);
+		}
+	}
+
+	return effect_index;
+}
+
+/* the definition's test and the datum of effect_allocate */
+static long effect_allocate_datum(
+	long definition_index,
+	boolean can_be_deterministic)
+{
+	struct effect_definition *definition =
+		effect_definition_get(definition_index);
+	long effect_index = NONE;
+
+	if (!can_be_deterministic && TEST_FLAG(
+		definition->flags,
+		_effect_definition_must_be_deterministic_bit))
+	{
+		error(
+			_error_silent,
+			"cannot create objects, lights, or damage from an effect created by particles.");
+	}
+	else if (definition->events.count > 0)
+	{
+		effect_index = datum_new(effect_data);
+
+		if (effect_index == NONE && TEST_FLAG(
 			definition->flags,
 			_effect_definition_must_be_deterministic_bit))
 		{
-			error(
-				_error_silent,
-				"cannot create objects, lights, or damage from an effect created by particles.");
-		}
-		else if (definition->events.count > 0)
-		{
-			effect_index = datum_new(effect_data);
-
-			if (effect_index == NONE && TEST_FLAG(
-				definition->flags,
-				_effect_definition_must_be_deterministic_bit))
+			for (effect_index = data_next_index(effect_data, NONE);
+				effect_index != NONE;
+				effect_index = data_next_index(effect_data, effect_index))
 			{
-				for (effect_index = data_next_index(effect_data, NONE);
-					effect_index != NONE;
-					effect_index = data_next_index(effect_data, effect_index))
+				if (!TEST_FLAG(
+					effect_definition_get(
+						effect_get(effect_index)->definition_index)->flags,
+					_effect_definition_must_be_deterministic_bit))
 				{
-					if (!TEST_FLAG(
-						effect_definition_get(
-							effect_get(effect_index)->definition_index)->flags,
-						_effect_definition_must_be_deterministic_bit))
-					{
-						datum_delete(effect_data, effect_index);
-						effect_index = datum_new(effect_data);
-						match_assert(
-							"c:\\halo\\SOURCE\\effects\\effects.c",
-							941,
-							effect_index!=NONE);
-						break;
-					}
+					datum_delete(effect_data, effect_index);
+					effect_index = datum_new(effect_data);
+					match_assert(
+						"c:\\halo\\SOURCE\\effects\\effects.c",
+						941,
+						effect_index!=NONE);
+					break;
 				}
-			}
-
-			if (effect_index != NONE)
-			{
-				struct effect_datum *effect = effect_get(effect_index);
-
-				effect->definition_index = definition_index;
-				effect->owner_object_index = owner_object_index;
-				effect->local_player_index = NONE;
-				effect->header.flags = 0;
-
-				effect_set_event(effect_index, 0);
 			}
 		}
 	}
@@ -1561,12 +1854,15 @@ static long effect_allocate(
 }
 
 static void impulse_effect_initialize(
+	long effect_index,
 	struct effect_datum *effect,
 	real scale_a,
 	real scale_b,
 	real_rgb_color const *color,
 	struct effect_vector_field const *impulse_field)
 {
+	struct halo_sim_effect_call call;
+
 	effect->scale_a = scale_a;
 	effect->scale_b = scale_b;
 	effect->color = color ? *color : *global_real_rgb_white;
@@ -1575,15 +1871,10 @@ static void impulse_effect_initialize(
 		980,
 		&effect->color);
 
-	if (impulse_field)
-	{
-		effect->impulse_field = *impulse_field;
-	}
-	else
-	{
-		effect->impulse_field.translational_function = NULL;
-		effect->impulse_field.angular_function = NULL;
-	}
+	/* port: the field, through effect_call */
+	effect_call_new(&call, _effect_call_impulse_field);
+	call.a = (long)impulse_field;
+	effect_call(effect_index, &call);
 
 	return;
 }
@@ -2787,44 +3078,10 @@ static real effect_evaluate_function_integral(
 	return integral;
 }
 
-static long effect_build_location(
-	struct effect_datum *effect,
-	struct object_marker const *marker,
-	short location_index,
-	boolean first_person_weapon)
-{
-	long location_datum_index = datum_new(effect_location_data);
-
-	if (location_datum_index != NONE)
-	{
-		struct effect_location_datum *location =
-			effect_location_get(location_datum_index);
-		long node_designator;
-
-		if (marker->node_index == NONE)
-			node_designator = NONE;
-		else if (first_person_weapon)
-			node_designator = marker->node_index | FLAG(_effect_location_first_person_bit);
-		else
-			node_designator = marker->node_index & (FLAG(_effect_location_first_person_bit) - 1);
-
-		location->node_designator = (short)node_designator;
-		location->matrix = marker->node_matrix;
-		location->next_instance_location_index =
-			effect->location_datum_indices[location_index];
-		effect->location_datum_indices[location_index] = location_datum_index;
-	}
-
-	return location_datum_index;
-}
-
 static void effect_build_locations(
+	long effect_index,
 	struct effect_datum *effect,
-	short (*get_markers_by_name)(
-		long object_index,
-		char const *name,
-		struct object_marker *markers,
-		short maximum_marker_count))
+	short source)
 {
 	struct effect_definition *definition =
 		effect_definition_get(effect->definition_index);
@@ -2852,23 +3109,62 @@ static void effect_build_locations(
 			&definition->locations,
 			location_index,
 			struct effect_location_definition);
-		short marker_count = get_markers_by_name(
-			effect->object_index,
-			location->marker_name,
-			markers,
-			NUMBEROF(markers));
+		short marker_count;
 		short marker_index;
+
+		if (source == _effect_markers_list)
+		{
+			marker_count = effect_marker_list_get_markers_by_name(
+				effect->object_index,
+				location->marker_name,
+				markers,
+				NUMBEROF(markers));
+		}
+		else
+		{
+			/* port: the object's or first person weapon's markers, one by one
+			through effect_call */
+			struct halo_sim_effect_call call;
+
+			marker_count = 1;
+			for (marker_index = 0; marker_index < marker_count; marker_index++)
+			{
+				effect_call_new(&call, _effect_call_markers);
+				call.a = effect->object_index;
+				call.b = location_index;
+				call.c = source == _effect_markers_first_person_weapon ? 1 : 0;
+				call.d = marker_index;
+				effect_call(effect_index, &call);
+				marker_count = (short)call.result;
+				if (marker_index < marker_count)
+				{
+					markers[marker_index].node_index = (short)call.out_location_leaf;
+					memcpy(&markers[marker_index].node_matrix, call.out, sizeof(real_matrix4x3));
+				}
+			}
+		}
 
 		for (marker_index = 0; marker_index < marker_count; marker_index++)
 		{
-			if (effect_build_location(
-				effect,
-				&markers[marker_index],
-				location_index,
-				get_markers_by_name == first_person_weapon_get_marker_by_name) == NONE)
-			{
+			struct object_marker const *marker = &markers[marker_index];
+			struct halo_sim_effect_call call;
+			long node_designator;
+
+			if (marker->node_index == NONE)
+				node_designator = NONE;
+			else if (source == _effect_markers_first_person_weapon)
+				node_designator = marker->node_index | FLAG(_effect_location_first_person_bit);
+			else
+				node_designator = marker->node_index & (FLAG(_effect_location_first_person_bit) - 1);
+
+			/* port: effect_build_location, through effect_call */
+			effect_call_new(&call, _effect_call_build_location);
+			call.a = location_index;
+			call.b = (short)node_designator;
+			memcpy(call.f, &marker->node_matrix, sizeof(real_matrix4x3));
+			effect_call(effect_index, &call);
+			if (call.result == NONE)
 				break;
-			}
 		}
 	}
 
@@ -2931,10 +3227,107 @@ long effect_call(
 	struct effect_datum *effect = (struct effect_datum *)((char *)effect_data->data +
 		(effect_index & 0xffff) * effect_data->size);
 	long still_there;
+	int opened;
 
-	halo_sim_effect_event_begin(effect_index, call);
+	opened = halo_sim_effect_event_begin(effect_index, call);
 	switch (call->kind)
 	{
+		case _effect_call_allocate:
+			call->result = effect_allocate_datum(call->a, call->c != 0);
+			break;
+
+		case _effect_call_impulse_field:
+		{
+			struct effect_vector_field const *impulse_field =
+				(struct effect_vector_field const *)call->a;
+
+			if (impulse_field)
+			{
+				effect->impulse_field = *impulse_field;
+			}
+			else
+			{
+				effect->impulse_field.translational_function = NULL;
+				effect->impulse_field.angular_function = NULL;
+			}
+			break;
+		}
+
+		case _effect_call_corpse:
+			call->result = effects_object_is_corpse(call->a) ? 1 : 0;
+			break;
+
+		case _effect_call_local_index:
+			call->result = first_person_weapon_get_local_index(call->a);
+			break;
+
+		case _effect_call_location_from_point:
+		{
+			struct location location = effect->location;
+			real_point3d point;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			scenario_location_from_point(&location, &point);
+			call->out_location_leaf = location.leaf_index;
+			call->out_location_cluster = location.cluster_index;
+			call->out_location_bonus = location.bonus;
+			break;
+		}
+
+		case _effect_call_markers:
+		{
+			struct effect_definition *definition =
+				effect_definition_get(effect->definition_index);
+			struct effect_location_definition *location = TAG_BLOCK_GET_ELEMENT(
+				&definition->locations,
+				call->b,
+				struct effect_location_definition);
+			struct object_marker markers[MAXIMUM_EFFECT_INSTANCES];
+			short marker_count = call->c
+				? first_person_weapon_get_marker_by_name(call->a, location->marker_name, markers, NUMBEROF(markers))
+				: object_get_marker_by_name(call->a, location->marker_name, markers, NUMBEROF(markers));
+
+			call->result = marker_count;
+			if (call->d >= 0 && call->d < marker_count)
+			{
+				call->out_location_leaf = markers[call->d].node_index;
+				memcpy(call->out, &markers[call->d].node_matrix, sizeof(real_matrix4x3));
+			}
+			break;
+		}
+
+		case _effect_call_build_location:
+		{
+			long location_datum_index = datum_new(effect_location_data);
+
+			if (location_datum_index != NONE)
+			{
+				struct effect_location_datum *location =
+					effect_location_get(location_datum_index);
+
+				location->node_designator = (short)call->b;
+				memcpy(&location->matrix, call->f, sizeof(real_matrix4x3));
+				location->next_instance_location_index =
+					effect->location_datum_indices[call->a];
+				effect->location_datum_indices[call->a] = location_datum_index;
+			}
+			call->result = location_datum_index;
+			break;
+		}
+
+		case _effect_call_clear_locations:
+			csmemset(
+				effect->location_datum_indices,
+				NONE,
+				sizeof(effect->location_datum_indices));
+			break;
+
+		case _effect_call_object_node_matrix:
+			memcpy(call->out, object_get_node_matrix(call->a, (short)call->b), sizeof(real_matrix4x3));
+			break;
+
 		case _effect_call_object:
 		{
 			struct object_datum *object = object_try_and_get(call->a);
@@ -3228,8 +3621,11 @@ long effect_call(
 			break;
 		}
 	}
+	/* (an allocation's effect is the new one) */
+	if (call->kind == _effect_call_allocate)
+		effect_index = call->result;
 	still_there = effect_try_and_get(effect_index) != NULL;
-	halo_sim_effect_event_end(effect_index, call, still_there);
+	halo_sim_effect_event_end(effect_index, call, still_there, opened);
 
 	return still_there;
 }
@@ -3285,6 +3681,13 @@ void effect_halo_sim_state_store(
 	*get_global_local_random_seed_address() = state->local_random_seed;
 	if (!effect)
 		return;
+	effect->definition_index = (long)state->definition_index;
+	effect->owner_object_index = state->owner_object_index;
+	effect->object_index = state->object_index;
+	effect->local_player_index = state->local_player_index;
+	effect->scale_a_function_index = state->scale_a_function_index;
+	effect->scale_b_function_index = state->scale_b_function_index;
+	effect->change_color_index = state->change_color_index;
 	effect->header.flags = state->flags;
 	effect->location.leaf_index = state->location_leaf;
 	effect->location.cluster_index = state->location_cluster;

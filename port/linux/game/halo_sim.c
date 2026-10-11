@@ -68,7 +68,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 26
+#define HALO_SIM_VERSION 27
 
 /* ---------- structures */
 
@@ -1507,13 +1507,7 @@ typedef char halo_sim_effect_state_size_assert[sizeof(struct halo_sim_effect_sta
 typedef char halo_sim_effect_call_size_assert[sizeof(struct halo_sim_effect_call) == 176 ? 1 : -1];
 typedef char halo_sim_effect_instance_size_assert[sizeof(struct halo_sim_effect_instance) == 60 ? 1 : -1];
 
-struct halo_sim_effect_event
-{
-	struct halo_sim_effect_call call;
-	unsigned long still_there;
-	struct halo_sim_effect_state before;
-	struct halo_sim_effect_state after;
-};
+typedef char halo_sim_effect_new_call_size_assert[sizeof(struct halo_sim_effect_new_call) == 256 ? 1 : -1];
 
 struct halo_sim_effect_update_call
 {
@@ -1619,6 +1613,7 @@ typedef long (*halo_sim_object_exports_function)(struct halo_sim_export_state *s
 typedef long (*halo_sim_ik_function)(struct halo_sim_ik_call *call);
 typedef long (*halo_sim_lights_function)(struct halo_sim_lights_call *call);
 typedef long (*halo_sim_effect_function)(struct halo_sim_effect_update_call *call);
+typedef long (*halo_sim_effect_new_function)(struct halo_sim_effect_new_call *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -1688,6 +1683,8 @@ static struct
 	halo_sim_lights_function object_lights;
 	halo_sim_effect_function effect_update;
 	halo_sim_effect_function effect_update_check;
+	halo_sim_effect_new_function effect_new;
+	halo_sim_effect_new_function effect_new_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1908,6 +1905,14 @@ static struct
 	unsigned long event_count;
 	struct halo_sim_effect_event *open_event;
 	struct halo_sim_effect_state last;
+	/* a creation's: what it was given (its effect isn't yet known: the
+	effect index is NONE) */
+	boolean creating;
+	struct halo_sim_effect_new_call new_call;
+	unsigned long created_compared;
+	unsigned long created_differed;
+	unsigned long created[4];
+	unsigned long locations_built;
 	unsigned long compared;
 	unsigned long differed;
 	unsigned long skipped;
@@ -3629,6 +3634,9 @@ static long halo_sim_effect_call_callback(struct halo_sim_effect_state *state, s
 
 	effect_halo_sim_state_store(state);
 	still_there = effect_call(effect_index, call);
+	/* (an allocation's effect is the new one) */
+	if (call->kind == _effect_call_allocate)
+		effect_index = call->result;
 	effect_halo_sim_state_load(effect_index, state);
 	return still_there;
 }
@@ -3906,6 +3914,8 @@ static void halo_sim_initialize(void)
 	halo_sim.object_lights = (halo_sim_lights_function)halo_sim_symbol(library, "halo_sim_object_lights");
 	halo_sim.effect_update = (halo_sim_effect_function)halo_sim_symbol(library, "halo_sim_effect_update");
 	halo_sim.effect_update_check = (halo_sim_effect_function)halo_sim_symbol(library, "halo_sim_effect_update_check");
+	halo_sim.effect_new = (halo_sim_effect_new_function)halo_sim_symbol(library, "halo_sim_effect_new");
+	halo_sim.effect_new_check = (halo_sim_effect_new_function)halo_sim_symbol(library, "halo_sim_effect_new_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -3926,7 +3936,7 @@ static void halo_sim_initialize(void)
 		!halo_sim.objects_update || !halo_sim.objects_update_check || !halo_sim.garbage_update || !halo_sim.scenery_update ||
 		!halo_sim.object_functions || !halo_sim.object_exports ||
 		!halo_sim.unit_ik || !halo_sim.unit_ik_check || !halo_sim.object_lights ||
-		!halo_sim.effect_update || !halo_sim.effect_update_check)
+		!halo_sim.effect_update || !halo_sim.effect_update_check || !halo_sim.effect_new || !halo_sim.effect_new_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -7177,6 +7187,7 @@ int halo_sim_effect_update(long effect_index, float dt, int *checking)
 			return FALSE;
 		}
 		halo_sim_effect_checks.effect_index = effect_index;
+		halo_sim_effect_checks.creating = FALSE;
 		halo_sim_effect_checks.last = halo_sim_effect_checks.call.state;
 		halo_sim_effect_checks.event_count = 0;
 		halo_sim_effect_checks.open_event = NULL;
@@ -7202,19 +7213,20 @@ int halo_sim_effect_update(long effect_index, float dt, int *checking)
 	return TRUE;
 }
 
-void halo_sim_effect_event_begin(long effect_index, struct halo_sim_effect_call const *call)
+int halo_sim_effect_event_begin(long effect_index, struct halo_sim_effect_call const *call)
 {
 	struct halo_sim_effect_event *event;
 
-	if (!halo_sim_effect_checks.recording || halo_sim_effect_checks.effect_index != effect_index ||
-		halo_sim_effect_checks.open_event)
+	/* (a creation's calls are its effect's, whatever it turns out to be) */
+	if (!halo_sim_effect_checks.recording || halo_sim_effect_checks.open_event ||
+		(!halo_sim_effect_checks.creating && halo_sim_effect_checks.effect_index != effect_index))
 	{
-		return;
+		return FALSE;
 	}
 	if (halo_sim_effect_checks.event_count >= MAXIMUM_HALO_SIM_EFFECT_EVENTS)
 	{
 		halo_sim_effect_checks.overflow = TRUE;
-		return;
+		return FALSE;
 	}
 	event = &halo_sim_effect_checks.events[halo_sim_effect_checks.event_count++];
 	memset(event, 0, sizeof(*event));
@@ -7223,13 +7235,17 @@ void halo_sim_effect_event_begin(long effect_index, struct halo_sim_effect_call 
 	event->before = halo_sim_effect_checks.last;
 	effect_halo_sim_state_load(effect_index, &event->before);
 	halo_sim_effect_checks.open_event = event;
+	return TRUE;
 }
 
-void halo_sim_effect_event_end(long effect_index, struct halo_sim_effect_call const *call, long still_there)
+void halo_sim_effect_event_end(long effect_index, struct halo_sim_effect_call const *call, long still_there,
+	int opened)
 {
 	struct halo_sim_effect_event *event = halo_sim_effect_checks.open_event;
 
-	if (!event || halo_sim_effect_checks.effect_index != effect_index)
+	/* (only the call that opened the event closes it: calls nested in it are
+	part of it) */
+	if (!opened || !event)
 		return;
 	halo_sim_effect_checks.open_event = NULL;
 	event->call.result = call->result;
@@ -7251,7 +7267,7 @@ void halo_sim_effect_update_check(long effect_index)
 	boolean differs;
 	unsigned long event_number;
 
-	if (!halo_sim_effect_checks.recording)
+	if (!halo_sim_effect_checks.recording || halo_sim_effect_checks.creating)
 		return;
 	halo_sim_effect_checks.recording = FALSE;
 	if (halo_sim_effect_checks.effect_index != effect_index || halo_sim_effect_checks.overflow)
@@ -7322,6 +7338,127 @@ void halo_sim_effect_update_check(long effect_index)
 				compared - halo_sim_effect_checks.differed, compared, halo_sim_effect_checks.attached,
 				halo_sim_effect_checks.deleted, halo_sim_effect_checks.parts, halo_sim_effect_checks.particles,
 				halo_sim_effect_checks.calls, halo_sim_effect_checks.skipped);
+		}
+	}
+}
+
+/* ---------- creating effects */
+
+int halo_sim_effect_new(struct halo_sim_effect_new_call *call, int *checking)
+{
+	short mode = halo_sim_mode(_halo_sim_effects);
+
+	*checking = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		/* (a creation within a call of the game's own update or creation
+		isn't checked: it is part of that call) */
+		if (halo_sim_effect_checks.recording)
+			return FALSE;
+		halo_sim_effect_checks.new_call = *call;
+		halo_sim_effect_checks.effect_index = NONE;
+		halo_sim_effect_checks.creating = TRUE;
+		halo_sim_effect_checks.last = call->state;
+		halo_sim_effect_checks.event_count = 0;
+		halo_sim_effect_checks.open_event = NULL;
+		halo_sim_effect_checks.overflow = FALSE;
+		halo_sim_effect_checks.recording = TRUE;
+		*checking = TRUE;
+		return FALSE;
+	}
+
+	if (halo_sim.effect_new(call) != 0)
+		return FALSE;
+	/* (the seeds always; the effect if it is still there) */
+	effect_halo_sim_state_store(&call->state);
+
+	return TRUE;
+}
+
+void halo_sim_effect_new_check(long effect_index)
+{
+	struct halo_sim_effect_new_call call;
+	struct halo_sim_effect_state game;
+	boolean exists;
+	boolean differs;
+	unsigned long event_number;
+
+	if (!halo_sim_effect_checks.recording || !halo_sim_effect_checks.creating)
+		return;
+	halo_sim_effect_checks.recording = FALSE;
+	halo_sim_effect_checks.creating = FALSE;
+	if (halo_sim_effect_checks.overflow)
+	{
+		halo_sim_effect_checks.skipped++;
+		return;
+	}
+	game = halo_sim_effect_checks.last;
+	exists = effect_index != NONE && effect_halo_sim_state_load(effect_index, &game);
+	call = halo_sim_effect_checks.new_call;
+	call.events = halo_sim_effect_checks.events;
+	call.event_count = halo_sim_effect_checks.event_count;
+	if (halo_sim.effect_new_check(&call) != 0)
+	{
+		halo_sim_effect_checks.skipped++;
+		return;
+	}
+
+	halo_sim_effect_checks.created_compared++;
+	if (call.kind >= 0 && call.kind < 4)
+		halo_sim_effect_checks.created[call.kind]++;
+	halo_sim_effect_checks.calls += halo_sim_effect_checks.event_count;
+	for (event_number = 0; event_number < halo_sim_effect_checks.event_count; event_number++)
+	{
+		long kind = halo_sim_effect_checks.events[event_number].call.kind;
+
+		if (kind == _effect_call_build_location)
+			halo_sim_effect_checks.locations_built++;
+		else if (kind == _effect_call_particle)
+			halo_sim_effect_checks.particles++;
+		else if (kind >= _effect_call_particle_system && kind <= _effect_call_light)
+			halo_sim_effect_checks.parts++;
+	}
+	if (call.result != effect_index)
+		differs = TRUE;
+	else if (exists)
+		differs = !call.still_there || memcmp(&call.state, &game, sizeof(game)) != 0;
+	else
+		differs = (effect_index != NONE && call.still_there) || call.state.random_seed != game.random_seed ||
+			call.state.local_random_seed != game.local_random_seed;
+	if (differs || call.difference_event != NONE)
+	{
+		halo_sim_effect_checks.created_differed++;
+		if (halo_sim_effect_checks.created_differed <= 8)
+		{
+			unsigned char const *game_bytes = (unsigned char const *)&game;
+			unsigned char const *rust_bytes = (unsigned char const *)&call.state;
+			long kind = call.difference_event >= 0 && call.difference_event < (long)halo_sim_effect_checks.event_count ?
+				halo_sim_effect_checks.events[call.difference_event].call.kind : NONE;
+			long offset = 0;
+
+			while (offset < (long)sizeof(game) && game_bytes[offset] == rust_bytes[offset])
+				offset++;
+			offset &= ~3;
+			platform_log("halo_sim: effect creation differs: kind %ld (%s) effect game %lx rust %lx; call %ld of %lu (kind %ld) reason %ld; there game %d rust %lu; first difference at byte %ld: game %08lx rust %08lx",
+				call.kind, call.definition_index != NONE ? tag_get_name(call.definition_index) : "<none>",
+				(unsigned long)effect_index, (unsigned long)call.result, call.difference_event,
+				halo_sim_effect_checks.event_count, kind, call.difference_reason, exists, call.still_there, offset,
+				offset < (long)sizeof(game) ? *(unsigned long const *)(game_bytes + offset) : 0,
+				offset < (long)sizeof(game) ? *(unsigned long const *)(rust_bytes + offset) : 0);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_effect_checks.created_compared;
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: effect creation: %lu of %lu agree with the game (looping, from an object, attached and unattached from markers %lu/%lu/%lu/%lu; %lu locations built; %lu left out)",
+				compared - halo_sim_effect_checks.created_differed, compared, halo_sim_effect_checks.created[0],
+				halo_sim_effect_checks.created[1], halo_sim_effect_checks.created[2],
+				halo_sim_effect_checks.created[3], halo_sim_effect_checks.locations_built,
+				halo_sim_effect_checks.skipped);
 		}
 	}
 }

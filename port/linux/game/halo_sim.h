@@ -220,6 +220,24 @@ enum
 	_effect_call_damage,
 	_effect_call_light,
 	_effect_call_particle,
+	_effect_call_allocate,
+	_effect_call_impulse_field,
+	_effect_call_corpse,
+	_effect_call_local_index,
+	_effect_call_location_from_point,
+	_effect_call_markers,
+	_effect_call_build_location,
+	_effect_call_clear_locations,
+	_effect_call_object_node_matrix,
+};
+
+/* which effect_new_* (crates/halo_map's effects::new_kind) */
+enum
+{
+	_effect_new_looping = 0,
+	_effect_new_from_object,
+	_effect_new_attached_from_markers,
+	_effect_new_unattached_from_markers,
 };
 
 /* crates/halo_map's EffectCall: an effect's call of the game, and its answer */
@@ -266,6 +284,54 @@ struct halo_sim_effect_state
 	unsigned long has_translational_impulse;
 	unsigned long random_seed;
 	unsigned long local_random_seed;
+};
+
+/* crates/halo_sim's EffectEventC */
+struct halo_sim_effect_event
+{
+	struct halo_sim_effect_call call;
+	unsigned long still_there;
+	struct halo_sim_effect_state before;
+	struct halo_sim_effect_state after;
+};
+
+/* crates/halo_sim's EffectNewC: what an effect_new_* is given, and the
+effect it leaves */
+struct halo_sim_effect_new_call
+{
+	long kind;
+	long definition_index;
+	long owner_object_index;
+	long object_index;
+	short node_index;
+	short force_local_player_index;
+	short scale_a_function_index;
+	short scale_b_function_index;
+	short change_color_index;
+	short marker_count;
+	float scale_a;
+	float scale_b;
+	unsigned long has_color;
+	float color[3];
+	unsigned long has_velocity;
+	float velocity[3];
+	unsigned long impulse_field;
+	unsigned long can_be_deterministic;
+	char const **marker_names;
+	float const *marker_points;
+	float const *marker_forwards;
+	unsigned long game_in_editor;
+	unsigned long corpse_nonviolent;
+	long local_player_count;
+	void const *directions;
+	unsigned long direction_count;
+	struct halo_sim_effect_state state;
+	struct halo_sim_effect_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+	unsigned long still_there;
+	long result;
 };
 
 /* crates/halo_map's EffectInstance: one of an effect's location instances,
@@ -664,9 +730,18 @@ the game's begins with, effect_call records each call
 compares Rust's replay */
 int halo_sim_effect_update(long effect_index, float dt, int *checking);
 void halo_sim_effect_update_check(long effect_index);
-void halo_sim_effect_event_begin(long effect_index, struct halo_sim_effect_call const *call);
-void halo_sim_effect_event_end(long effect_index, struct halo_sim_effect_call const *call, long still_there);
+/* (begin's result: whether it opened an event, which only that call's end
+closes) */
+int halo_sim_effect_event_begin(long effect_index, struct halo_sim_effect_call const *call);
+void halo_sim_effect_event_end(long effect_index, struct halo_sim_effect_call const *call, long still_there,
+	int opened);
 long effect_call(long effect_index, struct halo_sim_effect_call *call);
+/* effects.c's effect_new_*: TRUE when the Rust port created the effect
+(`call->result`); in check mode `checking` is set when this creation is the
+one checked, and halo_sim_effect_new_check compares Rust's replay with the
+effect the game's made */
+int halo_sim_effect_new(struct halo_sim_effect_new_call *call, int *checking);
+void halo_sim_effect_new_check(long effect_index);
 /* effects.c's: an effect's state (FALSE if it is gone: the seeds are still
 read), and back (the seeds always); its location instances (FALSE if they
 don't fit) */

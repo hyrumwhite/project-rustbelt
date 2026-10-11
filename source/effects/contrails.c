@@ -67,6 +67,8 @@ symbols in this file:
 /* ---------- headers */
 
 #include "effects/contrails.h"
+#include "game/game.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include "bitmaps/bitmap_group.h"
 #include "cseries/errors.h"
@@ -147,6 +149,37 @@ static void contrail_update_points(
 	real dt);
 static void contrail_verify(
 	long contrail_index);
+static void contrail_update_game(
+	long contrail_index,
+	real dt,
+	real point_dt);
+
+/* port: a contrail's calls of the game (contrail_call) */
+static void contrail_call_new(
+	struct halo_sim_contrail_call *call,
+	long kind)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+}
+
+static void contrail_call_location(
+	struct halo_sim_contrail_call *call,
+	struct location const *location)
+{
+	call->a = location->leaf_index;
+	call->b = location->cluster_index;
+	call->c = location->bonus;
+}
+
+static void contrail_call_out_location(
+	struct halo_sim_contrail_call const *call,
+	struct location *location)
+{
+	location->leaf_index = call->out_location_leaf;
+	location->cluster_index = call->out_location_cluster;
+	location->bonus = call->out_location_bonus;
+}
 
 /* ---------- globals */
 
@@ -393,6 +426,26 @@ void contrails_update(
 		contrail_index != NONE;
 		contrail_index = data_next_index(contrail_data, contrail_index))
 	{
+		/* port: the Rust port's update in place of the game's when asked
+		(halo_sim.c); in check mode the game's runs and is compared */
+		int checking = FALSE;
+
+		if (halo_sim_contrail_update(contrail_index, dt, point_dt, &checking))
+			continue;
+		contrail_update_game(contrail_index, dt, point_dt);
+		if (checking)
+			halo_sim_contrail_update_check(contrail_index);
+	}
+
+	return;
+}
+
+static void contrail_update_game(
+	long contrail_index,
+	real dt,
+	real point_dt)
+{
+	{
 		struct contrail_datum *contrail = contrail_get(contrail_index);
 		struct contrail_definition *definition = contrail_definition_get(contrail->definition_index);
 		real frame_dt = dt - contrail->expired_dt;
@@ -408,10 +461,17 @@ void contrails_update(
 
 		if (contrail->object_index != NONE)
 		{
-			boolean active = object_get_function_value(
-				contrail->object_index,
-				contrail->density_function_index,
-				&contrail->density);
+			struct halo_sim_contrail_call call;
+			boolean active;
+
+			/* port: object_get_function_value, through contrail_call */
+			contrail_call_new(&call, _contrail_call_function_value);
+			call.a = contrail->object_index;
+			call.b = contrail->density_function_index;
+			call.f[0] = contrail->density;
+			contrail_call(contrail_index, &call);
+			contrail->density = call.out[0];
+			active = call.result != 0;
 
 			if (active != TEST_FLAG(contrail->flags, _contrail_active_bit))
 			{
@@ -485,7 +545,10 @@ void contrails_update(
 		if (instance_index == MAXIMUM_CONTRAIL_INSTANCES &&
 			contrail->object_index == NONE)
 		{
-			contrail_delete(contrail_index);
+			struct halo_sim_contrail_call call;
+
+			contrail_call_new(&call, _contrail_call_delete);
+			contrail_call(contrail_index, &call);
 		}
 	}
 
@@ -584,6 +647,18 @@ static void contrail_verify(
 	return;
 }
 
+/* port: datum_delete of a point, through contrail_call */
+static void contrail_call_point_delete(
+	long contrail_index,
+	long contrail_point_index)
+{
+	struct halo_sim_contrail_call call;
+
+	contrail_call_new(&call, _contrail_call_point_delete);
+	call.a = contrail_point_index;
+	contrail_call(contrail_index, &call);
+}
+
 static void contrail_update_points(
 	long contrail_index,
 	real dt)
@@ -670,18 +745,28 @@ static void contrail_update_points(
 
 				if (state->physics.index != NONE)
 				{
-					point_physics_update(
-						0,
-						point_physics_definition_get(state->physics.index),
-						&contrail_point->location,
-						NONE,
-						&contrail_point->position,
-						&contrail_point->velocity,
-						NULL,
-						NULL,
-						NULL,
-						state->width * 0.5f,
-						dt);
+					/* port: point_physics_update, through contrail_call */
+					struct halo_sim_contrail_call call;
+
+					contrail_call_new(&call, _contrail_call_physics);
+					contrail_call_location(&call, &contrail_point->location);
+					call.d = state->physics.index;
+					call.f[0] = contrail_point->position.x;
+					call.f[1] = contrail_point->position.y;
+					call.f[2] = contrail_point->position.z;
+					call.f[3] = contrail_point->velocity.i;
+					call.f[4] = contrail_point->velocity.j;
+					call.f[5] = contrail_point->velocity.k;
+					call.f[6] = state->width * 0.5f;
+					call.f[7] = dt;
+					contrail_call(contrail_index, &call);
+					contrail_point->position.x = call.out[0];
+					contrail_point->position.y = call.out[1];
+					contrail_point->position.z = call.out[2];
+					contrail_point->velocity.i = call.out[3];
+					contrail_point->velocity.j = call.out[4];
+					contrail_point->velocity.k = call.out[5];
+					contrail_call_out_location(&call, &contrail_point->location);
 				}
 			}
 
@@ -708,7 +793,7 @@ static void contrail_update_points(
 
 			previous_contrail_point->next_contrail_point_index = NONE;
 			contrail->contrail_point_counts[instance_index]--;
-			datum_delete(contrail_point_data, contrail_point_indices[contrail_point_count]);
+			contrail_call_point_delete(contrail_index, contrail_point_indices[contrail_point_count]);
 		}
 
 		if (contrail->contrail_point_counts[instance_index] == 1)
@@ -718,8 +803,8 @@ static void contrail_update_points(
 					contrail->first_contrail_point_indices[instance_index])->flags,
 				_contrail_point_expired_bit))
 			{
-				datum_delete(
-					contrail_point_data,
+				contrail_call_point_delete(
+					contrail_index,
 					contrail->first_contrail_point_indices[instance_index]);
 				contrail->first_contrail_point_indices[instance_index] = NONE;
 				contrail->contrail_point_counts[instance_index] = 0;
@@ -800,16 +885,35 @@ static void contrail_add_points(
 
 	if (contrail_point_count != 0)
 	{
-		struct object_datum *object = object_get(contrail->object_index);
-		struct object_marker markers[MAXIMUM_CONTRAIL_INSTANCES];
-		short marker_count = object_get_marker_by_name(
-			contrail->object_index,
-			TAG_BLOCK_GET_ELEMENT(
-				&object_definition_get(object->definition_index)->object.attachments,
-				contrail->attachment_index,
-				struct object_attachment_definition)->marker_name,
-			markers,
-			NUMBEROF(markers));
+		real_point3d marker_positions[MAXIMUM_CONTRAIL_INSTANCES];
+		real_vector3d marker_forwards[MAXIMUM_CONTRAIL_INSTANCES];
+		struct halo_sim_contrail_call call;
+		short marker_count = 1;
+		short marker_index;
+
+		/* port: the attachment's markers, one by one through contrail_call */
+		for (marker_index = 0;
+			marker_index < marker_count && marker_index < MAXIMUM_CONTRAIL_INSTANCES;
+			marker_index++)
+		{
+			contrail_call_new(&call, _contrail_call_markers);
+			call.a = contrail->object_index;
+			call.b = contrail->attachment_index;
+			call.c = marker_index;
+			contrail_call(contrail_index, &call);
+			marker_count = (short)call.result;
+			if (marker_index < marker_count)
+			{
+				marker_positions[marker_index].x = call.out[0];
+				marker_positions[marker_index].y = call.out[1];
+				marker_positions[marker_index].z = call.out[2];
+				marker_forwards[marker_index].i = call.out[3];
+				marker_forwards[marker_index].j = call.out[4];
+				marker_forwards[marker_index].k = call.out[5];
+			}
+		}
+		if (marker_count > MAXIMUM_CONTRAIL_INSTANCES)
+			marker_count = MAXIMUM_CONTRAIL_INSTANCES;
 
 		if (marker_count > 0)
 		{
@@ -829,11 +933,9 @@ static void contrail_add_points(
 				definition->point_inherited_velocity_fraction,
 				definition->scale_flags,
 				_contrail_scales_inherited_velocity_fraction_bit);
-			short marker_index;
 
 			for (marker_index = 0; marker_index < marker_count; marker_index++)
 			{
-				struct object_marker *marker = &markers[marker_index];
 				struct contrail_point_datum *previous_contrail_point;
 				short new_contrail_point_count;
 				short contrail_point_index;
@@ -852,7 +954,7 @@ static void contrail_add_points(
 
 				if (previous_contrail_point &&
 					!csmemcmp(
-						&marker->matrix.position,
+						&marker_positions[marker_index],
 						&previous_contrail_point->position,
 						sizeof(real_point3d)) &&
 					!force)
@@ -864,7 +966,11 @@ static void contrail_add_points(
 					contrail_point_index <= new_contrail_point_count;
 					contrail_point_index++)
 				{
-					long new_contrail_point_index = datum_new(contrail_point_data);
+					long new_contrail_point_index;
+
+					contrail_call_new(&call, _contrail_call_point_new);
+					contrail_call(contrail_index, &call);
+					new_contrail_point_index = call.result;
 
 					if (new_contrail_point_index != NONE)
 					{
@@ -880,15 +986,24 @@ static void contrail_add_points(
 						contrail_point->state_index = NONE;
 						contrail_point->density = contrail->density;
 						local_random_vector_in_cone3d(
-							&marker->matrix.forward,
+							&marker_forwards[marker_index],
 							0.0f,
 							point_velocity_cone_angle,
 							&direction);
-						contrail_point->position = marker->matrix.position;
-						scenario_location_from_point(
-							&contrail_point->location,
-							&contrail_point->position);
-						object_get_velocities(contrail->object_index, &object_velocity, NULL);
+						contrail_point->position = marker_positions[marker_index];
+						contrail_call_new(&call, _contrail_call_location_from_point);
+						contrail_call_location(&call, &contrail_point->location);
+						call.f[0] = contrail_point->position.x;
+						call.f[1] = contrail_point->position.y;
+						call.f[2] = contrail_point->position.z;
+						contrail_call(contrail_index, &call);
+						contrail_call_out_location(&call, &contrail_point->location);
+						contrail_call_new(&call, _contrail_call_velocity);
+						call.a = contrail->object_index;
+						contrail_call(contrail_index, &call);
+						object_velocity.i = call.out[0];
+						object_velocity.j = call.out[1];
+						object_velocity.k = call.out[2];
 						contrail_point->velocity.i = point_inherited_velocity_fraction *
 							object_velocity.i + direction.i * point_velocity;
 						contrail_point->velocity.j = point_inherited_velocity_fraction *
@@ -916,11 +1031,16 @@ static void contrail_add_points(
 								t * contrail_point->position.y;
 							interpolated_position.z = one_minus_t * previous_contrail_point->position.z +
 								t * contrail_point->position.z;
-							scenario_location_from_line(
-								&contrail_point->location,
-								&contrail_point->location,
-								&contrail_point->position,
-								&interpolated_position);
+							contrail_call_new(&call, _contrail_call_location_from_line);
+							contrail_call_location(&call, &contrail_point->location);
+							call.f[0] = contrail_point->position.x;
+							call.f[1] = contrail_point->position.y;
+							call.f[2] = contrail_point->position.z;
+							call.f[3] = interpolated_position.x;
+							call.f[4] = interpolated_position.y;
+							call.f[5] = interpolated_position.z;
+							contrail_call(contrail_index, &call);
+							contrail_call_out_location(&call, &contrail_point->location);
 							contrail_point->position = interpolated_position;
 
 							contrail_point->velocity.i = one_minus_t * previous_contrail_point->velocity.i +
@@ -942,4 +1062,267 @@ static void contrail_add_points(
 	}
 
 	return;
+}
+
+/* ---------- port: contrail_call */
+
+/* a contrail update's call of the rest of the game, shared by the C's update
+and the Rust port's (halo_sim.c); in check mode each is recorded */
+void contrail_call(
+	long contrail_index,
+	struct halo_sim_contrail_call *call)
+{
+	int opened = halo_sim_contrail_event_begin(contrail_index, call);
+
+	switch (call->kind)
+	{
+		case _contrail_call_function_value:
+		{
+			real value = call->f[0];
+
+			call->result = object_get_function_value(call->a, (short)call->b, &value);
+			call->out[0] = value;
+			break;
+		}
+
+		case _contrail_call_markers:
+		{
+			struct object_datum *object = object_get(call->a);
+			struct object_marker markers[MAXIMUM_CONTRAIL_INSTANCES];
+			short marker_count = object_get_marker_by_name(
+				call->a,
+				TAG_BLOCK_GET_ELEMENT(
+					&object_definition_get(object->definition_index)->object.attachments,
+					call->b,
+					struct object_attachment_definition)->marker_name,
+				markers,
+				NUMBEROF(markers));
+
+			call->result = marker_count;
+			if (call->c >= 0 && call->c < marker_count)
+			{
+				call->out[0] = markers[call->c].matrix.position.x;
+				call->out[1] = markers[call->c].matrix.position.y;
+				call->out[2] = markers[call->c].matrix.position.z;
+				call->out[3] = markers[call->c].matrix.forward.i;
+				call->out[4] = markers[call->c].matrix.forward.j;
+				call->out[5] = markers[call->c].matrix.forward.k;
+			}
+			break;
+		}
+
+		case _contrail_call_velocity:
+		{
+			real_vector3d velocity;
+
+			object_get_velocities(call->a, &velocity, NULL);
+			call->out[0] = velocity.i;
+			call->out[1] = velocity.j;
+			call->out[2] = velocity.k;
+			break;
+		}
+
+		case _contrail_call_point_new:
+			call->result = datum_new(contrail_point_data);
+			break;
+
+		case _contrail_call_point_delete:
+			datum_delete(contrail_point_data, call->a);
+			break;
+
+		case _contrail_call_location_from_point:
+		case _contrail_call_location_from_line:
+		{
+			struct location location;
+			real_point3d point0;
+
+			location.leaf_index = call->a;
+			location.cluster_index = (short)call->b;
+			location.bonus = (word)call->c;
+			point0.x = call->f[0];
+			point0.y = call->f[1];
+			point0.z = call->f[2];
+			if (call->kind == _contrail_call_location_from_point)
+			{
+				scenario_location_from_point(&location, &point0);
+			}
+			else
+			{
+				real_point3d point1;
+
+				point1.x = call->f[3];
+				point1.y = call->f[4];
+				point1.z = call->f[5];
+				scenario_location_from_line(&location, &location, &point0, &point1);
+			}
+			call->out_location_leaf = location.leaf_index;
+			call->out_location_cluster = location.cluster_index;
+			call->out_location_bonus = location.bonus;
+			break;
+		}
+
+		case _contrail_call_physics:
+		{
+			struct location location;
+			real_point3d position;
+			real_vector3d velocity;
+
+			location.leaf_index = call->a;
+			location.cluster_index = (short)call->b;
+			location.bonus = (word)call->c;
+			position.x = call->f[0];
+			position.y = call->f[1];
+			position.z = call->f[2];
+			velocity.i = call->f[3];
+			velocity.j = call->f[4];
+			velocity.k = call->f[5];
+			point_physics_update(
+				0,
+				point_physics_definition_get(call->d),
+				&location,
+				NONE,
+				&position,
+				&velocity,
+				NULL,
+				NULL,
+				NULL,
+				call->f[6],
+				call->f[7]);
+			call->out[0] = position.x;
+			call->out[1] = position.y;
+			call->out[2] = position.z;
+			call->out[3] = velocity.i;
+			call->out[4] = velocity.j;
+			call->out[5] = velocity.k;
+			call->out_location_leaf = location.leaf_index;
+			call->out_location_cluster = location.cluster_index;
+			call->out_location_bonus = location.bonus;
+			break;
+		}
+
+		case _contrail_call_delete:
+			contrail_delete(contrail_index);
+			break;
+	}
+	halo_sim_contrail_event_end(contrail_index, call, opened);
+
+	return;
+}
+
+/* ---------- port: the contrail and its points for halo_sim.c */
+
+int contrail_halo_sim_load(
+	long contrail_index,
+	struct halo_sim_contrail_state *state,
+	struct halo_sim_contrail_point *points,
+	unsigned long maximum_point_count,
+	unsigned long *point_count)
+{
+	struct contrail_datum *contrail = (struct contrail_datum *)datum_try_and_get(contrail_data, contrail_index);
+	short instance_index;
+	unsigned long count = 0;
+
+	*point_count = 0;
+	state->local_random_seed = *get_global_local_random_seed_address();
+	if (!contrail)
+		return FALSE;
+	state->contrail_index = (unsigned long)contrail_index;
+	state->definition_index = (unsigned long)contrail->definition_index;
+	state->flags = contrail->flags;
+	state->attachment_index = contrail->attachment_index;
+	state->object_index = contrail->object_index;
+	state->density_function_index = contrail->density_function_index;
+	state->sequence_index = contrail->sequence_index;
+	state->frame_index = contrail->frame_index;
+	state->pad = 0;
+	state->density = contrail->density;
+	state->texture_offset_u = contrail->texture_offset_u;
+	state->texture_offset_v = contrail->texture_offset_v;
+	state->time_until_point = contrail->time_until_point;
+	state->frame_time = contrail->frame_time;
+	state->expired_dt = contrail->expired_dt;
+	for (instance_index = 0; instance_index < MAXIMUM_CONTRAIL_INSTANCES; instance_index++)
+	{
+		long contrail_point_index = contrail->first_contrail_point_indices[instance_index];
+
+		state->point_counts[instance_index] = contrail->contrail_point_counts[instance_index];
+		state->first_points[instance_index] = contrail_point_index;
+		while (contrail_point_index != NONE)
+		{
+			struct contrail_point_datum *contrail_point = contrail_point_get(contrail_point_index);
+			struct halo_sim_contrail_point *point;
+
+			if (count >= maximum_point_count)
+				return FALSE;
+			point = &points[count++];
+			point->index = contrail_point_index;
+			point->next = contrail_point->next_contrail_point_index;
+			point->flags = contrail_point->flags;
+			point->state_index = contrail_point->state_index;
+			point->pad = 0;
+			point->time = contrail_point->time;
+			point->delta = contrail_point->delta;
+			point->density = contrail_point->density;
+			point->width = contrail_point->width;
+			point->location_leaf = contrail_point->location.leaf_index;
+			point->location_cluster = contrail_point->location.cluster_index;
+			point->location_bonus = contrail_point->location.bonus;
+			memcpy(point->position, &contrail_point->position, sizeof(point->position));
+			memcpy(point->velocity, &contrail_point->velocity, sizeof(point->velocity));
+			contrail_point_index = contrail_point->next_contrail_point_index;
+		}
+	}
+	*point_count = count;
+
+	return TRUE;
+}
+
+void contrail_halo_sim_store(
+	struct halo_sim_contrail_state const *state,
+	struct halo_sim_contrail_point const *points,
+	unsigned long point_count)
+{
+	struct contrail_datum *contrail =
+		(struct contrail_datum *)datum_try_and_get(contrail_data, (long)state->contrail_index);
+	unsigned long point_number;
+	short instance_index;
+
+	*get_global_local_random_seed_address() = state->local_random_seed;
+	if (!contrail)
+		return;
+	contrail->flags = state->flags;
+	contrail->sequence_index = state->sequence_index;
+	contrail->frame_index = state->frame_index;
+	contrail->density = state->density;
+	contrail->texture_offset_u = state->texture_offset_u;
+	contrail->texture_offset_v = state->texture_offset_v;
+	contrail->time_until_point = state->time_until_point;
+	contrail->frame_time = state->frame_time;
+	contrail->expired_dt = state->expired_dt;
+	for (instance_index = 0; instance_index < MAXIMUM_CONTRAIL_INSTANCES; instance_index++)
+	{
+		contrail->contrail_point_counts[instance_index] = state->point_counts[instance_index];
+		contrail->first_contrail_point_indices[instance_index] = state->first_points[instance_index];
+	}
+	for (point_number = 0; point_number < point_count; point_number++)
+	{
+		struct halo_sim_contrail_point const *point = &points[point_number];
+		struct contrail_point_datum *contrail_point =
+			(struct contrail_point_datum *)datum_try_and_get(contrail_point_data, point->index);
+
+		if (!contrail_point)
+			continue;
+		contrail_point->next_contrail_point_index = point->next;
+		contrail_point->flags = point->flags;
+		contrail_point->state_index = point->state_index;
+		contrail_point->time = point->time;
+		contrail_point->delta = point->delta;
+		contrail_point->density = point->density;
+		contrail_point->width = point->width;
+		contrail_point->location.leaf_index = point->location_leaf;
+		contrail_point->location.cluster_index = point->location_cluster;
+		contrail_point->location.bonus = point->location_bonus;
+		memcpy(&contrail_point->position, point->position, sizeof(point->position));
+		memcpy(&contrail_point->velocity, point->velocity, sizeof(point->velocity));
+	}
 }

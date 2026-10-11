@@ -68,7 +68,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 28
+#define HALO_SIM_VERSION 29
 
 /* ---------- structures */
 
@@ -1557,6 +1557,40 @@ struct halo_sim_particle_callbacks
 	long (*call)(struct halo_sim_particle_state *state, struct halo_sim_particle_call *call);
 };
 
+/* crates/halo_sim's ContrailEventC, ContrailUpdateC and ContrailCallbacks */
+typedef char halo_sim_contrail_state_size_assert[sizeof(struct halo_sim_contrail_state) == 76 ? 1 : -1];
+typedef char halo_sim_contrail_point_size_assert[sizeof(struct halo_sim_contrail_point) == 60 ? 1 : -1];
+typedef char halo_sim_contrail_call_size_assert[sizeof(struct halo_sim_contrail_call) == 88 ? 1 : -1];
+
+struct halo_sim_contrail_event
+{
+	struct halo_sim_contrail_call call;
+	unsigned long seed_before;
+	unsigned long seed_after;
+};
+
+struct halo_sim_contrail_update_call
+{
+	struct halo_sim_contrail_state state;
+	real dt;
+	real point_dt;
+	real_vector3d const *directions;
+	unsigned long direction_count;
+	struct halo_sim_contrail_point *points;
+	unsigned long point_count;
+	unsigned long point_capacity;
+	struct halo_sim_contrail_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+	unsigned long still_there;
+};
+
+struct halo_sim_contrail_callbacks
+{
+	void (*call)(struct halo_sim_contrail_state *state, struct halo_sim_contrail_call *call);
+};
+
 struct halo_sim_effect_callbacks
 {
 	long (*call)(struct halo_sim_effect_state *state, struct halo_sim_effect_call *call);
@@ -1587,6 +1621,7 @@ struct halo_sim_host
 	struct halo_sim_ik_callbacks ik;
 	struct halo_sim_effect_callbacks effects;
 	struct halo_sim_particle_callbacks particles;
+	struct halo_sim_contrail_callbacks contrails;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -1647,6 +1682,7 @@ typedef long (*halo_sim_lights_function)(struct halo_sim_lights_call *call);
 typedef long (*halo_sim_effect_function)(struct halo_sim_effect_update_call *call);
 typedef long (*halo_sim_effect_new_function)(struct halo_sim_effect_new_call *call);
 typedef long (*halo_sim_particle_function)(struct halo_sim_particle_update_call *call);
+typedef long (*halo_sim_contrail_function)(struct halo_sim_contrail_update_call *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -1720,6 +1756,8 @@ static struct
 	halo_sim_effect_new_function effect_new_check;
 	halo_sim_particle_function particle_update;
 	halo_sim_particle_function particle_update_check;
+	halo_sim_contrail_function contrail_update;
+	halo_sim_contrail_function contrail_update_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1762,6 +1800,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"lights",
 	"effects",
 	"particles",
+	"contrails",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -1981,6 +2020,34 @@ static struct
 	unsigned long effects;
 	unsigned long attached;
 } halo_sim_particle_checks;
+
+/* the contrail update checks: the contrail, its points and the seed the
+game's began with, its calls, and the comparisons */
+#define MAXIMUM_HALO_SIM_CONTRAIL_POINTS 8192
+#define MAXIMUM_HALO_SIM_CONTRAIL_EVENTS 4096
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	long contrail_index;
+	struct halo_sim_contrail_update_call call;
+	struct halo_sim_contrail_point points[MAXIMUM_HALO_SIM_CONTRAIL_POINTS];
+	struct halo_sim_contrail_point game_points[MAXIMUM_HALO_SIM_CONTRAIL_POINTS];
+	struct halo_sim_contrail_event events[MAXIMUM_HALO_SIM_CONTRAIL_EVENTS];
+	unsigned long event_count;
+	struct halo_sim_contrail_event *open_event;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long calls;
+	unsigned long deleted;
+	unsigned long points_made;
+	unsigned long points_compared;
+	unsigned long physics;
+} halo_sim_contrail_checks;
+
+/* (Rust's updates': contrails don't nest) */
+static struct halo_sim_contrail_point halo_sim_contrail_points[MAXIMUM_HALO_SIM_CONTRAIL_POINTS];
 
 /* the object update loop checks: the game's calls and what they read, and
 the comparisons (and garbage's and scenery's) */
@@ -3713,6 +3780,19 @@ static long halo_sim_particle_call_callback(struct halo_sim_particle_state *stat
 	return still_there;
 }
 
+/* a contrail's call of the game: the seed (and for its deletion the
+contrail, whose points are none by then) written to the game first, the seed
+read back after */
+static void halo_sim_contrail_call_callback(struct halo_sim_contrail_state *state, struct halo_sim_contrail_call *call)
+{
+	if (call->kind == _contrail_call_delete)
+		contrail_halo_sim_store(state, NULL, 0);
+	else
+		*get_global_local_random_seed_address() = state->local_random_seed;
+	contrail_call((long)state->contrail_index, call);
+	state->local_random_seed = *get_global_local_random_seed_address();
+}
+
 /* a unit as firing reads it: FALSE if it is no unit */
 static long halo_sim_owner_unit_callback(unsigned long index, struct halo_sim_owner_unit *out)
 {
@@ -3906,6 +3986,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	{
 		halo_sim_particle_call_callback,
 	},
+	{
+		halo_sim_contrail_call_callback,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -3993,6 +4076,8 @@ static void halo_sim_initialize(void)
 	halo_sim.effect_new_check = (halo_sim_effect_new_function)halo_sim_symbol(library, "halo_sim_effect_new_check");
 	halo_sim.particle_update = (halo_sim_particle_function)halo_sim_symbol(library, "halo_sim_particle_update");
 	halo_sim.particle_update_check = (halo_sim_particle_function)halo_sim_symbol(library, "halo_sim_particle_update_check");
+	halo_sim.contrail_update = (halo_sim_contrail_function)halo_sim_symbol(library, "halo_sim_contrail_update");
+	halo_sim.contrail_update_check = (halo_sim_contrail_function)halo_sim_symbol(library, "halo_sim_contrail_update_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -4014,7 +4099,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.object_functions || !halo_sim.object_exports ||
 		!halo_sim.unit_ik || !halo_sim.unit_ik_check || !halo_sim.object_lights ||
 		!halo_sim.effect_update || !halo_sim.effect_update_check || !halo_sim.effect_new || !halo_sim.effect_new_check ||
-		!halo_sim.particle_update || !halo_sim.particle_update_check)
+		!halo_sim.particle_update || !halo_sim.particle_update_check ||
+		!halo_sim.contrail_update || !halo_sim.contrail_update_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -7582,6 +7668,199 @@ void halo_sim_particle_update_check(long particle_index)
 				compared - halo_sim_particle_checks.differed, compared, halo_sim_particle_checks.attached,
 				halo_sim_particle_checks.deleted, halo_sim_particle_checks.physics, halo_sim_particle_checks.effects,
 				halo_sim_particle_checks.calls, halo_sim_particle_checks.skipped);
+		}
+	}
+}
+
+/* ---------- contrail updates */
+
+static boolean halo_sim_contrail_call_new(long contrail_index, float dt, float point_dt,
+	struct halo_sim_contrail_update_call *call, struct halo_sim_contrail_point *points)
+{
+	real_vector3d const *directions = NULL;
+
+	memset(call, 0, sizeof(*call));
+	if (!contrail_halo_sim_load(contrail_index, &call->state, points, MAXIMUM_HALO_SIM_CONTRAIL_POINTS,
+		&call->point_count))
+	{
+		return FALSE;
+	}
+	call->dt = dt;
+	call->point_dt = point_dt;
+	call->direction_count = random_direction_table_get(&directions);
+	call->directions = directions;
+	call->points = points;
+	call->point_capacity = MAXIMUM_HALO_SIM_CONTRAIL_POINTS;
+	return TRUE;
+}
+
+int halo_sim_contrail_update(long contrail_index, float dt, float point_dt, int *checking)
+{
+	short mode = halo_sim_mode(_halo_sim_contrails);
+	struct halo_sim_contrail_update_call call;
+
+	*checking = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		if (halo_sim_contrail_checks.recording)
+			return FALSE;
+		if (!halo_sim_contrail_call_new(contrail_index, dt, point_dt, &halo_sim_contrail_checks.call,
+			halo_sim_contrail_checks.points))
+		{
+			halo_sim_contrail_checks.skipped++;
+			return FALSE;
+		}
+		halo_sim_contrail_checks.contrail_index = contrail_index;
+		halo_sim_contrail_checks.event_count = 0;
+		halo_sim_contrail_checks.open_event = NULL;
+		halo_sim_contrail_checks.overflow = FALSE;
+		halo_sim_contrail_checks.recording = TRUE;
+		*checking = TRUE;
+		return FALSE;
+	}
+
+	if (!halo_sim_contrail_call_new(contrail_index, dt, point_dt, &call, halo_sim_contrail_points))
+		return FALSE;
+	if (halo_sim.contrail_update(&call) != 0)
+		return FALSE;
+	/* (the seed always; the contrail and its points if it is still there) */
+	if (call.still_there)
+		contrail_halo_sim_store(&call.state, call.points, call.point_count);
+	else
+		*get_global_local_random_seed_address() = call.state.local_random_seed;
+
+	return TRUE;
+}
+
+int halo_sim_contrail_event_begin(long contrail_index, struct halo_sim_contrail_call const *call)
+{
+	struct halo_sim_contrail_event *event;
+
+	if (!halo_sim_contrail_checks.recording || halo_sim_contrail_checks.open_event ||
+		halo_sim_contrail_checks.contrail_index != contrail_index)
+	{
+		return FALSE;
+	}
+	if (halo_sim_contrail_checks.event_count >= MAXIMUM_HALO_SIM_CONTRAIL_EVENTS)
+	{
+		halo_sim_contrail_checks.overflow = TRUE;
+		return FALSE;
+	}
+	event = &halo_sim_contrail_checks.events[halo_sim_contrail_checks.event_count++];
+	memset(event, 0, sizeof(*event));
+	event->call = *call;
+	event->seed_before = *get_global_local_random_seed_address();
+	halo_sim_contrail_checks.open_event = event;
+	return TRUE;
+}
+
+void halo_sim_contrail_event_end(long contrail_index, struct halo_sim_contrail_call const *call, int opened)
+{
+	struct halo_sim_contrail_event *event = halo_sim_contrail_checks.open_event;
+
+	if (!opened || !event)
+		return;
+	halo_sim_contrail_checks.open_event = NULL;
+	event->call.result = call->result;
+	memcpy(event->call.out, call->out, sizeof(event->call.out));
+	event->call.out_location_leaf = call->out_location_leaf;
+	event->call.out_location_cluster = call->out_location_cluster;
+	event->call.out_location_bonus = call->out_location_bonus;
+	event->seed_after = *get_global_local_random_seed_address();
+}
+
+void halo_sim_contrail_update_check(long contrail_index)
+{
+	struct halo_sim_contrail_update_call call;
+	struct halo_sim_contrail_state game;
+	unsigned long game_point_count;
+	boolean exists;
+	boolean differs;
+	unsigned long event_number;
+
+	if (!halo_sim_contrail_checks.recording)
+		return;
+	halo_sim_contrail_checks.recording = FALSE;
+	if (halo_sim_contrail_checks.contrail_index != contrail_index || halo_sim_contrail_checks.overflow)
+	{
+		halo_sim_contrail_checks.skipped++;
+		return;
+	}
+	memset(&game, 0, sizeof(game));
+	exists = contrail_halo_sim_load(contrail_index, &game, halo_sim_contrail_checks.game_points,
+		MAXIMUM_HALO_SIM_CONTRAIL_POINTS, &game_point_count);
+	call = halo_sim_contrail_checks.call;
+	call.events = halo_sim_contrail_checks.events;
+	call.event_count = halo_sim_contrail_checks.event_count;
+	if (halo_sim.contrail_update_check(&call) != 0)
+	{
+		halo_sim_contrail_checks.skipped++;
+		return;
+	}
+
+	halo_sim_contrail_checks.compared++;
+	halo_sim_contrail_checks.calls += halo_sim_contrail_checks.event_count;
+	if (!exists)
+		halo_sim_contrail_checks.deleted++;
+	for (event_number = 0; event_number < halo_sim_contrail_checks.event_count; event_number++)
+	{
+		long kind = halo_sim_contrail_checks.events[event_number].call.kind;
+
+		if (kind == _contrail_call_point_new)
+			halo_sim_contrail_checks.points_made++;
+		else if (kind == _contrail_call_physics)
+			halo_sim_contrail_checks.physics++;
+	}
+	if (exists)
+	{
+		differs = !call.still_there || memcmp(&call.state, &game, sizeof(game)) != 0 ||
+			call.point_count != game_point_count ||
+			memcmp(call.points, halo_sim_contrail_checks.game_points,
+				game_point_count * sizeof(struct halo_sim_contrail_point)) != 0;
+		halo_sim_contrail_checks.points_compared += game_point_count;
+	}
+	else
+	{
+		differs = call.still_there || call.state.local_random_seed != game.local_random_seed;
+	}
+	if (differs || call.difference_event != NONE)
+	{
+		halo_sim_contrail_checks.differed++;
+		if (halo_sim_contrail_checks.differed <= 8)
+		{
+			unsigned char const *game_bytes = (unsigned char const *)&game;
+			unsigned char const *rust_bytes = (unsigned char const *)&call.state;
+			long kind = call.difference_event >= 0 && call.difference_event < (long)halo_sim_contrail_checks.event_count ?
+				halo_sim_contrail_checks.events[call.difference_event].call.kind : NONE;
+			long offset = 0;
+			unsigned long point_number = 0;
+
+			while (offset < (long)sizeof(game) && game_bytes[offset] == rust_bytes[offset])
+				offset++;
+			offset &= ~3;
+			while (point_number < game_point_count && point_number < call.point_count &&
+				!memcmp(&call.points[point_number], &halo_sim_contrail_checks.game_points[point_number],
+					sizeof(struct halo_sim_contrail_point)))
+			{
+				point_number++;
+			}
+			platform_log("halo_sim: contrail update differs: contrail %lx (%s) call %ld of %lu (kind %ld) reason %ld; there game %d rust %lu; first difference at byte %ld; points game %lu rust %lu, first differing %lu",
+				(unsigned long)contrail_index, tag_get_name(halo_sim_contrail_checks.call.state.definition_index),
+				call.difference_event, halo_sim_contrail_checks.event_count, kind, call.difference_reason, exists,
+				call.still_there, offset, game_point_count, call.point_count, point_number);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_contrail_checks.compared;
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: contrail update: %lu of %lu agree with the game (%lu ended; %lu points made, %lu compared, %lu point physics; %lu calls of the game; %lu left out)",
+				compared - halo_sim_contrail_checks.differed, compared, halo_sim_contrail_checks.deleted,
+				halo_sim_contrail_checks.points_made, halo_sim_contrail_checks.points_compared,
+				halo_sim_contrail_checks.physics, halo_sim_contrail_checks.calls, halo_sim_contrail_checks.skipped);
 		}
 	}
 }

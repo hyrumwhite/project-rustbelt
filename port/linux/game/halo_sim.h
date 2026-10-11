@@ -40,6 +40,7 @@ enum
 	_halo_sim_lights,
 	_halo_sim_effects,
 	_halo_sim_particles,
+	_halo_sim_contrails,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -398,6 +399,80 @@ struct halo_sim_particle_state
 	float angular_velocity;
 	float radius;
 	unsigned long local_random_seed;
+};
+
+/* a contrail's calls of the rest of the game (contrails.c's contrail_call;
+crates/halo_map's contrails::call) */
+enum
+{
+	_contrail_call_function_value = 1,
+	_contrail_call_markers,
+	_contrail_call_velocity,
+	_contrail_call_point_new,
+	_contrail_call_point_delete,
+	_contrail_call_location_from_point,
+	_contrail_call_location_from_line,
+	_contrail_call_physics,
+	_contrail_call_delete,
+};
+
+/* crates/halo_map's ContrailCall: a contrail's call of the game, and its
+answer */
+struct halo_sim_contrail_call
+{
+	long kind;
+	long a;
+	long b;
+	long c;
+	long d;
+	float f[8];
+	long result;
+	float out[6];
+	long out_location_leaf;
+	short out_location_cluster;
+	unsigned short out_location_bonus;
+};
+
+/* crates/halo_map's ContrailState and ContrailPoint: what a contrail's update
+changes of the contrail and its points, and the game's local random seed */
+struct halo_sim_contrail_state
+{
+	unsigned long contrail_index;
+	unsigned long definition_index;
+	unsigned short flags;
+	short attachment_index;
+	long object_index;
+	short density_function_index;
+	short sequence_index;
+	short frame_index;
+	short pad;
+	float density;
+	float texture_offset_u;
+	float texture_offset_v;
+	float time_until_point;
+	float frame_time;
+	float expired_dt;
+	short point_counts[4];
+	long first_points[4];
+	unsigned long local_random_seed;
+};
+
+struct halo_sim_contrail_point
+{
+	long index;
+	long next;
+	unsigned char flags;
+	signed char state_index;
+	unsigned short pad;
+	float time;
+	float delta;
+	float density;
+	float width;
+	long location_leaf;
+	short location_cluster;
+	unsigned short location_bonus;
+	float position[3];
+	float velocity[3];
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -822,5 +897,23 @@ long particle_call(long particle_index, struct halo_sim_particle_call *call);
 read), and back (the seed always) */
 int particle_halo_sim_state_load(long particle_index, struct halo_sim_particle_state *state);
 void particle_halo_sim_state_store(struct halo_sim_particle_state const *state);
+
+/* contrails.c's contrails_update, each contrail's: TRUE when the Rust port
+ran it (its calls of the game through contrail_call); in check mode
+`checking` is set, contrail_call records each call
+(halo_sim_contrail_event_begin and _end), and halo_sim_contrail_update_check
+compares Rust's replay with the contrail and points the game's left */
+int halo_sim_contrail_update(long contrail_index, float dt, float point_dt, int *checking);
+void halo_sim_contrail_update_check(long contrail_index);
+int halo_sim_contrail_event_begin(long contrail_index, struct halo_sim_contrail_call const *call);
+void halo_sim_contrail_event_end(long contrail_index, struct halo_sim_contrail_call const *call, int opened);
+void contrail_call(long contrail_index, struct halo_sim_contrail_call *call);
+/* contrails.c's: a contrail and its points in the order its lists walk
+(FALSE if it is gone, or they don't fit: the seed is still read), and back
+(the seed always) */
+int contrail_halo_sim_load(long contrail_index, struct halo_sim_contrail_state *state,
+	struct halo_sim_contrail_point *points, unsigned long maximum_point_count, unsigned long *point_count);
+void contrail_halo_sim_store(struct halo_sim_contrail_state const *state, struct halo_sim_contrail_point const *points,
+	unsigned long point_count);
 
 #endif // __HALO_SIM_H

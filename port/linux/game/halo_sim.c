@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 44
+#define HALO_SIM_VERSION 45
 
 /* ---------- structures */
 
@@ -1833,6 +1833,7 @@ struct halo_sim_ai_step_callbacks
 	void (*communication)(struct halo_sim_ai_call *call);
 	void (*conversation)(struct halo_sim_ai_call *call);
 	void (*destination)(struct halo_sim_ai_call *call);
+	void (*unit_control)(struct halo_sim_ai_call *call);
 };
 
 struct halo_sim_effect_callbacks
@@ -2092,6 +2093,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"actor_communication",
 	"actor_conversation",
 	"actor_destination",
+	"actor_unit_control",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2459,6 +2461,7 @@ static short const halo_sim_ai_step_systems[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	_halo_sim_actor_communication,
 	_halo_sim_actor_conversation,
 	_halo_sim_actor_destination,
+	_halo_sim_actor_unit_control,
 };
 
 static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
@@ -2474,6 +2477,7 @@ static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	"actor idle vocalization",
 	"actor conversation look",
 	"actor destination update",
+	"actor unit control",
 };
 
 /* the steps that write the actor's props: their check puts them back too,
@@ -2482,6 +2486,7 @@ static boolean const halo_sim_ai_step_props[NUMBER_OF_HALO_SIM_AI_STEPS] =
 {
 	FALSE,
 	TRUE,
+	FALSE,
 	FALSE,
 	FALSE,
 	FALSE,
@@ -4544,6 +4549,7 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		actor_communication_call,
 		actor_conversation_call,
 		actor_destination_call,
+		actor_unit_control_call,
 	},
 };
 

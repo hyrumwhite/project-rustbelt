@@ -4414,67 +4414,143 @@ void actors_handle_unit_effect(
 	return;
 }
 
-static void actor_unit_control(
-	long actor_index)
+/* port: what an actor's control of its unit asks of the rest of the game,
+shared by the game's and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_unit_control_call(
+	struct halo_sim_ai_call *call)
 {
-	struct actor_datum *actor = actor_get(actor_index);
-	struct unit_datum *unit = unit_get(actor->meta.unit_index);
-	struct unit_control_data control_data;
+	int opened = halo_sim_ai_event_begin(call);
+	struct actor_datum *actor = actor_get(call->actor);
 
-	control_data.animation_state = global_movement_animation_states[actor->output.movement_type];
-	control_data.control_flags = actor->output.control_flags;
-	control_data.primary_trigger = actor->output.analog_primary_trigger;
-	control_data.throttle = actor->output.throttle;
-	control_data.aiming_speed = actor->output.aiming_speed;
-	control_data.facing_vector = actor->output.facing_vector;
-	control_data.aiming_vector = actor->output.aiming_vector;
-	control_data.looking_vector = actor->output.looking_vector;
-	control_data.weapon_index = NONE;
-	control_data.grenade_index = NONE;
-	control_data.zoom_level = NONE;
-
-	if (!actor->state.flying)
+	switch (call->kind)
 	{
-		match_vassert(
-			"c:\\halo\\SOURCE\\ai\\actors.c",
-			3846,
-			valid_real_normal2d((real_vector2d *) &control_data.facing_vector),
-			csprintf(
-				temporary,
-				"%s: assert_valid_real_normal2d(%f, %f)",
-				"(real_vector2d *) &control_data.facing_vector",
-				control_data.facing_vector.i,
-				control_data.facing_vector.j));
-	}
-	match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actors.c", 3848, &control_data.facing_vector);
-	match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actors.c", 3849, &control_data.aiming_vector);
-	match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actors.c", 3850, &control_data.looking_vector);
-	match_assert("c:\\halo\\SOURCE\\ai\\actors.c", 3851, (fabs(control_data.throttle.i) <= 1.0f) && (fabs(control_data.throttle.j) <= 1.0f) && (fabs(control_data.throttle.k) <= 1.0f));
+		case _actor_unit_control_call_player_input_enabled:
+			call->result = player_input_enabled() ? 1 : 0;
+			break;
 
-	if (unit->unit.player_index == NONE || !player_input_enabled())
-	{
-		if (actor->meta.frozen)
-		{
+		case _actor_unit_control_call_set_actively_controlled:
 			unit_set_actively_controlled(actor->meta.unit_index, TRUE);
-			actor->meta.frozen = FALSE;
+			break;
+
+		case _actor_unit_control_call_control:
+		{
+			struct unit_control_data control_data;
+
+			control_data.animation_state = global_movement_animation_states[actor->output.movement_type];
+			control_data.control_flags = actor->output.control_flags;
+			control_data.primary_trigger = actor->output.analog_primary_trigger;
+			control_data.throttle = actor->output.throttle;
+			control_data.aiming_speed = actor->output.aiming_speed;
+			control_data.facing_vector = actor->output.facing_vector;
+			control_data.aiming_vector = actor->output.aiming_vector;
+			control_data.looking_vector = actor->output.looking_vector;
+			control_data.weapon_index = NONE;
+			control_data.grenade_index = NONE;
+			control_data.zoom_level = NONE;
+
+			if (!actor->state.flying)
+			{
+				match_vassert(
+					"c:\\halo\\SOURCE\\ai\\actors.c",
+					3846,
+					valid_real_normal2d((real_vector2d *) &control_data.facing_vector),
+					csprintf(
+						temporary,
+						"%s: assert_valid_real_normal2d(%f, %f)",
+						"(real_vector2d *) &control_data.facing_vector",
+						control_data.facing_vector.i,
+						control_data.facing_vector.j));
+			}
+			match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actors.c", 3848, &control_data.facing_vector);
+			match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actors.c", 3849, &control_data.aiming_vector);
+			match_assert_valid_real_normal3d("c:\\halo\\SOURCE\\ai\\actors.c", 3850, &control_data.looking_vector);
+			match_assert("c:\\halo\\SOURCE\\ai\\actors.c", 3851, (fabs(control_data.throttle.i) <= 1.0f) && (fabs(control_data.throttle.j) <= 1.0f) && (fabs(control_data.throttle.k) <= 1.0f));
+
+
+			unit_control(actor->meta.unit_index, &control_data);
+			break;
 		}
 
-		unit_control(actor->meta.unit_index, &control_data);
-
-		if (actor->output.animation.impulse != NONE)
-		{
+		case _actor_unit_control_call_start_animation_impulse:
 			unit_start_animation_impulse(
 				actor->meta.unit_index,
 				actor->output.animation.impulse,
 				&actor->output.animation.alignment_vector);
-		}
+			break;
 
-		if (actor->output.persistent_control_ticks > 0)
-		{
+		case _actor_unit_control_call_persistent_control:
 			unit_persistent_control(
 				actor->meta.unit_index,
 				actor->output.persistent_control_ticks,
 				actor->output.persistent_control_flags);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_unit_control_call_simple(
+	long actor_index,
+	long kind)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	actor_unit_control_call(&call);
+
+	return call.result;
+}
+
+static void actor_unit_control_game(
+	long actor_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
+static void actor_unit_control(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_unit_control, actor_index, &checking))
+		return;
+	actor_unit_control_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_unit_control, 0);
+
+	return;
+}
+
+/* the game's, what it asks through actor_unit_control_call (the control
+data is built in the call, from the actor's output) */
+static void actor_unit_control_game(
+	long actor_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct unit_datum *unit = unit_get(actor->meta.unit_index);
+
+	if (unit->unit.player_index == NONE ||
+		!actor_unit_control_call_simple(actor_index, _actor_unit_control_call_player_input_enabled))
+	{
+		if (actor->meta.frozen)
+		{
+			actor_unit_control_call_simple(actor_index, _actor_unit_control_call_set_actively_controlled);
+			actor->meta.frozen = FALSE;
+		}
+
+		actor_unit_control_call_simple(actor_index, _actor_unit_control_call_control);
+
+		if (actor->output.animation.impulse != NONE)
+		{
+			actor_unit_control_call_simple(actor_index, _actor_unit_control_call_start_animation_impulse);
+		}
+
+		if (actor->output.persistent_control_ticks > 0)
+		{
+			actor_unit_control_call_simple(actor_index, _actor_unit_control_call_persistent_control);
 		}
 	}
 

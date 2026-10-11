@@ -55,6 +55,7 @@ enum
 	_halo_sim_actor_communication,
 	_halo_sim_actor_conversation,
 	_halo_sim_actor_destination,
+	_halo_sim_actor_unit_control,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -859,6 +860,7 @@ enum
 	_halo_sim_ai_step_communication,
 	_halo_sim_ai_step_conversation,
 	_halo_sim_ai_step_destination,
+	_halo_sim_ai_step_unit_control,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
@@ -986,6 +988,17 @@ enum
 	_actor_destination_call_path_clear,
 	_actor_destination_call_unfinished_path,
 	_actor_destination_call_tau_ceti,
+};
+
+/* the unit control's calls (actors.c's actor_unit_control_call;
+crates/halo_map's actor_unit_control::call) */
+enum
+{
+	_actor_unit_control_call_player_input_enabled = 1,
+	_actor_unit_control_call_set_actively_controlled,
+	_actor_unit_control_call_control,
+	_actor_unit_control_call_start_animation_impulse,
+	_actor_unit_control_call_persistent_control,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1537,6 +1550,7 @@ void actor_look_movement_call(struct halo_sim_ai_call *call);
 void actor_communication_call(struct halo_sim_ai_call *call);
 void actor_conversation_call(struct halo_sim_ai_call *call);
 void actor_destination_call(struct halo_sim_ai_call *call);
+void actor_unit_control_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

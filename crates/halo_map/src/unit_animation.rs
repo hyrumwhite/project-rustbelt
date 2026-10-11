@@ -43,6 +43,9 @@ pub struct WeaponClass {
     /// Per weapon type, per `_unit_weapon_type_animation`, its animation.
     pub weapon_type_animations: Vec<Vec<i16>>,
     pub aiming_screen_bounds: crate::pose::ScreenBounds,
+    /// Its inverse kinematics' points: the hand's marker, and the weapon's
+    /// it is attached to.
+    pub ik_points: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -52,6 +55,9 @@ pub struct UnitSeat {
     pub animations: Vec<i16>,
     pub weapon_classes: Vec<WeaponClass>,
     pub looking_screen_bounds: crate::pose::ScreenBounds,
+    /// Its inverse kinematics' points: the hand's marker, and the vehicle's
+    /// it is attached to.
+    pub ik_points: Vec<(String, String)>,
 }
 
 /// An animation graph (`antr` tag), what choosing and advancing a unit's
@@ -73,6 +79,13 @@ impl AnimationGraph {
             ptr.block(rel, 2)?.iter().map(|p| p.i16(0)).collect()
         };
         let label = |ptr: crate::Ptr<'_>| ptr.c_string(32);
+        let ik_points = |ptr: crate::Ptr<'_>, rel: usize| -> Result<Vec<(String, String)>> {
+            use layout::animation_graph_ik_point as k;
+            ptr.block(rel, k::SIZEOF)?
+                .iter()
+                .map(|p| Ok((p.add(k::MARKER_NAME).c_string(32)?, p.add(k::ATTACHED_TO_MARKER_NAME).c_string(32)?)))
+                .collect()
+        };
         let mut graph = AnimationGraph::default();
         for seat in root.block(g::UNIT_SEATS, s::SIZEOF)?.iter() {
             let mut weapon_classes = Vec::new();
@@ -87,6 +100,7 @@ impl AnimationGraph {
                     weapon_type_labels,
                     weapon_type_animations,
                     aiming_screen_bounds: crate::pose::ScreenBounds::read(class.add(w::AIMING_SCREEN_BOUNDS))?,
+                    ik_points: ik_points(class, w::IK_POINTS)?,
                 });
             }
             graph.unit_seats.push(UnitSeat {
@@ -94,6 +108,7 @@ impl AnimationGraph {
                 animations: indices(seat, s::ANIMATIONS)?,
                 weapon_classes,
                 looking_screen_bounds: crate::pose::ScreenBounds::read(seat.add(s::LOOKING_SCREEN_BOUNDS))?,
+                ik_points: ik_points(seat, s::IK_POINTS)?,
             });
         }
         for animation in root.block(g::ANIMATIONS, a::SIZEOF)?.iter() {

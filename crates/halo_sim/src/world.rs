@@ -76,6 +76,7 @@ pub struct Host {
     pub items: crate::items::ItemCallbacks,
     pub weapons: crate::weapons::WeaponCallbacks,
     pub objects: crate::objects::ObjectsCallbacks,
+    pub ik: crate::unit_ik::IkCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);

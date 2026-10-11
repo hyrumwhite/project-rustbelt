@@ -56,6 +56,7 @@ enum
 	_halo_sim_actor_conversation,
 	_halo_sim_actor_destination,
 	_halo_sim_actor_unit_control,
+	_halo_sim_actor_perception,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -861,11 +862,13 @@ enum
 	_halo_sim_ai_step_conversation,
 	_halo_sim_ai_step_destination,
 	_halo_sim_ai_step_unit_control,
+	_halo_sim_ai_step_perception,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
 #define HALO_SIM_ACTOR_DATUM_SIZE 0x724
 #define HALO_SIM_PROP_DATUM_SIZE 0x138
+#define HALO_SIM_DATA_ARRAY_SIZE 0x38
 
 /* crates/halo_map's AiCall: what an actor's step asks of the game */
 struct halo_sim_ai_call
@@ -999,6 +1002,41 @@ enum
 	_actor_unit_control_call_control,
 	_actor_unit_control_call_start_animation_impulse,
 	_actor_unit_control_call_persistent_control,
+};
+
+/* the perception update's calls (actor_perception.c's actor_perception_call;
+crates/halo_map's actor_perception::call) */
+enum
+{
+	_actor_perception_call_refresh = 1,
+	_actor_perception_call_refresh_danger_zone,
+	_actor_perception_call_random,
+	_actor_perception_call_noticed_danger,
+	_actor_perception_call_refresh_prop,
+	_actor_perception_call_debug_start_aware,
+	_actor_perception_call_debug_stop_aware,
+	_actor_perception_call_knowledge,
+	_actor_perception_call_debug_awareness,
+	_actor_perception_call_debug_become_aware,
+	_actor_perception_call_desire_orphan,
+	_actor_perception_call_orphan_transition,
+	_actor_perception_call_switch_props,
+	_actor_perception_call_become_acknowledged,
+	_actor_perception_call_unopposable,
+	_actor_perception_call_target_weight,
+	_actor_perception_call_prop_delete,
+	_actor_perception_call_stimulus_just_killed,
+	_actor_perception_call_stimulus_sighted,
+	_actor_perception_call_sighted_friend_player,
+	_actor_perception_call_team_is_enemy,
+	_actor_perception_call_allegiance_changed,
+	_actor_perception_call_stimulus_found_body,
+	_actor_perception_call_stimulus_perceived_enemy,
+	_actor_perception_call_encounter_enemy_unseen,
+	_actor_perception_call_alert_noncombat,
+	_actor_perception_call_in_combat,
+	_actor_perception_call_is_fighting,
+	_actor_perception_call_profile,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1551,6 +1589,7 @@ void actor_communication_call(struct halo_sim_ai_call *call);
 void actor_conversation_call(struct halo_sim_ai_call *call);
 void actor_destination_call(struct halo_sim_ai_call *call);
 void actor_unit_control_call(struct halo_sim_ai_call *call);
+void actor_perception_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

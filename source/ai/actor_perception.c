@@ -6386,7 +6386,404 @@ static boolean actor_perception_assess_suicide_danger(
 	return result;
 }
 
+/* port: what an actor's perception update asks of the rest of the game,
+shared by the game's update and the Rust port's (halo_sim.c); in check mode
+each is recorded, with the props it changed */
+void actor_perception_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	struct prop_datum *prop = NULL;
+
+	switch (call->kind)
+	{
+		case _actor_perception_call_refresh_prop:
+		case _actor_perception_call_debug_start_aware:
+		case _actor_perception_call_debug_stop_aware:
+		case _actor_perception_call_debug_awareness:
+		case _actor_perception_call_debug_become_aware:
+		case _actor_perception_call_desire_orphan:
+		case _actor_perception_call_sighted_friend_player:
+		case _actor_perception_call_alert_noncombat:
+			prop = prop_get(call->a);
+			break;
+	}
+
+	switch (call->kind)
+	{
+		case _actor_perception_call_refresh:
+			actor_perception_refresh(actor_index);
+			break;
+
+		case _actor_perception_call_refresh_danger_zone:
+			actor_perception_refresh_danger_zone(actor_index);
+			break;
+
+		case _actor_perception_call_random:
+			call->output[0] = real_seed_random(get_global_random_seed_address());
+			break;
+
+		case _actor_perception_call_noticed_danger:
+			actor_stimulus_noticed_danger_zone(
+				actor_index,
+				actor->danger_zone.danger_type,
+				actor->danger_zone.hostility,
+				actor->danger_zone.object_index,
+				&actor->danger_zone.position);
+			break;
+
+		case _actor_perception_call_refresh_prop:
+		{
+			struct actor_position_data position;
+
+			prop_position_refresh(actor_index, call->a, &position, FALSE, (boolean)call->b);
+			if (call->b)
+				prop_status_refresh(actor_index, call->a, &position);
+			break;
+		}
+
+		case _actor_perception_call_debug_start_aware:
+			if (ai_debug.print_acknowledgement)
+			{
+				char buffer[256];
+
+				ai_debug_describe_actor(actor_index, actor->meta.unit_index, NONE, buffer, sizeof(buffer));
+				error(_error_silent, "%s: start to become aware", buffer);
+			}
+			break;
+
+		case _actor_perception_call_debug_stop_aware:
+		{
+			struct actor_debug_info *debug = &actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+
+			debug->perception_awareness_speed = NONE;
+			if (ai_debug.print_acknowledgement)
+			{
+				char buffer[256];
+
+				ai_debug_describe_actor(actor_index, actor->meta.unit_index, NONE, buffer, sizeof(buffer));
+				error(_error_silent, "%s: stop becoming aware", buffer);
+			}
+			break;
+		}
+
+		case _actor_perception_call_knowledge:
+			call->result = actor_get_perception_knowledge(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_debug_awareness:
+		{
+			struct actor_debug_info *debug = &actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+			short knowledge_type = (short)(signed char)(call->b & 0xFF);
+			short awareness_speed = (short)(signed char)((call->b >> 8) & 0xFF);
+			real awareness_delta = call->input[0];
+
+			if (prop->player &&
+				debug->perception_awareness_speed != awareness_speed)
+			{
+				debug->perception_awareness_speed = awareness_speed;
+				if (ai_debug.print_acknowledgement)
+				{
+					char const *awareness_speed_names[] =
+					{
+						"never",
+						"noncombat",
+						"guard",
+						"combat",
+						"instant"
+					};
+					char const *knowledge_names[] =
+					{
+						"noncombat",
+						"guard",
+						"searching",
+						"definite"
+					};
+					char const *perception_names[] =
+					{
+						"none",
+						"partial",
+						"full",
+						"unmistakable"
+					};
+					char buffer[256];
+
+					ai_debug_describe_actor(actor_index, actor->meta.unit_index, NONE, buffer, sizeof(buffer));
+					error(
+						_error_silent,
+						"%s: knowledge %s percep %s -> awareness %s",
+						buffer,
+						knowledge_names[knowledge_type],
+						perception_names[prop->perception],
+						awareness_speed_names[awareness_speed]);
+
+					if (awareness_delta > 0.0f &&
+						awareness_delta < 1.0f)
+					{
+						error(
+							_error_silent,
+							"  awareness delta: %.2f (current awareness %.2f -> time %.2fsec)",
+							awareness_delta,
+							prop->awareness,
+							(1.0f - prop->awareness) / (awareness_delta * TICKS_PER_SECOND));
+					}
+				}
+			}
+
+			break;
+		}
+
+		case _actor_perception_call_debug_become_aware:
+		{
+			struct actor_debug_info *debug = &actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+
+			debug->perception_awareness_speed = NONE;
+			if (ai_debug.print_acknowledgement)
+			{
+				char buffer[256];
+
+				ai_debug_describe_actor(actor_index, actor->meta.unit_index, NONE, buffer, sizeof(buffer));
+				error(_error_silent, "%s: become aware!", buffer);
+			}
+			break;
+		}
+
+		case _actor_perception_call_desire_orphan:
+			call->result = actor_perception_desire_prop(
+				actor_index,
+				_prop_state_uninspected_orphan,
+				prop->unit_index,
+				prop->actor_index,
+				prop->in_use,
+				prop->player,
+				prop->enemy,
+				prop->dead,
+				prop->dead_ticks,
+				prop->suicide_radius,
+				actor_perception_distance_squared(prop->distance),
+				prop->required_ticks,
+				NULL) ? 1 : 0;
+			break;
+
+		case _actor_perception_call_orphan_transition:
+		{
+			struct actor_position_data orphan_position;
+
+			prop_position_refresh(actor_index, call->a, &orphan_position, FALSE, FALSE);
+			actor_perception_find_prop_pathfinding_location(actor_index, call->a);
+			call->result = prop_orphan_transition(actor_index, call->a);
+			break;
+		}
+
+		case _actor_perception_call_switch_props:
+			actor_switch_props(actor_index, call->a, call->b);
+			break;
+
+		case _actor_perception_call_become_acknowledged:
+		{
+			boolean expected_acknowledgement = FALSE;
+			boolean became_acknowledged = actor_perception_become_acknowledged(
+				actor_index,
+				call->a,
+				&expected_acknowledgement);
+
+			call->result = (became_acknowledged ? 1 : 0) | (expected_acknowledgement ? 2 : 0);
+			break;
+		}
+
+		case _actor_perception_call_unopposable:
+			call->result = (byte)actor_compute_prop_unopposable(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_target_weight:
+			call->output[0] = actor_compute_prop_target_weight(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_prop_delete:
+			prop_delete(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_stimulus_just_killed:
+			actor_stimulus_prop_just_killed(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_stimulus_sighted:
+			actor_stimulus_prop_sighted(actor_index, call->a, (boolean)call->b);
+			break;
+
+		case _actor_perception_call_sighted_friend_player:
+			ai_communication_event(
+				_ai_communication_sighted_friend_player,
+				actor->meta.unit_index,
+				prop->unit_index,
+				_comm_hostility_friend,
+				NONE,
+				NONE,
+				NULL);
+			break;
+
+		case _actor_perception_call_team_is_enemy:
+			call->result = game_team_is_enemy((short)call->a, (short)call->b) ? 1 : 0;
+			break;
+
+		case _actor_perception_call_allegiance_changed:
+		{
+			/* port: the information starts from zeros (the game's left the
+			rest of its union as the stack's leftovers) */
+			struct ai_information_data information;
+			boolean enemy = (boolean)call->b;
+
+			prop = prop_get(call->a);
+			memset(&information, 0, sizeof(information));
+			information.allegiance.team1_index = actor->meta.team_index;
+			information.allegiance.team2_index = prop->team_index;
+			information.allegiance.broken = enemy;
+			ai_communication_event(
+				_ai_communication_allegiance_changed,
+				actor->meta.unit_index,
+				prop->unit_index,
+				enemy ? _comm_hostility_traitor : _comm_hostility_friend,
+				NONE,
+				_ai_information_allegiance,
+				&information);
+			break;
+		}
+
+		case _actor_perception_call_stimulus_found_body:
+			actor_stimulus_enter_combat_found_body(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_stimulus_perceived_enemy:
+			actor_stimulus_enter_combat_perceived_enemy(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_encounter_enemy_unseen:
+		{
+			struct encounter_datum *encounter = encounter_get(call->a);
+
+			call->result = encounter->enemy_visible_timer == NONE ||
+				(encounter->enemy_visible_timer >= 180 && encounter->enemy_alive);
+			break;
+		}
+
+		case _actor_perception_call_alert_noncombat:
+			if (call->b)
+			{
+				ai_communication_event(
+					_ai_communication_alert_noncombat,
+					actor->meta.unit_index,
+					prop->unit_index,
+					_comm_hostility_friend,
+					NONE,
+					_ai_information_combat_stimulus,
+					NULL);
+			}
+			else
+			{
+				ai_communication_event(
+					_ai_communication_alert_noncombat,
+					prop->unit_index,
+					actor->meta.unit_index,
+					_comm_hostility_friend,
+					NONE,
+					_ai_information_combat_stimulus,
+					NULL);
+			}
+			break;
+
+		case _actor_perception_call_in_combat:
+			call->result = actor_in_combat(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_perception_call_is_fighting:
+			call->result = actor_is_fighting(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_perception_call_profile:
+		{
+			static short const meters[9] =
+			{
+				_ai_meter_dead_props_acknowledged,
+				_ai_meter_dead_props_orphaned,
+				_ai_meter_dead_props_unacknowledged,
+				_ai_meter_enemy_props_acknowledged,
+				_ai_meter_enemy_props_orphaned,
+				_ai_meter_enemy_props_unacknowledged,
+				_ai_meter_friendly_props_acknowledged,
+				_ai_meter_friendly_props_orphaned,
+				_ai_meter_friendly_props_unacknowledged,
+			};
+
+			if (call->a >= 0 && call->a < 9)
+				ai_profile.meters[meters[call->a]].accumulator++;
+			break;
+		}
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_perception_call_full(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	call.input[0] = input;
+	actor_perception_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
+
+#define actor_perception_call_simple(actor_index, kind, a) \
+	actor_perception_call_full((actor_index), (kind), (a), 0, 0.0f, NULL)
+
+static real actor_perception_call_random(
+	long actor_index)
+{
+	real result;
+
+	actor_perception_call_full(actor_index, _actor_perception_call_random, 0, 0, 0.0f, &result);
+
+	return result;
+}
+
+static void actor_perception_update_game(
+	long actor_index);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 void actor_perception_update(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_perception, actor_index, &checking))
+		return;
+	actor_perception_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_perception, 0);
+
+	return;
+}
+
+/* the game's perception update, what it asks of the rest of the game
+through actor_perception_call */
+static void actor_perception_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -6397,16 +6794,15 @@ void actor_perception_update(
 	real nearest_orphan_distance = REAL_MAX;
 	struct prop_iterator iterator;
 	struct prop_datum *prop;
-	struct actor_position_data position;
 
 	if (!actor->meta.dormant)
 	{
 		if (actor->meta.timeslice)
 		{
-			actor_perception_refresh(actor_index);
+			actor_perception_call_simple(actor_index, _actor_perception_call_refresh, 0);
 		}
 
-		actor_perception_refresh_danger_zone(actor_index);
+		actor_perception_call_simple(actor_index, _actor_perception_call_refresh_danger_zone, 0);
 
 		if (actor->danger_zone.danger_type > _actor_danger_zone_none)
 		{
@@ -6450,7 +6846,7 @@ void actor_perception_update(
 					notice_chance = definition->perception.notice_projectile_chance;
 				test_notice_chance:
 					if (notice_chance > 0.0f &&
-						real_seed_random(get_global_random_seed_address()) < notice_chance)
+						actor_perception_call_random(actor_index) < notice_chance)
 					{
 						actor->danger_zone.noticed_danger = TRUE;
 					}
@@ -6476,16 +6872,11 @@ void actor_perception_update(
 					else
 					{
 						actor->danger_zone.allow_dive_evasion =
-							real_seed_random(get_global_random_seed_address()) <
+							actor_perception_call_random(actor_index) <
 								definition->moving.grenade_dive_chance;
 					}
 
-					actor_stimulus_noticed_danger_zone(
-						actor_index,
-						actor->danger_zone.danger_type,
-						actor->danger_zone.hostility,
-						actor->danger_zone.object_index,
-						&actor->danger_zone.position);
+					actor_perception_call_simple(actor_index, _actor_perception_call_noticed_danger, 0);
 				}
 			}
 
@@ -6515,7 +6906,7 @@ void actor_perception_update(
 		boolean refresh_status = FALSE;
 		boolean became_acknowledged = FALSE;
 		boolean expected_acknowledgement = FALSE;
-
+		short meter_class = NONE;
 		if (prop->unit_effect_decay_ticks > 0 &&
 			--prop->unit_effect_decay_ticks == 0)
 		{
@@ -6672,17 +7063,8 @@ void actor_perception_update(
 
 			if (refresh_position)
 			{
-				prop_position_refresh(
-					actor_index,
-					iterator.index,
-					&position,
-					FALSE,
-					refresh_status);
-			}
-
-			if (refresh_status)
-			{
-				prop_status_refresh(actor_index, iterator.index, &position);
+				actor_perception_call_full(actor_index, _actor_perception_call_refresh_prop,
+					iterator.index, refresh_status, 0.0f, NULL);
 			}
 		}
 
@@ -6696,45 +7078,33 @@ void actor_perception_update(
 
 			new_state = _prop_state_becoming_acknowledged;
 			prop->awareness = 0.0f;
-			if (prop->player &&
-				ai_debug.print_acknowledgement)
+			if (prop->player)
 			{
-				char buffer[256];
-
-				ai_debug_describe_actor(actor_index, actor->meta.unit_index, NONE, buffer, sizeof(buffer));
-				error(_error_silent, "%s: start to become aware", buffer);
+				actor_perception_call_simple(actor_index, _actor_perception_call_debug_start_aware, iterator.index);
 			}
 
 		case _prop_state_becoming_acknowledged:
 			{
-				struct actor_debug_info *debug = &actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
-
 				if (prop->perception == _actor_perception_none)
 				{
 					prop->awareness = 0.0f;
 					new_state = _prop_state_unacknowledged;
 					if (prop->player)
 					{
-						debug->perception_awareness_speed = NONE;
-						if (ai_debug.print_acknowledgement)
-						{
-							char buffer[256];
-
-							ai_debug_describe_actor(actor_index, actor->meta.unit_index, NONE, buffer, sizeof(buffer));
-							error(_error_silent, "%s: stop becoming aware", buffer);
-						}
+						actor_perception_call_simple(actor_index, _actor_perception_call_debug_stop_aware, iterator.index);
 					}
 				}
 				else
 				{
-					short knowledge_type = actor_get_perception_knowledge(actor_index, iterator.index);
+					short knowledge_type = (short)actor_perception_call_simple(actor_index,
+						_actor_perception_call_knowledge, iterator.index);
 					short awareness_speed;
 					real awareness_delta;
 
 #line 489 "c:\\halo\\SOURCE\\ai\\actor_perception.c"
 					assert((knowledge_type >= 0) && (knowledge_type < NUMBER_OF_ACTOR_KNOWLEDGE_TYPES));
 					assert((prop->perception >= 0) && (prop->perception < NUMBER_OF_ACTOR_PERCEPTION_TYPES));
-#line 6690 "source\\ai\\actor_perception.c"
+#line 7000 "source\\ai\\actor_perception.c"
 
 					awareness_speed = global_acknowledgement_speeds[knowledge_type][prop->perception];
 					switch (awareness_speed)
@@ -6759,67 +7129,18 @@ void actor_perception_update(
 						awareness_delta = 1.0f;
 						break;
 
-					/* awareness_delta is left unassigned only by this default arm. Not reached unassigned: the
-					 * arm's assertion failure calls system_exit, which does not return in January
-					 * (0x47c960 jumps to halt_and_catch_fire 0x4f21c0, which loops or calls exit).
-					 * Source-policy approval pending (2026-09-27 audit). */
+					/* port: unreachable (the table holds only these); the Rust
+					port's takes no awareness here, as this now does */
 					default:
-#line 516 "c:\\halo\\SOURCE\\ai\\actor_perception.c"
-						assert(!"unreachable");
-#line 6718 "source\\ai\\actor_perception.c"
+						awareness_delta = 0.0f;
 						break;
 					}
 
-					if (prop->player &&
-						debug->perception_awareness_speed != awareness_speed)
+					if (prop->player)
 					{
-						debug->perception_awareness_speed = awareness_speed;
-						if (ai_debug.print_acknowledgement)
-						{
-							char const *awareness_speed_names[] =
-							{
-								"never",
-								"noncombat",
-								"guard",
-								"combat",
-								"instant"
-							};
-							char const *knowledge_names[] =
-							{
-								"noncombat",
-								"guard",
-								"searching",
-								"definite"
-							};
-							char const *perception_names[] =
-							{
-								"none",
-								"partial",
-								"full",
-								"unmistakable"
-							};
-							char buffer[256];
-
-							ai_debug_describe_actor(actor_index, actor->meta.unit_index, NONE, buffer, sizeof(buffer));
-							error(
-								_error_silent,
-								"%s: knowledge %s percep %s -> awareness %s",
-								buffer,
-								knowledge_names[knowledge_type],
-								perception_names[prop->perception],
-								awareness_speed_names[awareness_speed]);
-
-							if (awareness_delta > 0.0f &&
-								awareness_delta < 1.0f)
-							{
-								error(
-									_error_silent,
-									"  awareness delta: %.2f (current awareness %.2f -> time %.2fsec)",
-									awareness_delta,
-									prop->awareness,
-									(1.0f - prop->awareness) / (awareness_delta * TICKS_PER_SECOND));
-							}
-						}
+						actor_perception_call_full(actor_index, _actor_perception_call_debug_awareness,
+							iterator.index, (knowledge_type & 0xFF) | ((awareness_speed & 0xFF) << 8),
+							awareness_delta, NULL);
 					}
 
 					prop->awareness += awareness_delta;
@@ -6828,14 +7149,7 @@ void actor_perception_update(
 						new_state = _prop_state_acknowledged;
 						if (prop->player)
 						{
-							debug->perception_awareness_speed = NONE;
-							if (ai_debug.print_acknowledgement)
-							{
-								char buffer[256];
-
-								ai_debug_describe_actor(actor_index, actor->meta.unit_index, NONE, buffer, sizeof(buffer));
-								error(_error_silent, "%s: become aware!", buffer);
-							}
+							actor_perception_call_simple(actor_index, _actor_perception_call_debug_become_aware, iterator.index);
 						}
 					}
 				}
@@ -6856,34 +7170,14 @@ void actor_perception_update(
 				{
 					long orphan_prop_index = NONE;
 
-					if (actor_perception_desire_prop(
-							actor_index,
-							_prop_state_uninspected_orphan,
-							prop->unit_index,
-							prop->actor_index,
-							prop->in_use,
-							prop->player,
-							prop->enemy,
-							prop->dead,
-							prop->dead_ticks,
-							prop->suicide_radius,
-							actor_perception_distance_squared(prop->distance),
-							prop->required_ticks,
-							NULL))
+					if (actor_perception_call_simple(actor_index, _actor_perception_call_desire_orphan, iterator.index))
 					{
-						struct actor_position_data orphan_position;
-
-						prop_position_refresh(
-							actor_index,
-							iterator.index,
-							&orphan_position,
-							FALSE,
-							FALSE);
-						actor_perception_find_prop_pathfinding_location(actor_index, iterator.index);
-						orphan_prop_index = prop_orphan_transition(actor_index, iterator.index);
+						orphan_prop_index = actor_perception_call_simple(actor_index,
+							_actor_perception_call_orphan_transition, iterator.index);
 					}
 
-					actor_switch_props(actor_index, iterator.index, orphan_prop_index);
+					actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
+						iterator.index, orphan_prop_index, 0.0f, NULL);
 					new_state = _prop_state_unacknowledged;
 				}
 			}
@@ -6892,31 +7186,18 @@ void actor_perception_update(
 		case _prop_state_acknowledged:
 			if (prop->perception == _actor_perception_none)
 			{
-				if (actor_perception_desire_prop(
-						actor_index,
-						_prop_state_uninspected_orphan,
-						prop->unit_index,
-						prop->actor_index,
-						prop->in_use,
-						prop->player,
-						prop->enemy,
-						prop->dead,
-						prop->dead_ticks,
-						prop->suicide_radius,
-						actor_perception_distance_squared(prop->distance),
-						prop->required_ticks,
-						NULL))
+				if (actor_perception_call_simple(actor_index, _actor_perception_call_desire_orphan, iterator.index))
 				{
 					new_state = _prop_state_becoming_unacknowledged;
 				}
 				else
 				{
-					actor_switch_props(actor_index, iterator.index, NONE);
+					actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
+						iterator.index, NONE, 0.0f, NULL);
 					new_state = _prop_state_unacknowledged;
 				}
 			}
 			break;
-
 		case _prop_state_uninspected_orphan:
 		case _prop_state_inspected_orphan:
 			{
@@ -6969,10 +7250,6 @@ void actor_perception_update(
 
 		if (new_state != NONE)
 		{
-#line 694 "c:\\halo\\SOURCE\\ai\\actor_perception.c"
-			assert(new_state!=prop->state);
-#line 6928 "source\\ai\\actor_perception.c"
-
 			switch (new_state)
 			{
 			case _prop_state_becoming_unacknowledged:
@@ -6980,55 +7257,39 @@ void actor_perception_update(
 				break;
 
 			case _prop_state_acknowledged:
-				became_acknowledged =
-					actor_perception_become_acknowledged(
-						actor_index,
-						iterator.index,
-						&expected_acknowledgement);
+			{
+				long result = actor_perception_call_simple(actor_index,
+					_actor_perception_call_become_acknowledged, iterator.index);
+
+				became_acknowledged = (result & 1) != 0;
+				expected_acknowledgement = (result & 2) != 0;
 				iterator.next_index = prop->next_prop_index;
 				break;
+			}
 
 			case _prop_state_uninspected_orphan:
-				match_vassert("c:\\halo\\SOURCE\\ai\\actor_perception.c", 721, FALSE, NULL);
-
 			case _prop_state_unacknowledged:
 			case _prop_state_inspected_orphan:
 				prop->definitely_located = FALSE;
 				prop->definite_knowledge_source_actor = NONE;
 				break;
-
-			case _prop_state_becoming_acknowledged:
-				break;
-
-			default:
-				match_vassert("c:\\halo\\SOURCE\\ai\\actor_perception.c", 730, FALSE, NULL);
-				break;
 			}
 
 			prop->state = new_state;
-			prop->unopposable_enemy = actor_compute_prop_unopposable(actor_index, iterator.index);
-			prop->target_weight = actor_compute_prop_target_weight(actor_index, iterator.index);
+			prop->unopposable_enemy = (boolean)actor_perception_call_simple(actor_index,
+				_actor_perception_call_unopposable, iterator.index);
+			actor_perception_call_full(actor_index, _actor_perception_call_target_weight,
+				iterator.index, 0, 0.0f, &prop->target_weight);
 		}
 
 		if (orphan_expired)
 		{
-			struct prop_datum *parent_prop;
-
-			match_vassert(
-				"c:\\halo\\SOURCE\\ai\\actor_perception.c",
-				746,
-				prop->parent_prop_index != NONE,
-				"prop->parent_prop_index != NONE");
-
-			parent_prop = prop_get(prop->parent_prop_index);
-
-#line 751 "c:\\halo\\SOURCE\\ai\\actor_perception.c"
-			assert(parent_prop->orphan_prop_index == iterator.index);
-#line 6981 "source\\ai\\actor_perception.c"
+			struct prop_datum *parent_prop = prop_get(prop->parent_prop_index);
 
 			parent_prop->orphan_prop_index = NONE;
-			actor_switch_props(actor_index, iterator.index, NONE);
-			prop_delete(actor_index, iterator.index);
+			actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
+				iterator.index, NONE, 0.0f, NULL);
+			actor_perception_call_simple(actor_index, _actor_perception_call_prop_delete, iterator.index);
 		}
 		else if (prop->refresh_stimuli &&
 			prop->state >= _prop_state_becoming_unacknowledged &&
@@ -7036,7 +7297,7 @@ void actor_perception_update(
 		{
 			if (prop->just_killed)
 			{
-				actor_stimulus_prop_just_killed(actor_index, iterator.index);
+				actor_perception_call_simple(actor_index, _actor_perception_call_stimulus_just_killed, iterator.index);
 				prop->just_killed = FALSE;
 			}
 
@@ -7045,7 +7306,8 @@ void actor_perception_update(
 			{
 				boolean initial_sighting = became_acknowledged && !expected_acknowledgement;
 
-				actor_stimulus_prop_sighted(actor_index, iterator.index, initial_sighting);
+				actor_perception_call_full(actor_index, _actor_perception_call_stimulus_sighted,
+					iterator.index, initial_sighting, 0.0f, NULL);
 				prop->just_became_visible = FALSE;
 			}
 
@@ -7057,15 +7319,9 @@ void actor_perception_update(
 				prop->distance < 7.0f)
 			{
 				actor->emotions.sighted_friendly_player = TRUE;
-				ai_communication_event(
-					_ai_communication_sighted_friend_player,
-					actor->meta.unit_index,
-					prop->unit_index,
-					_comm_hostility_friend,
-					NONE,
-					NONE,
-					NULL);
-				actor_stimulus_prop_sighted(actor_index, iterator.index, FALSE);
+				actor_perception_call_simple(actor_index, _actor_perception_call_sighted_friend_player, iterator.index);
+				actor_perception_call_full(actor_index, _actor_perception_call_stimulus_sighted,
+					iterator.index, FALSE, 0.0f, NULL);
 			}
 
 			if (actor->meta.unit_index != NONE &&
@@ -7073,26 +7329,16 @@ void actor_perception_update(
 				prop->ally &&
 				prop->ally_status_changed)
 			{
-				boolean enemy = game_team_is_enemy(actor->meta.team_index, prop->team_index);
+				boolean enemy = (boolean)actor_perception_call_full(actor_index, _actor_perception_call_team_is_enemy,
+					actor->meta.team_index, prop->team_index, 0.0f, NULL);
 				boolean close =
 					prop->distance <
 						(enemy ? 15.0f : prop->quantized_facing <= 2 ? 10.0f : 3.0f);
 
 				if ((enemy && prop->currently_damaging_me) || close)
 				{
-					struct ai_information_data information;
-
-					information.allegiance.team1_index = actor->meta.team_index;
-					information.allegiance.team2_index = prop->team_index;
-					information.allegiance.broken = enemy;
-					ai_communication_event(
-						_ai_communication_allegiance_changed,
-						actor->meta.unit_index,
-						prop->unit_index,
-						enemy ? _comm_hostility_traitor : _comm_hostility_friend,
-						NONE,
-						_ai_information_allegiance,
-						&information);
+					actor_perception_call_full(actor_index, _actor_perception_call_allegiance_changed,
+						iterator.index, enemy, 0.0f, NULL);
 				}
 			}
 
@@ -7100,11 +7346,11 @@ void actor_perception_update(
 			{
 				if (prop->dead && !prop->enemy)
 				{
-					actor_stimulus_enter_combat_found_body(actor_index, iterator.index);
+					actor_perception_call_simple(actor_index, _actor_perception_call_stimulus_found_body, iterator.index);
 				}
 				else if (prop->enemy)
 				{
-					actor_stimulus_enter_combat_perceived_enemy(actor_index, iterator.index);
+					actor_perception_call_simple(actor_index, _actor_perception_call_stimulus_perceived_enemy, iterator.index);
 				}
 			}
 
@@ -7112,14 +7358,12 @@ void actor_perception_update(
 				!prop->dead &&
 				!prop->player)
 			{
-				struct encounter_datum *encounter;
-
 				if ((actor->target.target_prop_index != NONE &&
 						(actor->target.since_any_target_visible_timer == NONE ||
 							actor->target.since_any_target_visible_timer >= 180)) ||
 					(actor->meta.encounter_index != NONE &&
-						((encounter = encounter_get(actor->meta.encounter_index))->enemy_visible_timer == NONE ||
-							(encounter->enemy_visible_timer >= 180 && encounter->enemy_alive))))
+						actor_perception_call_simple(actor_index, _actor_perception_call_encounter_enemy_unseen,
+							actor->meta.encounter_index)))
 				{
 					if (actor->meta.unit_index != NONE)
 					{
@@ -7127,29 +7371,17 @@ void actor_perception_update(
 						{
 							if (prop->in_combat)
 							{
-								ai_communication_event(
-									_ai_communication_alert_noncombat,
-									prop->unit_index,
-									actor->meta.unit_index,
-									_comm_hostility_friend,
-									NONE,
-									_ai_information_combat_stimulus,
-									NULL);
+								actor_perception_call_full(actor_index, _actor_perception_call_alert_noncombat,
+									iterator.index, FALSE, 0.0f, NULL);
 							}
 						}
-						else if (actor_in_combat(actor_index) &&
-							!actor_is_fighting(actor_index) &&
+						else if (actor_perception_call_simple(actor_index, _actor_perception_call_in_combat, 0) &&
+							!actor_perception_call_simple(actor_index, _actor_perception_call_is_fighting, 0) &&
 							prop->noncombat &&
 							prop->visibility >= _actor_perception_full)
 						{
-							ai_communication_event(
-								_ai_communication_alert_noncombat,
-								actor->meta.unit_index,
-								prop->unit_index,
-								_comm_hostility_friend,
-								NONE,
-								_ai_information_combat_stimulus,
-								NULL);
+							actor_perception_call_full(actor_index, _actor_perception_call_alert_noncombat,
+								iterator.index, TRUE, 0.0f, NULL);
 						}
 					}
 				}
@@ -7163,50 +7395,22 @@ void actor_perception_update(
 			nearest_orphan_distance = prop->distance;
 		}
 
-		if (prop->dead)
+		if (prop->state >= _prop_state_becoming_unacknowledged && prop->state <= _prop_state_acknowledged)
 		{
-			if (prop->state >= _prop_state_becoming_unacknowledged && prop->state <= _prop_state_acknowledged)
-			{
-				ai_profile.meters[_ai_meter_dead_props_acknowledged].accumulator++;
-			}
-			else if (prop->state >= _prop_state_uninspected_orphan && prop->state <= _prop_state_inspected_orphan)
-			{
-				ai_profile.meters[_ai_meter_dead_props_orphaned].accumulator++;
-			}
-			else if (prop->state >= _prop_state_unacknowledged && prop->state <= _prop_state_becoming_acknowledged)
-			{
-				ai_profile.meters[_ai_meter_dead_props_unacknowledged].accumulator++;
-			}
+			meter_class = 0;
 		}
-		else if (prop->enemy)
+		else if (prop->state >= _prop_state_uninspected_orphan && prop->state <= _prop_state_inspected_orphan)
 		{
-			if (prop->state >= _prop_state_becoming_unacknowledged && prop->state <= _prop_state_acknowledged)
-			{
-				ai_profile.meters[_ai_meter_enemy_props_acknowledged].accumulator++;
-			}
-			else if (prop->state >= _prop_state_uninspected_orphan && prop->state <= _prop_state_inspected_orphan)
-			{
-				ai_profile.meters[_ai_meter_enemy_props_orphaned].accumulator++;
-			}
-			else if (prop->state >= _prop_state_unacknowledged && prop->state <= _prop_state_becoming_acknowledged)
-			{
-				ai_profile.meters[_ai_meter_enemy_props_unacknowledged].accumulator++;
-			}
+			meter_class = 1;
 		}
-		else
+		else if (prop->state >= _prop_state_unacknowledged && prop->state <= _prop_state_becoming_acknowledged)
 		{
-			if (prop->state >= _prop_state_becoming_unacknowledged && prop->state <= _prop_state_acknowledged)
-			{
-				ai_profile.meters[_ai_meter_friendly_props_acknowledged].accumulator++;
-			}
-			else if (prop->state >= _prop_state_uninspected_orphan && prop->state <= _prop_state_inspected_orphan)
-			{
-				ai_profile.meters[_ai_meter_friendly_props_orphaned].accumulator++;
-			}
-			else if (prop->state >= _prop_state_unacknowledged && prop->state <= _prop_state_becoming_acknowledged)
-			{
-				ai_profile.meters[_ai_meter_friendly_props_unacknowledged].accumulator++;
-			}
+			meter_class = 2;
+		}
+		if (meter_class != NONE)
+		{
+			actor_perception_call_simple(actor_index, _actor_perception_call_profile,
+				(prop->dead ? 0 : prop->enemy ? 3 : 6) + meter_class);
 		}
 	}
 

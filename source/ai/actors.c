@@ -4600,6 +4600,8 @@ long actors_port_step_props(
 	return count;
 }
 
+typedef char actors_port_data_array_size_assert[
+	sizeof(struct data_array) == HALO_SIM_DATA_ARRAY_SIZE ? 1 : -1];
 typedef char actors_port_prop_datum_size_assert[
 	sizeof(struct prop_datum) == HALO_SIM_PROP_DATUM_SIZE ? 1 : -1];
 

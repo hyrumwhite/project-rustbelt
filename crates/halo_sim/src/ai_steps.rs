@@ -29,7 +29,7 @@ use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext, PropIterator};
 pub const ACTOR_DATUM_SIZE: usize = halo_map::layout::actor_datum::SIZEOF;
 /// The head of an actor's debug info the checks save and compare
 /// (halo_sim.h's `HALO_SIM_ACTOR_DEBUG_HEAD_SIZE`).
-pub const ACTOR_DEBUG_HEAD_SIZE: usize = 0x100;
+pub const ACTOR_DEBUG_HEAD_SIZE: usize = 0x160;
 /// `sizeof(struct data_array)`.
 pub const DATA_ARRAY_SIZE: usize = 0x38;
 /// `sizeof(struct prop_datum)`.

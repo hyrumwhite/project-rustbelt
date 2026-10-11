@@ -83,6 +83,15 @@ pub fn run(action: i16, function: Function, context: &AiStepContext, host: &impl
             vehicle_control(context, host);
             false
         }
+        (v::_ACTOR_ACTION_CHARGE, Function::Perform) => charge_perform(context, host),
+        (v::_ACTOR_ACTION_CHARGE, Function::Update) => {
+            charge_update(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_CHARGE, Function::Control) => {
+            charge_control(context, host);
+            false
+        }
         (v::_ACTOR_ACTION_WAIT, Function::Perform) => wait_perform(context, host),
         (v::_ACTOR_ACTION_WAIT, Function::Update) => {
             wait_update(context, host);
@@ -1901,4 +1910,520 @@ fn vehicle_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
         }
     }
     m.bool(done) || m.bool(failed)
+}
+
+/// action_charge.c's calls.
+pub mod charge_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_CHARGE as i32) << 8;
+    /// `actor_path_has_path(actor)`, the result.
+    pub const HAS_PATH: i32 = BASE | 1;
+    /// `actor_combat_get_firing_variant_definition(actor)`, its address the result.
+    pub const FIRING_VARIANT: i32 = BASE | 2;
+    /// `actor_has_ranged_weapon(actor)`, the result.
+    pub const HAS_RANGED_WEAPON: i32 = BASE | 3;
+    /// `actor_get_weapon_definition(actor)`, its address (or 0) the result.
+    pub const WEAPON_DEFINITION: i32 = BASE | 4;
+    /// `unit_is_busy(unit)`, the result.
+    pub const UNIT_IS_BUSY: i32 = BASE | 5;
+    /// `projectile_aim_ballistic` of the leap at the target prop: the
+    /// result, the aim vector in `output[0..3]`, the vertical and horizontal
+    /// velocities in `output[3..5]`.
+    pub const AIM_LEAP: i32 = BASE | 6;
+    /// `unit_melee_attack_begin(unit, FALSE, input)`, and if it began its
+    /// shout at the target's unit `a`: the result.
+    pub const MELEE_ATTACK: i32 = BASE | 7;
+    /// `actor_move_to_prop(actor, a, input[0])`, the result.
+    pub const MOVE_TO_PROP: i32 = BASE | 8;
+    /// `actor_move_keep_moving_past_destination(actor)`.
+    pub const KEEP_MOVING: i32 = BASE | 9;
+    /// `actor_move_halt(actor)`.
+    pub const MOVE_HALT: i32 = BASE | 10;
+    /// `actor_perception_unreachable(actor, a, b)`.
+    pub const PERCEPTION_UNREACHABLE: i32 = BASE | 11;
+}
+
+const CHARGE_GOAL_CLOSE_RANGE: i16 = v::_CHARGE_GOAL_CLOSE_RANGE as i16;
+const CHARGE_GOAL_STALKING: i16 = v::_CHARGE_GOAL_STALKING as i16;
+const CHARGE_GOAL_MELEE: i16 = v::_CHARGE_GOAL_MELEE as i16;
+const CHARGE_GOAL_MELEE_LEAPING: i16 = v::_CHARGE_GOAL_MELEE_LEAPING as i16;
+const CHARGE_GOAL_VEHICLE_STRAFING: i16 = v::_CHARGE_GOAL_VEHICLE_STRAFING as i16;
+const CHARGE_GOAL_VEHICLE_RAMMING: i16 = v::_CHARGE_GOAL_VEHICLE_RAMMING as i16;
+
+fn normalize2(v: &mut [f32; 2]) -> f32 {
+    let magnitude = (v[0] * v[0] + v[1] * v[1]).sqrt();
+    if !(0.0001 > magnitude.abs()) {
+        let s = 1.0 / magnitude;
+        *v = [s * v[0], s * v[1]];
+        magnitude
+    } else {
+        0.0
+    }
+}
+
+fn set_vector(m: &dyn AiMemory, address: u32, v: [f32; 3]) {
+    for (i, value) in v.into_iter().enumerate() {
+        m.set_f32(address + 4 * i as u32, value);
+    }
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// `point_from_line3d(p, global_up3d, 0.05)`.
+fn above(p: [f32; 3]) -> [f32; 3] {
+    [0.0 * 0.05 + p[0], 0.0 * 0.05 + p[1], 1.0 * 0.05 + p[2]]
+}
+
+/// `action_charge_find_target_range`.
+fn charge_find_target_range(context: &AiStepContext, host: &impl AiHost, goal: i16) -> f32 {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = context.definition;
+    let mut range = 0.0f32;
+    if goal == CHARGE_GOAL_MELEE || goal == CHARGE_GOAL_MELEE_LEAPING {
+        let upper = m.f32(definition + d::BERSERK_MELEE_LEAP_RANGE_UPPER_BOUND as u32);
+        if goal == CHARGE_GOAL_MELEE_LEAPING && !(0.0 > upper) {
+            range = upper;
+        }
+        let attack_range = m.f32(definition + d::BERSERK_MELEE_ATTACK_RANGE as u32);
+        if m.bool(at(a::STATE_CHARGE_MELEE_SUICIDE)) {
+            if !(range > attack_range) {
+                range = attack_range;
+            }
+        } else {
+            let melee_range = attack_range + m.f32(at(a::STATE_CHARGE_MELEE_DANGER_RANGE));
+            if !(range > melee_range) {
+                range = melee_range;
+            }
+        }
+    } else if (goal == CHARGE_GOAL_VEHICLE_STRAFING || goal == CHARGE_GOAL_CLOSE_RANGE)
+        && call_simple(context, host, charge_call::HAS_RANGED_WEAPON, 0) != 0
+        && m.i16(at(a::TARGET_TARGET_TYPE)) >= v::_ACTOR_TARGET_ACKNOWLEDGED_ENEMY as i16
+    {
+        let maximum = m.f32(at(a::CONTROL_WEAPON_MAXIMUM_RANGE));
+        if !(0.0 > maximum) {
+            range = maximum;
+        }
+    }
+    range
+}
+
+/// `action_charge_update`.
+fn charge_update(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.i16(at(a::STATE_CHARGE_GOAL)) == CHARGE_GOAL_MELEE_LEAPING
+        && m.bool(at(a::STATE_CHARGE_LAUNCHED_LEAP))
+        && !m.bool(at(a::STATE_CHARGE_LAUNCHED_MELEE_ATTACK))
+        && !m.bool(at(a::INPUT_IN_MIDAIR))
+    {
+        let timer = at(a::STATE_CHARGE_LEAP_FAILURE_TIMER);
+        m.set_i16(timer, m.i16(timer).wrapping_add(1));
+    }
+}
+
+/// `action_charge_control`.
+fn charge_control(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let flags = m.r32(context.definition + d::FLAGS as u32);
+    let goal = m.i16(at(a::STATE_CHARGE_GOAL));
+    m.set_i16(at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE), v::_DIRECTION_SPECIFICATION_TARGET as i16);
+    m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), 4);
+    let priority = at(a::ORDERS_LOOK_PRIMARY_PRIORITY);
+    if (goal == CHARGE_GOAL_MELEE || goal == CHARGE_GOAL_MELEE_LEAPING)
+        && m.bool(at(a::STATE_CHARGE_ALIGNMENT_INCORRECT))
+        && !m.bool(at(a::CONTROL_MOVING))
+        && call_simple(context, host, charge_call::HAS_PATH, 0) == 0
+    {
+        m.set_i16(priority, 4);
+    } else if m.i16(at(a::STATE_COMBAT_STATUS)) >= 5 && goal != CHARGE_GOAL_STALKING {
+        m.set_i16(priority, 7);
+    } else {
+        m.set_i16(priority, 5);
+    }
+
+    let stationary = at(a::ORDERS_MOVE_STATIONARY_CROUCH);
+    let moving = at(a::ORDERS_MOVE_MOVING_CROUCH);
+    if goal == CHARGE_GOAL_STALKING {
+        let crouch = !m.bool(at(a::STATE_CHARGE_STALKING_CATCH_TARGET));
+        m.set_bool(stationary, crouch);
+        m.set_bool(moving, crouch);
+    } else if !m.bool(at(a::ORDERS_MOVE_PANICKED))
+        && flags & (1 << v::_ACTOR_DEFINITION_DEFENSIVE_CROUCH_WHILE_CHARGING_BIT) != 0
+    {
+        let crouch = m.r8(at(a::EMOTIONS_DEFENSIVE_CROUCH));
+        m.w8(stationary, crouch);
+        m.w8(moving, crouch);
+    } else {
+        m.set_bool(stationary, false);
+        m.set_bool(moving, false);
+    }
+
+    if m.bool(at(a::STATE_CHARGE_LEAP_PENDING)) {
+        let horizontal = m.f32(at(a::STATE_CHARGE_LEAP_HORIZONTAL_VELOCITY));
+        let vertical = m.f32(at(a::STATE_CHARGE_LEAP_VERTICAL_VELOCITY));
+        m.set_bool(at(a::ORDERS_MOVE_JUMP), true);
+        m.set_bool(at(a::ORDERS_MOVE_JUMP_LEAP), vertical < horizontal * 0.7);
+        m.set_bool(at(a::ORDERS_MOVE_JUMP_TARGETED), true);
+        for word in 0..2 {
+            m.w32(at(a::ORDERS_MOVE_JUMP_ALIGNMENT_VECTOR) + word * 4, m.r32(at(a::STATE_CHARGE_LEAP_ALIGNMENT_VECTOR) + word * 4));
+        }
+        m.set_f32(at(a::ORDERS_MOVE_JUMP_TARGET_HORIZONTAL_VEL), horizontal);
+        m.set_f32(at(a::ORDERS_MOVE_JUMP_TARGET_VERTICAL_VEL), vertical);
+        m.set_bool(at(a::STATE_CHARGE_LAUNCHED_LEAP), true);
+        m.set_bool(at(a::STATE_CHARGE_LEAP_PENDING), false);
+        m.w32(at(a::STATE_CHARGE_LEAP_START_TIME), context.game_time as u32);
+        m.set_i16(at(a::STATE_CHARGE_LEAP_FAILURE_TIMER), 0);
+    }
+
+    if flags & (1 << v::_ACTOR_DEFINITION_BERSERK_USE_PANIC_MOVEMENT_BIT) != 0
+        && (m.bool(at(a::EMOTIONS_BERSERK)) || goal == CHARGE_GOAL_MELEE || goal == CHARGE_GOAL_MELEE_LEAPING)
+    {
+        m.set_bool(at(a::ORDERS_MOVE_PANICKED), m.bool(at(a::STATE_CHARGE_ADVANCING)) && !m.bool(moving));
+    }
+    m.set_bool(at(a::ORDERS_MOVE_MOVE_FACE_EXACTLY), true);
+    m.set_bool(at(a::ORDERS_MOVE_DIVE_INTO_COVER), false);
+    m.set_bool(at(a::ORDERS_MOVE_EMERGE_FROM_COVER), false);
+    m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), goal != CHARGE_GOAL_STALKING);
+}
+
+/// `action_charge_perform`.
+fn charge_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    use crate::ai_actor::object_get;
+    use crate::layout::{actor_debug_info as dbg, unit_datum as u, weapon_definition};
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = context.definition;
+    let def = |offset: usize| m.f32(definition + offset as u32);
+    let variant = context.variant_definition;
+    let flags = m.r32(definition + d::FLAGS as u32);
+    let firing_variant = call_simple(context, host, charge_call::FIRING_VARIANT, 0) as u32;
+    let goal_address = at(a::STATE_CHARGE_GOAL);
+    let advancing = at(a::STATE_CHARGE_ADVANCING);
+    let aborted = at(a::STATE_CHARGE_ABORTED_MELEE_ATTACK);
+    let launched_melee = at(a::STATE_CHARGE_LAUNCHED_MELEE_ATTACK);
+    let launched_leap = at(a::STATE_CHARGE_LAUNCHED_LEAP);
+    let leap_pending = at(a::STATE_CHARGE_LEAP_PENDING);
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    let mut prop = 0u32;
+
+    if target_prop_index != NONE {
+        prop = prop_get(m, context, target_prop_index);
+        let goal = m.i16(goal_address);
+        if m.i32(at(a::INPUT_DELAYED_ATTACHED_PROJECTILE_INDEX)) != NONE {
+            m.set_bool(advancing, true);
+        } else if goal == CHARGE_GOAL_VEHICLE_RAMMING || goal == CHARGE_GOAL_VEHICLE_STRAFING {
+            m.set_bool(advancing, true);
+        } else if goal == CHARGE_GOAL_MELEE || goal == CHARGE_GOAL_MELEE_LEAPING {
+            let mut abort_range = f32::MAX;
+            let mut check_range = true;
+            let mut berserk_ranges = m.bool(at(a::EMOTIONS_BERSERK));
+            if call_simple(context, host, charge_call::HAS_RANGED_WEAPON, 0) == 0 {
+                berserk_ranges = true;
+            }
+            if m.bool(launched_melee) || m.bool(launched_leap) || m.bool(leap_pending) {
+                check_range = false;
+            } else if m.bool(at(a::EMOTIONS_BERSERK)) || call_simple(context, host, charge_call::HAS_RANGED_WEAPON, 0) == 0 {
+                abort_range = if berserk_ranges {
+                    m.f32(variant + var::RANGED_COMBAT_BERSERK_MELEE_ABORT_RANGE as u32)
+                } else {
+                    m.f32(variant + var::RANGED_COMBAT_MELEE_ABORT_RANGE as u32)
+                };
+            }
+            if m.bool(at(a::EXTERNAL_ORDERS_DISABLE_CHARGING)) {
+                let attack_range = def(d::BERSERK_MELEE_ATTACK_RANGE);
+                let maximum_abort_range = (if 0.0 > attack_range { 0.0 } else { attack_range }) + 0.8;
+                abort_range = if abort_range < maximum_abort_range { abort_range } else { maximum_abort_range };
+            }
+            let distance = m.f32(prop + p::DISTANCE as u32);
+            if check_range && distance > abort_range {
+                m.set_bool(aborted, true);
+            } else {
+                m.w32(at(a::EMOTIONS_LAST_MELEE_ATTACK_TIME), context.game_time as u32);
+                m.set_bool(advancing, true);
+                if check_range {
+                    let possible = at(a::STATE_CHARGE_LEAP_POSSIBLE_IF_AT_RANGE);
+                    let lower = def(d::BERSERK_MELEE_LEAP_RANGE_LOWER_BOUND);
+                    if goal == CHARGE_GOAL_MELEE {
+                        let unreachable = m.i16(prop + p::UNREACHABLE_TICKS as u32);
+                        if def(d::BERSERK_MELEE_LEAP_RANGE_UPPER_BOUND) == 0.0 || def(d::BERSERK_MELEE_LEAP_CHANCE) == 0.0 {
+                            m.set_bool(possible, false);
+                        } else if m.bool(prop + p::FLYING as u32) || unreachable > 0 {
+                            m.set_bool(possible, true);
+                        }
+                        if m.bool(possible) && (unreachable > 0 || distance > lower * 1.5) {
+                            m.set_i16(goal_address, CHARGE_GOAL_MELEE_LEAPING);
+                        }
+                    } else if distance < lower {
+                        m.set_i16(goal_address, CHARGE_GOAL_MELEE);
+                        m.set_bool(possible, true);
+                    }
+                }
+            }
+        } else {
+            let stalking = flags & (1 << v::_ACTOR_DEFINITION_STALKING_BEHAVIOR_BIT) != 0
+                && m.i16(at(a::STATE_COMBAT_STATUS)) >= 5
+                && !m.bool(at(a::EMOTIONS_BERSERK));
+            m.set_i16(goal_address, if stalking { CHARGE_GOAL_STALKING } else { CHARGE_GOAL_CLOSE_RANGE });
+            let line_of_sight = m.i16(prop + p::LINE_OF_SIGHT as u32);
+            let distance = m.f32(prop + p::DISTANCE as u32);
+            if stalking {
+                let exposed = (line_of_sight == v::_AI_LINE_OF_SIGHT_CLEAR as i16
+                    || line_of_sight == v::_AI_LINE_OF_SIGHT_OCCLUDED as i16)
+                    && m.i8(prop + p::QUANTIZED_FACING as u32) <= 2;
+                m.set_bool(at(a::STATE_CHARGE_STALKING_CURRENTLY_EXPOSED), exposed);
+                let freeze = exposed && flags & (1 << v::_ACTOR_DEFINITION_STALKING_FREEZE_WHEN_EXPOSED_BIT) != 0;
+                m.set_bool(advancing, !freeze);
+                if exposed {
+                    let timer = at(a::STATE_CHARGE_STALKING_DISCOVERY_TIMER);
+                    m.set_i16(timer, m.i16(timer).wrapping_add(1));
+                }
+                let catch = at(a::STATE_CHARGE_STALKING_CATCH_TARGET);
+                m.set_bool(catch, false);
+                let maximum = def(d::DEFENSIVE_STALKING_MAX_DISTANCE);
+                if !exposed && m.i8(prop + p::QUANTIZED_CLOSING_SPEED as u32) <= 1 {
+                    m.set_bool(catch, true);
+                } else if maximum > 0.0 && distance >= maximum {
+                    m.set_bool(catch, true);
+                }
+            } else if call_simple(context, host, charge_call::HAS_RANGED_WEAPON, 0) == 0 || m.bool(at(a::INPUT_UNDERWATER)) {
+                m.set_bool(advancing, true);
+            } else {
+                let (mut minimum_range, maximum_range) = if m.bool(at(a::EMOTIONS_BERSERK)) {
+                    (
+                        m.f32(firing_variant + var::RANGED_COMBAT_BERSERK_FIRING_RANGE_LOWER_BOUND as u32),
+                        m.f32(firing_variant + var::RANGED_COMBAT_BERSERK_FIRING_RANGE_UPPER_BOUND as u32),
+                    )
+                } else {
+                    (
+                        m.f32(firing_variant + var::RANGED_COMBAT_COMBAT_RANGE_LOWER_BOUND as u32),
+                        m.f32(firing_variant + var::RANGED_COMBAT_COMBAT_RANGE_UPPER_BOUND as u32),
+                    )
+                };
+                let weapon = call_simple(context, host, charge_call::WEAPON_DEFINITION, 0) as u32;
+                if weapon != 0 {
+                    let weapon_minimum = m.f32(weapon + weapon_definition::WEAPON_AI_MINIMUM_TARGET_RANGE as u32);
+                    if weapon_minimum > 0.0 {
+                        minimum_range = if minimum_range > weapon_minimum { minimum_range } else { weapon_minimum };
+                    }
+                }
+                if m.bool(advancing) {
+                    if distance < minimum_range {
+                        m.set_bool(advancing, false);
+                    }
+                } else if distance > maximum_range {
+                    m.set_bool(advancing, true);
+                }
+                if distance > 0.7
+                    && line_of_sight != v::_AI_LINE_OF_SIGHT_CLEAR as i16
+                    && line_of_sight != v::_AI_LINE_OF_SIGHT_OCCLUDED as i16
+                {
+                    m.set_bool(advancing, true);
+                }
+            }
+        }
+    } else {
+        m.set_bool(advancing, false);
+    }
+
+    let goal = m.i16(goal_address);
+    let melee_goal = |goal: i16| goal == CHARGE_GOAL_MELEE || goal == CHARGE_GOAL_MELEE_LEAPING;
+    if m.bool(launched_melee) {
+        let unit_index = m.i32(at(a::META_UNIT_INDEX));
+        let finished = unit_index == NONE || call_simple(context, host, charge_call::UNIT_IS_BUSY, 0) == 0;
+        m.set_bool(at(a::STATE_CHARGE_FINISHED_MELEE_ATTACK), finished);
+    } else if !m.bool(leap_pending) && melee_goal(goal) && prop != 0 {
+        let debug = context.debug_info;
+        let mut melee = false;
+        let body = m.vector(at(a::INPUT_BODY_POSITION));
+        let prop_body = m.vector(prop + p::BODY_POSITION as u32);
+        let actor_to_prop = m.vector(prop + p::ACTOR_TO_PROP as u32);
+        m.w32(debug + dbg::LAST_MELEE_TIME as u32, context.game_time as u32);
+        set_vector(m, debug + dbg::FIELD_108 as u32, above(body));
+        set_vector(m, debug + dbg::FIELD_114 as u32, m.vector(at(a::INPUT_FACING_VECTOR)));
+        set_vector(m, debug + dbg::FIELD_120 as u32, above(prop_body));
+        let mut direction;
+        if m.f32(prop + p::DISTANCE as u32) < 0.8 {
+            m.set_bool(debug + dbg::FIELD_139 as u32, true);
+            direction = actor_to_prop;
+            melee = true;
+        } else {
+            let unit = object_get(m, context, m.i32(at(a::META_UNIT_INDEX))).unwrap_or(0);
+            let unit_velocity = m.vector(unit + u::OBJECT_TRANSLATIONAL_VELOCITY as u32);
+            m.set_bool(debug + dbg::FIELD_139 as u32, false);
+            let velocity = m.vector(prop + p::VELOCITY as u32);
+            let mut lead_fraction = 0.0f32;
+            let speed = dot(velocity, velocity).sqrt();
+            if speed > 0.0 {
+                lead_fraction = (dot(velocity, actor_to_prop) / speed + 1.0) * 0.5;
+            }
+            let ticks = m.i16(at(a::STATE_CHARGE_MELEE_TICKS_UNTIL_DANGEROUS)) as f32;
+            let t = lead_fraction * ticks;
+            let target_point = [velocity[0] * t + prop_body[0], velocity[1] * t + prop_body[1], velocity[2] * t + prop_body[2]];
+            direction = [target_point[0] - body[0], target_point[1] - body[1], target_point[2] - body[2]];
+            set_vector(m, debug + dbg::FIELD_13C as u32, above(target_point));
+            let mut distance;
+            if dot(direction, actor_to_prop) < 0.0 {
+                distance = 0.0;
+                direction = actor_to_prop;
+            } else {
+                let magnitude = dot(direction, direction).sqrt();
+                if !(0.0001 > magnitude.abs()) {
+                    let s = 1.0 / magnitude;
+                    direction = [s * direction[0], s * direction[1], s * direction[2]];
+                    distance = magnitude;
+                } else {
+                    distance = 0.0;
+                }
+                if distance == 0.0 {
+                    direction = actor_to_prop;
+                }
+            }
+
+            let lower = def(d::BERSERK_MELEE_LEAP_RANGE_LOWER_BOUND);
+            let upper = def(d::BERSERK_MELEE_LEAP_RANGE_UPPER_BOUND);
+            let attack_range = def(d::BERSERK_MELEE_ATTACK_RANGE);
+            if goal == CHARGE_GOAL_MELEE_LEAPING && !m.bool(launched_leap) {
+                m.set_f32(debug + dbg::FIELD_148 as u32, lower);
+                m.set_f32(debug + dbg::FIELD_14C as u32, upper);
+                if distance < lower && m.i16(prop + p::UNREACHABLE_TICKS as u32) == 0 && !m.bool(prop + p::FLYING as u32) {
+                    m.set_bool(aborted, true);
+                    m.w32(at(a::EMOTIONS_LAST_MELEE_ATTACK_TIME), NONE as u32);
+                } else if distance < upper {
+                    let aim = call_full(context, host, charge_call::AIM_LEAP, 0, 0, &[]);
+                    if aim.result != 0 {
+                        let mut aim_vector = [aim.output[0], aim.output[1]];
+                        if normalize2(&mut aim_vector) == 0.0 {
+                            let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+                            aim_vector = [facing[0], facing[1]];
+                            if normalize2(&mut aim_vector) == 0.0 {
+                                aim_vector = [1.0, 0.0];
+                            }
+                        }
+                        m.set_bool(leap_pending, true);
+                        m.set_f32(at(a::STATE_CHARGE_LEAP_ALIGNMENT_VECTOR), aim_vector[0]);
+                        m.set_f32(at(a::STATE_CHARGE_LEAP_ALIGNMENT_VECTOR) + 4, aim_vector[1]);
+                        m.set_f32(at(a::STATE_CHARGE_LEAP_HORIZONTAL_VELOCITY), aim.output[4]);
+                        m.set_f32(at(a::STATE_CHARGE_LEAP_VERTICAL_VELOCITY), aim.output[3]);
+                    }
+                }
+            } else if m.bool(at(a::STATE_CHARGE_MELEE_SUICIDE)) {
+                m.set_f32(debug + dbg::FIELD_148 as u32, 0.0);
+                m.set_f32(debug + dbg::FIELD_14C as u32, attack_range);
+                if distance < attack_range {
+                    melee = true;
+                } else if distance < def(d::BERSERK_SUICIDE_SENSING_DISTANCE) {
+                    let relative = [velocity[0] - unit_velocity[0], velocity[1] - unit_velocity[1], velocity[2] - unit_velocity[2]];
+                    if dot(relative, direction) > 0.023333333 {
+                        melee = true;
+                    }
+                }
+            } else {
+                if goal == CHARGE_GOAL_MELEE_LEAPING && m.bool(launched_leap) {
+                    distance -= dot(direction, unit_velocity) * ticks;
+                }
+                let danger_range = m.f32(at(a::STATE_CHARGE_MELEE_DANGER_RANGE));
+                m.set_f32(debug + dbg::FIELD_148 as u32, danger_range);
+                m.set_f32(debug + dbg::FIELD_14C as u32, danger_range + attack_range);
+                if distance < danger_range + attack_range {
+                    melee = true;
+                }
+            }
+        }
+
+        if m.bool(leap_pending) || (melee && !m.bool(at(a::STATE_CHARGE_MELEE_SUICIDE))) {
+            let mut alignment = [direction[0], direction[1]];
+            if normalize2(&mut alignment) > 0.0 {
+                let minimum_alignment = if m.bool(launched_leap) { 0.0 } else { 0.866_025_4 };
+                let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+                if alignment[0] * facing[0] + alignment[1] * facing[1] < minimum_alignment {
+                    melee = false;
+                    m.set_bool(leap_pending, false);
+                    m.set_bool(at(a::STATE_CHARGE_ALIGNMENT_INCORRECT), true);
+                }
+            }
+        }
+        set_vector(m, debug + dbg::FIELD_12C as u32, direction);
+        m.set_bool(debug + dbg::FIELD_138 as u32, melee);
+        if melee {
+            let mut alignment = [direction[0], direction[1]];
+            if normalize2(&mut alignment) == 0.0 {
+                let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+                alignment = [facing[0], facing[1]];
+            }
+            let began = call_full(context, host, charge_call::MELEE_ATTACK, m.i32(prop + p::UNIT_INDEX as u32), 0, &alignment);
+            if began.result != 0 {
+                m.set_bool(launched_melee, true);
+            }
+        }
+    }
+
+    let time = context.game_time;
+    let goal = m.i16(goal_address);
+    if melee_goal(goal) && !m.bool(launched_melee) && !m.bool(leap_pending) {
+        if m.bool(launched_leap) {
+            if m.i16(at(a::STATE_CHARGE_LEAP_FAILURE_TIMER)) > 15 {
+                m.set_bool(aborted, true);
+            }
+        } else {
+            let charge_timer = def(d::BERSERK_MELEE_ATTACK_CHARGE_TIMER);
+            if charge_timer > 0.0 && (time as f32) >= m.i32(at(a::STATE_CHARGE_CHARGE_START_TIME)) as f32 + charge_timer * 30.0 {
+                m.set_bool(aborted, true);
+            }
+        }
+    }
+    if goal == CHARGE_GOAL_VEHICLE_STRAFING || goal == CHARGE_GOAL_VEHICLE_RAMMING {
+        m.w32(at(a::EMOTIONS_LAST_VEHICLE_CHARGE_TIME), time as u32);
+    }
+    let target_range = charge_find_target_range(context, host, goal);
+    m.set_f32(at(a::STATE_CHARGE_ACCEPTABLE_TARGET_RANGE), target_range);
+
+    let unable = at(a::STATE_CHARGE_UNABLE_TO_ADVANCE);
+    if !m.bool(at(a::META_SWARM)) && m.bool(at(a::META_TIMESLICE)) {
+        let mut moving = false;
+        m.set_bool(unable, false);
+        if !m.bool(launched_melee) && !m.bool(launched_leap) && !m.bool(leap_pending) && m.bool(advancing) {
+            let minimum_move_range: f32 = if goal == CHARGE_GOAL_MELEE_LEAPING { 4.0 } else { 1.5 };
+            let move_range = if minimum_move_range > target_range { minimum_move_range } else { target_range };
+            let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+            if call_full(context, host, charge_call::MOVE_TO_PROP, target_prop_index, 0, &[move_range]).result != 0 {
+                call_simple(context, host, charge_call::KEEP_MOVING, 0);
+                moving = true;
+            } else {
+                m.set_bool(unable, true);
+                m.set_bool(advancing, false);
+            }
+        }
+        if !moving {
+            call_simple(context, host, charge_call::MOVE_HALT, 0);
+        }
+        if m.i16(at(a::TARGET_TARGET_TYPE)) >= v::_ACTOR_TARGET_ACKNOWLEDGED_ENEMY as i16 {
+            let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+            let target_prop = prop_get(m, context, target_prop_index);
+            let acceptable = m.f32(at(a::STATE_CHARGE_ACCEPTABLE_TARGET_RANGE));
+            let mut unreachable = false;
+            let mut out_of_range = m.f32(target_prop + p::DISTANCE as u32) > acceptable;
+            if melee_goal(goal) && (m.bool(launched_leap) || m.bool(leap_pending) || m.bool(launched_melee)) {
+                out_of_range = false;
+            }
+            if out_of_range {
+                if m.bool(unable) || call_simple(context, host, charge_call::HAS_PATH, 0) == 0 {
+                    unreachable = true;
+                } else if m.f32(at(a::CONTROL_PATH_PATH_ENDPOINT_TARGET_RADIUS)) > acceptable {
+                    unreachable = true;
+                }
+            }
+            call_full(context, host, charge_call::PERCEPTION_UNREACHABLE, target_prop_index, unreachable as i32, &[]);
+        }
+    }
+
+    if melee_goal(goal) {
+        m.bool(aborted) || m.bool(at(a::STATE_CHARGE_FINISHED_MELEE_ATTACK)) || m.bool(unable)
+    } else if goal == CHARGE_GOAL_VEHICLE_STRAFING || goal == CHARGE_GOAL_VEHICLE_RAMMING {
+        m.bool(unable)
+    } else {
+        false
+    }
 }

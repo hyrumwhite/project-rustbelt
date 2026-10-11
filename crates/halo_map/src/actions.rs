@@ -1461,7 +1461,7 @@ const PANIC_MELEE_ATTACHED_TO_US: i16 = 11;
 const PANIC_BURNING_TO_DEATH: i16 = 12;
 
 /// `action_flee_blind_panic`.
-fn flee_blind_panic(panic_type: i16) -> bool {
+pub(crate) fn flee_blind_panic(panic_type: i16) -> bool {
     (PANIC_GRENADE_ATTACHED_TO_US..=PANIC_BURNING_TO_DEATH).contains(&panic_type)
 }
 

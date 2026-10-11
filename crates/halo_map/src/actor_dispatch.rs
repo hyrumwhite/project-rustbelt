@@ -4,17 +4,19 @@
 //! and control (actions.c's `actor_action_update`, `actor_action_control`)
 //! and a swarm's control (actor_types.c's `actor_type_swarm_control`).
 //!
-//! The actions ported to Rust ([`crate::actions`]) run here; the rest, and
-//! the types, are still the game's: each goes through [`AiHost::call`]
-//! (actors.c's `actor_dispatch_call`, shared with the C).
+//! The actions ported to Rust ([`crate::actions`]) and the types' decisions
+//! ([`crate::actor_types`]) run here; the rest are still the game's: each
+//! goes through [`AiHost::call`] (actors.c's `actor_dispatch_call`, shared
+//! with the C).
 
 use crate::actions::{self, Function};
+use crate::actor_types;
 use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE};
 use crate::layout::actor_datum as a;
 
 /// The dispatch's calls (halo_sim.h's `_actor_dispatch_call_*`).
 pub mod call {
-    /// `actor_type_decide_action(actor)`.
+    /// `actor_type_decide_action(actor)` (now Rust's, [`crate::actor_types`]).
     pub const DECIDE_ACTION: i32 = 1;
     /// `actor_stimulus_clear(actor)`.
     pub const STIMULUS_CLEAR: i32 = 2;
@@ -57,7 +59,7 @@ pub fn actor_decision_loop(context: &AiStepContext, host: &impl AiHost) {
         iteration += 1;
         history_index = (history_index + 1) % NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES;
         m.set_bool(action_changed, false);
-        call_simple(context, host, call::DECIDE_ACTION);
+        actor_types::actor_type_decide_action(context, host);
         call_simple(context, host, call::STIMULUS_CLEAR);
         if (action_performed && !m.bool(action_changed)) || iteration >= MAXIMUM_DECISION_LOOP_ITERATIONS {
             break;

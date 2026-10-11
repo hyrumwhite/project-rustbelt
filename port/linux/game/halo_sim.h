@@ -58,6 +58,7 @@ enum
 	_halo_sim_actor_unit_control,
 	_halo_sim_actor_perception,
 	_halo_sim_actor_look,
+	_halo_sim_actor_move,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -865,6 +866,7 @@ enum
 	_halo_sim_ai_step_unit_control,
 	_halo_sim_ai_step_perception,
 	_halo_sim_ai_step_look,
+	_halo_sim_ai_step_move,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
@@ -880,7 +882,7 @@ struct halo_sim_ai_call
 	long a;
 	long b;
 	float input[9];
-	float output[3];
+	float output[6];
 	long result;
 };
 
@@ -1066,6 +1068,25 @@ enum
 	_actor_look_direction_secondary,
 	_actor_look_direction_idle_major,
 	_actor_look_direction_idle_minor,
+};
+
+/* the move update's calls (actor_moving.c's actor_move_call; crates/halo_map's
+actor_moving::call) */
+enum
+{
+	_actor_move_call_vector_avoidance = 1,
+	_actor_move_call_has_path,
+	_actor_move_call_vehicle_definition,
+	_actor_move_call_vehicle_stuck,
+	_actor_move_call_calculate_movement,
+	_actor_move_call_clear_discarded_firing_positions,
+	_actor_move_call_force_crouch,
+	_actor_move_call_unit_control_crouch,
+	_actor_move_call_animation_busy,
+	_actor_move_call_berserk,
+	_actor_move_call_unit_control_jump,
+	_actor_move_call_leap_begin,
+	_actor_move_call_leap_shout,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1620,6 +1641,7 @@ void actor_destination_call(struct halo_sim_ai_call *call);
 void actor_unit_control_call(struct halo_sim_ai_call *call);
 void actor_perception_call(struct halo_sim_ai_call *call);
 void actor_look_call(struct halo_sim_ai_call *call);
+void actor_move_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

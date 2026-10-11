@@ -3086,7 +3086,169 @@ static void actor_move_calculate_free(
 	return;
 }
 
+/* port: what an actor's move update asks of the rest of the game, shared by
+the game's update and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_move_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _actor_move_call_vector_avoidance:
+		{
+			real_vector3d fake_movement_vector;
+			real_vector3d const *movement_direction = &actor->control.moving_towards_vector;
+			real_vector3d instantaneous_rotation_vector;
+			real emergency_amount;
+
+			if (call->a)
+			{
+				scale_vector3d(&actor->input.facing_vector, 3.f, &fake_movement_vector);
+				movement_direction = &fake_movement_vector;
+			}
+			actor_move_vector_avoidance(actor_index, movement_direction, &instantaneous_rotation_vector, &emergency_amount);
+			memcpy(call->output, &instantaneous_rotation_vector, sizeof(instantaneous_rotation_vector));
+			call->output[3] = emergency_amount;
+			break;
+		}
+
+		case _actor_move_call_has_path:
+			call->result = actor_path_has_path(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_move_call_vehicle_definition:
+		{
+			struct vehicle_datum *vehicle = vehicle_datum_get(call->a);
+			struct vehicle_definition *vehicle_definition =
+				vehicle_specific_definition_get(vehicle->definition_index);
+
+			call->output[0] = vehicle_definition->ai_steering_max_angle;
+			call->output[1] = vehicle_definition->ai_steering_max_throttle;
+			call->output[2] = vehicle_definition->ai_oversteer_angle_lower_bound;
+			call->output[3] = vehicle_definition->ai_oversteer_angle_upper_bound;
+			call->output[4] = vehicle_definition->ai_sideslip_distance;
+			break;
+		}
+
+		case _actor_move_call_vehicle_stuck:
+			call->result = vehicle_stuck(call->a, (real_vector3d *)call->output) ? 1 : 0;
+			break;
+
+		case _actor_move_call_calculate_movement:
+			actor_move_calculate_movement(
+				actor_index,
+				(call->a & 1) != 0,
+				(short)call->b,
+				(call->a & 2) != 0,
+				call->input[0],
+				(call->a & 4) != 0,
+				call->input[1],
+				call->input[2],
+				call->input[3],
+				call->input[4],
+				call->input[5],
+				&actor->control.moving_towards_vector,
+				&actor->control.desired_facing_vector,
+				&actor->control.moving_facing_direction,
+				&actor->output.throttle,
+				&actor->control.movement_thwarted,
+				&actor->control.movement_complete);
+			break;
+
+		case _actor_move_call_clear_discarded_firing_positions:
+			actor_clear_discarded_firing_positions(actor_index, TRUE);
+			break;
+
+		case _actor_move_call_force_crouch:
+			call->result = game_connection() == _game_connection_local && ai_debug.force_crouch;
+			break;
+
+		case _actor_move_call_unit_control_crouch:
+			actor_unit_control_crouch(actor_index, (boolean)call->a);
+			break;
+
+		case _actor_move_call_animation_busy:
+			call->result = actor_move_animation_busy(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_move_call_berserk:
+			actor_move_animation_impulse(actor_index, 0, (real_vector2d *)call->input);
+			ai_communication_event(
+				_ai_communication_berserk,
+				actor->meta.unit_index,
+				call->a,
+				_comm_hostility_enemy,
+				NONE,
+				NONE,
+				NULL);
+			break;
+
+		case _actor_move_call_unit_control_jump:
+			actor_unit_control_jump(actor_index);
+			break;
+
+		case _actor_move_call_leap_begin:
+			call->result = unit_leap_begin(actor->meta.unit_index, (real_vector2d *)call->input) ? 1 : 0;
+			break;
+
+		case _actor_move_call_leap_shout:
+			ai_communication_event(
+				_ai_communication_leap,
+				actor->meta.unit_index,
+				NONE,
+				NONE,
+				NONE,
+				NONE,
+				NULL);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_move_call_simple(
+	long actor_index,
+	long kind,
+	long a)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	actor_move_call(&call);
+
+	return call.result;
+}
+
+static void actor_move_update_game(
+	long actor_index);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 void actor_move_update(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_move, actor_index, &checking))
+		return;
+	actor_move_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_move, 0);
+
+	return;
+}
+
+/* the game's move update, what it asks of the rest of the game through
+actor_move_call */
+static void actor_move_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -3131,32 +3293,20 @@ void actor_move_update(
 	else if (actor->input.vehicle_driver_type ==
 		_actor_vehicle_driver_directional_flying)
 	{
-		real_vector3d fake_movement_vector;
 		real_vector3d instantaneous_rotation_vector;
-		real_vector3d const *movement_direction;
 		real emergency_amount;
 		real rotation_magnitude_squared;
 		real previous_magnitude_squared;
 		real blend;
+		struct halo_sim_ai_call avoidance;
 
-		if (actor->control.moving)
-		{
-			movement_direction = &actor->control.moving_towards_vector;
-		}
-		else
-		{
-			scale_vector3d(
-				&actor->input.facing_vector,
-				3.f,
-				&fake_movement_vector);
-			movement_direction = &fake_movement_vector;
-		}
-
-		actor_move_vector_avoidance(
-			actor_index,
-			movement_direction,
-			&instantaneous_rotation_vector,
-			&emergency_amount);
+		memset(&avoidance, 0, sizeof(avoidance));
+		avoidance.kind = _actor_move_call_vector_avoidance;
+		avoidance.actor = actor_index;
+		avoidance.a = !actor->control.moving;
+		actor_move_call(&avoidance);
+		memcpy(&instantaneous_rotation_vector, avoidance.output, sizeof(instantaneous_rotation_vector));
+		emergency_amount = avoidance.output[3];
 
 		rotation_magnitude_squared = magnitude_squared3d(&instantaneous_rotation_vector);
 		previous_magnitude_squared =
@@ -3244,7 +3394,7 @@ void actor_move_update(
 	actor->output.movement_type = movement_type;
 
 	override_facing = actor->orders.move.override_movement_facing;
-	if (actor_path_has_path(actor_index) &&
+	if (actor_move_call_simple(actor_index, _actor_move_call_has_path, 0) &&
 		actor->control.path.destination_original_distance >=
 			definition->moving.stationary_moving_distance)
 	{
@@ -3259,20 +3409,20 @@ void actor_move_update(
 	{
 		struct vehicle_datum *vehicle =
 			vehicle_datum_get(actor->input.vehicle_index);
-		struct vehicle_definition *vehicle_definition =
-			vehicle_specific_definition_get(vehicle->definition_index);
+		struct halo_sim_ai_call steering;
 
-		steering_maximum_angle =
-			vehicle_definition->ai_steering_max_angle;
-		if (vehicle_definition->ai_steering_max_throttle > 0.f)
+		memset(&steering, 0, sizeof(steering));
+		steering.kind = _actor_move_call_vehicle_definition;
+		steering.actor = actor_index;
+		steering.a = actor->input.vehicle_index;
+		actor_move_call(&steering);
+		steering_maximum_angle = steering.output[0];
+		if (steering.output[1] > 0.f)
 		{
-			maximum_throttle =
-				vehicle_definition->ai_steering_max_throttle;
+			maximum_throttle = steering.output[1];
 		}
-		oversteer_minimum_angle =
-			vehicle_definition->ai_oversteer_angle_lower_bound;
-		oversteer_maximum_angle =
-			vehicle_definition->ai_oversteer_angle_upper_bound;
+		oversteer_minimum_angle = steering.output[2];
+		oversteer_maximum_angle = steering.output[3];
 
 		switch (actor->input.vehicle_driver_type)
 		{
@@ -3317,18 +3467,23 @@ void actor_move_update(
 		case _actor_vehicle_driver_nondirectional_ground:
 			free_movement = TRUE;
 			free_movement_distance_squared =
-				vehicle_definition->ai_sideslip_distance *
-				vehicle_definition->ai_sideslip_distance;
+				steering.output[4] *
+				steering.output[4];
 			crouch = FALSE;
 			break;
 
 		case _actor_vehicle_driver_directional_flying:
 			{
 				real_vector3d stuck_direction;
+				struct halo_sim_ai_call stuck;
 
-				if (vehicle_stuck(
-					actor->input.vehicle_index,
-					&stuck_direction))
+				memset(&stuck, 0, sizeof(stuck));
+				stuck.kind = _actor_move_call_vehicle_stuck;
+				stuck.actor = actor_index;
+				stuck.a = actor->input.vehicle_index;
+				actor_move_call(&stuck);
+				memcpy(&stuck_direction, stuck.output, sizeof(stuck_direction));
+				if (stuck.result)
 				{
 					actor->control.moving = FALSE;
 					actor->control.free_facing_vector = FALSE;
@@ -3451,24 +3606,20 @@ void actor_move_update(
 
 	if (actor->control.moving && !actor->control.movement_complete)
 	{
-		actor_move_calculate_movement(
-			actor_index,
-			move_in_3d,
-			override_facing,
-			free_movement,
-			free_movement_distance_squared,
-			allow_all_moving_turns,
-			steering_maximum_angle,
-			oversteer_minimum_angle,
-			oversteer_maximum_angle,
-			rotation_emergency_amount,
-			maximum_throttle,
-			&actor->control.moving_towards_vector,
-			&actor->control.desired_facing_vector,
-			&actor->control.moving_facing_direction,
-			&actor->output.throttle,
-			&actor->control.movement_thwarted,
-			&actor->control.movement_complete);
+		struct halo_sim_ai_call movement;
+
+		memset(&movement, 0, sizeof(movement));
+		movement.kind = _actor_move_call_calculate_movement;
+		movement.actor = actor_index;
+		movement.a = (move_in_3d ? 1 : 0) | (free_movement ? 2 : 0) | (allow_all_moving_turns ? 4 : 0);
+		movement.b = override_facing;
+		movement.input[0] = free_movement_distance_squared;
+		movement.input[1] = steering_maximum_angle;
+		movement.input[2] = oversteer_minimum_angle;
+		movement.input[3] = oversteer_maximum_angle;
+		movement.input[4] = rotation_emergency_amount;
+		movement.input[5] = maximum_throttle;
+		actor_move_call(&movement);
 		if (actor->control.movement_complete)
 			actor->control.moving = FALSE;
 	}
@@ -3500,7 +3651,7 @@ void actor_move_update(
 		&actor->control.desired_facing_vector);
 
 	if (clear_firing_positions && !actor->control.moving)
-		actor_clear_discarded_firing_positions(actor_index, TRUE);
+		actor_move_call_simple(actor_index, _actor_move_call_clear_discarded_firing_positions, 0);
 
 	if (actor->control.moving &&
 		TEST_FLAG(
@@ -3510,7 +3661,7 @@ void actor_move_update(
 		crouch = FALSE;
 	}
 
-	if (game_connection() == _game_connection_local && ai_debug.force_crouch)
+	if (actor_move_call_simple(actor_index, _actor_move_call_force_crouch, 0))
 		crouch = TRUE;
 
 	actor->control.desire_stationary_facing = FALSE;
@@ -3522,9 +3673,9 @@ void actor_move_update(
 		actor->control.desire_stationary_facing = TRUE;
 	}
 	actor->control.crouching = crouch;
-	actor_unit_control_crouch(actor_index, crouch);
+	actor_move_call_simple(actor_index, _actor_move_call_unit_control_crouch, crouch);
 
-	if (!actor_move_animation_busy(actor_index) &&
+	if (!actor_move_call_simple(actor_index, _actor_move_call_animation_busy, 0) &&
 		actor->input.vehicle_index == NONE &&
 		!actor->input.in_midair &&
 		actor->emotions.berserk &&
@@ -3550,27 +3701,28 @@ void actor_move_update(
 			}
 		}
 
-		actor_move_animation_impulse(actor_index, 0, &alignment_vector);
-		ai_communication_event(
-			_ai_communication_berserk,
-			actor->meta.unit_index,
-			cause_unit_index,
-			_comm_hostility_enemy,
-			NONE,
-			NONE,
-			NULL);
+		{
+			struct halo_sim_ai_call berserk;
+
+			memset(&berserk, 0, sizeof(berserk));
+			berserk.kind = _actor_move_call_berserk;
+			berserk.actor = actor_index;
+			berserk.a = cause_unit_index;
+			memcpy(berserk.input, &alignment_vector, sizeof(alignment_vector));
+			actor_move_call(&berserk);
+		}
 		actor->emotions.played_berserk_sound = TRUE;
 	}
 
 	if (allow_jump)
 	{
-		actor_unit_control_jump(actor_index);
+		actor_move_call_simple(actor_index, _actor_move_call_unit_control_jump, 0);
 	}
 	else if (actor->input.in_midair || actor->input.vehicle_index != NONE)
 	{
 		actor->control.jumping_targeted = FALSE;
 	}
-	else if (!actor_move_animation_busy(actor_index) &&
+	else if (!actor_move_call_simple(actor_index, _actor_move_call_animation_busy, 0) &&
 		actor->orders.move.jump)
 	{
 		boolean leaped = FALSE;
@@ -3591,25 +3743,25 @@ void actor_move_update(
 					alignment_vector = *global_forward2d;
 			}
 
-			leaped = unit_leap_begin(
-				actor->meta.unit_index,
-				&alignment_vector);
+			{
+				struct halo_sim_ai_call leap;
+
+				memset(&leap, 0, sizeof(leap));
+				leap.kind = _actor_move_call_leap_begin;
+				leap.actor = actor_index;
+				memcpy(leap.input, &alignment_vector, sizeof(alignment_vector));
+				actor_move_call(&leap);
+				leaped = (boolean)leap.result;
+			}
 		}
 
 		if (leaped)
 		{
-			ai_communication_event(
-				_ai_communication_leap,
-				actor->meta.unit_index,
-				NONE,
-				NONE,
-				NONE,
-				NONE,
-				NULL);
+			actor_move_call_simple(actor_index, _actor_move_call_leap_shout, 0);
 		}
 		else
 		{
-			actor_unit_control_jump(actor_index);
+			actor_move_call_simple(actor_index, _actor_move_call_unit_control_jump, 0);
 		}
 
 		if (actor->orders.move.jump_targeted)

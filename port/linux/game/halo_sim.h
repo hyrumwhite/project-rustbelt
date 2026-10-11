@@ -1268,6 +1268,10 @@ enum
 	_actions_port_handler_call_try_to_dive,
 	_actions_port_handler_call_at_destination,
 	_actions_port_handler_call_avoid,
+	_actions_port_handler_call_grenades_enabled,
+	_actions_port_handler_call_grenade_chance_scale,
+	_actions_port_handler_call_test_grenade,
+	_actions_port_handler_call_try_to_throw_grenade,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

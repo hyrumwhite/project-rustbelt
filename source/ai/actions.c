@@ -1637,6 +1637,24 @@ void actions_port_handler_call(
 			call->result = actor_path_at_destination(actor_index) ? 1 : 0;
 			break;
 
+		case _actions_port_handler_call_grenades_enabled:
+			call->result = ai_globals->grenades_enabled ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_grenade_chance_scale:
+			call->output[0] = game_difficulty_get_team_value(
+				_game_difficulty_value_grenade_chance_scale,
+				(word)actor->meta.team_index);
+			break;
+
+		case _actions_port_handler_call_test_grenade:
+			call->result = actor_action_test_grenade(actor_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_try_to_throw_grenade:
+			actor_action_try_to_throw_grenade(actor_index, (boolean)call->a);
+			break;
+
 		case _actions_port_handler_call_avoid:
 		{
 			struct action_state_data state;
@@ -3763,7 +3781,7 @@ boolean actor_action_handle_grenade_throwing(
 		}
 
 		if (actor->control.grenade_trying_to_throw)
-			actor_action_try_to_throw_grenade(actor_index, FALSE);
+			actions_port_handler_simple(actor_index, _actions_port_handler_call_try_to_throw_grenade, FALSE);
 	}
 	else
 	{
@@ -3835,7 +3853,7 @@ boolean actor_action_consider_grenade(
 	{
 		result = TRUE;
 	}
-	else if (ai_globals->grenades_enabled &&
+	else if (actions_port_handler_simple(actor_index, _actions_port_handler_call_grenades_enabled, 0) &&
 		variant_definition->grenade_combat.grenade_type != NONE &&
 		variant_definition->grenade_combat.trajectory_type != NONE)
 	{
@@ -3850,17 +3868,21 @@ boolean actor_action_consider_grenade(
 			{
 				chance =
 					variant_definition->grenade_combat.throw_grenade_chance;
-				chance *= game_difficulty_get_team_value(
-					_game_difficulty_value_grenade_chance_scale,
-					(word)actor->meta.team_index);
+				{
+					real scale[6];
+
+					actions_port_handler(actor_index, _actions_port_handler_call_grenade_chance_scale,
+						0, 0, NULL, 0, scale);
+					chance *= scale[0];
+				}
 
 				actor->control.grenade_last_check_time = current_time;
 
-				if (real_seed_random(get_global_random_seed_address()) < chance &&
-					actor_action_test_grenade(actor_index))
+				if (actions_port_handler_random(actor_index) < chance &&
+					actions_port_handler_simple(actor_index, _actions_port_handler_call_test_grenade, 0))
 				{
 					actor->control.grenade_trying_to_throw = TRUE;
-					actor_action_try_to_throw_grenade(actor_index, TRUE);
+					actions_port_handler_simple(actor_index, _actions_port_handler_call_try_to_throw_grenade, TRUE);
 					result = TRUE;
 				}
 			}
@@ -4804,7 +4826,7 @@ boolean actor_action_handle_evasion(
 
 			if (variant_definition->grenade_combat.stimulus_type ==
 					_actor_grenade_stimulus_seek_cover &&
-				actions_port_handler_simple(actor_index, _actions_port_handler_call_consider_grenade, 0))
+				actor_action_consider_grenade(actor_index))
 			{
 				actor->emotions.perceived_danger = 0.0f;
 				result = TRUE;

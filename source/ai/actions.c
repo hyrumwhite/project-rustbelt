@@ -1224,6 +1224,60 @@ void actions_port_handler_call(
 				call->b,
 				(boolean)call->input[0]) ? 1 : 0;
 			break;
+
+		case _actions_port_handler_call_combat_selection:
+			call->result = actor_action_handle_combat_selection(actor_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_lost_contact:
+			call->result = actor_action_handle_lost_contact(actor_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_guard_from_fleeing:
+		{
+			struct action_state_data state;
+			boolean success = action_guard_setup_from_fleeing(
+				actor_index,
+				&actor->state.action_data.flee,
+				&state.guard);
+
+			match_assert(
+				"c:\\halo\\SOURCE\\ai\\actions.c",
+				2681,
+				success);
+
+			actor_action_change(actor_index, _actor_action_guard, &state);
+			break;
+		}
+
+		case _actions_port_handler_call_berserk:
+			actor_berserk(actor_index, TRUE);
+			break;
+
+		case _actions_port_handler_call_guard_from_combat_transition:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_guard_setup_from_combat_transition(actor_index, &state.guard))
+			{
+				actor_action_change(actor_index, _actor_action_guard, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_tried_to_uncover:
+			actor_perception_tried_to_uncover(actor_index, call->a);
+			break;
+
+		case _actions_port_handler_call_tried_to_search:
+			actor_perception_tried_to_search(actor_index, call->a);
+			break;
+
+		case _actions_port_handler_call_abandoned_search:
+			actor_perception_abandoned_search(actor_index, call->a);
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -3202,24 +3256,13 @@ boolean actor_action_handle_lost_contact(
 boolean actor_action_handle_done_fleeing(
 	long actor_index)
 {
-	struct action_state_data state;
 	struct actor_datum *actor = actor_get(actor_index);
 	boolean result = FALSE;
 
 	if (actor->state.action == _actor_action_flee &&
 		actor->state.action_data.flee.done_fleeing)
 	{
-		boolean success = action_guard_setup_from_fleeing(
-			actor_index,
-			&actor->state.action_data.flee,
-			&state.guard);
-
-		match_assert(
-			"c:\\halo\\SOURCE\\ai\\actions.c",
-			2681,
-			success);
-
-		actor_action_change(actor_index, _actor_action_guard, &state);
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_from_fleeing, 0);
 		result = TRUE;
 	}
 
@@ -3249,7 +3292,7 @@ boolean actor_action_handle_combat_status(
 		{
 			if (actor->state.combat_status >= 5)
 			{
-				result = actor_action_handle_combat_selection(actor_index);
+				result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
 			}
 			else if (actor->state.combat_status >= 2 ||
 				actor->state.action == _actor_action_alert ||
@@ -3257,25 +3300,25 @@ boolean actor_action_handle_combat_status(
 					(actor->external_orders.stand_down ||
 						actor->external_orders.postcombat_type > 0)))
 			{
-				result = actor_action_handle_lost_contact(actor_index);
+				result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
 			}
 		}
 		break;
 
 	case 4:
 		result = actor->state.combat_status >= 4 ?
-			actor_action_handle_combat_selection(actor_index) :
-			actor_action_handle_lost_contact(actor_index);
+			(boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0) :
+			(boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
 		break;
 
 	case 3:
 		if (allow_initiative && actor->state.combat_status >= 4)
 		{
-			result = actor_action_handle_combat_selection(actor_index);
+			result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
 		}
 		else if (actor->state.combat_status < 2)
 		{
-			result = actor_action_handle_lost_contact(actor_index);
+			result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
 		}
 		else if (actor->target.target_prop_index != NONE)
 		{
@@ -3292,7 +3335,7 @@ boolean actor_action_handle_combat_status(
 					(actor->state.action != _actor_action_search ||
 						actor->state.action_data.search.pursuit_location.type)))
 			{
-				result = actor_action_handle_lost_contact(actor_index);
+				result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
 			}
 		}
 		break;
@@ -3308,7 +3351,7 @@ boolean actor_action_handle_combat_status(
 	}
 
 	if (!result && force_decision)
-		result = actor_action_handle_lost_contact(actor_index);
+		result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
 
 	return result;
 }
@@ -3338,7 +3381,7 @@ boolean actor_action_handle_combat_failure(
 		}
 
 		if (failed)
-			result = actor_action_handle_combat_selection(actor_index);
+			result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
 	}
 
 	return result;
@@ -3354,10 +3397,10 @@ boolean actor_action_handle_berserk_transition(
 	if (actor->stimuli.berserk_type >= berserk_level &&
 		!actor->emotions.berserk)
 	{
-		actor_berserk(actor_index, TRUE);
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_berserk, 0);
 
 		if (actor->state.combat_status >= 4)
-			result = actor_action_handle_combat_selection(actor_index);
+			result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
 	}
 
 	actor->stimuli.berserk_type = 0;
@@ -3367,7 +3410,6 @@ boolean actor_action_handle_berserk_transition(
 boolean actor_action_handle_combat_transition(
 	long actor_index)
 {
-	struct action_state_data state;
 	struct actor_datum *actor = actor_get(actor_index);
 	boolean result = FALSE;
 
@@ -3375,10 +3417,8 @@ boolean actor_action_handle_combat_transition(
 	{
 		actor->state.mode = 3;
 
-		if (action_guard_setup_from_combat_transition(actor_index, &state.guard))
-			actor_action_change(actor_index, _actor_action_guard, &state);
-		else
-			actor_action_handle_combat_selection(actor_index);
+		if (!actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_from_combat_transition, 0))
+			actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
 
 		actor->stimuli.combat_transition = 0;
 		result = TRUE;
@@ -3406,8 +3446,9 @@ boolean actor_action_handle_exit_pursuit(
 		{
 			if (!actor->state.action_data.uncover.pursuit_location.type)
 			{
-				actor_perception_tried_to_uncover(
+				actions_port_handler_simple(
 					actor_index,
+					_actions_port_handler_call_tried_to_uncover,
 					actor->target.target_prop_index);
 			}
 			reported = TRUE;
@@ -3419,8 +3460,9 @@ boolean actor_action_handle_exit_pursuit(
 		{
 			if (!actor->state.action_data.search.pursuit_location.type)
 			{
-				actor_perception_tried_to_search(
+				actions_port_handler_simple(
 					actor_index,
+					_actions_port_handler_call_tried_to_search,
 					actor->target.target_prop_index);
 			}
 			reported = TRUE;
@@ -3430,8 +3472,9 @@ boolean actor_action_handle_exit_pursuit(
 	case _actor_action_wait:
 		if (actor->state.action_data.wait.wait_done)
 		{
-			actor_perception_abandoned_search(
+			actions_port_handler_simple(
 				actor_index,
+				_actions_port_handler_call_abandoned_search,
 				actor->target.target_prop_index);
 			reported = TRUE;
 		}
@@ -3439,7 +3482,7 @@ boolean actor_action_handle_exit_pursuit(
 	}
 
 	if (reported)
-		reported = actor_action_handle_lost_contact(actor_index);
+		reported = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
 
 	return reported;
 }

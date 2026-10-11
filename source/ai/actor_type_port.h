@@ -12,8 +12,6 @@ actor_type_*.c after its headers
 
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
-#define actor_action_handle_combat_transition(actor_index) \
-	((boolean)actor_type_port_handle(_actor_type_call_combat_transition, (actor_index), 0, 0, 0))
 #define actor_action_handle_vehicle_entry(actor_index) \
 	((boolean)actor_type_port_handle(_actor_type_call_vehicle_entry, (actor_index), 0, 0, 0))
 #define actor_action_handle_vehicle_exit(actor_index) \
@@ -22,20 +20,10 @@ actor_type_*.c after its headers
 	((boolean)actor_type_port_handle(_actor_type_call_grenade_throwing, (actor_index), 0, 0, 0))
 #define actor_action_handle_danger_avoidance(actor_index) \
 	((boolean)actor_type_port_handle(_actor_type_call_danger_avoidance, (actor_index), 0, 0, 0))
-#define actor_action_handle_combat_status(actor_index, a, b) \
-	((boolean)actor_type_port_handle(_actor_type_call_combat_status, (actor_index), (long)(a), (long)(b), 0))
-#define actor_action_handle_combat_failure(actor_index) \
-	((boolean)actor_type_port_handle(_actor_type_call_combat_failure, (actor_index), 0, 0, 0))
 #define actor_action_handle_evasion(actor_index) \
 	((boolean)actor_type_port_handle(_actor_type_call_evasion, (actor_index), 0, 0, 0))
-#define actor_action_handle_done_fleeing(actor_index) \
-	((boolean)actor_type_port_handle(_actor_type_call_done_fleeing, (actor_index), 0, 0, 0))
 #define actor_action_consider_grenade(actor_index) \
 	((boolean)actor_type_port_handle(_actor_type_call_consider_grenade, (actor_index), 0, 0, 0))
-#define actor_action_handle_exit_pursuit(actor_index) \
-	((boolean)actor_type_port_handle(_actor_type_call_exit_pursuit, (actor_index), 0, 0, 0))
-#define actor_action_handle_berserk_transition(actor_index, a) \
-	((boolean)actor_type_port_handle(_actor_type_call_berserk_transition, (actor_index), (long)(a), 0, 0))
 #define actor_action_handle_active_cover_seeking(actor_index, a, b) \
 	((boolean)actor_type_port_handle(_actor_type_call_active_cover_seeking, (actor_index), (long)(a), (long)(b), 0))
 

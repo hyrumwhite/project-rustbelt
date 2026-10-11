@@ -1227,6 +1227,14 @@ enum
 	_actions_port_handler_call_firing_variant,
 	_actions_port_handler_call_random,
 	_actions_port_handler_call_try_to_panic,
+	_actions_port_handler_call_combat_selection,
+	_actions_port_handler_call_lost_contact,
+	_actions_port_handler_call_guard_from_fleeing,
+	_actions_port_handler_call_berserk,
+	_actions_port_handler_call_guard_from_combat_transition,
+	_actions_port_handler_call_tried_to_uncover,
+	_actions_port_handler_call_tried_to_search,
+	_actions_port_handler_call_abandoned_search,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

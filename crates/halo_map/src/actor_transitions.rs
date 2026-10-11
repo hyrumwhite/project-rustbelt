@@ -56,12 +56,37 @@ pub mod call {
     pub const RANDOM: i32 = BASE | 17;
     /// `actor_action_try_to_panic(actor, a, b, input[0])`, the result.
     pub const TRY_TO_PANIC: i32 = BASE | 18;
+    /// `actor_action_handle_combat_selection(actor)`, the result.
+    pub const COMBAT_SELECTION: i32 = BASE | 19;
+    /// `actor_action_handle_lost_contact(actor)`, the result.
+    pub const LOST_CONTACT: i32 = BASE | 20;
+    /// `action_guard_setup_from_fleeing` and `actor_action_change` to guard.
+    pub const GUARD_FROM_FLEEING: i32 = BASE | 21;
+    /// `actor_berserk(actor, TRUE)`.
+    pub const BERSERK: i32 = BASE | 22;
+    /// `action_guard_setup_from_combat_transition` and, if it sets up,
+    /// `actor_action_change` to guard: whether it did, the result.
+    pub const GUARD_FROM_COMBAT_TRANSITION: i32 = BASE | 23;
+    /// `actor_perception_tried_to_uncover(actor, a)`.
+    pub const TRIED_TO_UNCOVER: i32 = BASE | 24;
+    /// `actor_perception_tried_to_search(actor, a)`.
+    pub const TRIED_TO_SEARCH: i32 = BASE | 25;
+    /// `actor_perception_abandoned_search(actor, a)`.
+    pub const ABANDONED_SEARCH: i32 = BASE | 26;
 }
 
 /// The actions (actions.h's `_actor_action_*`).
 const ACTION_NONE: i16 = 0;
+const ACTION_ALERT: i16 = 2;
 const ACTION_FLEE: i16 = 4;
+const ACTION_UNCOVER: i16 = 5;
+const ACTION_SEARCH: i16 = 7;
+const ACTION_WAIT: i16 = 8;
+const ACTION_CHARGE: i16 = 10;
 const ACTION_OBEY: i16 = 11;
+
+/// Each action's class (actions.c's `global_action_functions`).
+const ACTION_CLASSES: [i16; 14] = [0, 0, 0, 4, 2, 3, 1, 3, 3, 2, 4, 2, 2, 2];
 
 /// actions.c's panics (`_actor_panic_*`).
 const PANIC_NONE: i16 = 0;
@@ -128,6 +153,12 @@ pub fn run(kind: i32, a: i32, b: i32, c: i32, context: &AiStepContext, host: &im
         handler::BERSERKING_FROM_DAMAGE => handle_berserking_from_damage(context, host),
         handler::BERSERKING_FROM_PROXIMITY => handle_berserking_from_proximity(context, host),
         handler::BERSERKING_FROM_ATTACHED_PROJECTILES => handle_berserking_from_attached_projectiles(context, host),
+        handler::DONE_FLEEING => handle_done_fleeing(context, host),
+        handler::COMBAT_STATUS => handle_combat_status(context, host, a != 0, b != 0),
+        handler::COMBAT_FAILURE => handle_combat_failure(context, host),
+        handler::BERSERK_TRANSITION => handle_berserk_transition(context, host, a as i16),
+        handler::COMBAT_TRANSITION => handle_combat_transition(context, host),
+        handler::EXIT_PURSUIT => handle_exit_pursuit(context, host),
         _ => return None,
     })
 }
@@ -504,4 +535,183 @@ pub fn handle_panic_transition(
     }
     m.set_i16(at(a::STIMULI_PANIC_TYPE), PANIC_NONE);
     result
+}
+
+fn combat_selection(context: &AiStepContext, host: &impl AiHost) -> bool {
+    call_simple(context, host, call::COMBAT_SELECTION, 0) != 0
+}
+
+fn lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool {
+    call_simple(context, host, call::LOST_CONTACT, 0) != 0
+}
+
+/// `actor_action_handle_done_fleeing`: a fled actor guards.
+pub fn handle_done_fleeing(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.i16(at(a::STATE_ACTION)) == ACTION_FLEE && m.bool(at(a::STATE_FLEE_DONE_FLEEING)) {
+        call_simple(context, host, call::GUARD_FROM_FLEEING, 0);
+        true
+    } else {
+        false
+    }
+}
+
+/// `actor_action_handle_combat_status`: by the action's class, a new
+/// combat action when the actor can take the initiative (or must decide) and
+/// is in combat, or the lost-contact decision when it isn't (or a pursuit's
+/// target changed or is yet to be uncovered or searched).
+pub fn handle_combat_status(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    allow_initiative: bool,
+    force_decision: bool,
+) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let action_class = ACTION_CLASSES[m.i16(at(a::STATE_ACTION)) as usize];
+    let allow_initiative = allow_initiative || force_decision;
+    let combat_status = || m.i16(at(a::STATE_COMBAT_STATUS));
+    let mut result = false;
+
+    match action_class {
+        1 | 2 => {
+            if allow_initiative {
+                if combat_status() >= 5 {
+                    result = combat_selection(context, host);
+                } else if combat_status() >= 2
+                    || m.i16(at(a::STATE_ACTION)) == ACTION_ALERT
+                    || (combat_status() == 0
+                        && (m.bool(at(a::EXTERNAL_ORDERS_STAND_DOWN))
+                            || m.i16(at(a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE)) > 0))
+                {
+                    result = lost_contact(context, host);
+                }
+            }
+        }
+        4 => {
+            result = if combat_status() >= 4 { combat_selection(context, host) } else { lost_contact(context, host) };
+        }
+        3 => {
+            if allow_initiative && combat_status() >= 4 {
+                result = combat_selection(context, host);
+            } else if combat_status() < 2 {
+                result = lost_contact(context, host);
+            } else {
+                let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+                if target_prop_index != NONE {
+                    let prop = prop_get(m, context, target_prop_index);
+                    let action = m.i16(at(a::STATE_ACTION));
+                    // the game's reads the search's pursuit location for an
+                    // uncover too (the two share it)
+                    let pursuit_location_type = m.i16(at(a::STATE_SEARCH_PURSUIT_LOCATION_TYPE));
+                    if target_prop_index != m.i32(at(a::FIRING_POSITIONS_PURSUIT_PROP_INDEX))
+                        || (!m.bool(prop + p::TRIED_TO_UNCOVER as u32)
+                            && (action != ACTION_UNCOVER || pursuit_location_type != 0))
+                        || (!m.bool(prop + p::TRIED_TO_SEARCH as u32)
+                            && (action != ACTION_UNCOVER || pursuit_location_type != 0)
+                            && (action != ACTION_SEARCH || pursuit_location_type != 0))
+                    {
+                        result = lost_contact(context, host);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if !result && force_decision {
+        result = lost_contact(context, host);
+    }
+    result
+}
+
+/// `actor_action_handle_combat_failure`: a charge's melee attack that ended
+/// or couldn't advance, or a vehicle's charge that couldn't, chooses again.
+pub fn handle_combat_failure(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.i16(at(a::STATE_ACTION)) != ACTION_CHARGE {
+        return false;
+    }
+    let goal = m.i16(at(a::STATE_CHARGE_GOAL));
+    let failed = if goal == v::_CHARGE_GOAL_MELEE as i16 || goal == v::_CHARGE_GOAL_MELEE_LEAPING as i16 {
+        m.bool(at(a::STATE_CHARGE_FINISHED_MELEE_ATTACK))
+            || m.bool(at(a::STATE_CHARGE_ABORTED_MELEE_ATTACK))
+            || m.bool(at(a::STATE_CHARGE_UNABLE_TO_ADVANCE))
+    } else if goal == v::_CHARGE_GOAL_VEHICLE_STRAFING as i16 || goal == v::_CHARGE_GOAL_VEHICLE_RAMMING as i16 {
+        m.bool(at(a::STATE_CHARGE_UNABLE_TO_ADVANCE))
+    } else {
+        false
+    };
+    failed && combat_selection(context, host)
+}
+
+/// `actor_action_handle_berserk_transition`: berserking of at least
+/// `berserk_level` sends the actor berserk (choosing a combat action if it's
+/// in combat); its berserking then clears.
+pub fn handle_berserk_transition(context: &AiStepContext, host: &impl AiHost, berserk_level: i16) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut result = false;
+    if m.i16(at(a::STIMULI_BERSERK_TYPE)) >= berserk_level && !m.bool(at(a::EMOTIONS_BERSERK)) {
+        call_simple(context, host, call::BERSERK, 0);
+        if m.i16(at(a::STATE_COMBAT_STATUS)) >= 4 {
+            result = combat_selection(context, host);
+        }
+    }
+    m.set_i16(at(a::STIMULI_BERSERK_TYPE), 0);
+    result
+}
+
+/// `actor_action_handle_combat_transition`: an actor going into combat
+/// guards (or chooses a combat action).
+pub fn handle_combat_transition(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.i16(at(a::STATE_MODE)) < 3 && m.i16(at(a::STIMULI_COMBAT_TRANSITION)) != 0 {
+        m.set_i16(at(a::STATE_MODE), 3);
+        if call_simple(context, host, call::GUARD_FROM_COMBAT_TRANSITION, 0) == 0 {
+            combat_selection(context, host);
+        }
+        m.set_i16(at(a::STIMULI_COMBAT_TRANSITION), 0);
+        true
+    } else {
+        false
+    }
+}
+
+/// `actor_action_handle_exit_pursuit`: a finished uncover, search or wait
+/// reports it to the target's prop and takes the lost-contact decision.
+pub fn handle_exit_pursuit(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let target_prop_index = || m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    let mut reported = false;
+    match m.i16(at(a::STATE_ACTION)) {
+        ACTION_UNCOVER => {
+            if m.bool(at(a::STATE_UNCOVER_UNCOVER_DONE)) {
+                if m.i16(at(a::STATE_UNCOVER_PURSUIT_LOCATION_TYPE)) == 0 {
+                    call_simple(context, host, call::TRIED_TO_UNCOVER, target_prop_index());
+                }
+                reported = true;
+            }
+        }
+        ACTION_SEARCH => {
+            if m.bool(at(a::STATE_SEARCH_SEARCH_DONE)) {
+                if m.i16(at(a::STATE_SEARCH_PURSUIT_LOCATION_TYPE)) == 0 {
+                    call_simple(context, host, call::TRIED_TO_SEARCH, target_prop_index());
+                }
+                reported = true;
+            }
+        }
+        ACTION_WAIT => {
+            if m.bool(at(a::STATE_WAIT_WAIT_DONE)) {
+                call_simple(context, host, call::ABANDONED_SEARCH, target_prop_index());
+                reported = true;
+            }
+        }
+        _ => {}
+    }
+    reported && lost_contact(context, host)
 }

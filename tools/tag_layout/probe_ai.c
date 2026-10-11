@@ -121,6 +121,7 @@ LAYOUT_MEMBER(actor_datum, input_recent_shield_damage, input.recent_shield_damag
 LAYOUT_MEMBER(actor_datum, danger_zone_danger_type, danger_zone.danger_type)
 LAYOUT_MEMBER(actor_datum, danger_zone_object_index, danger_zone.object_index)
 LAYOUT_SIZE(actor_input_data)
+LAYOUT_MEMBER(actor_datum, state_action_changed, state.action_changed)
 LAYOUT_MEMBER(actor_datum, control_fire_state, control.fire_state)
 LAYOUT_MEMBER(actor_datum, control_fire_state_timer, control.fire_state_timer)
 LAYOUT_MEMBER(actor_datum, control_burst_disable_timer, control.burst_disable_timer)

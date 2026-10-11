@@ -13,6 +13,7 @@
 pub mod actor_attention;
 pub mod actor_combat;
 pub mod actor_destination;
+pub mod actor_dispatch;
 pub mod actor_emotions;
 pub mod actor_general;
 pub mod actor_input;

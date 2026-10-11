@@ -12,6 +12,7 @@ use std::cell::Cell;
 
 use halo_map::actor_combat::actor_combat_update;
 use halo_map::actor_attention::{actor_communication_update, actor_conversation_control, actor_look_affect_movement};
+use halo_map::actor_dispatch::{actor_action_control, actor_action_update, actor_decision_loop, actor_type_swarm_control};
 use halo_map::actor_destination::actor_destination_update;
 use halo_map::actor_emotions::actor_emotion_update;
 use halo_map::actor_general::actor_general_update;
@@ -76,6 +77,9 @@ pub struct AiStepCallbacks {
     pub moving: unsafe extern "C" fn(call: *mut AiCall),
     /// actor_combat.c's `actor_combat_call`.
     pub combat: unsafe extern "C" fn(call: *mut AiCall),
+    /// actors.c's `actor_dispatch_call` (the decision loop, the action's
+    /// update and control, a swarm's control).
+    pub dispatch: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -274,6 +278,10 @@ const STEP_PERCEPTION: i32 = 12;
 const STEP_LOOK: i32 = 13;
 const STEP_MOVE: i32 = 14;
 const STEP_COMBAT: i32 = 15;
+const STEP_DECISION_LOOP: i32 = 16;
+const STEP_ACTION_UPDATE: i32 = 17;
+const STEP_ACTION_CONTROL: i32 = 18;
+const STEP_SWARM_CONTROL: i32 = 19;
 
 /// The step run: its result, or None for a step the port doesn't have.
 fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
@@ -294,6 +302,10 @@ fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
         STEP_LOOK => actor_look_update(context, host),
         STEP_MOVE => actor_move_update(context, host),
         STEP_COMBAT => actor_combat_update(context, host),
+        STEP_DECISION_LOOP => actor_decision_loop(context, host),
+        STEP_ACTION_UPDATE => actor_action_update(context, host),
+        STEP_ACTION_CONTROL => actor_action_control(context, host),
+        STEP_SWARM_CONTROL => actor_type_swarm_control(context, host),
         _ => return None,
     }
     Some(0)
@@ -315,6 +327,7 @@ fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" 
         STEP_LOOK => Some(callbacks.look),
         STEP_MOVE => Some(callbacks.moving),
         STEP_COMBAT => Some(callbacks.combat),
+        STEP_DECISION_LOOP | STEP_ACTION_UPDATE | STEP_ACTION_CONTROL | STEP_SWARM_CONTROL => Some(callbacks.dispatch),
         _ => None,
     }
 }

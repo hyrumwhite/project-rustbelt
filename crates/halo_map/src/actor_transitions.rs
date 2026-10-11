@@ -162,6 +162,16 @@ pub mod call {
     /// `action_avoid_setup` and, if it sets up, the change to avoid: the
     /// result.
     pub const AVOID: i32 = BASE | 59;
+    /// Whether the AI may throw grenades (`ai_globals->grenades_enabled`),
+    /// the result.
+    pub const GRENADES_ENABLED: i32 = BASE | 60;
+    /// The difficulty's grenade chance scale for the actor's team, in
+    /// `output[0]`.
+    pub const GRENADE_CHANCE_SCALE: i32 = BASE | 61;
+    /// `actor_action_test_grenade(actor)`, the result.
+    pub const TEST_GRENADE: i32 = BASE | 62;
+    /// `actor_action_try_to_throw_grenade(actor, a)`.
+    pub const TRY_TO_THROW_GRENADE: i32 = BASE | 63;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -264,6 +274,8 @@ pub fn run(kind: i32, a: i32, b: i32, c: i32, context: &AiStepContext, host: &im
         handler::VEHICLE_EXIT => handle_vehicle_exit(context, host),
         handler::EVASION => handle_evasion(context, host),
         handler::DANGER_AVOIDANCE => handle_danger_avoidance(context, host),
+        handler::GRENADE_THROWING => handle_grenade_throwing(context, host),
+        handler::CONSIDER_GRENADE => consider_grenade(context, host),
         _ => return None,
     })
 }
@@ -1401,8 +1413,9 @@ const DEBUG_COVER_SEEKING_STAGE: u32 = 0xBA;
 const DEBUG_COVER_SEEKING_HIDDEN_TICKS: u32 = 0xBC;
 const DEBUG_COVER_SEEKING_SHIELD: u32 = 0xC0;
 
-/// actions.c's grenade stimulus of seeking cover
-/// (`_actor_grenade_stimulus_seek_cover`).
+/// actions.c's grenade stimuli (`_actor_grenade_stimulus_*`): a visible
+/// target, and seeking cover.
+const GRENADE_STIMULUS_VISIBLE_TARGET: i16 = 1;
 const GRENADE_STIMULUS_SEEK_COVER: i16 = 2;
 
 /// `actor_action_handle_active_cover_seeking`: on its timeslice, a pursuing
@@ -1594,7 +1607,7 @@ pub fn handle_evasion(context: &AiStepContext, host: &impl AiHost) -> bool {
                 call_full(context, host, call::RANDOM, 0, 0, &[]);
             }
             if m.i16(context.variant_definition + var::GRENADE_COMBAT_STIMULUS_TYPE as u32) == GRENADE_STIMULUS_SEEK_COVER
-                && call_simple(context, host, call::CONSIDER_GRENADE, 0) != 0
+                && consider_grenade(context, host)
             {
                 m.set_f32(at(a::EMOTIONS_PERCEIVED_DANGER), 0.0);
                 result = true;
@@ -2001,6 +2014,78 @@ pub fn handle_danger_avoidance(context: &AiStepContext, host: &impl AiHost) -> b
         let action_class = ACTION_CLASSES[m.i16(at(a::STATE_ACTION)) as usize];
         if (action_class == 1 || action_class == 3) && call_simple(context, host, call::AVOID, 0) != 0 {
             result = true;
+        }
+    }
+    result
+}
+
+/// `actor_action_handle_grenade_throwing`: an actor with a target (not
+/// fleeing in a panic) considers a grenade by its variant's stimulus (a
+/// visible target in combat, or a swarm or a calm flee), and keeps trying to
+/// throw one it's started.
+pub fn handle_grenade_throwing(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let fleeing_in_panic = || m.i16(at(a::STATE_ACTION)) == ACTION_FLEE && m.i16(at(a::STATE_FLEE_PANIC_TYPE)) > 0;
+    let mut result = false;
+    if m.i16(at(a::TARGET_TARGET_TYPE)) >= 5 && !fleeing_in_panic() {
+        let prop = prop_get(m, context, m.i32(at(a::TARGET_TARGET_PROP_INDEX)));
+        match m.i16(context.variant_definition + var::GRENADE_COMBAT_STIMULUS_TYPE as u32) {
+            GRENADE_STIMULUS_VISIBLE_TARGET => {
+                if m.i16(at(a::STATE_COMBAT_STATUS)) >= 5 {
+                    result = consider_grenade(context, host);
+                }
+            }
+            GRENADE_STIMULUS_SEEK_COVER => {
+                if m.bool(prop + p::SWARM as u32)
+                    || (m.i16(at(a::STATE_ACTION)) == ACTION_FLEE && m.i16(at(a::STATE_FLEE_PANIC_TYPE)) == PANIC_NONE)
+                {
+                    result = consider_grenade(context, host);
+                }
+            }
+            _ => {}
+        }
+        if m.bool(at(a::CONTROL_GRENADE_TRYING_TO_THROW)) {
+            call_simple(context, host, call::TRY_TO_THROW_GRENADE, 0);
+        }
+    } else {
+        m.set_bool(at(a::CONTROL_GRENADE_TRYING_TO_THROW), false);
+    }
+    result
+}
+
+/// `actor_action_consider_grenade`: an actor already throwing goes on; one
+/// with grenades (when the AI may throw them) checks no more often than its
+/// variant's delay, and by its chance (scaled by the difficulty for its
+/// team) and the throw's test starts throwing one.
+pub fn consider_grenade(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let variant = |offset: usize| context.variant_definition + offset as u32;
+    if m.bool(at(a::CONTROL_GRENADE_TRYING_TO_THROW)) {
+        return true;
+    }
+    let mut result = false;
+    if call_simple(context, host, call::GRENADES_ENABLED, 0) != 0
+        && m.i16(variant(var::GRENADE_COMBAT_GRENADE_TYPE)) != NONE as i16
+        && m.i16(variant(var::GRENADE_COMBAT_TRAJECTORY_TYPE)) != NONE as i16
+    {
+        let current_time = context.game_time;
+        let last_check_time = m.i32(at(a::CONTROL_GRENADE_LAST_CHECK_TIME));
+        if last_check_time == NONE
+            || current_time as f32
+                >= last_check_time as f32 + m.f32(variant(var::GRENADE_COMBAT_THROW_GRENADE_DELAY)) * 30.0
+        {
+            let mut chance = m.f32(variant(var::GRENADE_COMBAT_THROW_GRENADE_CHANCE));
+            chance *= call_full(context, host, call::GRENADE_CHANCE_SCALE, 0, 0, &[]).output[0];
+            m.w32(at(a::CONTROL_GRENADE_LAST_CHECK_TIME), current_time as u32);
+            if call_full(context, host, call::RANDOM, 0, 0, &[]).output[0] < chance
+                && call_simple(context, host, call::TEST_GRENADE, 0) != 0
+            {
+                m.set_bool(at(a::CONTROL_GRENADE_TRYING_TO_THROW), true);
+                call_simple(context, host, call::TRY_TO_THROW_GRENADE, 1);
+                result = true;
+            }
         }
     }
     result

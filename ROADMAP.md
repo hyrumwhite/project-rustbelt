@@ -390,6 +390,10 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **The C's side, through `actions_port_handler_call`:** the animation and path checks, giving up the position, finding the escape, the dive, and the avoid setup.
      - **The check:** the actor debug record's compared head grows from 0x160 to 0x1A0, to cover the danger and dive decisions; every AI step agrees with it.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the escape radius was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels at 144 frames a second.
+   - [x] Grenade throwing and considering a grenade in Rust (`halo_map::actor_transitions`).
+     - **What Rust does:** an actor with a target (not fleeing in a panic) considers a grenade by its variant's stimulus (a visible target in combat, or a swarm or a calm flee) and keeps trying to throw one it's started. Considering one: an actor already throwing goes on; one with grenades, when the AI may throw them, checks no more often than its variant's delay, and its chance (scaled by the difficulty for its team) and the throw's test start it throwing.
+     - **The C's side, through `actions_port_handler_call`:** whether grenades are enabled, the difficulty's chance scale, the throw's test and the throw. One handler is left the game's: vehicle entry.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the grenade check's delay was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

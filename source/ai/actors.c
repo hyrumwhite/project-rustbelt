@@ -2156,7 +2156,14 @@ recorded */
 void actor_dispatch_call(
 	struct halo_sim_ai_call *call)
 {
-	int opened = halo_sim_ai_event_begin(call);
+	int opened;
+
+	if (call->kind >= 0x100)
+	{
+		actions_port_call(call);
+		return;
+	}
+	opened = halo_sim_ai_event_begin(call);
 	long actor_index = call->actor;
 	struct actor_datum *actor = actor_get(actor_index);
 
@@ -2278,10 +2285,23 @@ static void actor_dispatch_step(
 	long actor_index)
 {
 	int checking = FALSE;
+	long function = kind == _actor_dispatch_call_action_update ? _actions_port_update : _actions_port_control;
 
 	if (halo_sim_ai_step_begin(step, actor_index, &checking))
 		return;
-	actor_dispatch_call_simple(actor_index, kind);
+	/* (an action ported to Rust runs directly, as the Rust port's does) */
+	if (kind != _actor_dispatch_call_swarm_control &&
+		actions_port_ported(actor_get(actor_index)->state.action, function))
+	{
+		if (kind == _actor_dispatch_call_action_update)
+			actor_action_update(actor_index);
+		else
+			actor_action_control(actor_index);
+	}
+	else
+	{
+		actor_dispatch_call_simple(actor_index, kind);
+	}
 	if (checking)
 		halo_sim_ai_step_check(step, 0);
 
@@ -2335,7 +2355,9 @@ static void actor_decision_loop_game(
 			break;
 		}
 
-		action_performed = (boolean)actor_dispatch_call_simple(actor_index, _actor_dispatch_call_action_perform);
+		action_performed = actions_port_ported(actor->state.action, _actions_port_perform)
+			? actor_action_perform(actor_index)
+			: (boolean)actor_dispatch_call_simple(actor_index, _actor_dispatch_call_action_perform);
 		if (!action_performed && !actor->state.action_changed)
 		{
 			return;

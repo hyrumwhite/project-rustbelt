@@ -24,6 +24,7 @@ symbols in this file:
 #include "actions.h"
 
 #include "actors.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -43,6 +44,77 @@ enum
 /* ---------- globals */
 
 /* ---------- public code */
+
+/* port: what the action asks of the rest of the game, shared by the game's
+and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded */
+void action_avoid_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _action_avoid_call_change_firing_position:
+		{
+			boolean position_flags;
+			long previous_owner_actor_index;
+			short firing_position_index;
+			struct firing_position candidate;
+			struct firing_position_evaluation_context search;
+			struct path_state workspace;
+
+			memset(&search, 0, sizeof(search));
+			search.evaluation_mode = _firing_point_evaluation_mode_avoid;
+			firing_position_index = actor_active_select_firing_position(
+				actor_index,
+				&search,
+				&candidate,
+				&previous_owner_actor_index,
+				&workspace,
+				&position_flags);
+			call->result = actor_change_firing_position(
+				actor_index,
+				firing_position_index,
+				&candidate,
+				previous_owner_actor_index,
+				&workspace,
+				position_flags);
+			break;
+		}
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_avoid_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input0,
+	real input1,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	call.input[0] = input0;
+	call.input[1] = input1;
+	action_avoid_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
+
 
 boolean action_avoid_setup(
 	long actor_index,
@@ -81,22 +153,7 @@ boolean action_avoid_perform(
 	match_assert("c:\\halo\\SOURCE\\ai\\action_avoid.c", 55, !actor->meta.swarm);
 	if (actor->meta.timeslice)
 	{
-		memset(&search, 0, sizeof(search));
-		search.evaluation_mode = _firing_point_evaluation_mode_avoid;
-		firing_position_index = actor_active_select_firing_position(
-			actor_index,
-			&search,
-			&candidate,
-			&previous_owner_actor_index,
-			&workspace,
-			&position_flags);
-		actor_change_firing_position(
-			actor_index,
-			firing_position_index,
-			&candidate,
-			previous_owner_actor_index,
-			&workspace,
-			position_flags);
+		action_avoid_call_simple(actor_index, _action_avoid_call_change_firing_position, 0, 0, 0.0f, 0.0f, NULL);
 	}
 
 	return actor->danger_zone.danger_type == 0;

@@ -27,6 +27,7 @@ symbols in this file:
 #include "ai_communication.h"
 #include "props.h"
 #include "game/game.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -47,6 +48,69 @@ symbols in this file:
 
 /* ---------- public code */
 
+/* port: what the action asks of the rest of the game, shared by the game's
+and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded */
+void action_wait_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _action_wait_call_find_nearby_actors:
+			actor_pursuit_find_nearby_actors(actor_index, (boolean)call->a);
+			break;
+
+		case _action_wait_call_move_to_prop:
+			call->result = actor_move_to_prop(actor_index, call->a, 8.0f) ? 1 : 0;
+			break;
+
+		case _action_wait_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_wait_call_communication:
+			ai_communication_event((short)call->a, actor->meta.unit_index, NONE, NONE, NONE, NONE, NULL);
+			break;
+
+		case _action_wait_call_query_time:
+			call->result = seed_random_range(get_global_random_seed_address(), 300, 600);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_wait_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input0,
+	real input1,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	call.input[0] = input0;
+	call.input[1] = input1;
+	action_wait_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
+
+
 void
 action_wait_begin(
 	long actor_index)
@@ -64,7 +128,8 @@ action_wait_perform(
 	if (actor->meta.timeslice)
 	{
 		state_data->desire_move = FALSE;
-		actor_pursuit_find_nearby_actors(actor_index, actor->external_orders.pursuit_is_coordinator);
+		action_wait_call_simple(actor_index, _action_wait_call_find_nearby_actors,
+			actor->external_orders.pursuit_is_coordinator, 0, 0.0f, 0.0f, NULL);
 		if (state_data->waiting_as_coordinator)
 		{
 			if (actor->external_orders.pursuit_group_prop_index == NONE)
@@ -101,12 +166,13 @@ action_wait_perform(
 		{
 			if (state_data->desire_move)
 			{
-				if (!actor_move_to_prop(actor_index, actor->external_orders.pursuit_group_prop_index, 8.0f))
+				if (!action_wait_call_simple(actor_index, _action_wait_call_move_to_prop,
+					actor->external_orders.pursuit_group_prop_index, 0, 0.0f, 0.0f, NULL))
 					state_data->move_failed = TRUE;
 			}
 			else
 			{
-				actor_move_halt(actor_index);
+				action_wait_call_simple(actor_index, _action_wait_call_move_halt, 0, 0, 0.0f, 0.0f, NULL);
 			}
 		}
 	}
@@ -186,9 +252,10 @@ action_wait_update(
 		{
 			if (actor->meta.unit_index != NONE)
 			{
-				ai_communication_event(17, actor->meta.unit_index, NONE, NONE, NONE, NONE, NULL);
+				action_wait_call_simple(actor_index, _action_wait_call_communication, 17, 0, 0.0f, 0.0f, NULL);
 			}
-			actor->state.action_data.wait.query_timer = seed_random_range(get_global_random_seed_address(), 300, 600);
+			actor->state.action_data.wait.query_timer = (short)action_wait_call_simple(actor_index,
+				_action_wait_call_query_time, 0, 0, 0.0f, 0.0f, NULL);
 		}
 	}
 
@@ -199,7 +266,7 @@ action_wait_update(
 		{
 			if (actor->state.action_data.wait.waiting_as_coordinator && actor->meta.unit_index != NONE)
 			{
-				ai_communication_event(20, actor->meta.unit_index, NONE, NONE, NONE, NONE, NULL);
+				action_wait_call_simple(actor_index, _action_wait_call_communication, 20, 0, 0.0f, 0.0f, NULL);
 			}
 			actor->state.action_data.wait.wait_done = TRUE;
 		}

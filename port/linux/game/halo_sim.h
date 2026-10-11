@@ -1169,6 +1169,46 @@ enum
 	_actor_dispatch_call_swarm_control,
 };
 
+/* the actions' functions (actions.c's actions_port_ported) */
+enum
+{
+	_actions_port_perform = 0,
+	_actions_port_update,
+	_actions_port_control,
+};
+
+/* the actions' calls ((action << 8) | n: action_wait.c's action_wait_call and
+so on; crates/halo_map's actions) */
+enum
+{
+	_action_wait_call_find_nearby_actors = (8 << 8) | 1,
+	_action_wait_call_move_to_prop,
+	_action_wait_call_move_halt,
+	_action_wait_call_communication,
+	_action_wait_call_query_time,
+};
+
+enum
+{
+	_action_avoid_call_change_firing_position = (13 << 8) | 1,
+};
+
+enum
+{
+	_action_fight_call_discard_firing_position = (3 << 8) | 1,
+	_action_fight_call_firing_variant,
+	_action_fight_call_find_pathfinding_location,
+	_action_fight_call_nearby_firing_positions,
+	_action_fight_call_near_current_firing_position,
+	_action_fight_call_move_halt,
+	_action_fight_call_change_firing_position,
+	_action_fight_call_random_range,
+	_action_fight_call_vehicle_minimum_firing_position_time,
+	_action_fight_call_has_ranged_weapon,
+	_action_fight_call_firing_position_reaches,
+	_action_fight_call_perception_unreachable,
+};
+
 /* the object update loop's calls (objects.c's objects_update_call;
 crates/halo_map's objects_update::call) */
 enum
@@ -1724,6 +1764,11 @@ void actor_look_call(struct halo_sim_ai_call *call);
 void actor_move_call(struct halo_sim_ai_call *call);
 void actor_combat_call(struct halo_sim_ai_call *call);
 void actor_dispatch_call(struct halo_sim_ai_call *call);
+int actions_port_ported(short action, long function);
+void actions_port_call(struct halo_sim_ai_call *call);
+void action_wait_call(struct halo_sim_ai_call *call);
+void action_avoid_call(struct halo_sim_ai_call *call);
+void action_fight_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

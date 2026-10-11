@@ -32,6 +32,7 @@ symbols in this file:
 #include "objects/objects.h"
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -50,6 +51,164 @@ struct fight_vehicle_definition
 /* ---------- globals */
 
 /* ---------- public code */
+
+/* port: what the action asks of the rest of the game, shared by the game's
+and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded */
+void action_fight_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _action_fight_call_discard_firing_position:
+			actor_discard_firing_position(actor_index, (short)call->a, FALSE);
+			break;
+
+		case _action_fight_call_firing_variant:
+			call->result = (long)actor_combat_get_firing_variant_definition(actor_index);
+			break;
+
+		case _action_fight_call_find_pathfinding_location:
+			actor_find_pathfinding_location(actor_index);
+			break;
+
+		case _action_fight_call_nearby_firing_positions:
+			call->result = actor_nearby_firing_positions(
+				actor_index,
+				&actor->input.pathfinding_point,
+				actor->input.pathfinding_surface_index,
+				_firing_position_group_normal) ? 1 : 0;
+			break;
+
+		case _action_fight_call_near_current_firing_position:
+		{
+			struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_encounters,
+				DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
+				struct encounter_definition);
+			struct firing_position_definition *firing_position = TAG_BLOCK_GET_ELEMENT(
+				&encounter->firing_positions,
+				actor->firing_positions.current_position_index,
+				struct firing_position_definition);
+			real tolerance = actor_destination_tolerance(actor_index);
+
+			call->result = distance_squared3d(
+				&actor->input.position.body_position,
+				&firing_position->position) < tolerance * tolerance;
+			break;
+		}
+
+		case _action_fight_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_fight_call_change_firing_position:
+		{
+			short firing_position_index;
+			boolean position_flags;
+			long previous_owner_actor_index;
+			struct firing_position candidate;
+			struct firing_position_evaluation_context search;
+			struct path_state workspace;
+
+			csmemset(&search, 0, sizeof(search));
+			search.evaluation_mode = _firing_point_evaluation_mode_fight;
+			firing_position_index = actor_active_select_firing_position(
+				actor_index,
+				&search,
+				&candidate,
+				&previous_owner_actor_index,
+				&workspace,
+				&position_flags);
+			call->result = actor_change_firing_position(
+				actor_index,
+				firing_position_index,
+				&candidate,
+				previous_owner_actor_index,
+				&workspace,
+				position_flags);
+			break;
+		}
+
+		case _action_fight_call_random_range:
+			call->output[0] = real_seed_random_range(get_global_random_seed_address(), call->input[0], call->input[1]);
+			break;
+
+		case _action_fight_call_vehicle_minimum_firing_position_time:
+		{
+			struct unit_datum *vehicle = vehicle_get(actor->input.vehicle_index);
+			struct fight_vehicle_definition *vehicle_definition =
+				(struct fight_vehicle_definition *)vehicle_definition_get(vehicle->definition_index);
+
+			call->output[0] = vehicle_definition->minimum_firing_position_time;
+			break;
+		}
+
+		case _action_fight_call_has_ranged_weapon:
+			call->result = actor_has_ranged_weapon(actor_index) ? 1 : 0;
+			break;
+
+		case _action_fight_call_firing_position_reaches:
+		{
+			struct prop_datum *prop = prop_get(call->a);
+			struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_encounters,
+				DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
+				struct encounter_definition);
+			struct firing_position_definition *firing_position = TAG_BLOCK_GET_ELEMENT(
+				&encounter->firing_positions,
+				actor->firing_positions.current_position_index,
+				struct firing_position_definition);
+			real tolerance = actor_destination_tolerance(actor_index);
+
+			call->result = distance_squared3d(
+				&actor->input.position.body_position,
+				&firing_position->position) > tolerance * tolerance &&
+				distance_squared3d(
+					&firing_position->position,
+					&prop->body_position) < actor->control.weapon_maximum_range *
+						actor->control.weapon_maximum_range;
+			break;
+		}
+
+		case _action_fight_call_perception_unreachable:
+			actor_perception_unreachable(actor_index, call->a, (boolean)call->b);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_fight_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input0,
+	real input1,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	call.input[0] = input0;
+	call.input[1] = input1;
+	action_fight_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
+
 
 boolean action_fight_setup(
 	long actor_index,
@@ -88,10 +247,8 @@ action_fight_update(
 			actor->firing_positions.current_position_index != NONE &&
 			!actor->firing_positions.current_position_found_outside_range)
 		{
-			actor_discard_firing_position(
-				actor_index,
-				actor->firing_positions.current_position_index,
-				FALSE);
+			action_fight_call_simple(actor_index, _action_fight_call_discard_firing_position,
+				actor->firing_positions.current_position_index, 0, 0.0f, 0.0f, NULL);
 		}
 	}
 
@@ -135,19 +292,16 @@ action_fight_perform(
 		struct actor_variant_definition *firing_variant;
 
 		definition = actor_definition_get(actor->meta.definition_index);
-		firing_variant = actor_combat_get_firing_variant_definition(actor_index);
+		firing_variant = (struct actor_variant_definition *)action_fight_call_simple(actor_index,
+			_action_fight_call_firing_variant, 0, 0, 0.0f, 0.0f, NULL);
 
 		if (!actor->input.vehicle_passenger)
 		{
 			if (actor->emotions.defensive_crouch &&
 				TEST_FLAG(definition->flags, 5))
 			{
-				actor_find_pathfinding_location(actor_index);
-				if (actor_nearby_firing_positions(
-					actor_index,
-					&actor->input.pathfinding_point,
-					actor->input.pathfinding_surface_index,
-					_firing_position_group_normal))
+				action_fight_call_simple(actor_index, _action_fight_call_find_pathfinding_location, 0, 0, 0.0f, 0.0f, NULL);
+				if (action_fight_call_simple(actor_index, _action_fight_call_nearby_firing_positions, 0, 0, 0.0f, 0.0f, NULL))
 				{
 					boolean near_current_firing_position;
 
@@ -155,22 +309,8 @@ action_fight_perform(
 					if (actor->meta.encounter_index != NONE &&
 						actor->firing_positions.current_position_index != NONE)
 					{
-						struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
-							&global_scenario_get()->ai_encounters,
-							DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
-							struct encounter_definition);
-						struct firing_position_definition *firing_position = TAG_BLOCK_GET_ELEMENT(
-							&encounter->firing_positions,
-							actor->firing_positions.current_position_index,
-							struct firing_position_definition);
-						real tolerance = actor_destination_tolerance(actor_index);
-
-						if (distance_squared3d(
-							&actor->input.position.body_position,
-							&firing_position->position) < tolerance * tolerance)
-						{
-							near_current_firing_position = TRUE;
-						}
+						near_current_firing_position = (boolean)action_fight_call_simple(actor_index,
+							_action_fight_call_near_current_firing_position, 0, 0, 0.0f, 0.0f, NULL);
 					}
 
 					if (actor->control.moving &&
@@ -189,39 +329,18 @@ action_fight_perform(
 					}
 
 					actor->firing_positions.current_position_index = NONE;
-					actor_move_halt(actor_index);
+					action_fight_call_simple(actor_index, _action_fight_call_move_halt, 0, 0, 0.0f, 0.0f, NULL);
 					goto update_unreachable;
 				}
 			}
 
 			{
-				short firing_position_index;
-				boolean position_flags;
-				real combat_position_time_lower_bound;
-				long previous_owner_actor_index;
 				short old_firing_position_index;
 				short new_firing_position_index;
-				struct firing_position candidate;
-				struct firing_position_evaluation_context search;
-				struct path_state workspace;
 
 				old_firing_position_index = actor->firing_positions.current_position_index;
-				csmemset(&search, 0, sizeof(search));
-				search.evaluation_mode = _firing_point_evaluation_mode_fight;
-				firing_position_index = actor_active_select_firing_position(
-					actor_index,
-					&search,
-					&candidate,
-					&previous_owner_actor_index,
-					&workspace,
-					&position_flags);
-				new_firing_position_index = actor_change_firing_position(
-					actor_index,
-					firing_position_index,
-					&candidate,
-					previous_owner_actor_index,
-					&workspace,
-					position_flags);
+				new_firing_position_index = (short)action_fight_call_simple(actor_index,
+					_action_fight_call_change_firing_position, 0, 0, 0.0f, 0.0f, NULL);
 				if (new_firing_position_index == NONE)
 				{
 					actor->state.action_data.fight.firing_position_timer = 0;
@@ -229,27 +348,21 @@ action_fight_perform(
 				else if (new_firing_position_index != old_firing_position_index)
 				{
 					real combat_position_time;
-					real combat_position_time_upper_bound;
 
-					combat_position_time_upper_bound =
-						definition->firing_position.combat_position_time_upper_bound;
-					combat_position_time_lower_bound =
-						definition->firing_position.combat_position_time_lower_bound;
-					combat_position_time = real_seed_random_range(
-						get_global_random_seed_address(),
-						combat_position_time_lower_bound,
-						combat_position_time_upper_bound);
+					action_fight_call_simple(actor_index, _action_fight_call_random_range, 0, 0,
+						definition->firing_position.combat_position_time_lower_bound,
+						definition->firing_position.combat_position_time_upper_bound,
+						&combat_position_time);
 					if (actor->input.vehicle_driver_type > 0)
 					{
-						struct unit_datum *vehicle = vehicle_get(actor->input.vehicle_index);
-						struct fight_vehicle_definition *vehicle_definition =
-							(struct fight_vehicle_definition *)vehicle_definition_get(
-								vehicle->definition_index);
+						real minimum_firing_position_time;
 
-						if (vehicle_definition->minimum_firing_position_time > 0.f &&
-							combat_position_time > vehicle_definition->minimum_firing_position_time)
+						action_fight_call_simple(actor_index, _action_fight_call_vehicle_minimum_firing_position_time,
+							0, 0, 0.0f, 0.0f, &minimum_firing_position_time);
+						if (minimum_firing_position_time > 0.f &&
+							combat_position_time > minimum_firing_position_time)
 						{
-							combat_position_time = vehicle_definition->minimum_firing_position_time;
+							combat_position_time = minimum_firing_position_time;
 						}
 					}
 
@@ -265,42 +378,23 @@ update_unreachable:
 			struct prop_datum *prop = prop_get(actor->target.target_prop_index);
 			boolean unreachable = TRUE;
 
-			if (actor_has_ranged_weapon(actor_index))
+			if (action_fight_call_simple(actor_index, _action_fight_call_has_ranged_weapon, 0, 0, 0.0f, 0.0f, NULL))
 			{
 				if (prop->distance < actor->control.weapon_maximum_range)
 				{
 					unreachable = FALSE;
 				}
 				else if (actor->meta.encounter_index != NONE &&
-					actor->firing_positions.current_position_index != NONE)
+					actor->firing_positions.current_position_index != NONE &&
+					action_fight_call_simple(actor_index, _action_fight_call_firing_position_reaches,
+						actor->target.target_prop_index, 0, 0.0f, 0.0f, NULL))
 				{
-					struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
-						&global_scenario_get()->ai_encounters,
-						DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
-						struct encounter_definition);
-					struct firing_position_definition *firing_position = TAG_BLOCK_GET_ELEMENT(
-						&encounter->firing_positions,
-						actor->firing_positions.current_position_index,
-						struct firing_position_definition);
-					real tolerance = actor_destination_tolerance(actor_index);
-
-					if (distance_squared3d(
-						&actor->input.position.body_position,
-						&firing_position->position) > tolerance * tolerance &&
-						distance_squared3d(
-							&firing_position->position,
-							&prop->body_position) < actor->control.weapon_maximum_range *
-								actor->control.weapon_maximum_range)
-					{
-						unreachable = FALSE;
-					}
+					unreachable = FALSE;
 				}
 			}
 
-			actor_perception_unreachable(
-				actor_index,
-				actor->target.target_prop_index,
-				unreachable);
+			action_fight_call_simple(actor_index, _action_fight_call_perception_unreachable,
+				actor->target.target_prop_index, unreachable, 0.0f, 0.0f, NULL);
 		}
 	}
 

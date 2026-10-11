@@ -250,6 +250,7 @@ symbols in this file:
 #include "units/unit_definitions.h"
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -700,6 +701,37 @@ char const *global_actor_mode_names[NUMBER_OF_ACTOR_MODES] =
 };
 
 /* ---------- public code */
+
+/* port: the actions' functions crates/halo_map's actions runs in place of
+the game's (the dispatching steps' game side runs these directly, the rest
+through actor_dispatch_call) */
+int actions_port_ported(
+	short action,
+	long function)
+{
+	switch (action)
+	{
+		case _actor_action_sleep: return function == _actions_port_control;
+		case _actor_action_wait:
+		case _actor_action_avoid:
+		case _actor_action_fight: return TRUE;
+	}
+
+	return FALSE;
+}
+
+/* port: an action's call, to its file's call function (by its kind's high
+byte, the action) */
+void actions_port_call(
+	struct halo_sim_ai_call *call)
+{
+	switch (call->kind >> 8)
+	{
+		case _actor_action_wait: action_wait_call(call); break;
+		case _actor_action_avoid: action_avoid_call(call); break;
+		case _actor_action_fight: action_fight_call(call); break;
+	}
+}
 
 boolean actor_action_perform(
 	long actor_index)

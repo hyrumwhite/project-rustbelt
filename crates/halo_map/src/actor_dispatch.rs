@@ -4,10 +4,11 @@
 //! and control (actions.c's `actor_action_update`, `actor_action_control`)
 //! and a swarm's control (actor_types.c's `actor_type_swarm_control`).
 //!
-//! The actions and the types are still the game's: each goes through
-//! [`AiHost::call`] (actors.c's `actor_dispatch_call`, shared with the C),
-//! and an action ported to Rust takes its place here.
+//! The actions ported to Rust ([`crate::actions`]) run here; the rest, and
+//! the types, are still the game's: each goes through [`AiHost::call`]
+//! (actors.c's `actor_dispatch_call`, shared with the C).
 
+use crate::actions::{self, Function};
 use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE};
 use crate::layout::actor_datum as a;
 
@@ -61,7 +62,10 @@ pub fn actor_decision_loop(context: &AiStepContext, host: &impl AiHost) {
         if (action_performed && !m.bool(action_changed)) || iteration >= MAXIMUM_DECISION_LOOP_ITERATIONS {
             break;
         }
-        action_performed = call_simple(context, host, call::ACTION_PERFORM) != 0;
+        action_performed = match actions::run(m.i16(action), Function::Perform, context, host) {
+            Some(performed) => performed,
+            None => call_simple(context, host, call::ACTION_PERFORM) != 0,
+        };
         if !action_performed && !m.bool(action_changed) {
             return;
         }
@@ -81,12 +85,18 @@ pub fn actor_decision_loop(context: &AiStepContext, host: &impl AiHost) {
 
 /// `actor_action_update`.
 pub fn actor_action_update(context: &AiStepContext, host: &impl AiHost) {
-    call_simple(context, host, call::ACTION_UPDATE);
+    let action = host.memory().i16(context.actor + a::STATE_ACTION as u32);
+    if actions::run(action, Function::Update, context, host).is_none() {
+        call_simple(context, host, call::ACTION_UPDATE);
+    }
 }
 
 /// `actor_action_control`.
 pub fn actor_action_control(context: &AiStepContext, host: &impl AiHost) {
-    call_simple(context, host, call::ACTION_CONTROL);
+    let action = host.memory().i16(context.actor + a::STATE_ACTION as u32);
+    if actions::run(action, Function::Control, context, host).is_none() {
+        call_simple(context, host, call::ACTION_CONTROL);
+    }
 }
 
 /// `actor_type_swarm_control`.

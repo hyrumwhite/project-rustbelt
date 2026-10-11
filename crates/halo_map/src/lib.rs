@@ -10,6 +10,7 @@
 //! Struct offsets come from [`layout`], which is generated from OpenCE's C
 //! definitions by `tools/tag_layout`.
 
+pub mod actions;
 pub mod actor_attention;
 pub mod actor_combat;
 pub mod actor_destination;

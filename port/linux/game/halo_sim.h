@@ -1305,6 +1305,13 @@ enum
 	_action_obey_call_animation_impulse,
 	_action_obey_call_communication,
 	_action_obey_call_unit_is_busy,
+	_action_obey_call_tolerance,
+	_action_obey_call_move_halt,
+	_action_obey_call_plan_grenade,
+	_action_obey_call_recording,
+	_action_obey_call_loop_error,
+	_action_obey_call_biped_release,
+	_action_obey_call_look_secondary_stop,
 };
 
 enum

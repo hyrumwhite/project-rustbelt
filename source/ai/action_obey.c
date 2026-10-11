@@ -1155,6 +1155,66 @@ void action_obey_call(
 		case _action_obey_call_unit_is_busy:
 			call->result = unit_is_busy(actor->meta.unit_index) ? 1 : 0;
 			break;
+
+		case _action_obey_call_tolerance:
+			call->output[0] = actor_destination_tolerance(actor_index);
+			break;
+
+		case _action_obey_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_obey_call_plan_grenade:
+		{
+			real_point3d grenade_target = state_data->complex_control.grenade_target;
+
+			call->result = actor_combat_plan_grenade_trajectory(
+				actor_index,
+				state_data->complex_control.grenade_throw_trajectory_type,
+				&grenade_target,
+				NONE,
+				NONE) ? 1 : 0;
+			break;
+		}
+
+		case _action_obey_call_recording:
+			call->result = recorded_animation_controlling_unit(call->a) ? 1 : 0;
+			break;
+
+		case _action_obey_call_loop_error:
+		{
+			struct ai_command_list_definition *command_list = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_command_lists,
+				state_data->command_list_index,
+				struct ai_command_list_definition);
+			char buffer[512];
+
+			ai_debug_describe_actor(actor_index, NONE, TRUE, buffer, sizeof(buffer));
+			error(
+				_error_silent,
+				call->a ? "%s: command list %s is stuck looping (aborting on loop #%d)" :
+					"%s: command list %s entry #%d tried to loop to itself",
+				buffer,
+				command_list->name,
+				call->b);
+			break;
+		}
+
+		case _action_obey_call_biped_release:
+		{
+			struct biped_datum *biped = biped_try_and_get(call->a);
+
+			if (biped)
+			{
+				SET_FLAG(biped->biped.flags, _biped_absolute_movement_bit, FALSE);
+				SET_FLAG(biped->biped.flags, _biped_no_collision_bit, FALSE);
+			}
+			break;
+		}
+
+		case _action_obey_call_look_secondary_stop:
+			actor_look_secondary_stop(actor_index);
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -1205,7 +1265,8 @@ static void action_obey_individual_perform_actor(
 			byte next_command_index;
 
 			if (command_valid &&
-				!action_obey_call_simple(actor_index, _action_obey_call_command_perform, 0))
+				!action_obey_command_perform(actor_index, actor_get(actor_index)->meta.unit_index,
+					state_data->command_list_index, simple_control, &state_data->complex_control))
 			{
 				break;
 			}
@@ -1214,8 +1275,8 @@ static void action_obey_individual_perform_actor(
 
 			if (command_valid)
 			{
-				next_command_index = (byte)action_obey_call_simple(actor_index, _action_obey_call_command_end,
-					next_command_index);
+				action_obey_command_end(actor_index, actor_get(actor_index)->meta.unit_index,
+					state_data->command_list_index, simple_control, &state_data->complex_control, &next_command_index);
 			}
 
 			if (next_command_index >= command_list->commands.count)
@@ -1529,7 +1590,7 @@ static void action_obey_command_end(
 		case _ai_atom_go_to_and_face:
 			if (unit_index == actor->meta.unit_index)
 			{
-				actor_move_halt(actor_index);
+				action_obey_call_simple(actor_index, _action_obey_call_move_halt, 0);
 			}
 			if (complex_control)
 			{
@@ -1572,27 +1633,29 @@ static void action_obey_command_end(
 				{
 					if (command->command_index == simple_control->current_command_index)
 					{
-						char buffer[512];
+						{
+							struct halo_sim_ai_call loop_error;
 
-						ai_debug_describe_actor(actor_index, NONE, TRUE, buffer, sizeof(buffer));
-						error(
-							_error_silent,
-							"%s: command list %s entry #%d tried to loop to itself",
-							buffer,
-							command_list->name,
-							simple_control->current_command_index);
+							memset(&loop_error, 0, sizeof(loop_error));
+							loop_error.kind = _action_obey_call_loop_error;
+							loop_error.actor = actor_index;
+							loop_error.a = 0;
+							loop_error.b = simple_control->current_command_index;
+							action_obey_call(&loop_error);
+						}
 					}
 					else if (simple_control->loop_counter >= OBEY_MAXIMUM_LOOP_COUNT)
 					{
-						char buffer[512];
+						{
+							struct halo_sim_ai_call loop_error;
 
-						ai_debug_describe_actor(actor_index, NONE, TRUE, buffer, sizeof(buffer));
-						error(
-							_error_silent,
-							"%s: command list %s is stuck looping (aborting on loop #%d)",
-							buffer,
-							command_list->name,
-							simple_control->current_command_index);
+							memset(&loop_error, 0, sizeof(loop_error));
+							loop_error.kind = _action_obey_call_loop_error;
+							loop_error.actor = actor_index;
+							loop_error.a = 1;
+							loop_error.b = simple_control->current_command_index;
+							action_obey_call(&loop_error);
+						}
 					}
 					else
 					{
@@ -1604,15 +1667,7 @@ static void action_obey_command_end(
 			break;
 
 		case _ai_atom_animate:
-			{
-				struct biped_datum *biped = biped_try_and_get(unit_index);
-
-				if (biped)
-				{
-					SET_FLAG(biped->biped.flags, _biped_absolute_movement_bit, FALSE);
-					SET_FLAG(biped->biped.flags, _biped_no_collision_bit, FALSE);
-				}
-			}
+			action_obey_call_simple(actor_index, _action_obey_call_biped_release, unit_index);
 			break;
 
 		case _ai_atom_look:
@@ -1621,7 +1676,7 @@ static void action_obey_command_end(
 		case _ai_atom_look_object:
 			if (unit_index == actor->meta.unit_index)
 			{
-				actor_look_secondary_stop(actor_index);
+				action_obey_call_simple(actor_index, _action_obey_call_look_secondary_stop, 0);
 			}
 			break;
 		}
@@ -2715,15 +2770,22 @@ static boolean action_obey_command_perform(
 		case _ai_atom_go_to_and_face:
 			if (unit_index == actor->meta.unit_index && complex_control)
 			{
-				done = actor_path_at_destination(actor_index);
+				done = (boolean)action_obey_call_simple(actor_index, _action_obey_call_at_destination, 0);
 
 				if (!done &&
 					complex_control->destination_keep_moving &&
 					complex_control->destination_valid)
 				{
-					real tolerance = actor_destination_tolerance(actor_index);
+					real tolerance;
 					real_vector3d destination_vector;
 					real distance_squared;
+					struct halo_sim_ai_call tolerance_call;
+
+					memset(&tolerance_call, 0, sizeof(tolerance_call));
+					tolerance_call.kind = _action_obey_call_tolerance;
+					tolerance_call.actor = actor_index;
+					action_obey_call(&tolerance_call);
+					tolerance = tolerance_call.output[0];
 
 					vector_from_points3d(
 						&actor->input.position.body_position,
@@ -2803,7 +2865,7 @@ static boolean action_obey_command_perform(
 			facing_done:
 				if (done)
 				{
-					actor_move_halt(actor_index);
+					action_obey_call_simple(actor_index, _action_obey_call_move_halt, 0);
 				}
 			}
 			else
@@ -2892,16 +2954,9 @@ static boolean action_obey_command_perform(
 
 					simple_control->pause_timer = unit->unit.grenade_throw_state != _unit_grenade_throw_idle ? 30 : 0;
 				}
-				else if (!unit_is_busy(unit_index))
+				else if (!action_obey_call_simple(actor_index, _action_obey_call_unit_is_busy, 0))
 				{
-					real_point3d grenade_target = complex_control->grenade_target;
-
-					if (actor_combat_plan_grenade_trajectory(
-						actor_index,
-						complex_control->grenade_throw_trajectory_type,
-						&grenade_target,
-						NONE,
-						NONE))
+					if (action_obey_call_simple(actor_index, _action_obey_call_plan_grenade, 0))
 					{
 						complex_control->grenade_throw_depress_trigger = TRUE;
 					}
@@ -2919,7 +2974,7 @@ static boolean action_obey_command_perform(
 			break;
 
 		case _ai_atom_recording:
-			done = !recorded_animation_controlling_unit(unit_index);
+			done = !action_obey_call_simple(actor_index, _action_obey_call_recording, unit_index);
 			break;
 
 		case _ai_atom_action:

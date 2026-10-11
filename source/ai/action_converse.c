@@ -87,6 +87,64 @@ void action_converse_begin(
 	return;
 }
 
+/* port: what the converse action asks of the rest of the game, shared by
+the game's and the Rust port's (crates/halo_map's actions); in check mode
+each is recorded */
+void action_converse_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	struct converse_state_data *state_data = &actor->state.action_data.converse;
+
+	switch (call->kind)
+	{
+		case _action_converse_call_base_prop:
+			call->result = prop_get_base_by_unit_index(actor_index, call->a, TRUE, TRUE);
+			break;
+
+		case _action_converse_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_converse_call_move_to_prop:
+			call->result = actor_move_to_prop(actor_index, call->a, call->input[0]) ? 1 : 0;
+			break;
+
+		case _action_converse_call_player_prop:
+		{
+			struct conversation_datum *conversation = ai_conversation_header_get(state_data->conversation_index);
+
+			call->result = conversation && conversation->triggering_player_unit_index != NONE
+				? prop_get_active_by_unit_index(actor_index, conversation->triggering_player_unit_index)
+				: NONE;
+			break;
+		}
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_converse_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	real input)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.input[0] = input;
+	action_converse_call(&call);
+
+	return call.result;
+}
+
 boolean action_converse_perform(
 	long actor_index)
 {
@@ -98,11 +156,8 @@ boolean action_converse_perform(
 		if (state_data->run_to_prop_index == NONE &&
 			state_data->run_to_unit_index != NONE)
 		{
-			state_data->run_to_prop_index = prop_get_base_by_unit_index(
-				actor_index,
-				state_data->run_to_unit_index,
-				TRUE,
-				TRUE);
+			state_data->run_to_prop_index = action_converse_call_simple(actor_index,
+				_action_converse_call_base_prop, state_data->run_to_unit_index, 0.0f);
 		}
 
 		if (state_data->run_to_prop_index == NONE)
@@ -128,12 +183,10 @@ boolean action_converse_perform(
 
 			if (state_data->in_range)
 			{
-				actor_move_halt(actor_index);
+				action_converse_call_simple(actor_index, _action_converse_call_move_halt, 0, 0.0f);
 			}
-			else if (!actor_move_to_prop(
-				actor_index,
-				state_data->run_to_prop_index,
-				state_data->run_to_distance))
+			else if (!action_converse_call_simple(actor_index, _action_converse_call_move_to_prop,
+				state_data->run_to_prop_index, state_data->run_to_distance))
 			{
 				state_data->failed = TRUE;
 			}
@@ -156,21 +209,17 @@ void action_converse_control(
 {
 	struct actor_datum *actor = actor_get(actor_index);
 	struct converse_state_data *state_data = &actor->state.action_data.converse;
-	struct conversation_datum *conversation = NULL;
 	long prop_index = NONE;
 
-	if (state_data->conversation_index != NONE)
-		conversation = ai_conversation_header_get(state_data->conversation_index);
-
+	/* port: the conversation's player's prop through action_converse_call
+	(its header read only where it is used) */
 	if (state_data->run_to_prop_index != NONE)
 	{
 		prop_index = state_data->run_to_prop_index;
 	}
-	else if (conversation && conversation->triggering_player_unit_index != NONE)
+	else if (state_data->conversation_index != NONE)
 	{
-		prop_index = prop_get_active_by_unit_index(
-			actor_index,
-			conversation->triggering_player_unit_index);
+		prop_index = action_converse_call_simple(actor_index, _action_converse_call_player_prop, 0, 0.0f);
 	}
 
 	actor->orders.look.idle_look_type = 1;

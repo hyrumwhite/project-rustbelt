@@ -82,6 +82,7 @@ symbols in this file:
 #include "units/units.h"
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -163,6 +164,11 @@ void action_vehicle_update(
 	return;
 }
 
+static long action_vehicle_call_simple(
+	long actor_index,
+	long kind,
+	long a);
+
 void action_vehicle_control(
 	long actor_index)
 {
@@ -175,7 +181,7 @@ void action_vehicle_control(
 		actor->orders.look.primary_direction.type = _direction_specification_vector;
 		actor->orders.look.primary_direction.vector = state_data->destination_facing;
 	}
-	else if (actor_path_has_path(actor_index))
+	else if (action_vehicle_call_simple(actor_index, _action_vehicle_call_has_path, 0))
 	{
 		actor->orders.look.primary_priority = _primary_priority_facing;
 		actor->orders.look.primary_direction.type = _direction_specification_movement;
@@ -779,12 +785,126 @@ boolean action_vehicle_setup_specific(
 	return result;
 }
 
+/* port: what the vehicle action asks of the rest of the game, shared by the
+game's and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded. The seat's evaluation is kept for the destination's search. */
+static struct
+{
+	real_point3d entry_point;
+	real_vector3d entry_facing;
+	real_point3d hint_point;
+} action_vehicle_seat;
+
+void action_vehicle_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	struct vehicle_state_data *state_data = &actor->state.action_data.vehicle;
+
+	switch (call->kind)
+	{
+		case _action_vehicle_call_has_path:
+			call->result = actor_path_has_path(actor_index) ? 1 : 0;
+			break;
+
+		case _action_vehicle_call_vehicle_exists:
+			call->result = vehicle_try_and_get(call->a) != NULL;
+			break;
+
+		case _action_vehicle_call_desirable:
+			call->result = action_vehicle_desirable(
+				actor_index,
+				state_data->vehicle_index,
+				!state_data->impromptu,
+				state_data->attempt_distance,
+				state_data->continue_distance,
+				FALSE,
+				TRUE) ? 1 : 0;
+			break;
+
+		case _action_vehicle_call_evaluate_seat:
+		{
+			boolean within_range = FALSE;
+			boolean correct_facing = FALSE;
+			boolean could_potentially_fake = FALSE;
+			boolean valid = action_vehicle_evaluate_seat(
+				actor_index,
+				state_data->vehicle_index,
+				state_data->seat_index,
+				!state_data->impromptu,
+				&action_vehicle_seat.entry_point,
+				&action_vehicle_seat.entry_facing,
+				&action_vehicle_seat.hint_point,
+				NULL,
+				&within_range,
+				&correct_facing,
+				&could_potentially_fake);
+
+			call->result = (valid ? 1 : 0) | (within_range ? 2 : 0) | (correct_facing ? 4 : 0) |
+				(could_potentially_fake ? 8 : 0);
+			memcpy(call->output, &action_vehicle_seat.entry_point, sizeof(action_vehicle_seat.entry_point));
+			memcpy(call->output + 3, &action_vehicle_seat.entry_facing, sizeof(action_vehicle_seat.entry_facing));
+			break;
+		}
+
+		case _action_vehicle_call_enter_seat:
+			unit_enter_seat(actor->meta.unit_index, state_data->vehicle_index, state_data->seat_index);
+			break;
+
+		case _action_vehicle_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_vehicle_call_find_destination:
+			call->result = action_vehicle_find_destination(
+				actor_index,
+				state_data->vehicle_index,
+				&action_vehicle_seat.entry_point,
+				&action_vehicle_seat.entry_facing,
+				&action_vehicle_seat.hint_point,
+				&state_data->ignore_hint,
+				&state_data->destination_point,
+				&state_data->destination_surface_index) ? 1 : 0;
+			break;
+
+		case _action_vehicle_call_move_to_destination:
+			call->result = actor_move_to_point(
+				actor_index,
+				&state_data->destination_point,
+				state_data->destination_surface_index,
+				state_data->vehicle_index) ? 1 : 0;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_vehicle_call_simple(
+	long actor_index,
+	long kind,
+	long a)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	action_vehicle_call(&call);
+
+	return call.result;
+}
+
 boolean action_vehicle_perform(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
 	struct vehicle_state_data *state_data = &actor->state.action_data.vehicle;
-	struct unit_datum *vehicle = vehicle_try_and_get(state_data->vehicle_index);
+	boolean vehicle_exists = (boolean)action_vehicle_call_simple(actor_index,
+		_action_vehicle_call_vehicle_exists, state_data->vehicle_index);
 
 	match_assert(
 		"c:\\halo\\SOURCE\\ai\\action_vehicle.c",
@@ -797,19 +917,12 @@ boolean action_vehicle_perform(
 	}
 	else if (!state_data->started_entry)
 	{
-		if (!vehicle)
+		if (!vehicle_exists)
 		{
 			state_data->vehicle_index = NONE;
 			state_data->vehicle_entry_failed = TRUE;
 		}
-		else if (!action_vehicle_desirable(
-			actor_index,
-			state_data->vehicle_index,
-			!state_data->impromptu,
-			state_data->attempt_distance,
-			state_data->continue_distance,
-			FALSE,
-			TRUE))
+		else if (!action_vehicle_call_simple(actor_index, _action_vehicle_call_desirable, 0))
 		{
 			state_data->vehicle_entry_failed = TRUE;
 		}
@@ -836,26 +949,22 @@ boolean action_vehicle_perform(
 
 			if (state_data->stuck_detection_counter < 8)
 			{
-				real_point3d entry_point;
-				real_vector3d entry_facing;
-				real_point3d hint_point;
-				boolean within_range;
-				boolean correct_facing;
-				boolean could_potentially_fake;
+				struct halo_sim_ai_call seat;
 
-				if (action_vehicle_evaluate_seat(
-					actor_index,
-					state_data->vehicle_index,
-					state_data->seat_index,
-					!state_data->impromptu,
-					&entry_point,
-					&entry_facing,
-					&hint_point,
-					NULL,
-					&within_range,
-					&correct_facing,
-					&could_potentially_fake))
+				memset(&seat, 0, sizeof(seat));
+				seat.kind = _action_vehicle_call_evaluate_seat;
+				seat.actor = actor_index;
+				action_vehicle_call(&seat);
+				if (seat.result & 1)
 				{
+					real_point3d entry_point;
+					real_vector3d entry_facing;
+					boolean within_range = (seat.result & 2) != 0;
+					boolean correct_facing = (seat.result & 4) != 0;
+					boolean could_potentially_fake = (seat.result & 8) != 0;
+
+					memcpy(&entry_point, seat.output, sizeof(entry_point));
+					memcpy(&entry_facing, seat.output + 3, sizeof(entry_facing));
 					if (could_potentially_fake)
 					{
 						state_data->fake_entry_potential_timer++;
@@ -874,36 +983,22 @@ boolean action_vehicle_perform(
 					{
 						if (correct_facing)
 						{
-							unit_enter_seat(
-								actor->meta.unit_index,
-								state_data->vehicle_index,
-								state_data->seat_index);
+							action_vehicle_call_simple(actor_index, _action_vehicle_call_enter_seat, 0);
 							state_data->started_entry = TRUE;
 						}
 						else
 						{
-							actor_move_halt(actor_index);
+							action_vehicle_call_simple(actor_index, _action_vehicle_call_move_halt, 0);
 						}
 					}
 					else if (actor->meta.timeslice)
 					{
 						boolean moving = FALSE;
 
-						if (action_vehicle_find_destination(
-							actor_index,
-							state_data->vehicle_index,
-							&entry_point,
-							&entry_facing,
-							&hint_point,
-							&state_data->ignore_hint,
-							&state_data->destination_point,
-							&state_data->destination_surface_index))
+						if (action_vehicle_call_simple(actor_index, _action_vehicle_call_find_destination, 0))
 						{
-							moving = actor_move_to_point(
-								actor_index,
-								&state_data->destination_point,
-								state_data->destination_surface_index,
-								state_data->vehicle_index);
+							moving = (boolean)action_vehicle_call_simple(actor_index,
+								_action_vehicle_call_move_to_destination, 0);
 						}
 
 						if (moving)

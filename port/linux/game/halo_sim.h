@@ -1260,6 +1260,26 @@ enum
 
 enum
 {
+	_action_converse_call_base_prop = (12 << 8) | 1,
+	_action_converse_call_move_halt,
+	_action_converse_call_move_to_prop,
+	_action_converse_call_player_prop,
+};
+
+enum
+{
+	_action_vehicle_call_has_path = (9 << 8) | 1,
+	_action_vehicle_call_vehicle_exists,
+	_action_vehicle_call_desirable,
+	_action_vehicle_call_evaluate_seat,
+	_action_vehicle_call_enter_seat,
+	_action_vehicle_call_move_halt,
+	_action_vehicle_call_find_destination,
+	_action_vehicle_call_move_to_destination,
+};
+
+enum
+{
 	_action_fight_call_discard_firing_position = (3 << 8) | 1,
 	_action_fight_call_firing_variant,
 	_action_fight_call_find_pathfinding_location,
@@ -1837,6 +1857,8 @@ void action_search_call(struct halo_sim_ai_call *call);
 void action_uncover_call(struct halo_sim_ai_call *call);
 void action_guard_call(struct halo_sim_ai_call *call);
 void action_flee_call(struct halo_sim_ai_call *call);
+void action_converse_call(struct halo_sim_ai_call *call);
+void action_vehicle_call(struct halo_sim_ai_call *call);
 void action_avoid_call(struct halo_sim_ai_call *call);
 void action_fight_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);

@@ -1295,6 +1295,20 @@ enum
 
 enum
 {
+	_action_obey_call_swarm_update = (11 << 8) | 1,
+	_action_obey_call_swarm_perform,
+	_action_obey_call_command_perform,
+	_action_obey_call_command_end,
+	_action_obey_call_command_begin,
+	_action_obey_call_at_destination,
+	_action_obey_call_animation_busy,
+	_action_obey_call_animation_impulse,
+	_action_obey_call_communication,
+	_action_obey_call_unit_is_busy,
+};
+
+enum
+{
 	_action_fight_call_discard_firing_position = (3 << 8) | 1,
 	_action_fight_call_firing_variant,
 	_action_fight_call_find_pathfinding_location,
@@ -1875,6 +1889,7 @@ void action_flee_call(struct halo_sim_ai_call *call);
 void action_converse_call(struct halo_sim_ai_call *call);
 void action_vehicle_call(struct halo_sim_ai_call *call);
 void action_charge_call(struct halo_sim_ai_call *call);
+void action_obey_call(struct halo_sim_ai_call *call);
 void action_avoid_call(struct halo_sim_ai_call *call);
 void action_fight_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);

@@ -720,6 +720,7 @@ int actions_port_ported(
 		case _actor_action_converse:
 		case _actor_action_vehicle:
 		case _actor_action_charge:
+		case _actor_action_obey:
 		case _actor_action_wait:
 		case _actor_action_avoid:
 		case _actor_action_fight: return TRUE;
@@ -743,6 +744,7 @@ void actions_port_call(
 		case _actor_action_converse: action_converse_call(call); break;
 		case _actor_action_vehicle: action_vehicle_call(call); break;
 		case _actor_action_charge: action_charge_call(call); break;
+		case _actor_action_obey: action_obey_call(call); break;
 		case _actor_action_wait: action_wait_call(call); break;
 		case _actor_action_avoid: action_avoid_call(call); break;
 		case _actor_action_fight: action_fight_call(call); break;

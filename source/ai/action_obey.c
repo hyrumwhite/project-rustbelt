@@ -271,6 +271,7 @@ symbols in this file:
 #include "units/biped_definitions.h"
 #include "memory/data.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -1075,18 +1076,190 @@ void action_obey_describe_command(
 	return;
 }
 
+/* port: what the obey action asks of the rest of the game, shared by the
+game's and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded. A swarm's components and the commands themselves are still the
+game's. */
+void action_obey_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	struct obey_state_data *state_data = &actor->state.action_data.obey;
+
+	switch (call->kind)
+	{
+		case _action_obey_call_swarm_update:
+			action_obey_individuals_iterate(actor_index, FALSE, state_data, action_obey_individual_update, NULL);
+			break;
+
+		case _action_obey_call_swarm_perform:
+		{
+			boolean finished = TRUE;
+
+			action_obey_individuals_iterate(actor_index, FALSE, state_data, action_obey_individual_perform, &finished);
+			call->result = finished ? 1 : 0;
+			break;
+		}
+
+		case _action_obey_call_command_perform:
+			call->result = action_obey_command_perform(
+				actor_index,
+				actor->meta.unit_index,
+				state_data->command_list_index,
+				&state_data->simple_control,
+				&state_data->complex_control) ? 1 : 0;
+			break;
+
+		case _action_obey_call_command_end:
+		{
+			byte next_command_index = (byte)call->a;
+
+			action_obey_command_end(
+				actor_index,
+				actor->meta.unit_index,
+				state_data->command_list_index,
+				&state_data->simple_control,
+				&state_data->complex_control,
+				&next_command_index);
+			call->result = next_command_index;
+			break;
+		}
+
+		case _action_obey_call_command_begin:
+			call->result = action_obey_command_begin(
+				actor_index,
+				actor->meta.unit_index,
+				state_data->command_list_index,
+				&state_data->simple_control,
+				&state_data->complex_control) ? 1 : 0;
+			break;
+
+		case _action_obey_call_at_destination:
+			call->result = actor_path_at_destination(actor_index) ? 1 : 0;
+			break;
+
+		case _action_obey_call_animation_busy:
+			call->result = actor_move_animation_busy(actor_index) ? 1 : 0;
+			break;
+
+		case _action_obey_call_animation_impulse:
+			actor_move_animation_impulse(actor_index, (short)call->a, (real_vector2d *)call->input);
+			break;
+
+		case _action_obey_call_communication:
+			ai_communication_event((short)call->a, actor->meta.unit_index, NONE, NONE, NONE, NONE, NULL);
+			break;
+
+		case _action_obey_call_unit_is_busy:
+			call->result = unit_is_busy(actor->meta.unit_index) ? 1 : 0;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_obey_call_simple(
+	long actor_index,
+	long kind,
+	long a)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	action_obey_call(&call);
+
+	return call.result;
+}
+
+/* port: the actor's own individual perform (action_obey_individual_perform's,
+the commands through action_obey_call) */
+static void action_obey_individual_perform_actor(
+	long actor_index,
+	struct obey_state_data *state_data,
+	boolean *finished_reference)
+{
+	struct ai_command_list_definition *command_list = TAG_BLOCK_GET_ELEMENT(
+		&global_scenario_get()->ai_command_lists,
+		state_data->command_list_index,
+		struct ai_command_list_definition);
+	struct obey_individual_simple_control *simple_control = &state_data->simple_control;
+
+	if (!TEST_FLAG(simple_control->metadata_flags, _obey_metadata_commands_finished_bit))
+	{
+		boolean command_valid = FALSE;
+
+		if (simple_control->current_command_index < command_list->commands.count)
+		{
+			command_valid = TRUE;
+		}
+
+		simple_control->loop_counter = 0;
+		do
+		{
+			byte next_command_index;
+
+			if (command_valid &&
+				!action_obey_call_simple(actor_index, _action_obey_call_command_perform, 0))
+			{
+				break;
+			}
+
+			next_command_index = simple_control->current_command_index == NONE ? 0 : simple_control->current_command_index + 1;
+
+			if (command_valid)
+			{
+				next_command_index = (byte)action_obey_call_simple(actor_index, _action_obey_call_command_end,
+					next_command_index);
+			}
+
+			if (next_command_index >= command_list->commands.count)
+			{
+				SET_FLAG(simple_control->metadata_flags, _obey_metadata_commands_finished_bit, TRUE);
+				break;
+			}
+
+			simple_control->current_command_index = next_command_index;
+			command_valid = (boolean)action_obey_call_simple(actor_index, _action_obey_call_command_begin, 0);
+		}
+		while (!TEST_FLAG(simple_control->metadata_flags, _obey_metadata_action_changed_bit));
+	}
+
+	if (!TEST_FLAG(simple_control->metadata_flags, _obey_metadata_commands_finished_bit))
+	{
+		*finished_reference = FALSE;
+	}
+
+	return;
+}
+
 void action_obey_update(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
 	struct obey_state_data *state_data = &actor->state.action_data.obey;
 
-	action_obey_individuals_iterate(
-		actor_index,
-		FALSE,
-		state_data,
-		action_obey_individual_update,
-		NULL);
+	/* port: a swarm's components through action_obey_call; the actor's own
+	directly (its update asks nothing of the rest of the game) */
+	if (actor->meta.swarm)
+	{
+		action_obey_call_simple(actor_index, _action_obey_call_swarm_update, 0);
+	}
+	else
+	{
+		action_obey_individual_update(
+			actor_index,
+			actor->meta.unit_index,
+			state_data->command_list_index,
+			&state_data->simple_control,
+			&state_data->complex_control,
+			NULL);
+	}
 
 	return;
 }
@@ -1098,12 +1271,16 @@ boolean action_obey_perform(
 	struct obey_state_data *state_data = &actor->state.action_data.obey;
 	boolean finished = TRUE;
 
-	action_obey_individuals_iterate(
-		actor_index,
-		FALSE,
-		state_data,
-		action_obey_individual_perform,
-		&finished);
+	/* port: a swarm's components through action_obey_call; the actor's own
+	commands through it too */
+	if (actor->meta.swarm)
+	{
+		finished = (boolean)action_obey_call_simple(actor_index, _action_obey_call_swarm_perform, 0);
+	}
+	else
+	{
+		action_obey_individual_perform_actor(actor_index, state_data, &finished);
+	}
 
 	if (finished && !state_data->finished)
 	{
@@ -1146,7 +1323,7 @@ void action_obey_control(
 	}
 
 	if (state_data->complex_control.destination_facing &&
-		actor_path_at_destination(actor_index))
+		action_obey_call_simple(actor_index, _action_obey_call_at_destination, 0))
 	{
 		boolean flying = actor->state.flying;
 
@@ -1205,7 +1382,7 @@ flush_order_effects:
 	actor->orders.move.moving_crouch = state_data->complex_control.override_crouch;
 	actor->orders.move.override_movement_type = state_data->complex_control.override_movement_type;
 
-	if (state_data->complex_control.play_action && !actor_move_animation_busy(actor_index))
+	if (state_data->complex_control.play_action && !action_obey_call_simple(actor_index, _action_obey_call_animation_busy, 0))
 	{
 		short animation_impulse = state_data->complex_control.action_animation_impulse;
 
@@ -1216,19 +1393,22 @@ flush_order_effects:
 			alignment_vector.i = actor->control.desired_facing_vector.i;
 			alignment_vector.j = actor->control.desired_facing_vector.j;
 			normalize2d(&alignment_vector);
-			actor_move_animation_impulse(actor_index, animation_impulse, &alignment_vector);
+			{
+				struct halo_sim_ai_call impulse;
+
+				memset(&impulse, 0, sizeof(impulse));
+				impulse.kind = _action_obey_call_animation_impulse;
+				impulse.actor = actor_index;
+				impulse.a = animation_impulse;
+				memcpy(impulse.input, &alignment_vector, sizeof(alignment_vector));
+				action_obey_call(&impulse);
+			}
 		}
 
 		if (state_data->complex_control.action_communication_type != NONE)
 		{
-			ai_communication_event(
-				state_data->complex_control.action_communication_type,
-				actor->meta.unit_index,
-				NONE,
-				NONE,
-				NONE,
-				NONE,
-				NULL);
+			action_obey_call_simple(actor_index, _action_obey_call_communication,
+				state_data->complex_control.action_communication_type);
 		}
 
 		state_data->complex_control.play_action = FALSE;
@@ -1251,7 +1431,7 @@ flush_order_effects:
 		}
 		else if (state_data->simple_control.jump.delay_ticks ||
 			actor->input.in_midair ||
-			unit_is_busy(actor->meta.unit_index))
+			action_obey_call_simple(actor_index, _action_obey_call_unit_is_busy, 0))
 		{
 			aim_set = TRUE;
 		}

@@ -404,6 +404,20 @@ boolean actor_action_test_grenade(
 boolean actor_action_try_to_evade(
 	long actor_index);
 
+static boolean actor_action_find_escape_from_danger(
+	long actor_index,
+	short *escape_direction_reference,
+	real *escape_distance_reference,
+	real_vector2d *alignment_vector_reference,
+	boolean *escape_is_ledge_reference);
+
+boolean actor_action_try_to_dive(
+	long actor_index,
+	short escape_direction,
+	real dive_distance,
+	real_vector2d *alignment_vector,
+	real maximum_ledge_height);
+
 boolean actor_action_try_to_panic(
 	long actor_index,
 	short panic_type,
@@ -1570,6 +1584,71 @@ void actions_port_handler_call(
 		case _actions_port_handler_call_try_to_evade:
 			call->result = actor_action_try_to_evade(actor_index) ? 1 : 0;
 			break;
+
+		case _actions_port_handler_call_animation_busy:
+			call->result = actor_move_animation_busy(actor_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_has_path:
+			call->result = actor_path_has_path(actor_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_discard_firing_position:
+			actor_discard_firing_position(actor_index, (short)call->a, TRUE);
+			break;
+
+		case _actions_port_handler_call_find_escape:
+		{
+			short escape_direction;
+			real escape_distance;
+			real_vector2d alignment_vector;
+			boolean escape_is_ledge;
+
+			call->result = actor_action_find_escape_from_danger(
+				actor_index,
+				&escape_direction,
+				&escape_distance,
+				&alignment_vector,
+				&escape_is_ledge) ? 1 : 0;
+			call->output[0] = (real)escape_direction;
+			call->output[1] = escape_distance;
+			call->output[2] = alignment_vector.i;
+			call->output[3] = alignment_vector.j;
+			call->output[4] = (real)(escape_is_ledge != FALSE);
+			break;
+		}
+
+		case _actions_port_handler_call_try_to_dive:
+		{
+			real_vector2d alignment_vector;
+
+			alignment_vector.i = call->input[1];
+			alignment_vector.j = call->input[2];
+			call->result = actor_action_try_to_dive(
+				actor_index,
+				(short)call->a,
+				call->input[0],
+				&alignment_vector,
+				call->input[3]) ? 1 : 0;
+			break;
+		}
+
+		case _actions_port_handler_call_at_destination:
+			call->result = actor_path_at_destination(actor_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_avoid:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_avoid_setup(actor_index, &state.avoid))
+			{
+				actor_action_change(actor_index, _actor_action_avoid, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -4896,7 +4975,7 @@ boolean actor_action_handle_danger_avoidance(
 		}
 	}
 
-	if (actor_move_animation_busy(actor_index))
+	if (actions_port_handler_simple(actor_index, _actions_port_handler_call_animation_busy, 0))
 	{
 		debug_info->danger_decision = _danger_avoidance_animation_busy;
 		goto try_avoid_action;
@@ -4930,7 +5009,7 @@ boolean actor_action_handle_danger_avoidance(
 			(actor->danger_zone.danger_radius + 3.5f) *
 			(actor->danger_zone.danger_radius + 3.5f);
 
-		if (actor_path_has_path(actor_index))
+		if (actions_port_handler_simple(actor_index, _actions_port_handler_call_has_path, 0))
 		{
 			real destination_line_distance_squared =
 				point_to_line_distance_squared3d(
@@ -4981,10 +5060,10 @@ boolean actor_action_handle_danger_avoidance(
 
 			if (firing_position_index != NONE)
 			{
-				actor_discard_firing_position(
+				actions_port_handler_simple(
 					actor_index,
-					firing_position_index,
-					TRUE);
+					_actions_port_handler_call_discard_firing_position,
+					firing_position_index);
 				debug_info->danger_abandoned_path = TRUE;
 			}
 		}
@@ -5048,14 +5127,10 @@ boolean actor_action_handle_danger_avoidance(
 				if (actor->danger_zone.danger_type ==
 					_actor_danger_zone_projectile)
 				{
-					ai_communication_event(
-						_ai_communication_grenade_danger,
-						actor->meta.unit_index,
-						NONE,
-						hostility,
-						NONE,
-						NONE,
-						NULL);
+					real hostility_input = (real)hostility;
+
+					actions_port_handler(actor_index, _actions_port_handler_call_communication,
+						_ai_communication_grenade_danger, NONE, &hostility_input, 1, NULL);
 				}
 
 				actor->danger_zone.communicated = TRUE;
@@ -5066,12 +5141,17 @@ boolean actor_action_handle_danger_avoidance(
 				boolean escape_found;
 				boolean escape_is_ledge;
 
-				escape_found = actor_action_find_escape_from_danger(
-					actor_index,
-					&escape_direction,
-					&escape_distance,
-					&alignment_vector,
-					&escape_is_ledge);
+				{
+					real escape[6];
+
+					escape_found = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_find_escape,
+						0, 0, NULL, 0, escape);
+					escape_direction = (short)escape[0];
+					escape_distance = escape[1];
+					alignment_vector.i = escape[2];
+					alignment_vector.j = escape[3];
+					escape_is_ledge = escape[4] != 0.0f;
+				}
 
 				if (escape_direction == NONE)
 				{
@@ -5137,12 +5217,14 @@ boolean actor_action_handle_danger_avoidance(
 								_actor_definition_dive_off_ledges_bit) ?
 								8.0f : 0.0f;
 
-						result = actor_action_try_to_dive(
-							actor_index,
-							escape_direction,
-							escape_distance,
-							&alignment_vector,
-							ledge_avoidance_distance);
+						real dive[4];
+
+						dive[0] = escape_distance;
+						dive[1] = alignment_vector.i;
+						dive[2] = alignment_vector.j;
+						dive[3] = ledge_avoidance_distance;
+						result = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_try_to_dive,
+							escape_direction, 0, dive, 4, NULL);
 					}
 					else
 					{
@@ -5167,18 +5249,16 @@ boolean actor_action_handle_danger_avoidance(
 
 try_avoid_action:
 	if (!result && within_escape_radius &&
-		(actor_path_at_destination(actor_index) ||
+		(actions_port_handler_simple(actor_index, _actions_port_handler_call_at_destination, 0) ||
 			!actor->control.moving || path_re_enters_danger) &&
 		!actor->emotions.forced_to_charge)
 	{
-		struct action_state_data action_data;
 		short action_class = actor_action_class(actor_index);
 
 		if ((action_class == _action_class_passive ||
 				action_class == _action_class_pursuit) &&
-			action_avoid_setup(actor_index, &action_data.avoid))
+			actions_port_handler_simple(actor_index, _actions_port_handler_call_avoid, 0))
 		{
-			actor_action_change(actor_index, _actor_action_avoid, &action_data);
 			result = TRUE;
 		}
 	}

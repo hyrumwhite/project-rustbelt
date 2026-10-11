@@ -883,7 +883,7 @@ enum
 /* the head of an actor's debug info the AI step checks save and compare
 (the firing decision, the burst's tracking and alignment; the rest, its
 histories, is 0x657C bytes in all) */
-#define HALO_SIM_ACTOR_DEBUG_HEAD_SIZE 0x160
+#define HALO_SIM_ACTOR_DEBUG_HEAD_SIZE 0x1A0
 
 /* crates/halo_map's AiCall: what an actor's step asks of the game */
 struct halo_sim_ai_call
@@ -1261,6 +1261,13 @@ enum
 	_actions_port_handler_call_exit_seat,
 	_actions_port_handler_call_consider_grenade,
 	_actions_port_handler_call_try_to_evade,
+	_actions_port_handler_call_animation_busy,
+	_actions_port_handler_call_has_path,
+	_actions_port_handler_call_discard_firing_position,
+	_actions_port_handler_call_find_escape,
+	_actions_port_handler_call_try_to_dive,
+	_actions_port_handler_call_at_destination,
+	_actions_port_handler_call_avoid,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

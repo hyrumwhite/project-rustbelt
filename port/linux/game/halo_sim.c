@@ -62,7 +62,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 21
+#define HALO_SIM_VERSION 22
 
 /* ---------- structures */
 
@@ -1148,6 +1148,30 @@ struct halo_sim_objects_callbacks
 	long (*call)(struct halo_sim_objects_call *call);
 };
 
+/* crates/halo_map's ObjectFunctionsState, crates/halo_sim's
+ObjectFunctionsCallC */
+struct halo_sim_object_functions_state
+{
+	unsigned long object_index;
+	unsigned long definition_index;
+	unsigned char functions_active_flags;
+	unsigned char pad[3];
+	real incoming_function_values[4];
+	real outgoing_function_values[4];
+	real_rgb_color outgoing_change_colors[4];
+};
+
+typedef char halo_sim_object_functions_state_size_assert[sizeof(struct halo_sim_object_functions_state) == 92 ? 1 : -1];
+
+struct halo_sim_object_functions_call
+{
+	struct halo_sim_object_functions_state state;
+	unsigned long part;
+	long game_time;
+	unsigned char const *periodic_tables[12];
+	unsigned char const *transition_tables[6];
+};
+
 struct halo_sim_damage_callbacks
 {
 	long (*object)(unsigned long index, struct halo_sim_object_damage_state *out);
@@ -1408,6 +1432,7 @@ typedef long (*halo_sim_device_function)(struct halo_sim_device_call_c *call);
 typedef long (*halo_sim_item_function)(struct halo_sim_item_call_c *call);
 typedef long (*halo_sim_weapon_function)(struct halo_sim_weapon_call *call);
 typedef long (*halo_sim_objects_function)(struct halo_sim_objects_update_call *call);
+typedef long (*halo_sim_object_functions_function)(struct halo_sim_object_functions_call *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -1470,6 +1495,7 @@ static struct
 	halo_sim_objects_function objects_update_check;
 	halo_sim_garbage_function garbage_update;
 	halo_sim_scenery_function scenery_update;
+	halo_sim_object_functions_function object_functions;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1506,6 +1532,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"items",
 	"weapons",
 	"objects",
+	"object_functions",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -1692,6 +1719,18 @@ static struct
 	unsigned long garbage_compared[2];
 	unsigned long scenery_compared[2];
 } halo_sim_objects_checks;
+
+/* the function values' and change colours' checks: what the game's began
+with, and the comparisons */
+static struct
+{
+	boolean recording;
+	long object_index;
+	struct halo_sim_object_functions_call call;
+	unsigned long compared[2];
+	unsigned long differed[2];
+	unsigned long active[2];
+} halo_sim_object_functions_checks;
 
 /* the unit update checks: the update the game's began with, its calls of
 the rest of the game, and the comparisons */
@@ -3546,6 +3585,7 @@ static void halo_sim_initialize(void)
 	halo_sim.objects_update_check = (halo_sim_objects_function)halo_sim_symbol(library, "halo_sim_objects_update_check");
 	halo_sim.garbage_update = (halo_sim_garbage_function)halo_sim_symbol(library, "halo_sim_garbage_update");
 	halo_sim.scenery_update = (halo_sim_scenery_function)halo_sim_symbol(library, "halo_sim_scenery_update");
+	halo_sim.object_functions = (halo_sim_object_functions_function)halo_sim_symbol(library, "halo_sim_object_functions");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -3563,7 +3603,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.device_update || !halo_sim.device_update_check ||
 		!halo_sim.item_update || !halo_sim.item_update_check ||
 		!halo_sim.weapon_update || !halo_sim.weapon_update_check ||
-		!halo_sim.objects_update || !halo_sim.objects_update_check || !halo_sim.garbage_update || !halo_sim.scenery_update)
+		!halo_sim.objects_update || !halo_sim.objects_update_check || !halo_sim.garbage_update || !halo_sim.scenery_update ||
+		!halo_sim.object_functions)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -6937,4 +6978,111 @@ void halo_sim_scenery_animation_check(long scenery_index)
 		platform_log("halo_sim: scenery update differs: scenery %lx animation game %d/%d rust %d/%d; seed game %lx rust %lx",
 			(unsigned long)scenery_index, game.animation_index, game.animation_frame_index, rust.animation_index,
 			rust.animation_frame_index, game.random_seed, rust.random_seed);
+}
+
+/* ---------- function values and change colours */
+
+unsigned char const *transition_function_table_get(short function_type); /* periodic_functions.c */
+
+static void halo_sim_object_functions_load(long object_index, struct halo_sim_object_functions_state *state)
+{
+	struct object_datum *object = object_get(object_index);
+
+	memset(state, 0, sizeof(*state));
+	state->object_index = (unsigned long)object_index;
+	state->definition_index = (unsigned long)object->definition_index;
+	state->functions_active_flags = object->object.functions_active_flags;
+	memcpy(state->incoming_function_values, object->object.incoming_function_values, sizeof(state->incoming_function_values));
+	memcpy(state->outgoing_function_values, object->object.outgoing_function_values, sizeof(state->outgoing_function_values));
+	memcpy(state->outgoing_change_colors, object->object.outgoing_change_colors, sizeof(state->outgoing_change_colors));
+}
+
+static void halo_sim_object_functions_call_new(long object_index, int part, struct halo_sim_object_functions_call *call)
+{
+	short function_type;
+
+	memset(call, 0, sizeof(*call));
+	halo_sim_object_functions_load(object_index, &call->state);
+	call->part = (unsigned long)part;
+	call->game_time = game_time_get();
+	for (function_type = 0; function_type < 12; function_type++)
+		call->periodic_tables[function_type] = periodic_function_table_get(function_type);
+	for (function_type = 0; function_type < 6; function_type++)
+		call->transition_tables[function_type] = transition_function_table_get(function_type);
+}
+
+int halo_sim_object_functions(long object_index, int part)
+{
+	short mode = halo_sim_mode(_halo_sim_object_functions);
+	struct halo_sim_object_functions_call call;
+	struct object_datum *object;
+
+	halo_sim_object_functions_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_object_functions_call_new(object_index, part, &halo_sim_object_functions_checks.call);
+		halo_sim_object_functions_checks.object_index = object_index;
+		halo_sim_object_functions_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_object_functions_call_new(object_index, part, &call);
+	if (halo_sim.object_functions(&call) != 0)
+		return FALSE;
+	object = object_get(object_index);
+	object->object.functions_active_flags = call.state.functions_active_flags;
+	memcpy(object->object.outgoing_function_values, call.state.outgoing_function_values, sizeof(call.state.outgoing_function_values));
+	memcpy(object->object.outgoing_change_colors, call.state.outgoing_change_colors, sizeof(call.state.outgoing_change_colors));
+
+	return TRUE;
+}
+
+void halo_sim_object_functions_check(long object_index, int part)
+{
+	struct halo_sim_object_functions_call call;
+	struct halo_sim_object_functions_state game;
+
+	if (!halo_sim_object_functions_checks.recording || halo_sim_object_functions_checks.object_index != object_index)
+		return;
+	halo_sim_object_functions_checks.recording = FALSE;
+	call = halo_sim_object_functions_checks.call;
+	if (halo_sim.object_functions(&call) != 0)
+		return;
+	halo_sim_object_functions_load(object_index, &game);
+	part = part ? 1 : 0;
+	halo_sim_object_functions_checks.compared[part]++;
+	if (memcmp(&halo_sim_object_functions_checks.call.state, &game, sizeof(game)) != 0)
+		halo_sim_object_functions_checks.active[part]++;
+	if (memcmp(&call.state, &game, sizeof(game)) != 0)
+	{
+		halo_sim_object_functions_checks.differed[part]++;
+		if (halo_sim_object_functions_checks.differed[0] + halo_sim_object_functions_checks.differed[1] <= 8)
+		{
+			platform_log("halo_sim: %s differ: object %lx definition %lx; outgoing game %f %f %f %f rust %f %f %f %f; active game %x rust %x; colour a game %f %f %f rust %f %f %f",
+				part ? "change colours" : "function values", (unsigned long)object_index, game.definition_index,
+				(double)game.outgoing_function_values[0], (double)game.outgoing_function_values[1],
+				(double)game.outgoing_function_values[2], (double)game.outgoing_function_values[3],
+				(double)call.state.outgoing_function_values[0], (double)call.state.outgoing_function_values[1],
+				(double)call.state.outgoing_function_values[2], (double)call.state.outgoing_function_values[3],
+				game.functions_active_flags, call.state.functions_active_flags,
+				(double)game.outgoing_change_colors[0].red, (double)game.outgoing_change_colors[0].green,
+				(double)game.outgoing_change_colors[0].blue, (double)call.state.outgoing_change_colors[0].red,
+				(double)call.state.outgoing_change_colors[0].green, (double)call.state.outgoing_change_colors[0].blue);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_object_functions_checks.compared[0] + halo_sim_object_functions_checks.compared[1];
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: object functions: %lu of %lu function values and %lu of %lu change colours agree with the game (%lu and %lu changing)",
+				halo_sim_object_functions_checks.compared[0] - halo_sim_object_functions_checks.differed[0],
+				halo_sim_object_functions_checks.compared[0],
+				halo_sim_object_functions_checks.compared[1] - halo_sim_object_functions_checks.differed[1],
+				halo_sim_object_functions_checks.compared[1], halo_sim_object_functions_checks.active[0],
+				halo_sim_object_functions_checks.active[1]);
+		}
+	}
 }

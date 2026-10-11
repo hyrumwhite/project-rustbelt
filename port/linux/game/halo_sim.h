@@ -34,6 +34,7 @@ enum
 	_halo_sim_items,
 	_halo_sim_weapons,
 	_halo_sim_objects,
+	_halo_sim_object_functions,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -532,5 +533,12 @@ int halo_sim_garbage_lifetime(short *lifetime_ticks, unsigned char *active);
 void halo_sim_garbage_lifetime_check(short lifetime_ticks, unsigned char active);
 int halo_sim_scenery_animation(long scenery_index);
 void halo_sim_scenery_animation_check(long scenery_index);
+
+/* objects.c's object_compute_function_values (part 0) and
+object_compute_change_colors (part 1): TRUE when the Rust port computed
+them; in check mode it notes the values the game's begins with, and
+halo_sim_object_functions_check compares Rust's from them with the game's */
+int halo_sim_object_functions(long object_index, int part);
+void halo_sim_object_functions_check(long object_index, int part);
 
 #endif // __HALO_SIM_H

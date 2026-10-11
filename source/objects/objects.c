@@ -181,6 +181,8 @@ static void object_delete_attachments(long object_index);
 static void object_delete_recursive(long object_index, boolean delete_siblings);
 static void object_compute_function_values(long object_index);
 static void object_compute_change_colors(long object_index);
+static void object_compute_function_values_game(long object_index);
+static void object_compute_change_colors_game(long object_index);
 static void objects_update_step(long kind, long object_index, long a, long b);
 static struct halo_sim_objects_call objects_update_header(short index);
 static struct halo_sim_objects_call objects_update_read(long object_index);
@@ -5361,7 +5363,7 @@ static void object_delete_recursive(
 	return;
 }
 
-static void object_compute_function_values(
+static void object_compute_function_values_game(
 	long object_index)
 {
 	short function_index;
@@ -5498,7 +5500,7 @@ static void object_compute_function_values(
 	return;
 }
 
-static void object_compute_change_colors(
+static void object_compute_change_colors_game(
 	long object_index)
 {
 	struct object_datum *object = object_get(object_index);
@@ -5556,4 +5558,25 @@ static void object_compute_change_colors(
 	}
 
 	return;
+}
+
+/* ---------- port: function values' and change colours' Rust port
+(halo_sim.c) */
+
+static void object_compute_function_values(
+	long object_index)
+{
+	if (halo_sim_object_functions(object_index, 0))
+		return;
+	object_compute_function_values_game(object_index);
+	halo_sim_object_functions_check(object_index, 0);
+}
+
+static void object_compute_change_colors(
+	long object_index)
+{
+	if (halo_sim_object_functions(object_index, 1))
+		return;
+	object_compute_change_colors_game(object_index);
+	halo_sim_object_functions_check(object_index, 1);
 }

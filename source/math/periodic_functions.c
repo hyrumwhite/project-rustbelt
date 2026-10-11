@@ -234,6 +234,16 @@ unsigned char const *periodic_function_table_get(
 	return periodic_function_tables[function_type];
 }
 
+/* port: a transition function's table (1024 bytes), NULL before the tables
+are built (for the Rust port, port/linux/game/halo_sim.c) */
+unsigned char const *transition_function_table_get(
+	short function_type)
+{
+	if (!function_tables_initialized || !VALID_INDEX(function_type, NUMBER_OF_TRANSITION_FUNCTIONS))
+		return NULL;
+	return transition_function_tables[function_type];
+}
+
 real periodic_function_evaluate(
 	short function_type,
 	real time)

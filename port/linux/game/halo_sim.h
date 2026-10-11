@@ -1257,6 +1257,10 @@ enum
 	_actions_port_handler_call_wait,
 	_actions_port_handler_call_guard_postcombat,
 	_actions_port_handler_call_guard_find_position,
+	_actions_port_handler_call_allow_cover_seeking,
+	_actions_port_handler_call_exit_seat,
+	_actions_port_handler_call_consider_grenade,
+	_actions_port_handler_call_try_to_evade,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

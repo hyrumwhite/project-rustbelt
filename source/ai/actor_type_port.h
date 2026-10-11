@@ -14,17 +14,11 @@ actor_type_*.c after its headers
 
 #define actor_action_handle_vehicle_entry(actor_index) \
 	((boolean)actor_type_port_handle(_actor_type_call_vehicle_entry, (actor_index), 0, 0, 0))
-#define actor_action_handle_vehicle_exit(actor_index) \
-	((boolean)actor_type_port_handle(_actor_type_call_vehicle_exit, (actor_index), 0, 0, 0))
 #define actor_action_handle_grenade_throwing(actor_index) \
 	((boolean)actor_type_port_handle(_actor_type_call_grenade_throwing, (actor_index), 0, 0, 0))
 #define actor_action_handle_danger_avoidance(actor_index) \
 	((boolean)actor_type_port_handle(_actor_type_call_danger_avoidance, (actor_index), 0, 0, 0))
-#define actor_action_handle_evasion(actor_index) \
-	((boolean)actor_type_port_handle(_actor_type_call_evasion, (actor_index), 0, 0, 0))
 #define actor_action_consider_grenade(actor_index) \
 	((boolean)actor_type_port_handle(_actor_type_call_consider_grenade, (actor_index), 0, 0, 0))
-#define actor_action_handle_active_cover_seeking(actor_index, a, b) \
-	((boolean)actor_type_port_handle(_actor_type_call_active_cover_seeking, (actor_index), (long)(a), (long)(b), 0))
 
 #endif

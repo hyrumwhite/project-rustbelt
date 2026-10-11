@@ -401,6 +401,9 @@ boolean actor_action_allow_cover_seeking(
 boolean actor_action_test_grenade(
 	long actor_index);
 
+boolean actor_action_try_to_evade(
+	long actor_index);
+
 boolean actor_action_try_to_panic(
 	long actor_index,
 	short panic_type,
@@ -1551,6 +1554,22 @@ void actions_port_handler_call(
 			actor_action_change(actor_index, _actor_action_guard, &state);
 			break;
 		}
+
+		case _actions_port_handler_call_allow_cover_seeking:
+			call->result = actor_action_allow_cover_seeking(actor_index, (boolean)call->a) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_exit_seat:
+			call->result = unit_try_and_exit_seat(actor->meta.unit_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_consider_grenade:
+			call->result = actor_action_consider_grenade(actor_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_try_to_evade:
+			call->result = actor_action_try_to_evade(actor_index) ? 1 : 0;
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -1588,6 +1607,28 @@ static long actions_port_handler_simple(
 	long a)
 {
 	return actions_port_handler(actor_index, kind, a, 0, NULL, 0, NULL);
+}
+
+static boolean actions_port_handler_try_to_panic(
+	long actor_index,
+	short panic_type,
+	long panic_prop_index,
+	boolean force)
+{
+	real force_input = (real)force;
+
+	return (boolean)actions_port_handler(actor_index, _actions_port_handler_call_try_to_panic,
+		panic_type, panic_prop_index, &force_input, 1, NULL);
+}
+
+static real actions_port_handler_random(
+	long actor_index)
+{
+	real output[6];
+
+	actions_port_handler(actor_index, _actions_port_handler_call_random, 0, 0, NULL, 0, output);
+
+	return output[0];
 }
 
 /* port: the handlers below ask through actions_port_handler_call, as the
@@ -2342,13 +2383,11 @@ boolean actor_action_handle_active_cover_seeking(
 						debug_info->field_BA = 3;
 						actor->emotions.last_active_cover_seeking_time = current_time;
 
-						if (actor_action_allow_cover_seeking(actor_index, FALSE))
+						if (actions_port_handler_simple(actor_index, _actions_port_handler_call_allow_cover_seeking, FALSE))
 						{
 							debug_info->field_BA = 5;
-							if (actor_action_try_to_seek_cover(
-								actor_index,
-								TRUE,
-								FALSE))
+							if (actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
+								TRUE, FALSE, NULL, 0, NULL))
 							{
 								debug_info->field_BA = 6;
 								result = TRUE;
@@ -2356,7 +2395,7 @@ boolean actor_action_handle_active_cover_seeking(
 							}
 
 							if (allow_defensive_cover &&
-								actor_action_try_to_panic(
+								actions_port_handler_try_to_panic(
 									actor_index,
 									4,
 									actor->target.target_prop_index,
@@ -4590,7 +4629,7 @@ boolean actor_action_handle_vehicle_exit(
 		{
 			actor->emotions.last_vehicle_exit_forced = forced_exit;
 
-			if (unit_try_and_exit_seat(actor->meta.unit_index))
+			if (actions_port_handler_simple(actor_index, _actions_port_handler_call_exit_seat, 0))
 			{
 				actor->emotions.vehicle_ignore_index = actor->input.vehicle_index;
 				actor->emotions.vehicle_ignore_time = game_time_get() + 180;
@@ -4637,19 +4676,17 @@ boolean actor_action_handle_evasion(
 		{
 			actor->emotions.last_defensive_cover_seeking_time = current_time;
 
-			if (actor_action_allow_cover_seeking(actor_index, TRUE))
+			if (actions_port_handler_simple(actor_index, _actions_port_handler_call_allow_cover_seeking, TRUE))
 			{
-				if (actor_action_try_to_seek_cover(
-					actor_index,
-					FALSE,
-					TRUE))
+				if (actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
+					FALSE, TRUE, NULL, 0, NULL))
 				{
 					result = TRUE;
 				}
 				else if (TEST_FLAG(
 						definition->flags,
 						_actor_definition_panicked_by_unopposable_enemy_bit) &&
-					actor_action_try_to_panic(
+					actions_port_handler_try_to_panic(
 						actor_index,
 						_actor_panic_unopposable_enemy,
 						actor->emotions.unopposable_retreat_prop_index,
@@ -4684,11 +4721,11 @@ boolean actor_action_handle_evasion(
 		if (actor->emotions.perceived_danger > dive_threshold)
 		{
 			if (!actor->control.moving)
-				real_seed_random(get_global_random_seed_address());
+				actions_port_handler_random(actor_index);
 
 			if (variant_definition->grenade_combat.stimulus_type ==
 					_actor_grenade_stimulus_seek_cover &&
-				actor_action_consider_grenade(actor_index))
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_consider_grenade, 0))
 			{
 				actor->emotions.perceived_danger = 0.0f;
 				result = TRUE;
@@ -4733,19 +4770,18 @@ boolean actor_action_handle_evasion(
 			{
 				actor->emotions.last_defensive_cover_seeking_time = current_time;
 
-				if (actor_action_allow_cover_seeking(actor_index, FALSE) &&
-					real_seed_random(get_global_random_seed_address()) <
+				if (actions_port_handler_simple(actor_index, _actions_port_handler_call_allow_cover_seeking, FALSE) &&
+					actions_port_handler_random(actor_index) <
 						definition->defensive.evasion_seek_cover_chance &&
-					actor_action_try_to_seek_cover(actor_index, FALSE, TRUE))
+					actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
+						FALSE, TRUE, NULL, 0, NULL))
 				{
-					ai_communication_event(
-						_ai_communication_cover,
-						actor->meta.unit_index,
-						actor_target_unit_index(actor_index),
-						NONE,
-						NONE,
-						NONE,
-						NULL);
+					long target_unit_index = actions_port_handler_simple(actor_index,
+						_actions_port_handler_call_target_unit, 0);
+					real weapon_state = (real)NONE;
+
+					actions_port_handler(actor_index, _actions_port_handler_call_communication,
+						_ai_communication_cover, target_unit_index, &weapon_state, 1, NULL);
 					actor->emotions.perceived_danger = 0.0f;
 					result = TRUE;
 				}
@@ -4754,7 +4790,7 @@ boolean actor_action_handle_evasion(
 			if (!result &&
 				not_fleeing &&
 				!actor->emotions.evasion_delay_timer &&
-				actor_action_try_to_evade(actor_index))
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_try_to_evade, 0))
 			{
 				actor->emotions.perceived_danger = 0.0f;
 				actor->emotions.evasion_delay_timer =

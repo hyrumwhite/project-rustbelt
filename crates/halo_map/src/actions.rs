@@ -2478,6 +2478,45 @@ pub mod obey_call {
     pub const BIPED_RELEASE: i32 = BASE | 16;
     /// `actor_look_secondary_stop(actor)`.
     pub const LOOK_SECONDARY_STOP: i32 = BASE | 17;
+    /// `actor_move_to_point` to the command's destination, the result.
+    pub const MOVE_TO_DESTINATION: i32 = BASE | 18;
+    /// `actor_move_keep_moving_past_destination(actor)`.
+    pub const KEEP_MOVING: i32 = BASE | 19;
+    /// `random_range(a, b)`, the result.
+    pub const RANDOM_RANGE_SHORT: i32 = BASE | 20;
+    /// `real_random_range(input[0], input[1])`, in `output[0]`.
+    pub const RANDOM_RANGE: i32 = BASE | 21;
+    /// The unit of the player nearest the actor's head, the result.
+    pub const NEAREST_PLAYER_UNIT: i32 = BASE | 22;
+    /// The unit named by the scenario's object name `a` (or NONE), the result.
+    pub const OBJECT_UNIT: i32 = BASE | 23;
+    /// `prop_get_active_by_unit_index(actor, a)`, the result.
+    pub const ACTIVE_PROP: i32 = BASE | 24;
+    /// `unit_get_head_position(a)`, in `output`.
+    pub const HEAD_POSITION: i32 = BASE | 25;
+    /// `actor_look_secondary(actor, scripted, a >> 8, direction)`: the
+    /// direction's type `a & 0xFF`, its prop `b` or its point in `input`.
+    pub const LOOK_SECONDARY: i32 = BASE | 26;
+    /// `unit_add_grenade_type_to_inventory(unit, a, 1)`.
+    pub const ADD_GRENADE: i32 = BASE | 27;
+    /// The vehicle atom: the nearest vehicles tried (by the command's range
+    /// and seat): whether one was entered, the result.
+    pub const ENTER_VEHICLE: i32 = BASE | 28;
+    /// The animation reference `a` started (`b` the modifier), with the
+    /// biped's movement flags: the result.
+    pub const ANIMATE: i32 = BASE | 29;
+    /// The recording reference `a` played, the result.
+    pub const PLAY_RECORDING: i32 = BASE | 30;
+    /// The script reference `a` woken, the result.
+    pub const WAKE_SCRIPT: i32 = BASE | 31;
+    /// The unit dies (silently with the modifier `a`).
+    pub const DIE: i32 = BASE | 32;
+    /// The scripted vocalization `a` spoken, the result.
+    pub const VOCALIZE: i32 = BASE | 33;
+    /// The unit teleported to the point `a`, facing the point `b`: the result.
+    pub const TELEPORT: i32 = BASE | 34;
+    /// The command's begin, `a` its result (a debug message).
+    pub const DEBUG_COMMAND: i32 = BASE | 35;
 }
 
 const OBEY_METADATA_TARGETING_BIT: u8 = 0;
@@ -2635,7 +2674,7 @@ fn obey_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                     break;
                 }
                 m.w8(current, next_command_index);
-                command_valid = call_simple(context, host, obey_call::COMMAND_BEGIN, 0) != 0;
+                command_valid = obey_command_begin(context, host);
                 if test_bit(m, metadata, OBEY_METADATA_ACTION_CHANGED_BIT) {
                     break;
                 }
@@ -3027,4 +3066,345 @@ fn obey_command_end(context: &AiStepContext, host: &impl AiHost, mut next_comman
         _ => {}
     }
     next_command_index
+}
+
+/// `action_obey_command_begin` of the actor's own unit: whether the command
+/// began.
+fn obey_command_begin(context: &AiStepContext, host: &impl AiHost) -> bool {
+    use crate::ai_actor::{PropIterator, tag_block_count, tag_block_element};
+    use crate::layout::{
+        ai_command_definition as command, ai_command_list_definition as list, ai_command_point_definition as point,
+        obey_individual_complex_control as cc, obey_individual_directmovement_control as dm,
+        obey_individual_jump_control as jump, obey_individual_simple_control as sc,
+    };
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let control = ObeyControl::of(context);
+    let command_list = obey_command_list(m, context);
+    let Some(definition) = obey_current_command(m, context, &control) else {
+        return false;
+    };
+    let points = command_list + list::POINTS as u32;
+    let point_count = tag_block_count(m, points);
+    let valid_point = |index: i16| index >= 0 && (index as i32) < point_count;
+    let point_position = |index: i16| tag_block_element(m, points, index as i32, point::SIZEOF) + point::POSITION as u32;
+    let copy = |to: u32, from: u32| {
+        for word in 0..3 {
+            m.w32(to + word * 4, m.r32(from + word * 4));
+        }
+    };
+    let field16 = |offset: usize| m.i16(definition + offset as u32);
+    let field = |offset: usize| m.f32(definition + offset as u32);
+    let atom_type = field16(command::ATOM_TYPE);
+    let modifier = field16(command::ATOM_MODIFIER);
+    let parameter1 = field(command::PARAMETER1);
+    let parameter2 = field(command::PARAMETER2);
+    let point1 = field16(command::POINT1_INDEX);
+    let point2 = field16(command::POINT2_INDEX);
+    let pause_timer = control.simple(sc::PAUSE_TIMER);
+    let flags = control.simple(sc::SIMPLE_CONTROL_FLAGS);
+    let metadata = control.simple(sc::METADATA_FLAGS);
+    let directmovement = control.simple(sc::DIRECTMOVEMENT);
+    let jump_control = control.simple(sc::JUMP);
+    let set_flag = |address: u32, bit: u8, value: bool| if value { set_bit(m, address, bit) } else { clear_bit(m, address, bit) };
+
+    let result = match atom_type {
+        atom::PAUSE => {
+            m.set_i16(pause_timer, c_short(parameter1 * 30.0));
+            true
+        }
+        atom::GO_TO | atom::GO_TO_AND_FACE => {
+            let mut result = false;
+            if valid_point(point1) {
+                let destination = tag_block_element(m, points, point1 as i32, point::SIZEOF);
+                m.set_i16(pause_timer, 0);
+                m.set_bool(control.complex(cc::DESTINATION_VALID), true);
+                let keep_moving = modifier == 1;
+                m.set_bool(control.complex(cc::DESTINATION_KEEP_MOVING), keep_moving);
+                copy(control.complex(cc::DESTINATION_POINT), destination + point::POSITION as u32);
+                m.w32(control.complex(cc::DESTINATION_SURFACE_INDEX), m.r32(destination + point::SURFACE_INDEX as u32));
+                result = call_simple(context, host, obey_call::MOVE_TO_DESTINATION, 0) != 0;
+                if result {
+                    if keep_moving {
+                        call_simple(context, host, obey_call::KEEP_MOVING, 0);
+                    }
+                    if atom_type == atom::GO_TO_AND_FACE && valid_point(point2) {
+                        m.set_bool(control.complex(cc::DESTINATION_FACING), true);
+                        copy(control.complex(cc::DESTINATION_FACING_POINT), point_position(point2));
+                    }
+                }
+            }
+            result
+        }
+        atom::LOOK | atom::LOOK_RANDOM | atom::LOOK_PLAYER | atom::LOOK_OBJECT => {
+            let mut look_point_index = NONE as i16;
+            let mut look_prop_index = NONE;
+            let mut look_unit_index = NONE;
+            let mut look_duration = parameter1;
+            if atom_type == atom::LOOK {
+                if valid_point(point1) {
+                    look_point_index = point1;
+                    look_duration = parameter1;
+                }
+            } else if atom_type == atom::LOOK_RANDOM {
+                if valid_point(point1) && valid_point(point2) {
+                    look_point_index =
+                        call_full(context, host, obey_call::RANDOM_RANGE_SHORT, point1 as i32, point2 as i32 + 1, &[]).result as i16;
+                    let (lower, upper) = if parameter1 == 0.0 && parameter2 == 0.0 {
+                        let idle = context.definition + d::LOOKING_IDLE_LOOK_NONCOMBAT as u32;
+                        (
+                            m.f32(idle + crate::layout::actor_idle_looking::IDLE_LOOK_TIME_LOWER_BOUND as u32),
+                            m.f32(idle + crate::layout::actor_idle_looking::IDLE_LOOK_TIME_UPPER_BOUND as u32),
+                        )
+                    } else {
+                        (parameter1, parameter2)
+                    };
+                    look_duration = call_full(context, host, obey_call::RANDOM_RANGE, 0, 0, &[lower, upper]).output[0];
+                }
+            } else if atom_type == atom::LOOK_PLAYER {
+                let mut closest = f32::MAX;
+                let mut iterator = PropIterator::new(m, context);
+                while let Some(prop) = iterator.next(m, context) {
+                    let state = m.i16(prop + p::STATE as u32);
+                    let distance = m.f32(prop + p::DISTANCE as u32);
+                    if state >= v::_PROP_STATE_BECOMING_UNACKNOWLEDGED as i16
+                        && state <= v::_PROP_STATE_ACKNOWLEDGED as i16
+                        && m.bool(prop + p::PLAYER as u32)
+                        && distance < closest
+                    {
+                        look_prop_index = iterator.index;
+                        closest = distance;
+                    }
+                }
+                if look_prop_index == NONE {
+                    look_unit_index = call_simple(context, host, obey_call::NEAREST_PLAYER_UNIT, 0);
+                }
+            } else {
+                let unit_index = call_simple(context, host, obey_call::OBJECT_UNIT, field16(command::OBJECT_NAME_INDEX) as i32);
+                if unit_index != NONE {
+                    look_prop_index = call_simple(context, host, obey_call::ACTIVE_PROP, unit_index);
+                    look_unit_index = unit_index;
+                }
+            }
+
+            if look_duration > 0.0 && (look_prop_index != NONE || look_unit_index != NONE || valid_point(look_point_index)) {
+                let priority: i32 = match modifier {
+                    1 => 5,
+                    2 => 2,
+                    4 => 7,
+                    3 => 8,
+                    _ => 1,
+                };
+                let (direction_type, prop, look_point) = if look_prop_index != NONE {
+                    (v::_DIRECTION_SPECIFICATION_PROP as i32, look_prop_index, [0.0; 3])
+                } else if look_unit_index != NONE {
+                    let head = call_full(context, host, obey_call::HEAD_POSITION, look_unit_index, 0, &[]).vector();
+                    (v::_DIRECTION_SPECIFICATION_POINT as i32, 0, head)
+                } else {
+                    (v::_DIRECTION_SPECIFICATION_POINT as i32, 0, m.vector(point_position(look_point_index)))
+                };
+                call_full(
+                    context,
+                    host,
+                    obey_call::LOOK_SECONDARY,
+                    direction_type | priority << 8,
+                    prop,
+                    &look_point,
+                );
+                m.set_i16(pause_timer, c_short(look_duration * 30.0));
+                true
+            } else {
+                false
+            }
+        }
+        atom::MOVE_DIRECTION => {
+            let start = directmovement + dm::START_POSITION as u32;
+            copy(start, at(a::INPUT_BODY_POSITION));
+            let vector = directmovement + dm::VECTOR as u32;
+            let mut result = false;
+            if valid_point(point1) {
+                let to = m.vector(point_position(point1));
+                let from = m.vector(start);
+                let mut direction = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+                let magnitude = dot(direction, direction).sqrt();
+                let normalized = if !(0.0001 > magnitude.abs()) {
+                    let s = 1.0 / magnitude;
+                    direction = [s * direction[0], s * direction[1], s * direction[2]];
+                    magnitude
+                } else {
+                    0.0
+                };
+                for (i, value) in direction.into_iter().enumerate() {
+                    m.set_f32(vector + 4 * i as u32, value);
+                }
+                result = normalized > 0.0;
+            } else if parameter2 >= 0.0 && parameter2 < 360.0 {
+                let angle = parameter2 * std::f32::consts::PI / 180.0;
+                m.set_f32(vector + 8, 0.0);
+                m.set_f32(vector, (angle as f64).cos() as f32);
+                m.set_f32(vector + 4, (angle as f64).sin() as f32);
+                result = true;
+            }
+            if result {
+                let facing = if (0..=3).contains(&modifier) { modifier } else { NONE as i16 };
+                m.set_i16(directmovement + dm::FACING as u32, facing);
+                call_simple(context, host, obey_call::MOVE_HALT, 0);
+                clear_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_UPDATE_CONTINUOUSLY_BIT);
+                set_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_BIT);
+            }
+            result
+        }
+        atom::MOVE_IMMEDIATE => {
+            let facing = if (0..=3).contains(&modifier) { modifier } else { 0 };
+            m.set_i16(directmovement + dm::FACING as u32, facing);
+            obey_directmovement_update_facing(context, host, &control);
+            m.set_i16(pause_timer, c_short(parameter1 * 30.0));
+            set_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_BIT);
+            set_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_UPDATE_CONTINUOUSLY_BIT);
+            true
+        }
+        atom::RUNNING_JUMP | atom::TARGETED_JUMP => {
+            if m.i32(at(a::INPUT_VEHICLE_INDEX)) == NONE {
+                let targeted = atom_type == atom::TARGETED_JUMP;
+                set_bit(m, flags, OBEY_SIMPLE_JUMP_BIT);
+                clear_bit(m, flags, OBEY_SIMPLE_JUMP_JUMPED_BIT);
+                set_flag(flags, OBEY_SIMPLE_JUMP_TARGETED_BIT, targeted);
+                if targeted {
+                    m.set_i16(jump_control + jump::DELAY_TICKS as u32, 0);
+                    m.set_f32(jump_control + jump::TARGET_HORIZONTAL_VEL as u32, parameter1);
+                    m.set_f32(jump_control + jump::TARGET_VERTICAL_VEL as u32, parameter2);
+                } else {
+                    let moving_forward = m.bool(at(a::CONTROL_MOVING)) && m.i16(at(a::CONTROL_MOVING_FACING_DIRECTION)) == 0;
+                    m.set_i16(jump_control + jump::DELAY_TICKS as u32, if moving_forward { 0 } else { 10 });
+                }
+                m.set_i16(pause_timer, 60);
+                true
+            } else {
+                false
+            }
+        }
+        5 => {
+            // animation mode
+            if (0..4).contains(&modifier) {
+                m.set_i16(control.complex(cc::OVERRIDE_MOVEMENT_TYPE), modifier);
+                true
+            } else {
+                false
+            }
+        }
+        6 => {
+            // crouch
+            m.set_bool(control.complex(cc::OVERRIDE_CROUCH), modifier == 1);
+            true
+        }
+        17 => {
+            // targeting
+            set_flag(metadata, OBEY_METADATA_TARGETING_BIT, modifier == 0);
+            true
+        }
+        18 => {
+            // initiative
+            m.set_bool(at(a::STATE_OBEY_INITIATIVE), modifier == 0);
+            true
+        }
+        26 => {
+            // set radius
+            if parameter1 > 0.0 {
+                m.set_bool(control.complex(cc::DESTINATION_RADIUS_VALID), true);
+                m.set_f32(control.complex(cc::DESTINATION_RADIUS), parameter1);
+                true
+            } else {
+                false
+            }
+        }
+        atom::ACTION => {
+            let play_action = control.complex(cc::PLAY_ACTION);
+            m.set_bool(play_action, false);
+            let berserk = v::_AI_COMMUNICATION_BERSERK as i16;
+            let surprise = v::_AI_COMMUNICATION_SURPRISE as i16;
+            let dive = v::_AI_COMMUNICATION_DIVE as i16;
+            let action = match modifier {
+                0 => Some((0, berserk)),
+                1 => Some((4, surprise)),
+                2 => Some((5, surprise)),
+                3 => Some((6, NONE as i16)),
+                4 => Some((7, NONE as i16)),
+                5 => Some((8, dive)),
+                6 => Some((9, dive)),
+                7 => Some((10, dive)),
+                8 => Some((11, dive)),
+                9 => Some((NONE as i16, v::_AI_COMMUNICATION_VEHICLE_WOOHOO as i16)),
+                10 => Some((NONE as i16, v::_AI_COMMUNICATION_VEHICLE_SCARED as i16)),
+                _ => None,
+            };
+            if let Some((impulse, communication)) = action {
+                m.set_bool(play_action, true);
+                m.set_i16(control.complex(cc::ACTION_ANIMATION_IMPULSE), impulse);
+                m.set_i16(control.complex(cc::ACTION_COMMUNICATION_TYPE), communication);
+            }
+            m.bool(play_action)
+        }
+        atom::SHOOT => {
+            if valid_point(point1) {
+                m.set_bool(control.complex(cc::SHOOT_AT_TARGET), true);
+                copy(control.complex(cc::SHOOT_TARGET), point_position(point1));
+                m.set_f32(control.complex(cc::SHOOT_BURST_LENGTH), parameter1);
+                true
+            } else {
+                false
+            }
+        }
+        atom::GRENADE => {
+            let grenade_type = m.i16(context.variant_definition + var::GRENADE_COMBAT_GRENADE_TYPE as u32);
+            if grenade_type != NONE as i16 && valid_point(point1) {
+                call_simple(context, host, obey_call::ADD_GRENADE, grenade_type as i32);
+                m.set_bool(control.complex(cc::GRENADE_THROW_STARTED), false);
+                m.set_bool(control.complex(cc::GRENADE_THROW_DEPRESS_TRIGGER), false);
+                copy(control.complex(cc::GRENADE_TARGET), point_position(point1));
+                let trajectory = if (0..3).contains(&modifier) { modifier } else { 0 };
+                m.set_i16(control.complex(cc::GRENADE_THROW_TRAJECTORY_TYPE), trajectory);
+                m.set_i16(pause_timer, 60);
+                true
+            } else {
+                false
+            }
+        }
+        9 => {
+            // vehicle
+            let entered = call_simple(context, host, obey_call::ENTER_VEHICLE, 0) != 0;
+            if entered {
+                set_bit(m, metadata, OBEY_METADATA_ACTION_CHANGED_BIT);
+            }
+            entered
+        }
+        atom::ANIMATE => {
+            let reference = field16(command::ANIMATION_REFERENCE_INDEX);
+            reference != NONE as i16
+                && call_full(context, host, obey_call::ANIMATE, reference as i32, modifier as i32, &[]).result != 0
+        }
+        atom::RECORDING => {
+            call_simple(context, host, obey_call::PLAY_RECORDING, field16(command::RECORDING_REFERENCE_INDEX) as i32) != 0
+        }
+        12 => call_simple(context, host, obey_call::WAKE_SCRIPT, field16(command::SCRIPT_REFERENCE_INDEX) as i32) != 0,
+        atom::LOOP => {
+            let target = field16(command::COMMAND_INDEX);
+            target >= 0
+                && (target as i32) < tag_block_count(m, command_list + list::COMMANDS as u32)
+                && target as i32 != m.r8(control.simple(sc::CURRENT_COMMAND_INDEX)) as i32
+        }
+        21 => {
+            // die
+            call_simple(context, host, obey_call::DIE, modifier as i32);
+            true
+        }
+        atom::VOCALIZE => call_simple(context, host, obey_call::VOCALIZE, modifier as i32) != 0,
+        27 => {
+            // teleport
+            valid_point(point1) && call_full(context, host, obey_call::TELEPORT, point1 as i32, point2 as i32, &[]).result != 0
+        }
+        atom::WAIT => true,
+        _ => false,
+    };
+    call_simple(context, host, obey_call::DEBUG_COMMAND, result as i32);
+    result
 }

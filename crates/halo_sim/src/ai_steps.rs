@@ -10,6 +10,7 @@
 
 use std::cell::Cell;
 
+use halo_map::actor_attention::{actor_communication_update, actor_conversation_control, actor_look_affect_movement};
 use halo_map::actor_emotions::actor_emotion_update;
 use halo_map::actor_general::actor_general_update;
 use halo_map::actor_input::actor_input_update;
@@ -35,6 +36,12 @@ pub struct AiStepCallbacks {
     pub input: unsafe extern "C" fn(call: *mut AiCall),
     /// actors.c's `actor_general_call`.
     pub general: unsafe extern "C" fn(call: *mut AiCall),
+    /// actor_looking.c's `actor_look_movement_call`.
+    pub look_movement: unsafe extern "C" fn(call: *mut AiCall),
+    /// ai_communication.c's `actor_communication_call`.
+    pub communication: unsafe extern "C" fn(call: *mut AiCall),
+    /// action_converse.c's `actor_conversation_call`.
+    pub conversation: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -162,6 +169,9 @@ const STEP_CLEAR_ORDERS: i32 = 3;
 const STEP_CLEAR_OUTPUT: i32 = 4;
 const STEP_INPUT: i32 = 5;
 const STEP_GENERAL: i32 = 6;
+const STEP_LOOK_MOVEMENT: i32 = 7;
+const STEP_COMMUNICATION: i32 = 8;
+const STEP_CONVERSATION: i32 = 9;
 
 /// The step run: its result, or None for a step the port doesn't have.
 fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
@@ -173,6 +183,9 @@ fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
         STEP_CLEAR_OUTPUT => actor_clear_output(context, host),
         STEP_INPUT => actor_input_update(context, host),
         STEP_GENERAL => return Some(actor_general_update(context, host) as i32),
+        STEP_LOOK_MOVEMENT => actor_look_affect_movement(context, host),
+        STEP_COMMUNICATION => actor_communication_update(context, host),
+        STEP_CONVERSATION => actor_conversation_control(context, host),
         _ => return None,
     }
     Some(0)
@@ -185,6 +198,9 @@ fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" 
         STEP_TIMESLICE | STEP_CLEAR_ORDERS | STEP_CLEAR_OUTPUT => Some(callbacks.upkeep),
         STEP_INPUT => Some(callbacks.input),
         STEP_GENERAL => Some(callbacks.general),
+        STEP_LOOK_MOVEMENT => Some(callbacks.look_movement),
+        STEP_COMMUNICATION => Some(callbacks.communication),
+        STEP_CONVERSATION => Some(callbacks.conversation),
         _ => None,
     }
 }

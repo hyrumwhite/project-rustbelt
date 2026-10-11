@@ -65,6 +65,24 @@ LAYOUT_MEMBER(actor_datum, target_target_last_visible_time, target.target_last_v
 LAYOUT_MEMBER(actor_datum, target_target_really_alive, target.target_really_alive)
 LAYOUT_MEMBER(actor_datum, stimuli_suspicion_combat_status, stimuli.suspicion_combat_status)
 LAYOUT_MEMBER(actor_datum, stimuli_suspicion_timer, stimuli.suspicion_timer)
+LAYOUT_MEMBER(actor_datum, meta_service_timer, meta.service_timer)
+LAYOUT_MEMBER(actor_datum, meta_timeslice, meta.timeslice)
+LAYOUT_MEMBER(actor_datum, state_charge_goal, state.action_data.charge.goal)
+LAYOUT_MEMBER(actor_datum, input_facing_vector, input.facing_vector)
+LAYOUT_MEMBER(actor_datum, input_aiming_vector, input.aiming_vector)
+LAYOUT_MEMBER(actor_datum, input_looking_vector, input.looking_vector)
+LAYOUT_MEMBER(actor_datum, orders, orders)
+LAYOUT_MEMBER(actor_datum, orders_move_animation_impulse, orders.move.animation.impulse)
+LAYOUT_MEMBER(actor_datum, orders_move_override_movement_type, orders.move.override_movement_type)
+LAYOUT_MEMBER(actor_datum, orders_move_override_movement_facing, orders.move.override_movement_facing)
+LAYOUT_MEMBER(actor_datum, output_control_flags, output.control_flags)
+LAYOUT_MEMBER(actor_datum, output_throttle, output.throttle)
+LAYOUT_MEMBER(actor_datum, output_animation_impulse, output.animation.impulse)
+LAYOUT_MEMBER(actor_datum, output_facing_vector, output.facing_vector)
+LAYOUT_MEMBER(actor_datum, output_aiming_vector, output.aiming_vector)
+LAYOUT_MEMBER(actor_datum, output_looking_vector, output.looking_vector)
+LAYOUT_MEMBER(actor_datum, output_analog_primary_trigger, output.analog_primary_trigger)
+LAYOUT_SIZE(actor_orders)
 
 LAYOUT_SIZE(actor_situation)
 LAYOUT_OFFSET(actor_situation, known_enemies)
@@ -118,6 +136,7 @@ LAYOUT_OFFSET(actor_defensive_properties, defensive_crouch_min_crouch_time)
 
 #include "ai/ai_communication.h"
 #include "ai/actor_types.h"
+#include "ai/actions.h"
 
 /* the constants (`ai_values`) */
 #define LAYOUT_VALUE(name) const int layout__ai_values__##name = name;
@@ -151,3 +170,7 @@ LAYOUT_VALUE(NUMBER_OF_ACTOR_TARGET_TYPES)
 LAYOUT_VALUE(_actor_player)
 LAYOUT_VALUE(_actor_none)
 LAYOUT_VALUE(NUMBER_OF_ACTOR_TYPES)
+LAYOUT_VALUE(_charge_goal_melee)
+LAYOUT_VALUE(_charge_goal_melee_leaping)
+LAYOUT_VALUE(_charge_goal_vehicle_strafing)
+LAYOUT_VALUE(_charge_goal_vehicle_ramming)

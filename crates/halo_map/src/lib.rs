@@ -12,6 +12,7 @@
 
 pub mod actor_emotions;
 pub mod actor_situation;
+pub mod actor_upkeep;
 pub mod ai_actor;
 pub mod ai_update;
 pub mod animation;

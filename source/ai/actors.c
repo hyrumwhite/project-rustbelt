@@ -4220,7 +4220,33 @@ void actors_port_step_context(
 	context->definition = (unsigned long)actor_definition_get(actor->meta.definition_index);
 	context->prop_data = (unsigned long)prop_data;
 	context->game_time = game_time_get();
+	context->actor_data = (unsigned long)actor_data;
 }
+
+/* port: the actor's props' datums, for the AI step checks (halo_sim.c): their
+count, up to `maximum` (more than `maximum` when there are more) */
+long actors_port_step_props(
+	long actor_index,
+	unsigned long *addresses,
+	long maximum)
+{
+	struct prop_iterator iterator;
+	struct prop_datum *prop;
+	long count = 0;
+
+	prop_iterator_new(&iterator, actor_index);
+	while ((prop = prop_iterator_next(&iterator)) != NULL)
+	{
+		if (count >= maximum)
+			return maximum + 1;
+		addresses[count++] = (unsigned long)prop;
+	}
+
+	return count;
+}
+
+typedef char actors_port_prop_datum_size_assert[
+	sizeof(struct prop_datum) == HALO_SIM_PROP_DATUM_SIZE ? 1 : -1];
 
 /* port: an actor's steps, and the questions the walk over the actors asks,
 through ai.c's ai_update_call (shared with the Rust port's update) */

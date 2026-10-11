@@ -831,6 +831,11 @@ typedef char actor_perception_threat_arrays_adjacent_assert[
 		offsetof(struct actor_situation, specific_threats) +
 			NUMBER_OF_ACTOR_THREAT_TYPES ? 1 : -1];
 
+/* port: the Rust port writes the view's target_outside_active_area as
+actors.h's target.target_really_alive */
+typedef char actor_perception_actor_view_target_outside_active_area_offset_assert[
+	offsetof(struct actor_perception_actor_view, target_outside_active_area) ==
+		offsetof(struct actor_datum, target.target_really_alive) ? 1 : -1];
 typedef char actor_perception_actor_view_target_prop_index_offset_assert[
 	offsetof(struct actor_perception_actor_view, target_prop_index) == 0x270 ? 1 : -1];
 typedef char actor_perception_actor_view_team_offset_assert[
@@ -1430,6 +1435,12 @@ void actor_get_vision_distances(
 	return;
 }
 
+static long actor_situation_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	real *output);
+
 void actor_situation_update_target_status(
 	long actor_index)
 {
@@ -1447,9 +1458,6 @@ void actor_situation_update_target_status(
 		struct actor_perception_prop_view *target_prop =
 			(struct actor_perception_prop_view *)prop_get(
 				actor->target_prop_index);
-		struct actor_perception_target_unit_view *target_unit =
-			(struct actor_perception_target_unit_view *)
-				unit_get(target_prop->unit_index);
 		short target_type;
 
 #line 4291 "c:\\halo\\SOURCE\\ai\\actor_perception.c"
@@ -1534,9 +1542,16 @@ void actor_situation_update_target_status(
 		}
 		else
 		{
+			/* port: the unit's active regions through actor_situation_call
+			(the C read them through unit_get above, its assertion aside the
+			same) */
 			actor->target_outside_active_area =
 				!TEST_FLAG(
-					target_unit->active_region_flags,
+					actor_situation_call_simple(
+						actor_index,
+						_actor_situation_call_unit_active_region_flags,
+						target_prop->unit_index,
+						NULL),
 					2);
 		}
 	}
@@ -1625,7 +1640,28 @@ void actor_situation_combat_status_update(
 	return;
 }
 
+static void actor_situation_update_game(
+	long actor_index);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 void actor_situation_update(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_situation, actor_index, &checking))
+		return;
+	actor_situation_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_situation);
+
+	return;
+}
+
+/* the game's situation update, what it asks of the rest of the game through
+actor_situation_call */
+static void actor_situation_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -1722,17 +1758,25 @@ void actor_situation_update(
 			}
 			else
 			{
-				struct unit_datum *unit = unit_get(prop->unit_index);
+				long friend_actor_index = actor_situation_call_simple(
+					actor_index,
+					_actor_situation_call_unit_actor,
+					prop->unit_index,
+					NULL);
 				struct actor_datum *friend_actor =
-					unit->unit.actor_index == NONE ?
+					friend_actor_index == NONE ?
 						NULL :
-						actor_get(unit->unit.actor_index);
+						actor_get(friend_actor_index);
 				short actor_type;
 				boolean area;
 				boolean visible;
 				boolean close;
 
-				if (unit->unit.player_index != NONE)
+				if (actor_situation_call_simple(
+						actor_index,
+						_actor_situation_call_unit_player,
+						prop->unit_index,
+						NULL) != NONE)
 				{
 					actor_type = _actor_player;
 				}
@@ -1851,22 +1895,28 @@ void actor_situation_update(
 		{
 			struct prop_datum *old_target_prop =
 				prop_get(old_target_prop_index);
+			real target_weight;
 
-			old_target_prop->target_weight =
-				actor_compute_prop_target_weight(
-					actor_index,
-					old_target_prop_index);
+			actor_situation_call_simple(
+				actor_index,
+				_actor_situation_call_target_weight,
+				old_target_prop_index,
+				&target_weight);
+			old_target_prop->target_weight = target_weight;
 		}
 
 		if (best_prop_index != NONE)
 		{
 			struct prop_datum *new_target_prop =
 				prop_get(best_prop_index);
+			real target_weight;
 
-			new_target_prop->target_weight =
-				actor_compute_prop_target_weight(
-					actor_index,
-					actor->target.target_prop_index);
+			actor_situation_call_simple(
+				actor_index,
+				_actor_situation_call_target_weight,
+				actor->target.target_prop_index,
+				&target_weight);
+			new_target_prop->target_weight = target_weight;
 		}
 	}
 
@@ -3328,6 +3378,57 @@ void actor_perception_abandoned_search(
 	}
 
 	return;
+}
+
+/* port: what an actor's situation update asks of the rest of the game,
+shared by the game's update and the Rust port's (halo_sim.c); in check mode
+each is recorded */
+void actor_situation_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _actor_situation_call_unit_actor:
+			call->result = unit_get(call->a)->unit.actor_index;
+			break;
+
+		case _actor_situation_call_unit_player:
+			call->result = unit_get(call->a)->unit.player_index;
+			break;
+
+		case _actor_situation_call_unit_active_region_flags:
+			call->result = ((struct actor_perception_target_unit_view *)
+				unit_get(call->a))->active_region_flags;
+			break;
+
+		case _actor_situation_call_target_weight:
+			call->output[0] = actor_compute_prop_target_weight(call->actor, call->a);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_situation_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	actor_situation_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
 }
 
 /* port: what an actor's emotion update asks of the rest of the game, shared

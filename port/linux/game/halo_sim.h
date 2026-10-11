@@ -47,6 +47,7 @@ enum
 	_halo_sim_hs,
 	_halo_sim_ai_update,
 	_halo_sim_actor_emotions,
+	_halo_sim_actor_situation,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -841,10 +842,12 @@ ai_steps), and their systems */
 enum
 {
 	_halo_sim_ai_step_emotion,
+	_halo_sim_ai_step_situation,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
 #define HALO_SIM_ACTOR_DATUM_SIZE 0x724
+#define HALO_SIM_PROP_DATUM_SIZE 0x138
 
 /* crates/halo_map's AiCall: what an actor's step asks of the game */
 struct halo_sim_ai_call
@@ -866,6 +869,7 @@ struct halo_sim_ai_step_context
 	unsigned long definition;
 	unsigned long prop_data;
 	long game_time;
+	unsigned long actor_data;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -878,6 +882,16 @@ enum
 	_actor_emotion_call_discard_firing_position,
 	_actor_emotion_call_flood_shamble,
 	_actor_emotion_call_unopposable_retreat,
+};
+
+/* the situation update's calls (actor_perception.c's actor_situation_call;
+crates/halo_map's actor_situation::call) */
+enum
+{
+	_actor_situation_call_unit_actor = 1,
+	_actor_situation_call_unit_player,
+	_actor_situation_call_unit_active_region_flags,
+	_actor_situation_call_target_weight,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1420,5 +1434,7 @@ int halo_sim_ai_event_begin(struct halo_sim_ai_call const *call);
 void halo_sim_ai_event_end(struct halo_sim_ai_call const *call, int opened);
 void actors_port_step_context(long actor_index, struct halo_sim_ai_step_context *context);
 void actor_emotion_call(struct halo_sim_ai_call *call);
+void actor_situation_call(struct halo_sim_ai_call *call);
+long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

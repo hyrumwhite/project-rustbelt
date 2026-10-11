@@ -4576,6 +4576,8 @@ void actors_port_step_context(
 	context->game_time = game_time_get();
 	context->actor_data = (unsigned long)actor_data;
 	context->object_header_data = (unsigned long)object_header_data;
+	context->debug_info = (unsigned long)&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+	context->variant_definition = (unsigned long)actor_variant_definition_get(actor->meta.variant_definition_index);
 }
 
 /* port: the actor's props' datums, for the AI step checks (halo_sim.c): their
@@ -4600,6 +4602,8 @@ long actors_port_step_props(
 	return count;
 }
 
+typedef char actors_port_debug_head_size_assert[
+	sizeof(struct actor_debug_info) >= HALO_SIM_ACTOR_DEBUG_HEAD_SIZE ? 1 : -1];
 typedef char actors_port_data_array_size_assert[
 	sizeof(struct data_array) == HALO_SIM_DATA_ARRAY_SIZE ? 1 : -1];
 typedef char actors_port_prop_datum_size_assert[

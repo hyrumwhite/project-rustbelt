@@ -59,6 +59,7 @@ enum
 	_halo_sim_actor_perception,
 	_halo_sim_actor_look,
 	_halo_sim_actor_move,
+	_halo_sim_actor_combat,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -867,12 +868,17 @@ enum
 	_halo_sim_ai_step_perception,
 	_halo_sim_ai_step_look,
 	_halo_sim_ai_step_move,
+	_halo_sim_ai_step_combat,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
 #define HALO_SIM_ACTOR_DATUM_SIZE 0x724
 #define HALO_SIM_PROP_DATUM_SIZE 0x138
 #define HALO_SIM_DATA_ARRAY_SIZE 0x38
+/* the head of an actor's debug info the AI step checks save and compare
+(the firing decision, the burst's tracking and alignment; the rest, its
+histories, is 0x657C bytes in all) */
+#define HALO_SIM_ACTOR_DEBUG_HEAD_SIZE 0x100
 
 /* crates/halo_map's AiCall: what an actor's step asks of the game */
 struct halo_sim_ai_call
@@ -884,6 +890,7 @@ struct halo_sim_ai_call
 	float input[9];
 	float output[6];
 	long result;
+	long result2;
 };
 
 /* crates/halo_map's AiStepContext */
@@ -896,6 +903,9 @@ struct halo_sim_ai_step_context
 	long game_time;
 	unsigned long actor_data;
 	unsigned long object_header_data;
+	/* its debug info (ai_debug.h's actor_debug_array) */
+	unsigned long debug_info;
+	unsigned long variant_definition;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -1087,6 +1097,58 @@ enum
 	_actor_move_call_unit_control_jump,
 	_actor_move_call_leap_begin,
 	_actor_move_call_leap_shout,
+};
+
+/* the combat update's calls (actor_combat.c's actor_combat_call;
+crates/halo_map's actor_combat::call), the difficulty values and gun offsets
+they take */
+enum
+{
+	_actor_combat_call_firing_variant = 1,
+	_actor_combat_call_weapon_definition,
+	_actor_combat_call_weapon,
+	_actor_combat_call_has_ranged_weapon,
+	_actor_combat_call_grenade_count,
+	_actor_combat_call_add_grenade,
+	_actor_combat_call_throw_grenade,
+	_actor_combat_call_weapon_triggers,
+	_actor_combat_call_difficulty,
+	_actor_combat_call_enable_special_fire,
+	_actor_combat_call_random_range,
+	_actor_combat_call_random,
+	_actor_combat_call_allow_special_fire,
+	_actor_combat_call_players_see_cluster,
+	_actor_combat_call_manual_line_of_sight,
+	_actor_combat_call_aim_at_target,
+	_actor_combat_call_animation_busy,
+	_actor_combat_call_weapon_vector,
+	_actor_combat_call_first_burst_delay,
+	_actor_combat_call_start_burst,
+	_actor_combat_call_start_pause,
+	_actor_combat_call_time_to_target,
+	_actor_combat_call_camera_position,
+	_actor_combat_call_gun_position,
+	_actor_combat_call_aim_burst,
+	_actor_combat_call_line_of_fire,
+	_actor_combat_call_blocked_shout,
+	_actor_combat_call_firing_pattern,
+	_actor_combat_call_primary_trigger,
+	_actor_combat_call_secondary_trigger,
+};
+
+enum
+{
+	_actor_combat_difficulty_target_tracking = 0,
+	_actor_combat_difficulty_target_leading,
+	_actor_combat_difficulty_rate_of_fire,
+};
+
+enum
+{
+	_actor_combat_gun_offset_variant_crouch = 0,
+	_actor_combat_gun_offset_definition_crouch,
+	_actor_combat_gun_offset_variant_stand,
+	_actor_combat_gun_offset_definition_stand,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1642,6 +1704,7 @@ void actor_unit_control_call(struct halo_sim_ai_call *call);
 void actor_perception_call(struct halo_sim_ai_call *call);
 void actor_look_call(struct halo_sim_ai_call *call);
 void actor_move_call(struct halo_sim_ai_call *call);
+void actor_combat_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

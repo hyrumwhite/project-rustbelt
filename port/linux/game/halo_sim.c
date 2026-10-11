@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 50
+#define HALO_SIM_VERSION 52
 
 /* ---------- structures */
 
@@ -1826,6 +1826,9 @@ struct halo_sim_ai_event
 	/* the props' data array as the call left it (its count and free list
 	change as props are made and deleted) */
 	unsigned char prop_data_after[HALO_SIM_DATA_ARRAY_SIZE];
+	/* the head of the actor's debug info before and after the call */
+	unsigned char debug_before[HALO_SIM_ACTOR_DEBUG_HEAD_SIZE];
+	unsigned char debug_after[HALO_SIM_ACTOR_DEBUG_HEAD_SIZE];
 };
 
 struct halo_sim_ai_step_c
@@ -1856,6 +1859,7 @@ struct halo_sim_ai_step_callbacks
 	void (*perception)(struct halo_sim_ai_call *call);
 	void (*look)(struct halo_sim_ai_call *call);
 	void (*move)(struct halo_sim_ai_call *call);
+	void (*combat)(struct halo_sim_ai_call *call);
 };
 
 struct halo_sim_effect_callbacks
@@ -2119,6 +2123,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"actor_perception",
 	"actor_look",
 	"actor_move",
+	"actor_combat",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2459,6 +2464,8 @@ static struct
 	struct halo_sim_ai_step_context context;
 	unsigned char before[HALO_SIM_ACTOR_DATUM_SIZE];
 	unsigned char after[HALO_SIM_ACTOR_DATUM_SIZE];
+	unsigned char debug_before[HALO_SIM_ACTOR_DEBUG_HEAD_SIZE];
+	unsigned char debug_after[HALO_SIM_ACTOR_DEBUG_HEAD_SIZE];
 	/* the actor's props as the step began and as the game's left them, for a
 	step that writes them (halo_sim_ai_step_props) */
 	long prop_count;
@@ -2499,6 +2506,7 @@ static short const halo_sim_ai_step_systems[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	_halo_sim_actor_perception,
 	_halo_sim_actor_look,
 	_halo_sim_actor_move,
+	_halo_sim_actor_combat,
 };
 
 static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
@@ -2518,6 +2526,7 @@ static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	"actor perception update",
 	"actor look update",
 	"actor move update",
+	"actor combat update",
 };
 
 /* the steps that write the actor's props: their check puts them back too,
@@ -2536,6 +2545,7 @@ static boolean const halo_sim_ai_step_props[NUMBER_OF_HALO_SIM_AI_STEPS] =
 	FALSE,
 	FALSE,
 	FALSE,
+	TRUE,
 	TRUE,
 	TRUE,
 	TRUE,
@@ -4596,6 +4606,7 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 		actor_perception_call,
 		actor_look_call,
 		actor_move_call,
+		actor_combat_call,
 	},
 };
 
@@ -9338,6 +9349,8 @@ int halo_sim_ai_step_begin(long step, long actor_index, int *checking)
 		halo_sim_ai_step_checks.step = step;
 		actors_port_step_context(actor_index, &halo_sim_ai_step_checks.context);
 		memcpy(halo_sim_ai_step_checks.before, (void const *)halo_sim_ai_step_checks.context.actor, HALO_SIM_ACTOR_DATUM_SIZE);
+		memcpy(halo_sim_ai_step_checks.debug_before, (void const *)halo_sim_ai_step_checks.context.debug_info,
+			HALO_SIM_ACTOR_DEBUG_HEAD_SIZE);
 		halo_sim_ai_step_checks.event_count = 0;
 		halo_sim_ai_step_checks.open_event = NULL;
 		halo_sim_ai_step_checks.overflow = FALSE;
@@ -9449,6 +9462,7 @@ int halo_sim_ai_event_begin(struct halo_sim_ai_call const *call)
 	event = &halo_sim_ai_step_checks.events[halo_sim_ai_step_checks.event_count++];
 	event->call = *call;
 	memcpy(event->before, (void const *)halo_sim_ai_step_checks.context.actor, HALO_SIM_ACTOR_DATUM_SIZE);
+	memcpy(event->debug_before, (void const *)halo_sim_ai_step_checks.context.debug_info, HALO_SIM_ACTOR_DEBUG_HEAD_SIZE);
 	event->prop_checksum = 0;
 	event->delta_first = halo_sim_ai_step_checks.delta_count;
 	event->delta_count = 0;
@@ -9539,7 +9553,9 @@ void halo_sim_ai_event_end(struct halo_sim_ai_call const *call, int opened)
 	halo_sim_ai_step_checks.open_event = NULL;
 	memcpy(event->call.output, call->output, sizeof(event->call.output));
 	event->call.result = call->result;
+	event->call.result2 = call->result2;
 	memcpy(event->after, (void const *)halo_sim_ai_step_checks.context.actor, HALO_SIM_ACTOR_DATUM_SIZE);
+	memcpy(event->debug_after, (void const *)halo_sim_ai_step_checks.context.debug_info, HALO_SIM_ACTOR_DEBUG_HEAD_SIZE);
 	if (halo_sim_ai_step_props[halo_sim_ai_step_checks.step])
 	{
 		halo_sim_ai_event_props(event);
@@ -9552,7 +9568,9 @@ void halo_sim_ai_step_check(long step, long result)
 {
 	struct halo_sim_ai_step_c call;
 	boolean prop_differs;
+	boolean debug_differs = FALSE;
 	unsigned char *actor = (unsigned char *)halo_sim_ai_step_checks.context.actor;
+	unsigned char *debug_info = (unsigned char *)halo_sim_ai_step_checks.context.debug_info;
 
 	if (!halo_sim_ai_step_checks.recording)
 		return;
@@ -9601,6 +9619,8 @@ void halo_sim_ai_step_check(long step, long result)
 	}
 	memcpy(halo_sim_ai_step_checks.after, actor, HALO_SIM_ACTOR_DATUM_SIZE);
 	memcpy(actor, halo_sim_ai_step_checks.before, HALO_SIM_ACTOR_DATUM_SIZE);
+	memcpy(halo_sim_ai_step_checks.debug_after, debug_info, HALO_SIM_ACTOR_DEBUG_HEAD_SIZE);
+	memcpy(debug_info, halo_sim_ai_step_checks.debug_before, HALO_SIM_ACTOR_DEBUG_HEAD_SIZE);
 	halo_sim_ai_step_props_copy(1, TRUE);
 	halo_sim_ai_step_props_copy(0, FALSE);
 	memset(&call, 0, sizeof(call));
@@ -9613,6 +9633,7 @@ void halo_sim_ai_step_check(long step, long result)
 	if (halo_sim.ai_step_check(step, &call) != 0)
 	{
 		memcpy(actor, halo_sim_ai_step_checks.after, HALO_SIM_ACTOR_DATUM_SIZE);
+		memcpy(debug_info, halo_sim_ai_step_checks.debug_after, HALO_SIM_ACTOR_DEBUG_HEAD_SIZE);
 		halo_sim_ai_step_props_copy(1, FALSE);
 		halo_sim_ai_step_checks.skipped[step]++;
 		return;
@@ -9621,6 +9642,23 @@ void halo_sim_ai_step_check(long step, long result)
 	room, then the game's put back) */
 	memcpy(halo_sim_ai_step_checks.before, actor, HALO_SIM_ACTOR_DATUM_SIZE);
 	memcpy(actor, halo_sim_ai_step_checks.after, HALO_SIM_ACTOR_DATUM_SIZE);
+	memcpy(halo_sim_ai_step_checks.debug_before, debug_info, HALO_SIM_ACTOR_DEBUG_HEAD_SIZE);
+	memcpy(debug_info, halo_sim_ai_step_checks.debug_after, HALO_SIM_ACTOR_DEBUG_HEAD_SIZE);
+	if (memcmp(halo_sim_ai_step_checks.debug_before, halo_sim_ai_step_checks.debug_after,
+		HALO_SIM_ACTOR_DEBUG_HEAD_SIZE) != 0)
+	{
+		long offset = 0;
+
+		while (halo_sim_ai_step_checks.debug_before[offset] == halo_sim_ai_step_checks.debug_after[offset])
+			offset++;
+		debug_differs = TRUE;
+		if (halo_sim_ai_step_checks.differed[step] < 8)
+		{
+			platform_log("halo_sim: %s differs (actor %lx): its debug info first differs at byte %lx (game %02x rust %02x)",
+				halo_sim_ai_step_names[step], (unsigned long)halo_sim_ai_step_checks.context.actor_index, offset,
+				halo_sim_ai_step_checks.debug_after[offset], halo_sim_ai_step_checks.debug_before[offset]);
+		}
+	}
 	halo_sim_ai_step_props_copy(0, TRUE);
 	halo_sim_ai_step_props_copy(1, FALSE);
 
@@ -9658,7 +9696,7 @@ void halo_sim_ai_step_check(long step, long result)
 		}
 	}
 	if (memcmp(halo_sim_ai_step_checks.before, halo_sim_ai_step_checks.after, HALO_SIM_ACTOR_DATUM_SIZE) != 0 ||
-		call.difference_event != NONE || prop_differs || call.result != result)
+		call.difference_event != NONE || prop_differs || debug_differs || call.result != result)
 	{
 		halo_sim_ai_step_checks.differed[step]++;
 		if (halo_sim_ai_step_checks.differed[step] <= 8 &&

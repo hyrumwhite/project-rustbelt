@@ -87,6 +87,7 @@ symbols in this file:
 /* ---------- headers */
 
 #include "effects/player_effects.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include "camera/observer.h"
 #include "cseries/errors.h"
@@ -229,6 +230,8 @@ struct player_effect_globals_definition
 	long reference_time;
 };
 
+typedef char halo_sim_player_effect_state_datum_assert[
+	sizeof(((struct halo_sim_player_effect_state *)0)->datum) == sizeof(struct player_effect_datum) ? 1 : -1];
 typedef char player_effect_datum_size_assert[
 	sizeof(struct player_effect_datum) == 0xEC ? 1 : -1];
 typedef char player_effect_datum_screen_flash_offset_assert[
@@ -300,6 +303,17 @@ static void get_shake_matrix(
 
 static struct player_effect_globals_definition *player_effect_globals;
 
+/* port: a player effect's calls of the game (player_effect_call) */
+static void player_effect_call_new(
+	struct halo_sim_player_effect_call *call,
+	long kind,
+	long a)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+	call->a = a;
+}
+
 static short render_screen_flash_type_map[NUMBER_OF_SCREEN_FLASH_TYPES] =
 {
 	_render_screen_flash_type_none,
@@ -356,7 +370,35 @@ void player_effect_dispose_from_old_map(
 	return;
 }
 
+static void player_effect_add_continuous_effect_game(
+	short local_player_index,
+	long effect_index,
+	real distance);
+
 void player_effect_add_continuous_effect(
+	short local_player_index,
+	long effect_index,
+	real distance)
+{
+	struct halo_sim_player_effect_args args;
+	int checking = FALSE;
+
+	/* port: the Rust port's when asked (halo_sim.c) */
+	memset(&args, 0, sizeof(args));
+	args.op = _player_effect_op_continuous;
+	args.local_player_index = local_player_index;
+	args.definition_index = effect_index;
+	args.distance = distance;
+	if (halo_sim_player_effect(&args, &checking))
+		return;
+	player_effect_add_continuous_effect_game(local_player_index, effect_index, distance);
+	if (checking)
+		halo_sim_player_effect_check(&args);
+
+	return;
+}
+
+static void player_effect_add_continuous_effect_game(
 	short local_player_index,
 	long effect_index,
 	real distance)
@@ -736,6 +778,21 @@ void player_effect_screen_flash(
 		if (local_player_index != NONE)
 		{
 			struct player_effect_datum *effect = player_effect_get((short)local_player_index);
+			struct halo_sim_player_effect_args args;
+			int checking = FALSE;
+
+			/* port: the Rust port's when asked (halo_sim.c) */
+			memset(&args, 0, sizeof(args));
+			args.op = _player_effect_op_screen_flash;
+			args.local_player_index = (short)local_player_index;
+			args.screen_flash = screen_flash;
+			args.scale = scale;
+			if (halo_sim_player_effect(&args, &checking))
+				return;
+			player_effect_update_screen_flash((short)local_player_index, effect, screen_flash, scale, 1.0f);
+			if (checking)
+				halo_sim_player_effect_check(&args);
+			return;
 
 			player_effect_update_screen_flash((short)local_player_index, effect, screen_flash, scale, 1.0f);
 		}
@@ -744,7 +801,32 @@ void player_effect_screen_flash(
 	return;
 }
 
+static void player_effect_get_screen_flash_game(
+	short local_player_index,
+	struct render_screen_flash *screen_flash);
+
 void player_effect_get_screen_flash(
+	short local_player_index,
+	struct render_screen_flash *screen_flash)
+{
+	struct halo_sim_player_effect_args args;
+	int checking = FALSE;
+
+	/* port: the Rust port's when asked (halo_sim.c) */
+	memset(&args, 0, sizeof(args));
+	args.op = _player_effect_op_get_screen_flash;
+	args.local_player_index = local_player_index;
+	args.render_screen_flash = screen_flash;
+	if (halo_sim_player_effect(&args, &checking))
+		return;
+	player_effect_get_screen_flash_game(local_player_index, screen_flash);
+	if (checking)
+		halo_sim_player_effect_check(&args);
+
+	return;
+}
+
+static void player_effect_get_screen_flash_game(
 	short local_player_index,
 	struct render_screen_flash *screen_flash)
 {
@@ -807,13 +889,39 @@ void player_effect_get_screen_flash(
 	return;
 }
 
+static void player_telefrag_effect_start_game(
+	long local_player_index,
+	real intensity);
+
 void player_telefrag_effect_start(
 	long player_index,
 	real intensity)
 {
+	long local_player_index = player_get(player_index)->local_player_index;
+	struct halo_sim_player_effect_args args;
+	int checking = FALSE;
+
+	if (local_player_index == NONE)
+		return;
+	memset(&args, 0, sizeof(args));
+	args.op = _player_effect_op_telefrag;
+	args.local_player_index = (short)local_player_index;
+	args.intensity = intensity;
+	if (halo_sim_player_effect(&args, &checking))
+		return;
+	player_telefrag_effect_start_game(local_player_index, intensity);
+	if (checking)
+		halo_sim_player_effect_check(&args);
+
+	return;
+}
+
+static void player_telefrag_effect_start_game(
+	long local_player_index,
+	real intensity)
+{
 	struct screen_flash_definition screen_flash = {0};
 	struct camera_shake_definition camera_shake = {0};
-	long local_player_index = player_get(player_index)->local_player_index;
 
 	if (local_player_index != NONE)
 	{
@@ -828,7 +936,14 @@ void player_telefrag_effect_start(
 		screen_flash.zero_scale_factor = 0.0f;
 		screen_flash.screen_flash_color = *global_real_argb_white;
 
-		rumble_player_continuous((short)local_player_index, intensity, intensity);
+		{
+			struct halo_sim_player_effect_call call;
+
+			player_effect_call_new(&call, _player_effect_call_rumble_continuous, local_player_index);
+			call.f[0] = intensity;
+			call.f[1] = intensity;
+			player_effect_call((short)local_player_index, &call);
+		}
 		player_effect_update_screen_flash((short)local_player_index, effect, &screen_flash, intensity, 1.0f);
 		player_effect_update_camera_shake((short)local_player_index, effect, &camera_shake, intensity, 1.0f);
 	}
@@ -879,7 +994,32 @@ static void get_shake_matrix(
 	return;
 }
 
+static void player_effect_get_camera_effect_matrix_game(
+	short local_player_index,
+	real_matrix4x3 *matrix);
+
 void player_effect_get_camera_effect_matrix(
+	short local_player_index,
+	real_matrix4x3 *matrix)
+{
+	struct halo_sim_player_effect_args args;
+	int checking = FALSE;
+
+	/* port: the Rust port's when asked (halo_sim.c) */
+	memset(&args, 0, sizeof(args));
+	args.op = _player_effect_op_camera_matrix;
+	args.local_player_index = local_player_index;
+	args.matrix = matrix;
+	if (local_player_index != NONE && halo_sim_player_effect(&args, &checking))
+		return;
+	player_effect_get_camera_effect_matrix_game(local_player_index, matrix);
+	if (checking)
+		halo_sim_player_effect_check(&args);
+
+	return;
+}
+
+static void player_effect_get_camera_effect_matrix_game(
 	short local_player_index,
 	real_matrix4x3 *matrix)
 {
@@ -925,11 +1065,15 @@ void player_effect_get_camera_effect_matrix(
 			}
 			else if (TEST_FLAG(player_effect_globals->global_flags, _scripted_player_effect_stopping_bit))
 			{
+				struct halo_sim_player_effect_call call;
+
 				SET_FLAG(
 					player_effect_globals->global_flags,
 					_scripted_player_effect_active_bit,
 					FALSE);
-				rumble_player_set_scale(0.0f);
+				player_effect_call_new(&call, _player_effect_call_rumble_set_scale, local_player_index);
+				call.f[0] = 0.0f;
+				player_effect_call(local_player_index, &call);
 			}
 
 			if (TEST_FLAG(player_effect_globals->global_flags, _scripted_player_effect_active_bit))
@@ -941,8 +1085,12 @@ void player_effect_get_camera_effect_matrix(
 				real random_horizontal;
 				real random_vertical;
 
+				struct halo_sim_player_effect_call call;
+
 				intensity = PIN(intensity, 0.0f, 1.0f);
-				rumble_player_set_scale(intensity);
+				player_effect_call_new(&call, _player_effect_call_rumble_set_scale, local_player_index);
+				call.f[0] = intensity;
+				player_effect_call(local_player_index, &call);
 
 				random_roll = real_seed_random_range(
 					get_global_local_random_seed_address(),
@@ -1093,10 +1241,14 @@ void player_effect_get_camera_effect_matrix(
 					random_rotation_magnitude + continuous->rotational_shake,
 					&effect_matrix);
 
-				rumble_player_continuous(
-					local_player_index,
-					continuous->vibrate_frequencies[0],
-					continuous->vibrate_frequencies[1]);
+				{
+					struct halo_sim_player_effect_call call;
+
+					player_effect_call_new(&call, _player_effect_call_rumble_continuous, local_player_index);
+					call.f[0] = continuous->vibrate_frequencies[0];
+					call.f[1] = continuous->vibrate_frequencies[1];
+					player_effect_call(local_player_index, &call);
+				}
 
 				/* Looping sounds add their continuous shake once a frame
 				(game_sound.c), so it is used up once a frame too: a frame that
@@ -1156,7 +1308,14 @@ static void player_effect_update_camera_impulse(
 		flattened_direction.k = 0.0f;
 		normalize3d(&flattened_direction);
 
-		facing_angles = *player_control_get_facing_angles(local_player_index);
+		{
+			struct halo_sim_player_effect_call call;
+
+			player_effect_call_new(&call, _player_effect_call_facing_angles, local_player_index);
+			player_effect_call(local_player_index, &call);
+			facing_angles.yaw = call.out[0];
+			facing_angles.pitch = call.out[1];
+		}
 		vector3d_from_euler_angles2d(&facing, &facing_angles);
 		facing.k = 0.0f;
 		normalize3d(&facing);
@@ -1218,7 +1377,13 @@ static void player_effect_update_camera_impulse(
 		real_vector3d left;
 		real_euler_angles2d delta;
 
-		player_control_get_facing_direction(local_player_index, &facing);
+		struct halo_sim_player_effect_call call;
+
+		player_effect_call_new(&call, _player_effect_call_facing_direction, local_player_index);
+		player_effect_call(local_player_index, &call);
+		facing.i = call.out[0];
+		facing.j = call.out[1];
+		facing.k = call.out[2];
 		cross_product3d(global_up3d, &facing, &left);
 
 		delta.yaw = dot_product3d(&left, direction) *
@@ -1226,12 +1391,24 @@ static void player_effect_update_camera_impulse(
 		delta.pitch = dot_product3d(&facing, direction) *
 			camera_impulse->permanent_angle * permanent_intensity;
 
-		player_control_permanent_impulse(local_player_index, &delta);
+		player_effect_call_new(&call, _player_effect_call_permanent_impulse, local_player_index);
+		call.f[0] = delta.yaw;
+		call.f[1] = delta.pitch;
+		player_effect_call(local_player_index, &call);
 	}
 
 	return;
 }
 
+static void player_effect_start_game(
+	short local_player_index,
+	struct damage_data const *damage,
+	real_vector3d const *direction,
+	real scale,
+	real total_damage);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
 void player_effect_start(
 	long player_index,
 	struct damage_data const *damage,
@@ -1240,11 +1417,38 @@ void player_effect_start(
 	real total_damage)
 {
 	short local_player_index = player_get(player_index)->local_player_index;
+	struct halo_sim_player_effect_args args;
+	int checking = FALSE;
 
 	match_assert("c:\\halo\\SOURCE\\effects\\player_effects.c", 342, direction);
 
 	lock_global_random_seed();
+	memset(&args, 0, sizeof(args));
+	args.op = _player_effect_op_start;
+	args.local_player_index = local_player_index;
+	args.definition_index = damage->definition_index;
+	args.owner_object_index = damage->owner_object_index;
+	args.direction = *direction;
+	args.scale = scale;
+	args.total_damage = total_damage;
+	if (local_player_index == NONE || !halo_sim_player_effect(&args, &checking))
+	{
+		player_effect_start_game(local_player_index, damage, direction, scale, total_damage);
+		if (checking)
+			halo_sim_player_effect_check(&args);
+	}
+	unlock_global_random_seed();
 
+	return;
+}
+
+static void player_effect_start_game(
+	short local_player_index,
+	struct damage_data const *damage,
+	real_vector3d const *direction,
+	real scale,
+	real total_damage)
+{
 	if (local_player_index != NONE)
 	{
 		struct damage_effect_definition *definition =
@@ -1270,14 +1474,20 @@ void player_effect_start(
 			&definition->camera_shake,
 			scale,
 			1.0f);
-		rumble_player_impulse(
-			local_player_index,
-			(struct rumble_definition *)&definition->vibrate,
-			scale,
-			1.0f);
+		{
+			struct halo_sim_player_effect_call call;
 
-		if (definition->sound.index != NONE)
-			unspatialized_impulse_sound_new(definition->sound.index, 1.0f);
+			player_effect_call_new(&call, _player_effect_call_rumble_impulse, local_player_index);
+			call.b = damage->definition_index;
+			call.f[0] = scale;
+			player_effect_call(local_player_index, &call);
+
+			if (definition->sound.index != NONE)
+			{
+				player_effect_call_new(&call, _player_effect_call_sound, definition->sound.index);
+				player_effect_call(local_player_index, &call);
+			}
+		}
 
 		if (total_damage > 0.0f && damage->owner_object_index != NONE)
 		{
@@ -1287,46 +1497,47 @@ void player_effect_start(
 			}
 			else
 			{
-				long unit_index;
-				struct unit_datum *unit;
-				struct object_datum *attacker;
+				struct halo_sim_player_effect_call call;
 
-				if (local_player_get_player_index(local_player_index) == NONE)
-					unit_index = NONE;
-				else
-					unit_index = player_get(
-						local_player_get_player_index(local_player_index))->unit_index;
+				/* port: the unit's head, the attacker and the camera, through
+				player_effect_call */
+				player_effect_call_new(&call, _player_effect_call_indicator, local_player_index);
+				call.b = damage->owner_object_index;
+				player_effect_call(local_player_index, &call);
 
-				unit = unit_try_and_get(unit_index);
-				attacker = object_try_and_get(damage->owner_object_index);
-
-				if (unit && attacker)
+				if (call.result)
 				{
-					struct observer_result const *camera =
-						observer_get_camera(local_player_index);
-
-					if (camera)
 					{
 						real_point3d head_position;
 						real_point3d attacker_position;
+						real_vector3d forward;
+						real_vector3d up;
 						real_vector3d delta;
 						real_vector3d left;
 						real_vector3d relative;
 
-						unit_get_head_position(unit_index, &head_position);
-						object_get_origin(
-							damage->owner_object_index,
-							&attacker_position);
+						head_position.x = call.out[0];
+						head_position.y = call.out[1];
+						head_position.z = call.out[2];
+						attacker_position.x = call.out[3];
+						attacker_position.y = call.out[4];
+						attacker_position.z = call.out[5];
+						forward.i = call.out[6];
+						forward.j = call.out[7];
+						forward.k = call.out[8];
+						up.i = call.out[9];
+						up.j = call.out[10];
+						up.k = call.out[11];
 						vector_from_points3d(
 							&head_position,
 							&attacker_position,
 							&delta);
-						cross_product3d(&camera->forward, &camera->up, &left);
+						cross_product3d(&forward, &up, &left);
 
 						set_real_vector3d(&relative,
 							dot_product3d(&left, &delta),
-							dot_product3d(&delta, &camera->forward),
-							dot_product3d(&delta, &camera->up));
+							dot_product3d(&delta, &forward),
+							dot_product3d(&delta, &up));
 
 						if (normalize3d(&relative) != 0.0f)
 						{
@@ -1358,9 +1569,141 @@ void player_effect_start(
 		}
 	}
 
-	unlock_global_random_seed();
-
 	return;
 }
 
 /* ---------- private code */
+
+/* ---------- port: player_effect_call */
+
+/* a player effect's call of the rest of the game, shared by the C and the
+Rust port (halo_sim.c); in check mode each is recorded */
+void player_effect_call(
+	short local_player_index,
+	struct halo_sim_player_effect_call *call)
+{
+	int opened = halo_sim_player_effect_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _player_effect_call_facing_angles:
+		{
+			real_euler_angles2d const *angles = player_control_get_facing_angles((short)call->a);
+
+			call->out[0] = angles->yaw;
+			call->out[1] = angles->pitch;
+			break;
+		}
+
+		case _player_effect_call_facing_direction:
+		{
+			real_vector3d facing;
+
+			player_control_get_facing_direction((short)call->a, &facing);
+			call->out[0] = facing.i;
+			call->out[1] = facing.j;
+			call->out[2] = facing.k;
+			break;
+		}
+
+		case _player_effect_call_permanent_impulse:
+		{
+			real_euler_angles2d delta;
+
+			delta.yaw = call->f[0];
+			delta.pitch = call->f[1];
+			player_control_permanent_impulse((short)call->a, &delta);
+			break;
+		}
+
+		case _player_effect_call_rumble_impulse:
+		{
+			struct damage_effect_definition *definition = damage_effect_definition_get(call->b);
+
+			rumble_player_impulse((short)call->a, (struct rumble_definition *)&definition->vibrate, call->f[0], 1.0f);
+			break;
+		}
+
+		case _player_effect_call_sound:
+			unspatialized_impulse_sound_new(call->a, 1.0f);
+			break;
+
+		case _player_effect_call_indicator:
+		{
+			short local = (short)call->a;
+			long unit_index = local_player_get_player_index(local) == NONE
+				? NONE
+				: player_get(local_player_get_player_index(local))->unit_index;
+			struct unit_datum *unit = unit_try_and_get(unit_index);
+			struct object_datum *attacker = object_try_and_get(call->b);
+
+			call->result = 0;
+			if (unit && attacker)
+			{
+				struct observer_result const *camera = observer_get_camera(local);
+
+				if (camera)
+				{
+					real_point3d head_position;
+					real_point3d attacker_position;
+
+					unit_get_head_position(unit_index, &head_position);
+					object_get_origin(call->b, &attacker_position);
+					call->result = 1;
+					call->out[0] = head_position.x;
+					call->out[1] = head_position.y;
+					call->out[2] = head_position.z;
+					call->out[3] = attacker_position.x;
+					call->out[4] = attacker_position.y;
+					call->out[5] = attacker_position.z;
+					call->out[6] = camera->forward.i;
+					call->out[7] = camera->forward.j;
+					call->out[8] = camera->forward.k;
+					call->out[9] = camera->up.i;
+					call->out[10] = camera->up.j;
+					call->out[11] = camera->up.k;
+				}
+			}
+			break;
+		}
+
+		case _player_effect_call_rumble_continuous:
+			rumble_player_continuous((short)call->a, call->f[0], call->f[1]);
+			break;
+
+		case _player_effect_call_rumble_set_scale:
+			rumble_player_set_scale(call->f[0]);
+			break;
+	}
+	halo_sim_player_effect_event_end(call, opened);
+	(void)local_player_index;
+
+	return;
+}
+
+/* ---------- port: the state for halo_sim.c */
+
+void player_effect_halo_sim_load(
+	short local_player_index,
+	struct halo_sim_player_effect_state *state)
+{
+	memset(state, 0, sizeof(*state));
+	state->local_player_index = local_player_index;
+	if (local_player_index != NONE)
+		memcpy(state->datum, player_effect_get(local_player_index), sizeof(state->datum));
+	memcpy(state->screen_fade, &player_effect_globals->screen_fade, sizeof(state->screen_fade));
+	memcpy(state->scripted_effect, &player_effect_globals->scripted_effect, sizeof(state->scripted_effect));
+	state->global_flags = player_effect_globals->global_flags;
+	state->local_random_seed = *get_global_local_random_seed_address();
+}
+
+void player_effect_halo_sim_store(
+	struct halo_sim_player_effect_state const *state)
+{
+	if (state->local_player_index != NONE)
+		memcpy(player_effect_get((short)state->local_player_index), state->datum, sizeof(state->datum));
+	memcpy(&player_effect_globals->screen_fade, state->screen_fade, sizeof(state->screen_fade));
+	memcpy(&player_effect_globals->scripted_effect, state->scripted_effect, sizeof(state->scripted_effect));
+	player_effect_globals->global_flags = state->global_flags;
+	*get_global_local_random_seed_address() = state->local_random_seed;
+}

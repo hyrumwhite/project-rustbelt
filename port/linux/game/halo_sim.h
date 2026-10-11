@@ -42,6 +42,7 @@ enum
 	_halo_sim_particles,
 	_halo_sim_contrails,
 	_halo_sim_particle_systems,
+	_halo_sim_player_effects,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -587,6 +588,73 @@ struct halo_sim_system_particle
 	float transition_randomized_variables[7];
 };
 
+/* a player effect's calls of the rest of the game (player_effects.c's
+player_effect_call; crates/halo_map's player_effects::call) */
+enum
+{
+	_player_effect_call_facing_angles = 1,
+	_player_effect_call_facing_direction,
+	_player_effect_call_permanent_impulse,
+	_player_effect_call_rumble_impulse,
+	_player_effect_call_sound,
+	_player_effect_call_indicator,
+	_player_effect_call_rumble_continuous,
+	_player_effect_call_rumble_set_scale,
+};
+
+/* the operations (crates/halo_sim's player_effects::op) */
+enum
+{
+	_player_effect_op_start = 1,
+	_player_effect_op_screen_flash,
+	_player_effect_op_telefrag,
+	_player_effect_op_continuous,
+	_player_effect_op_camera_matrix,
+	_player_effect_op_get_screen_flash,
+};
+
+/* crates/halo_map's PlayerEffectCall */
+struct halo_sim_player_effect_call
+{
+	long kind;
+	long a;
+	long b;
+	float f[2];
+	long result;
+	float out[12];
+};
+
+/* crates/halo_map's PlayerEffectState: a local player's effect (the game's
+datum), the screen fade, the scripted effect, the flags and the local seed */
+struct halo_sim_player_effect_state
+{
+	long local_player_index;
+	unsigned char datum[0xEC];
+	unsigned char screen_fade[20];
+	unsigned char scripted_effect[32];
+	unsigned long global_flags;
+	unsigned long local_random_seed;
+};
+
+/* what an operation is given, and where it leaves its answer */
+struct screen_flash_definition;
+struct render_screen_flash;
+struct halo_sim_player_effect_args
+{
+	long op;
+	short local_player_index;
+	long definition_index;
+	long owner_object_index;
+	real_vector3d direction;
+	float scale;
+	float total_damage;
+	float intensity;
+	float distance;
+	struct screen_flash_definition const *screen_flash;
+	struct render_screen_flash *render_screen_flash;
+	real_matrix4x3 *matrix;
+};
+
 /* the object update loop's calls (objects.c's objects_update_call;
 crates/halo_map's objects_update::call) */
 enum
@@ -1068,5 +1136,18 @@ int particle_system_halo_sim_load(long system_index, struct halo_sim_particle_sy
 	struct halo_sim_system_particle *particles, unsigned long maximum_particle_count, unsigned long *particle_count);
 void particle_system_halo_sim_store(struct halo_sim_particle_system_state const *state,
 	struct halo_sim_system_particle const *particles, unsigned long particle_count);
+
+/* player_effects.c's player effects: TRUE when the Rust port ran the
+operation (its answers written where `args` says); in check mode `checking`
+is set, player_effect_call records each call
+(halo_sim_player_effect_event_begin and _end), and
+halo_sim_player_effect_check compares Rust's replay */
+int halo_sim_player_effect(struct halo_sim_player_effect_args *args, int *checking);
+void halo_sim_player_effect_check(struct halo_sim_player_effect_args const *args);
+int halo_sim_player_effect_event_begin(struct halo_sim_player_effect_call const *call);
+void halo_sim_player_effect_event_end(struct halo_sim_player_effect_call const *call, int opened);
+void player_effect_call(short local_player_index, struct halo_sim_player_effect_call *call);
+void player_effect_halo_sim_load(short local_player_index, struct halo_sim_player_effect_state *state);
+void player_effect_halo_sim_store(struct halo_sim_player_effect_state const *state);
 
 #endif // __HALO_SIM_H

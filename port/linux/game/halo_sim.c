@@ -58,6 +58,10 @@ bit for bit; differences are counted and the first few logged.
 #include "math/real_math.h"
 #include "effects/effect_definitions.h"
 #include "effects/particles.h"
+#include "objects/damage_effect_definitions.h"
+#include "render/render_cameras.h"
+#include "main/console.h"
+unsigned char const *transition_function_table_get(short function_type); /* periodic_functions.c */
 #include "render/render.h"
 #include "tag_files/tag_groups.h"
 #include "bevy_bridge.h"
@@ -70,7 +74,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 32
+#define HALO_SIM_VERSION 33
 
 /* ---------- structures */
 
@@ -1686,6 +1690,52 @@ struct halo_sim_particle_system_callbacks
 		unsigned long particle_count, struct halo_sim_particle_system_call *call);
 };
 
+/* crates/halo_sim's PlayerEffectEventC, PlayerEffectCallC and
+PlayerEffectCallbacks */
+typedef char halo_sim_player_effect_state_size_assert[sizeof(struct halo_sim_player_effect_state) == 0x12C ? 1 : -1];
+typedef char halo_sim_player_effect_call_size_assert[sizeof(struct halo_sim_player_effect_call) == 72 ? 1 : -1];
+
+struct halo_sim_player_effect_event
+{
+	struct halo_sim_player_effect_call call;
+	struct halo_sim_player_effect_state before;
+	struct halo_sim_player_effect_state after;
+};
+
+struct halo_sim_player_effect_call_c
+{
+	long op;
+	long definition_index;
+	long owner_object_index;
+	float direction[3];
+	float scale;
+	float total_damage;
+	float intensity;
+	float distance;
+	struct screen_flash_definition screen_flash;
+	long game_time;
+	short elapsed;
+	unsigned char console_active;
+	unsigned char pad;
+	unsigned char const *periodic_tables[12];
+	unsigned char const *transition_tables[6];
+	real_vector3d const *directions;
+	unsigned long direction_count;
+	struct halo_sim_player_effect_state state;
+	struct render_screen_flash screen_flash_out;
+	float matrix[13];
+	unsigned long has_matrix;
+	struct halo_sim_player_effect_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+};
+
+struct halo_sim_player_effect_callbacks
+{
+	void (*call)(struct halo_sim_player_effect_state *state, struct halo_sim_player_effect_call *call);
+};
+
 struct halo_sim_effect_callbacks
 {
 	long (*call)(struct halo_sim_effect_state *state, struct halo_sim_effect_call *call);
@@ -1718,6 +1768,7 @@ struct halo_sim_host
 	struct halo_sim_particle_callbacks particles;
 	struct halo_sim_contrail_callbacks contrails;
 	struct halo_sim_particle_system_callbacks particle_systems;
+	struct halo_sim_player_effect_callbacks player_effects;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -1783,6 +1834,7 @@ typedef long (*halo_sim_contrail_function)(struct halo_sim_contrail_update_call 
 typedef long (*halo_sim_contrail_new_function)(struct halo_sim_contrail_new_call *call);
 typedef long (*halo_sim_particle_system_function)(struct halo_sim_particle_system_update_call *call);
 typedef long (*halo_sim_particle_system_new_function)(struct halo_sim_particle_system_new_call *call);
+typedef long (*halo_sim_player_effect_function)(struct halo_sim_player_effect_call_c *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -1866,6 +1918,8 @@ static struct
 	halo_sim_particle_system_function particle_system_update_check;
 	halo_sim_particle_system_new_function particle_system_new;
 	halo_sim_particle_system_new_function particle_system_new_check;
+	halo_sim_player_effect_function player_effect;
+	halo_sim_player_effect_function player_effect_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1910,6 +1964,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"particles",
 	"contrails",
 	"particle_systems",
+	"player_effects",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2205,6 +2260,24 @@ static struct
 
 /* (Rust's updates': particle systems don't nest) */
 static struct halo_sim_system_particle halo_sim_system_particles[MAXIMUM_HALO_SIM_SYSTEM_PARTICLES];
+
+/* the player effect checks: the state the game's began with, its calls,
+and the comparisons */
+#define MAXIMUM_HALO_SIM_PLAYER_EFFECT_EVENTS 16
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	struct halo_sim_player_effect_call_c call;
+	struct halo_sim_player_effect_event events[MAXIMUM_HALO_SIM_PLAYER_EFFECT_EVENTS];
+	unsigned long event_count;
+	struct halo_sim_player_effect_event *open_event;
+	struct halo_sim_player_effect_state last;
+	unsigned long compared[7];
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long calls;
+} halo_sim_player_effect_checks;
 
 /* the object update loop checks: the game's calls and what they read, and
 the comparisons (and garbage's and scenery's) */
@@ -3968,6 +4041,18 @@ static void halo_sim_particle_system_call_callback(struct halo_sim_particle_syst
 	state->local_random_seed = *get_global_local_random_seed_address();
 }
 
+/* a player effect's call of the game: the state written to the game first,
+read back after */
+static void halo_sim_player_effect_call_callback(struct halo_sim_player_effect_state *state,
+	struct halo_sim_player_effect_call *call)
+{
+	short local_player_index = (short)state->local_player_index;
+
+	player_effect_halo_sim_store(state);
+	player_effect_call(local_player_index, call);
+	player_effect_halo_sim_load(local_player_index, state);
+}
+
 /* a unit as firing reads it: FALSE if it is no unit */
 static long halo_sim_owner_unit_callback(unsigned long index, struct halo_sim_owner_unit *out)
 {
@@ -4167,6 +4252,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	{
 		halo_sim_particle_system_call_callback,
 	},
+	{
+		halo_sim_player_effect_call_callback,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -4264,6 +4352,8 @@ static void halo_sim_initialize(void)
 	halo_sim.contrail_new_check = (halo_sim_contrail_new_function)halo_sim_symbol(library, "halo_sim_contrail_new_check");
 	halo_sim.particle_system_new = (halo_sim_particle_system_new_function)halo_sim_symbol(library, "halo_sim_particle_system_new");
 	halo_sim.particle_system_new_check = (halo_sim_particle_system_new_function)halo_sim_symbol(library, "halo_sim_particle_system_new_check");
+	halo_sim.player_effect = (halo_sim_player_effect_function)halo_sim_symbol(library, "halo_sim_player_effect");
+	halo_sim.player_effect_check = (halo_sim_player_effect_function)halo_sim_symbol(library, "halo_sim_player_effect_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -4289,7 +4379,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.contrail_update || !halo_sim.contrail_update_check ||
 		!halo_sim.particle_system_update || !halo_sim.particle_system_update_check ||
 		!halo_sim.contrail_new || !halo_sim.contrail_new_check ||
-		!halo_sim.particle_system_new || !halo_sim.particle_system_new_check)
+		!halo_sim.particle_system_new || !halo_sim.particle_system_new_check ||
+		!halo_sim.player_effect || !halo_sim.player_effect_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -8625,6 +8716,171 @@ void halo_sim_particle_system_new_check(long system_index)
 			platform_log("halo_sim: particle system creation: %lu of %lu agree with the game (%lu made)",
 				compared - halo_sim_particle_system_checks.created_differed, compared,
 				halo_sim_particle_system_checks.created);
+		}
+	}
+}
+
+/* ---------- player effects */
+
+static void halo_sim_player_effect_call_new(struct halo_sim_player_effect_args const *args,
+	struct halo_sim_player_effect_call_c *call)
+{
+	short function_type;
+	real_vector3d const *directions = NULL;
+
+	memset(call, 0, sizeof(*call));
+	call->op = args->op;
+	call->definition_index = args->definition_index;
+	call->owner_object_index = args->owner_object_index;
+	call->direction[0] = args->direction.i;
+	call->direction[1] = args->direction.j;
+	call->direction[2] = args->direction.k;
+	call->scale = args->scale;
+	call->total_damage = args->total_damage;
+	call->intensity = args->intensity;
+	call->distance = args->distance;
+	if (args->screen_flash)
+		call->screen_flash = *args->screen_flash;
+	call->game_time = game_time_get();
+	call->elapsed = game_time_get_elapsed();
+	call->console_active = console_is_active() ? 1 : 0;
+	for (function_type = 0; function_type < 12; function_type++)
+		call->periodic_tables[function_type] = periodic_function_table_get(function_type);
+	for (function_type = 0; function_type < 6; function_type++)
+		call->transition_tables[function_type] = transition_function_table_get(function_type);
+	call->direction_count = random_direction_table_get(&directions);
+	call->directions = directions;
+	player_effect_halo_sim_load(args->local_player_index, &call->state);
+	if (args->render_screen_flash)
+		call->screen_flash_out = *args->render_screen_flash;
+}
+
+int halo_sim_player_effect(struct halo_sim_player_effect_args *args, int *checking)
+{
+	short mode = halo_sim_mode(_halo_sim_player_effects);
+	struct halo_sim_player_effect_call_c call;
+
+	*checking = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		if (halo_sim_player_effect_checks.recording)
+			return FALSE;
+		halo_sim_player_effect_call_new(args, &halo_sim_player_effect_checks.call);
+		halo_sim_player_effect_checks.last = halo_sim_player_effect_checks.call.state;
+		halo_sim_player_effect_checks.event_count = 0;
+		halo_sim_player_effect_checks.open_event = NULL;
+		halo_sim_player_effect_checks.overflow = FALSE;
+		halo_sim_player_effect_checks.recording = TRUE;
+		*checking = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_player_effect_call_new(args, &call);
+	if (halo_sim.player_effect(&call) != 0)
+		return FALSE;
+	player_effect_halo_sim_store(&call.state);
+	if (args->render_screen_flash)
+		*args->render_screen_flash = call.screen_flash_out;
+	if (args->matrix && call.has_matrix)
+		memcpy(args->matrix, call.matrix, sizeof(call.matrix));
+
+	return TRUE;
+}
+
+int halo_sim_player_effect_event_begin(struct halo_sim_player_effect_call const *call)
+{
+	struct halo_sim_player_effect_event *event;
+
+	if (!halo_sim_player_effect_checks.recording || halo_sim_player_effect_checks.open_event)
+		return FALSE;
+	if (halo_sim_player_effect_checks.event_count >= MAXIMUM_HALO_SIM_PLAYER_EFFECT_EVENTS)
+	{
+		halo_sim_player_effect_checks.overflow = TRUE;
+		return FALSE;
+	}
+	event = &halo_sim_player_effect_checks.events[halo_sim_player_effect_checks.event_count++];
+	memset(event, 0, sizeof(*event));
+	event->call = *call;
+	player_effect_halo_sim_load((short)halo_sim_player_effect_checks.last.local_player_index, &event->before);
+	halo_sim_player_effect_checks.open_event = event;
+	return TRUE;
+}
+
+void halo_sim_player_effect_event_end(struct halo_sim_player_effect_call const *call, int opened)
+{
+	struct halo_sim_player_effect_event *event = halo_sim_player_effect_checks.open_event;
+
+	if (!opened || !event)
+		return;
+	halo_sim_player_effect_checks.open_event = NULL;
+	event->call.result = call->result;
+	memcpy(event->call.out, call->out, sizeof(event->call.out));
+	player_effect_halo_sim_load((short)halo_sim_player_effect_checks.last.local_player_index, &event->after);
+}
+
+void halo_sim_player_effect_check(struct halo_sim_player_effect_args const *args)
+{
+	struct halo_sim_player_effect_call_c call;
+	struct halo_sim_player_effect_state game;
+	boolean differs;
+
+	if (!halo_sim_player_effect_checks.recording)
+		return;
+	halo_sim_player_effect_checks.recording = FALSE;
+	if (halo_sim_player_effect_checks.overflow)
+	{
+		halo_sim_player_effect_checks.skipped++;
+		return;
+	}
+	player_effect_halo_sim_load(args->local_player_index, &game);
+	call = halo_sim_player_effect_checks.call;
+	call.events = halo_sim_player_effect_checks.events;
+	call.event_count = halo_sim_player_effect_checks.event_count;
+	if (halo_sim.player_effect_check(&call) != 0)
+	{
+		halo_sim_player_effect_checks.skipped++;
+		return;
+	}
+	if (call.op >= 0 && call.op < 7)
+		halo_sim_player_effect_checks.compared[call.op]++;
+	halo_sim_player_effect_checks.calls += halo_sim_player_effect_checks.event_count;
+	differs = memcmp(&call.state, &game, sizeof(game)) != 0;
+	if (args->render_screen_flash)
+		differs = differs || memcmp(&call.screen_flash_out, args->render_screen_flash, sizeof(call.screen_flash_out)) != 0;
+	if (args->matrix && call.has_matrix)
+		differs = differs || memcmp(call.matrix, args->matrix, sizeof(call.matrix)) != 0;
+	if (differs || call.difference_event != NONE)
+	{
+		halo_sim_player_effect_checks.differed++;
+		if (halo_sim_player_effect_checks.differed <= 8)
+		{
+			unsigned char const *game_bytes = (unsigned char const *)&game;
+			unsigned char const *rust_bytes = (unsigned char const *)&call.state;
+			long offset = 0;
+
+			while (offset < (long)sizeof(game) && game_bytes[offset] == rust_bytes[offset])
+				offset++;
+			platform_log("halo_sim: player effect differs: op %ld call %ld of %lu reason %ld; state first differs at byte %ld (of %lu)",
+				call.op, call.difference_event, halo_sim_player_effect_checks.event_count, call.difference_reason, offset,
+				(unsigned long)sizeof(game));
+		}
+	}
+	{
+		unsigned long compared = 0;
+		long op;
+
+		for (op = 0; op < 7; op++)
+			compared += halo_sim_player_effect_checks.compared[op];
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: player effect: %lu of %lu agree with the game (start, screen flash, telefrag, continuous, camera matrix, screen flash read %lu/%lu/%lu/%lu/%lu/%lu; %lu calls of the game; %lu left out)",
+				compared - halo_sim_player_effect_checks.differed, compared, halo_sim_player_effect_checks.compared[1],
+				halo_sim_player_effect_checks.compared[2], halo_sim_player_effect_checks.compared[3],
+				halo_sim_player_effect_checks.compared[4], halo_sim_player_effect_checks.compared[5],
+				halo_sim_player_effect_checks.compared[6], halo_sim_player_effect_checks.calls,
+				halo_sim_player_effect_checks.skipped);
 		}
 	}
 }

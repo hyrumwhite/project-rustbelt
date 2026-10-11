@@ -81,6 +81,7 @@ pub struct Host {
     pub particles: crate::particles::ParticleCallbacks,
     pub contrails: crate::contrails::ContrailCallbacks,
     pub particle_systems: crate::particle_systems::ParticleSystemCallbacks,
+    pub player_effects: crate::player_effects::PlayerEffectCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);

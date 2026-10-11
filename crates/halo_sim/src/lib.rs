@@ -44,6 +44,7 @@ pub mod effects;
 pub mod particles;
 pub mod contrails;
 pub mod particle_systems;
+pub mod player_effects;
 pub mod items;
 pub mod object_exports;
 pub mod object_functions;
@@ -56,7 +57,7 @@ pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 32;
+pub const VERSION: u32 = 33;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {
@@ -122,6 +123,8 @@ pub(crate) struct Tags {
     particle_definitions: HashMap<u32, Option<Arc<halo_map::particles::ParticleDefinition>>>,
     contrail_definitions: HashMap<u32, Option<Arc<halo_map::contrails::ContrailDefinition>>>,
     particle_system_definitions: HashMap<u32, Option<Arc<halo_map::particle_systems::ParticleSystemDefinition>>>,
+    damage_effect_views: HashMap<u32, Option<Arc<halo_map::player_effects::DamageEffectView>>>,
+    continuous_effect_views: HashMap<u32, Option<Arc<halo_map::player_effects::ContinuousEffectView>>>,
     object_functions_definitions: HashMap<u32, Option<Arc<halo_map::object_functions::ObjectFunctionsDefinition>>>,
     export_definitions: HashMap<(u32, i16), Option<Arc<halo_map::object_exports::ExportDefinition>>>,
     model_markers: HashMap<u32, Option<Arc<halo_map::markers::ModelMarkers>>>,
@@ -199,6 +202,8 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
         particle_definitions: HashMap::new(),
         contrail_definitions: HashMap::new(),
         particle_system_definitions: HashMap::new(),
+        damage_effect_views: HashMap::new(),
+        continuous_effect_views: HashMap::new(),
         object_functions_definitions: HashMap::new(),
         export_definitions: HashMap::new(),
         model_markers: HashMap::new(),

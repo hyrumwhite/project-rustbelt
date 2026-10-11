@@ -84,6 +84,7 @@ pub struct Host {
     pub player_effects: crate::player_effects::PlayerEffectCallbacks,
     pub game_tick: crate::game_tick::GameTickCallbacks,
     pub hs: crate::hs::HsCallbacks,
+    pub ai_update: crate::ai_update::AiUpdateCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);

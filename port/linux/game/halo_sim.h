@@ -1208,6 +1208,27 @@ enum
 
 enum
 {
+	_action_search_call_communication = (7 << 8) | 1,
+	_action_search_call_sees_pursuit_location,
+	_action_search_call_searching_same_position,
+	_action_search_call_mark_examined,
+	_action_search_call_move_halt,
+	_action_search_call_move_to_prop,
+	_action_search_call_move_to_firing_position,
+};
+
+enum
+{
+	_action_uncover_call_select_firing_position = (5 << 8) | 1,
+	_action_uncover_call_tolerance,
+	_action_uncover_call_debug,
+	_action_uncover_call_change_firing_position,
+	_action_uncover_call_discard_firing_position,
+	_action_uncover_call_done,
+};
+
+enum
+{
 	_action_fight_call_discard_firing_position = (3 << 8) | 1,
 	_action_fight_call_firing_variant,
 	_action_fight_call_find_pathfinding_location,
@@ -1781,6 +1802,8 @@ int actions_port_ported(short action, long function);
 void actions_port_call(struct halo_sim_ai_call *call);
 void action_wait_call(struct halo_sim_ai_call *call);
 void action_alert_call(struct halo_sim_ai_call *call);
+void action_search_call(struct halo_sim_ai_call *call);
+void action_uncover_call(struct halo_sim_ai_call *call);
 void action_avoid_call(struct halo_sim_ai_call *call);
 void action_fight_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);

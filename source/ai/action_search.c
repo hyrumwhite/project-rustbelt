@@ -46,6 +46,7 @@ symbols in this file:
 #include "scenario/scenario_definitions.h"
 #include "units/units.h"
 #include "math/real_math.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -56,6 +57,103 @@ symbols in this file:
 /* ---------- prototypes */
 
 /* ---------- public code */
+
+/* port: what the search action asks of the rest of the game, shared by the
+game's and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded */
+void action_search_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	struct search_state_data *state_data = &actor->state.action_data.search;
+
+	switch (call->kind)
+	{
+		case _action_search_call_communication:
+			ai_communication_event(
+				(short)call->a,
+				actor->meta.unit_index,
+				actor_target_unit_index(actor_index),
+				NONE,
+				NONE,
+				NONE,
+				NULL);
+			break;
+
+		case _action_search_call_sees_pursuit_location:
+		{
+			real_point3d calculated_head_position;
+
+			unit_estimate_position(
+				actor->meta.unit_index,
+				1,
+				&state_data->pursuit_location.position,
+				NULL,
+				NULL,
+				&calculated_head_position);
+			call->result = ai_test_line_of_sight(
+				&actor->input.position.head_position,
+				actor->input.position.body_location.cluster_index,
+				&calculated_head_position,
+				state_data->pursuit_location.cluster_index,
+				0,
+				0,
+				NONE,
+				actor->input.vehicle_index != NONE) == 0;
+			break;
+		}
+
+		case _action_search_call_searching_same_position:
+			call->result = actors_searching_same_position(actor_index, call->a) ? 1 : 0;
+			break;
+
+		case _action_search_call_mark_examined:
+			encounter_mark_examined_pursuit_position(
+				actor->meta.encounter_index,
+				actor_index,
+				(short)call->a,
+				call->b);
+			break;
+
+		case _action_search_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_search_call_move_to_prop:
+			call->result = actor_move_to_prop(actor_index, call->a, 2.5f) ? 1 : 0;
+			break;
+
+		case _action_search_call_move_to_firing_position:
+			call->result = actor_move_to_firing_position(actor_index, (short)call->a, NULL) ? 1 : 0;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_search_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	action_search_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
 
 boolean action_search_setup_target(
 	long actor_index,
@@ -187,27 +285,13 @@ void action_search_update(
 						state_data->search_remaining_time + 3*TICKS_PER_SECOND <
 							state_data->search_desired_time))
 				{
-					ai_communication_event(
-						13,
-						actor->meta.unit_index,
-						actor_target_unit_index(actor_index),
-						NONE,
-						NONE,
-						NONE,
-						NULL);
+					action_search_call_simple(actor_index, _action_search_call_communication, 13, 0, NULL);
 					actor->firing_positions.pursuit_communicated_lost_contact = TRUE;
 				}
 			}
 			else if (state_data->search_remaining_time == 0)
 			{
-				ai_communication_event(
-					18,
-					actor->meta.unit_index,
-					actor_target_unit_index(actor_index),
-					NONE,
-					NONE,
-					NONE,
-					NULL);
+				action_search_call_simple(actor_index, _action_search_call_communication, 18, 0, NULL);
 			}
 		}
 	}
@@ -379,24 +463,8 @@ boolean action_search_perform(
 			}
 			else
 			{
-				real_point3d calculated_head_position;
-
-				unit_estimate_position(
-					actor->meta.unit_index,
-					1,
-					&state_data->pursuit_location.position,
-					NULL,
-					NULL,
-					&calculated_head_position);
-				state_data->at_destination = ai_test_line_of_sight(
-					&actor->input.position.head_position,
-					actor->input.position.body_location.cluster_index,
-					&calculated_head_position,
-					state_data->pursuit_location.cluster_index,
-					0,
-					0,
-					NONE,
-					actor->input.vehicle_index != NONE) == 0;
+				state_data->at_destination = (boolean)action_search_call_simple(actor_index,
+					_action_search_call_sees_pursuit_location, 0, 0, NULL);
 			}
 		}
 
@@ -416,7 +484,7 @@ boolean action_search_perform(
 					!prop->enemy &&
 					!prop->dead &&
 					prop->actor_index != NONE &&
-					actors_searching_same_position(actor_index, prop->actor_index))
+					action_search_call_simple(actor_index, _action_search_call_searching_same_position, prop->actor_index, 0, NULL))
 				{
 					struct actor_datum *other_actor = actor_get(prop->actor_index);
 
@@ -446,11 +514,8 @@ boolean action_search_perform(
 				}
 				if (actor->meta.encounter_index != NONE)
 				{
-					encounter_mark_examined_pursuit_position(
-						actor->meta.encounter_index,
-						actor_index,
-						state_data->pursuit_location.firing_position_index,
-						last_perceived_time);
+					action_search_call_simple(actor_index, _action_search_call_mark_examined,
+						state_data->pursuit_location.firing_position_index, last_perceived_time, NULL);
 				}
 			}
 			else if (nearby_searching_actor_count > 0)
@@ -461,11 +526,11 @@ boolean action_search_perform(
 
 		if (state_data->at_destination)
 		{
-			actor_move_halt(actor_index);
+			action_search_call_simple(actor_index, _action_search_call_move_halt, 0, 0, NULL);
 		}
 		else if (state_data->pursuit_location.type == 0)
 		{
-			if (!actor_move_to_prop(actor_index, actor->target.target_prop_index, 2.5f))
+			if (!action_search_call_simple(actor_index, _action_search_call_move_to_prop, actor->target.target_prop_index, 0, NULL))
 			{
 				state_data->search_done = TRUE;
 				state_data->search_failed = TRUE;
@@ -474,10 +539,8 @@ boolean action_search_perform(
 		else if (state_data->pursuit_location.type == 1)
 		{
 			actor->firing_positions.current_position_index = NONE;
-			if (!actor_move_to_firing_position(
-				actor_index,
-				state_data->pursuit_location.firing_position_index,
-				NULL))
+			if (!action_search_call_simple(actor_index, _action_search_call_move_to_firing_position,
+				state_data->pursuit_location.firing_position_index, 0, NULL))
 			{
 				state_data->search_done = TRUE;
 				state_data->search_failed = TRUE;
@@ -485,9 +548,10 @@ boolean action_search_perform(
 		}
 		else
 		{
-			actor_move_halt(actor_index);
+			action_search_call_simple(actor_index, _action_search_call_move_halt, 0, 0, NULL);
 		}
 	}
+
 	return state_data->search_done;
 }
 

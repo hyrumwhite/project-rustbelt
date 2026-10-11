@@ -29,6 +29,7 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
 #include "math/real_math.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- macros */
 
@@ -44,6 +45,143 @@ typedef char action_uncover_ai_debug_printing_offset_must_be_0xA4[
 /* ---------- prototypes */
 
 /* ---------- public code */
+
+/* port: what the uncover action asks of the rest of the game, shared by the
+game's and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded. The firing position the search selected is kept for its change. */
+static struct
+{
+	boolean position_flags;
+	long previous_owner_actor_index;
+	short selected_firing_position_index;
+	struct firing_position candidate;
+	struct path_state workspace;
+} action_uncover_selection;
+
+void action_uncover_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	struct uncover_state_data *state_data = &actor->state.action_data.uncover;
+	char temporary[256];
+
+	switch (call->kind)
+	{
+		case _action_uncover_call_select_firing_position:
+		{
+			struct firing_position_evaluation_context search;
+
+			csmemset(&search, 0, sizeof(search));
+			search.evaluation_mode = _firing_point_evaluation_mode_uncover;
+			if (state_data->pursuit_location.type == _pursuit_location_position)
+			{
+				search.specific_target_enable = TRUE;
+				search.specific_target_point = state_data->pursuit_location.position;
+				search.specific_target_surface_index = state_data->pursuit_location.surface_index;
+				search.specific_target_cluster_index = state_data->pursuit_location.cluster_index;
+			}
+			else
+			{
+				search.use_last_visible_target_position = state_data->no_target_sight_available;
+			}
+			action_uncover_selection.selected_firing_position_index = actor_active_select_firing_position(
+				actor_index,
+				&search,
+				&action_uncover_selection.candidate,
+				&action_uncover_selection.previous_owner_actor_index,
+				&action_uncover_selection.workspace,
+				&action_uncover_selection.position_flags);
+			call->result = action_uncover_selection.selected_firing_position_index;
+			call->result2 = action_uncover_selection.candidate.line_of_sight;
+			call->output[0] = action_uncover_selection.candidate.path_distance_from_actor;
+			break;
+		}
+
+		case _action_uncover_call_tolerance:
+			call->output[0] = actor_destination_tolerance(actor_index);
+			break;
+
+		case _action_uncover_call_debug:
+			if (ACTION_UNCOVER_DEBUG_PRINTING_ENABLED())
+			{
+				ai_debug_describe_actor(actor_index, NONE, TRUE, temporary, NUMBEROF(temporary));
+				error(2, call->a ? "%s: inspected pursuit location" : "%s: unable to see target's current location",
+					temporary);
+			}
+			break;
+
+		case _action_uncover_call_change_firing_position:
+			call->result = actor_change_firing_position(
+				actor_index,
+				action_uncover_selection.selected_firing_position_index,
+				&action_uncover_selection.candidate,
+				action_uncover_selection.previous_owner_actor_index,
+				&action_uncover_selection.workspace,
+				action_uncover_selection.position_flags);
+			break;
+
+		case _action_uncover_call_discard_firing_position:
+			actor_discard_firing_position(actor_index, (short)call->a, FALSE);
+			break;
+
+		case _action_uncover_call_done:
+			if (ACTION_UNCOVER_DEBUG_PRINTING_ENABLED())
+			{
+				char reason[256];
+
+				ai_debug_describe_actor(actor_index, NONE, TRUE, temporary, NUMBEROF(temporary));
+				if (state_data->uncover_remaining_time == 0)
+				{
+					sprintf(reason, "timer %d finished", state_data->uncover_desired_time);
+				}
+				else if (state_data->uncover_exit_persistent_timer >= 12*TICKS_PER_SECOND)
+				{
+					sprintf(reason, "persistent timer %d", state_data->uncover_exit_persistent_timer);
+				}
+				else if (state_data->pursuit_location.type == _pursuit_location_position && state_data->pursuit_location_inspected)
+				{
+					csstrcpy(reason, "location inspected");
+				}
+				else
+				{
+					csstrcpy(reason, "<unknown reason>");
+				}
+				error(
+					2,
+					"%s: %s uncover done: %s",
+					temporary,
+					state_data->pursuit_location.type == _pursuit_location_target ? "target" : "pursuit",
+					reason);
+			}
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_uncover_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	action_uncover_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
 
 boolean action_uncover_setup_target(
 	long actor_index,
@@ -112,69 +250,42 @@ boolean action_uncover_perform(
 		!actor->input.vehicle_passenger &&
 		!state_data->uncover_done)
 	{
-		boolean position_flags;
-		long previous_owner_actor_index;
-		short selected_firing_position_index;
-		struct firing_position candidate;
-		char temporary[256];
-		struct firing_position_evaluation_context search;
-		struct path_state workspace;
+		struct halo_sim_ai_call selection;
 
-		csmemset(&search, 0, sizeof(search));
-		search.evaluation_mode = _firing_point_evaluation_mode_uncover;
-		if (state_data->pursuit_location.type == _pursuit_location_position)
+		/* port: the search, the candidate's tests and the change through
+		action_uncover_call */
+		memset(&selection, 0, sizeof(selection));
+		selection.kind = _action_uncover_call_select_firing_position;
+		selection.actor = actor_index;
+		action_uncover_call(&selection);
+		if ((short)selection.result != NONE)
 		{
-			search.specific_target_enable = TRUE;
-			search.specific_target_point = state_data->pursuit_location.position;
-			search.specific_target_surface_index = state_data->pursuit_location.surface_index;
-			search.specific_target_cluster_index = state_data->pursuit_location.cluster_index;
-		}
-		else
-		{
-			search.use_last_visible_target_position = state_data->no_target_sight_available;
-		}
+			short line_of_sight = (short)selection.result2;
 
-		selected_firing_position_index = actor_active_select_firing_position(
-			actor_index,
-			&search,
-			&candidate,
-			&previous_owner_actor_index,
-			&workspace,
-			&position_flags);
-		if (selected_firing_position_index != NONE)
-		{
 			if (state_data->pursuit_location.type == _pursuit_location_target)
 			{
-				if (candidate.line_of_sight != _ai_line_of_sight_clear &&
-					candidate.line_of_sight != _ai_line_of_sight_occluded)
+				if (line_of_sight != _ai_line_of_sight_clear &&
+					line_of_sight != _ai_line_of_sight_occluded)
 				{
-					if (!state_data->no_target_sight_available && ACTION_UNCOVER_DEBUG_PRINTING_ENABLED())
-					{
-						ai_debug_describe_actor(actor_index, NONE, TRUE, temporary, NUMBEROF(temporary));
-						error(2, "%s: unable to see target's current location", temporary);
-					}
+					if (!state_data->no_target_sight_available)
+						action_uncover_call_simple(actor_index, _action_uncover_call_debug, 0, 0, NULL);
 					state_data->no_target_sight_available = TRUE;
 				}
 			}
-			else if (candidate.line_of_sight == _ai_line_of_sight_clear &&
-				actor_destination_tolerance(actor_index) > candidate.path_distance_from_actor)
+			else if (line_of_sight == _ai_line_of_sight_clear)
 			{
-				if (!state_data->pursuit_location_inspected && ACTION_UNCOVER_DEBUG_PRINTING_ENABLED())
+				real tolerance;
+
+				action_uncover_call_simple(actor_index, _action_uncover_call_tolerance, 0, 0, &tolerance);
+				if (tolerance > selection.output[0])
 				{
-					ai_debug_describe_actor(actor_index, NONE, TRUE, temporary, NUMBEROF(temporary));
-					error(2, "%s: inspected pursuit location", temporary);
+					if (!state_data->pursuit_location_inspected)
+						action_uncover_call_simple(actor_index, _action_uncover_call_debug, 1, 0, NULL);
+					state_data->pursuit_location_inspected = TRUE;
 				}
-				state_data->pursuit_location_inspected = TRUE;
 			}
 		}
-
-		if (actor_change_firing_position(
-			actor_index,
-			selected_firing_position_index,
-			&candidate,
-			previous_owner_actor_index,
-			&workspace,
-			position_flags) == NONE)
+		if ((short)action_uncover_call_simple(actor_index, _action_uncover_call_change_firing_position, 0, 0, NULL) == NONE)
 		{
 			state_data->uncover_exit_failure = TRUE;
 		}
@@ -401,10 +512,8 @@ void action_uncover_update(
 		if (state_data->pursuit_location.type == _pursuit_location_target &&
 			state_data->current_position_hold_timer >= TICKS_PER_SECOND)
 		{
-			actor_discard_firing_position(
-				actor_index,
-				actor->firing_positions.current_position_index,
-				FALSE);
+			action_uncover_call_simple(actor_index, _action_uncover_call_discard_firing_position,
+				actor->firing_positions.current_position_index, 0, NULL);
 		}
 	}
 
@@ -459,31 +568,9 @@ test_uncover_timers:
 		done = TRUE;
 	}
 
-	if (done && ACTION_UNCOVER_DEBUG_PRINTING_ENABLED())
+	if (done)
 	{
-		ai_debug_describe_actor(actor_index, NONE, TRUE, actor_name, NUMBEROF(actor_name));
-		if (state_data->uncover_remaining_time == 0)
-		{
-			sprintf(reason, "timer %d finished", state_data->uncover_desired_time);
-		}
-		else if (state_data->uncover_exit_persistent_timer >= 12*TICKS_PER_SECOND)
-		{
-			sprintf(reason, "persistent timer %d", state_data->uncover_exit_persistent_timer);
-		}
-		else if (state_data->pursuit_location.type == _pursuit_location_position && state_data->pursuit_location_inspected)
-		{
-			csstrcpy(reason, "location inspected");
-		}
-		else
-		{
-			csstrcpy(reason, "<unknown reason>");
-		}
-		error(
-			2,
-			"%s: %s uncover done: %s",
-			actor_name,
-			state_data->pursuit_location.type == _pursuit_location_target ? "target" : "pursuit",
-			reason);
+		action_uncover_call_simple(actor_index, _action_uncover_call_done, 0, 0, NULL);
 	}
 	state_data->uncover_done = done;
 	return;

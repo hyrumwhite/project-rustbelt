@@ -45,6 +45,7 @@ enum
 	_halo_sim_player_effects,
 	_halo_sim_game_tick,
 	_halo_sim_hs,
+	_halo_sim_ai_update,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -762,6 +763,78 @@ struct halo_sim_hs_context
 	long scenario_loaded;
 };
 
+/* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's
+actors_port_call; crates/halo_map's ai_update::call) */
+enum
+{
+	_ai_update_call_state = 1,
+	_ai_update_call_set_control_data,
+	_ai_update_call_profile_enter,
+	_ai_update_call_profile_exit,
+	_ai_update_call_debug_update,
+	_ai_update_call_profile_update,
+	_ai_update_call_place_pending_mounted_weapons,
+	_ai_update_call_move_randomly,
+	_ai_update_call_conversation_update,
+	_ai_update_call_encounters_update,
+	_ai_update_call_freeze,
+	_ai_update_call_actors_begin,
+	_ai_update_call_encounter_next,
+	_ai_update_call_first_encounterless,
+	_ai_update_call_actor,
+	_ai_update_call_actor_erase,
+	_ai_update_call_actor_dormancy,
+	_ai_update_call_update_begin,
+	_ai_update_call_general_update,
+	_ai_update_call_timeslice,
+	_ai_update_call_input,
+	_ai_update_call_perception,
+	_ai_update_call_situation,
+	_ai_update_call_emotion,
+	_ai_update_call_clear_orders,
+	_ai_update_call_decision_loop,
+	_ai_update_call_action_update,
+	_ai_update_call_swarm_control,
+	_ai_update_call_clear_output,
+	_ai_update_call_action_control,
+	_ai_update_call_communication,
+	_ai_update_call_conversation_control,
+	_ai_update_call_destination,
+	_ai_update_call_look_affect_movement,
+	_ai_update_call_move_update,
+	_ai_update_call_look_update,
+	_ai_update_call_combat_update,
+	_ai_update_call_unit_control,
+	_ai_update_call_update_end,
+};
+
+/* _ai_update_call_state's and _actor's bits */
+enum
+{
+	_ai_update_state_initialized = 1<<0,
+	_ai_update_state_profile_disabled = 1<<1,
+	_ai_update_state_move_randomly = 1<<2,
+	_ai_update_state_active = 1<<3,
+	_ai_update_state_has_control_data = 1<<4,
+};
+enum
+{
+	_ai_update_actor_active = 1<<0,
+	_ai_update_actor_erase_next_tick = 1<<1,
+	_ai_update_actor_thinking = 1<<2,
+};
+
+/* crates/halo_map's AiUpdateCall */
+struct halo_sim_ai_update_call
+{
+	long kind;
+	long a;
+	long result;
+	long result2;
+	long result3;
+	long result4;
+};
+
 /* the object update loop's calls (objects.c's objects_update_call;
 crates/halo_map's objects_update::call) */
 enum
@@ -1279,5 +1352,16 @@ void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened);
 void hs_runtime_call(struct halo_sim_hs_call *call);
 void hs_runtime_port_context(struct halo_sim_hs_context *context);
 void hs_runtime_port_thread(long thread_index, void **thread_address, long **destination);
+
+/* ai.c's ai_update: TRUE when the Rust port ran it (its steps through
+ai_update_call); in check mode `checking` is set, ai_update_call notes each
+call (halo_sim_ai_update_note), and halo_sim_ai_update_check compares
+Rust's replay */
+int halo_sim_ai_update(int *checking);
+void halo_sim_ai_update_check(void);
+void halo_sim_ai_update_note(struct halo_sim_ai_update_call const *call);
+void ai_update_call(struct halo_sim_ai_update_call *call);
+long ai_update_call_simple(long kind, long a);
+void actors_port_call(struct halo_sim_ai_update_call *call);
 
 #endif // __HALO_SIM_H

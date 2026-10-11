@@ -239,6 +239,7 @@ symbols in this file:
 #include "tag_files/tag_groups.h"
 
 #include <stddef.h>
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #undef COLLISIONS_EXTERNAL_COLLISION_TEST_LINE
 #undef REAL_MATH_EXTERNAL_NORMALIZE3D
@@ -1934,40 +1935,143 @@ void ai_initialize_for_new_map(
 	return;
 }
 
-void ai_update(
+/* port: a step of the AI's update, or a question it asks, shared by the
+game's update and the Rust port's (halo_sim.c); the actors' steps are
+actors.c's */
+void ai_update_call(
+	struct halo_sim_ai_update_call *call)
+{
+	switch (call->kind)
+	{
+		case _ai_update_call_state:
+			call->result =
+				(ai_globals->ai_initialized_for_map ? _ai_update_state_initialized : 0) |
+				(ai_profile.disabled ? _ai_update_state_profile_disabled : 0) |
+				(ai_profile.move_actors_randomly ? _ai_update_state_move_randomly : 0) |
+				(ai_globals->ai_active ? _ai_update_state_active : 0) |
+				(ai_globals->ai_has_control_data ? _ai_update_state_has_control_data : 0);
+			break;
+
+		case _ai_update_call_set_control_data:
+			ai_globals->ai_has_control_data = call->a != 0;
+			break;
+
+		case _ai_update_call_profile_enter:
+			profile_enter(ai_update_section);
+			break;
+
+		case _ai_update_call_profile_exit:
+			profile_exit(ai_update_section);
+			break;
+
+		case _ai_update_call_debug_update:
+			ai_debug_update();
+			break;
+
+		case _ai_update_call_profile_update:
+			ai_profile_update();
+			break;
+
+		case _ai_update_call_place_pending_mounted_weapons:
+			ai_place_pending_mounted_weapons();
+			break;
+
+		case _ai_update_call_move_randomly:
+			actors_move_randomly();
+			break;
+
+		case _ai_update_call_conversation_update:
+			ai_conversation_update();
+			break;
+
+		case _ai_update_call_encounters_update:
+			encounters_update();
+			break;
+
+		case _ai_update_call_freeze:
+			actors_freeze();
+			break;
+
+		default:
+			actors_port_call(call);
+			break;
+	}
+	halo_sim_ai_update_note(call);
+
+	return;
+}
+
+long ai_update_call_simple(
+	long kind,
+	long a)
+{
+	struct halo_sim_ai_update_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.a = a;
+	ai_update_call(&call);
+
+	return call.result;
+}
+
+/* the game's update, each step through ai_update_call (the state asked
+again after the first steps, which may change it) */
+static void ai_update_game(
 	void)
 {
-	boolean update_ai = ai_globals->ai_initialized_for_map && !ai_profile.disabled;
-	boolean move_actors_randomly = ai_profile.move_actors_randomly;
+	long state = ai_update_call_simple(_ai_update_call_state, 0);
+	boolean update_ai = (state & _ai_update_state_initialized) && !(state & _ai_update_state_profile_disabled);
+	boolean move_actors_randomly = (state & _ai_update_state_move_randomly) != 0;
 
-	profile_enter(ai_update_section);
+	ai_update_call_simple(_ai_update_call_profile_enter, 0);
 
 	if (update_ai)
 	{
-		ai_debug_update();
-		ai_profile_update();
-		ai_place_pending_mounted_weapons();
+		ai_update_call_simple(_ai_update_call_debug_update, 0);
+		ai_update_call_simple(_ai_update_call_profile_update, 0);
+		ai_update_call_simple(_ai_update_call_place_pending_mounted_weapons, 0);
 
 		if (move_actors_randomly)
 		{
-			actors_move_randomly();
-			ai_globals->ai_has_control_data = TRUE;
+			ai_update_call_simple(_ai_update_call_move_randomly, 0);
+			ai_update_call_simple(_ai_update_call_set_control_data, TRUE);
 		}
-		else if (ai_globals->ai_active)
+		else
 		{
-			ai_conversation_update();
-			encounters_update();
-			actors_update();
-			ai_globals->ai_has_control_data = TRUE;
-		}
-		else if (ai_globals->ai_has_control_data)
-		{
-			actors_freeze();
-			ai_globals->ai_has_control_data = FALSE;
+			state = ai_update_call_simple(_ai_update_call_state, 0);
+			if (state & _ai_update_state_active)
+			{
+				ai_update_call_simple(_ai_update_call_conversation_update, 0);
+				ai_update_call_simple(_ai_update_call_encounters_update, 0);
+				actors_update();
+				ai_update_call_simple(_ai_update_call_set_control_data, TRUE);
+			}
+			else if (state & _ai_update_state_has_control_data)
+			{
+				ai_update_call_simple(_ai_update_call_freeze, 0);
+				ai_update_call_simple(_ai_update_call_set_control_data, FALSE);
+			}
 		}
 	}
 
-	profile_exit(ai_update_section);
+	ai_update_call_simple(_ai_update_call_profile_exit, 0);
+
+	return;
+}
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
+void ai_update(
+	void)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_update(&checking))
+		return;
+	ai_update_game();
+	if (checking)
+		halo_sim_ai_update_check();
 
 	return;
 }

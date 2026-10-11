@@ -318,6 +318,7 @@ symbols in this file:
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
 #include "networking/network_game_globals.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -4202,69 +4203,223 @@ static void actor_unit_control(
 	return;
 }
 
-static void actor_update(
-	long actor_index)
+/* port: an actor's steps, and the questions the walk over the actors asks,
+through ai.c's ai_update_call (shared with the Rust port's update) */
+void actors_port_call(
+	struct halo_sim_ai_update_call *call)
 {
-	struct actor_datum *actor = actor_get(actor_index);
+	long actor_index = call->a;
 
-	actor_update_begin(actor_index);
-	if (actor_general_update(actor_index))
+	switch (call->kind)
 	{
-		actor_get_timeslice(actor_index);
-		actor_input_update(actor_index);
-		actor_perception_update(actor_index);
-		actor_situation_update(actor_index);
-		actor_emotion_update(actor_index);
-		actor_clear_orders(actor_index);
-		actor_decision_loop(actor_index);
-		actor_action_update(actor_index);
+		case _ai_update_call_actors_begin:
+			ai_globals->last_highest_service_timer = ai_globals->current_highest_service_timer;
+			ai_globals->current_highest_service_timer = 0;
+			ai_globals->time_given_this_frame = FALSE;
+			break;
 
-		if (!actor->meta.dormant)
+		case _ai_update_call_encounter_next:
 		{
-			if (actor->meta.swarm)
+			/* (data_iterator_next from the walk's absolute index) */
+			struct data_iterator iterator;
+			struct encounter_datum *encounter;
+
+			data_iterator_new(&iterator, encounter_data);
+			iterator.absolute_index = (short)call->a;
+			encounter = (struct encounter_datum *)data_iterator_next(&iterator);
+			call->result = encounter != NULL;
+			call->result2 = iterator.absolute_index;
+			if (encounter)
 			{
-				actor_type_swarm_control(actor_index);
+				call->result3 = encounter->active ? 1 : 0;
+				call->result4 = encounter->first_actor_index;
 			}
-			else
-			{
-				actor_clear_output(actor_index);
-				actor_action_control(actor_index);
-				actor_communication_update(actor_index);
-				actor_conversation_control(actor_index);
-				actor_destination_update(actor_index);
-				actor_look_affect_movement(actor_index);
-				actor_move_update(actor_index);
-				actor_look_update(actor_index);
-				actor_combat_update(actor_index);
-				actor_unit_control(actor_index);
-			}
+			break;
 		}
+
+		case _ai_update_call_first_encounterless:
+			call->result = ai_globals->first_encounterless_actor_index;
+			break;
+
+		case _ai_update_call_actor:
+		{
+			struct actor_datum *actor = actor_get(actor_index);
+
+			call->result = actor->meta.next_actor_index;
+			call->result2 =
+				(actor->meta.active ? _ai_update_actor_active : 0) |
+				(actor->meta.erase_next_tick ? _ai_update_actor_erase_next_tick : 0) |
+				(actor->state.mode > _actor_mode_braindead ? _ai_update_actor_thinking : 0);
+			break;
+		}
+
+		case _ai_update_call_actor_erase:
+			actor_erase(actor_index, FALSE);
+			break;
+
+		case _ai_update_call_actor_dormancy:
+		{
+			struct actor_datum *actor = actor_get(actor_index);
+
+			call->result = (actor->meta.dormant ? 1 : 0) | (actor->meta.swarm ? 2 : 0);
+			break;
+		}
+
+		case _ai_update_call_update_begin: actor_update_begin(actor_index); break;
+		case _ai_update_call_general_update: call->result = actor_general_update(actor_index) ? 1 : 0; break;
+		case _ai_update_call_timeslice: actor_get_timeslice(actor_index); break;
+		case _ai_update_call_input: actor_input_update(actor_index); break;
+		case _ai_update_call_perception: actor_perception_update(actor_index); break;
+		case _ai_update_call_situation: actor_situation_update(actor_index); break;
+		case _ai_update_call_emotion: actor_emotion_update(actor_index); break;
+		case _ai_update_call_clear_orders: actor_clear_orders(actor_index); break;
+		case _ai_update_call_decision_loop: actor_decision_loop(actor_index); break;
+		case _ai_update_call_action_update: actor_action_update(actor_index); break;
+		case _ai_update_call_swarm_control: actor_type_swarm_control(actor_index); break;
+		case _ai_update_call_clear_output: actor_clear_output(actor_index); break;
+		case _ai_update_call_action_control: actor_action_control(actor_index); break;
+		case _ai_update_call_communication: actor_communication_update(actor_index); break;
+		case _ai_update_call_conversation_control: actor_conversation_control(actor_index); break;
+		case _ai_update_call_destination: actor_destination_update(actor_index); break;
+		case _ai_update_call_look_affect_movement: actor_look_affect_movement(actor_index); break;
+		case _ai_update_call_move_update: actor_move_update(actor_index); break;
+		case _ai_update_call_look_update: actor_look_update(actor_index); break;
+		case _ai_update_call_combat_update: actor_combat_update(actor_index); break;
+		case _ai_update_call_unit_control: actor_unit_control(actor_index); break;
+		case _ai_update_call_update_end: actor_update_end(); break;
 	}
-	actor_update_end();
 
 	return;
 }
 
+/* port: actor_update, each step through ai_update_call */
+static void actor_update(
+	long actor_index)
+{
+	ai_update_call_simple(_ai_update_call_update_begin, actor_index);
+	if (ai_update_call_simple(_ai_update_call_general_update, actor_index))
+	{
+		long dormancy;
+
+		ai_update_call_simple(_ai_update_call_timeslice, actor_index);
+		ai_update_call_simple(_ai_update_call_input, actor_index);
+		ai_update_call_simple(_ai_update_call_perception, actor_index);
+		ai_update_call_simple(_ai_update_call_situation, actor_index);
+		ai_update_call_simple(_ai_update_call_emotion, actor_index);
+		ai_update_call_simple(_ai_update_call_clear_orders, actor_index);
+		ai_update_call_simple(_ai_update_call_decision_loop, actor_index);
+		ai_update_call_simple(_ai_update_call_action_update, actor_index);
+
+		dormancy = ai_update_call_simple(_ai_update_call_actor_dormancy, actor_index);
+		if (!(dormancy & 1))
+		{
+			if (dormancy & 2)
+			{
+				ai_update_call_simple(_ai_update_call_swarm_control, actor_index);
+			}
+			else
+			{
+				ai_update_call_simple(_ai_update_call_clear_output, actor_index);
+				ai_update_call_simple(_ai_update_call_action_control, actor_index);
+				ai_update_call_simple(_ai_update_call_communication, actor_index);
+				ai_update_call_simple(_ai_update_call_conversation_control, actor_index);
+				ai_update_call_simple(_ai_update_call_destination, actor_index);
+				ai_update_call_simple(_ai_update_call_look_affect_movement, actor_index);
+				ai_update_call_simple(_ai_update_call_move_update, actor_index);
+				ai_update_call_simple(_ai_update_call_look_update, actor_index);
+				ai_update_call_simple(_ai_update_call_combat_update, actor_index);
+				ai_update_call_simple(_ai_update_call_unit_control, actor_index);
+			}
+		}
+	}
+	ai_update_call_simple(_ai_update_call_update_end, actor_index);
+
+	return;
+}
+
+/* port: actor_iterator_next over the active actors (encounters.c), its
+questions through ai_update_call: the Rust port's walk */
+struct actors_port_iterator
+{
+	long encounter_absolute_index;
+	boolean iterated_encounterless_list;
+	long next_index;
+};
+
+static long actors_port_iterator_next(
+	struct actors_port_iterator *iterator,
+	long *bits)
+{
+	if (!(ai_update_call_simple(_ai_update_call_state, 0) & _ai_update_state_initialized))
+		return NONE;
+	if (iterator->next_index == NONE)
+	{
+		boolean encounter_found;
+
+		do
+		{
+			struct halo_sim_ai_update_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _ai_update_call_encounter_next;
+			call.a = iterator->encounter_absolute_index;
+			ai_update_call(&call);
+			iterator->encounter_absolute_index = call.result2;
+			encounter_found = call.result != 0;
+			if (!encounter_found)
+				break;
+			if (call.result3)
+				iterator->next_index = call.result4;
+		} while (iterator->next_index == NONE);
+
+		if (!encounter_found && !iterator->iterated_encounterless_list)
+		{
+			iterator->next_index = ai_update_call_simple(_ai_update_call_first_encounterless, 0);
+			iterator->iterated_encounterless_list = TRUE;
+		}
+	}
+	for (;;)
+	{
+		long index = iterator->next_index;
+		struct halo_sim_ai_update_call call;
+
+		if (index == NONE)
+			return NONE;
+		memset(&call, 0, sizeof(call));
+		call.kind = _ai_update_call_actor;
+		call.a = index;
+		ai_update_call(&call);
+		iterator->next_index = call.result;
+		if (call.result2 & _ai_update_actor_active)
+		{
+			*bits = call.result2;
+			return index;
+		}
+	}
+}
+
+/* port: actors_update, through ai_update_call */
 void actors_update(
 	void)
 {
-	struct actor_iterator iterator;
-	struct actor_datum *actor;
+	struct actors_port_iterator iterator;
+	long actor_index;
+	long bits = 0;
 
-	ai_globals->last_highest_service_timer = ai_globals->current_highest_service_timer;
-	ai_globals->current_highest_service_timer = 0;
-	ai_globals->time_given_this_frame = FALSE;
+	ai_update_call_simple(_ai_update_call_actors_begin, 0);
 
-	actor_iterator_new(&iterator, TRUE);
-	while ((actor = actor_iterator_next(&iterator)) != NULL)
+	iterator.encounter_absolute_index = 0;
+	iterator.iterated_encounterless_list = FALSE;
+	iterator.next_index = NONE;
+	while ((actor_index = actors_port_iterator_next(&iterator, &bits)) != NONE)
 	{
-		if (actor->meta.erase_next_tick)
+		if (bits & _ai_update_actor_erase_next_tick)
 		{
-			actor_erase(iterator.index, FALSE);
+			ai_update_call_simple(_ai_update_call_actor_erase, actor_index);
 		}
-		else if (actor->state.mode > _actor_mode_braindead)
+		else if (bits & _ai_update_actor_thinking)
 		{
-			actor_update(iterator.index);
+			actor_update(actor_index);
 		}
 	}
 

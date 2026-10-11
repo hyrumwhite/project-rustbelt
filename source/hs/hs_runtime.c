@@ -269,6 +269,10 @@ symbols in this file:
 #include "hs/hs_library_internal_runtime.h"
 #include "hs/object_lists.h"
 #include "hs/hs_scenario_definitions.h"
+extern struct hs_function_table_storage { struct hs_function_definition const *functions[418 + 4]; } hs_function_table; /* hs.c (its first member) */
+extern long const hs_function_table_count;
+extern short const hs_external_global_count;
+extern struct hs_external_global_definition *hs_external_globals[];
 #include "math/real_math.h"
 #include "memory/data.h"
 #include "objects/objects.h"
@@ -283,6 +287,9 @@ symbols in this file:
 #include "cseries/errors.h"
 #include "main/console.h"
 #include "game/game.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
+static long hs_runtime_call_simple(long kind, long a);
+static long hs_object_list_from_ai_reference(long ai_reference);
 
 /* ---------- constants */
 
@@ -679,7 +686,7 @@ hs_typecasting_procedure typecasting_procedures[NUMBER_OF_HS_TYPES][NUMBER_OF_HS
 		NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, NULL,
-		object_list_from_ai_reference,
+		hs_object_list_from_ai_reference,
 		NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, NULL,
 		NULL, NULL, NULL, NULL,
@@ -1195,7 +1202,26 @@ void hs_runtime_port_shift_sleep_times(
 	}
 }
 
+static void hs_runtime_update_game(
+	void);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 void hs_runtime_update(
+	void)
+{
+	int checking = FALSE;
+
+	if (halo_sim_hs_update(&checking))
+		return;
+	hs_runtime_update_game();
+	if (checking)
+		halo_sim_hs_update_check();
+
+	return;
+}
+
+static void hs_runtime_update_game(
 	void)
 {
 	if (hs_runtime_globals.initialized)
@@ -1216,9 +1242,9 @@ void hs_runtime_update(
 				hs_thread_main(thread_index);
 		}
 
-		object_list_gc();
+		hs_runtime_call_simple(_hs_runtime_call_object_list_gc, 0);
 		if (!console_command_running && game_time_get()%16==0)
-			hs_node_gc();
+			hs_runtime_call_simple(_hs_runtime_call_node_gc, 0);
 	}
 
 	return;
@@ -1400,8 +1426,13 @@ static void hs_stack_overflow(
 
 	if (!TEST_FLAG(thread->flags, _hs_thread_stack_overflow_bit))
 	{
-		error(_error_silent, "a problem occurred while executing the script %s: stack overflow. (it was stopped)",
-			hs_thread_format(thread_index));
+		struct halo_sim_hs_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _hs_runtime_call_error;
+		call.a = _hs_runtime_error_stack_overflow;
+		call.b = thread_index;
+		hs_runtime_call(&call);
 		SET_FLAG(thread->flags, _hs_thread_stack_overflow_bit, TRUE);
 	}
 
@@ -1417,8 +1448,13 @@ static void hs_syntax_error(
 
 	if (!TEST_FLAG(thread->flags, _hs_thread_stack_overflow_bit))
 	{
-		error(_error_silent, "a problem occurred while executing the script %s: corrupt syntax tree. (it was stopped)",
-			hs_thread_format(thread_index));
+		struct halo_sim_hs_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _hs_runtime_call_error;
+		call.a = _hs_runtime_error_syntax;
+		call.b = thread_index;
+		hs_runtime_call(&call);
 		SET_FLAG(thread->flags, _hs_thread_stack_overflow_bit, TRUE);
 	}
 
@@ -1653,10 +1689,27 @@ static void hs_inspect_enum(
 	return;
 }
 
+/* port: the casts to a boolean or a short below write only their low byte
+or word, and the rest is set as January leaves it (the argument's), so the
+game's runtime and the Rust port's (halo_sim.c) agree to the byte; the C
+left it to whatever the compiler did */
+static long hs_runtime_call_simple(
+	long kind,
+	long a)
+{
+	struct halo_sim_hs_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.a = a;
+	hs_runtime_call(&call);
+	return call.result;
+}
+
 static long hs_long_to_boolean(
 	long n)
 {
-	long result;
+	long result = n;
 
 	/* BUG: only the low byte of this uninitialised long is written, and the whole long is returned; its
 	   upper three bytes are indeterminate. January homes result in the argument slot, so they are bits 8-31
@@ -1673,7 +1726,7 @@ static long hs_long_to_boolean(
 static long hs_short_to_boolean(
 	long s)
 {
-	long result;
+	long result = s;
 
 	/* BUG: only the low byte of this uninitialised long is written, and the whole long is returned; its
 	   upper three bytes are indeterminate. January homes result in the argument slot, so they are bits 8-31
@@ -1689,7 +1742,8 @@ static long hs_short_to_boolean(
 static long hs_string_to_boolean(
 	long n)
 {
-	return hs_long_to_boolean(csstrlen((char const *)n));
+	/* (inlined in January, with its upper bytes zero) */
+	return csstrlen((char const *)n)==0;
 }
 
 static long hs_data_to_void(
@@ -1731,7 +1785,7 @@ static long hs_enum_to_real(
 static long hs_real_to_short(
 	long r)
 {
-	long result;
+	long result = r;
 
 	/* BUG: only the low word of this uninitialised long is written, and the whole long is returned; its
 	   upper word is indeterminate. January homes result in the argument slot, so it is the upper word of r's
@@ -1753,7 +1807,7 @@ static long hs_real_to_long(
 static long hs_long_to_short(
 	long l)
 {
-	long result;
+	long result = l;
 
 	/* BUG: only the low word of this uninitialised long is written, and the whole long is returned; its
 	   upper word is indeterminate. January homes result in the argument slot, so it is the upper word of l
@@ -1772,12 +1826,9 @@ static long hs_object_name_to_object_list(
 	long object_index;
 	long object_list_index = NONE;
 
-	object_index = object_index_from_name_index((short)object_name_index);
+	object_index = hs_runtime_call_simple(_hs_runtime_call_object_from_name, (short)object_name_index);
 	if (object_index != NONE)
-	{
-		object_list_index = object_list_new();
-		object_list_add(object_list_index, object_index);
-	}
+		object_list_index = hs_runtime_call_simple(_hs_runtime_call_object_list_of_object, object_index);
 
 	return object_list_index;
 }
@@ -1788,12 +1839,16 @@ static long hs_object_to_object_list(
 	long object_list_index = NONE;
 
 	if (object_index != NONE)
-	{
-		object_list_index = object_list_new();
-		object_list_add(object_list_index, object_index);
-	}
+		object_list_index = hs_runtime_call_simple(_hs_runtime_call_object_list_of_object, object_index);
 
 	return object_list_index;
+}
+
+/* port: object_list_from_ai_reference, through hs_runtime_call */
+static long hs_object_list_from_ai_reference(
+	long ai_reference)
+{
+	return hs_runtime_call_simple(_hs_runtime_call_object_list_from_ai, ai_reference);
 }
 
 static boolean hs_object_type_can_cast(
@@ -1882,7 +1937,7 @@ long hs_cast(
 		if (!HS_TYPE_IS_OBJECT(desired_type))
 			return typecasting_procedures[desired_type][actual_type](value);
 		else if (HS_TYPE_IS_OBJECT_NAME(actual_type))
-			return object_index_from_name_index((short)value);
+			return hs_runtime_call_simple(_hs_runtime_call_object_from_name, (short)value);
 	}
 
 	return value;
@@ -2006,7 +2061,8 @@ void hs_evaluate_equality(
 		   the pass-through forms copy the whole long into hs thread stacks and hs globals, so these bytes
 		   reach the saved-game CRC and the save files (game_state_write_to_persistent_storage,
 		   game_state_write_to_file, game_state_write_core). */
-		*(boolean *)&result_long = equal;
+		/* port: (type<<16)|equal, as January leaves it */
+		result_long = ((long)type<<16)|equal;
 		hs_return(thread_index, result_long);
 	}
 
@@ -2058,7 +2114,8 @@ void hs_evaluate_inequality(
 		   the whole long into hs thread stacks and hs globals, so these bytes reach the saved-game CRC and
 		   the save files (game_state_write_to_persistent_storage, game_state_write_to_file,
 		   game_state_write_core). */
-		*(boolean *)&result_long = comparison;
+		/* port: value1's upper bytes, as January leaves them */
+		result_long = (long)((*(unsigned long *)&value1 & 0xFFFFFF00UL) | (comparison ? 1 : 0));
 		hs_return(thread_index, result_long);
 	}
 
@@ -2114,7 +2171,9 @@ void hs_evaluate_logical(
 		   hs_return and the pass-through forms copy the whole long into hs thread stacks and hs globals, so
 		   these bytes reach the saved-game CRC and the save files (game_state_write_to_persistent_storage,
 		   game_state_write_to_file, game_state_write_core). */
-		*(boolean *)&result_long = *result;
+		/* port: the upper bytes zero (January's were the initialize argument's
+		residue) */
+		result_long = (unsigned char)*result;
 
 		hs_return(thread_index, result_long);
 	}
@@ -2214,7 +2273,8 @@ void hs_evaluate_set(
 	if (initialize)
 	{
 		if (type==_hs_type_object_list)
-			object_list_remove_reference(hs_global_evaluate((short)variable->data));
+			hs_runtime_call_simple(_hs_runtime_call_object_list_remove_reference,
+				hs_global_evaluate((short)variable->data));
 
 		if (HS_GLOBAL_DESIGNATOR_IS_EXTERNAL(variable->data))
 			global_index = HS_GLOBAL_DESIGNATOR_TO_INDEX((short)variable->data);
@@ -2231,7 +2291,8 @@ void hs_evaluate_set(
 	{
 		hs_global_reconcile_write((short)variable->data);
 		if (type==_hs_type_object_list)
-			object_list_add_reference(hs_global_evaluate((short)variable->data));
+			hs_runtime_call_simple(_hs_runtime_call_object_list_add_reference,
+				hs_global_evaluate((short)variable->data));
 
 		hs_return(thread_index, hs_global_evaluate((short)variable->data));
 	}
@@ -2265,17 +2326,15 @@ void hs_evaluate_inspect(
 	{
 		struct hs_syntax_node *expression = hs_syntax_get(hs_syntax_get(hs_syntax_get(
 			thread->stack->expression_index)->data)->next_node_index);
+		struct halo_sim_hs_call call;
 
-		/* port: (the type was checked as the value was evaluated: checked
-		again before it picks an inspector) */
-		if (hs_type_valid(expression->type) && hs_type_inspectors[expression->type])
-		{
-			hs_type_inspectors[expression->type](expression->type, *value, string);
-			/* port: printed through "%s". January passes the text as the
-			format (0x4bc840 +0xdd..+0xe6), so a '%' in an inspected string
-			read arguments that were never passed */
-			console_printf(FALSE, "%s", string);
-		}
+		/* port: printed through hs_runtime_call */
+		memset(&call, 0, sizeof(call));
+		call.kind = _hs_runtime_call_inspect;
+		call.a = expression->type;
+		call.b = *value;
+		hs_runtime_call(&call);
+		(void)string;
 
 		hs_return(thread_index, 0);
 	}
@@ -2383,18 +2442,23 @@ void hs_evaluate_object_cast_up(
 	}
 	else if (*object_index!=NONE)
 	{
-		struct object_datum *object = object_get(*object_index);
 		short object_type = function_index-_hs_function_inspect;
+		long type = hs_runtime_call_simple(_hs_runtime_call_object_type, *object_index);
 
-		if (TEST_FLAG((short)hs_object_type_masks[object_type], object->object.type))
+		if (TEST_FLAG((short)hs_object_type_masks[object_type], type))
 		{
 			hs_return(thread_index, *object_index);
 		}
 		else
 		{
-			error(_error_silent, "attempt to convert object %s to type %s",
-				tag_get_name(object->definition_index),
-				hs_type_names[object_type+_hs_type_object]);
+			struct halo_sim_hs_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _hs_runtime_call_error;
+			call.a = _hs_runtime_error_object_cast;
+			call.b = object_type+_hs_type_object;
+			call.c = *object_index;
+			hs_runtime_call(&call);
 			hs_return(thread_index, NONE);
 		}
 	}
@@ -2712,7 +2776,7 @@ static void hs_thread_main(
 			"found a static script at toplevel.");
 		/* port: a script that doesn't run (hs_scenario_functions_check)
 		gets no thread; one a saved game brings back sleeps for good */
-		if (hs_scenario_script_disabled((short)thread->script_index))
+		if (hs_runtime_call_simple(_hs_runtime_call_script_disabled, (short)thread->script_index))
 		{
 			thread->sleep_until = NONE;
 			hs_runtime_globals.executing_thread_index = NONE;
@@ -2736,9 +2800,10 @@ static void hs_thread_main(
 			hs_evaluate(thread_index, script->root_expression_index, root_result);
 	}
 
+	/* port: the questions through hs_runtime_call, in the C's order */
 	while (thread->stack!=(struct hs_stack_frame *)thread->stack_data &&
 		thread->sleep_until>=0 &&
-		(!game_in_progress() || thread->sleep_until<=game_time_get()) &&
+		(!hs_runtime_call_simple(_hs_runtime_call_game_in_progress, 0) || thread->sleep_until<=game_time_get()) &&
 		hs_runtime_globals.initialized)
 	{
 		struct hs_syntax_node *expression = hs_syntax_get(thread->stack->expression_index);
@@ -2764,10 +2829,27 @@ static void hs_thread_main(
 
 			match_assert("c:\\halo\\SOURCE\\hs\\hs_runtime.c", 0x2d8, function->evaluate);
 
-			function->evaluate(
-				expression->index,
-				thread_index,
-				initialize);
+			/* port: the built-ins here, the library's (and cond's and the
+			debug strings') through hs_runtime_call */
+			if (expression->index>=_hs_function_begin && expression->index<=_hs_function_object_to_unit &&
+				expression->index!=_hs_function_cond)
+			{
+				function->evaluate(
+					expression->index,
+					thread_index,
+					initialize);
+			}
+			else
+			{
+				struct halo_sim_hs_call call;
+
+				memset(&call, 0, sizeof(call));
+				call.kind = _hs_runtime_call_external;
+				call.a = expression->index;
+				call.b = thread_index;
+				call.c = initialize ? 1 : 0;
+				hs_runtime_call(&call);
+			}
 		}
 		else
 		{
@@ -2796,7 +2878,7 @@ static void hs_thread_main(
 		}
 		else if (thread->type==_hs_thread_type_console_command)
 		{
-			hs_thread_delete(thread_index);
+			hs_runtime_call_simple(_hs_runtime_call_thread_delete, thread_index);
 		}
 	}
 
@@ -2824,7 +2906,7 @@ static void hs_script_evaluate(
 	/* port: a static script that calls a function a map's scripts may not
 	isn't evaluated: it returns its type's default
 	(hs_scenario_functions_check) */
-	if (hs_scenario_script_disabled(script_index))
+	if (hs_runtime_call_simple(_hs_runtime_call_script_disabled, script_index))
 		hs_return(thread_index, hs_type_default_value(script->return_type));
 	else if (initialize)
 		hs_evaluate(thread_index, script->root_expression_index, result);
@@ -3421,8 +3503,13 @@ static long *hs_arguments_evaluate(
 
 		if (hs_syntax_get(*expression_index)->type!=formal_parameters[*argument_index])
 		{
-			script_error(thread_index, "unexpected actual parameters.",
-				"hs_syntax_get(*expression_index)->type==formal_parameters[*argument_index]");
+			struct halo_sim_hs_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _hs_runtime_call_error;
+			call.a = _hs_runtime_error_unexpected_parameters;
+			call.b = thread_index;
+			hs_runtime_call(&call);
 
 			return values;
 		}
@@ -3453,4 +3540,159 @@ static boolean script_error(
 		expression);
 
 	return FALSE;
+}
+
+/* ---------- port: hs_runtime_call */
+
+/* what the script runtime asks of the rest of the game, shared by the
+game's runtime and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void hs_runtime_call(
+	struct halo_sim_hs_call *call)
+{
+	int opened = halo_sim_hs_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _hs_runtime_call_external:
+		{
+			struct hs_function_definition *function = hs_function_get((short)call->a);
+
+			function->evaluate((short)call->a, call->b, call->c != 0);
+			break;
+		}
+
+		case _hs_runtime_call_script_disabled:
+			call->result = hs_scenario_script_disabled((short)call->a) ? 1 : 0;
+			break;
+
+		case _hs_runtime_call_game_in_progress:
+			call->result = game_in_progress() ? 1 : 0;
+			break;
+
+		case _hs_runtime_call_object_from_name:
+			call->result = object_index_from_name_index((short)call->a);
+			break;
+
+		case _hs_runtime_call_object_list_from_ai:
+			call->result = object_list_from_ai_reference(call->a);
+			break;
+
+		case _hs_runtime_call_object_list_of_object:
+			call->result = object_list_new();
+			object_list_add(call->result, call->a);
+			break;
+
+		case _hs_runtime_call_object_list_add_reference:
+			object_list_add_reference(call->a);
+			break;
+
+		case _hs_runtime_call_object_list_remove_reference:
+			object_list_remove_reference(call->a);
+			break;
+
+		case _hs_runtime_call_object_type:
+			call->result = object_get(call->a)->object.type;
+			break;
+
+		case _hs_runtime_call_error:
+			switch (call->a)
+			{
+				case _hs_runtime_error_stack_overflow:
+					error(_error_silent, "a problem occurred while executing the script %s: stack overflow. (it was stopped)",
+						hs_thread_format(call->b));
+					break;
+
+				case _hs_runtime_error_syntax:
+					error(_error_silent, "a problem occurred while executing the script %s: corrupt syntax tree. (it was stopped)",
+						hs_thread_format(call->b));
+					break;
+
+				case _hs_runtime_error_unexpected_parameters:
+					script_error(call->b, "unexpected actual parameters.",
+						"hs_syntax_get(*expression_index)->type==formal_parameters[*argument_index]");
+					break;
+
+				case _hs_runtime_error_object_cast:
+					error(_error_silent, "attempt to convert object %s to type %s",
+						tag_get_name(object_get(call->c)->definition_index),
+						hs_type_names[call->b]);
+					break;
+			}
+			break;
+
+		case _hs_runtime_call_inspect:
+		{
+			char string[HS_INSPECT_BUFFER_SIZE];
+
+			/* (the type was checked as the value was evaluated: checked again
+			before it picks an inspector) */
+			if (hs_type_valid((short)call->a) && hs_type_inspectors[call->a])
+			{
+				hs_type_inspectors[call->a]((short)call->a, call->b, string);
+				/* port: printed through "%s". January passes the text as the
+				format (0x4bc840 +0xdd..+0xe6), so a '%' in an inspected string
+				read arguments that were never passed */
+				console_printf(FALSE, "%s", string);
+			}
+			break;
+		}
+
+		case _hs_runtime_call_object_list_gc:
+			object_list_gc();
+			break;
+
+		case _hs_runtime_call_node_gc:
+			hs_node_gc();
+			break;
+
+		case _hs_runtime_call_thread_delete:
+			hs_thread_delete(call->a);
+			break;
+	}
+	halo_sim_hs_event_end(call, opened);
+}
+
+/* port: where the runtime's state and tables are, for halo_sim.c */
+void hs_runtime_port_context(
+	struct halo_sim_hs_context *context)
+{
+	struct scenario *scenario = global_scenario_index!=NONE ? global_scenario_get() : NULL;
+
+	memset(context, 0, sizeof(*context));
+	context->thread_data = (unsigned long)hs_thread_data;
+	context->syntax_data = (unsigned long)hs_syntax_data;
+	context->global_data = (unsigned long)hs_global_data;
+	context->functions = (unsigned long)hs_function_table.functions;
+	context->function_count = hs_function_table_count;
+	context->external_globals = (unsigned long)hs_external_globals;
+	context->external_global_count = hs_external_global_count;
+	if (scenario)
+	{
+		context->script_count = scenario->hs_scripts.count;
+		context->scripts = scenario->hs_scripts.count > 0
+			? (unsigned long)TAG_BLOCK_GET_ELEMENT(&scenario->hs_scripts, 0, struct hs_script)
+			: 0;
+		context->global_count = scenario->hs_globals.count;
+		context->globals = scenario->hs_globals.count > 0
+			? (unsigned long)TAG_BLOCK_GET_ELEMENT(&scenario->hs_globals, 0, struct hs_global)
+			: 0;
+	}
+	context->runtime_globals = (unsigned long)&hs_runtime_globals;
+	context->random_seed = (unsigned long)get_global_random_seed_address();
+	context->game_time = game_time_get();
+	context->string_default = (unsigned long)_hs_type_string_default;
+}
+
+/* port: the thread a library function's evaluation is in, and where its
+value returns to (halo_sim.c's recording) */
+void hs_runtime_port_thread(
+	long thread_index,
+	void **thread_address,
+	long **destination)
+{
+	struct hs_thread_datum *thread = hs_thread_get(thread_index);
+
+	*thread_address = thread;
+	*destination = thread->stack && thread->stack->previous ? (long *)thread->stack->previous->result : NULL;
 }

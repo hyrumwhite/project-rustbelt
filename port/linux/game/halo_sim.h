@@ -44,6 +44,7 @@ enum
 	_halo_sim_particle_systems,
 	_halo_sim_player_effects,
 	_halo_sim_game_tick,
+	_halo_sim_hs,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -686,6 +687,67 @@ enum
 	_game_tick_call_end,
 };
 
+/* the script runtime's calls of the rest of the game (hs_runtime.c's
+hs_runtime_call; crates/halo_map's hs_runtime::call) */
+enum
+{
+	_hs_runtime_call_external = 1,
+	_hs_runtime_call_script_disabled,
+	_hs_runtime_call_game_in_progress,
+	_hs_runtime_call_object_from_name,
+	_hs_runtime_call_object_list_from_ai,
+	_hs_runtime_call_object_list_of_object,
+	_hs_runtime_call_object_list_add_reference,
+	_hs_runtime_call_object_list_remove_reference,
+	_hs_runtime_call_object_type,
+	_hs_runtime_call_error,
+	_hs_runtime_call_inspect,
+	_hs_runtime_call_unused12,
+	_hs_runtime_call_object_list_gc,
+	_hs_runtime_call_node_gc,
+	_hs_runtime_call_thread_delete,
+};
+
+/* the runtime's messages */
+enum
+{
+	_hs_runtime_error_stack_overflow = 1,
+	_hs_runtime_error_syntax,
+	_hs_runtime_error_unexpected_parameters,
+	_hs_runtime_error_object_cast,
+};
+
+/* crates/halo_map's HsCall */
+struct halo_sim_hs_call
+{
+	long kind;
+	long a;
+	long b;
+	long c;
+	long result;
+};
+
+/* crates/halo_sim's HsContextC: where the script runtime's state and tables
+are */
+struct halo_sim_hs_context
+{
+	unsigned long thread_data;
+	unsigned long syntax_data;
+	unsigned long global_data;
+	unsigned long functions;
+	long function_count;
+	unsigned long external_globals;
+	long external_global_count;
+	unsigned long scripts;
+	long script_count;
+	unsigned long globals;
+	long global_count;
+	unsigned long runtime_globals;
+	unsigned long random_seed;
+	long game_time;
+	unsigned long string_default;
+};
+
 /* the object update loop's calls (objects.c's objects_update_call;
 crates/halo_map's objects_update::call) */
 enum
@@ -1189,5 +1251,18 @@ int halo_sim_game_tick(int *checking);
 void halo_sim_game_tick_check(void);
 void halo_sim_game_tick_note(long kind, float f, long result);
 long game_tick_call(long kind, float f);
+
+/* hs_runtime.c's hs_runtime_update: TRUE when the Rust port ran it; in check
+mode `checking` is set, hs_runtime_call records each call
+(halo_sim_hs_event_begin and _end), and halo_sim_hs_update_check puts the
+script memory back as the update began, runs Rust's replay on it, compares,
+and leaves the game's */
+int halo_sim_hs_update(int *checking);
+void halo_sim_hs_update_check(void);
+int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call);
+void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened);
+void hs_runtime_call(struct halo_sim_hs_call *call);
+void hs_runtime_port_context(struct halo_sim_hs_context *context);
+void hs_runtime_port_thread(long thread_index, void **thread_address, long **destination);
 
 #endif // __HALO_SIM_H

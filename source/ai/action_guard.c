@@ -54,6 +54,7 @@ symbols in this file:
 #include "ai_communication.h"
 #include "props.h"
 #include "game/game_allegiance.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -476,6 +477,152 @@ action_guard_replace_prop(
 /* ---------- private code */
 
 /* action_guard_speak_post_combat */
+/* port: what the guard action asks of the rest of the game, shared by the
+game's and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded */
+void action_guard_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	struct guard_state_data *state_data = &actor->state.action_data.guard;
+
+	switch (call->kind)
+	{
+		case _action_guard_call_team_is_ally:
+			call->result = game_team_is_ally((short)call->a, (short)call->b) ? 1 : 0;
+			break;
+
+		case _action_guard_call_communication:
+			ai_communication_event(
+				(short)call->a,
+				actor->meta.unit_index,
+				call->b,
+				(long)call->input[0],
+				NONE,
+				NONE,
+				NULL);
+			break;
+
+		case _action_guard_call_wake:
+			actor_set_dormant(actor_index, FALSE);
+			break;
+
+		case _action_guard_call_communication_target:
+			ai_communication_event(
+				(short)call->a,
+				actor->meta.unit_index,
+				actor_target_unit_index(actor_index),
+				NONE,
+				NONE,
+				NONE,
+				NULL);
+			break;
+
+		case _action_guard_call_discard_firing_position:
+			actor_discard_firing_position(actor_index, (short)call->a, FALSE);
+			break;
+
+		case _action_guard_call_change_firing_position:
+		{
+			boolean position_flags;
+			long previous_owner_actor_index;
+			short selected_firing_position_index;
+			struct firing_position candidate;
+			struct firing_position_evaluation_context search;
+			struct path_state workspace;
+
+			csmemset(&search, 0, sizeof(search));
+			search.evaluation_mode = _firing_point_evaluation_mode_guard;
+			search.allowed_position_mask = actor_get_firing_position_group(
+				actor_index,
+				_firing_point_evaluation_mode_guard,
+				_firing_position_group_normal);
+			search.allow_outside_range = TRUE;
+			selected_firing_position_index = actor_select_firing_position(
+				actor_index,
+				&search,
+				&candidate,
+				&previous_owner_actor_index,
+				&workspace,
+				&position_flags);
+			call->result = actor_change_firing_position(
+				actor_index,
+				selected_firing_position_index,
+				&candidate,
+				previous_owner_actor_index,
+				&workspace,
+				position_flags);
+			break;
+		}
+
+		case _action_guard_call_random_range:
+			call->output[0] = real_seed_random_range(get_global_random_seed_address(), call->input[0], call->input[1]);
+			break;
+
+		case _action_guard_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_guard_call_move_to_guard_point:
+			actor_move_to_point(
+				actor_index,
+				&state_data->guard_point.position,
+				state_data->guard_point.surface_index,
+				NONE);
+			break;
+
+		case _action_guard_call_move_to_firing_position:
+			call->result = actor_move_to_firing_position(actor_index, (short)call->a, NULL) ? 1 : 0;
+			break;
+
+		case _action_guard_call_shout_dead_friend:
+		{
+			struct prop_datum *prop = prop_get(call->a);
+
+			actor_stimulus_suspicion(actor_index, 2, 600);
+			ai_communication_event(
+				7,
+				actor->meta.unit_index,
+				prop->unit_index,
+				NONE,
+				NONE,
+				2,
+				NULL);
+			break;
+		}
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_guard_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input0,
+	real input1,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	call.input[0] = input0;
+	call.input[1] = input1;
+	action_guard_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
+
 static boolean action_guard_speak_post_combat(
 	long actor_index)
 {
@@ -531,7 +678,8 @@ static boolean action_guard_speak_post_combat(
 				prop_unit_index = prop->unit_index;
 				if (action_guard_prop_is_dead(prop))
 				{
-					prop_type = game_team_is_ally(actor->meta.team_index, prop->team_index) ? 4 : 3;
+					prop_type = action_guard_call_simple(actor_index, _action_guard_call_team_is_ally,
+						actor->meta.team_index, prop->team_index, 0.0f, 0.0f, NULL) ? 4 : 3;
 				}
 				else
 				{
@@ -539,14 +687,8 @@ static boolean action_guard_speak_post_combat(
 				}
 			}
 
-			ai_communication_event(
-				communication_type,
-				actor->meta.unit_index,
-				prop_unit_index,
-				prop_type,
-				NONE,
-				NONE,
-				NULL);
+			action_guard_call_simple(actor_index, _action_guard_call_communication,
+				communication_type, prop_unit_index, (real)prop_type, 0.0f, NULL);
 			result = TRUE;
 		}
 
@@ -616,7 +758,7 @@ action_guard_update(
 
 		if (cower_finished)
 		{
-			actor_set_dormant(actor_index, FALSE);
+			action_guard_call_simple(actor_index, _action_guard_call_wake, 0, 0, 0.0f, 0.0f, NULL);
 			state_data->cower = FALSE;
 			state_data->cower_panicked = FALSE;
 			state_data->cower_from_retreat = FALSE;
@@ -624,22 +766,13 @@ action_guard_update(
 
 			if (actor->state.combat_status >= 2 && actor->meta.unit_index != NONE)
 			{
-				ai_communication_event(
-					35,
-					actor->meta.unit_index,
-					actor_target_unit_index(actor_index),
-					NONE,
-					NONE,
-					NONE,
-					NULL);
+				action_guard_call_simple(actor_index, _action_guard_call_communication_target, 35, 0, 0.0f, 0.0f, NULL);
 			}
 
 			if (state_data->guard_location_type == 3)
 			{
-				actor_discard_firing_position(
-					actor_index,
-					state_data->guard_firing_position_index,
-					FALSE);
+				action_guard_call_simple(actor_index, _action_guard_call_discard_firing_position,
+					state_data->guard_firing_position_index, 0, 0.0f, 0.0f, NULL);
 				state_data->guard_firing_position_index = NONE;
 			}
 
@@ -700,33 +833,12 @@ action_guard_perform(
 		if (state_data->guard_location_type == 3 &&
 			actor->firing_positions.current_position_index != NONE)
 		{
-			actor_discard_firing_position(
-				actor_index,
-				actor->firing_positions.current_position_index,
-				FALSE);
+			action_guard_call_simple(actor_index, _action_guard_call_discard_firing_position,
+				actor->firing_positions.current_position_index, 0, 0.0f, 0.0f, NULL);
 		}
 
-		csmemset(&search, 0, sizeof(search));
-		search.evaluation_mode = _firing_point_evaluation_mode_guard;
-		search.allowed_position_mask = actor_get_firing_position_group(
-			actor_index,
-			_firing_point_evaluation_mode_guard,
-			_firing_position_group_normal);
-		search.allow_outside_range = TRUE;
-		selected_firing_position_index = actor_select_firing_position(
-			actor_index,
-			&search,
-			&candidate,
-			&previous_owner_actor_index,
-			&workspace,
-			&position_flags);
-		firing_position_index = actor_change_firing_position(
-			actor_index,
-			selected_firing_position_index,
-			&candidate,
-			previous_owner_actor_index,
-			&workspace,
-			position_flags);
+		firing_position_index = (short)action_guard_call_simple(actor_index,
+			_action_guard_call_change_firing_position, 0, 0, 0.0f, 0.0f, NULL);
 		state_data->find_new_guard_position = FALSE;
 		state_data->has_guard_direction = FALSE;
 		if (firing_position_index == NONE)
@@ -741,10 +853,13 @@ action_guard_perform(
 
 		guard_position_time_upper_bound = definition->firing_position.guard_position_time_upper_bound;
 		guard_position_time_lower_bound = definition->firing_position.guard_position_time_lower_bound;
-		state_data->wait_ticks = (short)(real_seed_random_range(
-			get_global_random_seed_address(),
-			guard_position_time_lower_bound,
-			guard_position_time_upper_bound) * 30.f);
+		{
+			real guard_position_time;
+
+			action_guard_call_simple(actor_index, _action_guard_call_random_range, 0, 0,
+				guard_position_time_lower_bound, guard_position_time_upper_bound, &guard_position_time);
+			state_data->wait_ticks = (short)(guard_position_time * 30.f);
+		}
 	}
 
 	return FALSE;
@@ -799,7 +914,7 @@ action_guard_control(
 		{
 		case 0:
 		case 1:
-			actor_move_halt(actor_index);
+			action_guard_call_simple(actor_index, _action_guard_call_move_halt, 0, 0, 0.0f, 0.0f, NULL);
 			path_succeeded = TRUE;
 			break;
 
@@ -811,15 +926,11 @@ action_guard_control(
 
 			if (distance_squared < state_data->guard_point.radius * state_data->guard_point.radius)
 			{
-				actor_move_halt(actor_index);
+				action_guard_call_simple(actor_index, _action_guard_call_move_halt, 0, 0, 0.0f, 0.0f, NULL);
 			}
 			else
 			{
-				actor_move_to_point(
-					actor_index,
-					&state_data->guard_point.position,
-					state_data->guard_point.surface_index,
-					NONE);
+				action_guard_call_simple(actor_index, _action_guard_call_move_to_guard_point, 0, 0, 0.0f, 0.0f, NULL);
 			}
 
 			path_succeeded = distance_squared < 9.f;
@@ -832,15 +943,11 @@ action_guard_control(
 			{
 				actor->firing_positions.current_position_index = state_data->guard_firing_position_index;
 				actor->firing_positions.current_position_found_outside_range = FALSE;
-				if (!actor_move_to_firing_position(
-					actor_index,
-					actor->firing_positions.current_position_index,
-					NULL))
+				if (!action_guard_call_simple(actor_index, _action_guard_call_move_to_firing_position,
+					actor->firing_positions.current_position_index, 0, 0.0f, 0.0f, NULL))
 				{
-					actor_discard_firing_position(
-						actor_index,
-						state_data->guard_firing_position_index,
-						FALSE);
+					action_guard_call_simple(actor_index, _action_guard_call_discard_firing_position,
+						state_data->guard_firing_position_index, 0, 0.0f, 0.0f, NULL);
 					actor->firing_positions.current_position_index = NONE;
 				}
 			}
@@ -863,19 +970,11 @@ action_guard_control(
 		{
 			if (state_data->shout_about_dead_friend)
 			{
-				struct prop_datum *prop = prop_get(state_data->shout_dead_friend_prop_index);
+				long prop_index = state_data->shout_dead_friend_prop_index;
 
 				state_data->shout_about_dead_friend = FALSE;
 				state_data->shout_dead_friend_prop_index = NONE;
-				actor_stimulus_suspicion(actor_index, 2, 600);
-				ai_communication_event(
-					7,
-					actor->meta.unit_index,
-					prop->unit_index,
-					NONE,
-					NONE,
-					2,
-					NULL);
+				action_guard_call_simple(actor_index, _action_guard_call_shout_dead_friend, prop_index, 0, 0.0f, 0.0f, NULL);
 			}
 
 			if (state_data->post_combat)

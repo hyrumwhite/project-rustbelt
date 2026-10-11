@@ -1229,6 +1229,21 @@ enum
 
 enum
 {
+	_action_guard_call_team_is_ally = (6 << 8) | 1,
+	_action_guard_call_communication,
+	_action_guard_call_wake,
+	_action_guard_call_communication_target,
+	_action_guard_call_discard_firing_position,
+	_action_guard_call_change_firing_position,
+	_action_guard_call_random_range,
+	_action_guard_call_move_halt,
+	_action_guard_call_move_to_guard_point,
+	_action_guard_call_move_to_firing_position,
+	_action_guard_call_shout_dead_friend,
+};
+
+enum
+{
 	_action_fight_call_discard_firing_position = (3 << 8) | 1,
 	_action_fight_call_firing_variant,
 	_action_fight_call_find_pathfinding_location,
@@ -1804,6 +1819,7 @@ void action_wait_call(struct halo_sim_ai_call *call);
 void action_alert_call(struct halo_sim_ai_call *call);
 void action_search_call(struct halo_sim_ai_call *call);
 void action_uncover_call(struct halo_sim_ai_call *call);
+void action_guard_call(struct halo_sim_ai_call *call);
 void action_avoid_call(struct halo_sim_ai_call *call);
 void action_fight_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);

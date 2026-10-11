@@ -234,6 +234,7 @@ symbols in this file:
 #include "objects/object_types.h"
 #include "objects/objects.h"
 #include "physics/collision_model_definitions.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 #undef PATH_EXTERNAL_FLEE_ROUTINES
 #undef REAL_MATH_EXTERNAL_POINT_FROM_LINE3D
 
@@ -2100,7 +2101,95 @@ boolean actor_path_refresh(
 	return success;
 }
 
+/* port: what an actor's destination update asks of the rest of the game,
+shared by the game's and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_destination_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _actor_destination_call_path_refresh:
+			actor_path_refresh(actor_index, FALSE, NULL);
+			break;
+
+		case _actor_destination_call_test_destination:
+			actor_test_destination(actor_index);
+			break;
+
+		case _actor_destination_call_path_clear:
+			actor_path_clear(actor_index);
+			break;
+
+		case _actor_destination_call_unfinished_path:
+			if (ai_debug.print_unfinished_paths)
+			{
+				char actor_description[512];
+
+				ai_debug_describe_actor(
+					actor_index,
+					NONE,
+					TRUE,
+					actor_description,
+					sizeof(actor_description));
+				error(
+					_error_silent,
+					"%s: fell off end of unfinished path %d/%d",
+					actor_description,
+					actor->control.path.path.step_count,
+					NUMBEROF(actor->control.path.path.steps));
+			}
+			break;
+
+		case _actor_destination_call_tau_ceti:
+			error(
+				_error_silent,
+				"pathfinding is attempting to walk to tau ceti");
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static void actor_destination_call_simple(
+	long actor_index,
+	long kind)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	actor_destination_call(&call);
+}
+
+static void actor_destination_update_game(
+	long actor_index);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 void actor_destination_update(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_destination, actor_index, &checking))
+		return;
+	actor_destination_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_destination, 0);
+
+	return;
+}
+
+/* the game's destination update, what it asks through
+actor_destination_call */
+static void actor_destination_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -2109,9 +2198,9 @@ void actor_destination_update(
 		!actor->control.path.refreshed_this_tick &&
 		!actor->meta.dormant)
 	{
-		actor_path_refresh(actor_index, FALSE, NULL);
+		actor_destination_call_simple(actor_index, _actor_destination_call_path_refresh);
 	}
-	actor_test_destination(actor_index);
+	actor_destination_call_simple(actor_index, _actor_destination_call_test_destination);
 
 	if (actor->control.path.path.valid)
 	{
@@ -2184,24 +2273,11 @@ void actor_destination_update(
 
 			if (actor->control.path.path.steps_finish_path)
 			{
-				actor_path_clear(actor_index);
+				actor_destination_call_simple(actor_index, _actor_destination_call_path_clear);
 			}
-			else if (ai_debug.print_unfinished_paths)
+			else
 			{
-				char actor_description[512];
-
-				ai_debug_describe_actor(
-					actor_index,
-					NONE,
-					TRUE,
-					actor_description,
-					sizeof(actor_description));
-				error(
-					_error_silent,
-					"%s: fell off end of unfinished path %d/%d",
-					actor_description,
-					actor->control.path.path.step_count,
-					NUMBEROF(actor->control.path.path.steps));
+				actor_destination_call_simple(actor_index, _actor_destination_call_unfinished_path);
 			}
 		}
 	}
@@ -2217,9 +2293,7 @@ void actor_destination_update(
 			&actor->control.moving_towards_vector);
 		if (magnitude3d(&actor->control.moving_towards_vector) >= 1000000.f)
 		{
-			error(
-				_error_silent,
-				"pathfinding is attempting to walk to tau ceti");
+			actor_destination_call_simple(actor_index, _actor_destination_call_tau_ceti);
 			actor->control.path.path.valid = FALSE;
 		}
 	}
@@ -2246,7 +2320,7 @@ void actor_destination_update(
 		actor->control.moving = FALSE;
 		actor->control.movement_complete = FALSE;
 		actor->control.path.at_destination = TRUE;
-		actor_path_clear(actor_index);
+		actor_destination_call_simple(actor_index, _actor_destination_call_path_clear);
 	}
 
 	return;

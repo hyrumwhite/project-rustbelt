@@ -26,6 +26,7 @@ pub mod devices;
 pub mod effects;
 pub mod particles;
 pub mod contrails;
+pub mod particle_systems;
 pub mod items;
 pub mod markers;
 pub mod object_exports;

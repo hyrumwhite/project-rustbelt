@@ -16,6 +16,7 @@ use halo_map::actor_emotions::actor_emotion_update;
 use halo_map::actor_general::actor_general_update;
 use halo_map::actor_input::actor_input_update;
 use halo_map::actor_situation::actor_situation_update;
+use halo_map::actor_unit_control::actor_unit_control;
 use halo_map::actor_upkeep::{actor_clear_orders, actor_clear_output, actor_get_timeslice};
 use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext};
 
@@ -45,6 +46,8 @@ pub struct AiStepCallbacks {
     pub conversation: unsafe extern "C" fn(call: *mut AiCall),
     /// actor_moving.c's `actor_destination_call`.
     pub destination: unsafe extern "C" fn(call: *mut AiCall),
+    /// actors.c's `actor_unit_control_call`.
+    pub unit_control: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -176,6 +179,7 @@ const STEP_LOOK_MOVEMENT: i32 = 7;
 const STEP_COMMUNICATION: i32 = 8;
 const STEP_CONVERSATION: i32 = 9;
 const STEP_DESTINATION: i32 = 10;
+const STEP_UNIT_CONTROL: i32 = 11;
 
 /// The step run: its result, or None for a step the port doesn't have.
 fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
@@ -191,6 +195,7 @@ fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
         STEP_COMMUNICATION => actor_communication_update(context, host),
         STEP_CONVERSATION => actor_conversation_control(context, host),
         STEP_DESTINATION => actor_destination_update(context, host),
+        STEP_UNIT_CONTROL => actor_unit_control(context, host),
         _ => return None,
     }
     Some(0)
@@ -207,6 +212,7 @@ fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" 
         STEP_COMMUNICATION => Some(callbacks.communication),
         STEP_CONVERSATION => Some(callbacks.conversation),
         STEP_DESTINATION => Some(callbacks.destination),
+        STEP_UNIT_CONTROL => Some(callbacks.unit_control),
         _ => None,
     }
 }

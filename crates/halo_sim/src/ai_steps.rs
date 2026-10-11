@@ -11,6 +11,7 @@
 use std::cell::Cell;
 
 use halo_map::actor_emotions::actor_emotion_update;
+use halo_map::actor_general::actor_general_update;
 use halo_map::actor_input::actor_input_update;
 use halo_map::actor_situation::actor_situation_update;
 use halo_map::actor_upkeep::{actor_clear_orders, actor_clear_output, actor_get_timeslice};
@@ -32,6 +33,8 @@ pub struct AiStepCallbacks {
     pub upkeep: unsafe extern "C" fn(call: *mut AiCall),
     /// actors.c's `actor_input_call`.
     pub input: unsafe extern "C" fn(call: *mut AiCall),
+    /// actors.c's `actor_general_call`.
+    pub general: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -44,9 +47,11 @@ pub struct AiEventC {
     pub after: [u8; ACTOR_DATUM_SIZE],
 }
 
-/// A step: where it works, and in check mode the game's calls and the first
-/// that differs (-1 for none) and why (1 its kind, 2 its arguments, 3 the
-/// actor before it, 4 more calls than the game's, 5 fewer).
+/// A step: where it works, what it returns (for the steps that return
+/// something: the timeslice and the general update), and in check mode the
+/// game's calls and the first that differs (-1 for none) and why (1 its
+/// kind, 2 its arguments, 3 the actor before it, 4 more calls than the
+/// game's, 5 fewer).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct AiStepC {
@@ -55,6 +60,7 @@ pub struct AiStepC {
     pub event_count: u32,
     pub difference_event: i32,
     pub difference_reason: i32,
+    pub result: i32,
 }
 
 /// The game's memory, in this process.
@@ -155,20 +161,21 @@ const STEP_TIMESLICE: i32 = 2;
 const STEP_CLEAR_ORDERS: i32 = 3;
 const STEP_CLEAR_OUTPUT: i32 = 4;
 const STEP_INPUT: i32 = 5;
+const STEP_GENERAL: i32 = 6;
 
-fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> bool {
+/// The step run: its result, or None for a step the port doesn't have.
+fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
     match step {
         STEP_EMOTION => actor_emotion_update(context, host),
         STEP_SITUATION => actor_situation_update(context, host),
-        STEP_TIMESLICE => {
-            actor_get_timeslice(context, host);
-        }
+        STEP_TIMESLICE => return Some(actor_get_timeslice(context, host) as i32),
         STEP_CLEAR_ORDERS => actor_clear_orders(context, host),
         STEP_CLEAR_OUTPUT => actor_clear_output(context, host),
         STEP_INPUT => actor_input_update(context, host),
-        _ => return false,
+        STEP_GENERAL => return Some(actor_general_update(context, host) as i32),
+        _ => return None,
     }
-    true
+    Some(0)
 }
 
 fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" fn(*mut AiCall)> {
@@ -177,6 +184,7 @@ fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" 
         STEP_SITUATION => Some(callbacks.situation),
         STEP_TIMESLICE | STEP_CLEAR_ORDERS | STEP_CLEAR_OUTPUT => Some(callbacks.upkeep),
         STEP_INPUT => Some(callbacks.input),
+        STEP_GENERAL => Some(callbacks.general),
         _ => None,
     }
 }
@@ -195,7 +203,9 @@ pub unsafe extern "C" fn halo_sim_ai_step(step: i32, step_call: *mut AiStepC) ->
     let Some(call) = callback(&host.ai_steps, step) else { return -1 };
     // SAFETY: the caller's step
     let step_call = unsafe { &mut *step_call };
-    if run(step, &step_call.context, &LiveHost { call }) { 0 } else { -1 }
+    let Some(result) = run(step, &step_call.context, &LiveHost { call }) else { return -1 };
+    step_call.result = result;
+    0
 }
 
 /// The check of a step the game ran: Rust's replay of it on the actor the
@@ -218,9 +228,8 @@ pub unsafe extern "C" fn halo_sim_ai_step_check(step: i32, step_call: *mut AiSte
     };
     let checker =
         CheckHost { actor: step_call.context.actor, events, next: Cell::new(0), difference: Cell::new(None) };
-    if !run(step, &step_call.context, &checker) {
-        return -1;
-    }
+    let Some(result) = run(step, &step_call.context, &checker) else { return -1 };
+    step_call.result = result;
     if checker.difference.get().is_none() && checker.next.get() < events.len() {
         checker.differ(checker.next.get(), 5);
     }

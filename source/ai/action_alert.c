@@ -56,6 +56,7 @@ symbols in this file:
 #include "scenario/scenario_definitions.h"
 #include "units/unit_definitions.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -85,6 +86,139 @@ static short action_alert_next_position(
 /* ---------- globals */
 
 /* ---------- public code */
+
+/* port: what the alert action asks of the rest of the game, shared by the
+game's and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded */
+void action_alert_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _action_alert_call_at_destination:
+			call->result = actor_path_at_destination(actor_index) ? 1 : 0;
+			break;
+
+		case _action_alert_call_play_animation:
+		{
+			struct ai_animation_reference_definition *animation_reference =
+				TAG_BLOCK_GET_ELEMENT(
+					&global_scenario_get()->ai_animation_references,
+					(short)call->a,
+					struct ai_animation_reference_definition);
+			long animation_graph_index = animation_reference->animation_graph.index;
+
+			if (animation_graph_index == NONE)
+			{
+				struct unit_datum *unit = unit_get(actor->meta.unit_index);
+				struct unit_definition *definition =
+					unit_definition_get(unit->definition_index);
+
+				animation_graph_index = definition->object.animation_graph.index;
+			}
+
+			unit_start_user_animation(
+				actor->meta.unit_index,
+				animation_graph_index,
+				animation_reference->animation_name,
+				TRUE);
+			break;
+		}
+
+		case _action_alert_call_has_path:
+			call->result = actor_path_has_path(actor_index) ? 1 : 0;
+			break;
+
+		case _action_alert_call_tolerance:
+			call->output[0] = actor_destination_tolerance(actor_index);
+			break;
+
+		case _action_alert_call_too_many_positions:
+		{
+			static boolean reported = FALSE;
+			struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_encounters,
+				DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
+				struct encounter_definition);
+			struct squad_definition *squad = TAG_BLOCK_GET_ELEMENT(
+				&encounter->squads,
+				actor->meta.squad_index,
+				struct squad_definition);
+
+			if (!reported)
+			{
+				error(_error_silent, "squad %s has %ld move positions (only %d are used)",
+					squad->name,
+					squad->move_positions.count,
+					(short)call->a);
+				reported = TRUE;
+			}
+			break;
+		}
+
+		case _action_alert_call_choose_random_position:
+		{
+			struct encounter_definition *encounter = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_encounters,
+				DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
+				struct encounter_definition);
+			struct squad_definition *squad = TAG_BLOCK_GET_ELEMENT(
+				&encounter->squads,
+				actor->meta.squad_index,
+				struct squad_definition);
+			unsigned long unavailable_positions[BIT_VECTOR_SIZE_IN_LONGS(32)];
+
+			unavailable_positions[0] = (unsigned long)call->a;
+			call->result = choose_random_array_element(
+				squad->move_positions.address,
+				sizeof(struct move_position_definition),
+				(short)call->b,
+				offsetof(struct move_position_definition, weight),
+				unavailable_positions);
+			break;
+		}
+
+		case _action_alert_call_random_range:
+			call->output[0] = real_random_range(call->input[0], call->input[1]);
+			break;
+
+		case _action_alert_call_move_to_move_position:
+			call->result = actor_move_to_move_position(actor_index, (short)call->a) ? 1 : 0;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_alert_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input0,
+	real input1,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	call.input[0] = input0;
+	call.input[1] = input1;
+	action_alert_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
 
 boolean action_alert_setup(
 	long actor_index,
@@ -169,7 +303,8 @@ void action_alert_update(
 			&state_data->target_position_definition.position);
 
 		match_assert("c:\\halo\\SOURCE\\ai\\action_alert.c", 174, !actor->meta.swarm);
-		if (actor_path_at_destination(actor_index) || distance_squared < 0.25f)
+		if (action_alert_call_simple(actor_index, _action_alert_call_at_destination, 0, 0, 0.0f, 0.0f, NULL) ||
+			distance_squared < 0.25f)
 		{
 			if (state_data->wait_ticks > 0)
 				state_data->wait_ticks--;
@@ -181,27 +316,8 @@ void action_alert_update(
 
 				if (animation_reference_index != NONE)
 				{
-					struct ai_animation_reference_definition *animation_reference =
-						TAG_BLOCK_GET_ELEMENT(
-							&global_scenario_get()->ai_animation_references,
-							animation_reference_index,
-							struct ai_animation_reference_definition);
-					long animation_graph_index = animation_reference->animation_graph.index;
-
-					if (animation_graph_index == NONE)
-					{
-						struct unit_datum *unit = unit_get(actor->meta.unit_index);
-						struct unit_definition *definition =
-							unit_definition_get(unit->definition_index);
-
-						animation_graph_index = definition->object.animation_graph.index;
-					}
-
-					unit_start_user_animation(
-						actor->meta.unit_index,
-						animation_graph_index,
-						animation_reference->animation_name,
-						TRUE);
+					action_alert_call_simple(actor_index, _action_alert_call_play_animation,
+						animation_reference_index, 0, 0.0f, 0.0f, NULL);
 				}
 
 				state_data->must_play_animation = FALSE;
@@ -264,16 +380,8 @@ static short action_alert_next_position(
 			move_position_count = (short)PIN(move_positions->count, 0, (long)SIZEOF_BITS(unavailable_positions));
 			if (move_position_count < move_positions->count)
 			{
-				static boolean reported = FALSE;
-
-				if (!reported)
-				{
-					error(_error_silent, "squad %s has %ld move positions (only %d are used)",
-						squad->name,
-						move_positions->count,
-						move_position_count);
-					reported = TRUE;
-				}
+				action_alert_call_simple(actor_index, _action_alert_call_too_many_positions,
+					move_position_count, 0, 0.0f, 0.0f, NULL);
 			}
 			while (position_index < move_position_count)
 			{
@@ -335,12 +443,8 @@ static short action_alert_next_position(
 			{
 				if (move_position_order == _move_position_order_random)
 				{
-					result = choose_random_array_element(
-						squad->move_positions.address,
-						sizeof(struct move_position_definition),
-						move_position_count,
-						offsetof(struct move_position_definition, weight),
-						unavailable_positions);
+					result = (short)action_alert_call_simple(actor_index, _action_alert_call_choose_random_position,
+						(long)unavailable_positions[0], move_position_count, 0.0f, 0.0f, NULL);
 				}
 				else
 				{
@@ -418,12 +522,14 @@ boolean action_alert_perform(
 
 		match_assert("c:\\halo\\SOURCE\\ai\\action_alert.c", 71, !actor->meta.swarm);
 		if (state_data->target_move_position_index != NONE &&
-			actor_path_has_path(actor_index))
+			action_alert_call_simple(actor_index, _action_alert_call_has_path, 0, 0, 0.0f, 0.0f, NULL))
 		{
 			real distance_squared = distance_squared3d(
 				&actor->input.position.body_position,
 				&state_data->target_position_definition.position);
-			real tolerance = actor_destination_tolerance(actor_index);
+			real tolerance;
+
+			action_alert_call_simple(actor_index, _action_alert_call_tolerance, 0, 0, 0.0f, 0.0f, &tolerance);
 
 			tolerance = MAX(tolerance, 0.5f);
 			if (distance_squared > tolerance * tolerance)
@@ -477,9 +583,10 @@ boolean action_alert_perform(
 						&squad->move_positions,
 						state_data->pending_move_position_index,
 						struct move_position_definition);
-				real wait_time = real_random_range(
-					move_position->time_lower_bound,
-					move_position->time_upper_bound);
+				real wait_time;
+
+				action_alert_call_simple(actor_index, _action_alert_call_random_range, 0, 0,
+					move_position->time_lower_bound, move_position->time_upper_bound, &wait_time);
 
 				state_data->target_move_position_index =
 					state_data->pending_move_position_index;
@@ -487,9 +594,8 @@ boolean action_alert_perform(
 				state_data->target_position_definition = *move_position;
 				state_data->wait_ticks = (short)(wait_time * TICKS_PER_SECOND);
 				state_data->must_play_animation = TRUE;
-				moved = actor_move_to_move_position(
-					actor_index,
-					state_data->target_move_position_index);
+				moved = (boolean)action_alert_call_simple(actor_index, _action_alert_call_move_to_move_position,
+					state_data->target_move_position_index, 0, 0.0f, 0.0f, NULL);
 			}
 		}
 

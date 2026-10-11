@@ -712,6 +712,7 @@ int actions_port_ported(
 	switch (action)
 	{
 		case _actor_action_sleep: return function == _actions_port_control;
+		case _actor_action_alert:
 		case _actor_action_wait:
 		case _actor_action_avoid:
 		case _actor_action_fight: return TRUE;
@@ -727,6 +728,7 @@ void actions_port_call(
 {
 	switch (call->kind >> 8)
 	{
+		case _actor_action_alert: action_alert_call(call); break;
 		case _actor_action_wait: action_wait_call(call); break;
 		case _actor_action_avoid: action_avoid_call(call); break;
 		case _actor_action_fight: action_fight_call(call); break;

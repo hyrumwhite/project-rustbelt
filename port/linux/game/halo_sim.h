@@ -911,6 +911,7 @@ struct halo_sim_ai_step_context
 	/* its debug info (ai_debug.h's actor_debug_array) */
 	unsigned long debug_info;
 	unsigned long variant_definition;
+	unsigned long scenario;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -1191,6 +1192,18 @@ enum
 enum
 {
 	_action_avoid_call_change_firing_position = (13 << 8) | 1,
+};
+
+enum
+{
+	_action_alert_call_at_destination = (2 << 8) | 1,
+	_action_alert_call_play_animation,
+	_action_alert_call_has_path,
+	_action_alert_call_tolerance,
+	_action_alert_call_too_many_positions,
+	_action_alert_call_choose_random_position,
+	_action_alert_call_random_range,
+	_action_alert_call_move_to_move_position,
 };
 
 enum
@@ -1767,6 +1780,7 @@ void actor_dispatch_call(struct halo_sim_ai_call *call);
 int actions_port_ported(short action, long function);
 void actions_port_call(struct halo_sim_ai_call *call);
 void action_wait_call(struct halo_sim_ai_call *call);
+void action_alert_call(struct halo_sim_ai_call *call);
 void action_avoid_call(struct halo_sim_ai_call *call);
 void action_fight_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);

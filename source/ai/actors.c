@@ -4720,6 +4720,7 @@ void actors_port_step_context(
 	context->object_header_data = (unsigned long)object_header_data;
 	context->debug_info = (unsigned long)&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
 	context->variant_definition = (unsigned long)actor_variant_definition_get(actor->meta.variant_definition_index);
+	context->scenario = (unsigned long)global_scenario_get();
 }
 
 /* port: the actor's props' datums, for the AI step checks (halo_sim.c): their

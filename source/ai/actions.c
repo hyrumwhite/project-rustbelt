@@ -1327,6 +1327,230 @@ void actions_port_handler_call(
 			actor_action_change(actor_index, _actor_action_fight, &state);
 			break;
 		}
+
+		case _actions_port_handler_call_encounter_stand_down:
+			call->result = encounter_get(actor->meta.encounter_index)->stand_down ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_pursuit_desires:
+		{
+			boolean pursue_tenacious = call->input[0] != 0.0f;
+			short group_pursuit_restriction = (short)call->input[1];
+			boolean group_pursuit_controller = call->input[2] != 0.0f;
+			short desire_target_search = (short)call->input[3];
+			short desire_pursuit = (short)call->input[4];
+			short desire_pursuit_search = (short)call->input[5];
+
+			encounter_modify_pursuit_desires(
+				actor->meta.encounter_index,
+				actor->meta.squad_index,
+				&pursue_tenacious,
+				&group_pursuit_restriction,
+				&group_pursuit_controller,
+				&desire_target_search,
+				&desire_pursuit,
+				&desire_pursuit_search);
+			call->output[0] = (real)(pursue_tenacious != FALSE);
+			call->output[1] = (real)group_pursuit_restriction;
+			call->output[2] = (real)(group_pursuit_controller != FALSE);
+			call->output[3] = (real)desire_target_search;
+			call->output[4] = (real)desire_pursuit;
+			call->output[5] = (real)desire_pursuit_search;
+			break;
+		}
+
+		case _actions_port_handler_call_pursuit_availability:
+		{
+			boolean flags[8];
+			short flag_index;
+
+			for (flag_index = 0; flag_index < NUMBEROF(flags); flag_index++)
+				flags[flag_index] = call->input[flag_index] != 0.0f;
+			encounter_determine_pursuit_availability(
+				actor->meta.encounter_index,
+				actor_index,
+				(short)call->a,
+				(boolean)call->b,
+				&flags[0],
+				&flags[1],
+				&flags[2],
+				&flags[3],
+				&flags[4],
+				&flags[5],
+				&flags[6],
+				&flags[7]);
+			call->result = 0;
+			for (flag_index = 0; flag_index < NUMBEROF(flags); flag_index++)
+			{
+				if (flags[flag_index])
+					call->result |= 1 << flag_index;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_find_prop_pathfinding_location:
+			actor_perception_find_prop_pathfinding_location(actor_index, call->a);
+			break;
+
+		case _actions_port_handler_call_nearby_firing_positions:
+		{
+			struct prop_datum *prop = prop_get(call->a);
+
+			call->result = actor_nearby_firing_positions(
+				actor_index,
+				&prop->pathfinding_point,
+				prop->pathfinding_surface_index,
+				_firing_position_group_when_searching) ? 1 : 0;
+			break;
+		}
+
+		case _actions_port_handler_call_uncover_target:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_uncover_setup_target(actor_index, (boolean)call->a, &state.uncover))
+			{
+				actor_action_change(actor_index, _actor_action_uncover, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_search_target:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_search_setup_target(actor_index, (boolean)call->a, &state.search))
+			{
+				actor_action_change(actor_index, _actor_action_search, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_target_unit:
+			call->result = actor_target_unit_index(actor_index);
+			break;
+
+		case _actions_port_handler_call_search_undirected:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_search_setup_undirected(actor_index, (boolean)call->a, &state.search))
+			{
+				actor_action_change(actor_index, _actor_action_search, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_select_pursuit_position:
+		{
+			struct path_state search_workspace;
+			struct firing_position_evaluation_context search;
+			struct firing_position candidate;
+			long previous_owner_actor_index;
+			boolean position_flags;
+
+			csmemset(&search, 0, sizeof(search));
+			search.evaluation_mode = _firing_point_evaluation_mode_pursue;
+			search.evaluation_data.pursue.orphan_prop_index =
+				actor->target.target_prop_index;
+			search.evaluation_data.pursue.last_perceived_time = call->b;
+			search.evaluation_data.pursue.tenacious = (boolean)call->a;
+			search.find_path_direction_from_target =
+				actor->target.target_prop_index != NONE;
+			search.allowed_position_mask =
+				actor_get_firing_position_group(
+					actor_index,
+					_firing_point_evaluation_mode_pursue,
+					_firing_position_group_normal);
+			search.maximum_search_range = 20.0f;
+			call->result = actor_select_firing_position(
+				actor_index,
+				&search,
+				&candidate,
+				&previous_owner_actor_index,
+				&search_workspace,
+				&position_flags);
+			break;
+		}
+
+		case _actions_port_handler_call_uncover_pursuit:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_uncover_setup_pursuit(actor_index, (short)call->a, &state.uncover))
+			{
+				actor_action_change(actor_index, _actor_action_uncover, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_search_pursuit:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_search_setup_pursuit(actor_index, (short)call->a, (boolean)call->b, &state.search))
+			{
+				actor_action_change(actor_index, _actor_action_search, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_mark_examined:
+			call->result = encounter_mark_examined_pursuit_position(
+				actor->meta.encounter_index,
+				actor_index,
+				(short)call->a,
+				call->b) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_wait:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_wait_setup(actor_index, (boolean)call->a, &state.wait))
+			{
+				actor_action_change(actor_index, _actor_action_wait, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_guard_postcombat:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_guard_setup_postcombat(actor_index, &state.guard))
+			{
+				actor_action_change(actor_index, _actor_action_guard, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_guard_find_position:
+		{
+			struct action_state_data state;
+			boolean success = action_guard_setup_find_position(actor_index, call->a, &state.guard);
+
+			match_assert(
+				"c:\\halo\\SOURCE\\ai\\actions.c",
+				2658,
+				success);
+			actor_action_change(actor_index, _actor_action_guard, &state);
+			break;
+		}
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -1692,6 +1916,8 @@ static void actor_action_determine_pursuit_options(
 	boolean *allow_pursuit_search,
 	boolean *wait_after_pursuit)
 {
+	/* port: what it asks through actions_port_handler_call, as the Rust
+	port's does (crates/halo_map's actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
 
 	if (desire_target_search == 2 ||
@@ -1741,16 +1967,16 @@ static void actor_action_determine_pursuit_options(
 		{
 			if (prop->state >= 2 && prop->state <= 3)
 			{
-				actor_perception_find_prop_pathfinding_location(
+				actions_port_handler_simple(
 					actor_index,
+					_actions_port_handler_call_find_prop_pathfinding_location,
 					actor->target.target_prop_index);
 			}
 
-			*allow_target_search = actor_nearby_firing_positions(
+			*allow_target_search = (boolean)actions_port_handler_simple(
 				actor_index,
-				&prop->pathfinding_point,
-				prop->pathfinding_surface_index,
-				_firing_position_group_when_searching);
+				_actions_port_handler_call_nearby_firing_positions,
+				actor->target.target_prop_index);
 		}
 	}
 
@@ -2802,19 +3028,18 @@ boolean actor_action_handle_combat_selection(
 boolean actor_action_handle_lost_contact(
 	long actor_index)
 {
-	struct path_state search_workspace;
-	struct action_state_data action_data;
+	/* port: what it asks of the rest of the game through
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
 	struct actor_definition *definition =
 		actor_definition_get(actor->meta.definition_index);
-	struct encounter_datum *encounter = actor->meta.encounter_index == NONE ?
-		NULL : encounter_get(actor->meta.encounter_index);
 	boolean handled = FALSE;
 	boolean should_return_to_idle = FALSE;
 	boolean wants_postcombat_guard = FALSE;
 
-	if (encounter &&
-		encounter->stand_down &&
+	if (actor->meta.encounter_index != NONE &&
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_encounter_stand_down, 0) &&
 		actor->state.combat_status <= 2 &&
 		!actor->state.artificial_combat_status &&
 		!actor->state.suspicion_combat_status)
@@ -2864,7 +3089,7 @@ boolean actor_action_handle_lost_contact(
 			desire_pursuit_search =
 				actor_type_get_when_to_search_pursuit(actor->meta.type);
 			group_pursuit_controller =
-				actor_type_get_pursuit_controller(actor->meta.type);
+				actor_type_get_pursuit_controller(actor->meta.type) != 0;
 			group_pursuit_restriction = 0;
 			controlling_group_pursuit = FALSE;
 			controlled_by_group_pursuit = FALSE;
@@ -2881,15 +3106,23 @@ boolean actor_action_handle_lost_contact(
 
 			if (actor->meta.encounter_index != NONE)
 			{
-				encounter_modify_pursuit_desires(
-					actor->meta.encounter_index,
-					actor->meta.squad_index,
-					&pursue_tenacious,
-					&group_pursuit_restriction,
-					&group_pursuit_controller,
-					&desire_target_search,
-					&desire_pursuit,
-					&desire_pursuit_search);
+				real desires[6];
+				real output[6];
+
+				desires[0] = (real)(pursue_tenacious != FALSE);
+				desires[1] = (real)group_pursuit_restriction;
+				desires[2] = (real)(group_pursuit_controller != FALSE);
+				desires[3] = (real)desire_target_search;
+				desires[4] = (real)desire_pursuit;
+				desires[5] = (real)desire_pursuit_search;
+				actions_port_handler(actor_index, _actions_port_handler_call_pursuit_desires,
+					0, 0, desires, 6, output);
+				pursue_tenacious = output[0] != 0.0f;
+				group_pursuit_restriction = (short)output[1];
+				group_pursuit_controller = output[2] != 0.0f;
+				desire_target_search = (short)output[3];
+				desire_pursuit = (short)output[4];
+				desire_pursuit_search = (short)output[5];
 
 				if (actor->meta.swarm)
 				{
@@ -2901,19 +3134,27 @@ boolean actor_action_handle_lost_contact(
 				}
 				else
 				{
-					encounter_determine_pursuit_availability(
-						actor->meta.encounter_index,
-						actor_index,
-						group_pursuit_restriction,
-						group_pursuit_controller,
-						&allow_target_uncover,
-						&allow_indefinite_target_uncover,
-						&allow_target_search,
-						&allow_pursuit,
-						&allow_pursuit_search,
-						&controlling_group_pursuit,
-						&controlled_by_group_pursuit,
-						&wait_after_pursuit);
+					real flags[8];
+					long result;
+
+					flags[0] = (real)(allow_target_uncover != FALSE);
+					flags[1] = (real)(allow_indefinite_target_uncover != FALSE);
+					flags[2] = (real)(allow_target_search != FALSE);
+					flags[3] = (real)(allow_pursuit != FALSE);
+					flags[4] = (real)(allow_pursuit_search != FALSE);
+					flags[5] = (real)(controlling_group_pursuit != FALSE);
+					flags[6] = (real)(controlled_by_group_pursuit != FALSE);
+					flags[7] = (real)(wait_after_pursuit != FALSE);
+					result = actions_port_handler(actor_index, _actions_port_handler_call_pursuit_availability,
+						group_pursuit_restriction, group_pursuit_controller, flags, 8, NULL);
+					allow_target_uncover = (result & (1 << 0)) != 0;
+					allow_indefinite_target_uncover = (result & (1 << 1)) != 0;
+					allow_target_search = (result & (1 << 2)) != 0;
+					allow_pursuit = (result & (1 << 3)) != 0;
+					allow_pursuit_search = (result & (1 << 4)) != 0;
+					controlling_group_pursuit = (result & (1 << 5)) != 0;
+					controlled_by_group_pursuit = (result & (1 << 6)) != 0;
+					wait_after_pursuit = (result & (1 << 7)) != 0;
 				}
 			}
 
@@ -2945,54 +3186,37 @@ boolean actor_action_handle_lost_contact(
 		}
 
 		if (allow_target_uncover &&
-			action_uncover_setup_target(
-				actor_index,
-				allow_target_search,
-				&action_data.uncover))
+			actions_port_handler_simple(actor_index, _actions_port_handler_call_uncover_target, allow_target_search))
 		{
-			actor_action_change(
-				actor_index,
-				_actor_action_uncover,
-				&action_data);
 			handled = TRUE;
 		}
 
 		if (!handled)
 		{
-			actor_perception_tried_to_uncover(
-				actor_index,
+			actions_port_handler_simple(actor_index, _actions_port_handler_call_tried_to_uncover,
 				actor->target.target_prop_index);
 
 			if (allow_target_search &&
-				action_search_setup_target(
-					actor_index,
-					actor->emotions.forced_to_charge,
-					&action_data.search))
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_search_target,
+					actor->emotions.forced_to_charge))
 			{
-				actor_action_change(
-					actor_index,
-					_actor_action_search,
-					&action_data);
 				handled = TRUE;
 			}
 
 			if (!handled)
 			{
-				actor_perception_tried_to_search(
-					actor_index,
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_tried_to_search,
 					actor->target.target_prop_index);
 
 				if (actor->firing_positions.pursuit_fired_at_orphan &&
 					!actor->firing_positions.pursuit_communicated_lost_contact)
 				{
-					ai_communication_event(
-						13,
-						actor->meta.unit_index,
-						actor_target_unit_index(actor_index),
-						NONE,
-						NONE,
-						NONE,
-						NULL);
+					long target_unit_index = actions_port_handler_simple(actor_index,
+						_actions_port_handler_call_target_unit, 0);
+					real weapon_state = (real)NONE;
+
+					actions_port_handler(actor_index, _actions_port_handler_call_communication,
+						13, target_unit_index, &weapon_state, 1, NULL);
 					actor->firing_positions.pursuit_communicated_lost_contact = TRUE;
 				}
 
@@ -3006,15 +3230,9 @@ boolean actor_action_handle_lost_contact(
 					if (actor->meta.swarm)
 					{
 						if (allow_pursuit_search &&
-							action_search_setup_undirected(
-								actor_index,
-								pursue_tenacious,
-								&action_data.search))
+							actions_port_handler_simple(actor_index, _actions_port_handler_call_search_undirected,
+								pursue_tenacious))
 						{
-							actor_action_change(
-								actor_index,
-								_actor_action_search,
-								&action_data);
 							handled = TRUE;
 						}
 					}
@@ -3043,61 +3261,29 @@ boolean actor_action_handle_lost_contact(
 								actor->firing_positions.pursuit_positions_count <
 									examined_threshold)
 							{
-								struct firing_position_evaluation_context search;
-								struct firing_position candidate;
-								long previous_owner_actor_index;
-								boolean position_flags;
-
-								csmemset(&search, 0, sizeof(search));
-								search.evaluation_mode = _firing_point_evaluation_mode_pursue;
-								search.evaluation_data.pursue.orphan_prop_index =
-									actor->target.target_prop_index;
-								search.evaluation_data.pursue.last_perceived_time = orphan == NULL ?
-									NONE : orphan->last_perceived_time;
-								search.evaluation_data.pursue.tenacious = pursue_tenacious;
-								search.find_path_direction_from_target =
-									actor->target.target_prop_index != NONE;
-								search.allowed_position_mask =
-									actor_get_firing_position_group(
-										actor_index,
-										_firing_point_evaluation_mode_pursue,
-										_firing_position_group_normal);
-								search.maximum_search_range = 20.0f;
-								firing_position_index = actor_select_firing_position(
+								firing_position_index = (short)actions_port_handler(
 									actor_index,
-									&search,
-									&candidate,
-									&previous_owner_actor_index,
-									&search_workspace,
-									&position_flags);
+									_actions_port_handler_call_select_pursuit_position,
+									pursue_tenacious,
+									orphan == NULL ? NONE : orphan->last_perceived_time,
+									NULL,
+									0,
+									NULL);
 							}
 						}
 
 						if (firing_position_index != NONE)
 						{
 							if (!pursuit_from_uncover &&
-								action_uncover_setup_pursuit(
-									actor_index,
-									firing_position_index,
-									&action_data.uncover))
+								actions_port_handler_simple(actor_index, _actions_port_handler_call_uncover_pursuit,
+									firing_position_index))
 							{
-								actor_action_change(
-									actor_index,
-									_actor_action_uncover,
-									&action_data);
 								handled = TRUE;
 							}
 							else if (allow_pursuit_search &&
-								action_search_setup_pursuit(
-									actor_index,
-									firing_position_index,
-									pursue_tenacious,
-									&action_data.search))
+								actions_port_handler(actor_index, _actions_port_handler_call_search_pursuit,
+									firing_position_index, pursue_tenacious, NULL, 0, NULL))
 							{
-								actor_action_change(
-									actor_index,
-									_actor_action_search,
-									&action_data);
 								handled = TRUE;
 							}
 						}
@@ -3109,22 +3295,15 @@ boolean actor_action_handle_lost_contact(
 							NONE : orphan->last_perceived_time;
 
 						if (actor->meta.encounter_index != NONE &&
-							encounter_mark_examined_pursuit_position(
-								actor->meta.encounter_index,
-								actor_index,
-								firing_position_index,
-								last_perceived_time))
+							actions_port_handler(actor_index, _actions_port_handler_call_mark_examined,
+								firing_position_index, last_perceived_time, NULL, 0, NULL))
 						{
 							if (actor->firing_positions.pursuit_positions_count == 0)
 							{
-								ai_communication_event(
-									16,
-									actor->meta.unit_index,
-									NONE,
-									NONE,
-									NONE,
-									NONE,
-									NULL);
+								real weapon_state = (real)NONE;
+
+								actions_port_handler(actor_index, _actions_port_handler_call_communication,
+									16, NONE, &weapon_state, 1, NULL);
 							}
 
 							actor->firing_positions.pursuit_positions_count++;
@@ -3137,27 +3316,16 @@ boolean actor_action_handle_lost_contact(
 					if (actor->firing_positions.pursuit_positions_count > 0 &&
 						actor->meta.unit_index != NONE)
 					{
-						ai_communication_event(
-							19,
-							actor->meta.unit_index,
-							NONE,
-							NONE,
-							NONE,
-							NONE,
-							NULL);
+						real weapon_state = (real)NONE;
+
+						actions_port_handler(actor_index, _actions_port_handler_call_communication,
+							19, NONE, &weapon_state, 1, NULL);
 					}
 
 					if (!actor->meta.swarm &&
 						wait_after_pursuit &&
-						action_wait_setup(
-							actor_index,
-							allow_pursuit,
-							&action_data.wait))
+						actions_port_handler_simple(actor_index, _actions_port_handler_call_wait, allow_pursuit))
 					{
-						actor_action_change(
-							actor_index,
-							_actor_action_wait,
-							&action_data);
 						handled = TRUE;
 					}
 				}
@@ -3172,24 +3340,15 @@ boolean actor_action_handle_lost_contact(
 		{
 			handled = TRUE;
 		}
-		else if (action_guard_setup_postcombat(actor_index, &action_data.guard))
+		else if (actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_postcombat, 0))
 		{
-			actor_action_change(
-				actor_index,
-				_actor_action_guard,
-				&action_data);
 			handled = TRUE;
 		}
 	}
 
 	if (!handled && should_return_to_idle)
 	{
-		match_assert(
-			"c:\\halo\\SOURCE\\ai\\actions.c",
-			2629,
-			encounter);
-
-		handled = actor_action_set_default_state(actor_index, NONE);
+		handled = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_set_default_state, 0);
 	}
 
 	if (!handled && actor_action_class(actor_index) != _action_class_passive)
@@ -3203,23 +3362,10 @@ boolean actor_action_handle_lost_contact(
 			find_position_delay = 90;
 		}
 
-		actor_perception_abandoned_search(
-			actor_index,
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_abandoned_search,
 			actor->target.target_prop_index);
-		{
-			boolean success = action_guard_setup_find_position(
-				actor_index,
-				find_position_delay,
-				&action_data.guard);
-			match_assert(
-				"c:\\halo\\SOURCE\\ai\\actions.c",
-				2658,
-				success);
-		}
-		actor_action_change(
-			actor_index,
-			_actor_action_guard,
-			&action_data);
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_find_position,
+			find_position_delay);
 		handled = TRUE;
 	}
 
@@ -3278,7 +3424,7 @@ boolean actor_action_handle_combat_status(
 					(actor->external_orders.stand_down ||
 						actor->external_orders.postcombat_type > 0)))
 			{
-				result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
+				result = actor_action_handle_lost_contact(actor_index);
 			}
 		}
 		break;
@@ -3286,7 +3432,7 @@ boolean actor_action_handle_combat_status(
 	case 4:
 		result = actor->state.combat_status >= 4 ?
 			actor_action_handle_combat_selection(actor_index) :
-			(boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
+			actor_action_handle_lost_contact(actor_index);
 		break;
 
 	case 3:
@@ -3296,7 +3442,7 @@ boolean actor_action_handle_combat_status(
 		}
 		else if (actor->state.combat_status < 2)
 		{
-			result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
+			result = actor_action_handle_lost_contact(actor_index);
 		}
 		else if (actor->target.target_prop_index != NONE)
 		{
@@ -3313,7 +3459,7 @@ boolean actor_action_handle_combat_status(
 					(actor->state.action != _actor_action_search ||
 						actor->state.action_data.search.pursuit_location.type)))
 			{
-				result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
+				result = actor_action_handle_lost_contact(actor_index);
 			}
 		}
 		break;
@@ -3329,7 +3475,7 @@ boolean actor_action_handle_combat_status(
 	}
 
 	if (!result && force_decision)
-		result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
+		result = actor_action_handle_lost_contact(actor_index);
 
 	return result;
 }
@@ -3460,7 +3606,7 @@ boolean actor_action_handle_exit_pursuit(
 	}
 
 	if (reported)
-		reported = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
+		reported = actor_action_handle_lost_contact(actor_index);
 
 	return reported;
 }

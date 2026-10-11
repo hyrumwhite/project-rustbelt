@@ -1241,6 +1241,22 @@ enum
 	_actions_port_handler_call_charge,
 	_actions_port_handler_call_vehicle_definition,
 	_actions_port_handler_call_fight,
+	_actions_port_handler_call_encounter_stand_down,
+	_actions_port_handler_call_pursuit_desires,
+	_actions_port_handler_call_pursuit_availability,
+	_actions_port_handler_call_find_prop_pathfinding_location,
+	_actions_port_handler_call_nearby_firing_positions,
+	_actions_port_handler_call_uncover_target,
+	_actions_port_handler_call_search_target,
+	_actions_port_handler_call_target_unit,
+	_actions_port_handler_call_search_undirected,
+	_actions_port_handler_call_select_pursuit_position,
+	_actions_port_handler_call_uncover_pursuit,
+	_actions_port_handler_call_search_pursuit,
+	_actions_port_handler_call_mark_examined,
+	_actions_port_handler_call_wait,
+	_actions_port_handler_call_guard_postcombat,
+	_actions_port_handler_call_guard_find_position,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

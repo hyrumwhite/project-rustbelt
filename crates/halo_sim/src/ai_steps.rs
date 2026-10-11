@@ -10,6 +10,7 @@
 
 use std::cell::Cell;
 
+use halo_map::actor_combat::actor_combat_update;
 use halo_map::actor_attention::{actor_communication_update, actor_conversation_control, actor_look_affect_movement};
 use halo_map::actor_destination::actor_destination_update;
 use halo_map::actor_emotions::actor_emotion_update;
@@ -25,6 +26,9 @@ use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext, PropIterator};
 
 /// `sizeof(struct actor_datum)`.
 pub const ACTOR_DATUM_SIZE: usize = halo_map::layout::actor_datum::SIZEOF;
+/// The head of an actor's debug info the checks save and compare
+/// (halo_sim.h's `HALO_SIM_ACTOR_DEBUG_HEAD_SIZE`).
+pub const ACTOR_DEBUG_HEAD_SIZE: usize = 0x100;
 /// `sizeof(struct data_array)`.
 pub const DATA_ARRAY_SIZE: usize = 0x38;
 /// `sizeof(struct prop_datum)`.
@@ -70,6 +74,8 @@ pub struct AiStepCallbacks {
     pub look: unsafe extern "C" fn(call: *mut AiCall),
     /// actor_moving.c's `actor_move_call`.
     pub moving: unsafe extern "C" fn(call: *mut AiCall),
+    /// actor_combat.c's `actor_combat_call`.
+    pub combat: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -88,6 +94,9 @@ pub struct AiEventC {
     /// The props' data array as the call left it (its count and free list
     /// change as props are made and deleted).
     pub prop_data_after: [u8; DATA_ARRAY_SIZE],
+    /// The head of the actor's debug info before and after the call.
+    pub debug_before: [u8; ACTOR_DEBUG_HEAD_SIZE],
+    pub debug_after: [u8; ACTOR_DEBUG_HEAD_SIZE],
 }
 
 /// A step: where it works, what it returns (for the steps that return
@@ -203,6 +212,13 @@ impl AiHost for CheckHost<'_> {
             self.differ(index, 3);
         }
         actor.copy_from_slice(&event.after);
+        // SAFETY: the head of the actor's debug info in the game's memory
+        let debug =
+            unsafe { std::slice::from_raw_parts_mut(self.context.debug_info as usize as *mut u8, ACTOR_DEBUG_HEAD_SIZE) };
+        if debug != &event.debug_before[..] {
+            self.differ(index, 3);
+        }
+        debug.copy_from_slice(&event.debug_after);
         if self.props {
             // SAFETY: the props' data array in the game's memory
             unsafe {
@@ -222,6 +238,7 @@ impl AiHost for CheckHost<'_> {
         }
         call.output = e.output;
         call.result = e.result;
+        call.result2 = e.result2;
     }
 }
 
@@ -256,6 +273,7 @@ const STEP_UNIT_CONTROL: i32 = 11;
 const STEP_PERCEPTION: i32 = 12;
 const STEP_LOOK: i32 = 13;
 const STEP_MOVE: i32 = 14;
+const STEP_COMBAT: i32 = 15;
 
 /// The step run: its result, or None for a step the port doesn't have.
 fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
@@ -275,6 +293,7 @@ fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
         STEP_PERCEPTION => actor_perception_update(context, host),
         STEP_LOOK => actor_look_update(context, host),
         STEP_MOVE => actor_move_update(context, host),
+        STEP_COMBAT => actor_combat_update(context, host),
         _ => return None,
     }
     Some(0)
@@ -295,6 +314,7 @@ fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" 
         STEP_PERCEPTION => Some(callbacks.perception),
         STEP_LOOK => Some(callbacks.look),
         STEP_MOVE => Some(callbacks.moving),
+        STEP_COMBAT => Some(callbacks.combat),
         _ => None,
     }
 }

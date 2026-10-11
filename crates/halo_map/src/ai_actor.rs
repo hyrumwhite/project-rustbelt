@@ -68,6 +68,7 @@ pub struct AiCall {
     pub input: [f32; 9],
     pub output: [f32; 6],
     pub result: i32,
+    pub result2: i32,
 }
 
 impl AiCall {
@@ -99,6 +100,10 @@ pub struct AiStepContext {
     pub actor_data: u32,
     /// `object_header_data` (its `struct data_array`).
     pub object_header_data: u32,
+    /// Its debug info (ai_debug.h's `actor_debug_array`).
+    pub debug_info: u32,
+    /// Its variant's definition (`actor_variant_definition_get`).
+    pub variant_definition: u32,
 }
 
 /// `datum_get`: the datum's address (None for one unused or changed).

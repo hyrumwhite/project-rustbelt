@@ -38,6 +38,7 @@ enum
 	_halo_sim_object_exports,
 	_halo_sim_unit_ik,
 	_halo_sim_lights,
+	_halo_sim_effects,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -197,6 +198,84 @@ struct halo_sim_weapon_game_call
 	float f[12];
 	long result;
 	float out[8];
+};
+
+/* an effect's calls of the rest of the game (effects.c's effect_call;
+crates/halo_map's effects::call) */
+enum
+{
+	_effect_call_object = 1,
+	_effect_call_delete,
+	_effect_call_detach_delete,
+	_effect_call_function_value,
+	_effect_call_change_color,
+	_effect_call_visible,
+	_effect_call_underwater,
+	_effect_call_node_matrix,
+	_effect_call_impulse,
+	_effect_call_particle_system,
+	_effect_call_sound,
+	_effect_call_object_new,
+	_effect_call_decal,
+	_effect_call_damage,
+	_effect_call_light,
+	_effect_call_particle,
+};
+
+/* crates/halo_map's EffectCall: an effect's call of the game, and its answer */
+struct halo_sim_effect_call
+{
+	long kind;
+	long a;
+	long b;
+	long c;
+	long d;
+	float f[20];
+	long result;
+	float out[16];
+	long out_location_leaf;
+	short out_location_cluster;
+	unsigned short out_location_bonus;
+};
+
+/* crates/halo_map's EffectState: what an effect's update changes of the
+effect, and the game's two random seeds */
+struct halo_sim_effect_state
+{
+	unsigned long effect_index;
+	unsigned long definition_index;
+	unsigned short flags;
+	short scale_a_function_index;
+	short scale_b_function_index;
+	short change_color_index;
+	long location_leaf;
+	short location_cluster;
+	unsigned short location_bonus;
+	float color[3];
+	float velocity[3];
+	long object_index;
+	long owner_object_index;
+	float scale_a;
+	float scale_b;
+	short local_player_index;
+	short event_index;
+	float event_time;
+	float event_duration;
+	float last_event_fraction;
+	unsigned char particle_counts[32];
+	unsigned long has_translational_impulse;
+	unsigned long random_seed;
+	unsigned long local_random_seed;
+};
+
+/* crates/halo_map's EffectInstance: one of an effect's location instances,
+`next` the next one's index among them */
+struct halo_sim_effect_instance
+{
+	short node_designator;
+	short pad;
+	long next;
+	float matrix[13];
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -576,5 +655,24 @@ void halo_sim_unit_ik_note_grenade(long unit_index, int releases);
 lights (`lights`, `light_count`); in check mode the game's list is compared */
 int halo_sim_object_lights(long object_index, long *lights, short *light_count);
 void halo_sim_object_lights_check(long object_index, long const *lights, short light_count);
+
+/* effects.c's effect_update: TRUE when the Rust port ran it (its calls of
+the game through effect_call); in check mode `checking` is set when this
+update is the one checked (a nested one isn't): it notes the effect and seeds
+the game's begins with, effect_call records each call
+(halo_sim_effect_event_begin and _end), and halo_sim_effect_update_check
+compares Rust's replay */
+int halo_sim_effect_update(long effect_index, float dt, int *checking);
+void halo_sim_effect_update_check(long effect_index);
+void halo_sim_effect_event_begin(long effect_index, struct halo_sim_effect_call const *call);
+void halo_sim_effect_event_end(long effect_index, struct halo_sim_effect_call const *call, long still_there);
+long effect_call(long effect_index, struct halo_sim_effect_call *call);
+/* effects.c's: an effect's state (FALSE if it is gone: the seeds are still
+read), and back (the seeds always); its location instances (FALSE if they
+don't fit) */
+int effect_halo_sim_state_load(long effect_index, struct halo_sim_effect_state *state);
+void effect_halo_sim_state_store(struct halo_sim_effect_state const *state);
+int effect_halo_sim_instances(long effect_index, long *first_instances, struct halo_sim_effect_instance *instances,
+	unsigned long maximum_instance_count, unsigned long *instance_count);
 
 #endif // __HALO_SIM_H

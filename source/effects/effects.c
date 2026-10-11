@@ -172,6 +172,7 @@ symbols in this file:
 #include "tag_files/tag_groups.h"
 #include "units/bipeds.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 #undef real_local_random
 
 /* ---------- constants */
@@ -493,6 +494,7 @@ static void impulse_effect_initialize(
 
 // effect_generate_part: the part definition and the location instance are passed in registers
 static void effect_generate_part(
+	long effect_index,
 	struct effect_datum const *effect,
 	struct effect_part_definition const *part_definition,
 	struct effect_location_datum const *instance,
@@ -503,13 +505,18 @@ static void effect_generate_part(
 
 // effect_generate_parts: effect is passed in ebx
 static void effect_generate_parts(
+	long effect_index,
 	struct effect_datum *effect);
 
 // effect_generate_particles: effect is passed in edi
 static void effect_generate_particles(
+	long effect_index,
 	struct effect_datum *effect);
 
 static void effect_update(
+	long effect_index,
+	real dt);
+static void effect_update_game(
 	long effect_index,
 	real dt);
 
@@ -556,8 +563,8 @@ static void effect_random_angular_velocity(
 
 // effect_allowed_by_environment: all three arguments are passed in registers
 static boolean effect_allowed_by_environment(
+	long effect_index,
 	short environment,
-	struct location const *location,
 	real_point3d const *world_point);
 
 // effect_part_allowed_by_disposition: both arguments are passed in registers
@@ -1581,7 +1588,26 @@ static void impulse_effect_initialize(
 	return;
 }
 
+/* port: an effect update's call of the game (effect_call) */
+static void effect_call_new(
+	struct halo_sim_effect_call *call,
+	long kind)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+}
+
+static void effect_call_vector(
+	float *f,
+	real const *v)
+{
+	f[0] = v[0];
+	f[1] = v[1];
+	f[2] = v[2];
+}
+
 static void effect_generate_part(
+	long effect_index,
 	struct effect_datum const *effect,
 	struct effect_part_definition const *part_definition,
 	struct effect_location_datum const *instance,
@@ -1590,6 +1616,7 @@ static void effect_generate_part(
 	real_vector3d const *world_up,
 	real scale)
 {
+	struct halo_sim_effect_call call;
 	real_vector3d direction;
 	real_vector3d velocity;
 
@@ -1597,11 +1624,6 @@ static void effect_generate_part(
 	{
 		case PARTICLE_SYSTEM_DEFINITION_TAG:
 		{
-			real_argb_color tint;
-
-			tint.alpha = 1.0f;
-			tint.rgb = effect->color;
-
 			effect_random_translational_velocity(
 				get_global_local_random_seed_address(),
 				effect,
@@ -1618,16 +1640,19 @@ static void effect_generate_part(
 			velocity.j += effect->velocity.j;
 			velocity.k += effect->velocity.k;
 
-			particle_system_new_unattached(
-				part_definition->reference.index,
-				world_point,
-				&velocity,
-				&tint,
-				scale);
+			effect_call_new(&call, _effect_call_particle_system);
+			call.a = part_definition->reference.index;
+			effect_call_vector(&call.f[0], &world_point->x);
+			effect_call_vector(&call.f[3], &velocity.i);
+			effect_call_vector(&call.f[6], &effect->color.red);
+			call.f[9] = scale;
+			effect_call(effect_index, &call);
 			break;
 		}
 
 		case SOUND_DEFINITION_TAG:
+			effect_call_new(&call, _effect_call_sound);
+			call.b = part_definition->reference.index;
 			if (effect->object_index != NONE)
 			{
 				short node_index = instance->node_designator;
@@ -1635,71 +1660,62 @@ static void effect_generate_part(
 				if (node_index != NONE)
 					node_index &= (short)(FLAG(_effect_location_first_person_bit) - 1);
 
-				object_impulse_sound_new(
-					effect->object_index,
-					part_definition->reference.index,
-					node_index,
-					&instance->matrix.position,
-					&instance->matrix.forward,
-					scale);
+				call.a = effect->object_index;
+				call.c = node_index;
+				effect_call_vector(&call.f[0], &instance->matrix.position.x);
+				effect_call_vector(&call.f[3], &instance->matrix.forward.i);
 			}
 			else
 			{
-				struct sound_location location;
-
-				location.position = *world_point;
-				location.forward = *world_forward;
-				location.translational_velocity = *global_zero_vector3d;
-				location.game_location = effect->location;
-
-				unattached_impulse_sound_new(
-					part_definition->reference.index,
-					&location,
-					scale);
+				call.a = NONE;
+				effect_call_vector(&call.f[0], &world_point->x);
+				effect_call_vector(&call.f[3], &world_forward->i);
 			}
+			call.f[6] = scale;
+			effect_call(effect_index, &call);
 			break;
 
 		case OBJECT_DEFINITION_TAG:
 		{
-			struct object_placement_data data;
+			real_vector3d translational_velocity;
+			real_vector3d angular_velocity;
 			unsigned long *seed;
-
-			object_placement_data_new(
-				&data,
-				part_definition->reference.index,
-				effect->owner_object_index);
-
-			data.position = *world_point;
-			data.forward = *world_forward;
-			data.up = *world_up;
 
 			effect_random_translational_velocity(
 				get_global_random_seed_address(),
 				effect,
 				world_forward,
 				&direction,
-				&data.translational_velocity,
+				&translational_velocity,
 				part_definition->velocity_lower_bound,
 				part_definition->velocity_upper_bound,
 				part_definition->velocity_cone_angle,
 				part_definition->scale_a_flags,
 				part_definition->scale_b_flags);
 
-			data.translational_velocity.i += effect->velocity.i;
-			data.translational_velocity.j += effect->velocity.j;
-			data.translational_velocity.k += effect->velocity.k;
+			translational_velocity.i += effect->velocity.i;
+			translational_velocity.j += effect->velocity.j;
+			translational_velocity.k += effect->velocity.k;
 
 			seed = get_global_random_seed_address();
 			effect_random_angular_velocity(
 				seed,
 				effect,
-				&data.angular_velocity,
+				&angular_velocity,
 				part_definition->angular_velocity_lower_bound,
 				part_definition->angular_velocity_upper_bound,
 				part_definition->scale_a_flags,
 				part_definition->scale_b_flags);
 
-			object_new(&data);
+			effect_call_new(&call, _effect_call_object_new);
+			call.a = part_definition->reference.index;
+			call.b = effect->owner_object_index;
+			effect_call_vector(&call.f[0], &world_point->x);
+			effect_call_vector(&call.f[3], &world_forward->i);
+			effect_call_vector(&call.f[6], &world_up->i);
+			effect_call_vector(&call.f[9], &translational_velocity.i);
+			effect_call_vector(&call.f[12], &angular_velocity.i);
+			effect_call(effect_index, &call);
 			break;
 		}
 
@@ -1724,41 +1740,23 @@ static void effect_generate_part(
 				part_definition->radius_modifier_lower_bound,
 				part_definition->radius_modifier_upper_bound);
 
-			decal_new(
-				part_definition->reference.index,
-				world_point,
-				&velocity,
-				radius_modifier,
-				FALSE,
-				NONE,
-				NULL);
+			effect_call_new(&call, _effect_call_decal);
+			call.a = part_definition->reference.index;
+			effect_call_vector(&call.f[0], &world_point->x);
+			effect_call_vector(&call.f[3], &velocity.i);
+			call.f[6] = radius_modifier;
+			effect_call(effect_index, &call);
 			break;
 		}
 
 		case DAMAGE_EFFECT_DEFINITION_TAG:
-		{
-			struct damage_data damage;
-			struct object_datum *owner =
-				object_try_and_get(effect->owner_object_index);
-
-			damage_data_new(&damage, part_definition->reference.index);
-
-			if (owner)
-			{
-				damage.owner_player_index = owner->object.owner_player_index;
-				damage.owner_object_index = effect->owner_object_index;
-				damage.owner_team_index = owner->object.owner_team_index;
-			}
-
-			damage.scale = scale;
-			damage.location = effect->location;
-			damage.origin = *world_point;
-			damage.epicenter = *world_point;
-			damage.direction = *world_forward;
-
-			area_of_effect_cause_damage(&damage, NONE);
+			effect_call_new(&call, _effect_call_damage);
+			call.a = part_definition->reference.index;
+			effect_call_vector(&call.f[0], &world_point->x);
+			effect_call_vector(&call.f[3], &world_forward->i);
+			call.f[6] = scale;
+			effect_call(effect_index, &call);
 			break;
-		}
 
 		case LIGHT_DEFINITION_TAG:
 		{
@@ -1767,13 +1765,14 @@ static void effect_generate_part(
 			if (node_index != NONE)
 				node_index &= (short)(FLAG(_effect_location_first_person_bit) - 1);
 
-			light_new_unattached(
-				part_definition->reference.index,
-				effect->object_index,
-				node_index,
-				&instance->matrix.position,
-				&instance->matrix.forward,
-				scale);
+			effect_call_new(&call, _effect_call_light);
+			call.a = part_definition->reference.index;
+			call.b = effect->object_index;
+			call.c = node_index;
+			effect_call_vector(&call.f[0], &instance->matrix.position.x);
+			effect_call_vector(&call.f[3], &instance->matrix.forward.i);
+			call.f[6] = scale;
+			effect_call(effect_index, &call);
 			break;
 		}
 
@@ -1793,7 +1792,22 @@ static void effect_generate_part(
 	return;
 }
 
+/* port: effect_get_node_matrix, through effect_call */
+static void effect_node_matrix(
+	long effect_index,
+	short node_designator,
+	real_matrix4x3 *matrix)
+{
+	struct halo_sim_effect_call call;
+
+	effect_call_new(&call, _effect_call_node_matrix);
+	call.a = node_designator;
+	effect_call(effect_index, &call);
+	memcpy(matrix, call.out, sizeof(*matrix));
+}
+
 static void effect_generate_parts(
+	long effect_index,
 	struct effect_datum *effect)
 {
 	struct effect_definition *definition =
@@ -1842,20 +1856,20 @@ static void effect_generate_parts(
 
 			if (instance->node_designator != NONE)
 			{
-				real_matrix4x3 *node_matrix = effect_get_node_matrix(
-					effect,
-					instance->node_designator);
+				real_matrix4x3 node_matrix;
+
+				effect_node_matrix(effect_index, instance->node_designator, &node_matrix);
 
 				matrix4x3_transform_point(
-					node_matrix,
+					&node_matrix,
 					&instance->matrix.position,
 					&world_point);
 				matrix4x3_transform_normal(
-					node_matrix,
+					&node_matrix,
 					&instance->matrix.forward,
 					&world_forward);
 				matrix4x3_transform_normal(
-					node_matrix,
+					&node_matrix,
 					&instance->matrix.up,
 					&world_up);
 			}
@@ -1873,11 +1887,12 @@ static void effect_generate_parts(
 			}
 
 			if (effect_allowed_by_environment(
+				effect_index,
 				part->environment,
-				&effect->location,
 				&world_point))
 			{
 				effect_generate_part(
+					effect_index,
 					effect,
 					part,
 					instance,
@@ -1898,6 +1913,7 @@ static void effect_generate_parts(
 }
 
 static void effect_generate_particles(
+	long effect_index,
 	struct effect_datum *effect)
 {
 	struct effect_definition *definition =
@@ -1984,6 +2000,7 @@ static void effect_generate_particles(
 				real_point3d world_point;
 				real_vector3d world_direction;
 				real_vector3d world_velocity;
+				struct halo_sim_effect_call call;
 				real emission_radius = effect_real_random_range(
 					get_global_local_random_seed_address(),
 					effect,
@@ -2029,20 +2046,20 @@ static void effect_generate_particles(
 
 				if (instance->node_designator != NONE)
 				{
-					real_matrix4x3 *node_matrix = effect_get_node_matrix(
-						effect,
-						instance->node_designator);
+					real_matrix4x3 node_matrix;
+
+					effect_node_matrix(effect_index, instance->node_designator, &node_matrix);
 
 					matrix4x3_transform_point(
-						node_matrix,
+						&node_matrix,
 						&data.position,
 						&world_point);
 					matrix4x3_transform_normal(
-						node_matrix,
+						&node_matrix,
 						&data.direction,
 						&world_direction);
 					matrix4x3_transform_vector(
-						node_matrix,
+						&node_matrix,
 						&data.velocity,
 						&world_velocity);
 				}
@@ -2054,8 +2071,8 @@ static void effect_generate_particles(
 				}
 
 				if (effect_allowed_by_environment(
+					effect_index,
 					particles->environment,
-					&effect->location,
 					&world_point))
 				{
 					data.definition_index = particles->particle.index;
@@ -2075,10 +2092,12 @@ static void effect_generate_particles(
 					{
 						if (effect->impulse_field.translational_function)
 						{
-							effect->impulse_field.translational_function(
-								&data.initial_impulse,
-								&world_point,
-								effect->impulse_field.user_data);
+							effect_call_new(&call, _effect_call_impulse);
+							effect_call_vector(&call.f[0], &world_point.x);
+							effect_call(effect_index, &call);
+							data.initial_impulse.i = call.out[0];
+							data.initial_impulse.j = call.out[1];
+							data.initial_impulse.k = call.out[2];
 						}
 						else
 						{
@@ -2086,6 +2105,8 @@ static void effect_generate_particles(
 						}
 
 						data.object_index = NONE;
+						/* (the node is the game's leftover; the particle has no object) */
+						data.node_index = 0;
 						data.position = world_point;
 						data.direction = world_direction;
 						data.velocity.i = world_velocity.i + effect->velocity.i * 30.0f;
@@ -2163,7 +2184,24 @@ static void effect_generate_particles(
 					data.dont_draw_third_person =
 						particles->camera_mode == _effect_camera_mode_first_person_only;
 
-					particle_new(&data);
+					effect_call_new(&call, _effect_call_particle);
+					call.a = data.definition_index;
+					call.b = data.object_index;
+					call.c = (unsigned short)data.node_index |
+						(data.attached_to_local_player ? 1 << 16 : 0) |
+						(data.dont_draw_first_person ? 1 << 17 : 0) |
+						(data.dont_draw_third_person ? 1 << 18 : 0);
+					call.d = data.local_player_index;
+					effect_call_vector(&call.f[0], &data.position.x);
+					effect_call_vector(&call.f[3], &data.direction.i);
+					effect_call_vector(&call.f[6], &data.velocity.i);
+					effect_call_vector(&call.f[9], &data.initial_impulse.i);
+					call.f[12] = data.rotation;
+					call.f[13] = data.angular_velocity;
+					call.f[14] = data.radius;
+					call.f[15] = data.color.alpha;
+					effect_call_vector(&call.f[16], &data.color.red);
+					effect_call(effect_index, &call);
 				}
 			}
 
@@ -2179,36 +2217,55 @@ static void effect_generate_particles(
 	return;
 }
 
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 static void effect_update(
+	long effect_index,
+	real dt)
+{
+	int checking = FALSE;
+
+	if (halo_sim_effect_update(effect_index, dt, &checking))
+		return;
+	effect_update_game(effect_index, dt);
+	if (checking)
+		halo_sim_effect_update_check(effect_index);
+
+	return;
+}
+
+static void effect_update_game(
 	long effect_index,
 	real dt)
 {
 	struct effect_datum *effect = effect_get(effect_index);
 	struct effect_definition *definition =
 		effect_definition_get(effect->definition_index);
+	struct halo_sim_effect_call call;
 	boolean visible;
 	short iteration_index;
 
 	if (effect->object_index != NONE)
 	{
-		struct object_datum *object =
-			object_try_and_get(effect->object_index);
-		struct object_datum *parent;
-		long parent_object_index;
-
-		if (!object)
+		effect_call_new(&call, _effect_call_object);
+		call.a = effect->object_index;
+		effect_call(effect_index, &call);
+		if (call.result == 0)
 		{
-			effect_delete(effect_index);
+			effect_call_new(&call, _effect_call_delete);
+			effect_call(effect_index, &call);
 
 			return;
 		}
 
-		parent_object_index = object_get_ultimate_parent(effect->object_index);
-		parent = object_get(parent_object_index);
-		if (TEST_FLAG(parent->object.flags, _object_connected_to_map_bit))
+		if (call.result == 2)
 		{
-			effect->location = parent->object.location;
-			effect->velocity = parent->object.translational_velocity;
+			effect->location.leaf_index = call.out_location_leaf;
+			effect->location.cluster_index = call.out_location_cluster;
+			effect->location.bonus = call.out_location_bonus;
+			effect->velocity.i = call.out[0];
+			effect->velocity.j = call.out[1];
+			effect->velocity.k = call.out[2];
 		}
 		else
 		{
@@ -2217,38 +2274,21 @@ static void effect_update(
 
 		if (TEST_FLAG(effect->header.flags, _effect_loop_bit))
 		{
-			if (!object_get_function_value(
-				effect->object_index,
-				effect->scale_a_function_index,
-				&effect->scale_a))
+			effect_call_new(&call, _effect_call_function_value);
+			call.a = effect->object_index;
+			call.b = effect->scale_a_function_index;
+			call.f[0] = effect->scale_a;
+			effect_call(effect_index, &call);
+			effect->scale_a = call.out[0];
+			if (!call.result)
 			{
 				if (TEST_FLAG(
 					definition->flags,
 					_effect_definition_deleted_when_inactive_bit))
 				{
-					struct object_definition *object_definition =
-						object_definition_get(object->definition_index);
-					short attachment_index;
-					/* port: no more than the object holds (the map's count;
-					objects.c makes no more than that) */
-					short attachment_count = (short)MIN(
-						object_definition->object.attachments.count,
-						MAXIMUM_NUMBER_OF_ATTACHMENTS_PER_OBJECT);
-
-					for (attachment_index = 0;
-						attachment_index < attachment_count;
-						attachment_index++)
-					{
-						if (object->object.attachment_indices[attachment_index] ==
-							effect_index)
-						{
-							object->object.attachment_indices[attachment_index] =
-								NONE;
-							break;
-						}
-					}
-
-					effect_delete(effect_index);
+					effect_call_new(&call, _effect_call_detach_delete);
+					call.a = effect->object_index;
+					effect_call(effect_index, &call);
 
 					return;
 				}
@@ -2266,7 +2306,10 @@ static void effect_update(
 				{
 					if (TEST_FLAG(flags, _effect_delete_on_stop_bit))
 					{
-						effect_delete(effect_index);
+						effect_call_new(&call, _effect_call_delete);
+						effect_call(effect_index, &call);
+
+						return;
 					}
 					else
 					{
@@ -2277,15 +2320,22 @@ static void effect_update(
 				}
 			}
 
-			object_get_function_value(
-				effect->object_index,
-				effect->scale_b_function_index,
-				&effect->scale_b);
+			effect_call_new(&call, _effect_call_function_value);
+			call.a = effect->object_index;
+			call.b = effect->scale_b_function_index;
+			call.f[0] = effect->scale_b;
+			effect_call(effect_index, &call);
+			effect->scale_b = call.out[0];
 
 			if (effect->change_color_index != NONE)
 			{
-				effect->color =
-					object->object.outgoing_change_colors[effect->change_color_index];
+				effect_call_new(&call, _effect_call_change_color);
+				call.a = effect->object_index;
+				call.b = effect->change_color_index;
+				effect_call(effect_index, &call);
+				effect->color.red = call.out[0];
+				effect->color.green = call.out[1];
+				effect->color.blue = call.out[2];
 				match_assert_valid_real_rgb_color(
 					"c:\\halo\\SOURCE\\effects\\effects.c",
 					1227,
@@ -2297,11 +2347,12 @@ static void effect_update(
 	visible = FALSE;
 	if (effect->location.cluster_index != NONE)
 	{
-		visible = TEST_FLAG(
+		effect_call_new(&call, _effect_call_visible);
+		call.a = TEST_FLAG(
 			definition->flags,
-			_effect_definition_must_be_deterministic_bit)
-			? scenario_location_potentially_visible(&effect->location)
-			: scenario_location_potentially_visible_local(&effect->location);
+			_effect_definition_must_be_deterministic_bit) ? 1 : 0;
+		effect_call(effect_index, &call);
+		visible = call.result != 0;
 	}
 
 	if (!visible)
@@ -2316,7 +2367,8 @@ static void effect_update(
 			}
 			else
 			{
-				effect_delete(effect_index);
+				effect_call_new(&call, _effect_call_delete);
+				effect_call(effect_index, &call);
 
 				return;
 			}
@@ -2361,7 +2413,7 @@ static void effect_update(
 			short next_event_index;
 
 			if (!TEST_FLAG(flags, _effect_invisible_bit))
-				effect_generate_particles(effect);
+				effect_generate_particles(effect_index, effect);
 
 			if (!event_completed)
 				continue;
@@ -2393,9 +2445,14 @@ static void effect_update(
 				word end_flags = effect->header.flags;
 
 				if (TEST_FLAG(end_flags, _effect_loop_bit))
+				{
 					effect->header.flags = (word)(end_flags | FLAG(_effect_stopped_bit));
+				}
 				else
-					effect_delete(effect_index);
+				{
+					effect_call_new(&call, _effect_call_delete);
+					effect_call(effect_index, &call);
+				}
 
 				return;
 			}
@@ -2460,7 +2517,7 @@ static void effect_update(
 			}
 
 			if (!TEST_FLAG(effect->header.flags, _effect_invisible_bit))
-				effect_generate_parts(effect);
+				effect_generate_parts(effect_index, effect);
 		}
 	}
 
@@ -2593,10 +2650,11 @@ static void effect_random_angular_velocity(
 }
 
 static boolean effect_allowed_by_environment(
+	long effect_index,
 	short environment,
-	struct location const *location,
 	real_point3d const *world_point)
 {
+	struct halo_sim_effect_call call;
 	boolean allowed;
 
 	switch (environment)
@@ -2606,11 +2664,17 @@ static boolean effect_allowed_by_environment(
 			break;
 
 		case _effect_environment_air:
-			allowed = !scenario_location_underwater(location, world_point, NULL);
+			effect_call_new(&call, _effect_call_underwater);
+			effect_call_vector(&call.f[0], &world_point->x);
+			effect_call(effect_index, &call);
+			allowed = !call.result;
 			break;
 
 		case _effect_environment_water:
-			allowed = scenario_location_underwater(location, world_point, NULL);
+			effect_call_new(&call, _effect_call_underwater);
+			effect_call_vector(&call.f[0], &world_point->x);
+			effect_call(effect_index, &call);
+			allowed = call.result != 0;
 			break;
 
 		case _effect_environment_vacuum:
@@ -2851,4 +2915,439 @@ static void effect_set_event(
 	}
 
 	return;
+}
+
+/* ---------- port: effect_call */
+
+/* an effect update's call of the rest of the game, shared by the C's update
+and the Rust port's (halo_sim.c); in check mode each is recorded. TRUE if
+the effect is still there after. */
+long effect_call(
+	long effect_index,
+	struct halo_sim_effect_call *call)
+{
+	/* (the datum even if the effect was deleted during its update: the
+	update reads it on, as January's does) */
+	struct effect_datum *effect = (struct effect_datum *)((char *)effect_data->data +
+		(effect_index & 0xffff) * effect_data->size);
+	long still_there;
+
+	halo_sim_effect_event_begin(effect_index, call);
+	switch (call->kind)
+	{
+		case _effect_call_object:
+		{
+			struct object_datum *object = object_try_and_get(call->a);
+
+			if (!object)
+			{
+				call->result = 0;
+			}
+			else
+			{
+				struct object_datum *parent = object_get(object_get_ultimate_parent(call->a));
+
+				if (TEST_FLAG(parent->object.flags, _object_connected_to_map_bit))
+				{
+					call->result = 2;
+					call->out_location_leaf = parent->object.location.leaf_index;
+					call->out_location_cluster = parent->object.location.cluster_index;
+					call->out_location_bonus = parent->object.location.bonus;
+					call->out[0] = parent->object.translational_velocity.i;
+					call->out[1] = parent->object.translational_velocity.j;
+					call->out[2] = parent->object.translational_velocity.k;
+				}
+				else
+				{
+					call->result = 1;
+				}
+			}
+			break;
+		}
+
+		case _effect_call_delete:
+			effect_delete(effect_index);
+			break;
+
+		case _effect_call_detach_delete:
+		{
+			struct object_datum *object = object_get(call->a);
+			struct object_definition *object_definition =
+				object_definition_get(object->definition_index);
+			short attachment_index;
+			/* port: no more than the object holds (the map's count;
+			objects.c makes no more than that) */
+			short attachment_count = (short)MIN(
+				object_definition->object.attachments.count,
+				MAXIMUM_NUMBER_OF_ATTACHMENTS_PER_OBJECT);
+
+			for (attachment_index = 0;
+				attachment_index < attachment_count;
+				attachment_index++)
+			{
+				if (object->object.attachment_indices[attachment_index] ==
+					effect_index)
+				{
+					object->object.attachment_indices[attachment_index] =
+						NONE;
+					break;
+				}
+			}
+
+			effect_delete(effect_index);
+			break;
+		}
+
+		case _effect_call_function_value:
+		{
+			real value = call->f[0];
+
+			call->result = object_get_function_value(call->a, (short)call->b, &value);
+			call->out[0] = value;
+			break;
+		}
+
+		case _effect_call_change_color:
+		{
+			struct object_datum *object = object_get(call->a);
+			real_rgb_color const *color = &object->object.outgoing_change_colors[call->b];
+
+			call->out[0] = color->red;
+			call->out[1] = color->green;
+			call->out[2] = color->blue;
+			break;
+		}
+
+		case _effect_call_visible:
+			call->result = (call->a
+				? scenario_location_potentially_visible(&effect->location)
+				: scenario_location_potentially_visible_local(&effect->location)) ? 1 : 0;
+			break;
+
+		case _effect_call_underwater:
+		{
+			real_point3d point;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			call->result = scenario_location_underwater(&effect->location, &point, NULL) ? 1 : 0;
+			break;
+		}
+
+		case _effect_call_node_matrix:
+		{
+			real_matrix4x3 const *matrix = effect_get_node_matrix(effect, (short)call->a);
+
+			memcpy(call->out, matrix, sizeof(*matrix));
+			break;
+		}
+
+		case _effect_call_impulse:
+		{
+			real_point3d point;
+			real_vector3d impulse;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			effect->impulse_field.translational_function(
+				&impulse,
+				&point,
+				effect->impulse_field.user_data);
+			call->out[0] = impulse.i;
+			call->out[1] = impulse.j;
+			call->out[2] = impulse.k;
+			break;
+		}
+
+		case _effect_call_particle_system:
+		{
+			real_point3d point;
+			real_vector3d velocity;
+			real_argb_color tint;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			velocity.i = call->f[3];
+			velocity.j = call->f[4];
+			velocity.k = call->f[5];
+			tint.alpha = 1.0f;
+			tint.red = call->f[6];
+			tint.green = call->f[7];
+			tint.blue = call->f[8];
+			particle_system_new_unattached(call->a, &point, &velocity, &tint, call->f[9]);
+			break;
+		}
+
+		case _effect_call_sound:
+		{
+			real_point3d point;
+			real_vector3d forward;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			forward.i = call->f[3];
+			forward.j = call->f[4];
+			forward.k = call->f[5];
+			if (call->a != NONE)
+			{
+				object_impulse_sound_new(call->a, call->b, (short)call->c, &point, &forward, call->f[6]);
+			}
+			else
+			{
+				struct sound_location location;
+
+				location.position = point;
+				location.forward = forward;
+				location.translational_velocity = *global_zero_vector3d;
+				location.game_location = effect->location;
+
+				unattached_impulse_sound_new(call->b, &location, call->f[6]);
+			}
+			break;
+		}
+
+		case _effect_call_object_new:
+		{
+			struct object_placement_data data;
+
+			object_placement_data_new(&data, call->a, call->b);
+			data.position.x = call->f[0];
+			data.position.y = call->f[1];
+			data.position.z = call->f[2];
+			data.forward.i = call->f[3];
+			data.forward.j = call->f[4];
+			data.forward.k = call->f[5];
+			data.up.i = call->f[6];
+			data.up.j = call->f[7];
+			data.up.k = call->f[8];
+			data.translational_velocity.i = call->f[9];
+			data.translational_velocity.j = call->f[10];
+			data.translational_velocity.k = call->f[11];
+			data.angular_velocity.i = call->f[12];
+			data.angular_velocity.j = call->f[13];
+			data.angular_velocity.k = call->f[14];
+			object_new(&data);
+			break;
+		}
+
+		case _effect_call_decal:
+		{
+			real_point3d point;
+			real_vector3d velocity;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			velocity.i = call->f[3];
+			velocity.j = call->f[4];
+			velocity.k = call->f[5];
+			decal_new(call->a, &point, &velocity, call->f[6], FALSE, NONE, NULL);
+			break;
+		}
+
+		case _effect_call_damage:
+		{
+			struct damage_data damage;
+			struct object_datum *owner =
+				object_try_and_get(effect->owner_object_index);
+
+			damage_data_new(&damage, call->a);
+
+			if (owner)
+			{
+				damage.owner_player_index = owner->object.owner_player_index;
+				damage.owner_object_index = effect->owner_object_index;
+				damage.owner_team_index = owner->object.owner_team_index;
+			}
+
+			damage.scale = call->f[6];
+			damage.location = effect->location;
+			damage.origin.x = call->f[0];
+			damage.origin.y = call->f[1];
+			damage.origin.z = call->f[2];
+			damage.epicenter = damage.origin;
+			damage.direction.i = call->f[3];
+			damage.direction.j = call->f[4];
+			damage.direction.k = call->f[5];
+
+			area_of_effect_cause_damage(&damage, NONE);
+			break;
+		}
+
+		case _effect_call_light:
+		{
+			real_point3d point;
+			real_vector3d forward;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			forward.i = call->f[3];
+			forward.j = call->f[4];
+			forward.k = call->f[5];
+			light_new_unattached(call->a, call->b, (short)call->c, &point, &forward, call->f[6]);
+			break;
+		}
+
+		case _effect_call_particle:
+		{
+			struct new_particle_data data;
+
+			memset(&data, 0, sizeof(data));
+			data.definition_index = call->a;
+			data.object_index = call->b;
+			data.node_index = (short)(call->c & 0xffff);
+			data.attached_to_local_player = (call->c >> 16) & 1;
+			data.dont_draw_first_person = (call->c >> 17) & 1;
+			data.dont_draw_third_person = (call->c >> 18) & 1;
+			data.local_player_index = (short)call->d;
+			data.position.x = call->f[0];
+			data.position.y = call->f[1];
+			data.position.z = call->f[2];
+			data.direction.i = call->f[3];
+			data.direction.j = call->f[4];
+			data.direction.k = call->f[5];
+			data.velocity.i = call->f[6];
+			data.velocity.j = call->f[7];
+			data.velocity.k = call->f[8];
+			data.initial_impulse.i = call->f[9];
+			data.initial_impulse.j = call->f[10];
+			data.initial_impulse.k = call->f[11];
+			data.rotation = call->f[12];
+			data.angular_velocity = call->f[13];
+			data.radius = call->f[14];
+			data.color.alpha = call->f[15];
+			data.color.red = call->f[16];
+			data.color.green = call->f[17];
+			data.color.blue = call->f[18];
+			particle_new(&data);
+			break;
+		}
+	}
+	still_there = effect_try_and_get(effect_index) != NULL;
+	halo_sim_effect_event_end(effect_index, call, still_there);
+
+	return still_there;
+}
+
+/* ---------- port: the effect's state for halo_sim.c */
+
+int effect_halo_sim_state_load(
+	long effect_index,
+	struct halo_sim_effect_state *state)
+{
+	struct effect_datum *effect = effect_try_and_get(effect_index);
+
+	state->random_seed = *get_global_random_seed_address();
+	state->local_random_seed = *get_global_local_random_seed_address();
+	if (!effect)
+		return FALSE;
+	state->effect_index = (unsigned long)effect_index;
+	state->definition_index = (unsigned long)effect->definition_index;
+	state->flags = effect->header.flags;
+	state->scale_a_function_index = effect->scale_a_function_index;
+	state->scale_b_function_index = effect->scale_b_function_index;
+	state->change_color_index = effect->change_color_index;
+	state->location_leaf = effect->location.leaf_index;
+	state->location_cluster = effect->location.cluster_index;
+	state->location_bonus = effect->location.bonus;
+	state->color[0] = effect->color.red;
+	state->color[1] = effect->color.green;
+	state->color[2] = effect->color.blue;
+	state->velocity[0] = effect->velocity.i;
+	state->velocity[1] = effect->velocity.j;
+	state->velocity[2] = effect->velocity.k;
+	state->object_index = effect->object_index;
+	state->owner_object_index = effect->owner_object_index;
+	state->scale_a = effect->scale_a;
+	state->scale_b = effect->scale_b;
+	state->local_player_index = effect->local_player_index;
+	state->event_index = effect->event_index;
+	state->event_time = effect->event_time;
+	state->event_duration = effect->event_duration;
+	state->last_event_fraction = effect->last_event_fraction;
+	memcpy(state->particle_counts, effect->particle_counts, sizeof(state->particle_counts));
+	state->has_translational_impulse = effect->impulse_field.translational_function ? 1 : 0;
+
+	return TRUE;
+}
+
+void effect_halo_sim_state_store(
+	struct halo_sim_effect_state const *state)
+{
+	struct effect_datum *effect = effect_try_and_get((long)state->effect_index);
+
+	*get_global_random_seed_address() = state->random_seed;
+	*get_global_local_random_seed_address() = state->local_random_seed;
+	if (!effect)
+		return;
+	effect->header.flags = state->flags;
+	effect->location.leaf_index = state->location_leaf;
+	effect->location.cluster_index = state->location_cluster;
+	effect->location.bonus = state->location_bonus;
+	effect->color.red = state->color[0];
+	effect->color.green = state->color[1];
+	effect->color.blue = state->color[2];
+	effect->velocity.i = state->velocity[0];
+	effect->velocity.j = state->velocity[1];
+	effect->velocity.k = state->velocity[2];
+	effect->scale_a = state->scale_a;
+	effect->scale_b = state->scale_b;
+	effect->event_index = state->event_index;
+	effect->event_time = state->event_time;
+	effect->event_duration = state->event_duration;
+	effect->last_event_fraction = state->last_event_fraction;
+	memcpy(effect->particle_counts, state->particle_counts, sizeof(effect->particle_counts));
+}
+
+int effect_halo_sim_instances(
+	long effect_index,
+	long *first_instances,
+	struct halo_sim_effect_instance *instances,
+	unsigned long maximum_instance_count,
+	unsigned long *instance_count)
+{
+	struct effect_datum *effect = effect_try_and_get(effect_index);
+	struct effect_definition *definition;
+	short location_count;
+	short location_index;
+	unsigned long count = 0;
+
+	*instance_count = 0;
+	for (location_index = 0; location_index < MAXIMUM_EFFECT_LOCATIONS; location_index++)
+		first_instances[location_index] = NONE;
+	if (!effect)
+		return FALSE;
+	definition = effect_definition_get(effect->definition_index);
+	location_count = (short)MIN(definition->locations.count, (long)NUMBEROF(effect->location_datum_indices));
+	for (location_index = 0; location_index < location_count; location_index++)
+	{
+		long location_datum_index = effect->location_datum_indices[location_index];
+		long *link = &first_instances[location_index];
+
+		while (location_datum_index != NONE)
+		{
+			struct effect_location_datum *location = effect_location_get(location_datum_index);
+			struct halo_sim_effect_instance *instance;
+
+			if (count >= maximum_instance_count)
+				return FALSE;
+			instance = &instances[count];
+			instance->node_designator = location->node_designator;
+			instance->pad = 0;
+			instance->next = NONE;
+			memcpy(instance->matrix, &location->matrix, sizeof(instance->matrix));
+			*link = (long)count;
+			link = &instance->next;
+			count++;
+			location_datum_index = location->next_instance_location_index;
+		}
+	}
+	*instance_count = count;
+
+	return TRUE;
 }

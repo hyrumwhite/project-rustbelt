@@ -43,6 +43,7 @@ enum
 	_halo_sim_contrails,
 	_halo_sim_particle_systems,
 	_halo_sim_player_effects,
+	_halo_sim_game_tick,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -655,6 +656,36 @@ struct halo_sim_player_effect_args
 	real_matrix4x3 *matrix;
 };
 
+/* the tick's steps and questions (game.c's game_tick_call; crates/halo_map's
+game_tick::call) */
+enum
+{
+	_game_tick_call_begin = 1,
+	_game_tick_call_data_check,
+	_game_tick_call_cheats_enforce,
+	_game_tick_call_remove_quitting_players,
+	_game_tick_call_allegiance,
+	_game_tick_call_units,
+	_game_tick_call_distributed_client,
+	_game_tick_call_ai,
+	_game_tick_call_network_actors,
+	_game_tick_call_players_before,
+	_game_tick_call_double_speed,
+	_game_tick_call_effects,
+	_game_tick_call_antennas,
+	_game_tick_call_first_person,
+	_game_tick_call_game_engine,
+	_game_tick_call_editor,
+	_game_tick_call_coop_active,
+	_game_tick_call_scripts,
+	_game_tick_call_recorded_animations,
+	_game_tick_call_objects,
+	_game_tick_call_players_after,
+	_game_tick_call_hud,
+	_game_tick_call_player_effects,
+	_game_tick_call_end,
+};
+
 /* the object update loop's calls (objects.c's objects_update_call;
 crates/halo_map's objects_update::call) */
 enum
@@ -1149,5 +1180,14 @@ void halo_sim_player_effect_event_end(struct halo_sim_player_effect_call const *
 void player_effect_call(short local_player_index, struct halo_sim_player_effect_call *call);
 void player_effect_halo_sim_load(short local_player_index, struct halo_sim_player_effect_state *state);
 void player_effect_halo_sim_store(struct halo_sim_player_effect_state const *state);
+
+/* game.c's game_tick: TRUE when the Rust port ran the tick (its steps
+through game_tick_call); in check mode `checking` is set, game_tick_call
+notes each step (halo_sim_game_tick_note), and halo_sim_game_tick_check
+compares Rust's replay */
+int halo_sim_game_tick(int *checking);
+void halo_sim_game_tick_check(void);
+void halo_sim_game_tick_note(long kind, float f, long result);
+long game_tick_call(long kind, float f);
 
 #endif // __HALO_SIM_H

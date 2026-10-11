@@ -74,7 +74,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 33
+#define HALO_SIM_VERSION 34
 
 /* ---------- structures */
 
@@ -1736,6 +1736,27 @@ struct halo_sim_player_effect_callbacks
 	void (*call)(struct halo_sim_player_effect_state *state, struct halo_sim_player_effect_call *call);
 };
 
+/* crates/halo_sim's GameTickEventC, GameTickC and GameTickCallbacks */
+struct halo_sim_game_tick_event
+{
+	long kind;
+	float f;
+	long result;
+};
+
+struct halo_sim_game_tick_call
+{
+	struct halo_sim_game_tick_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+};
+
+struct halo_sim_game_tick_callbacks
+{
+	long (*call)(long kind, float f);
+};
+
 struct halo_sim_effect_callbacks
 {
 	long (*call)(struct halo_sim_effect_state *state, struct halo_sim_effect_call *call);
@@ -1769,6 +1790,7 @@ struct halo_sim_host
 	struct halo_sim_contrail_callbacks contrails;
 	struct halo_sim_particle_system_callbacks particle_systems;
 	struct halo_sim_player_effect_callbacks player_effects;
+	struct halo_sim_game_tick_callbacks game_tick;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -1835,6 +1857,7 @@ typedef long (*halo_sim_contrail_new_function)(struct halo_sim_contrail_new_call
 typedef long (*halo_sim_particle_system_function)(struct halo_sim_particle_system_update_call *call);
 typedef long (*halo_sim_particle_system_new_function)(struct halo_sim_particle_system_new_call *call);
 typedef long (*halo_sim_player_effect_function)(struct halo_sim_player_effect_call_c *call);
+typedef long (*halo_sim_game_tick_function)(struct halo_sim_game_tick_call *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -1920,6 +1943,8 @@ static struct
 	halo_sim_particle_system_new_function particle_system_new_check;
 	halo_sim_player_effect_function player_effect;
 	halo_sim_player_effect_function player_effect_check;
+	halo_sim_game_tick_function game_tick;
+	halo_sim_game_tick_function game_tick_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1965,6 +1990,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"contrails",
 	"particle_systems",
 	"player_effects",
+	"game_tick",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2278,6 +2304,19 @@ static struct
 	unsigned long skipped;
 	unsigned long calls;
 } halo_sim_player_effect_checks;
+
+/* the tick checks: the game's steps, and the comparisons */
+#define MAXIMUM_HALO_SIM_GAME_TICK_EVENTS 64
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	struct halo_sim_game_tick_event events[MAXIMUM_HALO_SIM_GAME_TICK_EVENTS];
+	unsigned long event_count;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+} halo_sim_game_tick_checks;
 
 /* the object update loop checks: the game's calls and what they read, and
 the comparisons (and garbage's and scenery's) */
@@ -4255,6 +4294,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	{
 		halo_sim_player_effect_call_callback,
 	},
+	{
+		game_tick_call,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -4354,6 +4396,8 @@ static void halo_sim_initialize(void)
 	halo_sim.particle_system_new_check = (halo_sim_particle_system_new_function)halo_sim_symbol(library, "halo_sim_particle_system_new_check");
 	halo_sim.player_effect = (halo_sim_player_effect_function)halo_sim_symbol(library, "halo_sim_player_effect");
 	halo_sim.player_effect_check = (halo_sim_player_effect_function)halo_sim_symbol(library, "halo_sim_player_effect_check");
+	halo_sim.game_tick = (halo_sim_game_tick_function)halo_sim_symbol(library, "halo_sim_game_tick");
+	halo_sim.game_tick_check = (halo_sim_game_tick_function)halo_sim_symbol(library, "halo_sim_game_tick_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -4380,7 +4424,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.particle_system_update || !halo_sim.particle_system_update_check ||
 		!halo_sim.contrail_new || !halo_sim.contrail_new_check ||
 		!halo_sim.particle_system_new || !halo_sim.particle_system_new_check ||
-		!halo_sim.player_effect || !halo_sim.player_effect_check)
+		!halo_sim.player_effect || !halo_sim.player_effect_check ||
+		!halo_sim.game_tick || !halo_sim.game_tick_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -8882,6 +8927,83 @@ void halo_sim_player_effect_check(struct halo_sim_player_effect_args const *args
 				halo_sim_player_effect_checks.compared[6], halo_sim_player_effect_checks.calls,
 				halo_sim_player_effect_checks.skipped);
 		}
+	}
+}
+
+/* ---------- the tick */
+
+int halo_sim_game_tick(int *checking)
+{
+	short mode = halo_sim_mode(_halo_sim_game_tick);
+	struct halo_sim_game_tick_call call;
+
+	*checking = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_game_tick_checks.event_count = 0;
+		halo_sim_game_tick_checks.overflow = FALSE;
+		halo_sim_game_tick_checks.recording = TRUE;
+		*checking = TRUE;
+		return FALSE;
+	}
+	memset(&call, 0, sizeof(call));
+
+	return halo_sim.game_tick(&call) == 0;
+}
+
+void halo_sim_game_tick_note(long kind, float f, long result)
+{
+	struct halo_sim_game_tick_event *event;
+
+	if (!halo_sim_game_tick_checks.recording)
+		return;
+	if (halo_sim_game_tick_checks.event_count >= MAXIMUM_HALO_SIM_GAME_TICK_EVENTS)
+	{
+		halo_sim_game_tick_checks.overflow = TRUE;
+		return;
+	}
+	event = &halo_sim_game_tick_checks.events[halo_sim_game_tick_checks.event_count++];
+	event->kind = kind;
+	event->f = f;
+	event->result = result;
+}
+
+void halo_sim_game_tick_check(void)
+{
+	struct halo_sim_game_tick_call call;
+
+	if (!halo_sim_game_tick_checks.recording)
+		return;
+	halo_sim_game_tick_checks.recording = FALSE;
+	if (halo_sim_game_tick_checks.overflow)
+	{
+		halo_sim_game_tick_checks.skipped++;
+		return;
+	}
+	memset(&call, 0, sizeof(call));
+	call.events = halo_sim_game_tick_checks.events;
+	call.event_count = halo_sim_game_tick_checks.event_count;
+	if (halo_sim.game_tick_check(&call) != 0)
+	{
+		halo_sim_game_tick_checks.skipped++;
+		return;
+	}
+	halo_sim_game_tick_checks.compared++;
+	if (call.difference_event != NONE)
+	{
+		halo_sim_game_tick_checks.differed++;
+		if (halo_sim_game_tick_checks.differed <= 8)
+			platform_log("halo_sim: tick differs: step %ld of %lu reason %ld", call.difference_event,
+				halo_sim_game_tick_checks.event_count, call.difference_reason);
+	}
+	{
+		unsigned long compared = halo_sim_game_tick_checks.compared;
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+			platform_log("halo_sim: tick: %lu of %lu agree with the game (%lu left out)",
+				compared - halo_sim_game_tick_checks.differed, compared, halo_sim_game_tick_checks.skipped);
 	}
 }
 

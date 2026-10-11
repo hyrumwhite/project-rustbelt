@@ -120,6 +120,7 @@ struct game_options;
 
 #include "cseries/cseries.h"
 #include "game/game.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 #include "ai/ai.h"
 #include "bink/bink_playback.h"
 #include "bungie_net/network/transport.h"
@@ -304,76 +305,204 @@ void game_initialize(
 	return;
 }
 
-void game_tick(
+/* port: a step of the tick, shared by the game's tick and the Rust port's
+(halo_sim.c): a question's answer */
+long game_tick_call(
+	long kind,
+	real f)
+{
+	long result = 0;
+
+	switch (kind)
+	{
+		case _game_tick_call_begin:
+			profile_tick_start();
+			collision_log_begin_period(0);
+			real_math_reset_precision();
+			profile_enter(game_update_section);
+
+			match_assert(
+				"c:\\halo\\SOURCE\\game\\game.c",
+				0x28D,
+				game_globals->active);
+			break;
+
+		case _game_tick_call_data_check:
+			/* port: a data array gone out of order reported, and the lights
+			made again if it was theirs (game_state.c, object_lights.c), at the
+			tick's start and end: a loaded game state's first tick, its scripts
+			placing actors, made the first light from it (Sentry NATIVE-7) */
+			game_state_check_data_arrays();
+			lights_port_recover();
+			break;
+
+		case _game_tick_call_cheats_enforce:
+			/* port: a client of another's game, the host's rules (its own
+			cheats and game speed, set before it joined too, put back) */
+			cheats_network_client_enforce();
+			break;
+
+		case _game_tick_call_remove_quitting_players:
+			remove_quitting_players_from_game();
+			break;
+
+		case _game_tick_call_allegiance:
+			game_allegiance_update();
+			break;
+
+		case _game_tick_call_units:
+			units_update();
+			break;
+
+		case _game_tick_call_distributed_client:
+			result = network_game_distributed_client() ? 1 : 0;
+			break;
+
+		case _game_tick_call_ai:
+			ai_update();
+			break;
+
+		case _game_tick_call_network_actors:
+			/* (the host's actors drive the host's units, which a client of the
+			distributed netcode has from the host: its own would fight the
+			host's positions, and could place objects of their own) */
+			network_actors_drive();
+			break;
+
+		case _game_tick_call_players_before:
+			players_update_before_game();
+			break;
+
+		case _game_tick_call_double_speed:
+			result = game_globals->players_are_double_speed ? 1 : 0;
+			break;
+
+		case _game_tick_call_effects:
+			effects_update(f);
+			break;
+
+		case _game_tick_call_antennas:
+			/* An antenna's chain is a simulation of the Xbox's own step, an
+			update a tick: stepped a frame at a time, its springs, its carry and
+			its points' physics act against the frames' own movement of it, and
+			a vehicle at speed swings it far wider than a tick's step does. The
+			frames between the ticks are drawn from what each tick leaves
+			(antenna.c). */
+			antennas_update(f);
+			break;
+
+		case _game_tick_call_first_person:
+			lock_global_random_seed();
+			rumble_update();
+			first_person_weapons_update();
+			unlock_global_random_seed();
+			break;
+
+		case _game_tick_call_game_engine:
+			game_engine_update();
+			break;
+
+		case _game_tick_call_editor:
+			editor_update();
+			break;
+
+		case _game_tick_call_coop_active:
+			result = network_coop_active() ? 1 : 0;
+			break;
+
+		case _game_tick_call_scripts:
+			/* port: in network co-op only the host runs the scripts. A client
+			running them would place the map's actors and objects a second time
+			and make decisions that belong to the host. */
+			hs_update();
+			break;
+
+		case _game_tick_call_recorded_animations:
+			recorded_animations_update();
+			break;
+
+		case _game_tick_call_objects:
+			objects_update();
+			break;
+
+		case _game_tick_call_players_after:
+			players_update_after_game();
+			break;
+
+		case _game_tick_call_hud:
+			hud_update();
+			break;
+
+		case _game_tick_call_player_effects:
+			player_effect_update();
+			break;
+
+		case _game_tick_call_end:
+			profile_exit(game_update_section);
+			collision_log_end_period();
+			profile_tick_end();
+			break;
+	}
+	halo_sim_game_tick_note(kind, f, result);
+
+	return result;
+}
+
+/* the game's tick, each step through game_tick_call */
+static void game_tick_game(
 	void)
 {
 	real seconds_per_tick;
 
-	profile_tick_start();
-	collision_log_begin_period(0);
-	real_math_reset_precision();
-	profile_enter(game_update_section);
-
-	match_assert(
-		"c:\\halo\\SOURCE\\game\\game.c",
-		0x28D,
-		game_globals->active);
-
-	/* port: a data array gone out of order reported, and the lights made
-	again if it was theirs (game_state.c, object_lights.c), before anything
-	of the tick: a loaded game state's first tick, its scripts placing
-	actors, made the first light from it (Sentry NATIVE-7) */
-	game_state_check_data_arrays();
-	lights_port_recover();
-
-	/* port: a client of another's game, the host's rules (its own cheats and
-	game speed, set before it joined too, put back) */
-	cheats_network_client_enforce();
-	remove_quitting_players_from_game();
-	game_allegiance_update();
-	units_update();
-	/* (the host's actors drive the host's units, which a client of the
-	distributed netcode has from the host: its own would fight the host's
-	positions, and could place objects of their own) */
-	if (!network_game_distributed_client())
-		ai_update();
+	game_tick_call(_game_tick_call_begin, 0.0f);
+	game_tick_call(_game_tick_call_data_check, 0.0f);
+	game_tick_call(_game_tick_call_cheats_enforce, 0.0f);
+	game_tick_call(_game_tick_call_remove_quitting_players, 0.0f);
+	game_tick_call(_game_tick_call_allegiance, 0.0f);
+	game_tick_call(_game_tick_call_units, 0.0f);
+	if (!game_tick_call(_game_tick_call_distributed_client, 0.0f))
+		game_tick_call(_game_tick_call_ai, 0.0f);
 	else
-		network_actors_drive();
-	players_update_before_game();
+		game_tick_call(_game_tick_call_network_actors, 0.0f);
+	game_tick_call(_game_tick_call_players_before, 0.0f);
 
-	seconds_per_tick = game_globals->players_are_double_speed
+	seconds_per_tick = game_tick_call(_game_tick_call_double_speed, 0.0f)
 		? 1.0f / (2 * TICKS_PER_SECOND)
 		: 1.0f / TICKS_PER_SECOND;
-	effects_update(seconds_per_tick);
-	/* An antenna's chain is a simulation of the Xbox's own step, an update a
-	tick: stepped a frame at a time, its springs, its carry and its points'
-	physics act against the frames' own movement of it, and a vehicle at
-	speed swings it far wider than a tick's step does. The frames between the
-	ticks are drawn from what each tick leaves (antenna.c). */
-	antennas_update(seconds_per_tick);
-	lock_global_random_seed();
-	rumble_update();
-	first_person_weapons_update();
-	unlock_global_random_seed();
-	game_engine_update();
-	editor_update();
-	/* port: in network co-op only the host runs the scripts. A client running
-	them would place the map's actors and objects a second time and make
-	decisions that belong to the host. */
-	if (!(network_game_distributed_client() && network_coop_active()))
-		hs_update();
-	recorded_animations_update();
-	objects_update();
-	players_update_after_game();
-	hud_update();
-	player_effect_update();
+	game_tick_call(_game_tick_call_effects, seconds_per_tick);
+	game_tick_call(_game_tick_call_antennas, seconds_per_tick);
+	game_tick_call(_game_tick_call_first_person, 0.0f);
+	game_tick_call(_game_tick_call_game_engine, 0.0f);
+	game_tick_call(_game_tick_call_editor, 0.0f);
+	if (!(game_tick_call(_game_tick_call_distributed_client, 0.0f) &&
+		game_tick_call(_game_tick_call_coop_active, 0.0f)))
+	{
+		game_tick_call(_game_tick_call_scripts, 0.0f);
+	}
+	game_tick_call(_game_tick_call_recorded_animations, 0.0f);
+	game_tick_call(_game_tick_call_objects, 0.0f);
+	game_tick_call(_game_tick_call_players_after, 0.0f);
+	game_tick_call(_game_tick_call_hud, 0.0f);
+	game_tick_call(_game_tick_call_player_effects, 0.0f);
 	/* port: and at its end, before the frame draws the lights */
-	game_state_check_data_arrays();
-	lights_port_recover();
+	game_tick_call(_game_tick_call_data_check, 0.0f);
+	game_tick_call(_game_tick_call_end, 0.0f);
 
-	profile_exit(game_update_section);
-	collision_log_end_period();
-	profile_tick_end();
+	return;
+}
+
+/* port: the Rust port's order in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
+void game_tick(
+	void)
+{
+	int checking = FALSE;
+
+	if (halo_sim_game_tick(&checking))
+		return;
+	game_tick_game();
+	if (checking)
+		halo_sim_game_tick_check();
 
 	return;
 }

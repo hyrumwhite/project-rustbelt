@@ -15,8 +15,8 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use halo_map::particle_systems::{
-    ParticleSystemCall, ParticleSystemDefinition, ParticleSystemHost, ParticleSystemInputs, ParticleSystemState,
-    SystemParticle, particle_system_update, particles_in_order,
+    NewSystem, ParticleSystemCall, ParticleSystemDefinition, ParticleSystemHost, ParticleSystemInputs,
+    ParticleSystemState, SystemParticle, particle_system_new, particle_system_update, particles_in_order,
 };
 
 use crate::TAGS;
@@ -214,4 +214,148 @@ pub unsafe extern "C" fn halo_sim_particle_system_update_check(call: *mut Partic
     }
     // SAFETY: the caller's call
     run(unsafe { &mut *call }, true)
+}
+
+/// What `particle_system_new_unattached` (`attached` 0) or `_attached` is
+/// given, and the system and particles it leaves.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ParticleSystemNewC {
+    pub attached: u32,
+    pub definition_index: i32,
+    pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    /// alpha, red, green, blue.
+    pub color: [f32; 4],
+    pub scale: f32,
+    pub object_index: i32,
+    pub attachment_index: i32,
+    /// The seed in (its index NONE); the new system out.
+    pub state: ParticleSystemState,
+    pub directions: *const [f32; 3],
+    pub direction_count: u32,
+    /// Its particles out, in the order the game walks them.
+    pub particles: *mut SystemParticle,
+    pub particle_count: u32,
+    pub particle_capacity: u32,
+    /// In check mode: the game's calls, and the first that differs.
+    pub events: *const ParticleSystemEventC,
+    pub event_count: u32,
+    pub difference_event: i32,
+    pub difference_reason: i32,
+    /// Whether the new system is still there after its first update.
+    pub still_there: u32,
+    /// The new system (NONE for none).
+    pub result: i32,
+}
+
+/// A host that notes a deletion of the system (its first update can delete
+/// it).
+struct Noting<'a, H: ParticleSystemHost> {
+    host: &'a H,
+    deleted: Cell<bool>,
+}
+
+impl<H: ParticleSystemHost> ParticleSystemHost for Noting<'_, H> {
+    fn call(&self, state: &mut ParticleSystemState, particles: &[SystemParticle], call: &mut ParticleSystemCall) {
+        if call.kind == halo_map::particle_systems::call::DELETE {
+            self.deleted.set(true);
+        }
+        self.host.call(state, particles, call);
+    }
+}
+
+fn run_new(call: &mut ParticleSystemNewC, check: bool) -> i32 {
+    let Some(host) = crate::world::host() else { return -1 };
+    if call.particles.is_null() {
+        return -1;
+    }
+    let definition = {
+        let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tags) = tags.as_mut() else { return -1 };
+        tags.particle_system_definition(call.definition_index as u32)
+    };
+    let Some(definition) = definition else { return -1 };
+    // SAFETY: the game's direction table, direction_count of them
+    let directions = if call.directions.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(call.directions, call.direction_count as usize) }
+    };
+    let inputs = ParticleSystemInputs { dt: 0.0, directions };
+    let new = if call.attached != 0 {
+        NewSystem::Attached { object_index: call.object_index, attachment_index: call.attachment_index as i16 }
+    } else {
+        NewSystem::Unattached { position: call.position, velocity: call.velocity, color: call.color, scale: call.scale }
+    };
+    let mut state = call.state;
+    let mut particles = Vec::new();
+    call.difference_event = -1;
+    call.difference_reason = 0;
+    let definition_index = call.definition_index;
+    let deleted = if check {
+        // SAFETY: the game's recording, as described
+        let events = if call.events.is_null() || call.event_count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(call.events, call.event_count as usize) }
+        };
+        let checker = CheckHost { events, next: Cell::new(0), difference: Cell::new(None) };
+        let noting = Noting { host: &checker, deleted: Cell::new(false) };
+        call.result =
+            particle_system_new(&definition, definition_index, &new, &inputs, &noting, &mut state, &mut particles);
+        if checker.difference.get().is_none() && checker.next.get() < events.len() {
+            checker.differ(checker.next.get(), 5);
+        }
+        (call.difference_event, call.difference_reason) = checker.difference.get().map_or((-1, 0), |(e, r)| (e as i32, r));
+        noting.deleted.get()
+    } else {
+        let live = LiveHost { callbacks: host.particle_systems };
+        let noting = Noting { host: &live, deleted: Cell::new(false) };
+        call.result =
+            particle_system_new(&definition, definition_index, &new, &inputs, &noting, &mut state, &mut particles);
+        noting.deleted.get()
+    };
+    call.still_there = (call.result != -1 && !deleted) as u32;
+    let ordered = if call.still_there != 0 {
+        particles_in_order(&state, definition.types.len(), &particles)
+    } else {
+        Vec::new()
+    };
+    let count = ordered.len().min(call.particle_capacity as usize);
+    // SAFETY: the buffer holds particle_capacity
+    unsafe { std::ptr::copy_nonoverlapping(ordered.as_ptr(), call.particles, count) };
+    call.particle_count = count as u32;
+    call.state = state;
+    0
+}
+
+/// `particle_system_new_*` on the running game, in place of the game's.
+/// Returns 0 (`result` the new system; it, its particles and the seed in
+/// `call`), or -1 if it can't run (the game then runs its own; nothing was
+/// done).
+///
+/// # Safety
+/// `call` must be valid, its particle buffer holding `particle_capacity`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_particle_system_new(call: *mut ParticleSystemNewC) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_new(unsafe { &mut *call }, false)
+}
+
+/// The check of a system the game made: Rust's replay of it. Returns 0, or
+/// -1.
+///
+/// # Safety
+/// As [`halo_sim_particle_system_new`]; the events hold their count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_particle_system_new_check(call: *mut ParticleSystemNewC) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_new(unsafe { &mut *call }, true)
 }

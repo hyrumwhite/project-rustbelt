@@ -72,6 +72,11 @@ pub mod call {
     pub const PHYSICS: i32 = 8;
     /// `contrail_delete` (its points are none by then).
     pub const DELETE: i32 = 9;
+    /// Making a contrail on the object `a`'s attachment `b`: its datum, the
+    /// result its index (NONE for none), `out_location_leaf` the
+    /// attachment's density function (`primary_scale_function_reference`
+    /// less one).
+    pub const NEW: i32 = 10;
 }
 
 /// halo_sim.h's `struct halo_sim_contrail_call`.
@@ -677,4 +682,58 @@ pub fn points_in_order(state: &ContrailState, points: &[ContrailPoint]) -> Vec<C
         }
     }
     ordered
+}
+
+/// `contrail_new`: the new contrail on the object's attachment (NONE for
+/// none), from `state` (the seed; its index NONE), where it and its points
+/// are left.
+#[allow(clippy::too_many_arguments)]
+pub fn contrail_new(
+    definition: &ContrailDefinition,
+    definition_index: i32,
+    object_index: i32,
+    attachment_index: i16,
+    inputs: &ContrailInputs,
+    host: &impl ContrailHost,
+    state: &mut ContrailState,
+    points: &mut Vec<ContrailPoint>,
+) -> i32 {
+    if definition_index == NONE {
+        return NONE;
+    }
+    let update = Update { definition, inputs, host };
+    let mut call = ContrailCall::new(call::NEW);
+    call.a = object_index;
+    call.b = attachment_index as i32;
+    update.call(state, &mut call);
+    let contrail_index = call.result;
+    if contrail_index == NONE {
+        return NONE;
+    }
+    // (the datum is new: zeros)
+    let seed = state.local_random_seed;
+    *state = ContrailState { contrail_index: contrail_index as u32, local_random_seed: seed, ..Default::default() };
+    state.flags = 0;
+    state.definition_index = definition_index as u32;
+    state.object_index = object_index;
+    state.attachment_index = attachment_index;
+    state.density_function_index = call.out_location_leaf as i16;
+    state.sequence_index = NONE as i16;
+    update.next_frame(state);
+    state.texture_offset_u = 0.0;
+    state.texture_offset_v = 0.0;
+    state.point_counts = [0; MAXIMUM_CONTRAIL_INSTANCES];
+    state.first_points = [NONE; MAXIMUM_CONTRAIL_INSTANCES];
+
+    let mut call = ContrailCall::new(call::FUNCTION_VALUE);
+    call.a = state.object_index;
+    call.b = state.density_function_index as i32;
+    call.f[0] = state.density;
+    update.call(state, &mut call);
+    state.density = call.out[0];
+    if call.result != 0 {
+        state.flags |= CONTRAIL_ACTIVE;
+        update.add_points(state, points, 1, true);
+    }
+    contrail_index
 }

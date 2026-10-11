@@ -92,6 +92,20 @@ pub mod call {
     pub const PARTICLE_PHYSICS: i32 = 8;
     /// `particle_system_delete` (the system written to the game first).
     pub const DELETE: i32 = 9;
+    /// Making a system: its datum, the result its index (NONE for none).
+    pub const NEW: i32 = 10;
+    /// Deleting a new system's datum alone (`datum_delete`).
+    pub const DATUM_DELETE: i32 = 11;
+    /// `light_particle` at `f`: the light in `out`.
+    pub const LIGHT: i32 = 12;
+    /// The object `a`'s attachment `b`: the result its scale function
+    /// (`primary_scale_function_reference` less one), `out[0..4]` its colour
+    /// (alpha first: the object's change colour it names, or white),
+    /// `out[4..7]` the object's velocity.
+    pub const ATTACHMENT: i32 = 13;
+    /// `object_get_function_value(a, b)` from `f[0]`: the result whether it
+    /// has one, `out[0]` the value.
+    pub const FUNCTION_VALUE: i32 = 14;
 }
 
 /// halo_sim.h's `struct halo_sim_particle_system_call`.
@@ -169,6 +183,7 @@ pub struct ParticleSystemState {
     pub velocity: [f32; 3],
     /// alpha, red, green, blue.
     pub color: [f32; 4],
+    pub lighting: [f32; 3],
     /// `physics_state.explosion.grounded`.
     pub grounded: u8,
     pub pad: [u8; 3],
@@ -205,7 +220,7 @@ pub struct SystemParticle {
 }
 
 const _: () = assert!(std::mem::size_of::<ParticleType>() == 64);
-const _: () = assert!(std::mem::size_of::<ParticleSystemState>() == 336);
+const _: () = assert!(std::mem::size_of::<ParticleSystemState>() == 348);
 const _: () = assert!(std::mem::size_of::<SystemParticle>() == 132);
 const _: () = assert!(std::mem::size_of::<ParticleSystemCall>() == 104);
 
@@ -1043,4 +1058,136 @@ pub fn particles_in_order(state: &ParticleSystemState, type_count: usize, partic
         }
     }
     ordered
+}
+
+/// What `particle_system_new_unattached` or `_attached` is given.
+pub enum NewSystem {
+    Unattached { position: [f32; 3], velocity: [f32; 3], color: [f32; 4], scale: f32 },
+    Attached { object_index: i32, attachment_index: i16 },
+}
+
+impl<H: ParticleSystemHost> Update<'_, H> {
+    /// `particle_system_initialize`: false if a type has no states.
+    fn initialize(&self, state: &mut ParticleSystemState, particles: &mut Vec<SystemParticle>) -> bool {
+        let mut call = ParticleSystemCall::new(call::LOCATION_FROM_POINT);
+        call.set_location(state.location_leaf, state.location_cluster, state.location_bonus);
+        call.f[..3].copy_from_slice(&state.position);
+        self.call(state, particles, &mut call);
+        (state.location_leaf, state.location_cluster, state.location_bonus) =
+            (call.out_location_leaf, call.out_location_cluster, call.out_location_bonus);
+        state.flags |= SYSTEM_INITIALIZING;
+
+        let mut success = true;
+        for (type_index, type_definition) in self.definition.types.iter().enumerate().take(MAXIMUM_TYPES) {
+            if let Some(first) = type_definition.type_states.first() {
+                let ty = &mut state.types[type_index];
+                ty.state_index = 0;
+                ty.transition_state_index = NONE as i16;
+                ty.states_moving_forward = 1;
+                ty.particle_count = 0;
+                ty.first_particle_index = NONE;
+                let duration =
+                    real_local_random_range(&mut state.local_random_seed, first.duration_lower_bound, first.duration_upper_bound);
+                let ty = &mut state.types[type_index];
+                ty.time_left_in_state = duration;
+                ty.state_length = duration;
+            } else {
+                success = false;
+            }
+        }
+        if success {
+            let inputs = ParticleSystemInputs { dt: 0.001, directions: self.inputs.directions };
+            Update { definition: self.definition, inputs: &inputs, host: self.host }.update(state, particles);
+        }
+        success
+    }
+
+    /// `particle_system_new_unattached` and `_attached`.
+    fn new_system(
+        &self,
+        definition_index: i32,
+        new: &NewSystem,
+        state: &mut ParticleSystemState,
+        particles: &mut Vec<SystemParticle>,
+    ) -> i32 {
+        let mut call = ParticleSystemCall::new(call::NEW);
+        self.call(state, particles, &mut call);
+        let system_index = call.result;
+        if system_index == NONE {
+            return NONE;
+        }
+        // (the datum is new: zeros)
+        let seed = state.local_random_seed;
+        *state = ParticleSystemState { system_index: system_index as u32, local_random_seed: seed, ..Default::default() };
+        state.definition_index = definition_index as u32;
+        match *new {
+            NewSystem::Unattached { position, velocity, color, scale } => {
+                state.object_index = NONE;
+                state.position = position;
+                state.velocity = velocity;
+                state.color = color;
+                state.scale = scale;
+                state.flags |= SYSTEM_ACTIVE;
+                let mut call = ParticleSystemCall::new(call::LIGHT);
+                call.f[..3].copy_from_slice(&state.position);
+                self.call(state, particles, &mut call);
+                state.lighting = [call.out[0], call.out[1], call.out[2]];
+            }
+            NewSystem::Attached { object_index, attachment_index } => {
+                state.object_index = object_index;
+                state.attachment_index = attachment_index;
+                let mut call = ParticleSystemCall::new(call::ATTACHMENT);
+                call.a = object_index;
+                call.b = attachment_index as i32;
+                self.call(state, particles, &mut call);
+                state.function_index = call.result as i16;
+                state.color = [call.out[0], call.out[1], call.out[2], call.out[3]];
+                let velocity = [call.out[4], call.out[5], call.out[6]];
+                let mut call = ParticleSystemCall::new(call::MARKERS);
+                call.a = object_index;
+                call.b = attachment_index as i32;
+                call.c = 0;
+                self.call(state, particles, &mut call);
+                // (no marker: the C's was the stack's leftover)
+                state.position = if call.result > 0 { [call.out[0], call.out[1], call.out[2]] } else { [0.0; 3] };
+                for c in 0..3 {
+                    state.velocity[c] = velocity[c] * TICKS_PER_SECOND;
+                }
+                state.lighting = [1.0, 1.0, 1.0];
+                let mut call = ParticleSystemCall::new(call::FUNCTION_VALUE);
+                call.a = object_index;
+                call.b = state.function_index as i32;
+                call.f[0] = state.scale;
+                self.call(state, particles, &mut call);
+                state.scale = call.out[0];
+                if call.result != 0 {
+                    state.flags |= SYSTEM_ACTIVE;
+                } else {
+                    state.flags &= !SYSTEM_ACTIVE;
+                }
+            }
+        }
+        if !self.initialize(state, particles) {
+            let mut call = ParticleSystemCall::new(call::DATUM_DELETE);
+            call.a = system_index;
+            self.call(state, particles, &mut call);
+            return NONE;
+        }
+        system_index
+    }
+}
+
+/// `particle_system_new_unattached` or `_attached`: the new system (NONE
+/// for none), from `state` (the seed; its index NONE), where it and its
+/// particles are left.
+pub fn particle_system_new(
+    definition: &ParticleSystemDefinition,
+    definition_index: i32,
+    new: &NewSystem,
+    inputs: &ParticleSystemInputs,
+    host: &impl ParticleSystemHost,
+    state: &mut ParticleSystemState,
+    particles: &mut Vec<SystemParticle>,
+) -> i32 {
+    Update { definition, inputs, host }.new_system(definition_index, new, state, particles)
 }

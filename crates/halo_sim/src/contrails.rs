@@ -14,8 +14,8 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use halo_map::contrails::{
-    ContrailCall, ContrailDefinition, ContrailHost, ContrailInputs, ContrailPoint, ContrailState, contrail_update,
-    points_in_order,
+    ContrailCall, ContrailDefinition, ContrailHost, ContrailInputs, ContrailPoint, ContrailState, contrail_new,
+    contrail_update, points_in_order,
 };
 
 use crate::TAGS;
@@ -209,4 +209,125 @@ pub unsafe extern "C" fn halo_sim_contrail_update_check(call: *mut ContrailUpdat
     }
     // SAFETY: the caller's call
     run(unsafe { &mut *call }, true)
+}
+
+/// What `contrail_new` is given, and the contrail and points it leaves.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ContrailNewC {
+    pub definition_index: i32,
+    pub object_index: i32,
+    pub attachment_index: i32,
+    /// The seed in (its index NONE); the new contrail out.
+    pub state: ContrailState,
+    pub directions: *const [f32; 3],
+    pub direction_count: u32,
+    /// Its points out, in the order the game walks them.
+    pub points: *mut ContrailPoint,
+    pub point_count: u32,
+    pub point_capacity: u32,
+    /// In check mode: the game's calls, and the first that differs.
+    pub events: *const ContrailEventC,
+    pub event_count: u32,
+    pub difference_event: i32,
+    pub difference_reason: i32,
+    /// The new contrail (NONE for none).
+    pub result: i32,
+}
+
+fn run_new(call: &mut ContrailNewC, check: bool) -> i32 {
+    let Some(host) = crate::world::host() else { return -1 };
+    if call.definition_index == -1 || call.points.is_null() {
+        return -1;
+    }
+    let definition = {
+        let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tags) = tags.as_mut() else { return -1 };
+        tags.contrail_definition(call.definition_index as u32)
+    };
+    let Some(definition) = definition else { return -1 };
+    // SAFETY: the game's direction table, direction_count of them
+    let directions = if call.directions.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(call.directions, call.direction_count as usize) }
+    };
+    let inputs = ContrailInputs { dt: 0.0, point_dt: 0.0, directions };
+    let mut state = call.state;
+    let mut points = Vec::new();
+    call.difference_event = -1;
+    call.difference_reason = 0;
+    let (definition_index, object_index, attachment_index) =
+        (call.definition_index, call.object_index, call.attachment_index as i16);
+    if check {
+        // SAFETY: the game's recording, as described
+        let events = if call.events.is_null() || call.event_count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(call.events, call.event_count as usize) }
+        };
+        let checker = CheckHost { events, next: Cell::new(0), difference: Cell::new(None) };
+        call.result = contrail_new(
+            &definition,
+            definition_index,
+            object_index,
+            attachment_index,
+            &inputs,
+            &checker,
+            &mut state,
+            &mut points,
+        );
+        if checker.difference.get().is_none() && checker.next.get() < events.len() {
+            checker.differ(checker.next.get(), 5);
+        }
+        (call.difference_event, call.difference_reason) = checker.difference.get().map_or((-1, 0), |(e, r)| (e as i32, r));
+    } else {
+        let live = LiveHost { callbacks: host.contrails };
+        call.result = contrail_new(
+            &definition,
+            definition_index,
+            object_index,
+            attachment_index,
+            &inputs,
+            &live,
+            &mut state,
+            &mut points,
+        );
+    }
+    let ordered = if call.result != -1 { points_in_order(&state, &points) } else { Vec::new() };
+    let count = ordered.len().min(call.point_capacity as usize);
+    // SAFETY: the buffer holds point_capacity
+    unsafe { std::ptr::copy_nonoverlapping(ordered.as_ptr(), call.points, count) };
+    call.point_count = count as u32;
+    call.state = state;
+    0
+}
+
+/// `contrail_new` on the running game, in place of the game's. Returns 0
+/// (`result` the new contrail; it, its points and the seed in `call`), or -1
+/// if it can't run (the game then runs its own; nothing was done).
+///
+/// # Safety
+/// `call` must be valid, its points buffer holding `point_capacity`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_contrail_new(call: *mut ContrailNewC) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_new(unsafe { &mut *call }, false)
+}
+
+/// The check of a contrail the game made: Rust's replay of it. Returns 0,
+/// or -1.
+///
+/// # Safety
+/// As [`halo_sim_contrail_new`]; the events hold their count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_contrail_new_check(call: *mut ContrailNewC) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_new(unsafe { &mut *call }, true)
 }

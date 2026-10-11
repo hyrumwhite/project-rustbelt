@@ -94,6 +94,7 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "sound/game_sound.h"
 #include "sound/sound_definitions.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -201,6 +202,30 @@ static boolean particle_update_frame_time(
 static boolean particle_update_physics(
 	long particle_index,
 	real dt);
+static void particle_update_game(
+	long particle_index,
+	real dt);
+
+/* port: a particle's calls of the game (particle_call) */
+static void particle_call_new(
+	struct halo_sim_particle_call *call,
+	long kind)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+}
+
+static void particle_call_simple(
+	long particle_index,
+	long kind,
+	long a)
+{
+	struct halo_sim_particle_call call;
+
+	particle_call_new(&call, kind);
+	call.a = a;
+	particle_call(particle_index, &call);
+}
 
 /* ---------- globals */
 
@@ -452,14 +477,16 @@ static void particle_die(
 
 	if (definition->effect.index != NONE)
 	{
-		particle_effect_new(
-			particle,
-			definition->effect.group_tag,
-			definition->effect.index,
-			0.0f);
+		struct halo_sim_particle_call call;
+
+		particle_call_new(&call, _particle_call_effect);
+		call.a = (long)definition->effect.group_tag;
+		call.b = definition->effect.index;
+		call.f[0] = 0.0f;
+		particle_call(particle_index, &call);
 	}
 
-	datum_delete(particle_data, particle_index);
+	particle_call_simple(particle_index, _particle_call_delete, 0);
 
 	return;
 }
@@ -628,6 +655,19 @@ static boolean particle_update_frame_time(
 	return result;
 }
 
+/* port: object_try_and_get, through particle_call */
+static boolean particle_call_object_exists(
+	long particle_index,
+	long object_index)
+{
+	struct halo_sim_particle_call call;
+
+	particle_call_new(&call, _particle_call_object_exists);
+	call.a = object_index;
+	particle_call(particle_index, &call);
+	return call.result != 0;
+}
+
 static boolean particle_update_physics(
 	long particle_index,
 	real dt)
@@ -645,19 +685,19 @@ static boolean particle_update_physics(
 			real_vector3d collision_normal;
 			short collision_material_type;
 			unsigned long collision_flags;
+			struct halo_sim_particle_call call;
 
-			collision_flags = point_physics_update(
-				0,
-				physics,
-				&particle->location,
-				NONE,
-				&particle->position,
-				&particle->translational_velocity,
-				NULL,
-				&collision_normal,
-				&collision_material_type,
-				particle_get_radius(particle_index),
-				dt);
+			/* port: point_physics_update, through particle_call */
+			particle_call_new(&call, _particle_call_physics);
+			call.a = definition->physics.index;
+			call.f[0] = particle_get_radius(particle_index);
+			call.f[1] = dt;
+			particle_call(particle_index, &call);
+			collision_flags = (unsigned long)call.result;
+			collision_normal.i = call.out[0];
+			collision_normal.j = call.out[1];
+			collision_normal.k = call.out[2];
+			collision_material_type = (short)call.out_material_type;
 
 			if (TEST_FLAG(collision_flags, _point_physics_collided_with_structure_bit))
 			{
@@ -678,24 +718,24 @@ static boolean particle_update_physics(
 
 					if (collision_effect_index != NONE)
 					{
-						particle_effect_new(
-							particle,
-							definition->collision_effect.group_tag,
-							collision_effect_index,
-							scale);
+						particle_call_new(&call, _particle_call_effect);
+						call.a = (long)definition->collision_effect.group_tag;
+						call.b = collision_effect_index;
+						call.f[0] = scale;
+						particle_call(particle_index, &call);
 					}
 
-					if (definition->collision_material_effects.index != NONE &&
-						material_effect_visible(&particle->position))
+					if (definition->collision_material_effects.index != NONE)
 					{
-						material_effect_new(
-							definition->collision_material_effects.index,
-							_material_effect_impact,
-							collision_material_type,
-							&particle->position,
-							&collision_normal,
-							&particle->location,
-							scale);
+						/* (its visibility is the call's to test) */
+						particle_call_new(&call, _particle_call_material_effect);
+						call.a = definition->collision_material_effects.index;
+						call.b = collision_material_type;
+						call.f[0] = collision_normal.i;
+						call.f[1] = collision_normal.j;
+						call.f[2] = collision_normal.k;
+						call.f[3] = scale;
+						particle_call(particle_index, &call);
 					}
 				}
 
@@ -705,7 +745,7 @@ static boolean particle_update_physics(
 					if (definition->collision_effect.index == NONE)
 						particle_die(particle_index);
 					else
-						particle_delete(particle_index);
+						particle_call_simple(particle_index, _particle_call_delete, 0);
 
 					return FALSE;
 				}
@@ -741,9 +781,9 @@ static boolean particle_update_physics(
 			real scale;
 
 			if (!TEST_FLAG(particle->flags, _particle_datum_attached_to_local_player_bit) &&
-				!object_try_and_get(particle->object_index))
+				!particle_call_object_exists(particle_index, particle->object_index))
 			{
-				datum_delete(particle_data, particle_index);
+				particle_call_simple(particle_index, _particle_call_delete, 0);
 
 				return FALSE;
 			}
@@ -797,9 +837,9 @@ static boolean particle_update_physics(
 
 		particle->rotation = dt * particle->angular_velocity + particle->rotation;
 	}
-	else if (particle->object_index != NONE && !object_try_and_get(particle->object_index))
+	else if (particle->object_index != NONE && !particle_call_object_exists(particle_index, particle->object_index))
 	{
-		datum_delete(particle_data, particle_index);
+		particle_call_simple(particle_index, _particle_call_delete, 0);
 
 		return FALSE;
 	}
@@ -1028,38 +1068,203 @@ void particles_update(
 		particle_index != NONE;
 		particle_index = data_next_index(particle_data, particle_index))
 	{
-		struct particle_datum *particle = particle_get(particle_index);
-		struct particle_definition *definition = particle_definition_get(particle->definition_index);
-		boolean was_new = (particle->age == 0.0f);
+		/* port: the Rust port's update in place of the game's when asked
+		(halo_sim.c); in check mode the game's runs and is compared */
+		int checking = FALSE;
 
-		if (render.frame_index - particle->last_rendered_frame_index >
-			MAXIMUM_PARTICLE_UNRENDERED_FRAME_COUNT &&
-			particle->last_rendered_frame_index < particles_tick_frame_indices[
-				(particles_tick_frame_head + 1) % NUMBEROF(particles_tick_frame_indices)])
+		if (halo_sim_particle_update(particle_index, dt, render.frame_index,
+			particles_tick_frame_indices[(particles_tick_frame_head + 1) % NUMBEROF(particles_tick_frame_indices)],
+			particles_update_ticks, &checking))
 		{
-			datum_delete(particle_data, particle_index);
+			continue;
 		}
-		else
-		{
-			particle->age = dt + particle->age;
-
-			if (particle->age >= particle->lifespan &&
-				!was_new &&
-				!definition->final_sequence_count)
-			{
-				particle_die(particle_index);
-			}
-			else
-			{
-				if (particle_update_frame_time(particle_index, dt))
-					particle_update_physics(particle_index, dt);
-			}
-		}
+		particle_update_game(particle_index, dt);
+		if (checking)
+			halo_sim_particle_update_check(particle_index);
 	}
 
 	profile_exit(particles_update_section);
 
 	return;
+}
+
+static void particle_update_game(
+	long particle_index,
+	real dt)
+{
+	struct particle_datum *particle = particle_get(particle_index);
+	struct particle_definition *definition = particle_definition_get(particle->definition_index);
+	boolean was_new = (particle->age == 0.0f);
+
+	if (render.frame_index - particle->last_rendered_frame_index >
+		MAXIMUM_PARTICLE_UNRENDERED_FRAME_COUNT &&
+		particle->last_rendered_frame_index < particles_tick_frame_indices[
+			(particles_tick_frame_head + 1) % NUMBEROF(particles_tick_frame_indices)])
+	{
+		particle_call_simple(particle_index, _particle_call_delete, 0);
+	}
+	else
+	{
+		particle->age = dt + particle->age;
+
+		if (particle->age >= particle->lifespan &&
+			!was_new &&
+			!definition->final_sequence_count)
+		{
+			particle_die(particle_index);
+		}
+		else
+		{
+			if (particle_update_frame_time(particle_index, dt))
+				particle_update_physics(particle_index, dt);
+		}
+	}
+
+	return;
+}
+
+/* ---------- port: particle_call */
+
+/* a particle update's call of the rest of the game, shared by the C's update
+and the Rust port's (halo_sim.c); in check mode each is recorded. TRUE if
+the particle is still there after. */
+long particle_call(
+	long particle_index,
+	struct halo_sim_particle_call *call)
+{
+	/* (the datum even if the particle was deleted: the update reads it on,
+	as January's does) */
+	struct particle_datum *particle = (struct particle_datum *)((char *)particle_data->data +
+		(particle_index & 0xffff) * particle_data->size);
+	long still_there;
+	int opened;
+
+	opened = halo_sim_particle_event_begin(particle_index, call);
+	switch (call->kind)
+	{
+		case _particle_call_delete:
+			datum_delete(particle_data, particle_index);
+			break;
+
+		case _particle_call_effect:
+			particle_effect_new(particle, (unsigned long)call->a, call->b, call->f[0]);
+			break;
+
+		case _particle_call_object_exists:
+			call->result = object_try_and_get(call->a) != NULL;
+			break;
+
+		case _particle_call_physics:
+		{
+			real_vector3d collision_normal = *global_zero_vector3d;
+			short collision_material_type = 0;
+
+			call->result = (long)point_physics_update(
+				0,
+				point_physics_definition_get(call->a),
+				&particle->location,
+				NONE,
+				&particle->position,
+				&particle->translational_velocity,
+				NULL,
+				&collision_normal,
+				&collision_material_type,
+				call->f[0],
+				call->f[1]);
+			call->out[0] = collision_normal.i;
+			call->out[1] = collision_normal.j;
+			call->out[2] = collision_normal.k;
+			call->out_material_type = collision_material_type;
+			break;
+		}
+
+		case _particle_call_material_effect:
+			if (material_effect_visible(&particle->position))
+			{
+				real_vector3d normal;
+
+				normal.i = call->f[0];
+				normal.j = call->f[1];
+				normal.k = call->f[2];
+				material_effect_new(
+					call->a,
+					_material_effect_impact,
+					(short)call->b,
+					&particle->position,
+					&normal,
+					&particle->location,
+					call->f[3]);
+			}
+			break;
+	}
+	still_there = datum_try_and_get(particle_data, particle_index) != NULL;
+	halo_sim_particle_event_end(particle_index, call, still_there, opened);
+
+	return still_there;
+}
+
+/* ---------- port: the particle's state for halo_sim.c */
+
+int particle_halo_sim_state_load(
+	long particle_index,
+	struct halo_sim_particle_state *state)
+{
+	struct particle_datum *particle = (struct particle_datum *)datum_try_and_get(particle_data, particle_index);
+
+	state->local_random_seed = *get_global_local_random_seed_address();
+	if (!particle)
+		return FALSE;
+	state->particle_index = (unsigned long)particle_index;
+	state->definition_index = (unsigned long)particle->definition_index;
+	state->flags = particle->flags;
+	state->state = particle->state;
+	state->local_player_index = particle->local_player_index;
+	state->object_index = particle->object_index;
+	state->node_index = particle->node_index;
+	state->sequence_index = particle->sequence_index;
+	state->frame_index = particle->frame_index;
+	state->pad = 0;
+	state->last_rendered_frame_index = particle->last_rendered_frame_index;
+	state->age = particle->age;
+	state->lifespan = particle->lifespan;
+	state->frame_time = particle->frame_time;
+	state->frame_span = particle->frame_span;
+	state->location_leaf = particle->location.leaf_index;
+	state->location_cluster = particle->location.cluster_index;
+	state->location_bonus = particle->location.bonus;
+	memcpy(state->position, &particle->position, sizeof(state->position));
+	memcpy(state->direction, &particle->direction, sizeof(state->direction));
+	memcpy(state->translational_velocity, &particle->translational_velocity, sizeof(state->translational_velocity));
+	state->rotation = particle->rotation;
+	state->angular_velocity = particle->angular_velocity;
+	state->radius = particle->radius;
+
+	return TRUE;
+}
+
+void particle_halo_sim_state_store(
+	struct halo_sim_particle_state const *state)
+{
+	struct particle_datum *particle =
+		(struct particle_datum *)datum_try_and_get(particle_data, (long)state->particle_index);
+
+	*get_global_local_random_seed_address() = state->local_random_seed;
+	if (!particle)
+		return;
+	particle->flags = state->flags;
+	particle->state = state->state;
+	particle->sequence_index = state->sequence_index;
+	particle->frame_index = state->frame_index;
+	particle->age = state->age;
+	particle->frame_time = state->frame_time;
+	particle->frame_span = state->frame_span;
+	particle->location.leaf_index = state->location_leaf;
+	particle->location.cluster_index = state->location_cluster;
+	particle->location.bonus = state->location_bonus;
+	memcpy(&particle->position, state->position, sizeof(state->position));
+	memcpy(&particle->direction, state->direction, sizeof(state->direction));
+	memcpy(&particle->translational_velocity, state->translational_velocity, sizeof(state->translational_velocity));
+	particle->rotation = state->rotation;
 }
 
 /* ---------- private code */

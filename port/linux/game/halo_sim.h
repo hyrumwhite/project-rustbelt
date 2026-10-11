@@ -39,6 +39,7 @@ enum
 	_halo_sim_unit_ik,
 	_halo_sim_lights,
 	_halo_sim_effects,
+	_halo_sim_particles,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -342,6 +343,61 @@ struct halo_sim_effect_instance
 	short pad;
 	long next;
 	float matrix[13];
+};
+
+/* a particle's calls of the rest of the game (particles.c's particle_call;
+crates/halo_map's particles::call) */
+enum
+{
+	_particle_call_delete = 1,
+	_particle_call_effect,
+	_particle_call_object_exists,
+	_particle_call_physics,
+	_particle_call_material_effect,
+};
+
+/* crates/halo_map's ParticleCall: a particle's call of the game, and its
+answer */
+struct halo_sim_particle_call
+{
+	long kind;
+	long a;
+	long b;
+	float f[4];
+	long result;
+	float out[3];
+	long out_material_type;
+};
+
+/* crates/halo_map's ParticleState: what a particle's update changes of the
+particle, and the game's local random seed */
+struct halo_sim_particle_state
+{
+	unsigned long particle_index;
+	unsigned long definition_index;
+	unsigned short flags;
+	unsigned char state;
+	unsigned char local_player_index;
+	long object_index;
+	short node_index;
+	short sequence_index;
+	short frame_index;
+	short pad;
+	long last_rendered_frame_index;
+	float age;
+	float lifespan;
+	float frame_time;
+	float frame_span;
+	long location_leaf;
+	short location_cluster;
+	unsigned short location_bonus;
+	float position[3];
+	float direction[3];
+	float translational_velocity[3];
+	float rotation;
+	float angular_velocity;
+	float radius;
+	unsigned long local_random_seed;
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -749,5 +805,22 @@ int effect_halo_sim_state_load(long effect_index, struct halo_sim_effect_state *
 void effect_halo_sim_state_store(struct halo_sim_effect_state const *state);
 int effect_halo_sim_instances(long effect_index, long *first_instances, struct halo_sim_effect_instance *instances,
 	unsigned long maximum_instance_count, unsigned long *instance_count);
+
+/* particles.c's particles_update, each particle's: TRUE when the Rust port
+ran it (its calls of the game through particle_call); in check mode
+`checking` is set, particle_call records each call
+(halo_sim_particle_event_begin and _end), and halo_sim_particle_update_check
+compares Rust's replay */
+int halo_sim_particle_update(long particle_index, float dt, long frame_index, long oldest_tick_frame_index,
+	long update_ticks, int *checking);
+void halo_sim_particle_update_check(long particle_index);
+int halo_sim_particle_event_begin(long particle_index, struct halo_sim_particle_call const *call);
+void halo_sim_particle_event_end(long particle_index, struct halo_sim_particle_call const *call, long still_there,
+	int opened);
+long particle_call(long particle_index, struct halo_sim_particle_call *call);
+/* particles.c's: a particle's state (FALSE if it is gone: the seed is still
+read), and back (the seed always) */
+int particle_halo_sim_state_load(long particle_index, struct halo_sim_particle_state *state);
+void particle_halo_sim_state_store(struct halo_sim_particle_state const *state);
 
 #endif // __HALO_SIM_H

@@ -1170,6 +1170,41 @@ enum
 	_actor_dispatch_call_swarm_control,
 };
 
+/* the types' handlers (actor_types.c's actor_type_call; crates/halo_map's
+actor_types::call) */
+enum
+{
+	_actor_type_call_initial_action = 0x1000 | 1,
+	_actor_type_call_pending_command_list,
+	_actor_type_call_surprise,
+	_actor_type_call_deny_transition,
+	_actor_type_call_panic_from_surprise,
+	_actor_type_call_panic_from_damage,
+	_actor_type_call_panic_from_attached_projectiles,
+	_actor_type_call_panic_from_attached_melee_attackers,
+	_actor_type_call_panic_from_burning_to_death,
+	_actor_type_call_panic_transition,
+	_actor_type_call_combat_transition,
+	_actor_type_call_vehicle_entry,
+	_actor_type_call_vehicle_exit,
+	_actor_type_call_grenade_throwing,
+	_actor_type_call_danger_avoidance,
+	_actor_type_call_combat_status,
+	_actor_type_call_combat_failure,
+	_actor_type_call_evasion,
+	_actor_type_call_can_stop_guarding,
+	_actor_type_call_done_fleeing,
+	_actor_type_call_consider_grenade,
+	_actor_type_call_exit_pursuit,
+	_actor_type_call_can_stop_conversing,
+	_actor_type_call_berserking_from_attacking_mode,
+	_actor_type_call_berserking_from_damage,
+	_actor_type_call_berserking_from_proximity,
+	_actor_type_call_berserk_transition,
+	_actor_type_call_berserking_from_attached_projectiles,
+	_actor_type_call_active_cover_seeking,
+};
+
 /* the actions' functions (actions.c's actions_port_ported) */
 enum
 {
@@ -1905,6 +1940,8 @@ void actor_combat_call(struct halo_sim_ai_call *call);
 void actor_dispatch_call(struct halo_sim_ai_call *call);
 int actions_port_ported(short action, long function);
 void actions_port_call(struct halo_sim_ai_call *call);
+void actor_type_call(struct halo_sim_ai_call *call);
+long actor_type_port_handle(long kind, long actor_index, long a, long b, long c);
 void action_wait_call(struct halo_sim_ai_call *call);
 void action_alert_call(struct halo_sim_ai_call *call);
 void action_search_call(struct halo_sim_ai_call *call);

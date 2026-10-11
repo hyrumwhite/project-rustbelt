@@ -75,6 +75,8 @@ symbols in this file:
 
 #include "actors.h"
 #include "actor_types.h"
+#include "actions.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -251,6 +253,158 @@ void actor_type_swarm_aim_jump(
 	}
 
 	return;
+}
+
+/* port: the handlers the types decide by (actions.c's), shared by the
+game's (actor_type_port.h) and the Rust port's (crates/halo_map's
+actor_types); in check mode each is recorded */
+void actor_type_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+
+	switch (call->kind)
+	{
+		case _actor_type_call_initial_action:
+			call->result = actor_action_handle_initial_action(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_pending_command_list:
+			call->result = actor_action_handle_pending_command_list(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_surprise:
+			call->result = actor_action_handle_surprise(actor_index, (short)call->a) ? 1 : 0;
+			break;
+
+		case _actor_type_call_deny_transition:
+			call->result = actor_action_deny_transition(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_panic_from_surprise:
+			call->result = actor_action_handle_panic_from_surprise(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_panic_from_damage:
+			call->result = actor_action_handle_panic_from_damage(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_panic_from_attached_projectiles:
+			call->result = actor_action_handle_panic_from_attached_projectiles(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_panic_from_attached_melee_attackers:
+			call->result = actor_action_handle_panic_from_attached_melee_attackers(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_panic_from_burning_to_death:
+			call->result = actor_action_handle_panic_from_burning_to_death(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_panic_transition:
+			call->result = actor_action_handle_panic_transition(actor_index, (short)call->a, (boolean)call->b, (short)call->input[0]) ? 1 : 0;
+			break;
+
+		case _actor_type_call_combat_transition:
+			call->result = actor_action_handle_combat_transition(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_vehicle_entry:
+			call->result = actor_action_handle_vehicle_entry(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_vehicle_exit:
+			call->result = actor_action_handle_vehicle_exit(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_grenade_throwing:
+			call->result = actor_action_handle_grenade_throwing(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_danger_avoidance:
+			call->result = actor_action_handle_danger_avoidance(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_combat_status:
+			call->result = actor_action_handle_combat_status(actor_index, (boolean)call->a, (boolean)call->b) ? 1 : 0;
+			break;
+
+		case _actor_type_call_combat_failure:
+			call->result = actor_action_handle_combat_failure(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_evasion:
+			call->result = actor_action_handle_evasion(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_can_stop_guarding:
+			call->result = actor_action_can_stop_guarding(actor_index, (short)call->a, (short)call->b) ? 1 : 0;
+			break;
+
+		case _actor_type_call_done_fleeing:
+			call->result = actor_action_handle_done_fleeing(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_consider_grenade:
+			call->result = actor_action_consider_grenade(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_exit_pursuit:
+			call->result = actor_action_handle_exit_pursuit(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_can_stop_conversing:
+			call->result = actor_action_can_stop_conversing(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_berserking_from_attacking_mode:
+			call->result = actor_action_handle_berserking_from_attacking_mode(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_berserking_from_damage:
+			call->result = actor_action_handle_berserking_from_damage(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_berserking_from_proximity:
+			call->result = actor_action_handle_berserking_from_proximity(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_berserk_transition:
+			call->result = actor_action_handle_berserk_transition(actor_index, (short)call->a) ? 1 : 0;
+			break;
+
+		case _actor_type_call_berserking_from_attached_projectiles:
+			call->result = actor_action_handle_berserking_from_attached_projectiles(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_type_call_active_cover_seeking:
+			call->result = actor_action_handle_active_cover_seeking(actor_index, (boolean)call->a, (boolean)call->b) ? 1 : 0;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+long actor_type_port_handle(
+	long kind,
+	long actor_index,
+	long a,
+	long b,
+	long c)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	call.input[0] = (real)c;
+	actor_type_call(&call);
+
+	return call.result;
 }
 
 /* ---------- private code */

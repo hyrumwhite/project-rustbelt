@@ -18,6 +18,7 @@ symbols in this file:
 #include "actor_types.h"
 #include "actors.h"
 #include "actions.h"
+#include "actor_type_port.h" /* port: the handlers through actor_type_call */
 
 /* ---------- constants */
 

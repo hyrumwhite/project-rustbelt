@@ -57,6 +57,7 @@ symbols in this file:
 #include "units/bipeds.h"
 #include "units/units.h"
 #include "units/unit_definitions.h"
+#include "actor_type_port.h" /* port: the handlers through actor_type_call */
 
 /* ---------- constants */
 

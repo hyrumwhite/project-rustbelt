@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 39
+#define HALO_SIM_VERSION 40
 
 /* ---------- structures */
 
@@ -1825,6 +1825,7 @@ struct halo_sim_ai_step_callbacks
 {
 	void (*emotion)(struct halo_sim_ai_call *call);
 	void (*situation)(struct halo_sim_ai_call *call);
+	void (*upkeep)(struct halo_sim_ai_call *call);
 };
 
 struct halo_sim_effect_callbacks
@@ -2077,6 +2078,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"ai_update",
 	"actor_emotions",
 	"actor_situation",
+	"actor_upkeep",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2435,12 +2437,18 @@ static short const halo_sim_ai_step_systems[NUMBER_OF_HALO_SIM_AI_STEPS] =
 {
 	_halo_sim_actor_emotions,
 	_halo_sim_actor_situation,
+	_halo_sim_actor_upkeep,
+	_halo_sim_actor_upkeep,
+	_halo_sim_actor_upkeep,
 };
 
 static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
 {
 	"actor emotion update",
 	"actor situation update",
+	"actor timeslice",
+	"actor orders' clearing",
+	"actor output's clearing",
 };
 
 /* the steps that write the actor's props: their check puts them back too,
@@ -2449,6 +2457,9 @@ static boolean const halo_sim_ai_step_props[NUMBER_OF_HALO_SIM_AI_STEPS] =
 {
 	FALSE,
 	TRUE,
+	FALSE,
+	FALSE,
+	FALSE,
 };
 
 /* the AI update checks: the game's calls, and the comparisons */
@@ -4495,6 +4506,7 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	{
 		actor_emotion_call,
 		actor_situation_call,
+		actor_upkeep_call,
 	},
 };
 

@@ -1362,6 +1362,57 @@ void actor_change_encounter(
 	return;
 }
 
+/* port: what an actor's upkeep (its timeslice) asks of the rest of the game,
+shared by the game's and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_upkeep_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _actor_upkeep_call_time_given:
+			call->result = ai_globals->time_given_this_frame ? 1 : 0;
+			break;
+
+		case _actor_upkeep_call_last_highest_service_timer:
+			call->result = ai_globals->last_highest_service_timer;
+			break;
+
+		case _actor_upkeep_call_current_highest_service_timer:
+			call->result = ai_globals->current_highest_service_timer;
+			break;
+
+		case _actor_upkeep_call_give_time:
+			ai_globals->time_given_this_frame = TRUE;
+			break;
+
+		case _actor_upkeep_call_set_current_highest_service_timer:
+			ai_globals->current_highest_service_timer = (short)call->a;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_upkeep_call_simple(
+	long actor_index,
+	long kind,
+	long a)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	actor_upkeep_call(&call);
+
+	return call.result;
+}
+
 static void actor_update_begin(
 	long actor_index)
 {
@@ -1384,7 +1435,28 @@ static void actor_update_end(
 	return;
 }
 
+static boolean actor_get_timeslice_game(
+	long actor_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
 static boolean actor_get_timeslice(
+	long actor_index)
+{
+	int checking = FALSE;
+	boolean result;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_timeslice, actor_index, &checking))
+		return actor_get(actor_index)->meta.timeslice;
+	result = actor_get_timeslice_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_timeslice);
+
+	return result;
+}
+
+/* the game's, the AI's globals through actor_upkeep_call */
+static boolean actor_get_timeslice_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -1406,17 +1478,17 @@ static boolean actor_get_timeslice(
 
 	actor->meta.service_timer += jumping ? 3 : 1;
 
-	if (!ai_globals->time_given_this_frame &&
-		actor->meta.service_timer > ai_globals->last_highest_service_timer &&
+	if (!actor_upkeep_call_simple(actor_index, _actor_upkeep_call_time_given, 0) &&
+		actor->meta.service_timer > actor_upkeep_call_simple(actor_index, _actor_upkeep_call_last_highest_service_timer, 0) &&
 		actor->meta.service_timer > 15)
 	{
 		actor->meta.service_timer = 0;
-		ai_globals->time_given_this_frame = TRUE;
+		actor_upkeep_call_simple(actor_index, _actor_upkeep_call_give_time, 0);
 		result = TRUE;
 	}
-	else if (actor->meta.service_timer > ai_globals->current_highest_service_timer)
+	else if (actor->meta.service_timer > actor_upkeep_call_simple(actor_index, _actor_upkeep_call_current_highest_service_timer, 0))
 	{
-		ai_globals->current_highest_service_timer = actor->meta.service_timer;
+		actor_upkeep_call_simple(actor_index, _actor_upkeep_call_set_current_highest_service_timer, actor->meta.service_timer);
 	}
 
 	actor->meta.timeslice = result;
@@ -1424,7 +1496,25 @@ static boolean actor_get_timeslice(
 	return result;
 }
 
+static void actor_clear_output_game(
+	long actor_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c) */
 static void actor_clear_output(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_clear_output, actor_index, &checking))
+		return;
+	actor_clear_output_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_clear_output);
+
+	return;
+}
+
+static void actor_clear_output_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -1933,7 +2023,25 @@ static void actor_input_update(
 	return;
 }
 
+static void actor_clear_orders_game(
+	long actor_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c) */
 static void actor_clear_orders(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_clear_orders, actor_index, &checking))
+		return;
+	actor_clear_orders_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_clear_orders);
+
+	return;
+}
+
+static void actor_clear_orders_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);

@@ -48,6 +48,7 @@ enum
 	_halo_sim_ai_update,
 	_halo_sim_actor_emotions,
 	_halo_sim_actor_situation,
+	_halo_sim_actor_upkeep,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -843,6 +844,9 @@ enum
 {
 	_halo_sim_ai_step_emotion,
 	_halo_sim_ai_step_situation,
+	_halo_sim_ai_step_timeslice,
+	_halo_sim_ai_step_clear_orders,
+	_halo_sim_ai_step_clear_output,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
@@ -892,6 +896,17 @@ enum
 	_actor_situation_call_unit_player,
 	_actor_situation_call_unit_active_region_flags,
 	_actor_situation_call_target_weight,
+};
+
+/* the upkeep's calls (actors.c's actor_upkeep_call; crates/halo_map's
+actor_upkeep::call) */
+enum
+{
+	_actor_upkeep_call_time_given = 1,
+	_actor_upkeep_call_last_highest_service_timer,
+	_actor_upkeep_call_current_highest_service_timer,
+	_actor_upkeep_call_give_time,
+	_actor_upkeep_call_set_current_highest_service_timer,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1435,6 +1450,7 @@ void halo_sim_ai_event_end(struct halo_sim_ai_call const *call, int opened);
 void actors_port_step_context(long actor_index, struct halo_sim_ai_step_context *context);
 void actor_emotion_call(struct halo_sim_ai_call *call);
 void actor_situation_call(struct halo_sim_ai_call *call);
+void actor_upkeep_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

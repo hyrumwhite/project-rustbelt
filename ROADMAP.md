@@ -385,6 +385,11 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - evasion: an actor retreating from an unopposable enemy it can see seeks cover or panics; one in more danger than it stands (less when defending, at most 1.1 when playfighting) throws a grenade, seeks cover by chance (shouting so), or evades.
      - **The C's side, through `actions_port_handler_call`:** whether cover seeking is allowed, leaving the seat, considering a grenade and evading. Four handlers are left the game's: vehicle entry, grenade throwing, considering a grenade, and danger avoidance.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in cover seeking's debug stage was caught on b30 and a50. With all forty-seven systems in Rust, every probe check agrees on the five levels at 144 frames a second.
+   - [x] Danger avoidance in Rust (`halo_map::actor_transitions`).
+     - **What Rust does:** an actor in a danger it noticed (not stuck to it, within the danger's sphere and three units, not busy animating or a passenger) gives up a position or path into the danger's swept line, shouts of a grenade (urgent or not hostile), and dives clear when the danger type allows it and it's urgent enough. One within three and a half units of the line that isn't moving away avoids it. Its debug record notes the decision. It needs real_math.c's segment distances (`point_to_line_distance_squared3d`, `vector_to_line_distance_squared3d`) and the sphere intersection, ported exactly.
+     - **The C's side, through `actions_port_handler_call`:** the animation and path checks, giving up the position, finding the escape, the dive, and the avoid setup.
+     - **The check:** the actor debug record's compared head grows from 0x160 to 0x1A0, to cover the danger and dive decisions; every AI step agrees with it.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the escape radius was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

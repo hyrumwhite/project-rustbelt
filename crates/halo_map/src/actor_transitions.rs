@@ -10,7 +10,10 @@
 use crate::actions::dot;
 use crate::actor_types::{call as handler, pursuit_settings};
 use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE, PropIterator, prop_get};
-use crate::layout::{actor_datum as a, actor_definition as d, actor_variant_definition as var, ai_values as v, prop_datum as p};
+use crate::layout::{
+    actor_datum as a, actor_debug_info as debug, actor_definition as d, actor_variant_definition as var, ai_values as v,
+    prop_datum as p,
+};
 
 /// What the handlers ask (halo_sim.h's `_actions_port_handler_call_*`).
 pub mod call {
@@ -141,6 +144,24 @@ pub mod call {
     pub const CONSIDER_GRENADE: i32 = BASE | 51;
     /// `actor_action_try_to_evade(actor)`, the result.
     pub const TRY_TO_EVADE: i32 = BASE | 52;
+    /// `actor_move_animation_busy(actor)`, the result.
+    pub const ANIMATION_BUSY: i32 = BASE | 53;
+    /// `actor_path_has_path(actor)`, the result.
+    pub const HAS_PATH: i32 = BASE | 54;
+    /// `actor_discard_firing_position(actor, a, TRUE)`.
+    pub const DISCARD_FIRING_POSITION: i32 = BASE | 55;
+    /// `actor_action_find_escape_from_danger(actor)`: whether it found one,
+    /// the result; in `output`, the escape's direction, distance, alignment
+    /// (two) and whether it's a ledge.
+    pub const FIND_ESCAPE: i32 = BASE | 56;
+    /// `actor_action_try_to_dive(actor, a, input[0], input[1..3], input[3])`,
+    /// the result.
+    pub const TRY_TO_DIVE: i32 = BASE | 57;
+    /// `actor_path_at_destination(actor)`, the result.
+    pub const AT_DESTINATION: i32 = BASE | 58;
+    /// `action_avoid_setup` and, if it sets up, the change to avoid: the
+    /// result.
+    pub const AVOID: i32 = BASE | 59;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -242,6 +263,7 @@ pub fn run(kind: i32, a: i32, b: i32, c: i32, context: &AiStepContext, host: &im
         handler::ACTIVE_COVER_SEEKING => handle_active_cover_seeking(context, host, a != 0, b != 0),
         handler::VEHICLE_EXIT => handle_vehicle_exit(context, host),
         handler::EVASION => handle_evasion(context, host),
+        handler::DANGER_AVOIDANCE => handle_danger_avoidance(context, host),
         _ => return None,
     })
 }
@@ -1628,6 +1650,357 @@ pub fn handle_evasion(context: &AiStepContext, host: &impl AiHost) -> bool {
                 m.set_bool(at(a::FIRING_POSITIONS_MOVED_AWAY_FROM_FIRING_POSITION), true);
                 result = true;
             }
+        }
+    }
+    result
+}
+
+/// real_math.h's `vector_from_points3d(a, b)`.
+fn vector_from_points(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+}
+
+/// real_math.h's `magnitude_squared3d`.
+fn magnitude_squared(v: [f32; 3]) -> f32 {
+    v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+}
+
+/// real_math.c's `magnitude_squared3d_right_associated`.
+fn magnitude_squared_right_associated(v: [f32; 3]) -> f32 {
+    v[0] * v[0] + (v[1] * v[1] + v[2] * v[2])
+}
+
+/// real_math.h's `cross_product3d`.
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    let k = a[0] * b[1] - a[1] * b[0];
+    let j = a[2] * b[0] - a[0] * b[2];
+    let i = a[1] * b[2] - a[2] * b[1];
+    [i, j, k]
+}
+
+/// real_math.h's `point_from_line3d(p, v, t)`.
+fn point_from_line(p: [f32; 3], v: [f32; 3], t: f32) -> [f32; 3] {
+    [v[0] * t + p[0], v[1] * t + p[1], v[2] * t + p[2]]
+}
+
+/// cseries.h's `PIN(n, 0, 1)`.
+fn pin_unit(n: f32) -> f32 {
+    if n < 0.0 {
+        0.0
+    } else if n > 1.0 {
+        1.0
+    } else {
+        n
+    }
+}
+
+const REAL_EPSILON: f32 = 0.0001;
+
+/// real_math.c's `point_to_line_distance_squared3d`: from the point to the
+/// segment from `base` along `height`.
+fn point_to_line_distance_squared(point: [f32; 3], base: [f32; 3], height: [f32; 3]) -> f32 {
+    let v = vector_from_points(base, point);
+    let t = pin_unit(dot(v, height) / magnitude_squared(height));
+    magnitude_squared(point_from_line(v, height, -t))
+}
+
+/// real_math.c's `vector_to_line_distance_squared3d`: between the segment
+/// from `point` along `vector` and the one from `line_point` along
+/// `line_vector`.
+fn vector_to_line_distance_squared(point: [f32; 3], vector: [f32; 3], line_point: [f32; 3], line_vector: [f32; 3]) -> f32 {
+    let offset = vector_from_points(point, line_point);
+    let mut cross_vector = cross(vector, line_vector);
+    let denominator = magnitude_squared_right_associated(cross_vector);
+    let t0;
+    let t1;
+    if !((denominator as f64).abs() < REAL_EPSILON as f64) {
+        let inverse_denominator = 1.0 / denominator;
+        cross_vector = [
+            inverse_denominator * cross_vector[0],
+            inverse_denominator * cross_vector[1],
+            inverse_denominator * cross_vector[2],
+        ];
+        t0 = dot(cross(offset, line_vector), cross_vector);
+        t1 = dot(cross(offset, vector), cross_vector);
+        let t0_out_of_range = t0 < 0.0 || t0 > 1.0;
+        let t1_out_of_range = t1 < 0.0 || t1 > 1.0;
+        if t0_out_of_range || t1_out_of_range {
+            let mut d0 = f32::MAX;
+            let mut d1 = f32::MAX;
+            if t0_out_of_range {
+                let closest_point0 = point_from_line(point, vector, if t0 < 0.0 { 0.0 } else { 1.0 });
+                d0 = point_to_line_distance_squared(closest_point0, line_point, line_vector);
+            }
+            if t1_out_of_range {
+                let closest_point1 = point_from_line(line_point, line_vector, if t1 < 0.0 { 0.0 } else { 1.0 });
+                d1 = point_to_line_distance_squared(closest_point1, point, vector);
+            }
+            return if d0 > d1 { d1 } else { d0 };
+        }
+    } else {
+        let dot_vectors = dot(vector, line_vector);
+        let vector_magnitude_squared = magnitude_squared(vector);
+        t0 = if vector_magnitude_squared > REAL_EPSILON {
+            let inverse = 1.0 / vector_magnitude_squared;
+            let mut start = offset[2] * vector[2];
+            start += offset[1] * vector[1];
+            start += offset[0] * vector[0];
+            start *= inverse;
+            let end = inverse * dot_vectors + start;
+            (pin_unit(start) + pin_unit(end)) * 0.5
+        } else {
+            0.0
+        };
+        let line_magnitude_squared = magnitude_squared(line_vector);
+        t1 = if line_magnitude_squared > REAL_EPSILON {
+            let inverse = 1.0 / line_magnitude_squared;
+            let start = -dot(offset, line_vector) * inverse;
+            let end = inverse * dot_vectors + start;
+            (pin_unit(start) + pin_unit(end)) * 0.5
+        } else {
+            0.0
+        };
+    }
+    let closest_point0 = point_from_line(point, vector, t0);
+    let closest_point1 = point_from_line(line_point, line_vector, t1);
+    magnitude_squared(vector_from_points(closest_point0, closest_point1))
+}
+
+/// real_math.c's `fast_vector_intersection_with_sphere`: the fraction of the
+/// vector at which it enters the sphere (0 from inside, REAL_MAX if never).
+fn fast_vector_intersection_with_sphere(point: [f32; 3], vector: [f32; 3], center: [f32; 3], radius: f32) -> f32 {
+    let p = [point[0] - center[0], point[1] - center[1], point[2] - center[2]];
+    let c = p[0] * p[0] + p[1] * p[1] + p[2] * p[2] - radius * radius;
+    if c < 0.0 {
+        return 0.0;
+    }
+    let b = vector[0] * p[0] + vector[1] * p[1] + vector[2] * p[2];
+    if b >= 0.0 {
+        return f32::MAX;
+    }
+    let a = vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];
+    let discriminant = b * b - a * c;
+    if discriminant <= 0.0 {
+        return f32::MAX;
+    }
+    (-b - discriminant.sqrt()) / a
+}
+
+/// `actor_action_handle_danger_avoidance`: an actor in a danger it noticed
+/// (not stuck to it, near enough, not busy animating or a passenger) gives
+/// up a position or path into it, shouts of a grenade, and dives clear when
+/// the danger allows and it's urgent enough; one near a danger that isn't
+/// moving away from it avoids it. Its debug record notes the decision.
+pub fn handle_danger_avoidance(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let debug_at = |offset: usize| context.debug_info + offset as u32;
+    let decision = |value: usize| m.set_i16(debug_at(debug::DANGER_DECISION), value as i16);
+    let mut result = false;
+    let mut within_escape_radius = false;
+    let mut path_re_enters_danger = false;
+
+    m.w32(debug_at(debug::DANGER_AVOIDANCE_TIME), context.game_time as u32);
+    decision(0);
+    m.set_i16(debug_at(debug::DIVE_DECISION), 0);
+    m.set_bool(debug_at(debug::DANGER_ABANDONED_PATH), false);
+
+    'decide: {
+        let danger_type = m.i16(at(a::DANGER_ZONE_DANGER_TYPE));
+        if danger_type == 0 {
+            decision(0);
+            break 'decide;
+        }
+        if !m.bool(at(a::DANGER_ZONE_NOTICED_DANGER)) {
+            decision(v::_DANGER_AVOIDANCE_UNNOTICED);
+            break 'decide;
+        }
+        if m.bool(at(a::DANGER_ZONE_ATTACHED_TO_US)) {
+            decision(v::_DANGER_AVOIDANCE_ATTACHED_TO_US);
+            break 'decide;
+        }
+
+        let body_position = m.vector(at(a::INPUT_BODY_POSITION));
+        {
+            let reference = m.vector(at(a::DANGER_ZONE_BOUNDING_SPHERE_CENTER));
+            let x = reference[0] - body_position[0];
+            let y = reference[1] - body_position[1];
+            let z = reference[2] - body_position[2];
+            let radius = m.f32(at(a::DANGER_ZONE_BOUNDING_SPHERE_RADIUS)) + 3.0;
+            if y * y + (z * z + x * x) > radius * radius {
+                decision(v::_DANGER_AVOIDANCE_FAR_AWAY);
+                let distance = magnitude_squared(vector_from_points(body_position, reference)).sqrt();
+                m.set_f32(debug_at(debug::DANGER_FAR_DIST), distance);
+                m.set_f32(debug_at(debug::DANGER_FAR_RADIUS), m.f32(at(a::DANGER_ZONE_BOUNDING_SPHERE_RADIUS)) + 3.0);
+                break 'decide;
+            }
+        }
+
+        if call_simple(context, host, call::ANIMATION_BUSY, 0) != 0 {
+            decision(v::_DANGER_AVOIDANCE_ANIMATION_BUSY);
+            break 'decide;
+        }
+        if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) {
+            decision(v::_DANGER_AVOIDANCE_VEHICLE);
+            break 'decide;
+        }
+
+        let danger_position = m.vector(at(a::DANGER_ZONE_POSITION));
+        let danger_line_delta = vector_from_points(danger_position, m.vector(at(a::DANGER_ZONE_PREDICT_DANGER_POSITION)));
+        let danger_radius = || m.f32(at(a::DANGER_ZONE_DANGER_RADIUS));
+        let body_line_distance_squared = point_to_line_distance_squared(body_position, danger_position, danger_line_delta);
+        let body_within_danger = body_line_distance_squared < danger_radius() * danger_radius();
+        within_escape_radius = body_line_distance_squared < (danger_radius() + 3.5) * (danger_radius() + 3.5);
+
+        let destination_within_danger;
+        if call_simple(context, host, call::HAS_PATH, 0) != 0 {
+            let destination_line_distance_squared = point_to_line_distance_squared(
+                m.vector(at(a::CONTROL_PATH_PATH_ENDPOINT_POINT)),
+                danger_position,
+                danger_line_delta,
+            );
+            destination_within_danger = destination_line_distance_squared < danger_radius() * danger_radius();
+            if m.bool(at(a::CONTROL_MOVING)) && !body_within_danger && !destination_within_danger {
+                let towards = m.vector(at(a::CONTROL_MOVING_TOWARDS_VECTOR));
+                let path_direction_scaled = [towards[0] * 3.0, towards[1] * 3.0, towards[2] * 3.0];
+                let path_line_distance_squared = vector_to_line_distance_squared(
+                    body_position,
+                    path_direction_scaled,
+                    danger_position,
+                    danger_line_delta,
+                );
+                path_re_enters_danger = path_line_distance_squared < danger_radius() * danger_radius();
+            }
+        } else {
+            destination_within_danger = body_within_danger;
+            path_re_enters_danger = false;
+        }
+
+        if destination_within_danger || (path_re_enters_danger && !body_within_danger) {
+            let firing_position_index = m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX));
+            if firing_position_index != NONE as i16 {
+                call_simple(context, host, call::DISCARD_FIRING_POSITION, firing_position_index as i32);
+                m.set_bool(debug_at(debug::DANGER_ABANDONED_PATH), true);
+            }
+        }
+
+        if !body_within_danger {
+            decision(v::_DANGER_AVOIDANCE_OUTSIDE_ZONE);
+            m.set_f32(debug_at(debug::DANGER_ZONE_DIST), body_line_distance_squared.sqrt());
+            m.set_f32(debug_at(debug::DANGER_ZONE_RADIUS), danger_radius());
+            break 'decide;
+        }
+
+        let mut reaction_is_urgent = false;
+        let mut urgency = fast_vector_intersection_with_sphere(danger_position, danger_line_delta, body_position, danger_radius());
+        if urgency < f32::MAX {
+            urgency *= 45.0;
+        }
+        let danger_type = m.i16(at(a::DANGER_ZONE_DANGER_TYPE));
+        if danger_type == v::_ACTOR_DANGER_ZONE_SUICIDE as i16 {
+            let time_until_death = m.i16(at(a::DANGER_ZONE_SUICIDE_TIME_UNTIL_DEATH));
+            if urgency == 0.0 && time_until_death != NONE as i16 && time_until_death < 30 {
+                reaction_is_urgent = true;
+            }
+        } else if danger_type == v::_ACTOR_DANGER_ZONE_PROJECTILE as i16 {
+            let time_until_explosion = m.i16(at(a::DANGER_ZONE_PROJECTILE_TIME_UNTIL_EXPLOSION));
+            if urgency == 0.0 && time_until_explosion != NONE as i16 && time_until_explosion < 20 {
+                reaction_is_urgent = true;
+            }
+        } else if danger_type == v::_ACTOR_DANGER_ZONE_VEHICLE as i16 && urgency < 30.0 {
+            reaction_is_urgent = true;
+        }
+
+        let hostility = m.i16(at(a::DANGER_ZONE_HOSTILITY));
+        if (hostility == 0 || reaction_is_urgent) && !m.bool(at(a::DANGER_ZONE_COMMUNICATED)) {
+            let communication_hostility = if hostility == v::_ACTOR_DANGER_HOSTILITY_ENEMY as i16 {
+                v::_COMM_HOSTILITY_ENEMY as i32
+            } else if hostility == v::_ACTOR_DANGER_HOSTILITY_FRIEND as i16 {
+                v::_COMM_HOSTILITY_FRIEND as i32
+            } else if hostility == v::_ACTOR_DANGER_HOSTILITY_SELF as i16 {
+                v::_COMM_HOSTILITY_SELF as i32
+            } else {
+                NONE
+            };
+            if m.i16(at(a::DANGER_ZONE_DANGER_TYPE)) == v::_ACTOR_DANGER_ZONE_PROJECTILE as i16 {
+                call_full(
+                    context,
+                    host,
+                    call::COMMUNICATION,
+                    v::_AI_COMMUNICATION_GRENADE_DANGER as i32,
+                    NONE,
+                    &[communication_hostility as f32],
+                );
+            }
+            m.set_bool(at(a::DANGER_ZONE_COMMUNICATED), true);
+        }
+
+        let escape = call_full(context, host, call::FIND_ESCAPE, 0, 0, &[]);
+        let escape_found = escape.result != 0;
+        let escape_direction = escape.output[0] as i16;
+        let escape_distance = escape.output[1];
+        let alignment_vector = [escape.output[2], escape.output[3]];
+        let escape_is_ledge = escape.output[4] != 0.0;
+        if escape_direction == NONE as i16 {
+            decision(v::_DANGER_AVOIDANCE_NO_SAFE_DIRECTION);
+            break 'decide;
+        }
+
+        if m.bool(at(a::DANGER_ZONE_ALLOW_DIVE_EVASION)) && m.i32(at(a::INPUT_VEHICLE_INDEX)) == NONE {
+            let mut should_dive = false;
+            let danger_type = m.i16(at(a::DANGER_ZONE_DANGER_TYPE));
+            if danger_type == v::_ACTOR_DANGER_ZONE_SUICIDE as i16 {
+                if (escape_found || escape_is_ledge) && urgency == 0.0 {
+                    decision(v::_DANGER_AVOIDANCE_CAN_AVOID);
+                    should_dive = true;
+                } else if reaction_is_urgent {
+                    decision(v::_DANGER_AVOIDANCE_IMMINENT_EXPLOSION);
+                    should_dive = true;
+                }
+            } else if danger_type == v::_ACTOR_DANGER_ZONE_PROJECTILE as i16 {
+                if (escape_found || escape_is_ledge) && urgency < 7.0 {
+                    decision(v::_DANGER_AVOIDANCE_CAN_AVOID);
+                    should_dive = true;
+                } else if reaction_is_urgent {
+                    decision(v::_DANGER_AVOIDANCE_IMMINENT_EXPLOSION);
+                    should_dive = true;
+                }
+            } else if danger_type == v::_ACTOR_DANGER_ZONE_VEHICLE as i16 && reaction_is_urgent {
+                decision(v::_DANGER_AVOIDANCE_IMMINENT_IMPACT);
+                should_dive = true;
+            }
+
+            if should_dive {
+                let flags = m.r32(context.definition + d::FLAGS as u32);
+                let ledge_avoidance_distance =
+                    if flags & (1 << v::_ACTOR_DEFINITION_DIVE_OFF_LEDGES_BIT) != 0 { 8.0 } else { 0.0 };
+                result = call_full(
+                    context,
+                    host,
+                    call::TRY_TO_DIVE,
+                    escape_direction as i32,
+                    0,
+                    &[escape_distance, alignment_vector[0], alignment_vector[1], ledge_avoidance_distance],
+                )
+                .result
+                    != 0;
+            } else {
+                decision(v::_DANGER_AVOIDANCE_NO_DESIRE);
+                m.set_f32(debug_at(debug::DANGER_INTERSECT_TIME), urgency);
+            }
+        } else {
+            decision(v::_DANGER_AVOIDANCE_EVASION_DISALLOWED);
+        }
+    }
+
+    if !result
+        && within_escape_radius
+        && (call_simple(context, host, call::AT_DESTINATION, 0) != 0 || !m.bool(at(a::CONTROL_MOVING)) || path_re_enters_danger)
+        && !m.bool(at(a::EMOTIONS_FORCED_TO_CHARGE))
+    {
+        let action_class = ACTION_CLASSES[m.i16(at(a::STATE_ACTION)) as usize];
+        if (action_class == 1 || action_class == 3) && call_simple(context, host, call::AVOID, 0) != 0 {
+            result = true;
         }
     }
     result

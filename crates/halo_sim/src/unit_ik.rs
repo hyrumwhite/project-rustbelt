@@ -118,21 +118,27 @@ impl IkHost for Host {
     }
 
     fn grip_object(&self, index: i32) -> Option<GripObject> {
-        let o = self.source.host_object(index as u32, purpose::OTHER)?;
-        let markers = {
-            let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
-            let tags = tags.as_mut()?;
-            tags.definition(o.definition_index).and_then(|d| d.model).and_then(|model| tags.model_markers(model))
-        };
-        let node_matrices = (0..o.node_count as usize)
-            .map(|n| {
-                // SAFETY: the host's matrices, node_count of them
-                let f = unsafe { std::slice::from_raw_parts(o.matrices.add(n * 13), 13) };
-                matrix(f)
-            })
-            .collect();
-        Some(GripObject { markers, node_matrices, region_permutations: o.region_permutations, mirrored: o.flags & OBJECT_MIRRORED != 0 })
+        read_grip(&self.source, index)
     }
+}
+
+/// An object's markers and pose, as the game holds them (a hand's grip, a
+/// weapon's effect object).
+pub(crate) fn read_grip(source: &GameObjects, index: i32) -> Option<GripObject> {
+    let o = source.host_object(index as u32, purpose::OTHER)?;
+    let markers = {
+        let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+        let tags = tags.as_mut()?;
+        tags.definition(o.definition_index).and_then(|d| d.model).and_then(|model| tags.model_markers(model))
+    };
+    let node_matrices = (0..o.node_count as usize)
+        .map(|n| {
+            // SAFETY: the host's matrices, node_count of them
+            let f = unsafe { std::slice::from_raw_parts(o.matrices.add(n * 13), 13) };
+            matrix(f)
+        })
+        .collect();
+    Some(GripObject { markers, node_matrices, region_permutations: o.region_permutations, mirrored: o.flags & OBJECT_MIRRORED != 0 })
 }
 
 fn run(call: &mut IkCallC, check: bool) -> i32 {

@@ -201,7 +201,7 @@ pub struct Random<'a> {
 
 impl Random<'_> {
     /// `seed_random`.
-    fn next(&mut self) -> u16 {
+    pub fn next(&mut self) -> u16 {
         self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         (self.seed >> 16) as u16
     }
@@ -219,13 +219,13 @@ impl Random<'_> {
     }
 
     /// `seed_random_range`.
-    fn index(&mut self, lower: i16, upper: i16) -> i16 {
+    pub fn index(&mut self, lower: i16, upper: i16) -> i16 {
         let span = (upper as i32 - lower as i32) as u32;
         lower.wrapping_add(((span.wrapping_mul(self.next() as u32)) >> 16) as i16)
     }
 
     /// `random_vector_in_cone3d`.
-    fn vector_in_cone(&mut self, axis: [f32; 3], inner: f32, outer: f32) -> [f32; 3] {
+    pub fn vector_in_cone(&mut self, axis: [f32; 3], inner: f32, outer: f32) -> [f32; 3] {
         let mut result = axis;
         let index = self.index(0, self.directions.len() as i16);
         let direction = self.directions.get(index as usize).copied().unwrap_or([0.0; 3]);

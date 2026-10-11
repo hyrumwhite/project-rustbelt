@@ -66,6 +66,9 @@ pub struct UnitSeat {
 pub struct AnimationGraph {
     pub unit_seats: Vec<UnitSeat>,
     pub animations: Vec<GraphAnimation>,
+    /// Its first weapon animations' animation per weapon state (`None` for
+    /// a graph with none).
+    pub weapon_animations: Option<Vec<i16>>,
 }
 
 impl AnimationGraph {
@@ -111,6 +114,14 @@ impl AnimationGraph {
                 ik_points: ik_points(seat, s::IK_POINTS)?,
             });
         }
+        graph.weapon_animations = match root
+            .block(g::WEAPON_ANIMATIONS, layout::animation_graph_weapon_animations::SIZEOF)?
+            .iter()
+            .next()
+        {
+            Some(weapon) => Some(indices(weapon, layout::animation_graph_weapon_animations::ANIMATIONS)?),
+            None => None,
+        };
         for animation in root.block(g::ANIMATIONS, a::SIZEOF)?.iter() {
             graph.animations.push(GraphAnimation {
                 frame_count: animation.i16(a::FRAME_COUNT)?,
@@ -299,6 +310,15 @@ impl Random {
         self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         (self.seed >> 16) as f32 / 65535.0
     }
+}
+
+/// `animation_choose_random_permutation_internal` affecting the game's state
+/// (the global seed's).
+pub fn animation_choose_random_permutation(graph: &AnimationGraph, seed: &mut u32, animation_index: i16) -> i16 {
+    let mut random = Random { seed: *seed };
+    let result = choose_random_permutation(graph, &mut random, animation_index);
+    *seed = random.seed;
+    result
 }
 
 /// `animation_choose_random_permutation_internal`: one of an animation's

@@ -180,6 +180,7 @@ symbols in this file:
 #include "physics/collision_usage.h"
 #include "props.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 
 /* ---------- constants */
@@ -1966,24 +1967,82 @@ update_facing:
 	return;
 }
 
+/* port: what the look's effect on movement asks of the rest of the game,
+shared by the game's and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_look_movement_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	struct actor_datum *actor = actor_get(call->actor);
+
+	switch (call->kind)
+	{
+		case _actor_look_movement_call_has_path:
+			call->result = actor_path_has_path(call->actor) ? 1 : 0;
+			break;
+
+		case _actor_look_movement_call_decode_direction:
+			call->result = actor_look_decode_direction(
+				call->actor,
+				&actor->orders.look.primary_direction,
+				&actor->control.moving_forced_aim_direction) ? 1 : 0;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_look_movement_call_simple(
+	long actor_index,
+	long kind)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	actor_look_movement_call(&call);
+
+	return call.result;
+}
+
+static void actor_look_affect_movement_game(
+	long actor_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
 void actor_look_affect_movement(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_look_movement, actor_index, &checking))
+		return;
+	actor_look_affect_movement_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_look_movement, 0);
+
+	return;
+}
+
+/* the game's, what it asks through actor_look_movement_call */
+static void actor_look_affect_movement_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
 	struct direction_specification *movement_direction = &actor->orders.look.primary_direction;
 
 	if (movement_direction->type == _direction_specification_movement &&
-		!actor_path_has_path(actor_index))
+		!actor_look_movement_call_simple(actor_index, _actor_look_movement_call_has_path))
 	{
 		actor->orders.look.primary_priority = _primary_priority_none;
 	}
 
 	if (actor->orders.look.primary_priority >= _primary_priority_facing &&
 		movement_direction->type != _direction_specification_movement &&
-		actor_look_decode_direction(
-			actor_index,
-			movement_direction,
-			&actor->control.moving_forced_aim_direction))
+		actor_look_movement_call_simple(actor_index, _actor_look_movement_call_decode_direction))
 	{
 		actor->control.moving_forced_by_aiming = TRUE;
 	}

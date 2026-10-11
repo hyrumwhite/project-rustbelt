@@ -36,6 +36,7 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -198,7 +199,71 @@ void action_converse_replace_prop(
 	return;
 }
 
+/* port: what an actor's conversation asks of the rest of the game, shared
+by the game's and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_conversation_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _actor_conversation_call_active_prop:
+			call->result = prop_get_active_by_unit_index(call->actor, call->a);
+			break;
+
+		case _actor_conversation_call_head_position:
+			unit_get_head_position(call->a, (real_point3d *)call->output);
+			break;
+
+		case _actor_conversation_call_look:
+		{
+			/* port: the direction starts from zeros (the game's left the
+			union's rest of a prop direction as the stack's leftovers, and
+			actor_look_secondary copies all of it into the actor) */
+			struct direction_specification direction;
+
+			memset(&direction, 0, sizeof(direction));
+			direction.type = (short)call->a;
+			if (direction.type == _direction_specification_prop)
+				direction.prop_index = call->b;
+			else
+				memcpy(&direction.point, call->input, sizeof(direction.point));
+			actor_look_secondary(
+				call->actor,
+				_secondary_look_communicating_prop,
+				_secondary_look_priority_turn_and_aim,
+				&direction);
+			break;
+		}
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static void actor_conversation_control_game(
+	long actor_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
 void actor_conversation_control(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_conversation, actor_index, &checking))
+		return;
+	actor_conversation_control_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_conversation, 0);
+
+	return;
+}
+
+/* the game's, what it asks through actor_conversation_call */
+static void actor_conversation_control_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -206,29 +271,41 @@ void actor_conversation_control(
 	if (actor->external_orders.conversation_index != NONE &&
 		actor->external_orders.conversation_attention_unit_index != NONE)
 	{
-		struct direction_specification direction;
-		long prop_index = prop_get_active_by_unit_index(
-			actor_index,
-			actor->external_orders.conversation_attention_unit_index);
+		struct halo_sim_ai_call call;
 
-		if (prop_index != NONE)
+		memset(&call, 0, sizeof(call));
+		call.kind = _actor_conversation_call_active_prop;
+		call.actor = actor_index;
+		call.a = actor->external_orders.conversation_attention_unit_index;
+		actor_conversation_call(&call);
+		if (call.result != NONE)
 		{
-			direction.type = _direction_specification_prop;
-			direction.prop_index = prop_index;
+			long prop_index = call.result;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _actor_conversation_call_look;
+			call.actor = actor_index;
+			call.a = _direction_specification_prop;
+			call.b = prop_index;
 		}
 		else
 		{
-			direction.type = _direction_specification_point;
-			unit_get_head_position(
-				actor->external_orders.conversation_attention_unit_index,
-				&direction.point);
-		}
+			real_point3d head_position;
 
-		actor_look_secondary(
-			actor_index,
-			_secondary_look_communicating_prop,
-			_secondary_look_priority_turn_and_aim,
-			&direction);
+			memset(&call, 0, sizeof(call));
+			call.kind = _actor_conversation_call_head_position;
+			call.actor = actor_index;
+			call.a = actor->external_orders.conversation_attention_unit_index;
+			actor_conversation_call(&call);
+			memcpy(&head_position, call.output, sizeof(head_position));
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _actor_conversation_call_look;
+			call.actor = actor_index;
+			call.a = _direction_specification_point;
+			memcpy(call.input, &head_position, sizeof(head_position));
+		}
+		actor_conversation_call(&call);
 	}
 
 	return;

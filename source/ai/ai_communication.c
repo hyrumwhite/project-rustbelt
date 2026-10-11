@@ -571,6 +571,7 @@ symbols in this file:
 #include "tag_files/tag_files.h"
 #include "units/dialogue_definitions.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -3033,7 +3034,78 @@ void ai_conversation_stop(
 	return;
 }
 
+/* port: what an actor's idle vocalizations ask of the rest of the game,
+shared by the game's and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+static void actor_communication_idle_speech(
+	long actor_index,
+	boolean in_combat);
+
+void actor_communication_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _actor_communication_call_dialogue_triggers_enabled:
+			call->result = (byte)ai_globals->dialogue_triggers_enabled;
+			break;
+
+		case _actor_communication_call_in_combat:
+			call->result = (byte)actor_in_combat(call->actor);
+			break;
+
+		case _actor_communication_call_reset_idle_vocalization_timer:
+			actor_reset_idle_vocalization_timer(call->actor);
+			break;
+
+		case _actor_communication_call_idle_speech:
+			actor_communication_idle_speech(call->actor, (boolean)call->a);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_communication_call_simple(
+	long actor_index,
+	long kind,
+	long a)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	actor_communication_call(&call);
+
+	return call.result;
+}
+
+static void actor_communication_update_game(
+	long actor_index);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
 void actor_communication_update(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_communication, actor_index, &checking))
+		return;
+	actor_communication_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_communication, 0);
+
+	return;
+}
+
+/* the game's, what it asks through actor_communication_call */
+static void actor_communication_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor;
@@ -3041,17 +3113,33 @@ void actor_communication_update(
 
 	actor = actor_get(actor_index);
 	if (actor->state.mode >= _actor_mode_alert &&
-		ai_globals->dialogue_triggers_enabled)
+		actor_communication_call_simple(actor_index, _actor_communication_call_dialogue_triggers_enabled, 0))
 	{
-		in_combat = actor_in_combat(actor_index);
+		in_combat = (boolean)actor_communication_call_simple(actor_index, _actor_communication_call_in_combat, 0);
 		if (actor->control.idle_vocalization_timer == 0 ||
 			actor->control.idle_vocalization_combat != in_combat)
 		{
-			actor_reset_idle_vocalization_timer(actor_index);
+			actor_communication_call_simple(actor_index, _actor_communication_call_reset_idle_vocalization_timer, 0);
 		}
 
 		if (actor->control.idle_vocalization_timer > 0 &&
 			--actor->control.idle_vocalization_timer == 0)
+		{
+			actor_communication_call_simple(actor_index, _actor_communication_call_idle_speech, in_combat);
+		}
+	}
+
+	return;
+}
+
+/* the idle speech (the game's, from its communication update) */
+static void actor_communication_idle_speech(
+	long actor_index,
+	boolean in_combat)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	{
 		{
 			long sound_definition_index = NONE;
 			long vocalization_type = in_combat != FALSE;

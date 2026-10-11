@@ -51,6 +51,9 @@ enum
 	_halo_sim_actor_upkeep,
 	_halo_sim_actor_input,
 	_halo_sim_actor_general,
+	_halo_sim_actor_look_movement,
+	_halo_sim_actor_communication,
+	_halo_sim_actor_conversation,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -851,6 +854,9 @@ enum
 	_halo_sim_ai_step_clear_output,
 	_halo_sim_ai_step_input,
 	_halo_sim_ai_step_general,
+	_halo_sim_ai_step_look_movement,
+	_halo_sim_ai_step_communication,
+	_halo_sim_ai_step_conversation,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
@@ -942,6 +948,31 @@ enum
 	_actor_general_call_action_class,
 	_actor_general_call_has_path,
 	_actor_general_call_encounter_follows_players,
+};
+
+/* the look's effect on movement's calls (actor_looking.c's
+actor_look_movement_call), the idle vocalizations' (ai_communication.c's
+actor_communication_call) and the conversation's (action_converse.c's
+actor_conversation_call); crates/halo_map's actor_attention */
+enum
+{
+	_actor_look_movement_call_has_path = 1,
+	_actor_look_movement_call_decode_direction,
+};
+
+enum
+{
+	_actor_communication_call_dialogue_triggers_enabled = 1,
+	_actor_communication_call_in_combat,
+	_actor_communication_call_reset_idle_vocalization_timer,
+	_actor_communication_call_idle_speech,
+};
+
+enum
+{
+	_actor_conversation_call_active_prop = 1,
+	_actor_conversation_call_head_position,
+	_actor_conversation_call_look,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1489,6 +1520,9 @@ void actor_situation_call(struct halo_sim_ai_call *call);
 void actor_upkeep_call(struct halo_sim_ai_call *call);
 void actor_input_call(struct halo_sim_ai_call *call);
 void actor_general_call(struct halo_sim_ai_call *call);
+void actor_look_movement_call(struct halo_sim_ai_call *call);
+void actor_communication_call(struct halo_sim_ai_call *call);
+void actor_conversation_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

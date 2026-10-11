@@ -17,6 +17,8 @@ props and its definition (ai/actors.h, props.h, actor_definitions.h).
 #include "items/projectiles.h"
 #include "ai/path.h"
 #include "ai/ai_debug.h"
+#include "ai/ai_scenario_definitions.h"
+#include "scenario/scenario_definitions.h"
 #include "items/weapon_definitions.h"
 #include "units/vehicle_datum.h"
 
@@ -121,6 +123,26 @@ LAYOUT_MEMBER(actor_datum, input_recent_shield_damage, input.recent_shield_damag
 LAYOUT_MEMBER(actor_datum, danger_zone_danger_type, danger_zone.danger_type)
 LAYOUT_MEMBER(actor_datum, danger_zone_object_index, danger_zone.object_index)
 LAYOUT_SIZE(actor_input_data)
+LAYOUT_MEMBER(actor_datum, state_alert_move_position_order, state.action_data.alert.move_position_order)
+LAYOUT_MEMBER(actor_datum, state_alert_wait_ticks, state.action_data.alert.wait_ticks)
+LAYOUT_MEMBER(actor_datum, state_alert_move_position_increasing, state.action_data.alert.move_position_increasing)
+LAYOUT_MEMBER(actor_datum, state_alert_target_move_position_index, state.action_data.alert.target_move_position_index)
+LAYOUT_MEMBER(actor_datum, state_alert_pending_move_position_index, state.action_data.alert.pending_move_position_index)
+LAYOUT_MEMBER(actor_datum, state_alert_must_play_animation, state.action_data.alert.must_play_animation)
+LAYOUT_MEMBER(actor_datum, state_alert_target_position_definition, state.action_data.alert.target_position_definition)
+LAYOUT_MEMBER(actor_datum, state_noncombat_sequence_id, state.noncombat_sequence_id)
+LAYOUT_SIZE(move_position_definition)
+LAYOUT_OFFSET(move_position_definition, position)
+LAYOUT_OFFSET(move_position_definition, time_lower_bound)
+LAYOUT_OFFSET(move_position_definition, time_upper_bound)
+LAYOUT_OFFSET(move_position_definition, animation_reference_index)
+LAYOUT_OFFSET(move_position_definition, sequence_id)
+LAYOUT_SIZE(squad_definition)
+LAYOUT_OFFSET(squad_definition, move_positions)
+LAYOUT_SIZE(encounter_definition)
+LAYOUT_OFFSET(encounter_definition, squads)
+LAYOUT_OFFSET(scenario, ai_encounters)
+LAYOUT_MEMBER(unit_datum, unit_animation_state, unit.animation.state)
 LAYOUT_MEMBER(actor_datum, orders_move_dive_into_cover, orders.move.dive_into_cover)
 LAYOUT_MEMBER(actor_datum, orders_move_emerge_from_cover, orders.move.emerge_from_cover)
 LAYOUT_MEMBER(actor_datum, external_orders_pursuit_is_coordinator, external_orders.pursuit_is_coordinator)
@@ -485,6 +507,9 @@ LAYOUT_VALUE(_actor_player)
 LAYOUT_VALUE(_actor_none)
 LAYOUT_VALUE(NUMBER_OF_ACTOR_TYPES)
 LAYOUT_VALUE(_charge_goal_melee)
+LAYOUT_VALUE(_actor_action_alert)
+LAYOUT_VALUE(_unit_state_user_animation)
+LAYOUT_VALUE(_actor_definition_crouch_when_noncombat_bit)
 LAYOUT_VALUE(_actor_action_sleep)
 LAYOUT_VALUE(_actor_action_wait)
 LAYOUT_VALUE(_actor_action_avoid)

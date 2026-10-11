@@ -26,6 +26,15 @@ pub fn run(action: i16, function: Function, context: &AiStepContext, host: &impl
             sleep_control(context, host);
             false
         }
+        (v::_ACTOR_ACTION_ALERT, Function::Perform) => alert_perform(context, host),
+        (v::_ACTOR_ACTION_ALERT, Function::Update) => {
+            alert_update(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_ALERT, Function::Control) => {
+            alert_control(context, host);
+            false
+        }
         (v::_ACTOR_ACTION_WAIT, Function::Perform) => wait_perform(context, host),
         (v::_ACTOR_ACTION_WAIT, Function::Update) => {
             wait_update(context, host);
@@ -380,6 +389,250 @@ fn fight_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
             }
         }
         call_full(context, host, fight_call::PERCEPTION_UNREACHABLE, target_prop_index, unreachable as i32, &[]);
+    }
+    false
+}
+
+/// action_alert.c's calls.
+pub mod alert_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_ALERT as i32) << 8;
+    /// `actor_path_at_destination(actor)`, the result.
+    pub const AT_DESTINATION: i32 = BASE | 1;
+    /// The target position's animation (its reference `a`) started on the unit.
+    pub const PLAY_ANIMATION: i32 = BASE | 2;
+    /// `actor_path_has_path(actor)`, the result.
+    pub const HAS_PATH: i32 = BASE | 3;
+    /// `actor_destination_tolerance(actor)`, in `output[0]`.
+    pub const TOLERANCE: i32 = BASE | 4;
+    /// The squad has more move positions than are used (`a`): its error, once.
+    pub const TOO_MANY_POSITIONS: i32 = BASE | 5;
+    /// `choose_random_array_element` of the squad's first `b` move positions
+    /// by weight, those of the mask `a` unavailable: the result.
+    pub const CHOOSE_RANDOM_POSITION: i32 = BASE | 6;
+    /// `real_random_range(input[0], input[1])`, in `output[0]`.
+    pub const RANDOM_RANGE: i32 = BASE | 7;
+    /// `actor_move_to_move_position(actor, a)`, the result.
+    pub const MOVE_TO_MOVE_POSITION: i32 = BASE | 8;
+}
+
+/// The local enum (action_alert.c's).
+const MOVE_POSITION_ORDER_NONE: i16 = 0;
+const MOVE_POSITION_ORDER_REPEAT: i16 = 1;
+const MOVE_POSITION_ORDER_LOOP: i16 = 2;
+const MOVE_POSITION_ORDER_LOOP_BACK_AND_FORTH: i16 = 3;
+const MOVE_POSITION_ORDER_LOOP_RANDOMLY: i16 = 4;
+const MOVE_POSITION_ORDER_RANDOM: i16 = 5;
+
+/// `distance_squared3d(a, b)`.
+fn distance_squared(m: &dyn AiMemory, a: u32, b: u32) -> f32 {
+    let (a, b) = (m.vector(a), m.vector(b));
+    let v = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+}
+
+/// `action_alert_control`.
+fn alert_control(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), 1);
+    if m.r32(context.definition + d::FLAGS as u32) & (1 << v::_ACTOR_DEFINITION_CROUCH_WHEN_NONCOMBAT_BIT) != 0 {
+        m.set_bool(at(a::ORDERS_MOVE_STATIONARY_CROUCH), true);
+        m.set_bool(at(a::ORDERS_MOVE_MOVING_CROUCH), true);
+    }
+}
+
+/// `action_alert_update`.
+fn alert_update(context: &AiStepContext, host: &impl AiHost) {
+    use crate::layout::move_position_definition as mp;
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let target_position = at(a::STATE_ALERT_TARGET_POSITION_DEFINITION);
+    if m.bool(at(a::META_DORMANT)) || m.i16(at(a::STATE_ALERT_TARGET_MOVE_POSITION_INDEX)) == NONE as i16 {
+        return;
+    }
+    let distance = distance_squared(m, at(a::INPUT_BODY_POSITION), target_position + mp::POSITION as u32);
+    if call_simple(context, host, alert_call::AT_DESTINATION, 0) != 0 || distance < 0.25 {
+        let wait_ticks = at(a::STATE_ALERT_WAIT_TICKS);
+        if m.i16(wait_ticks) > 0 {
+            m.set_i16(wait_ticks, m.i16(wait_ticks) - 1);
+        }
+        if m.bool(at(a::STATE_ALERT_MUST_PLAY_ANIMATION)) {
+            let reference = m.i16(target_position + mp::ANIMATION_REFERENCE_INDEX as u32);
+            if reference != NONE as i16 {
+                call_simple(context, host, alert_call::PLAY_ANIMATION, reference as i32);
+            }
+            m.set_bool(at(a::STATE_ALERT_MUST_PLAY_ANIMATION), false);
+        }
+    }
+}
+
+/// `action_alert_next_position`: the next move position, or NONE.
+fn alert_next_position(context: &AiStepContext, host: &impl AiHost, order: i16, current: i16) -> i16 {
+    use crate::ai_actor::{PropIterator, squad_definition, tag_block_count, tag_block_element};
+    use crate::layout::{move_position_definition as mp, squad_definition as squad};
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let encounter_index = m.i32(at(a::META_ENCOUNTER_INDEX));
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) || order == MOVE_POSITION_ORDER_NONE || encounter_index == NONE {
+        return NONE as i16;
+    }
+    if order == MOVE_POSITION_ORDER_REPEAT && current != NONE as i16 {
+        return current;
+    }
+    let squad = squad_definition(m, context, encounter_index, m.i16(at(a::META_SQUAD_INDEX)));
+    let block = squad + squad::MOVE_POSITIONS as u32;
+    let block_count = tag_block_count(m, block);
+    let count = block_count.clamp(0, 32) as i16;
+    if (count as i32) < block_count {
+        call_simple(context, host, alert_call::TOO_MANY_POSITIONS, count as i32);
+    }
+
+    let mut unavailable: u32 = 0;
+    let mut any_available = false;
+    for index in 0..count {
+        let definition = tag_block_element(m, block, index as i32, mp::SIZEOF);
+        let position = definition + mp::POSITION as u32;
+        let mut available = index != current;
+        if current != NONE as i16 && distance_squared(m, at(a::INPUT_BODY_POSITION), position) < 0.25 {
+            available = false;
+        }
+        let sequence_id = m.i8(definition + mp::SEQUENCE_ID as u32);
+        if sequence_id != 0 && sequence_id != m.i8(at(a::STATE_NONCOMBAT_SEQUENCE_ID)) {
+            available = false;
+        }
+        let mut iterator = PropIterator::new(m, context);
+        while let Some(prop) = iterator.next(m, context) {
+            let state = m.i16(prop + p::STATE as u32);
+            if state >= v::_PROP_STATE_BECOMING_UNACKNOWLEDGED as i16
+                && state <= v::_PROP_STATE_ACKNOWLEDGED as i16
+                && distance_squared(m, prop + p::BODY_POSITION as u32, position) < 0.25
+            {
+                available = false;
+                break;
+            }
+        }
+        if available {
+            any_available = true;
+        } else {
+            unavailable |= 1 << index;
+        }
+    }
+    if !any_available {
+        return NONE as i16;
+    }
+    if order == MOVE_POSITION_ORDER_RANDOM {
+        return call_full(context, host, alert_call::CHOOSE_RANDOM_POSITION, unavailable as i32, count as i32, &[]).result
+            as i16;
+    }
+
+    let increasing_address = at(a::STATE_ALERT_MOVE_POSITION_INCREASING);
+    let mut next = if current < 0 || current >= count { 0 } else { current };
+    loop {
+        let increasing = match order {
+            MOVE_POSITION_ORDER_LOOP => true,
+            MOVE_POSITION_ORDER_LOOP_BACK_AND_FORTH => {
+                if next == 0 {
+                    true
+                } else if next == count - 1 {
+                    false
+                } else {
+                    m.bool(increasing_address)
+                }
+            }
+            MOVE_POSITION_ORDER_LOOP_RANDOMLY => context.game_time & 1 != 0,
+            _ => true,
+        };
+        m.set_bool(increasing_address, increasing);
+        if increasing {
+            next += 1;
+            if next >= count {
+                next = 0;
+            }
+        } else {
+            next -= 1;
+            if next < 0 {
+                next = count - 1;
+            }
+        }
+        if unavailable & (1 << next) == 0 {
+            break;
+        }
+    }
+    next
+}
+
+/// `action_alert_perform`.
+fn alert_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    use crate::ai_actor::{object_get, squad_definition, tag_block_count, tag_block_element};
+    use crate::layout::{move_position_definition as mp, squad_definition as squad, unit_datum as u};
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let order = m.i16(at(a::STATE_ALERT_MOVE_POSITION_ORDER));
+    let target = at(a::STATE_ALERT_TARGET_MOVE_POSITION_INDEX);
+    let pending = at(a::STATE_ALERT_PENDING_MOVE_POSITION_INDEX);
+    let wait_ticks = at(a::STATE_ALERT_WAIT_TICKS);
+    let must_play = at(a::STATE_ALERT_MUST_PLAY_ANIMATION);
+    let target_position = at(a::STATE_ALERT_TARGET_POSITION_DEFINITION);
+
+    if order != MOVE_POSITION_ORDER_NONE && m.i16(pending) == NONE as i16 {
+        let mut reached = true;
+        if m.i16(target) != NONE as i16 && call_simple(context, host, alert_call::HAS_PATH, 0) != 0 {
+            let distance = distance_squared(m, at(a::INPUT_BODY_POSITION), target_position + mp::POSITION as u32);
+            let mut tolerance = call_full(context, host, alert_call::TOLERANCE, 0, 0, &[]).output[0];
+            tolerance = if tolerance > 0.5 { tolerance } else { 0.5 };
+            if distance > tolerance * tolerance {
+                reached = false;
+            }
+        }
+        if reached {
+            let unit = object_get(m, context, m.i32(at(a::META_UNIT_INDEX))).unwrap_or(0);
+            if m.i16(wait_ticks) > 0
+                || m.bool(must_play)
+                || m.i8(unit + u::UNIT_ANIMATION_STATE as u32) as i32 == v::_UNIT_STATE_USER_ANIMATION as i32
+            {
+                reached = false;
+            }
+        }
+        if reached {
+            let next = alert_next_position(context, host, order, m.i16(target));
+            m.set_i16(pending, next);
+        }
+    }
+
+    if m.bool(at(a::META_TIMESLICE)) && !m.bool(at(a::META_DORMANT)) && m.i16(pending) != NONE as i16 {
+        let mut moved = false;
+        let encounter_index = m.i32(at(a::META_ENCOUNTER_INDEX));
+        if encounter_index != NONE {
+            let squad = squad_definition(m, context, encounter_index, m.i16(at(a::META_SQUAD_INDEX)));
+            let block = squad + squad::MOVE_POSITIONS as u32;
+            let pending_index = m.i16(pending);
+            if pending_index >= 0 && (pending_index as i32) < tag_block_count(m, block) {
+                let position = tag_block_element(m, block, pending_index as i32, mp::SIZEOF);
+                let wait_time = call_full(
+                    context,
+                    host,
+                    alert_call::RANDOM_RANGE,
+                    0,
+                    0,
+                    &[m.f32(position + mp::TIME_LOWER_BOUND as u32), m.f32(position + mp::TIME_UPPER_BOUND as u32)],
+                )
+                .output[0];
+                m.set_i16(target, pending_index);
+                m.set_i16(pending, NONE as i16);
+                for offset in 0..mp::SIZEOF as u32 {
+                    m.w8(target_position + offset, m.r8(position + offset));
+                }
+                m.set_i16(wait_ticks, c_short(wait_time * 30.0));
+                m.set_bool(must_play, true);
+                moved = call_simple(context, host, alert_call::MOVE_TO_MOVE_POSITION, pending_index as i32) != 0;
+            }
+        }
+        if !moved {
+            m.set_i16(target, m.i16(pending));
+            m.set_i16(pending, NONE as i16);
+            m.set_i16(wait_ticks, 0);
+            m.set_bool(must_play, false);
+        }
     }
     false
 }

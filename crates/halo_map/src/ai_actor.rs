@@ -104,6 +104,8 @@ pub struct AiStepContext {
     pub debug_info: u32,
     /// Its variant's definition (`actor_variant_definition_get`).
     pub variant_definition: u32,
+    /// The scenario (`global_scenario_get`).
+    pub scenario: u32,
 }
 
 /// `datum_get`: the datum's address (None for one unused or changed).
@@ -126,6 +128,28 @@ pub fn datum_get(m: &dyn AiMemory, data: u32, index: i32) -> Option<u32> {
 pub fn object_get(m: &dyn AiMemory, context: &AiStepContext, object_index: i32) -> Option<u32> {
     datum_get(m, context.object_header_data, object_index)
         .map(|header| m.r32(header + crate::layout::object_header_datum::DATUM as u32))
+}
+
+/// `TAG_BLOCK_GET_ELEMENT`: the element's address.
+pub fn tag_block_element(m: &dyn AiMemory, block: u32, index: i32, size: usize) -> u32 {
+    m.r32(block + crate::layout::tag_block::ADDRESS as u32).wrapping_add((index as u32).wrapping_mul(size as u32))
+}
+
+/// A tag block's count.
+pub fn tag_block_count(m: &dyn AiMemory, block: u32) -> i32 {
+    m.i32(block + crate::layout::tag_block::COUNT as u32)
+}
+
+/// The definition of an encounter's squad (the scenario's).
+pub fn squad_definition(m: &dyn AiMemory, context: &AiStepContext, encounter_index: i32, squad_index: i16) -> u32 {
+    use crate::layout::{encounter_definition, scenario, squad_definition};
+    let encounter = tag_block_element(
+        m,
+        context.scenario + scenario::AI_ENCOUNTERS as u32,
+        encounter_index & 0xFFFF,
+        encounter_definition::SIZEOF,
+    );
+    tag_block_element(m, encounter + encounter_definition::SQUADS as u32, squad_index as i32, squad_definition::SIZEOF)
 }
 
 /// `prop_get`.

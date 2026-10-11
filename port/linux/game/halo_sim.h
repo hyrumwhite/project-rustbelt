@@ -1244,6 +1244,22 @@ enum
 
 enum
 {
+	_action_flee_call_run_blindly = (4 << 8) | 1,
+	_action_flee_call_move_halt,
+	_action_flee_call_move_to_firing_position,
+	_action_flee_call_discard_firing_position,
+	_action_flee_call_at_destination,
+	_action_flee_call_tolerance,
+	_action_flee_call_situation_status,
+	_action_flee_call_position_exposed,
+	_action_flee_call_find_flee_position,
+	_action_flee_call_unit_is_speaking,
+	_action_flee_call_scream,
+	_action_flee_call_shout,
+};
+
+enum
+{
 	_action_fight_call_discard_firing_position = (3 << 8) | 1,
 	_action_fight_call_firing_variant,
 	_action_fight_call_find_pathfinding_location,
@@ -1820,6 +1836,7 @@ void action_alert_call(struct halo_sim_ai_call *call);
 void action_search_call(struct halo_sim_ai_call *call);
 void action_uncover_call(struct halo_sim_ai_call *call);
 void action_guard_call(struct halo_sim_ai_call *call);
+void action_flee_call(struct halo_sim_ai_call *call);
 void action_avoid_call(struct halo_sim_ai_call *call);
 void action_fight_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);

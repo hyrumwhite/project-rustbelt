@@ -56,6 +56,7 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -333,6 +334,117 @@ void action_flee_replace_prop(
 	return;
 }
 
+/* port: what the flee action asks of the rest of the game, shared by the
+game's and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded */
+void action_flee_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	struct flee_state_data *state_data = &actor->state.action_data.flee;
+
+	switch (call->kind)
+	{
+		case _action_flee_call_run_blindly:
+			unit_start_running_blindly(actor->meta.unit_index);
+			break;
+
+		case _action_flee_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_flee_call_move_to_firing_position:
+			call->result = actor_move_to_firing_position(actor_index, (short)call->a, NULL) ? 1 : 0;
+			break;
+
+		case _action_flee_call_discard_firing_position:
+			actor_discard_firing_position(actor_index, (short)call->a, FALSE);
+			break;
+
+		case _action_flee_call_at_destination:
+			call->result = actor_path_at_destination(actor_index) ? 1 : 0;
+			break;
+
+		case _action_flee_call_tolerance:
+			call->output[0] = actor_destination_tolerance(actor_index);
+			break;
+
+		case _action_flee_call_situation_status:
+			actor_situation_update_target_status(actor_index);
+			actor_situation_combat_status_update(actor_index);
+			break;
+
+		case _action_flee_call_position_exposed:
+			call->result = action_flee_current_position_exposed(actor_index, state_data) ? 1 : 0;
+			break;
+
+		case _action_flee_call_find_flee_position:
+			action_flee_find_flee_position(actor_index, TRUE, state_data);
+			break;
+
+		case _action_flee_call_unit_is_speaking:
+			call->result = unit_is_speaking(actor->meta.unit_index) ? 1 : 0;
+			break;
+
+		case _action_flee_call_scream:
+			unit_scream(actor->meta.unit_index,
+				call->a ? _unit_scream_grenade_attached_to_us : _unit_scream_burning_to_death);
+			break;
+
+		case _action_flee_call_shout:
+			if (!call->a)
+			{
+				ai_communication_event(
+					state_data->panic_type == _actor_panic_friend_leader_type_killed ?
+						_ai_communication_flee_leader_died : _ai_communication_flee,
+					actor->meta.unit_index,
+					call->b,
+					NONE,
+					NONE,
+					_ai_information_flee,
+					NULL);
+			}
+			else
+			{
+				ai_communication_event(
+					_ai_communication_flee_idle,
+					actor->meta.unit_index,
+					call->b,
+					NONE,
+					NONE,
+					NONE,
+					NULL);
+			}
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_flee_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	action_flee_call(&call);
+	if (output)
+		*output = call.output[0];
+
+	return call.result;
+}
+
 boolean action_flee_blind_panic(
 	short panic_type)
 {
@@ -435,7 +547,7 @@ void action_flee_update(
 			actor->meta.unit_index != NONE &&
 			action_flee_blind_panic(state_data->panic_type))
 		{
-			unit_start_running_blindly(actor->meta.unit_index);
+			action_flee_call_simple(actor_index, _action_flee_call_run_blindly, 0, 0, NULL);
 		}
 	}
 
@@ -487,11 +599,12 @@ void action_flee_control(
 
 	if (state_data->flee_firing_position_index == NONE)
 	{
-		actor_move_halt(actor_index);
+		action_flee_call_simple(actor_index, _action_flee_call_move_halt, 0, 0, NULL);
 	}
 	else if (actor->meta.timeslice)
 	{
-		if (actor_move_to_firing_position(actor_index, state_data->flee_firing_position_index, NULL))
+		if (action_flee_call_simple(actor_index, _action_flee_call_move_to_firing_position,
+			state_data->flee_firing_position_index, 0, NULL))
 		{
 			actor->firing_positions.current_position_index = state_data->flee_firing_position_index;
 			actor->firing_positions.current_position_found_outside_range = state_data->flee_firing_position_found_randomly;
@@ -500,8 +613,9 @@ void action_flee_control(
 		{
 			if (actor->firing_positions.current_position_index != NONE)
 			{
-				actor_discard_firing_position(actor_index, actor->firing_positions.current_position_index, FALSE);
-				actor_move_halt(actor_index);
+				action_flee_call_simple(actor_index, _action_flee_call_discard_firing_position,
+					actor->firing_positions.current_position_index, 0, NULL);
+				action_flee_call_simple(actor_index, _action_flee_call_move_halt, 0, 0, NULL);
 				actor->firing_positions.current_position_index = NONE;
 			}
 			state_data->flee_firing_position_index = NONE;
@@ -540,7 +654,7 @@ static boolean action_flee_at_flee_position(
 		&encounter->firing_positions,
 		actor->firing_positions.current_position_index,
 		struct firing_position_definition);
-	if (actor_path_at_destination(actor_index) &&
+	if (action_flee_call_simple(actor_index, _action_flee_call_at_destination, 0, 0, NULL) &&
 		actor->control.path.destination_orders.destination_type == _destination_firing_position &&
 		actor->control.path.destination_orders.firing_position_index ==
 			actor->firing_positions.current_position_index)
@@ -548,7 +662,7 @@ static boolean action_flee_at_flee_position(
 		return TRUE;
 	}
 
-	tolerance = actor_destination_tolerance(actor_index);
+	action_flee_call_simple(actor_index, _action_flee_call_tolerance, 0, 0, &tolerance);
 	if (!(distance_squared3d(
 			&actor->input.position.body_position,
 			&firing_position->position) < tolerance*tolerance))
@@ -627,8 +741,7 @@ boolean action_flee_perform(
 						prop->perception = MAX(prop->audibility, prop->ineffability);
 						prop->currently_damaging_me = FALSE;
 						prop->line_of_sight = _ai_line_of_sight_from_cover;
-						actor_situation_update_target_status(actor_index);
-						actor_situation_combat_status_update(actor_index);
+						action_flee_call_simple(actor_index, _action_flee_call_situation_status, 0, 0, NULL);
 					}
 				}
 			}
@@ -657,7 +770,7 @@ boolean action_flee_perform(
 		{
 			if (state_data->flee_firing_position_index != NONE &&
 				state_data->forced_flee_ticks == 0 &&
-				action_flee_current_position_exposed(actor_index, state_data))
+				action_flee_call_simple(actor_index, _action_flee_call_position_exposed, 0, 0, NULL))
 			{
 				state_data->flee_firing_position_index = NONE;
 				state_data->find_new_flee_position = TRUE;
@@ -671,7 +784,7 @@ boolean action_flee_perform(
 			}
 			else if (state_data->find_new_flee_position)
 			{
-				action_flee_find_flee_position(actor_index, TRUE, state_data);
+				action_flee_call_simple(actor_index, _action_flee_call_find_flee_position, 0, 0, NULL);
 				if (state_data->flee_firing_position_index == NONE)
 				{
 					state_data->unable_to_flee = TRUE;
@@ -685,7 +798,7 @@ boolean action_flee_perform(
 	{
 		long unit_index = actor->meta.unit_index;
 
-		if (unit_index != NONE && !unit_is_speaking(unit_index))
+		if (unit_index != NONE && !action_flee_call_simple(actor_index, _action_flee_call_unit_is_speaking, 0, 0, NULL))
 		{
 			state_data->communicated_flee = FALSE;
 		}
@@ -704,12 +817,12 @@ boolean action_flee_perform(
 			if (state_data->panic_type == _actor_panic_burning_to_death ||
 				state_data->panic_type == _actor_panic_melee_attached_to_us)
 			{
-				unit_scream(actor->meta.unit_index, _unit_scream_burning_to_death);
+				action_flee_call_simple(actor_index, _action_flee_call_scream, 0, 0, NULL);
 			}
 			else if (state_data->panic_type == _actor_panic_grenade_attached_to_us ||
 				state_data->panic_type == _actor_panic_delayed_projectile_attached_to_us)
 			{
-				unit_scream(actor->meta.unit_index, _unit_scream_grenade_attached_to_us);
+				action_flee_call_simple(actor_index, _action_flee_call_scream, 1, 0, NULL);
 			}
 			else
 			{
@@ -722,27 +835,12 @@ boolean action_flee_perform(
 
 				if (!state_data->communicated_flee)
 				{
-					ai_communication_event(
-						state_data->panic_type == _actor_panic_friend_leader_type_killed ?
-							_ai_communication_flee_leader_died : _ai_communication_flee,
-						actor->meta.unit_index,
-						cause_unit_index,
-						NONE,
-						NONE,
-						_ai_information_flee,
-						NULL);
+					action_flee_call_simple(actor_index, _action_flee_call_shout, 0, cause_unit_index, NULL);
 					state_data->communicated_flee = TRUE;
 				}
 				else
 				{
-					ai_communication_event(
-						_ai_communication_flee_idle,
-						actor->meta.unit_index,
-						cause_unit_index,
-						NONE,
-						NONE,
-						NONE,
-						NULL);
+					action_flee_call_simple(actor_index, _action_flee_call_shout, 1, cause_unit_index, NULL);
 				}
 			}
 			state_data->last_communication_time = now;

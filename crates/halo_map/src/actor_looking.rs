@@ -103,7 +103,7 @@ fn call_simple(context: &AiStepContext, host: &impl AiHost, kind: i32, a: i32, b
 
 fn decode(context: &AiStepContext, host: &impl AiHost, which: i32) -> Option<Vector> {
     let call = call_full(context, host, call::DECODE, which, 0, [0.0; 3]);
-    (call.result != 0).then_some(call.output)
+    (call.result != 0).then_some(call.vector())
 }
 
 /// `normalize2d`: the magnitude (0 below epsilon, the vector left).

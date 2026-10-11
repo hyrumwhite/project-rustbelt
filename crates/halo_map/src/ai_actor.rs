@@ -66,8 +66,15 @@ pub struct AiCall {
     pub a: i32,
     pub b: i32,
     pub input: [f32; 9],
-    pub output: [f32; 3],
+    pub output: [f32; 6],
     pub result: i32,
+}
+
+impl AiCall {
+    /// The first three of `output`: a vector.
+    pub fn vector(&self) -> [f32; 3] {
+        [self.output[0], self.output[1], self.output[2]]
+    }
 }
 
 /// The game's side of a step.

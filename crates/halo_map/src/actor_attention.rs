@@ -112,7 +112,7 @@ pub fn actor_conversation_control(context: &AiStepContext, host: &impl AiHost) {
             (v::_DIRECTION_SPECIFICATION_PROP, [0.0; 3])
         } else {
             let head =
-                call_full(context, host, conversation_call::HEAD_POSITION, attention_unit_index, 0, [0.0; 3]).output;
+                call_full(context, host, conversation_call::HEAD_POSITION, attention_unit_index, 0, [0.0; 3]).vector();
             (v::_DIRECTION_SPECIFICATION_POINT, head)
         };
         let prop = if prop_index != NONE { prop_index } else { 0 };

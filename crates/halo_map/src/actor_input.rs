@@ -270,7 +270,7 @@ pub fn actor_input_update(context: &AiStepContext, host: &impl AiHost) {
     } else {
         unit_index
     };
-    set_vector(m, facing_address, call_full(context, host, call::FACING, facing_unit, 0).output);
+    set_vector(m, facing_address, call_full(context, host, call::FACING, facing_unit, 0).vector());
     if !m.bool(flying_address) {
         let facing = m.vector(facing_address);
         let mut planar = [facing[0], facing[1]];
@@ -294,7 +294,7 @@ pub fn actor_input_update(context: &AiStepContext, host: &impl AiHost) {
         let gunner_vehicle = object_get(m, context, gunner_vehicle_index).unwrap_or(0);
         let flags = call_simple(context, host, call::VEHICLE_FLAGS, gunner_vehicle_index) as u32;
         if test_flag(flags, VEHICLE_AI_WEAPON_CANNOT_ROTATE_BIT) {
-            set_vector(m, aiming_address, call_full(context, host, call::FACING, unit_index, 0).output);
+            set_vector(m, aiming_address, call_full(context, host, call::FACING, unit_index, 0).vector());
         } else {
             copy_vector(m, aiming_address, gunner_vehicle + u::UNIT_AIMING_VECTOR as u32);
         }

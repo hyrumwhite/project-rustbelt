@@ -209,7 +209,7 @@ pub fn actor_emotion_update(context: &AiStepContext, host: &impl AiHost) {
                 {
                     let attacking = call(call::FRIEND_ATTACKING, iterator.index, 0);
                     if attacking.result != 0 {
-                        let friend_attack_vector = attacking.output;
+                        let friend_attack_vector = attacking.vector();
                         let prop_position = m.vector(prop + p::BODY_POSITION as u32);
                         let body_position = m.vector(at(a::INPUT_BODY_POSITION));
                         // (the port's: zeros where the game's was the stack's

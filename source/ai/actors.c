@@ -1613,7 +1613,217 @@ void actor_input_sample_position(
 	return;
 }
 
+/* port: what an actor's input update asks of the rest of the game, shared by
+the game's update and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_input_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _actor_input_call_swarm_refresh:
+		{
+			struct swarm_datum *swarm = swarm_get(actor->meta.swarm_cache_index);
+			short unit_index;
+
+			swarm->swarm_center = *global_origin3d;
+			for (unit_index = 0; unit_index < swarm->unit_count; unit_index++)
+			{
+				struct swarm_component_datum *component =
+					swarm_component_get(swarm->component_indices[unit_index]);
+
+				actor_swarm_component_refresh(
+					swarm->unit_indices[unit_index],
+					swarm->component_indices[unit_index]);
+				add_vectors3d(
+					(real_vector3d *)&component->position,
+					(real_vector3d *)&swarm->swarm_center,
+					(real_vector3d *)&swarm->swarm_center);
+			}
+
+			if (swarm->unit_count > 0)
+			{
+				scale_vector3d(
+					(real_vector3d *)&swarm->swarm_center,
+					1.f / (real)swarm->unit_count,
+					(real_vector3d *)&swarm->swarm_center);
+			}
+
+			break;
+		}
+
+		case _actor_input_call_sample_position:
+			actor_input_sample_position(actor_index, call->a, &actor->input.position);
+			break;
+
+		case _actor_input_call_underwater:
+		{
+			real_point3d center_of_mass;
+
+			unit_get_center_of_mass(call->a, &center_of_mass);
+			call->result = (byte)scenario_location_underwater(
+				&actor->input.position.body_location,
+				&center_of_mass,
+				NULL);
+			break;
+		}
+
+		case _actor_input_call_vehicle_flags:
+			call->result = (long)vehicle_specific_definition_get(
+				((struct unit_datum *)object_get(call->a))->definition_index)->flags;
+			break;
+
+		case _actor_input_call_gunner_bombardment:
+			call->result = actor_combat_get_firing_variant_definition(actor_index)->
+				ranged_combat.weapon_bombardment_range > 0.f;
+			break;
+
+		case _actor_input_call_keep_squad:
+		{
+			struct encounter_datum *encounter = encounter_get(actor->meta.encounter_index);
+
+			call->result = FALSE;
+			if (encounter->follow_target_type > 0)
+			{
+				struct squad_datum *actor_squad = encounter_get_squad(encounter, actor->meta.squad_index);
+				struct squad_datum *vehicle_squad = encounter_get_squad(encounter, (short)call->a);
+
+				if (actor_squad->automatic_migration_target &&
+					vehicle_squad->automatic_migration_target)
+				{
+					call->result = TRUE;
+				}
+			}
+			break;
+		}
+
+		case _actor_input_call_mark_prevehicle_encounter:
+			encounter_get(call->a)->is_prevehicle_encounter = TRUE;
+			break;
+
+		case _actor_input_call_change_encounter:
+			actor_change_encounter(actor_index, call->a, (short)call->b);
+			break;
+
+		case _actor_input_call_firing_position_type:
+			/* (the step asks only with an encounter) */
+			if (actor->meta.encounter_index != NONE)
+			{
+				struct actor_debug_info *actor_debug_info =
+					&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+				struct encounter_definition *encounter_definition =
+					TAG_BLOCK_GET_ELEMENT(
+						&global_scenario_get()->ai_encounters,
+						DATUM_INDEX_TO_ABSOLUTE_INDEX(
+							actor->meta.encounter_index),
+						struct encounter_definition);
+				boolean firing_position_type_mismatch = FALSE;
+
+				if (actor->state.flying &&
+					!TEST_FLAG(encounter_definition->flags, _encounter_3d_firing_positions_bit))
+				{
+					firing_position_type_mismatch = TRUE;
+				}
+				else if (!actor->state.flying &&
+					TEST_FLAG(encounter_definition->flags, _encounter_3d_firing_positions_bit))
+				{
+					firing_position_type_mismatch = TRUE;
+				}
+
+				if (firing_position_type_mismatch)
+				{
+					if (actor_debug_info->firing_position_type_mismatch_ticks < 150)
+					{
+						actor_debug_info->firing_position_type_mismatch_ticks++;
+						if (actor_debug_info->firing_position_type_mismatch_ticks == 150)
+						{
+							if (actor->state.flying)
+							{
+								error(
+									_error_silent,
+									"actor %s is flying but was placed in a non-3d-firing-position encounter (%s)",
+									tag_get_name(actor->meta.definition_index),
+									encounter_definition->name);
+							}
+							else
+							{
+								error(
+									_error_silent,
+									"actor %s is not flying but was placed in a 3d-firing-position encounter (%s)",
+									tag_get_name(actor->meta.definition_index),
+									encounter_definition->name);
+							}
+						}
+					}
+				}
+				else
+				{
+					actor_debug_info->firing_position_type_mismatch_ticks = 0;
+				}
+			}
+
+			break;
+
+		case _actor_input_call_team_is_enemy:
+			call->result = game_team_is_enemy((short)call->a, (short)call->b) ? 1 : 0;
+			break;
+
+		case _actor_input_call_facing:
+			unit_get_facing_vector(call->a, (real_vector3d *)call->output);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_input_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real_vector3d *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	actor_input_call(&call);
+	if (output)
+		memcpy(output, call.output, sizeof(*output));
+
+	return call.result;
+}
+
+static void actor_input_update_game(
+	long actor_index);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 static void actor_input_update(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_input, actor_index, &checking))
+		return;
+	actor_input_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_input);
+
+	return;
+}
+
+/* the game's input update, what it asks of the rest of the game through
+actor_input_call */
+static void actor_input_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -1622,42 +1832,15 @@ static void actor_input_update(
 
 	if (actor->meta.swarm)
 	{
-		struct swarm_datum *swarm = swarm_get(actor->meta.swarm_cache_index);
-		short unit_index;
-
-		swarm->swarm_center = *global_origin3d;
-		for (unit_index = 0; unit_index < swarm->unit_count; unit_index++)
-		{
-			struct swarm_component_datum *component =
-				swarm_component_get(swarm->component_indices[unit_index]);
-
-			actor_swarm_component_refresh(
-				swarm->unit_indices[unit_index],
-				swarm->component_indices[unit_index]);
-			add_vectors3d(
-				(real_vector3d *)&component->position,
-				(real_vector3d *)&swarm->swarm_center,
-				(real_vector3d *)&swarm->swarm_center);
-		}
-
-		if (swarm->unit_count > 0)
-		{
-			scale_vector3d(
-				(real_vector3d *)&swarm->swarm_center,
-				1.f / (real)swarm->unit_count,
-				(real_vector3d *)&swarm->swarm_center);
-		}
-
+		actor_input_call_simple(actor_index, _actor_input_call_swarm_refresh, 0, 0, NULL);
 		csmemset(&actor->input.position, 0, sizeof(actor->input));
 		actor->input.vehicle_index = NONE;
 		actor->input.pathfinding_surface_index = NONE;
 
 		if (actor->meta.swarm_unit_index != NONE)
 		{
-			actor_input_sample_position(
-				actor_index,
-				actor->meta.swarm_unit_index,
-				&actor->input.position);
+			actor_input_call_simple(actor_index, _actor_input_call_sample_position,
+				actor->meta.swarm_unit_index, 0, NULL);
 		}
 	}
 	else
@@ -1667,25 +1850,19 @@ static void actor_input_update(
 		struct object_datum *parent_object = vehicle_index == NONE
 			? NULL
 			: object_get(vehicle_index);
-		real_point3d center_of_mass;
 
-		actor_input_sample_position(
-			actor_index,
-			actor->meta.unit_index,
-			&actor->input.position);
-		unit_get_center_of_mass(actor->meta.unit_index, &center_of_mass);
-		actor->input.underwater = scenario_location_underwater(
-			&actor->input.position.body_location,
-			&center_of_mass,
-			NULL);
+		actor_input_call_simple(actor_index, _actor_input_call_sample_position,
+			actor->meta.unit_index, 0, NULL);
+		actor->input.underwater = (boolean)actor_input_call_simple(actor_index,
+			_actor_input_call_underwater, actor->meta.unit_index, 0, NULL);
 		actor->state.flying =
 			TEST_FLAG(actor_definition->flags, _actor_definition_flying_bit);
 
 		if (parent_object && parent_object->object.type == _object_type_vehicle)
 		{
 			struct unit_datum *vehicle = (struct unit_datum *)parent_object;
-			struct vehicle_definition *vehicle_definition =
-				vehicle_specific_definition_get(vehicle->definition_index);
+			unsigned long vehicle_flags = (unsigned long)actor_input_call_simple(actor_index,
+				_actor_input_call_vehicle_flags, vehicle_index, 0, NULL);
 
 			actor->input.vehicle_index = vehicle_index;
 			actor->input.vehicle_gunner = FALSE;
@@ -1696,20 +1873,20 @@ static void actor_input_update(
 			{
 				actor->input.vehicle_driver_type =
 					_actor_vehicle_driver_unknown;
-				if (TEST_FLAG(vehicle_definition->flags, _vehicle_ai_driver_enable_bit))
+				if (TEST_FLAG(vehicle_flags, _vehicle_ai_driver_enable_bit))
 				{
-					if (TEST_FLAG(vehicle_definition->flags, _vehicle_ai_driver_flying_bit))
+					if (TEST_FLAG(vehicle_flags, _vehicle_ai_driver_flying_bit))
 					{
 						actor->input.vehicle_driver_type =
 							_actor_vehicle_driver_directional_flying;
 						actor->state.flying = TRUE;
 					}
 					else if (TEST_FLAG(
-						vehicle_definition->flags,
+						vehicle_flags,
 						_vehicle_ai_driver_nondirectional_bit))
 					{
 						actor->input.vehicle_driver_type =
-							TEST_FLAG(vehicle_definition->flags, _vehicle_ai_driver_hovering_bit)
+							TEST_FLAG(vehicle_flags, _vehicle_ai_driver_hovering_bit)
 								? _actor_vehicle_driver_hovering_ground
 								: _actor_vehicle_driver_nondirectional_ground;
 					}
@@ -1718,13 +1895,9 @@ static void actor_input_update(
 
 			if (vehicle->unit.gunner_object_index == actor->meta.unit_index)
 			{
-				struct actor_variant_definition *firing_variant_definition;
-
 				actor->input.vehicle_gunner = TRUE;
-				firing_variant_definition =
-					actor_combat_get_firing_variant_definition(actor_index);
-				actor->input.vehicle_gunner_bombardment =
-					firing_variant_definition->ranged_combat.weapon_bombardment_range > 0.f;
+				actor->input.vehicle_gunner_bombardment = (boolean)actor_input_call_simple(actor_index,
+					_actor_input_call_gunner_bombardment, 0, 0, NULL);
 			}
 
 			actor->input.vehicle_passenger =
@@ -1745,27 +1918,8 @@ static void actor_input_update(
 					if (vehicle->unit.fake_squad_index != NONE &&
 						actor->meta.squad_index != vehicle->unit.fake_squad_index)
 					{
-						struct encounter_datum *encounter =
-							encounter_get(actor->meta.encounter_index);
-
-						migrate = TRUE;
-						if (encounter->follow_target_type > 0)
-						{
-							struct squad_datum *actor_squad =
-								encounter_get_squad(
-									encounter,
-									actor->meta.squad_index);
-							struct squad_datum *vehicle_squad =
-								encounter_get_squad(
-								encounter,
-								vehicle->unit.fake_squad_index);
-
-							if (actor_squad->automatic_migration_target &&
-								vehicle_squad->automatic_migration_target)
-							{
-								migrate = FALSE;
-							}
-						}
+						migrate = !actor_input_call_simple(actor_index, _actor_input_call_keep_squad,
+							vehicle->unit.fake_squad_index, 0, NULL);
 					}
 				}
 
@@ -1781,17 +1935,13 @@ static void actor_input_update(
 
 						if (actor->meta.encounter_index != NONE)
 						{
-							struct encounter_datum *prevehicle_encounter =
-								encounter_get(actor->meta.encounter_index);
-
-							prevehicle_encounter->is_prevehicle_encounter = TRUE;
+							actor_input_call_simple(actor_index, _actor_input_call_mark_prevehicle_encounter,
+								actor->meta.encounter_index, 0, NULL);
 						}
 					}
 
-					actor_change_encounter(
-						actor_index,
-						vehicle->unit.fake_encounter_index,
-						vehicle->unit.fake_squad_index);
+					actor_input_call_simple(actor_index, _actor_input_call_change_encounter,
+						vehicle->unit.fake_encounter_index, vehicle->unit.fake_squad_index, NULL);
 				}
 			}
 		}
@@ -1804,67 +1954,15 @@ static void actor_input_update(
 
 			if (actor->meta.stored_prevehicle_encounter)
 			{
-				actor_change_encounter(
-					actor_index,
-					actor->meta.prevehicle_encounter_index,
-					actor->meta.prevehicle_squad_index);
+				actor_input_call_simple(actor_index, _actor_input_call_change_encounter,
+					actor->meta.prevehicle_encounter_index, actor->meta.prevehicle_squad_index, NULL);
 				actor->meta.stored_prevehicle_encounter = FALSE;
 			}
 		}
 
 		if (actor->meta.encounter_index != NONE)
 		{
-			struct actor_debug_info *actor_debug_info =
-				&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
-			struct encounter_definition *encounter_definition =
-				TAG_BLOCK_GET_ELEMENT(
-					&global_scenario_get()->ai_encounters,
-					DATUM_INDEX_TO_ABSOLUTE_INDEX(
-						actor->meta.encounter_index),
-					struct encounter_definition);
-			boolean firing_position_type_mismatch = FALSE;
-
-			if (actor->state.flying &&
-				!TEST_FLAG(encounter_definition->flags, _encounter_3d_firing_positions_bit))
-			{
-				firing_position_type_mismatch = TRUE;
-			}
-			else if (!actor->state.flying &&
-				TEST_FLAG(encounter_definition->flags, _encounter_3d_firing_positions_bit))
-			{
-				firing_position_type_mismatch = TRUE;
-			}
-
-			if (firing_position_type_mismatch)
-			{
-				if (actor_debug_info->firing_position_type_mismatch_ticks < 150)
-				{
-					actor_debug_info->firing_position_type_mismatch_ticks++;
-					if (actor_debug_info->firing_position_type_mismatch_ticks == 150)
-					{
-						if (actor->state.flying)
-						{
-							error(
-								_error_silent,
-								"actor %s is flying but was placed in a non-3d-firing-position encounter (%s)",
-								tag_get_name(actor->meta.definition_index),
-								encounter_definition->name);
-						}
-						else
-						{
-							error(
-								_error_silent,
-								"actor %s is not flying but was placed in a 3d-firing-position encounter (%s)",
-								tag_get_name(actor->meta.definition_index),
-								encounter_definition->name);
-						}
-					}
-				}
-			}
-			else
-			{
-				actor_debug_info->firing_position_type_mismatch_ticks = 0;
-			}
+			actor_input_call_simple(actor_index, _actor_input_call_firing_position_type, 0, 0, NULL);
 		}
 
 		actor->input.burning_to_death = unit->unit.flaming_death_delay > 0;
@@ -1879,9 +1977,12 @@ static void actor_input_update(
 				struct object_datum *threat = object_get(threat_index);
 
 				if (threat->object.type == _object_type_biped &&
-					game_team_is_enemy(
+					actor_input_call_simple(
+						actor_index,
+						_actor_input_call_team_is_enemy,
 						actor->meta.team_index,
-						threat->object.owner_team_index))
+						threat->object.owner_team_index,
+						NULL))
 				{
 					actor->input.melee_attacker_attached = TRUE;
 				}
@@ -1920,18 +2021,14 @@ static void actor_input_update(
 			actor->input.pathfinding_point = biped->biped.pathfinding_point;
 		}
 
-		if (actor->input.vehicle_driver_type > _actor_vehicle_driver_none)
-		{
-			unit_get_facing_vector(
-				actor->input.vehicle_index,
-				&actor->input.facing_vector);
-		}
-		else
-		{
-			unit_get_facing_vector(
-				actor->meta.unit_index,
-				&actor->input.facing_vector);
-		}
+		actor_input_call_simple(
+			actor_index,
+			_actor_input_call_facing,
+			actor->input.vehicle_driver_type > _actor_vehicle_driver_none
+				? actor->input.vehicle_index
+				: actor->meta.unit_index,
+			0,
+			&actor->input.facing_vector);
 		if (!actor->state.flying)
 		{
 			if (normalize2d((real_vector2d *)&actor->input.facing_vector) > 0.f)
@@ -1948,17 +2045,15 @@ static void actor_input_update(
 		{
 			struct unit_datum *gunner_vehicle =
 				vehicle_get(actor->input.vehicle_index);
-			struct vehicle_definition *gunner_vehicle_definition =
-				vehicle_specific_definition_get(
-					gunner_vehicle->definition_index);
+			unsigned long gunner_vehicle_flags = (unsigned long)actor_input_call_simple(actor_index,
+				_actor_input_call_vehicle_flags, actor->input.vehicle_index, 0, NULL);
 
 			if (TEST_FLAG(
-				gunner_vehicle_definition->flags,
+				gunner_vehicle_flags,
 				_vehicle_ai_weapon_cannot_rotate_bit))
 			{
-				unit_get_facing_vector(
-					actor->meta.unit_index,
-					&actor->input.aiming_vector);
+				actor_input_call_simple(actor_index, _actor_input_call_facing,
+					actor->meta.unit_index, 0, &actor->input.aiming_vector);
 			}
 			else
 			{
@@ -4329,6 +4424,7 @@ void actors_port_step_context(
 	context->prop_data = (unsigned long)prop_data;
 	context->game_time = game_time_get();
 	context->actor_data = (unsigned long)actor_data;
+	context->object_header_data = (unsigned long)object_header_data;
 }
 
 /* port: the actor's props' datums, for the AI step checks (halo_sim.c): their

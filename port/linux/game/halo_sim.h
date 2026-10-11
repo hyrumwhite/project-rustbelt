@@ -49,6 +49,7 @@ enum
 	_halo_sim_actor_emotions,
 	_halo_sim_actor_situation,
 	_halo_sim_actor_upkeep,
+	_halo_sim_actor_input,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -847,6 +848,7 @@ enum
 	_halo_sim_ai_step_timeslice,
 	_halo_sim_ai_step_clear_orders,
 	_halo_sim_ai_step_clear_output,
+	_halo_sim_ai_step_input,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
@@ -874,6 +876,7 @@ struct halo_sim_ai_step_context
 	unsigned long prop_data;
 	long game_time;
 	unsigned long actor_data;
+	unsigned long object_header_data;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -907,6 +910,23 @@ enum
 	_actor_upkeep_call_current_highest_service_timer,
 	_actor_upkeep_call_give_time,
 	_actor_upkeep_call_set_current_highest_service_timer,
+};
+
+/* the input update's calls (actors.c's actor_input_call; crates/halo_map's
+actor_input::call) */
+enum
+{
+	_actor_input_call_swarm_refresh = 1,
+	_actor_input_call_sample_position,
+	_actor_input_call_underwater,
+	_actor_input_call_vehicle_flags,
+	_actor_input_call_gunner_bombardment,
+	_actor_input_call_keep_squad,
+	_actor_input_call_mark_prevehicle_encounter,
+	_actor_input_call_change_encounter,
+	_actor_input_call_firing_position_type,
+	_actor_input_call_team_is_enemy,
+	_actor_input_call_facing,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1451,6 +1471,7 @@ void actors_port_step_context(long actor_index, struct halo_sim_ai_step_context 
 void actor_emotion_call(struct halo_sim_ai_call *call);
 void actor_situation_call(struct halo_sim_ai_call *call);
 void actor_upkeep_call(struct halo_sim_ai_call *call);
+void actor_input_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

@@ -46,6 +46,7 @@ enum
 	_halo_sim_game_tick,
 	_halo_sim_hs,
 	_halo_sim_ai_update,
+	_halo_sim_actor_emotions,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -835,6 +836,50 @@ struct halo_sim_ai_update_call
 	long result4;
 };
 
+/* the AI's steps of an actor the Rust port runs (crates/halo_sim's
+ai_steps), and their systems */
+enum
+{
+	_halo_sim_ai_step_emotion,
+	NUMBER_OF_HALO_SIM_AI_STEPS
+};
+
+#define HALO_SIM_ACTOR_DATUM_SIZE 0x724
+
+/* crates/halo_map's AiCall: what an actor's step asks of the game */
+struct halo_sim_ai_call
+{
+	long kind;
+	long actor;
+	long a;
+	long b;
+	float input[9];
+	float output[3];
+	long result;
+};
+
+/* crates/halo_map's AiStepContext */
+struct halo_sim_ai_step_context
+{
+	long actor_index;
+	unsigned long actor;
+	unsigned long definition;
+	unsigned long prop_data;
+	long game_time;
+};
+
+/* the emotion update's calls (actor_perception.c's actor_emotion_call;
+crates/halo_map's actor_emotions::call) */
+enum
+{
+	_actor_emotion_call_berserk_end = 1,
+	_actor_emotion_call_communication_event,
+	_actor_emotion_call_friend_attacking,
+	_actor_emotion_call_discard_firing_position,
+	_actor_emotion_call_flood_shamble,
+	_actor_emotion_call_unopposable_retreat,
+};
+
 /* the object update loop's calls (objects.c's objects_update_call;
 crates/halo_map's objects_update::call) */
 enum
@@ -1363,5 +1408,17 @@ void halo_sim_ai_update_note(struct halo_sim_ai_update_call const *call);
 void ai_update_call(struct halo_sim_ai_update_call *call);
 long ai_update_call_simple(long kind, long a);
 void actors_port_call(struct halo_sim_ai_update_call *call);
+
+/* an actor's step (_halo_sim_ai_step_*): TRUE when the Rust port ran it; in
+check mode `checking` is set, the step's call function records each call
+(halo_sim_ai_event_begin and _end), and halo_sim_ai_step_check puts the
+actor back as the step began, runs Rust's replay on it, compares, and leaves
+the game's */
+int halo_sim_ai_step_begin(long step, long actor_index, int *checking);
+void halo_sim_ai_step_check(long step);
+int halo_sim_ai_event_begin(struct halo_sim_ai_call const *call);
+void halo_sim_ai_event_end(struct halo_sim_ai_call const *call, int opened);
+void actors_port_step_context(long actor_index, struct halo_sim_ai_step_context *context);
+void actor_emotion_call(struct halo_sim_ai_call *call);
 
 #endif // __HALO_SIM_H

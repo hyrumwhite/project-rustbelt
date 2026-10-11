@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 37
+#define HALO_SIM_VERSION 38
 
 /* ---------- structures */
 
@@ -1804,6 +1804,28 @@ struct halo_sim_ai_update_callbacks
 	void (*call)(struct halo_sim_ai_update_call *call);
 };
 
+/* crates/halo_sim's AiEventC, AiStepC and AiStepCallbacks */
+struct halo_sim_ai_event
+{
+	struct halo_sim_ai_call call;
+	unsigned char before[HALO_SIM_ACTOR_DATUM_SIZE];
+	unsigned char after[HALO_SIM_ACTOR_DATUM_SIZE];
+};
+
+struct halo_sim_ai_step_c
+{
+	struct halo_sim_ai_step_context context;
+	struct halo_sim_ai_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+};
+
+struct halo_sim_ai_step_callbacks
+{
+	void (*emotion)(struct halo_sim_ai_call *call);
+};
+
 struct halo_sim_effect_callbacks
 {
 	long (*call)(struct halo_sim_effect_state *state, struct halo_sim_effect_call *call);
@@ -1840,6 +1862,7 @@ struct halo_sim_host
 	struct halo_sim_game_tick_callbacks game_tick;
 	struct halo_sim_hs_callbacks hs;
 	struct halo_sim_ai_update_callbacks ai_update;
+	struct halo_sim_ai_step_callbacks ai_steps;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -1909,6 +1932,7 @@ typedef long (*halo_sim_player_effect_function)(struct halo_sim_player_effect_ca
 typedef long (*halo_sim_game_tick_function)(struct halo_sim_game_tick_call *call);
 typedef long (*halo_sim_hs_function)(struct halo_sim_hs_update_call *call);
 typedef long (*halo_sim_ai_update_function)(struct halo_sim_ai_update_c *call);
+typedef long (*halo_sim_ai_step_function)(long step, struct halo_sim_ai_step_c *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -2000,6 +2024,8 @@ static struct
 	halo_sim_hs_function hs_update_check;
 	halo_sim_ai_update_function ai_update;
 	halo_sim_ai_update_function ai_update_check;
+	halo_sim_ai_step_function ai_step;
+	halo_sim_ai_step_function ai_step_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -2048,6 +2074,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"game_tick",
 	"hs",
 	"ai_update",
+	"actor_emotions",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2374,6 +2401,36 @@ static struct
 	unsigned long differed;
 	unsigned long skipped;
 } halo_sim_game_tick_checks;
+
+/* the AI step checks: the actor as the step began and as the game's left
+it, the game's calls, and the comparisons */
+#define MAXIMUM_HALO_SIM_AI_EVENTS 256
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	long step;
+	struct halo_sim_ai_step_context context;
+	unsigned char before[HALO_SIM_ACTOR_DATUM_SIZE];
+	unsigned char after[HALO_SIM_ACTOR_DATUM_SIZE];
+	struct halo_sim_ai_event events[MAXIMUM_HALO_SIM_AI_EVENTS];
+	unsigned long event_count;
+	struct halo_sim_ai_event *open_event;
+	unsigned long compared[NUMBER_OF_HALO_SIM_AI_STEPS];
+	unsigned long differed[NUMBER_OF_HALO_SIM_AI_STEPS];
+	unsigned long skipped[NUMBER_OF_HALO_SIM_AI_STEPS];
+	unsigned long calls[NUMBER_OF_HALO_SIM_AI_STEPS];
+} halo_sim_ai_step_checks;
+
+static short const halo_sim_ai_step_systems[NUMBER_OF_HALO_SIM_AI_STEPS] =
+{
+	_halo_sim_actor_emotions,
+};
+
+static char const *const halo_sim_ai_step_names[NUMBER_OF_HALO_SIM_AI_STEPS] =
+{
+	"actor emotion update",
+};
 
 /* the AI update checks: the game's calls, and the comparisons */
 #define MAXIMUM_HALO_SIM_AI_UPDATE_EVENTS 32768
@@ -4416,6 +4473,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	{
 		ai_update_call,
 	},
+	{
+		actor_emotion_call,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -4521,6 +4581,8 @@ static void halo_sim_initialize(void)
 	halo_sim.hs_update_check = (halo_sim_hs_function)halo_sim_symbol(library, "halo_sim_hs_update_check");
 	halo_sim.ai_update = (halo_sim_ai_update_function)halo_sim_symbol(library, "halo_sim_ai_update");
 	halo_sim.ai_update_check = (halo_sim_ai_update_function)halo_sim_symbol(library, "halo_sim_ai_update_check");
+	halo_sim.ai_step = (halo_sim_ai_step_function)halo_sim_symbol(library, "halo_sim_ai_step");
+	halo_sim.ai_step_check = (halo_sim_ai_step_function)halo_sim_symbol(library, "halo_sim_ai_step_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -4550,7 +4612,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.player_effect || !halo_sim.player_effect_check ||
 		!halo_sim.game_tick || !halo_sim.game_tick_check ||
 		!halo_sim.hs_update || !halo_sim.hs_update_check ||
-		!halo_sim.ai_update || !halo_sim.ai_update_check)
+		!halo_sim.ai_update || !halo_sim.ai_update_check ||
+		!halo_sim.ai_step || !halo_sim.ai_step_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -9129,6 +9192,132 @@ void halo_sim_game_tick_check(void)
 		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
 			platform_log("halo_sim: tick: %lu of %lu agree with the game (%lu left out)",
 				compared - halo_sim_game_tick_checks.differed, compared, halo_sim_game_tick_checks.skipped);
+	}
+}
+
+/* ---------- the AI's steps of an actor */
+
+int halo_sim_ai_step_begin(long step, long actor_index, int *checking)
+{
+	short mode = halo_sim_mode(halo_sim_ai_step_systems[step]);
+	struct halo_sim_ai_step_c call;
+
+	*checking = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		/* (a step within one the game is running isn't checked: it is part
+		of that one's calls) */
+		if (halo_sim_ai_step_checks.recording)
+			return FALSE;
+		halo_sim_ai_step_checks.step = step;
+		actors_port_step_context(actor_index, &halo_sim_ai_step_checks.context);
+		memcpy(halo_sim_ai_step_checks.before, (void const *)halo_sim_ai_step_checks.context.actor, HALO_SIM_ACTOR_DATUM_SIZE);
+		halo_sim_ai_step_checks.event_count = 0;
+		halo_sim_ai_step_checks.open_event = NULL;
+		halo_sim_ai_step_checks.overflow = FALSE;
+		halo_sim_ai_step_checks.recording = TRUE;
+		*checking = TRUE;
+		return FALSE;
+	}
+	memset(&call, 0, sizeof(call));
+	actors_port_step_context(actor_index, &call.context);
+
+	return halo_sim.ai_step(step, &call) == 0;
+}
+
+int halo_sim_ai_event_begin(struct halo_sim_ai_call const *call)
+{
+	struct halo_sim_ai_event *event;
+
+	if (!halo_sim_ai_step_checks.recording || halo_sim_ai_step_checks.open_event)
+		return FALSE;
+	if (halo_sim_ai_step_checks.event_count >= MAXIMUM_HALO_SIM_AI_EVENTS)
+	{
+		halo_sim_ai_step_checks.overflow = TRUE;
+		return FALSE;
+	}
+	event = &halo_sim_ai_step_checks.events[halo_sim_ai_step_checks.event_count++];
+	event->call = *call;
+	memcpy(event->before, (void const *)halo_sim_ai_step_checks.context.actor, HALO_SIM_ACTOR_DATUM_SIZE);
+	halo_sim_ai_step_checks.open_event = event;
+	return TRUE;
+}
+
+void halo_sim_ai_event_end(struct halo_sim_ai_call const *call, int opened)
+{
+	struct halo_sim_ai_event *event = halo_sim_ai_step_checks.open_event;
+
+	if (!opened || !event)
+		return;
+	halo_sim_ai_step_checks.open_event = NULL;
+	memcpy(event->call.output, call->output, sizeof(event->call.output));
+	event->call.result = call->result;
+	memcpy(event->after, (void const *)halo_sim_ai_step_checks.context.actor, HALO_SIM_ACTOR_DATUM_SIZE);
+}
+
+void halo_sim_ai_step_check(long step)
+{
+	struct halo_sim_ai_step_c call;
+	unsigned char *actor = (unsigned char *)halo_sim_ai_step_checks.context.actor;
+
+	if (!halo_sim_ai_step_checks.recording)
+		return;
+	halo_sim_ai_step_checks.recording = FALSE;
+	if (halo_sim_ai_step_checks.overflow)
+	{
+		halo_sim_ai_step_checks.skipped[step]++;
+		return;
+	}
+	memcpy(halo_sim_ai_step_checks.after, actor, HALO_SIM_ACTOR_DATUM_SIZE);
+	memcpy(actor, halo_sim_ai_step_checks.before, HALO_SIM_ACTOR_DATUM_SIZE);
+	memset(&call, 0, sizeof(call));
+	call.context = halo_sim_ai_step_checks.context;
+	call.events = halo_sim_ai_step_checks.events;
+	call.event_count = halo_sim_ai_step_checks.event_count;
+	if (halo_sim.ai_step_check(step, &call) != 0)
+	{
+		memcpy(actor, halo_sim_ai_step_checks.after, HALO_SIM_ACTOR_DATUM_SIZE);
+		halo_sim_ai_step_checks.skipped[step]++;
+		return;
+	}
+	/* (Rust's left in the actor: kept in the before copy's room, then the
+	game's put back) */
+	memcpy(halo_sim_ai_step_checks.before, actor, HALO_SIM_ACTOR_DATUM_SIZE);
+	memcpy(actor, halo_sim_ai_step_checks.after, HALO_SIM_ACTOR_DATUM_SIZE);
+
+	halo_sim_ai_step_checks.compared[step]++;
+	halo_sim_ai_step_checks.calls[step] += halo_sim_ai_step_checks.event_count;
+	if (memcmp(halo_sim_ai_step_checks.before, halo_sim_ai_step_checks.after, HALO_SIM_ACTOR_DATUM_SIZE) != 0 ||
+		call.difference_event != NONE)
+	{
+		halo_sim_ai_step_checks.differed[step]++;
+		if (halo_sim_ai_step_checks.differed[step] <= 8)
+		{
+			long offset = 0;
+			long kind = call.difference_event >= 0 && call.difference_event < (long)halo_sim_ai_step_checks.event_count
+				? halo_sim_ai_step_checks.events[call.difference_event].call.kind : NONE;
+
+			while (offset < HALO_SIM_ACTOR_DATUM_SIZE &&
+				halo_sim_ai_step_checks.before[offset] == halo_sim_ai_step_checks.after[offset])
+			{
+				offset++;
+			}
+			platform_log("halo_sim: %s differs (actor %lx): call %ld of %lu (kind %ld) reason %ld; the actor first differs at byte %lx (game %02x rust %02x)",
+				halo_sim_ai_step_names[step], (unsigned long)halo_sim_ai_step_checks.context.actor_index,
+				call.difference_event, halo_sim_ai_step_checks.event_count, kind, call.difference_reason, offset,
+				offset < HALO_SIM_ACTOR_DATUM_SIZE ? halo_sim_ai_step_checks.after[offset] : 0,
+				offset < HALO_SIM_ACTOR_DATUM_SIZE ? halo_sim_ai_step_checks.before[offset] : 0);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_ai_step_checks.compared[step];
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu calls; %lu left out)",
+				halo_sim_ai_step_names[step], compared - halo_sim_ai_step_checks.differed[step], compared,
+				halo_sim_ai_step_checks.calls[step], halo_sim_ai_step_checks.skipped[step]);
 	}
 }
 

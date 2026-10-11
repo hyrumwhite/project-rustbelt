@@ -274,6 +274,7 @@ symbols in this file:
 #include "units/vehicle_definitions.h"
 #include "units/vehicles.h"
 #include "units/biped_definitions.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -3329,7 +3330,101 @@ void actor_perception_abandoned_search(
 	return;
 }
 
+/* port: what an actor's emotion update asks of the rest of the game, shared
+by the game's update and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_emotion_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _actor_emotion_call_berserk_end:
+			actor_berserk(call->actor, FALSE);
+			break;
+
+		case _actor_emotion_call_communication_event:
+			ai_communication_event(
+				(short)call->a,
+				call->b,
+				NONE,
+				NONE,
+				NONE,
+				NONE,
+				NULL);
+			break;
+
+		case _actor_emotion_call_friend_attacking:
+			call->result = actor_perception_friend_prop_is_attacking(
+				call->actor,
+				call->a,
+				(real_vector3d *)call->output) ? 1 : 0;
+			break;
+
+		case _actor_emotion_call_discard_firing_position:
+			actor_discard_firing_position(
+				call->actor,
+				(short)call->a,
+				call->b != 0);
+			break;
+
+		case _actor_emotion_call_flood_shamble:
+			call->result = actor_type_flood_desire_shamble(call->actor) ? 1 : 0;
+			break;
+
+		case _actor_emotion_call_unopposable_retreat:
+			actor_emotion_unopposable_retreat(call->actor);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_emotion_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real_vector3d *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	actor_emotion_call(&call);
+	if (output)
+		memcpy(output, call.output, sizeof(*output));
+
+	return call.result;
+}
+
+static void actor_emotion_update_game(
+	long actor_index);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 void actor_emotion_update(
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_emotion, actor_index, &checking))
+		return;
+	actor_emotion_update_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_emotion);
+
+	return;
+}
+
+/* the game's emotion update, what it asks of the rest of the game through
+actor_emotion_call */
+static void actor_emotion_update_game(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
@@ -3344,7 +3439,7 @@ void actor_emotion_update(
 				actor->state.combat_status <
 					_actor_combat_status_definite)))
 	{
-		actor_berserk(actor_index, FALSE);
+		actor_emotion_call_simple(actor_index, _actor_emotion_call_berserk_end, 0, 0, NULL);
 	}
 
 	if (actor->emotions.currently_defending !=
@@ -3355,14 +3450,9 @@ void actor_emotion_update(
 		actor->emotions.currently_defending = defending;
 		if (actor->meta.unit_index != NONE)
 		{
-			ai_communication_event(
+			actor_emotion_call_simple(actor_index, _actor_emotion_call_communication_event,
 				(defending != FALSE) + _ai_communication_advance,
-				actor->meta.unit_index,
-				NONE,
-				NONE,
-				NONE,
-				NONE,
-				NULL);
+				actor->meta.unit_index, NULL);
 		}
 	}
 
@@ -3488,12 +3578,12 @@ void actor_emotion_update(
 				{
 					real_vector3d friend_attack_vector;
 
-					if (actor_perception_friend_prop_is_attacking(
-						actor_index,
-						iterator.index,
-						&friend_attack_vector))
+					if (actor_emotion_call_simple(actor_index, _actor_emotion_call_friend_attacking,
+						iterator.index, 0, &friend_attack_vector))
 					{
-						real_vector3d vector_to_line_of_fire;
+						/* port: zeros where the C's was the stack's leftover, when
+						the friend isn't ahead of the aim (the test leaves it) */
+						real_vector3d vector_to_line_of_fire = { 0.0f, 0.0f, 0.0f };
 						short blockage =
 							actor_perception_aiming_vector_test_blockage(
 								&prop->body_position,
@@ -3594,10 +3684,8 @@ void actor_emotion_update(
 
 	if (actor->emotions.moving_into_player_line_of_fire)
 	{
-		actor_discard_firing_position(
-			actor_index,
-			actor->firing_positions.current_position_index,
-			TRUE);
+		actor_emotion_call_simple(actor_index, _actor_emotion_call_discard_firing_position,
+			actor->firing_positions.current_position_index, TRUE, NULL);
 		actor->emotions.moving_into_fire_timer = 22;
 	}
 	else if (actor->emotions.moving_into_fire_timer > 0)
@@ -3652,7 +3740,7 @@ void actor_emotion_update(
 			break;
 
 		case _defensive_crouch_flood_shamble:
-			crouch = actor_type_flood_desire_shamble(actor_index);
+			crouch = actor_emotion_call_simple(actor_index, _actor_emotion_call_flood_shamble, 0, 0, NULL) != 0;
 			break;
 
 		default:
@@ -3709,7 +3797,7 @@ void actor_emotion_update(
 	if (actor->emotions.evasion_delay_timer > 0)
 		actor->emotions.evasion_delay_timer--;
 
-	actor_emotion_unopposable_retreat(actor_index);
+	actor_emotion_call_simple(actor_index, _actor_emotion_call_unopposable_retreat, 0, 0, NULL);
 
 	return;
 }

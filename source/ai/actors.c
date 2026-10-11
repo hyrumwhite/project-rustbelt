@@ -4203,6 +4203,25 @@ static void actor_unit_control(
 	return;
 }
 
+/* port: where an actor's step finds the actor, its definition and the props
+(halo_sim.c's ports of the AI's steps) */
+typedef char actors_port_actor_datum_size_assert[
+	sizeof(struct actor_datum) == HALO_SIM_ACTOR_DATUM_SIZE ? 1 : -1];
+
+void actors_port_step_context(
+	long actor_index,
+	struct halo_sim_ai_step_context *context)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	memset(context, 0, sizeof(*context));
+	context->actor_index = actor_index;
+	context->actor = (unsigned long)actor;
+	context->definition = (unsigned long)actor_definition_get(actor->meta.definition_index);
+	context->prop_data = (unsigned long)prop_data;
+	context->game_time = game_time_get();
+}
+
 /* port: an actor's steps, and the questions the walk over the actors asks,
 through ai.c's ai_update_call (shared with the Rust port's update) */
 void actors_port_call(

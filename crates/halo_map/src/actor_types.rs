@@ -2,10 +2,12 @@
 //! and each actor_type_*.c's `*_decide_action`, which choose an actor's
 //! action from its situation by actions.c's transition handlers.
 //!
-//! The handlers are still the game's: each goes through [`AiHost::call`]
+//! The handlers ported to Rust ([`crate::actor_transitions`]) run here; the
+//! rest are still the game's: each goes through [`AiHost::call`]
 //! (actor_types.c's `actor_type_call`, shared with the C).
 
 use crate::actions::flee_blind_panic;
+use crate::actor_transitions;
 use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE};
 use crate::layout::{actor_datum as a, actor_definition as d};
 
@@ -94,6 +96,9 @@ struct Decide<'a, H: AiHost> {
 
 impl<H: AiHost> Decide<'_, H> {
     fn handle3(&self, kind: i32, a: i32, b: i32, c: i32) -> bool {
+        if let Some(result) = actor_transitions::run(kind, a, b, c, self.context, self.host) {
+            return result;
+        }
         let mut call = AiCall { kind, actor: self.context.actor_index, a, b, ..AiCall::default() };
         call.input[0] = c as f32;
         self.host.call(&mut call);

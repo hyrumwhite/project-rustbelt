@@ -23,6 +23,7 @@ pub mod actor_moving;
 pub mod actor_perception;
 pub mod actor_situation;
 pub mod actor_unit_control;
+pub mod actor_transitions;
 pub mod actor_types;
 pub mod actor_upkeep;
 pub mod ai_actor;

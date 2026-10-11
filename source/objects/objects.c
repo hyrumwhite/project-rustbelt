@@ -181,6 +181,9 @@ static void object_delete_attachments(long object_index);
 static void object_delete_recursive(long object_index, boolean delete_siblings);
 static void object_compute_function_values(long object_index);
 static void object_compute_change_colors(long object_index);
+static void objects_update_step(long kind, long object_index, long a, long b);
+static struct halo_sim_objects_call objects_update_header(short index);
+static struct halo_sim_objects_call objects_update_read(long object_index);
 static void object_model_nodes_error(long model_index, struct model const *model);
 static void object_definition_data_error(long definition_index, char const *problem);
 
@@ -3868,73 +3871,55 @@ boolean object_force_inside_bsp(
 static boolean object_update(
 	long object_index)
 {
-	struct object_header_datum *header = object_header_get(object_index);
-	struct object_datum *object = object_get(object_index);
-	struct object_definition *object_definition = object_definition_get(object->definition_index);
+	/* port: each step through objects_update_call, which the Rust port's
+	loop calls too (port/linux/game/halo_sim.c) */
+	struct halo_sim_objects_call state = objects_update_read(object_index);
+	struct halo_sim_objects_call step;
+	long children;
 
-	boolean result = TRUE;
-	if (!TEST_FLAG(header->flags, _object_header_do_not_update_bit))
+	if (!state.state.exists || TEST_FLAG(state.state.header_flags, _object_header_do_not_update_bit))
+		return TRUE;
+	if (TEST_FLAG(state.state.object_flags, _object_garbage_bit))
+		objects_update_step(_objects_call_count_garbage, object_index, 0, 0);
+	if (state.state.interpolation_frame_count)
 	{
-		if (TEST_FLAG(object->object.flags, _object_garbage_bit))
-		{
-			++object_globals->active_garbage_object_count;
-		}
+		short frame_index = (short)(state.state.interpolation_frame_index + 1);
+		short count = frame_index >= state.state.interpolation_frame_count ? 0 : state.state.interpolation_frame_count;
 
-		if (object->object.animation.interpolation_frame_count)
-		{
-			match_assert("c:\\halo\\SOURCE\\objects\\objects.c", 2508, !TEST_FLAG(_object_mask_cannot_interpolate, object->object.type));
-			if (++object->object.animation.interpolation_frame_index>=
-				object->object.animation.interpolation_frame_count)
-			{
-				object->object.animation.interpolation_frame_count = 0;
-			}
-		}
-
-		object_type_update(object_index);
-		if (object_definition->object.collision_model.index!=NONE)
-		{
-			object_damage_update(object_index);
-		}
-
-		object_type_export_function_values(object_index);
-
-		if (!TEST_FLAG(object->object.flags, _object_do_not_recompute_node_matrices_bit))
-		{
-			object_compute_node_matrices(object_index);
-		}
-
-		object_compute_function_values(object_index);
-		object_compute_change_colors(object_index);
-
-		if (
-			TEST_FLAG(object->object.flags, _object_dynamic_lighting_recompute_bit) &&
-			(
-				!TEST_FLAG(object->object.flags, _object_invisible_bit) ||
-				object_definition_get(object->definition_index)->object.model.index==NONE
-			)
-		)
-		{
-			object_connect_lights(object_index, TRUE, TRUE);
-		}
-
-		// Update children (if we have any)
-		if (object->object.first_child_object_index!=NONE)
-		{
-			object_update(object->object.first_child_object_index);
-		}
-
-		if (object->object.parent_object_index!=NONE)
-		{
-			if (object->object.next_object_index!=NONE)
-			{
-				object_update(object->object.next_object_index);
-			}
-		}
-
-		object_postprocess_node_matrices(object_index);
+		match_assert("c:\\halo\\SOURCE\\objects\\objects.c", 2508,
+			!TEST_FLAG(_object_mask_cannot_interpolate, object_get(object_index)->object.type));
+		objects_update_step(_objects_call_set_interpolation, object_index, frame_index, count);
 	}
 
-	return result;
+	objects_update_step(_objects_call_type_update, object_index, 0, 0);
+	if (state.state.has_collision_model)
+		objects_update_step(_objects_call_damage_update, object_index, 0, 0);
+	objects_update_step(_objects_call_export_function_values, object_index, 0, 0);
+
+	step = objects_update_read(object_index);
+	if (!TEST_FLAG(step.state.object_flags, _object_do_not_recompute_node_matrices_bit))
+		objects_update_step(_objects_call_compute_node_matrices, object_index, 0, 0);
+	objects_update_step(_objects_call_compute_function_values, object_index, 0, 0);
+	objects_update_step(_objects_call_compute_change_colors, object_index, 0, 0);
+
+	step = objects_update_read(object_index);
+	if (TEST_FLAG(step.state.object_flags, _object_dynamic_lighting_recompute_bit) &&
+		(!TEST_FLAG(step.state.object_flags, _object_invisible_bit) || !state.state.has_model))
+	{
+		objects_update_step(_objects_call_connect_lights, object_index, 0, 0);
+	}
+
+	// Update children (if we have any)
+	children = objects_update_read(object_index).state.first_child_object_index;
+	if (children!=NONE)
+		object_update(children);
+	step = objects_update_read(object_index);
+	if (step.state.parent_object_index!=NONE && step.state.next_object_index!=NONE)
+		object_update(step.state.next_object_index);
+
+	objects_update_step(_objects_call_postprocess_node_matrices, object_index, 0, 0);
+
+	return TRUE;
 }
 
 void object_compute_node_matrices_recursive(
@@ -4478,23 +4463,17 @@ void objects_garbage_collection(
 }
 
 
-void objects_update(
+/* port: the players' view's activation and deactivation (objects_update's
+first pass) */
+static void objects_update_activation(
 	void)
 {
-	static struct profile_section section = {"objects_update", NONE, TRUE};
-
 	unsigned long *last_active_cluster_bits;
 	unsigned long *active_cluster_bits;
 	short cluster_count;
 	short i;
 	struct object_header_datum *object_header;
 
-	boolean dont_update_object = ((game_time_get()&1)!=0) && game_players_are_double_speed();
-
-	profile_enter(section);
-
-	object_globals->active_garbage_object_count = 0;
-	
 	last_active_cluster_bits = object_globals->last_active_cluster_bits;
 	active_cluster_bits = object_globals->active_cluster_bits;
 	cluster_count = global_structure_bsp_get()->clusters.count;
@@ -4544,59 +4523,264 @@ void objects_update(
 			active_cluster_bits,
 			cluster_count);
 	}
+}
 
-	object_header = (struct object_header_datum *)object_header_data->data;
-	for (i = 0; i<object_header_data->count; ++object_header)
+/* port: objects_update's loops, each step through objects_update_call
+(which the Rust port's loop calls too) */
+static void objects_update_internal(
+	boolean dont_update_object)
+{
+	short i;
+
+	objects_update_step(_objects_call_begin, NONE, 0, 0);
+	objects_update_step(_objects_call_activation, NONE, 0, 0);
+
+	for (i = 0; ; ++i)
 	{
-		if (object_header->identifier)
+		struct halo_sim_objects_call header = objects_update_header(i);
+
+		if (i >= header.header.count)
+			break;
+		if (header.header.identifier &&
+			TEST_FLAG(header.header.flags, _object_header_active_bit) &&
+			!TEST_FLAG(header.header.flags, _object_header_being_created_bit))
 		{
-			if (TEST_FLAG(object_header->flags, _object_header_active_bit) &&
-				!TEST_FLAG(object_header->flags, _object_header_being_created_bit))
+			long object_index = DATUM_INDEX_NEW(i, header.header.identifier);
+
+			if (!dont_update_object ||
+				TEST_FLAG(_object_mask_unit, header.header.object_type) &&
+				header.header.unit_player_index!=NONE)
 			{
-				long object_index = DATUM_INDEX_NEW(i, object_header->identifier);
-				match_assert("c:\\halo\\SOURCE\\objects\\objects.c", 416, object_get(object_index)->object.parent_object_index==NONE);
-				match_assert("c:\\halo\\SOURCE\\objects\\objects.c", 417, object_get(object_index)->object.next_object_index==NONE);
-			
-				if (!dont_update_object ||
-					TEST_FLAG(_object_mask_unit, object_header->type) &&
-					unit_get(object_index)->unit.player_index!=NONE)
-				{
-					object_update(object_index);
-				}
+				object_update(object_index);
 			}
 		}
-		++i;
 	}
 
-	object_header = (struct object_header_datum *)object_header_data->data;
-	for (i = 0; i<object_header_data->count; ++object_header)
+	for (i = 0; ; ++i)
 	{
-		if (object_header->identifier)
+		struct halo_sim_objects_call header = objects_update_header(i);
+
+		if (i >= header.header.count)
+			break;
+		if (header.header.identifier)
 		{
-			SET_FLAG(object_header->flags, _object_header_do_not_update_bit, FALSE);
+			byte flags = header.header.flags;
+			short identifier = header.header.identifier;
 
-			if (TEST_FLAG(object_header->flags, _object_header_being_created_bit))
+			objects_update_step(_objects_call_clear_do_not_update, NONE, i, 0);
+			if (TEST_FLAG(flags, _object_header_being_created_bit))
 			{
-				SET_FLAG(
-					object_header->flags,
-					_object_header_being_created_bit,
-					FALSE);
-				object_update(DATUM_INDEX_NEW(i, object_header->identifier));
+				objects_update_step(_objects_call_clear_being_created, NONE, i, 0);
+				object_update(DATUM_INDEX_NEW(i, identifier));
+				header = objects_update_header(i);
+				flags = header.header.flags;
+				identifier = header.header.identifier;
 			}
-
-			if (TEST_FLAG(object_header->flags, _object_header_being_deleted_bit))
-			{
-				object_delete_recursive(DATUM_INDEX_NEW(i, object_header->identifier), FALSE);
-			}
+			if (TEST_FLAG(flags, _object_header_being_deleted_bit))
+				objects_update_step(_objects_call_delete, DATUM_INDEX_NEW(i, identifier), 0, 0);
 		}
-		++i;
 	}
 
-	objects_garbage_collection();
+	objects_update_step(_objects_call_garbage_collection, NONE, 0, 0);
+}
 
+void objects_update(
+	void)
+{
+	static struct profile_section section = {"objects_update", NONE, TRUE};
+
+	boolean dont_update_object = ((game_time_get()&1)!=0) && game_players_are_double_speed();
+
+	profile_enter(section);
+	/* port: the Rust port's loop in place of the game's, or (in check mode)
+	the game's recorded for it */
+	if (!halo_sim_objects_update(dont_update_object))
+	{
+		objects_update_internal(dont_update_object);
+		halo_sim_objects_update_check(dont_update_object);
+	}
 	profile_exit(section);
 
 	return;
+}
+
+/* port: objects_update's calls of an object update's steps and the reads
+they make, the game's and the Rust port's (crates/halo_map's
+objects_update::call) */
+void objects_update_call(
+	struct halo_sim_objects_call *call)
+{
+	switch (call->kind)
+	{
+	case _objects_call_header:
+		memset(&call->header, 0, sizeof(call->header));
+		call->header.count = object_header_data->count;
+		call->header.unit_player_index = NONE;
+		if (call->a >= 0 && call->a < object_header_data->count)
+		{
+			struct object_header_datum *object_header = (struct object_header_datum *)object_header_data->data + call->a;
+
+			call->header.identifier = object_header->identifier;
+			call->header.flags = object_header->flags;
+			call->header.object_type = object_header->type;
+			if (object_header->identifier &&
+				TEST_FLAG(object_header->flags, _object_header_active_bit) &&
+				!TEST_FLAG(object_header->flags, _object_header_being_created_bit) &&
+				TEST_FLAG(_object_mask_unit, object_header->type))
+			{
+				call->header.unit_player_index = unit_get(DATUM_INDEX_NEW(call->a, object_header->identifier))->unit.player_index;
+			}
+		}
+		break;
+
+	case _objects_call_begin:
+		object_globals->active_garbage_object_count = 0;
+		break;
+
+	case _objects_call_activation:
+		objects_update_activation();
+		break;
+
+	case _objects_call_object:
+		{
+			struct object_datum *object = object_try_and_get(call->object_index);
+
+			memset(&call->state, 0, sizeof(call->state));
+			if (object)
+			{
+				struct object_definition *definition = object_definition_get(object->definition_index);
+
+				call->state.exists = 1;
+				call->state.header_flags = object_header_get(call->object_index)->flags;
+				call->state.interpolation_frame_index = object->object.animation.interpolation_frame_index;
+				call->state.interpolation_frame_count = object->object.animation.interpolation_frame_count;
+				call->state.object_flags = object->object.flags;
+				call->state.first_child_object_index = object->object.first_child_object_index;
+				call->state.next_object_index = object->object.next_object_index;
+				call->state.parent_object_index = object->object.parent_object_index;
+				call->state.has_collision_model = definition->object.collision_model.index != NONE ? 1 : 0;
+				call->state.has_model = definition->object.model.index != NONE ? 1 : 0;
+			}
+		}
+		break;
+
+	case _objects_call_count_garbage:
+		++object_globals->active_garbage_object_count;
+		break;
+
+	case _objects_call_set_interpolation:
+		{
+			struct object_datum *object = object_get(call->object_index);
+
+			object->object.animation.interpolation_frame_index = (short)call->a;
+			object->object.animation.interpolation_frame_count = (short)call->b;
+		}
+		break;
+
+	case _objects_call_type_update:
+		object_type_update(call->object_index);
+		break;
+
+	case _objects_call_damage_update:
+		object_damage_update(call->object_index);
+		break;
+
+	case _objects_call_export_function_values:
+		object_type_export_function_values(call->object_index);
+		break;
+
+	case _objects_call_compute_node_matrices:
+		object_compute_node_matrices(call->object_index);
+		break;
+
+	case _objects_call_compute_function_values:
+		object_compute_function_values(call->object_index);
+		break;
+
+	case _objects_call_compute_change_colors:
+		object_compute_change_colors(call->object_index);
+		break;
+
+	case _objects_call_connect_lights:
+		object_connect_lights(call->object_index, TRUE, TRUE);
+		break;
+
+	case _objects_call_postprocess_node_matrices:
+		object_postprocess_node_matrices(call->object_index);
+		break;
+
+	case _objects_call_clear_do_not_update:
+		{
+			struct object_header_datum *object_header = (struct object_header_datum *)object_header_data->data + call->a;
+
+			SET_FLAG(object_header->flags, _object_header_do_not_update_bit, FALSE);
+		}
+		break;
+
+	case _objects_call_clear_being_created:
+		{
+			struct object_header_datum *object_header = (struct object_header_datum *)object_header_data->data + call->a;
+
+			SET_FLAG(object_header->flags, _object_header_being_created_bit, FALSE);
+		}
+		break;
+
+	case _objects_call_delete:
+		object_delete_recursive(call->object_index, FALSE);
+		break;
+
+	case _objects_call_garbage_collection:
+		objects_garbage_collection();
+		break;
+	}
+	halo_sim_objects_event(call);
+
+	return;
+}
+
+static void objects_update_step(
+	long kind,
+	long object_index,
+	long a,
+	long b)
+{
+	struct halo_sim_objects_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.object_index = object_index;
+	call.a = a;
+	call.b = b;
+	objects_update_call(&call);
+
+	return;
+}
+
+static struct halo_sim_objects_call objects_update_header(
+	short index)
+{
+	struct halo_sim_objects_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _objects_call_header;
+	call.object_index = NONE;
+	call.a = index;
+	objects_update_call(&call);
+
+	return call;
+}
+
+static struct halo_sim_objects_call objects_update_read(
+	long object_index)
+{
+	struct halo_sim_objects_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _objects_call_object;
+	call.object_index = object_index;
+	objects_update_call(&call);
+
+	return call;
 }
 
 boolean debug_objects_bounding_spheres = TRUE;

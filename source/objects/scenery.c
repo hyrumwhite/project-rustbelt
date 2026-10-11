@@ -36,6 +36,7 @@ symbols in this file:
 #include "object_types.h"
 #include "objects.h"
 #include "scenery.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include "main/console.h"
 #include "models/model_animation_definitions.h"
@@ -147,6 +148,9 @@ boolean scenery_update(
 	long animation_graph_index;
 	struct scenery_datum *scenery = scenery_get(object_index);
 
+	/* port: the Rust port's in place of the game's (port/linux/game/halo_sim.c) */
+	if (halo_sim_scenery_animation(object_index))
+		return TRUE;
 	if (TEST_FLAG(scenery->flags, 0))
 	{
 		animation_graph_index = scenery->object.object.animation.animation_graph_index;
@@ -161,6 +165,7 @@ boolean scenery_update(
 			break;
 		}
 	}
+	halo_sim_scenery_animation_check(object_index);
 
 	return TRUE;
 }

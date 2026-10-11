@@ -33,6 +33,7 @@ enum
 	_halo_sim_devices,
 	_halo_sim_items,
 	_halo_sim_weapons,
+	_halo_sim_objects,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -180,6 +181,67 @@ enum
 	_weapon_update_call_trigger_locked,
 	_weapon_update_call_trigger_finish_tracking,
 	_weapon_update_call_permute_blurred,
+};
+
+/* the object update loop's calls (objects.c's objects_update_call;
+crates/halo_map's objects_update::call) */
+enum
+{
+	_objects_call_header = 1,
+	_objects_call_begin,
+	_objects_call_activation,
+	_objects_call_object,
+	_objects_call_count_garbage,
+	_objects_call_set_interpolation,
+	_objects_call_type_update,
+	_objects_call_damage_update,
+	_objects_call_export_function_values,
+	_objects_call_compute_node_matrices,
+	_objects_call_compute_function_values,
+	_objects_call_compute_change_colors,
+	_objects_call_connect_lights,
+	_objects_call_postprocess_node_matrices,
+	_objects_call_clear_do_not_update,
+	_objects_call_clear_being_created,
+	_objects_call_delete,
+	_objects_call_garbage_collection,
+};
+
+/* crates/halo_map's ObjectHeader, ObjectUpdateState and ObjectsCall: a
+call of the object update loop, and what it read */
+struct halo_sim_objects_header
+{
+	long count;
+	short identifier;
+	unsigned char flags;
+	unsigned char object_type;
+	long unit_player_index;
+};
+
+struct halo_sim_objects_state
+{
+	unsigned long exists;
+	unsigned char header_flags;
+	unsigned char pad0;
+	short interpolation_frame_index;
+	short interpolation_frame_count;
+	short pad1;
+	unsigned long object_flags;
+	long first_child_object_index;
+	long next_object_index;
+	long parent_object_index;
+	unsigned long has_collision_model;
+	unsigned long has_model;
+};
+
+struct halo_sim_objects_call
+{
+	long kind;
+	long object_index;
+	long a;
+	long b;
+	struct halo_sim_objects_header header;
+	struct halo_sim_objects_state state;
 };
 
 /* the rest of a biped update's calls of the rest of the game (bipeds.c's
@@ -453,5 +515,22 @@ int halo_sim_weapon_update(long weapon_index);
 void halo_sim_weapon_update_check(long weapon_index);
 void halo_sim_weapon_event_begin(long weapon_index, long kind, long a, long b);
 void halo_sim_weapon_event_end(long weapon_index, long result);
+
+/* objects.c's objects_update: TRUE when the Rust port ran the tick's loop
+(its calls through objects_update_call); in check mode objects_update_call
+records each call and what it read (halo_sim_objects_event), and
+halo_sim_objects_update_check compares Rust's replay */
+int halo_sim_objects_update(int dont_update_object);
+void halo_sim_objects_update_check(int dont_update_object);
+void halo_sim_objects_event(struct halo_sim_objects_call const *call);
+void objects_update_call(struct halo_sim_objects_call *call);
+
+/* garbage.c's garbage_update and scenery.c's scenery_update, under
+`objects`: TRUE when the Rust port ran them; in check mode the game's runs
+and the _check compares Rust's from the state it began with */
+int halo_sim_garbage_lifetime(short *lifetime_ticks, unsigned char *active);
+void halo_sim_garbage_lifetime_check(short lifetime_ticks, unsigned char active);
+int halo_sim_scenery_animation(long scenery_index);
+void halo_sim_scenery_animation_check(long scenery_index);
 
 #endif // __HALO_SIM_H

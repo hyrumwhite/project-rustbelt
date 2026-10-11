@@ -12,6 +12,7 @@ symbols in this file:
 
 #include "cseries.h"
 #include "garbage.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include "items/items.h"
 #include "math/real_math.h"
@@ -36,8 +37,16 @@ boolean garbage_update(
 	struct garbage_datum *garbage = garbage_get(garbage_index);
 	boolean active;
 
+	/* port: the Rust port's in place of the game's (port/linux/game/halo_sim.c) */
+	if (halo_sim_garbage_lifetime(&garbage->lifetime_ticks, &active))
+	{
+		if (!active)
+			object_delete(garbage_index);
+		return active;
+	}
 	--garbage->lifetime_ticks;
 	active = garbage->lifetime_ticks > 0;
+	halo_sim_garbage_lifetime_check(garbage->lifetime_ticks, active);
 
 	if (!active)
 		object_delete(garbage_index);

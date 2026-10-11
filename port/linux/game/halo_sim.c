@@ -33,6 +33,8 @@ bit for bit; differences are counted and the first few logged.
 #include "devices/devices.h"
 #include "items/items.h"
 #include "items/weapons.h"
+#include "items/garbage.h"
+#include "objects/scenery.h"
 #include "units/unit_definitions.h"
 #include "physics/point_physics.h"
 #include "physics/collisions.h"
@@ -60,7 +62,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 20
+#define HALO_SIM_VERSION 21
 
 /* ---------- structures */
 
@@ -1120,6 +1122,32 @@ struct halo_sim_weapon_callbacks
 	long (*call)(struct halo_sim_weapon_state *state, long kind, long a, long b);
 };
 
+typedef char halo_sim_objects_call_size_assert[sizeof(struct halo_sim_objects_call) == 64 ? 1 : -1];
+
+/* crates/halo_sim's ObjectsUpdateC, SceneryCallC and ObjectsCallbacks */
+struct halo_sim_objects_update_call
+{
+	unsigned long dont_update_object;
+	struct halo_sim_objects_call const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+};
+
+struct halo_sim_scenery_call
+{
+	unsigned long animation_graph_index;
+	unsigned long flags;
+	unsigned long random_seed;
+	short animation_index;
+	short animation_frame_index;
+};
+
+struct halo_sim_objects_callbacks
+{
+	long (*call)(struct halo_sim_objects_call *call);
+};
+
 struct halo_sim_damage_callbacks
 {
 	long (*object)(unsigned long index, struct halo_sim_object_damage_state *out);
@@ -1326,6 +1354,7 @@ struct halo_sim_host
 	struct halo_sim_device_callbacks devices;
 	struct halo_sim_item_callbacks items;
 	struct halo_sim_weapon_callbacks weapons;
+	struct halo_sim_objects_callbacks objects;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -1378,6 +1407,9 @@ typedef long (*halo_sim_damage_update_function)(struct halo_sim_damage_update_ca
 typedef long (*halo_sim_device_function)(struct halo_sim_device_call_c *call);
 typedef long (*halo_sim_item_function)(struct halo_sim_item_call_c *call);
 typedef long (*halo_sim_weapon_function)(struct halo_sim_weapon_call *call);
+typedef long (*halo_sim_objects_function)(struct halo_sim_objects_update_call *call);
+typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
+typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
 	struct halo_sim_collision_vector_result *result);
 typedef long (*halo_sim_pose_preprocess_function)(struct halo_sim_pose_preprocess_call *call);
@@ -1434,6 +1466,10 @@ static struct
 	halo_sim_item_function item_update_check;
 	halo_sim_weapon_function weapon_update;
 	halo_sim_weapon_function weapon_update_check;
+	halo_sim_objects_function objects_update;
+	halo_sim_objects_function objects_update_check;
+	halo_sim_garbage_function garbage_update;
+	halo_sim_scenery_function scenery_update;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1469,6 +1505,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"devices",
 	"items",
 	"weapons",
+	"objects",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -1632,6 +1669,29 @@ static struct
 	unsigned long reloading;
 	unsigned long heating;
 } halo_sim_weapon_checks;
+
+/* the object update loop checks: the game's calls and what they read, and
+the comparisons (and garbage's and scenery's) */
+#define MAXIMUM_HALO_SIM_OBJECTS_EVENTS 131072
+static struct
+{
+	boolean recording;
+	boolean overflow;
+	struct halo_sim_objects_call events[MAXIMUM_HALO_SIM_OBJECTS_EVENTS];
+	unsigned long event_count;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long skipped;
+	unsigned long calls;
+	unsigned long updates;
+	short garbage_lifetime;
+	boolean garbage_recording;
+	struct halo_sim_scenery_call scenery_before;
+	long scenery_index;
+	boolean scenery_recording;
+	unsigned long garbage_compared[2];
+	unsigned long scenery_compared[2];
+} halo_sim_objects_checks;
 
 /* the unit update checks: the update the game's began with, its calls of
 the rest of the game, and the comparisons */
@@ -3260,6 +3320,12 @@ static long halo_sim_weapon_call_callback(struct halo_sim_weapon_state *state, l
 	return result;
 }
 
+static long halo_sim_objects_call_callback(struct halo_sim_objects_call *call)
+{
+	objects_update_call(call);
+	return 0;
+}
+
 /* bipeds.c's, a player melee's side effects */
 void biped_rust_melee_started(long biped_index, long weapon_index);
 void biped_rust_melee_damage(long biped_index);
@@ -3401,6 +3467,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	{
 		halo_sim_weapon_call_callback,
 	},
+	{
+		halo_sim_objects_call_callback,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -3473,6 +3542,10 @@ static void halo_sim_initialize(void)
 	halo_sim.item_update_check = (halo_sim_item_function)halo_sim_symbol(library, "halo_sim_item_update_check");
 	halo_sim.weapon_update = (halo_sim_weapon_function)halo_sim_symbol(library, "halo_sim_weapon_update");
 	halo_sim.weapon_update_check = (halo_sim_weapon_function)halo_sim_symbol(library, "halo_sim_weapon_update_check");
+	halo_sim.objects_update = (halo_sim_objects_function)halo_sim_symbol(library, "halo_sim_objects_update");
+	halo_sim.objects_update_check = (halo_sim_objects_function)halo_sim_symbol(library, "halo_sim_objects_update_check");
+	halo_sim.garbage_update = (halo_sim_garbage_function)halo_sim_symbol(library, "halo_sim_garbage_update");
+	halo_sim.scenery_update = (halo_sim_scenery_function)halo_sim_symbol(library, "halo_sim_scenery_update");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -3489,7 +3562,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.damage_update || !halo_sim.damage_update_check ||
 		!halo_sim.device_update || !halo_sim.device_update_check ||
 		!halo_sim.item_update || !halo_sim.item_update_check ||
-		!halo_sim.weapon_update || !halo_sim.weapon_update_check)
+		!halo_sim.weapon_update || !halo_sim.weapon_update_check ||
+		!halo_sim.objects_update || !halo_sim.objects_update_check || !halo_sim.garbage_update || !halo_sim.scenery_update)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -6682,4 +6756,185 @@ void halo_sim_weapon_update_check(long weapon_index)
 				halo_sim_weapon_checks.skipped);
 		}
 	}
+}
+
+/* ---------- the object update loop */
+
+int halo_sim_objects_update(int dont_update_object)
+{
+	short mode = halo_sim_mode(_halo_sim_objects);
+	struct halo_sim_objects_update_call call;
+
+	halo_sim_objects_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_objects_checks.event_count = 0;
+		halo_sim_objects_checks.overflow = FALSE;
+		halo_sim_objects_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	memset(&call, 0, sizeof(call));
+	call.dont_update_object = dont_update_object ? 1 : 0;
+	return halo_sim.objects_update(&call) == 0;
+}
+
+void halo_sim_objects_event(struct halo_sim_objects_call const *call)
+{
+	if (!halo_sim_objects_checks.recording)
+		return;
+	if (halo_sim_objects_checks.event_count >= MAXIMUM_HALO_SIM_OBJECTS_EVENTS)
+	{
+		halo_sim_objects_checks.overflow = TRUE;
+		return;
+	}
+	halo_sim_objects_checks.events[halo_sim_objects_checks.event_count++] = *call;
+	if (call->kind == _objects_call_type_update)
+		halo_sim_objects_checks.updates++;
+}
+
+void halo_sim_objects_update_check(int dont_update_object)
+{
+	struct halo_sim_objects_update_call call;
+
+	if (!halo_sim_objects_checks.recording)
+		return;
+	halo_sim_objects_checks.recording = FALSE;
+	if (halo_sim_objects_checks.overflow)
+	{
+		halo_sim_objects_checks.skipped++;
+		return;
+	}
+	memset(&call, 0, sizeof(call));
+	call.dont_update_object = dont_update_object ? 1 : 0;
+	call.events = halo_sim_objects_checks.events;
+	call.event_count = halo_sim_objects_checks.event_count;
+	if (halo_sim.objects_update_check(&call) != 0)
+	{
+		halo_sim_objects_checks.skipped++;
+		return;
+	}
+
+	halo_sim_objects_checks.compared++;
+	halo_sim_objects_checks.calls += halo_sim_objects_checks.event_count;
+	if (call.difference_event != NONE)
+	{
+		halo_sim_objects_checks.differed++;
+		if (halo_sim_objects_checks.differed <= 8)
+		{
+			struct halo_sim_objects_call const *event = call.difference_event >= 0 &&
+				call.difference_event < (long)halo_sim_objects_checks.event_count ?
+					&halo_sim_objects_checks.events[call.difference_event] : NULL;
+
+			platform_log("halo_sim: object update loop differs: call %ld of %lu (kind %ld object %lx a %ld) reason %ld",
+				call.difference_event, halo_sim_objects_checks.event_count, event ? event->kind : NONE,
+				event ? (unsigned long)event->object_index : 0, event ? event->a : 0, call.difference_reason);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_objects_checks.compared;
+
+		if ((compared & 0x3fff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: object update loop: %lu of %lu ticks agree with the game (%lu object updates, %lu calls of the game; garbage %lu of %lu, scenery %lu of %lu; %lu left out)",
+				compared - halo_sim_objects_checks.differed, compared, halo_sim_objects_checks.updates,
+				halo_sim_objects_checks.calls, halo_sim_objects_checks.garbage_compared[0],
+				halo_sim_objects_checks.garbage_compared[1], halo_sim_objects_checks.scenery_compared[0],
+				halo_sim_objects_checks.scenery_compared[1], halo_sim_objects_checks.skipped);
+		}
+	}
+}
+
+int halo_sim_garbage_lifetime(short *lifetime_ticks, unsigned char *active)
+{
+	short mode = halo_sim_mode(_halo_sim_objects);
+
+	halo_sim_objects_checks.garbage_recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_objects_checks.garbage_lifetime = *lifetime_ticks;
+		halo_sim_objects_checks.garbage_recording = TRUE;
+		return FALSE;
+	}
+	*active = halo_sim.garbage_update(lifetime_ticks) ? TRUE : FALSE;
+	return TRUE;
+}
+
+void halo_sim_garbage_lifetime_check(short lifetime_ticks, unsigned char active)
+{
+	short rust_lifetime = halo_sim_objects_checks.garbage_lifetime;
+	long rust_active;
+
+	if (!halo_sim_objects_checks.garbage_recording)
+		return;
+	halo_sim_objects_checks.garbage_recording = FALSE;
+	rust_active = halo_sim.garbage_update(&rust_lifetime);
+	halo_sim_objects_checks.garbage_compared[1]++;
+	if (rust_lifetime == lifetime_ticks && (rust_active != 0) == (active != 0))
+		halo_sim_objects_checks.garbage_compared[0]++;
+	else
+		platform_log("halo_sim: garbage update differs: lifetime game %d rust %d", lifetime_ticks, rust_lifetime);
+}
+
+static void halo_sim_scenery_call_load(long scenery_index, struct halo_sim_scenery_call *call)
+{
+	struct scenery_datum *scenery = scenery_get(scenery_index);
+
+	memset(call, 0, sizeof(*call));
+	call->animation_graph_index = (unsigned long)scenery->object.object.animation.animation_graph_index;
+	call->flags = scenery->flags;
+	call->random_seed = get_random_seed();
+	call->animation_index = scenery->object.object.animation.state.index;
+	call->animation_frame_index = scenery->object.object.animation.state.frame_index;
+}
+
+int halo_sim_scenery_animation(long scenery_index)
+{
+	short mode = halo_sim_mode(_halo_sim_objects);
+	struct halo_sim_scenery_call call;
+	struct scenery_datum *scenery;
+
+	halo_sim_objects_checks.scenery_recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_scenery_call_load(scenery_index, &halo_sim_objects_checks.scenery_before);
+		halo_sim_objects_checks.scenery_index = scenery_index;
+		halo_sim_objects_checks.scenery_recording = TRUE;
+		return FALSE;
+	}
+	halo_sim_scenery_call_load(scenery_index, &call);
+	if (halo_sim.scenery_update(&call) != 0)
+		return FALSE;
+	scenery = scenery_get(scenery_index);
+	scenery->object.object.animation.state.index = call.animation_index;
+	scenery->object.object.animation.state.frame_index = call.animation_frame_index;
+	*get_global_random_seed_address() = call.random_seed;
+	return TRUE;
+}
+
+void halo_sim_scenery_animation_check(long scenery_index)
+{
+	struct halo_sim_scenery_call rust;
+	struct halo_sim_scenery_call game;
+
+	if (!halo_sim_objects_checks.scenery_recording || halo_sim_objects_checks.scenery_index != scenery_index)
+		return;
+	halo_sim_objects_checks.scenery_recording = FALSE;
+	rust = halo_sim_objects_checks.scenery_before;
+	if (halo_sim.scenery_update(&rust) != 0)
+		return;
+	halo_sim_scenery_call_load(scenery_index, &game);
+	halo_sim_objects_checks.scenery_compared[1]++;
+	if (memcmp(&rust, &game, sizeof(game)) == 0)
+		halo_sim_objects_checks.scenery_compared[0]++;
+	else
+		platform_log("halo_sim: scenery update differs: scenery %lx animation game %d/%d rust %d/%d; seed game %lx rust %lx",
+			(unsigned long)scenery_index, game.animation_index, game.animation_frame_index, rust.animation_index,
+			rust.animation_frame_index, game.random_seed, rust.random_seed);
 }

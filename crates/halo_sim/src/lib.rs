@@ -45,6 +45,7 @@ pub mod particles;
 pub mod contrails;
 pub mod particle_systems;
 pub mod player_effects;
+pub mod game_tick;
 pub mod items;
 pub mod object_exports;
 pub mod object_functions;
@@ -57,7 +58,7 @@ pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 33;
+pub const VERSION: u32 = 34;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {

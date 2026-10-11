@@ -28,6 +28,7 @@ pub mod particles;
 pub mod contrails;
 pub mod particle_systems;
 pub mod player_effects;
+pub mod game_tick;
 pub mod items;
 pub mod markers;
 pub mod object_exports;

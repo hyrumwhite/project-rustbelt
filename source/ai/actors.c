@@ -2149,12 +2149,170 @@ static void actor_clear_orders_game(
 	return;
 }
 
+/* port: what an actor's decision loop, its action's update and control and
+a swarm's control ask of the rest of the game (the actions and types), shared
+by the game's and the Rust port's (halo_sim.c); in check mode each is
+recorded */
+void actor_dispatch_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _actor_dispatch_call_decide_action:
+			actor_type_decide_action(actor_index);
+			break;
+
+		case _actor_dispatch_call_stimulus_clear:
+			actor_stimulus_clear(actor_index);
+			break;
+
+		case _actor_dispatch_call_action_perform:
+			call->result = actor_action_perform(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_dispatch_call_loop_failed:
+		{
+			char message[1024];
+			char encounter_name[256];
+			short action_history[NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES];
+			long history_index = call->a & 0xFF;
+			boolean exceeded = (call->a & 0x100) != 0;
+			long entry;
+
+			for (entry = 0; entry < NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES; entry++)
+				action_history[entry] = (short)call->input[entry];
+			if (actor->meta.encounter_index == NONE)
+			{
+				csstrcpy(encounter_name, "<no encounter>");
+			}
+			else
+			{
+				struct encounter_definition *encounter_definition = TAG_BLOCK_GET_ELEMENT(
+					&global_scenario_get()->ai_encounters,
+					DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
+					struct encounter_definition);
+				struct squad_definition *squad_definition = TAG_BLOCK_GET_ELEMENT(
+					&encounter_definition->squads,
+					actor->meta.squad_index,
+					struct squad_definition);
+
+				sprintf(encounter_name, "%s/%s", encounter_definition->name, squad_definition->name);
+			}
+
+			if (exceeded)
+			{
+				long entry_index;
+
+				sprintf(message, "actor-type %s ", actor_type_get_name(actor->meta.type));
+				entry_index = history_index;
+				do
+				{
+					if (action_history[entry_index] != NONE)
+					{
+						csstrcat(message, actor_action_name(action_history[entry_index]));
+						csstrcat(message, "/");
+					}
+					entry_index = (entry_index + 1) % NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES;
+				}
+				while (entry_index != history_index);
+				sprintf(temporary, " infinite decision loop (%s)", encounter_name);
+				csstrcat(message, temporary);
+			}
+			else
+			{
+				sprintf(
+					message,
+					"actor-type %s %s internal logic error (%s)",
+					actor_type_get_name(actor->meta.type),
+					actor_action_name(actor->state.action),
+					encounter_name);
+			}
+
+			match_vwarn("c:\\halo\\SOURCE\\ai\\actors.c", 3436, FALSE, message);
+			error(_error_silent, "AI error condition detected, attempting to recover (please tell butcher)...");
+			actor_action_change(actor_index, _actor_action_none, NULL);
+
+			break;
+		}
+
+		case _actor_dispatch_call_action_update:
+			actor_action_update(actor_index);
+			break;
+
+		case _actor_dispatch_call_action_control:
+			actor_action_control(actor_index);
+			break;
+
+		case _actor_dispatch_call_swarm_control:
+			actor_type_swarm_control(actor_index);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actor_dispatch_call_simple(
+	long actor_index,
+	long kind)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	actor_dispatch_call(&call);
+
+	return call.result;
+}
+
+/* port: a dispatching step, the Rust port's in place of the game's when
+asked (halo_sim.c); in check mode the game's runs and is compared */
+static void actor_dispatch_step(
+	long step,
+	long kind,
+	long actor_index)
+{
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(step, actor_index, &checking))
+		return;
+	actor_dispatch_call_simple(actor_index, kind);
+	if (checking)
+		halo_sim_ai_step_check(step, 0);
+
+	return;
+}
+
+static void actor_decision_loop_game(
+	long actor_index);
+
+/* port: the Rust port's loop in place of the game's when asked
+(halo_sim.c); in check mode the game's runs and is compared */
 static void actor_decision_loop(
 	long actor_index)
 {
+	int checking = FALSE;
+
+	if (halo_sim_ai_step_begin(_halo_sim_ai_step_decision_loop, actor_index, &checking))
+		return;
+	actor_decision_loop_game(actor_index);
+	if (checking)
+		halo_sim_ai_step_check(_halo_sim_ai_step_decision_loop, 0);
+
+	return;
+}
+
+/* the game's decision loop, its actions and types through
+actor_dispatch_call */
+static void actor_decision_loop_game(
+	long actor_index)
+{
 	struct actor_datum *actor = actor_get(actor_index);
-	char message[1024];
-	char encounter_name[256];
 	short action_history[NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES];
 	boolean action_performed = FALSE;
 	long iteration = 0;
@@ -2168,8 +2326,8 @@ static void actor_decision_loop(
 		iteration++;
 		history_index = (history_index + 1) % NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES;
 		actor->state.action_changed = FALSE;
-		actor_type_decide_action(actor_index);
-		actor_stimulus_clear(actor_index);
+		actor_dispatch_call_simple(actor_index, _actor_dispatch_call_decide_action);
+		actor_dispatch_call_simple(actor_index, _actor_dispatch_call_stimulus_clear);
 
 		if ((action_performed && !actor->state.action_changed) ||
 			iteration >= MAXIMUM_DECISION_LOOP_ITERATIONS)
@@ -2177,63 +2335,25 @@ static void actor_decision_loop(
 			break;
 		}
 
-		action_performed = actor_action_perform(actor_index);
+		action_performed = (boolean)actor_dispatch_call_simple(actor_index, _actor_dispatch_call_action_perform);
 		if (!action_performed && !actor->state.action_changed)
 		{
 			return;
 		}
 	}
 
-	if (actor->meta.encounter_index == NONE)
 	{
-		csstrcpy(encounter_name, "<no encounter>");
-	}
-	else
-	{
-		struct encounter_definition *encounter_definition = TAG_BLOCK_GET_ELEMENT(
-			&global_scenario_get()->ai_encounters,
-			DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->meta.encounter_index),
-			struct encounter_definition);
-		struct squad_definition *squad_definition = TAG_BLOCK_GET_ELEMENT(
-			&encounter_definition->squads,
-			actor->meta.squad_index,
-			struct squad_definition);
+		struct halo_sim_ai_call call;
+		long entry;
 
-		sprintf(encounter_name, "%s/%s", encounter_definition->name, squad_definition->name);
+		memset(&call, 0, sizeof(call));
+		call.kind = _actor_dispatch_call_loop_failed;
+		call.actor = actor_index;
+		call.a = history_index | (iteration >= MAXIMUM_DECISION_LOOP_ITERATIONS ? 0x100 : 0);
+		for (entry = 0; entry < NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES; entry++)
+			call.input[entry] = (float)action_history[entry];
+		actor_dispatch_call(&call);
 	}
-
-	if (iteration >= MAXIMUM_DECISION_LOOP_ITERATIONS)
-	{
-		long entry_index;
-
-		sprintf(message, "actor-type %s ", actor_type_get_name(actor->meta.type));
-		entry_index = history_index;
-		do
-		{
-			if (action_history[entry_index] != NONE)
-			{
-				csstrcat(message, actor_action_name(action_history[entry_index]));
-				csstrcat(message, "/");
-			}
-			entry_index = (entry_index + 1) % NUMBER_OF_DECISION_LOOP_HISTORY_ENTRIES;
-		}
-		while (entry_index != history_index);
-		sprintf(temporary, " infinite decision loop (%s)", encounter_name);
-		csstrcat(message, temporary);
-	}
-	else
-	{
-		sprintf(
-			message,
-			"actor-type %s %s internal logic error (%s)",
-			actor_type_get_name(actor->meta.type),
-			actor_action_name(actor->state.action),
-			encounter_name);
-	}
-
-	match_vwarn("c:\\halo\\SOURCE\\ai\\actors.c", 3436, FALSE, message);
-	error(_error_silent, "AI error condition detected, attempting to recover (please tell butcher)...");
-	actor_action_change(actor_index, _actor_action_none, NULL);
 
 	return;
 }
@@ -4680,10 +4800,10 @@ void actors_port_call(
 		case _ai_update_call_emotion: actor_emotion_update(actor_index); break;
 		case _ai_update_call_clear_orders: actor_clear_orders(actor_index); break;
 		case _ai_update_call_decision_loop: actor_decision_loop(actor_index); break;
-		case _ai_update_call_action_update: actor_action_update(actor_index); break;
-		case _ai_update_call_swarm_control: actor_type_swarm_control(actor_index); break;
+		case _ai_update_call_action_update: actor_dispatch_step(_halo_sim_ai_step_action_update, _actor_dispatch_call_action_update, actor_index); break;
+		case _ai_update_call_swarm_control: actor_dispatch_step(_halo_sim_ai_step_swarm_control, _actor_dispatch_call_swarm_control, actor_index); break;
 		case _ai_update_call_clear_output: actor_clear_output(actor_index); break;
-		case _ai_update_call_action_control: actor_action_control(actor_index); break;
+		case _ai_update_call_action_control: actor_dispatch_step(_halo_sim_ai_step_action_control, _actor_dispatch_call_action_control, actor_index); break;
 		case _ai_update_call_communication: actor_communication_update(actor_index); break;
 		case _ai_update_call_conversation_control: actor_conversation_control(actor_index); break;
 		case _ai_update_call_destination: actor_destination_update(actor_index); break;

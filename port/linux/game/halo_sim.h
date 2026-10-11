@@ -60,6 +60,7 @@ enum
 	_halo_sim_actor_look,
 	_halo_sim_actor_move,
 	_halo_sim_actor_combat,
+	_halo_sim_actor_dispatch,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -869,6 +870,10 @@ enum
 	_halo_sim_ai_step_look,
 	_halo_sim_ai_step_move,
 	_halo_sim_ai_step_combat,
+	_halo_sim_ai_step_decision_loop,
+	_halo_sim_ai_step_action_update,
+	_halo_sim_ai_step_action_control,
+	_halo_sim_ai_step_swarm_control,
 	NUMBER_OF_HALO_SIM_AI_STEPS
 };
 
@@ -1149,6 +1154,19 @@ enum
 	_actor_combat_gun_offset_definition_crouch,
 	_actor_combat_gun_offset_variant_stand,
 	_actor_combat_gun_offset_definition_stand,
+};
+
+/* the dispatch's calls (actors.c's actor_dispatch_call; crates/halo_map's
+actor_dispatch::call) */
+enum
+{
+	_actor_dispatch_call_decide_action = 1,
+	_actor_dispatch_call_stimulus_clear,
+	_actor_dispatch_call_action_perform,
+	_actor_dispatch_call_loop_failed,
+	_actor_dispatch_call_action_update,
+	_actor_dispatch_call_action_control,
+	_actor_dispatch_call_swarm_control,
 };
 
 /* the object update loop's calls (objects.c's objects_update_call;
@@ -1705,6 +1723,7 @@ void actor_perception_call(struct halo_sim_ai_call *call);
 void actor_look_call(struct halo_sim_ai_call *call);
 void actor_move_call(struct halo_sim_ai_call *call);
 void actor_combat_call(struct halo_sim_ai_call *call);
+void actor_dispatch_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);
 
 #endif // __HALO_SIM_H

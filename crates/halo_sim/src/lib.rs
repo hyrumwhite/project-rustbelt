@@ -41,6 +41,7 @@ pub mod damage;
 pub mod damage_update;
 pub mod devices;
 pub mod items;
+pub mod objects;
 pub mod weapons;
 pub mod projectiles;
 pub mod units;
@@ -48,7 +49,7 @@ pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 20;
+pub const VERSION: u32 = 21;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {

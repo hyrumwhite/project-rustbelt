@@ -71,6 +71,18 @@ pub fn run(action: i16, function: Function, context: &AiStepContext, host: &impl
             flee_control(context, host);
             false
         }
+        (v::_ACTOR_ACTION_CONVERSE, Function::Perform) => converse_perform(context, host),
+        (v::_ACTOR_ACTION_CONVERSE, Function::Update) => false,
+        (v::_ACTOR_ACTION_CONVERSE, Function::Control) => {
+            converse_control(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_VEHICLE, Function::Perform) => vehicle_perform(context, host),
+        (v::_ACTOR_ACTION_VEHICLE, Function::Update) => false,
+        (v::_ACTOR_ACTION_VEHICLE, Function::Control) => {
+            vehicle_control(context, host);
+            false
+        }
         (v::_ACTOR_ACTION_WAIT, Function::Perform) => wait_perform(context, host),
         (v::_ACTOR_ACTION_WAIT, Function::Update) => {
             wait_update(context, host);
@@ -1675,4 +1687,218 @@ fn flee_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
         }
     }
     m.bool(unable) || m.bool(done)
+}
+
+/// action_converse.c's calls.
+pub mod converse_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_CONVERSE as i32) << 8;
+    /// `prop_get_base_by_unit_index(actor, a, TRUE, TRUE)`, the result.
+    pub const BASE_PROP: i32 = BASE | 1;
+    /// `actor_move_halt(actor)`.
+    pub const MOVE_HALT: i32 = BASE | 2;
+    /// `actor_move_to_prop(actor, a, input[0])`, the result.
+    pub const MOVE_TO_PROP: i32 = BASE | 3;
+    /// The actor's prop of its conversation's triggering player (or NONE),
+    /// the result.
+    pub const PLAYER_PROP: i32 = BASE | 4;
+}
+
+/// `action_converse_perform`.
+fn converse_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let failed = at(a::STATE_CONVERSE_FAILED);
+    if m.bool(at(a::META_TIMESLICE)) {
+        let prop_index = at(a::STATE_CONVERSE_RUN_TO_PROP_INDEX);
+        let unit_index = m.i32(at(a::STATE_CONVERSE_RUN_TO_UNIT_INDEX));
+        if m.i32(prop_index) == NONE && unit_index != NONE {
+            let prop = call_simple(context, host, converse_call::BASE_PROP, unit_index);
+            m.w32(prop_index, prop as u32);
+        }
+        if m.i32(prop_index) == NONE {
+            m.set_bool(failed, true);
+        } else {
+            let in_range = at(a::STATE_CONVERSE_IN_RANGE);
+            let distance = m.f32(at(a::STATE_CONVERSE_RUN_TO_DISTANCE));
+            if !m.bool(in_range) {
+                let prop = prop_get(m, context, m.i32(prop_index));
+                let prop_distance = m.f32(prop + p::DISTANCE as u32);
+                if m.i16(prop + p::VISIBILITY as u32) >= v::_ACTOR_PERCEPTION_FULL as i16 && prop_distance < distance {
+                    m.set_bool(in_range, true);
+                } else if prop_distance < 0.7 {
+                    m.set_bool(in_range, true);
+                }
+            }
+            if m.bool(in_range) {
+                call_simple(context, host, converse_call::MOVE_HALT, 0);
+            } else if call_full(context, host, converse_call::MOVE_TO_PROP, m.i32(prop_index), 0, &[distance]).result == 0 {
+                m.set_bool(failed, true);
+            }
+        }
+    }
+    m.bool(failed)
+}
+
+/// `action_converse_control`.
+fn converse_control(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut prop_index = m.i32(at(a::STATE_CONVERSE_RUN_TO_PROP_INDEX));
+    if prop_index == NONE {
+        prop_index = if m.i32(at(a::STATE_CONVERSE_CONVERSATION_INDEX)) != NONE {
+            call_simple(context, host, converse_call::PLAYER_PROP, 0)
+        } else {
+            NONE
+        };
+    }
+    m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), 1);
+    if prop_index != NONE {
+        m.set_i16(at(a::ORDERS_LOOK_PRIMARY_PRIORITY), v::_PRIMARY_PRIORITY_FACING as i16);
+        m.set_i16(at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE), v::_DIRECTION_SPECIFICATION_PROP as i16);
+        m.w32(at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE) + 4, prop_index as u32);
+    }
+}
+
+/// action_vehicle.c's calls.
+pub mod vehicle_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_VEHICLE as i32) << 8;
+    /// `actor_path_has_path(actor)`, the result.
+    pub const HAS_PATH: i32 = BASE | 1;
+    /// Whether the vehicle `a` exists (`vehicle_try_and_get`), the result.
+    pub const VEHICLE_EXISTS: i32 = BASE | 2;
+    /// `action_vehicle_desirable` of the actor's vehicle by its state, the result.
+    pub const DESIRABLE: i32 = BASE | 3;
+    /// `action_vehicle_evaluate_seat` of the actor's seat: whether it is
+    /// valid, within range, facing correctly and could be faked in bits 0-3
+    /// of the result, the entry point and facing in `output` (its hint point
+    /// kept for [`FIND_DESTINATION`]).
+    pub const EVALUATE_SEAT: i32 = BASE | 4;
+    /// `unit_enter_seat(unit, its vehicle, its seat)`.
+    pub const ENTER_SEAT: i32 = BASE | 5;
+    /// `actor_move_halt(actor)`.
+    pub const MOVE_HALT: i32 = BASE | 6;
+    /// `action_vehicle_find_destination` from the evaluated seat, into the
+    /// actor: the result.
+    pub const FIND_DESTINATION: i32 = BASE | 7;
+    /// `actor_move_to_point` to the actor's destination, the result.
+    pub const MOVE_TO_DESTINATION: i32 = BASE | 8;
+}
+
+/// `action_vehicle_control`.
+fn vehicle_control(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let priority = at(a::ORDERS_LOOK_PRIMARY_PRIORITY);
+    let direction = at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE);
+    if m.bool(at(a::STATE_VEHICLE_LOCK_FACING)) {
+        m.set_i16(priority, v::_PRIMARY_PRIORITY_EXACT_FACING as i16);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_VECTOR as i16);
+        for word in 0..3 {
+            m.w32(direction + 4 + word * 4, m.r32(at(a::STATE_VEHICLE_DESTINATION_FACING) + word * 4));
+        }
+    } else if call_simple(context, host, vehicle_call::HAS_PATH, 0) != 0 {
+        m.set_i16(priority, v::_PRIMARY_PRIORITY_FACING as i16);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_MOVEMENT as i16);
+    } else {
+        m.set_i16(priority, v::_PRIMARY_PRIORITY_NONE as i16);
+    }
+    m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), 4);
+    m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), false);
+    m.set_bool(at(a::ORDERS_MOVE_STATIONARY_CROUCH), false);
+    clear_move_orders(m, context.actor);
+}
+
+/// `action_vehicle_perform`.
+fn vehicle_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let done = at(a::STATE_VEHICLE_VEHICLE_ENTRY_DONE);
+    let failed = at(a::STATE_VEHICLE_VEHICLE_ENTRY_FAILED);
+    let vehicle_index = at(a::STATE_VEHICLE_VEHICLE_INDEX);
+    let vehicle_exists = call_simple(context, host, vehicle_call::VEHICLE_EXISTS, m.i32(vehicle_index)) != 0;
+
+    if m.i32(at(a::INPUT_VEHICLE_INDEX)) != NONE {
+        m.set_bool(done, true);
+    } else if !m.bool(at(a::STATE_VEHICLE_STARTED_ENTRY)) {
+        if !vehicle_exists {
+            m.w32(vehicle_index, NONE as u32);
+            m.set_bool(failed, true);
+        } else if call_simple(context, host, vehicle_call::DESIRABLE, 0) == 0 {
+            m.set_bool(failed, true);
+        } else {
+            let current_time = context.game_time;
+            let detection_time = at(a::STATE_VEHICLE_STUCK_DETECTION_TIME);
+            let counter = at(a::STATE_VEHICLE_STUCK_DETECTION_COUNTER);
+            if current_time >= m.i32(detection_time).wrapping_add(150) {
+                m.w32(detection_time, current_time as u32);
+                if distance_squared(m, at(a::STATE_VEHICLE_STUCK_DETECTION_POINT), at(a::INPUT_BODY_POSITION)) < 25.0 {
+                    m.set_i16(counter, m.i16(counter).wrapping_add(1));
+                } else {
+                    m.set_i16(counter, 0);
+                    for word in 0..3 {
+                        m.w32(at(a::STATE_VEHICLE_STUCK_DETECTION_POINT) + word * 4, m.r32(at(a::INPUT_BODY_POSITION) + word * 4));
+                    }
+                }
+            }
+            if m.i16(counter) < 8 {
+                let seat = call_full(context, host, vehicle_call::EVALUATE_SEAT, 0, 0, &[]);
+                if seat.result & 1 != 0 {
+                    let mut within_range = seat.result & 2 != 0;
+                    let mut correct_facing = seat.result & 4 != 0;
+                    let could_fake = seat.result & 8 != 0;
+                    let entry_point = [seat.output[0], seat.output[1], seat.output[2]];
+                    let entry_facing = [seat.output[3], seat.output[4], seat.output[5]];
+                    let fake_timer = at(a::STATE_VEHICLE_FAKE_ENTRY_POTENTIAL_TIMER);
+                    if could_fake {
+                        m.set_i16(fake_timer, m.i16(fake_timer).wrapping_add(1));
+                        if m.i16(fake_timer) >= 30 {
+                            correct_facing = true;
+                            within_range = true;
+                        }
+                    } else {
+                        m.set_i16(fake_timer, 0);
+                    }
+                    if within_range {
+                        if correct_facing {
+                            call_simple(context, host, vehicle_call::ENTER_SEAT, 0);
+                            m.set_bool(at(a::STATE_VEHICLE_STARTED_ENTRY), true);
+                        } else {
+                            call_simple(context, host, vehicle_call::MOVE_HALT, 0);
+                        }
+                    } else if m.bool(at(a::META_TIMESLICE)) {
+                        let mut moving = false;
+                        if call_simple(context, host, vehicle_call::FIND_DESTINATION, 0) != 0 {
+                            moving = call_simple(context, host, vehicle_call::MOVE_TO_DESTINATION, 0) != 0;
+                        }
+                        let failures = at(a::STATE_VEHICLE_PATHFINDING_FAILURES);
+                        if moving {
+                            m.set_i16(failures, 0);
+                        } else {
+                            let maximum: i16 = if m.bool(at(a::STATE_VEHICLE_IMPROMPTU)) { 5 } else { 50 };
+                            m.set_i16(failures, m.i16(failures).wrapping_add(1));
+                            if m.i16(failures) > maximum {
+                                m.set_bool(failed, true);
+                            }
+                        }
+                    }
+                    let body = m.vector(at(a::INPUT_BODY_POSITION));
+                    let offset = [entry_point[0] - body[0], entry_point[1] - body[1], entry_point[2] - body[2]];
+                    m.set_bool(
+                        at(a::STATE_VEHICLE_LOCK_FACING),
+                        offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2] < 1.0,
+                    );
+                    for (i, value) in entry_facing.into_iter().enumerate() {
+                        m.set_f32(at(a::STATE_VEHICLE_DESTINATION_FACING) + 4 * i as u32, value);
+                    }
+                    m.set_bool(at(a::STATE_VEHICLE_CURRENTLY_CORRECT_FACING), correct_facing);
+                    m.set_bool(at(a::STATE_VEHICLE_CURRENTLY_WITHIN_RANGE), within_range);
+                } else {
+                    m.set_bool(failed, true);
+                }
+            } else {
+                m.set_bool(failed, true);
+            }
+        }
+    }
+    m.bool(done) || m.bool(failed)
 }

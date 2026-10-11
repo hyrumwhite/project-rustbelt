@@ -25,6 +25,7 @@ pub mod damage_update;
 pub mod devices;
 pub mod items;
 pub mod markers;
+pub mod object_exports;
 pub mod object_functions;
 pub mod objects_update;
 pub mod weapons;

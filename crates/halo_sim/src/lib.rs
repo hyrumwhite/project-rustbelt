@@ -41,6 +41,7 @@ pub mod damage;
 pub mod damage_update;
 pub mod devices;
 pub mod items;
+pub mod object_exports;
 pub mod object_functions;
 pub mod objects;
 pub mod weapons;
@@ -50,7 +51,7 @@ pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 22;
+pub const VERSION: u32 = 23;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {
@@ -113,6 +114,7 @@ pub(crate) struct Tags {
     item_definitions: HashMap<u32, Option<Arc<halo_map::items::ItemDefinition>>>,
     weapon_definitions: HashMap<u32, Option<Arc<halo_map::weapons::WeaponDefinition>>>,
     object_functions_definitions: HashMap<u32, Option<Arc<halo_map::object_functions::ObjectFunctionsDefinition>>>,
+    export_definitions: HashMap<(u32, i16), Option<Arc<halo_map::object_exports::ExportDefinition>>>,
 }
 
 impl Tags {
@@ -184,6 +186,7 @@ pub unsafe extern "C" fn halo_sim_set_tag_cache(memory: *const u8, size: u32, ba
         item_definitions: HashMap::new(),
         weapon_definitions: HashMap::new(),
         object_functions_definitions: HashMap::new(),
+        export_definitions: HashMap::new(),
     });
     count
 }

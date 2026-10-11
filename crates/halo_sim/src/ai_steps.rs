@@ -11,6 +11,7 @@
 use std::cell::Cell;
 
 use halo_map::actor_emotions::actor_emotion_update;
+use halo_map::actor_input::actor_input_update;
 use halo_map::actor_situation::actor_situation_update;
 use halo_map::actor_upkeep::{actor_clear_orders, actor_clear_output, actor_get_timeslice};
 use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext};
@@ -29,6 +30,8 @@ pub struct AiStepCallbacks {
     /// actors.c's `actor_upkeep_call` (the timeslice and the clearing of
     /// orders and output).
     pub upkeep: unsafe extern "C" fn(call: *mut AiCall),
+    /// actors.c's `actor_input_call`.
+    pub input: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -151,6 +154,7 @@ const STEP_SITUATION: i32 = 1;
 const STEP_TIMESLICE: i32 = 2;
 const STEP_CLEAR_ORDERS: i32 = 3;
 const STEP_CLEAR_OUTPUT: i32 = 4;
+const STEP_INPUT: i32 = 5;
 
 fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> bool {
     match step {
@@ -161,6 +165,7 @@ fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> bool {
         }
         STEP_CLEAR_ORDERS => actor_clear_orders(context, host),
         STEP_CLEAR_OUTPUT => actor_clear_output(context, host),
+        STEP_INPUT => actor_input_update(context, host),
         _ => return false,
     }
     true
@@ -171,6 +176,7 @@ fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" 
         STEP_EMOTION => Some(callbacks.emotion),
         STEP_SITUATION => Some(callbacks.situation),
         STEP_TIMESLICE | STEP_CLEAR_ORDERS | STEP_CLEAR_OUTPUT => Some(callbacks.upkeep),
+        STEP_INPUT => Some(callbacks.input),
         _ => None,
     }
 }

@@ -90,6 +90,8 @@ pub struct AiStepContext {
     pub game_time: i32,
     /// `actor_data` (its `struct data_array`).
     pub actor_data: u32,
+    /// `object_header_data` (its `struct data_array`).
+    pub object_header_data: u32,
 }
 
 /// `datum_get`: the datum's address (None for one unused or changed).
@@ -106,6 +108,12 @@ pub fn datum_get(m: &dyn AiMemory, data: u32, index: i32) -> Option<u32> {
         }
     }
     None
+}
+
+/// `object_get`: the object's datum (None for one unused or changed).
+pub fn object_get(m: &dyn AiMemory, context: &AiStepContext, object_index: i32) -> Option<u32> {
+    datum_get(m, context.object_header_data, object_index)
+        .map(|header| m.r32(header + crate::layout::object_header_datum::DATUM as u32))
 }
 
 /// `prop_get`.

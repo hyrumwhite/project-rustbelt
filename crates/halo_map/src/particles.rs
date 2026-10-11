@@ -26,10 +26,23 @@ const MAXIMUM_PARTICLE_UNRENDERED_FRAME_COUNT: i32 = 15;
 /// `enum particle_flags`.
 const PARTICLE_ANIMATES_BACKWARDS: u16 = 1 << 0;
 const PARTICLE_AT_REST: u16 = 1 << 1;
+const PARTICLE_U_MIRROR: u16 = 1 << 2;
+const PARTICLE_V_MIRROR: u16 = 1 << 3;
+const PARTICLE_DONT_DRAW_FIRST_PERSON: u16 = 1 << 4;
+const PARTICLE_DONT_DRAW_THIRD_PERSON: u16 = 1 << 5;
 const PARTICLE_ATTACHED_TO_LOCAL_PLAYER: u16 = 1 << 6;
 
+/// `PARTICLE_SHARED_LIFESPAN`.
+const PARTICLE_SHARED_LIFESPAN: f32 = 0.7;
+
 /// `enum particle_definition_flags`.
+const DEFINITION_CAN_ANIMATE_BACKWARDS: u32 = 1 << 0;
 const DEFINITION_ANIMATION_STOPS_AT_REST: u32 = 1 << 1;
+const DEFINITION_ANIMATION_STARTS_ON_RANDOM_FRAME: u32 = 1 << 2;
+const DEFINITION_TINT_FROM_DIFFUSE_TEXTURE: u32 = 1 << 6;
+const DEFINITION_SELF_ILLUMINATED: u32 = 1 << 9;
+const DEFINITION_RANDOM_HORIZONTAL_MIRRORING: u32 = 1 << 10;
+const DEFINITION_RANDOM_VERTICAL_MIRRORING: u32 = 1 << 11;
 const DEFINITION_ANIMATE_ONCE_PER_FRAME: u32 = 1 << 3;
 const DEFINITION_DIES_AT_REST: u32 = 1 << 4;
 const DEFINITION_DIES_ON_CONTACT_WITH_STRUCTURE: u32 = 1 << 5;
@@ -69,6 +82,19 @@ pub mod call {
     /// The impact's material effect if it is visible: `a` the material
     /// effects, `b` the material; `f` the normal and scale.
     pub const MATERIAL_EFFECT: i32 = 5;
+    /// Making a particle: the point `f` in the node `b` of the object `a`
+    /// (`c` 1 its first person weapon's, for the local player `d`), in `out`.
+    pub const NODE_POINT: i32 = 6;
+    /// `scenario_location_from_point` at `f` (from a location of zeros), in
+    /// `out_location_*`.
+    pub const LOCATION_FROM_POINT: i32 = 7;
+    /// Whether the location in `a` (leaf), `b` (cluster), `c` (bonus) is
+    /// potentially visible to the local players.
+    pub const VISIBLE: i32 = 8;
+    /// The particle's datum: the result its index (NONE for none).
+    pub const NEW: i32 = 9;
+    /// `light_particle` at `f`: the light and the diffuse colour in `out`.
+    pub const LIGHT: i32 = 10;
 }
 
 /// halo_sim.h's `struct halo_sim_particle_call`.
@@ -78,15 +104,33 @@ pub struct ParticleCall {
     pub kind: i32,
     pub a: i32,
     pub b: i32,
+    pub c: i32,
+    pub d: i32,
     pub f: [f32; 4],
     pub result: i32,
-    pub out: [f32; 3],
+    pub out: [f32; 6],
     pub out_material_type: i32,
+    pub out_location_leaf: i32,
+    pub out_location_cluster: i16,
+    pub out_location_bonus: u16,
 }
 
 impl ParticleCall {
     pub fn new(kind: i32) -> Self {
-        ParticleCall { kind, a: 0, b: 0, f: [0.0; 4], result: 0, out: [0.0; 3], out_material_type: 0 }
+        ParticleCall {
+            kind,
+            a: 0,
+            b: 0,
+            c: 0,
+            d: 0,
+            f: [0.0; 4],
+            result: 0,
+            out: [0.0; 6],
+            out_material_type: 0,
+            out_location_leaf: 0,
+            out_location_cluster: 0,
+            out_location_bonus: 0,
+        }
     }
 }
 
@@ -119,12 +163,14 @@ pub struct ParticleState {
     pub rotation: f32,
     pub angular_velocity: f32,
     pub radius: f32,
+    /// alpha, red, green, blue.
+    pub color: [f32; 4],
     /// `get_global_local_random_seed_address`'s.
     pub local_random_seed: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<ParticleState>() == 104);
-const _: () = assert!(std::mem::size_of::<ParticleCall>() == 48);
+const _: () = assert!(std::mem::size_of::<ParticleState>() == 120);
+const _: () = assert!(std::mem::size_of::<ParticleCall>() == 76);
 
 /// What a frame's particle updates read of the game besides the particle.
 pub struct ParticleInputs {
@@ -135,6 +181,8 @@ pub struct ParticleInputs {
     pub oldest_tick_frame_index: i32,
     /// `particles_update_ticks`: the ticks this frame ends.
     pub update_ticks: i32,
+    /// `local_player_count()` (making a particle).
+    pub local_player_count: i16,
 }
 
 /// The game's side of a particle's update.
@@ -163,6 +211,10 @@ pub struct ParticleDefinition {
     pub radius_lower_bound: f32,
     pub radius_upper_bound: f32,
     pub frames_per_second_contact_deterioration: f32,
+    pub life_span_lower_bound: f32,
+    pub life_span_upper_bound: f32,
+    pub frames_per_second_lower_bound: f32,
+    pub frames_per_second_upper_bound: f32,
     pub first_sequence_index: i16,
     pub initial_sequence_count: i16,
     pub looping_sequence_count: i16,
@@ -200,6 +252,10 @@ impl ParticleDefinition {
             radius_lower_bound: root.f32(p::RADIUS_LOWER_BOUND)?,
             radius_upper_bound: root.f32(p::RADIUS_UPPER_BOUND)?,
             frames_per_second_contact_deterioration: root.f32(p::FRAMES_PER_SECOND_CONTACT_DETERIORATION)?,
+            life_span_lower_bound: root.f32(p::LIFE_SPAN_LOWER_BOUND)?,
+            life_span_upper_bound: root.f32(p::LIFE_SPAN_UPPER_BOUND)?,
+            frames_per_second_lower_bound: root.f32(p::FRAMES_PER_SECOND_LOWER_BOUND)?,
+            frames_per_second_upper_bound: root.f32(p::FRAMES_PER_SECOND_UPPER_BOUND)?,
             first_sequence_index: root.i16(p::FIRST_SEQUENCE_INDEX)?,
             initial_sequence_count: root.i16(p::INITIAL_SEQUENCE_COUNT)?,
             looping_sequence_count: root.i16(p::LOOPING_SEQUENCE_COUNT)?,
@@ -398,7 +454,7 @@ impl<H: ParticleHost> Update<'_, H> {
                 call.f[1] = dt;
                 self.call(state, &mut call);
                 let collision_flags = call.result;
-                let collision_normal = call.out;
+                let collision_normal = [call.out[0], call.out[1], call.out[2]];
                 let collision_material_type = call.out_material_type;
 
                 if collision_flags & PHYSICS_COLLIDED_WITH_STRUCTURE != 0 {
@@ -528,4 +584,200 @@ pub fn particle_update(
     dt: f32,
 ) {
     Update { definition, inputs, host }.update(state, dt);
+}
+
+/// `struct new_particle_data`: what `particle_new` is given.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NewParticleData {
+    pub definition_index: i32,
+    pub object_index: i32,
+    pub node_index: i16,
+    pub local_player_index: i16,
+    pub attached_to_local_player: u8,
+    pub dont_draw_first_person: u8,
+    pub dont_draw_third_person: u8,
+    pub pad: u8,
+    pub position: [f32; 3],
+    pub direction: [f32; 3],
+    pub velocity: [f32; 3],
+    pub initial_impulse: [f32; 3],
+    pub rotation: f32,
+    pub angular_velocity: f32,
+    pub radius: f32,
+    /// alpha, red, green, blue.
+    pub color: [f32; 4],
+}
+
+const _: () = assert!(std::mem::size_of::<NewParticleData>() == 92);
+
+/// `local_random`: `seed_random` on the local seed.
+fn local_random(seed: &mut u32) -> u16 {
+    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    (*seed >> 16) as u16
+}
+
+/// `real_local_random_range`.
+fn real_local_random_range(seed: &mut u32, lower_bound: f32, upper_bound: f32) -> f32 {
+    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    let random = (*seed >> 16) as f32 / 65535.0;
+    lower_bound + (upper_bound - lower_bound) * random
+}
+
+impl<H: ParticleHost> Update<'_, H> {
+    /// `particle_new`, from `state` (the seed; its index NONE): the new
+    /// particle in `state`, or NONE.
+    fn new_particle(&self, state: &mut ParticleState, data: &NewParticleData) -> i32 {
+        let definition = self.definition;
+        let position = if data.object_index != NONE {
+            let mut call = ParticleCall::new(call::NODE_POINT);
+            call.a = data.object_index;
+            call.b = data.node_index as i32;
+            call.c = data.attached_to_local_player as i32;
+            call.d = data.local_player_index as i32;
+            call.f[..3].copy_from_slice(&data.position);
+            self.call(state, &mut call);
+            [call.out[0], call.out[1], call.out[2]]
+        } else {
+            data.position
+        };
+        let mut call = ParticleCall::new(call::LOCATION_FROM_POINT);
+        call.f[..3].copy_from_slice(&position);
+        self.call(state, &mut call);
+        let location = (call.out_location_leaf, call.out_location_cluster, call.out_location_bonus);
+        if location.0 == NONE {
+            return NONE;
+        }
+        let mut call = ParticleCall::new(call::VISIBLE);
+        call.a = location.0;
+        call.b = location.1 as i32;
+        call.c = location.2 as i32;
+        self.call(state, &mut call);
+        if call.result == 0 {
+            return NONE;
+        }
+        let mut call = ParticleCall::new(call::NEW);
+        self.call(state, &mut call);
+        let particle_index = call.result;
+        if particle_index == NONE {
+            return NONE;
+        }
+
+        // (the datum is new: zeros)
+        let seed = state.local_random_seed;
+        *state = ParticleState { particle_index: particle_index as u32, local_random_seed: seed, ..Default::default() };
+        let mut flags: u16 = 0;
+        if definition.flags & DEFINITION_CAN_ANIMATE_BACKWARDS != 0 {
+            flags |= local_random(&mut state.local_random_seed) & PARTICLE_ANIMATES_BACKWARDS;
+        }
+        if definition.flags & DEFINITION_RANDOM_HORIZONTAL_MIRRORING != 0 {
+            flags |= local_random(&mut state.local_random_seed) & PARTICLE_U_MIRROR;
+        }
+        if definition.flags & DEFINITION_RANDOM_VERTICAL_MIRRORING != 0 {
+            flags |= local_random(&mut state.local_random_seed) & PARTICLE_V_MIRROR;
+        }
+        for (set, bit) in [
+            (data.dont_draw_first_person, PARTICLE_DONT_DRAW_FIRST_PERSON),
+            (data.dont_draw_third_person, PARTICLE_DONT_DRAW_THIRD_PERSON),
+            (data.attached_to_local_player, PARTICLE_ATTACHED_TO_LOCAL_PLAYER),
+        ] {
+            if set != 0 {
+                flags |= bit;
+            } else {
+                flags &= !bit;
+            }
+        }
+        state.flags = flags;
+        state.definition_index = data.definition_index as u32;
+        state.local_player_index = data.local_player_index as u8;
+        state.object_index = data.object_index;
+        state.node_index = data.node_index;
+        state.state = STATE_NEXT_SEQUENCE_INITIAL;
+        state.last_rendered_frame_index = self.inputs.frame_index;
+
+        state.lifespan = real_local_random_range(
+            &mut state.local_random_seed,
+            definition.life_span_lower_bound,
+            definition.life_span_upper_bound,
+        );
+        if state.lifespan > PARTICLE_SHARED_LIFESPAN {
+            state.lifespan = (state.lifespan - PARTICLE_SHARED_LIFESPAN) / self.inputs.local_player_count as f32
+                + PARTICLE_SHARED_LIFESPAN;
+        }
+        state.frame_span = if definition.frames_per_second_upper_bound != 0.0 {
+            1.0 / real_local_random_range(
+                &mut state.local_random_seed,
+                definition.frames_per_second_lower_bound,
+                definition.frames_per_second_upper_bound,
+            )
+        } else {
+            f32::MAX
+        };
+        state.frame_time = -1.0;
+
+        (state.location_leaf, state.location_cluster, state.location_bonus) = location;
+        state.position = data.position;
+        state.direction = data.direction;
+        state.rotation = data.rotation;
+        state.radius = data.radius;
+        state.color = data.color;
+        state.translational_velocity = data.velocity;
+        if state.object_index == NONE {
+            let radius = self.radius(state);
+            let mass =
+                definition.physics.as_ref().map_or(0.0, |p| p.runtime_mass_over_radius_cubed) * radius * radius * radius;
+            for c in 0..3 {
+                state.translational_velocity[c] = data.initial_impulse[c] * mass + state.translational_velocity[c];
+            }
+        }
+        state.angular_velocity = data.angular_velocity;
+
+        if definition.flags & DEFINITION_SELF_ILLUMINATED == 0 || definition.flags & DEFINITION_TINT_FROM_DIFFUSE_TEXTURE != 0
+        {
+            let mut call = ParticleCall::new(call::LIGHT);
+            call.f[..3].copy_from_slice(&position);
+            self.call(state, &mut call);
+            if definition.flags & DEFINITION_SELF_ILLUMINATED == 0 {
+                for c in 0..3 {
+                    state.color[1 + c] *= call.out[c];
+                }
+            }
+            if definition.flags & DEFINITION_TINT_FROM_DIFFUSE_TEXTURE != 0 {
+                for c in 0..3 {
+                    state.color[1 + c] *= call.out[3 + c];
+                }
+            }
+        }
+
+        if self.next_sequence(state) {
+            let sprite_count = self.sprite_count(state);
+            if definition.flags & DEFINITION_ANIMATION_STARTS_ON_RANDOM_FRAME != 0 {
+                let start: i16 = if state.flags & PARTICLE_ANIMATES_BACKWARDS != 0 { 1 } else { NONE as i16 };
+                state.frame_index =
+                    start.wrapping_add(local_random_range(&mut state.local_random_seed, 0, sprite_count as i16));
+            } else if state.flags & PARTICLE_ANIMATES_BACKWARDS != 0 {
+                state.frame_index = sprite_count as i16;
+            } else {
+                state.frame_index = NONE as i16;
+            }
+        }
+        particle_index
+    }
+}
+
+/// `particle_new`: the new particle (NONE for none), from `state` (the
+/// seed; its index NONE), where it is left. `definition` is the particle's
+/// (None when `data` names none).
+pub fn particle_new(
+    definition: Option<&ParticleDefinition>,
+    inputs: &ParticleInputs,
+    host: &impl ParticleHost,
+    state: &mut ParticleState,
+    data: &NewParticleData,
+) -> i32 {
+    let Some(definition) = definition else { return NONE };
+    if data.definition_index == NONE {
+        return NONE;
+    }
+    Update { definition, inputs, host }.new_particle(state, data)
 }

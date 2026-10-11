@@ -25,6 +25,7 @@ pub mod damage_update;
 pub mod devices;
 pub mod effects;
 pub mod particles;
+pub mod contrails;
 pub mod items;
 pub mod markers;
 pub mod object_exports;

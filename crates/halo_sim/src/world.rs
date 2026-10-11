@@ -79,6 +79,7 @@ pub struct Host {
     pub ik: crate::unit_ik::IkCallbacks,
     pub effects: crate::effects::EffectCallbacks,
     pub particles: crate::particles::ParticleCallbacks,
+    pub contrails: crate::contrails::ContrailCallbacks,
 }
 
 static HOST: Mutex<Option<Host>> = Mutex::new(None);

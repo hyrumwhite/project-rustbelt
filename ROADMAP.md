@@ -371,6 +371,13 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - otherwise it charges when it wants to (forced, gunless and charging in attacking mode, or a charge still under way, with the strafing charge stopped at its destination, its stop range or turned away), or fights.
      - **The C's side, through `actions_port_handler_call`:** seeking cover, going berserk, the ranged weapon, the difficulty's melee delay, the charge and fight setups, and the vehicle's definition.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the melee check's interval was caught on d20. With all forty-seven systems in Rust, every probe check agrees on the five levels at 144 frames a second.
+   - [x] Lost contact in Rust (`halo_map::actor_transitions`): what an actor that lost its target does, which the handlers now call directly.
+     - **What Rust does:**
+       - the pursuit's options: the type's desires (actor_types.c's table: when to search at the target, to pursue and to search the pursuit), as the encounter modifies them, limited by the target's prop and the vehicle (`actor_action_determine_pursuit_options`);
+       - then it uncovers or searches the target, or pursues: to a position the encounter hasn't examined (or one an uncover found), undirected for a swarm, with the shouts on losing contact, starting and ending the pursuit; or it waits;
+       - otherwise it guards after combat, returns to idle when its encounter stands down, or guards to find a position (after three seconds unless a search is under way).
+     - **The C's side, through `actions_port_handler_call`:** the encounter's stand-down, desires, availability and examined positions, the prop's pathfinding location and nearby positions, choosing a pursuit position, the target's unit, and the uncover, search, wait and guard setups.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the find-position delay was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

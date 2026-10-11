@@ -561,6 +561,22 @@ impl<H: AiHost> Decide<'_, H> {
     }
 }
 
+/// The pursuit settings of an actor of `actor_type` (actor_types.c's table:
+/// its desires to search at the target, to pursue and to search the pursuit,
+/// and whether it controls a group's pursuit).
+pub fn pursuit_settings(actor_type: i16) -> (i16, i16, i16, u8) {
+    match actor_type {
+        actor_type::ELITE | actor_type::ASSASSIN | actor_type::HUNTER => (0, 1, 1, 1),
+        actor_type::JACKAL => (2, 0, 2, 0),
+        actor_type::COMBAT_FORM => (0, 0, 0, 1),
+        actor_type::INFECTION_FORM | actor_type::MOUNTED_WEAPON => (2, 2, 2, 0),
+        actor_type::CARRIER_FORM => (0, 2, 2, 1),
+        // grunts, engineers, marines (and players), crew, sentinels (and
+        // monitors), and none
+        _ => (0, 0, 0, 0),
+    }
+}
+
 /// actor_types.c's `actor_type_decide_action`: the actor's type's decision
 /// (by actor_types.c's table: assassins decide as elites, players as
 /// marines, monitors as sentinels, and none, or a type it lacks, as grunts).

@@ -8,7 +8,7 @@
 //! (actions.c's `actions_port_handler_call`, shared with the C).
 
 use crate::actions::dot;
-use crate::actor_types::call as handler;
+use crate::actor_types::{call as handler, pursuit_settings};
 use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE, prop_get};
 use crate::layout::{actor_datum as a, actor_definition as d, actor_variant_definition as var, ai_values as v, prop_datum as p};
 
@@ -88,6 +88,51 @@ pub mod call {
     pub const VEHICLE_DEFINITION: i32 = BASE | 31;
     /// `action_fight_setup` and `actor_action_change` to fight.
     pub const FIGHT: i32 = BASE | 32;
+    /// Whether the actor's encounter is standing down, the result.
+    pub const ENCOUNTER_STAND_DOWN: i32 = BASE | 33;
+    /// `encounter_modify_pursuit_desires` of the actor's squad: in `input`
+    /// and `output`, whether to pursue tenaciously, the group's restriction,
+    /// whether it controls the group's pursuit, and the desires to search at
+    /// the target, to pursue and to search the pursuit.
+    pub const PURSUIT_DESIRES: i32 = BASE | 34;
+    /// `encounter_determine_pursuit_availability` (`a` the group's
+    /// restriction, `b` whether it controls the pursuit): its eight flags in
+    /// `input` and, by bit, the result.
+    pub const PURSUIT_AVAILABILITY: i32 = BASE | 35;
+    /// `actor_perception_find_prop_pathfinding_location(actor, a)`.
+    pub const FIND_PROP_PATHFINDING_LOCATION: i32 = BASE | 36;
+    /// `actor_nearby_firing_positions` around the prop `a`'s pathfinding
+    /// point, for searching: the result.
+    pub const NEARBY_FIRING_POSITIONS: i32 = BASE | 37;
+    /// `action_uncover_setup_target(actor, a)` and, if it sets up,
+    /// `actor_action_change` to uncover: whether it did, the result.
+    pub const UNCOVER_TARGET: i32 = BASE | 38;
+    /// `action_search_setup_target(actor, a)` and the change to search: the
+    /// result.
+    pub const SEARCH_TARGET: i32 = BASE | 39;
+    /// `actor_target_unit_index(actor)`, the result.
+    pub const TARGET_UNIT: i32 = BASE | 40;
+    /// `action_search_setup_undirected(actor, a)` and the change to search:
+    /// the result.
+    pub const SEARCH_UNDIRECTED: i32 = BASE | 41;
+    /// `actor_select_firing_position` of a pursuit position (`a` tenacious,
+    /// `b` the orphan's last perceived time): its index, the result.
+    pub const SELECT_PURSUIT_POSITION: i32 = BASE | 42;
+    /// `action_uncover_setup_pursuit(actor, a)` and the change to uncover:
+    /// the result.
+    pub const UNCOVER_PURSUIT: i32 = BASE | 43;
+    /// `action_search_setup_pursuit(actor, a, b)` and the change to search:
+    /// the result.
+    pub const SEARCH_PURSUIT: i32 = BASE | 44;
+    /// `encounter_mark_examined_pursuit_position(encounter, actor, a, b)`,
+    /// the result.
+    pub const MARK_EXAMINED: i32 = BASE | 45;
+    /// `action_wait_setup(actor, a)` and the change to wait: the result.
+    pub const WAIT: i32 = BASE | 46;
+    /// `action_guard_setup_postcombat` and the change to guard: the result.
+    pub const GUARD_POSTCOMBAT: i32 = BASE | 47;
+    /// `action_guard_setup_find_position(actor, a)` and the change to guard.
+    pub const GUARD_FIND_POSITION: i32 = BASE | 48;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -106,6 +151,7 @@ const ACTION_ALERT: i16 = 2;
 const ACTION_FIGHT: i16 = 3;
 const ACTION_FLEE: i16 = 4;
 const ACTION_UNCOVER: i16 = 5;
+const ACTION_GUARD: i16 = 6;
 const ACTION_SEARCH: i16 = 7;
 const ACTION_WAIT: i16 = 8;
 const ACTION_CHARGE: i16 = 10;
@@ -568,7 +614,7 @@ fn combat_selection(context: &AiStepContext, host: &impl AiHost) -> bool {
 }
 
 fn lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool {
-    call_simple(context, host, call::LOST_CONTACT, 0) != 0
+    handle_lost_contact(context, host)
 }
 
 /// `actor_action_handle_done_fleeing`: a fled actor guards.
@@ -934,4 +980,383 @@ pub fn handle_combat_selection(context: &AiStepContext, host: &impl AiHost) -> b
     }
 
     action_changed
+}
+
+/// The pursuit an actor that lost contact may take
+/// (`actor_action_determine_pursuit_options`'s flags).
+#[derive(Default)]
+struct PursuitOptions {
+    allow_target_uncover: bool,
+    allow_indefinite_target_uncover: bool,
+    allow_target_search: bool,
+    allow_pursuit: bool,
+    allow_pursuit_search: bool,
+    wait_after_pursuit: bool,
+}
+
+/// actions.c's `actor_action_determine_pursuit_options`: the desires (2
+/// never, 1 not when controlling a group's pursuit) and the target's prop
+/// limit the pursuit (uncover what's yet to be, search what's yet to be
+/// where there are positions to search from), and so does the vehicle.
+#[allow(clippy::too_many_arguments)]
+fn determine_pursuit_options(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    desire_target_search: i16,
+    desire_pursuit: i16,
+    desire_pursuit_search: i16,
+    controlling_group: bool,
+    should_return_to_idle: bool,
+    force_charge: bool,
+    options: &mut PursuitOptions,
+) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if desire_target_search == 2 || (desire_target_search == 1 && controlling_group) {
+        options.allow_target_search = false;
+    }
+    if desire_pursuit == 2 || (desire_pursuit == 1 && controlling_group) {
+        options.allow_pursuit = false;
+        options.allow_pursuit_search = false;
+    } else if desire_pursuit_search == 2 || (desire_pursuit_search == 1 && controlling_group) {
+        options.allow_pursuit_search = false;
+    }
+    if should_return_to_idle {
+        options.allow_pursuit = false;
+        options.allow_pursuit_search = false;
+        options.wait_after_pursuit = false;
+    }
+
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    if target_prop_index == NONE {
+        options.allow_target_uncover = false;
+        options.allow_target_search = false;
+        return;
+    }
+    let prop = prop_get(m, context, target_prop_index);
+    options.allow_target_uncover = !m.bool(prop + p::TRIED_TO_UNCOVER as u32);
+    options.allow_target_search = !m.bool(prop + p::TRIED_TO_SEARCH as u32);
+    if force_charge {
+        options.allow_target_uncover = false;
+    } else if options.allow_target_search {
+        let state = m.i16(prop + p::STATE as u32);
+        if (2..=3).contains(&state) {
+            call_simple(context, host, call::FIND_PROP_PATHFINDING_LOCATION, target_prop_index);
+        }
+        options.allow_target_search = call_simple(context, host, call::NEARBY_FIRING_POSITIONS, target_prop_index) != 0;
+    }
+
+    if !options.allow_indefinite_target_uncover && m.i16(at(a::STATE_COMBAT_STATUS)) < 3 {
+        options.allow_target_uncover = false;
+    }
+    let driver_type = m.i16(at(a::INPUT_VEHICLE_DRIVER_TYPE));
+    if driver_type > 0 {
+        options.wait_after_pursuit = false;
+    }
+    if driver_type == 4 {
+        options.allow_target_search = false;
+        options.allow_pursuit_search = false;
+    }
+}
+
+/// `actor_action_handle_lost_contact`: an actor that lost contact uncovers
+/// or searches its target if it may, else pursues (to a position the
+/// encounter hasn't examined, or undirected for a swarm), else waits; else
+/// guards after combat, returns to idle when its encounter stands down, or
+/// guards to find a position.
+pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let combat_status = || m.i16(at(a::STATE_COMBAT_STATUS));
+    let action = || m.i16(at(a::STATE_ACTION));
+    let target_prop_index = || m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    let communicate = |kind: usize, unit_index: i32| {
+        call_full(context, host, call::COMMUNICATION, kind as i32, unit_index, &[NONE as f32]);
+    };
+    let encounter_index = m.i32(at(a::META_ENCOUNTER_INDEX));
+    let mut handled = false;
+    let mut should_return_to_idle = false;
+    let mut wants_postcombat_guard = false;
+
+    if encounter_index != NONE
+        && call_simple(context, host, call::ENCOUNTER_STAND_DOWN, 0) != 0
+        && combat_status() <= 2
+        && m.i16(at(a::STATE_ARTIFICIAL_COMBAT_STATUS)) == 0
+        && m.i16(at(a::STATE_SUSPICION_COMBAT_STATUS)) == 0
+    {
+        should_return_to_idle = true;
+    }
+    if m.i16(at(a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE)) > 0
+        && combat_status() <= 2
+        && m.i16(at(a::STATE_SUSPICION_COMBAT_STATUS)) == 0
+    {
+        wants_postcombat_guard = true;
+    }
+    if m.i16(at(a::STATE_MODE)) < 3 && ACTION_CLASSES[action() as usize] == 0 {
+        handled = true;
+    }
+
+    if !handled
+        && !m.bool(at(a::INPUT_VEHICLE_PASSENGER))
+        && !wants_postcombat_guard
+        && !should_return_to_idle
+        && combat_status() >= 2
+    {
+        let orphan = if target_prop_index() == NONE { None } else { Some(prop_get(m, context, target_prop_index())) };
+        let mut pursue_tenacious = false;
+        let mut options = PursuitOptions::default();
+        let swarm = m.bool(at(a::META_SWARM));
+
+        if orphan.is_none_or(|orphan| !m.bool(orphan + p::ABANDONED_SEARCH as u32)) {
+            let (mut desire_target_search, mut desire_pursuit, mut desire_pursuit_search, controller) =
+                pursuit_settings(m.i16(at(a::META_TYPE)));
+            let mut group_pursuit_controller = controller != 0;
+            let mut group_pursuit_restriction: i16 = 0;
+            let mut controlling_group_pursuit = false;
+
+            if orphan.is_some() {
+                options.allow_indefinite_target_uncover = true;
+                options.allow_target_uncover = true;
+            }
+            options.allow_pursuit = true;
+            options.allow_target_search = true;
+            options.allow_pursuit_search = true;
+
+            if encounter_index != NONE {
+                let desires = call_full(
+                    context,
+                    host,
+                    call::PURSUIT_DESIRES,
+                    0,
+                    0,
+                    &[
+                        pursue_tenacious as i32 as f32,
+                        group_pursuit_restriction as f32,
+                        group_pursuit_controller as i32 as f32,
+                        desire_target_search as f32,
+                        desire_pursuit as f32,
+                        desire_pursuit_search as f32,
+                    ],
+                )
+                .output;
+                pursue_tenacious = desires[0] != 0.0;
+                group_pursuit_restriction = desires[1] as i16;
+                group_pursuit_controller = desires[2] != 0.0;
+                desire_target_search = desires[3] as i16;
+                desire_pursuit = desires[4] as i16;
+                desire_pursuit_search = desires[5] as i16;
+
+                if swarm {
+                    options.allow_target_search = true;
+                    options.allow_indefinite_target_uncover = true;
+                    options.allow_target_uncover = true;
+                    options.allow_pursuit_search = true;
+                    options.allow_pursuit = true;
+                } else {
+                    let flags = [
+                        options.allow_target_uncover,
+                        options.allow_indefinite_target_uncover,
+                        options.allow_target_search,
+                        options.allow_pursuit,
+                        options.allow_pursuit_search,
+                        controlling_group_pursuit,
+                        false,
+                        options.wait_after_pursuit,
+                    ]
+                    .map(|flag| flag as i32 as f32);
+                    let result = call_full(
+                        context,
+                        host,
+                        call::PURSUIT_AVAILABILITY,
+                        group_pursuit_restriction as i32,
+                        group_pursuit_controller as i32,
+                        &flags,
+                    )
+                    .result;
+                    let bit = |n: u32| result & (1 << n) != 0;
+                    options.allow_target_uncover = bit(0);
+                    options.allow_indefinite_target_uncover = bit(1);
+                    options.allow_target_search = bit(2);
+                    options.allow_pursuit = bit(3);
+                    options.allow_pursuit_search = bit(4);
+                    controlling_group_pursuit = bit(5);
+                    options.wait_after_pursuit = bit(7);
+                }
+            }
+
+            determine_pursuit_options(
+                context,
+                host,
+                desire_target_search,
+                desire_pursuit,
+                desire_pursuit_search,
+                controlling_group_pursuit,
+                should_return_to_idle,
+                m.bool(at(a::EMOTIONS_FORCED_TO_CHARGE)),
+                &mut options,
+            );
+        }
+
+        if m.i32(at(a::FIRING_POSITIONS_PURSUIT_PROP_INDEX)) != target_prop_index() {
+            m.set_i16(at(a::FIRING_POSITIONS_PURSUIT_POSITIONS_COUNT), 0);
+            m.w32(at(a::FIRING_POSITIONS_PURSUIT_PROP_INDEX), target_prop_index() as u32);
+            m.set_bool(at(a::FIRING_POSITIONS_PURSUIT_FIRED_AT_ORPHAN), false);
+            m.set_bool(at(a::FIRING_POSITIONS_PURSUIT_COMMUNICATED_LOST_CONTACT), false);
+        }
+
+        if options.allow_target_uncover
+            && call_simple(context, host, call::UNCOVER_TARGET, options.allow_target_search as i32) != 0
+        {
+            handled = true;
+        }
+
+        if !handled {
+            call_simple(context, host, call::TRIED_TO_UNCOVER, target_prop_index());
+            if options.allow_target_search
+                && call_simple(context, host, call::SEARCH_TARGET, m.bool(at(a::EMOTIONS_FORCED_TO_CHARGE)) as i32) != 0
+            {
+                handled = true;
+            }
+
+            if !handled {
+                call_simple(context, host, call::TRIED_TO_SEARCH, target_prop_index());
+                if m.bool(at(a::FIRING_POSITIONS_PURSUIT_FIRED_AT_ORPHAN))
+                    && !m.bool(at(a::FIRING_POSITIONS_PURSUIT_COMMUNICATED_LOST_CONTACT))
+                {
+                    let target_unit_index = call_simple(context, host, call::TARGET_UNIT, 0);
+                    communicate(13, target_unit_index);
+                    m.set_bool(at(a::FIRING_POSITIONS_PURSUIT_COMMUNICATED_LOST_CONTACT), true);
+                }
+
+                if options.allow_pursuit {
+                    let mut firing_position_index = NONE as i16;
+                    let mut pursuit_from_uncover = false;
+                    m.set_bool(at(a::STATE_SEARCHING), true);
+
+                    if swarm {
+                        if options.allow_pursuit_search
+                            && call_simple(context, host, call::SEARCH_UNDIRECTED, pursue_tenacious as i32) != 0
+                        {
+                            handled = true;
+                        }
+                    } else {
+                        if action() == ACTION_UNCOVER
+                            && options.allow_pursuit_search
+                            && m.i16(at(a::STATE_UNCOVER_PURSUIT_LOCATION_TYPE)) == v::_PURSUIT_LOCATION_POSITION as i16
+                        {
+                            firing_position_index = m.i16(at(a::STATE_UNCOVER_PURSUIT_LOCATION_FIRING_POSITION_INDEX));
+                            pursuit_from_uncover = true;
+                        }
+
+                        if firing_position_index == NONE as i16 {
+                            let definition = |offset: usize| m.i16(context.definition + offset as u32);
+                            let examined_threshold = if m.i32(at(a::EXTERNAL_ORDERS_PURSUIT_GROUP_PROP_INDEX)) == NONE {
+                                definition(d::PURSUIT_UNCOORDINATED_PURSUIT_POSITIONS)
+                            } else {
+                                definition(d::PURSUIT_COORDINATED_PURSUIT_POSITIONS)
+                            };
+                            if pursue_tenacious
+                                || m.i32(at(a::FIRING_POSITIONS_PURSUIT_PROP_INDEX)) != target_prop_index()
+                                || m.i16(at(a::FIRING_POSITIONS_PURSUIT_POSITIONS_COUNT)) < examined_threshold
+                            {
+                                let last_perceived_time =
+                                    orphan.map_or(NONE, |orphan| m.i32(orphan + p::LAST_PERCEIVED_TIME as u32));
+                                firing_position_index = call_full(
+                                    context,
+                                    host,
+                                    call::SELECT_PURSUIT_POSITION,
+                                    pursue_tenacious as i32,
+                                    last_perceived_time,
+                                    &[],
+                                )
+                                .result as i16;
+                            }
+                        }
+
+                        if firing_position_index != NONE as i16 {
+                            if !pursuit_from_uncover
+                                && call_simple(context, host, call::UNCOVER_PURSUIT, firing_position_index as i32) != 0
+                            {
+                                handled = true;
+                            } else if options.allow_pursuit_search
+                                && call_full(
+                                    context,
+                                    host,
+                                    call::SEARCH_PURSUIT,
+                                    firing_position_index as i32,
+                                    pursue_tenacious as i32,
+                                    &[],
+                                )
+                                .result
+                                    != 0
+                            {
+                                handled = true;
+                            }
+                        }
+                    }
+
+                    if handled {
+                        let last_perceived_time =
+                            orphan.map_or(NONE, |orphan| m.i32(orphan + p::LAST_PERCEIVED_TIME as u32));
+                        if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE
+                            && call_full(
+                                context,
+                                host,
+                                call::MARK_EXAMINED,
+                                firing_position_index as i32,
+                                last_perceived_time,
+                                &[],
+                            )
+                            .result
+                                != 0
+                        {
+                            let count = at(a::FIRING_POSITIONS_PURSUIT_POSITIONS_COUNT);
+                            if m.i16(count) == 0 {
+                                communicate(16, NONE);
+                            }
+                            m.set_i16(count, m.i16(count).wrapping_add(1));
+                        }
+                    }
+                }
+
+                if !handled {
+                    if m.i16(at(a::FIRING_POSITIONS_PURSUIT_POSITIONS_COUNT)) > 0 && m.i32(at(a::META_UNIT_INDEX)) != NONE {
+                        communicate(19, NONE);
+                    }
+                    if !swarm
+                        && options.wait_after_pursuit
+                        && call_simple(context, host, call::WAIT, options.allow_pursuit as i32) != 0
+                    {
+                        handled = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !handled && wants_postcombat_guard {
+        if action() == ACTION_GUARD && m.bool(at(a::STATE_GUARD_POST_COMBAT)) {
+            handled = true;
+        } else if call_simple(context, host, call::GUARD_POSTCOMBAT, 0) != 0 {
+            handled = true;
+        }
+    }
+
+    if !handled && should_return_to_idle {
+        handled = call_simple(context, host, call::SET_DEFAULT_STATE, 0) != 0;
+    }
+
+    if !handled && ACTION_CLASSES[action() as usize] != 1 {
+        let find_position_delay =
+            if (action() != ACTION_SEARCH || m.bool(at(a::STATE_SEARCH_SEARCH_FAILED))) && action() != ACTION_WAIT {
+                90
+            } else {
+                0
+            };
+        call_simple(context, host, call::ABANDONED_SEARCH, target_prop_index());
+        call_simple(context, host, call::GUARD_FIND_POSITION, find_position_delay);
+        handled = true;
+    }
+
+    handled
 }

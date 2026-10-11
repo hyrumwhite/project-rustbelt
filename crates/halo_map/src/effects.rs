@@ -136,6 +136,31 @@ pub mod call {
     /// the position, direction, velocity, initial impulse, rotation, angular
     /// velocity, radius and colour (alpha first).
     pub const PARTICLE: i32 = 16;
+    /// Creating an effect: `effect_allocate`'s test of the definition (`a`)
+    /// and its datum, with the owner `b` and `c` whether it can be
+    /// deterministic; the result the new effect (NONE for none).
+    pub const ALLOCATE: i32 = 17;
+    /// Its impulse field, from the creator's (`a`, its address; 0 for none).
+    pub const IMPULSE_FIELD: i32 = 18;
+    /// `effects_object_is_corpse(a)`.
+    pub const CORPSE: i32 = 19;
+    /// `first_person_weapon_get_local_index(a)`.
+    pub const LOCAL_INDEX: i32 = 20;
+    /// `scenario_location_from_point` at `f`, from its location: in
+    /// `out_location_*`.
+    pub const LOCATION_FROM_POINT: i32 = 21;
+    /// The markers of its location `b` on the object `a` (`c` 0 the object's,
+    /// 1 its first person weapon's): the result their count, and marker `d`'s
+    /// node (`out_location_leaf`) and node matrix (`out`).
+    pub const MARKERS: i32 = 22;
+    /// `effect_build_location`: an instance of location `a` with the node
+    /// designator `b` and the matrix `f`; the result its datum (NONE for
+    /// none).
+    pub const BUILD_LOCATION: i32 = 23;
+    /// Its location instances emptied (before they are built).
+    pub const CLEAR_LOCATIONS: i32 = 24;
+    /// `object_get_node_matrix(a, b)`, in `out`.
+    pub const OBJECT_NODE_MATRIX: i32 = 25;
 }
 
 /// halo_sim.h's `struct halo_sim_effect_call`: a call of the game, and its
@@ -339,6 +364,8 @@ pub struct EffectDefinition {
     pub loop_stop_index: i16,
     /// No more than the effect holds (the game cuts a tag's to that).
     pub location_count: i32,
+    /// Each location's marker name (up to its terminator).
+    pub location_names: Vec<Vec<u8>>,
     pub events: Vec<EventDefinition>,
 }
 
@@ -428,6 +455,10 @@ impl EffectDefinition {
             loop_start_index: root.i16(d::LOOP_START_INDEX)?,
             loop_stop_index: root.i16(d::LOOP_STOP_INDEX)?,
             location_count: (locations.count as i32).min(MAXIMUM_EFFECT_LOCATIONS as i32),
+            location_names: locations
+                .iter()
+                .map(|l| l.bytes(0, 32).map(|b| b.iter().take_while(|&&c| c != 0).copied().collect()))
+                .collect::<Result<_>>()?,
             events,
         })
     }
@@ -1320,4 +1351,367 @@ pub fn effect_update(
 ) {
     let update = Update { definition, inputs, locations, host };
     update.update(state, dt);
+}
+
+/// Which `effect_new_*`.
+pub mod new_kind {
+    pub const LOOPING: i32 = 0;
+    pub const FROM_OBJECT: i32 = 1;
+    pub const ATTACHED_FROM_MARKERS: i32 = 2;
+    pub const UNATTACHED_FROM_MARKERS: i32 = 3;
+}
+
+/// `struct effect_marker_list`'s markers, as the creator hands them over.
+pub struct MarkerList<'a> {
+    /// None for no names.
+    pub names: Option<Vec<&'a [u8]>>,
+    pub points: &'a [[f32; 3]],
+    pub forwards: &'a [[f32; 3]],
+}
+
+/// What an `effect_new_*` is given.
+pub struct EffectNew<'a> {
+    /// [`new_kind`].
+    pub kind: i32,
+    pub definition_index: i32,
+    pub owner_object_index: i32,
+    pub object_index: i32,
+    pub node_index: i16,
+    pub force_local_player_index: i16,
+    pub scale_a_function_index: i16,
+    pub scale_b_function_index: i16,
+    pub change_color_index: i16,
+    pub scale_a: f32,
+    pub scale_b: f32,
+    pub color: Option<[f32; 3]>,
+    pub translational_velocity: Option<[f32; 3]>,
+    /// The impulse field's address (0 for none).
+    pub impulse_field: i32,
+    pub can_be_deterministic: bool,
+    pub markers: Option<MarkerList<'a>>,
+    /// `game_in_editor()`.
+    pub game_in_editor: bool,
+    /// `effects_corpse_nonviolent`.
+    pub corpse_nonviolent: bool,
+}
+
+/// `NUMBER_OF_OBJECT_CHANGE_COLORS`.
+const NUMBER_OF_OBJECT_CHANGE_COLORS: i16 = 4;
+
+/// `MAXIMUM_EFFECT_INSTANCES`: the markers a location takes.
+const MAXIMUM_EFFECT_INSTANCES: usize = 16;
+
+/// Where an effect's location markers come from (`effect_build_locations`'
+/// `get_markers_by_name`).
+#[derive(Clone, Copy, PartialEq)]
+enum MarkerSource {
+    Object,
+    FirstPersonWeapon,
+    List,
+}
+
+/// `perpendicular3d`.
+fn perpendicular3d(a: [f32; 3]) -> [f32; 3] {
+    let (i, j, k) = (a[0].abs(), a[1].abs(), a[2].abs());
+    if i <= j && i <= k {
+        [0.0, a[2], -a[1]]
+    } else if j <= k {
+        [-a[2], 0.0, a[0]]
+    } else {
+        [a[1], -a[0], 0.0]
+    }
+}
+
+/// `matrix4x3_inverse_transform_normal`.
+fn inverse_transform_normal(m: &Matrix4x3, n: [f32; 3]) -> [f32; 3] {
+    let [i, j, k] = n;
+    [
+        i * m.forward[0] + j * m.forward[1] + k * m.forward[2],
+        i * m.left[0] + j * m.left[1] + k * m.left[2],
+        i * m.up[0] + j * m.up[1] + k * m.up[2],
+    ]
+}
+
+fn matrix_floats(m: &Matrix4x3) -> [f32; 13] {
+    [
+        m.scale,
+        m.forward[0],
+        m.forward[1],
+        m.forward[2],
+        m.left[0],
+        m.left[1],
+        m.left[2],
+        m.up[0],
+        m.up[1],
+        m.up[2],
+        m.position[0],
+        m.position[1],
+        m.position[2],
+    ]
+}
+
+/// A new effect's locations, as they are built.
+struct Built {
+    first: [i32; MAXIMUM_EFFECT_LOCATIONS],
+    instances: Vec<EffectInstance>,
+}
+
+/// An `effect_new_*`.
+struct Creation<'a, H: EffectHost> {
+    new: &'a EffectNew<'a>,
+    update: Update<'a, H>,
+    /// The marker list's node and node matrix.
+    list_node: i16,
+    list_matrix: Option<Matrix4x3>,
+}
+
+impl<H: EffectHost> Creation<'_, H> {
+    /// `effect_allocate`: the new effect, or NONE.
+    fn allocate(&self, state: &mut EffectState, owner_object_index: i32, can_be_deterministic: bool) -> i32 {
+        let mut call = EffectCall::new(call::ALLOCATE);
+        call.a = self.new.definition_index;
+        call.b = owner_object_index;
+        call.c = can_be_deterministic as i32;
+        self.update.call(state, &mut call);
+        let effect_index = call.result;
+        if effect_index != NONE {
+            state.effect_index = effect_index as u32;
+            state.definition_index = self.new.definition_index as u32;
+            state.owner_object_index = owner_object_index;
+            state.local_player_index = NONE as i16;
+            state.flags = 0;
+            self.update.set_event(state, 0);
+        }
+        effect_index
+    }
+
+    /// `impulse_effect_initialize`.
+    fn impulse_initialize(&self, state: &mut EffectState) {
+        state.scale_a = self.new.scale_a;
+        state.scale_b = self.new.scale_b;
+        state.color = self.new.color.unwrap_or([1.0, 1.0, 1.0]);
+        let mut call = EffectCall::new(call::IMPULSE_FIELD);
+        call.a = self.new.impulse_field;
+        self.update.call(state, &mut call);
+    }
+
+    fn simple(&self, state: &mut EffectState, kind: i32, a: i32) -> i32 {
+        let mut call = EffectCall::new(kind);
+        call.a = a;
+        self.update.call(state, &mut call);
+        call.result
+    }
+
+    /// The corpse test of the attached creations.
+    fn note_corpse(&self, state: &mut EffectState) {
+        if self.new.corpse_nonviolent && self.simple(state, call::CORPSE, state.object_index) != 0 {
+            state.flags |= EFFECT_NONVIOLENT;
+        }
+    }
+
+    /// `effect_marker_list_get_marker`: the marker's node and node matrix.
+    fn list_marker(&self, list: &MarkerList, index: usize) -> (i16, [f32; 13]) {
+        let point = list.points.get(index).copied().unwrap_or_default();
+        let forward = list.forwards.get(index).copied().unwrap_or_default();
+        let (point, forward) = match &self.list_matrix {
+            Some(m) => (crate::collision::inverse_transform_point(m, point), inverse_transform_normal(m, forward)),
+            None => (point, forward),
+        };
+        let mut up = perpendicular3d(forward);
+        crate::markers::normalize3(&mut up);
+        (self.list_node, matrix_floats(&crate::markers::matrix_from_point_and_vectors(point, forward, up)))
+    }
+
+    /// `effect_marker_list_get_markers_by_name`.
+    fn list_markers(&self, name: &[u8]) -> Vec<(i16, [f32; 13])> {
+        let mut markers = Vec::new();
+        let Some(list) = &self.new.markers else { return markers };
+        if let Some(names) = &list.names
+            && !name.is_empty()
+        {
+            for (index, marker_name) in names.iter().enumerate() {
+                if markers.len() >= MAXIMUM_EFFECT_INSTANCES {
+                    break;
+                }
+                if *marker_name == name {
+                    markers.push(self.list_marker(list, index));
+                }
+            }
+        }
+        if markers.is_empty() {
+            markers.push(self.list_marker(list, 0));
+        }
+        markers
+    }
+
+    /// The object's or first person weapon's markers, through the game.
+    fn game_markers(&self, state: &mut EffectState, source: MarkerSource, location_index: usize) -> Vec<(i16, [f32; 13])> {
+        let mut markers = Vec::new();
+        let mut count = 1;
+        let mut index = 0;
+        while index < count {
+            let mut call = EffectCall::new(call::MARKERS);
+            call.a = state.object_index;
+            call.b = location_index as i32;
+            call.c = (source == MarkerSource::FirstPersonWeapon) as i32;
+            call.d = index;
+            self.update.call(state, &mut call);
+            count = call.result;
+            if index < count {
+                let mut matrix = [0.0; 13];
+                matrix.copy_from_slice(&call.out[..13]);
+                markers.push((call.out_location_leaf as i16, matrix));
+            }
+            index += 1;
+        }
+        markers
+    }
+
+    /// `effect_build_locations`.
+    fn build_locations(&self, state: &mut EffectState, built: &mut Built, source: MarkerSource) {
+        let definition = self.update.definition;
+        for location_index in 0..definition.location_count.max(0) as usize {
+            let markers = match source {
+                MarkerSource::List => {
+                    let name = definition.location_names.get(location_index).map_or(&[][..], |n| &n[..]);
+                    self.list_markers(name)
+                }
+                _ => self.game_markers(state, source, location_index),
+            };
+            for (node_index, matrix) in markers {
+                let node_designator = if node_index == NONE as i16 {
+                    NONE as i16
+                } else if source == MarkerSource::FirstPersonWeapon {
+                    node_index | LOCATION_FIRST_PERSON
+                } else {
+                    node_index & LOCATION_NODE_MASK
+                };
+                let mut call = EffectCall::new(call::BUILD_LOCATION);
+                call.a = location_index as i32;
+                call.b = node_designator as i32;
+                call.f[..13].copy_from_slice(&matrix);
+                self.update.call(state, &mut call);
+                if call.result == NONE {
+                    break;
+                }
+                built.instances.push(EffectInstance { node_designator, pad: 0, next: built.first[location_index], matrix });
+                built.first[location_index] = built.instances.len() as i32 - 1;
+            }
+        }
+    }
+
+    fn create(&mut self, state: &mut EffectState) -> i32 {
+        let new = self.new;
+        let mut built = Built { first: [NONE; MAXIMUM_EFFECT_LOCATIONS], instances: Vec::new() };
+        let effect_index;
+        match new.kind {
+            new_kind::ATTACHED_FROM_MARKERS => {
+                effect_index = self.allocate(state, new.owner_object_index, true);
+                if effect_index == NONE {
+                    return NONE;
+                }
+                self.impulse_initialize(state);
+                state.object_index = new.object_index;
+                self.note_corpse(state);
+                self.list_node = if new.node_index != NONE as i16 { new.node_index } else { 0 };
+                let mut call = EffectCall::new(call::OBJECT_NODE_MATRIX);
+                call.a = new.object_index;
+                call.b = self.list_node as i32;
+                self.update.call(state, &mut call);
+                self.list_matrix = Some(matrix_from(&call.out[..13]));
+                self.simple(state, call::CLEAR_LOCATIONS, 0);
+                self.build_locations(state, &mut built, MarkerSource::List);
+            }
+            new_kind::UNATTACHED_FROM_MARKERS => {
+                effect_index = self.allocate(state, new.owner_object_index, new.can_be_deterministic);
+                if effect_index == NONE {
+                    return NONE;
+                }
+                self.impulse_initialize(state);
+                state.object_index = NONE;
+                self.list_node = NONE as i16;
+                self.list_matrix = None;
+                let mut call = EffectCall::new(call::LOCATION_FROM_POINT);
+                let point = new.markers.as_ref().and_then(|m| m.points.first().copied()).unwrap_or_default();
+                put3(&mut call.f, 0, point);
+                self.update.call(state, &mut call);
+                state.location_leaf = call.out_location_leaf;
+                state.location_cluster = call.out_location_cluster;
+                state.location_bonus = call.out_location_bonus;
+                state.velocity = new.translational_velocity.unwrap_or([0.0; 3]);
+                self.simple(state, call::CLEAR_LOCATIONS, 0);
+                self.build_locations(state, &mut built, MarkerSource::List);
+            }
+            new_kind::FROM_OBJECT => {
+                effect_index = self.allocate(state, new.owner_object_index, true);
+                if effect_index == NONE {
+                    return NONE;
+                }
+                self.impulse_initialize(state);
+                state.object_index = new.object_index;
+                state.local_player_index = self.simple(state, call::LOCAL_INDEX, new.object_index) as i16;
+                self.note_corpse(state);
+                self.simple(state, call::CLEAR_LOCATIONS, 0);
+                self.build_locations(state, &mut built, MarkerSource::Object);
+                if state.local_player_index != NONE as i16 {
+                    self.build_locations(state, &mut built, MarkerSource::FirstPersonWeapon);
+                }
+                if new.force_local_player_index != NONE as i16 {
+                    state.local_player_index = new.force_local_player_index;
+                }
+            }
+            _ => {
+                effect_index = self.allocate(state, new.object_index, true);
+                if effect_index == NONE {
+                    return NONE;
+                }
+                state.object_index = new.object_index;
+                state.local_player_index = self.simple(state, call::LOCAL_INDEX, new.object_index) as i16;
+                state.scale_a_function_index = new.scale_a_function_index;
+                state.scale_b_function_index = new.scale_b_function_index;
+                let mut change_color_index = new.change_color_index;
+                // (the game says so once)
+                if change_color_index != NONE as i16 && !(0..NUMBER_OF_OBJECT_CHANGE_COLORS).contains(&change_color_index) {
+                    change_color_index = NONE as i16;
+                }
+                state.change_color_index = change_color_index;
+                self.simple(state, call::IMPULSE_FIELD, 0);
+                if change_color_index == NONE as i16 {
+                    state.color = [1.0, 1.0, 1.0];
+                }
+                state.flags |= EFFECT_LOOP;
+                self.simple(state, call::CLEAR_LOCATIONS, 0);
+                self.build_locations(state, &mut built, MarkerSource::Object);
+                if state.local_player_index != NONE as i16 {
+                    self.build_locations(state, &mut built, MarkerSource::FirstPersonWeapon);
+                }
+            }
+        }
+
+        let locations = EffectLocations { first: built.first, instances: &built.instances };
+        let update =
+            Update { definition: self.update.definition, inputs: self.update.inputs, locations: &locations, host: self.update.host };
+        update.update(state, 0.0);
+        effect_index
+    }
+}
+
+/// An `effect_new_*`: the new effect (NONE for none), from `state` (the
+/// seeds, its index NONE), where the effect is left. `definition` is the
+/// effect's (None if it names none).
+pub fn effect_new(
+    definition: Option<&EffectDefinition>,
+    new: &EffectNew,
+    inputs: &EffectInputs,
+    host: &impl EffectHost,
+    state: &mut EffectState,
+) -> i32 {
+    if new.game_in_editor || new.definition_index == NONE {
+        return NONE;
+    }
+    let Some(definition) = definition else { return NONE };
+    let empty = EffectLocations { first: [NONE; MAXIMUM_EFFECT_LOCATIONS], instances: &[] };
+    let mut creation =
+        Creation { new, update: Update { definition, inputs, locations: &empty, host }, list_node: NONE as i16, list_matrix: None };
+    creation.create(state)
 }

@@ -222,3 +222,168 @@ pub unsafe extern "C" fn halo_sim_effect_update_check(call: *mut EffectUpdateC) 
     // SAFETY: the caller's call
     run(unsafe { &mut *call }, true)
 }
+
+/// What an `effect_new_*` is given, and the effect it leaves.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct EffectNewC {
+    /// `halo_map::effects::new_kind`.
+    pub kind: i32,
+    pub definition_index: i32,
+    pub owner_object_index: i32,
+    pub object_index: i32,
+    pub node_index: i16,
+    pub force_local_player_index: i16,
+    pub scale_a_function_index: i16,
+    pub scale_b_function_index: i16,
+    pub change_color_index: i16,
+    pub marker_count: i16,
+    pub scale_a: f32,
+    pub scale_b: f32,
+    pub has_color: u32,
+    pub color: [f32; 3],
+    pub has_velocity: u32,
+    pub velocity: [f32; 3],
+    /// The impulse field's address (0 for none).
+    pub impulse_field: u32,
+    pub can_be_deterministic: u32,
+    pub marker_names: *const *const std::ffi::c_char,
+    pub marker_points: *const [f32; 3],
+    pub marker_forwards: *const [f32; 3],
+    pub game_in_editor: u32,
+    pub corpse_nonviolent: u32,
+    pub local_player_count: i32,
+    pub directions: *const [f32; 3],
+    pub direction_count: u32,
+    /// The seeds in (its index NONE); the new effect out.
+    pub state: EffectState,
+    /// In check mode: the game's calls, and the first that differs (as
+    /// [`EffectUpdateC`]'s).
+    pub events: *const EffectEventC,
+    pub event_count: u32,
+    pub difference_event: i32,
+    pub difference_reason: i32,
+    /// Whether the new effect is still there after its first update.
+    pub still_there: u32,
+    /// The new effect (NONE for none).
+    pub result: i32,
+}
+
+const _: () = assert!(size_of::<EffectNewC>() == 256);
+
+fn run_new(call: &mut EffectNewC, check: bool) -> i32 {
+    use halo_map::effects::{EffectNew, MarkerList, effect_new};
+
+    let Some(host) = crate::world::host() else { return -1 };
+    let definition = if call.definition_index == -1 {
+        None
+    } else {
+        let mut tags = TAGS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tags) = tags.as_mut() else { return -1 };
+        // (a definition Rust can't read is left to the game)
+        let Some(definition) = tags.effect_definition(call.definition_index as u32) else { return -1 };
+        Some(definition)
+    };
+    // SAFETY: the game's direction table, direction_count of them
+    let directions = if call.directions.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(call.directions, call.direction_count as usize) }
+    };
+    let count = call.marker_count.max(0) as usize;
+    let markers = if call.marker_points.is_null() || call.marker_forwards.is_null() || count == 0 {
+        None
+    } else {
+        // SAFETY: the creator's markers, marker_count of each, and their
+        // names (C strings) if it gave them
+        unsafe {
+            let names = (!call.marker_names.is_null()).then(|| {
+                (0..count)
+                    .map(|i| {
+                        let name = *call.marker_names.add(i);
+                        if name.is_null() { &[][..] } else { std::ffi::CStr::from_ptr(name).to_bytes() }
+                    })
+                    .collect()
+            });
+            Some(MarkerList {
+                names,
+                points: std::slice::from_raw_parts(call.marker_points, count),
+                forwards: std::slice::from_raw_parts(call.marker_forwards, count),
+            })
+        }
+    };
+    let new = EffectNew {
+        kind: call.kind,
+        definition_index: call.definition_index,
+        owner_object_index: call.owner_object_index,
+        object_index: call.object_index,
+        node_index: call.node_index,
+        force_local_player_index: call.force_local_player_index,
+        scale_a_function_index: call.scale_a_function_index,
+        scale_b_function_index: call.scale_b_function_index,
+        change_color_index: call.change_color_index,
+        scale_a: call.scale_a,
+        scale_b: call.scale_b,
+        color: (call.has_color != 0).then_some(call.color),
+        translational_velocity: (call.has_velocity != 0).then_some(call.velocity),
+        impulse_field: call.impulse_field as i32,
+        can_be_deterministic: call.can_be_deterministic != 0,
+        markers,
+        game_in_editor: call.game_in_editor != 0,
+        corpse_nonviolent: call.corpse_nonviolent != 0,
+    };
+    let inputs = EffectInputs { local_player_count: call.local_player_count as i16, directions };
+    let mut state = call.state;
+    call.difference_event = -1;
+    call.difference_reason = 0;
+    if check {
+        // SAFETY: the game's recording, as described
+        let events = if call.events.is_null() || call.event_count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(call.events, call.event_count as usize) }
+        };
+        let checker = CheckHost { events, next: Cell::new(0), still_there: Cell::new(true), difference: Cell::new(None) };
+        call.result = effect_new(definition.as_deref(), &new, &inputs, &checker, &mut state);
+        if checker.difference.get().is_none() && checker.next.get() < events.len() {
+            checker.differ(checker.next.get(), 5);
+        }
+        (call.difference_event, call.difference_reason) = checker.difference.get().map_or((-1, 0), |(e, r)| (e as i32, r));
+        call.still_there = checker.still_there.get() as u32;
+    } else {
+        let live = LiveHost { callbacks: host.effects, still_there: Cell::new(true) };
+        call.result = effect_new(definition.as_deref(), &new, &inputs, &live, &mut state);
+        call.still_there = live.still_there.get() as u32;
+    }
+    call.state = state;
+    0
+}
+
+/// An `effect_new_*` on the running game, in place of the game's. Returns 0
+/// (`result` the new effect, the effect and seeds in `state`), or -1 if it
+/// can't run (the game then runs its own; nothing was done).
+///
+/// # Safety
+/// `call` must be valid, with the pointers it describes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_effect_new(call: *mut EffectNewC) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_new(unsafe { &mut *call }, false)
+}
+
+/// The check of a creation the game ran: Rust's replay of it. Returns 0, or
+/// -1.
+///
+/// # Safety
+/// As [`halo_sim_effect_new`]; the events hold their count.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_effect_new_check(call: *mut EffectNewC) -> i32 {
+    if call.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's call
+    run_new(unsafe { &mut *call }, true)
+}

@@ -1235,6 +1235,12 @@ enum
 	_actions_port_handler_call_tried_to_uncover,
 	_actions_port_handler_call_tried_to_search,
 	_actions_port_handler_call_abandoned_search,
+	_actions_port_handler_call_try_to_seek_cover,
+	_actions_port_handler_call_has_ranged_weapon,
+	_actions_port_handler_call_difficulty,
+	_actions_port_handler_call_charge,
+	_actions_port_handler_call_vehicle_definition,
+	_actions_port_handler_call_fight,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

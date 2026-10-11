@@ -1278,6 +1278,55 @@ void actions_port_handler_call(
 		case _actions_port_handler_call_abandoned_search:
 			actor_perception_abandoned_search(actor_index, call->a);
 			break;
+
+		case _actions_port_handler_call_try_to_seek_cover:
+			call->result = actor_action_try_to_seek_cover(actor_index, (boolean)call->a, (boolean)call->b) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_has_ranged_weapon:
+			call->result = actor_has_ranged_weapon(actor_index) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_difficulty:
+			call->output[0] = game_difficulty_get_value(call->a == 0 ?
+				_game_difficulty_value_melee_delay_scale :
+				_game_difficulty_value_melee_delay_base);
+			break;
+
+		case _actions_port_handler_call_charge:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_charge_setup(actor_index, (short)call->a, &state.charge))
+			{
+				actor_action_change(actor_index, _actor_action_charge, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_vehicle_definition:
+		{
+			struct unit_datum *vehicle = vehicle_get(actor->input.vehicle_index);
+
+			call->result = (long)vehicle_specific_definition_get(vehicle->definition_index);
+			break;
+		}
+
+		case _actions_port_handler_call_fight:
+		{
+			struct action_state_data state;
+			boolean success = action_fight_setup(actor_index, &state.fight);
+
+			match_assert(
+				"c:\\halo\\SOURCE\\ai\\actions.c",
+				2171,
+				success);
+
+			actor_action_change(actor_index, _actor_action_fight, &state);
+			break;
+		}
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -2463,19 +2512,23 @@ boolean actor_action_allow_cover_seeking(
 boolean actor_action_handle_combat_selection(
 	long actor_index)
 {
+	/* port: what it asks of the rest of the game through
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
 	struct actor_definition *definition =
 		actor_definition_get(actor->meta.definition_index);
 	struct actor_variant_definition *variant_definition =
 		actor_variant_definition_get(actor->meta.variant_definition_index);
-	struct actor_variant_definition *firing_variant =
-		actor_combat_get_firing_variant_definition(actor_index);
+	struct actor_variant_definition *firing_variant = (struct actor_variant_definition *)
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_firing_variant, 0);
 	struct charge_state_data *charge = &actor->state.action_data.charge;
 	boolean action_changed = FALSE;
 	struct prop_datum *prop = NULL;
 	real prop_distance = REAL_MAX;
 	real charge_delay;
-	struct action_state_data new_action_data;
+
+#define HAS_RANGED_WEAPON() ((boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_has_ranged_weapon, 0))
 
 	if (actor->target.target_prop_index != NONE)
 	{
@@ -2497,18 +2550,22 @@ boolean actor_action_handle_combat_selection(
 				if (prop_distance >
 					firing_variant->ranged_combat.combat_range_upper_bound)
 				{
-					action_changed = actor_action_try_to_seek_cover(
+					action_changed = (boolean)actions_port_handler(
 						actor_index,
+						_actions_port_handler_call_try_to_seek_cover,
 						FALSE,
-						FALSE);
+						FALSE,
+						NULL,
+						0,
+						NULL);
 				}
 
 				if (!action_changed)
-					actor_berserk(actor_index, TRUE);
+					actions_port_handler_simple(actor_index, _actions_port_handler_call_berserk, 0);
 			}
 		}
 
-		if (!actor_has_ranged_weapon(actor_index) ||
+		if (!HAS_RANGED_WEAPON() ||
 			(prop->vehicle_index == NONE && !prop->swarm))
 		{
 			if (actor->state.action != _actor_action_charge ||
@@ -2519,17 +2576,14 @@ boolean actor_action_handle_combat_selection(
 					actor->input.vehicle_index == NONE &&
 					actor->control.fire_state != _actor_fire_state_bursting)
 				{
-					/* The original validates the controlled unit here even though
-					 * this policy decision does not otherwise consume it. */
-					struct unit_datum *unit = unit_get(actor->meta.unit_index);
 					long current_time = game_time_get();
 					boolean use_berserk_range = actor->emotions.berserk;
 					real charge_range;
 					boolean begin_charge = FALSE;
+					real scale[6];
+					real base[6];
 
-					(void)unit;
-
-					if (!actor_has_ranged_weapon(actor_index) &&
+					if (!HAS_RANGED_WEAPON() &&
 						!TEST_FLAG(
 							definition->flags,
 							_actor_definition_stalking_behavior_bit))
@@ -2539,10 +2593,9 @@ boolean actor_action_handle_combat_selection(
 
 					charge_delay = actor->emotions.berserk ?
 						0.0f : definition->berserk.melee_attack_delay_timer;
-					charge_delay = game_difficulty_get_value(
-						_game_difficulty_value_melee_delay_scale) * charge_delay +
-						game_difficulty_get_value(
-							_game_difficulty_value_melee_delay_base);
+					actions_port_handler(actor_index, _actions_port_handler_call_difficulty, 0, 0, NULL, 0, scale);
+					actions_port_handler(actor_index, _actions_port_handler_call_difficulty, 1, 0, NULL, 0, base);
+					charge_delay = scale[0] * charge_delay + base[0];
 					charge_range = use_berserk_range ?
 						variant_definition->ranged_combat.berserk_melee_range :
 						variant_definition->ranged_combat.melee_range;
@@ -2575,7 +2628,7 @@ boolean actor_action_handle_combat_selection(
 										(real)last_charge_time >=
 											(real)current_time))
 								{
-									actor_has_ranged_weapon(actor_index);
+									HAS_RANGED_WEAPON();
 									begin_charge = TRUE;
 								}
 							}
@@ -2586,17 +2639,8 @@ boolean actor_action_handle_combat_selection(
 					{
 						actor->emotions.last_melee_check_time = current_time;
 
-						if (action_charge_setup(
-							actor_index,
-							_charge_goal_melee,
-							&new_action_data.charge))
-						{
-							actor_action_change(
-								actor_index,
-								_actor_action_charge,
-								&new_action_data);
+						if (actions_port_handler_simple(actor_index, _actions_port_handler_call_charge, _charge_goal_melee))
 							action_changed = TRUE;
-						}
 					}
 				}
 			}
@@ -2607,10 +2651,8 @@ boolean actor_action_handle_combat_selection(
 			!action_changed &&
 			actor->input.vehicle_driver_type > _actor_vehicle_driver_none)
 		{
-			struct unit_datum *vehicle =
-				vehicle_get(actor->input.vehicle_index);
-			struct vehicle_definition *vehicle_definition =
-				vehicle_specific_definition_get(vehicle->definition_index);
+			struct vehicle_definition *vehicle_definition = (struct vehicle_definition *)
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_vehicle_definition, 0);
 			long last_charge_time = actor->emotions.last_vehicle_charge_time;
 			boolean repeat_elapsed = FALSE;
 
@@ -2637,15 +2679,9 @@ boolean actor_action_handle_combat_selection(
 					begin_charge = TRUE;
 				}
 
-				if (begin_charge && action_charge_setup(
-					actor_index,
-					_charge_goal_vehicle_strafing,
-					&new_action_data.charge))
+				if (begin_charge &&
+					actions_port_handler_simple(actor_index, _actions_port_handler_call_charge, _charge_goal_vehicle_strafing))
 				{
-					actor_action_change(
-						actor_index,
-						_actor_action_charge,
-						&new_action_data);
 					action_changed = TRUE;
 				}
 			}
@@ -2659,7 +2695,7 @@ boolean actor_action_handle_combat_selection(
 		boolean restart_charge = FALSE;
 
 		if (!actor->external_orders.disable_charging &&
-			!actor_has_ranged_weapon(actor_index) &&
+			!HAS_RANGED_WEAPON() &&
 			TEST_FLAG(
 				definition->flags,
 				_actor_definition_charge_in_attacking_mode_bit))
@@ -2705,10 +2741,8 @@ boolean actor_action_handle_combat_selection(
 
 					if (goal == _charge_goal_vehicle_strafing)
 					{
-						struct unit_datum *vehicle =
-							vehicle_get(actor->input.vehicle_index);
-						struct vehicle_definition *vehicle_definition =
-							vehicle_specific_definition_get(vehicle->definition_index);
+						struct vehicle_definition *vehicle_definition = (struct vehicle_definition *)
+							actions_port_handler_simple(actor_index, _actions_port_handler_call_vehicle_definition, 0);
 
 						if (actor->control.path.at_destination &&
 							actor->control.path.destination_orders.destination_type ==
@@ -2741,15 +2775,8 @@ boolean actor_action_handle_combat_selection(
 			(restart_charge ||
 				actor->state.action != _actor_action_charge))
 		{
-			if (action_charge_setup(
-				actor_index,
-				_charge_goal_close_range,
-				&new_action_data.charge))
+			if (actions_port_handler_simple(actor_index, _actions_port_handler_call_charge, _charge_goal_close_range))
 			{
-				actor_action_change(
-					actor_index,
-					_actor_action_charge,
-					&new_action_data);
 				action_changed = TRUE;
 			}
 			else
@@ -2762,61 +2789,12 @@ boolean actor_action_handle_combat_selection(
 			!action_changed &&
 			actor->state.action != _actor_action_fight)
 		{
-			boolean success = action_fight_setup(
-				actor_index,
-				&new_action_data.fight);
-
-			match_assert(
-				"c:\\halo\\SOURCE\\ai\\actions.c",
-				2171,
-				success);
-
-			actor_action_change(
-				actor_index,
-				_actor_action_fight,
-				&new_action_data);
+			actions_port_handler_simple(actor_index, _actions_port_handler_call_fight, 0);
 			action_changed = TRUE;
 		}
-
-		else if (!action_changed)
-		{
-			if (desires_charge)
-			{
-				match_assert(
-					"c:\\halo\\SOURCE\\ai\\actions.c",
-					2182,
-					actor->state.action == _actor_action_charge);
-
-				if (actor->state.action_data.charge.goal == _charge_goal_melee ||
-					actor->state.action_data.charge.goal == _charge_goal_melee_leaping)
-				{
-					match_assert(
-						"c:\\halo\\SOURCE\\ai\\actions.c",
-						2185,
-						!actor->state.action_data.charge.finished_melee_attack &&
-							!actor->state.action_data.charge.aborted_melee_attack &&
-							!actor->state.action_data.charge.unable_to_advance);
-				}
-				else if (actor->state.action_data.charge.goal ==
-						_charge_goal_vehicle_strafing ||
-					actor->state.action_data.charge.goal ==
-						_charge_goal_vehicle_ramming)
-				{
-					match_assert(
-						"c:\\halo\\SOURCE\\ai\\actions.c",
-						2189,
-						!actor->state.action_data.charge.unable_to_advance);
-				}
-			}
-			else
-			{
-				match_assert(
-					"c:\\halo\\SOURCE\\ai\\actions.c",
-					2194,
-					actor->state.action == _actor_action_fight);
-			}
-		}
 	}
+
+#undef HAS_RANGED_WEAPON
 
 	return action_changed;
 }
@@ -3292,7 +3270,7 @@ boolean actor_action_handle_combat_status(
 		{
 			if (actor->state.combat_status >= 5)
 			{
-				result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
+				result = actor_action_handle_combat_selection(actor_index);
 			}
 			else if (actor->state.combat_status >= 2 ||
 				actor->state.action == _actor_action_alert ||
@@ -3307,14 +3285,14 @@ boolean actor_action_handle_combat_status(
 
 	case 4:
 		result = actor->state.combat_status >= 4 ?
-			(boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0) :
+			actor_action_handle_combat_selection(actor_index) :
 			(boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_lost_contact, 0);
 		break;
 
 	case 3:
 		if (allow_initiative && actor->state.combat_status >= 4)
 		{
-			result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
+			result = actor_action_handle_combat_selection(actor_index);
 		}
 		else if (actor->state.combat_status < 2)
 		{
@@ -3381,7 +3359,7 @@ boolean actor_action_handle_combat_failure(
 		}
 
 		if (failed)
-			result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
+			result = actor_action_handle_combat_selection(actor_index);
 	}
 
 	return result;
@@ -3400,7 +3378,7 @@ boolean actor_action_handle_berserk_transition(
 		actions_port_handler_simple(actor_index, _actions_port_handler_call_berserk, 0);
 
 		if (actor->state.combat_status >= 4)
-			result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
+			result = actor_action_handle_combat_selection(actor_index);
 	}
 
 	actor->stimuli.berserk_type = 0;
@@ -3418,7 +3396,7 @@ boolean actor_action_handle_combat_transition(
 		actor->state.mode = 3;
 
 		if (!actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_from_combat_transition, 0))
-			actions_port_handler_simple(actor_index, _actions_port_handler_call_combat_selection, 0);
+			actor_action_handle_combat_selection(actor_index);
 
 		actor->stimuli.combat_transition = 0;
 		result = TRUE;

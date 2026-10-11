@@ -2462,6 +2462,22 @@ pub mod obey_call {
     pub const COMMUNICATION: i32 = BASE | 9;
     /// `unit_is_busy(unit)`, the result.
     pub const UNIT_IS_BUSY: i32 = BASE | 10;
+    /// `actor_destination_tolerance(actor)`, in `output[0]`.
+    pub const TOLERANCE: i32 = BASE | 11;
+    /// `actor_move_halt(actor)`.
+    pub const MOVE_HALT: i32 = BASE | 12;
+    /// `actor_combat_plan_grenade_trajectory` to the command's grenade
+    /// target by its trajectory type, the result.
+    pub const PLAN_GRENADE: i32 = BASE | 13;
+    /// `recorded_animation_controlling_unit(a)`, the result.
+    pub const RECORDING: i32 = BASE | 14;
+    /// A loop command's error: looping to itself (`a` 0) or stuck (1), at
+    /// the command `b`.
+    pub const LOOP_ERROR: i32 = BASE | 15;
+    /// The biped `a`'s absolute movement and no-collision flags cleared.
+    pub const BIPED_RELEASE: i32 = BASE | 16;
+    /// `actor_look_secondary_stop(actor)`.
+    pub const LOOK_SECONDARY_STOP: i32 = BASE | 17;
 }
 
 const OBEY_METADATA_TARGETING_BIT: u8 = 0;
@@ -2606,14 +2622,13 @@ fn obey_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
             let mut command_valid = (m.r8(current) as i32) < commands;
             m.w8(control.simple(sc::LOOP_COUNTER), 0);
             loop {
-                if command_valid && call_simple(context, host, obey_call::COMMAND_PERFORM, 0) == 0 {
+                if command_valid && !obey_command_perform(context, host) {
                     break;
                 }
                 // (the C's test against NONE never holds of a byte)
                 let mut next_command_index = m.r8(current).wrapping_add(1);
                 if command_valid {
-                    next_command_index =
-                        call_simple(context, host, obey_call::COMMAND_END, next_command_index as i32) as u8;
+                    next_command_index = obey_command_end(context, host, next_command_index);
                 }
                 if next_command_index as i32 >= commands {
                     set_bit(m, metadata, OBEY_METADATA_COMMANDS_FINISHED_BIT);
@@ -2768,4 +2783,248 @@ fn obey_control(context: &AiStepContext, host: &impl AiHost) {
             m.set_i16(at(a::ORDERS_MOVE_OVERRIDE_MOVEMENT_FACING), 0);
         }
     }
+}
+
+/// The command atoms (ai_scenario_definitions.h's `_ai_atom_*`).
+mod atom {
+    pub const PAUSE: i16 = 0;
+    pub const GO_TO: i16 = 1;
+    pub const GO_TO_AND_FACE: i16 = 2;
+    pub const MOVE_DIRECTION: i16 = 3;
+    pub const LOOK: i16 = 4;
+    pub const SHOOT: i16 = 7;
+    pub const GRENADE: i16 = 8;
+    pub const RUNNING_JUMP: i16 = 10;
+    pub const TARGETED_JUMP: i16 = 11;
+    pub const ANIMATE: i16 = 13;
+    pub const RECORDING: i16 = 14;
+    pub const ACTION: i16 = 15;
+    pub const VOCALIZE: i16 = 16;
+    pub const WAIT: i16 = 19;
+    pub const LOOP: i16 = 20;
+    pub const MOVE_IMMEDIATE: i16 = 22;
+    pub const LOOK_RANDOM: i16 = 23;
+    pub const LOOK_PLAYER: i16 = 24;
+    pub const LOOK_OBJECT: i16 = 25;
+}
+
+const OBEY_MAXIMUM_LOOP_COUNT: u8 = 10;
+const OBEY_METADATA_TOLD_TO_ADVANCE_BIT: u8 = 3;
+const OBEY_METADATA_WAITING_FOR_ADVANCE_NOTIFICATION_BIT: u8 = 4;
+
+fn clear_bit(m: &dyn AiMemory, address: u32, bit: u8) {
+    m.w8(address, m.r8(address) & !(1 << bit));
+}
+
+/// The actor's current command's definition, if its index is in its list.
+fn obey_current_command(m: &dyn AiMemory, context: &AiStepContext, control: &ObeyControl) -> Option<u32> {
+    use crate::ai_actor::{tag_block_count, tag_block_element};
+    use crate::layout::{ai_command_definition, ai_command_list_definition as list, obey_individual_simple_control as sc};
+    let commands = obey_command_list(m, context) + list::COMMANDS as u32;
+    let current = m.r8(control.simple(sc::CURRENT_COMMAND_INDEX)) as i32;
+    (current < tag_block_count(m, commands)).then(|| tag_block_element(m, commands, current, ai_command_definition::SIZEOF))
+}
+
+/// `action_obey_command_perform` of the actor's own unit: whether the
+/// command is done.
+fn obey_command_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    use crate::ai_actor::object_get;
+    use crate::layout::{
+        ai_command_definition as command, obey_individual_complex_control as cc,
+        obey_individual_directmovement_control as dm, obey_individual_simple_control as sc, unit_datum as u,
+    };
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let control = ObeyControl::of(context);
+    let Some(definition) = obey_current_command(m, context, &control) else { return true };
+    let pause_timer = control.simple(sc::PAUSE_TIMER);
+    let paused = |m: &dyn AiMemory| m.i16(pause_timer) == 0;
+    let flags = control.simple(sc::SIMPLE_CONTROL_FLAGS);
+    let metadata = control.simple(sc::METADATA_FLAGS);
+    let unit = || object_get(m, context, m.i32(at(a::META_UNIT_INDEX))).unwrap_or(0);
+    let atom_type = m.i16(definition + command::ATOM_TYPE as u32);
+    let modifier = m.i16(definition + command::ATOM_MODIFIER as u32);
+
+    match atom_type {
+        atom::PAUSE | atom::LOOK | atom::MOVE_IMMEDIATE | atom::LOOK_RANDOM | atom::LOOK_PLAYER | atom::LOOK_OBJECT => {
+            paused(m)
+        }
+        atom::GO_TO | atom::GO_TO_AND_FACE => {
+            let mut done = call_simple(context, host, obey_call::AT_DESTINATION, 0) != 0;
+            if !done && m.bool(control.complex(cc::DESTINATION_KEEP_MOVING)) && m.bool(control.complex(cc::DESTINATION_VALID)) {
+                let tolerance = call_full(context, host, obey_call::TOLERANCE, 0, 0, &[]).output[0];
+                let body = m.vector(at(a::INPUT_BODY_POSITION));
+                let destination = m.vector(control.complex(cc::DESTINATION_POINT));
+                let vector = [destination[0] - body[0], destination[1] - body[1], destination[2] - body[2]];
+                let distance_squared = dot(vector, vector);
+                if distance_squared < tolerance * tolerance {
+                    done = true;
+                } else if distance_squared < (tolerance + 0.5) * (tolerance + 0.5)
+                    && dot(vector, m.vector(unit() + u::OBJECT_TRANSLATIONAL_VELOCITY as u32)) < 0.0
+                {
+                    done = true;
+                }
+            }
+            if atom_type == atom::GO_TO_AND_FACE || modifier == 0 {
+                if m.bool(at(a::CONTROL_MOVING)) {
+                    m.set_i16(pause_timer, 10);
+                }
+                done = done && paused(m);
+            }
+            if done && m.bool(control.complex(cc::DESTINATION_FACING)) {
+                let body = m.vector(at(a::INPUT_BODY_POSITION));
+                let point = m.vector(control.complex(cc::DESTINATION_FACING_POINT));
+                let input_facing = m.vector(at(a::INPUT_FACING_VECTOR));
+                let facing_dot = if m.bool(at(a::STATE_FLYING)) {
+                    let mut facing = [point[0] - body[0], point[1] - body[1], point[2] - body[2]];
+                    let magnitude = dot(facing, facing).sqrt();
+                    if !(0.0001 > magnitude.abs()) && magnitude > 0.0 {
+                        let s = 1.0 / magnitude;
+                        facing = [s * facing[0], s * facing[1], s * facing[2]];
+                        Some(dot(facing, input_facing))
+                    } else {
+                        None
+                    }
+                } else {
+                    let mut facing = [point[0] - body[0], point[1] - body[1]];
+                    if normalize2(&mut facing) > 0.0 {
+                        Some(facing[0] * input_facing[0] + facing[1] * input_facing[1])
+                    } else {
+                        None
+                    }
+                };
+                if let Some(facing_dot) = facing_dot
+                    && facing_dot < 0.984
+                {
+                    done = false;
+                }
+            }
+            if done {
+                call_simple(context, host, obey_call::MOVE_HALT, 0);
+            }
+            done
+        }
+        atom::MOVE_DIRECTION => {
+            let origin = m.vector(at(a::INPUT_BODY_POSITION));
+            let directmovement = control.simple(sc::DIRECTMOVEMENT);
+            let start = m.vector(directmovement + dm::START_POSITION as u32);
+            let movement = [origin[0] - start[0], origin[1] - start[1], origin[2] - start[2]];
+            dot(movement, m.vector(directmovement + dm::VECTOR as u32)) > m.f32(definition + command::PARAMETER1 as u32)
+        }
+        atom::SHOOT => {
+            let manual = m.i16(at(a::CONTROL_CURRENT_FIRE_TARGET_TYPE)) == 2;
+            let target = m.vector(control.complex(cc::SHOOT_TARGET));
+            let point = m.vector(at(a::CONTROL_CURRENT_FIRE_TARGET_MANUAL_POINT));
+            let offset = [point[0] - target[0], point[1] - target[1], point[2] - target[2]];
+            if !manual || !(dot(offset, offset) < 0.25) {
+                let delay = m.f32(context.variant_definition + var::RANGED_COMBAT_FIRST_BURST_DELAY_UPPER_BOUND as u32);
+                let pause_ticks = c_short(delay * 30.0);
+                m.set_i16(pause_timer, if pause_ticks > 60 { pause_ticks } else { 60 });
+            }
+            paused(m)
+        }
+        atom::RUNNING_JUMP | atom::TARGETED_JUMP => {
+            if test_bit(m, flags, OBEY_SIMPLE_JUMP_BIT) {
+                if test_bit(m, flags, OBEY_SIMPLE_JUMP_JUMPED_BIT) && m.bool(at(a::INPUT_IN_MIDAIR)) {
+                    m.set_i16(pause_timer, 0);
+                }
+                paused(m)
+            } else {
+                true
+            }
+        }
+        atom::GRENADE => {
+            if m.bool(control.complex(cc::GRENADE_THROW_STARTED)) {
+                let throwing = m.i8(unit() + u::UNIT_GRENADE_THROW_STATE as u32) as i32 != v::_UNIT_GRENADE_THROW_IDLE as i32;
+                m.set_i16(pause_timer, if throwing { 30 } else { 0 });
+            } else if call_simple(context, host, obey_call::UNIT_IS_BUSY, 0) == 0
+                && call_simple(context, host, obey_call::PLAN_GRENADE, 0) != 0
+            {
+                m.set_bool(control.complex(cc::GRENADE_THROW_DEPRESS_TRIGGER), true);
+            }
+            paused(m)
+        }
+        atom::ANIMATE => m.i8(unit() + u::UNIT_ANIMATION_STATE as u32) as i32 != v::_UNIT_STATE_USER_ANIMATION as i32,
+        atom::RECORDING => call_simple(context, host, obey_call::RECORDING, m.i32(at(a::META_UNIT_INDEX))) == 0,
+        atom::ACTION => !m.bool(control.complex(cc::PLAY_ACTION)),
+        atom::WAIT => match modifier {
+            0 => m.i16(at(a::STATE_COMBAT_STATUS)) > 0,
+            1 => m.i16(at(a::STATE_COMBAT_STATUS)) >= 7,
+            2 => {
+                if test_bit(m, metadata, OBEY_METADATA_TOLD_TO_ADVANCE_BIT) {
+                    clear_bit(m, metadata, OBEY_METADATA_TOLD_TO_ADVANCE_BIT);
+                    clear_bit(m, metadata, OBEY_METADATA_WAITING_FOR_ADVANCE_NOTIFICATION_BIT);
+                    true
+                } else {
+                    set_bit(m, metadata, OBEY_METADATA_WAITING_FOR_ADVANCE_NOTIFICATION_BIT);
+                    false
+                }
+            }
+            _ => true,
+        },
+        atom::VOCALIZE => m.i16(unit() + u::UNIT_SPEECH_CURRENT_PRIORITY as u32) != v::_UNIT_SPEECH_SCRIPTED as i16,
+        _ => true,
+    }
+}
+
+/// `action_obey_command_end` of the actor's own unit: the next command.
+fn obey_command_end(context: &AiStepContext, host: &impl AiHost, mut next_command_index: u8) -> u8 {
+    use crate::layout::{
+        ai_command_definition as command, obey_individual_complex_control as cc,
+        obey_individual_directmovement_control as dm, obey_individual_jump_control as jump,
+        obey_individual_simple_control as sc,
+    };
+    let m = host.memory();
+    let control = ObeyControl::of(context);
+    let Some(definition) = obey_current_command(m, context, &control) else { return next_command_index };
+    let flags = control.simple(sc::SIMPLE_CONTROL_FLAGS);
+    let metadata = control.simple(sc::METADATA_FLAGS);
+    match m.i16(definition + command::ATOM_TYPE as u32) {
+        atom::GO_TO | atom::GO_TO_AND_FACE => {
+            call_simple(context, host, obey_call::MOVE_HALT, 0);
+            m.set_bool(control.complex(cc::DESTINATION_VALID), false);
+            m.set_bool(control.complex(cc::DESTINATION_FACING), false);
+        }
+        atom::MOVE_DIRECTION | atom::MOVE_IMMEDIATE => {
+            clear_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_BIT);
+            m.set_i16(control.simple(sc::DIRECTMOVEMENT) + dm::FACING as u32, NONE as i16);
+        }
+        atom::SHOOT => m.set_bool(control.complex(cc::SHOOT_AT_TARGET), false),
+        atom::RUNNING_JUMP | atom::TARGETED_JUMP => {
+            clear_bit(m, flags, OBEY_SIMPLE_JUMP_BIT);
+            m.set_i16(control.simple(sc::JUMP) + jump::DELAY_TICKS as u32, 0);
+        }
+        atom::LOOP => {
+            let mut repeat = true;
+            if m.i16(definition + command::ATOM_MODIFIER as u32) == 1 {
+                repeat = !test_bit(m, metadata, OBEY_METADATA_TOLD_TO_ADVANCE_BIT);
+                clear_bit(m, metadata, OBEY_METADATA_TOLD_TO_ADVANCE_BIT);
+                if repeat {
+                    set_bit(m, metadata, OBEY_METADATA_WAITING_FOR_ADVANCE_NOTIFICATION_BIT);
+                } else {
+                    clear_bit(m, metadata, OBEY_METADATA_WAITING_FOR_ADVANCE_NOTIFICATION_BIT);
+                }
+            }
+            if repeat {
+                let target = m.i16(definition + command::COMMAND_INDEX as u32);
+                let loop_counter = control.simple(sc::LOOP_COUNTER);
+                if target as i32 == m.r8(control.simple(sc::CURRENT_COMMAND_INDEX)) as i32 {
+                    call_full(context, host, obey_call::LOOP_ERROR, 0, m.r8(control.simple(sc::CURRENT_COMMAND_INDEX)) as i32, &[]);
+                } else if m.r8(loop_counter) >= OBEY_MAXIMUM_LOOP_COUNT {
+                    call_full(context, host, obey_call::LOOP_ERROR, 1, m.r8(control.simple(sc::CURRENT_COMMAND_INDEX)) as i32, &[]);
+                } else {
+                    next_command_index = target as u8;
+                    m.w8(loop_counter, m.r8(loop_counter).wrapping_add(1));
+                }
+            }
+        }
+        atom::ANIMATE => {
+            call_simple(context, host, obey_call::BIPED_RELEASE, m.i32(context.actor + a::META_UNIT_INDEX as u32));
+        }
+        atom::LOOK | atom::LOOK_RANDOM | atom::LOOK_PLAYER | atom::LOOK_OBJECT => {
+            call_simple(context, host, obey_call::LOOK_SECONDARY_STOP, 0);
+        }
+        _ => {}
+    }
+    next_command_index
 }

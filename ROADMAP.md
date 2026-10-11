@@ -363,6 +363,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **What Rust does:** the combat status by the action's class (actions.c's table): a new combat action when the actor may take the initiative (or must decide) in combat, or the lost-contact decision out of it, or when a pursuit's target changed or is yet to be uncovered or searched. Also a charge's failure (a melee attack that ended or couldn't advance, or a vehicle that couldn't), the berserk transition, the combat transition (into combat mode, guarding or choosing), fleeing's end (guarding), and the pursuit's exit (an uncover, search or wait that finished reports to the target's prop).
      - **The C's side, through `actions_port_handler_call`:** combat selection and lost contact (about 800 lines, next), the guard's setups, going berserk, and the prop's reports. Seven handlers are left the game's: active cover seeking, vehicle entry and exit, grenade throwing and considering, evasion and danger avoidance.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the fight class's combat status was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels at 144 frames a second.
+   - [x] Combat selection in Rust (`halo_map::actor_transitions`): the actor's combat action, which the handlers now call directly.
+     - **What Rust does:**
+       - a discovered stalker (one damaging it, shooting close, or past the discovery time) seeks cover if far or goes berserk;
+       - an actor without a gun, or facing a target on foot, charges to melee within its melee range (its berserk range when berserk or gunless and no stalker), no more often than every ten ticks and its melee delay (scaled by difficulty) allow, and only at point blank when charging's disabled;
+       - a flying driver strafes a target it can't see, as often as its vehicle's repeat time allows;
+       - otherwise it charges when it wants to (forced, gunless and charging in attacking mode, or a charge still under way, with the strafing charge stopped at its destination, its stop range or turned away), or fights.
+     - **The C's side, through `actions_port_handler_call`:** seeking cover, going berserk, the ranged weapon, the difficulty's melee delay, the charge and fight setups, and the vehicle's definition.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the melee check's interval was caught on d20. With all forty-seven systems in Rust, every probe check agrees on the five levels at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

@@ -7,6 +7,7 @@
 //! What they ask of the rest of the game goes through [`AiHost::call`]
 //! (actions.c's `actions_port_handler_call`, shared with the C).
 
+use crate::actions::dot;
 use crate::actor_types::call as handler;
 use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE, prop_get};
 use crate::layout::{actor_datum as a, actor_definition as d, actor_variant_definition as var, ai_values as v, prop_datum as p};
@@ -73,11 +74,36 @@ pub mod call {
     pub const TRIED_TO_SEARCH: i32 = BASE | 25;
     /// `actor_perception_abandoned_search(actor, a)`.
     pub const ABANDONED_SEARCH: i32 = BASE | 26;
+    /// `actor_action_try_to_seek_cover(actor, a, b)`, the result.
+    pub const TRY_TO_SEEK_COVER: i32 = BASE | 27;
+    /// `actor_has_ranged_weapon(actor)`, the result.
+    pub const HAS_RANGED_WEAPON: i32 = BASE | 28;
+    /// The game's difficulty value `a` (the melee delay's scale, 0, or its
+    /// base, 1), in `output[0]`.
+    pub const DIFFICULTY: i32 = BASE | 29;
+    /// `action_charge_setup` for the goal `a` and, if it sets up,
+    /// `actor_action_change` to charge: whether it did, the result.
+    pub const CHARGE: i32 = BASE | 30;
+    /// The definition of the actor's vehicle, its address the result.
+    pub const VEHICLE_DEFINITION: i32 = BASE | 31;
+    /// `action_fight_setup` and `actor_action_change` to fight.
+    pub const FIGHT: i32 = BASE | 32;
 }
+
+/// The difficulty values [`call::DIFFICULTY`] reads.
+mod difficulty {
+    pub const MELEE_DELAY_SCALE: i32 = 0;
+    pub const MELEE_DELAY_BASE: i32 = 1;
+}
+
+/// actions.c's vehicle definition's AI fields (its local layout).
+const VEHICLE_AI_CHARGE_REPEAT_TIME: u32 = 0x390;
+const VEHICLE_AI_STRAFING_STOP_RANGE: u32 = 0x394;
 
 /// The actions (actions.h's `_actor_action_*`).
 const ACTION_NONE: i16 = 0;
 const ACTION_ALERT: i16 = 2;
+const ACTION_FIGHT: i16 = 3;
 const ACTION_FLEE: i16 = 4;
 const ACTION_UNCOVER: i16 = 5;
 const ACTION_SEARCH: i16 = 7;
@@ -538,7 +564,7 @@ pub fn handle_panic_transition(
 }
 
 fn combat_selection(context: &AiStepContext, host: &impl AiHost) -> bool {
-    call_simple(context, host, call::COMBAT_SELECTION, 0) != 0
+    handle_combat_selection(context, host)
 }
 
 fn lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool {
@@ -714,4 +740,198 @@ pub fn handle_exit_pursuit(context: &AiStepContext, host: &impl AiHost) -> bool 
         _ => {}
     }
     reported && lost_contact(context, host)
+}
+
+fn c_short(value: f32) -> i16 {
+    let long = if (-2_147_483_648.0..2_147_483_648.0).contains(&value) { value as i32 } else { i32::MIN };
+    long as i16
+}
+
+/// `actor_action_handle_combat_selection`: the actor's combat action. A
+/// discovered stalker seeks cover or goes berserk; an actor near enough a
+/// target (on foot, or with no gun) charges it to melee, as often as its
+/// melee delay allows; a flying driver strafes a target it can't see; and
+/// otherwise it charges when it wants to (forced, gunless, or still charging)
+/// or fights.
+pub fn handle_combat_selection(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = |offset: usize| context.definition + offset as u32;
+    let variant = |offset: usize| context.variant_definition + offset as u32;
+    let firing_variant = call_simple(context, host, call::FIRING_VARIANT, 0) as u32;
+    let has_ranged_weapon = || call_simple(context, host, call::HAS_RANGED_WEAPON, 0) != 0;
+    let action = || m.i16(at(a::STATE_ACTION));
+    let goal = || m.i16(at(a::STATE_CHARGE_GOAL));
+    let goal_melee = |goal: i16| goal == v::_CHARGE_GOAL_MELEE as i16 || goal == v::_CHARGE_GOAL_MELEE_LEAPING as i16;
+    let definition_flag = |bit: usize| m.r32(definition(d::FLAGS)) & (1 << bit) != 0;
+    let mut action_changed = false;
+    let mut prop = 0;
+    let mut prop_distance = f32::MAX;
+
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    if target_prop_index != NONE {
+        prop = prop_get(m, context, target_prop_index);
+        prop_distance = m.f32(prop + p::DISTANCE as u32);
+
+        if action() == ACTION_CHARGE && goal() == v::_CHARGE_GOAL_STALKING as i16 {
+            let discovery_time = m.f32(definition(d::DEFENSIVE_STALKING_DISCOVERY_TIME));
+            let discovered = m.bool(prop + p::CURRENTLY_DAMAGING_ME as u32)
+                || (m.bool(prop + p::SHOOTING as u32) && m.i8(prop + p::QUANTIZED_DISTANCE as u32) <= 1)
+                || (discovery_time > 0.0
+                    && m.i16(at(a::STATE_CHARGE_STALKING_DISCOVERY_TIMER)) >= c_short(discovery_time * 30.0));
+            if discovered {
+                if prop_distance > m.f32(firing_variant + var::RANGED_COMBAT_COMBAT_RANGE_UPPER_BOUND as u32) {
+                    action_changed = call_full(context, host, call::TRY_TO_SEEK_COVER, 0, 0, &[]).result != 0;
+                }
+                if !action_changed {
+                    call_simple(context, host, call::BERSERK, 0);
+                }
+            }
+        }
+
+        if (!has_ranged_weapon() || (m.i32(prop + p::VEHICLE_INDEX as u32) == NONE && !m.bool(prop + p::SWARM as u32)))
+            && (action() != ACTION_CHARGE || !goal_melee(goal()))
+            && !action_changed
+            && !m.bool(at(a::META_SWARM))
+            && m.i32(at(a::INPUT_VEHICLE_INDEX)) == NONE
+            && m.i16(at(a::CONTROL_FIRE_STATE)) != v::_ACTOR_FIRE_STATE_BURSTING as i16
+        {
+            let current_time = context.game_time;
+            let berserk = m.bool(at(a::EMOTIONS_BERSERK));
+            let mut use_berserk_range = berserk;
+            if !has_ranged_weapon() && !definition_flag(v::_ACTOR_DEFINITION_STALKING_BEHAVIOR_BIT) {
+                use_berserk_range = true;
+            }
+            let charge_delay = if berserk { 0.0 } else { m.f32(definition(d::BERSERK_MELEE_ATTACK_DELAY_TIMER)) };
+            let scale = call_full(context, host, call::DIFFICULTY, difficulty::MELEE_DELAY_SCALE, 0, &[]).output[0];
+            let base = call_full(context, host, call::DIFFICULTY, difficulty::MELEE_DELAY_BASE, 0, &[]).output[0];
+            let charge_delay = scale * charge_delay + base;
+            let charge_range = m.f32(variant(if use_berserk_range {
+                var::RANGED_COMBAT_BERSERK_MELEE_RANGE
+            } else {
+                var::RANGED_COMBAT_MELEE_RANGE
+            }));
+            let mut begin_charge = false;
+
+            let last_melee_check_time = m.i32(at(a::EMOTIONS_LAST_MELEE_CHECK_TIME));
+            if (last_melee_check_time == NONE || last_melee_check_time.wrapping_add(10) < current_time)
+                && !(prop_distance > charge_range)
+            {
+                let mut in_range = true;
+                if m.bool(at(a::EXTERNAL_ORDERS_DISABLE_CHARGING)) {
+                    let melee_attack_range = m.f32(definition(d::BERSERK_MELEE_ATTACK_RANGE));
+                    let point_blank_range = if 0.0 > melee_attack_range { 0.0 } else { melee_attack_range };
+                    if prop_distance > point_blank_range + 0.8 {
+                        in_range = false;
+                    }
+                }
+                if in_range {
+                    let last_charge_time = m.i32(at(a::EMOTIONS_LAST_MELEE_ATTACK_TIME));
+                    if last_charge_time == NONE || !(charge_delay * 30.0 + last_charge_time as f32 >= current_time as f32) {
+                        // the game's asks again, the answer unused
+                        has_ranged_weapon();
+                        begin_charge = true;
+                    }
+                }
+            }
+
+            if begin_charge {
+                m.w32(at(a::EMOTIONS_LAST_MELEE_CHECK_TIME), current_time as u32);
+                if call_simple(context, host, call::CHARGE, v::_CHARGE_GOAL_MELEE as i32) != 0 {
+                    action_changed = true;
+                }
+            }
+        }
+
+        let driver_type = m.i16(at(a::INPUT_VEHICLE_DRIVER_TYPE));
+        if action() != ACTION_CHARGE
+            && !m.bool(at(a::EXTERNAL_ORDERS_DISABLE_CHARGING))
+            && !action_changed
+            && driver_type > v::_ACTOR_VEHICLE_DRIVER_NONE as i16
+        {
+            let vehicle_definition = call_simple(context, host, call::VEHICLE_DEFINITION, 0) as u32;
+            let last_charge_time = m.i32(at(a::EMOTIONS_LAST_VEHICLE_CHARGE_TIME));
+            let repeat_elapsed = last_charge_time == NONE
+                || m.f32(vehicle_definition + VEHICLE_AI_CHARGE_REPEAT_TIME) * 30.0 + (last_charge_time as f32)
+                    < context.game_time as f32;
+            if repeat_elapsed {
+                let begin_charge = driver_type == v::_ACTOR_VEHICLE_DRIVER_DIRECTIONAL_FLYING as i16
+                    && prop_distance > m.f32(firing_variant + var::RANGED_COMBAT_MELEE_RANGE as u32)
+                    && m.i16(prop + p::LINE_OF_SIGHT as u32) == 0;
+                if begin_charge
+                    && call_simple(context, host, call::CHARGE, v::_CHARGE_GOAL_VEHICLE_STRAFING as i32) != 0
+                {
+                    action_changed = true;
+                }
+            }
+        }
+    }
+
+    if !action_changed {
+        let disable_charging = || m.bool(at(a::EXTERNAL_ORDERS_DISABLE_CHARGING));
+        let mut desires_charge = m.bool(at(a::EMOTIONS_FORCED_TO_CHARGE)) && !disable_charging();
+        let mut restart_charge = false;
+
+        if !disable_charging()
+            && !has_ranged_weapon()
+            && definition_flag(v::_ACTOR_DEFINITION_CHARGE_IN_ATTACKING_MODE_BIT)
+        {
+            desires_charge = true;
+        }
+
+        if action() == ACTION_CHARGE {
+            let goal = goal();
+            let unable_to_advance = m.bool(at(a::STATE_CHARGE_UNABLE_TO_ADVANCE));
+            if goal_melee(goal) {
+                if !m.bool(at(a::STATE_CHARGE_FINISHED_MELEE_ATTACK))
+                    && !m.bool(at(a::STATE_CHARGE_ABORTED_MELEE_ATTACK))
+                    && !unable_to_advance
+                {
+                    desires_charge = true;
+                } else {
+                    restart_charge = true;
+                }
+            } else if disable_charging() {
+                desires_charge = false;
+                restart_charge = true;
+            } else if goal == v::_CHARGE_GOAL_VEHICLE_STRAFING as i16 || goal == v::_CHARGE_GOAL_VEHICLE_RAMMING as i16 {
+                if unable_to_advance || m.i16(at(a::INPUT_VEHICLE_DRIVER_TYPE)) <= v::_ACTOR_VEHICLE_DRIVER_UNKNOWN as i16 {
+                    restart_charge = true;
+                } else {
+                    desires_charge = true;
+                    if goal == v::_CHARGE_GOAL_VEHICLE_STRAFING as i16 {
+                        let vehicle_definition = call_simple(context, host, call::VEHICLE_DEFINITION, 0) as u32;
+                        let stop_range = m.f32(vehicle_definition + VEHICLE_AI_STRAFING_STOP_RANGE);
+                        if m.bool(at(a::CONTROL_PATH_AT_DESTINATION))
+                            && m.i16(at(a::CONTROL_PATH_DESTINATION_TYPE)) == v::_DESTINATION_PROP as i16
+                            && m.i32(at(a::CONTROL_PATH_DESTINATION_PROP_INDEX)) == m.i32(at(a::TARGET_TARGET_PROP_INDEX))
+                        {
+                            desires_charge = false;
+                        } else if prop_distance < stop_range {
+                            desires_charge = false;
+                        } else if prop_distance < stop_range * 2.0
+                            && dot(m.vector(at(a::INPUT_FACING_VECTOR)), m.vector(prop + p::ACTOR_TO_PROP as u32)) < 0.5
+                        {
+                            desires_charge = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if desires_charge && (restart_charge || action() != ACTION_CHARGE) {
+            if call_simple(context, host, call::CHARGE, v::_CHARGE_GOAL_CLOSE_RANGE as i32) != 0 {
+                action_changed = true;
+            } else {
+                desires_charge = false;
+            }
+        }
+
+        if !desires_charge && !action_changed && action() != ACTION_FIGHT {
+            call_simple(context, host, call::FIGHT, 0);
+            action_changed = true;
+        }
+    }
+
+    action_changed
 }

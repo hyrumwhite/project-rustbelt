@@ -1975,7 +1975,7 @@ fn set_vector(m: &dyn AiMemory, address: u32, v: [f32; 3]) {
     }
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+pub(crate) fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 

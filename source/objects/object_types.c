@@ -125,6 +125,8 @@ symbols in this file:
 #include "cseries.h"
 #include "errors.h"
 #include "object_types.h"
+#include "game/game_engine.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include "cache/cache_files.h"
 #include "cutscene/cinematics.h"
@@ -796,8 +798,12 @@ void object_type_export_function_values(
 	long object_index)
 {
 	short i;
-	struct object_type_definition *definition = object_type_definition_get(object_get(object_index)->object.type);
+	struct object_type_definition *definition;
 
+	/* port: the Rust port's in place of the game's (port/linux/game/halo_sim.c) */
+	if (halo_sim_object_exports(object_index))
+		return;
+	definition = object_type_definition_get(object_get(object_index)->object.type);
 	for (i = 0; definition->part_definitions[i]; i++)
 	{
 		struct object_type_definition *current_definition = definition->part_definitions[i];
@@ -806,6 +812,7 @@ void object_type_export_function_values(
 			current_definition->datum_export_function_values(object_index);
 		}
 	}
+	halo_sim_object_exports_check(object_index);
 
 	return;
 }

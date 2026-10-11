@@ -35,6 +35,7 @@ enum
 	_halo_sim_weapons,
 	_halo_sim_objects,
 	_halo_sim_object_functions,
+	_halo_sim_object_exports,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -540,5 +541,11 @@ them; in check mode it notes the values the game's begins with, and
 halo_sim_object_functions_check compares Rust's from them with the game's */
 int halo_sim_object_functions(long object_index, int part);
 void halo_sim_object_functions_check(long object_index, int part);
+
+/* object_types.c's object_type_export_function_values: TRUE when the Rust
+port exported them; in check mode it notes the state the game's begins
+with, and halo_sim_object_exports_check compares Rust's from it */
+int halo_sim_object_exports(long object_index);
+void halo_sim_object_exports_check(long object_index);
 
 #endif // __HALO_SIM_H

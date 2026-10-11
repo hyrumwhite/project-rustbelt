@@ -424,6 +424,16 @@ void get_postgame_hilite_colors(
 
 boolean game_engine_running(
 	void);
+
+/* port: the gametype's vehicles counted as the scenario's are placed
+(game_engine.c; object_types.c's object_types_place_objects) */
+struct scenario_object_datum;
+struct tag_block;
+void game_engine_vehicle_placement_begin(
+	void);
+boolean game_engine_vehicle_placement_allowed(
+	struct scenario_object_datum const *placement,
+	struct tag_block *palette);
 boolean game_engine_showing_postgame(
 	void);
 

@@ -35,6 +35,8 @@ bit for bit; differences are counted and the first few logged.
 #include "items/weapons.h"
 #include "items/garbage.h"
 #include "objects/scenery.h"
+#include "items/projectiles.h"
+#include "devices/device_machines.h"
 #include "units/unit_definitions.h"
 #include "physics/point_physics.h"
 #include "physics/collisions.h"
@@ -62,7 +64,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 22
+#define HALO_SIM_VERSION 23
 
 /* ---------- structures */
 
@@ -1172,6 +1174,87 @@ struct halo_sim_object_functions_call
 	unsigned char const *transition_tables[6];
 };
 
+/* crates/halo_map's ExportTrigger and ExportState */
+struct halo_sim_export_trigger
+{
+	char state;
+	char pad;
+	short state_timer;
+	real illumination;
+	real ejection_port_position;
+	real rate_of_fire;
+};
+
+struct halo_sim_export_state
+{
+	unsigned long object_index;
+	unsigned long definition_index;
+	short object_type;
+	short pad0;
+	unsigned long random_seed;
+	real incoming_function_values[4];
+	real current_body_damage;
+	real current_shield_damage;
+	real body_vitality;
+	real shield_vitality;
+	word damage_flags;
+	word pad1;
+	byte region_damage[8];
+	real_vector3d node_forward;
+	real local_north;
+	unsigned long object_flags;
+	real_vector3d translational_velocity;
+	real_vector3d forward;
+	real_vector3d up;
+	real seat_power[2];
+	byte aiming_change;
+	byte pad2;
+	char shield_sap_timeout;
+	char pad3;
+	real mouth_aperture;
+	real unit_integrated_light_power;
+	unsigned long unit_flags;
+	unsigned long animation_graph_index;
+	short animation_index;
+	short pad4;
+	real speed;
+	real slide;
+	real turn;
+	real wheel;
+	real left_tread;
+	real right_tread;
+	real hover;
+	real thrust;
+	word vehicle_flags;
+	byte airborne_ticks;
+	byte pad5;
+	real heat;
+	real overcharged;
+	real weapon_integrated_light_power;
+	real age;
+	unsigned long weapon_flags;
+	long game_time_last_fired;
+	long game_time;
+	struct halo_sim_export_trigger triggers[2];
+	short rounds_loaded[2];
+	unsigned long target_object_index;
+	real target_incoming_function_values[4];
+	real power;
+	real power_velocity;
+	real position;
+	real position_velocity;
+	short delay_ticks;
+	short position_group_index;
+	unsigned long machine_flags;
+	word group_flags;
+	word pad6;
+	real odometer;
+	real detonation_timer;
+	unsigned long projectile_flags;
+};
+
+typedef char halo_sim_export_state_size_assert[sizeof(struct halo_sim_export_state) == 308 ? 1 : -1];
+
 struct halo_sim_damage_callbacks
 {
 	long (*object)(unsigned long index, struct halo_sim_object_damage_state *out);
@@ -1433,6 +1516,7 @@ typedef long (*halo_sim_item_function)(struct halo_sim_item_call_c *call);
 typedef long (*halo_sim_weapon_function)(struct halo_sim_weapon_call *call);
 typedef long (*halo_sim_objects_function)(struct halo_sim_objects_update_call *call);
 typedef long (*halo_sim_object_functions_function)(struct halo_sim_object_functions_call *call);
+typedef long (*halo_sim_object_exports_function)(struct halo_sim_export_state *state);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -1496,6 +1580,7 @@ static struct
 	halo_sim_garbage_function garbage_update;
 	halo_sim_scenery_function scenery_update;
 	halo_sim_object_functions_function object_functions;
+	halo_sim_object_exports_function object_exports;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1533,6 +1618,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"weapons",
 	"objects",
 	"object_functions",
+	"object_exports",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -1731,6 +1817,19 @@ static struct
 	unsigned long differed[2];
 	unsigned long active[2];
 } halo_sim_object_functions_checks;
+
+/* the function exports' checks: what the game's began with, and the
+comparisons */
+static struct
+{
+	boolean recording;
+	long object_index;
+	struct halo_sim_export_state before;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long changing;
+	unsigned long changing_by_type[12];
+} halo_sim_object_exports_checks;
 
 /* the unit update checks: the update the game's began with, its calls of
 the rest of the game, and the comparisons */
@@ -3586,6 +3685,7 @@ static void halo_sim_initialize(void)
 	halo_sim.garbage_update = (halo_sim_garbage_function)halo_sim_symbol(library, "halo_sim_garbage_update");
 	halo_sim.scenery_update = (halo_sim_scenery_function)halo_sim_symbol(library, "halo_sim_scenery_update");
 	halo_sim.object_functions = (halo_sim_object_functions_function)halo_sim_symbol(library, "halo_sim_object_functions");
+	halo_sim.object_exports = (halo_sim_object_exports_function)halo_sim_symbol(library, "halo_sim_object_exports");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -3604,7 +3704,7 @@ static void halo_sim_initialize(void)
 		!halo_sim.item_update || !halo_sim.item_update_check ||
 		!halo_sim.weapon_update || !halo_sim.weapon_update_check ||
 		!halo_sim.objects_update || !halo_sim.objects_update_check || !halo_sim.garbage_update || !halo_sim.scenery_update ||
-		!halo_sim.object_functions)
+		!halo_sim.object_functions || !halo_sim.object_exports)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -7083,6 +7183,222 @@ void halo_sim_object_functions_check(long object_index, int part)
 				halo_sim_object_functions_checks.compared[1] - halo_sim_object_functions_checks.differed[1],
 				halo_sim_object_functions_checks.compared[1], halo_sim_object_functions_checks.active[0],
 				halo_sim_object_functions_checks.active[1]);
+		}
+	}
+}
+
+/* ---------- function exports */
+
+/* an object's state as its type's exports read it */
+static void halo_sim_export_state_load(long object_index, struct halo_sim_export_state *state)
+{
+	struct object_datum *object = object_get(object_index);
+	short type = object->object.type;
+
+	memset(state, 0, sizeof(*state));
+	state->object_index = (unsigned long)object_index;
+	state->definition_index = (unsigned long)object->definition_index;
+	state->object_type = type;
+	state->random_seed = get_random_seed();
+	memcpy(state->incoming_function_values, object->object.incoming_function_values, sizeof(state->incoming_function_values));
+	state->current_body_damage = object->object.current_body_damage;
+	state->current_shield_damage = object->object.current_shield_damage;
+	state->body_vitality = object->object.body_vitality;
+	state->shield_vitality = object->object.shield_vitality;
+	state->damage_flags = object->object.damage_flags;
+	memcpy(state->region_damage, object->object.region_damage, sizeof(state->region_damage));
+	state->node_forward = object_get_node_matrix(object_index, 0)->forward;
+	state->local_north = global_scenario_get()->local_north;
+	state->object_flags = object->object.flags;
+	state->translational_velocity = object->object.translational_velocity;
+	state->forward = object->object.forward;
+	state->up = object->object.up;
+	state->target_object_index = (unsigned long)object_index;
+	state->game_time = game_time_get();
+	if (TEST_FLAG(_object_mask_unit, type))
+	{
+		struct unit_datum *unit = (struct unit_datum *)object;
+
+		state->seat_power[0] = unit->unit.seat_power[0];
+		state->seat_power[1] = unit->unit.seat_power[1];
+		state->aiming_change = unit->unit.aiming_change;
+		state->shield_sap_timeout = unit->unit.shield_sap_timeout;
+		state->mouth_aperture = unit->unit.mouth_aperture;
+		state->unit_integrated_light_power = unit->unit.integrated_light_power;
+		state->unit_flags = unit->unit.flags;
+		state->animation_graph_index = (unsigned long)unit->object.animation.animation_graph_index;
+		state->animation_index = unit->object.animation.state.index;
+	}
+	if (type == _object_type_vehicle)
+	{
+		struct vehicle_datum *vehicle = (struct vehicle_datum *)object;
+
+		state->speed = vehicle->vehicle.speed;
+		state->slide = vehicle->vehicle.slide;
+		state->turn = vehicle->vehicle.turn;
+		state->wheel = vehicle->vehicle.wheel;
+		state->left_tread = vehicle->vehicle.left_tread;
+		state->right_tread = vehicle->vehicle.right_tread;
+		state->hover = vehicle->vehicle.hover;
+		state->thrust = vehicle->vehicle.thrust;
+		state->vehicle_flags = vehicle->vehicle.flags;
+		state->airborne_ticks = vehicle->vehicle.airborne_ticks;
+	}
+	if (type == _object_type_weapon)
+	{
+		struct weapon_datum *weapon = (struct weapon_datum *)object;
+		struct object_datum *target = object;
+		long target_index = object_index;
+		short trigger_index;
+
+		state->heat = weapon->weapon.heat;
+		state->overcharged = weapon->weapon.overcharged;
+		state->weapon_integrated_light_power = weapon->weapon.integrated_light_power;
+		state->age = weapon->weapon.age;
+		state->weapon_flags = weapon->weapon.flags;
+		state->game_time_last_fired = weapon->weapon.game_time_last_fired;
+		for (trigger_index = 0; trigger_index < 2; trigger_index++)
+		{
+			state->triggers[trigger_index].state = weapon->weapon.triggers[trigger_index].state;
+			state->triggers[trigger_index].state_timer = weapon->weapon.triggers[trigger_index].state_timer;
+			state->triggers[trigger_index].illumination = weapon->weapon.triggers[trigger_index].illumination;
+			state->triggers[trigger_index].ejection_port_position = weapon->weapon.triggers[trigger_index].ejection_port_position;
+			state->triggers[trigger_index].rate_of_fire = weapon->weapon.triggers[trigger_index].rate_of_fire;
+		}
+		state->rounds_loaded[0] = weapon->weapon.magazines[0].rounds_loaded;
+		state->rounds_loaded[1] = weapon->weapon.magazines[1].rounds_loaded;
+		/* (its first visible ancestor) */
+		while (TEST_FLAG(target->object.flags, _object_invisible_bit) && target->object.parent_object_index != NONE)
+		{
+			target_index = target->object.parent_object_index;
+			target = object_get(target_index);
+		}
+		state->target_object_index = (unsigned long)target_index;
+		if (target_index != object_index)
+		{
+			memcpy(state->target_incoming_function_values, target->object.incoming_function_values,
+				sizeof(state->target_incoming_function_values));
+		}
+	}
+	if (type == _object_type_projectile)
+	{
+		struct projectile_datum *projectile = (struct projectile_datum *)object;
+
+		state->odometer = projectile->projectile.odometer;
+		state->detonation_timer = projectile->projectile.detonation_timer;
+		state->projectile_flags = projectile->projectile.flags;
+	}
+	if (TEST_FLAG(_object_mask_device, type))
+	{
+		struct device_datum *device = (struct device_datum *)object;
+
+		state->power = device->device.power;
+		state->power_velocity = device->device.power_velocity;
+		state->position = device->device.position;
+		state->position_velocity = device->device.position_velocity;
+		state->delay_ticks = device->device.delay_ticks;
+		state->position_group_index = device->device.position_group_index;
+		if (type == _object_type_machine)
+		{
+			struct machine_datum *machine = (struct machine_datum *)object;
+
+			state->machine_flags = machine->machine.flags;
+			if (device->device.position_group_index != NONE)
+			{
+				real value;
+				word flags = 0;
+				boolean runtime;
+
+				device_group_network_get(device->device.position_group_index, &value, &flags, &runtime);
+				state->group_flags = flags;
+			}
+		}
+	}
+}
+
+int halo_sim_object_exports(long object_index)
+{
+	short mode = halo_sim_mode(_halo_sim_object_exports);
+	struct halo_sim_export_state state;
+	struct object_datum *object;
+
+	halo_sim_object_exports_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_export_state_load(object_index, &halo_sim_object_exports_checks.before);
+		halo_sim_object_exports_checks.object_index = object_index;
+		halo_sim_object_exports_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_export_state_load(object_index, &state);
+	if (halo_sim.object_exports(&state) != 0)
+		return FALSE;
+	object = object_get(object_index);
+	memcpy(object->object.incoming_function_values, state.incoming_function_values, sizeof(state.incoming_function_values));
+	if (state.target_object_index != (unsigned long)object_index)
+	{
+		memcpy(object_get((long)state.target_object_index)->object.incoming_function_values,
+			state.target_incoming_function_values, sizeof(state.target_incoming_function_values));
+	}
+	if (object->object.type == _object_type_weapon)
+	{
+		struct weapon_datum *weapon = (struct weapon_datum *)object;
+
+		weapon->weapon.triggers[0].illumination = state.triggers[0].illumination;
+		weapon->weapon.triggers[1].illumination = state.triggers[1].illumination;
+	}
+	*get_global_random_seed_address() = state.random_seed;
+
+	return TRUE;
+}
+
+void halo_sim_object_exports_check(long object_index)
+{
+	struct halo_sim_export_state rust;
+	struct halo_sim_export_state game;
+
+	if (!halo_sim_object_exports_checks.recording || halo_sim_object_exports_checks.object_index != object_index)
+		return;
+	halo_sim_object_exports_checks.recording = FALSE;
+	rust = halo_sim_object_exports_checks.before;
+	if (halo_sim.object_exports(&rust) != 0)
+		return;
+	halo_sim_export_state_load(object_index, &game);
+	halo_sim_object_exports_checks.compared++;
+	if (memcmp(&halo_sim_object_exports_checks.before, &game, sizeof(game)) != 0)
+	{
+		halo_sim_object_exports_checks.changing++;
+		if (game.object_type >= 0 && game.object_type < 12)
+			halo_sim_object_exports_checks.changing_by_type[game.object_type]++;
+	}
+	if (memcmp(&rust, &game, sizeof(game)) != 0)
+	{
+		halo_sim_object_exports_checks.differed++;
+		if (halo_sim_object_exports_checks.differed <= 8)
+		{
+			platform_log("halo_sim: function exports differ: object %lx type %d definition %lx; incoming game %f %f %f %f rust %f %f %f %f; target game %f rust %f; seed game %lx rust %lx",
+				(unsigned long)object_index, game.object_type, game.definition_index,
+				(double)game.incoming_function_values[0], (double)game.incoming_function_values[1],
+				(double)game.incoming_function_values[2], (double)game.incoming_function_values[3],
+				(double)rust.incoming_function_values[0], (double)rust.incoming_function_values[1],
+				(double)rust.incoming_function_values[2], (double)rust.incoming_function_values[3],
+				(double)game.target_incoming_function_values[0], (double)rust.target_incoming_function_values[0],
+				game.random_seed, rust.random_seed);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_object_exports_checks.compared;
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			unsigned long const *by_type = halo_sim_object_exports_checks.changing_by_type;
+
+			platform_log("halo_sim: function exports: %lu of %lu agree with the game (%lu changing: bipeds %lu, vehicles %lu, weapons %lu, equipment %lu, projectiles %lu, scenery %lu, machines %lu, controls %lu, light fixtures %lu)",
+				compared - halo_sim_object_exports_checks.differed, compared, halo_sim_object_exports_checks.changing,
+				by_type[0], by_type[1], by_type[2], by_type[3], by_type[5], by_type[6], by_type[7], by_type[8], by_type[9]);
 		}
 	}
 }

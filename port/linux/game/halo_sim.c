@@ -64,7 +64,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 23
+#define HALO_SIM_VERSION 24
 
 /* ---------- structures */
 
@@ -1255,6 +1255,43 @@ struct halo_sim_export_state
 
 typedef char halo_sim_export_state_size_assert[sizeof(struct halo_sim_export_state) == 308 ? 1 : -1];
 
+/* crates/halo_sim's IkCallC, LightsCallC and IkCallbacks */
+struct halo_sim_ik_call
+{
+	unsigned long unit_index;
+	unsigned long definition_index;
+	long parent_object_index;
+	long current_weapon_object_index;
+	short seat_index;
+	short weapon_class_index;
+	short soft_ping_animation_index;
+	short current_weapon_slot;
+	char animation_state;
+	char action;
+	short pad;
+	unsigned long object_flags;
+	byte region_permutations[8];
+	real *node_matrices;
+	unsigned long node_count;
+	long grenade_releases;
+	unsigned long weapon_ik;
+};
+
+struct halo_sim_lights_call
+{
+	unsigned long object_flags;
+	unsigned long attachment_count;
+	char attachment_types[8];
+	long attachment_indices[8];
+	unsigned long light_count;
+	long lights[8];
+};
+
+struct halo_sim_ik_callbacks
+{
+	long (*grenade_throw_releases_vehicle_ik)(unsigned long unit_index);
+};
+
 struct halo_sim_damage_callbacks
 {
 	long (*object)(unsigned long index, struct halo_sim_object_damage_state *out);
@@ -1462,6 +1499,7 @@ struct halo_sim_host
 	struct halo_sim_item_callbacks items;
 	struct halo_sim_weapon_callbacks weapons;
 	struct halo_sim_objects_callbacks objects;
+	struct halo_sim_ik_callbacks ik;
 };
 
 /* crates/halo_sim's CollisionVectorCall and CollisionVectorResult */
@@ -1517,6 +1555,8 @@ typedef long (*halo_sim_weapon_function)(struct halo_sim_weapon_call *call);
 typedef long (*halo_sim_objects_function)(struct halo_sim_objects_update_call *call);
 typedef long (*halo_sim_object_functions_function)(struct halo_sim_object_functions_call *call);
 typedef long (*halo_sim_object_exports_function)(struct halo_sim_export_state *state);
+typedef long (*halo_sim_ik_function)(struct halo_sim_ik_call *call);
+typedef long (*halo_sim_lights_function)(struct halo_sim_lights_call *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -1581,6 +1621,9 @@ static struct
 	halo_sim_scenery_function scenery_update;
 	halo_sim_object_functions_function object_functions;
 	halo_sim_object_exports_function object_exports;
+	halo_sim_ik_function unit_ik;
+	halo_sim_ik_function unit_ik_check;
+	halo_sim_lights_function object_lights;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -1619,6 +1662,8 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"objects",
 	"object_functions",
 	"object_exports",
+	"unit_ik",
+	"lights",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -1830,6 +1875,28 @@ static struct
 	unsigned long changing;
 	unsigned long changing_by_type[12];
 } halo_sim_object_exports_checks;
+
+/* the inverse kinematics' and lights' checks */
+#define MAXIMUM_HALO_SIM_IK_NODES 64
+static struct
+{
+	boolean recording;
+	long unit_index;
+	struct halo_sim_ik_call call;
+	real before[MAXIMUM_HALO_SIM_IK_NODES * 13];
+	word flags_before;
+	unsigned long compared;
+	unsigned long differed;
+	unsigned long adjusted;
+	unsigned long weapon_ik;
+	unsigned long vehicle_ik;
+	boolean lights_recording;
+	long lights_object_index;
+	struct halo_sim_lights_call lights_call;
+	unsigned long lights_compared;
+	unsigned long lights_differed;
+	unsigned long lights_found;
+} halo_sim_ik_checks;
 
 /* the unit update checks: the update the game's began with, its calls of
 the rest of the game, and the comparisons */
@@ -3464,6 +3531,14 @@ static long halo_sim_objects_call_callback(struct halo_sim_objects_call *call)
 	return 0;
 }
 
+/* units.c's */
+long unit_rust_grenade_throw_releases_vehicle_ik(long unit_index);
+
+static long halo_sim_ik_grenade_callback(unsigned long unit_index)
+{
+	return unit_rust_grenade_throw_releases_vehicle_ik((long)unit_index);
+}
+
 /* bipeds.c's, a player melee's side effects */
 void biped_rust_melee_started(long biped_index, long weapon_index);
 void biped_rust_melee_damage(long biped_index);
@@ -3608,6 +3683,9 @@ static struct halo_sim_host const halo_sim_host_callbacks =
 	{
 		halo_sim_objects_call_callback,
 	},
+	{
+		halo_sim_ik_grenade_callback,
+	},
 };
 
 static void halo_sim_initialize(void)
@@ -3686,6 +3764,9 @@ static void halo_sim_initialize(void)
 	halo_sim.scenery_update = (halo_sim_scenery_function)halo_sim_symbol(library, "halo_sim_scenery_update");
 	halo_sim.object_functions = (halo_sim_object_functions_function)halo_sim_symbol(library, "halo_sim_object_functions");
 	halo_sim.object_exports = (halo_sim_object_exports_function)halo_sim_symbol(library, "halo_sim_object_exports");
+	halo_sim.unit_ik = (halo_sim_ik_function)halo_sim_symbol(library, "halo_sim_unit_ik");
+	halo_sim.unit_ik_check = (halo_sim_ik_function)halo_sim_symbol(library, "halo_sim_unit_ik_check");
+	halo_sim.object_lights = (halo_sim_lights_function)halo_sim_symbol(library, "halo_sim_object_lights");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -3704,7 +3785,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.item_update || !halo_sim.item_update_check ||
 		!halo_sim.weapon_update || !halo_sim.weapon_update_check ||
 		!halo_sim.objects_update || !halo_sim.objects_update_check || !halo_sim.garbage_update || !halo_sim.scenery_update ||
-		!halo_sim.object_functions || !halo_sim.object_exports)
+		!halo_sim.object_functions || !halo_sim.object_exports ||
+		!halo_sim.unit_ik || !halo_sim.unit_ik_check || !halo_sim.object_lights)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -7399,6 +7481,197 @@ void halo_sim_object_exports_check(long object_index)
 			platform_log("halo_sim: function exports: %lu of %lu agree with the game (%lu changing: bipeds %lu, vehicles %lu, weapons %lu, equipment %lu, projectiles %lu, scenery %lu, machines %lu, controls %lu, light fixtures %lu)",
 				compared - halo_sim_object_exports_checks.differed, compared, halo_sim_object_exports_checks.changing,
 				by_type[0], by_type[1], by_type[2], by_type[3], by_type[5], by_type[6], by_type[7], by_type[8], by_type[9]);
+		}
+	}
+}
+
+/* ---------- inverse kinematics and lights */
+
+static void halo_sim_ik_call_new(long unit_index, void *node_matrices, long current_weapon_object_index,
+	struct halo_sim_ik_call *call)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+
+	memset(call, 0, sizeof(*call));
+	call->unit_index = (unsigned long)unit_index;
+	call->definition_index = (unsigned long)unit->definition_index;
+	call->parent_object_index = unit->object.parent_object_index;
+	call->current_weapon_object_index = current_weapon_object_index;
+	call->seat_index = unit->unit.animation.seat_index;
+	call->weapon_class_index = unit->unit.animation.weapon_index;
+	call->soft_ping_animation_index = unit->unit.animation.soft_ping_animation.index;
+	call->current_weapon_slot = unit->unit.current_weapon_index;
+	call->animation_state = unit->unit.animation.state;
+	call->action = unit->unit.animation.action;
+	call->object_flags = unit->object.flags;
+	memcpy(call->region_permutations, unit->object.region_permutations, sizeof(call->region_permutations));
+	call->node_matrices = (real *)node_matrices;
+	call->node_count = (unsigned long)(unit->object.node_matrices.size / (long)sizeof(real_matrix4x3));
+	call->grenade_releases = NONE;
+}
+
+int halo_sim_unit_ik(long unit_index, void *node_matrices, long current_weapon_object_index)
+{
+	short mode = halo_sim_mode(_halo_sim_unit_ik);
+	struct halo_sim_ik_call call;
+	struct unit_datum *unit;
+
+	halo_sim_ik_checks.recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_ik_call_new(unit_index, node_matrices, current_weapon_object_index, &halo_sim_ik_checks.call);
+		if (halo_sim_ik_checks.call.node_count > MAXIMUM_HALO_SIM_IK_NODES)
+			return FALSE;
+		memcpy(halo_sim_ik_checks.before, node_matrices, halo_sim_ik_checks.call.node_count * sizeof(real_matrix4x3));
+		halo_sim_ik_checks.flags_before = unit_get(unit_index)->unit.animation.flags;
+		halo_sim_ik_checks.unit_index = unit_index;
+		halo_sim_ik_checks.recording = TRUE;
+		return FALSE;
+	}
+
+	halo_sim_ik_call_new(unit_index, node_matrices, current_weapon_object_index, &call);
+	if (halo_sim.unit_ik(&call) != 0)
+		return FALSE;
+	unit = unit_get(unit_index);
+	if (call.weapon_ik)
+		SET_FLAG(unit->unit.animation.flags, _unit_animation_postpone_weapon_ik_until_interpolation_ends_bit, FALSE);
+
+	return TRUE;
+}
+
+void halo_sim_unit_ik_note_grenade(long unit_index, int releases)
+{
+	if (halo_sim_ik_checks.recording && halo_sim_ik_checks.unit_index == unit_index)
+	{
+		halo_sim_ik_checks.call.grenade_releases = releases ? 1 : 0;
+		if (!releases)
+			halo_sim_ik_checks.vehicle_ik++;
+	}
+}
+
+void halo_sim_unit_ik_check(long unit_index, void const *node_matrices)
+{
+	struct halo_sim_ik_call call;
+	real rust[MAXIMUM_HALO_SIM_IK_NODES * 13];
+	word flags_game;
+	word flags_rust;
+	unsigned long size;
+
+	if (!halo_sim_ik_checks.recording || halo_sim_ik_checks.unit_index != unit_index)
+		return;
+	halo_sim_ik_checks.recording = FALSE;
+	call = halo_sim_ik_checks.call;
+	size = call.node_count * sizeof(real_matrix4x3);
+	memcpy(rust, halo_sim_ik_checks.before, size);
+	call.node_matrices = rust;
+	if (halo_sim.unit_ik_check(&call) != 0)
+		return;
+	flags_game = unit_get(unit_index)->unit.animation.flags;
+	flags_rust = halo_sim_ik_checks.flags_before;
+	if (call.weapon_ik)
+		SET_FLAG(flags_rust, _unit_animation_postpone_weapon_ik_until_interpolation_ends_bit, FALSE);
+	halo_sim_ik_checks.compared++;
+	if (memcmp(halo_sim_ik_checks.before, node_matrices, size) != 0)
+		halo_sim_ik_checks.adjusted++;
+	if (call.weapon_ik)
+		halo_sim_ik_checks.weapon_ik++;
+	if (memcmp(rust, node_matrices, size) != 0 || flags_game != flags_rust)
+	{
+		halo_sim_ik_checks.differed++;
+		if (halo_sim_ik_checks.differed <= 8)
+		{
+			unsigned long index;
+
+			for (index = 0; index < call.node_count * 13 && rust[index] == ((real const *)node_matrices)[index]; index++)
+				;
+			platform_log("halo_sim: inverse kinematics differ: unit %lx seat %d weapon class %d state %d; float %lu (node %lu) game %f rust %f; flags game %x rust %x",
+				(unsigned long)unit_index, call.seat_index, call.weapon_class_index, call.animation_state, index, index / 13,
+				index < call.node_count * 13 ? (double)((real const *)node_matrices)[index] : 0.0,
+				index < call.node_count * 13 ? (double)rust[index] : 0.0, flags_game, flags_rust);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_ik_checks.compared;
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: inverse kinematics: %lu of %lu agree with the game (%lu adjusting the pose, %lu with the weapon's, %lu with the vehicle's)",
+				compared - halo_sim_ik_checks.differed, compared, halo_sim_ik_checks.adjusted, halo_sim_ik_checks.weapon_ik,
+				halo_sim_ik_checks.vehicle_ik);
+		}
+	}
+}
+
+static void halo_sim_lights_call_new(long object_index, struct halo_sim_lights_call *call)
+{
+	struct object_datum *object = object_get(object_index);
+	struct object_definition *definition = object_definition_get(object->definition_index);
+
+	memset(call, 0, sizeof(*call));
+	call->object_flags = object->object.flags;
+	call->attachment_count = definition->object.attachments.count < 0 ? 0 : (unsigned long)definition->object.attachments.count;
+	memcpy(call->attachment_types, object->object.attachment_types, sizeof(call->attachment_types));
+	memcpy(call->attachment_indices, object->object.attachment_indices, sizeof(call->attachment_indices));
+}
+
+int halo_sim_object_lights(long object_index, long *lights, short *light_count)
+{
+	short mode = halo_sim_mode(_halo_sim_lights);
+	struct halo_sim_lights_call call;
+	unsigned long index;
+
+	halo_sim_ik_checks.lights_recording = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	halo_sim_lights_call_new(object_index, &call);
+	if (halo_sim.object_lights(&call) != 0)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		halo_sim_ik_checks.lights_call = call;
+		halo_sim_ik_checks.lights_object_index = object_index;
+		halo_sim_ik_checks.lights_recording = TRUE;
+		return FALSE;
+	}
+	for (index = 0; index < call.light_count && index < 8; index++)
+		lights[index] = call.lights[index];
+	*light_count = (short)call.light_count;
+
+	return TRUE;
+}
+
+void halo_sim_object_lights_check(long object_index, long const *lights, short light_count)
+{
+	struct halo_sim_lights_call const *call = &halo_sim_ik_checks.lights_call;
+	boolean agree;
+	short index;
+
+	if (!halo_sim_ik_checks.lights_recording || halo_sim_ik_checks.lights_object_index != object_index)
+		return;
+	halo_sim_ik_checks.lights_recording = FALSE;
+	agree = call->light_count == (unsigned long)light_count;
+	for (index = 0; agree && index < light_count; index++)
+		agree = call->lights[index] == lights[index];
+	halo_sim_ik_checks.lights_compared++;
+	halo_sim_ik_checks.lights_found += (unsigned long)light_count;
+	if (!agree)
+	{
+		halo_sim_ik_checks.lights_differed++;
+		if (halo_sim_ik_checks.lights_differed <= 8)
+		{
+			platform_log("halo_sim: lights differ: object %lx: game %d lights, rust %lu", (unsigned long)object_index, light_count,
+				call->light_count);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_ik_checks.lights_compared;
+
+		if ((compared & 0x3fff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: lights: %lu of %lu agree with the game (%lu lights)",
+				compared - halo_sim_ik_checks.lights_differed, compared, halo_sim_ik_checks.lights_found);
 		}
 	}
 }

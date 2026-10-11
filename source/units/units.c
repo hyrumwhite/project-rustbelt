@@ -11027,6 +11027,8 @@ void unit_grenade_throw_set_leg_weights(
 or playing an action (a reload, readying or putting away a weapon, a
 melee), and through the interpolation back to the seat after it, which the
 grips would otherwise snap */
+static boolean unit_ik_grenade_throw_releases_vehicle_ik(long unit_index);
+
 static boolean unit_grenade_throw_releases_vehicle_ik(
 	long unit_index)
 {
@@ -11709,7 +11711,7 @@ void unit_preprocess_node_orientations(
 	return;
 }
 
-void unit_postprocess_node_matrices(
+static void unit_postprocess_node_matrices_game(
 	long unit_index,
 	real_matrix4x3 *node_matrices)
 {
@@ -11744,7 +11746,7 @@ void unit_postprocess_node_matrices(
 
 		if (unit->object.parent_object_index!=NONE &&
 			unit_animation_vehicle_ik(&unit->unit.animation) &&
-			!unit_grenade_throw_releases_vehicle_ik(unit_index))
+			!unit_ik_grenade_throw_releases_vehicle_ik(unit_index))
 		{
 			ik_points = &unit_seat->ik_points;
 			ik_point_index = 0;
@@ -12793,4 +12795,37 @@ long unit_update_call(
 	halo_sim_unit_event_end(unit_index, result);
 
 	return result;
+}
+
+/* ---------- port: a unit's inverse kinematics' Rust port (halo_sim.c) */
+
+/* unit_grenade_throw_releases_vehicle_ik, its answer noted for the check */
+static boolean unit_ik_grenade_throw_releases_vehicle_ik(
+	long unit_index)
+{
+	boolean result = unit_grenade_throw_releases_vehicle_ik(unit_index);
+
+	halo_sim_unit_ik_note_grenade(unit_index, result);
+	return result;
+}
+
+/* for the Rust port's host */
+long unit_rust_grenade_throw_releases_vehicle_ik(
+	long unit_index)
+{
+	return unit_grenade_throw_releases_vehicle_ik(unit_index) ? 1 : 0;
+}
+
+void unit_postprocess_node_matrices(
+	long unit_index,
+	real_matrix4x3 *node_matrices)
+{
+	struct unit_datum *unit = unit_get(unit_index);
+	long current_weapon_object_index = unit->unit.current_weapon_index != NONE ?
+		unit_get_current_weapon_index(unit_index) : NONE;
+
+	if (halo_sim_unit_ik(unit_index, node_matrices, current_weapon_object_index))
+		return;
+	unit_postprocess_node_matrices_game(unit_index, node_matrices);
+	halo_sim_unit_ik_check(unit_index, node_matrices);
 }

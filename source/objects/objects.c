@@ -4804,17 +4804,39 @@ static void object_connect_lights(
 	boolean reconnect)
 {
 	struct object_datum *object = object_get(object_index);
+	long lights[MAXIMUM_NUMBER_OF_ATTACHMENTS_PER_OBJECT];
+	short light_count = 0;
+	short light_number;
+
+	/* port: the Rust port's choice of the lights, or (in check mode) the
+	game's checked against it (port/linux/game/halo_sim.c) */
+	if (halo_sim_object_lights(object_index, lights, &light_count))
+	{
+		for (light_number = 0; light_number < light_count; light_number++)
+		{
+			if (disconnect)
+			{
+				light_disconnect_from_map(lights[light_number]);
+			}
+			if (reconnect)
+			{
+				light_reconnect_to_map(lights[light_number]);
+			}
+		}
+		return;
+	}
 
 	if (TEST_FLAG(object->object.flags, _object_has_attached_lights_bit))
 	{
 		short i;
 		struct object_definition *object_definition = object_definition_get(object->definition_index);
-		
+
 		/* port: the attachments attachments_new made (a map's count) */
 		for (i =0; i<MIN(object_definition->object.attachments.count, MAXIMUM_NUMBER_OF_ATTACHMENTS_PER_OBJECT); ++i)
 		{
 			if (!object->object.attachment_types[i] && object->object.attachment_indices[i]!=NONE)
 			{
+				lights[light_count++] = object->object.attachment_indices[i];
 				if (disconnect)
 				{
 					light_disconnect_from_map(object->object.attachment_indices[i]);
@@ -4826,6 +4848,7 @@ static void object_connect_lights(
 			}
 		}
 	}
+	halo_sim_object_lights_check(object_index, lights, light_count);
 
 	return;
 }

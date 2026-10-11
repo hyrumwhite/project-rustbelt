@@ -36,6 +36,8 @@ enum
 	_halo_sim_objects,
 	_halo_sim_object_functions,
 	_halo_sim_object_exports,
+	_halo_sim_unit_ik,
+	_halo_sim_lights,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -547,5 +549,19 @@ port exported them; in check mode it notes the state the game's begins
 with, and halo_sim_object_exports_check compares Rust's from it */
 int halo_sim_object_exports(long object_index);
 void halo_sim_object_exports_check(long object_index);
+
+/* units.c's unit_postprocess_node_matrices: TRUE when the Rust port
+adjusted the unit's node matrices; in check mode it notes the matrices the
+game's begins with, halo_sim_unit_ik_note_grenade the game's answer to
+whether a grenade throw releases the vehicle's grip, and
+halo_sim_unit_ik_check compares Rust's */
+int halo_sim_unit_ik(long unit_index, void *node_matrices, long current_weapon_object_index);
+void halo_sim_unit_ik_check(long unit_index, void const *node_matrices);
+void halo_sim_unit_ik_note_grenade(long unit_index, int releases);
+
+/* objects.c's object_connect_lights: TRUE when the Rust port chose the
+lights (`lights`, `light_count`); in check mode the game's list is compared */
+int halo_sim_object_lights(long object_index, long *lights, short *light_count);
+void halo_sim_object_lights_check(long object_index, long const *lights, short light_count);
 
 #endif // __HALO_SIM_H

@@ -15,6 +15,7 @@ props and its definition (ai/actors.h, props.h, actor_definitions.h).
 #include "units/units.h"
 #include "units/bipeds.h"
 #include "items/projectiles.h"
+#include "ai/path.h"
 
 #include <stddef.h>
 
@@ -117,6 +118,19 @@ LAYOUT_MEMBER(actor_datum, input_recent_shield_damage, input.recent_shield_damag
 LAYOUT_MEMBER(actor_datum, danger_zone_danger_type, danger_zone.danger_type)
 LAYOUT_MEMBER(actor_datum, danger_zone_object_index, danger_zone.object_index)
 LAYOUT_SIZE(actor_input_data)
+LAYOUT_MEMBER(actor_datum, control_path_path, control.path.path)
+LAYOUT_MEMBER(actor_datum, control_path_at_destination, control.path.at_destination)
+LAYOUT_MEMBER(actor_datum, control_movement_complete, control.movement_complete)
+LAYOUT_MEMBER(actor_datum, control_movement_thwarted, control.movement_thwarted)
+LAYOUT_MEMBER(actor_datum, control_moving_towards_point, control.moving_towards_point)
+LAYOUT_MEMBER(actor_datum, control_vector_avoidance_rotation_emergency_instantaneous, control.vector_avoidance_rotation_emergency_instantaneous)
+LAYOUT_OFFSET(path_result, valid)
+LAYOUT_OFFSET(path_result, steps_finish_path)
+LAYOUT_OFFSET(path_result, step_count)
+LAYOUT_OFFSET(path_result, step_index)
+LAYOUT_OFFSET(path_result, steps)
+LAYOUT_SIZE(path_step)
+LAYOUT_OFFSET(path_step, point)
 LAYOUT_MEMBER(actor_datum, orders_look_primary_priority, orders.look.primary_priority)
 LAYOUT_MEMBER(actor_datum, orders_look_primary_direction_type, orders.look.primary_direction.type)
 LAYOUT_MEMBER(actor_datum, control_moving_forced_by_aiming, control.moving_forced_by_aiming)

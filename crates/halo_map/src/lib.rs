@@ -11,6 +11,7 @@
 //! definitions by `tools/tag_layout`.
 
 pub mod actor_attention;
+pub mod actor_destination;
 pub mod actor_emotions;
 pub mod actor_general;
 pub mod actor_input;

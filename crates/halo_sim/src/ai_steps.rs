@@ -11,6 +11,7 @@
 use std::cell::Cell;
 
 use halo_map::actor_attention::{actor_communication_update, actor_conversation_control, actor_look_affect_movement};
+use halo_map::actor_destination::actor_destination_update;
 use halo_map::actor_emotions::actor_emotion_update;
 use halo_map::actor_general::actor_general_update;
 use halo_map::actor_input::actor_input_update;
@@ -42,6 +43,8 @@ pub struct AiStepCallbacks {
     pub communication: unsafe extern "C" fn(call: *mut AiCall),
     /// action_converse.c's `actor_conversation_call`.
     pub conversation: unsafe extern "C" fn(call: *mut AiCall),
+    /// actor_moving.c's `actor_destination_call`.
+    pub destination: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -172,6 +175,7 @@ const STEP_GENERAL: i32 = 6;
 const STEP_LOOK_MOVEMENT: i32 = 7;
 const STEP_COMMUNICATION: i32 = 8;
 const STEP_CONVERSATION: i32 = 9;
+const STEP_DESTINATION: i32 = 10;
 
 /// The step run: its result, or None for a step the port doesn't have.
 fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
@@ -186,6 +190,7 @@ fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
         STEP_LOOK_MOVEMENT => actor_look_affect_movement(context, host),
         STEP_COMMUNICATION => actor_communication_update(context, host),
         STEP_CONVERSATION => actor_conversation_control(context, host),
+        STEP_DESTINATION => actor_destination_update(context, host),
         _ => return None,
     }
     Some(0)
@@ -201,6 +206,7 @@ fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" 
         STEP_LOOK_MOVEMENT => Some(callbacks.look_movement),
         STEP_COMMUNICATION => Some(callbacks.communication),
         STEP_CONVERSATION => Some(callbacks.conversation),
+        STEP_DESTINATION => Some(callbacks.destination),
         _ => None,
     }
 }

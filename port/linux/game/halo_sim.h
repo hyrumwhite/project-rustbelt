@@ -356,6 +356,11 @@ enum
 	_particle_call_object_exists,
 	_particle_call_physics,
 	_particle_call_material_effect,
+	_particle_call_node_point,
+	_particle_call_location_from_point,
+	_particle_call_visible,
+	_particle_call_new,
+	_particle_call_light,
 };
 
 /* crates/halo_map's ParticleCall: a particle's call of the game, and its
@@ -365,10 +370,15 @@ struct halo_sim_particle_call
 	long kind;
 	long a;
 	long b;
+	long c;
+	long d;
 	float f[4];
 	long result;
-	float out[3];
+	float out[6];
 	long out_material_type;
+	long out_location_leaf;
+	short out_location_cluster;
+	unsigned short out_location_bonus;
 };
 
 /* crates/halo_map's ParticleState: what a particle's update changes of the
@@ -399,6 +409,7 @@ struct halo_sim_particle_state
 	float rotation;
 	float angular_velocity;
 	float radius;
+	float color[4];
 	unsigned long local_random_seed;
 };
 
@@ -987,6 +998,13 @@ int halo_sim_particle_event_begin(long particle_index, struct halo_sim_particle_
 void halo_sim_particle_event_end(long particle_index, struct halo_sim_particle_call const *call, long still_there,
 	int opened);
 long particle_call(long particle_index, struct halo_sim_particle_call *call);
+/* particles.c's particle_new: TRUE when the Rust port made the particle; in
+check mode `checking` is set when this one is checked, and
+halo_sim_particle_new_check compares Rust's replay with the particle the
+game's made (NONE for none) */
+struct new_particle_data;
+int halo_sim_particle_new(struct new_particle_data const *data, int *checking);
+void halo_sim_particle_new_check(long particle_index);
 /* particles.c's: a particle's state (FALSE if it is gone: the seed is still
 read), and back (the seed always) */
 int particle_halo_sim_state_load(long particle_index, struct halo_sim_particle_state *state);

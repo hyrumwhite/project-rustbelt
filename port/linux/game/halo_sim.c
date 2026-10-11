@@ -57,6 +57,8 @@ bit for bit; differences are counted and the first few logged.
 #include "game/players.h"
 #include "math/real_math.h"
 #include "effects/effect_definitions.h"
+#include "effects/particles.h"
+#include "render/render.h"
 #include "tag_files/tag_groups.h"
 #include "bevy_bridge.h"
 #include "halo_sim.h"
@@ -68,7 +70,7 @@ bit for bit; differences are counted and the first few logged.
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 30
+#define HALO_SIM_VERSION 31
 
 /* ---------- structures */
 
@@ -1527,8 +1529,9 @@ struct halo_sim_effect_update_call
 };
 
 /* crates/halo_sim's ParticleEventC, ParticleUpdateC and ParticleCallbacks */
-typedef char halo_sim_particle_state_size_assert[sizeof(struct halo_sim_particle_state) == 104 ? 1 : -1];
-typedef char halo_sim_particle_call_size_assert[sizeof(struct halo_sim_particle_call) == 48 ? 1 : -1];
+typedef char halo_sim_particle_state_size_assert[sizeof(struct halo_sim_particle_state) == 120 ? 1 : -1];
+typedef char halo_sim_particle_call_size_assert[sizeof(struct halo_sim_particle_call) == 76 ? 1 : -1];
+typedef char halo_sim_new_particle_data_size_assert[sizeof(struct new_particle_data) == 92 ? 1 : -1];
 
 struct halo_sim_particle_event
 {
@@ -1550,6 +1553,20 @@ struct halo_sim_particle_update_call
 	long difference_event;
 	long difference_reason;
 	unsigned long still_there;
+};
+
+struct halo_sim_particle_new_call
+{
+	struct new_particle_data data;
+	struct halo_sim_particle_state state;
+	long frame_index;
+	long local_player_count;
+	struct halo_sim_particle_event const *events;
+	unsigned long event_count;
+	long difference_event;
+	long difference_reason;
+	unsigned long still_there;
+	long result;
 };
 
 struct halo_sim_particle_callbacks
@@ -1719,6 +1736,7 @@ typedef long (*halo_sim_lights_function)(struct halo_sim_lights_call *call);
 typedef long (*halo_sim_effect_function)(struct halo_sim_effect_update_call *call);
 typedef long (*halo_sim_effect_new_function)(struct halo_sim_effect_new_call *call);
 typedef long (*halo_sim_particle_function)(struct halo_sim_particle_update_call *call);
+typedef long (*halo_sim_particle_new_function)(struct halo_sim_particle_new_call *call);
 typedef long (*halo_sim_contrail_function)(struct halo_sim_contrail_update_call *call);
 typedef long (*halo_sim_particle_system_function)(struct halo_sim_particle_system_update_call *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
@@ -1794,6 +1812,8 @@ static struct
 	halo_sim_effect_new_function effect_new_check;
 	halo_sim_particle_function particle_update;
 	halo_sim_particle_function particle_update_check;
+	halo_sim_particle_new_function particle_new;
+	halo_sim_particle_new_function particle_new_check;
 	halo_sim_contrail_function contrail_update;
 	halo_sim_contrail_function contrail_update_check;
 	halo_sim_particle_system_function particle_system_update;
@@ -2052,6 +2072,13 @@ static struct
 	unsigned long event_count;
 	struct halo_sim_particle_event *open_event;
 	struct halo_sim_particle_state last;
+	/* a creation's (its particle isn't yet known: the index is NONE) */
+	boolean creating;
+	struct halo_sim_particle_new_call new_call;
+	unsigned long created_compared;
+	unsigned long created_differed;
+	unsigned long created;
+	unsigned long nested;
 	unsigned long compared;
 	unsigned long differed;
 	unsigned long skipped;
@@ -3846,6 +3873,9 @@ static long halo_sim_particle_call_callback(struct halo_sim_particle_state *stat
 
 	particle_halo_sim_state_store(state);
 	still_there = particle_call(particle_index, call);
+	/* (a new datum's particle is the new one) */
+	if (call->kind == _particle_call_new)
+		particle_index = call->result;
 	particle_halo_sim_state_load(particle_index, state);
 	return still_there;
 }
@@ -4164,6 +4194,8 @@ static void halo_sim_initialize(void)
 	halo_sim.effect_new_check = (halo_sim_effect_new_function)halo_sim_symbol(library, "halo_sim_effect_new_check");
 	halo_sim.particle_update = (halo_sim_particle_function)halo_sim_symbol(library, "halo_sim_particle_update");
 	halo_sim.particle_update_check = (halo_sim_particle_function)halo_sim_symbol(library, "halo_sim_particle_update_check");
+	halo_sim.particle_new = (halo_sim_particle_new_function)halo_sim_symbol(library, "halo_sim_particle_new");
+	halo_sim.particle_new_check = (halo_sim_particle_new_function)halo_sim_symbol(library, "halo_sim_particle_new_check");
 	halo_sim.contrail_update = (halo_sim_contrail_function)halo_sim_symbol(library, "halo_sim_contrail_update");
 	halo_sim.contrail_update_check = (halo_sim_contrail_function)halo_sim_symbol(library, "halo_sim_contrail_update_check");
 	halo_sim.particle_system_update = (halo_sim_particle_system_function)halo_sim_symbol(library, "halo_sim_particle_system_update");
@@ -4189,7 +4221,7 @@ static void halo_sim_initialize(void)
 		!halo_sim.object_functions || !halo_sim.object_exports ||
 		!halo_sim.unit_ik || !halo_sim.unit_ik_check || !halo_sim.object_lights ||
 		!halo_sim.effect_update || !halo_sim.effect_update_check || !halo_sim.effect_new || !halo_sim.effect_new_check ||
-		!halo_sim.particle_update || !halo_sim.particle_update_check ||
+		!halo_sim.particle_update || !halo_sim.particle_update_check || !halo_sim.particle_new || !halo_sim.particle_new_check ||
 		!halo_sim.contrail_update || !halo_sim.contrail_update_check ||
 		!halo_sim.particle_system_update || !halo_sim.particle_system_update_check)
 	{
@@ -7611,7 +7643,10 @@ int halo_sim_particle_update(long particle_index, float dt, long frame_index, lo
 		return FALSE;
 	/* (an update within a call of the game's own update isn't checked) */
 	if (mode == _halo_sim_mode_check && halo_sim_particle_checks.recording)
+	{
+		halo_sim_particle_checks.nested++;
 		return FALSE;
+	}
 	target = mode == _halo_sim_mode_check ? &halo_sim_particle_checks.call : &call;
 	memset(target, 0, sizeof(*target));
 	if (!particle_halo_sim_state_load(particle_index, &target->state))
@@ -7623,6 +7658,7 @@ int halo_sim_particle_update(long particle_index, float dt, long frame_index, lo
 	if (mode == _halo_sim_mode_check)
 	{
 		halo_sim_particle_checks.particle_index = particle_index;
+		halo_sim_particle_checks.creating = FALSE;
 		halo_sim_particle_checks.last = target->state;
 		halo_sim_particle_checks.event_count = 0;
 		halo_sim_particle_checks.open_event = NULL;
@@ -7644,8 +7680,9 @@ int halo_sim_particle_event_begin(long particle_index, struct halo_sim_particle_
 {
 	struct halo_sim_particle_event *event;
 
+	/* (a creation's calls are its particle's, whatever it turns out to be) */
 	if (!halo_sim_particle_checks.recording || halo_sim_particle_checks.open_event ||
-		halo_sim_particle_checks.particle_index != particle_index)
+		(!halo_sim_particle_checks.creating && halo_sim_particle_checks.particle_index != particle_index))
 	{
 		return FALSE;
 	}
@@ -7676,6 +7713,9 @@ void halo_sim_particle_event_end(long particle_index, struct halo_sim_particle_c
 	event->call.result = call->result;
 	memcpy(event->call.out, call->out, sizeof(event->call.out));
 	event->call.out_material_type = call->out_material_type;
+	event->call.out_location_leaf = call->out_location_leaf;
+	event->call.out_location_cluster = call->out_location_cluster;
+	event->call.out_location_bonus = call->out_location_bonus;
 	event->still_there = still_there ? 1 : 0;
 	event->after = event->before;
 	particle_halo_sim_state_load(particle_index, &event->after);
@@ -7690,7 +7730,7 @@ void halo_sim_particle_update_check(long particle_index)
 	boolean differs;
 	unsigned long event_number;
 
-	if (!halo_sim_particle_checks.recording)
+	if (!halo_sim_particle_checks.recording || halo_sim_particle_checks.creating)
 		return;
 	halo_sim_particle_checks.recording = FALSE;
 	if (halo_sim_particle_checks.particle_index != particle_index || halo_sim_particle_checks.overflow)
@@ -7755,10 +7795,125 @@ void halo_sim_particle_update_check(long particle_index)
 
 		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
 		{
-			platform_log("halo_sim: particle update: %lu of %lu agree with the game (%lu attached, %lu ended; %lu point physics, %lu effects; %lu calls of the game; %lu left out)",
+			platform_log("halo_sim: particle update: %lu of %lu agree with the game (%lu attached, %lu ended; %lu point physics, %lu effects; %lu calls of the game; %lu left out, %lu within a recorded call)",
 				compared - halo_sim_particle_checks.differed, compared, halo_sim_particle_checks.attached,
 				halo_sim_particle_checks.deleted, halo_sim_particle_checks.physics, halo_sim_particle_checks.effects,
-				halo_sim_particle_checks.calls, halo_sim_particle_checks.skipped);
+				halo_sim_particle_checks.calls, halo_sim_particle_checks.skipped, halo_sim_particle_checks.nested);
+		}
+	}
+}
+
+/* ---------- making particles */
+
+int halo_sim_particle_new(struct new_particle_data const *data, int *checking)
+{
+	short mode = halo_sim_mode(_halo_sim_particles);
+	struct halo_sim_particle_new_call call;
+
+	*checking = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	memset(&call, 0, sizeof(call));
+	call.data = *data;
+	call.state.particle_index = (unsigned long)NONE;
+	particle_halo_sim_state_load(NONE, &call.state);
+	call.frame_index = render.frame_index;
+	call.local_player_count = local_player_count();
+	call.result = NONE;
+	if (mode == _halo_sim_mode_check)
+	{
+		/* (one made within a call of a recorded update or creation is part of
+		that call) */
+		if (halo_sim_particle_checks.recording)
+			return FALSE;
+		halo_sim_particle_checks.new_call = call;
+		halo_sim_particle_checks.particle_index = NONE;
+		halo_sim_particle_checks.creating = TRUE;
+		halo_sim_particle_checks.last = call.state;
+		halo_sim_particle_checks.event_count = 0;
+		halo_sim_particle_checks.open_event = NULL;
+		halo_sim_particle_checks.overflow = FALSE;
+		halo_sim_particle_checks.recording = TRUE;
+		*checking = TRUE;
+		return FALSE;
+	}
+
+	if (halo_sim.particle_new(&call) != 0)
+		return FALSE;
+	/* (the seed always; the particle if it is still there) */
+	particle_halo_sim_state_store(&call.state);
+
+	return TRUE;
+}
+
+void halo_sim_particle_new_check(long particle_index)
+{
+	struct halo_sim_particle_new_call call;
+	struct halo_sim_particle_state game;
+	boolean exists;
+	boolean differs;
+
+	if (!halo_sim_particle_checks.recording || !halo_sim_particle_checks.creating)
+		return;
+	halo_sim_particle_checks.recording = FALSE;
+	halo_sim_particle_checks.creating = FALSE;
+	if (halo_sim_particle_checks.overflow)
+	{
+		halo_sim_particle_checks.skipped++;
+		return;
+	}
+	game = halo_sim_particle_checks.last;
+	exists = particle_index != NONE && particle_halo_sim_state_load(particle_index, &game);
+	call = halo_sim_particle_checks.new_call;
+	call.events = halo_sim_particle_checks.events;
+	call.event_count = halo_sim_particle_checks.event_count;
+	if (halo_sim.particle_new_check(&call) != 0)
+	{
+		halo_sim_particle_checks.skipped++;
+		return;
+	}
+
+	halo_sim_particle_checks.created_compared++;
+	halo_sim_particle_checks.calls += halo_sim_particle_checks.event_count;
+	if (exists)
+		halo_sim_particle_checks.created++;
+	if (call.result != particle_index)
+		differs = TRUE;
+	else if (exists)
+		differs = !call.still_there || memcmp(&call.state, &game, sizeof(game)) != 0;
+	else
+		differs = (particle_index != NONE && call.still_there) ||
+			call.state.local_random_seed != game.local_random_seed;
+	if (differs || call.difference_event != NONE)
+	{
+		halo_sim_particle_checks.created_differed++;
+		if (halo_sim_particle_checks.created_differed <= 8)
+		{
+			unsigned char const *game_bytes = (unsigned char const *)&game;
+			unsigned char const *rust_bytes = (unsigned char const *)&call.state;
+			long kind = call.difference_event >= 0 && call.difference_event < (long)halo_sim_particle_checks.event_count ?
+				halo_sim_particle_checks.events[call.difference_event].call.kind : NONE;
+			long offset = 0;
+
+			while (offset < (long)sizeof(game) && game_bytes[offset] == rust_bytes[offset])
+				offset++;
+			offset &= ~3;
+			platform_log("halo_sim: particle creation differs: (%s) particle game %lx rust %lx; call %ld of %lu (kind %ld) reason %ld; there game %d rust %lu; first difference at byte %ld: game %08lx rust %08lx",
+				call.data.definition_index != NONE ? tag_get_name(call.data.definition_index) : "<none>",
+				(unsigned long)particle_index, (unsigned long)call.result, call.difference_event,
+				halo_sim_particle_checks.event_count, kind, call.difference_reason, exists, call.still_there, offset,
+				offset < (long)sizeof(game) ? *(unsigned long const *)(game_bytes + offset) : 0,
+				offset < (long)sizeof(game) ? *(unsigned long const *)(rust_bytes + offset) : 0);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_particle_checks.created_compared;
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+		{
+			platform_log("halo_sim: particle creation: %lu of %lu agree with the game (%lu made; %lu left out)",
+				compared - halo_sim_particle_checks.created_differed, compared, halo_sim_particle_checks.created,
+				halo_sim_particle_checks.skipped);
 		}
 	}
 }

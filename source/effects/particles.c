@@ -847,7 +847,29 @@ static boolean particle_update_physics(
 	return TRUE;
 }
 
+static long particle_new_game(
+	struct new_particle_data const *data);
+
+/* port: the Rust port's in place of the game's when asked (halo_sim.c); in
+check mode the game's runs and is compared */
 void particle_new(
+	struct new_particle_data const *data)
+{
+	int checking = FALSE;
+	long particle_index;
+
+	if (halo_sim_particle_new(data, &checking))
+		return;
+	particle_index = particle_new_game(data);
+	if (checking)
+		halo_sim_particle_new_check(particle_index);
+
+	return;
+}
+
+/* the game's particle_new, its calls of the game through particle_call: the
+new particle, or NONE */
+static long particle_new_game(
 	struct new_particle_data const *data)
 {
 	struct particle_definition *definition;
@@ -855,6 +877,7 @@ void particle_new(
 	struct location location;
 	real_point3d position;
 	long particle_index;
+	struct halo_sim_particle_call call;
 
 	match_assert_valid_real_vector3d(
 		"c:\\halo\\SOURCE\\effects\\particles.c",
@@ -870,44 +893,58 @@ void particle_new(
 		&data->color);
 
 	if (data->definition_index == NONE)
-		return;
+		return NONE;
 
 	definition = particle_definition_get(data->definition_index);
 
 	if (data->object_index != NONE)
 	{
-		if (data->attached_to_local_player)
-		{
-			matrix4x3_transform_point(
-				first_person_weapon_get_node_matrix(data->local_player_index, data->node_index),
-				&data->position,
-				&position);
-		}
-		else
-		{
-			matrix4x3_transform_point(
-				object_get_node_matrix(data->object_index, data->node_index),
-				&data->position,
-				&position);
-		}
+		/* port: the node's transform, through particle_call */
+		particle_call_new(&call, _particle_call_node_point);
+		call.a = data->object_index;
+		call.b = data->node_index;
+		call.c = data->attached_to_local_player ? 1 : 0;
+		call.d = data->local_player_index;
+		call.f[0] = data->position.x;
+		call.f[1] = data->position.y;
+		call.f[2] = data->position.z;
+		particle_call(NONE, &call);
+		position.x = call.out[0];
+		position.y = call.out[1];
+		position.z = call.out[2];
 	}
 	else
 	{
 		position = data->position;
 	}
 
-	scenario_location_from_point(&location, &position);
+	/* port: the location (from zeros: the C's was the stack's leftover) and
+	its visibility, through particle_call */
+	particle_call_new(&call, _particle_call_location_from_point);
+	call.f[0] = position.x;
+	call.f[1] = position.y;
+	call.f[2] = position.z;
+	particle_call(NONE, &call);
+	location.leaf_index = call.out_location_leaf;
+	location.cluster_index = call.out_location_cluster;
+	location.bonus = call.out_location_bonus;
 
-	if (location.leaf_index == NONE ||
-		!new_particle_is_visible(definition, &location, &position, data->radius))
-	{
-		return;
-	}
+	if (location.leaf_index == NONE)
+		return NONE;
+	particle_call_new(&call, _particle_call_visible);
+	call.a = location.leaf_index;
+	call.b = location.cluster_index;
+	call.c = location.bonus;
+	particle_call(NONE, &call);
+	if (!call.result)
+		return NONE;
 
-	particle_index = datum_new(particle_data);
+	particle_call_new(&call, _particle_call_new);
+	particle_call(NONE, &call);
+	particle_index = call.result;
 
 	if (particle_index == NONE)
-		return;
+		return NONE;
 
 	particle = particle_get(particle_index);
 
@@ -987,7 +1024,18 @@ void particle_new(
 		real_rgb_color light;
 		real_rgb_color diffuse;
 
-		light_particle(&position, &light, &diffuse, FALSE);
+		/* port: light_particle, through particle_call */
+		particle_call_new(&call, _particle_call_light);
+		call.f[0] = position.x;
+		call.f[1] = position.y;
+		call.f[2] = position.z;
+		particle_call(particle_index, &call);
+		light.red = call.out[0];
+		light.green = call.out[1];
+		light.blue = call.out[2];
+		diffuse.red = call.out[3];
+		diffuse.green = call.out[4];
+		diffuse.blue = call.out[5];
 
 		match_assert_valid_real_rgb_color(
 			"c:\\halo\\SOURCE\\effects\\particles.c",
@@ -1038,7 +1086,7 @@ void particle_new(
 		}
 	}
 
-	return;
+	return particle_index;
 }
 
 void particles_update(
@@ -1178,6 +1226,76 @@ long particle_call(
 			break;
 		}
 
+		case _particle_call_node_point:
+		{
+			real_point3d point;
+			real_point3d result;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			matrix4x3_transform_point(
+				call->c
+					? first_person_weapon_get_node_matrix((short)call->d, (short)call->b)
+					: object_get_node_matrix(call->a, (short)call->b),
+				&point,
+				&result);
+			call->out[0] = result.x;
+			call->out[1] = result.y;
+			call->out[2] = result.z;
+			break;
+		}
+
+		case _particle_call_location_from_point:
+		{
+			struct location location;
+			real_point3d point;
+
+			memset(&location, 0, sizeof(location));
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			scenario_location_from_point(&location, &point);
+			call->out_location_leaf = location.leaf_index;
+			call->out_location_cluster = location.cluster_index;
+			call->out_location_bonus = location.bonus;
+			break;
+		}
+
+		case _particle_call_visible:
+		{
+			struct location location;
+
+			location.leaf_index = call->a;
+			location.cluster_index = (short)call->b;
+			location.bonus = (word)call->c;
+			call->result = scenario_location_potentially_visible_local(&location) ? 1 : 0;
+			break;
+		}
+
+		case _particle_call_new:
+			call->result = datum_new(particle_data);
+			break;
+
+		case _particle_call_light:
+		{
+			real_point3d point;
+			real_rgb_color light;
+			real_rgb_color diffuse;
+
+			point.x = call->f[0];
+			point.y = call->f[1];
+			point.z = call->f[2];
+			light_particle(&point, &light, &diffuse, FALSE);
+			call->out[0] = light.red;
+			call->out[1] = light.green;
+			call->out[2] = light.blue;
+			call->out[3] = diffuse.red;
+			call->out[4] = diffuse.green;
+			call->out[5] = diffuse.blue;
+			break;
+		}
+
 		case _particle_call_material_effect:
 			if (material_effect_visible(&particle->position))
 			{
@@ -1197,7 +1315,11 @@ long particle_call(
 			}
 			break;
 	}
-	still_there = datum_try_and_get(particle_data, particle_index) != NULL;
+	/* (a new datum's particle is the new one) */
+	if (call->kind == _particle_call_new)
+		particle_index = call->result;
+	/* (a call before a creation's particle exists has none to lose) */
+	still_there = particle_index == NONE || datum_try_and_get(particle_data, particle_index) != NULL;
 	halo_sim_particle_event_end(particle_index, call, still_there, opened);
 
 	return still_there;
@@ -1238,6 +1360,7 @@ int particle_halo_sim_state_load(
 	state->rotation = particle->rotation;
 	state->angular_velocity = particle->angular_velocity;
 	state->radius = particle->radius;
+	memcpy(state->color, &particle->color, sizeof(state->color));
 
 	return TRUE;
 }
@@ -1252,6 +1375,15 @@ void particle_halo_sim_state_store(
 	if (!particle)
 		return;
 	particle->flags = state->flags;
+	particle->definition_index = (long)state->definition_index;
+	particle->object_index = state->object_index;
+	particle->node_index = state->node_index;
+	particle->local_player_index = state->local_player_index;
+	particle->last_rendered_frame_index = state->last_rendered_frame_index;
+	particle->lifespan = state->lifespan;
+	particle->radius = state->radius;
+	particle->angular_velocity = state->angular_velocity;
+	memcpy(&particle->color, state->color, sizeof(state->color));
 	particle->state = state->state;
 	particle->sequence_index = state->sequence_index;
 	particle->frame_index = state->frame_index;

@@ -53,6 +53,15 @@ pub fn run(action: i16, function: Function, context: &AiStepContext, host: &impl
             uncover_control(context, host);
             false
         }
+        (v::_ACTOR_ACTION_GUARD, Function::Perform) => guard_perform(context, host),
+        (v::_ACTOR_ACTION_GUARD, Function::Update) => {
+            guard_update(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_GUARD, Function::Control) => {
+            guard_control(context, host);
+            false
+        }
         (v::_ACTOR_ACTION_WAIT, Function::Perform) => wait_perform(context, host),
         (v::_ACTOR_ACTION_WAIT, Function::Update) => {
             wait_update(context, host);
@@ -1062,4 +1071,313 @@ fn uncover_update(context: &AiStepContext, host: &impl AiHost) {
         call_simple(context, host, uncover_call::DONE, 0);
     }
     m.set_bool(at(a::STATE_UNCOVER_UNCOVER_DONE), done);
+}
+
+/// action_guard.c's calls.
+pub mod guard_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_GUARD as i32) << 8;
+    /// `game_team_is_ally(a, b)`, the result.
+    pub const TEAM_IS_ALLY: i32 = BASE | 1;
+    /// `ai_communication_event(a, unit, b, input[0], NONE...)`.
+    pub const COMMUNICATION: i32 = BASE | 2;
+    /// `actor_set_dormant(actor, FALSE)`.
+    pub const WAKE: i32 = BASE | 3;
+    /// `ai_communication_event(a, unit, the target's unit, NONE...)`.
+    pub const COMMUNICATION_TARGET: i32 = BASE | 4;
+    /// `actor_discard_firing_position(actor, a, FALSE)`.
+    pub const DISCARD_FIRING_POSITION: i32 = BASE | 5;
+    /// A guard firing position selected and changed to: the new index the result.
+    pub const CHANGE_FIRING_POSITION: i32 = BASE | 6;
+    /// `real_seed_random_range(global seed, input[0], input[1])`, in `output[0]`.
+    pub const RANDOM_RANGE: i32 = BASE | 7;
+    /// `actor_move_halt(actor)`.
+    pub const MOVE_HALT: i32 = BASE | 8;
+    /// `actor_move_to_point` to the guard point.
+    pub const MOVE_TO_GUARD_POINT: i32 = BASE | 9;
+    /// `actor_move_to_firing_position(actor, a, NULL)`, the result.
+    pub const MOVE_TO_FIRING_POSITION: i32 = BASE | 10;
+    /// The shout about the dead friend of the prop `a` (with the suspicion it raises).
+    pub const SHOUT_DEAD_FRIEND: i32 = BASE | 11;
+}
+
+/// action_guard.c's raw offsets (January's layout; the shared structures
+/// name them otherwise): a prop's death, the actor's arrival at its
+/// destination (the C names it moving), its cower retreat timer.
+const GUARD_PROP_IS_DEAD: u32 = 0x60;
+const GUARD_ACTOR_AT_DESTINATION: u32 = 0x484;
+const GUARD_COWER_RETREAT_TIMER: u32 = 0x3A8;
+const GUARD_CROUCH_WHEN_INACTIVE_BIT: u32 = 6;
+const GUARD_CROUCH_WHEN_UNCOVERED_BIT: u32 = 7;
+const GUARD_CROUCH_WHEN_COWERING_BIT: u32 = 23;
+
+/// `action_guard_speak_post_combat`.
+fn guard_speak_post_combat(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let vocalized = at(a::STATE_GUARD_POST_COMBAT_VOCALIZED);
+    if m.bool(vocalized) {
+        return false;
+    }
+    let communication_type: i32 = match m.i16(at(a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE)) {
+        1 => 48,
+        2 => 49,
+        3 => 50,
+        4 => 51,
+        5 => 52,
+        7 => 53,
+        8 => 54,
+        9 => 55,
+        10 => 56,
+        _ => NONE,
+    };
+    let mut result = false;
+    if communication_type != NONE {
+        let mut prop_unit_index = NONE;
+        let mut prop_type = NONE;
+        let look_prop_index = m.i32(at(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX));
+        if look_prop_index != NONE {
+            let prop = prop_get(m, context, look_prop_index);
+            prop_unit_index = m.i32(prop + p::UNIT_INDEX as u32);
+            prop_type = if m.bool(prop + GUARD_PROP_IS_DEAD) {
+                let ally = call_full(
+                    context,
+                    host,
+                    guard_call::TEAM_IS_ALLY,
+                    m.i16(at(a::META_TEAM_INDEX)) as i32,
+                    m.i16(prop + p::TEAM_INDEX as u32) as i32,
+                    &[],
+                )
+                .result
+                    != 0;
+                if ally { 4 } else { 3 }
+            } else {
+                2
+            };
+        }
+        call_full(context, host, guard_call::COMMUNICATION, communication_type, prop_unit_index, &[prop_type as f32]);
+        result = true;
+    }
+    m.set_bool(vocalized, true);
+    result
+}
+
+/// `action_guard_update`.
+fn guard_update(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let actor = context.actor;
+    let at = |offset: usize| actor + offset as u32;
+    let at_destination = || m.bool(actor + GUARD_ACTOR_AT_DESTINATION);
+    let wait_ticks = at(a::STATE_GUARD_WAIT_TICKS);
+    if !m.bool(at(a::META_DORMANT)) && at_destination() && m.i16(wait_ticks) > 0 {
+        m.set_i16(wait_ticks, m.i16(wait_ticks) - 1);
+        if m.i16(wait_ticks) == 0 && !m.bool(at(a::INPUT_VEHICLE_PASSENGER)) && !m.bool(at(a::META_SWARM)) {
+            if m.bool(at(a::STATE_GUARD_POST_COMBAT)) {
+                guard_speak_post_combat(context, host);
+                m.set_i16(at(a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE), v::_ACTOR_POSTCOMBAT_NONE as i16);
+                m.w32(at(a::EXTERNAL_ORDERS_POSTCOMBAT_PROP_INDEX), NONE as u32);
+                m.set_bool(at(a::STATE_GUARD_POST_COMBAT), false);
+                m.set_bool(at(a::STATE_GUARD_POST_COMBAT_SHOOTING), false);
+                m.w32(at(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX), NONE as u32);
+            }
+            m.set_bool(at(a::STATE_GUARD_FIND_NEW_GUARD_POSITION), true);
+        }
+    }
+
+    let look_ticks = at(a::STATE_GUARD_LOOK_TICKS);
+    if m.i16(look_ticks) > 0 && (!m.bool(at(a::STATE_GUARD_GUARD_LOOK_UNTIL_REACHED_POINT)) || at_destination()) {
+        m.set_i16(look_ticks, m.i16(look_ticks) - 1);
+        if m.i16(look_ticks) == 0 {
+            m.w32(at(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX), NONE as u32);
+        }
+    }
+
+    if m.bool(at(a::STATE_GUARD_PATH_BEGUN)) && at_destination() {
+        let cower_from_retreat = at(a::STATE_GUARD_COWER_FROM_RETREAT);
+        let cower_ticks = at(a::STATE_GUARD_COWER_TICKS);
+        let cower_finished = if m.bool(cower_from_retreat) {
+            let still = m.i16(actor + GUARD_COWER_RETREAT_TIMER) > 0;
+            m.set_bool(cower_from_retreat, still);
+            !still
+        } else if m.i16(cower_ticks) > 0 {
+            m.set_i16(cower_ticks, m.i16(cower_ticks) - 1);
+            m.i16(cower_ticks) == 0
+        } else {
+            false
+        };
+        if cower_finished {
+            call_simple(context, host, guard_call::WAKE, 0);
+            m.set_bool(at(a::STATE_GUARD_COWER), false);
+            m.set_bool(at(a::STATE_GUARD_COWER_PANICKED), false);
+            m.set_bool(cower_from_retreat, false);
+            m.set_i16(cower_ticks, 0);
+            if m.i16(at(a::STATE_COMBAT_STATUS)) >= 2 && m.i32(at(a::META_UNIT_INDEX)) != NONE {
+                call_simple(context, host, guard_call::COMMUNICATION_TARGET, 35);
+            }
+            let location_type = at(a::STATE_GUARD_GUARD_LOCATION_TYPE);
+            if m.i16(location_type) == 3 {
+                let index = m.i16(at(a::STATE_GUARD_GUARD_FIRING_POSITION_INDEX)) as i32;
+                call_simple(context, host, guard_call::DISCARD_FIRING_POSITION, index);
+                m.set_i16(at(a::STATE_GUARD_GUARD_FIRING_POSITION_INDEX), NONE as i16);
+            }
+            m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), NONE as i16);
+            if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) {
+                m.set_i16(location_type, 1);
+                return;
+            }
+            m.set_i16(location_type, 0);
+            m.set_bool(at(a::STATE_GUARD_FIND_NEW_GUARD_POSITION), true);
+        }
+    }
+}
+
+/// `action_guard_perform`.
+fn guard_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let location_type = at(a::STATE_GUARD_GUARD_LOCATION_TYPE);
+    let find_new = at(a::STATE_GUARD_FIND_NEW_GUARD_POSITION);
+    if m.bool(at(a::META_SWARM)) {
+        m.set_i16(location_type, 1);
+        return false;
+    }
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) {
+        m.set_i16(location_type, 1);
+        m.set_bool(find_new, true);
+        return false;
+    }
+    let current = at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX);
+    if m.i16(location_type) == 3 && m.i16(current) == NONE as i16 {
+        m.set_i16(location_type, 0);
+        m.set_bool(find_new, true);
+    }
+    if m.bool(at(a::META_TIMESLICE)) && m.bool(find_new) {
+        if m.i16(location_type) == 3 && m.i16(current) != NONE as i16 {
+            call_simple(context, host, guard_call::DISCARD_FIRING_POSITION, m.i16(current) as i32);
+        }
+        let firing_position_index = call_simple(context, host, guard_call::CHANGE_FIRING_POSITION, 0) as i16;
+        m.set_bool(find_new, false);
+        m.set_bool(at(a::STATE_GUARD_HAS_GUARD_DIRECTION), false);
+        if firing_position_index == NONE as i16 {
+            m.set_i16(location_type, 1);
+        } else {
+            m.set_i16(location_type, 3);
+            m.set_i16(at(a::STATE_GUARD_GUARD_FIRING_POSITION_INDEX), firing_position_index);
+        }
+        let upper = m.f32(context.definition + d::FIRING_POSITION_GUARD_POSITION_TIME_UPPER_BOUND as u32);
+        let lower = m.f32(context.definition + d::FIRING_POSITION_GUARD_POSITION_TIME_LOWER_BOUND as u32);
+        let time = call_full(context, host, guard_call::RANDOM_RANGE, 0, 0, &[lower, upper]).output[0];
+        m.set_i16(at(a::STATE_GUARD_WAIT_TICKS), c_short(time * 30.0));
+    }
+    false
+}
+
+/// `action_guard_control`.
+fn guard_control(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let flags = m.r32(context.definition + d::FLAGS as u32);
+    let combat_status = m.i16(at(a::STATE_COMBAT_STATUS));
+    let stationary = at(a::ORDERS_MOVE_STATIONARY_CROUCH);
+    if flags & (1 << GUARD_CROUCH_WHEN_INACTIVE_BIT) != 0 && combat_status == 0 {
+        m.set_bool(stationary, true);
+        m.set_bool(at(a::ORDERS_MOVE_MOVING_CROUCH), true);
+    } else {
+        m.set_bool(at(a::ORDERS_MOVE_MOVING_CROUCH), false);
+        if m.bool(at(a::STATE_GUARD_COWER)) {
+            if m.bool(at(a::STATE_GUARD_COWER_FROM_RETREAT)) {
+                m.set_bool(stationary, flags & (1 << GUARD_CROUCH_WHEN_COWERING_BIT) != 0);
+            } else {
+                m.set_bool(stationary, true);
+            }
+        } else {
+            m.set_bool(stationary, flags & (1 << GUARD_CROUCH_WHEN_UNCOVERED_BIT) != 0 && combat_status > 0);
+        }
+    }
+    m.set_bool(at(a::ORDERS_MOVE_PANICKED), false);
+    m.set_bool(at(a::ORDERS_MOVE_DIVE_INTO_COVER), false);
+    m.set_bool(at(a::ORDERS_MOVE_EMERGE_FROM_COVER), false);
+
+    let location_type = m.i16(at(a::STATE_GUARD_GUARD_LOCATION_TYPE));
+    if m.bool(at(a::META_TIMESLICE)) && !m.bool(at(a::META_SWARM)) {
+        let path_succeeded = match location_type {
+            2 => {
+                let distance = distance_squared(m, at(a::INPUT_BODY_POSITION), at(a::STATE_GUARD_POINT_POSITION));
+                let radius = m.f32(at(a::STATE_GUARD_POINT_RADIUS));
+                if distance < radius * radius {
+                    call_simple(context, host, guard_call::MOVE_HALT, 0);
+                } else {
+                    call_simple(context, host, guard_call::MOVE_TO_GUARD_POINT, 0);
+                }
+                distance < 9.0
+            }
+            3 => {
+                let guard_index = m.i16(at(a::STATE_GUARD_GUARD_FIRING_POSITION_INDEX));
+                if guard_index != NONE as i16 {
+                    m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), guard_index);
+                    m.set_bool(at(a::FIRING_POSITIONS_CURRENT_POSITION_FOUND_OUTSIDE_RANGE), false);
+                    if call_simple(context, host, guard_call::MOVE_TO_FIRING_POSITION, guard_index as i32) == 0 {
+                        call_simple(context, host, guard_call::DISCARD_FIRING_POSITION, guard_index as i32);
+                        m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), NONE as i16);
+                    }
+                }
+                !m.bool(at(a::CONTROL_PATH_PATH) + crate::layout::path_result::VALID as u32)
+                    || distance_squared(m, at(a::CONTROL_PATH_PATH_ENDPOINT_POINT), at(a::INPUT_BODY_POSITION)) < 9.0
+            }
+            // (0 and 1; the C's assertion ends the game for any other)
+            _ => {
+                call_simple(context, host, guard_call::MOVE_HALT, 0);
+                true
+            }
+        };
+        m.set_bool(at(a::STATE_GUARD_PATH_BEGUN), true);
+        if path_succeeded {
+            if m.bool(at(a::STATE_GUARD_SHOUT_ABOUT_DEAD_FRIEND)) {
+                let prop_index = m.i32(at(a::STATE_GUARD_SHOUT_DEAD_FRIEND_PROP_INDEX));
+                m.set_bool(at(a::STATE_GUARD_SHOUT_ABOUT_DEAD_FRIEND), false);
+                m.w32(at(a::STATE_GUARD_SHOUT_DEAD_FRIEND_PROP_INDEX), NONE as u32);
+                call_simple(context, host, guard_call::SHOUT_DEAD_FRIEND, prop_index);
+            }
+            if m.bool(at(a::STATE_GUARD_POST_COMBAT)) {
+                guard_speak_post_combat(context, host);
+                if m.i16(at(a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE)) == v::_ACTOR_POSTCOMBAT_SHOOT_CORPSE as i16
+                    && m.i16(at(a::STATE_GUARD_GUARD_LOCATION_TYPE)) == 2
+                {
+                    m.set_bool(at(a::STATE_GUARD_POST_COMBAT_SHOOTING), true);
+                }
+            }
+        }
+    }
+
+    let priority = at(a::ORDERS_LOOK_PRIMARY_PRIORITY);
+    let direction = at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE);
+    let look_prop_index = m.i32(at(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX));
+    if m.bool(at(a::STATE_GUARD_POST_COMBAT_SHOOTING)) {
+        m.set_i16(priority, 7);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_TARGET as i16);
+        m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), true);
+        m.set_bool(at(a::ORDERS_COMBAT_USE_MANUAL_TARGET_POINT), true);
+        let point = m.vector(at(a::STATE_GUARD_POINT_POSITION));
+        let up = [0.0f32, 0.0, 1.0];
+        let target = at(a::ORDERS_COMBAT_TARGET_POINT);
+        for i in 0..3 {
+            m.set_f32(target + 4 * i as u32, point[i] + up[i] * 0.05);
+        }
+    } else if look_prop_index != NONE {
+        m.set_i16(priority, 5);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_PROP as i16);
+        m.w32(direction + 4, look_prop_index as u32);
+    } else if m.bool(at(a::STATE_GUARD_HAS_GUARD_DIRECTION)) {
+        m.set_i16(priority, if m.bool(at(a::STATE_GUARD_AIM_IN_GUARD_DIRECTION)) { 5 } else { 3 });
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_VECTOR as i16);
+        for word in 0..3 {
+            m.w32(direction + 4 + word * 4, m.r32(at(a::STATE_GUARD_GUARD_DIRECTION) + word * 4));
+        }
+    } else if m.i16(at(a::STATE_COMBAT_STATUS)) > 0 && m.i32(at(a::TARGET_TARGET_PROP_INDEX)) != NONE {
+        m.set_i16(priority, 3);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_PROP as i16);
+        m.w32(direction + 4, m.r32(at(a::TARGET_TARGET_PROP_INDEX)));
+    } else {
+        m.set_i16(priority, v::_PRIMARY_PRIORITY_NONE as i16);
+    }
+    m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), if m.i16(at(a::STATE_COMBAT_STATUS)) >= 4 { 4 } else { 2 });
 }

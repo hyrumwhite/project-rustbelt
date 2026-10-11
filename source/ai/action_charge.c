@@ -99,6 +99,7 @@ symbols in this file:
 #include "physics/collision_usage.h"
 #include "units/units.h"
 #include "ai_debug.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -133,6 +134,127 @@ static boolean action_charge_valid_melee_destination(
 /* ---------- globals */
 
 /* ---------- public code */
+
+/* port: what the charge action asks of the rest of the game, shared by the
+game's and the Rust port's (crates/halo_map's actions); in check mode each is
+recorded */
+void action_charge_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _action_charge_call_has_path:
+			call->result = actor_path_has_path(actor_index) ? 1 : 0;
+			break;
+
+		case _action_charge_call_firing_variant:
+			call->result = (long)actor_combat_get_firing_variant_definition(actor_index);
+			break;
+
+		case _action_charge_call_has_ranged_weapon:
+			call->result = actor_has_ranged_weapon(actor_index) ? 1 : 0;
+			break;
+
+		case _action_charge_call_weapon_definition:
+			call->result = (long)actor_get_weapon_definition(actor_index);
+			break;
+
+		case _action_charge_call_unit_is_busy:
+			call->result = unit_is_busy(actor->meta.unit_index) ? 1 : 0;
+			break;
+
+		case _action_charge_call_aim_leap:
+		{
+			struct actor_definition *definition = actor_definition_get(actor->meta.definition_index);
+			struct prop_datum *prop = prop_get(actor->target.target_prop_index);
+			real target_velocity_minimum = definition->berserk.melee_leap_velocity * 0.3f;
+			real_vector3d aim_vector;
+			real horizontal_velocity;
+			real vertical_velocity;
+
+			call->result = projectile_aim_ballistic(
+				definition->berserk.melee_leap_velocity,
+				1.f,
+				&actor->input.position.body_position,
+				&prop->body_position,
+				&target_velocity_minimum,
+				&definition->berserk.melee_leap_ballistic,
+				NULL,
+				FALSE,
+				&aim_vector,
+				NULL,
+				NULL,
+				NULL,
+				&vertical_velocity,
+				&horizontal_velocity) ? 1 : 0;
+			if (call->result)
+			{
+				memcpy(call->output, &aim_vector, sizeof(aim_vector));
+				call->output[3] = vertical_velocity;
+				call->output[4] = horizontal_velocity;
+			}
+			break;
+		}
+
+		case _action_charge_call_melee_attack:
+			call->result = unit_melee_attack_begin(actor->meta.unit_index, FALSE, (real_vector2d *)call->input) ? 1 : 0;
+			if (call->result)
+			{
+				ai_communication_event(
+					_ai_communication_melee,
+					actor->meta.unit_index,
+					call->a,
+					_comm_hostility_enemy,
+					NONE,
+					NONE,
+					NULL);
+			}
+			break;
+
+		case _action_charge_call_move_to_prop:
+			call->result = actor_move_to_prop(actor_index, call->a, call->input[0]) ? 1 : 0;
+			break;
+
+		case _action_charge_call_keep_moving:
+			actor_move_keep_moving_past_destination(actor_index);
+			break;
+
+		case _action_charge_call_move_halt:
+			actor_move_halt(actor_index);
+			break;
+
+		case _action_charge_call_perception_unreachable:
+			actor_perception_unreachable(actor_index, call->a, (boolean)call->b);
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long action_charge_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	call.input[0] = input;
+	action_charge_call(&call);
+
+	return call.result;
+}
 
 void action_charge_begin(
 	long actor_index)
@@ -194,7 +316,7 @@ static real action_charge_find_target_range(
 	}
 	else if (goal == _charge_goal_vehicle_strafing || goal == _charge_goal_close_range)
 	{
-		if (actor_has_ranged_weapon(actor_index) &&
+		if (action_charge_call_simple(actor_index, _action_charge_call_has_ranged_weapon, 0, 0, 0.0f) &&
 			actor->target.target_type >= _actor_target_acknowledged_enemy)
 		{
 			if (!(0.f > actor->control.weapon_maximum_range))
@@ -237,7 +359,7 @@ void action_charge_control(
 		state_data->goal == _charge_goal_melee_leaping) &&
 		state_data->alignment_incorrect &&
 		!actor->control.moving &&
-		!actor_path_has_path(actor_index))
+		!action_charge_call_simple(actor_index, _action_charge_call_has_path, 0, 0, 0.0f))
 	{
 		actor->orders.look.primary_priority = _action_charge_primary_priority_exact_facing;
 	}
@@ -329,7 +451,7 @@ boolean action_charge_perform(
 	struct actor_variant_definition *variant_definition =
 		actor_variant_definition_get(actor->meta.variant_definition_index);
 	struct actor_variant_definition *firing_variant_definition =
-		actor_combat_get_firing_variant_definition(actor_index);
+		(struct actor_variant_definition *)action_charge_call_simple(actor_index, _action_charge_call_firing_variant, 0, 0, 0.0f);
 	struct charge_state_data *state_data = &actor->state.action_data.charge;
 	struct prop_datum *prop = NULL;
 	boolean result = FALSE;
@@ -354,7 +476,7 @@ boolean action_charge_perform(
 			boolean check_range = TRUE;
 			boolean berserk_ranges = actor->emotions.berserk;
 
-			if (!actor_has_ranged_weapon(actor_index))
+			if (!action_charge_call_simple(actor_index, _action_charge_call_has_ranged_weapon, 0, 0, 0.0f))
 			{
 				berserk_ranges = TRUE;
 			}
@@ -370,7 +492,7 @@ boolean action_charge_perform(
 			{
 				check_range = FALSE;
 			}
-			else if (actor->emotions.berserk || !actor_has_ranged_weapon(actor_index))
+			else if (actor->emotions.berserk || !action_charge_call_simple(actor_index, _action_charge_call_has_ranged_weapon, 0, 0, 0.0f))
 			{
 				abort_range = berserk_ranges ?
 					variant_definition->ranged_combat.berserk_melee_abort_range :
@@ -460,7 +582,7 @@ boolean action_charge_perform(
 					state_data->stalking_catch_target = TRUE;
 				}
 			}
-			else if (!actor_has_ranged_weapon(actor_index) || actor->input.underwater)
+			else if (!action_charge_call_simple(actor_index, _action_charge_call_has_ranged_weapon, 0, 0, 0.0f) || actor->input.underwater)
 			{
 				state_data->advancing = TRUE;
 			}
@@ -481,7 +603,7 @@ boolean action_charge_perform(
 					maximum_range = firing_variant_definition->ranged_combat.combat_range_upper_bound;
 				}
 
-				weapon = actor_get_weapon_definition(actor_index);
+				weapon = (struct weapon_definition *)action_charge_call_simple(actor_index, _action_charge_call_weapon_definition, 0, 0, 0.0f);
 				if (weapon && weapon->weapon.ai_minimum_target_range > 0.f)
 				{
 					minimum_range = MAX(minimum_range, weapon->weapon.ai_minimum_target_range);
@@ -520,7 +642,8 @@ boolean action_charge_perform(
 	{
 		long unit_index = actor->meta.unit_index;
 
-		state_data->finished_melee_attack = unit_index == NONE || !unit_is_busy(unit_index);
+		state_data->finished_melee_attack = unit_index == NONE ||
+			!action_charge_call_simple(actor_index, _action_charge_call_unit_is_busy, 0, 0, 0.0f);
 	}
 	else if (!state_data->leap_pending &&
 		(state_data->goal == _charge_goal_melee || state_data->goal == _charge_goal_melee_leaping) &&
@@ -601,26 +724,19 @@ boolean action_charge_perform(
 				{
 					if (distance < definition->berserk.melee_leap_range_upper_bound)
 					{
-						real target_velocity_minimum = definition->berserk.melee_leap_velocity * 0.3f;
 						real_vector3d aim_vector;
 						real horizontal_velocity;
 						real vertical_velocity;
+						struct halo_sim_ai_call aim;
 
-						if (projectile_aim_ballistic(
-							definition->berserk.melee_leap_velocity,
-							1.f,
-							&actor->input.position.body_position,
-							&prop->body_position,
-							&target_velocity_minimum,
-							&definition->berserk.melee_leap_ballistic,
-							NULL,
-							FALSE,
-							&aim_vector,
-							NULL,
-							NULL,
-							NULL,
-							&vertical_velocity,
-							&horizontal_velocity))
+						memset(&aim, 0, sizeof(aim));
+						aim.kind = _action_charge_call_aim_leap;
+						aim.actor = actor_index;
+						action_charge_call(&aim);
+						memcpy(&aim_vector, aim.output, sizeof(aim_vector));
+						vertical_velocity = aim.output[3];
+						horizontal_velocity = aim.output[4];
+						if (aim.result)
 						{
 							if (normalize2d((real_vector2d *)&aim_vector) == 0.f)
 							{
@@ -711,17 +827,19 @@ boolean action_charge_perform(
 				alignment_vector.j = actor->input.facing_vector.j;
 			}
 
-			if (unit_melee_attack_begin(actor->meta.unit_index, FALSE, &alignment_vector))
 			{
-				ai_communication_event(
-					_ai_communication_melee,
-					actor->meta.unit_index,
-					prop->unit_index,
-					_comm_hostility_enemy,
-					NONE,
-					NONE,
-					NULL);
-				state_data->launched_melee_attack = TRUE;
+				struct halo_sim_ai_call attack;
+
+				memset(&attack, 0, sizeof(attack));
+				attack.kind = _action_charge_call_melee_attack;
+				attack.actor = actor_index;
+				attack.a = prop->unit_index;
+				memcpy(attack.input, &alignment_vector, sizeof(alignment_vector));
+				action_charge_call(&attack);
+				if (attack.result)
+				{
+					state_data->launched_melee_attack = TRUE;
+				}
 			}
 		}
 	}
@@ -770,9 +888,10 @@ boolean action_charge_perform(
 				real minimum_move_range = state_data->goal == _charge_goal_melee_leaping ? 4.f : 1.5f;
 				real move_range = MAX(minimum_move_range, target_range);
 
-				if (actor_move_to_prop(actor_index, actor->target.target_prop_index, move_range))
+				if (action_charge_call_simple(actor_index, _action_charge_call_move_to_prop,
+					actor->target.target_prop_index, 0, move_range))
 				{
-					actor_move_keep_moving_past_destination(actor_index);
+					action_charge_call_simple(actor_index, _action_charge_call_keep_moving, 0, 0, 0.0f);
 					moving = TRUE;
 				}
 				else
@@ -784,7 +903,7 @@ boolean action_charge_perform(
 
 			if (!moving)
 			{
-				actor_move_halt(actor_index);
+				action_charge_call_simple(actor_index, _action_charge_call_move_halt, 0, 0, 0.0f);
 			}
 
 			if (actor->target.target_type >= _actor_target_acknowledged_enemy)
@@ -806,7 +925,8 @@ boolean action_charge_perform(
 
 				if (out_of_range)
 				{
-					if (state_data->unable_to_advance || !actor_path_has_path(actor_index))
+					if (state_data->unable_to_advance ||
+						!action_charge_call_simple(actor_index, _action_charge_call_has_path, 0, 0, 0.0f))
 					{
 						unreachable = TRUE;
 					}
@@ -816,7 +936,8 @@ boolean action_charge_perform(
 					}
 				}
 
-				actor_perception_unreachable(actor_index, actor->target.target_prop_index, unreachable);
+				action_charge_call_simple(actor_index, _action_charge_call_perception_unreachable,
+					actor->target.target_prop_index, unreachable, 0.0f);
 			}
 		}
 	}

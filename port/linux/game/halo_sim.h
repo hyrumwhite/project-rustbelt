@@ -883,7 +883,7 @@ enum
 /* the head of an actor's debug info the AI step checks save and compare
 (the firing decision, the burst's tracking and alignment; the rest, its
 histories, is 0x657C bytes in all) */
-#define HALO_SIM_ACTOR_DEBUG_HEAD_SIZE 0x100
+#define HALO_SIM_ACTOR_DEBUG_HEAD_SIZE 0x160
 
 /* crates/halo_map's AiCall: what an actor's step asks of the game */
 struct halo_sim_ai_call
@@ -1276,6 +1276,21 @@ enum
 	_action_vehicle_call_move_halt,
 	_action_vehicle_call_find_destination,
 	_action_vehicle_call_move_to_destination,
+};
+
+enum
+{
+	_action_charge_call_has_path = (10 << 8) | 1,
+	_action_charge_call_firing_variant,
+	_action_charge_call_has_ranged_weapon,
+	_action_charge_call_weapon_definition,
+	_action_charge_call_unit_is_busy,
+	_action_charge_call_aim_leap,
+	_action_charge_call_melee_attack,
+	_action_charge_call_move_to_prop,
+	_action_charge_call_keep_moving,
+	_action_charge_call_move_halt,
+	_action_charge_call_perception_unreachable,
 };
 
 enum
@@ -1859,6 +1874,7 @@ void action_guard_call(struct halo_sim_ai_call *call);
 void action_flee_call(struct halo_sim_ai_call *call);
 void action_converse_call(struct halo_sim_ai_call *call);
 void action_vehicle_call(struct halo_sim_ai_call *call);
+void action_charge_call(struct halo_sim_ai_call *call);
 void action_avoid_call(struct halo_sim_ai_call *call);
 void action_fight_call(struct halo_sim_ai_call *call);
 long actors_port_step_props(long actor_index, unsigned long *addresses, long maximum);

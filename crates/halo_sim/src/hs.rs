@@ -12,7 +12,10 @@
 
 use std::cell::Cell;
 
-use halo_map::hs_runtime::{HsCall, HsContext, HsHost, HsMemory, call, hs_runtime_update};
+use halo_map::hs_runtime::{
+    HsCall, HsContext, HsHost, HsMemory, call, hs_runtime_evaluate, hs_runtime_initialize_for_new_map,
+    hs_runtime_update,
+};
 
 /// `sizeof(struct hs_thread_datum)`.
 pub const THREAD_DATUM_SIZE: usize = 0x218;
@@ -52,6 +55,31 @@ pub struct HsUpdateC {
     pub event_count: u32,
     pub difference_event: i32,
     pub difference_reason: i32,
+    /// The operation: 0 the update, 1 the level start, 2 a console command's
+    /// evaluation (of `expression`, its value in `result`).
+    pub operation: i32,
+    pub expression: i32,
+    pub result: i32,
+}
+
+/// halo_sim.h's `_halo_sim_hs_*` operations.
+const OPERATION_UPDATE: i32 = 0;
+const OPERATION_INITIALIZE_FOR_NEW_MAP: i32 = 1;
+const OPERATION_EVALUATE: i32 = 2;
+
+/// The operation on the game's memory, through the host: its value.
+fn run(update: &HsUpdateC, context: &HsContext, host: &impl HsHost) -> i32 {
+    match update.operation {
+        OPERATION_INITIALIZE_FOR_NEW_MAP => {
+            hs_runtime_initialize_for_new_map(context, host);
+            -1
+        }
+        OPERATION_EVALUATE => hs_runtime_evaluate(context, host, update.expression),
+        OPERATION_UPDATE | _ => {
+            hs_runtime_update(context, host);
+            -1
+        }
+    }
 }
 
 /// `halo_map::hs_runtime::HsContext`, as the game hands it over.
@@ -73,6 +101,7 @@ pub struct HsContextC {
     pub random_seed: u32,
     pub game_time: i32,
     pub string_default: u32,
+    pub scenario_loaded: i32,
 }
 
 impl HsContextC {
@@ -90,6 +119,7 @@ impl HsContextC {
             globals: self.globals,
             global_count: self.global_count,
             runtime_globals: self.runtime_globals,
+            scenario_loaded: self.scenario_loaded != 0,
             random_seed: self.random_seed,
             game_time: self.game_time,
             string_default: self.string_default,
@@ -190,7 +220,8 @@ impl HsHost for CheckHost<'_> {
     }
 }
 
-/// The script runtime's update on the running game, in place of the game's.
+/// The script runtime's operation (its update, level start or a command's
+/// evaluation) on the running game, in place of the game's.
 /// Returns 0, or -1 if it can't run (the game then runs its own; nothing was
 /// done).
 ///
@@ -204,7 +235,7 @@ pub unsafe extern "C" fn halo_sim_hs_update(update: *mut HsUpdateC) -> i32 {
     let Some(host) = crate::world::host() else { return -1 };
     // SAFETY: the caller's update
     let update = unsafe { &mut *update };
-    hs_runtime_update(&update.context.context(), &LiveHost { callbacks: host.hs });
+    update.result = run(update, &update.context.context(), &LiveHost { callbacks: host.hs });
     0
 }
 
@@ -228,7 +259,7 @@ pub unsafe extern "C" fn halo_sim_hs_update_check(update: *mut HsUpdateC) -> i32
     };
     let context = update.context.context();
     let checker = CheckHost { context, events, next: Cell::new(0), difference: Cell::new(None) };
-    hs_runtime_update(&context, &checker);
+    update.result = run(update, &context, &checker);
     if checker.difference.get().is_none() && checker.next.get() < events.len() {
         checker.differ(checker.next.get(), 5);
     }

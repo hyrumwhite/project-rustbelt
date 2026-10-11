@@ -1,4 +1,7 @@
-//! The script runtime's update (`hs_runtime.c`'s `hs_runtime_update`, with
+//! The script runtime: its level start (`hs_runtime.c`'s
+//! `hs_runtime_initialize_for_new_map`: the scenario's globals initialized
+//! and its scripts' threads), a console command's evaluation
+//! (`hs_runtime_evaluate`) and its update (`hs_runtime_update`, with
 //! `hs_thread_main`, `hs_evaluate`, the thread stacks, `hs_return`, casting,
 //! globals and the built-in functions: `begin`, `begin_random`, `if`, `set`,
 //! `and`, `or`, arithmetic, comparisons, `sleep`, `sleep_until`, `wake`,
@@ -16,9 +19,18 @@
 const NONE: i32 = -1;
 
 /// `struct data_array`'s fields.
+const DATA_NAME: u32 = 0;
+const DATA_MAXIMUM_COUNT: u32 = 0x20;
 const DATA_SIZE: u32 = 0x22;
+const DATA_VALID: u32 = 0x24;
+const DATA_SIGNATURE: u32 = 0x28;
+const DATA_FIRST_FREE_ABSOLUTE_INDEX: u32 = 0x2C;
 const DATA_COUNT: u32 = 0x2E;
+const DATA_ACTUAL_COUNT: u32 = 0x30;
+const DATA_NEXT_IDENTIFIER: u32 = 0x32;
 const DATA_DATA: u32 = 0x34;
+/// `'d@t@'`.
+const DATA_SIGNATURE_VALUE: u32 = u32::from_be_bytes(*b"d@t@");
 
 /// `struct hs_thread_datum`.
 const THREAD_TYPE: u32 = 2;
@@ -27,6 +39,7 @@ const THREAD_SCRIPT_INDEX: u32 = 4;
 const THREAD_SLEEP_UNTIL: u32 = 8;
 const THREAD_PREVIOUS_SLEEP_UNTIL: u32 = 12;
 const THREAD_STACK: u32 = 16;
+const THREAD_RESULT: u32 = 20;
 const THREAD_STACK_DATA: u32 = 24;
 /// `HS_THREAD_STACK_SIZE`.
 const STACK_SIZE: u32 = 0x200;
@@ -60,6 +73,9 @@ const SCRIPT_RETURN_TYPE: u32 = 34;
 const SCRIPT_ROOT_EXPRESSION_INDEX: u32 = 36;
 const GLOBAL_SIZE: u32 = 92;
 const GLOBAL_TYPE: u32 = 32;
+const GLOBAL_INITIALIZATION_EXPRESSION_INDEX: u32 = 40;
+/// `DATUM_INDEX_NEW`'s salt for the globals.
+const GLOBAL_SALT: i32 = 0xaced;
 
 /// `struct hs_runtime_globals`.
 const RUNTIME_INITIALIZED: u32 = 0;
@@ -67,6 +83,7 @@ const RUNTIME_EXECUTING_THREAD_INDEX: u32 = 2;
 
 /// Thread types.
 const THREAD_TYPE_SCRIPT: u8 = 0;
+const THREAD_TYPE_GLOBAL_INITIALIZE: u8 = 1;
 const THREAD_TYPE_CONSOLE_COMMAND: u8 = 2;
 
 /// Thread flags.
@@ -82,6 +99,8 @@ const NODE_GLOBAL: i16 = 1 << 2;
 /// Script types.
 const SCRIPT_STARTUP: i16 = 0;
 const SCRIPT_DORMANT: i16 = 1;
+const SCRIPT_STATIC: i16 = 3;
+const SCRIPT_STUB: i16 = 4;
 
 /// `enum hs_type`.
 const HS_UNPARSED: i16 = 0;
@@ -168,8 +187,9 @@ pub mod call {
     pub const OBJECT_LIST_GC: i32 = 13;
     /// `hs_node_gc()`.
     pub const NODE_GC: i32 = 14;
-    /// `hs_thread_delete(a)` (a console command's thread).
-    pub const THREAD_DELETE: i32 = 15;
+    // (15, a console command's thread deleted, is the runtime's own now)
+    /// `hs_scenario_global_initializer_disabled(a)`.
+    pub const GLOBAL_INITIALIZER_DISABLED: i32 = 16;
 }
 
 /// The messages' kinds.
@@ -177,6 +197,12 @@ const ERROR_STACK_OVERFLOW: i32 = 1;
 const ERROR_SYNTAX: i32 = 2;
 const ERROR_UNEXPECTED_PARAMETERS: i32 = 3;
 const ERROR_OBJECT_CAST: i32 = 4;
+/// "ran out of script threads."
+const ERROR_OUT_OF_SCRIPT_THREADS: i32 = 5;
+/// "there are not enough threads to execute that command."
+const ERROR_OUT_OF_COMMAND_THREADS: i32 = 6;
+/// A global's initialization slept (the game's assertion; `b` its thread).
+const ERROR_GLOBAL_INITIALIZATION_SLEPT: i32 = 7;
 
 /// halo_sim.h's `struct halo_sim_hs_call`.
 #[repr(C)]
@@ -226,6 +252,8 @@ pub struct HsContext {
     pub global_count: i32,
     /// `hs_runtime_globals`.
     pub runtime_globals: u32,
+    /// Whether a scenario is loaded (`global_scenario_index != NONE`).
+    pub scenario_loaded: bool,
     /// `get_global_random_seed_address()`.
     pub random_seed: u32,
     /// `game_time_get()`.
@@ -288,6 +316,149 @@ impl<H: HsHost> Runtime<'_, H> {
             }
         }
         NONE
+    }
+
+    /// `data_usable`: whether the array gives out datums.
+    fn data_usable(&self, data: u32) -> bool {
+        let m = self.m();
+        m.r32(data + DATA_SIGNATURE) == DATA_SIGNATURE_VALUE
+            && m.r32(data + DATA_DATA) != 0
+            && m.r8(data + DATA_VALID) != 0
+            && m.r16(data + DATA_NEXT_IDENTIFIER) != 0
+    }
+
+    /// `datum_initialize`: zeroed, with the array's next identifier.
+    fn datum_initialize(&self, data: u32, header: u32) {
+        let m = self.m();
+        let size = m.r16(data + DATA_SIZE) as i16 as u32;
+        for offset in 0..size {
+            m.w8(header + offset, 0);
+        }
+        let identifier = m.r16(data + DATA_NEXT_IDENTIFIER);
+        m.w16(header, identifier);
+        let next = identifier.wrapping_add(1);
+        m.w16(data + DATA_NEXT_IDENTIFIER, if next == 0 { 0x8000 } else { next });
+    }
+
+    /// `datum_new`.
+    fn datum_new(&self, data: u32) -> i32 {
+        let m = self.m();
+        if !self.data_usable(data) {
+            return NONE;
+        }
+        let maximum_count = m.r16(data + DATA_MAXIMUM_COUNT) as i16;
+        let size = m.r16(data + DATA_SIZE) as i16 as u32;
+        let base = m.r32(data + DATA_DATA);
+        let mut absolute_index = m.r16(data + DATA_FIRST_FREE_ABSOLUTE_INDEX) as i16;
+        while absolute_index < maximum_count {
+            let header = base.wrapping_add(size.wrapping_mul(absolute_index as i32 as u32));
+            if m.r16(header) == 0 {
+                self.datum_initialize(data, header);
+                m.w16(data + DATA_ACTUAL_COUNT, m.r16(data + DATA_ACTUAL_COUNT).wrapping_add(1));
+                m.w16(data + DATA_FIRST_FREE_ABSOLUTE_INDEX, (absolute_index + 1) as u16);
+                if m.r16(data + DATA_COUNT) as i16 <= absolute_index {
+                    m.w16(data + DATA_COUNT, (absolute_index + 1) as u16);
+                }
+                return ((m.r16(header) as i16 as i32) << 16) | absolute_index as i32;
+            }
+            absolute_index += 1;
+        }
+        // (the port's: none free from here on, so the next search starts at
+        // the end, until a datum is deleted)
+        m.w16(data + DATA_FIRST_FREE_ABSOLUTE_INDEX, maximum_count as u16);
+        NONE
+    }
+
+    /// `datum_new_at_index`.
+    fn datum_new_at_index(&self, data: u32, index: i32) -> i32 {
+        let m = self.m();
+        if !self.data_usable(data) {
+            return NONE;
+        }
+        let absolute_index = index as i16;
+        let identifier = (index >> 16) as i16;
+        let maximum_count = m.r16(data + DATA_MAXIMUM_COUNT) as i16;
+        if absolute_index >= 0 && absolute_index < maximum_count && identifier != 0 {
+            let size = m.r16(data + DATA_SIZE) as i16 as u32;
+            let header = m.r32(data + DATA_DATA).wrapping_add(size * absolute_index as u32);
+            if m.r16(header) == 0 {
+                m.w16(data + DATA_ACTUAL_COUNT, m.r16(data + DATA_ACTUAL_COUNT).wrapping_add(1));
+                if absolute_index >= m.r16(data + DATA_COUNT) as i16 {
+                    m.w16(data + DATA_COUNT, (absolute_index + 1) as u16);
+                }
+                self.datum_initialize(data, header);
+                m.w16(header, identifier as u16);
+                return ((identifier as i32) << 16) | absolute_index as i32;
+            }
+        }
+        NONE
+    }
+
+    /// `datum_delete`.
+    fn datum_delete(&self, data: u32, index: i32) {
+        let m = self.m();
+        let Some(mut header) = self.datum_get(data, index) else { return };
+        m.w16(header, 0);
+        if (index as i16) < m.r16(data + DATA_FIRST_FREE_ABSOLUTE_INDEX) as i16 {
+            m.w16(data + DATA_FIRST_FREE_ABSOLUTE_INDEX, index as u16);
+        }
+        if (index as i16) as i32 + 1 == m.r16(data + DATA_COUNT) as i16 as i32 {
+            let size = m.r16(data + DATA_SIZE) as i16 as u32;
+            loop {
+                header = header.wrapping_sub(size);
+                let count = (m.r16(data + DATA_COUNT) as i16).wrapping_sub(1);
+                m.w16(data + DATA_COUNT, count as u16);
+                if !(count > 0 && m.r16(header) == 0) {
+                    break;
+                }
+            }
+        }
+        m.w16(data + DATA_ACTUAL_COUNT, m.r16(data + DATA_ACTUAL_COUNT).wrapping_sub(1));
+    }
+
+    /// `data_make_valid` (with `data_delete_all`).
+    fn data_make_valid(&self, data: u32) {
+        let m = self.m();
+        m.w8(data + DATA_VALID, 1);
+        m.w16(data + DATA_COUNT, 0);
+        m.w16(data + DATA_ACTUAL_COUNT, 0);
+        m.w16(data + DATA_FIRST_FREE_ABSOLUTE_INDEX, 0);
+        // (the name's first two characters, as `csstrncpy` copies them)
+        let first = m.r8(data + DATA_NAME) as u16;
+        let second = if first == 0 { 0 } else { m.r8(data + DATA_NAME + 1) as u16 };
+        m.w16(data + DATA_NEXT_IDENTIFIER, first | (second << 8) | 0x8000);
+        let maximum_count = m.r16(data + DATA_MAXIMUM_COUNT) as i16;
+        let size = m.r16(data + DATA_SIZE) as i16 as u32;
+        let base = m.r32(data + DATA_DATA);
+        for absolute_index in 0..maximum_count.max(0) as u32 {
+            m.w16(base + size * absolute_index, 0);
+        }
+    }
+
+    /// `hs_thread_new`.
+    fn thread_new(&self, thread_type: u8, script_index: i32) -> i32 {
+        let m = self.m();
+        let thread_index = self.datum_new(self.context.thread_data);
+        if thread_index != NONE {
+            let thread = self.thread(thread_index);
+            let base = thread + THREAD_STACK_DATA;
+            m.w32(thread + THREAD_STACK, base);
+            m.w32(base + FRAME_PREVIOUS, 0);
+            m.w16(base + FRAME_SIZE, 0);
+            m.w32(base + FRAME_EXPRESSION_INDEX, NONE as u32);
+            m.w8(thread + THREAD_TYPE, thread_type);
+            m.w32(thread + THREAD_SCRIPT_INDEX, script_index as u32);
+            m.w8(thread + THREAD_FLAGS, 0);
+            let dormant =
+                script_index != NONE && m.r16(self.script(script_index) + SCRIPT_TYPE) as i16 == SCRIPT_DORMANT;
+            m.w32(thread + THREAD_SLEEP_UNTIL, if dormant { (NONE - 1) as u32 } else { 0 });
+        }
+        thread_index
+    }
+
+    /// `hs_thread_delete`.
+    fn thread_delete(&self, thread_index: i32) {
+        self.datum_delete(self.context.thread_data, thread_index);
     }
 
     fn thread(&self, thread_index: i32) -> u32 {
@@ -1203,10 +1374,91 @@ impl<H: HsHost> Runtime<'_, H> {
                     }
                 }
             } else if thread_type == THREAD_TYPE_CONSOLE_COMMAND {
-                self.call(call::THREAD_DELETE, thread_index, 0, 0);
+                self.thread_delete(thread_index);
             }
         }
         m.w16(self.context.runtime_globals + RUNTIME_EXECUTING_THREAD_INDEX, NONE as u16);
+    }
+
+    /// `hs_runtime_initialize_for_new_map`: the scenario's globals
+    /// initialized (each in an internal thread of its own), and a thread for
+    /// each of its scripts that runs.
+    fn initialize_for_new_map(&self) {
+        let m = self.m();
+        self.data_make_valid(self.context.thread_data);
+        m.w8(self.context.runtime_globals + RUNTIME_INITIALIZED, 1);
+        m.w16(self.context.runtime_globals + RUNTIME_EXECUTING_THREAD_INDEX, NONE as u16);
+        let internal_thread_index = self.thread_new(THREAD_TYPE_GLOBAL_INITIALIZE, NONE);
+        if !self.context.scenario_loaded {
+            return;
+        }
+        let internal_thread = self.thread(internal_thread_index);
+        for global_index in 0..self.context.global_count as i16 {
+            let global = self.context.globals + GLOBAL_SIZE * global_index as u32;
+            let global_datum_index = global_index as i32 + self.context.external_global_count;
+            self.datum_new_at_index(self.context.global_data, (GLOBAL_SALT << 16) | global_datum_index);
+            let global_datum = self.datum_get(self.context.global_data, global_datum_index).unwrap_or(0);
+            m.w32(internal_thread + THREAD_SCRIPT_INDEX, NONE as u32);
+            m.w16(self.stack(internal_thread) + FRAME_SIZE, 0);
+            let global_type = m.r16(global + GLOBAL_TYPE) as i16;
+            if self.call(call::GLOBAL_INITIALIZER_DISABLED, global_index as i32, 0, 0) != 0 {
+                m.w32(global_datum + 4, type_default_value(global_type, self.context.string_default) as u32);
+            } else {
+                let expression = m.r32(global + GLOBAL_INITIALIZATION_EXPRESSION_INDEX) as i32;
+                self.evaluate(internal_thread_index, expression, global_datum + 4);
+            }
+            if self.flags(internal_thread) & THREAD_IN_FUNCTION_CALL != 0 {
+                self.thread_main(internal_thread_index);
+                if global_type == HS_TYPE_OBJECT_LIST {
+                    self.call(call::OBJECT_LIST_ADD_REFERENCE, self.global_evaluate(global_index), 0, 0);
+                }
+                if m.r32(internal_thread + THREAD_SLEEP_UNTIL) != 0 {
+                    self.call(call::ERROR, ERROR_GLOBAL_INITIALIZATION_SLEPT, internal_thread_index, 0);
+                }
+            }
+            self.global_reconcile_write(global_index);
+        }
+        self.thread_delete(internal_thread_index);
+        for script_index in 0..self.context.script_count {
+            let script_type = m.r16(self.script(script_index) + SCRIPT_TYPE) as i16;
+            if script_type != SCRIPT_STATIC
+                && script_type != SCRIPT_STUB
+                && self.call(call::SCRIPT_DISABLED, script_index as i16 as i32, 0, 0) == 0
+                && self.thread_new(THREAD_TYPE_SCRIPT, script_index) == NONE
+            {
+                self.call(call::ERROR, ERROR_OUT_OF_SCRIPT_THREADS, 0, 0);
+            }
+        }
+    }
+
+    /// `hs_runtime_evaluate`: a console command's expression, in a thread of
+    /// its own; its value, or NONE if it is left running.
+    fn evaluate_command(&self, expression_index: i32) -> i32 {
+        let m = self.m();
+        if !self.initialized() || expression_index == NONE {
+            return NONE;
+        }
+        let thread_index = self.datum_new(self.context.thread_data);
+        if thread_index == NONE {
+            self.call(call::ERROR, ERROR_OUT_OF_COMMAND_THREADS, 0, 0);
+            return NONE;
+        }
+        let thread = self.thread(thread_index);
+        let base = thread + THREAD_STACK_DATA;
+        m.w32(thread + THREAD_STACK, base);
+        m.w32(base + FRAME_PREVIOUS, 0);
+        m.w16(base + FRAME_SIZE, 0);
+        m.w32(base + FRAME_EXPRESSION_INDEX, NONE as u32);
+        m.w8(thread + THREAD_TYPE, THREAD_TYPE_CONSOLE_COMMAND);
+        m.w32(thread + THREAD_SCRIPT_INDEX, NONE as u32);
+        m.w8(thread + THREAD_FLAGS, 0);
+        m.w32(thread + THREAD_SLEEP_UNTIL, 0);
+        self.evaluate(thread_index, expression_index, thread + THREAD_RESULT);
+        if self.flags(thread) & THREAD_IN_FUNCTION_CALL != 0 {
+            self.thread_main(thread_index);
+            return NONE;
+        }
+        m.r32(thread + THREAD_RESULT) as i32
     }
 
     /// `hs_runtime_update`.
@@ -1255,6 +1507,16 @@ fn type_default_value(ty: i16, string_default: u32) -> i32 {
         HS_TYPE_SCRIPT => NONE,
         _ => NONE,
     }
+}
+
+/// `hs_runtime_initialize_for_new_map`, on the game's memory.
+pub fn hs_runtime_initialize_for_new_map(context: &HsContext, host: &impl HsHost) {
+    Runtime { context, host }.initialize_for_new_map();
+}
+
+/// `hs_runtime_evaluate`, on the game's memory: the command's value, or NONE.
+pub fn hs_runtime_evaluate(context: &HsContext, host: &impl HsHost, expression_index: i32) -> i32 {
+    Runtime { context, host }.evaluate_command(expression_index)
 }
 
 /// `hs_runtime_update`: every thread due runs, on the game's memory.

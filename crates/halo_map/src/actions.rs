@@ -62,6 +62,15 @@ pub fn run(action: i16, function: Function, context: &AiStepContext, host: &impl
             guard_control(context, host);
             false
         }
+        (v::_ACTOR_ACTION_FLEE, Function::Perform) => flee_perform(context, host),
+        (v::_ACTOR_ACTION_FLEE, Function::Update) => {
+            flee_update(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_FLEE, Function::Control) => {
+            flee_control(context, host);
+            false
+        }
         (v::_ACTOR_ACTION_WAIT, Function::Perform) => wait_perform(context, host),
         (v::_ACTOR_ACTION_WAIT, Function::Update) => {
             wait_update(context, host);
@@ -1380,4 +1389,290 @@ fn guard_control(context: &AiStepContext, host: &impl AiHost) {
         m.set_i16(priority, v::_PRIMARY_PRIORITY_NONE as i16);
     }
     m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), if m.i16(at(a::STATE_COMBAT_STATUS)) >= 4 { 4 } else { 2 });
+}
+
+/// action_flee.c's calls.
+pub mod flee_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_FLEE as i32) << 8;
+    /// `unit_start_running_blindly(unit)`.
+    pub const RUN_BLINDLY: i32 = BASE | 1;
+    /// `actor_move_halt(actor)`.
+    pub const MOVE_HALT: i32 = BASE | 2;
+    /// `actor_move_to_firing_position(actor, a, NULL)`, the result.
+    pub const MOVE_TO_FIRING_POSITION: i32 = BASE | 3;
+    /// `actor_discard_firing_position(actor, a, FALSE)`.
+    pub const DISCARD_FIRING_POSITION: i32 = BASE | 4;
+    /// `actor_path_at_destination(actor)`, the result.
+    pub const AT_DESTINATION: i32 = BASE | 5;
+    /// `actor_destination_tolerance(actor)`, in `output[0]`.
+    pub const TOLERANCE: i32 = BASE | 6;
+    /// `actor_situation_update_target_status` and
+    /// `actor_situation_combat_status_update` of the actor.
+    pub const SITUATION_STATUS: i32 = BASE | 7;
+    /// `action_flee_current_position_exposed(actor)`, the result (its
+    /// approach point written to the actor).
+    pub const POSITION_EXPOSED: i32 = BASE | 8;
+    /// `action_flee_find_flee_position(actor, TRUE)`, into the actor.
+    pub const FIND_FLEE_POSITION: i32 = BASE | 9;
+    /// `unit_is_speaking(unit)`, the result.
+    pub const UNIT_IS_SPEAKING: i32 = BASE | 10;
+    /// `unit_scream`: burning to death (`a` 0) or a grenade attached (1).
+    pub const SCREAM: i32 = BASE | 11;
+    /// The flee shout (`a` 0, or its leader-died form by the panic) or its
+    /// idle form (`a` 1), the cause `b`.
+    pub const SHOUT: i32 = BASE | 12;
+}
+
+/// The panic types (action_flee.c's).
+const PANIC_NONE: i16 = 0;
+const PANIC_GRENADE_ATTACHED_TO_US: i16 = 9;
+const PANIC_DELAYED_PROJECTILE_ATTACHED_TO_US: i16 = 10;
+const PANIC_MELEE_ATTACHED_TO_US: i16 = 11;
+const PANIC_BURNING_TO_DEATH: i16 = 12;
+
+/// `action_flee_blind_panic`.
+fn flee_blind_panic(panic_type: i16) -> bool {
+    (PANIC_GRENADE_ATTACHED_TO_US..=PANIC_BURNING_TO_DEATH).contains(&panic_type)
+}
+
+/// `action_flee_update`.
+fn flee_update(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let timer = at(a::STATE_FLEE_FLEE_TIMER);
+    m.w32(timer, m.r32(timer).wrapping_add(1));
+    let forced = at(a::STATE_FLEE_FORCED_FLEE_TICKS);
+    if m.i16(forced) > 0 {
+        m.set_i16(forced, m.i16(forced) - 1);
+    }
+    let panic_type = m.i16(at(a::STATE_FLEE_PANIC_TYPE));
+    let stationary = at(a::STATE_FLEE_FLEE_STATIONARY_TICKS);
+    if m.i16(stationary) > 0 {
+        m.set_i16(stationary, m.i16(stationary) - 1);
+        if m.i16(stationary) == 0 && m.i32(at(a::META_UNIT_INDEX)) != NONE && flee_blind_panic(panic_type) {
+            call_simple(context, host, flee_call::RUN_BLINDLY, 0);
+        }
+    }
+    if m.i16(at(a::STATE_FLEE_PANIC_TYPE)) > PANIC_NONE {
+        m.w32(at(a::EMOTIONS_FLEE_WITH_FRIENDS_DISABLE_TIME), context.game_time.wrapping_add(750) as u32);
+    }
+}
+
+/// `action_flee_control`.
+fn flee_control(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let panic_type = m.i16(at(a::STATE_FLEE_PANIC_TYPE));
+    let priority = at(a::ORDERS_LOOK_PRIMARY_PRIORITY);
+    let direction = at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE);
+    let flee_prop_index = m.i32(at(a::STATE_FLEE_FLEE_PROP_INDEX));
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    if panic_type > PANIC_NONE {
+        m.set_i16(priority, 6);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_MOVEMENT as i16);
+        m.set_bool(at(a::ORDERS_COMBAT_ABORT_BURST), true);
+    } else if target_prop_index != NONE && m.i16(prop_get(m, context, target_prop_index) + p::VISIBILITY as u32) > 0 {
+        m.set_i16(priority, 7);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_TARGET as i16);
+        m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), true);
+    } else if flee_prop_index != NONE {
+        m.set_i16(priority, 3);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_PROP as i16);
+        m.w32(direction + 4, flee_prop_index as u32);
+    } else {
+        m.set_i16(priority, v::_PRIMARY_PRIORITY_NONE as i16);
+    }
+    m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), 4);
+    m.set_bool(at(a::ORDERS_MOVE_PANICKED), panic_type > PANIC_NONE);
+    m.set_bool(at(a::ORDERS_MOVE_FLAMING), flee_blind_panic(panic_type));
+    m.set_bool(at(a::ORDERS_MOVE_STATIONARY_CROUCH), true);
+    m.set_bool(at(a::ORDERS_MOVE_MOVING_CROUCH), false);
+    m.set_bool(at(a::ORDERS_MOVE_DIVE_INTO_COVER), true);
+    m.set_bool(at(a::ORDERS_MOVE_EMERGE_FROM_COVER), false);
+
+    let flee_position = at(a::STATE_FLEE_FLEE_FIRING_POSITION_INDEX);
+    let current = at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX);
+    if m.i16(flee_position) == NONE as i16 {
+        call_simple(context, host, flee_call::MOVE_HALT, 0);
+    } else if m.bool(at(a::META_TIMESLICE)) {
+        if call_simple(context, host, flee_call::MOVE_TO_FIRING_POSITION, m.i16(flee_position) as i32) != 0 {
+            m.set_i16(current, m.i16(flee_position));
+            m.w8(
+                at(a::FIRING_POSITIONS_CURRENT_POSITION_FOUND_OUTSIDE_RANGE),
+                m.r8(at(a::STATE_FLEE_FLEE_FIRING_POSITION_FOUND_RANDOMLY)),
+            );
+        } else {
+            if m.i16(current) != NONE as i16 {
+                call_simple(context, host, flee_call::DISCARD_FIRING_POSITION, m.i16(current) as i32);
+                call_simple(context, host, flee_call::MOVE_HALT, 0);
+                m.set_i16(current, NONE as i16);
+            }
+            m.set_i16(flee_position, NONE as i16);
+            m.set_bool(at(a::STATE_FLEE_FIND_NEW_FLEE_POSITION), true);
+        }
+    }
+}
+
+/// `action_flee_at_flee_position`.
+fn flee_at_flee_position(context: &AiStepContext, host: &impl AiHost) -> bool {
+    use crate::ai_actor::tag_block_element;
+    use crate::layout::{encounter_definition, firing_position_definition as fp, scenario};
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let encounter_index = m.i32(at(a::META_ENCOUNTER_INDEX));
+    let current = m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX));
+    if encounter_index == NONE || current == NONE as i16 {
+        return false;
+    }
+    let encounter = tag_block_element(
+        m,
+        context.scenario + scenario::AI_ENCOUNTERS as u32,
+        encounter_index & 0xFFFF,
+        encounter_definition::SIZEOF,
+    );
+    let firing_position =
+        tag_block_element(m, encounter + encounter_definition::FIRING_POSITIONS as u32, current as i32, fp::SIZEOF);
+    if call_simple(context, host, flee_call::AT_DESTINATION, 0) != 0
+        && m.i16(at(a::CONTROL_PATH_DESTINATION_TYPE)) == v::_DESTINATION_FIRING_POSITION as i16
+        && m.i16(at(a::CONTROL_PATH_DESTINATION_FIRING_POSITION_INDEX)) == m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX))
+    {
+        return true;
+    }
+    let tolerance = call_full(context, host, flee_call::TOLERANCE, 0, 0, &[]).output[0];
+    if !(distance_squared(m, at(a::INPUT_BODY_POSITION), firing_position + fp::POSITION as u32) < tolerance * tolerance) {
+        return false;
+    }
+    let prop_index = m.i32(at(a::STATE_FLEE_FLEE_PROP_INDEX));
+    let mut seen = false;
+    if prop_index != NONE {
+        let line_of_sight = m.i16(prop_get(m, context, prop_index) + p::LINE_OF_SIGHT as u32);
+        seen = line_of_sight == v::_AI_LINE_OF_SIGHT_CLEAR as i16 || line_of_sight == v::_AI_LINE_OF_SIGHT_OCCLUDED as i16;
+    }
+    !seen
+}
+
+/// `action_flee_perform`.
+fn flee_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let panic_type = || m.i16(at(a::STATE_FLEE_PANIC_TYPE));
+    let flee_position = at(a::STATE_FLEE_FLEE_FIRING_POSITION_INDEX);
+    let find_new = at(a::STATE_FLEE_FIND_NEW_FLEE_POSITION);
+    let done = at(a::STATE_FLEE_DONE_FLEEING);
+    let unable = at(a::STATE_FLEE_UNABLE_TO_FLEE);
+    let forced = at(a::STATE_FLEE_FORCED_FLEE_TICKS);
+    let current = at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX);
+
+    if !m.bool(at(a::META_SWARM)) {
+        if flee_blind_panic(panic_type()) {
+            m.set_i16(forced, 180);
+        }
+        if m.i16(at(a::STATE_FLEE_FLEE_STATIONARY_TICKS)) > 0 {
+            m.set_i16(flee_position, NONE as i16);
+        } else if m.i16(flee_position) == NONE as i16 {
+            m.set_bool(find_new, true);
+        } else if m.i16(current) == NONE as i16 {
+            m.set_i16(flee_position, NONE as i16);
+            m.set_bool(find_new, true);
+        } else if flee_at_flee_position(context, host) {
+            if m.i16(forced) != 0 {
+                m.set_bool(find_new, true);
+            } else {
+                let flee_prop_index = m.i32(at(a::STATE_FLEE_FLEE_PROP_INDEX));
+                m.set_i16(flee_position, m.i16(current));
+                m.w8(
+                    at(a::STATE_FLEE_FLEE_FIRING_POSITION_FOUND_RANDOMLY),
+                    m.r8(at(a::FIRING_POSITIONS_CURRENT_POSITION_FOUND_OUTSIDE_RANGE)),
+                );
+                m.set_bool(done, true);
+                m.set_bool(find_new, false);
+                if flee_prop_index != NONE {
+                    let prop = prop_get(m, context, flee_prop_index);
+                    m.set_i16(prop + p::VISIBILITY as u32, 0);
+                    let audibility = m.i16(prop + p::AUDIBILITY as u32);
+                    let ineffability = m.i16(prop + p::INEFFABILITY as u32);
+                    m.set_i16(prop + p::PERCEPTION as u32, if audibility > ineffability { audibility } else { ineffability });
+                    m.set_bool(prop + p::CURRENTLY_DAMAGING_ME as u32, false);
+                    m.set_i16(prop + p::LINE_OF_SIGHT as u32, v::_AI_LINE_OF_SIGHT_FROM_COVER as i16);
+                    call_simple(context, host, flee_call::SITUATION_STATUS, 0);
+                }
+            }
+        }
+
+        match panic_type() {
+            PANIC_GRENADE_ATTACHED_TO_US | PANIC_DELAYED_PROJECTILE_ATTACHED_TO_US => {
+                if m.i32(at(a::INPUT_DELAYED_ATTACHED_PROJECTILE_INDEX)) == NONE {
+                    m.set_bool(done, true);
+                }
+            }
+            PANIC_MELEE_ATTACHED_TO_US => {
+                if !m.bool(at(a::INPUT_MELEE_ATTACKER_ATTACHED)) {
+                    m.set_bool(done, true);
+                }
+            }
+            PANIC_BURNING_TO_DEATH => {
+                if !m.bool(at(a::INPUT_BURNING_TO_DEATH)) {
+                    m.set_bool(done, true);
+                }
+            }
+            _ => {}
+        }
+
+        if m.bool(at(a::META_TIMESLICE)) && !m.bool(done) {
+            if m.i16(flee_position) != NONE as i16
+                && m.i16(forced) == 0
+                && call_simple(context, host, flee_call::POSITION_EXPOSED, 0) != 0
+            {
+                m.set_i16(flee_position, NONE as i16);
+                m.set_bool(find_new, true);
+            }
+            if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) {
+                m.set_bool(find_new, false);
+                m.set_bool(unable, true);
+                m.w32(at(a::EMOTIONS_LAST_FLEE_FAILED_TIME), context.game_time as u32);
+            } else if m.bool(find_new) {
+                call_simple(context, host, flee_call::FIND_FLEE_POSITION, 0);
+                if m.i16(flee_position) == NONE as i16 {
+                    m.set_bool(unable, true);
+                    m.w32(at(a::EMOTIONS_LAST_FLEE_FAILED_TIME), context.game_time as u32);
+                }
+            }
+        }
+    }
+
+    let communicated = at(a::STATE_FLEE_COMMUNICATED_FLEE);
+    let unit_index = m.i32(at(a::META_UNIT_INDEX));
+    if flee_blind_panic(panic_type())
+        && unit_index != NONE
+        && call_simple(context, host, flee_call::UNIT_IS_SPEAKING, 0) == 0
+    {
+        m.set_bool(communicated, false);
+    }
+
+    let panic = panic_type();
+    if panic > PANIC_NONE && m.i16(flee_position) != NONE as i16 && !m.bool(unable) && unit_index != NONE {
+        let now = context.game_time;
+        let last_time = at(a::STATE_FLEE_LAST_COMMUNICATION_TIME);
+        if !m.bool(communicated) || m.i32(last_time).wrapping_add(60) >= now {
+            if panic == PANIC_BURNING_TO_DEATH || panic == PANIC_MELEE_ATTACHED_TO_US {
+                call_simple(context, host, flee_call::SCREAM, 0);
+            } else if panic == PANIC_GRENADE_ATTACHED_TO_US || panic == PANIC_DELAYED_PROJECTILE_ATTACHED_TO_US {
+                call_simple(context, host, flee_call::SCREAM, 1);
+            } else {
+                let mut cause_unit_index = NONE;
+                let flee_prop_index = m.i32(at(a::STATE_FLEE_FLEE_PROP_INDEX));
+                if flee_prop_index != NONE {
+                    cause_unit_index = m.i32(prop_get(m, context, flee_prop_index) + p::UNIT_INDEX as u32);
+                }
+                if !m.bool(communicated) {
+                    call_full(context, host, flee_call::SHOUT, 0, cause_unit_index, &[]);
+                    m.set_bool(communicated, true);
+                } else {
+                    call_full(context, host, flee_call::SHOUT, 1, cause_unit_index, &[]);
+                }
+            }
+            m.w32(last_time, now as u32);
+        }
+    }
+    m.bool(unable) || m.bool(done)
 }

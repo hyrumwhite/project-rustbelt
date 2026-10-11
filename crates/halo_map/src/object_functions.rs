@@ -389,7 +389,7 @@ fn hsv_to_rgb(hsv: [f32; 3], rgb: &mut [f32; 3]) {
 }
 
 /// `rgb_colors_interpolate`.
-fn rgb_colors_interpolate(result: &mut [f32; 3], flags: u32, lower: [f32; 3], upper: [f32; 3], factor: f32) {
+pub(crate) fn rgb_colors_interpolate(result: &mut [f32; 3], flags: u32, lower: [f32; 3], upper: [f32; 3], factor: f32) {
     let inverse = 1.0 - factor;
     if flags & INTERPOLATION_HSV != 0 {
         let mut hsv_lower = rgb_to_hsv(lower);

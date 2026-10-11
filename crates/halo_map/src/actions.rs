@@ -92,6 +92,15 @@ pub fn run(action: i16, function: Function, context: &AiStepContext, host: &impl
             charge_control(context, host);
             false
         }
+        (v::_ACTOR_ACTION_OBEY, Function::Perform) => obey_perform(context, host),
+        (v::_ACTOR_ACTION_OBEY, Function::Update) => {
+            obey_update(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_OBEY, Function::Control) => {
+            obey_control(context, host);
+            false
+        }
         (v::_ACTOR_ACTION_WAIT, Function::Perform) => wait_perform(context, host),
         (v::_ACTOR_ACTION_WAIT, Function::Update) => {
             wait_update(context, host);
@@ -2425,5 +2434,338 @@ fn charge_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
         m.bool(unable)
     } else {
         false
+    }
+}
+
+/// action_obey.c's calls.
+pub mod obey_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_OBEY as i32) << 8;
+    /// A swarm's update: each obeying component's (the game's).
+    pub const SWARM_UPDATE: i32 = BASE | 1;
+    /// A swarm's perform: each obeying component's (the game's): whether
+    /// all finished, the result.
+    pub const SWARM_PERFORM: i32 = BASE | 2;
+    /// `action_obey_command_perform` of the actor's current command, the result.
+    pub const COMMAND_PERFORM: i32 = BASE | 3;
+    /// `action_obey_command_end` of the actor's current command (`a` the
+    /// next command): the next command, the result.
+    pub const COMMAND_END: i32 = BASE | 4;
+    /// `action_obey_command_begin` of the actor's current command, the result.
+    pub const COMMAND_BEGIN: i32 = BASE | 5;
+    /// `actor_path_at_destination(actor)`, the result.
+    pub const AT_DESTINATION: i32 = BASE | 6;
+    /// `actor_move_animation_busy(actor)`, the result.
+    pub const ANIMATION_BUSY: i32 = BASE | 7;
+    /// `actor_move_animation_impulse(actor, a, input)`.
+    pub const ANIMATION_IMPULSE: i32 = BASE | 8;
+    /// `ai_communication_event(a, unit, NONE...)`.
+    pub const COMMUNICATION: i32 = BASE | 9;
+    /// `unit_is_busy(unit)`, the result.
+    pub const UNIT_IS_BUSY: i32 = BASE | 10;
+}
+
+const OBEY_METADATA_TARGETING_BIT: u8 = 0;
+const OBEY_METADATA_COMMANDS_FINISHED_BIT: u8 = 1;
+const OBEY_METADATA_ACTION_CHANGED_BIT: u8 = 2;
+const OBEY_SIMPLE_DIRECTMOVEMENT_BIT: u8 = 0;
+const OBEY_SIMPLE_DIRECTMOVEMENT_UPDATE_CONTINUOUSLY_BIT: u8 = 1;
+const OBEY_SIMPLE_JUMP_BIT: u8 = 2;
+const OBEY_SIMPLE_JUMP_JUMPED_BIT: u8 = 3;
+const OBEY_SIMPLE_JUMP_TARGETED_BIT: u8 = 4;
+
+/// The actor's simple and complex control (its obey state's).
+struct ObeyControl {
+    simple: u32,
+    complex: u32,
+}
+
+impl ObeyControl {
+    fn of(context: &AiStepContext) -> Self {
+        Self {
+            simple: context.actor + a::STATE_OBEY_SIMPLE_CONTROL as u32,
+            complex: context.actor + a::STATE_OBEY_COMPLEX_CONTROL as u32,
+        }
+    }
+    fn simple(&self, offset: usize) -> u32 {
+        self.simple + offset as u32
+    }
+    fn complex(&self, offset: usize) -> u32 {
+        self.complex + offset as u32
+    }
+}
+
+fn test_bit(m: &dyn AiMemory, address: u32, bit: u8) -> bool {
+    m.r8(address) & (1 << bit) != 0
+}
+
+fn set_bit(m: &dyn AiMemory, address: u32, bit: u8) {
+    m.w8(address, m.r8(address) | (1 << bit));
+}
+
+/// `action_obey_directmovement_update_facing` of the actor's own unit.
+fn obey_directmovement_update_facing(context: &AiStepContext, host: &impl AiHost, control: &ObeyControl) {
+    use crate::ai_actor::object_get;
+    use crate::layout::{obey_individual_directmovement_control as dm, obey_individual_simple_control as sc, unit_datum as u};
+    let m = host.memory();
+    let facing = m.vector(context.actor + a::INPUT_FACING_VECTOR as u32);
+    let directmovement = control.simple(sc::DIRECTMOVEMENT);
+    let vector = directmovement + dm::VECTOR as u32;
+    let write = |v: [f32; 3]| {
+        for (i, value) in v.into_iter().enumerate() {
+            m.set_f32(vector + 4 * i as u32, value);
+        }
+    };
+    let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let normalize = |v: &mut [f32; 3]| {
+        let magnitude = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if !(0.0001 > magnitude.abs()) {
+            let s = 1.0 / magnitude;
+            *v = [s * v[0], s * v[1], s * v[2]];
+            magnitude
+        } else {
+            0.0
+        }
+    };
+    let facing_type = m.i16(directmovement + dm::FACING as u32);
+    match facing_type {
+        0 => write(facing),
+        1 => write([-facing[0], -facing[1], -facing[2]]),
+        2 | 3 => {
+            let mut perpendicular = cross([0.0, 0.0, 1.0], facing);
+            if normalize(&mut perpendicular) == 0.0 {
+                let unit = object_get(m, context, m.i32(context.actor + a::META_UNIT_INDEX as u32)).unwrap_or(0);
+                perpendicular = cross(m.vector(unit + u::OBJECT_UP as u32), facing);
+                if normalize(&mut perpendicular) == 0.0 {
+                    perpendicular = [1.0, 0.0, 0.0];
+                }
+            }
+            if facing_type == 2 {
+                write(perpendicular);
+            } else {
+                write([-perpendicular[0], -perpendicular[1], -perpendicular[2]]);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `action_obey_update`.
+fn obey_update(context: &AiStepContext, host: &impl AiHost) {
+    use crate::layout::{obey_individual_jump_control as jump, obey_individual_simple_control as sc};
+    let m = host.memory();
+    if m.bool(context.actor + a::META_SWARM as u32) {
+        call_simple(context, host, obey_call::SWARM_UPDATE, 0);
+        return;
+    }
+    let control = ObeyControl::of(context);
+    let pause_timer = control.simple(sc::PAUSE_TIMER);
+    if m.i16(pause_timer) > 0 {
+        m.set_i16(pause_timer, m.i16(pause_timer) - 1);
+    }
+    let flags = control.simple(sc::SIMPLE_CONTROL_FLAGS);
+    if test_bit(m, flags, OBEY_SIMPLE_JUMP_BIT) {
+        let delay = control.simple(sc::JUMP) + jump::DELAY_TICKS as u32;
+        if m.i16(delay) > 0 {
+            m.set_i16(delay, m.i16(delay) - 1);
+        }
+    }
+    if test_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_BIT) && test_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_UPDATE_CONTINUOUSLY_BIT) {
+        obey_directmovement_update_facing(context, host, &control);
+    }
+}
+
+/// The command list of the actor's obey state.
+fn obey_command_list(m: &dyn AiMemory, context: &AiStepContext) -> u32 {
+    use crate::ai_actor::tag_block_element;
+    use crate::layout::{ai_command_list_definition, scenario};
+    tag_block_element(
+        m,
+        context.scenario + scenario::AI_COMMAND_LISTS as u32,
+        m.i16(context.actor + a::STATE_OBEY_COMMAND_LIST_INDEX as u32) as i32,
+        ai_command_list_definition::SIZEOF,
+    )
+}
+
+/// `action_obey_perform`.
+fn obey_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    use crate::ai_actor::tag_block_count;
+    use crate::layout::{ai_command_list_definition as list, obey_individual_simple_control as sc};
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut finished = true;
+
+    if m.bool(at(a::META_SWARM)) {
+        finished = call_simple(context, host, obey_call::SWARM_PERFORM, 0) != 0;
+    } else {
+        // action_obey_individual_perform of the actor's own unit
+        let control = ObeyControl::of(context);
+        let metadata = control.simple(sc::METADATA_FLAGS);
+        let current = control.simple(sc::CURRENT_COMMAND_INDEX);
+        let commands = tag_block_count(m, obey_command_list(m, context) + list::COMMANDS as u32);
+        if !test_bit(m, metadata, OBEY_METADATA_COMMANDS_FINISHED_BIT) {
+            let mut command_valid = (m.r8(current) as i32) < commands;
+            m.w8(control.simple(sc::LOOP_COUNTER), 0);
+            loop {
+                if command_valid && call_simple(context, host, obey_call::COMMAND_PERFORM, 0) == 0 {
+                    break;
+                }
+                // (the C's test against NONE never holds of a byte)
+                let mut next_command_index = m.r8(current).wrapping_add(1);
+                if command_valid {
+                    next_command_index =
+                        call_simple(context, host, obey_call::COMMAND_END, next_command_index as i32) as u8;
+                }
+                if next_command_index as i32 >= commands {
+                    set_bit(m, metadata, OBEY_METADATA_COMMANDS_FINISHED_BIT);
+                    break;
+                }
+                m.w8(current, next_command_index);
+                command_valid = call_simple(context, host, obey_call::COMMAND_BEGIN, 0) != 0;
+                if test_bit(m, metadata, OBEY_METADATA_ACTION_CHANGED_BIT) {
+                    break;
+                }
+            }
+        }
+        if !test_bit(m, metadata, OBEY_METADATA_COMMANDS_FINISHED_BIT) {
+            finished = false;
+        }
+    }
+
+    let state_finished = at(a::STATE_OBEY_FINISHED);
+    if finished && !m.bool(state_finished) {
+        let list_flags = m.r32(obey_command_list(m, context) + list::FLAGS as u32);
+        if list_flags & (1 << v::_AI_COMMAND_LIST_DISABLE_FALLING_DAMAGE_BIT) == 0
+            || !m.bool(at(a::INPUT_IN_MIDAIR))
+            || m.r32(context.definition + d::FLAGS as u32) & (1 << v::_ACTOR_DEFINITION_FLYING_BIT) != 0
+        {
+            m.w32(at(a::STATE_LAST_COMMAND_LIST_TIME), context.game_time as u32);
+            m.set_bool(state_finished, true);
+        }
+    }
+    m.i16(at(a::STATE_ACTION)) == v::_ACTOR_ACTION_OBEY as i16 && m.bool(state_finished)
+}
+
+/// `action_obey_control`.
+fn obey_control(context: &AiStepContext, host: &impl AiHost) {
+    use crate::layout::{
+        obey_individual_complex_control as cc, obey_individual_directmovement_control as dm,
+        obey_individual_jump_control as jump, obey_individual_simple_control as sc,
+    };
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let control = ObeyControl::of(context);
+    let priority = at(a::ORDERS_LOOK_PRIMARY_PRIORITY);
+    let direction = at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE);
+    let idle = at(a::ORDERS_LOOK_IDLE_LOOK_TYPE);
+    let override_movement_type = m.i16(control.complex(cc::OVERRIDE_MOVEMENT_TYPE));
+    let idle_by_mode = |m: &dyn AiMemory| if m.i16(at(a::STATE_MODE)) >= 3 { 4 } else { 1 };
+    let copy = |to: u32, from: u32, words: u32| {
+        for word in 0..words {
+            m.w32(to + word * 4, m.r32(from + word * 4));
+        }
+    };
+
+    if m.bool(control.complex(cc::SHOOT_AT_TARGET)) {
+        m.set_i16(priority, 7);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_TARGET as i16);
+        m.set_i16(idle, 4);
+        m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), true);
+        m.set_bool(at(a::ORDERS_COMBAT_OVERRIDE_FIRING_RESTRICTIONS), true);
+        m.set_bool(at(a::ORDERS_COMBAT_USE_MANUAL_TARGET_POINT), true);
+        copy(at(a::ORDERS_COMBAT_TARGET_POINT), control.complex(cc::SHOOT_TARGET), 3);
+        copy(at(a::ORDERS_COMBAT_OVERRIDE_BURST_DURATION), control.complex(cc::SHOOT_BURST_LENGTH), 1);
+    } else if m.bool(control.complex(cc::DESTINATION_FACING)) && call_simple(context, host, obey_call::AT_DESTINATION, 0) != 0 {
+        let flying = m.bool(at(a::STATE_FLYING));
+        m.set_i16(priority, 4);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_POINT as i16);
+        copy(direction + 4, control.complex(cc::DESTINATION_FACING_POINT), 3);
+        if !flying {
+            m.w32(direction + 12, m.r32(at(a::INPUT_POSITION_HEAD_POSITION) + 8));
+        }
+        m.set_i16(idle, idle_by_mode(m));
+    } else if override_movement_type == v::_ACTOR_MOVEMENT_TYPE_PANIC as i16
+        || override_movement_type == v::_ACTOR_MOVEMENT_TYPE_ASLEEP as i16
+    {
+        m.set_i16(priority, 7);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_MOVEMENT as i16);
+        m.set_i16(idle, 0);
+    } else if m.i16(at(a::STATE_COMBAT_STATUS)) >= 5 && test_bit(m, control.simple(sc::METADATA_FLAGS), OBEY_METADATA_TARGETING_BIT) {
+        m.set_i16(priority, 7);
+        m.set_i16(direction, v::_DIRECTION_SPECIFICATION_TARGET as i16);
+        m.set_i16(idle, 4);
+        m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), true);
+    } else {
+        m.set_i16(priority, v::_PRIMARY_PRIORITY_NONE as i16);
+        let look = if m.bool(at(a::STATE_OBEY_ALLOW_LOOKING)) { idle_by_mode(m) } else { 0 };
+        m.set_i16(idle, look);
+    }
+
+    // flush_order_effects:
+    let depress = control.complex(cc::GRENADE_THROW_DEPRESS_TRIGGER);
+    if m.bool(depress) {
+        m.set_bool(at(a::ORDERS_COMBAT_THROW_GRENADE), true);
+        m.set_bool(depress, false);
+    }
+    let crouch = m.r8(control.complex(cc::OVERRIDE_CROUCH));
+    m.w8(at(a::ORDERS_MOVE_STATIONARY_CROUCH), crouch);
+    m.w8(at(a::ORDERS_MOVE_MOVING_CROUCH), crouch);
+    m.set_i16(at(a::ORDERS_MOVE_OVERRIDE_MOVEMENT_TYPE), m.i16(control.complex(cc::OVERRIDE_MOVEMENT_TYPE)));
+
+    let play_action = control.complex(cc::PLAY_ACTION);
+    if m.bool(play_action) && call_simple(context, host, obey_call::ANIMATION_BUSY, 0) == 0 {
+        let impulse = m.i16(control.complex(cc::ACTION_ANIMATION_IMPULSE));
+        if impulse != NONE as i16 {
+            let facing = m.vector(at(a::CONTROL_DESIRED_FACING_VECTOR));
+            let mut alignment = [facing[0], facing[1]];
+            normalize2(&mut alignment);
+            call_full(context, host, obey_call::ANIMATION_IMPULSE, impulse as i32, 0, &alignment);
+        }
+        let communication = m.i16(control.complex(cc::ACTION_COMMUNICATION_TYPE));
+        if communication != NONE as i16 {
+            call_simple(context, host, obey_call::COMMUNICATION, communication as i32);
+        }
+        m.set_bool(play_action, false);
+    }
+
+    let flags = control.simple(sc::SIMPLE_CONTROL_FLAGS);
+    let directmovement = control.simple(sc::DIRECTMOVEMENT);
+    if test_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_BIT) {
+        m.set_bool(at(a::ORDERS_MOVE_OVERRIDE_MOVEMENT_DIRECTION), true);
+        copy(at(a::ORDERS_MOVE_OVERRIDE_MOVEMENT_DIRECTION_VECTOR), directmovement + dm::VECTOR as u32, 3);
+        m.set_i16(at(a::ORDERS_MOVE_OVERRIDE_MOVEMENT_FACING), m.i16(directmovement + dm::FACING as u32));
+    }
+    if test_bit(m, flags, OBEY_SIMPLE_JUMP_BIT) {
+        let jump_control = control.simple(sc::JUMP);
+        let delay = jump_control + jump::DELAY_TICKS as u32;
+        let aim_set = if test_bit(m, flags, OBEY_SIMPLE_JUMP_JUMPED_BIT) {
+            m.i16(delay) > 0
+        } else if m.i16(delay) != 0 || m.bool(at(a::INPUT_IN_MIDAIR)) || call_simple(context, host, obey_call::UNIT_IS_BUSY, 0) != 0 {
+            true
+        } else {
+            let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+            let mut alignment = [facing[0], facing[1]];
+            if normalize2(&mut alignment) == 0.0 {
+                alignment = [1.0, 0.0];
+            }
+            let horizontal = m.f32(jump_control + jump::TARGET_HORIZONTAL_VEL as u32);
+            let vertical = m.f32(jump_control + jump::TARGET_VERTICAL_VEL as u32);
+            m.set_bool(at(a::ORDERS_MOVE_JUMP), true);
+            m.set_bool(at(a::ORDERS_MOVE_JUMP_LEAP), vertical < horizontal * 0.7);
+            m.set_bool(at(a::ORDERS_MOVE_JUMP_TARGETED), test_bit(m, flags, OBEY_SIMPLE_JUMP_TARGETED_BIT));
+            m.set_f32(at(a::ORDERS_MOVE_JUMP_ALIGNMENT_VECTOR), alignment[0]);
+            m.set_f32(at(a::ORDERS_MOVE_JUMP_ALIGNMENT_VECTOR) + 4, alignment[1]);
+            m.set_f32(at(a::ORDERS_MOVE_JUMP_TARGET_HORIZONTAL_VEL), horizontal);
+            m.set_f32(at(a::ORDERS_MOVE_JUMP_TARGET_VERTICAL_VEL), vertical);
+            set_bit(m, flags, OBEY_SIMPLE_JUMP_JUMPED_BIT);
+            if !test_bit(m, flags, OBEY_SIMPLE_JUMP_TARGETED_BIT) {
+                m.set_i16(delay, 15);
+            }
+            false
+        };
+        if aim_set {
+            m.set_bool(at(a::ORDERS_MOVE_OVERRIDE_MOVEMENT_DIRECTION), true);
+            copy(at(a::ORDERS_MOVE_OVERRIDE_MOVEMENT_DIRECTION_VECTOR), at(a::INPUT_FACING_VECTOR), 3);
+            m.set_i16(at(a::ORDERS_MOVE_OVERRIDE_MOVEMENT_FACING), 0);
+        }
     }
 }

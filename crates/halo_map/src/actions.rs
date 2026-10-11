@@ -35,6 +35,24 @@ pub fn run(action: i16, function: Function, context: &AiStepContext, host: &impl
             alert_control(context, host);
             false
         }
+        (v::_ACTOR_ACTION_SEARCH, Function::Perform) => search_perform(context, host),
+        (v::_ACTOR_ACTION_SEARCH, Function::Update) => {
+            search_update(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_SEARCH, Function::Control) => {
+            search_control(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_UNCOVER, Function::Perform) => uncover_perform(context, host),
+        (v::_ACTOR_ACTION_UNCOVER, Function::Update) => {
+            uncover_update(context, host);
+            false
+        }
+        (v::_ACTOR_ACTION_UNCOVER, Function::Control) => {
+            uncover_control(context, host);
+            false
+        }
         (v::_ACTOR_ACTION_WAIT, Function::Perform) => wait_perform(context, host),
         (v::_ACTOR_ACTION_WAIT, Function::Update) => {
             wait_update(context, host);
@@ -635,4 +653,413 @@ fn alert_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
         }
     }
     false
+}
+
+/// action_search.c's calls.
+pub mod search_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_SEARCH as i32) << 8;
+    /// `ai_communication_event(a, unit, the target's unit, NONE...)`.
+    pub const COMMUNICATION: i32 = BASE | 1;
+    /// Whether the actor's head sees the head it would have at the pursuit
+    /// location (`unit_estimate_position`, `ai_test_line_of_sight` clear),
+    /// the result.
+    pub const SEES_PURSUIT_LOCATION: i32 = BASE | 2;
+    /// `actors_searching_same_position(actor, a)`, the result.
+    pub const SEARCHING_SAME_POSITION: i32 = BASE | 3;
+    /// `encounter_mark_examined_pursuit_position(encounter, actor, a, b)`.
+    pub const MARK_EXAMINED: i32 = BASE | 4;
+    /// `actor_move_halt(actor)`.
+    pub const MOVE_HALT: i32 = BASE | 5;
+    /// `actor_move_to_prop(actor, a, 2.5)`, the result.
+    pub const MOVE_TO_PROP: i32 = BASE | 6;
+    /// `actor_move_to_firing_position(actor, a, NULL)`, the result.
+    pub const MOVE_TO_FIRING_POSITION: i32 = BASE | 7;
+}
+
+/// action_uncover.c's calls.
+pub mod uncover_call {
+    const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_UNCOVER as i32) << 8;
+    /// `actor_active_select_firing_position` for uncovering (its candidate
+    /// kept for [`CHANGE_FIRING_POSITION`]): the index the result, the
+    /// candidate's line of sight in `result2`, its path distance in `output[0]`.
+    pub const SELECT_FIRING_POSITION: i32 = BASE | 1;
+    /// `actor_destination_tolerance(actor)`, in `output[0]`.
+    pub const TOLERANCE: i32 = BASE | 2;
+    /// A debug message: the target's location can't be seen (`a` 0), or the
+    /// pursuit location was inspected (`a` 1).
+    pub const DEBUG: i32 = BASE | 3;
+    /// `actor_change_firing_position` to the selected one: the result.
+    pub const CHANGE_FIRING_POSITION: i32 = BASE | 4;
+    /// `actor_discard_firing_position(actor, a, FALSE)`.
+    pub const DISCARD_FIRING_POSITION: i32 = BASE | 5;
+    /// The uncover's done (a debug message, its reason from the actor).
+    pub const DONE: i32 = BASE | 6;
+}
+
+const PURSUIT_LOCATION_TARGET: i16 = 0;
+const PURSUIT_LOCATION_POSITION: i16 = 1;
+
+fn defensive_crouch_type(m: &dyn AiMemory, context: &AiStepContext) -> i16 {
+    m.i16(context.definition + d::DEFENSIVE as u32 + crate::layout::actor_defensive_properties::DEFENSIVE_CROUCH_TYPE as u32)
+}
+
+fn definition_flag(m: &dyn AiMemory, context: &AiStepContext, bit: usize) -> bool {
+    m.r32(context.definition + d::FLAGS as u32) & (1 << bit) != 0
+}
+
+/// `action_search_update`.
+fn search_update(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.bool(at(a::STATE_SEARCH_SEARCH_DONE)) {
+        return;
+    }
+    let pursuit_type = m.i16(at(a::STATE_SEARCH_PURSUIT_TYPE));
+    let sneaking = if defensive_crouch_type(m, context) == 4 {
+        true
+    } else {
+        definition_flag(m, context, v::_ACTOR_DEFINITION_SNEAK_UNCOVERING_TARGET_BIT)
+            && pursuit_type == 0
+            && m.i16(at(a::TARGET_TARGET_TYPE)) == 5
+            && m.i8(prop_get(m, context, m.i32(at(a::TARGET_TARGET_PROP_INDEX))) + p::QUANTIZED_DISTANCE as u32) <= 2
+    };
+    m.set_bool(at(a::STATE_SEARCH_SNEAKING), sneaking);
+
+    let remaining = at(a::STATE_SEARCH_SEARCH_REMAINING_TIME);
+    if m.bool(at(a::STATE_SEARCH_AT_DESTINATION)) {
+        if m.i32(remaining) > 0 {
+            m.w32(remaining, (m.i32(remaining) - 1) as u32);
+        }
+        if m.i32(remaining) == 0 {
+            m.set_bool(at(a::STATE_SEARCH_SEARCH_DONE), true);
+        }
+        if m.i32(at(a::META_UNIT_INDEX)) != NONE {
+            if pursuit_type == 0 {
+                let communicated = at(a::FIRING_POSITIONS_PURSUIT_COMMUNICATED_LOST_CONTACT);
+                if !m.bool(communicated)
+                    && (m.bool(at(a::STATE_SEARCH_SEARCH_DONE))
+                        || m.i32(remaining).wrapping_add(90) < m.i32(at(a::STATE_SEARCH_SEARCH_DESIRED_TIME)))
+                {
+                    call_simple(context, host, search_call::COMMUNICATION, 13);
+                    m.set_bool(communicated, true);
+                }
+            } else if m.i32(remaining) == 0 {
+                call_simple(context, host, search_call::COMMUNICATION, 18);
+            }
+        }
+    } else if !m.bool(at(a::CONTROL_MOVING)) && !m.bool(at(a::META_SWARM)) {
+        let timer = at(a::STATE_SEARCH_SEARCH_FAILURE_TIMER);
+        m.w32(timer, m.r32(timer).wrapping_add(1));
+        if m.i32(timer) > 120 {
+            m.set_bool(at(a::STATE_SEARCH_SEARCH_FAILED), true);
+            m.set_bool(at(a::STATE_SEARCH_SEARCH_DONE), true);
+        }
+    }
+}
+
+/// `action_search_control`.
+fn search_control(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let pursuit_type = m.i16(at(a::STATE_SEARCH_PURSUIT_TYPE));
+    let priority = at(a::ORDERS_LOOK_PRIMARY_PRIORITY);
+    let direction = at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE);
+    if m.bool(at(a::CONTROL_MOVING)) {
+        m.set_i16(priority, 3);
+        m.set_i16(direction, 0);
+    } else {
+        let desired = m.i32(at(a::STATE_SEARCH_SEARCH_DESIRED_TIME));
+        let minimum = (desired / 3).max(90);
+        if desired.wrapping_sub(m.i32(at(a::STATE_SEARCH_SEARCH_REMAINING_TIME))) < minimum {
+            if pursuit_type == 0 {
+                m.set_i16(priority, 3);
+                m.set_i16(direction, 2);
+            } else if pursuit_type == 1 {
+                m.set_i16(priority, 3);
+                m.set_i16(direction, 3);
+                for word in 0..3 {
+                    m.w32(direction + 4 + word * 4, m.r32(at(a::STATE_SEARCH_PURSUIT_POSITION) + word * 4));
+                }
+            } else {
+                m.set_i16(priority, 1);
+            }
+        } else {
+            m.set_i16(priority, 1);
+        }
+    }
+    m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), 3);
+    if pursuit_type == 0 {
+        let minimum_type = if definition_flag(m, context, v::_ACTOR_DEFINITION_SHOOT_AT_TARGETS_LAST_LOCATION_BIT) { 5 } else { 6 };
+        m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), m.i16(at(a::TARGET_TARGET_TYPE)) >= minimum_type);
+    }
+    let sneaking = m.r8(at(a::STATE_SEARCH_SNEAKING));
+    m.w8(at(a::ORDERS_MOVE_STATIONARY_CROUCH), sneaking);
+    m.w8(at(a::ORDERS_MOVE_MOVING_CROUCH), sneaking);
+    m.set_bool(at(a::ORDERS_MOVE_PANICKED), false);
+    m.set_bool(at(a::ORDERS_MOVE_DIVE_INTO_COVER), false);
+    m.set_bool(at(a::ORDERS_MOVE_EMERGE_FROM_COVER), true);
+}
+
+/// `action_search_perform`.
+fn search_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    use crate::ai_actor::{PropIterator, datum_get};
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let done = at(a::STATE_SEARCH_SEARCH_DONE);
+    let at_destination = at(a::STATE_SEARCH_AT_DESTINATION);
+    if m.bool(at(a::META_SWARM)) || !m.bool(at(a::META_TIMESLICE)) || m.bool(done) {
+        return m.bool(done);
+    }
+    m.set_bool(at_destination, true);
+    let pursuit_type = m.i16(at(a::STATE_SEARCH_PURSUIT_TYPE));
+    let pursuit_index = m.i16(at(a::STATE_SEARCH_PURSUIT_FIRING_POSITION_INDEX));
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    if pursuit_type == 0 && target_prop_index != NONE {
+        let prop = prop_get(m, context, target_prop_index);
+        let radius: f32 = if m.i16(prop + p::LINE_OF_SIGHT as u32) != 0 { 0.7 } else { 1.7 };
+        let reached = distance_squared(m, prop + p::BODY_POSITION as u32, at(a::INPUT_BODY_POSITION)) < radius * radius;
+        m.set_bool(at_destination, reached);
+    } else if pursuit_type == 1 && pursuit_index != NONE as i16 {
+        let distance = distance_squared(m, at(a::STATE_SEARCH_PURSUIT_POSITION), at(a::INPUT_BODY_POSITION));
+        if distance < 0.7f32 * 0.7f32 {
+            m.set_bool(at_destination, true);
+        } else if distance > 2.5f32 * 2.5f32 {
+            m.set_bool(at_destination, false);
+        } else {
+            let sees = call_simple(context, host, search_call::SEES_PURSUIT_LOCATION, 0) != 0;
+            m.set_bool(at_destination, sees);
+        }
+    }
+
+    if !m.bool(at_destination) && !m.bool(at(a::STATE_SEARCH_CHARGING)) {
+        let mut searching_actor_count: i16 = 0;
+        let mut nearby_searching_actor_count: i16 = 0;
+        let mut iterator = PropIterator::new(m, context);
+        while let Some(prop) = iterator.next(m, context) {
+            let state = m.i16(prop + p::STATE as u32);
+            let other_index = m.i32(prop + p::ACTOR_INDEX as u32);
+            if state >= v::_PROP_STATE_BECOMING_UNACKNOWLEDGED as i16
+                && state <= v::_PROP_STATE_ACKNOWLEDGED as i16
+                && !m.bool(prop + p::ENEMY as u32)
+                && !m.bool(prop + p::DEAD as u32)
+                && other_index != NONE
+                && call_simple(context, host, search_call::SEARCHING_SAME_POSITION, other_index) != 0
+            {
+                let other = datum_get(m, context.actor_data, other_index).unwrap_or(0);
+                searching_actor_count += 1;
+                if !m.bool(other + a::META_SWARM as u32)
+                    && !m.bool(other + a::CONTROL_MOVING as u32)
+                    && distance_squared(m, at(a::INPUT_BODY_POSITION), other + a::INPUT_BODY_POSITION as u32)
+                        < 0.8f32 * 0.8f32
+                {
+                    nearby_searching_actor_count += 1;
+                }
+            }
+        }
+        let needed: i16 = if pursuit_type == 1 { 2 } else { 4 };
+        if !m.bool(at(a::STATE_SEARCH_TENACIOUS)) && searching_actor_count >= needed {
+            m.set_bool(done, true);
+            let mut last_perceived_time = NONE;
+            let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+            if target_prop_index != NONE {
+                last_perceived_time = m.i32(prop_get(m, context, target_prop_index) + p::LAST_PERCEIVED_TIME as u32);
+            }
+            if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE {
+                call_full(
+                    context,
+                    host,
+                    search_call::MARK_EXAMINED,
+                    m.i16(at(a::STATE_SEARCH_PURSUIT_FIRING_POSITION_INDEX)) as i32,
+                    last_perceived_time,
+                    &[],
+                );
+            }
+        } else if nearby_searching_actor_count > 0 {
+            m.set_bool(at_destination, true);
+        }
+    }
+
+    if m.bool(at_destination) {
+        call_simple(context, host, search_call::MOVE_HALT, 0);
+    } else if pursuit_type == 0 {
+        if call_simple(context, host, search_call::MOVE_TO_PROP, m.i32(at(a::TARGET_TARGET_PROP_INDEX))) == 0 {
+            m.set_bool(done, true);
+            m.set_bool(at(a::STATE_SEARCH_SEARCH_FAILED), true);
+        }
+    } else if pursuit_type == 1 {
+        m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), NONE as i16);
+        let index = m.i16(at(a::STATE_SEARCH_PURSUIT_FIRING_POSITION_INDEX)) as i32;
+        if call_simple(context, host, search_call::MOVE_TO_FIRING_POSITION, index) == 0 {
+            m.set_bool(done, true);
+            m.set_bool(at(a::STATE_SEARCH_SEARCH_FAILED), true);
+        }
+    } else {
+        call_simple(context, host, search_call::MOVE_HALT, 0);
+    }
+    m.bool(done)
+}
+
+/// `action_uncover_perform`.
+fn uncover_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if !(m.bool(at(a::META_TIMESLICE)) && !m.bool(at(a::INPUT_VEHICLE_PASSENGER)) && !m.bool(at(a::STATE_UNCOVER_UNCOVER_DONE)))
+    {
+        return false;
+    }
+    let selected = call_full(context, host, uncover_call::SELECT_FIRING_POSITION, 0, 0, &[]);
+    if selected.result as i16 != NONE as i16 {
+        let line_of_sight = selected.result2 as i16;
+        if m.i16(at(a::STATE_UNCOVER_PURSUIT_TYPE)) == PURSUIT_LOCATION_TARGET {
+            if line_of_sight != v::_AI_LINE_OF_SIGHT_CLEAR as i16 && line_of_sight != v::_AI_LINE_OF_SIGHT_OCCLUDED as i16 {
+                if !m.bool(at(a::STATE_UNCOVER_NO_TARGET_SIGHT_AVAILABLE)) {
+                    call_simple(context, host, uncover_call::DEBUG, 0);
+                }
+                m.set_bool(at(a::STATE_UNCOVER_NO_TARGET_SIGHT_AVAILABLE), true);
+            }
+        } else if line_of_sight == v::_AI_LINE_OF_SIGHT_CLEAR as i16
+            && call_full(context, host, uncover_call::TOLERANCE, 0, 0, &[]).output[0] > selected.output[0]
+        {
+            if !m.bool(at(a::STATE_UNCOVER_PURSUIT_LOCATION_INSPECTED)) {
+                call_simple(context, host, uncover_call::DEBUG, 1);
+            }
+            m.set_bool(at(a::STATE_UNCOVER_PURSUIT_LOCATION_INSPECTED), true);
+        }
+    }
+    if call_simple(context, host, uncover_call::CHANGE_FIRING_POSITION, 0) as i16 == NONE as i16 {
+        m.set_bool(at(a::STATE_UNCOVER_UNCOVER_EXIT_FAILURE), true);
+    }
+    false
+}
+
+/// `action_uncover_control`.
+fn uncover_control(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let pursuit_type = m.i16(at(a::STATE_UNCOVER_PURSUIT_TYPE));
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    if target_prop_index != NONE {
+        let prop = prop_get(m, context, target_prop_index);
+        let mut force_shoot = false;
+        let target_type = m.i16(at(a::TARGET_TARGET_TYPE));
+        if pursuit_type == PURSUIT_LOCATION_TARGET {
+            if m.bool(at(a::INPUT_VEHICLE_GUNNER_BOMBARDMENT)) {
+                m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), true);
+                m.set_bool(at(a::ORDERS_COMBAT_BOMBARD_TARGET), true);
+                force_shoot = true;
+            } else {
+                let minimum_type =
+                    if definition_flag(m, context, v::_ACTOR_DEFINITION_SHOOT_AT_TARGETS_LAST_LOCATION_BIT) { 5 } else { 6 };
+                m.set_bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET), target_type >= minimum_type);
+            }
+        }
+        let line_of_sight = m.i16(prop + p::LINE_OF_SIGHT as u32);
+        let priority = if (m.bool(at(a::ORDERS_COMBAT_SHOOT_AT_TARGET))
+            && (line_of_sight == v::_AI_LINE_OF_SIGHT_CLEAR as i16 || line_of_sight == v::_AI_LINE_OF_SIGHT_OCCLUDED as i16))
+            || force_shoot
+        {
+            7
+        } else if target_type < 5 {
+            3
+        } else if line_of_sight != v::_AI_LINE_OF_SIGHT_FROM_COVER as i16 && line_of_sight != v::_AI_LINE_OF_SIGHT_OBSTRUCTED as i16 {
+            5
+        } else {
+            2
+        };
+        m.set_i16(at(a::ORDERS_LOOK_PRIMARY_PRIORITY), priority);
+        let direction = at(a::ORDERS_LOOK_PRIMARY_DIRECTION_TYPE);
+        if pursuit_type == PURSUIT_LOCATION_TARGET {
+            m.set_i16(direction, 2);
+        } else if pursuit_type == PURSUIT_LOCATION_POSITION {
+            m.set_i16(direction, 3);
+            for word in 0..3 {
+                m.w32(direction + 4 + word * 4, m.r32(at(a::STATE_UNCOVER_PURSUIT_POSITION) + word * 4));
+            }
+        }
+    }
+    m.set_i16(at(a::ORDERS_LOOK_IDLE_LOOK_TYPE), 3);
+    let sneaking = m.r8(at(a::STATE_UNCOVER_SNEAKING));
+    m.w8(at(a::ORDERS_MOVE_STATIONARY_CROUCH), sneaking);
+    m.w8(at(a::ORDERS_MOVE_MOVING_CROUCH), sneaking);
+    m.set_bool(at(a::ORDERS_MOVE_PANICKED), false);
+    m.set_bool(at(a::ORDERS_MOVE_DIVE_INTO_COVER), false);
+    m.set_bool(at(a::ORDERS_MOVE_EMERGE_FROM_COVER), true);
+}
+
+/// `action_uncover_update`.
+fn uncover_update(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.bool(at(a::STATE_UNCOVER_UNCOVER_DONE)) {
+        return;
+    }
+    let pursuit_type = m.i16(at(a::STATE_UNCOVER_PURSUIT_TYPE));
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    let target_type = m.i16(at(a::TARGET_TARGET_TYPE));
+    let mut done;
+    let mut target_visible = false;
+    let sneaking = at(a::STATE_UNCOVER_SNEAKING);
+    m.set_bool(sneaking, false);
+    if pursuit_type == PURSUIT_LOCATION_TARGET {
+        if defensive_crouch_type(m, context) == 4 {
+            m.set_bool(sneaking, target_type != 6);
+        } else if definition_flag(m, context, v::_ACTOR_DEFINITION_SNEAK_UNCOVERING_TARGET_BIT)
+            && target_type == 5
+            && m.i8(prop_get(m, context, target_prop_index) + p::QUANTIZED_DISTANCE as u32) <= 2
+        {
+            m.set_bool(sneaking, true);
+        }
+    } else if pursuit_type == PURSUIT_LOCATION_POSITION
+        && (defensive_crouch_type(m, context) == 4
+            || (definition_flag(m, context, v::_ACTOR_DEFINITION_SNEAK_UNCOVERING_PURSUIT_POSITION_BIT)
+                && distance_squared(m, at(a::INPUT_BODY_POSITION), at(a::STATE_UNCOVER_PURSUIT_POSITION)) < 100.0))
+    {
+        m.set_bool(sneaking, true);
+    }
+
+    let hold_timer = at(a::STATE_UNCOVER_CURRENT_POSITION_HOLD_TIMER);
+    if m.bool(at(a::CONTROL_MOVING)) {
+        m.w32(hold_timer, 0);
+    } else {
+        m.w32(hold_timer, m.r32(hold_timer).wrapping_add(1));
+        if pursuit_type == PURSUIT_LOCATION_TARGET && m.i32(hold_timer) >= 30 {
+            let index = m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX)) as i32;
+            call_simple(context, host, uncover_call::DISCARD_FIRING_POSITION, index);
+        }
+    }
+
+    if pursuit_type == PURSUIT_LOCATION_TARGET {
+        done = true;
+        if target_prop_index != NONE {
+            target_visible = m.i16(prop_get(m, context, target_prop_index) + p::VISIBILITY as u32) > 0;
+            done = !(target_visible && target_type < 5);
+        }
+    } else {
+        done = !m.bool(at(a::STATE_UNCOVER_PURSUIT_LOCATION_INSPECTED));
+    }
+
+    let remaining = at(a::STATE_UNCOVER_UNCOVER_REMAINING_TIME);
+    let persistent = at(a::STATE_UNCOVER_UNCOVER_EXIT_PERSISTENT_TIMER);
+    let reset = if m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX)) == NONE as i16 {
+        m.set_bool(at(a::STATE_UNCOVER_UNCOVER_EXIT_FAILURE), true);
+        false
+    } else {
+        done && (m.bool(at(a::INPUT_VEHICLE_GUNNER_BOMBARDMENT)) || target_visible || m.bool(at(a::CONTROL_MOVING)))
+    };
+    if reset {
+        m.w32(remaining, m.r32(at(a::STATE_UNCOVER_UNCOVER_DESIRED_TIME)));
+    } else {
+        if m.i32(remaining) > 0 {
+            m.w32(remaining, (m.i32(remaining) - 1) as u32);
+        }
+        m.w32(persistent, m.r32(persistent).wrapping_add(1));
+    }
+    done = !(m.i32(remaining) != 0 && m.i32(persistent) < 360);
+    if pursuit_type == PURSUIT_LOCATION_POSITION && m.bool(at(a::STATE_UNCOVER_PURSUIT_LOCATION_INSPECTED)) {
+        done = true;
+    }
+    if done {
+        call_simple(context, host, uncover_call::DONE, 0);
+    }
+    m.set_bool(at(a::STATE_UNCOVER_UNCOVER_DONE), done);
 }

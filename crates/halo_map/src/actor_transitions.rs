@@ -9,7 +9,7 @@
 
 use crate::actions::dot;
 use crate::actor_types::{call as handler, pursuit_settings};
-use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE, prop_get};
+use crate::ai_actor::{AiCall, AiHost, AiMemoryExt, AiStepContext, NONE, PropIterator, prop_get};
 use crate::layout::{actor_datum as a, actor_definition as d, actor_variant_definition as var, ai_values as v, prop_datum as p};
 
 /// What the handlers ask (halo_sim.h's `_actions_port_handler_call_*`).
@@ -133,6 +133,14 @@ pub mod call {
     pub const GUARD_POSTCOMBAT: i32 = BASE | 47;
     /// `action_guard_setup_find_position(actor, a)` and the change to guard.
     pub const GUARD_FIND_POSITION: i32 = BASE | 48;
+    /// `actor_action_allow_cover_seeking(actor, a)`, the result.
+    pub const ALLOW_COVER_SEEKING: i32 = BASE | 49;
+    /// `unit_try_and_exit_seat` of the actor's unit, the result.
+    pub const EXIT_SEAT: i32 = BASE | 50;
+    /// `actor_action_consider_grenade(actor)`, the result.
+    pub const CONSIDER_GRENADE: i32 = BASE | 51;
+    /// `actor_action_try_to_evade(actor)`, the result.
+    pub const TRY_TO_EVADE: i32 = BASE | 52;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -231,6 +239,9 @@ pub fn run(kind: i32, a: i32, b: i32, c: i32, context: &AiStepContext, host: &im
         handler::BERSERK_TRANSITION => handle_berserk_transition(context, host, a as i16),
         handler::COMBAT_TRANSITION => handle_combat_transition(context, host),
         handler::EXIT_PURSUIT => handle_exit_pursuit(context, host),
+        handler::ACTIVE_COVER_SEEKING => handle_active_cover_seeking(context, host, a != 0, b != 0),
+        handler::VEHICLE_EXIT => handle_vehicle_exit(context, host),
+        handler::EVASION => handle_evasion(context, host),
         _ => return None,
     })
 }
@@ -1359,4 +1370,265 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
     }
 
     handled
+}
+
+/// The actor's debug record's cover-seeking fields (ai_debug.h's
+/// `actor_debug_info` `field_B8` to `field_C0`).
+const DEBUG_COVER_SEEKING: u32 = 0xB8;
+const DEBUG_COVER_SEEKING_STAGE: u32 = 0xBA;
+const DEBUG_COVER_SEEKING_HIDDEN_TICKS: u32 = 0xBC;
+const DEBUG_COVER_SEEKING_SHIELD: u32 = 0xC0;
+
+/// actions.c's grenade stimulus of seeking cover
+/// (`_actor_grenade_stimulus_seek_cover`).
+const GRENADE_STIMULUS_SEEK_COVER: i16 = 2;
+
+/// `actor_action_handle_active_cover_seeking`: on its timeslice, a pursuing
+/// or fighting actor (not berserk) whose shield is down to its fraction to
+/// hide seeks cover (at most once a second), or (when allowed) flees to
+/// defensive cover. Its debug record notes how far it got.
+pub fn handle_active_cover_seeking(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    allow_defensive_cover: bool,
+    force_flee_transition: bool,
+) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let debug = |offset: u32| context.debug_info + offset;
+    let stage = |value: i16| m.set_i16(debug(DEBUG_COVER_SEEKING_STAGE), value);
+
+    if !m.bool(at(a::META_TIMESLICE)) {
+        return false;
+    }
+    m.set_bool(debug(DEBUG_COVER_SEEKING), true);
+    stage(4);
+    let last_visible_time = m.i32(at(a::TARGET_TARGET_LAST_VISIBLE_TIME));
+    let target_hidden_ticks =
+        if last_visible_time == NONE { 1000 } else { context.game_time.wrapping_sub(last_visible_time) };
+    m.set_i16(debug(DEBUG_COVER_SEEKING_HIDDEN_TICKS), target_hidden_ticks as i16);
+    let shield_vitality = m.f32(at(a::INPUT_SHIELD_VITALITY));
+    m.set_f32(debug(DEBUG_COVER_SEEKING_SHIELD), shield_vitality);
+
+    if shield_vitality > m.f32(context.definition + d::DEFENSIVE_SHIELD_FRACTION_HIDE as u32) {
+        return false;
+    }
+    let action_class = ACTION_CLASSES[m.i16(at(a::STATE_ACTION)) as usize];
+    stage(0);
+    if m.bool(at(a::EMOTIONS_BERSERK)) || !(action_class == 4 || action_class == 3) {
+        return false;
+    }
+    stage(1);
+    if m.i16(at(a::STATE_COMBAT_STATUS)) < 2 {
+        return false;
+    }
+    let current_time = context.game_time;
+    stage(2);
+    let last_seeking_time = m.i32(at(a::EMOTIONS_LAST_ACTIVE_COVER_SEEKING_TIME));
+    if !(last_seeking_time == NONE || current_time >= last_seeking_time.wrapping_add(30)) {
+        return false;
+    }
+    stage(3);
+    m.w32(at(a::EMOTIONS_LAST_ACTIVE_COVER_SEEKING_TIME), current_time as u32);
+    if call_simple(context, host, call::ALLOW_COVER_SEEKING, 0) == 0 {
+        return false;
+    }
+    stage(5);
+    if call_full(context, host, call::TRY_TO_SEEK_COVER, 1, 0, &[]).result != 0 {
+        stage(6);
+        return true;
+    }
+    if allow_defensive_cover
+        && call_full(
+            context,
+            host,
+            call::TRY_TO_PANIC,
+            4,
+            m.i32(at(a::TARGET_TARGET_PROP_INDEX)),
+            &[force_flee_transition as i32 as f32],
+        )
+        .result
+            != 0
+    {
+        stage(7);
+        return true;
+    }
+    false
+}
+
+/// `actor_action_handle_vehicle_exit`: an actor gets out of a vehicle an
+/// enemy player's in (or one it's evicted from, or as a passenger with a
+/// grenade stuck to it or under it), and ignores the vehicle for six
+/// seconds.
+pub fn handle_vehicle_exit(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut exited = false;
+    let vehicle_index = m.i32(at(a::INPUT_VEHICLE_INDEX));
+    if vehicle_index != NONE {
+        let mut want_exit = false;
+        let mut forced_exit = false;
+        let mut iterator = PropIterator::new(m, context);
+        while let Some(prop) = iterator.next(m, context) {
+            let state = m.i16(prop + p::STATE as u32);
+            if state >= v::_PROP_STATE_BECOMING_UNACKNOWLEDGED as i16
+                && state <= v::_PROP_STATE_ACKNOWLEDGED as i16
+                && m.bool(prop + p::PLAYER as u32)
+                && m.bool(prop + p::ENEMY as u32)
+                && m.i32(prop + p::VEHICLE_INDEX as u32) == vehicle_index
+            {
+                want_exit = true;
+                forced_exit = true;
+                break;
+            }
+        }
+        if m.bool(at(a::STIMULI_VEHICLE_EVICTION)) {
+            want_exit = true;
+        }
+        if m.bool(at(a::INPUT_VEHICLE_PASSENGER))
+            && (m.i32(at(a::INPUT_DELAYED_ATTACHED_PROJECTILE_INDEX)) != NONE
+                || (m.i16(at(a::DANGER_ZONE_DANGER_TYPE)) == v::_ACTOR_DANGER_ZONE_PROJECTILE as i16
+                    && m.bool(at(a::DANGER_ZONE_ATTACHED_TO_US))))
+        {
+            want_exit = true;
+            forced_exit = true;
+        }
+        if want_exit {
+            m.set_bool(at(a::EMOTIONS_LAST_VEHICLE_EXIT_FORCED), forced_exit);
+            if call_simple(context, host, call::EXIT_SEAT, 0) != 0 {
+                m.w32(at(a::EMOTIONS_VEHICLE_IGNORE_INDEX), m.r32(at(a::INPUT_VEHICLE_INDEX)));
+                m.w32(at(a::EMOTIONS_VEHICLE_IGNORE_TIME), context.game_time.wrapping_add(180) as u32);
+                exited = true;
+            }
+            m.set_bool(at(a::EMOTIONS_LAST_VEHICLE_EXIT_FORCED), false);
+        }
+    }
+    m.set_bool(at(a::STIMULI_VEHICLE_EVICTION), false);
+    exited
+}
+
+/// `actor_action_handle_evasion`: an actor retreating from an unopposable
+/// enemy it can see seeks cover or panics (at most once a second); one in
+/// more danger than it stands (less when defending, at most 1.1 when
+/// playfighting with cover to seek) throws a grenade, seeks cover by chance
+/// (shouting so), or evades.
+pub fn handle_evasion(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = |offset: usize| m.f32(context.definition + offset as u32);
+    let definition_flag = |bit: usize| m.r32(context.definition + d::FLAGS as u32) & (1 << bit) != 0;
+    let current_time = context.game_time;
+    let last_cover_seeking_elapsed = || {
+        let time = m.i32(at(a::EMOTIONS_LAST_DEFENSIVE_COVER_SEEKING_TIME));
+        time == NONE || time.wrapping_add(30) <= current_time
+    };
+    let mut result = false;
+
+    if m.i16(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_TIMER)) > 0 && m.i32(at(a::INPUT_VEHICLE_INDEX)) == NONE {
+        let retreat_prop_index = m.i32(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_PROP_INDEX));
+        let prop = prop_get(m, context, retreat_prop_index);
+        let line_of_sight = m.i16(prop + p::LINE_OF_SIGHT as u32);
+        if m.bool(prop + p::UNOPPOSABLE_ENEMY as u32)
+            && (line_of_sight == v::_AI_LINE_OF_SIGHT_CLEAR as i16 || line_of_sight == v::_AI_LINE_OF_SIGHT_OCCLUDED as i16)
+            && last_cover_seeking_elapsed()
+        {
+            m.w32(at(a::EMOTIONS_LAST_DEFENSIVE_COVER_SEEKING_TIME), current_time as u32);
+            if call_simple(context, host, call::ALLOW_COVER_SEEKING, 1) != 0 {
+                if call_full(context, host, call::TRY_TO_SEEK_COVER, 0, 1, &[]).result != 0 {
+                    result = true;
+                } else if definition_flag(v::_ACTOR_DEFINITION_PANICKED_BY_UNOPPOSABLE_ENEMY_BIT)
+                    && call_full(
+                        context,
+                        host,
+                        call::TRY_TO_PANIC,
+                        5,
+                        m.i32(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_PROP_INDEX)),
+                        &[0.0],
+                    )
+                    .result
+                        != 0
+                {
+                    result = true;
+                }
+            }
+        }
+    }
+
+    if !result {
+        let mut dive_threshold = if !m.bool(at(a::EMOTIONS_CURRENTLY_DEFENDING)) || m.bool(at(a::EMOTIONS_BERSERK)) {
+            definition(d::DEFENSIVE_EVASION_DANGER_THRESHOLD_ATTACKING)
+        } else {
+            definition(d::DEFENSIVE_EVASION_DANGER_THRESHOLD_DEFENDING)
+        };
+        if m.bool(at(a::EXTERNAL_ORDERS_PLAYFIGHTING))
+            && definition(d::DEFENSIVE_EVASION_SEEK_COVER_CHANCE) > 0.0
+            && dive_threshold > 1.1
+        {
+            dive_threshold = 1.1;
+        }
+
+        if m.f32(at(a::EMOTIONS_PERCEIVED_DANGER)) > dive_threshold {
+            if !m.bool(at(a::CONTROL_MOVING)) {
+                call_full(context, host, call::RANDOM, 0, 0, &[]);
+            }
+            if m.i16(context.variant_definition + var::GRENADE_COMBAT_STIMULUS_TYPE as u32) == GRENADE_STIMULUS_SEEK_COVER
+                && call_simple(context, host, call::CONSIDER_GRENADE, 0) != 0
+            {
+                m.set_f32(at(a::EMOTIONS_PERCEIVED_DANGER), 0.0);
+                result = true;
+            }
+
+            let mut prop_dangerous = true;
+            let mut not_fleeing = true;
+            if m.bool(at(a::EMOTIONS_DEFENSIVE_CROUCH)) && definition_flag(v::_ACTOR_DEFINITION_CROUCH_TRY_NOT_TO_MOVE_BIT) {
+                prop_dangerous = false;
+                let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+                if target_prop_index != NONE {
+                    let prop = prop_get(m, context, target_prop_index);
+                    if m.i8(prop + p::QUANTIZED_FACING as u32) <= 2 && m.i8(prop + p::QUANTIZED_DISTANCE as u32) <= 1 {
+                        prop_dangerous = true;
+                    }
+                }
+            }
+            let goal = m.i16(at(a::STATE_CHARGE_GOAL));
+            if m.i16(at(a::STATE_ACTION)) == ACTION_CHARGE
+                && (goal == v::_CHARGE_GOAL_MELEE as i16 || goal == v::_CHARGE_GOAL_MELEE_LEAPING as i16)
+            {
+                not_fleeing = false;
+            }
+
+            if !result && prop_dangerous && last_cover_seeking_elapsed() {
+                m.w32(at(a::EMOTIONS_LAST_DEFENSIVE_COVER_SEEKING_TIME), current_time as u32);
+                if call_simple(context, host, call::ALLOW_COVER_SEEKING, 0) != 0
+                    && call_full(context, host, call::RANDOM, 0, 0, &[]).output[0]
+                        < definition(d::DEFENSIVE_EVASION_SEEK_COVER_CHANCE)
+                    && call_full(context, host, call::TRY_TO_SEEK_COVER, 0, 1, &[]).result != 0
+                {
+                    let target_unit_index = call_simple(context, host, call::TARGET_UNIT, 0);
+                    call_full(
+                        context,
+                        host,
+                        call::COMMUNICATION,
+                        v::_AI_COMMUNICATION_COVER as i32,
+                        target_unit_index,
+                        &[NONE as f32],
+                    );
+                    m.set_f32(at(a::EMOTIONS_PERCEIVED_DANGER), 0.0);
+                    result = true;
+                }
+            }
+
+            if !result
+                && not_fleeing
+                && m.i16(at(a::EMOTIONS_EVASION_DELAY_TIMER)) == 0
+                && call_simple(context, host, call::TRY_TO_EVADE, 0) != 0
+            {
+                m.set_f32(at(a::EMOTIONS_PERCEIVED_DANGER), 0.0);
+                m.set_i16(at(a::EMOTIONS_EVASION_DELAY_TIMER), c_short(definition(d::DEFENSIVE_EVASION_DELAY_TIMER) * 30.0));
+                m.set_bool(at(a::FIRING_POSITIONS_MOVED_AWAY_FROM_FIRING_POSITION), true);
+                result = true;
+            }
+        }
+    }
+    result
 }

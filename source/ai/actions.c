@@ -1085,6 +1085,186 @@ boolean actor_action_set_default_state(
 	return changed;
 }
 
+/* port: what the transition handlers ask of the rest of the game, shared by
+the game's and the Rust port's (crates/halo_map's actor_transitions); in check
+mode each is recorded */
+void actions_port_handler_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _actions_port_handler_call_set_default_state:
+			call->result = actor_action_set_default_state(actor_index, NONE) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_obey_command_list:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_obey_command_list_setup(actor_index, (short)call->a, &state.obey))
+			{
+				actor_action_change(actor_index, _actor_action_obey, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_flee_always:
+			call->result = game_connection() == _game_connection_local && ai_debug.flee_always;
+			break;
+
+		case _actions_port_handler_call_recent_damaging_prop:
+			call->result = actor_perception_find_recent_damaging_prop_index(actor_index, TRUE);
+			break;
+
+		case _actions_port_handler_call_attached_projectile_prop:
+		{
+			struct object_datum *attached_projectile =
+				object_try_and_get(actor->input.delayed_attached_projectile_index);
+
+			call->result = NONE;
+			if (attached_projectile)
+			{
+				long responsible_unit_index = ai_get_responsible_unit(
+					attached_projectile->object.owner_object_index,
+					TRUE);
+
+				if (responsible_unit_index != NONE)
+					call->result = prop_get_active_by_unit_index(actor_index, responsible_unit_index);
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_burning_prop:
+		{
+			struct unit_datum *unit = unit_get(actor->meta.unit_index);
+			long responsible_unit_index = ai_get_responsible_unit(
+				unit->unit.flaming_death_attacker_object_index,
+				TRUE);
+
+			call->result = NONE;
+			if (responsible_unit_index != NONE)
+				call->result = prop_get_active_by_unit_index(actor_index, responsible_unit_index);
+			break;
+		}
+
+		case _actions_port_handler_call_squad_delayed:
+		{
+			struct encounter_datum *encounter = encounter_get(actor->meta.encounter_index);
+			struct squad_datum *squad = encounter_get_squad(encounter, actor->meta.squad_index);
+
+			call->result = squad->delay_timer > 0;
+			break;
+		}
+
+		case _actions_port_handler_call_squad_timer_expire:
+			encounter_squad_timer_expire(actor->meta.encounter_index, actor->meta.squad_index);
+			break;
+
+		case _actions_port_handler_call_conversation_flags:
+		{
+			struct conversation_datum *conversation = ai_conversation_header_get(call->a);
+			struct ai_conversation *definition = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_conversations,
+				conversation->scenario_conversation_index,
+				struct ai_conversation);
+
+			call->result = (word)definition->flags;
+			break;
+		}
+
+		case _actions_port_handler_call_animation_impulse:
+			actor_move_animation_impulse(actor_index, (short)call->a, (real_vector2d *)call->input);
+			break;
+
+		case _actions_port_handler_call_communication:
+			ai_communication_event(
+				(short)call->a,
+				actor->meta.unit_index,
+				call->b,
+				(long)call->input[0],
+				NONE,
+				NONE,
+				NULL);
+			break;
+
+		case _actions_port_handler_call_fire_wildly:
+			actor_combat_fire_wildly(actor_index, call->a);
+			break;
+
+		case _actions_port_handler_call_disable_bursts:
+			actor_combat_disable_bursts(actor_index, call->a);
+			break;
+
+		case _actions_port_handler_call_was_surprised:
+			actor_stimulus_was_surprised(actor_index);
+			break;
+
+		case _actions_port_handler_call_try_new_target:
+			actor_situation_try_new_target(actor_index, call->a);
+			break;
+
+		case _actions_port_handler_call_firing_variant:
+			call->result = (long)actor_combat_get_firing_variant_definition(actor_index);
+			break;
+
+		case _actions_port_handler_call_random:
+			call->output[0] = real_seed_random(get_global_random_seed_address());
+			break;
+
+		case _actions_port_handler_call_try_to_panic:
+			call->result = actor_action_try_to_panic(
+				actor_index,
+				(short)call->a,
+				call->b,
+				(boolean)call->input[0]) ? 1 : 0;
+			break;
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static long actions_port_handler(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real const *input,
+	short input_count,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	if (input)
+		memcpy(call.input, input, input_count * sizeof(real));
+	actions_port_handler_call(&call);
+	if (output)
+		memcpy(output, call.output, sizeof(call.output));
+
+	return call.result;
+}
+
+static long actions_port_handler_simple(
+	long actor_index,
+	long kind,
+	long a)
+{
+	return actions_port_handler(actor_index, kind, a, 0, NULL, 0, NULL);
+}
+
+/* port: the handlers below ask through actions_port_handler_call, as the
+Rust port's do (crates/halo_map's actor_transitions) */
 boolean actor_action_handle_initial_action(
 	long actor_index)
 {
@@ -1092,7 +1272,7 @@ boolean actor_action_handle_initial_action(
 	boolean result = FALSE;
 
 	if (actor->state.action == _actor_action_none && actor->state.mode != 0)
-		result = actor_action_set_default_state(actor_index, NONE);
+		result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_set_default_state, 0);
 
 	return result;
 }
@@ -1100,7 +1280,6 @@ boolean actor_action_handle_initial_action(
 boolean actor_action_handle_pending_command_list(
 	long actor_index)
 {
-	struct action_state_data state;
 	struct actor_datum *actor = actor_get(actor_index);
 	boolean entered_obey = FALSE;
 
@@ -1116,12 +1295,9 @@ boolean actor_action_handle_pending_command_list(
 
 		if (!blocked)
 		{
-			if (action_obey_command_list_setup(
-				actor_index,
-				actor->state.command_list_index,
-				&state.obey))
+			if (actions_port_handler_simple(actor_index, _actions_port_handler_call_obey_command_list,
+				actor->state.command_list_index))
 			{
-				actor_action_change(actor_index, _actor_action_obey, &state);
 				entered_obey = TRUE;
 			}
 
@@ -1194,18 +1370,17 @@ boolean actor_action_handle_panic_from_damage(
 	boolean result = FALSE;
 
 	if (actor->stimuli.was_damaged &&
-		((game_connection() == _game_connection_local &&
-			ai_debug.flee_always) ||
+		(actions_port_handler_simple(actor_index, _actions_port_handler_call_flee_always, 0) ||
 			actor->input.recent_body_damage >
 				definition->panic.panic_damage_threshold))
 	{
 		if (actor->stimuli.panic_type == _actor_panic_none ||
 			actor->stimuli.panic_prop_index == NONE)
 		{
-			actor->stimuli.panic_prop_index =
-				actor_perception_find_recent_damaging_prop_index(
-					actor_index,
-					TRUE);
+			actor->stimuli.panic_prop_index = actions_port_handler_simple(
+				actor_index,
+				_actions_port_handler_call_recent_damaging_prop,
+				0);
 		}
 
 		actor->stimuli.panic_type = MAX(
@@ -1232,23 +1407,10 @@ boolean actor_action_handle_panic_from_attached_projectiles(
 
 	if (actor->input.delayed_attached_projectile_index != NONE)
 	{
-		struct object_datum *attached_projectile =
-			object_try_and_get(actor->input.delayed_attached_projectile_index);
-		long panic_prop_index = NONE;
-
-		if (attached_projectile)
-		{
-			long responsible_unit_index = ai_get_responsible_unit(
-				attached_projectile->object.owner_object_index,
-				TRUE);
-
-			if (responsible_unit_index != NONE)
-			{
-				panic_prop_index = prop_get_active_by_unit_index(
-					actor_index,
-					responsible_unit_index);
-			}
-		}
+		long panic_prop_index = actions_port_handler_simple(
+			actor_index,
+			_actions_port_handler_call_attached_projectile_prop,
+			0);
 
 		if (actor->stimuli.panic_type == _actor_panic_none ||
 			actor->stimuli.panic_prop_index == NONE)
@@ -1277,17 +1439,10 @@ boolean actor_action_handle_panic_from_burning_to_death(
 
 		if (actor->meta.unit_index != NONE)
 		{
-			struct unit_datum *unit = unit_get(actor->meta.unit_index);
-			long responsible_unit_index = ai_get_responsible_unit(
-				unit->unit.flaming_death_attacker_object_index,
-				TRUE);
-
-			if (responsible_unit_index != NONE)
-			{
-				panic_prop_index = prop_get_active_by_unit_index(
-					actor_index,
-					responsible_unit_index);
-			}
+			panic_prop_index = actions_port_handler_simple(
+				actor_index,
+				_actions_port_handler_call_burning_prop,
+				0);
 		}
 
 		if (actor->stimuli.panic_type == _actor_panic_none ||
@@ -1395,19 +1550,11 @@ boolean actor_action_deny_transition(
 
 	if (actor->meta.encounter_index != NONE)
 	{
-		struct encounter_datum *encounter =
-			encounter_get(actor->meta.encounter_index);
-		struct squad_datum *squad = encounter_get_squad(
-			encounter,
-			actor->meta.squad_index);
-
-		if (squad->delay_timer > 0)
+		if (actions_port_handler_simple(actor_index, _actions_port_handler_call_squad_delayed, 0))
 		{
 			if (actor->state.combat_status >= 5)
 			{
-				encounter_squad_timer_expire(
-					actor->meta.encounter_index,
-					actor->meta.squad_index);
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_squad_timer_expire, 0);
 			}
 			else
 			{
@@ -1554,16 +1701,10 @@ boolean actor_action_can_stop_conversing(
 
 	if (conversation_index != NONE)
 	{
-		word flags;
-		struct conversation_datum *conversation =
-			ai_conversation_header_get(conversation_index);
-		struct ai_conversation *definition =
-			TAG_BLOCK_GET_ELEMENT(
-				&global_scenario_get()->ai_conversations,
-				conversation->scenario_conversation_index,
-				struct ai_conversation);
-
-		flags = definition->flags;
+		word flags = (word)actions_port_handler_simple(
+			actor_index,
+			_actions_port_handler_call_conversation_flags,
+			conversation_index);
 
 		if (TEST_FLAG(flags, _ai_conversation_stop_if_damaged_bit) &&
 			actor->situation.specific_threats[8])
@@ -1663,11 +1804,13 @@ boolean actor_action_handle_surprise(
 			animation = _actor_animation_surprise_front;
 		}
 
-		actor_move_animation_impulse(actor_index, animation, &direction);
+		actions_port_handler(actor_index, _actions_port_handler_call_animation_impulse,
+			animation, 0, (real const *)&direction, 2, NULL);
 
 		{
 			long unit_index = NONE;
 			long weapon_state = 0;
+			real weapon_state_input;
 
 			if (actor->stimuli.surprise_prop_index != NONE)
 			{
@@ -1677,38 +1820,36 @@ boolean actor_action_handle_surprise(
 				weapon_state = (prop->enemy != FALSE) + 2;
 			}
 
-			ai_communication_event(
-				_ai_communication_surprise,
-				actor->meta.unit_index,
-				unit_index,
-				weapon_state,
-				NONE,
-				NONE,
-				NULL);
+			weapon_state_input = (real)weapon_state;
+			actions_port_handler(actor_index, _actions_port_handler_call_communication,
+				_ai_communication_surprise, unit_index, &weapon_state_input, 1, NULL);
 		}
 
 		if (variant_definition->ranged_combat.surprise_wildfire_time > 0.0f)
 		{
-			actor_combat_fire_wildly(
+			actions_port_handler_simple(
 				actor_index,
+				_actions_port_handler_call_fire_wildly,
 				(long)(variant_definition->ranged_combat.surprise_wildfire_time *
 					TICKS_PER_SECOND));
 		}
 
 		if (variant_definition->ranged_combat.surprise_delay_time > 0.0f)
 		{
-			actor_combat_disable_bursts(
+			actions_port_handler_simple(
 				actor_index,
+				_actions_port_handler_call_disable_bursts,
 				(long)(variant_definition->ranged_combat.surprise_delay_time *
 					TICKS_PER_SECOND));
 		}
 
-		actor_stimulus_was_surprised(actor_index);
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_was_surprised, 0);
 
 		if (actor->stimuli.surprise_prop_index != NONE)
 		{
-			actor_situation_try_new_target(
+			actions_port_handler_simple(
 				actor_index,
+				_actions_port_handler_call_try_new_target,
 				actor->stimuli.surprise_prop_index);
 		}
 
@@ -1725,14 +1866,15 @@ boolean actor_action_handle_berserking_from_attached_projectiles(
 	struct actor_datum *actor = actor_get(actor_index);
 	struct actor_definition *definition =
 		actor_definition_get(actor->meta.definition_index);
-	struct actor_variant_definition *firing_variant =
-		actor_combat_get_firing_variant_definition(actor_index);
+	struct actor_variant_definition *firing_variant = (struct actor_variant_definition *)
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_firing_variant, 0);
 	boolean result = FALSE;
 
 	if (actor->input.delayed_attached_projectile_index != NONE &&
 		actor->state.combat_status >= 5)
 	{
 		struct prop_datum *prop = prop_get(actor->target.target_prop_index);
+		real random[6];
 
 		match_assert(
 			"c:\\halo\\SOURCE\\ai\\actions.c",
@@ -1741,8 +1883,8 @@ boolean actor_action_handle_berserking_from_attached_projectiles(
 
 		if (prop->distance <
 				firing_variant->ranged_combat.berserk_firing_range_upper_bound &&
-			real_seed_random(get_global_random_seed_address()) <
-				definition->berserk.grenade_attached_chance)
+			(actions_port_handler(actor_index, _actions_port_handler_call_random, 0, 0, NULL, 0, random),
+				random[0] < definition->berserk.grenade_attached_chance))
 		{
 			actor->stimuli.berserk_type = MAX(
 				actor->stimuli.berserk_type,
@@ -1800,22 +1942,19 @@ boolean actor_action_handle_panic_transition(
 
 			if (communicate_failure && !force)
 			{
-				ai_communication_event(
-					_ai_communication_attempted_flee,
-					actor->meta.unit_index,
-					NONE,
-					NONE,
-					NONE,
-					NONE,
-					NULL);
+				real weapon_state = (real)NONE;
+
+				actions_port_handler(actor_index, _actions_port_handler_call_communication,
+					_ai_communication_attempted_flee, NONE, &weapon_state, 1, NULL);
 				goto done;
 			}
 
-			result = actor_action_try_to_panic(
-				actor_index,
-				actor->stimuli.panic_type,
-				actor->stimuli.panic_prop_index,
-				force);
+			{
+				real force_input = (real)force;
+
+				result = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_try_to_panic,
+					actor->stimuli.panic_type, actor->stimuli.panic_prop_index, &force_input, 1, NULL);
+			}
 		}
 	}
 

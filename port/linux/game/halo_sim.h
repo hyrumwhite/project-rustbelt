@@ -1205,6 +1205,30 @@ enum
 	_actor_type_call_active_cover_seeking,
 };
 
+/* what the handlers ask (actions.c's actions_port_handler_call; crates/halo_map's
+actor_transitions::call) */
+enum
+{
+	_actions_port_handler_call_set_default_state = 0x1040 | 1,
+	_actions_port_handler_call_obey_command_list,
+	_actions_port_handler_call_flee_always,
+	_actions_port_handler_call_recent_damaging_prop,
+	_actions_port_handler_call_attached_projectile_prop,
+	_actions_port_handler_call_burning_prop,
+	_actions_port_handler_call_squad_delayed,
+	_actions_port_handler_call_squad_timer_expire,
+	_actions_port_handler_call_conversation_flags,
+	_actions_port_handler_call_animation_impulse,
+	_actions_port_handler_call_communication,
+	_actions_port_handler_call_fire_wildly,
+	_actions_port_handler_call_disable_bursts,
+	_actions_port_handler_call_was_surprised,
+	_actions_port_handler_call_try_new_target,
+	_actions_port_handler_call_firing_variant,
+	_actions_port_handler_call_random,
+	_actions_port_handler_call_try_to_panic,
+};
+
 /* the actions' functions (actions.c's actions_port_ported) */
 enum
 {
@@ -1941,6 +1965,7 @@ void actor_dispatch_call(struct halo_sim_ai_call *call);
 int actions_port_ported(short action, long function);
 void actions_port_call(struct halo_sim_ai_call *call);
 void actor_type_call(struct halo_sim_ai_call *call);
+void actions_port_handler_call(struct halo_sim_ai_call *call);
 long actor_type_port_handle(long kind, long actor_index, long a, long b, long c);
 void action_wait_call(struct halo_sim_ai_call *call);
 void action_alert_call(struct halo_sim_ai_call *call);

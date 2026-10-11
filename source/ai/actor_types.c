@@ -261,9 +261,15 @@ actor_types); in check mode each is recorded */
 void actor_type_call(
 	struct halo_sim_ai_call *call)
 {
-	int opened = halo_sim_ai_event_begin(call);
+	int opened;
 	long actor_index = call->actor;
 
+	if (call->kind >= _actions_port_handler_call_set_default_state)
+	{
+		actions_port_handler_call(call);
+		return;
+	}
+	opened = halo_sim_ai_event_begin(call);
 	switch (call->kind)
 	{
 		case _actor_type_call_initial_action:

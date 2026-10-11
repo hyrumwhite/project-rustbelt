@@ -141,6 +141,10 @@ impl PropIterator {
             return None;
         }
         let prop = prop_get(m, context, self.index);
+        if prop == 0 {
+            // (the C's prop_get asserts; a list through a freed prop ends)
+            return None;
+        }
         self.next_index = m.i32(prop + prop_datum::NEXT_PROP_INDEX as u32);
         Some(prop)
     }

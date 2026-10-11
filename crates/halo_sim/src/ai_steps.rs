@@ -15,13 +15,27 @@ use halo_map::actor_destination::actor_destination_update;
 use halo_map::actor_emotions::actor_emotion_update;
 use halo_map::actor_general::actor_general_update;
 use halo_map::actor_input::actor_input_update;
+use halo_map::actor_perception::actor_perception_update;
 use halo_map::actor_situation::actor_situation_update;
 use halo_map::actor_unit_control::actor_unit_control;
 use halo_map::actor_upkeep::{actor_clear_orders, actor_clear_output, actor_get_timeslice};
-use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext};
+use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext, PropIterator};
 
 /// `sizeof(struct actor_datum)`.
 pub const ACTOR_DATUM_SIZE: usize = halo_map::layout::actor_datum::SIZEOF;
+/// `sizeof(struct data_array)`.
+pub const DATA_ARRAY_SIZE: usize = 0x38;
+/// `sizeof(struct prop_datum)`.
+pub const PROP_DATUM_SIZE: usize = halo_map::layout::prop_datum::SIZEOF;
+
+/// A prop a call of a step that writes props changed (or made), as the
+/// call left it.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AiPropDeltaC {
+    pub address: u32,
+    pub after: [u8; PROP_DATUM_SIZE],
+}
 
 /// The game's side of each step (halo_sim.c).
 #[repr(C)]
@@ -48,6 +62,8 @@ pub struct AiStepCallbacks {
     pub destination: unsafe extern "C" fn(call: *mut AiCall),
     /// actors.c's `actor_unit_control_call`.
     pub unit_control: unsafe extern "C" fn(call: *mut AiCall),
+    /// actor_perception.c's `actor_perception_call`.
+    pub perception: unsafe extern "C" fn(call: *mut AiCall),
 }
 
 /// A call of the game's step, recorded in check mode, with the actor's
@@ -58,13 +74,21 @@ pub struct AiEventC {
     pub call: AiCall,
     pub before: [u8; ACTOR_DATUM_SIZE],
     pub after: [u8; ACTOR_DATUM_SIZE],
+    /// For a step that writes props: their checksum before the call
+    /// ([`props_checksum`]) and the ones it changed (`deltas`).
+    pub prop_checksum: u32,
+    pub delta_first: u32,
+    pub delta_count: u32,
+    /// The props' data array as the call left it (its count and free list
+    /// change as props are made and deleted).
+    pub prop_data_after: [u8; DATA_ARRAY_SIZE],
 }
 
 /// A step: where it works, what it returns (for the steps that return
 /// something: the timeslice and the general update), and in check mode the
 /// game's calls and the first that differs (-1 for none) and why (1 its
 /// kind, 2 its arguments, 3 the actor before it, 4 more calls than the
-/// game's, 5 fewer).
+/// game's, 5 fewer, 6 the actor's props before it).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct AiStepC {
@@ -74,6 +98,11 @@ pub struct AiStepC {
     pub difference_event: i32,
     pub difference_reason: i32,
     pub result: i32,
+    /// Whether the step writes props (each call's prop checksum is then
+    /// compared, reason 6, and its deltas applied).
+    pub props: i32,
+    pub deltas: *const AiPropDeltaC,
+    pub delta_count: u32,
 }
 
 /// The game's memory, in this process.
@@ -121,6 +150,9 @@ impl AiHost for LiveHost {
 }
 
 struct CheckHost<'a> {
+    context: AiStepContext,
+    props: bool,
+    deltas: &'a [AiPropDeltaC],
     actor: u32,
     events: &'a [AiEventC],
     next: Cell<usize>,
@@ -156,15 +188,50 @@ impl AiHost for CheckHost<'_> {
         {
             self.differ(index, 2);
         }
+        if self.props && props_checksum(&GameMemory, &self.context) != event.prop_checksum {
+            self.differ(index, 6);
+        }
         // SAFETY: the actor's datum in the game's memory
         let actor = unsafe { std::slice::from_raw_parts_mut(self.actor as usize as *mut u8, ACTOR_DATUM_SIZE) };
         if actor != &event.before[..] {
             self.differ(index, 3);
         }
         actor.copy_from_slice(&event.after);
+        if self.props {
+            // SAFETY: the props' data array in the game's memory
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    event.prop_data_after.as_ptr(),
+                    self.context.prop_data as usize as *mut u8,
+                    DATA_ARRAY_SIZE,
+                )
+            };
+        }
+        let first = event.delta_first as usize;
+        for delta in self.deltas.get(first..first + event.delta_count as usize).unwrap_or(&[]) {
+            // SAFETY: a prop's datum in the game's memory, as the game's call left it
+            unsafe {
+                std::ptr::copy_nonoverlapping(delta.after.as_ptr(), delta.address as usize as *mut u8, PROP_DATUM_SIZE)
+            };
+        }
         call.output = e.output;
         call.result = e.result;
     }
+}
+
+/// The actor's props' checksum: FNV-1a over their datums in the actor's
+/// order, then their count (halo_sim.c's `halo_sim_ai_props_checksum_of`).
+fn props_checksum(m: &dyn AiMemory, context: &AiStepContext) -> u32 {
+    let mut hash: u32 = 2_166_136_261;
+    let mut count: u32 = 0;
+    let mut iterator = PropIterator::new(m, context);
+    while let Some(prop) = iterator.next(m, context) {
+        for offset in 0..PROP_DATUM_SIZE as u32 {
+            hash = (hash ^ m.r8(prop + offset) as u32).wrapping_mul(16_777_619);
+        }
+        count += 1;
+    }
+    (hash ^ count).wrapping_mul(16_777_619)
 }
 
 /// The steps the port runs (halo_sim.h's `_halo_sim_ai_step_*`).
@@ -180,6 +247,7 @@ const STEP_COMMUNICATION: i32 = 8;
 const STEP_CONVERSATION: i32 = 9;
 const STEP_DESTINATION: i32 = 10;
 const STEP_UNIT_CONTROL: i32 = 11;
+const STEP_PERCEPTION: i32 = 12;
 
 /// The step run: its result, or None for a step the port doesn't have.
 fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
@@ -196,6 +264,7 @@ fn run(step: i32, context: &AiStepContext, host: &impl AiHost) -> Option<i32> {
         STEP_CONVERSATION => actor_conversation_control(context, host),
         STEP_DESTINATION => actor_destination_update(context, host),
         STEP_UNIT_CONTROL => actor_unit_control(context, host),
+        STEP_PERCEPTION => actor_perception_update(context, host),
         _ => return None,
     }
     Some(0)
@@ -213,6 +282,7 @@ fn callback(callbacks: &AiStepCallbacks, step: i32) -> Option<unsafe extern "C" 
         STEP_CONVERSATION => Some(callbacks.conversation),
         STEP_DESTINATION => Some(callbacks.destination),
         STEP_UNIT_CONTROL => Some(callbacks.unit_control),
+        STEP_PERCEPTION => Some(callbacks.perception),
         _ => None,
     }
 }
@@ -254,8 +324,21 @@ pub unsafe extern "C" fn halo_sim_ai_step_check(step: i32, step_call: *mut AiSte
     } else {
         unsafe { std::slice::from_raw_parts(step_call.events, step_call.event_count as usize) }
     };
-    let checker =
-        CheckHost { actor: step_call.context.actor, events, next: Cell::new(0), difference: Cell::new(None) };
+    // SAFETY: the game's recording, as described
+    let deltas = if step_call.deltas.is_null() || step_call.delta_count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(step_call.deltas, step_call.delta_count as usize) }
+    };
+    let checker = CheckHost {
+        context: step_call.context,
+        props: step_call.props != 0,
+        deltas,
+        actor: step_call.context.actor,
+        events,
+        next: Cell::new(0),
+        difference: Cell::new(None),
+    };
     let Some(result) = run(step, &step_call.context, &checker) else { return -1 };
     step_call.result = result;
     if checker.difference.get().is_none() && checker.next.get() < events.len() {

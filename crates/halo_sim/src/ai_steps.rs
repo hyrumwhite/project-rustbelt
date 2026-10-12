@@ -158,9 +158,35 @@ struct LiveHost {
     call: unsafe extern "C" fn(call: *mut AiCall),
 }
 
+/// [`AiHost::structure_test_vector`]: the level's structure (the
+/// simulation's own copy of its collision BSP), the same for either host.
+fn structure_test_vector(
+    context: &AiStepContext,
+    breakable_surfaces: bool,
+    flags: u32,
+    point: [f32; 3],
+    vector: [f32; 3],
+    maximum_t: f32,
+) -> Option<f32> {
+    let flags_address = if breakable_surfaces { context.breakable_surface_flags } else { 0 };
+    let structure = crate::structure(context.structure_bsp_index, flags_address as usize as *const u8)?;
+    structure.collision.test_vector(flags, point, vector, maximum_t).map(|hit| hit.t)
+}
+
 impl AiHost for LiveHost {
     fn memory(&self) -> &dyn AiMemory {
         &GameMemory
+    }
+    fn structure_test_vector(
+        &self,
+        context: &AiStepContext,
+        breakable_surfaces: bool,
+        flags: u32,
+        point: [f32; 3],
+        vector: [f32; 3],
+        maximum_t: f32,
+    ) -> Option<f32> {
+        structure_test_vector(context, breakable_surfaces, flags, point, vector, maximum_t)
     }
     fn call(&self, call: &mut AiCall) {
         // SAFETY: the game's callback
@@ -189,6 +215,17 @@ impl CheckHost<'_> {
 impl AiHost for CheckHost<'_> {
     fn memory(&self) -> &dyn AiMemory {
         &GameMemory
+    }
+    fn structure_test_vector(
+        &self,
+        context: &AiStepContext,
+        breakable_surfaces: bool,
+        flags: u32,
+        point: [f32; 3],
+        vector: [f32; 3],
+        maximum_t: f32,
+    ) -> Option<f32> {
+        structure_test_vector(context, breakable_surfaces, flags, point, vector, maximum_t)
     }
     fn call(&self, call: &mut AiCall) {
         let index = self.next.get();

@@ -82,6 +82,18 @@ impl AiCall {
 pub trait AiHost {
     fn memory(&self) -> &dyn AiMemory;
     fn call(&self, call: &mut AiCall);
+    /// `collision_bsp_test_vector` in the step's structure (its collision
+    /// BSP): the hit's t, if any. With `breakable_surfaces`, broken ones are
+    /// passed through; without, every one stands (the game passes none).
+    fn structure_test_vector(
+        &self,
+        context: &AiStepContext,
+        breakable_surfaces: bool,
+        flags: u32,
+        point: [f32; 3],
+        vector: [f32; 3],
+        maximum_t: f32,
+    ) -> Option<f32>;
 }
 
 /// Where an actor's step finds what it works on.
@@ -110,6 +122,8 @@ pub struct AiStepContext {
     pub structure: u32,
     /// Which breakable surfaces still stand (`breakable_surface_flags_get`).
     pub breakable_surface_flags: u32,
+    /// `global_structure_bsp_index`.
+    pub structure_bsp_index: i32,
 }
 
 /// `datum_get`: the datum's address (None for one unused or changed).

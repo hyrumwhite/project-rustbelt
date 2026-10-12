@@ -8,8 +8,8 @@
 //! the facing, the throttle and the steering towards the moving vector).
 //!
 //! The actor's datum, definition and vehicle are the game's memory, worked
-//! on in place ([`crate::ai_actor`]); the vector avoidance, the vehicle's
-//! definition and stuckness, the path, the pathfinding location, the
+//! on in place ([`crate::ai_actor`]); the vector avoidance is
+//! [`crate::actor_avoidance`]'s; the vehicle's definition and stuckness, the path, the pathfinding location, the
 //! destination tolerance and stopping distances, the firing positions, the
 //! unit's crouch, jump and leap, its animation and the shouts are the
 //! game's, through [`AiHost::call`] (actor_moving.c's `actor_move_call`,
@@ -20,10 +20,7 @@ use crate::layout::{actor_animation_orders, actor_datum as a, actor_definition a
 
 /// The move update's calls (halo_sim.h's `_actor_move_call_*`).
 pub mod call {
-    /// `actor_move_vector_avoidance` along the movement (`a`: the facing
-    /// three units ahead, not moving): the rotation in `output[0..3]`, the
-    /// emergency in `output[3]`.
-    pub const VECTOR_AVOIDANCE: i32 = 1;
+    // 1 was `actor_move_vector_avoidance`, now Rust's (`crate::actor_avoidance`).
     /// `actor_path_has_path(actor)`, the result.
     pub const HAS_PATH: i32 = 2;
     /// The vehicle `a`'s definition: its steering angle, throttle, oversteer
@@ -57,6 +54,9 @@ pub mod call {
     pub const STOPPING_DISTANCES: i32 = 16;
     /// Whether a local game's debug disables oversteer, the result.
     pub const OVERSTEER_DISABLE: i32 = 17;
+    /// `actor_move_avoidance_setup` for the object `a` into the actor's debug
+    /// info's avoidance data (its origin, axes and the objects' cylinders).
+    pub const AVOIDANCE_SETUP: i32 = 18;
 }
 
 const EPSILON: f32 = 0.0001;
@@ -184,9 +184,9 @@ pub fn actor_move_update(context: &AiStepContext, host: &impl AiHost) {
         m.set_f32(emergency, 0.0);
         m.set_f32(emergency_instantaneous, 0.0);
     } else if driver_type == v::_ACTOR_VEHICLE_DRIVER_DIRECTIONAL_FLYING as i16 {
-        let avoidance = call_full(context, host, call::VECTOR_AVOIDANCE, !m.bool(moving) as i32, 0, &[]);
-        let instantaneous = avoidance.vector();
-        let emergency_amount = avoidance.output[3];
+        let movement_direction = if m.bool(moving) { m.vector(towards) } else { scale(m.vector(at(a::INPUT_FACING_VECTOR)), 3.0) };
+        let (instantaneous, emergency_amount) =
+            crate::actor_avoidance::actor_move_vector_avoidance(context, host, movement_direction, call::AVOIDANCE_SETUP);
         let blend = if magnitude_squared(instantaneous) > magnitude_squared(m.vector(rotation)) { 0.3 } else { 0.05 };
         let scaled = scale(m.vector(rotation), 1.0 - blend);
         let mut blended = [

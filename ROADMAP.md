@@ -599,6 +599,16 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every destination update, decision loop, action update and action control agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. b30 with AI pilots in its banshees also agrees.
        - Planted errors in the prop's accept radius (d20), the original distance (b30) and the radius at which a path is dropped (d20) were caught. One in a raw point's re-order distance (0.1 to 0.3) went unseen on b30 (also with the banshees) and d20.
        - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The flyers' vector avoidance in Rust (`halo_map::actor_avoidance`, under `actor_move`): actor_moving.c's `actor_move_vector_avoidance`, with its ray test, its direction finding, the rays of `actor_move_initialize`, and real_math.c's `pill_test_vector3d`, `sphere_test_vector3d` and `angle_between_vectors3d`. With it, an actor's whole move update is Rust's apart from the game's queries.
+     - **What Rust does:**
+       - Nine sense rays ahead and sixteen avoidance rays (two in each of eight directions round the vehicle) test the structure and the cylinders of the objects nearby.
+       - Each ray weighs the directions: a blocked one against, and one clear for long enough for. Weights spread to the neighbouring directions, with a bias towards the direction the actor last chose and against the way the vehicle is already turning.
+       - It turns the vehicle sharply towards the best direction when the movement points behind it, rotates it about its forward axis when the best direction is well off the movement, or steers away from what the sense rays meet. It also keeps the avoidance's debug record (rays, weights, choice).
+     - **The C's side:** the object setup (`actor_move_avoidance_setup`: the bipeds in a sphere, their pathfinding spheres' cylinders) stays the game's. A new move call gathers it, with the vehicle's origin and axes, into the actor's debug info, where Rust reads it. The structure's rays are Rust's own, through a new `AiHost::structure_test_vector` on the simulation's copy of the collision BSP; the game passes no breakable surface flags, so every surface stands. The step context now carries the structure BSP's index.
+     - **Results:**
+       - Only an AI flying a vehicle runs this, so it was checked with the `beach_banshee` encounter seated in b30's banshees. Every move step agrees, with none left out.
+       - Planted errors in the emergency scale, in the objects' pill test and in a structure ray's t were caught. One in the weight of the last chosen direction (0.4 to 0.41) went unseen.
+       - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second, and on b30 with the banshee pilots.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

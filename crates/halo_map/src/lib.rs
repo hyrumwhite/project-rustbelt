@@ -19,6 +19,7 @@ pub mod actor_emotions;
 pub mod actor_general;
 pub mod actor_input;
 pub mod actor_looking;
+pub mod actor_avoidance;
 pub mod actor_moving;
 pub mod actor_path;
 pub mod actor_perception;

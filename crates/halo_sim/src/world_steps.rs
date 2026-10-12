@@ -12,6 +12,7 @@
 use std::cell::Cell;
 
 use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext, WorldContext};
+use halo_map::communication::ai_communication_event;
 use halo_map::conversations::ai_conversation_update;
 use halo_map::encounters::encounters_update;
 
@@ -175,11 +176,13 @@ impl AiHost for CheckHost<'_> {
 /// halo_sim.h's world steps.
 const STEP_ENCOUNTERS: i32 = 0;
 const STEP_CONVERSATIONS: i32 = 1;
+const STEP_COMMUNICATION: i32 = 2;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
         STEP_ENCOUNTERS => encounters_update(context, host),
         STEP_CONVERSATIONS => ai_conversation_update(context, host),
+        STEP_COMMUNICATION => ai_communication_event(context, host),
         _ => return None,
     }
     Some(())

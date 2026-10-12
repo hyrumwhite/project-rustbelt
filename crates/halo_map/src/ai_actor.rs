@@ -165,6 +165,18 @@ pub struct WorldContext {
     /// Bit 0 `game_in_editor()`, bit 1 a local game's
     /// `ai_debug.force_all_active`.
     pub activation_flags: u32,
+    /// A communication event's arguments: its type, subject and cause
+    /// units, hostility, damage type and information type.
+    pub communication: [i32; 6],
+    /// `global_communication_table_indices`, `global_dialogue_table`,
+    /// `global_dialogue_events`, and the port's selected possibility.
+    pub communication_table_indices: u32,
+    pub dialogue_table: u32,
+    pub dialogue_events: u32,
+    pub communication_selected: u32,
+    /// Bit 0 a local game's debug suppressing the event's type, bit 1 its
+    /// dialogue timeouts disabled.
+    pub communication_flags: u32,
 }
 
 impl WorldContext {

@@ -44,6 +44,7 @@ pub mod bitmap;
 pub mod bsp;
 pub mod collision;
 pub mod combiner;
+pub mod communication;
 pub mod area_damage;
 pub mod damage;
 pub mod damage_update;

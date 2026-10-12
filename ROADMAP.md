@@ -662,6 +662,19 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every encounters' update agrees in minute-long runs of the six levels, with none left out (875 to 3,064 calls on each).
        - Planted errors in the remain-active time and an actor's cluster visibility were caught on b30.
        - With all fifty systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] A communication event in Rust (`halo_map::communication`, a new system `communication`, the third world step): ai_communication.c's `ai_communication_event`, the choice of who says what when something happens to a unit.
+     - **What Rust does:**
+       - It finds the subject's and the cause's actors, races and friend groups.
+       - A death between allied teams may be a betrayal, observed by a friend nearby, and an allegiance incident.
+       - It works out the enemy's status (never seen, dead, lost, unseen, no danger, visible) from the subject's encounter or its own targets, and the two communication teams' speech timers by priority and distance.
+       - It tests each of the event type's dialogue usages (read from the game's own table) against the hostility, scripted dialogue, the enemy's status, the races and the damage. It finds the speaker (the subject, the cause, a friend or an enemy, or a reply to a player) and weighs it by the player rating, its speech and animation, how recently the line was heard and its timeout.
+       - It picks one at random by weight (or among those that force themselves) and speaks it or replies with it.
+     - **The C's side:** these calls stay the game's (ai_communication.c's `communication_call`): the teams' allegiance, an actor type's race, finding an actor to talk (global or in an encounter) or to reply to a player, the allegiance incident and its debug line, the player rating, the communication team, the speech and animation tests, an actor's action class and the random seed. Speaking or replying (the unit's speech, its animation turned to the recipient, the speaker's look, the speech timers) is one call on the chosen possibility, which both sides write field by field into a static the check compares. The dialogue usage's and possibility's layouts are asserted in the C. The communication's debug lines stay the game's alone.
+     - **Results:**
+       - Every event agrees in minute-long runs of b30 (2,048 events), d20 (512), b40 (64), a50 (16) and c20 (4), with none left out; a30 has none early.
+       - Planted errors in the repeat rating and the speech timers' delay were caught on b30.
+       - Planted errors in the player's additional delay and the animation's weight went unseen: no player-caused speech or animation was chosen in those minutes.
+       - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

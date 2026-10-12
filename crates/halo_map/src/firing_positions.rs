@@ -1206,7 +1206,7 @@ fn estimate_position(
     call_full(context, host, call::ESTIMATE_POSITION, estimate_mode, flags, &input).vector()
 }
 
-/// `ai_test_line_of_sight`.
+/// `ai_test_line_of_sight` ([`crate::sensing`]).
 #[allow(clippy::too_many_arguments)]
 fn test_line_of_sight(
     context: &AiStepContext,
@@ -1220,14 +1220,18 @@ fn test_line_of_sight(
     ignore_object_index: i32,
     ignore_vehicles: bool,
 ) -> i16 {
-    let mut input = [0.0f32; 9];
-    input[0..3].copy_from_slice(&point0);
-    input[3..6].copy_from_slice(&point1);
-    input[6] = line_of_sight_mode as f32;
-    input[7] = test_line_of_fire as i32 as f32;
-    input[8] = ignore_vehicles as i32 as f32;
-    let clusters = (cluster0 as u16 as u32 | (cluster1 as u16 as u32) << 16) as i32;
-    call_full(context, host, call::LINE_OF_SIGHT, clusters, ignore_object_index, &input).result as i16
+    crate::sensing::ai_test_line_of_sight(
+        context,
+        host,
+        point0,
+        cluster0,
+        point1,
+        cluster1,
+        line_of_sight_mode,
+        test_line_of_fire,
+        ignore_object_index,
+        ignore_vehicles,
+    )
 }
 
 /// `firing_position_compute_line_of_sight`: whether the actor would see

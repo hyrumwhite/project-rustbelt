@@ -53,7 +53,8 @@ pub mod call {
     pub const ALLOW_SPECIAL_FIRE: i32 = 13;
     /// Whether the players' combined visibility holds the cluster `a`, the result.
     pub const PLAYERS_SEE_CLUSTER: i32 = 14;
-    /// The line of sight from the actor's head to the manual target, the result.
+    /// (no longer asked: [`crate::sensing::ai_test_line_of_sight`]) The line
+    /// of sight from the actor's head to the manual target, the result.
     pub const MANUAL_LINE_OF_SIGHT: i32 = 15;
     /// `weapon_aim` at the fire target, into the actor: the result.
     pub const AIM_AT_TARGET: i32 = 16;
@@ -315,8 +316,21 @@ pub fn actor_combat_update(context: &AiStepContext, host: &impl AiHost) {
                 actor.set_bool(a::CONTROL_CURRENT_FIRE_TARGET_UNDERWATER, false);
                 actor.set_bool(a::CONTROL_CURRENT_FIRE_TARGET_OUTSIDE_ACTIVE_AREA, false);
                 if actor.i32(a::CONTROL_CURRENT_FIRE_TARGET_TIMER) % 10 == 0 {
-                    let line_of_sight = call_simple(context, host, call::MANUAL_LINE_OF_SIGHT, 0);
-                    actor.set_i16(a::CONTROL_CURRENT_FIRE_TARGET_LINE_OF_SIGHT, line_of_sight as i16);
+                    let m = host.memory();
+                    let at = |offset: usize| context.actor + offset as u32;
+                    let line_of_sight = crate::sensing::ai_test_line_of_sight(
+                        context,
+                        host,
+                        m.vector(at(a::INPUT_POSITION_HEAD_POSITION)),
+                        m.i16(at(a::INPUT_POSITION_BODY_LOCATION_CLUSTER_INDEX)),
+                        m.vector(at(a::CONTROL_CURRENT_FIRE_TARGET_POSITION)),
+                        NONE as i16,
+                        crate::sensing::mode::NORMAL,
+                        false,
+                        NONE,
+                        m.i32(at(a::INPUT_VEHICLE_INDEX)) != NONE,
+                    );
+                    actor.set_i16(a::CONTROL_CURRENT_FIRE_TARGET_LINE_OF_SIGHT, line_of_sight);
                 }
             }
 

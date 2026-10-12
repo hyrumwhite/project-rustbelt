@@ -203,6 +203,16 @@ impl AiHost for LiveHost {
     ) -> Option<(f32, i32)> {
         structure_test_vector(context, breakable_surfaces, flags, point, vector, maximum_t)
     }
+    fn world_test_vector(&self, context: &AiStepContext, flags: u32, point: [f32; 3], vector: [f32; 3], ignore_object_index: i32) -> Option<f32> {
+        crate::world::game_test_vector(
+            context.structure_bsp_index,
+            context.breakable_surface_flags as usize as *const u8,
+            flags,
+            point,
+            vector,
+            ignore_object_index as u32,
+        )
+    }
     fn call(&self, call: &mut AiCall) {
         // SAFETY: the game's callback
         unsafe { (self.call)(call) };
@@ -244,6 +254,16 @@ impl AiHost for CheckHost<'_> {
         maximum_t: f32,
     ) -> Option<(f32, i32)> {
         structure_test_vector(context, breakable_surfaces, flags, point, vector, maximum_t)
+    }
+    fn world_test_vector(&self, context: &AiStepContext, flags: u32, point: [f32; 3], vector: [f32; 3], ignore_object_index: i32) -> Option<f32> {
+        crate::world::game_test_vector(
+            context.structure_bsp_index,
+            context.breakable_surface_flags as usize as *const u8,
+            flags,
+            point,
+            vector,
+            ignore_object_index as u32,
+        )
     }
     fn call(&self, call: &mut AiCall) {
         let index = self.next.get();

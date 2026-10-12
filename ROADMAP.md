@@ -735,6 +735,23 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every decision loop, action update, action control and encounters' update agrees in minute-long runs of b30, a30, d20, c20, b40 and a50, with none left out. The decision loop's calls fell by about a third on b30 and by half on a50.
        - A planted error in the squad timer was caught on d20 by the encounters' update. Transitions' own expiry, by an actor in combat while its squad waits, didn't happen in these runs. A planted error in the grenade mark was caught on b30.
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The AI's senses in Rust (`halo_map::sensing`, under `actor_perception`, `actor_combat` and `actor_dispatch`): ai.c's `ai_test_line_of_sight`, actor_perception.c's `actor_visibility_at_point` (with `actor_get_vision_distances`) and `actor_audibility_at_point`.
+     - **What Rust does:**
+       - **Line of sight:** the clusters' PVS from the structure in game memory, then the game's whole ray test in Rust (structure and sight-blocking objects, through a new `AiHost::world_test_vector`), widened about an enemy player. Blocked lines are classed as from cover, to cover or obstructed by distance.
+       - **Visibility:** the vision range scaled by knowledge, lighting, pitch and the horizontal angle's full and partial distances, noting a player's sighting in the debug info.
+       - **Audibility:** hearing scaled by facing, mode, the sound's type, deafening background sounds and line of sight, against the structure's encoded sound distances. The heard unit's constant sound comes from its definition.
+       - A tag's data is now found by its index as `tag_get` finds it (the step context gains the loaded tags' table). That resolves the unit definitions and looping sounds.
+       - An actor senses from its own input position. A swarm actor senses from its sampled unit's, which the game samples; the rest of that position is a new call. The sense-position call stays, because the game keeps the position for the danger assessments.
+       - The firing positions' and combat's manual line of sight use the same function.
+     - **Left to the game:**
+       - Fog is none: `scenario_fog_at_point` is zero in this build.
+       - The firing variant behind the vision range stays a call.
+       - The AI profile's meters, the collision user stack and the line-of-sight debug switches are the game's alone.
+       - The danger zone's sensing and the search's pursuit sighting (by an estimated unit position) stay calls.
+     - **Results:**
+       - Every perception, combat, decision loop and action update agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out.
+       - Planted errors were caught: the cover distance on b30 and a50, the sound distance on b30, the vision angles on b30, and a swarm's sense cluster on d20 and c20. A planted error in the pitch limit went unseen: targets that far above an actor's view are rare.
+       - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

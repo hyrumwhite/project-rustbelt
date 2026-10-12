@@ -345,6 +345,24 @@ pub unsafe extern "C" fn halo_sim_collision_test_vector(call: *const CollisionVe
     0
 }
 
+/// The game's whole ray test on the running game's structure and objects:
+/// the hit's t, if any (none where the world can't be had).
+pub(crate) fn game_test_vector(
+    structure_bsp_index: i32,
+    breakable_surfaces: *const u8,
+    flags: u32,
+    point: [f32; 3],
+    vector: [f32; 3],
+    ignore_object_index: u32,
+) -> Option<f32> {
+    let host = host()?;
+    let structure = crate::structure(structure_bsp_index, breakable_surfaces)?;
+    let source = GameObjects { host };
+    let world = World { collision: &structure.collision, clusters: &structure.clusters, objects: &[], source: Some(&source) };
+    let r = world.test(flags, point, vector, ignore_object_index);
+    r.kind.map(|_| r.t)
+}
+
 /// What a biped's movement physics reads (`biped_update_physics`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

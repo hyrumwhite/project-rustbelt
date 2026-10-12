@@ -15,6 +15,7 @@
 //! shared with the C).
 
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, AiStepContext, NONE, PropIterator, prop_get};
+use crate::sensing::SensePosition;
 use crate::layout::{actor_datum as a, actor_definition as d, ai_values as v, prop_datum as p};
 
 /// The perception update's calls (halo_sim.h's `_actor_perception_call_*`).
@@ -127,9 +128,11 @@ pub mod call {
     pub const STATUS_SAMPLE: i32 = 40;
     /// `actor_look_secondary(actor, started moving prop, default, a)`.
     pub const LOOK_STARTED_MOVING: i32 = 41;
+    /// (no longer asked: [`crate::sensing::ai_test_line_of_sight`])
     /// `ai_test_line_of_sight` from the kept sense position to the prop
     /// `a`'s head, the result.
     pub const LINE_OF_SIGHT: i32 = 42;
+    /// (no longer asked: [`crate::sensing::visibility_at_point`])
     /// `actor_visibility_at_point` of the prop `a`'s head from the kept sense
     /// position, with its line of sight: `b` the lighting (its low byte),
     /// whether to use the maximum distance (bit 8), whether it's a player
@@ -138,6 +141,7 @@ pub mod call {
     /// Whether the actor `a` is noncombat (bit 0), in combat (bit 1) and
     /// fighting (bit 2), the result.
     pub const COMBAT_STATE: i32 = 44;
+    /// (no longer asked: [`crate::sensing::audibility_at_point`])
     /// `actor_audibility_at_point` of the prop `a` (its vehicle's or unit's
     /// constant sound) from the kept sense position, the result.
     pub const AUDIBILITY: i32 = 45;
@@ -260,6 +264,10 @@ pub mod call {
     /// (`ai_get_responsible_unit(object, TRUE)`) the result, the damage's
     /// time `result2`.
     pub const ATTACKER: i32 = 88;
+    /// The rest of a swarm actor's [`SENSE_POSITION`] kept (its sampled
+    /// unit's): its head `output[0..3]`, its body's facing `output[3..6]`,
+    /// its leaf the result and its cluster `result2`.
+    pub const SENSE_DETAIL: i32 = 89;
 }
 
 /// The status sample's bits ([`call::STATUS_SAMPLE`]): of the unit, its
@@ -470,9 +478,9 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                 refresh_position = true;
             }
             if refresh_position {
-                let sense_velocity = prop_position_refresh(context, host, index, refresh_status);
+                let sense = prop_position_refresh(context, host, index, refresh_status);
                 if refresh_status {
-                    prop_status_refresh(context, host, index, sense_velocity);
+                    prop_status_refresh(context, host, index, &sense);
                 }
             }
         }
@@ -1298,13 +1306,14 @@ pub fn become_acknowledged(context: &AiStepContext, host: &impl AiHost, prop_ind
 /// (unless it's the target still to be uncovered or searched) and keeps its
 /// position; a swarm's prop picks another of its units every three seconds;
 /// the prop's unit is sampled; and the prop's direction and distance from
-/// the actor's sense position follow. The sense position's velocity, for
-/// the status refresh.
-pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_index: i32, refresh_vehicle: bool) -> [f32; 3] {
+/// the actor's sense position follow. The sense position, for the status
+/// refresh: the actor's own input position, or a swarm's sampled unit's
+/// (the game's, [`call::SENSE_DETAIL`]).
+pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_index: i32, refresh_vehicle: bool) -> SensePosition {
     let m = host.memory();
     let at = |offset: usize| context.actor + offset as u32;
     if !m.bool(at(a::META_ACTIVE)) {
-        return [0.0; 3];
+        return SensePosition::default();
     }
     let prop = prop_get(m, context, prop_index);
     let field = |offset: usize| prop + offset as u32;
@@ -1346,8 +1355,23 @@ pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_i
         call_simple(context, host, call::SAMPLE_UNIT, prop_index);
     }
 
-    let sense = call_full(context, host, call::SENSE_POSITION, prop_index, 0, 0.0);
-    let sense_body = sense.vector();
+    // (the game keeps the position too, for the dangers and sensing it
+    // still does)
+    let found = call_full(context, host, call::SENSE_POSITION, prop_index, 0, 0.0);
+    let sense = if m.bool(at(a::META_SWARM)) {
+        let detail = call_full(context, host, call::SENSE_DETAIL, prop_index, 0, 0.0);
+        SensePosition {
+            head: [detail.output[0], detail.output[1], detail.output[2]],
+            body: found.vector(),
+            body_facing: [detail.output[3], detail.output[4], detail.output[5]],
+            leaf: detail.result,
+            cluster: detail.result2 as i16,
+            velocity: [found.output[3], found.output[4], found.output[5]],
+        }
+    } else {
+        SensePosition::read(m, at(a::INPUT_POSITION))
+    };
+    let sense_body = sense.body;
     let body = m.vector(field(p::BODY_POSITION));
     let mut actor_to_prop = [body[0] - sense_body[0], body[1] - sense_body[1], body[2] - sense_body[2]];
     let magnitude = crate::features::magnitude_squared3(actor_to_prop).sqrt();
@@ -1365,7 +1389,7 @@ pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_i
     for (i, value) in actor_to_prop.into_iter().enumerate() {
         m.set_f32(field(p::ACTOR_TO_PROP) + 4 * i as u32, value);
     }
-    [sense.output[3], sense.output[4], sense.output[5]]
+    sense
 }
 
 /// actor_perception.c's local enums the status refresh uses.
@@ -1379,18 +1403,60 @@ const PERCEPTION_PARTIAL: i16 = 1;
 const PERCEPTION_UNMISTAKABLE: i16 = 3;
 const TICKS_PER_SECOND: f32 = 30.0;
 
-/// The [`call::VISIBILITY`] of the prop's head.
+/// `actor_visibility_at_point` of the prop's head from the sense position,
+/// with its line of sight (the firing variant the game's,
+/// [`call::FIRING_VARIANT`]).
+#[allow(clippy::too_many_arguments)]
 fn visibility(
     context: &AiStepContext,
     host: &impl AiHost,
+    sense: &SensePosition,
     prop_index: i32,
     lighting: i8,
     use_maximum_distance: bool,
     player: bool,
     knowledge: i16,
 ) -> i16 {
-    let b = lighting as u8 as i32 | (use_maximum_distance as i32) << 8 | (player as i32) << 9 | (knowledge as i32) << 16;
-    call_full(context, host, call::VISIBILITY, prop_index, b, 0.0).result as i16
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    crate::sensing::visibility_at_point(
+        m,
+        context,
+        sense,
+        m.vector(prop + p::HEAD_POSITION as u32),
+        lighting,
+        m.i16(prop + p::LINE_OF_SIGHT as u32),
+        use_maximum_distance,
+        player,
+        knowledge,
+        || call_simple(context, host, call::FIRING_VARIANT, 0) as u32,
+    )
+}
+
+/// `ai_test_line_of_sight` from the sense position to the prop's head
+/// (widened about an enemy player), past its vehicle (and others, from a
+/// vehicle).
+fn line_of_sight(context: &AiStepContext, host: &impl AiHost, sense: &SensePosition, prop_index: i32) -> i16 {
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    let field = |offset: usize| prop + offset as u32;
+    let line_mode = if m.bool(field(p::PLAYER)) && m.bool(field(p::ENEMY)) {
+        crate::sensing::mode::EXPAND_TARGET
+    } else {
+        crate::sensing::mode::NORMAL
+    };
+    crate::sensing::ai_test_line_of_sight(
+        context,
+        host,
+        sense.head,
+        sense.cluster,
+        m.vector(field(p::HEAD_POSITION)),
+        m.i16(field(p::BODY_LOCATION_CLUSTER_INDEX)),
+        line_mode,
+        false,
+        m.i32(field(p::VEHICLE_INDEX)),
+        m.i32(context.actor + a::INPUT_VEHICLE_INDEX as u32) != NONE,
+    )
 }
 
 /// actor_perception.c's `prop_status_refresh`, from the sense position
@@ -1404,7 +1470,8 @@ fn visibility(
 /// last the dangers of its vehicle and suicide, its reachability, the
 /// requirement decision left for now, and its unopposability, target
 /// weight and look interest.
-pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_index: i32, sense_velocity: [f32; 3]) {
+pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_index: i32, sense: &SensePosition) {
+    let sense_velocity = sense.velocity;
     let m = host.memory();
     let at = |offset: usize| context.actor + offset as u32;
     if !m.bool(at(a::META_ACTIVE)) {
@@ -1551,13 +1618,13 @@ pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_ind
     };
 
     if prop_orphaned(m.i16(field(p::STATE))) {
-        let line_of_sight = call_simple(context, host, call::LINE_OF_SIGHT, prop_index) as i16;
+        let line_of_sight = line_of_sight(context, host, sense, prop_index);
         m.set_i16(field(p::LINE_OF_SIGHT), line_of_sight);
         if m.bool(field(p::IGNORE)) || blind {
             set_perceptions_none();
         } else {
             let visibility =
-                visibility(context, host, prop_index, m.i8(field(p::LIGHTING)), true, false, KNOWLEDGE_SEARCHING);
+                visibility(context, host, sense, prop_index, m.i8(field(p::LIGHTING)), true, false, KNOWLEDGE_SEARCHING);
             m.set_i16(field(p::VISIBILITY), visibility);
             m.set_i16(field(p::AUDIBILITY), PERCEPTION_NONE);
             m.set_i16(field(p::INEFFABILITY), PERCEPTION_NONE);
@@ -1567,7 +1634,7 @@ pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_ind
         let mut noticed = false;
         let enemy = m.bool(field(p::ENEMY));
         let player = m.bool(field(p::PLAYER));
-        let line_of_sight = call_simple(context, host, call::LINE_OF_SIGHT, prop_index) as i16;
+        let line_of_sight = line_of_sight(context, host, sense, prop_index);
         m.set_i16(field(p::LINE_OF_SIGHT), line_of_sight);
         m.w8(field(p::LIGHTING), LIGHTING_BRIGHT as u8);
         m.set_bool(field(p::FLYING), has(sample::FLYING));
@@ -1623,7 +1690,7 @@ pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_ind
             let mut visibility_noticed = PERCEPTION_NONE;
             if !blind {
                 let knowledge = perception_knowledge(context, host, prop_index);
-                visibility_noticed = visibility(context, host, prop_index, lighting(), true, false, knowledge);
+                visibility_noticed = visibility(context, host, sense, prop_index, lighting(), true, false, knowledge);
             }
             if visibility_noticed < PERCEPTION_FULL {
                 m.set_i16(field(p::PERCEPTION), visibility_noticed);
@@ -1661,7 +1728,7 @@ pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_ind
                 }
                 let lighting = lighting();
                 let knowledge = perception_knowledge(context, host, prop_index);
-                let visible = visibility(context, host, prop_index, lighting, use_maximum_distance, player, knowledge);
+                let visible = visibility(context, host, sense, prop_index, lighting, use_maximum_distance, player, knowledge);
                 m.set_bool(
                     field(p::JUST_BECAME_VISIBLE),
                     m.i16(field(p::VISIBILITY)) == PERCEPTION_NONE && visible > PERCEPTION_NONE,
@@ -1681,7 +1748,20 @@ pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_ind
             } else if unit_effect == UNIT_EFFECT_SHOOTING || unit_effect == UNIT_EFFECT_DEATH_SCREAM {
                 m.set_i16(field(p::AUDIBILITY), PERCEPTION_UNMISTAKABLE);
             } else {
-                let audibility = call_simple(context, host, call::AUDIBILITY, prop_index) as i16;
+                let sound_unit_index = if m.i32(field(p::VEHICLE_INDEX)) != NONE {
+                    m.i32(field(p::VEHICLE_INDEX))
+                } else {
+                    m.i32(field(p::UNIT_INDEX))
+                };
+                let audibility = crate::sensing::audibility_at_point(
+                    m,
+                    context,
+                    sense,
+                    m.vector(field(p::BODY_POSITION)),
+                    m.i16(field(p::BODY_LOCATION_CLUSTER_INDEX)),
+                    crate::sensing::unit_constant_sound(m, context, sound_unit_index),
+                    m.i16(field(p::LINE_OF_SIGHT)),
+                );
                 m.set_i16(field(p::AUDIBILITY), audibility);
             }
 

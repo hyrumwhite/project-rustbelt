@@ -95,6 +95,12 @@ pub trait AiHost {
         vector: [f32; 3],
         maximum_t: f32,
     ) -> Option<(f32, i32)>;
+    /// The game's whole ray test (`collision_test_vector`) in the step's
+    /// structure and among its objects: the hit's t, if any. None where
+    /// there is no running game's world (an update over the arrays).
+    fn world_test_vector(&self, _context: &AiStepContext, _flags: u32, _point: [f32; 3], _vector: [f32; 3], _ignore_object_index: i32) -> Option<f32> {
+        None
+    }
 }
 
 /// Where an actor's step finds what it works on.
@@ -131,6 +137,10 @@ pub struct AiStepContext {
     pub pursuit_data: u32,
     /// `squad_array` (its first element).
     pub squad_array: u32,
+    /// The loaded tags' table (cache_files.c's `cache_files_tag_instances`)
+    /// and its count, for [`crate::sensing::tag_get`].
+    pub tag_instances: u32,
+    pub tag_count: i32,
 }
 
 /// Where an update over the game's arrays (not one actor's step) finds

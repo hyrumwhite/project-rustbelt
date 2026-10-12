@@ -16,6 +16,7 @@ reads (units.c's unit_update), and a biped's footsteps.
 /* units */
 LAYOUT_OFFSET(unit_definition, unit)
 LAYOUT_OFFSET(_unit_definition, flags)
+LAYOUT_OFFSET(_unit_definition, constant_sound)
 LAYOUT_OFFSET(_unit_definition, aiming_velocity_maximum)
 LAYOUT_OFFSET(_unit_definition, aiming_acceleration_maximum)
 LAYOUT_OFFSET(_unit_definition, casual_aiming_modifier)

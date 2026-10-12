@@ -1241,7 +1241,12 @@ boolean actor_move_try_evasion_vector(
 		evasion_point.y = evade_distance * evasion_vector->j +
 			actor->input.position.body_position.y;
 
-		actor_find_pathfinding_location(actor_index);
+		{
+			/* port: a call */
+			struct halo_sim_ai_call call;
+
+			actor_path_call_simple(actor_index, _actor_path_call_find_pathfinding_location, 0, &call);
+		}
 		if (!structure_test_pill2d(
 			global_structure_bsp_get(),
 			actor->emotions.ignorant_of_broken_surfaces,
@@ -1375,7 +1380,11 @@ boolean actor_move_try_evasion_direction(
 		break;
 
 	case _actor_evade_random_side:
-		if (seed_random(get_global_random_seed_address()) > 0x8000)
+	{
+		/* port: a call */
+		struct halo_sim_ai_call call;
+
+		if ((unsigned short)actor_path_call_simple(actor_index, _actor_path_call_seed_random, 0, &call)->result > 0x8000)
 		{
 			evade_direction = _actor_evade_left;
 			set_real_vector2d(&evasion_vector, -alignment_vector->j, alignment_vector->i);
@@ -1387,6 +1396,7 @@ boolean actor_move_try_evasion_direction(
 		}
 		attempt_count = 2;
 		break;
+	}
 
 	default:
 		match_vassert(
@@ -3090,6 +3100,14 @@ void actor_path_call(
 				0.f,
 				&actor->control.path.destination.point,
 				&actor->control.path.path) ? 1 : 0;
+			break;
+
+		case _actor_path_call_find_pathfinding_location:
+			actor_find_pathfinding_location(actor_index);
+			break;
+
+		case _actor_path_call_seed_random:
+			call->result = seed_random(get_global_random_seed_address());
 			break;
 
 		case _actor_path_call_build_cached:

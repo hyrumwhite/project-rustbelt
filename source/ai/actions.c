@@ -1796,29 +1796,6 @@ void actions_port_handler_call(
 			call->output[0] = unit_definition_get(unit_get(actor->meta.unit_index)->definition_index)->unit.evade_distance;
 			break;
 
-		case _actions_port_handler_call_try_evasion_direction:
-		{
-			short evade_direction = _actor_evade_random;
-			real_vector2d alignment_vector;
-			boolean is_ledge;
-			byte collision_result[0x1C];
-
-			alignment_vector.i = call->input[0];
-			alignment_vector.j = call->input[1];
-			call->result = actor_move_try_evasion_direction(
-				actor_index,
-				&alignment_vector,
-				call->input[2],
-				&evade_direction,
-				0.0f,
-				&is_ledge,
-				collision_result) ? 1 : 0;
-			call->output[0] = alignment_vector.i;
-			call->output[1] = alignment_vector.j;
-			call->output[2] = (real)evade_direction;
-			break;
-		}
-
 		case _actions_port_handler_call_test_animation_impulse:
 			call->result = unit_test_animation_impulse(actor->meta.unit_index, (short)call->a) ? 1 : 0;
 			break;
@@ -2025,48 +2002,6 @@ void actions_port_handler_call(
 		case _actions_port_handler_call_unit_dive_distance:
 			call->output[0] = unit_definition_get(unit_get(actor->meta.unit_index)->definition_index)->unit.dive_distance;
 			break;
-
-		case _actions_port_handler_call_try_evasion_vector:
-		{
-			real_vector2d evasion_vector;
-			boolean is_ledge = FALSE;
-			byte collision_result[0x1C];
-
-			evasion_vector.i = call->input[0];
-			evasion_vector.j = call->input[1];
-			call->result = actor_move_try_evasion_vector(
-				actor_index,
-				&evasion_vector,
-				call->input[2],
-				call->input[3],
-				&is_ledge,
-				collision_result) ? 1 : 0;
-			call->result2 = is_ledge != FALSE;
-			break;
-		}
-
-		case _actions_port_handler_call_evasion_direction:
-		{
-			short evade_direction = (short)call->a;
-			real_vector2d alignment_vector;
-			boolean is_ledge;
-			byte collision_result[0x1C];
-
-			alignment_vector.i = call->input[0];
-			alignment_vector.j = call->input[1];
-			call->result = actor_move_try_evasion_direction(
-				actor_index,
-				&alignment_vector,
-				call->input[2],
-				&evade_direction,
-				call->input[3],
-				&is_ledge,
-				collision_result) ? 1 : 0;
-			call->output[0] = alignment_vector.i;
-			call->output[1] = alignment_vector.j;
-			call->output[2] = (real)evade_direction;
-			break;
-		}
 
 		case _actions_port_handler_call_vehicle_exists:
 			call->result = vehicle_try_and_get(call->a) != NULL;
@@ -4461,14 +4396,20 @@ boolean actor_action_try_to_evade(
 	input[0] = alignment_vector.i;
 	input[1] = alignment_vector.j;
 	input[2] = evade_distance;
-	if (!actions_port_handler(actor_index, _actions_port_handler_call_try_evasion_direction,
-		0, 0, input, 3, evasion))
+	/* port: the evasion makes its own calls */
 	{
-		return FALSE;
+		short evade_direction = _actor_evade_random;
+		boolean is_ledge;
+		byte collision_result[0x1C];
+
+		if (!actor_move_try_evasion_direction(actor_index, &alignment_vector, evade_distance, &evade_direction,
+			0.0f, &is_ledge, collision_result))
+		{
+			return FALSE;
+		}
+		evasion[2] = (real)evade_direction;
 	}
 
-	alignment_vector.i = evasion[0];
-	alignment_vector.j = evasion[1];
 	animation = (short)evasion[2] == _actor_evade_right ?
 		_actor_animation_evade_right :
 		_actor_animation_evade_left;
@@ -4505,17 +4446,11 @@ boolean actor_action_try_to_dive(
 
 	debug_info->dive_decision_time = game_time_get();
 
+	/* port: the evasion makes its own calls */
 	if (actor->input.vehicle_index == NONE &&
-		(evasion[0] = alignment_vector->i,
-			evasion[1] = alignment_vector->j,
-			evasion[2] = dive_distance,
-			evasion[3] = maximum_ledge_height,
-			actions_port_handler(actor_index, _actions_port_handler_call_evasion_direction,
-				escape_direction, 0, evasion, 4, evasion)))
+		actor_move_try_evasion_direction(actor_index, alignment_vector, dive_distance, &escape_direction,
+			maximum_ledge_height, &dive_off_ledge, (struct path_collision_result *)collision_result))
 	{
-		alignment_vector->i = evasion[0];
-		alignment_vector->j = evasion[1];
-		escape_direction = (short)evasion[2];
 
 		switch (escape_direction)
 		{
@@ -5098,19 +5033,16 @@ static boolean actor_action_find_escape_from_danger(
 		right_position.z = right_vector.k * evade_distance +
 			actor->input.position.body_position.z;
 
+		/* port: the evasion makes its own calls */
 		{
-			struct halo_sim_ai_call evasion;
+			real_vector2d evasion_vector;
+			byte collision_result[0x1C];
 
-			memset(&evasion, 0, sizeof(evasion));
-			evasion.kind = _actions_port_handler_call_try_evasion_vector;
-			evasion.actor = actor_index;
-			evasion.input[0] = left_vector.i;
-			evasion.input[1] = left_vector.j;
-			evasion.input[2] = evade_distance;
-			evasion.input[3] = ledge_avoidance_distance;
-			actions_port_handler_call(&evasion);
-			left_found = evasion.result != 0;
-			left_is_ledge = evasion.result2 != 0;
+			evasion_vector.i = left_vector.i;
+			evasion_vector.j = left_vector.j;
+			left_is_ledge = FALSE;
+			left_found = actor_move_try_evasion_vector(actor_index, &evasion_vector, evade_distance,
+				ledge_avoidance_distance, &left_is_ledge, (struct path_collision_result *)collision_result);
 		}
 		left_distance = point_to_line_distance3d(
 			&left_position,
@@ -5119,19 +5051,16 @@ static boolean actor_action_find_escape_from_danger(
 		left_clear = left_found &&
 			left_distance > actor->danger_zone.danger_radius;
 
+		/* port: the evasion makes its own calls */
 		{
-			struct halo_sim_ai_call evasion;
+			real_vector2d evasion_vector;
+			byte collision_result[0x1C];
 
-			memset(&evasion, 0, sizeof(evasion));
-			evasion.kind = _actions_port_handler_call_try_evasion_vector;
-			evasion.actor = actor_index;
-			evasion.input[0] = right_vector.i;
-			evasion.input[1] = right_vector.j;
-			evasion.input[2] = evade_distance;
-			evasion.input[3] = ledge_avoidance_distance;
-			actions_port_handler_call(&evasion);
-			right_found = evasion.result != 0;
-			right_is_ledge = evasion.result2 != 0;
+			evasion_vector.i = right_vector.i;
+			evasion_vector.j = right_vector.j;
+			right_is_ledge = FALSE;
+			right_found = actor_move_try_evasion_vector(actor_index, &evasion_vector, evade_distance,
+				ledge_avoidance_distance, &right_is_ledge, (struct path_collision_result *)collision_result);
 		}
 		right_distance = point_to_line_distance3d(
 			&right_position,

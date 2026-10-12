@@ -2189,6 +2189,8 @@ enum
 	_actor_path_call_build,
 	/* (the game's alone: a cached path state, `a`) */
 	_actor_path_call_build_cached,
+	_actor_path_call_find_pathfinding_location,
+	_actor_path_call_seed_random,
 };
 
 void actor_path_call(struct halo_sim_ai_call *call);

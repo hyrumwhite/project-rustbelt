@@ -627,6 +627,19 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every update agrees in minute-long runs of b30, a30, d20, c20, b40 and a50 (1,024 on each), with none left out.
        - Planted errors in the strength's epsilon, the update's phase and the actors' defending order were caught. One at the boundary of the 50%-dead rule went unseen on b30 and d20.
        - With all forty-nine systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] An encounter's post-combat and standing down in Rust (`halo_map::encounters`, under `encounters`): encounters.c's `encounter_post_combat` (with its possibilities and random choice) and `encounter_stand_down`.
+     - **What Rust does:**
+       - The post-combat weighs each actor's dead props by distance, age and the actor's player rating, and adds the actor itself as a celebration after an enemy's death.
+       - It picks a behavior at random by weight (shooting a corpse, checking an enemy or a friend, celebrating), and a second one for another actor when the encounter isn't human or has beaten eight enemies.
+       - It picks the best-rated actor outside the communication team to speak of the fight (wounded, alone, a massacre, triumph, unscathed). A wounded speaker's nearest friend who sees it runs to it.
+       - Standing down forgets the encounter's pursuit and its actors' orphaned enemy props, except each actor's target.
+       - Both keep the original's slip: a candidate that beats the first slot fills the second too.
+     - **The C's side:** these calls stay the game's: the player rating, the random seed, the communication team, a unit's active prop, the actor definition's no-corpse-shooting flag, clearing the pursuit, and dropping a prop (switching from it and deleting it). The props (their data array and the ones in use) are now part of the update's checked memory, since standing down deletes them.
+     - **Results:**
+       - Every update agrees in minute-long runs of b30, a30, d20, c20, b40 and a50, with none left out.
+       - No encounter stands down or finishes a fight in a probe level's first minute. With the console killing b30's `beach_lz` at tick 900, a planted error in standing down was caught.
+       - The post-combat never ran, even with that kill at tick 2400 and a run of two and a half minutes, so it agrees without being exercised.
+       - With all forty-nine systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

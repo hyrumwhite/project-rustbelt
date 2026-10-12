@@ -6,14 +6,15 @@
 //! rules, migrates its squads after its follow target and orders its actors
 //! (standing down, defending, maneuvering).
 //!
-//! The encounters, squads, platoons and actors are the game's arrays,
-//! worked on in place ([`WorldContext`]); activating the encounters,
-//! standing down, the post-combat, spawning actors, the random seed, a
-//! squad's timer running out, the follow targets, an object's origin,
-//! moving an actor to another squad and the maneuvering stimulus are the
-//! game's, through [`AiHost::call`] (encounters.c's `encounter_call`, shared
-//! with the C). The rules' and the respawns' console lines (`ai_debug`'s
-//! print switches) are the game's alone.
+//! The encounters, squads, platoons, props and actors are the game's
+//! arrays, worked on in place ([`WorldContext`]). Activating the
+//! encounters, spawning actors, the random seed, a squad's timer running
+//! out, the follow targets, an object's origin, moving an actor to another
+//! squad, the maneuvering stimulus, the player rating, the communication
+//! team, a unit's active prop, clearing the pursuit and dropping a prop are
+//! the game's, through [`AiHost::call`] (encounters.c's `encounter_call`,
+//! shared with the C). The rules' and the respawns' console lines
+//! (`ai_debug`'s print switches) are the game's alone.
 
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, NONE, WorldContext, datum_get, prop_get, tag_block_count, tag_block_element};
 use crate::layout::{
@@ -26,10 +27,8 @@ use crate::layout::{
 pub mod call {
     /// `encounters_test_activation()`.
     pub const TEST_ACTIVATION: i32 = 1;
-    /// `encounter_stand_down(a)`.
-    pub const STAND_DOWN: i32 = 2;
-    /// `encounter_post_combat(a)`.
-    pub const POST_COMBAT: i32 = 3;
+    // 2 and 3 were `encounter_stand_down` and `encounter_post_combat`, now
+    // Rust's.
     /// `game_team_is_ally(a, b)`, the result.
     pub const TEAM_IS_ALLY: i32 = 4;
     /// `encounter_spawn_actor(a, b)`, the result.
@@ -50,6 +49,22 @@ pub mod call {
     pub const ACTOR_CHANGE_ENCOUNTER: i32 = 11;
     /// `actor_stimulus_maneuvering(actor, a, b)`.
     pub const STIMULUS_MANEUVERING: i32 = 12;
+    /// `ai_communication_get_player_rating(a, TRUE, NULL, NULL)`, in
+    /// `output[0]`.
+    pub const PLAYER_RATING: i32 = 13;
+    /// `real_seed_random(global seed)`, in `output[0]`.
+    pub const RANDOM_REAL: i32 = 14;
+    /// `actor_communication_team(actor)`, the result.
+    pub const COMMUNICATION_TEAM: i32 = 15;
+    /// `prop_get_active_by_unit_index(actor, a)`, the result.
+    pub const PROP_ACTIVE_BY_UNIT: i32 = 16;
+    /// Whether the actor's definition forbids shooting corpses
+    /// (`_actor_definition_no_corpse_shooting_bit`), the result.
+    pub const NO_CORPSE_SHOOTING: i32 = 17;
+    /// `encounter_clear_pursuit(a)`.
+    pub const CLEAR_PURSUIT: i32 = 18;
+    /// `actor_switch_props(actor, a, NONE)` and `prop_delete(actor, a)`.
+    pub const DROP_PROP: i32 = 19;
 }
 
 const TICKS_PER_SECOND: i32 = 30;
@@ -334,12 +349,12 @@ impl<H: AiHost> Encounters<'_, H> {
         } else if m.bool(at(e::POST_COMBAT)) {
             m.set_bool(at(e::POST_COMBAT_DELAY), !post_combat_behavior_pending);
             if m.i16(at(e::POST_COMBAT_DELAY_TIMER)) == 0 {
-                self.call(call::STAND_DOWN, NONE, encounter_index, 0);
+                self.stand_down(encounter_index);
             }
         } else if had_visible_enemy && been_in_combat {
-            self.call(call::POST_COMBAT, NONE, encounter_index, 0);
+            self.post_combat(encounter_index);
         } else {
-            self.call(call::STAND_DOWN, NONE, encounter_index, 0);
+            self.stand_down(encounter_index);
         }
 
         let original_count = m.i16(at(e::ORIGINAL_COUNT));
@@ -742,6 +757,315 @@ impl<H: AiHost> Encounters<'_, H> {
             }
         });
         self.update_dirty_status();
+    }
+}
+
+/// `struct post_combat_possibility`.
+#[derive(Clone, Copy)]
+struct Possibility {
+    actor_index: i32,
+    weight: f32,
+    prop_index: i32,
+    unit_index: i32,
+}
+
+/// `global_empty_possibility`.
+const EMPTY_POSSIBILITY: Possibility = Possibility { actor_index: NONE, weight: 0.0, prop_index: NONE, unit_index: NONE };
+const POSSIBILITIES: usize = 2;
+const BEHAVIOR_TYPES: usize = 4;
+const GAME_TEAM_HUMAN: i16 = 2;
+
+/// `global_post_combat_translation_table`.
+const POST_COMBAT_TRANSLATION: [usize; BEHAVIOR_TYPES] = [
+    v::_ACTOR_POSTCOMBAT_SHOOT_CORPSE,
+    v::_ACTOR_POSTCOMBAT_CHECK_ENEMY,
+    v::_ACTOR_POSTCOMBAT_CHECK_FRIEND,
+    v::_ACTOR_POSTCOMBAT_CELEBRATE,
+];
+
+/// `encounter_post_combat_add_possibility` (with the original's slip: a
+/// candidate that beats the first slot goes on to the second too).
+fn add_possibility(possibilities: &mut [Possibility; POSSIBILITIES], candidate: Possibility) -> bool {
+    let mut added = false;
+    for i in 0..POSSIBILITIES {
+        if candidate.weight > possibilities[i].weight {
+            for j in (i + 1..POSSIBILITIES).rev() {
+                possibilities[j] = possibilities[j - 1];
+            }
+            possibilities[i] = candidate;
+            added = true;
+        }
+    }
+    added
+}
+
+impl<H: AiHost> Encounters<'_, H> {
+    /// A step context for one of the encounter's actors (its props).
+    fn actor_context(&self, actor_index: i32, actor: u32) -> crate::ai_actor::AiStepContext {
+        crate::ai_actor::AiStepContext { actor_index, actor, ..self.context.step_context() }
+    }
+
+    /// `encounter_post_combat_select_random_behavior`.
+    fn select_random_behavior(
+        &self,
+        possibilities: &[[Possibility; POSSIBILITIES]; BEHAVIOR_TYPES],
+    ) -> (i16, Option<Possibility>) {
+        let mut total_weight = 0.0f32;
+        let mut selected = NONE as i16;
+        let mut count = 0;
+        for (behavior, possibility) in possibilities.iter().enumerate() {
+            if possibility[0].weight > 0.0 && possibility[0].actor_index != NONE {
+                total_weight += possibility[0].weight;
+                selected = behavior as i16;
+                count += 1;
+            }
+        }
+        if count > 1 {
+            let mut current_weight = 0.0f32;
+            let selected_weight = self.call(call::RANDOM_REAL, NONE, 0, 0).output[0] * total_weight;
+            for (behavior, possibility) in possibilities.iter().enumerate() {
+                if possibility[0].weight > 0.0 && possibility[0].actor_index != NONE {
+                    current_weight += possibility[0].weight;
+                    if current_weight > selected_weight {
+                        selected = behavior as i16;
+                        break;
+                    }
+                }
+            }
+        }
+        if selected != NONE as i16 { (selected, Some(possibilities[selected as usize][0])) } else { (selected, None) }
+    }
+
+    /// `encounter_post_combat`: who among the encounter's actors checks the
+    /// bodies, shoots a corpse, celebrates, or speaks of the fight.
+    fn post_combat(&self, encounter_index: i32) {
+        let m = self.m;
+        let encounter = self.encounter(encounter_index);
+        let at = |offset: usize| encounter + offset as u32;
+        let mut primary_behaviors = [NONE as i16; POSSIBILITIES];
+        let mut primary_possibilities = [EMPTY_POSSIBILITY; POSSIBILITIES];
+        let mut possibilities = [[EMPTY_POSSIBILITY; POSSIBILITIES]; BEHAVIOR_TYPES];
+        let mut postcombat_behavior = NONE as i16;
+        let mut behavior_actor_index = NONE;
+        let mut secondary_reply = None;
+        let mut found_possibility = false;
+
+        self.for_each_actor(encounter_index, |actor_index, actor| {
+            let unit_index = m.i32(actor + a::META_UNIT_INDEX as u32);
+            if unit_index == NONE {
+                return;
+            }
+            let mut found_enemy = false;
+            let player_rating = self.call(call::PLAYER_RATING, NONE, unit_index, 0).output[0];
+            let context = self.actor_context(actor_index, actor);
+            let mut props = crate::ai_actor::PropIterator::new(m, &context);
+            while let Some(prop) = props.next(m, &context) {
+                if !m.bool(prop + p::DEAD as u32) {
+                    continue;
+                }
+                let enemy = m.bool(prop + p::ENEMY as u32);
+                let dead_ticks = m.i16(prop + p::DEAD_TICKS as u32);
+                let (behavior, maximum_distance, extra_weight) = if enemy {
+                    if self.call(call::NO_CORPSE_SHOOTING, actor_index, 0, 0).result != 0 || dead_ticks >= 210 {
+                        (1, 5.0f32, 0.0f32)
+                    } else {
+                        (0, 10.0, 0.7)
+                    }
+                } else {
+                    (2, 9.0, 0.4)
+                };
+                let distance = m.f32(prop + p::DISTANCE as u32);
+                if distance < maximum_distance {
+                    let distance_factor = min(2.0, maximum_distance / distance);
+                    let rating = max(player_rating, 1.5);
+                    let age = min(1.0, dead_ticks as f32 * 0.0041666669);
+                    let mut weight = (2.0 - age) * rating * distance_factor + extra_weight;
+                    if m.bool(prop + p::PLAYER as u32) {
+                        weight += 2.0;
+                    }
+                    if enemy {
+                        found_enemy = true;
+                    }
+                    let candidate = Possibility {
+                        actor_index,
+                        weight,
+                        prop_index: props.index,
+                        unit_index: m.i32(prop + p::UNIT_INDEX as u32),
+                    };
+                    if add_possibility(&mut possibilities[behavior], candidate) {
+                        found_possibility = true;
+                    }
+                }
+            }
+            if found_enemy {
+                let step = self.context.step_context();
+                let unit = crate::ai_actor::object_get(m, &step, unit_index).unwrap_or(0);
+                let weight = m.i16(unit + u::UNIT_KILLING_SPREE_COUNT as u32) as f32 * 0.7 + player_rating;
+                let candidate = Possibility { actor_index, weight, prop_index: NONE, unit_index: NONE };
+                if add_possibility(&mut possibilities[3], candidate) {
+                    found_possibility = true;
+                }
+            }
+        });
+
+        let team_index = m.i16(at(e::TEAM_INDEX));
+        let enemies_defeated = m.i16(at(e::ENEMIES_DEFEATED));
+        if found_possibility {
+            let (behavior, possibility) = self.select_random_behavior(&possibilities);
+            primary_behaviors[0] = behavior;
+            if let Some(possibility) = possibility {
+                primary_possibilities[0] = possibility;
+            }
+            if team_index != GAME_TEAM_HUMAN || enemies_defeated >= 8 {
+                found_possibility = false;
+                for behavior_index in 0..BEHAVIOR_TYPES {
+                    if behavior_index as i16 == primary_behaviors[0] {
+                        possibilities[behavior_index] = [EMPTY_POSSIBILITY; POSSIBILITIES];
+                    } else if possibilities[behavior_index][0].actor_index == primary_possibilities[0].actor_index
+                        || possibilities[behavior_index][0].unit_index == primary_possibilities[0].unit_index
+                    {
+                        for possibility_index in 0..POSSIBILITIES - 1 {
+                            possibilities[behavior_index][possibility_index] = possibilities[behavior_index][possibility_index + 1];
+                        }
+                        possibilities[behavior_index][POSSIBILITIES - 1] = EMPTY_POSSIBILITY;
+                    }
+                    if possibilities[behavior_index][0].actor_index != NONE {
+                        found_possibility = true;
+                    }
+                }
+                if found_possibility {
+                    let (behavior, possibility) = self.select_random_behavior(&possibilities);
+                    primary_behaviors[1] = behavior;
+                    if let Some(possibility) = possibility {
+                        primary_possibilities[1] = possibility;
+                    }
+                }
+            }
+        }
+
+        if team_index != GAME_TEAM_HUMAN || enemies_defeated >= 4 {
+            let mut best_actor_index = NONE;
+            let mut best_actor_rating = 0.0f32;
+            self.for_each_actor(encounter_index, |actor_index, actor| {
+                let unit_index = m.i32(actor + a::META_UNIT_INDEX as u32);
+                if unit_index == NONE {
+                    return;
+                }
+                let rating = self.call(call::PLAYER_RATING, NONE, unit_index, 0).output[0];
+                if self.call(call::COMMUNICATION_TEAM, actor_index, 0, 0).result == 0
+                    && rating > 2.0
+                    && rating > best_actor_rating
+                {
+                    best_actor_index = actor_index;
+                    best_actor_rating = rating;
+                }
+            });
+
+            behavior_actor_index = best_actor_index;
+            if best_actor_index != NONE {
+                let behavior_actor = self.actor(best_actor_index);
+                let body_vitality = m.f32(behavior_actor + a::INPUT_BODY_VITALITY as u32);
+                let mut find_secondary_reply = false;
+                let current_count = m.i16(at(e::CURRENT_COUNT)) as i32;
+                let prebattle_living_count = m.i16(at(e::PREBATTLE_LIVING_COUNT)) as i32;
+                if body_vitality < 0.5
+                    && m.f32(behavior_actor + a::EMOTIONS_ORIGINAL_BODY_VITALITY as u32) - body_vitality > 0.3
+                {
+                    postcombat_behavior = v::_ACTOR_POSTCOMBAT_SPEAK_WOUNDED as i16;
+                    find_secondary_reply = true;
+                } else if current_count == 1 && prebattle_living_count > 1 {
+                    postcombat_behavior = v::_ACTOR_POSTCOMBAT_SPEAK_ALONE as i16;
+                } else if current_count >= 2 && prebattle_living_count >= current_count + current_count.min(2) {
+                    postcombat_behavior = v::_ACTOR_POSTCOMBAT_SPEAK_MASSACRE as i16;
+                } else if current_count >= 2 && current_count >= prebattle_living_count - 1 {
+                    postcombat_behavior = v::_ACTOR_POSTCOMBAT_SPEAK_TRIUMPH as i16;
+                } else if body_vitality > 0.8 {
+                    postcombat_behavior = v::_ACTOR_POSTCOMBAT_SPEAK_UNSCATHED as i16;
+                }
+
+                if find_secondary_reply {
+                    let behavior_head = m.vector(behavior_actor + a::INPUT_HEAD_POSITION as u32);
+                    let behavior_unit_index = m.i32(behavior_actor + a::META_UNIT_INDEX as u32);
+                    let mut closest_actor_index = NONE;
+                    let mut closest_prop_index = NONE;
+                    let mut closest_distance_squared = REAL_MAX;
+                    self.for_each_actor(encounter_index, |actor_index, actor| {
+                        if m.i32(actor + a::META_UNIT_INDEX as u32) == NONE || actor_index == best_actor_index {
+                            return;
+                        }
+                        let distance_squared = distance_squared(behavior_head, m.vector(actor + a::INPUT_HEAD_POSITION as u32));
+                        if closest_distance_squared == REAL_MAX
+                            || distance_squared < closest_distance_squared * closest_distance_squared
+                        {
+                            let active_prop_index =
+                                self.call(call::PROP_ACTIVE_BY_UNIT, actor_index, behavior_unit_index, 0).result;
+                            if active_prop_index != NONE {
+                                closest_distance_squared = distance_squared;
+                                closest_actor_index = actor_index;
+                                closest_prop_index = active_prop_index;
+                            }
+                        }
+                    });
+                    if closest_actor_index != NONE {
+                        secondary_reply = Some((closest_actor_index, closest_prop_index));
+                    }
+                }
+            }
+        }
+
+        for (behavior, possibility) in primary_behaviors.iter().zip(primary_possibilities.iter()) {
+            if *behavior != NONE as i16 && possibility.actor_index != NONE {
+                let primary_actor = self.actor(possibility.actor_index);
+                m.set_i16(
+                    primary_actor + a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE as u32,
+                    POST_COMBAT_TRANSLATION[*behavior as usize] as i16,
+                );
+                m.w32(primary_actor + a::EXTERNAL_ORDERS_POSTCOMBAT_PROP_INDEX as u32, possibility.prop_index as u32);
+            }
+        }
+
+        if postcombat_behavior != NONE as i16 && behavior_actor_index != NONE {
+            let behavior_actor = self.actor(behavior_actor_index);
+            m.set_i16(behavior_actor + a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE as u32, postcombat_behavior);
+            m.w32(behavior_actor + a::EXTERNAL_ORDERS_POSTCOMBAT_PROP_INDEX as u32, NONE as u32);
+            if let Some((reply_actor_index, reply_prop_index)) = secondary_reply {
+                let reply_actor = self.actor(reply_actor_index);
+                m.set_i16(reply_actor + a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE as u32, v::_ACTOR_POSTCOMBAT_RUN_TO as i16);
+                m.w32(reply_actor + a::EXTERNAL_ORDERS_POSTCOMBAT_PROP_INDEX as u32, reply_prop_index as u32);
+            }
+        }
+
+        m.set_bool(at(e::POST_COMBAT), true);
+        m.set_bool(at(e::POST_COMBAT_DELAY), false);
+        m.set_i16(at(e::POST_COMBAT_DELAY_TIMER), 120);
+        m.set_i16(at(e::ENEMIES_DEFEATED), 0);
+    }
+
+    /// `encounter_stand_down`: the encounter stands down, forgetting its
+    /// pursuit and its actors' orphaned enemies (but each one's target).
+    fn stand_down(&self, encounter_index: i32) {
+        let m = self.m;
+        let encounter = self.encounter(encounter_index);
+        m.set_bool(encounter + e::STAND_DOWN as u32, true);
+        m.set_i16(encounter + e::ENEMIES_DEFEATED as u32, 0);
+        self.call(call::CLEAR_PURSUIT, NONE, encounter_index, 0);
+
+        self.for_each_actor(encounter_index, |actor_index, actor| {
+            let context = self.actor_context(actor_index, actor);
+            let mut props = crate::ai_actor::PropIterator::new(m, &context);
+            while let Some(prop) = props.next(m, &context) {
+                let state = m.i16(prop + p::STATE as u32);
+                if state >= v::_PROP_STATE_UNINSPECTED_ORPHAN as i16
+                    && state <= v::_PROP_STATE_INSPECTED_ORPHAN as i16
+                    && m.bool(prop + p::ENEMY as u32)
+                    && props.index != m.i32(actor + a::TARGET_TARGET_PROP_INDEX as u32)
+                {
+                    let parent_prop = prop_get(m, &context, m.i32(prop + p::PARENT_PROP_INDEX as u32));
+                    m.w32(parent_prop + p::ORPHAN_PROP_INDEX as u32, NONE as u32);
+                    self.call(call::DROP_PROP, actor_index, props.index, 0);
+                }
+            }
+        });
     }
 }
 

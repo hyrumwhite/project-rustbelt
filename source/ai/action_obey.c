@@ -1160,10 +1160,6 @@ void action_obey_call(
 			call->output[0] = actor_destination_tolerance(actor_index);
 			break;
 
-		case _action_obey_call_move_halt:
-			actor_move_halt(actor_index);
-			break;
-
 		case _action_obey_call_plan_grenade:
 		{
 			real_point3d grenade_target = state_data->complex_control.grenade_target;
@@ -1214,14 +1210,6 @@ void action_obey_call(
 
 		case _action_obey_call_look_secondary_stop:
 			actor_look_secondary_stop(actor_index);
-			break;
-
-		case _action_obey_call_move_to_destination:
-			call->result = actor_move_to_point(
-				actor_index,
-				&state_data->complex_control.destination_point,
-				state_data->complex_control.destination_surface_index,
-				NONE) ? 1 : 0;
 			break;
 
 		case _action_obey_call_keep_moving:
@@ -1699,7 +1687,8 @@ static boolean action_obey_command_begin_actor(
 			complex_control->destination_keep_moving = command->atom_modifier == _ai_atom_go_to_modifier_keep_moving;
 			complex_control->destination_point = destination_point->position;
 			complex_control->destination_surface_index = destination_point->surface_index;
-			result = (boolean)action_obey_call_full(actor_index, _action_obey_call_move_to_destination, 0, 0, NULL, 0, NULL);
+			result = actor_move_to_point(actor_index, &actor_get(actor_index)->state.action_data.obey.complex_control.destination_point,
+				actor_get(actor_index)->state.action_data.obey.complex_control.destination_surface_index, NONE);
 			if (result)
 			{
 				if (complex_control->destination_keep_moving)
@@ -1854,7 +1843,7 @@ static boolean action_obey_command_begin_actor(
 				simple_control->directmovement.facing = command->atom_modifier;
 			else
 				simple_control->directmovement.facing = NONE;
-			action_obey_call_full(actor_index, _action_obey_call_move_halt, 0, 0, NULL, 0, NULL);
+			actor_move_halt(actor_index);
 			SET_FLAG(simple_control->simple_control_flags, _obey_simple_directmovement_update_continuously_bit, FALSE);
 			SET_FLAG(simple_control->simple_control_flags, _obey_simple_directmovement_bit, TRUE);
 		}
@@ -2415,7 +2404,7 @@ static void action_obey_command_end(
 		case _ai_atom_go_to_and_face:
 			if (unit_index == actor->meta.unit_index)
 			{
-				action_obey_call_simple(actor_index, _action_obey_call_move_halt, 0);
+				actor_move_halt(actor_index);
 			}
 			if (complex_control)
 			{
@@ -3690,7 +3679,7 @@ static boolean action_obey_command_perform(
 			facing_done:
 				if (done)
 				{
-					action_obey_call_simple(actor_index, _action_obey_call_move_halt, 0);
+					actor_move_halt(actor_index);
 				}
 			}
 			else

@@ -853,10 +853,6 @@ void action_vehicle_call(
 			unit_enter_seat(actor->meta.unit_index, state_data->vehicle_index, state_data->seat_index);
 			break;
 
-		case _action_vehicle_call_move_halt:
-			actor_move_halt(actor_index);
-			break;
-
 		case _action_vehicle_call_find_destination:
 			call->result = action_vehicle_find_destination(
 				actor_index,
@@ -867,14 +863,6 @@ void action_vehicle_call(
 				&state_data->ignore_hint,
 				&state_data->destination_point,
 				&state_data->destination_surface_index) ? 1 : 0;
-			break;
-
-		case _action_vehicle_call_move_to_destination:
-			call->result = actor_move_to_point(
-				actor_index,
-				&state_data->destination_point,
-				state_data->destination_surface_index,
-				state_data->vehicle_index) ? 1 : 0;
 			break;
 	}
 	halo_sim_ai_event_end(call, opened);
@@ -988,7 +976,7 @@ boolean action_vehicle_perform(
 						}
 						else
 						{
-							action_vehicle_call_simple(actor_index, _action_vehicle_call_move_halt, 0);
+							actor_move_halt(actor_index);
 						}
 					}
 					else if (actor->meta.timeslice)
@@ -997,8 +985,8 @@ boolean action_vehicle_perform(
 
 						if (action_vehicle_call_simple(actor_index, _action_vehicle_call_find_destination, 0))
 						{
-							moving = (boolean)action_vehicle_call_simple(actor_index,
-								_action_vehicle_call_move_to_destination, 0);
+							moving = actor_move_to_point(actor_index, &state_data->destination_point,
+								state_data->destination_surface_index, state_data->vehicle_index);
 						}
 
 						if (moving)
@@ -1160,6 +1148,6 @@ boolean action_vehicle_setup_impromptu(
 	memcpy(&state_data->destination_point, call.output, sizeof(real_point3d));
 	state_data->destination_surface_index = call.result2;
 
-	return (boolean)action_vehicle_port_handler(actor_index, _actions_port_handler_call_move_to_point,
-		state_data->destination_surface_index, vehicle_index, (real const *)&state_data->destination_point, 3, &call);
+	return actor_move_to_point(actor_index, &state_data->destination_point,
+		state_data->destination_surface_index, vehicle_index);
 }

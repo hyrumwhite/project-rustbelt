@@ -64,14 +64,6 @@ void action_wait_call(
 			actor_pursuit_find_nearby_actors(actor_index, (boolean)call->a);
 			break;
 
-		case _action_wait_call_move_to_prop:
-			call->result = actor_move_to_prop(actor_index, call->a, 8.0f) ? 1 : 0;
-			break;
-
-		case _action_wait_call_move_halt:
-			actor_move_halt(actor_index);
-			break;
-
 		case _action_wait_call_communication:
 			ai_communication_event((short)call->a, actor->meta.unit_index, NONE, NONE, NONE, NONE, NULL);
 			break;
@@ -166,13 +158,12 @@ action_wait_perform(
 		{
 			if (state_data->desire_move)
 			{
-				if (!action_wait_call_simple(actor_index, _action_wait_call_move_to_prop,
-					actor->external_orders.pursuit_group_prop_index, 0, 0.0f, 0.0f, NULL))
+				if (!actor_move_to_prop(actor_index, actor->external_orders.pursuit_group_prop_index, 8.0f))
 					state_data->move_failed = TRUE;
 			}
 			else
 			{
-				action_wait_call_simple(actor_index, _action_wait_call_move_halt, 0, 0, 0.0f, 0.0f, NULL);
+				actor_move_halt(actor_index);
 			}
 		}
 	}

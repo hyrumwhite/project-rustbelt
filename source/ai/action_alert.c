@@ -185,10 +185,6 @@ void action_alert_call(
 		case _action_alert_call_random_range:
 			call->output[0] = real_random_range(call->input[0], call->input[1]);
 			break;
-
-		case _action_alert_call_move_to_move_position:
-			call->result = actor_move_to_move_position(actor_index, (short)call->a) ? 1 : 0;
-			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -594,8 +590,7 @@ boolean action_alert_perform(
 				state_data->target_position_definition = *move_position;
 				state_data->wait_ticks = (short)(wait_time * TICKS_PER_SECOND);
 				state_data->must_play_animation = TRUE;
-				moved = (boolean)action_alert_call_simple(actor_index, _action_alert_call_move_to_move_position,
-					state_data->target_move_position_index, 0, 0.0f, 0.0f, NULL);
+				moved = actor_move_to_move_position(actor_index, state_data->target_move_position_index);
 			}
 		}
 

@@ -116,18 +116,6 @@ void action_search_call(
 				(short)call->a,
 				call->b);
 			break;
-
-		case _action_search_call_move_halt:
-			actor_move_halt(actor_index);
-			break;
-
-		case _action_search_call_move_to_prop:
-			call->result = actor_move_to_prop(actor_index, call->a, 2.5f) ? 1 : 0;
-			break;
-
-		case _action_search_call_move_to_firing_position:
-			call->result = actor_move_to_firing_position(actor_index, (short)call->a, NULL) ? 1 : 0;
-			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -548,11 +536,11 @@ boolean action_search_perform(
 
 		if (state_data->at_destination)
 		{
-			action_search_call_simple(actor_index, _action_search_call_move_halt, 0, 0, NULL);
+			actor_move_halt(actor_index);
 		}
 		else if (state_data->pursuit_location.type == 0)
 		{
-			if (!action_search_call_simple(actor_index, _action_search_call_move_to_prop, actor->target.target_prop_index, 0, NULL))
+			if (!actor_move_to_prop(actor_index, actor->target.target_prop_index, 2.5f))
 			{
 				state_data->search_done = TRUE;
 				state_data->search_failed = TRUE;
@@ -561,8 +549,7 @@ boolean action_search_perform(
 		else if (state_data->pursuit_location.type == 1)
 		{
 			actor->firing_positions.current_position_index = NONE;
-			if (!action_search_call_simple(actor_index, _action_search_call_move_to_firing_position,
-				state_data->pursuit_location.firing_position_index, 0, NULL))
+			if (!actor_move_to_firing_position(actor_index, state_data->pursuit_location.firing_position_index, NULL))
 			{
 				state_data->search_done = TRUE;
 				state_data->search_failed = TRUE;
@@ -570,7 +557,7 @@ boolean action_search_perform(
 		}
 		else
 		{
-			action_search_call_simple(actor_index, _action_search_call_move_halt, 0, 0, NULL);
+			actor_move_halt(actor_index);
 		}
 	}
 

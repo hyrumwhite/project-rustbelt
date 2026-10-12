@@ -604,22 +604,6 @@ void action_guard_call(
 			call->output[0] = real_seed_random_range(get_global_random_seed_address(), call->input[0], call->input[1]);
 			break;
 
-		case _action_guard_call_move_halt:
-			actor_move_halt(actor_index);
-			break;
-
-		case _action_guard_call_move_to_guard_point:
-			actor_move_to_point(
-				actor_index,
-				&state_data->guard_point.position,
-				state_data->guard_point.surface_index,
-				NONE);
-			break;
-
-		case _action_guard_call_move_to_firing_position:
-			call->result = actor_move_to_firing_position(actor_index, (short)call->a, NULL) ? 1 : 0;
-			break;
-
 		case _action_guard_call_shout_dead_friend:
 		{
 			struct prop_datum *prop = prop_get(call->a);
@@ -957,7 +941,7 @@ action_guard_control(
 		{
 		case 0:
 		case 1:
-			action_guard_call_simple(actor_index, _action_guard_call_move_halt, 0, 0, 0.0f, 0.0f, NULL);
+			actor_move_halt(actor_index);
 			path_succeeded = TRUE;
 			break;
 
@@ -969,11 +953,11 @@ action_guard_control(
 
 			if (distance_squared < state_data->guard_point.radius * state_data->guard_point.radius)
 			{
-				action_guard_call_simple(actor_index, _action_guard_call_move_halt, 0, 0, 0.0f, 0.0f, NULL);
+				actor_move_halt(actor_index);
 			}
 			else
 			{
-				action_guard_call_simple(actor_index, _action_guard_call_move_to_guard_point, 0, 0, 0.0f, 0.0f, NULL);
+				actor_move_to_point(actor_index, &state_data->guard_point.position, state_data->guard_point.surface_index, NONE);
 			}
 
 			path_succeeded = distance_squared < 9.f;
@@ -986,8 +970,7 @@ action_guard_control(
 			{
 				actor->firing_positions.current_position_index = state_data->guard_firing_position_index;
 				actor->firing_positions.current_position_found_outside_range = FALSE;
-				if (!action_guard_call_simple(actor_index, _action_guard_call_move_to_firing_position,
-					actor->firing_positions.current_position_index, 0, 0.0f, 0.0f, NULL))
+				if (!actor_move_to_firing_position(actor_index, actor->firing_positions.current_position_index, NULL))
 				{
 					/* port: the discard's writes are Rust's own too, not a call */
 					actor_discard_firing_position(actor_index, state_data->guard_firing_position_index, FALSE);

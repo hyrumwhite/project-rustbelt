@@ -416,14 +416,6 @@ void action_flee_call(
 			unit_start_running_blindly(actor->meta.unit_index);
 			break;
 
-		case _action_flee_call_move_halt:
-			actor_move_halt(actor_index);
-			break;
-
-		case _action_flee_call_move_to_firing_position:
-			call->result = actor_move_to_firing_position(actor_index, (short)call->a, NULL) ? 1 : 0;
-			break;
-
 		case _action_flee_call_discard_firing_position:
 			actor_discard_firing_position(actor_index, (short)call->a, FALSE);
 			break;
@@ -710,12 +702,11 @@ void action_flee_control(
 
 	if (state_data->flee_firing_position_index == NONE)
 	{
-		action_flee_call_simple(actor_index, _action_flee_call_move_halt, 0, 0, NULL);
+		actor_move_halt(actor_index);
 	}
 	else if (actor->meta.timeslice)
 	{
-		if (action_flee_call_simple(actor_index, _action_flee_call_move_to_firing_position,
-			state_data->flee_firing_position_index, 0, NULL))
+		if (actor_move_to_firing_position(actor_index, state_data->flee_firing_position_index, NULL))
 		{
 			actor->firing_positions.current_position_index = state_data->flee_firing_position_index;
 			actor->firing_positions.current_position_found_outside_range = state_data->flee_firing_position_found_randomly;
@@ -726,7 +717,7 @@ void action_flee_control(
 			{
 				/* port: the discard's writes are Rust's own too, not a call */
 				actor_discard_firing_position(actor_index, actor->firing_positions.current_position_index, FALSE);
-				action_flee_call_simple(actor_index, _action_flee_call_move_halt, 0, 0, NULL);
+				actor_move_halt(actor_index);
 				actor->firing_positions.current_position_index = NONE;
 			}
 			state_data->flee_firing_position_index = NONE;

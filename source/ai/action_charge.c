@@ -224,16 +224,8 @@ void action_charge_call(
 			}
 			break;
 
-		case _action_charge_call_move_to_prop:
-			call->result = actor_move_to_prop(actor_index, call->a, call->input[0]) ? 1 : 0;
-			break;
-
 		case _action_charge_call_keep_moving:
 			actor_move_keep_moving_past_destination(actor_index);
-			break;
-
-		case _action_charge_call_move_halt:
-			actor_move_halt(actor_index);
 			break;
 
 		case _action_charge_call_perception_unreachable:
@@ -900,8 +892,7 @@ boolean action_charge_perform(
 				real minimum_move_range = state_data->goal == _charge_goal_melee_leaping ? 4.f : 1.5f;
 				real move_range = MAX(minimum_move_range, target_range);
 
-				if (action_charge_call_simple(actor_index, _action_charge_call_move_to_prop,
-					actor->target.target_prop_index, 0, move_range))
+				if (actor_move_to_prop(actor_index, actor->target.target_prop_index, move_range))
 				{
 					action_charge_call_simple(actor_index, _action_charge_call_keep_moving, 0, 0, 0.0f);
 					moving = TRUE;
@@ -915,7 +906,7 @@ boolean action_charge_perform(
 
 			if (!moving)
 			{
-				action_charge_call_simple(actor_index, _action_charge_call_move_halt, 0, 0, 0.0f);
+				actor_move_halt(actor_index);
 			}
 
 			if (actor->target.target_type >= _actor_target_acknowledged_enemy)
@@ -1201,8 +1192,7 @@ boolean action_charge_setup(
 						minimum_move_range = goal == _charge_goal_melee_leaping ? 4.f : 1.5f;
 						move_range = MAX(minimum_move_range, target_range);
 
-						if (action_charge_port_handler(actor_index, _actions_port_handler_call_move_to_prop,
-							actor->target.target_prop_index, 0, &move_range, 1, NULL))
+						if (actor_move_to_prop(actor_index, actor->target.target_prop_index, move_range))
 						{
 							action_charge_port_handler(actor_index, _actions_port_handler_call_keep_moving, 0, 0, NULL, 0, NULL);
 							valid = (boolean)action_charge_port_handler(actor_index, _actions_port_handler_call_valid_melee_destination,

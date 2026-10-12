@@ -2170,6 +2170,23 @@ void actor_move_call(struct halo_sim_ai_call *call);
 void actor_combat_call(struct halo_sim_ai_call *call);
 void actor_dispatch_call(struct halo_sim_ai_call *call);
 void actor_firing_position_call(struct halo_sim_ai_call *call);
+
+/* an actor's path's calls (actor_moving.c's actor_path_call; crates/halo_map's
+actor_path::call), in a range of their own that any step's call function
+passes on */
+enum
+{
+	_actor_path_call_set_awake = (15 << 8) | 1,
+	_actor_path_call_find_prop_pathfinding_location,
+	_actor_path_call_path_3d_available,
+	_actor_path_call_destination_tolerance,
+	_actor_path_call_build_3d,
+	_actor_path_call_build,
+	/* (the game's alone: a cached path state, `a`) */
+	_actor_path_call_build_cached,
+};
+
+void actor_path_call(struct halo_sim_ai_call *call);
 short actor_firing_position_port_change(long actor_index, short firing_position_index, long previous_owner,
 	int cached_path_available);
 short actor_firing_position_port_change_to_active_selection(long actor_index, short evaluation_mode);

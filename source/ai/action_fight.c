@@ -102,10 +102,6 @@ void action_fight_call(
 			break;
 		}
 
-		case _action_fight_call_move_halt:
-			actor_move_halt(actor_index);
-			break;
-
 		case _action_fight_call_change_firing_position:
 		{
 			short firing_position_index;
@@ -329,7 +325,7 @@ action_fight_perform(
 					}
 
 					actor->firing_positions.current_position_index = NONE;
-					action_fight_call_simple(actor_index, _action_fight_call_move_halt, 0, 0, 0.0f, 0.0f, NULL);
+					actor_move_halt(actor_index);
 					goto update_unreachable;
 				}
 			}

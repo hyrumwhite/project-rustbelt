@@ -104,14 +104,6 @@ void action_converse_call(
 			call->result = prop_get_base_by_unit_index(actor_index, call->a, TRUE, TRUE);
 			break;
 
-		case _action_converse_call_move_halt:
-			actor_move_halt(actor_index);
-			break;
-
-		case _action_converse_call_move_to_prop:
-			call->result = actor_move_to_prop(actor_index, call->a, call->input[0]) ? 1 : 0;
-			break;
-
 		case _action_converse_call_player_prop:
 		{
 			struct conversation_datum *conversation = ai_conversation_header_get(state_data->conversation_index);
@@ -183,10 +175,9 @@ boolean action_converse_perform(
 
 			if (state_data->in_range)
 			{
-				action_converse_call_simple(actor_index, _action_converse_call_move_halt, 0, 0.0f);
+				actor_move_halt(actor_index);
 			}
-			else if (!action_converse_call_simple(actor_index, _action_converse_call_move_to_prop,
-				state_data->run_to_prop_index, state_data->run_to_distance))
+			else if (!actor_move_to_prop(actor_index, state_data->run_to_prop_index, state_data->run_to_distance))
 			{
 				state_data->failed = TRUE;
 			}

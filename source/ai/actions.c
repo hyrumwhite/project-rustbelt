@@ -829,6 +829,7 @@ void actions_port_call(
 		case _actor_action_avoid: action_avoid_call(call); break;
 		case _actor_action_fight: action_fight_call(call); break;
 		case _actor_firing_position_call_owners >> 8: actor_firing_position_call(call); break;
+		case _actor_path_call_set_awake >> 8: actor_path_call(call); break;
 	}
 }
 
@@ -1965,10 +1966,6 @@ void actions_port_handler_call(
 				(real_point3d *)call->input) ? 1 : 0;
 			break;
 
-		case _actions_port_handler_call_move_to_prop:
-			call->result = actor_move_to_prop(actor_index, call->a, call->input[0]) ? 1 : 0;
-			break;
-
 		case _actions_port_handler_call_keep_moving:
 			actor_move_keep_moving_past_destination(actor_index);
 			break;
@@ -2000,10 +1997,6 @@ void actions_port_handler_call(
 			call->result2 = destination_surface_index;
 			break;
 		}
-
-		case _actions_port_handler_call_move_to_point:
-			call->result = actor_move_to_point(actor_index, (real_point3d *)call->input, call->a, call->b) ? 1 : 0;
-			break;
 
 		case _actions_port_handler_call_unit_stop_running_blindly:
 			unit_stop_running_blindly(actor->meta.unit_index);

@@ -382,6 +382,16 @@ static void actor_move_call_output(
 	long kind,
 	float *output);
 
+/* port: the path's calls (actor_path_call) */
+static struct halo_sim_ai_call *actor_path_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	struct halo_sim_ai_call *call);
+
+static void actor_path_set_awake(
+	long actor_index);
+
 /* ---------- globals */
 
 real const sense_ray_length = 1.f;
@@ -1106,7 +1116,9 @@ boolean actor_test_destination(
 	}
 	else
 	{
-		real tolerance = actor_destination_tolerance(actor_index);
+		/* port: a call */
+		struct halo_sim_ai_call call;
+		real tolerance = actor_path_call_simple(actor_index, _actor_path_call_destination_tolerance, 0, &call)->output[0];
 
 		if (distance_squared3d(
 			&actor->input.position.body_position,
@@ -1954,9 +1966,11 @@ boolean actor_path_refresh(
 				if (prop->state < _prop_state_uninspected_orphan ||
 					prop->state > _prop_state_inspected_orphan)
 				{
-					actor_perception_find_prop_pathfinding_location(
-						actor_index,
-						actor->control.path.destination_orders.prop.prop_index);
+					/* port: a call */
+					struct halo_sim_ai_call call;
+
+					actor_path_call_simple(actor_index, _actor_path_call_find_prop_pathfinding_location,
+						actor->control.path.destination_orders.prop.prop_index, &call);
 				}
 
 				if (actor->state.flying)
@@ -1985,12 +1999,10 @@ boolean actor_path_refresh(
 
 			if (actor->state.flying)
 			{
-				real avoidance_distance;
+				/* port: a call */
+				struct halo_sim_ai_call call;
 
-				path_available = actor_path_3d_available(
-					actor_index,
-					&actor->control.path.destination.point,
-					&avoidance_distance);
+				path_available = actor_path_call_simple(actor_index, _actor_path_call_path_3d_available, 0, &call)->result != 0;
 			}
 			else if (actor->control.path.destination.target_radius == 0.f)
 			{
@@ -2015,8 +2027,7 @@ boolean actor_path_refresh(
 
 			if (build_path)
 			{
-				struct actor_definition *definition =
-					actor_definition_get(actor->meta.definition_index);
+				struct halo_sim_ai_call call;
 				real distance = distance3d(
 					&actor->input.position.body_position,
 					&actor->control.path.destination.point);
@@ -2025,71 +2036,13 @@ boolean actor_path_refresh(
 
 				debug_info->last_path_refresh = game_time_get();
 
+				/* port: the builds are calls */
 				if (actor->state.flying)
-				{
-					success = path_3d_build_path(
-						global_structure_bsp_get(),
-						&actor->input.position.body_position,
-						0.f,
-						&actor->control.path.destination.point,
-						&actor->control.path.path);
-				}
+					success = actor_path_call_simple(actor_index, _actor_path_call_build_3d, 0, &call)->result != 0;
 				else if (cached_path_state)
-				{
-					match_assert(
-						"c:\\halo\\SOURCE\\ai\\actor_moving.c",
-						3004,
-						actor->control.path.destination_orders.ignore_target_object_index == NONE);
-					path_state_destination(
-						cached_path_state,
-						&actor->control.path.destination.point,
-						actor->control.path.destination.surface_index,
-						actor->control.path.destination.target_radius);
-					success = path_state_build_path(
-						cached_path_state,
-						&actor->control.path.path);
-				}
+					success = actor_path_call_simple(actor_index, _actor_path_call_build_cached, (long)cached_path_state, &call)->result != 0;
 				else
-				{
-					struct path_input input;
-					struct path_state path_state;
-
-					actor_path_input_new(actor_index, &input);
-					if (actor->control.path.destination_orders.ignore_target_object_index != NONE)
-					{
-						path_input_set_target_object(
-							&input,
-							actor->control.path.destination_orders.ignore_target_object_index);
-					}
-					if (actor->danger_zone.danger_type > _actor_danger_zone_none &&
-						!actor->danger_zone.attached_to_us &&
-						!TEST_FLAG(
-							definition->flags2,
-							_actor_definition_flags2_pathfinding_ignores_danger_bit))
-					{
-						path_input_set_attractor(
-							&input,
-							&actor->danger_zone.position,
-							actor->danger_zone.danger_radius,
-							actor->danger_zone.object_index,
-							10.f);
-					}
-					path_state_new(
-						&input,
-						&path_state,
-						ai_debug_get_path_storage(actor_index));
-					path_state_destination(
-						&path_state,
-						&actor->control.path.destination.point,
-						actor->control.path.destination.surface_index,
-						actor->control.path.destination.target_radius);
-					success = FALSE;
-					if (path_state_find(&path_state) &&
-						path_state_build_path(&path_state, &actor->control.path.path))
-					{
-						success = TRUE;
-					}
-				}
+					success = actor_path_call_simple(actor_index, _actor_path_call_build, 0, &call)->result != 0;
 
 				actor->control.path.refreshed_this_tick = TRUE;
 				if (new_destination)
@@ -2118,24 +2071,19 @@ recorded */
 void actor_destination_call(
 	struct halo_sim_ai_call *call)
 {
-	int opened = halo_sim_ai_event_begin(call);
+	int opened;
 	long actor_index = call->actor;
 	struct actor_datum *actor = actor_get(actor_index);
 
+	if ((call->kind >> 8) == (_actor_path_call_set_awake >> 8))
+	{
+		actor_path_call(call);
+		return;
+	}
+	opened = halo_sim_ai_event_begin(call);
+
 	switch (call->kind)
 	{
-		case _actor_destination_call_path_refresh:
-			actor_path_refresh(actor_index, FALSE, NULL);
-			break;
-
-		case _actor_destination_call_test_destination:
-			actor_test_destination(actor_index);
-			break;
-
-		case _actor_destination_call_path_clear:
-			actor_path_clear(actor_index);
-			break;
-
 		case _actor_destination_call_unfinished_path:
 			if (ai_debug.print_unfinished_paths)
 			{
@@ -2209,9 +2157,9 @@ static void actor_destination_update_game(
 		!actor->control.path.refreshed_this_tick &&
 		!actor->meta.dormant)
 	{
-		actor_destination_call_simple(actor_index, _actor_destination_call_path_refresh);
+		actor_path_refresh(actor_index, FALSE, NULL);
 	}
-	actor_destination_call_simple(actor_index, _actor_destination_call_test_destination);
+	actor_test_destination(actor_index);
 
 	if (actor->control.path.path.valid)
 	{
@@ -2284,7 +2232,7 @@ static void actor_destination_update_game(
 
 			if (actor->control.path.path.steps_finish_path)
 			{
-				actor_destination_call_simple(actor_index, _actor_destination_call_path_clear);
+				actor_path_clear(actor_index);
 			}
 			else
 			{
@@ -2331,7 +2279,7 @@ static void actor_destination_update_game(
 		actor->control.moving = FALSE;
 		actor->control.movement_complete = FALSE;
 		actor->control.path.at_destination = TRUE;
-		actor_destination_call_simple(actor_index, _actor_destination_call_path_clear);
+		actor_path_clear(actor_index);
 	}
 
 	return;
@@ -2352,7 +2300,7 @@ boolean actor_move_to_point(
 		destination);
 
 	actor->firing_positions.current_position_index = NONE;
-	actor_set_dormant(actor_index, FALSE);
+	actor_path_set_awake(actor_index); /* port: a call */
 
 	if (actor->control.path.destination_orders.destination_type != _destination_raw_location ||
 		actor->control.path.destination_orders.raw.surface_index != surface_index ||
@@ -2383,7 +2331,7 @@ boolean actor_move_to_move_position(
 	boolean result = TRUE;
 
 	actor->firing_positions.current_position_index = NONE;
-	actor_set_dormant(actor_index, FALSE);
+	actor_path_set_awake(actor_index); /* port: a call */
 
 	if (actor->control.path.destination_orders.destination_type != _destination_move_position ||
 		actor->control.path.destination_orders.move_position_index != move_position_index)
@@ -2412,7 +2360,7 @@ boolean actor_move_to_firing_position(
 	struct actor_datum *actor = actor_get(actor_index);
 	boolean result = TRUE;
 
-	actor_set_dormant(actor_index, FALSE);
+	actor_path_set_awake(actor_index); /* port: a call */
 
 	if (actor->control.path.destination_orders.destination_type != _destination_firing_position ||
 		actor->control.path.destination_orders.firing_position_index != firing_position_index)
@@ -2443,7 +2391,7 @@ boolean actor_move_to_prop(
 	boolean result = TRUE;
 
 	actor->firing_positions.current_position_index = NONE;
-	actor_set_dormant(actor_index, FALSE);
+	actor_path_set_awake(actor_index); /* port: a call */
 
 	if (actor->control.path.destination_orders.destination_type != _destination_prop ||
 		actor->control.path.destination_orders.prop.prop_index != prop_index ||
@@ -3105,6 +3053,140 @@ static void actor_move_calculate_free(
 	}
 
 	return;
+}
+
+/* port: what an actor's path asks of the rest of the game, shared by every
+step that moves an actor and the Rust port's (halo_sim.c); in check mode each
+is recorded */
+void actor_path_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+
+	switch (call->kind)
+	{
+		case _actor_path_call_set_awake:
+			actor_set_dormant(actor_index, FALSE);
+			break;
+
+		case _actor_path_call_find_prop_pathfinding_location:
+			actor_perception_find_prop_pathfinding_location(actor_index, call->a);
+			break;
+
+		case _actor_path_call_path_3d_available:
+		{
+			real avoidance_distance;
+
+			call->result = actor_path_3d_available(
+				actor_index,
+				&actor->control.path.destination.point,
+				&avoidance_distance) ? 1 : 0;
+			break;
+		}
+
+		case _actor_path_call_destination_tolerance:
+			call->output[0] = actor_destination_tolerance(actor_index);
+			break;
+
+		case _actor_path_call_build_3d:
+			call->result = path_3d_build_path(
+				global_structure_bsp_get(),
+				&actor->input.position.body_position,
+				0.f,
+				&actor->control.path.destination.point,
+				&actor->control.path.path) ? 1 : 0;
+			break;
+
+		case _actor_path_call_build_cached:
+		{
+			struct path_state *cached_path_state = (struct path_state *)call->a;
+
+			path_state_destination(
+				cached_path_state,
+				&actor->control.path.destination.point,
+				actor->control.path.destination.surface_index,
+				actor->control.path.destination.target_radius);
+			call->result = path_state_build_path(
+				cached_path_state,
+				&actor->control.path.path) ? 1 : 0;
+			break;
+		}
+
+		case _actor_path_call_build:
+		{
+			struct actor_definition *definition =
+				actor_definition_get(actor->meta.definition_index);
+			struct path_input input;
+			struct path_state path_state;
+
+			actor_path_input_new(actor_index, &input);
+			if (actor->control.path.destination_orders.ignore_target_object_index != NONE)
+			{
+				path_input_set_target_object(
+					&input,
+					actor->control.path.destination_orders.ignore_target_object_index);
+			}
+			if (actor->danger_zone.danger_type > _actor_danger_zone_none &&
+				!actor->danger_zone.attached_to_us &&
+				!TEST_FLAG(
+					definition->flags2,
+					_actor_definition_flags2_pathfinding_ignores_danger_bit))
+			{
+				path_input_set_attractor(
+					&input,
+					&actor->danger_zone.position,
+					actor->danger_zone.danger_radius,
+					actor->danger_zone.object_index,
+					10.f);
+			}
+			path_state_new(
+				&input,
+				&path_state,
+				ai_debug_get_path_storage(actor_index));
+			path_state_destination(
+				&path_state,
+				&actor->control.path.destination.point,
+				actor->control.path.destination.surface_index,
+				actor->control.path.destination.target_radius);
+			call->result = path_state_find(&path_state) &&
+				path_state_build_path(&path_state, &actor->control.path.path) ? 1 : 0;
+			break;
+		}
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+static struct halo_sim_ai_call *actor_path_call_simple(
+	long actor_index,
+	long kind,
+	long a,
+	struct halo_sim_ai_call *call)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+	call->actor = actor_index;
+	call->a = a;
+	actor_path_call(call);
+
+	return call;
+}
+
+/* actor_set_dormant(actor, FALSE), through a call when it changes anything */
+static void actor_path_set_awake(
+	long actor_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	if (actor->meta.active && actor->meta.dormant)
+	{
+		struct halo_sim_ai_call call;
+
+		actor_path_call_simple(actor_index, _actor_path_call_set_awake, 0, &call);
+	}
 }
 
 /* port: what an actor's move update asks of the rest of the game, shared by

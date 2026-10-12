@@ -618,7 +618,7 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
             let parent = prop_get(m, context, m.i32(at(p::ORPHAN_PROP_INDEX)));
             m.w32(parent + p::ORPHAN_PROP_INDEX as u32, NONE as u32);
             call_full(context, host, call::SWITCH_PROPS, index, NONE, 0.0);
-            call_simple(context, host, call::PROP_DELETE, index);
+            crate::props::prop_delete(context, host, index);
         } else if m.bool(at(p::REFRESH_STIMULI)) && acknowledged(m.i16(at(p::STATE))) {
             stimuli_update(context, host, prop, index, became_acknowledged, expected_acknowledgement);
         } else if orphaned(m.i16(at(p::STATE))) && m.f32(at(p::DISTANCE)) < nearest_orphan_distance {
@@ -1272,7 +1272,7 @@ pub fn become_acknowledged(context: &AiStepContext, host: &impl AiHost, prop_ind
             }
         }
         call_full(context, host, call::SWITCH_PROPS, m.i32(prop + p::ORPHAN_PROP_INDEX as u32), prop_index, 0.0);
-        call_simple(context, host, call::PROP_DELETE, m.i32(prop + p::ORPHAN_PROP_INDEX as u32));
+        crate::props::prop_delete(context, host, m.i32(prop + p::ORPHAN_PROP_INDEX as u32));
         m.w32(prop + p::ORPHAN_PROP_INDEX as u32, NONE as u32);
     }
     m.set_i16(prop + p::STATE as u32, v::_PROP_STATE_ACKNOWLEDGED as i16);
@@ -1814,10 +1814,10 @@ fn refresh_discard(context: &AiStepContext, host: &impl AiHost, prop_index: i32)
     let orphan_prop_index = m.i32(prop + p::ORPHAN_PROP_INDEX as u32);
     if !prop_orphaned(m.i16(prop + p::STATE as u32)) && orphan_prop_index != NONE {
         call_full(context, host, call::SWITCH_PROPS, orphan_prop_index, NONE, 0.0);
-        call_simple(context, host, call::PROP_DELETE, m.i32(prop + p::ORPHAN_PROP_INDEX as u32));
+        crate::props::prop_delete(context, host, m.i32(prop + p::ORPHAN_PROP_INDEX as u32));
     }
     call_full(context, host, call::SWITCH_PROPS, prop_index, NONE, 0.0);
-    call_simple(context, host, call::PROP_DELETE, prop_index);
+    crate::props::prop_delete(context, host, prop_index);
 }
 
 /// `actor_perception_qsort_compare_optional_props`: nearest first.
@@ -1925,7 +1925,7 @@ pub fn perception_refresh(context: &AiStepContext, host: &impl AiHost) {
             while entry_index < enemies.entries.len() {
                 let entry = enemies.entries[entry_index];
                 if entry.prop_index == NONE {
-                    let prop_index = call_full(context, host, call::NEW_PROP, entry.unit_index, 1, 0.0).result;
+                    let prop_index = crate::props::prop_new_unacknowledged(context, host, entry.unit_index, true);
                     if prop_index == NONE {
                         entry_index += 1;
                         continue;
@@ -1959,7 +1959,7 @@ pub fn perception_refresh(context: &AiStepContext, host: &impl AiHost) {
             while entry_index < friends.entries.len() {
                 let entry = friends.entries[entry_index];
                 if entry.prop_index == NONE {
-                    let prop_index = call_full(context, host, call::NEW_PROP, entry.unit_index, 0, 0.0).result;
+                    let prop_index = crate::props::prop_new_unacknowledged(context, host, entry.unit_index, false);
                     if prop_index == NONE {
                         entry_index += 1;
                         continue;
@@ -2095,7 +2095,7 @@ fn refresh_test_biped(
                 list.entries.push(RefreshEntry { unit_index, prop_index: NONE, priority: distance_squared });
             }
         } else {
-            let prop_index = call_full(context, host, call::NEW_PROP, unit_index, enemy as i32, 0.0).result;
+            let prop_index = crate::props::prop_new_unacknowledged(context, host, unit_index, enemy);
             if prop_index != NONE {
                 prop_position_refresh(context, host, prop_index, false);
                 if !dead {
@@ -2232,7 +2232,7 @@ pub fn refresh_danger_zone(context: &AiStepContext, host: &impl AiHost) {
             if !perceived {
                 let driver = m.i32(object + u::UNIT_DRIVER_OBJECT_INDEX as u32);
                 let prop_index =
-                    if driver != NONE { call_simple(context, host, call::ACTIVE_PROP_OF_UNIT, driver) } else { NONE };
+                    if driver != NONE { crate::props::prop_get_active_by_unit_index(context, host, driver) } else { NONE };
                 if driver != NONE && prop_index != NONE {
                     perceived = m.i16(prop_get(m, context, prop_index) + p::PERCEPTION as u32) >= PERCEPTION_FULL;
                 } else {
@@ -2278,7 +2278,7 @@ pub fn refresh_danger_zone(context: &AiStepContext, host: &impl AiHost) {
         DANGER_ZONE_SUICIDE => {
             perceived = currently_perceived;
             if !perceived {
-                let prop_index = call_simple(context, host, call::ACTIVE_PROP_OF_UNIT, object_index);
+                let prop_index = crate::props::prop_get_active_by_unit_index(context, host, object_index);
                 if prop_index != NONE {
                     perceived = m.i16(prop_get(m, context, prop_index) + p::PERCEPTION as u32) >= PERCEPTION_FULL;
                 }

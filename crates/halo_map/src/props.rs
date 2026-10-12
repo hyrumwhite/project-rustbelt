@@ -317,3 +317,52 @@ pub fn actor_switch_props(context: &AiStepContext, host: &impl AiHost, old_prop_
 const FIRE_TARGET_NONE: i16 = 0;
 const FIRE_TARGET_PROP: i16 = 1;
 const DESTINATION_NONE: i16 = 0;
+
+/// props.c's `prop_setup_orphan`: the orphan takes the source prop's
+/// knowledge (keeping its own identity and place), uninspected, for thirty
+/// seconds, its hint the way the unit went since last perceived.
+fn prop_setup_orphan(context: &AiStepContext, host: &impl AiHost, orphan_prop_index: i32, source_prop_index: i32) {
+    let m = host.memory();
+    let source = prop_get(m, context, source_prop_index);
+    let prop = prop_get(m, context, orphan_prop_index);
+    let field = |offset: usize| prop + offset as u32;
+    let identifier = m.r16(prop);
+    let owner_actor_index = m.r32(field(p::OWNER_ACTOR_INDEX));
+    let next_prop_index = m.r32(field(p::NEXT_PROP_INDEX));
+    let parent_prop_index = m.r32(field(p::PARENT_PROP_INDEX));
+    for offset in 0..p::SIZEOF as u32 {
+        m.w8(prop + offset, m.r8(source + offset));
+    }
+    m.w32(field(p::OWNER_ACTOR_INDEX), owner_actor_index);
+    m.w32(field(p::NEXT_PROP_INDEX), next_prop_index);
+    m.w16(prop, identifier);
+    m.w32(field(p::PARENT_PROP_INDEX), parent_prop_index);
+    m.set_i16(field(p::STATE), v::_PROP_STATE_UNINSPECTED_ORPHAN as i16);
+    m.set_i16(field(p::ORPHAN_LIFESPAN_TICKS), 30 * 30);
+    m.set_i16(field(p::ORPHAN_INSPECTION_TICKS), 0);
+    m.set_bool(field(p::TRIED_TO_UNCOVER), false);
+    m.set_bool(field(p::TRIED_TO_SEARCH), false);
+    m.set_bool(field(p::ABANDONED_SEARCH), false);
+    let last = m.vector(field(p::LAST_PERCEIVED_BODY_POSITION));
+    let body = m.vector(field(p::BODY_POSITION));
+    for i in 0..3 {
+        m.set_f32(field(p::ORPHAN_HINT_VECTOR) + 4 * i as u32, body[i] - last[i]);
+        m.set_f32(field(p::VELOCITY) + 4 * i as u32, 0.0);
+    }
+    m.w8(field(p::QUANTIZED_SPEED), 0);
+}
+
+/// props.c's `prop_orphan_transition`: an orphan of the prop, where the
+/// actor will look for its unit.
+pub fn prop_orphan_transition(context: &AiStepContext, host: &impl AiHost, parent_prop_index: i32) -> i32 {
+    let m = host.memory();
+    let prop_index = crate::data_array::datum_new(m, context.prop_data);
+    prop_add(context, host, NONE, prop_index);
+    if prop_index != NONE {
+        prop_setup_orphan(context, host, prop_index, parent_prop_index);
+        let parent = prop_get(m, context, parent_prop_index);
+        m.w32(parent + p::ORPHAN_PROP_INDEX as u32, prop_index as u32);
+        m.w32(prop_get(m, context, prop_index) + p::PARENT_PROP_INDEX as u32, parent_prop_index as u32);
+    }
+    prop_index
+}

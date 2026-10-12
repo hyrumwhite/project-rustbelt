@@ -514,6 +514,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **What Rust does:** it moves the actor's references from a prop to another, or drops them and ends what they drove: its target, fire target and grenade target, the stimuli's props, the unopposable retreat, the pursuit group, the post-combat prop, its destination, its looks, and its action's props (flee's prop; guard's look and dead-friend shout; converse's run-to prop).
      - **The C's side:** the swarm's components' targets, through `actor_perception_call`.
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in dropping a target was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Perception's dangers, reachability, killers and orphans in Rust (`halo_map::actor_perception`, `halo_map::props`): actor_perception.c's `actor_perception_assess_suicide_danger`, `_assess_vehicle_danger`, `_unreachable` and `_find_killer_prop_index`, and props.c's `prop_orphan_transition` (with `prop_setup_orphan`).
+     - **What Rust does:**
+       - a suicide, or a fast vehicle with a danger zone, that is near enough (and nearer than the one the actor fears now) becomes the danger zone, the vehicle only for an actor on foot, with its driver's hostility;
+       - a prop's reachability, with its unopposability and target weight again;
+       - the killer is the acknowledged prop of the unit's last attacker;
+       - an orphan takes its prop's knowledge (keeping its own identity and place in the list), uninspected for thirty seconds, with its hint pointing the way the unit went.
+     - **The C's side, through `actor_perception_call`:** an object's origin, a vehicle's danger flag, bounding radius and sense position, and a unit's attackers (each one's responsible unit and the damage's time).
+     - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in the orphan's lifespan was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

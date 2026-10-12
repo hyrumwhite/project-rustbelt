@@ -249,6 +249,17 @@ pub mod call {
     /// The actor's unit's shout that it sighted (`b`, else found) the
     /// enemy prop `a`'s unit.
     pub const COMMUNICATE_SIGHTED_ENEMY: i32 = 82;
+    /// `object_get_origin(a)`, `output[0..3]`.
+    pub const OBJECT_ORIGIN: i32 = 86;
+    /// The vehicle `a` as a danger: whether its definition's danger zone is
+    /// on (flag 7) the result, its bounding radius's bits `result2`, its
+    /// origin `output[0..3]`, and the actor's sense body position to it
+    /// `output[3..6]` (the status refresh's kept one with `b`, else found).
+    pub const VEHICLE_DANGER_SAMPLE: i32 = 87;
+    /// The unit `a`'s attacker `b`: its responsible unit
+    /// (`ai_get_responsible_unit(object, TRUE)`) the result, the damage's
+    /// time `result2`.
+    pub const ATTACKER: i32 = 88;
 }
 
 /// The status sample's bits ([`call::STATUS_SAMPLE`]): of the unit, its
@@ -538,7 +549,9 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                     if m.i16(at(p::TICKS_UNTIL_ORPHAN)) == 0 || offset[0] * offset[0] + offset[1] * offset[1] > 1.0 {
                         let mut orphan_prop_index = NONE;
                         if desire_orphan(context, host, index) {
-                            orphan_prop_index = call_simple(context, host, call::ORPHAN_TRANSITION, index);
+                            prop_position_refresh(context, host, index, false);
+                            call_simple(context, host, call::FIND_PATHFINDING_LOCATION, index);
+                            orphan_prop_index = crate::props::prop_orphan_transition(context, host, index);
                         }
                         crate::props::actor_switch_props(context, host, index, orphan_prop_index);
                         new_state = UNACKNOWLEDGED;
@@ -1725,10 +1738,18 @@ pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_ind
 
     let perceived_fully = m.i16(field(p::PERCEPTION)) >= PERCEPTION_FULL;
     if m.bool(field(p::DANGEROUS_VEHICLE_DRIVER)) {
-        call_full(context, host, call::VEHICLE_DANGER, prop_index, perceived_fully as i32, 0.0);
+        assess_vehicle_danger(context, host, m.i32(field(p::VEHICLE_INDEX)), perceived_fully, true);
     }
     if m.f32(field(p::SUICIDE_RADIUS)) > 0.0 && (m.bool(field(p::DEAD)) || has(sample::MELEE_ATTACK)) {
-        call_full(context, host, call::SUICIDE_DANGER, prop_index, perceived_fully as i32, 0.0);
+        assess_suicide_danger(
+            context,
+            host,
+            m.i32(field(p::UNIT_INDEX)),
+            m.f32(field(p::SUICIDE_RADIUS)),
+            m.f32(field(p::DISTANCE)),
+            m.bool(field(p::ENEMY)),
+            perceived_fully,
+        );
     }
 
     if m.bool(field(p::ENEMY)) && prop_acknowledged(m.i16(field(p::STATE))) {
@@ -1738,13 +1759,13 @@ pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_ind
             || ((m.i32(context.definition + d::FLAGS as u32) >> v::_ACTOR_DEFINITION_SUICIDAL_MELEE_ATTACK_BIT) & 1 != 0
                 && distance < m.f32(context.definition + d::BERSERK_MELEE_ATTACK_RANGE as u32))
         {
-            call_simple(context, host, call::UNREACHABLE, prop_index);
+            perception_unreachable(context, host, prop_index, false);
         }
     }
 
     let last_unreachable_time = m.i32(field(p::LAST_UNREACHABLE_TIME));
     if last_unreachable_time != NONE && last_unreachable_time.wrapping_add(150) < game_time {
-        call_simple(context, host, call::UNREACHABLE, prop_index);
+        perception_unreachable(context, host, prop_index, false);
     }
 
     if m.bool(field(p::DELAY_REQUIREMENT_DECISION)) {
@@ -2005,7 +2026,9 @@ fn refresh_test_object(
             match m.i16(object + u::OBJECT_TYPE as u32) {
                 OBJECT_TYPE_BIPED => refresh_test_biped(context, host, object_index, enemies, friends),
                 OBJECT_TYPE_VEHICLE => {
-                    call_simple(context, host, call::VEHICLE_DANGER_UNDRIVEN, object_index);
+                    if m.i32(object + u::UNIT_DRIVER_OBJECT_INDEX as u32) == NONE {
+                        assess_vehicle_danger(context, host, object_index, false, false);
+                    }
                 }
                 OBJECT_TYPE_PROJECTILE => refresh_test_projectile(context, host, object_index),
                 _ => {}
@@ -2061,16 +2084,7 @@ fn refresh_test_biped(
     let distance_squared = distance_squared3(body, origin);
 
     if suicide_radius > 0.0 && (dead || melee_attack) {
-        let mut assess = AiCall {
-            kind: call::SUICIDE_DANGER_AT,
-            actor: context.actor_index,
-            a: unit_index,
-            b: enemy as i32,
-            ..AiCall::default()
-        };
-        assess.input[0] = suicide_radius;
-        assess.input[1] = distance_squared.sqrt();
-        host.call(&mut assess);
+        assess_suicide_danger(context, host, unit_index, suicide_radius, distance_squared.sqrt(), enemy, false);
     }
 
     let (desired, optional) = desire_prop(
@@ -2514,7 +2528,7 @@ fn stimulus_prop_just_killed(context: &AiStepContext, host: &impl AiHost, prop_i
     if m.bool(prop + p::ENEMY as u32) {
         return;
     }
-    let killer_prop_index = call_simple(context, host, call::KILLER_PROP, prop_index);
+    let killer_prop_index = find_killer_prop_index(context, host, prop_index, true);
     if m.i16(prop + p::TYPE as u32) == m.i16(definition + d::PANIC_PANIC_LEADER_TYPE as u32)
         && m.i16(at(a::STIMULI_PANIC_TYPE)) < PANIC_FRIEND_LEADER_TYPE_KILLED
         && random(context, host) < m.f32(definition + d::PANIC_PANIC_CHANCE_LEADER_TYPE_KILLED as u32)
@@ -2631,4 +2645,163 @@ fn stimulus_prop_sighted(context: &AiStepContext, host: &impl AiHost, prop_index
     {
         call_full(context, host, call::COMMUNICATE_SIGHTED_ENEMY, prop_index, initial_acknowledgement as i32, 0.0);
     }
+}
+
+/// actor_perception.c's `actor_perception_unreachable`: whether the actor
+/// can reach the prop (its ticks begun and time kept, or cleared), with its
+/// unopposability and target weight again.
+fn perception_unreachable(context: &AiStepContext, host: &impl AiHost, prop_index: i32, unreachable: bool) {
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    let field = |offset: usize| prop + offset as u32;
+    if unreachable {
+        if m.i16(field(p::UNREACHABLE_TICKS)) == 0 {
+            m.set_i16(field(p::UNREACHABLE_TICKS), 1);
+        }
+        m.w32(field(p::LAST_UNREACHABLE_TIME), context.game_time as u32);
+    } else {
+        m.set_i16(field(p::UNREACHABLE_TICKS), 0);
+        m.w32(field(p::LAST_UNREACHABLE_TIME), NONE as u32);
+    }
+    let unopposable = compute_prop_unopposable(context, host, prop_index);
+    m.set_bool(field(p::UNOPPOSABLE_ENEMY), unopposable);
+    let target_weight = compute_prop_target_weight(context, host, prop_index);
+    m.set_f32(field(p::TARGET_WEIGHT), target_weight);
+}
+
+/// `MAXIMUM_ATTACKERS_PER_UNIT`.
+const MAXIMUM_ATTACKERS_PER_UNIT: i32 = 4;
+
+/// actor_perception.c's `actor_perception_find_killer_prop_index`: of the
+/// prop's unit's attackers, the acknowledged prop (an enemy's, if asked) of
+/// the one that damaged it last.
+fn find_killer_prop_index(context: &AiStepContext, host: &impl AiHost, prop_index: i32, enemies_only: bool) -> i32 {
+    let m = host.memory();
+    let unit_index = m.i32(prop_get(m, context, prop_index) + p::UNIT_INDEX as u32);
+    let mut killer_prop_index = NONE;
+    let mut most_recent_damage_time = 0;
+    for attacker_index in 0..MAXIMUM_ATTACKERS_PER_UNIT {
+        let attacker = call_full(context, host, call::ATTACKER, unit_index, attacker_index, 0.0);
+        let damage_time = attacker.result2;
+        if attacker.result != NONE {
+            let current_prop_index = crate::props::prop_get_active_by_unit_index(context, host, attacker.result);
+            if current_prop_index != NONE {
+                let current = prop_get(m, context, current_prop_index);
+                if prop_acknowledged(m.i16(current + p::STATE as u32))
+                    && (m.bool(current + p::ENEMY as u32) || !enemies_only)
+                    && damage_time > most_recent_damage_time
+                {
+                    killer_prop_index = current_prop_index;
+                    most_recent_damage_time = damage_time;
+                }
+            }
+        }
+    }
+    killer_prop_index
+}
+
+/// The danger zone cleared for a new danger.
+fn danger_zone_clear(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    for offset in 0..crate::layout::actor_danger_zone::SIZEOF {
+        m.w8(context.actor + (a::DANGER_ZONE_DANGER_TYPE + offset) as u32, 0);
+    }
+}
+
+/// actor_perception.c's `actor_perception_assess_suicide_danger`: a suicide
+/// near enough (and nearer than the suicide the actor fears now) becomes its
+/// danger zone.
+fn assess_suicide_danger(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    object_index: i32,
+    suicide_radius: f32,
+    distance: f32,
+    enemy: bool,
+    visible: bool,
+) -> bool {
+    use crate::layout::unit_datum as u;
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if suicide_radius + 10.0 > distance {
+        let danger_type = m.i16(at(a::DANGER_ZONE_DANGER_TYPE));
+        if danger_type < DANGER_ZONE_SUICIDE
+            || (danger_type == DANGER_ZONE_SUICIDE
+                && m.i32(at(a::DANGER_ZONE_OBJECT_INDEX)) != object_index
+                && distance < m.f32(at(a::DANGER_ZONE_CURRENT_DISTANCE_FROM_ACTOR)))
+        {
+            let origin = call_full(context, host, call::OBJECT_ORIGIN, object_index, 0, 0.0).vector();
+            let unit = crate::ai_actor::object_get(m, context, object_index).unwrap_or(0);
+            let velocity = m.vector(unit + u::OBJECT_TRANSLATIONAL_VELOCITY as u32);
+            danger_zone_clear(context, host);
+            m.set_i16(at(a::DANGER_ZONE_DANGER_TYPE), DANGER_ZONE_SUICIDE);
+            m.w32(at(a::DANGER_ZONE_OBJECT_INDEX), object_index as u32);
+            m.set_f32(at(a::DANGER_ZONE_DANGER_RADIUS), suicide_radius);
+            for i in 0..3 {
+                m.set_f32(at(a::DANGER_ZONE_INITIAL_POSITION + 4 * i), origin[i]);
+                m.set_f32(at(a::DANGER_ZONE_INITIAL_VELOCITY + 4 * i), velocity[i]);
+            }
+            m.set_i16(at(a::DANGER_ZONE_ACKNOWLEDGEMENT_TIMER), 6);
+            m.set_bool(at(a::DANGER_ZONE_CURRENTLY_PERCEIVED), visible);
+            m.set_i16(at(a::DANGER_ZONE_HOSTILITY), !enemy as i16);
+            return true;
+        }
+    }
+    false
+}
+
+/// actor_perception.c's `actor_perception_assess_vehicle_danger`: a fast
+/// dangerous vehicle near enough (and nearer than the vehicle the actor
+/// fears now) becomes the danger zone of an actor on foot, with its
+/// driver's hostility.
+fn assess_vehicle_danger(context: &AiStepContext, host: &impl AiHost, vehicle_index: i32, mark: bool, kept_position: bool) -> bool {
+    use crate::layout::unit_datum as u;
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.i32(at(a::INPUT_VEHICLE_INDEX)) != NONE {
+        return false;
+    }
+    let vehicle = crate::ai_actor::object_get(m, context, vehicle_index).unwrap_or(0);
+    let velocity = m.vector(vehicle + u::OBJECT_TRANSLATIONAL_VELOCITY as u32);
+    let sample = call_full(context, host, call::VEHICLE_DANGER_SAMPLE, vehicle_index, kept_position as i32, 0.0);
+    if sample.result == 0 || !(crate::features::magnitude_squared3(velocity) > 0.0011111111380159855) {
+        return false;
+    }
+    let bounding_radius = f32::from_bits(sample.result2 as u32);
+    let origin = [sample.output[0], sample.output[1], sample.output[2]];
+    let body = [sample.output[3], sample.output[4], sample.output[5]];
+    let distance = distance_squared3(body, origin).sqrt();
+    if !(distance < bounding_radius + 10.0) {
+        return false;
+    }
+    let danger_type = m.i16(at(a::DANGER_ZONE_DANGER_TYPE));
+    if !(danger_type < DANGER_ZONE_VEHICLE
+        || (danger_type == DANGER_ZONE_VEHICLE
+            && m.i32(at(a::DANGER_ZONE_OBJECT_INDEX)) != vehicle_index
+            && distance < m.f32(at(a::DANGER_ZONE_CURRENT_DISTANCE_FROM_ACTOR))))
+    {
+        return false;
+    }
+    let driver = m.i32(vehicle + u::UNIT_DRIVER_OBJECT_INDEX as u32);
+    danger_zone_clear(context, host);
+    m.w32(at(a::DANGER_ZONE_OBJECT_INDEX), vehicle_index as u32);
+    m.set_i16(at(a::DANGER_ZONE_DANGER_TYPE), DANGER_ZONE_VEHICLE);
+    m.w32(at(a::DANGER_ZONE_OWNER_UNIT_INDEX), driver as u32);
+    m.set_f32(at(a::DANGER_ZONE_DANGER_RADIUS), bounding_radius);
+    for i in 0..3 {
+        m.set_f32(at(a::DANGER_ZONE_INITIAL_POSITION + 4 * i), origin[i]);
+        m.set_f32(at(a::DANGER_ZONE_INITIAL_VELOCITY + 4 * i), velocity[i]);
+    }
+    m.set_i16(at(a::DANGER_ZONE_ACKNOWLEDGEMENT_TIMER), 20);
+    m.set_bool(at(a::DANGER_ZONE_CURRENTLY_PERCEIVED), mark);
+    m.set_i16(at(a::DANGER_ZONE_HOSTILITY), 0);
+    if driver != NONE {
+        let driver_unit = crate::ai_actor::object_get(m, context, driver).unwrap_or(0);
+        let driver_team = m.i16(driver_unit + u::OBJECT_OWNER_TEAM_INDEX as u32) as i32;
+        let team = m.i16(at(a::META_TEAM_INDEX)) as i32;
+        if call_full(context, host, call::TEAM_IS_ENEMY, team, driver_team, 0.0).result == 0 {
+            m.set_i16(at(a::DANGER_ZONE_HOSTILITY), 1);
+        }
+    }
+    true
 }

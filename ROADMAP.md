@@ -545,6 +545,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - The dispatch steps (the decision loop and the actions' update and control), the emotion update and the move update agree in minute-long runs of b30, d20, c20, b40 and a50, with none left out.
        - Planted errors were each caught on b30: the actor's search range, the fight's line-of-sight score, the panic flee's attractor, and the given-up list's wrap.
        - With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The path search in Rust (new in `halo_map::path`, a new system `paths`): path.c's `path_state_find` and `path_state_estimated_distance`, which every path the AI plans and every firing position it weighs goes through.
+     - **What Rust does:** an A* search over the structure BSP's collision surfaces, from the start's surface through each edge into a walkable (and, unless told otherwise, unbroken) neighbour. Costs are kept in tenths of a unit on a heap of 1,024 nodes found through a hash of the surfaces; an attractor makes the stretches near it dearer, and a bound limits how far the search goes. Towards a destination it enters each long edge at the point nearest it, keeps the node nearest it (within four units, the nearest point of the surface, from collision_bsp.c's `collision_surface_find_closest_point2d`, ported), and gives up when no node can come close. The estimated distance adds a reached surface's straight line to its node's path distance, with the closest approach to the attractor and the direction the path sets off in.
+     - **Where it runs:** on the game's own path state and debug storage, in place, reading the BSP's surfaces, edges, vertices, planes and pathfinding flags and the breakable surfaces' flags from the game's memory. path.c calls halo_sim.c's `halo_sim_path_find` and `halo_sim_path_estimated_distance`, which run the game's or Rust's.
+     - **The check:** a function-level one. The game saves the path state (82 KB) and its debug storage (117 KB), runs its own search, puts them back, runs Rust's, compares every byte and the result, and keeps its own.
+     - **Results:**
+       - Every search and estimated distance agrees in minute-long runs of b30, d20, b40 and a50, with none left out (c20 searched no paths in its first minute).
+       - Planted errors in the attractor's cost and in the distance within which the nearest point of a surface is found were each caught on b30.
+       - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

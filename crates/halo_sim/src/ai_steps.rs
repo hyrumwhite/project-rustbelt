@@ -125,7 +125,7 @@ pub struct AiStepC {
 }
 
 /// The game's memory, in this process.
-struct GameMemory;
+pub(crate) struct GameMemory;
 
 impl AiMemory for GameMemory {
     fn r8(&self, address: u32) -> u8 {

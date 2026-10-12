@@ -53,6 +53,7 @@ pub mod items;
 pub mod object_exports;
 pub mod object_functions;
 pub mod objects;
+pub mod paths;
 pub mod weapons;
 pub mod projectiles;
 pub mod unit_ik;
@@ -61,7 +62,7 @@ pub mod vehicles;
 pub mod world;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 97;
+pub const VERSION: u32 = 98;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {

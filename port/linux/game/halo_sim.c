@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 88
+#define HALO_SIM_VERSION 89
 
 /* ---------- structures */
 
@@ -2455,7 +2455,7 @@ static struct
 
 /* the AI step checks: the actor as the step began and as the game's left
 it, the game's calls, and the comparisons */
-#define MAXIMUM_HALO_SIM_AI_EVENTS 256
+#define MAXIMUM_HALO_SIM_AI_EVENTS 4096
 #define MAXIMUM_HALO_SIM_AI_PROPS 256
 #define MAXIMUM_HALO_SIM_AI_PROP_DELTAS 2048
 static struct

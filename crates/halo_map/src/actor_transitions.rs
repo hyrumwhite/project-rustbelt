@@ -224,6 +224,15 @@ pub mod call {
     pub const ALERT: i32 = BASE + 81;
     /// `actor_action_change(actor, sleep, NULL)`.
     pub const SLEEP: i32 = BASE + 82;
+    /// The actor's unit's dive distance, in `output[0]`.
+    pub const UNIT_DIVE_DISTANCE: i32 = BASE + 83;
+    /// `actor_move_try_evasion_vector(actor, input[0..2], input[2],
+    /// input[3])`, the result, and whether it's a ledge, `result2`.
+    pub const TRY_EVASION_VECTOR: i32 = BASE + 84;
+    /// `actor_move_try_evasion_direction(actor, input[0..2], input[2], a,
+    /// input[3])`, the result; the alignment it leaves in `output[0..2]` and
+    /// the direction in `output[2]`.
+    pub const EVASION_DIRECTION: i32 = BASE + 85;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -2001,12 +2010,8 @@ pub fn handle_danger_avoidance(context: &AiStepContext, host: &impl AiHost) -> b
             m.set_bool(at(a::DANGER_ZONE_COMMUNICATED), true);
         }
 
-        let escape = call_full(context, host, call::FIND_ESCAPE, 0, 0, &[]);
-        let escape_found = escape.result != 0;
-        let escape_direction = escape.output[0] as i16;
-        let escape_distance = escape.output[1];
-        let alignment_vector = [escape.output[2], escape.output[3]];
-        let escape_is_ledge = escape.output[4] != 0.0;
+        let (escape_found, escape_direction, escape_distance, alignment_vector, escape_is_ledge) =
+            find_escape_from_danger(context, host);
         if escape_direction == NONE as i16 {
             decision(v::_DANGER_AVOIDANCE_NO_SAFE_DIRECTION);
             break 'decide;
@@ -2040,16 +2045,14 @@ pub fn handle_danger_avoidance(context: &AiStepContext, host: &impl AiHost) -> b
                 let flags = m.r32(context.definition + d::FLAGS as u32);
                 let ledge_avoidance_distance =
                     if flags & (1 << v::_ACTOR_DEFINITION_DIVE_OFF_LEDGES_BIT) != 0 { 8.0 } else { 0.0 };
-                result = call_full(
+                result = try_to_dive(
                     context,
                     host,
-                    call::TRY_TO_DIVE,
-                    escape_direction as i32,
-                    0,
-                    &[escape_distance, alignment_vector[0], alignment_vector[1], ledge_avoidance_distance],
-                )
-                .result
-                    != 0;
+                    escape_direction,
+                    escape_distance,
+                    alignment_vector,
+                    ledge_avoidance_distance,
+                );
             } else {
                 decision(v::_DANGER_AVOIDANCE_NO_DESIRE);
                 m.set_f32(debug_at(debug::DANGER_INTERSECT_TIME), urgency);
@@ -2175,7 +2178,7 @@ pub fn handle_vehicle_entry(context: &AiStepContext, host: &impl AiHost) -> bool
     let mut attempt_distance = f32::MAX;
     let mut continue_distance = f32::MAX;
     let mut best_vehicle_index = NONE;
-    let allowed = |vehicle_index: i32| call_simple(context, host, call::ALLOWED_TO_ENTER_VEHICLE, vehicle_index) != 0;
+    let allowed = |vehicle_index: i32| allowed_to_enter_vehicle(context, host, vehicle_index);
     let origin = |object_index: i32| call_full(context, host, call::OBJECT_ORIGIN, object_index, 0, &[]).vector();
 
     if m.r32(context.definition + d::FLAGS as u32) & (1 << v::_ACTOR_DEFINITION_HELPS_PLAYERS_IN_VEHICLES_BIT) != 0 {
@@ -2284,8 +2287,12 @@ pub fn handle_vehicle_entry(context: &AiStepContext, host: &impl AiHost) -> bool
     call_full(context, host, call::VEHICLE_SETUP, best_vehicle_index, 0, &[attempt_distance, continue_distance]).result != 0
 }
 
-/// actions.c's evade directions (`_actor_evade_*`): right (else left).
+/// actions.c's evade directions (`_actor_evade_*`).
+const EVADE_LEFT: i16 = 0;
 const EVADE_RIGHT: i16 = 1;
+const EVADE_FORWARD: i16 = 2;
+const EVADE_BACK: i16 = 3;
+const EVADE_RANDOM: i16 = 4;
 
 /// actions.c's evade animations (`_actor_animation_evade_*`).
 const ANIMATION_EVADE_LEFT: i32 = 6;
@@ -2587,4 +2594,204 @@ pub fn set_default_state(context: &AiStepContext, host: &impl AiHost, override_s
         changed = true;
     }
     changed
+}
+
+/// actions.c's dives (`global_dive_animation_table`): the animation, the
+/// direction it dives (left, right, forward, back) and its bias.
+const DIVE_ANIMATIONS: [(i32, usize, f32); 6] =
+    [(10, 0, 1.5), (6, 0, 0.0), (11, 1, 1.5), (7, 1, 0.0), (8, 2, 1.5), (9, 3, 1.5)];
+
+/// ai_debug.h's dive decisions (`_dive_*`).
+const DIVE_CANNOT_MOVE: i16 = 1;
+const DIVE_NO_ANIMATION: i16 = 2;
+const DIVE_ANIMATION_FAILURE: i16 = 3;
+const DIVE_SUCCESS: i16 = 4;
+
+/// `actor_action_allowed_to_enter_vehicle`: not the vehicle the actor's
+/// ignoring, until it stops ignoring it.
+pub fn allowed_to_enter_vehicle(context: &AiStepContext, host: &impl AiHost, vehicle_index: i32) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    !(vehicle_index == m.i32(at(a::EMOTIONS_VEHICLE_IGNORE_INDEX))
+        && context.game_time < m.i32(at(a::EMOTIONS_VEHICLE_IGNORE_TIME)))
+}
+
+/// actions.c's `actor_action_find_escape_from_danger`: the side (left or
+/// right of the way the danger comes, or else of the way to it, or the
+/// facing) the actor can dive as far as its unit dives, preferring a ledge,
+/// one clear of the danger's line, or the farther; whether it's clear, the
+/// direction (NONE if neither side has room, or random), the distance, the
+/// alignment and whether it's a ledge.
+fn find_escape_from_danger(context: &AiStepContext, host: &impl AiHost) -> (bool, i16, f32, [f32; 2], bool) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let evade_distance = call_full(context, host, call::UNIT_DIVE_DISTANCE, 0, 0, &[]).output[0];
+    let mut escape_direction = NONE as i16;
+    let mut result = false;
+    let mut selected_is_ledge = false;
+    let mut alignment = [0.0f32; 2];
+
+    if evade_distance > 0.0 {
+        let velocity = m.vector(at(a::DANGER_ZONE_VELOCITY));
+        let body = m.vector(at(a::INPUT_BODY_POSITION));
+        let danger_position = m.vector(at(a::DANGER_ZONE_POSITION));
+        alignment = [-velocity[0], -velocity[1]];
+        if normalize2(&mut alignment) < 0.033_333_335 {
+            alignment = [danger_position[0] - body[0], danger_position[1] - body[1]];
+            if normalize2(&mut alignment) == 0.0 {
+                let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+                alignment = [facing[0], facing[1]];
+                if normalize2(&mut alignment) == 0.0 {
+                    alignment = [1.0, 0.0];
+                }
+            }
+        }
+        let flags = m.r32(context.definition + d::FLAGS as u32);
+        let ledge_avoidance_distance = if flags & (1 << v::_ACTOR_DEFINITION_DIVE_OFF_LEDGES_BIT) != 0 { 8.0 } else { 0.0 };
+        let danger_motion = vector_from_points(danger_position, m.vector(at(a::DANGER_ZONE_PREDICT_DANGER_POSITION)));
+        let left_vector = [-alignment[1], alignment[0], 0.0f32];
+        let right_vector = [alignment[1], -alignment[0], 0.0f32];
+        let position = |side: [f32; 3]| {
+            [side[0] * evade_distance + body[0], side[1] * evade_distance + body[1], side[2] * evade_distance + body[2]]
+        };
+        let left_position = position(left_vector);
+        let right_position = position(right_vector);
+        let danger_radius = || m.f32(at(a::DANGER_ZONE_DANGER_RADIUS));
+
+        let left = call_full(
+            context,
+            host,
+            call::TRY_EVASION_VECTOR,
+            0,
+            0,
+            &[left_vector[0], left_vector[1], evade_distance, ledge_avoidance_distance],
+        );
+        let left_found = left.result != 0;
+        let left_is_ledge = left.result2 != 0;
+        let left_distance = point_to_line_distance_squared(left_position, danger_position, danger_motion).sqrt();
+        let left_clear = left_found && left_distance > danger_radius();
+
+        let right = call_full(
+            context,
+            host,
+            call::TRY_EVASION_VECTOR,
+            0,
+            0,
+            &[right_vector[0], right_vector[1], evade_distance, ledge_avoidance_distance],
+        );
+        let right_found = right.result != 0;
+        let right_is_ledge = right.result2 != 0;
+        let right_distance = point_to_line_distance_squared(right_position, danger_position, danger_motion).sqrt();
+        let right_clear = right_found && right_distance > danger_radius();
+
+        if left_found {
+            if right_found {
+                let distance_difference = left_distance - right_distance;
+                if left_is_ledge > right_is_ledge || left_clear > right_clear || distance_difference > 0.3 {
+                    escape_direction = EVADE_LEFT;
+                    selected_is_ledge = left_is_ledge;
+                    result = true;
+                } else if right_is_ledge > left_is_ledge || right_clear > left_clear || distance_difference < -0.3 {
+                    escape_direction = EVADE_RIGHT;
+                    selected_is_ledge = right_is_ledge;
+                    result = true;
+                } else {
+                    escape_direction = EVADE_RANDOM;
+                    selected_is_ledge = left_is_ledge;
+                    result = left_clear;
+                }
+            } else {
+                escape_direction = EVADE_LEFT;
+                selected_is_ledge = left_is_ledge;
+                result = left_clear;
+            }
+        } else if right_found {
+            escape_direction = EVADE_RIGHT;
+            selected_is_ledge = right_is_ledge;
+            result = right_clear;
+        }
+    }
+    (result, escape_direction, evade_distance, alignment, selected_is_ledge)
+}
+
+/// `actor_action_try_to_dive`: an actor on foot with room to dive that way
+/// takes the dive animation (of those its unit has) best matching the way
+/// it dives relative to its facing, and shouts. Its debug record notes the
+/// decision.
+pub fn try_to_dive(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    escape_direction: i16,
+    dive_distance: f32,
+    alignment_vector: [f32; 2],
+    maximum_ledge_height: f32,
+) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let debug_at = |offset: usize| context.debug_info + offset as u32;
+    let decision = |value: i16| m.set_i16(debug_at(debug::DIVE_DECISION), value);
+    m.w32(debug_at(debug::DIVE_DECISION_TIME), context.game_time as u32);
+
+    if m.i32(at(a::INPUT_VEHICLE_INDEX)) != NONE {
+        decision(DIVE_CANNOT_MOVE);
+        return false;
+    }
+    let evasion = call_full(
+        context,
+        host,
+        call::EVASION_DIRECTION,
+        escape_direction as i32,
+        0,
+        &[alignment_vector[0], alignment_vector[1], dive_distance, maximum_ledge_height],
+    );
+    if evasion.result == 0 {
+        decision(DIVE_CANNOT_MOVE);
+        return false;
+    }
+    let alignment = [evasion.output[0], evasion.output[1]];
+    let evade_vector = match evasion.output[2] as i16 {
+        EVADE_LEFT => [-alignment[1], alignment[0]],
+        EVADE_RIGHT => [alignment[1], -alignment[0]],
+        EVADE_FORWARD | EVADE_BACK => [alignment[0], alignment[1]],
+        _ => [0.0, 0.0],
+    };
+
+    let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+    let left_vector = [-facing[1], facing[0]];
+    let mut animation_desire = [0.0f32; 4];
+    animation_desire[2] = evade_vector[0] * facing[0] + evade_vector[1] * facing[1];
+    animation_desire[0] = evade_vector[0] * left_vector[0] + evade_vector[1] * left_vector[1];
+    animation_desire[3] = -animation_desire[2];
+    animation_desire[1] = -animation_desire[0];
+
+    let mut best_animation = NONE;
+    let mut best_direction = NONE as i16;
+    let mut best_score = -0.5f32;
+    for (animation, direction, bias) in DIVE_ANIMATIONS {
+        if best_score < animation_desire[direction] + bias
+            && call_simple(context, host, call::TEST_ANIMATION_IMPULSE, animation) != 0
+        {
+            best_animation = animation;
+            best_direction = direction as i16;
+            best_score = animation_desire[direction] + bias;
+        }
+    }
+
+    if best_animation == NONE {
+        decision(DIVE_NO_ANIMATION);
+        return false;
+    }
+    let animation_alignment = match best_direction {
+        0 => [evade_vector[1], -evade_vector[0]],
+        1 => [-evade_vector[1], evade_vector[0]],
+        _ => [evade_vector[0], evade_vector[1]],
+    };
+    let result = call_full(context, host, call::ANIMATION_IMPULSE, best_animation, 0, &animation_alignment).result != 0;
+    if result {
+        call_full(context, host, call::COMMUNICATION, v::_AI_COMMUNICATION_DIVE as i32, NONE, &[NONE as f32]);
+        decision(DIVE_SUCCESS);
+    } else {
+        decision(DIVE_ANIMATION_FAILURE);
+    }
+    result
 }

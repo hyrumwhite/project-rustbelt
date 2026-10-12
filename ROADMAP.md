@@ -457,6 +457,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **The C's views:** the unopposable check reads three actor bytes its view calls searching, flying and passenger. In this build's `actor_datum` they're `situation.visible_reachable_enemies`, `input.vehicle_gunner` and `situation.area_fire_support_friends`; Rust reads the same bytes (found with clang's record-layout dump).
      - **The C's side, through `actor_perception_call`:** the dead prop's encounter and death time, the ranged weapon, the weapon definition and the firing variant.
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the target weight's knowledge was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Perception's knowledge and acknowledgement in Rust (`halo_map::actor_perception`): actor_perception.c's `actor_get_perception_knowledge`, `actor_perception_become_acknowledged`, `actor_expected_acknowledgement` and `actor_perception_acknowledge`.
+     - **What Rust does:**
+       - the actor knows a prop definitely (acknowledged, heard shooting or screaming, a friend, or a corpse in combat), or is searching (or has located it) through its orphan, or else goes by its combat status and mode;
+       - an unseen prop becomes acknowledged, taking over its orphan's interest, reachability and unopposability and giving the orphan up;
+       - an acknowledgement is expected when another prop of the same unit or actor (or another seen enemy) stands within two and a half units of it, at its height and in its direction;
+       - an acknowledgement restarts the pursuit and refreshes the stimuli.
+     - **The C's side, through `actor_perception_call`:** switching from the orphan, deleting it, and the acknowledgement's stimulus.
+     - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the acknowledgement's stimulus refresh was caught on b30. One in the expected acknowledgement's facing (0.5 to 0.4) wasn't: it never changed an outcome. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

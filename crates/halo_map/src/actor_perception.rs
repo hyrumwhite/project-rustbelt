@@ -99,6 +99,9 @@ pub mod call {
     /// `actor_combat_get_firing_variant_definition(actor)`, its address the
     /// result.
     pub const FIRING_VARIANT: i32 = 33;
+    /// `actor_stimulus_prop_acknowledged(actor, a, ...)` (`b`: whether it had
+    /// an orphan, bit 0, and was expected, bit 1).
+    pub const STIMULUS_ACKNOWLEDGED: i32 = 34;
 }
 
 /// The local enums (actor_perception.c's).
@@ -315,7 +318,7 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                             call_simple(context, host, call::DEBUG_STOP_AWARE, index);
                         }
                     } else {
-                        let knowledge = call_simple(context, host, call::KNOWLEDGE, index) as i16;
+                        let knowledge = perception_knowledge(context, host, index);
                         let speed = ACKNOWLEDGEMENT_SPEEDS
                             .get(knowledge as usize)
                             .and_then(|row| row.get(perception as usize))
@@ -425,9 +428,7 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                     m.set_i16(at(p::TICKS_UNTIL_ORPHAN), ticks);
                 }
                 ACKNOWLEDGED => {
-                    let result = call_simple(context, host, call::BECOME_ACKNOWLEDGED, index);
-                    became_acknowledged = result & 1 != 0;
-                    expected_acknowledgement = result & 2 != 0;
+                    (became_acknowledged, expected_acknowledgement) = become_acknowledged(context, host, index);
                     iterator.next_index = m.i32(at(p::NEXT_PROP_INDEX));
                 }
                 UNINSPECTED_ORPHAN | UNACKNOWLEDGED | INSPECTED_ORPHAN => {
@@ -969,4 +970,141 @@ pub fn compute_prop_target_weight(context: &AiStepContext, host: &impl AiHost, p
     }
     target_weight = (target_weight as i16 as i32 + preferred_weight as i16 as i32) + (knowledge_weight as i32 + range_weight as i32);
     target_weight as f32 * 10.0 + (5.0 / (distance * 0.1 + 1.0) + bonus_weight)
+}
+
+/// actor_perception.c's knowledge types (`_actor_knowledge_*`).
+const KNOWLEDGE_NONCOMBAT: i16 = 0;
+const KNOWLEDGE_GUARD: i16 = 1;
+const KNOWLEDGE_SEARCHING: i16 = 2;
+const KNOWLEDGE_DEFINITE: i16 = 3;
+
+/// actor_perception.c's unit effects a prop is known by (`_ai_unit_effect_*`).
+const UNIT_EFFECT_SHOOTING: i16 = 1;
+const UNIT_EFFECT_DEATH_SCREAM: i16 = 2;
+
+/// `prop_acknowledged`: becoming unacknowledged to acknowledged.
+fn prop_acknowledged(state: i16) -> bool {
+    state >= v::_PROP_STATE_BECOMING_UNACKNOWLEDGED as i16 && state <= v::_PROP_STATE_ACKNOWLEDGED as i16
+}
+
+/// actor_perception.c's `actor_get_perception_knowledge`: what the actor
+/// knows of a prop: definitely (acknowledged, heard shooting or screaming, a
+/// friend, or a corpse in combat), searching (or located) for its orphan,
+/// else by its combat status and mode.
+pub fn perception_knowledge(context: &AiStepContext, host: &impl AiHost, prop_index: i32) -> i16 {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut knowledge = NONE as i16;
+    if prop_index != NONE {
+        let prop = prop_get(m, context, prop_index);
+        let unit_effect = m.i16(prop + p::UNIT_EFFECT as u32);
+        if prop_acknowledged(m.i16(prop + p::STATE as u32))
+            || unit_effect == UNIT_EFFECT_SHOOTING
+            || unit_effect == UNIT_EFFECT_DEATH_SCREAM
+            || (!m.bool(prop + p::ENEMY as u32) && (!m.bool(prop + p::DEAD as u32) || m.i16(at(a::STATE_MODE)) >= 3))
+        {
+            knowledge = KNOWLEDGE_DEFINITE;
+        }
+        let orphan_prop_index = m.i32(prop + p::ORPHAN_PROP_INDEX as u32);
+        if knowledge == NONE as i16 && orphan_prop_index != NONE {
+            let orphan = prop_get(m, context, orphan_prop_index);
+            knowledge = KNOWLEDGE_SEARCHING + m.bool(orphan + p::DEFINITELY_LOCATED as u32) as i16;
+        }
+    }
+    if knowledge == NONE as i16 {
+        knowledge = if m.i16(at(a::STATE_COMBAT_STATUS)) >= 2 {
+            KNOWLEDGE_SEARCHING
+        } else if m.i16(at(a::STATE_MODE)) >= 3 {
+            KNOWLEDGE_GUARD
+        } else {
+            KNOWLEDGE_NONCOMBAT
+        };
+    }
+    knowledge
+}
+
+/// actor_perception.c's `actor_expected_acknowledgement`: whether another
+/// prop of the same unit or actor (or, for an enemy, another seen or
+/// orphaned enemy) stands within two and a half units of it, at its height,
+/// in its direction.
+fn expected_acknowledgement(context: &AiStepContext, host: &impl AiHost, prop_index: i32) -> bool {
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    let unit_index = m.i32(prop + p::UNIT_INDEX as u32);
+    let actor_index = m.i32(prop + p::ACTOR_INDEX as u32);
+    let enemy = m.bool(prop + p::ENEMY as u32);
+    let body = m.vector(prop + p::BODY_POSITION as u32);
+    let actor_to_prop = m.vector(prop + p::ACTOR_TO_PROP as u32);
+    let mut result = false;
+    let mut iterator = PropIterator::new(m, context);
+    while let Some(current) = iterator.next(m, context) {
+        let state = m.i16(current + p::STATE as u32);
+        if iterator.index != prop_index
+            && (m.i32(current + p::UNIT_INDEX as u32) == unit_index
+                || m.i32(current + p::ACTOR_INDEX as u32) == actor_index
+                || (enemy && m.bool(current + p::ENEMY as u32) && (prop_orphaned(state) || prop_acknowledged(state))))
+        {
+            let current_body = m.vector(current + p::BODY_POSITION as u32);
+            let delta_x = body[0] - current_body[0];
+            let delta_y = body[1] - current_body[1];
+            if delta_x * delta_x + delta_y * delta_y < 6.25
+                && ((current_body[2] - body[2]) as f64).abs() < 1.5
+                && crate::features::dot3(m.vector(current + p::ACTOR_TO_PROP as u32), actor_to_prop) > 0.5
+            {
+                result = true;
+            }
+        }
+    }
+    result
+}
+
+/// actor_perception.c's `actor_perception_acknowledge`: an acknowledged
+/// prop's pursuit begins again, and its stimuli refresh.
+fn acknowledge(context: &AiStepContext, host: &impl AiHost, prop_index: i32, had_orphan: bool, expected: bool) {
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    m.set_bool(prop + p::TRIED_TO_SEARCH as u32, false);
+    m.set_bool(prop + p::TRIED_TO_UNCOVER as u32, false);
+    m.set_bool(prop + p::ABANDONED_SEARCH as u32, false);
+    m.set_bool(prop + p::REFRESH_STIMULI as u32, true);
+    call_full(context, host, call::STIMULUS_ACKNOWLEDGED, prop_index, had_orphan as i32 | (expected as i32) << 1, 0.0);
+}
+
+/// actor_perception.c's `actor_perception_become_acknowledged`: a prop not
+/// yet seen becomes acknowledged, taking over its orphan's interest,
+/// reachability and unopposability (the orphan given up); whether it did,
+/// and whether it was expected.
+pub fn become_acknowledged(context: &AiStepContext, host: &impl AiHost, prop_index: i32) -> (bool, bool) {
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    if prop_acknowledged(m.i16(prop + p::STATE as u32)) {
+        return (false, false);
+    }
+    let orphan_prop_index = m.i32(prop + p::ORPHAN_PROP_INDEX as u32);
+    let had_orphan = orphan_prop_index != NONE;
+    let expected = expected_acknowledgement(context, host, prop_index);
+    if had_orphan {
+        let orphan = prop_get(m, context, orphan_prop_index);
+        for (offset, size) in [
+            (p::TARGET_WEIGHT, 4),
+            (p::LOOK_INTEREST, 4),
+            (p::LAST_IDLE_LOOK_INTEREST, 4),
+            (p::LAST_IDLE_LOOK_TIME, 4),
+            (p::UNREACHABLE_TICKS, 2),
+            (p::LAST_UNREACHABLE_TIME, 4),
+            (p::UNOPPOSABLE_ENEMY, 1),
+            (p::UNOPPOSABLE_CASUALTIES_INFLICTED, 2),
+            (p::UNOPPOSABLE_CASUALTY_DECAY_TIMER, 2),
+        ] {
+            for byte in 0..size {
+                m.w8(prop + (offset + byte) as u32, m.r8(orphan + (offset + byte) as u32));
+            }
+        }
+        call_full(context, host, call::SWITCH_PROPS, m.i32(prop + p::ORPHAN_PROP_INDEX as u32), prop_index, 0.0);
+        call_simple(context, host, call::PROP_DELETE, m.i32(prop + p::ORPHAN_PROP_INDEX as u32));
+        m.w32(prop + p::ORPHAN_PROP_INDEX as u32, NONE as u32);
+    }
+    m.set_i16(prop + p::STATE as u32, v::_PROP_STATE_ACKNOWLEDGED as i16);
+    acknowledge(context, host, prop_index, had_orphan, expected);
+    (true, expected)
 }

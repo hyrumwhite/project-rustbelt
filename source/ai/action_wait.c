@@ -232,7 +232,19 @@ boolean action_wait_setup(
 		state_data->exit_timer = 0;
 		state_data->look_timer = 120;
 		state_data->desire_move = TRUE;
-		state_data->query_timer = seed_random_range(get_global_random_seed_address(), 300, 600);
+		{
+			/* port: the draw through actions.c's actions_port_handler_call, as
+			the Rust port's asks for it */
+			struct halo_sim_ai_call draw;
+
+			memset(&draw, 0, sizeof(draw));
+			draw.kind = _actions_port_handler_call_seed_random_range;
+			draw.actor = actor_index;
+			draw.a = 300;
+			draw.b = 600;
+			actions_port_handler_call(&draw);
+			state_data->query_timer = (short)draw.result;
+		}
 		result = TRUE;
 	}
 

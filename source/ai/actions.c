@@ -415,6 +415,22 @@ static boolean actions_port_handler_try_to_panic(
 	long panic_prop_index,
 	boolean force);
 
+static void actions_port_action_change(
+	long actor_index,
+	long new_action_type,
+	struct action_state_data *new_action_data);
+
+static boolean actions_port_guard_current_position(
+	long actor_index);
+
+static boolean actions_port_guard_find_position(
+	long actor_index,
+	long wait_ticks);
+
+static boolean actions_port_alert(
+	long actor_index,
+	long move_position_order);
+
 static boolean actor_action_find_escape_from_danger(
 	long actor_index,
 	short *escape_direction_reference,
@@ -1011,7 +1027,7 @@ boolean actor_action_set_default_state(
 			if (actor->state.mode != 1)
 			{
 				actor->state.mode = 1;
-				actions_port_handler_simple(actor_index, _actions_port_handler_call_sleep, 0);
+				actions_port_action_change(actor_index, _actor_action_sleep, NULL);
 				changed = TRUE;
 			}
 			break;
@@ -1019,7 +1035,7 @@ boolean actor_action_set_default_state(
 		case 8:
 			if ((actor->state.action != _actor_action_guard ||
 				actor->state.action_data.guard.guard_location_type != 1) &&
-				actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_current_position, 0))
+				actions_port_guard_current_position(actor_index))
 			{
 				changed = TRUE;
 			}
@@ -1031,7 +1047,7 @@ boolean actor_action_set_default_state(
 				if (actor->state.action_data.guard.guard_location_type != 3)
 					actor->state.action_data.guard.find_new_guard_position = TRUE;
 			}
-			else if (actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_find_position_if, 0))
+			else if (actions_port_guard_find_position(actor_index, 0))
 			{
 				changed = TRUE;
 			}
@@ -1045,7 +1061,7 @@ boolean actor_action_set_default_state(
 				actor->state.combat_status = 2;
 
 				if (!actor_action_handle_lost_contact(actor_index) &&
-					actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_current_position, 0))
+					actions_port_guard_current_position(actor_index))
 				{
 					changed = TRUE;
 				}
@@ -1060,7 +1076,7 @@ boolean actor_action_set_default_state(
 					changed = TRUE;
 				}
 				else if (actor->state.action != _actor_action_guard &&
-					actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_current_position, 0))
+					actions_port_guard_current_position(actor_index))
 				{
 					changed = TRUE;
 				}
@@ -1077,8 +1093,7 @@ boolean actor_action_set_default_state(
 			if ((actor->state.action != _actor_action_alert ||
 				actor->state.action_data.alert.move_position_order !=
 					global_state_move_position_orders[state]) &&
-				actions_port_handler_simple(actor_index, _actions_port_handler_call_alert,
-					global_state_move_position_orders[state]))
+				actions_port_alert(actor_index, global_state_move_position_orders[state]))
 			{
 				changed = TRUE;
 			}
@@ -1086,7 +1101,7 @@ boolean actor_action_set_default_state(
 		}
 
 		if (!changed && actor->state.action == _actor_action_none &&
-			actions_port_handler_simple(actor_index, _actions_port_handler_call_alert, 0))
+			actions_port_alert(actor_index, 0))
 		{
 			changed = TRUE;
 		}
@@ -1813,6 +1828,33 @@ void actions_port_handler_call(
 			actor_action_change(actor_index, _actor_action_sleep, NULL);
 			break;
 
+		case _actions_port_handler_call_action_end:
+		{
+			void (*handler)(long actor_index) = global_action_functions[call->a].end;
+
+			ai_profile.meters[_ai_meter_action_change].accumulator++;
+			if (handler)
+				handler(actor_index);
+			break;
+		}
+
+		case _actions_port_handler_call_clear_discarded_firing_positions:
+			actor_clear_discarded_firing_positions(actor_index, FALSE);
+			break;
+
+		case _actions_port_handler_call_action_begin:
+		{
+			void (*handler)(long actor_index) = global_action_functions[call->a].begin;
+
+			if (handler)
+				handler(actor_index);
+			break;
+		}
+
+		case _actions_port_handler_call_seed_random_range:
+			call->result = seed_random_range(get_global_random_seed_address(), (short)call->a, (short)call->b);
+			break;
+
 		case _actions_port_handler_call_unit_dive_distance:
 			call->output[0] = unit_definition_get(unit_get(actor->meta.unit_index)->definition_index)->unit.dive_distance;
 			break;
@@ -1947,6 +1989,78 @@ static real actions_port_handler_random(
 	actions_port_handler(actor_index, _actions_port_handler_call_random, 0, 0, NULL, 0, output);
 
 	return output[0];
+}
+
+/* port: actor_action_change as the Rust port's does it (crates/halo_map's
+actor_transitions), asking for the actions' end and begin and the
+discarded firing positions' clearing through actions_port_handler_call */
+static void actions_port_action_change(
+	long actor_index,
+	long new_action_type,
+	struct action_state_data *new_action_data)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	actions_port_handler_simple(actor_index, _actions_port_handler_call_action_end, actor->state.action);
+	if (global_action_functions[new_action_type].action_class == 0)
+	{
+		if (actor->state.mode >= 3)
+			actor->state.mode = 2;
+	}
+	else if (actor->state.mode < 3)
+	{
+		actor->state.mode = 3;
+	}
+	actions_port_handler_simple(actor_index, _actions_port_handler_call_clear_discarded_firing_positions, 0);
+	if (global_action_functions[new_action_type].data_size > 0 && new_action_data)
+	{
+		csmemcpy(
+			&actor->state.action_data,
+			new_action_data,
+			global_action_functions[new_action_type].data_size);
+	}
+	actor->state.action = new_action_type;
+	actor->state.action_changed = TRUE;
+	if (global_action_functions[new_action_type].begin)
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_action_begin, new_action_type);
+
+	return;
+}
+
+/* port: the setups and changes the Rust port's does itself */
+static boolean actions_port_guard_current_position(
+	long actor_index)
+{
+	struct action_state_data state;
+
+	action_guard_setup_current_position(actor_index, &state.guard);
+	actions_port_action_change(actor_index, _actor_action_guard, &state);
+
+	return TRUE;
+}
+
+static boolean actions_port_guard_find_position(
+	long actor_index,
+	long wait_ticks)
+{
+	struct action_state_data state;
+
+	action_guard_setup_find_position(actor_index, wait_ticks, &state.guard);
+	actions_port_action_change(actor_index, _actor_action_guard, &state);
+
+	return TRUE;
+}
+
+static boolean actions_port_alert(
+	long actor_index,
+	long move_position_order)
+{
+	struct action_state_data state;
+
+	action_alert_setup(actor_index, move_position_order, NONE, &state.alert);
+	actions_port_action_change(actor_index, _actor_action_alert, &state);
+
+	return TRUE;
 }
 
 /* port: the handlers below ask through actions_port_handler_call, as the
@@ -3364,7 +3478,10 @@ boolean actor_action_handle_combat_selection(
 			!action_changed &&
 			actor->state.action != _actor_action_fight)
 		{
-			actions_port_handler_simple(actor_index, _actions_port_handler_call_fight, 0);
+			struct action_state_data state;
+
+			action_fight_setup(actor_index, &state.fight);
+			actions_port_action_change(actor_index, _actor_action_fight, &state);
 			action_changed = TRUE;
 		}
 	}
@@ -3671,11 +3788,15 @@ boolean actor_action_handle_lost_contact(
 							19, NONE, &weapon_state, 1, NULL);
 					}
 
-					if (!actor->meta.swarm &&
-						wait_after_pursuit &&
-						actions_port_handler_simple(actor_index, _actions_port_handler_call_wait, allow_pursuit))
+					if (!actor->meta.swarm && wait_after_pursuit)
 					{
-						handled = TRUE;
+						struct action_state_data state;
+
+						if (action_wait_setup(actor_index, allow_pursuit, &state.wait))
+						{
+							actions_port_action_change(actor_index, _actor_action_wait, &state);
+							handled = TRUE;
+						}
 					}
 				}
 			}
@@ -3713,8 +3834,7 @@ boolean actor_action_handle_lost_contact(
 
 		actions_port_handler_simple(actor_index, _actions_port_handler_call_abandoned_search,
 			actor->target.target_prop_index);
-		actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_find_position,
-			find_position_delay);
+		actions_port_guard_find_position(actor_index, find_position_delay);
 		handled = TRUE;
 	}
 
@@ -5487,10 +5607,13 @@ try_avoid_action:
 	{
 		short action_class = actor_action_class(actor_index);
 
-		if ((action_class == _action_class_passive ||
-				action_class == _action_class_pursuit) &&
-			actions_port_handler_simple(actor_index, _actions_port_handler_call_avoid, 0))
+		if (action_class == _action_class_passive ||
+			action_class == _action_class_pursuit)
 		{
+			struct action_state_data state;
+
+			action_avoid_setup(actor_index, &state.avoid);
+			actions_port_action_change(actor_index, _actor_action_avoid, &state);
 			result = TRUE;
 		}
 	}

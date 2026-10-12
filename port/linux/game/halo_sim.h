@@ -1259,6 +1259,10 @@ enum
 	_actions_port_handler_call_unit_dive_distance,
 	_actions_port_handler_call_try_evasion_vector,
 	_actions_port_handler_call_evasion_direction,
+	_actions_port_handler_call_action_end,
+	_actions_port_handler_call_clear_discarded_firing_positions,
+	_actions_port_handler_call_action_begin,
+	_actions_port_handler_call_seed_random_range,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

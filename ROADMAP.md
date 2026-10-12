@@ -652,6 +652,16 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - A planted error in a line's delay was caught on a30.
        - Plants in the participants' attention went unseen: the early conversations' lines have no actor speaking to them, so the attention loop agrees without being exercised.
        - With all fifty systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The encounters' activation in Rust (`halo_map::encounters`, under `encounters`): encounters.c's `encounters_test_activation`, `encounter_compute_activation_cluster_bit_vector`, `encounter_activate`, `encounter_deactivate`, `encounterless_activate` and `encounterless_deactivate`.
+     - **What Rust does:**
+       - Once a second, each encounterless actor (or swarm) wants to sleep unless its unit's outermost parent stands in a cluster the players can see (their combined PVS). It is made active or, after its three-second timer, dormant.
+       - Each encounter in the current structure gathers the clusters of its actors, of its active actors' targets, of the firing positions they fight, guard or pursue from, and of the move positions of squads under alert orders, marking each actor's wish to sleep as it goes.
+       - The encounter stays active for five seconds after any of those clusters is visible, or while a linked encounter is. Otherwise its actors are made dormant and its pursuit forgotten.
+     - **The C's side:** making an actor active or dormant, its activation's verification, and a cached swarm's visibility stay the game's. The step context now carries the players' combined PVS, the structure's cluster count, and whether the game is in the editor or a local game forces every actor active.
+     - **Results:**
+       - Every encounters' update agrees in minute-long runs of the six levels, with none left out (875 to 3,064 calls on each).
+       - Planted errors in the remain-active time and an actor's cluster visibility were caught on b30.
+       - With all fifty systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

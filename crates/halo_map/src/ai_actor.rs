@@ -157,6 +157,14 @@ pub struct WorldContext {
     pub structure_bsp_index: i32,
     /// `conversation_data` (its `struct data_array`).
     pub conversation_data: u32,
+    /// `players_get_combined_pvs()`: the clusters the players can see (512
+    /// bits).
+    pub combined_pvs: u32,
+    /// The structure's cluster count.
+    pub structure_cluster_count: i32,
+    /// Bit 0 `game_in_editor()`, bit 1 a local game's
+    /// `ai_debug.force_all_active`.
+    pub activation_flags: u32,
 }
 
 impl WorldContext {

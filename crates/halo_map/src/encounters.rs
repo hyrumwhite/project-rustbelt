@@ -7,8 +7,9 @@
 //! (standing down, defending, maneuvering).
 //!
 //! The encounters, squads, platoons, props and actors are the game's
-//! arrays, worked on in place ([`WorldContext`]). Activating the
-//! encounters, spawning actors, the random seed, a squad's timer running
+//! arrays, worked on in place ([`WorldContext`]), with the encounters'
+//! activation (by the players' combined PVS). Making an actor active or
+//! dormant, spawning actors, the random seed, a squad's timer running
 //! out, the follow targets, an object's origin, moving an actor to another
 //! squad, the maneuvering stimulus, the player rating, the communication
 //! team, a unit's active prop, clearing the pursuit and dropping a prop are
@@ -19,14 +20,13 @@
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, NONE, WorldContext, datum_get, prop_get, tag_block_count, tag_block_element};
 use crate::layout::{
     actor_datum as a, ai_globals, ai_values as v, encounter_datum as e, encounter_definition as ed,
-    firing_position_definition as fp, platoon_datum as pl, platoon_definition as pd, platoon_rule as rule, prop_datum as p,
+    firing_position_definition as fp, move_position_definition as mp, platoon_datum as pl, platoon_definition as pd, platoon_rule as rule, prop_datum as p,
     scenario, squad_datum as sq, squad_definition as sd, unit_datum as u,
 };
 
 /// The encounters' calls (halo_sim.h's `_encounter_call_*`).
 pub mod call {
-    /// `encounters_test_activation()`.
-    pub const TEST_ACTIVATION: i32 = 1;
+    // 1 was `encounters_test_activation`, now Rust's.
     // 2 and 3 were `encounter_stand_down` and `encounter_post_combat`, now
     // Rust's.
     /// `game_team_is_ally(a, b)`, the result.
@@ -65,6 +65,13 @@ pub mod call {
     pub const CLEAR_PURSUIT: i32 = 18;
     /// `actor_switch_props(actor, a, NONE)` and `prop_delete(actor, a)`.
     pub const DROP_PROP: i32 = 19;
+    /// `actor_set_active(actor, a)`.
+    pub const SET_ACTOR_ACTIVE: i32 = 20;
+    /// `actor_verify_activation(actor)`.
+    pub const VERIFY_ACTIVATION: i32 = 21;
+    /// Whether any unit of the swarm actor's cached swarm is in the
+    /// players' combined PVS, the result.
+    pub const SWARM_IN_PVS: i32 = 22;
 }
 
 const TICKS_PER_SECOND: i32 = 30;
@@ -1069,6 +1076,294 @@ impl<H: AiHost> Encounters<'_, H> {
     }
 }
 
+/// encounters.c's activation constants.
+const ENCOUNTER_REMAIN_ACTIVE_TIME: i16 = 150;
+const MAXIMUM_CLUSTERS_PER_STRUCTURE: usize = 512;
+const ACTOR_MODE_ALERT: i16 = 2;
+const ACTOR_COMBAT_STATUS_INVESTIGATE: i16 = 2;
+/// [`WorldContext::activation_flags`]: `game_in_editor()` and
+/// `ai_debug.force_all_active`.
+const ACTIVATION_IN_EDITOR: u32 = 1 << 0;
+const ACTIVATION_FORCE_ALL_ACTIVE: u32 = 1 << 1;
+
+type ClusterBits = [u32; MAXIMUM_CLUSTERS_PER_STRUCTURE / 32];
+
+impl<H: AiHost> Encounters<'_, H> {
+    /// `object_get_ultimate_parent`'s object's cluster
+    /// (`location.cluster_index`).
+    fn ultimate_parent_cluster(&self, object_index: i32) -> i16 {
+        let m = self.m;
+        let step = self.context.step_context();
+        let mut index = object_index;
+        loop {
+            let object = crate::ai_actor::object_get(m, &step, index).unwrap_or(0);
+            let parent = m.i32(object + u::OBJECT_PARENT_OBJECT_INDEX as u32);
+            if parent == NONE {
+                return m.i16(object + u::OBJECT_LOCATION_CLUSTER_INDEX as u32);
+            }
+            index = parent;
+        }
+    }
+
+    fn unit_next_swarm_unit(&self, unit_index: i32) -> i32 {
+        let step = self.context.step_context();
+        let unit = crate::ai_actor::object_get(self.m, &step, unit_index).unwrap_or(0);
+        self.m.i32(unit + u::UNIT_SWARM_NEXT_UNIT_INDEX as u32)
+    }
+
+    /// Whether a cluster is in the players' combined potentially visible
+    /// set.
+    fn in_combined_pvs(&self, cluster_index: i16) -> bool {
+        let cluster = cluster_index as u32;
+        self.m.r32(self.context.combined_pvs + 4 * (cluster / 32)) & (1 << (cluster % 32)) != 0
+    }
+
+    /// `encounter_compute_activation_cluster_bit_vector` (with the actors'
+    /// dormancy updated, against the players' combined PVS): the clusters
+    /// where the encounter's actors, their targets, and the firing and move
+    /// positions they are using lie.
+    fn activation_clusters(&self, encounter_index: i32) -> ClusterBits {
+        let m = self.m;
+        let encounter = self.encounter(encounter_index);
+        let definition = self.definition(encounter_index);
+        let mut bits: ClusterBits = [0; MAXIMUM_CLUSTERS_PER_STRUCTURE / 32];
+        let mut active_squad_mask = 0u32;
+        let mut firing_position_group_mask = 0u32;
+        let set = |bits: &mut ClusterBits, cluster: i16| bits[cluster as usize / 32] |= 1 << (cluster as usize % 32);
+        let encounter_active = m.bool(encounter + e::ACTIVE as u32);
+
+        let mut actor_index = m.i32(encounter + e::FIRST_ACTOR_INDEX as u32);
+        while actor_index != NONE {
+            let actor = self.actor(actor_index);
+            let at = |offset: usize| actor + offset as u32;
+            let mut dormant_desire = true;
+            if m.bool(at(a::META_SWARM)) {
+                let mut unit_index = m.i32(at(a::META_SWARM_UNIT_INDEX));
+                while unit_index != NONE {
+                    let cluster_index = self.ultimate_parent_cluster(unit_index);
+                    if cluster_index != NONE as i16 {
+                        set(&mut bits, cluster_index);
+                        if self.in_combined_pvs(cluster_index) {
+                            dormant_desire = false;
+                        }
+                    }
+                    unit_index = self.unit_next_swarm_unit(unit_index);
+                }
+            } else {
+                let cluster_index = self.ultimate_parent_cluster(m.i32(at(a::META_UNIT_INDEX)));
+                if cluster_index != NONE as i16 {
+                    set(&mut bits, cluster_index);
+                    if self.in_combined_pvs(cluster_index) {
+                        dormant_desire = false;
+                    }
+                }
+                if encounter_active {
+                    let context = self.actor_context(actor_index, actor);
+                    let mode = m.i16(at(a::STATE_MODE));
+                    if mode == ACTOR_MODE_COMBAT {
+                        if m.i16(at(a::STATE_COMBAT_STATUS)) >= ACTOR_COMBAT_STATUS_INVESTIGATE {
+                            firing_position_group_mask |= crate::firing_positions::firing_position_group(
+                                m,
+                                &context,
+                                crate::firing_positions::mode::PURSUE,
+                                crate::firing_positions::group_selection::WHEN_SEARCHING,
+                            );
+                        }
+                        let action = m.i16(at(a::STATE_ACTION));
+                        if action == v::_ACTOR_ACTION_GUARD as i16 || action == v::_ACTOR_ACTION_FLEE as i16 {
+                            firing_position_group_mask |= crate::firing_positions::firing_position_group(
+                                m,
+                                &context,
+                                crate::firing_positions::mode::GUARD,
+                                crate::firing_positions::group_selection::NORMAL,
+                            );
+                        } else if action == v::_ACTOR_ACTION_FIGHT as i16 || action == v::_ACTOR_ACTION_UNCOVER as i16 {
+                            firing_position_group_mask |= crate::firing_positions::firing_position_group(
+                                m,
+                                &context,
+                                crate::firing_positions::mode::FIGHT,
+                                crate::firing_positions::group_selection::NORMAL,
+                            );
+                        }
+                    } else if mode == ACTOR_MODE_ALERT && m.bool(at(a::STATE_ALERT_MOVE_POSITION_ORDER)) {
+                        active_squad_mask |= 1u32.wrapping_shl(m.i16(at(a::META_SQUAD_INDEX)) as u32);
+                    }
+                    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+                    if target_prop_index != NONE {
+                        let prop = prop_get(m, &context, target_prop_index);
+                        let cluster_index = m.i16(prop + p::BODY_LOCATION_CLUSTER_INDEX as u32);
+                        if cluster_index != NONE as i16 {
+                            set(&mut bits, cluster_index);
+                        }
+                    }
+                }
+            }
+
+            let squad = self.squad(encounter, m.i16(at(a::META_SQUAD_INDEX)));
+            if m.bool(squad + sq::DISABLE_DORMANT as u32) {
+                dormant_desire = false;
+            }
+            m.set_bool(at(a::META_DORMANT_DESIRE), dormant_desire);
+            actor_index = m.i32(at(a::META_NEXT_ACTOR_INDEX));
+        }
+
+        let valid = |cluster: i16| (0..MAXIMUM_CLUSTERS_PER_STRUCTURE as i16).contains(&cluster);
+        if firing_position_group_mask != 0 {
+            let firing_positions = definition + ed::FIRING_POSITIONS as u32;
+            for index in 0..tag_block_count(m, firing_positions) as i16 {
+                let firing_position = tag_block_element(m, firing_positions, index as i32, fp::SIZEOF);
+                let cluster_index = m.i16(firing_position + fp::CLUSTER_INDEX as u32);
+                let group_index = m.i16(firing_position + fp::GROUP_INDEX as u32);
+                // TEST_FLAG: the C's shift wraps
+                if cluster_index != NONE as i16
+                    && firing_position_group_mask & 1u32.wrapping_shl(group_index as u32) != 0
+                    && valid(cluster_index)
+                {
+                    set(&mut bits, cluster_index);
+                }
+            }
+        }
+        if active_squad_mask != 0 {
+            let squads = definition + ed::SQUADS as u32;
+            for squad_index in 0..tag_block_count(m, squads) as i16 {
+                if active_squad_mask & 1u32.wrapping_shl(squad_index as u32) == 0 {
+                    continue;
+                }
+                let squad_definition = tag_block_element(m, squads, squad_index as i32, sd::SIZEOF);
+                let move_positions = squad_definition + sd::MOVE_POSITIONS as u32;
+                for index in 0..tag_block_count(m, move_positions) as i16 {
+                    let move_position = tag_block_element(m, move_positions, index as i32, mp::SIZEOF);
+                    let cluster_index = m.i16(move_position + mp::CLUSTER_INDEX as u32);
+                    if cluster_index != NONE as i16 && valid(cluster_index) {
+                        set(&mut bits, cluster_index);
+                    }
+                }
+            }
+        }
+        bits
+    }
+
+    /// `encounter_activate` (its actors made active as it becomes so).
+    fn activate(&self, encounter_index: i32) {
+        let m = self.m;
+        let encounter = self.encounter(encounter_index);
+        let bsp_index = m.i16(self.definition(encounter_index) + ed::RUNTIME_STRUCTURE_BSP_REFERENCE_INDEX as u32);
+        if bsp_index == NONE as i16 || bsp_index as i32 == self.context.structure_bsp_index {
+            if !m.bool(encounter + e::ACTIVE as u32) {
+                self.for_each_actor(encounter_index, |actor_index, _| {
+                    self.call(call::SET_ACTOR_ACTIVE, actor_index, 1, 0);
+                });
+            }
+            m.w32(encounter + e::LAST_ACTIVE_TIME as u32, self.context.game_time as u32);
+            m.set_bool(encounter + e::ACTIVE as u32, true);
+        }
+    }
+
+    /// `encounter_deactivate`.
+    fn deactivate(&self, encounter_index: i32) {
+        let m = self.m;
+        m.set_bool(self.encounter(encounter_index) + e::ACTIVE as u32, false);
+        self.call(call::CLEAR_PURSUIT, NONE, encounter_index, 0);
+        self.for_each_actor(encounter_index, |actor_index, actor| {
+            if m.bool(actor + a::META_ACTIVE as u32) {
+                self.call(call::SET_ACTOR_ACTIVE, actor_index, 0, 0);
+            }
+            self.call(call::VERIFY_ACTIVATION, actor_index, 0, 0);
+        });
+    }
+
+    /// `encounters_test_activation`: the encounterless actors and the
+    /// encounters made active or dormant by whether the players can see
+    /// where they are.
+    fn test_activation(&self) {
+        let m = self.m;
+        let flags = self.context.activation_flags;
+        let forced = flags & (ACTIVATION_IN_EDITOR | ACTIVATION_FORCE_ALL_ACTIVE) != 0;
+        let mut actor_index = m.i32(self.context.ai_globals + ai_globals::FIRST_ENCOUNTERLESS_ACTOR_INDEX as u32);
+        while actor_index != NONE {
+            let actor = self.actor(actor_index);
+            let at = |offset: usize| actor + offset as u32;
+            if m.bool(at(a::META_SWARM)) {
+                m.set_bool(at(a::META_DORMANT_DESIRE), true);
+                if m.i32(at(a::META_SWARM_CACHE_INDEX)) == NONE {
+                    let mut unit_index = m.i32(at(a::META_SWARM_UNIT_INDEX));
+                    while unit_index != NONE {
+                        let cluster_index = self.ultimate_parent_cluster(unit_index);
+                        if cluster_index != NONE as i16 && self.in_combined_pvs(cluster_index) {
+                            m.set_bool(at(a::META_DORMANT_DESIRE), false);
+                            break;
+                        }
+                        unit_index = self.unit_next_swarm_unit(unit_index);
+                    }
+                } else if self.call(call::SWARM_IN_PVS, actor_index, 0, 0).result != 0 {
+                    m.set_bool(at(a::META_DORMANT_DESIRE), false);
+                }
+            } else {
+                let cluster_index = self.ultimate_parent_cluster(m.i32(at(a::META_UNIT_INDEX)));
+                m.set_bool(
+                    at(a::META_DORMANT_DESIRE),
+                    cluster_index == NONE as i16 || !self.in_combined_pvs(cluster_index),
+                );
+            }
+
+            let active = m.bool(at(a::META_FORCE_ACTIVE)) || forced || !m.bool(at(a::META_DORMANT_DESIRE));
+            let timer = at(a::META_ENCOUNTERLESS_ACTIVE_TIMER);
+            if active {
+                m.set_i16(timer, 90);
+                self.call(call::SET_ACTOR_ACTIVE, actor_index, 1, 0);
+            } else if m.i16(timer) as i32 > TICKS_PER_SECOND {
+                m.set_i16(timer, (m.i16(timer) as i32 - TICKS_PER_SECOND) as i16);
+            } else {
+                m.set_i16(timer, 0);
+                m.set_i16(timer, 0);
+                self.call(call::SET_ACTOR_ACTIVE, actor_index, 0, 0);
+            }
+            self.call(call::VERIFY_ACTIVATION, actor_index, 0, 0);
+            actor_index = m.i32(at(a::META_NEXT_ACTOR_INDEX));
+        }
+
+        let cluster_count = self.context.structure_cluster_count;
+        self.for_each_encounter(false, |encounter_index, encounter| {
+            let at = |offset: usize| encounter + offset as u32;
+            let mut active = m.bool(at(e::FORCE_ACTIVE)) || forced || m.i16(at(e::RESPAWN_DELAY_TICKS)) > 0;
+            let bsp_index = m.i16(self.definition(encounter_index) + ed::RUNTIME_STRUCTURE_BSP_REFERENCE_INDEX as u32);
+            if bsp_index == NONE as i16 || bsp_index as i32 == self.context.structure_bsp_index {
+                let bits = self.activation_clusters(encounter_index);
+                // bit_vector_and over the clusters' longs
+                let longs = ((cluster_count as i16 as i32 + 31) >> 5).max(0) as usize;
+                for i in (0..longs.min(bits.len())).rev() {
+                    if self.m.r32(self.context.combined_pvs + 4 * i as u32) & bits[i] != 0 {
+                        active = true;
+                    }
+                }
+            } else {
+                active = false;
+            }
+
+            if active {
+                m.set_i16(at(e::REMAIN_ACTIVE_TIMER), ENCOUNTER_REMAIN_ACTIVE_TIME);
+                self.activate(encounter_index);
+            } else if m.bool(at(e::ACTIVE)) && m.i16(at(e::REMAIN_ACTIVE_TIMER)) as i32 > TICKS_PER_SECOND {
+                m.set_i16(at(e::REMAIN_ACTIVE_TIMER), (m.i16(at(e::REMAIN_ACTIVE_TIMER)) as i32 - TICKS_PER_SECOND) as i16);
+            } else {
+                let mut link_active = false;
+                for i in 0..m.i16(at(e::LINK_ENCOUNTER_COUNT)) {
+                    let link_index = m.i16(at(e::LINK_ENCOUNTER_INDICES) + 2 * i as u32) as i32;
+                    if m.i16(self.encounter(link_index) + e::REMAIN_ACTIVE_TIMER as u32) > 0 {
+                        link_active = true;
+                    }
+                }
+                m.set_i16(at(e::REMAIN_ACTIVE_TIMER), 0);
+                if link_active {
+                    self.activate(encounter_index);
+                } else {
+                    self.deactivate(encounter_index);
+                }
+            }
+        });
+    }
+}
+
 /// `encounters_update`.
 pub fn encounters_update(context: &WorldContext, host: &impl AiHost) {
     let encounters = Encounters { m: host.memory(), host, context };
@@ -1076,7 +1371,7 @@ pub fn encounters_update(context: &WorldContext, host: &impl AiHost) {
     let time = context.game_time;
     if time % TICKS_PER_SECOND == 0 {
         encounters.update_dirty_status();
-        encounters.call(call::TEST_ACTIVATION, NONE, 0, 0);
+        encounters.test_activation();
     }
     let phase = time % UPDATE_INTERVAL;
     encounters.for_each_encounter(true, |encounter_index, _| {

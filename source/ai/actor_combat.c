@@ -1731,18 +1731,6 @@ void actor_combat_call(
 			call->result = BIT_VECTOR_TEST_FLAG(players_get_combined_pvs(), call->a) ? 1 : 0;
 			break;
 
-		case _actor_combat_call_manual_line_of_sight:
-			call->result = ai_test_line_of_sight(
-				&actor->input.position.head_position,
-				actor->input.position.body_location.cluster_index,
-				&actor->control.current_fire_target_position,
-				NONE,
-				_ai_line_of_sight_normal,
-				FALSE,
-				NONE,
-				actor->input.vehicle_index != NONE);
-			break;
-
 		case _actor_combat_call_aim_at_target:
 		{
 			boolean linear = TRUE;
@@ -2220,8 +2208,16 @@ static void actor_combat_update_game(
 				actor->control.current_fire_target_outside_active_area = FALSE;
 				if ((actor->control.current_fire_target_timer % 10) == 0)
 				{
-					actor->control.current_fire_target_line_of_sight = (short)actor_combat_call_simple(
-						actor_index, _actor_combat_call_manual_line_of_sight, 0);
+					/* port: directly (the Rust port's) */
+					actor->control.current_fire_target_line_of_sight = ai_test_line_of_sight(
+						&actor->input.position.head_position,
+						actor->input.position.body_location.cluster_index,
+						&actor->control.current_fire_target_position,
+						NONE,
+						_ai_line_of_sight_normal,
+						FALSE,
+						NONE,
+						actor->input.vehicle_index != NONE);
 				}
 			}
 

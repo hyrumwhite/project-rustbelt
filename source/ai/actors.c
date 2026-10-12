@@ -4707,6 +4707,10 @@ static void actor_unit_control_game(
 	return;
 }
 
+/* cache_files.c's loaded tags' table */
+void *cache_files_tag_instances(
+	long *count);
+
 /* port: where an actor's step finds the actor, its definition and the props
 (halo_sim.c's ports of the AI's steps) */
 typedef char actors_port_actor_datum_size_assert[
@@ -4735,6 +4739,7 @@ void actors_port_step_context(
 	context->encounter_data = (unsigned long)encounter_data;
 	context->pursuit_data = (unsigned long)pursuit_data;
 	context->squad_array = (unsigned long)squad_array;
+	context->tag_instances = (unsigned long)cache_files_tag_instances(&context->tag_count);
 }
 
 /* port: the arrays the dispatch steps' checks follow (halo_sim.c): the

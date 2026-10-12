@@ -670,19 +670,6 @@ void actor_firing_position_call(
 			break;
 		}
 
-		case _actor_firing_position_call_line_of_sight:
-		{
-			real_point3d target_point;
-
-			target_point.x = call->input[3];
-			target_point.y = call->input[4];
-			target_point.z = call->input[5];
-			call->result = ai_test_line_of_sight(&point, (short)(call->a & 0xFFFF), &target_point,
-				(short)(call->a >> 16), (short)call->input[6], call->input[7] != 0.0f, call->b,
-				call->input[8] != 0.0f);
-			break;
-		}
-
 		case _actor_firing_position_call_change:
 			call->result = actor_change_firing_position(actor_index, (short)call->a, NULL, call->b,
 				&actor_firing_position_area_path_state, call->input[0] != 0.0f);
@@ -774,18 +761,9 @@ static short actor_firing_position_port_line_of_sight(
 	long ignore_object_index,
 	boolean ignore_vehicles)
 {
-	struct halo_sim_ai_call call;
-	real input[9];
-
-	memcpy(&input[0], point0->n, 3 * sizeof(real));
-	memcpy(&input[3], point1->n, 3 * sizeof(real));
-	input[6] = (real)mode;
-	input[7] = test_line_of_fire ? 1.0f : 0.0f;
-	input[8] = ignore_vehicles ? 1.0f : 0.0f;
-
-	return (short)actor_firing_position_port_call(actor_index, _actor_firing_position_call_line_of_sight,
-		(long)((unsigned long)(unsigned short)cluster0 | ((unsigned long)(unsigned short)cluster1 << 16)),
-		ignore_object_index, input, 9, &call);
+	/* port: directly (the Rust port's) */
+	return ai_test_line_of_sight(point0, cluster0, point1, cluster1, mode, test_line_of_fire, ignore_object_index,
+		ignore_vehicles);
 }
 
 /* ---------- private code */

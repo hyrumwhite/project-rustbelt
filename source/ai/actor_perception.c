@@ -6936,6 +6936,13 @@ void actor_perception_call(
 			prop_status_refresh(actor_index, call->a, &actor_perception_port_position);
 			break;
 
+		case _actor_perception_call_sense_detail:
+			memcpy(call->output, &actor_perception_port_position.head_position, sizeof(real_point3d));
+			memcpy(call->output + 3, &actor_perception_port_position.body_facing, sizeof(real_vector3d));
+			call->result = actor_perception_port_position.body_location.leaf_index;
+			call->result2 = actor_perception_port_position.body_location.cluster_index;
+			break;
+
 		case _actor_perception_call_status_sample:
 		{
 			struct prop_datum *sampled = prop_get(call->a);
@@ -7009,66 +7016,12 @@ void actor_perception_call(
 			break;
 		}
 
-		case _actor_perception_call_line_of_sight:
-		{
-			struct prop_datum *seen = prop_get(call->a);
-
-			call->result = ai_test_line_of_sight(
-				&actor_perception_port_position.head_position,
-				actor_perception_port_position.body_location.cluster_index,
-				&seen->head_position,
-				seen->body_location.cluster_index,
-				seen->player && seen->enemy ? _ai_line_of_sight_expand_target : _ai_line_of_sight_normal,
-				FALSE,
-				seen->vehicle_index,
-				actor->input.vehicle_index != NONE);
-			break;
-		}
-
-		case _actor_perception_call_visibility:
-		{
-			struct prop_datum *seen = prop_get(call->a);
-
-			call->result = actor_visibility_at_point(
-				actor_index,
-				&actor_perception_port_position,
-				&seen->head_position,
-				(char)(call->b & 0xFF),
-				seen->line_of_sight,
-				(boolean)((call->b >> 8) & 1),
-				(boolean)((call->b >> 9) & 1),
-				(short)(call->b >> 16));
-			break;
-		}
-
 		case _actor_perception_call_combat_state:
 			call->result =
 				(actor_is_noncombat(call->a) ? 1 : 0) |
 				(actor_in_combat(call->a) ? 2 : 0) |
 				(actor_is_fighting(call->a) ? 4 : 0);
 			break;
-
-		case _actor_perception_call_audibility:
-		{
-			struct prop_datum *heard = prop_get(call->a);
-			long sound_unit_index =
-				heard->vehicle_index != NONE ?
-					heard->vehicle_index :
-					heard->unit_index;
-			struct unit_datum *sound_unit = unit_get(sound_unit_index);
-			struct unit_definition *sound_unit_definition =
-				unit_definition_get(sound_unit->definition_index);
-
-			call->result = actor_audibility_at_point(
-				actor_index,
-				&actor_perception_port_position,
-				&heard->body_position,
-				&heard->body_location,
-				sound_unit_definition->unit.constant_sound,
-				1.0f,
-				heard->line_of_sight);
-			break;
-		}
 
 		case _actor_perception_call_vehicle_danger:
 			actor_perception_assess_vehicle_danger(
@@ -7809,6 +7762,16 @@ update_actor_to_prop:
 		sense.a = prop_index;
 		actor_perception_call(&sense);
 		memcpy(sense_body, sense.output, sizeof(sense_body));
+		/* port: a swarm's sampled position's rest, as the Rust port asks for it
+		(the game's position kept is read directly below) */
+		if (actor->meta.swarm)
+		{
+			memset(&sense, 0, sizeof(sense));
+			sense.kind = _actor_perception_call_sense_detail;
+			sense.actor = actor_index;
+			sense.a = prop_index;
+			actor_perception_call(&sense);
+		}
 	}
 	prop->actor_to_prop.i = prop->body_position.x - sense_body[0];
 	prop->actor_to_prop.j = prop->body_position.y - sense_body[1];
@@ -7862,12 +7825,46 @@ static short actor_perception_port_visibility(
 	boolean player,
 	short knowledge)
 {
-	struct halo_sim_ai_call call;
+	struct prop_datum *seen = prop_get(prop_index);
 
-	return (short)actor_perception_port_status_call(actor_index, _actor_perception_call_visibility, prop_index,
-		(long)(unsigned char)lighting | ((use_maximum_distance ? 1 : 0) << 8) | ((player ? 1 : 0) << 9) |
-			((long)knowledge << 16),
-		&call);
+	/* port: directly, the firing variant asked as the Rust port asks it
+	(when the line of sight lets the actor see) */
+	if (seen->line_of_sight == 0 || seen->line_of_sight == 1)
+	{
+		struct halo_sim_ai_call call;
+
+		actor_perception_port_status_call(actor_index, _actor_perception_call_firing_variant, 0, 0, &call);
+	}
+
+	return actor_visibility_at_point(
+		actor_index,
+		&actor_perception_port_position,
+		&seen->head_position,
+		lighting,
+		seen->line_of_sight,
+		use_maximum_distance,
+		player,
+		knowledge);
+}
+
+/* port: the line of sight to the prop's head from the kept sense position,
+directly (the Rust port's) */
+static short actor_perception_port_line_of_sight(
+	long actor_index,
+	long prop_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct prop_datum *seen = prop_get(prop_index);
+
+	return ai_test_line_of_sight(
+		&actor_perception_port_position.head_position,
+		actor_perception_port_position.body_location.cluster_index,
+		&seen->head_position,
+		seen->body_location.cluster_index,
+		seen->player && seen->enemy ? _ai_line_of_sight_expand_target : _ai_line_of_sight_normal,
+		FALSE,
+		seen->vehicle_index,
+		actor->input.vehicle_index != NONE);
 }
 
 static void actor_perception_port_status_refresh(
@@ -8029,8 +8026,7 @@ static void actor_perception_port_status_refresh(
 	if (prop->state >= _prop_state_uninspected_orphan &&
 		prop->state <= _prop_state_inspected_orphan)
 	{
-		prop->line_of_sight = (short)actor_perception_port_status_call(actor_index,
-			_actor_perception_call_line_of_sight, prop_index, 0, &call);
+		prop->line_of_sight = actor_perception_port_line_of_sight(actor_index, prop_index);
 		if (prop->ignore || blind)
 		{
 			prop->perception = _actor_perception_none;
@@ -8063,8 +8059,7 @@ static void actor_perception_port_status_refresh(
 		boolean in_combat;
 		boolean fighting;
 
-		prop->line_of_sight = (short)actor_perception_port_status_call(actor_index,
-			_actor_perception_call_line_of_sight, prop_index, 0, &call);
+		prop->line_of_sight = actor_perception_port_line_of_sight(actor_index, prop_index);
 		prop->lighting = _prop_lighting_bright;
 		prop->flying = (bits & (1 << 4)) != 0;
 		prop->active_camouflage = (bits & (1 << 5)) != 0;
@@ -8212,8 +8207,18 @@ static void actor_perception_port_status_refresh(
 			}
 			else
 			{
-				prop->audibility = (short)actor_perception_port_status_call(actor_index,
-					_actor_perception_call_audibility, prop_index, 0, &call);
+				/* port: directly */
+				long sound_unit_index = prop->vehicle_index != NONE ? prop->vehicle_index : prop->unit_index;
+				struct unit_datum *sound_unit = unit_get(sound_unit_index);
+
+				prop->audibility = actor_audibility_at_point(
+					actor_index,
+					&actor_perception_port_position,
+					&prop->body_position,
+					&prop->body_location,
+					unit_definition_get(sound_unit->definition_index)->unit.constant_sound,
+					1.0f,
+					prop->line_of_sight);
 			}
 
 			ineffability = _actor_perception_none;

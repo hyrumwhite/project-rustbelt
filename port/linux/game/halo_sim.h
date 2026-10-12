@@ -923,6 +923,9 @@ struct halo_sim_ai_step_context
 	unsigned long encounter_data;
 	unsigned long pursuit_data;
 	unsigned long squad_array;
+	/* the loaded tags' table and its count (cache_files_tag_instances) */
+	unsigned long tag_instances;
+	long tag_count;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -1087,10 +1090,10 @@ enum
 	_actor_perception_call_status_refresh,
 	_actor_perception_call_status_sample,
 	_actor_perception_call_look_started_moving,
-	_actor_perception_call_line_of_sight,
-	_actor_perception_call_visibility,
+	_actor_perception_call_line_of_sight, /* now Rust's (sensing) */
+	_actor_perception_call_visibility, /* now Rust's (sensing) */
 	_actor_perception_call_combat_state,
-	_actor_perception_call_audibility,
+	_actor_perception_call_audibility, /* now Rust's (sensing) */
 	_actor_perception_call_vehicle_danger,
 	_actor_perception_call_suicide_danger,
 	_actor_perception_call_unreachable,
@@ -1134,6 +1137,7 @@ enum
 	_actor_perception_call_object_origin,
 	_actor_perception_call_vehicle_danger_sample,
 	_actor_perception_call_attacker,
+	_actor_perception_call_sense_detail,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's
@@ -1206,7 +1210,7 @@ enum
 	_actor_combat_call_random,
 	_actor_combat_call_allow_special_fire,
 	_actor_combat_call_players_see_cluster,
-	_actor_combat_call_manual_line_of_sight,
+	_actor_combat_call_manual_line_of_sight, /* now Rust's (sensing) */
 	_actor_combat_call_aim_at_target,
 	_actor_combat_call_animation_busy,
 	_actor_combat_call_weapon_vector,
@@ -1572,7 +1576,7 @@ enum
 	_actor_firing_position_call_actor_path_3d_available,
 	_actor_firing_position_call_mark_examined, /* now Rust's (pursuits) */
 	_actor_firing_position_call_already_examined, /* now Rust's (pursuits) */
-	_actor_firing_position_call_line_of_sight,
+	_actor_firing_position_call_line_of_sight, /* now Rust's (sensing) */
 	_actor_firing_position_call_change,
 	_actor_firing_position_call_flee_approach,
 };

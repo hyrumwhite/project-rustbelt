@@ -38,6 +38,11 @@ pub mod call {
     /// input, the target it ignores, the danger zone's attractor, the search
     /// and the build), the result.
     pub const BUILD: i32 = BASE | 6;
+    // 7 is the game's alone (a cached path state).
+    /// `actor_find_pathfinding_location(actor)`.
+    pub const FIND_PATHFINDING_LOCATION: i32 = BASE | 8;
+    /// `seed_random(global seed)`, the result.
+    pub const SEED_RANDOM: i32 = BASE | 9;
 }
 
 fn call_simple(context: &AiStepContext, host: &impl AiHost, kind: i32, a: i32) -> AiCall {

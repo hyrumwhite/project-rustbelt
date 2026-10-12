@@ -820,6 +820,7 @@ LAYOUT_MEMBER(actor_datum, emotions_played_berserk_sound, emotions.played_berser
 LAYOUT_SIZE(actor_animation_orders)
 LAYOUT_MEMBER(actor_definition, moving_stationary_moving_distance, moving.stationary_moving_distance)
 LAYOUT_MEMBER(actor_definition, moving_free_flying_sidestep_distance, moving.free_flying_sidestep_distance)
+LAYOUT_MEMBER(actor_definition, moving_pathfinding_radius, moving.pathfinding_radius)
 LAYOUT_MEMBER(actor_definition, moving_runtime_begin_movement_angle_cosine, moving.runtime_begin_movement_angle_cosine)
 LAYOUT_MEMBER(vehicle_datum, object_up, object.up)
 LAYOUT_MEMBER(vehicle_datum, vehicle_airborne_ticks, vehicle.airborne_ticks)

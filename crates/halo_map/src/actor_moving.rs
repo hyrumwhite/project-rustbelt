@@ -860,3 +860,129 @@ fn calculate_free(move_in_3d: bool, movement_direction: Vector, facing_direction
     normalize3(&mut throttle);
     throttle
 }
+
+/// actor_moving.c's evade directions.
+pub const EVADE_LEFT: i16 = 0;
+pub const EVADE_RIGHT: i16 = 1;
+pub const EVADE_FORWARD: i16 = 2;
+pub const EVADE_BACK: i16 = 3;
+pub const EVADE_RANDOM_SIDE: i16 = 4;
+
+/// `actor_move_try_evasion_vector`: whether the actor can evade
+/// `evade_distance` along `evasion_vector` (a circle of its pathfinding
+/// radius swept over the walkable surfaces, not climbing or, without a
+/// ledge height, dropping more than half the distance; or, with one, off a
+/// ledge no higher than it); and whether that's off a ledge.
+pub fn try_evasion_vector(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    evasion_vector: [f32; 2],
+    evade_distance: f32,
+    maximum_ledge_height: f32,
+) -> (bool, bool) {
+    use crate::actor_path::call as path_call;
+    use crate::collision::flags as test_flags;
+    let m = host.memory();
+    let actor = context.actor;
+    let at = |offset: usize| actor + offset as u32;
+    let mut found = false;
+    let mut evasion_is_ledge = false;
+    if m.bool(at(a::STATE_FLYING)) {
+        return (found, evasion_is_ledge);
+    }
+    let body = m.vector(at(a::INPUT_BODY_POSITION));
+    let evasion_point = [evade_distance * evasion_vector[0] + body[0], evade_distance * evasion_vector[1] + body[1]];
+    let mut call = AiCall { kind: path_call::FIND_PATHFINDING_LOCATION, actor: context.actor_index, ..AiCall::default() };
+    host.call(&mut call);
+    let pathfinding_point = m.vector(at(a::INPUT_PATHFINDING_POINT));
+    let structure = crate::path::Structure::new(m, context.structure, context.breakable_surface_flags);
+    let (blocked, result) = structure.test_pill2d(
+        m.bool(at(a::EMOTIONS_IGNORANT_OF_BROKEN_SURFACES)),
+        [pathfinding_point[0], pathfinding_point[1]],
+        m.i32(at(a::INPUT_PATHFINDING_SURFACE_INDEX)),
+        evasion_point,
+        NONE,
+        m.f32(context.definition + d::MOVING_PATHFINDING_RADIUS as u32),
+        0,
+        crate::path::PathCollisionResult::default(),
+    );
+    if !blocked {
+        let height_delta = result.point[2] - body[2];
+        found = true;
+        if height_delta > evade_distance * 0.5 {
+            found = false;
+        } else if maximum_ledge_height == 0.0 && height_delta < evade_distance * -0.5 {
+            found = false;
+        }
+    }
+
+    if !found && maximum_ledge_height > 0.0 {
+        let head = m.vector(at(a::INPUT_HEAD_POSITION));
+        let midpoint = [(head[0] + body[0]) * 0.5, (head[1] + body[1]) * 0.5, (head[2] + body[2]) * 0.5];
+        let collision_vector = [evade_distance * evasion_vector[0], evade_distance * evasion_vector[1], 0.0];
+        let flags = test_flags::FRONT_FACING | test_flags::BACK_FACING;
+        if host.structure_test_vector(context, false, flags, midpoint, collision_vector, f32::MAX).is_none() {
+            found = true;
+            evasion_is_ledge = true;
+            if maximum_ledge_height < f32::MAX {
+                let down_ray_start = [
+                    collision_vector[0] * 1.0 + midpoint[0],
+                    collision_vector[1] * 1.0 + midpoint[1],
+                    collision_vector[2] * 1.0 + midpoint[2],
+                ];
+                // global_down3d scaled by the ledge height
+                let down_ray_vector = [0.0 * maximum_ledge_height, 0.0 * maximum_ledge_height, -1.0 * maximum_ledge_height];
+                if host.structure_test_vector(context, false, flags, down_ray_start, down_ray_vector, f32::MAX).is_none() {
+                    found = false;
+                }
+            }
+        }
+    }
+    (found, evasion_is_ledge)
+}
+
+/// `actor_move_try_evasion_direction`: whether the actor can evade in the
+/// direction asked of the alignment (a random side tries both), and the
+/// direction it can (NONE if none).
+pub fn try_evasion_direction(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    alignment_vector: [f32; 2],
+    evade_distance: f32,
+    evade_direction: i16,
+    maximum_ledge_height: f32,
+) -> (bool, i16) {
+    use crate::actor_path::call as path_call;
+    let mut attempt_count = 1;
+    let mut direction = evade_direction;
+    let [i, j] = alignment_vector;
+    let mut evasion_vector = match direction {
+        EVADE_LEFT => [-j, i],
+        EVADE_RIGHT => [j, -i],
+        EVADE_FORWARD => [i, j],
+        EVADE_BACK => [-i, -j],
+        EVADE_RANDOM_SIDE => {
+            let mut call = AiCall { kind: path_call::SEED_RANDOM, actor: context.actor_index, ..AiCall::default() };
+            host.call(&mut call);
+            attempt_count = 2;
+            if call.result as u16 > 0x8000 {
+                direction = EVADE_LEFT;
+                [-j, i]
+            } else {
+                direction = EVADE_RIGHT;
+                [j, -i]
+            }
+        }
+        _ => [0.0, 0.0],
+    };
+    let mut success = false;
+    for _ in 0..attempt_count {
+        if try_evasion_vector(context, host, evasion_vector, evade_distance, maximum_ledge_height).0 {
+            success = true;
+            break;
+        }
+        evasion_vector = [-evasion_vector[0], -evasion_vector[1]];
+        direction ^= 1;
+    }
+    (success, if success { direction } else { NONE as i16 })
+}

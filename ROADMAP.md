@@ -675,6 +675,13 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Planted errors in the repeat rating and the speech timers' delay were caught on b30.
        - Planted errors in the player's additional delay and the animation's weight went unseen: no player-caused speech or animation was chosen in those minutes.
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Evasion in Rust (`halo_map::actor_moving`, under `actor_dispatch`): actor_moving.c's `actor_move_try_evasion_vector` and `actor_move_try_evasion_direction`, which the evading, diving and danger-avoiding transitions ask.
+     - **What Rust does:** an evasion sweeps a circle of the actor's pathfinding radius over the walkable surfaces (Rust's own pill test) and refuses a climb, or without a ledge height a drop, of more than half the distance. With a ledge height it may instead clear the structure ahead and drop no further than that (Rust's own structure rays). A random side picks one by the random seed and tries the other if it fails.
+     - **The C's side:** finding the actor's pathfinding location and the random seed are new path calls (`_actor_path_call_find_pathfinding_location`, `_seed_random`). The transitions on both sides call the evasion directly, and the actions' three evasion calls are gone.
+     - **Results:**
+       - Every decision loop, action update and action control agrees in minute-long runs of the levels, with none left out.
+       - A planted error in the random side's threshold was caught on b30 and d20. One in the climb limit went unseen (the early evasions are over level ground).
+       - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

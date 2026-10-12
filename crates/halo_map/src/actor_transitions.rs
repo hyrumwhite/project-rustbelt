@@ -2541,12 +2541,18 @@ pub fn try_to_evade(context: &AiStepContext, host: &impl AiHost) -> bool {
 
     let mut alignment = attractor;
     normalize2(&mut alignment);
-    let evasion = call_full(context, host, call::TRY_EVASION_DIRECTION, 0, 0, &[alignment[0], alignment[1], evade_distance]);
-    if evasion.result == 0 {
+    let (evaded, direction) = crate::actor_moving::try_evasion_direction(
+        context,
+        host,
+        alignment,
+        evade_distance,
+        crate::actor_moving::EVADE_RANDOM_SIDE,
+        0.0,
+    );
+    if !evaded {
         return false;
     }
-    let alignment = [evasion.output[0], evasion.output[1]];
-    let animation = if evasion.output[2] as i16 == EVADE_RIGHT { ANIMATION_EVADE_RIGHT } else { ANIMATION_EVADE_LEFT };
+    let animation = if direction == EVADE_RIGHT { ANIMATION_EVADE_RIGHT } else { ANIMATION_EVADE_LEFT };
     call_simple(context, host, call::TEST_ANIMATION_IMPULSE, animation) != 0
         && call_full(context, host, call::ANIMATION_IMPULSE, animation, 0, &alignment).result != 0
 }
@@ -2711,29 +2717,23 @@ fn find_escape_from_danger(context: &AiStepContext, host: &impl AiHost) -> (bool
         let right_position = position(right_vector);
         let danger_radius = || m.f32(at(a::DANGER_ZONE_DANGER_RADIUS));
 
-        let left = call_full(
+        let (left_found, left_is_ledge) = crate::actor_moving::try_evasion_vector(
             context,
             host,
-            call::TRY_EVASION_VECTOR,
-            0,
-            0,
-            &[left_vector[0], left_vector[1], evade_distance, ledge_avoidance_distance],
+            [left_vector[0], left_vector[1]],
+            evade_distance,
+            ledge_avoidance_distance,
         );
-        let left_found = left.result != 0;
-        let left_is_ledge = left.result2 != 0;
         let left_distance = point_to_line_distance_squared(left_position, danger_position, danger_motion).sqrt();
         let left_clear = left_found && left_distance > danger_radius();
 
-        let right = call_full(
+        let (right_found, right_is_ledge) = crate::actor_moving::try_evasion_vector(
             context,
             host,
-            call::TRY_EVASION_VECTOR,
-            0,
-            0,
-            &[right_vector[0], right_vector[1], evade_distance, ledge_avoidance_distance],
+            [right_vector[0], right_vector[1]],
+            evade_distance,
+            ledge_avoidance_distance,
         );
-        let right_found = right.result != 0;
-        let right_is_ledge = right.result2 != 0;
         let right_distance = point_to_line_distance_squared(right_position, danger_position, danger_motion).sqrt();
         let right_clear = right_found && right_distance > danger_radius();
 
@@ -2789,20 +2789,20 @@ pub fn try_to_dive(
         decision(DIVE_CANNOT_MOVE);
         return false;
     }
-    let evasion = call_full(
+    let (evaded, evade_direction) = crate::actor_moving::try_evasion_direction(
         context,
         host,
-        call::EVASION_DIRECTION,
-        escape_direction as i32,
-        0,
-        &[alignment_vector[0], alignment_vector[1], dive_distance, maximum_ledge_height],
+        [alignment_vector[0], alignment_vector[1]],
+        dive_distance,
+        escape_direction,
+        maximum_ledge_height,
     );
-    if evasion.result == 0 {
+    if !evaded {
         decision(DIVE_CANNOT_MOVE);
         return false;
     }
-    let alignment = [evasion.output[0], evasion.output[1]];
-    let evade_vector = match evasion.output[2] as i16 {
+    let alignment = [alignment_vector[0], alignment_vector[1]];
+    let evade_vector = match evade_direction {
         EVADE_LEFT => [-alignment[1], alignment[0]],
         EVADE_RIGHT => [alignment[1], -alignment[0]],
         EVADE_FORWARD | EVADE_BACK => [alignment[0], alignment[1]],

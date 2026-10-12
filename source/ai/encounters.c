@@ -1307,6 +1307,23 @@ void encounter_modify_pursuit_desires(
 	return;
 }
 
+/* port: actions.c's actor_pursuit_find_nearby_actors, as the dispatch step's
+call (actions_port_handler_call) */
+static long encounter_port_find_nearby_actors(
+	long actor_index,
+	boolean pursuit_controller)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _actions_port_handler_call_pursuit_find_nearby_actors;
+	call.actor = actor_index;
+	call.a = pursuit_controller;
+	actions_port_handler_call(&call);
+
+	return call.result;
+}
+
 void encounter_determine_pursuit_availability(
 	long encounter_index,
 	long actor_index,
@@ -1380,14 +1397,15 @@ void encounter_determine_pursuit_availability(
 	}
 
 	actor = actor_get(actor_index);
+	/* port: the nearby actors are a call */
 	if (group_pursuit_controller)
 	{
-		*controlling_group_pursuit = actor_pursuit_find_nearby_actors(actor_index, TRUE) >= MINIMUM_GROUP_PURSUIT_ACTORS;
+		*controlling_group_pursuit = encounter_port_find_nearby_actors(actor_index, TRUE) >= MINIMUM_GROUP_PURSUIT_ACTORS;
 		actor->external_orders.pursuit_is_coordinator = *controlling_group_pursuit;
 	}
 	else
 	{
-		actor_pursuit_find_nearby_actors(actor_index, FALSE);
+		encounter_port_find_nearby_actors(actor_index, FALSE);
 		*controlled_by_group_pursuit = actor->external_orders.pursuit_group_prop_index != NONE;
 		actor->external_orders.pursuit_is_coordinator = FALSE;
 	}

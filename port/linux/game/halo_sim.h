@@ -1363,6 +1363,7 @@ enum
 	_actions_port_handler_call_forget_recent_damage,
 	_actions_port_handler_call_retreat_successful,
 	_actions_port_handler_call_playfight_nearby_target,
+	_actions_port_handler_call_pursuit_find_nearby_actors,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

@@ -1396,62 +1396,6 @@ void actions_port_handler_call(
 			call->result = encounter_get(actor->meta.encounter_index)->stand_down ? 1 : 0;
 			break;
 
-		case _actions_port_handler_call_pursuit_desires:
-		{
-			boolean pursue_tenacious = call->input[0] != 0.0f;
-			short group_pursuit_restriction = (short)call->input[1];
-			boolean group_pursuit_controller = call->input[2] != 0.0f;
-			short desire_target_search = (short)call->input[3];
-			short desire_pursuit = (short)call->input[4];
-			short desire_pursuit_search = (short)call->input[5];
-
-			encounter_modify_pursuit_desires(
-				actor->meta.encounter_index,
-				actor->meta.squad_index,
-				&pursue_tenacious,
-				&group_pursuit_restriction,
-				&group_pursuit_controller,
-				&desire_target_search,
-				&desire_pursuit,
-				&desire_pursuit_search);
-			call->output[0] = (real)(pursue_tenacious != FALSE);
-			call->output[1] = (real)group_pursuit_restriction;
-			call->output[2] = (real)(group_pursuit_controller != FALSE);
-			call->output[3] = (real)desire_target_search;
-			call->output[4] = (real)desire_pursuit;
-			call->output[5] = (real)desire_pursuit_search;
-			break;
-		}
-
-		case _actions_port_handler_call_pursuit_availability:
-		{
-			boolean flags[8];
-			short flag_index;
-
-			for (flag_index = 0; flag_index < NUMBEROF(flags); flag_index++)
-				flags[flag_index] = call->input[flag_index] != 0.0f;
-			encounter_determine_pursuit_availability(
-				actor->meta.encounter_index,
-				actor_index,
-				(short)call->a,
-				(boolean)call->b,
-				&flags[0],
-				&flags[1],
-				&flags[2],
-				&flags[3],
-				&flags[4],
-				&flags[5],
-				&flags[6],
-				&flags[7]);
-			call->result = 0;
-			for (flag_index = 0; flag_index < NUMBEROF(flags); flag_index++)
-			{
-				if (flags[flag_index])
-					call->result |= 1 << flag_index;
-			}
-			break;
-		}
-
 		case _actions_port_handler_call_find_prop_pathfinding_location:
 			actor_perception_find_prop_pathfinding_location(actor_index, call->a);
 			break;
@@ -1747,6 +1691,10 @@ void actions_port_handler_call(
 			call->result = encounter->last_grenade_throw_time;
 			break;
 		}
+
+		case _actions_port_handler_call_pursuit_find_nearby_actors:
+			call->result = actor_pursuit_find_nearby_actors(actor_index, (boolean)call->a);
+			break;
 
 		case _actions_port_handler_call_playfight_nearby_target:
 			memcpy(call->output, call->input, sizeof(real_point3d));
@@ -3648,14 +3596,10 @@ boolean actor_action_handle_lost_contact(
 				desires[3] = (real)desire_target_search;
 				desires[4] = (real)desire_pursuit;
 				desires[5] = (real)desire_pursuit_search;
-				actions_port_handler(actor_index, _actions_port_handler_call_pursuit_desires,
-					0, 0, desires, 6, output);
-				pursue_tenacious = output[0] != 0.0f;
-				group_pursuit_restriction = (short)output[1];
-				group_pursuit_controller = output[2] != 0.0f;
-				desire_target_search = (short)output[3];
-				desire_pursuit = (short)output[4];
-				desire_pursuit_search = (short)output[5];
+				/* port: directly */
+				encounter_modify_pursuit_desires(actor->meta.encounter_index, actor->meta.squad_index,
+					&pursue_tenacious, &group_pursuit_restriction, &group_pursuit_controller,
+					&desire_target_search, &desire_pursuit, &desire_pursuit_search);
 
 				if (actor->meta.swarm)
 				{
@@ -3678,16 +3622,12 @@ boolean actor_action_handle_lost_contact(
 					flags[5] = (real)(controlling_group_pursuit != FALSE);
 					flags[6] = (real)(controlled_by_group_pursuit != FALSE);
 					flags[7] = (real)(wait_after_pursuit != FALSE);
-					result = actions_port_handler(actor_index, _actions_port_handler_call_pursuit_availability,
-						group_pursuit_restriction, group_pursuit_controller, flags, 8, NULL);
-					allow_target_uncover = (result & (1 << 0)) != 0;
-					allow_indefinite_target_uncover = (result & (1 << 1)) != 0;
-					allow_target_search = (result & (1 << 2)) != 0;
-					allow_pursuit = (result & (1 << 3)) != 0;
-					allow_pursuit_search = (result & (1 << 4)) != 0;
-					controlling_group_pursuit = (result & (1 << 5)) != 0;
-					controlled_by_group_pursuit = (result & (1 << 6)) != 0;
-					wait_after_pursuit = (result & (1 << 7)) != 0;
+					/* port: directly */
+					encounter_determine_pursuit_availability(actor->meta.encounter_index, actor_index,
+						group_pursuit_restriction, group_pursuit_controller, &allow_target_uncover,
+						&allow_indefinite_target_uncover, &allow_target_search, &allow_pursuit,
+						&allow_pursuit_search, &controlling_group_pursuit, &controlled_by_group_pursuit,
+						&wait_after_pursuit);
 				}
 			}
 

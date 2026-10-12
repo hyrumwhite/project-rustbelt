@@ -6434,6 +6434,83 @@ static boolean actor_perception_assess_suicide_danger(
 /* port: what an actor's perception update asks of the rest of the game,
 shared by the game's update and the Rust port's (halo_sim.c); in check mode
 each is recorded, with the props it changed */
+/* port: the actor's sense position kept between the sense-position call
+and the status refresh's (the Rust port's reads only its body position) */
+static struct actor_position_data actor_perception_port_position;
+
+/* port: prop_position_refresh's sampling of the prop's unit, for
+actor_perception_call */
+static void actor_perception_port_sample_unit(
+	long prop_index)
+{
+	struct prop_datum *prop = prop_get(prop_index);
+	struct unit_datum *unit = unit_get(prop->unit_index);
+
+	unit_get_head_position(prop->unit_index, &prop->head_position);
+	object_get_origin(prop->unit_index, &prop->body_position);
+	unit_get_center_of_mass(prop->unit_index, &prop->center_of_mass);
+	prop->velocity = unit->object.translational_velocity;
+	prop->pathfinding_surface_index = NONE;
+	prop->body_location =
+		actor_perception_object_get(
+			object_get_ultimate_parent(prop->unit_index))
+			->object.location;
+	prop->underwater =
+		scenario_location_underwater(
+			&prop->body_location,
+			&prop->center_of_mass,
+			NULL);
+	prop->vehicle_index = NONE;
+	prop->vehicle_gunner = FALSE;
+	prop->dangerous_vehicle_driver = FALSE;
+	prop->attached_to_unit_index = NONE;
+
+	if (unit->object.parent_object_index != NONE)
+	{
+		struct object_datum *parent =
+			actor_perception_object_get(
+				unit->object.parent_object_index);
+
+		if (parent->object.type == _object_type_vehicle)
+		{
+			struct unit_datum *vehicle = (struct unit_datum *)parent;
+
+			prop->vehicle_index = unit->object.parent_object_index;
+			prop->vehicle_gunner =
+				vehicle->unit.gunner_object_index == prop->unit_index ||
+				prop->type == 15;
+			prop->dangerous_vehicle_driver =
+				vehicle->unit.driver_object_index == prop->unit_index &&
+				vehicle_causes_collision_damage(prop->vehicle_index);
+		}
+		else if (((1 << parent->object.type) & 3) != 0)
+		{
+			prop->attached_to_unit_index =
+				unit->object.parent_object_index;
+		}
+	}
+
+	prop->child_units_attached = 0;
+	{
+		long child_object_index = unit->object.first_child_object_index;
+
+		while (child_object_index != NONE)
+		{
+			struct object_datum *child =
+				actor_perception_object_get(child_object_index);
+
+			if (((1 << child->object.type) & _object_mask_unit) != 0)
+			{
+				prop->child_units_attached++;
+			}
+
+			child_object_index = child->object.next_object_index;
+		}
+	}
+
+	return;
+}
+
 void actor_perception_call(
 	struct halo_sim_ai_call *call)
 {
@@ -6795,6 +6872,49 @@ void actor_perception_call(
 		case _actor_perception_call_stimulus_acknowledged:
 			actor_stimulus_prop_acknowledged(actor_index, call->a, (call->b & 1) != 0, (call->b & 2) != 0);
 			break;
+
+		case _actor_perception_call_corpse_stopped:
+		{
+			struct prop_datum *corpse = prop_get(call->a);
+			struct unit_datum *unit = unit_get(corpse->unit_index);
+
+			call->result =
+				TEST_FLAG(unit->object.damage_flags, 2) &&
+				((struct actor_perception_unit_view *)unit)->parent_seat_index == 0 &&
+				corpse->perception == 0 &&
+				magnitude_squared3d(&unit->object.translational_velocity) < 0.010000000707805157f;
+			break;
+		}
+
+		case _actor_perception_call_unit_from_swarm:
+			call->result = actor_perception_unit_from_swarm(
+				call->a,
+				actor_index,
+				call->b,
+				FALSE,
+				&actor_get(actor_index)->input.position);
+			break;
+
+		case _actor_perception_call_sample_unit:
+			actor_perception_port_sample_unit(call->a);
+			break;
+
+		case _actor_perception_call_sense_position:
+		{
+			struct prop_datum *sensed = prop_get(call->a);
+
+			actor_perception_find_sense_position(
+				actor_index,
+				&sensed->body_position,
+				call->a,
+				&actor_perception_port_position);
+			memcpy(call->output, &actor_perception_port_position.body_position, sizeof(real_point3d));
+			break;
+		}
+
+		case _actor_perception_call_status_refresh:
+			prop_status_refresh(actor_index, call->a, &actor_perception_port_position);
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -6849,6 +6969,91 @@ static boolean actor_perception_port_desire_orphan(
 		actor_perception_distance_squared(prop->distance),
 		prop->required_ticks,
 		NULL);
+}
+
+/* port: prop_position_refresh (not refreshing an orphan's position) as the
+Rust port's does it (crates/halo_map's actor_perception), asking through
+actor_perception_call */
+static void actor_perception_port_position_refresh(
+	long actor_index,
+	long prop_index,
+	boolean refresh_vehicle)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct prop_datum *prop;
+	real sense_body[3];
+	real distance;
+
+	if (!actor->meta.active)
+		return;
+
+	prop = prop_get(prop_index);
+	if (prop->state >= _prop_state_uninspected_orphan &&
+		prop->state <= _prop_state_inspected_orphan)
+	{
+		boolean corpse_stopped;
+
+		if (prop->orphan_corpse_cheated)
+			goto update_actor_to_prop;
+		corpse_stopped = (boolean)actor_perception_call_full(actor_index, _actor_perception_call_corpse_stopped,
+			prop_index, 0, 0.0f, NULL);
+		if (actor->target.target_prop_index == prop_index &&
+			(!prop->tried_to_uncover || !prop->tried_to_search))
+		{
+			goto update_actor_to_prop;
+		}
+		if (!corpse_stopped)
+			goto update_actor_to_prop;
+		prop->orphan_corpse_cheated = TRUE;
+		prop->dead = TRUE;
+	}
+
+	if (prop->swarm && prop->actor_index != NONE && refresh_vehicle)
+	{
+		long current_time = game_time_get();
+
+		if (prop->swarm_unit_selected_time + 90 <= current_time)
+		{
+			long new_unit_index;
+
+			prop->swarm_unit_selected_time = current_time;
+			new_unit_index = actor_perception_call_full(actor_index, _actor_perception_call_unit_from_swarm,
+				prop->actor_index, prop->unit_index, 0.0f, NULL);
+			if (new_unit_index != prop->unit_index)
+			{
+				prop->unit_index = new_unit_index;
+				if ((prop->state >= _prop_state_uninspected_orphan &&
+						prop->state <= _prop_state_inspected_orphan) ||
+					prop->orphan_prop_index != NONE)
+				{
+					prop_get(prop->orphan_prop_index)->unit_index = prop->unit_index;
+				}
+			}
+		}
+	}
+
+	actor_perception_call_full(actor_index, _actor_perception_call_sample_unit, prop_index, 0, 0.0f, NULL);
+
+update_actor_to_prop:
+	{
+		struct halo_sim_ai_call sense;
+
+		memset(&sense, 0, sizeof(sense));
+		sense.kind = _actor_perception_call_sense_position;
+		sense.actor = actor_index;
+		sense.a = prop_index;
+		actor_perception_call(&sense);
+		memcpy(sense_body, sense.output, sizeof(sense_body));
+	}
+	prop->actor_to_prop.i = prop->body_position.x - sense_body[0];
+	prop->actor_to_prop.j = prop->body_position.y - sense_body[1];
+	prop->actor_to_prop.k = prop->body_position.z - sense_body[2];
+	distance = normalize3d(&prop->actor_to_prop);
+	prop->distance = distance;
+	if (prop->distance == 0.0f)
+		prop->actor_to_prop = *global_forward3d;
+
+	return;
 }
 
 static real actor_perception_call_random(
@@ -7162,8 +7367,12 @@ static void actor_perception_update_game(
 
 			if (refresh_position)
 			{
-				actor_perception_call_full(actor_index, _actor_perception_call_refresh_prop,
-					iterator.index, refresh_status, 0.0f, NULL);
+				actor_perception_port_position_refresh(actor_index, iterator.index, refresh_status);
+				if (refresh_status)
+				{
+					actor_perception_call_full(actor_index, _actor_perception_call_status_refresh,
+						iterator.index, 0, 0.0f, NULL);
+				}
 			}
 		}
 

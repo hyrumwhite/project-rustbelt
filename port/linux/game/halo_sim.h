@@ -1069,6 +1069,11 @@ enum
 	_actor_perception_call_weapon_definition,
 	_actor_perception_call_firing_variant,
 	_actor_perception_call_stimulus_acknowledged,
+	_actor_perception_call_corpse_stopped,
+	_actor_perception_call_unit_from_swarm,
+	_actor_perception_call_sample_unit,
+	_actor_perception_call_sense_position,
+	_actor_perception_call_status_refresh,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's

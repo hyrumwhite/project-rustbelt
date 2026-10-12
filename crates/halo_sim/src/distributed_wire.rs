@@ -4,10 +4,13 @@
 //! structs and buffers.
 
 use halo_map::distributed_wire::{
-    PlayerAction, RelayedAction, UnitState, INPUT_HISTORY, angle_pack, angle_unpack, relayed_action_from, relayed_action_read,
-    relayed_action_write, unit_state_read, unit_state_write, unit_vector_unpack, vector_pack, vector_unpack, vitality_pack,
-    vitality_unpack,
+    Game, INPUT_HISTORY, ObjectState, PlayerAction, PlayerExtras, RelayedAction, UnitState, angle_pack, angle_unpack,
+    axes_make_valid, checksum, inventory_from_unit, object_state_unpack, relayed_action_from, relayed_action_read,
+    relayed_action_write, state_from_object, state_from_player, transform_valid, unit_state_read, unit_state_write,
+    unit_vector_unpack, vector_clamp, vector_pack, vector_unpack, vitality_pack, vitality_unpack,
 };
+
+use crate::ai_steps::GameMemory;
 
 /// halo_sim.h's `struct halo_sim_wire_call`.
 #[repr(C)]
@@ -38,6 +41,26 @@ pub mod kind {
     pub const RELAYED_ACTION_WRITE: i32 = 10;
     pub const RELAYED_ACTION_READ: i32 = 11;
     pub const RELAYED_ACTION_FROM: i32 = 12;
+    pub const AXES_MAKE_VALID: i32 = 13;
+    pub const TRANSFORM_VALID: i32 = 14;
+    pub const VECTOR_CLAMP: i32 = 15;
+    pub const CHECKSUM: i32 = 16;
+    pub const OBJECT_STATE_UNPACK: i32 = 17;
+    pub const STATE_FROM_PLAYER: i32 = 18;
+    pub const STATE_FROM_OBJECT: i32 = 19;
+    pub const INVENTORY_FROM_UNIT: i32 = 20;
+}
+
+/// halo_sim.h's `struct halo_sim_wire_transform`: a transform's parts,
+/// the velocities' null for none.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct WireTransform {
+    pub position: *const [f32; 3],
+    pub forward: *const [f32; 3],
+    pub up: *const [f32; 3],
+    pub velocity: *const [f32; 3],
+    pub angular_velocity: *const [f32; 3],
 }
 
 /// The most bytes a unit state and a relayed action take on the wire.
@@ -126,6 +149,47 @@ pub unsafe extern "C" fn halo_sim_distributed_wire(call: *mut WireCall) -> i32 {
                 let mut relayed = RelayedAction::default();
                 call.result = relayed_action_from(player_index, &recent, &mut relayed) as i32;
                 write(call.output, relayed);
+            }
+            kind::AXES_MAKE_VALID => {
+                let mut axes: [f32; 6] = read(call.input);
+                call.result = axes_make_valid(&mut axes) as i32;
+                write(call.output, axes);
+            }
+            kind::TRANSFORM_VALID => {
+                let transform: WireTransform = read(call.input);
+                let optional = |pointer: *const [f32; 3]| (!pointer.is_null()).then(|| pointer.read_unaligned());
+                // (written only as far as the game's would be)
+                let mut valid: [f32; 6] = read(call.output);
+                call.result = transform_valid(
+                    transform.position.read_unaligned(),
+                    transform.forward.read_unaligned(),
+                    transform.up.read_unaligned(),
+                    optional(transform.velocity),
+                    optional(transform.angular_velocity),
+                    &mut valid,
+                ) as i32;
+                write(call.output, valid);
+            }
+            kind::VECTOR_CLAMP => {
+                let mut vector: [f32; 3] = read(call.input);
+                vector_clamp(&mut vector, call.value);
+                write(call.output, vector);
+            }
+            kind::CHECKSUM => {
+                call.result = checksum(std::slice::from_raw_parts(call.input, call.a.max(0) as usize)) as i32;
+            }
+            kind::OBJECT_STATE_UNPACK => write(call.output, object_state_unpack(&read::<ObjectState>(call.input))),
+            kind::STATE_FROM_PLAYER => {
+                let game: Game = read(call.end);
+                write(call.output, state_from_player(&GameMemory, &game, call.a as i16, &read::<PlayerExtras>(call.input)));
+            }
+            kind::STATE_FROM_OBJECT => {
+                let game: Game = read(call.end);
+                write(call.output, state_from_object(&GameMemory, &game, call.a));
+            }
+            kind::INVENTORY_FROM_UNIT => {
+                let game: Game = read(call.end);
+                write(call.output, inventory_from_unit(&GameMemory, &game, call.a));
             }
             _ => return -1,
         }

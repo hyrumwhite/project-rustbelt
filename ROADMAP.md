@@ -793,6 +793,23 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - A Rust host and a C joiner play together.
          - With all fifty-three systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
+   - [x] The netcode's sampling and checks of the game in Rust (`halo_map::distributed_wire`, under `distributed_wire`): network_distributed.c's `distributed_state_from_player` and `distributed_axes_make_valid`, network_objects.c's `distributed_state_from_object`, `distributed_inventory_from_unit`, `distributed_transform_valid`, `distributed_vector_clamp`, `distributed_object_state_unpack` and `distributed_checksum`.
+     - **What Rust does:** the host's sampling of the game, read straight from its memory (new layout probe `probe_net.c`):
+       - **Each player's unit, every tick:** alive or dead, riding, placed, its shields' state and vitalities, powerups, camouflage, where its client predicted it, and who killed it.
+       - **Each object's state:** at rest, dead, position, axes and velocities.
+       - **Each unit's inventory:** grenades, weapons, their magazines and age.
+
+       The receiver's checks: a transform within the world with finite velocities, axes made a rotation, a velocity held to a speed. The inventories' checksum.
+     - **The C's side:** wrappers as for the wire format. Each keeps a copy of its inputs before the game's runs, because callers pass their forward and up as the valid axes. The netcode's own tables give the player's prediction and death.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, every call of the eight agrees on both machines: 8,192 object states, 4,096 player states, 2,048 inventories, 8,192 transforms tested and so on.
+       - Planted errors in the object's at-rest flag and in the prediction's echo window were caught on the host.
+       - Two went unseen. A weapon's age scale: nobody carries a plasma weapon, so every age is 0. The axes' squareness limit: the host's axes are always square.
+       - **Rust in charge:**
+         - With both machines' codec, wire format and sampling in Rust, the machines' positions differ as with the C: median 3.7 cm against 3.6, largest 15 against 13.
+         - The items made and removed nearly match the C's.
+         - With all fifty-three systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

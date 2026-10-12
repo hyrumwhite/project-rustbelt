@@ -566,6 +566,17 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - On b30 every line and pill test was clear, so a planted error at a blocking edge (its 128th) went unseen there; it was caught on d20, b40 and a50.
        - A planted error in the smoothing's tangent radius was caught on d20.
        - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Building a path in Rust (`halo_map::path`, under `paths`): path.c's `path_state_build_path`, with path_obstacle_avoidance.c's `path_avoid_obstacles` (its planar search) and path_obstacles.c's discs (grouping, circle, pill and tangent tests). With it, the whole of path.c's search and build is Rust's; only the gathering of the objects' discs stays the game's.
+     - **What Rust does:**
+       - It takes the search's nodes back from the destination (or the node nearest it, within its radius) to the start as raw steps, up to 64, and smooths them.
+       - For each smoothed step it finds a way round the objects near its start. The discs come from the objects' pathfinding spheres within four units (and the attractor's, which may be passed through); discs that touch, with the radius between, are grouped into obstacles.
+       - The way round is a second A* over steps that sweep the circle towards the goal and, when they meet a disc, step past its tangents on both sides. It never wraps an obstacle both ways, prefers the step that comes nearest when the goal itself is blocked, and retries through the passable discs when there is no way.
+       - It writes the result (four steps at most, and whether they finish the path) and, with debug storage, the raw, smoothed and avoided steps and each step's obstacles and search.
+     - **The C's side:** the build goes through halo_sim.c's `halo_sim_path_build`, which hands Rust the game's `obstacles_get_discs_in_sphere` (the objects in a sphere, their collision models' pathfinding spheres at their nodes). Under the check, the game saves the path result and debug storage, runs its own build, puts them back, runs Rust's, compares every byte, and keeps its own.
+     - **Results:**
+       - Every build agrees in minute-long runs of b30, d20, b40 and a50 (128 to 512 on each), with none left out.
+       - A planted error in the discs' tangent margin was caught on b30 and d20.
+       - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

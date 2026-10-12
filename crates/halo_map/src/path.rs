@@ -1675,3 +1675,964 @@ pub fn path_smooth(
     }
     smoothed
 }
+
+// ---------- path_obstacles.c and path_obstacle_avoidance.c: the way round
+// the objects in the path
+
+use crate::layout::{
+    obstacle_disc as od, obstacle_path as op, obstacle_path_step as ops, obstacles as obs, path_result as pr, path_step as pst,
+};
+
+const MAXIMUM_DISC_COUNT: i16 = 128;
+const MAXIMUM_OBSTACLE_AVOIDANCE_STEPS: i16 = 128;
+const DISC_OPTIONAL: i16 = 1 << 0;
+
+/// `struct obstacles` in the game's memory (or a buffer of Rust's).
+#[derive(Clone, Copy)]
+struct Obstacles<'a> {
+    m: &'a dyn AiMemory,
+    at: u32,
+}
+
+impl Obstacles<'_> {
+    fn disc_count(&self) -> i16 {
+        self.m.i16(self.at + obs::DISC_COUNT as u32)
+    }
+    fn disc(&self, index: i16) -> u32 {
+        self.at + obs::DISCS as u32 + (index as i32 as u32).wrapping_mul(od::SIZEOF as u32)
+    }
+    fn center(&self, index: i16) -> [f32; 2] {
+        let disc = self.disc(index);
+        [self.m.f32(disc + od::CENTER as u32), self.m.f32(disc + od::CENTER as u32 + 4)]
+    }
+    fn radius(&self, index: i16) -> f32 {
+        self.m.f32(self.disc(index) + od::RADIUS as u32)
+    }
+    fn obstacle_index(&self, index: i16) -> i16 {
+        self.m.i16(self.disc(index) + od::OBSTACLE_INDEX as u32)
+    }
+
+    /// `obstacles_new`.
+    fn new(&self) {
+        self.m.set_i16(self.at + obs::OBSTACLE_COUNT as u32, 0);
+        self.m.set_i16(self.at + obs::DISC_COUNT as u32, 0);
+        self.m.set_i16(self.at + obs::DISC_OPTIONAL_COUNT as u32, 0);
+    }
+
+    /// `obstacles_add_disc`.
+    fn add_disc(&self, object_index: i32, flags: i16, center: [f32; 3], radius: f32) -> bool {
+        let m = self.m;
+        let disc_count = self.disc_count();
+        if disc_count == MAXIMUM_DISC_COUNT {
+            return false;
+        }
+        m.set_i16(self.at + obs::DISC_COUNT as u32, disc_count + 1);
+        let disc = self.disc(disc_count);
+        if flags & DISC_OPTIONAL != 0 {
+            let optional = self.at + obs::DISC_OPTIONAL_COUNT as u32;
+            m.set_i16(optional, m.i16(optional) + 1);
+        }
+        m.set_i16(disc + od::FLAGS as u32, flags);
+        m.w32(disc + od::OBJECT_INDEX as u32, object_index as u32);
+        m.set_i16(disc + od::OBSTACLE_INDEX as u32, NONE as i16);
+        m.set_f32(disc + od::CENTER as u32, center[0]);
+        m.set_f32(disc + od::CENTER as u32 + 4, center[1]);
+        m.set_f32(disc + od::RADIUS as u32, radius);
+        m.set_f32(disc + od::HEIGHT as u32, center[2]);
+        true
+    }
+
+    /// `obstacles_test_circle`.
+    fn test_circle(&self, ignore_disc_index: i16, center: [f32; 2], radius: f32) -> i16 {
+        for disc_index in 0..self.disc_count() {
+            if disc_index != ignore_disc_index && point_in_circle(center, self.center(disc_index), self.radius(disc_index) + radius) {
+                return disc_index;
+            }
+        }
+        NONE as i16
+    }
+
+    /// `obstacles_test_pill`: the nearest disc the swept circle meets
+    /// (distance, disc, obstacle).
+    #[allow(clippy::too_many_arguments)]
+    fn test_pill(
+        &self,
+        ignore_disc_index: i16,
+        point: [f32; 2],
+        direction: [f32; 2],
+        radius: f32,
+        distance: f32,
+        ignore_optional: bool,
+    ) -> (bool, f32, i16, i16) {
+        let mut result = (distance, NONE as i16, NONE as i16);
+        for disc_index in 0..self.disc_count() {
+            if disc_index == ignore_disc_index {
+                continue;
+            }
+            if ignore_optional && self.m.i16(self.disc(disc_index) + od::FLAGS as u32) & DISC_OPTIONAL != 0 {
+                continue;
+            }
+            if let Some(disc_distance) = circle_intersect_ray(self.center(disc_index), self.radius(disc_index) + radius, point, direction)
+                && result.0 > disc_distance
+            {
+                result = (disc_distance, disc_index, self.obstacle_index(disc_index));
+            }
+        }
+        (result.1 != NONE as i16, result.0, result.1, result.2)
+    }
+
+    /// `obstacles_disc_tangents`: the right and left directions past the
+    /// disc, and how far.
+    fn disc_tangents(&self, disc_index: i16, point: [f32; 2], radius: f32) -> ([f32; 2], [f32; 2], f32) {
+        let mut direction = vector2(point, self.center(disc_index));
+        let distance = normalize2(&mut direction);
+        circle_tangents(direction, distance, radius + self.radius(disc_index) + 0.00390625)
+    }
+
+    /// `obstacles_disc_neighborhood`: the discs that touch the seed's,
+    /// through each other (a bit vector of 128).
+    fn disc_neighborhood(&self, radius: f32, seed_disc_index: i16) -> [u32; 4] {
+        let mut flags = [0u32; 4];
+        if seed_disc_index == NONE as i16 {
+            return flags;
+        }
+        let set = |flags: &mut [u32; 4], index: i16| flags[(index >> 5) as usize] |= 1 << (index & 31);
+        let test = |flags: &[u32; 4], index: i16| flags[(index >> 5) as usize] & (1 << (index & 31)) != 0;
+        set(&mut flags, seed_disc_index);
+        let mut stack = vec![seed_disc_index];
+        while let Some(current) = stack.pop() {
+            for disc_index in 0..self.disc_count() {
+                if !test(&flags, disc_index)
+                    && point_in_circle(
+                        self.center(current),
+                        self.center(disc_index),
+                        (self.radius(disc_index) + radius) + (self.radius(current) + radius),
+                    )
+                {
+                    set(&mut flags, disc_index);
+                    stack.push(disc_index);
+                }
+            }
+        }
+        flags
+    }
+
+    /// `obstacles_recompute`: the discs grouped into obstacles (those that
+    /// touch, with the radius between).
+    fn recompute(&self, radius: f32) {
+        let m = self.m;
+        m.set_i16(self.at + obs::OBSTACLE_COUNT as u32, 0);
+        let disc_count = self.disc_count();
+        for disc_index in 0..disc_count {
+            m.set_i16(self.disc(disc_index) + od::OBSTACLE_INDEX as u32, NONE as i16);
+        }
+        for disc_index in 0..disc_count {
+            if self.obstacle_index(disc_index) == NONE as i16 {
+                let count_address = self.at + obs::OBSTACLE_COUNT as u32;
+                let obstacle_index = m.i16(count_address);
+                m.set_i16(count_address, obstacle_index + 1);
+                let flags = self.disc_neighborhood(radius, disc_index);
+                for neighbor in 0..disc_count {
+                    if flags[(neighbor >> 5) as usize] & (1 << (neighbor & 31)) != 0 {
+                        m.set_i16(self.disc(neighbor) + od::OBSTACLE_INDEX as u32, obstacle_index);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `obstacle_from_disc`.
+    fn obstacle_from_disc(&self, disc_index: i16) -> i16 {
+        if disc_index != NONE as i16 { self.obstacle_index(disc_index) } else { NONE as i16 }
+    }
+}
+
+/// real_math.h's `point_in_circle`.
+fn point_in_circle(point: [f32; 2], center: [f32; 2], radius: f32) -> bool {
+    let v = vector2(point, center);
+    v[0] * v[0] + v[1] * v[1] <= radius * radius
+}
+
+/// path_obstacles.c's `circle_intersect_ray`.
+fn circle_intersect_ray(center: [f32; 2], radius: f32, point: [f32; 2], direction: [f32; 2]) -> Option<f32> {
+    let offset = vector2(point, center);
+    let projection = direction[0] * offset[0] + direction[1] * offset[1];
+    if projection > 0.0 {
+        let distance_squared_minus_radius_squared = (offset[0] * offset[0] + offset[1] * offset[1]) - radius * radius;
+        if distance_squared_minus_radius_squared <= 0.0 {
+            return Some(0.0);
+        }
+        let discriminant = projection * projection - distance_squared_minus_radius_squared;
+        if discriminant >= 0.0 {
+            return Some(projection - discriminant.sqrt());
+        }
+    }
+    None
+}
+
+/// real_math.h's `rotate_vector2d`.
+fn rotate_vector2d(v: [f32; 2], sine: f32, cosine: f32) -> [f32; 2] {
+    let j = sine * v[0] + cosine * v[1];
+    let i = cosine * v[0] - sine * v[1];
+    [i, j]
+}
+
+/// path_obstacles.c's `circle_tangents`.
+fn circle_tangents(direction: [f32; 2], distance: f32, radius: f32) -> ([f32; 2], [f32; 2], f32) {
+    let mut sine = radius / distance;
+    sine = if sine > 1.0 { 1.0 } else { sine };
+    let cosine = (1.0 - sine * sine).sqrt();
+    (rotate_vector2d(direction, -sine, cosine), rotate_vector2d(direction, sine, cosine), cosine * distance)
+}
+
+/// path_obstacle_avoidance.c's `struct path_test_pill2d_result`.
+#[derive(Debug, Clone, Copy)]
+struct AvoidancePill {
+    distance: f32,
+    surface_index: i32,
+    edge_index: i32,
+    disc_index: i16,
+    obstacle_index: i16,
+}
+
+/// `struct obstacle_path` in the game's memory (or a buffer of Rust's).
+struct ObstaclePath<'a> {
+    m: &'a dyn AiMemory,
+    at: u32,
+    obstacles: Obstacles<'a>,
+    structure: &'a Structure<'a>,
+}
+
+impl ObstaclePath<'_> {
+    fn field(&self, offset: usize) -> u32 {
+        self.at + offset as u32
+    }
+    fn step(&self, index: i16) -> u32 {
+        self.at + op::STEPS as u32 + (index as i32 as u32).wrapping_mul(ops::SIZEOF as u32)
+    }
+    fn step_count(&self) -> i16 {
+        self.m.i16(self.field(op::STEP_COUNT))
+    }
+    fn heap_count(&self) -> i16 {
+        self.m.i16(self.field(op::HEAP_COUNT))
+    }
+    fn heap(&self, index: i16) -> u32 {
+        self.at + op::HEAP as u32 + (index as i32 as u32).wrapping_mul(2)
+    }
+    fn radius(&self) -> f32 {
+        self.m.f32(self.field(op::RADIUS))
+    }
+    fn ignore_broken_surfaces(&self) -> bool {
+        self.m.bool(self.field(op::IGNORE_BROKEN_SURFACES))
+    }
+    fn ignore_optional(&self) -> bool {
+        self.m.bool(self.field(op::IGNORE_OPTIONAL))
+    }
+    fn goal_step_index(&self) -> i16 {
+        self.m.i16(self.field(op::GOAL_STEP_INDEX))
+    }
+    fn step_point(&self, index: i16) -> [f32; 2] {
+        let step = self.step(index);
+        [self.m.f32(step + ops::POINT as u32), self.m.f32(step + ops::POINT as u32 + 4)]
+    }
+    fn step_direction(&self, index: i16) -> [f32; 2] {
+        let step = self.step(index);
+        [self.m.f32(step + ops::DIRECTION as u32), self.m.f32(step + ops::DIRECTION as u32 + 4)]
+    }
+    fn step_f32(&self, index: i16, offset: usize) -> f32 {
+        self.m.f32(self.step(index) + offset as u32)
+    }
+    fn step_i16(&self, index: i16, offset: usize) -> i16 {
+        self.m.i16(self.step(index) + offset as u32)
+    }
+    fn step_surface(&self, index: i16) -> i32 {
+        self.m.i32(self.step(index) + ops::SURFACE_INDEX as u32)
+    }
+
+    /// `heap_cost`.
+    fn heap_cost(&self, heap_index: i16) -> f32 {
+        let step_index = self.m.i16(self.heap(heap_index));
+        self.step_f32(step_index, ops::TOTAL_DISTANCE)
+    }
+
+    fn heap_swap(&self, a: i16, b: i16) {
+        let step_index = self.m.i16(self.heap(a));
+        self.m.set_i16(self.heap(a), self.m.i16(self.heap(b)));
+        self.m.set_i16(self.heap(b), step_index);
+    }
+
+    /// `heap_up`.
+    fn heap_up(&self, mut heap_index: i16) {
+        while heap_index > 0 {
+            let parent_index = (heap_index - 1) >> 1;
+            if self.heap_cost(parent_index) > self.heap_cost(heap_index) {
+                self.heap_swap(parent_index, heap_index);
+                heap_index = parent_index;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// `heap_down`.
+    fn heap_down(&self, mut heap_index: i16) {
+        if heap_index >= self.heap_count() {
+            return;
+        }
+        loop {
+            let mut smallest_index = heap_index;
+            let left_index = 2 * heap_index + 1;
+            let right_index = 2 * (heap_index + 1);
+            if left_index < self.heap_count() && self.heap_cost(heap_index) > self.heap_cost(left_index) {
+                smallest_index = left_index;
+            }
+            if right_index < self.heap_count() && self.heap_cost(smallest_index) > self.heap_cost(right_index) {
+                smallest_index = right_index;
+            }
+            if smallest_index == heap_index {
+                break;
+            }
+            self.heap_swap(smallest_index, heap_index);
+            heap_index = smallest_index;
+        }
+    }
+
+    /// `heap_insert`.
+    fn heap_insert(&self, step_index: i16) -> bool {
+        let heap_index = self.heap_count();
+        if heap_index >= MAXIMUM_OBSTACLE_AVOIDANCE_STEPS {
+            return false;
+        }
+        self.m.set_i16(self.field(op::HEAP_COUNT), heap_index + 1);
+        self.m.set_i16(self.heap(heap_index), step_index);
+        self.heap_up(heap_index);
+        true
+    }
+
+    /// `heap_remove`.
+    fn heap_remove(&self) -> i16 {
+        if self.heap_count() <= 0 {
+            return NONE as i16;
+        }
+        let heap_count = self.heap_count() - 1;
+        self.m.set_i16(self.field(op::HEAP_COUNT), heap_count);
+        let step_index = self.m.i16(self.heap(0));
+        self.m.set_i16(self.heap(0), self.m.i16(self.heap(heap_count)));
+        self.heap_down(0);
+        step_index
+    }
+
+    /// `path_add_step`: a step to the point (unless it doubles back round
+    /// an obstacle it wraps), NONE if not.
+    #[allow(clippy::too_many_arguments)]
+    fn add_step(
+        &self,
+        point: [f32; 2],
+        surface_index: i32,
+        obstacle_index: i16,
+        obstacle_direction_index: u8,
+        previous_distance: f32,
+        previous_step_index: i16,
+    ) -> i16 {
+        let m = self.m;
+        if self.step_count() >= MAXIMUM_OBSTACLE_AVOIDANCE_STEPS {
+            return NONE as i16;
+        }
+        let goal = [m.f32(self.field(op::GOAL)), m.f32(self.field(op::GOAL) + 4)];
+        let goal_obstacle_index = m.i16(self.field(op::GOAL_OBSTACLE_INDEX));
+        let mut blocks_goal = false;
+        let direction = vector2(point, goal);
+        let mut chain_step_index = previous_step_index;
+        while chain_step_index != NONE as i16 {
+            let chain_step = self.step(chain_step_index);
+            if m.i16(chain_step + ops::OBSTACLE_INDEX as u32) == obstacle_index {
+                if m.r8(chain_step + ops::OBSTACLE_DIRECTION_INDEX as u32) != obstacle_direction_index {
+                    return NONE as i16;
+                }
+                chain_step_index = m.i16(chain_step + ops::PREVIOUS_STEP_INDEX as u32);
+            } else {
+                if obstacle_index == goal_obstacle_index && goal_obstacle_index != NONE as i16 {
+                    let obstructed = |side: u8| chain_step + ops::OBSTRUCTED_GOAL_STEP_INDICES as u32 + 2 * side as u32;
+                    let opposite_step_index = m.i16(obstructed(u8::from(obstacle_direction_index == 0)));
+                    blocks_goal = true;
+                    if opposite_step_index != NONE as i16 {
+                        let opposite_direction = self.step_direction(opposite_step_index);
+                        let previous_direction = self.step_direction(previous_step_index);
+                        if opposite_direction[0] * direction[0] + opposite_direction[1] * direction[1] > 0.0
+                            && cross2(opposite_direction, previous_direction) * cross2(opposite_direction, direction) < 0.0
+                        {
+                            return NONE as i16;
+                        }
+                    }
+                    let same = m.i16(obstructed(obstacle_direction_index));
+                    if same == previous_step_index || same == NONE as i16 {
+                        m.set_i16(obstructed(obstacle_direction_index), self.step_count());
+                    }
+                }
+                break;
+            }
+        }
+        let step_index = self.step_count();
+        m.set_i16(self.field(op::STEP_COUNT), step_index + 1);
+        let step = self.step(step_index);
+        m.set_f32(step + ops::POINT as u32, point[0]);
+        m.set_f32(step + ops::POINT as u32 + 4, point[1]);
+        m.w32(step + ops::SURFACE_INDEX as u32, surface_index as u32);
+        let mut normalized = direction;
+        let distance = normalize2(&mut normalized);
+        m.set_f32(step + ops::DIRECTION as u32, normalized[0]);
+        m.set_f32(step + ops::DIRECTION as u32 + 4, normalized[1]);
+        m.set_f32(step + ops::DISTANCE as u32, distance);
+        m.set_f32(step + ops::TOTAL_DISTANCE as u32, distance + previous_distance);
+        m.set_i16(step + ops::OBSTACLE_INDEX as u32, obstacle_index);
+        m.w8(step + ops::OBSTACLE_DIRECTION_INDEX as u32, obstacle_direction_index);
+        m.set_i16(step + ops::PREVIOUS_STEP_INDEX as u32, previous_step_index);
+        m.w32(step + ops::OBSTRUCTED_GOAL_STEP_INDICES as u32, 0xFFFF_FFFF);
+        if blocks_goal && distance < m.f32(self.field(op::BEST_GOAL_BLOCKED_DISTANCE)) {
+            m.set_f32(self.field(op::BEST_GOAL_BLOCKED_DISTANCE), distance);
+            m.set_i16(self.field(op::BEST_GOAL_BLOCKED_STEP_INDEX), step_index);
+        }
+        self.heap_insert(step_index);
+        step_index
+    }
+
+    /// `path_new`.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        &self,
+        structure_address: u32,
+        ignore_broken_surfaces: bool,
+        radius: f32,
+        start: [f32; 2],
+        start_surface_index: i32,
+        goal: [f32; 2],
+        goal_surface_index: i32,
+        finishing_path: bool,
+        ignore_optional: bool,
+    ) {
+        let m = self.m;
+        m.w32(self.field(op::OBSTACLES), self.obstacles.at);
+        m.set_f32(self.field(op::RADIUS), radius);
+        m.w32(self.field(op::STRUCTURE), structure_address);
+        m.set_bool(self.field(op::IGNORE_BROKEN_SURFACES), ignore_broken_surfaces);
+        m.set_bool(self.field(op::GOAL_FOUND_EXACTLY), false);
+        m.set_f32(self.field(op::GOAL), goal[0]);
+        m.set_f32(self.field(op::GOAL) + 4, goal[1]);
+        m.w32(self.field(op::GOAL_SURFACE_INDEX), goal_surface_index as u32);
+        let goal_obstacle_index = self.obstacles.obstacle_from_disc(self.obstacles.test_circle(NONE as i16, goal, radius));
+        m.set_i16(self.field(op::GOAL_OBSTACLE_INDEX), goal_obstacle_index);
+        m.set_bool(self.field(op::FINISHING), finishing_path);
+        m.set_i16(self.field(op::GOAL_STEP_INDEX), NONE as i16);
+        m.set_f32(self.field(op::BEST_GOAL_BLOCKED_DISTANCE), f32::MAX);
+        m.set_i16(self.field(op::BEST_GOAL_BLOCKED_STEP_INDEX), NONE as i16);
+        m.set_bool(self.field(op::IGNORE_OPTIONAL), ignore_optional);
+        m.set_i16(self.field(op::STEP_COUNT), 0);
+        m.set_i16(self.field(op::HEAP_COUNT), 0);
+        self.add_step(start, start_surface_index, NONE as i16, 0, 0.0, NONE as i16);
+    }
+
+    /// path_obstacle_avoidance.c's `path_test_pill2d`: how far the circle
+    /// sweeps over the structure and past the discs.
+    #[allow(clippy::too_many_arguments)]
+    fn test_pill2d(
+        &self,
+        ignore_disc_index: i16,
+        point: [f32; 2],
+        surface_index: i32,
+        direction: [f32; 2],
+        radius: f32,
+        distance: f32,
+        ignore_structure: bool,
+        endpoint_is_goal: bool,
+        ignore_optional: bool,
+    ) -> (bool, AvoidancePill) {
+        let structure = self.structure;
+        let ignore_broken_surfaces = self.ignore_broken_surfaces();
+        let mut result =
+            AvoidancePill { distance, surface_index: NONE, edge_index: NONE, disc_index: NONE as i16, obstacle_index: NONE as i16 };
+        if endpoint_is_goal {
+            result.distance = distance - radius;
+        }
+        if !ignore_structure {
+            let (hit, ray) = structure.test_ray2d(ignore_broken_surfaces, point, surface_index, direction, result.distance);
+            if hit && result.distance > ray.distance {
+                result.distance = ray.distance;
+                result.edge_index = ray.edge_index;
+            }
+            let perpendicular = [-direction[1], direction[0]];
+            let left_point = point_from_line2(point, perpendicular, radius);
+            let (_, left) = structure.test_ray2d(ignore_broken_surfaces, point, surface_index, perpendicular, radius);
+            let (hit, left) = structure.test_ray2d(ignore_broken_surfaces, left_point, left.surface_index, direction, result.distance);
+            if hit && result.distance > left.distance {
+                result.distance = left.distance;
+                result.edge_index = left.edge_index;
+            }
+            let right_point = point_from_line2(point, perpendicular, -radius);
+            // (the game's: towards the left again)
+            let (_, right) = structure.test_ray2d(ignore_broken_surfaces, point, surface_index, perpendicular, radius);
+            let (hit, right) = structure.test_ray2d(ignore_broken_surfaces, right_point, right.surface_index, direction, result.distance);
+            if hit && result.distance > right.distance {
+                result.distance = right.distance;
+                result.edge_index = right.edge_index;
+            }
+        }
+        let (hit, pill_distance, disc_index, obstacle_index) =
+            self.obstacles.test_pill(ignore_disc_index, point, direction, radius, result.distance, ignore_optional);
+        if hit && result.distance > pill_distance {
+            result.distance = pill_distance;
+            result.edge_index = NONE;
+            result.disc_index = disc_index;
+            result.obstacle_index = obstacle_index;
+        }
+        let hit = if result.edge_index == NONE && result.disc_index == NONE as i16 {
+            result.distance = distance;
+            false
+        } else {
+            true
+        };
+        let (_, ray) = structure.test_ray2d(ignore_broken_surfaces, point, surface_index, direction, result.distance);
+        result.surface_index = ray.surface_index;
+        (hit, result)
+    }
+
+    /// `path_add_steps`: round the disc the step met (and those it meets on
+    /// the way), the steps past each side.
+    fn add_steps(&self, step_index: i16, seed_disc_index: i16) {
+        let radius = self.radius();
+        let ignore_optional = self.ignore_optional();
+        let mut visited = [0u32; 4];
+        visited[(seed_disc_index >> 5) as usize] |= 1 << (seed_disc_index & 31);
+        let mut stack = vec![seed_disc_index];
+        while let Some(disc_index) = stack.pop() {
+            let obstacle_index = self.obstacles.obstacle_from_disc(disc_index);
+            let step_point = self.step_point(step_index);
+            let (right, left, mut tangent_distance) = self.obstacles.disc_tangents(disc_index, step_point, radius);
+            if tangent_distance < radius {
+                tangent_distance = radius;
+            }
+            for (side, direction) in [right, left].into_iter().enumerate() {
+                let step_point = self.step_point(step_index);
+                let step_surface = self.step_surface(step_index);
+                let (_, result) = self.test_pill2d(
+                    disc_index,
+                    step_point,
+                    step_surface,
+                    direction,
+                    radius,
+                    2.0 * radius + tangent_distance,
+                    false,
+                    false,
+                    ignore_optional,
+                );
+                if result.disc_index != NONE as i16 {
+                    let word = (result.disc_index >> 5) as usize;
+                    let bit = 1u32 << (result.disc_index & 31);
+                    if visited[word] & bit == 0 {
+                        visited[word] |= bit;
+                        stack.push(result.disc_index);
+                    }
+                }
+                if result.distance > tangent_distance && result.obstacle_index != obstacle_index {
+                    let midpoint_distance = (result.distance + tangent_distance) * 0.5;
+                    let (_, ray) =
+                        self.structure.test_ray2d(self.ignore_broken_surfaces(), step_point, step_surface, direction, midpoint_distance);
+                    let midpoint = point_from_line2(step_point, direction, midpoint_distance);
+                    self.add_step(
+                        midpoint,
+                        ray.surface_index,
+                        obstacle_index,
+                        side as u8,
+                        self.step_f32(step_index, ops::TOTAL_DISTANCE) - self.step_f32(step_index, ops::DISTANCE) + midpoint_distance,
+                        step_index,
+                    );
+                }
+            }
+        }
+    }
+
+    /// `path_iterate`: the cheapest step's sweep to the goal (or round what
+    /// it meets); whether to go on.
+    fn iterate(&self) -> bool {
+        let m = self.m;
+        let step_index = self.heap_remove();
+        if step_index != NONE as i16 {
+            let (_, result) = self.test_pill2d(
+                NONE as i16,
+                self.step_point(step_index),
+                self.step_surface(step_index),
+                self.step_direction(step_index),
+                self.radius(),
+                self.step_f32(step_index, ops::DISTANCE),
+                self.step_i16(step_index, ops::PREVIOUS_STEP_INDEX) == NONE as i16,
+                true,
+                self.ignore_optional(),
+            );
+            if result.edge_index == NONE {
+                let goal_surface_index = m.i32(self.field(op::GOAL_SURFACE_INDEX));
+                if result.disc_index == NONE as i16 {
+                    let goal = [m.f32(self.field(op::GOAL)), m.f32(self.field(op::GOAL) + 4)];
+                    if result.surface_index == goal_surface_index
+                        || self.structure.surfaces_are_equivalent(goal, goal_surface_index, result.surface_index)
+                    {
+                        let point = point_from_line2(self.step_point(step_index), self.step_direction(step_index), result.distance);
+                        let goal_step_index = self.add_step(
+                            point,
+                            result.surface_index,
+                            NONE as i16,
+                            0,
+                            self.step_f32(step_index, ops::TOTAL_DISTANCE) - self.step_f32(step_index, ops::DISTANCE) + result.distance,
+                            step_index,
+                        );
+                        m.set_i16(self.field(op::GOAL_STEP_INDEX), goal_step_index);
+                    }
+                } else {
+                    if result.obstacle_index == m.i16(self.field(op::GOAL_OBSTACLE_INDEX))
+                        && self.step_f32(step_index, ops::DISTANCE) < m.f32(self.field(op::BEST_GOAL_BLOCKED_DISTANCE))
+                    {
+                        m.set_f32(self.field(op::BEST_GOAL_BLOCKED_DISTANCE), self.step_f32(step_index, ops::DISTANCE));
+                        m.set_i16(self.field(op::BEST_GOAL_BLOCKED_STEP_INDEX), step_index);
+                    }
+                    self.add_steps(step_index, result.disc_index);
+                }
+            }
+        }
+        self.goal_step_index() == NONE as i16 && self.heap_count() > 0
+    }
+
+    /// `path_find`.
+    #[allow(clippy::too_many_arguments)]
+    fn find(
+        &self,
+        structure_address: u32,
+        ignore_broken_surfaces: bool,
+        radius: f32,
+        start: [f32; 2],
+        start_surface_index: i32,
+        goal: [f32; 2],
+        goal_surface_index: i32,
+        finishing_path: bool,
+        ignore_optional: bool,
+    ) -> bool {
+        let m = self.m;
+        self.new(
+            structure_address,
+            ignore_broken_surfaces,
+            radius,
+            start,
+            start_surface_index,
+            goal,
+            goal_surface_index,
+            finishing_path,
+            ignore_optional,
+        );
+        while self.iterate() {}
+        if self.goal_step_index() != NONE as i16 {
+            m.set_bool(self.field(op::GOAL_FOUND_EXACTLY), true);
+        } else {
+            let best = m.i16(self.field(op::BEST_GOAL_BLOCKED_STEP_INDEX));
+            if best != NONE as i16 {
+                m.set_i16(self.field(op::GOAL_STEP_INDEX), best);
+            }
+        }
+        self.goal_step_index() != NONE as i16
+    }
+}
+
+/// What the game gathers for the avoidance: the discs of the objects in a
+/// sphere (`obstacles_get_discs_in_sphere`, into the obstacles at the
+/// address).
+pub type DiscsInSphere<'a> = dyn FnMut(u32, [f32; 3], f32, [f32; 3], i32, i32) + 'a;
+
+/// `path_avoid_obstacles`: each smoothed step's way round the objects in
+/// its way (into `avoided_steps`, four at most); false if one can't be
+/// found.
+#[allow(clippy::too_many_arguments)]
+fn path_avoid_obstacles(
+    m: &dyn AiMemory,
+    state: &State,
+    structure: &Structure,
+    structure_address: u32,
+    input_steps: &[PathStep],
+    avoided_steps: &mut Vec<PathStep>,
+    steps_finish_path: &mut bool,
+    discs_in_sphere: &mut DiscsInSphere,
+) -> bool {
+    let radius = max_c(m.f32(state.input(pi::PATHFINDING_RADIUS)), 0.2);
+    let debug = state.debug();
+    let local_obstacles = vec![0u8; obs::SIZEOF];
+    let local_path = vec![0u8; op::SIZEOF];
+    if debug != 0 && !m.bool(debug + dbg::USE_STORED_OBSTACLES as u32) {
+        m.set_i16(debug + dbg::AVOIDANCE_PATH_COUNT as u32, 0);
+    }
+    let start_point = m.vector(state.input(pi::START_POINT));
+    let mut last_step_end_point = [0.0f32; 3];
+    let mut previous_surface_index = NONE;
+    let ignore_broken_surfaces = m.bool(state.input(pi::IGNORE_BROKEN_SURFACES));
+    for (step_index, input_step) in input_steps.iter().enumerate() {
+        let last_step = step_index == input_steps.len() - 1;
+        let finishing = last_step && *steps_finish_path;
+        let (start, start_surface_index) = if step_index > 0 {
+            (last_step_end_point, previous_surface_index)
+        } else {
+            (start_point, m.i32(state.input(pi::START_SURFACE_INDEX)))
+        };
+        let goal_point = input_step.point;
+        let goal_surface_index = input_step.surface_index;
+        let mut movement_direction = vector_from_points(start, goal_point);
+        crate::actor_transitions::normalize3(&mut movement_direction);
+        let mut obstacles_address = local_obstacles.as_ptr() as u32;
+        let mut path_address = local_path.as_ptr() as u32;
+        let mut compute_obstacles = true;
+        if debug != 0 {
+            obstacles_address = debug + dbg::AVOIDANCE_OBSTACLES as u32 + (step_index * obs::SIZEOF) as u32;
+            path_address = debug + dbg::AVOIDANCE_PATHS as u32 + (step_index * op::SIZEOF) as u32;
+            if m.bool(debug + dbg::USE_STORED_OBSTACLES as u32)
+                && (step_index as i16) < m.i16(debug + dbg::AVOIDANCE_PATH_COUNT as u32)
+            {
+                compute_obstacles = false;
+            }
+        }
+        let obstacles = Obstacles { m, at: obstacles_address };
+        if compute_obstacles {
+            obstacles.new();
+            discs_in_sphere(
+                obstacles_address,
+                start,
+                4.0,
+                movement_direction,
+                m.i32(state.input(pi::IGNORE_SOURCE_OBJECT_INDEX)),
+                m.i32(state.input(pi::IGNORE_TARGET_OBJECT_INDEX)),
+            );
+            if m.bool(state.input(pi::ATTRACTOR_VALID)) {
+                obstacles.add_disc(
+                    m.i32(state.input(pi::ATTRACTOR_OBJECT_INDEX)),
+                    DISC_OPTIONAL,
+                    m.vector(state.input(pi::ATTRACTOR_POINT)),
+                    m.f32(state.input(pi::ATTRACTOR_RADIUS)),
+                );
+            }
+            obstacles.recompute(radius);
+            if debug != 0 && !m.bool(debug + dbg::USE_STORED_OBSTACLES as u32) {
+                let count = debug + dbg::AVOIDANCE_PATH_COUNT as u32;
+                m.set_i16(count, m.i16(count) + 1);
+            }
+        }
+        let path = ObstaclePath { m, at: path_address, obstacles, structure };
+        let start2 = [start[0], start[1]];
+        let goal2 = [goal_point[0], goal_point[1]];
+        let mut path_found = path.find(
+            structure_address,
+            ignore_broken_surfaces,
+            radius,
+            start2,
+            start_surface_index,
+            goal2,
+            goal_surface_index,
+            finishing,
+            false,
+        );
+        if !path_found && m.i16(obstacles_address + obs::DISC_OPTIONAL_COUNT as u32) > 0 {
+            path_found = path.find(
+                structure_address,
+                ignore_broken_surfaces,
+                radius,
+                start2,
+                start_surface_index,
+                goal2,
+                goal_surface_index,
+                finishing,
+                true,
+            );
+        }
+        if !path_found {
+            return false;
+        }
+        let goal_step_index = path.goal_step_index();
+        if m.bool(path.field(op::GOAL_FOUND_EXACTLY)) {
+            last_step_end_point = goal_point;
+            previous_surface_index = goal_surface_index;
+        } else {
+            previous_surface_index = path.step_surface(goal_step_index);
+            last_step_end_point = structure.project(previous_surface_index, path.step_point(goal_step_index));
+        }
+        let mut overflow = false;
+        let mut temporary_steps: Vec<PathStep> = Vec::new();
+        let mut obstacle_step_index = goal_step_index;
+        while obstacle_step_index != 0 {
+            let surface_index = path.step_surface(obstacle_step_index);
+            temporary_steps.push(PathStep { surface_index, point: structure.project(surface_index, path.step_point(obstacle_step_index)) });
+            obstacle_step_index = path.step_i16(obstacle_step_index, ops::PREVIOUS_STEP_INDEX);
+            if temporary_steps.len() >= MAXIMUM_OBSTACLE_AVOIDANCE_STEPS as usize {
+                overflow = true;
+                break;
+            }
+        }
+        for step in temporary_steps.iter().rev() {
+            if avoided_steps.len() >= MAXIMUM_SMOOTHED_PATH_STEPS {
+                overflow = true;
+                break;
+            }
+            avoided_steps.push(*step);
+        }
+        if overflow {
+            *steps_finish_path = false;
+            break;
+        }
+    }
+    true
+}
+
+/// path.h's `_path_build_result_*`.
+mod build_result {
+    pub const NONE: i16 = 0;
+    pub const NO_DESTINATION: i16 = 1;
+    pub const CACHED_NODE_MISSING: i16 = 2;
+    pub const OBSTACLE_AVOIDANCE_FAILED: i16 = 4;
+    pub const SUCCESS: i16 = 5;
+}
+
+/// What the path build reads besides the state.
+pub struct BuildContext<'a> {
+    pub breakable_surface_flags: u32,
+    /// `global_structure_bsp_get`.
+    pub structure: u32,
+    /// A local game's debug settings: no smoothing, no obstacle avoidance.
+    pub disable_smoothing: bool,
+    pub disable_obstacle_avoidance: bool,
+    pub discs_in_sphere: &'a mut DiscsInSphere<'a>,
+}
+
+fn write_step(m: &dyn AiMemory, address: u32, step: &PathStep) {
+    m.w32(address + pst::SURFACE_INDEX as u32, step.surface_index as u32);
+    for (k, value) in step.point.iter().enumerate() {
+        m.set_f32(address + pst::POINT as u32 + 4 * k as u32, *value);
+    }
+}
+
+fn write_steps(m: &dyn AiMemory, address: u32, steps: &[PathStep]) {
+    for (index, step) in steps.iter().enumerate() {
+        write_step(m, address + (index * pst::SIZEOF) as u32, step);
+    }
+}
+
+/// `path_state_build_path`: the steps (four at most) from the search's
+/// start to its destination (or to the node nearest it, within its
+/// radius): smoothed and round the objects in the way, into the result at
+/// `path`; whether there is one.
+pub fn path_state_build_path(m: &dyn AiMemory, state_address: u32, path: u32, context: &mut BuildContext) -> bool {
+    let state = State { m, state: state_address };
+    let debug = state.debug();
+    let set_build_result = |result: i16| {
+        if debug != 0 {
+            m.set_i16(debug + dbg::PATH_BUILD_RESULT as u32, result);
+        }
+    };
+    set_build_result(build_result::NONE);
+    m.set_bool(path + pr::VALID as u32, false);
+    let endpoint = path + pr::ENDPOINT as u32;
+    if m.bool(state.at(ps::DESTINATION_VALID)) {
+        let mut node_index = state.node_from_hash_table(m.i32(state.destination(pd::SURFACE_INDEX)));
+        if node_index != NONE as i16 {
+            for offset in (0..20).step_by(4) {
+                m.w32(endpoint + offset, m.r32(state.at(ps::DESTINATION) + offset));
+            }
+            m.set_f32(endpoint + pd::TARGET_RADIUS as u32, 0.0);
+        } else if m.f32(state.at(ps::CLOSEST_DISTANCE)) < m.f32(state.destination(pd::TARGET_RADIUS)) {
+            node_index = m.i16(state.at(ps::CLOSEST_NODE_INDEX));
+            state.set_vector(endpoint + pd::POINT as u32, m.vector(state.at(ps::CLOSEST_POINT)));
+            m.w32(endpoint + pd::SURFACE_INDEX as u32, m.r32(state.node(node_index) + pn::SURFACE_INDEX as u32));
+            m.set_f32(endpoint + pd::TARGET_RADIUS as u32, m.f32(state.at(ps::CLOSEST_DISTANCE)));
+        }
+        if node_index != NONE as i16 {
+            let depth_plus_one = m.i16(state.node(node_index) + pn::DEPTH as u32) as i32 + 1;
+            let mut steps_finish_path = true;
+            let raw_step_count = depth_plus_one.min(64) as usize;
+            let mut raw_steps = vec![PathStep::default(); raw_step_count];
+            let mut child_node: Option<u32> = None;
+            loop {
+                let node = state.node(node_index);
+                let depth = m.i16(node + pn::DEPTH as u32);
+                if depth >= 64 {
+                    steps_finish_path = false;
+                } else {
+                    let step = &mut raw_steps[depth as usize];
+                    step.surface_index = m.i32(node + pn::SURFACE_INDEX as u32);
+                    step.point = match child_node {
+                        None => m.vector(endpoint + pd::POINT as u32),
+                        Some(child) => m.vector(child + pn::ENTRY_POINT as u32),
+                    };
+                }
+                child_node = Some(node);
+                node_index = m.i16(node + pn::PARENT_NODE_INDEX as u32);
+                if node_index == NONE as i16 {
+                    break;
+                }
+            }
+            let smoothed_steps = if context.disable_smoothing {
+                raw_steps.iter().take(MAXIMUM_SMOOTHED_PATH_STEPS).copied().collect()
+            } else {
+                path_smooth(m, state_address, context.breakable_surface_flags, &raw_steps, &mut steps_finish_path)
+            };
+            let mut avoided_steps: Vec<PathStep> = Vec::new();
+            let path_build_success = if context.disable_obstacle_avoidance {
+                avoided_steps = smoothed_steps.iter().take(MAXIMUM_SMOOTHED_PATH_STEPS).copied().collect();
+                true
+            } else {
+                let structure = Structure::new(m, context.structure, context.breakable_surface_flags);
+                let success = path_avoid_obstacles(
+                    m,
+                    &state,
+                    &structure,
+                    context.structure,
+                    &smoothed_steps,
+                    &mut avoided_steps,
+                    &mut steps_finish_path,
+                    context.discs_in_sphere,
+                );
+                if !success {
+                    set_build_result(build_result::OBSTACLE_AVOIDANCE_FAILED);
+                }
+                success
+            };
+            if path_build_success {
+                m.w8(path + pr::STEP_COUNT as u32, avoided_steps.len() as u8);
+                m.set_bool(path + pr::STEPS_FINISH_PATH as u32, steps_finish_path);
+                m.set_bool(path + pr::VALID as u32, true);
+                m.w8(path + pr::STEP_INDEX as u32, 0);
+                write_steps(m, path + pr::STEPS as u32, &avoided_steps);
+                if steps_finish_path {
+                    // (the result's last step, as the game reads it)
+                    let last = (path + pr::STEPS as u32)
+                        .wrapping_add(((m.i8(path + pr::STEP_COUNT as u32) as i32 - 1) as u32).wrapping_mul(pst::SIZEOF as u32));
+                    let last_point = m.vector(last + pst::POINT as u32);
+                    state.set_vector(endpoint + pd::POINT as u32, last_point);
+                    m.w32(endpoint + pd::SURFACE_INDEX as u32, m.r32(last + pst::SURFACE_INDEX as u32));
+                    m.set_f32(endpoint + pd::TARGET_RADIUS as u32, distance(last_point, m.vector(state.destination(pd::POINT))));
+                }
+                set_build_result(build_result::SUCCESS);
+            }
+            if debug != 0 {
+                m.set_i16(debug + dbg::RAW_STEP_COUNT as u32, raw_step_count as i16);
+                write_steps(m, debug + dbg::RAW_STEPS as u32, &raw_steps);
+                m.set_i16(debug + dbg::SMOOTHED_STEP_COUNT as u32, smoothed_steps.len() as i16);
+                write_steps(m, debug + dbg::SMOOTHED_STEPS as u32, &smoothed_steps);
+                m.set_i16(debug + dbg::AVOIDED_STEP_COUNT as u32, avoided_steps.len() as i16);
+                write_steps(m, debug + dbg::AVOIDED_STEPS as u32, &avoided_steps);
+            }
+        } else if debug != 0 {
+            let closest_valid = m.i16(state.at(ps::CLOSEST_NODE_INDEX)) != NONE as i16;
+            set_build_result(closest_valid as i16 + build_result::CACHED_NODE_MISSING);
+        }
+    } else {
+        set_build_result(build_result::NO_DESTINATION);
+    }
+    if debug != 0 {
+        for offset in (0..pr::SIZEOF as u32).step_by(4) {
+            m.w32(debug + dbg::RESULT as u32 + offset, m.r32(path + offset));
+        }
+        if m.i16(debug + dbg::PATH_BUILD_RESULT as u32) != build_result::SUCCESS {
+            m.set_bool(debug + dbg::FAILURE as u32, true);
+        }
+    }
+    m.bool(path + pr::VALID as u32)
+}

@@ -4,12 +4,14 @@
 //! structure's 2D line and pill tests (path_structure_bsp.c's
 //! `structure_test_line2d` and `structure_test_pill2d`), the smoothing
 //! (path_smoothing.c's `path_smooth`) and the approach point (path.c's
-//! `path_state_approach_point`), through halo_sim.c's `halo_sim_path_*`.
+//! `path_state_approach_point`) and the path's build (path.c's
+//! `path_state_build_path`, with path_obstacle_avoidance.c's avoidance),
+//! through halo_sim.c's `halo_sim_path_*`.
 
 use halo_map::ai_actor::AiMemory;
 use halo_map::path::{
-    PathCollisionResult, PathContext, PathStep, Structure, path_smooth, path_state_approach_point, path_state_estimated_distance,
-    path_state_find,
+    BuildContext, PathCollisionResult, PathContext, PathStep, Structure, path_smooth, path_state_approach_point,
+    path_state_build_path, path_state_estimated_distance, path_state_find,
 };
 
 use crate::ai_steps::GameMemory;
@@ -48,9 +50,18 @@ pub struct PathCall {
     /// The smoothing's `steps_finish_path`; the approach point's straight
     /// line.
     pub steps_finish_path: i32,
+    /// The build's result (`struct path_result`), the game's
+    /// `obstacles_get_discs_in_sphere` and its flags (bit 0 no smoothing,
+    /// bit 1 no obstacle avoidance).
+    pub path_result: u32,
+    pub discs_in_sphere: Option<DiscsInSphereC>,
+    pub build_flags: i32,
 }
 
-const _: () = assert!(std::mem::size_of::<PathCall>() == 148);
+/// halo_sim.h's `halo_sim_path_discs_function`.
+pub type DiscsInSphereC = unsafe extern "C" fn(obstacles: u32, center: *const f32, radius: f32, movement: *const f32, ignore_source: i32, ignore_target: i32);
+
+const _: () = assert!(std::mem::size_of::<PathCall>() == 160);
 
 fn read_step(m: &dyn AiMemory, address: u32) -> PathStep {
     PathStep { surface_index: m.r32(address) as i32, point: std::array::from_fn(|k| f32::from_bits(m.r32(address + 4 + 4 * k as u32))) }
@@ -139,6 +150,21 @@ pub unsafe extern "C" fn halo_sim_path(call: *mut PathCall) -> i32 {
                 }
                 None => call.result = 0,
             }
+        }
+        6 => {
+            let Some(discs_in_sphere) = call.discs_in_sphere else { return -1 };
+            let mut discs = |obstacles: u32, center: [f32; 3], radius: f32, movement: [f32; 3], ignore_source: i32, ignore_target: i32| {
+                // SAFETY: the game's function, on its obstacles
+                unsafe { discs_in_sphere(obstacles, center.as_ptr(), radius, movement.as_ptr(), ignore_source, ignore_target) };
+            };
+            let mut context = BuildContext {
+                breakable_surface_flags: call.breakable_surface_flags,
+                structure: call.structure,
+                disable_smoothing: call.build_flags & 1 != 0,
+                disable_obstacle_avoidance: call.build_flags & 2 != 0,
+                discs_in_sphere: &mut discs,
+            };
+            call.result = path_state_build_path(&m, call.state, call.path_result, &mut context) as i32;
         }
         _ => return -1,
     }

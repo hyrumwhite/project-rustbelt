@@ -1068,6 +1068,7 @@ enum
 	_actor_perception_call_has_ranged_weapon,
 	_actor_perception_call_weapon_definition,
 	_actor_perception_call_firing_variant,
+	_actor_perception_call_stimulus_acknowledged,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's

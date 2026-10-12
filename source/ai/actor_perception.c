@@ -1278,6 +1278,14 @@ done:
 	return desire;
 }
 
+static long actor_perception_call_full(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input,
+	real *output);
+
 void actor_perception_acknowledge(
 	long actor_index,
 	long prop_index,
@@ -1298,11 +1306,9 @@ void actor_perception_acknowledge(
 	prop->abandoned_search = FALSE;
 	prop->refresh_stimuli = TRUE;
 
-	actor_stimulus_prop_acknowledged(
-		actor_index,
-		prop_index,
-		had_orphan,
-		expected_acknowledgement);
+	/* port: through actor_perception_call, as the Rust port's asks */
+	actor_perception_call_full(actor_index, _actor_perception_call_stimulus_acknowledged,
+		prop_index, (had_orphan ? 1 : 0) | (expected_acknowledgement ? 2 : 0), 0.0f, NULL);
 
 	return;
 }
@@ -2079,14 +2085,6 @@ short actor_perception_aiming_vector_test_blockage(
 done:
 	return blockage;
 }
-
-static long actor_perception_call_full(
-	long actor_index,
-	long kind,
-	long a,
-	long b,
-	real input,
-	real *output);
 
 real actor_compute_prop_target_weight(
 	long actor_index,
@@ -4014,11 +4012,11 @@ boolean actor_perception_become_acknowledged(
 			prop->unopposable_casualty_decay_timer =
 				orphan->unopposable_casualty_decay_timer;
 
-			actor_switch_props(
-				actor_index,
-				prop->orphan_prop_index,
-				prop_index);
-			prop_delete(actor_index, prop->orphan_prop_index);
+			/* port: through actor_perception_call, as the Rust port's asks */
+			actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
+				prop->orphan_prop_index, prop_index, 0.0f, NULL);
+			actor_perception_call_full(actor_index, _actor_perception_call_prop_delete,
+				prop->orphan_prop_index, 0, 0.0f, NULL);
 			prop->orphan_prop_index = NONE;
 		}
 
@@ -6793,6 +6791,10 @@ void actor_perception_call(
 		case _actor_perception_call_firing_variant:
 			call->result = (long)actor_combat_get_firing_variant_definition(actor_index);
 			break;
+
+		case _actor_perception_call_stimulus_acknowledged:
+			actor_stimulus_prop_acknowledged(actor_index, call->a, (call->b & 1) != 0, (call->b & 2) != 0);
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -7193,8 +7195,7 @@ static void actor_perception_update_game(
 				}
 				else
 				{
-					short knowledge_type = (short)actor_perception_call_simple(actor_index,
-						_actor_perception_call_knowledge, iterator.index);
+					short knowledge_type = actor_get_perception_knowledge(actor_index, iterator.index);
 					short awareness_speed;
 					real awareness_delta;
 
@@ -7355,11 +7356,10 @@ static void actor_perception_update_game(
 
 			case _prop_state_acknowledged:
 			{
-				long result = actor_perception_call_simple(actor_index,
-					_actor_perception_call_become_acknowledged, iterator.index);
-
-				became_acknowledged = (result & 1) != 0;
-				expected_acknowledgement = (result & 2) != 0;
+				became_acknowledged = actor_perception_become_acknowledged(
+					actor_index,
+					iterator.index,
+					&expected_acknowledgement);
 				iterator.next_index = prop->next_prop_index;
 				break;
 			}

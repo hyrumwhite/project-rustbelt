@@ -64,6 +64,7 @@ enum
 	_halo_sim_paths,
 	_halo_sim_encounters,
 	_halo_sim_conversations,
+	_halo_sim_communication,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2199,6 +2200,7 @@ enum
 {
 	_halo_sim_world_step_encounters = 0,
 	_halo_sim_world_step_conversations,
+	_halo_sim_world_step_communication,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2231,6 +2233,12 @@ struct halo_sim_world_context
 	unsigned long combined_pvs;
 	long structure_cluster_count;
 	unsigned long activation_flags;
+	long communication[6];
+	unsigned long communication_table_indices;
+	unsigned long dialogue_table;
+	unsigned long dialogue_events;
+	unsigned long communication_selected;
+	unsigned long communication_flags;
 };
 
 /* the world step's update in Rust when asked (returns TRUE, done), or the
@@ -2288,6 +2296,31 @@ enum
 };
 
 void conversation_call(struct halo_sim_ai_call *call);
+
+/* a communication event's calls (ai_communication.c's communication_call;
+crates/halo_map's communication::call); several pass integers in `input` as
+their bits */
+enum
+{
+	_communication_call_team_is_ally = 1,
+	_communication_call_team_is_enemy,
+	_communication_call_actor_type_race,
+	_communication_call_find_global_actor,
+	_communication_call_find_specific_actor,
+	_communication_call_incident,
+	_communication_call_scripted_dialog_playing,
+	_communication_call_find_reply_actor,
+	_communication_call_player_rating,
+	_communication_call_communication_team,
+	_communication_call_consider_speech,
+	_communication_call_test_animation_impulse,
+	_communication_call_action_class,
+	_communication_call_random_real,
+	_communication_call_reply,
+	_communication_call_speak,
+};
+
+void communication_call(struct halo_sim_ai_call *call);
 short actor_firing_position_port_change(long actor_index, short firing_position_index, long previous_owner,
 	int cached_path_available);
 short actor_firing_position_port_change_to_active_selection(long actor_index, short evaluation_mode);

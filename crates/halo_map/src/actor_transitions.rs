@@ -195,7 +195,7 @@ pub mod call {
     /// The actor's encounter's last grenade throw time, the result, and the
     /// difficulty's grenade timer scale for its team, `output[0]`.
     pub const ENCOUNTER_GRENADE_TIMER: i32 = BASE + 72;
-    /// `actor_combat_find_grenade_target(actor)`: whether it found one, the
+    /// (no longer asked: [`find_grenade_target`]) `actor_combat_find_grenade_target(actor)`: whether it found one, the
     /// result; the target in `output[0..3]`, its prop `result2`, and the
     /// object to ignore in `output[3]`'s bits.
     pub const FIND_GRENADE_TARGET: i32 = BASE + 73;
@@ -297,6 +297,10 @@ pub mod call {
     pub const FORGET_RECENT_DAMAGE: i32 = BASE + 107;
     /// `actor_perception_retreat_successful(actor)`.
     pub const RETREAT_SUCCESSFUL: i32 = BASE + 108;
+    /// actor_combat.c's `actor_combat_find_nearby_target` of the point in
+    /// `input[0..3]` (a playfighting grenade's random miss of 1.5), in
+    /// `output[0..3]`.
+    pub const PLAYFIGHT_NEARBY_TARGET: i32 = BASE + 109;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -2454,31 +2458,22 @@ pub fn test_grenade(context: &AiStepContext, host: &impl AiHost) -> bool {
         }
     }
 
-    let target = call_full(context, host, call::FIND_GRENADE_TARGET, 0, 0, &[]);
-    if target.result == 0 {
+    let Some((grenade_target, grenade_target_prop_index, grenade_ignore_object_index)) = find_grenade_target(context, host)
+    else {
         decision(6);
         return false;
-    }
-    let grenade_target = [target.output[0], target.output[1], target.output[2]];
-    let collateral = call_full(
+    };
+    let (spared, enemy_count) = check_collateral_damage(
         context,
         host,
-        call::COLLATERAL_DAMAGE,
-        0,
-        0,
-        &[
-            m.f32(variant(var::GRENADE_COMBAT_ENEMY_RADIUS)),
-            m.f32(variant(var::GRENADE_COMBAT_COLLATERAL_DAMAGE_RADIUS)),
-            grenade_target[0],
-            grenade_target[1],
-            grenade_target[2],
-        ],
+        m.f32(variant(var::GRENADE_COMBAT_ENEMY_RADIUS)),
+        m.f32(variant(var::GRENADE_COMBAT_COLLATERAL_DAMAGE_RADIUS)),
+        grenade_target,
     );
-    if collateral.result == 0 {
+    if !spared {
         decision(8);
         return false;
     }
-    let enemy_count = collateral.result2 as i16;
     let minimum_enemy_count = m.i16(variant(var::GRENADE_COMBAT_MINIMUM_ENEMY_COUNT));
     if enemy_count < minimum_enemy_count {
         m.set_i16(debug_at(debug::GRENADE_ENEMY_COUNT), enemy_count);
@@ -2491,8 +2486,8 @@ pub fn test_grenade(context: &AiStepContext, host: &impl AiHost) -> bool {
         host,
         call::PLAN_GRENADE_TRAJECTORY,
         m.i16(variant(var::GRENADE_COMBAT_TRAJECTORY_TYPE)) as i32,
-        target.result2,
-        &[grenade_target[0], grenade_target[1], grenade_target[2], target.output[3]],
+        grenade_target_prop_index,
+        &[grenade_target[0], grenade_target[1], grenade_target[2], f32::from_bits(grenade_ignore_object_index as u32)],
     )
     .result
         != 0
@@ -3706,4 +3701,161 @@ fn action_begin(context: &AiStepContext, host: &impl AiHost, action: i16) {
         }
         _ => {}
     }
+}
+
+/// actor_combat.c's `MAXIMUM_COLLATERAL_DAMAGE_ACTORS`.
+const MAXIMUM_COLLATERAL_DAMAGE_ACTORS: usize = 32;
+
+/// `distance_squared3d(a, b)`.
+fn distance_squared3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let v = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    v[0] * v[0] + v[1] * v[1] + v[2] * v[2]
+}
+
+/// actor_combat.c's `actor_combat_find_grenade_target`: the target prop's
+/// body (a little above it), if it's a live enemy acknowledged (or an
+/// uninspected orphan) within the grenade's range; the prop, and its
+/// vehicle to ignore. Playfighting moves it to a random miss nearby.
+fn find_grenade_target(context: &AiStepContext, host: &impl AiHost) -> Option<([f32; 3], i32, i32)> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    if target_prop_index == NONE {
+        return None;
+    }
+    let prop = prop_get(m, context, target_prop_index);
+    let state = m.i16(prop + p::STATE as u32);
+    let distance = m.f32(prop + p::DISTANCE as u32);
+    let variant = |offset: usize| context.variant_definition + offset as u32;
+    if !(m.bool(prop + p::ENEMY as u32)
+        && !m.bool(prop + p::DEAD as u32)
+        && ((state >= v::_PROP_STATE_BECOMING_UNACKNOWLEDGED as i16 && state <= v::_PROP_STATE_ACKNOWLEDGED as i16)
+            || state == v::_PROP_STATE_UNINSPECTED_ORPHAN as i16)
+        && distance > m.f32(variant(var::GRENADE_COMBAT_GRENADE_RANGE_LOWER_BOUND))
+        && distance < m.f32(variant(var::GRENADE_COMBAT_GRENADE_RANGE_UPPER_BOUND)))
+    {
+        return None;
+    }
+    let mut target = m.vector(prop + p::BODY_POSITION as u32);
+    target[2] += 0.2;
+    let ignore_object_index = m.i32(prop + p::VEHICLE_INDEX as u32);
+    if m.bool(at(a::EXTERNAL_ORDERS_PLAYFIGHTING)) {
+        target = call_full(context, host, call::PLAYFIGHT_NEARBY_TARGET, 0, 0, &target).vector();
+    }
+    Some((target, target_prop_index, ignore_object_index))
+}
+
+/// actor_combat.c's `actor_combat_check_collateral_damage`: whether a
+/// grenade at the point spares the actor's friends (none of its friendly
+/// props nor its encounter within the collateral radius), and the threats
+/// it meets within the enemy radius (a player ten, a vehicle five, an actor
+/// one or its swarm's units, and the target's encounter's other actors).
+fn check_collateral_damage(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    enemy_radius: f32,
+    collateral_damage_radius: f32,
+    test_point: [f32; 3],
+) -> (bool, i16) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut result = true;
+    let mut threats = 0i16;
+    let mut counted: Vec<i32> = Vec::new();
+    let actor_of = |index: i32| crate::ai_actor::datum_get(m, context.actor_data, index).unwrap_or(0);
+
+    let mut props = PropIterator::new(m, context);
+    while let Some(prop) = props.next(m, context) {
+        let state = m.i16(prop + p::STATE as u32);
+        if !(state >= v::_PROP_STATE_BECOMING_UNACKNOWLEDGED as i16
+            && state <= v::_PROP_STATE_ACKNOWLEDGED as i16
+            && !m.bool(prop + p::DEAD as u32))
+        {
+            continue;
+        }
+        let body = m.vector(prop + p::BODY_POSITION as u32);
+        if m.bool(prop + p::ENEMY as u32) {
+            if distance_squared3(body, test_point) < enemy_radius * enemy_radius {
+                if m.bool(prop + p::PLAYER as u32) {
+                    threats = threats.wrapping_add(10);
+                } else if m.i32(prop + p::VEHICLE_INDEX as u32) != NONE {
+                    threats = threats.wrapping_add(5);
+                } else {
+                    let actor_index = m.i32(prop + p::ACTOR_INDEX as u32);
+                    if actor_index != NONE {
+                        if counted.len() < MAXIMUM_COLLATERAL_DAMAGE_ACTORS {
+                            counted.push(actor_index);
+                        }
+                        if m.bool(prop + p::SWARM as u32) {
+                            threats = threats.wrapping_add(m.i16(actor_of(actor_index) + a::META_SWARM_UNIT_COUNT as u32));
+                        } else {
+                            threats = threats.wrapping_add(1);
+                        }
+                    }
+                }
+            }
+        } else if collateral_damage_radius > 0.0
+            && distance_squared3(body, test_point) < collateral_damage_radius * collateral_damage_radius
+        {
+            result = false;
+            break;
+        }
+    }
+
+    let for_each_in_encounter = |encounter_index: i32, mut f: Box<dyn FnMut(i32, u32) -> bool + '_>| {
+        let encounter = crate::ai_actor::datum_get(m, context.encounter_data, encounter_index).unwrap_or(0);
+        let mut next = m.i32(encounter + crate::layout::encounter_datum::FIRST_ACTOR_INDEX as u32);
+        while next != NONE {
+            let index = next;
+            let actor = actor_of(index);
+            next = m.i32(actor + a::META_NEXT_ACTOR_INDEX as u32);
+            if !f(index, actor) {
+                break;
+            }
+        }
+    };
+
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    if enemy_radius > 0.0 && target_prop_index != NONE {
+        let target_prop = prop_get(m, context, target_prop_index);
+        let target_actor_index = m.i32(target_prop + p::ACTOR_INDEX as u32);
+        if target_actor_index != NONE {
+            let encounter_index = m.i32(actor_of(target_actor_index) + a::META_ENCOUNTER_INDEX as u32);
+            if encounter_index != NONE {
+                for_each_in_encounter(
+                    encounter_index,
+                    Box::new(|index, enemy_actor| {
+                        if !counted.contains(&index)
+                            && distance_squared3(m.vector(enemy_actor + a::INPUT_BODY_POSITION as u32), test_point)
+                                < enemy_radius * enemy_radius
+                        {
+                            if m.bool(enemy_actor + a::META_SWARM as u32) {
+                                threats = threats.wrapping_add(m.i16(enemy_actor + a::META_SWARM_UNIT_COUNT as u32));
+                            } else {
+                                threats = threats.wrapping_add(1);
+                            }
+                        }
+                        true
+                    }),
+                );
+            }
+        }
+    }
+
+    let encounter_index = m.i32(at(a::META_ENCOUNTER_INDEX));
+    if result && encounter_index != NONE && collateral_damage_radius > 0.0 {
+        for_each_in_encounter(
+            encounter_index,
+            Box::new(|_, friend_actor| {
+                if distance_squared3(m.vector(friend_actor + a::INPUT_BODY_POSITION as u32), test_point)
+                    < collateral_damage_radius * collateral_damage_radius
+                {
+                    result = false;
+                    return false;
+                }
+                true
+            }),
+        );
+    }
+    (result, threats)
 }

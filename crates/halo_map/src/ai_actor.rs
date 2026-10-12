@@ -124,6 +124,8 @@ pub struct AiStepContext {
     pub breakable_surface_flags: u32,
     /// `global_structure_bsp_index`.
     pub structure_bsp_index: i32,
+    /// `encounter_data` (its `struct data_array`).
+    pub encounter_data: u32,
 }
 
 /// Where an update over the game's arrays (not one actor's step) finds

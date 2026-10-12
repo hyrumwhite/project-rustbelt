@@ -682,6 +682,15 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every decision loop, action update and action control agrees in minute-long runs of the levels, with none left out.
        - A planted error in the random side's threshold was caught on b30 and d20. One in the climb limit went unseen (the early evasions are over level ground).
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The grenade's target and collateral damage in Rust (`halo_map::actor_transitions`, under `actor_dispatch`): actor_combat.c's `actor_combat_find_grenade_target` and `actor_combat_check_collateral_damage`.
+     - **What Rust does:**
+       - The target is the target prop's body a little above it, if the prop is a live enemy that is acknowledged (or an uninspected orphan) within the variant's grenade range.
+       - The check counts the threats within the enemy radius: a player ten, a vehicle five, an actor one or its swarm's units, and the target's encounter's other actors once each. It refuses when a friendly prop, or one of the actor's own encounter, stands within the collateral radius.
+     - **The C's side:** a playfighting grenade's random miss (world collision rays and the random seed) is a new handler call. The trajectory's planning (the projectile's aim and the ballistic line of fire) stays a call, and the actions' two calls are gone. The step context now carries the encounters' data array.
+     - **Results:**
+       - Every decision loop agrees in minute-long runs of the levels, with none left out.
+       - A planted error in the target's height was caught on b30. One in a player's threat (ten to nine) can't show, since it still clears the minimum count.
+       - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

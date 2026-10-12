@@ -19,6 +19,9 @@ pub mod call {
     pub const PROP_UNIT_DETAILS: i32 = 83;
     /// The warning (at most each thirty seconds) that the props are full.
     pub const PROPS_FULL_WARNING: i32 = 84;
+    /// The actor's swarm's components' combat targets moved from the prop
+    /// `a` to `b`.
+    pub const SWITCH_SWARM_TARGETS: i32 = 85;
 }
 
 fn call_full(context: &AiStepContext, host: &impl AiHost, kind: i32, a: i32, b: i32) -> crate::ai_actor::AiCall {
@@ -212,7 +215,7 @@ pub fn prop_new_unacknowledged(context: &AiStepContext, host: &impl AiHost, unit
         prop_index = crate::data_array::datum_new(m, context.prop_data);
     } else {
         let prop = prop_get(m, context, prop_index);
-        call_full(context, host, call::SWITCH_PROPS, prop_index, NONE);
+        actor_switch_props(context, host, prop_index, NONE);
         prop_remove(context, host, prop_index);
         let identifier = m.r16(prop);
         for offset in 0..p::SIZEOF as u32 {
@@ -224,3 +227,93 @@ pub fn prop_new_unacknowledged(context: &AiStepContext, host: &impl AiHost, unit
     prop_add(context, host, unit_index, prop_index);
     prop_index
 }
+
+/// The actions whose data holds props (actions.c's `_actor_action_*`).
+const ACTION_FLEE: i16 = 4;
+const ACTION_GUARD: i16 = 6;
+const ACTION_CONVERSE: i16 = 12;
+
+/// actors.c's `actor_switch_props`: the actor's references to a prop moved
+/// to another (NONE: dropped, and what they drove ended): its target, fire
+/// target, grenade target, the stimuli's props, the unopposable retreat, the
+/// pursuit group, the post-combat prop, its destination, its looks, its
+/// swarm's components' targets, and its action's props (actions.c's
+/// `actor_action_replace_prop`: flee's, guard's and converse's).
+pub fn actor_switch_props(context: &AiStepContext, host: &impl AiHost, old_prop_index: i32, new_prop_index: i32) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let replace = |offset: usize| {
+        if m.i32(at(offset)) == old_prop_index {
+            m.w32(at(offset), new_prop_index as u32);
+            true
+        } else {
+            false
+        }
+    };
+    let dropped = new_prop_index == NONE;
+
+    if replace(a::TARGET_TARGET_PROP_INDEX) && dropped {
+        m.set_i16(at(a::TARGET_TARGET_TYPE), v::_ACTOR_TARGET_NONE as i16);
+    }
+    if m.i16(at(a::CONTROL_CURRENT_FIRE_TARGET_TYPE)) == FIRE_TARGET_PROP
+        && replace(a::CONTROL_CURRENT_FIRE_TARGET_PROP_INDEX)
+        && dropped
+    {
+        m.set_i16(at(a::CONTROL_CURRENT_FIRE_TARGET_TYPE), FIRE_TARGET_NONE);
+    }
+    replace(a::CONTROL_GRENADE_CURRENT_PROP_INDEX);
+    replace(a::STIMULI_SURPRISE_PROP_INDEX);
+    replace(a::STIMULI_PANIC_PROP_INDEX);
+    replace(a::STIMULI_COMBAT_TRANSITION_PROP_INDEX);
+    if m.i32(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_PROP_INDEX)) == old_prop_index {
+        if dropped {
+            m.set_i16(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_TIMER), 0);
+        }
+        m.w32(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_PROP_INDEX), new_prop_index as u32);
+    }
+    replace(a::EXTERNAL_ORDERS_PURSUIT_GROUP_PROP_INDEX);
+    if replace(a::EXTERNAL_ORDERS_POSTCOMBAT_PROP_INDEX) && dropped {
+        m.set_i16(at(a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE), v::_ACTOR_POSTCOMBAT_NONE as i16);
+    }
+    if m.i16(at(a::CONTROL_PATH_DESTINATION_TYPE)) == v::_DESTINATION_PROP as i16
+        && m.i32(at(a::CONTROL_PATH_DESTINATION_PROP_INDEX)) == old_prop_index
+    {
+        if dropped {
+            m.set_i16(at(a::CONTROL_PATH_DESTINATION_TYPE), DESTINATION_NONE);
+            m.w32(at(a::CONTROL_PATH_DESTINATION_IGNORE_TARGET_OBJECT_INDEX), NONE as u32);
+        } else {
+            m.w32(at(a::CONTROL_PATH_DESTINATION_PROP_INDEX), new_prop_index as u32);
+        }
+    }
+    for (direction_type, prop_index) in [
+        (a::CONTROL_SECONDARY_LOOK_DIRECTION_TYPE, a::CONTROL_SECONDARY_LOOK_DIRECTION_PROP_INDEX),
+        (a::CONTROL_IDLE_MAJOR_DIRECTION_TYPE, a::CONTROL_IDLE_MAJOR_DIRECTION_PROP_INDEX),
+        (a::CONTROL_IDLE_MINOR_DIRECTION_TYPE, a::CONTROL_IDLE_MINOR_DIRECTION_PROP_INDEX),
+    ] {
+        if m.i16(at(direction_type)) == v::_DIRECTION_SPECIFICATION_PROP as i16 {
+            replace(prop_index);
+        }
+    }
+    if m.bool(at(a::META_SWARM)) && m.i32(at(a::META_SWARM_CACHE_INDEX)) != NONE {
+        call_full(context, host, call::SWITCH_SWARM_TARGETS, old_prop_index, new_prop_index);
+    }
+    match m.i16(at(a::STATE_ACTION)) {
+        ACTION_FLEE => {
+            replace(a::STATE_FLEE_FLEE_PROP_INDEX);
+        }
+        ACTION_GUARD => {
+            replace(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX);
+            if replace(a::STATE_GUARD_SHOUT_DEAD_FRIEND_PROP_INDEX) && dropped {
+                m.set_bool(at(a::STATE_GUARD_SHOUT_ABOUT_DEAD_FRIEND), false);
+            }
+        }
+        ACTION_CONVERSE => {
+            replace(a::STATE_CONVERSE_RUN_TO_PROP_INDEX);
+        }
+        _ => {}
+    }
+}
+
+const FIRE_TARGET_NONE: i16 = 0;
+const FIRE_TARGET_PROP: i16 = 1;
+const DESTINATION_NONE: i16 = 0;

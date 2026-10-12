@@ -540,7 +540,7 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                         if desire_orphan(context, host, index) {
                             orphan_prop_index = call_simple(context, host, call::ORPHAN_TRANSITION, index);
                         }
-                        call_full(context, host, call::SWITCH_PROPS, index, orphan_prop_index, 0.0);
+                        crate::props::actor_switch_props(context, host, index, orphan_prop_index);
                         new_state = UNACKNOWLEDGED;
                     }
                 }
@@ -550,7 +550,7 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                     if desire_orphan(context, host, index) {
                         new_state = BECOMING_UNACKNOWLEDGED;
                     } else {
-                        call_full(context, host, call::SWITCH_PROPS, index, NONE, 0.0);
+                        crate::props::actor_switch_props(context, host, index, NONE);
                         new_state = UNACKNOWLEDGED;
                     }
                 }
@@ -617,7 +617,7 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
         if orphan_expired {
             let parent = prop_get(m, context, m.i32(at(p::ORPHAN_PROP_INDEX)));
             m.w32(parent + p::ORPHAN_PROP_INDEX as u32, NONE as u32);
-            call_full(context, host, call::SWITCH_PROPS, index, NONE, 0.0);
+            crate::props::actor_switch_props(context, host, index, NONE);
             crate::props::prop_delete(context, host, index);
         } else if m.bool(at(p::REFRESH_STIMULI)) && acknowledged(m.i16(at(p::STATE))) {
             stimuli_update(context, host, prop, index, became_acknowledged, expected_acknowledgement);
@@ -1271,7 +1271,7 @@ pub fn become_acknowledged(context: &AiStepContext, host: &impl AiHost, prop_ind
                 m.w8(prop + (offset + byte) as u32, m.r8(orphan + (offset + byte) as u32));
             }
         }
-        call_full(context, host, call::SWITCH_PROPS, m.i32(prop + p::ORPHAN_PROP_INDEX as u32), prop_index, 0.0);
+        crate::props::actor_switch_props(context, host, m.i32(prop + p::ORPHAN_PROP_INDEX as u32), prop_index);
         crate::props::prop_delete(context, host, m.i32(prop + p::ORPHAN_PROP_INDEX as u32));
         m.w32(prop + p::ORPHAN_PROP_INDEX as u32, NONE as u32);
     }
@@ -1813,10 +1813,10 @@ fn refresh_discard(context: &AiStepContext, host: &impl AiHost, prop_index: i32)
     let prop = prop_get(m, context, prop_index);
     let orphan_prop_index = m.i32(prop + p::ORPHAN_PROP_INDEX as u32);
     if !prop_orphaned(m.i16(prop + p::STATE as u32)) && orphan_prop_index != NONE {
-        call_full(context, host, call::SWITCH_PROPS, orphan_prop_index, NONE, 0.0);
+        crate::props::actor_switch_props(context, host, orphan_prop_index, NONE);
         crate::props::prop_delete(context, host, m.i32(prop + p::ORPHAN_PROP_INDEX as u32));
     }
-    call_full(context, host, call::SWITCH_PROPS, prop_index, NONE, 0.0);
+    crate::props::actor_switch_props(context, host, prop_index, NONE);
     crate::props::prop_delete(context, host, prop_index);
 }
 

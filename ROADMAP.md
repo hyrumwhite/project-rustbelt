@@ -510,6 +510,10 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **The C's side, through `actor_perception_call`:** switching an old prop's references (actors.c's `actor_switch_props`, which reaches into the actions' data), the unit's teams, death and definition, and the warning when the props are full.
      - **The check:** a prop the game's step created is now put back free (its identifier zero) for Rust's replay, so Rust's allocator finds the same slot.
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in a new prop's dead ticks was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Switching props in Rust (`halo_map::props`): actors.c's `actor_switch_props`, with actions.c's `actor_action_replace_prop` and the flee, guard and converse actions' `replace_prop`.
+     - **What Rust does:** it moves the actor's references from a prop to another, or drops them and ends what they drove: its target, fire target and grenade target, the stimuli's props, the unopposable retreat, the pursuit group, the post-combat prop, its destination, its looks, and its action's props (flee's prop; guard's look and dead-friend shout; converse's run-to prop).
+     - **The C's side:** the swarm's components' targets, through `actor_perception_call`.
+     - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in dropping a target was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

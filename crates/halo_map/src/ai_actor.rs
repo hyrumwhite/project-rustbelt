@@ -126,6 +126,56 @@ pub struct AiStepContext {
     pub structure_bsp_index: i32,
 }
 
+/// Where an update over the game's arrays (not one actor's step) finds
+/// them (halo_sim.h's `struct halo_sim_world_context`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorldContext {
+    pub game_time: i32,
+    /// The scenario (`global_scenario_get`).
+    pub scenario: u32,
+    /// `actor_data`, `prop_data`, `object_header_data` (their `struct
+    /// data_array`s).
+    pub actor_data: u32,
+    pub prop_data: u32,
+    pub object_header_data: u32,
+    /// `encounter_data` (its `struct data_array`), `squad_array` and
+    /// `platoon_array` (their first elements), `pursuit_data`.
+    pub encounter_data: u32,
+    pub squad_array: u32,
+    pub platoon_array: u32,
+    pub pursuit_data: u32,
+    /// `player_data` (its `struct data_array`).
+    pub player_data: u32,
+    /// `ai_globals`.
+    pub ai_globals: u32,
+    /// The AI profile's encounters-updated meter's accumulator (a short).
+    pub encounters_updated_meter: u32,
+    /// The structure, its breakable surfaces' flags and its index.
+    pub structure: u32,
+    pub breakable_surface_flags: u32,
+    pub structure_bsp_index: i32,
+}
+
+impl WorldContext {
+    /// A step context for the helpers an actor's step shares (`prop_get`,
+    /// `object_get`), with no actor.
+    pub fn step_context(&self) -> AiStepContext {
+        AiStepContext {
+            actor_index: NONE,
+            prop_data: self.prop_data,
+            game_time: self.game_time,
+            actor_data: self.actor_data,
+            object_header_data: self.object_header_data,
+            scenario: self.scenario,
+            structure: self.structure,
+            breakable_surface_flags: self.breakable_surface_flags,
+            structure_bsp_index: self.structure_bsp_index,
+            ..AiStepContext::default()
+        }
+    }
+}
+
 /// `datum_get`: the datum's address (None for one unused or changed).
 pub fn datum_get(m: &dyn AiMemory, data: u32, index: i32) -> Option<u32> {
     let identifier = (index >> 16) as i16;

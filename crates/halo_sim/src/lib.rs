@@ -60,9 +60,10 @@ pub mod unit_ik;
 pub mod units;
 pub mod vehicles;
 pub mod world;
+pub mod world_steps;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 103;
+pub const VERSION: u32 = 104;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {

@@ -609,6 +609,24 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Only an AI flying a vehicle runs this, so it was checked with the `beach_banshee` encounter seated in b30's banshees. Every move step agrees, with none left out.
        - Planted errors in the emergency scale, in the objects' pill test and in a structure ray's t were caught. One in the weight of the last chosen direction (0.4 to 0.41) went unseen.
        - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second, and on b30 with the banshee pilots.
+   - [x] The encounters' update in Rust (`halo_map::encounters`, a new system `encounters`), checked by a new kind of check for updates over the game's arrays.
+     - **What Rust does:** encounters.c's `encounters_update`, with `encounter_update_status`, `_timers`, `_respawn`, `_squads`, `_platoons`, `_follow`, `encounter_control_actors`, `encounter_test_rule` and `encounters_update_dirty_status` (and actors.c's `actor_in_combat` and `actor_is_fighting`).
+       - Each active encounter in its turn (one tick in every fifteen) counts its actors, swarms and strength by squad and platoon, and whether its enemies are visible or alive.
+       - It keeps its enemy timers, and stays active, stands down or begins its post-combat.
+       - It respawns its squads below their minimum, and one random squad below its maximum once its delay runs out.
+       - It runs out its squads' delay timers and tests its platoons' maneuvering and attacking/defending rules.
+       - It moves its automatically migrating squads to the one whose firing positions lie nearest its follow target (its players, a unit, or an AI's actors).
+       - It gives its actors their orders: standing down, playfighting, the post-combat cleared, defending, and the maneuver to another squad.
+     - **The C's side:** these calls stay the game's: activating the encounters and encounterless actors, standing down, the post-combat, spawning an actor, the random seed, a squad's timer running out, the follow targets, an object's origin, moving an actor to another squad, and the maneuvering stimulus (encounters.c's `encounter_call`). The rules' and respawns' debug console lines stay the game's alone.
+     - **The world steps:** a check for an update that isn't one actor's step (halo_sim.c's `halo_sim_world_step_*`, crates/halo_sim's `world_steps`).
+       - The C names the memory the update works on: the encounters, squads, platoons, pursuits and the actors in use, the data arrays' headers, `ai_globals` and the profile's meter.
+       - The game's update runs first. Each of its calls is recorded with a checksum of that memory before it and the runs of bytes it changed.
+       - The game puts the memory back. Rust replays the update, compares each call's kind, arguments and the memory's checksum before it, and applies the call's changes as the game's made them.
+       - The game then compares the memory with its own byte for byte, reports the first difference by region, and keeps its own.
+     - **Results:**
+       - Every update agrees in minute-long runs of b30, a30, d20, c20, b40 and a50 (1,024 on each), with none left out.
+       - Planted errors in the strength's epsilon, the update's phase and the actors' defending order were caught. One at the boundary of the 50%-dead rule went unseen on b30 and d20.
+       - With all forty-nine systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

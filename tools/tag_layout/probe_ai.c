@@ -586,6 +586,7 @@ LAYOUT_OFFSET(actor_discarded_firing_position, temporary)
 LAYOUT_OFFSET(actor_discarded_firing_position, index)
 LAYOUT_SIZE(encounter_definition)
 LAYOUT_OFFSET(encounter_definition, squads)
+LAYOUT_OFFSET(encounter_definition, searching)
 LAYOUT_OFFSET(encounter_definition, name)
 LAYOUT_OFFSET(encounter_definition, platoons)
 LAYOUT_OFFSET(encounter_definition, runtime_structure_bsp_reference_index)
@@ -1257,6 +1258,7 @@ LAYOUT_OFFSET(platoon_datum, current_strength_fraction)
 
 /* the constants (`ai_values`) */
 #define LAYOUT_VALUE(name) const int layout__ai_values__##name = name;
+LAYOUT_VALUE(_squad_never_search_bit)
 LAYOUT_VALUE(_actor_variant_definition_prefer_passenger_seat_bit)
 LAYOUT_VALUE(_actor_postcombat_run_to)
 LAYOUT_VALUE(_actor_postcombat_check_friend)

@@ -301,6 +301,8 @@ pub mod call {
     /// `input[0..3]` (a playfighting grenade's random miss of 1.5), in
     /// `output[0..3]`.
     pub const PLAYFIGHT_NEARBY_TARGET: i32 = BASE + 109;
+    /// actions.c's `actor_pursuit_find_nearby_actors(actor, a)`, the result.
+    pub const PURSUIT_FIND_NEARBY_ACTORS: i32 = BASE + 110;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -1293,28 +1295,16 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
             options.allow_pursuit_search = true;
 
             if encounter_index != NONE {
-                let desires = call_full(
+                modify_pursuit_desires(
                     context,
                     host,
-                    call::PURSUIT_DESIRES,
-                    0,
-                    0,
-                    &[
-                        pursue_tenacious as i32 as f32,
-                        group_pursuit_restriction as f32,
-                        group_pursuit_controller as i32 as f32,
-                        desire_target_search as f32,
-                        desire_pursuit as f32,
-                        desire_pursuit_search as f32,
-                    ],
-                )
-                .output;
-                pursue_tenacious = desires[0] != 0.0;
-                group_pursuit_restriction = desires[1] as i16;
-                group_pursuit_controller = desires[2] != 0.0;
-                desire_target_search = desires[3] as i16;
-                desire_pursuit = desires[4] as i16;
-                desire_pursuit_search = desires[5] as i16;
+                    &mut pursue_tenacious,
+                    &mut group_pursuit_restriction,
+                    &mut group_pursuit_controller,
+                    &mut desire_target_search,
+                    &mut desire_pursuit,
+                    &mut desire_pursuit_search,
+                );
 
                 if swarm {
                     options.allow_target_search = true;
@@ -1332,17 +1322,15 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
                         controlling_group_pursuit,
                         false,
                         options.wait_after_pursuit,
-                    ]
-                    .map(|flag| flag as i32 as f32);
-                    let result = call_full(
+                    ];
+                    let available = determine_pursuit_availability(
                         context,
                         host,
-                        call::PURSUIT_AVAILABILITY,
-                        group_pursuit_restriction as i32,
-                        group_pursuit_controller as i32,
-                        &flags,
-                    )
-                    .result;
+                        group_pursuit_restriction,
+                        group_pursuit_controller,
+                        flags,
+                    );
+                    let result = available.iter().enumerate().fold(0i32, |bits, (n, &flag)| bits | ((flag as i32) << n));
                     let bit = |n: u32| result & (1 << n) != 0;
                     options.allow_target_uncover = bit(0);
                     options.allow_indefinite_target_uncover = bit(1);
@@ -3856,4 +3844,139 @@ fn check_collateral_damage(
         );
     }
     (result, threats)
+}
+
+/// encounters.c's pursuit enums and limits.
+const ENCOUNTER_SEARCHING_NEVER: i16 = 1;
+const ENCOUNTER_SEARCHING_FOREVER: i16 = 2;
+const GROUP_PURSUIT_NOBODY: i16 = 1;
+const GROUP_PURSUIT_EVERYONE: i16 = 2;
+const PURSUIT_ALWAYS: i16 = 0;
+const PURSUIT_NEVER: i16 = 2;
+const MAXIMUM_SEARCHING_ACTORS: i16 = 6;
+const MAXIMUM_FLEEING_ACTORS: i16 = 4;
+const MINIMUM_PURSUING_ACTORS: i16 = 3;
+const UNLIMITED_PURSUING_ACTORS: i16 = 999;
+const MINIMUM_GROUP_PURSUIT_ACTORS: i32 = 2;
+
+/// encounters.c's `encounter_modify_pursuit_desires` of the actor's squad:
+/// an encounter (or squad) that never searches forbids pursuit; one that
+/// searches forever pursues tenaciously.
+#[allow(clippy::too_many_arguments)]
+fn modify_pursuit_desires(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    pursue_tenacious: &mut bool,
+    group_pursuit_restriction: &mut i16,
+    group_pursuit_controller: &mut bool,
+    desired_target_search: &mut i16,
+    desired_pursuit: &mut i16,
+    desired_pursuit_search: &mut i16,
+) {
+    use crate::ai_actor::tag_block_element;
+    use crate::layout::{encounter_definition as ed, scenario, squad_definition as sd};
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let encounter_definition = tag_block_element(
+        m,
+        context.scenario + scenario::AI_ENCOUNTERS as u32,
+        m.i32(at(a::META_ENCOUNTER_INDEX)) & 0xFFFF,
+        ed::SIZEOF,
+    );
+    let squad_definition =
+        tag_block_element(m, encounter_definition + ed::SQUADS as u32, m.i16(at(a::META_SQUAD_INDEX)) as i32, sd::SIZEOF);
+    let mut searching = m.i16(encounter_definition + ed::SEARCHING as u32);
+    if m.r32(squad_definition + sd::FLAGS as u32) & (1 << v::_SQUAD_NEVER_SEARCH_BIT) != 0 {
+        searching = ENCOUNTER_SEARCHING_NEVER;
+    }
+    match searching {
+        ENCOUNTER_SEARCHING_NEVER => {
+            *group_pursuit_restriction = GROUP_PURSUIT_NOBODY;
+            *desired_pursuit = PURSUIT_NEVER;
+            *desired_pursuit_search = PURSUIT_NEVER;
+        }
+        ENCOUNTER_SEARCHING_FOREVER => {
+            *pursue_tenacious = true;
+            *desired_target_search = PURSUIT_ALWAYS;
+            *desired_pursuit = PURSUIT_ALWAYS;
+            *desired_pursuit_search = PURSUIT_ALWAYS;
+            *group_pursuit_controller = false;
+        }
+        _ => {}
+    }
+}
+
+/// encounters.c's `encounter_determine_pursuit_availability`: how many of
+/// the encounter's other actors (of the same coordination) search, flee and
+/// pursue, against the limits, and whether the actor leads or follows a
+/// group's pursuit. The flags, in the C's order: target uncover (kept),
+/// indefinite target uncover, target search, pursuit, pursuit search,
+/// controlling and controlled by the group's pursuit, and waiting after it
+/// (always: the original tests its pointers).
+fn determine_pursuit_availability(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    group_pursuit_restriction: i16,
+    group_pursuit_controller: bool,
+    mut flags: [bool; 8],
+) -> [bool; 8] {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut combat_count = 0i16;
+    let mut fleeing_count = 0i16;
+    let mut pursuing_count = 0i16;
+    let mut searching_count = 0i16;
+    let encounter = crate::ai_actor::datum_get(m, context.encounter_data, m.i32(at(a::META_ENCOUNTER_INDEX))).unwrap_or(0);
+    let mut next = m.i32(encounter + crate::layout::encounter_datum::FIRST_ACTOR_INDEX as u32);
+    while next != NONE {
+        let index = next;
+        let actor = crate::ai_actor::datum_get(m, context.actor_data, index).unwrap_or(0);
+        next = m.i32(actor + a::META_NEXT_ACTOR_INDEX as u32);
+        if index != context.actor_index
+            && m.r8(actor + a::EXTERNAL_ORDERS_PURSUIT_IS_COORDINATOR as u32) == group_pursuit_controller as u8
+        {
+            let action = m.i16(actor + a::STATE_ACTION as u32);
+            if action == v::_ACTOR_ACTION_UNCOVER as i16 {
+                if m.i16(actor + a::STATE_UNCOVER_PURSUIT_LOCATION_TYPE as u32) == 0 {
+                    if m.i16(actor + a::STATE_COMBAT_STATUS as u32) < 3 {
+                        searching_count += 1;
+                    }
+                } else {
+                    pursuing_count += 1;
+                }
+            } else if action == v::_ACTOR_ACTION_SEARCH as i16 {
+                if m.i16(actor + a::STATE_SEARCH_PURSUIT_LOCATION_TYPE as u32) == 0 {
+                    fleeing_count += 1;
+                } else {
+                    pursuing_count += 1;
+                }
+            }
+        }
+        if m.i16(actor + a::STATE_MODE as u32) == 3 {
+            combat_count += 1;
+        }
+    }
+    let maximum_pursuing_count = match group_pursuit_restriction {
+        GROUP_PURSUIT_NOBODY => 0,
+        GROUP_PURSUIT_EVERYONE => UNLIMITED_PURSUING_ACTORS,
+        _ => {
+            let third = combat_count / 3;
+            if MINIMUM_PURSUING_ACTORS > third { MINIMUM_PURSUING_ACTORS } else { third }
+        }
+    };
+    let nearby = |controller: bool| call_full(context, host, call::PURSUIT_FIND_NEARBY_ACTORS, controller as i32, 0, &[]).result;
+    if group_pursuit_controller {
+        flags[5] = nearby(true) >= MINIMUM_GROUP_PURSUIT_ACTORS;
+        m.set_bool(at(a::EXTERNAL_ORDERS_PURSUIT_IS_COORDINATOR), flags[5]);
+    } else {
+        nearby(false);
+        flags[6] = m.i32(at(a::EXTERNAL_ORDERS_PURSUIT_GROUP_PROP_INDEX)) != NONE;
+        m.set_bool(at(a::EXTERNAL_ORDERS_PURSUIT_IS_COORDINATOR), false);
+    }
+    flags[7] = true;
+    flags[1] = searching_count < MAXIMUM_SEARCHING_ACTORS;
+    flags[2] = fleeing_count < MAXIMUM_FLEEING_ACTORS;
+    flags[3] = pursuing_count < maximum_pursuing_count;
+    flags[4] = flags[3];
+    flags
 }

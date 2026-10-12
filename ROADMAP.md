@@ -701,6 +701,16 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every decision loop, action update and action control agrees in minute-long runs of a50, b30, d20, c20 and b40, with none left out.
        - A planted error in a seat's range was caught on a50. Two others fell in runs where no actor boarded a vehicle, which is timing-dependent there.
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The pursuit's desires and availability in Rust (`halo_map::actor_transitions`, under `actor_dispatch`): encounters.c's `encounter_modify_pursuit_desires` and `encounter_determine_pursuit_availability`.
+     - **What Rust does:**
+       - An encounter or squad that never searches forbids the actor's pursuit, and one that searches forever pursues tenaciously.
+       - The encounter's other actors of the same coordination are counted as searching, fleeing or pursuing, against the limits (six, four, and a third of those in combat but at least three, or none, or any).
+       - The actor leads a group's pursuit when enough are near it, or follows one.
+     - **The C's side:** finding the nearby actors (actions.c's `actor_pursuit_find_nearby_actors`, which may write the group) is a new handler call. Marking and testing examined pursuit positions stay calls: they write the encounters' pursuit data, which the actor step's check doesn't follow.
+     - **Results:**
+       - Every decision loop agrees in minute-long runs of the levels, with none left out.
+       - A planted error in the actor's coordination was caught on b30, where the availability runs about ten times a minute. Planted errors in the limits went unseen: the counts stayed far below them.
+       - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

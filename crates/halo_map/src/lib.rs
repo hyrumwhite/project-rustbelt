@@ -26,6 +26,7 @@ pub mod actor_perception;
 pub mod msvc_qsort;
 pub mod data_array;
 pub mod data_packets;
+pub mod distributed_wire;
 pub mod props;
 pub mod firing_positions;
 pub mod path;

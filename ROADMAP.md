@@ -764,8 +764,10 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        halo_sim reads the group's definitions where the game holds them.
      - **The check:** each encoding is compared with Rust's of the same struct: result, error, size and bytes. Each decoding is compared with Rust's of the same received bytes, from copies kept before the game's: the struct, the type, the version, the size and the swapped buffer.
      - **Found on the way:** the packet table's order doesn't match the message enum for types 8 to 10. The pregame keep-alive (a 2-byte struct) is encoded and decoded with the graceful exit's definition (one long). Its decoding writes two bytes past the struct, onto the caller's message size. The begin-game message, in turn, goes out with only its first short.
-       - Rust keeps this exactly. It writes the caller's size before the struct, as the game does, so the same overrun lands the same way. The check compares the size the game set.
-       - The wire format is left as it is, for now.
+       - Rust kept this exactly. It writes the caller's size before the struct, as the game does, so the same overrun landed the same way. The check compares the size the game set.
+       - **Fixed afterwards:** the table is now in the enum's order, and the network version went from 24 to 25, so builds before and after don't join each other.
+         - The begin-game message now carries all of the host's time. A late joiner used to get only its low 16 bits, so a game more than about 36 minutes in started it at the wrong time until the first update.
+         - A late join (the joiner 30 seconds into the game) has all 67 of its seconds within 5 cm of the host's.
      - **Results:**
        - In minute-long sessions on Blood Gulch, every encoding (2,048 on the host) and decoding (1,024) agrees on both machines.
        - A planted error in the 4-byte swap was caught at once. A planted error in a string's length bound went unseen: no string in the traffic fills its field.
@@ -773,6 +775,23 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - With both machines' codec in Rust, the machines' player positions agree each second as they do with the C. The one difference is a millimetre on the joining player at one tick, in both cases.
          - A Rust host and a C joiner agree on all 51 seconds, with seven hits dealt across the link.
          - With all fifty-two systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+
+   - [x] The distributed netcode's wire format in Rust (`halo_map::distributed_wire`, under `distributed_wire`): network_distributed.c's packers, writers and readers.
+     - **What Rust does:**
+       - **16-bit packing:** vectors a part at a time, unit vectors, vitalities and angles.
+       - **Unit state:** each player's unit, every tick, with only the parts that are not their defaults: riding, tilt, damage, powerups, camouflage, the killer.
+       - **Relayed action:** each player's input as the host ran it, filled from the player's action, with each earlier tick's buttons only where they changed.
+     - **The C's side:** each function's body stays as the game's, behind a wrapper that runs Rust in Rust's mode and compares in check mode. One generic call (`halo_sim_distributed_wire`) covers all twelve.
+     - **Results:**
+       - In an 80-second session with shooting, kills and a vehicle, every call of eleven of the twelve agrees on both machines: 32,768 vector packs, 16,384 vitality packs, 4,096 unit state writes and so on. The unit-vector unpack never came up.
+       - **Planted errors:**
+         - Caught with scripted controller play (`HALO_TEST_INPUT=bot:<seed>`): the angle's rounding on the host, and the relayed action's history bits on the joiner.
+         - Caught on its own: a vitality packing error.
+         - Unseen: the unit state's tilt test. Units on foot are never tilted.
+       - **Rust in charge:**
+         - With both machines' wire layer and codec in Rust and players moving, the machines' positions differ by the same amount as with the C (median 3.8 cm, largest 9 cm against 8 cm).
+         - A Rust host and a C joiner play together.
+         - With all fifty-three systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
 When nothing is left in the 32-bit process, the bridge goes away.
 

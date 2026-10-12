@@ -2197,6 +2197,20 @@ enum
 
 void actor_path_call(struct halo_sim_ai_call *call);
 
+/* an actor's choice of a vehicle and its seat's calls (action_vehicle.c's
+vehicle_choice_call; crates/halo_map's vehicle_choice::call), in a range of
+their own the dispatch step's call function passes on */
+enum
+{
+	_vehicle_choice_call_seat_status = (17 << 8) | 1,
+	_vehicle_choice_call_seat_entrance,
+	_vehicle_choice_call_seat_hint,
+	_vehicle_choice_call_vehicle_shape,
+	_vehicle_choice_call_object_origin,
+};
+
+void vehicle_choice_call(struct halo_sim_ai_call *call);
+
 /* ---------- the world steps: the AI's updates over the game's arrays, not
 one actor (halo_sim.c; crates/halo_sim's world_steps) */
 

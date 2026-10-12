@@ -830,6 +830,7 @@ void actions_port_call(
 		case _actor_action_fight: action_fight_call(call); break;
 		case _actor_firing_position_call_owners >> 8: actor_firing_position_call(call); break;
 		case _actor_path_call_set_awake >> 8: actor_path_call(call); break;
+		case _vehicle_choice_call_seat_status >> 8: vehicle_choice_call(call); break;
 	}
 }
 
@@ -1921,33 +1922,9 @@ void actions_port_handler_call(
 			actor_move_keep_moving_past_destination(actor_index);
 			break;
 
-		case _actions_port_handler_call_vehicle_desirable:
-			call->result = action_vehicle_port_desirable(actor_index, call->a, call->input[0], call->input[1]) ? 1 : 0;
-			break;
-
-		case _actions_port_handler_call_find_impromptu_seat:
-			call->result = action_vehicle_port_find_impromptu_seat(actor_index, call->a);
-			break;
-
 		case _actions_port_handler_call_has_enter_animation:
 			call->result = unit_has_animation_to_enter_seat(actor->meta.unit_index, call->a, (short)call->b) ? 1 : 0;
 			break;
-
-		case _actions_port_handler_call_find_vehicle_destination:
-		{
-			real_point3d destination_point;
-			long destination_surface_index = NONE;
-
-			csmemset(&destination_point, 0, sizeof(destination_point));
-			call->result = action_vehicle_port_find_destination(
-				actor_index,
-				call->a,
-				&destination_point,
-				&destination_surface_index) ? 1 : 0;
-			memcpy(call->output, &destination_point, sizeof(destination_point));
-			call->result2 = destination_surface_index;
-			break;
-		}
 
 		case _actions_port_handler_call_unit_stop_running_blindly:
 			unit_stop_running_blindly(actor->meta.unit_index);

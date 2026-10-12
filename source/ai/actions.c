@@ -418,6 +418,22 @@ static boolean actions_port_charge(
 	long actor_index,
 	short goal);
 
+boolean action_vehicle_port_desirable(
+	long actor_index,
+	long vehicle_index,
+	real attempt_distance,
+	real continue_distance);
+
+short action_vehicle_port_find_impromptu_seat(
+	long actor_index,
+	long vehicle_index);
+
+boolean action_vehicle_port_find_destination(
+	long actor_index,
+	long vehicle_index,
+	real_point3d *destination_point,
+	long *surface_index_reference);
+
 static long actions_port_handler_simple(
 	long actor_index,
 	long kind,
@@ -1948,6 +1964,38 @@ void actions_port_handler_call(
 
 		case _actions_port_handler_call_keep_moving:
 			actor_move_keep_moving_past_destination(actor_index);
+			break;
+
+		case _actions_port_handler_call_vehicle_desirable:
+			call->result = action_vehicle_port_desirable(actor_index, call->a, call->input[0], call->input[1]) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_find_impromptu_seat:
+			call->result = action_vehicle_port_find_impromptu_seat(actor_index, call->a);
+			break;
+
+		case _actions_port_handler_call_has_enter_animation:
+			call->result = unit_has_animation_to_enter_seat(actor->meta.unit_index, call->a, (short)call->b) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_find_vehicle_destination:
+		{
+			real_point3d destination_point;
+			long destination_surface_index = NONE;
+
+			csmemset(&destination_point, 0, sizeof(destination_point));
+			call->result = action_vehicle_port_find_destination(
+				actor_index,
+				call->a,
+				&destination_point,
+				&destination_surface_index) ? 1 : 0;
+			memcpy(call->output, &destination_point, sizeof(destination_point));
+			call->result2 = destination_surface_index;
+			break;
+		}
+
+		case _actions_port_handler_call_move_to_point:
+			call->result = actor_move_to_point(actor_index, (real_point3d *)call->input, call->a, call->b) ? 1 : 0;
 			break;
 
 		case _actions_port_handler_call_unit_dive_distance:
@@ -4907,8 +4955,11 @@ setup_entry:
 
 		distances[0] = attempt_distance;
 		distances[1] = continue_distance;
-		result = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_vehicle_setup,
-			best_vehicle_index, 0, distances, 2, NULL);
+		struct action_state_data state;
+
+		result = action_vehicle_setup_impromptu(actor_index, best_vehicle_index, distances[0], distances[1], &state.vehicle);
+		if (result)
+			actions_port_action_change(actor_index, _actor_action_vehicle, &state);
 	}
 	if (!result)
 	{

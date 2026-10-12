@@ -1041,6 +1041,72 @@ boolean action_vehicle_perform(
 	return state_data->vehicle_entry_done || state_data->vehicle_entry_failed;
 }
 
+/* port: the impromptu setup's helpers for actions.c's
+actions_port_handler_call, the Rust port's asking for them; the seat's entry
+is kept between finding the seat and its destination */
+static real_point3d action_vehicle_port_entry_point;
+static real_vector3d action_vehicle_port_entry_facing;
+static real_point3d action_vehicle_port_hint_point;
+
+boolean action_vehicle_port_desirable(
+	long actor_index,
+	long vehicle_index,
+	real attempt_distance,
+	real continue_distance)
+{
+	return action_vehicle_desirable(actor_index, vehicle_index, FALSE, attempt_distance, continue_distance, FALSE, FALSE);
+}
+
+short action_vehicle_port_find_impromptu_seat(
+	long actor_index,
+	long vehicle_index)
+{
+	return action_vehicle_find_impromptu_seat(
+		actor_index,
+		vehicle_index,
+		&action_vehicle_port_entry_point,
+		&action_vehicle_port_entry_facing,
+		&action_vehicle_port_hint_point);
+}
+
+boolean action_vehicle_port_find_destination(
+	long actor_index,
+	long vehicle_index,
+	real_point3d *destination_point,
+	long *surface_index_reference)
+{
+	return action_vehicle_find_destination(
+		actor_index,
+		vehicle_index,
+		&action_vehicle_port_entry_point,
+		&action_vehicle_port_entry_facing,
+		&action_vehicle_port_hint_point,
+		NULL,
+		destination_point,
+		surface_index_reference);
+}
+
+static long action_vehicle_port_handler(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real const *input,
+	short input_count,
+	struct halo_sim_ai_call *out)
+{
+	memset(out, 0, sizeof(*out));
+	out->kind = kind;
+	out->actor = actor_index;
+	out->a = a;
+	out->b = b;
+	if (input)
+		memcpy(out->input, input, input_count * sizeof(real));
+	actions_port_handler_call(out);
+
+	return out->result;
+}
+
 boolean action_vehicle_setup_impromptu(
 	long actor_index,
 	long vehicle_index,
@@ -1048,8 +1114,12 @@ boolean action_vehicle_setup_impromptu(
 	real continue_distance,
 	struct vehicle_state_data *state_data)
 {
+	/* port: what it asks of the rest of the game through actions.c's
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
-	boolean result = FALSE;
+	struct halo_sim_ai_call call;
+	real distances[2];
 
 	match_assert(
 		"c:\\halo\\SOURCE\\ai\\action_vehicle.c",
@@ -1059,55 +1129,37 @@ boolean action_vehicle_setup_impromptu(
 	csmemset(state_data, 0, sizeof(*state_data));
 	state_data->attempt_distance = attempt_distance;
 	state_data->continue_distance = continue_distance;
-	if (actor->input.vehicle_index == NONE &&
-		!actor->meta.swarm &&
-		actor->state.action != _actor_action_vehicle &&
-		action_vehicle_desirable(
-			actor_index,
-			vehicle_index,
-			FALSE,
-			state_data->attempt_distance,
-			state_data->continue_distance,
-			FALSE,
-			FALSE))
+	distances[0] = attempt_distance;
+	distances[1] = continue_distance;
+	if (actor->input.vehicle_index != NONE ||
+		actor->meta.swarm ||
+		actor->state.action == _actor_action_vehicle ||
+		!action_vehicle_port_handler(actor_index, _actions_port_handler_call_vehicle_desirable,
+			vehicle_index, 0, distances, 2, &call))
 	{
-		real_point3d entry_point;
-		real_vector3d entry_facing;
-		real_point3d hint_point;
-
-		state_data->vehicle_index = vehicle_index;
-		state_data->seat_index = action_vehicle_find_impromptu_seat(
-			actor_index,
-			vehicle_index,
-			&entry_point,
-			&entry_facing,
-			&hint_point);
-		if (state_data->seat_index != NONE)
-		{
-			state_data->impromptu = TRUE;
-			if (unit_has_animation_to_enter_seat(
-				actor->meta.unit_index,
-				vehicle_index,
-				state_data->seat_index) &&
-				action_vehicle_find_destination(
-					actor_index,
-					vehicle_index,
-					&entry_point,
-					&entry_facing,
-					&hint_point,
-					NULL,
-					&state_data->destination_point,
-					&state_data->destination_surface_index) &&
-				actor_move_to_point(
-					actor_index,
-					&state_data->destination_point,
-					state_data->destination_surface_index,
-					vehicle_index))
-			{
-				result = TRUE;
-			}
-		}
+		return FALSE;
 	}
 
-	return result;
+	state_data->vehicle_index = vehicle_index;
+	state_data->seat_index = (short)action_vehicle_port_handler(actor_index,
+		_actions_port_handler_call_find_impromptu_seat, vehicle_index, 0, NULL, 0, &call);
+	if (state_data->seat_index == NONE)
+		return FALSE;
+
+	state_data->impromptu = TRUE;
+	if (!action_vehicle_port_handler(actor_index, _actions_port_handler_call_has_enter_animation,
+		vehicle_index, state_data->seat_index, NULL, 0, &call))
+	{
+		return FALSE;
+	}
+	if (!action_vehicle_port_handler(actor_index, _actions_port_handler_call_find_vehicle_destination,
+		vehicle_index, 0, NULL, 0, &call))
+	{
+		return FALSE;
+	}
+	memcpy(&state_data->destination_point, call.output, sizeof(real_point3d));
+	state_data->destination_surface_index = call.result2;
+
+	return (boolean)action_vehicle_port_handler(actor_index, _actions_port_handler_call_move_to_point,
+		state_data->destination_surface_index, vehicle_index, (real const *)&state_data->destination_point, 3, &call);
 }

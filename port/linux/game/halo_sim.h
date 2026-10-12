@@ -1271,6 +1271,11 @@ enum
 	_actions_port_handler_call_valid_melee_destination,
 	_actions_port_handler_call_move_to_prop,
 	_actions_port_handler_call_keep_moving,
+	_actions_port_handler_call_vehicle_desirable,
+	_actions_port_handler_call_find_impromptu_seat,
+	_actions_port_handler_call_has_enter_animation,
+	_actions_port_handler_call_find_vehicle_destination,
+	_actions_port_handler_call_move_to_point,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

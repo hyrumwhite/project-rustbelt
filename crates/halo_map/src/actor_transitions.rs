@@ -248,6 +248,13 @@ pub mod call {
     /// `real_seed_random_range(global seed, input[0], input[1])`, in
     /// `output[0]`.
     pub const REAL_SEED_RANDOM_RANGE: i32 = BASE + 91;
+    /// action_flee.c's `action_flee_find_flee_position(actor, FALSE)` for a
+    /// flee being set up (its panic type `a`, prop `b`, forced ticks
+    /// `input[0]`, and whether it flees from the last visible location,
+    /// `input[1]`, and allows occluded points, `input[2]`): the position, the
+    /// result; whether it was found randomly (bit 0) and has an approach
+    /// point (bit 1), `result2`; the approach point in `output[0..3]`.
+    pub const FIND_FLEE_POSITION: i32 = BASE + 92;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -717,16 +724,7 @@ pub fn handle_panic_transition(
                 );
                 break 'done;
             }
-            result = call_full(
-                context,
-                host,
-                call::TRY_TO_PANIC,
-                m.i16(at(a::STIMULI_PANIC_TYPE)) as i32,
-                m.i32(at(a::STIMULI_PANIC_PROP_INDEX)),
-                &[force as i32 as f32],
-            )
-            .result
-                != 0;
+            result = try_to_panic(context, host, m.i16(at(a::STIMULI_PANIC_TYPE)), m.i32(at(a::STIMULI_PANIC_PROP_INDEX)), force);
         }
     }
     m.set_i16(at(a::STIMULI_PANIC_TYPE), PANIC_NONE);
@@ -951,7 +949,7 @@ pub fn handle_combat_selection(context: &AiStepContext, host: &impl AiHost) -> b
                     && m.i16(at(a::STATE_CHARGE_STALKING_DISCOVERY_TIMER)) >= c_short(discovery_time * 30.0));
             if discovered {
                 if prop_distance > m.f32(firing_variant + var::RANGED_COMBAT_COMBAT_RANGE_UPPER_BOUND as u32) {
-                    action_changed = call_full(context, host, call::TRY_TO_SEEK_COVER, 0, 0, &[]).result != 0;
+                    action_changed = try_to_seek_cover(context, host, false, false);
                 }
                 if !action_changed {
                     call_simple(context, host, call::BERSERK, 0);
@@ -1546,21 +1544,12 @@ pub fn handle_active_cover_seeking(
         return false;
     }
     stage(5);
-    if call_full(context, host, call::TRY_TO_SEEK_COVER, 1, 0, &[]).result != 0 {
+    if try_to_seek_cover(context, host, true, false) {
         stage(6);
         return true;
     }
     if allow_defensive_cover
-        && call_full(
-            context,
-            host,
-            call::TRY_TO_PANIC,
-            4,
-            m.i32(at(a::TARGET_TARGET_PROP_INDEX)),
-            &[force_flee_transition as i32 as f32],
-        )
-        .result
-            != 0
+        && try_to_panic(context, host, 4, m.i32(at(a::TARGET_TARGET_PROP_INDEX)), force_flee_transition)
     {
         stage(7);
         return true;
@@ -1646,19 +1635,10 @@ pub fn handle_evasion(context: &AiStepContext, host: &impl AiHost) -> bool {
         {
             m.w32(at(a::EMOTIONS_LAST_DEFENSIVE_COVER_SEEKING_TIME), current_time as u32);
             if allow_cover_seeking(context, host, true) {
-                if call_full(context, host, call::TRY_TO_SEEK_COVER, 0, 1, &[]).result != 0 {
+                if try_to_seek_cover(context, host, false, true) {
                     result = true;
                 } else if definition_flag(v::_ACTOR_DEFINITION_PANICKED_BY_UNOPPOSABLE_ENEMY_BIT)
-                    && call_full(
-                        context,
-                        host,
-                        call::TRY_TO_PANIC,
-                        5,
-                        m.i32(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_PROP_INDEX)),
-                        &[0.0],
-                    )
-                    .result
-                        != 0
+                    && try_to_panic(context, host, 5, m.i32(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_PROP_INDEX)), false)
                 {
                     result = true;
                 }
@@ -1714,7 +1694,7 @@ pub fn handle_evasion(context: &AiStepContext, host: &impl AiHost) -> bool {
                 if allow_cover_seeking(context, host, false)
                     && call_full(context, host, call::RANDOM, 0, 0, &[]).output[0]
                         < definition(d::DEFENSIVE_EVASION_SEEK_COVER_CHANCE)
-                    && call_full(context, host, call::TRY_TO_SEEK_COVER, 0, 1, &[]).result != 0
+                    && try_to_seek_cover(context, host, false, true)
                 {
                     let target_unit_index = call_simple(context, host, call::TARGET_UNIT, 0);
                     call_full(
@@ -2600,7 +2580,7 @@ pub fn set_default_state(context: &AiStepContext, host: &impl AiHost, override_s
         }
         11 => {
             if action() != ACTION_FLEE {
-                if call_full(context, host, call::TRY_TO_PANIC, 13, NONE, &[1.0]).result != 0 {
+                if try_to_panic(context, host, 13, NONE, true) {
                     changed = true;
                 } else if action() != ACTION_GUARD && guard_current_position() {
                     changed = true;
@@ -3264,4 +3244,98 @@ pub fn uncover_setup_pursuit(context: &AiStepContext, host: &impl AiHost, firing
     data.set_bool(a::STATE_UNCOVER_ABLE_TO_SEARCH, true);
     m.set_bool(at(a::STATE_SEARCHING), true);
     Some(data)
+}
+
+/// action_flee.c's `action_flee_setup`: fleeing (not as a passenger), from
+/// `panic_prop_index` (taken as a target), in a blind panic standing still
+/// by chance, or to a flee position (a swarm has none).
+pub fn flee_setup(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    panic_type: i16,
+    panic_prop_index: i32,
+    force_state_entry: bool,
+    flee_from_last_visible_location: bool,
+    allow_occluded_points: bool,
+) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) {
+        return None;
+    }
+    let mut data = ActionData::new();
+    let forced_flee_ticks: i16 = if force_state_entry { 6 * 30 } else { 0 };
+    data.set_i16(a::STATE_FLEE_FORCED_FLEE_TICKS, forced_flee_ticks);
+    data.set_i16(a::STATE_FLEE_FLEE_FIRING_POSITION_INDEX, NONE as i16);
+    data.set_i16(a::STATE_FLEE_PANIC_TYPE, panic_type);
+    data.set_bool(a::STATE_FLEE_FLEE_FROM_LAST_VISIBLE_LOCATION, flee_from_last_visible_location);
+    data.set_bool(a::STATE_FLEE_ALLOW_OCCLUDED_POINTS, allow_occluded_points);
+    data.set_i32(a::STATE_FLEE_FLEE_PROP_INDEX, panic_prop_index);
+    if panic_prop_index != NONE {
+        call_simple(context, host, call::TRY_NEW_TARGET, panic_prop_index);
+    }
+
+    if crate::actions::flee_blind_panic(panic_type) && call_full(context, host, call::RANDOM, 0, 0, &[]).output[0] < 0.4 {
+        data.set_i16(a::STATE_FLEE_FLEE_STATIONARY_TICKS, 45);
+        return Some(data);
+    }
+    if m.bool(at(a::META_SWARM)) {
+        return None;
+    }
+    let found = call_full(
+        context,
+        host,
+        call::FIND_FLEE_POSITION,
+        panic_type as i32,
+        panic_prop_index,
+        &[forced_flee_ticks as f32, flee_from_last_visible_location as i32 as f32, allow_occluded_points as i32 as f32],
+    );
+    let flee_firing_position_index = found.result as i16;
+    data.set_i16(a::STATE_FLEE_FLEE_FIRING_POSITION_INDEX, flee_firing_position_index);
+    data.set_bool(a::STATE_FLEE_FLEE_FIRING_POSITION_FOUND_RANDOMLY, found.result2 & 1 != 0);
+    data.set_bool(a::STATE_FLEE_HAS_APPROACH_POINT, found.result2 & 2 != 0);
+    data.set_vector(a::STATE_FLEE_APPROACH_POINT, found.vector());
+    data.set_bool(a::STATE_FLEE_FIND_NEW_FLEE_POSITION, false);
+    if flee_firing_position_index != NONE as i16 {
+        Some(data)
+    } else {
+        None
+    }
+}
+
+/// actions.c's `actor_action_try_to_panic`: fleeing in a panic.
+pub fn try_to_panic(context: &AiStepContext, host: &impl AiHost, panic_type: i16, panic_prop_index: i32, force: bool) -> bool {
+    match flee_setup(context, host, panic_type, panic_prop_index, force, false, false) {
+        Some(data) => {
+            action_change(context, host, ACTION_FLEE, Some(&data));
+            true
+        }
+        None => false,
+    }
+}
+
+/// actions.c's `actor_action_try_to_seek_cover`: fleeing to cover from the
+/// target.
+pub fn try_to_seek_cover(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    cover_from_last_visible_location: bool,
+    allow_occluded_points: bool,
+) -> bool {
+    let target_prop_index = host.memory().i32(context.actor + a::TARGET_TARGET_PROP_INDEX as u32);
+    match flee_setup(
+        context,
+        host,
+        PANIC_NONE,
+        target_prop_index,
+        false,
+        cover_from_last_visible_location,
+        allow_occluded_points,
+    ) {
+        Some(data) => {
+            action_change(context, host, ACTION_FLEE, Some(&data));
+            true
+        }
+        None => false,
+    }
 }

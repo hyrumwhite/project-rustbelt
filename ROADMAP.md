@@ -425,6 +425,10 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
    - [x] The search and uncover setups in Rust (`halo_map::actor_transitions`): searching for the target, undirected (a swarm) or from a pursuit position, and uncovering the target or from a pursuit position.
      - **What Rust does:** each sets the pursuit location (the target, nowhere, or the encounter's firing position, read from the scenario's encounter definitions) and marks the actor searching. Lost contact now changes to them itself.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the uncover's ability to search was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The flee setup, panicking and seeking cover in Rust (`halo_map::actor_transitions`): action_flee.c's `action_flee_setup` and actions.c's `actor_action_try_to_panic` and `actor_action_try_to_seek_cover`.
+     - **What Rust does:** fleeing (not as a passenger) from the panic's prop (taken as a target), standing still by chance in a blind panic, or else to a flee position (a swarm has none), forced for six seconds when told.
+     - **The C's side, through `actions_port_handler_call`:** the new target, the blind panic's draw, and finding the flee position. That search writes into the setup's own data, so the call takes the setup's inputs and returns what it found (the position, whether it was found randomly, the approach point), through a port wrapper on action_flee.c's static `action_flee_find_flee_position`.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the flee's occluded points was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

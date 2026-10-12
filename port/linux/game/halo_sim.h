@@ -1064,6 +1064,10 @@ enum
 	_actor_perception_call_in_combat,
 	_actor_perception_call_is_fighting,
 	_actor_perception_call_profile,
+	_actor_perception_call_dead_prop_state,
+	_actor_perception_call_has_ranged_weapon,
+	_actor_perception_call_weapon_definition,
+	_actor_perception_call_firing_variant,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's

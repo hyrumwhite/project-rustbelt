@@ -1176,26 +1176,32 @@ boolean actor_perception_desire_prop(
 
 		if (actor->meta.encounter_index != NONE)
 		{
-			struct encounter_datum *encounter =
-				encounter_get(actor->meta.encounter_index);
-			struct unit_datum *unit = unit_get(unit_index);
-			long ignore_time = encounter->corpse_ignore_time;
+			/* port: the encounter and the unit through actor_perception_call, as
+			the Rust port's asks for them */
+			struct halo_sim_ai_call dead_state;
+			long ignore_time;
+			long time_of_death;
 			boolean inactive_encounter;
+
+			memset(&dead_state, 0, sizeof(dead_state));
+			dead_state.kind = _actor_perception_call_dead_prop_state;
+			dead_state.actor = actor_index;
+			dead_state.a = unit_index;
+			actor_perception_call(&dead_state);
+			ignore_time = dead_state.result;
+			time_of_death = dead_state.result2;
 
 			if (ignore_time <= actor->emotions.corpse_ignore_time)
 				ignore_time = actor->emotions.corpse_ignore_time;
 
 			if (ignore_time != NONE &&
-				(unit->unit.time_of_death == NONE ||
-					unit->unit.time_of_death < ignore_time))
+				(time_of_death == NONE ||
+					time_of_death < ignore_time))
 			{
 				desire = FALSE;
 			}
 
-			inactive_encounter =
-				!encounter->enemy_visible &&
-				!encounter->enemy_alive &&
-				!encounter->stand_down;
+			inactive_encounter = ((long)dead_state.output[0] & 7) == 0;
 
 			if (!desire)
 				goto done;
@@ -2074,6 +2080,14 @@ done:
 	return blockage;
 }
 
+static long actor_perception_call_full(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real input,
+	real *output);
+
 real actor_compute_prop_target_weight(
 	long actor_index,
 	long prop_index)
@@ -2122,7 +2136,7 @@ real actor_compute_prop_target_weight(
 		goto range_weight_done;
 	}
 
-	if (!actor_has_ranged_weapon(actor_index))
+	if (!actor_perception_call_full(actor_index, _actor_perception_call_has_ranged_weapon, 0, 0, 0.0f, NULL))
 	{
 		real maximum_range;
 
@@ -2157,9 +2171,9 @@ real actor_compute_prop_target_weight(
 	{
 		weapon_definition =
 			(struct actor_target_weight_weapon_definition_view *)
-				actor_get_weapon_definition(actor_index);
-		firing_variant =
-			actor_combat_get_firing_variant_definition(actor_index);
+				actor_perception_call_full(actor_index, _actor_perception_call_weapon_definition, 0, 0, 0.0f, NULL);
+		firing_variant = (struct actor_variant_definition *)
+			actor_perception_call_full(actor_index, _actor_perception_call_firing_variant, 0, 0, 0.0f, NULL);
 
 		if (weapon_definition != NULL &&
 			prop->distance <
@@ -6753,6 +6767,32 @@ void actor_perception_call(
 				ai_profile.meters[meters[call->a]].accumulator++;
 			break;
 		}
+
+		case _actor_perception_call_dead_prop_state:
+		{
+			struct encounter_datum *encounter = encounter_get(actor_get(actor_index)->meta.encounter_index);
+			struct unit_datum *unit = unit_get(call->a);
+
+			call->result = encounter->corpse_ignore_time;
+			call->result2 = unit->unit.time_of_death;
+			call->output[0] = (real)(
+				(encounter->enemy_visible ? 1 : 0) |
+				(encounter->enemy_alive ? 2 : 0) |
+				(encounter->stand_down ? 4 : 0));
+			break;
+		}
+
+		case _actor_perception_call_has_ranged_weapon:
+			call->result = actor_has_ranged_weapon(actor_index) ? 1 : 0;
+			break;
+
+		case _actor_perception_call_weapon_definition:
+			call->result = (long)actor_get_weapon_definition(actor_index);
+			break;
+
+		case _actor_perception_call_firing_variant:
+			call->result = (long)actor_combat_get_firing_variant_definition(actor_index);
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -6784,6 +6824,30 @@ static long actor_perception_call_full(
 
 #define actor_perception_call_simple(actor_index, kind, a) \
 	actor_perception_call_full((actor_index), (kind), (a), 0, 0.0f, NULL)
+
+/* port: whether the actor wants the prop as an uninspected orphan (the
+desire-orphan call's, which the Rust port's decides itself) */
+static boolean actor_perception_port_desire_orphan(
+	long actor_index,
+	long prop_index)
+{
+	struct prop_datum *prop = prop_get(prop_index);
+
+	return actor_perception_desire_prop(
+		actor_index,
+		_prop_state_uninspected_orphan,
+		prop->unit_index,
+		prop->actor_index,
+		prop->in_use,
+		prop->player,
+		prop->enemy,
+		prop->dead,
+		prop->dead_ticks,
+		prop->suicide_radius,
+		actor_perception_distance_squared(prop->distance),
+		prop->required_ticks,
+		NULL);
+}
 
 static real actor_perception_call_random(
 	long actor_index)
@@ -7203,7 +7267,7 @@ static void actor_perception_update_game(
 				{
 					long orphan_prop_index = NONE;
 
-					if (actor_perception_call_simple(actor_index, _actor_perception_call_desire_orphan, iterator.index))
+					if (actor_perception_port_desire_orphan(actor_index, iterator.index))
 					{
 						orphan_prop_index = actor_perception_call_simple(actor_index,
 							_actor_perception_call_orphan_transition, iterator.index);
@@ -7219,7 +7283,7 @@ static void actor_perception_update_game(
 		case _prop_state_acknowledged:
 			if (prop->perception == _actor_perception_none)
 			{
-				if (actor_perception_call_simple(actor_index, _actor_perception_call_desire_orphan, iterator.index))
+				if (actor_perception_port_desire_orphan(actor_index, iterator.index))
 				{
 					new_state = _prop_state_becoming_unacknowledged;
 				}
@@ -7309,10 +7373,8 @@ static void actor_perception_update_game(
 			}
 
 			prop->state = new_state;
-			prop->unopposable_enemy = (boolean)actor_perception_call_simple(actor_index,
-				_actor_perception_call_unopposable, iterator.index);
-			actor_perception_call_full(actor_index, _actor_perception_call_target_weight,
-				iterator.index, 0, 0.0f, &prop->target_weight);
+			prop->unopposable_enemy = actor_compute_prop_unopposable(actor_index, iterator.index);
+			prop->target_weight = actor_compute_prop_target_weight(actor_index, iterator.index);
 		}
 
 		if (orphan_expired)

@@ -255,6 +255,20 @@ pub mod call {
     /// result; whether it was found randomly (bit 0) and has an approach
     /// point (bit 1), `result2`; the approach point in `output[0..3]`.
     pub const FIND_FLEE_POSITION: i32 = BASE + 92;
+    /// Whether the actor's unit's melee attack is inhibited, the result.
+    pub const MELEE_INHIBITED: i32 = BASE + 93;
+    /// `unit_get_melee_range_and_ticks` of the actor's unit (`a` leaping),
+    /// with the game's warning of an animation with no damage keyframe
+    /// (unless `b`, suicidal): the result; the start and end ticks in
+    /// `result2`'s low and high halves, their ranges in `output[0..2]`.
+    pub const MELEE_RANGE_AND_TICKS: i32 = BASE + 94;
+    /// action_charge.c's `action_charge_valid_melee_destination` for the goal
+    /// `a` and the point `input[0..3]`, the result.
+    pub const VALID_MELEE_DESTINATION: i32 = BASE + 95;
+    /// `actor_move_to_prop(actor, a, input[0])`, the result.
+    pub const MOVE_TO_PROP: i32 = BASE + 96;
+    /// `actor_move_keep_moving_past_destination(actor)`.
+    pub const KEEP_MOVING: i32 = BASE + 97;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -1005,7 +1019,7 @@ pub fn handle_combat_selection(context: &AiStepContext, host: &impl AiHost) -> b
 
             if begin_charge {
                 m.w32(at(a::EMOTIONS_LAST_MELEE_CHECK_TIME), current_time as u32);
-                if call_simple(context, host, call::CHARGE, v::_CHARGE_GOAL_MELEE as i32) != 0 {
+                if charge(context, host, v::_CHARGE_GOAL_MELEE as i16) {
                     action_changed = true;
                 }
             }
@@ -1027,7 +1041,7 @@ pub fn handle_combat_selection(context: &AiStepContext, host: &impl AiHost) -> b
                     && prop_distance > m.f32(firing_variant + var::RANGED_COMBAT_MELEE_RANGE as u32)
                     && m.i16(prop + p::LINE_OF_SIGHT as u32) == 0;
                 if begin_charge
-                    && call_simple(context, host, call::CHARGE, v::_CHARGE_GOAL_VEHICLE_STRAFING as i32) != 0
+                    && charge(context, host, v::_CHARGE_GOAL_VEHICLE_STRAFING as i16)
                 {
                     action_changed = true;
                 }
@@ -1088,7 +1102,7 @@ pub fn handle_combat_selection(context: &AiStepContext, host: &impl AiHost) -> b
         }
 
         if desires_charge && (restart_charge || action() != ACTION_CHARGE) {
-            if call_simple(context, host, call::CHARGE, v::_CHARGE_GOAL_CLOSE_RANGE as i32) != 0 {
+            if charge(context, host, v::_CHARGE_GOAL_CLOSE_RANGE as i16) {
                 action_changed = true;
             } else {
                 desires_charge = false;
@@ -3337,5 +3351,156 @@ pub fn try_to_seek_cover(
             true
         }
         None => false,
+    }
+}
+
+/// ai_debug.h's charge decisions (`_charge_*`).
+mod charge_decision {
+    pub const VEHICLE_SUCCESS: i16 = 0;
+    pub const VEHICLE_NOT_DRIVER: i16 = 1;
+    pub const MELEE_SWARM_CANT: i16 = 2;
+    pub const MELEE_INHIBITED: i16 = 3;
+    pub const MELEE_NOTARGET: i16 = 4;
+    pub const MELEE_NO_ANIMATION: i16 = 5;
+    pub const MELEE_CANNOT_MOVE: i16 = 6;
+    pub const MELEE_SUCCESS: i16 = 7;
+    pub const STALKING_SUCCESS: i16 = 8;
+    pub const CLOSE_SUCCESS: i16 = 9;
+}
+
+/// action_charge.c's `action_charge_setup` and the change to charge: whether
+/// it charges.
+fn charge(context: &AiStepContext, host: &impl AiHost, goal: i16) -> bool {
+    match charge_setup(context, host, goal) {
+        Some(data) => {
+            action_change(context, host, ACTION_CHARGE, Some(&data));
+            true
+        }
+        None => false,
+    }
+}
+
+/// action_charge.c's `action_charge_setup`: a vehicle's charge (for a
+/// driver); a melee charge (not a swarm's, not inhibited, at a target),
+/// leaping when it can and by chance (and at range), moving in to the
+/// target's danger range, if the melee animation has the ticks and the
+/// destination can reach the target; or a close-range charge, stalking for a
+/// stalker in combat. Its debug record notes the decision.
+pub fn charge_setup(context: &AiStepContext, host: &impl AiHost, goal: i16) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = |offset: usize| m.f32(context.definition + offset as u32);
+    let definition_flag = |bit: usize| m.r32(context.definition + d::FLAGS as u32) & (1 << bit) != 0;
+    let debug_at = |offset: usize| context.debug_info + offset as u32;
+    let decision = |value: i16| m.set_i16(debug_at(debug::CHARGE_DECISION), value);
+    m.w32(debug_at(debug::CHARGE_LAST_TIME), context.game_time as u32);
+    let mut data = ActionData::new();
+    data.set_i32(a::STATE_CHARGE_CHARGE_START_TIME, context.game_time);
+    let mut goal = goal;
+    let mut result = true;
+
+    if goal == v::_CHARGE_GOAL_VEHICLE_RAMMING as i16 || goal == v::_CHARGE_GOAL_VEHICLE_STRAFING as i16 {
+        result = m.i16(at(a::INPUT_VEHICLE_DRIVER_TYPE)) > 1;
+        decision(if result { charge_decision::VEHICLE_SUCCESS } else { charge_decision::VEHICLE_NOT_DRIVER });
+    } else if goal == v::_CHARGE_GOAL_MELEE as i16 {
+        result = false;
+        if m.bool(at(a::META_SWARM)) {
+            decision(charge_decision::MELEE_SWARM_CANT);
+        } else if call_simple(context, host, call::MELEE_INHIBITED, 0) != 0 {
+            decision(charge_decision::MELEE_INHIBITED);
+        } else if m.i32(at(a::TARGET_TARGET_PROP_INDEX)) == NONE {
+            decision(charge_decision::MELEE_NOTARGET);
+        } else {
+            let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+            let prop = prop_get(m, context, target_prop_index);
+            let leap_upper = definition(d::BERSERK_MELEE_LEAP_RANGE_UPPER_BOUND);
+            let leap_chance = definition(d::BERSERK_MELEE_LEAP_CHANCE);
+            let leap = if leap_upper == 0.0 || leap_chance == 0.0 {
+                data.set_bool(a::STATE_CHARGE_LEAP_POSSIBLE_IF_AT_RANGE, false);
+                false
+            } else if m.bool(prop + p::FLYING as u32) || m.i16(prop + p::UNREACHABLE_TICKS as u32) > 0 {
+                data.set_bool(a::STATE_CHARGE_LEAP_POSSIBLE_IF_AT_RANGE, true);
+                true
+            } else {
+                let possible = call_full(context, host, call::RANDOM, 0, 0, &[]).output[0] < leap_chance;
+                data.set_bool(a::STATE_CHARGE_LEAP_POSSIBLE_IF_AT_RANGE, possible);
+                possible && !(m.f32(prop + p::DISTANCE as u32) < definition(d::BERSERK_MELEE_LEAP_RANGE_LOWER_BOUND))
+            };
+            if leap {
+                goal = v::_CHARGE_GOAL_MELEE_LEAPING as i16;
+            }
+            m.set_bool(debug_at(debug::FIELD_198), leap);
+
+            let suicidal = definition_flag(v::_ACTOR_DEFINITION_SUICIDAL_MELEE_ATTACK_BIT);
+            let melee = call_full(context, host, call::MELEE_RANGE_AND_TICKS, leap as i32, suicidal as i32, &[]);
+            if melee.result != 0 {
+                let mut start_tick = melee.result2 as i16;
+                let end_tick = (melee.result2 >> 16) as i16;
+                let mut start_range = melee.output[0];
+                let end_range = melee.output[1];
+                let (melee_suicide, melee_danger_range) = if suicidal {
+                    data.set_i16(a::STATE_CHARGE_MELEE_TICKS_UNTIL_DANGEROUS, end_tick);
+                    data.set_i32(a::STATE_CHARGE_MELEE_DANGER_RANGE, 0.0f32.to_bits() as i32);
+                    data.set_bool(a::STATE_CHARGE_MELEE_SUICIDE, true);
+                    (true, 0.0f32)
+                } else {
+                    if start_tick == 0 {
+                        start_range = end_range * 0.5;
+                        start_tick = end_tick / 2;
+                    }
+                    data.set_i16(a::STATE_CHARGE_MELEE_TICKS_UNTIL_DANGEROUS, start_tick);
+                    let danger_range = end_range - start_range;
+                    data.set_i32(a::STATE_CHARGE_MELEE_DANGER_RANGE, danger_range.to_bits() as i32);
+                    (false, danger_range)
+                };
+
+                // action_charge.c's `action_charge_find_target_range` for a
+                // melee goal, from the data being set up
+                let mut target_range = 0.0f32;
+                if goal == v::_CHARGE_GOAL_MELEE_LEAPING as i16 && !(0.0 > leap_upper) {
+                    target_range = leap_upper;
+                }
+                let attack_range = definition(d::BERSERK_MELEE_ATTACK_RANGE);
+                let melee_range = if melee_suicide { attack_range } else { attack_range + melee_danger_range };
+                if !(target_range > melee_range) {
+                    target_range = melee_range;
+                }
+                data.set_i32(a::STATE_CHARGE_ACCEPTABLE_TARGET_RANGE, target_range.to_bits() as i32);
+
+                let minimum_move_range = if goal == v::_CHARGE_GOAL_MELEE_LEAPING as i16 { 4.0f32 } else { 1.5 };
+                let move_range = if minimum_move_range > target_range { minimum_move_range } else { target_range };
+                let mut valid = false;
+                if call_full(context, host, call::MOVE_TO_PROP, target_prop_index, 0, &[move_range]).result != 0 {
+                    call_simple(context, host, call::KEEP_MOVING, 0);
+                    let center_of_mass = m.vector(prop + p::CENTER_OF_MASS as u32);
+                    valid = call_full(context, host, call::VALID_MELEE_DESTINATION, goal as i32, 0, &center_of_mass).result != 0;
+                }
+                if valid {
+                    result = true;
+                    decision(charge_decision::MELEE_SUCCESS);
+                } else {
+                    decision(charge_decision::MELEE_CANNOT_MOVE);
+                    m.set_f32(debug_at(debug::FIELD_194), move_range);
+                }
+            } else {
+                decision(charge_decision::MELEE_NO_ANIMATION);
+            }
+        }
+    } else if goal == v::_CHARGE_GOAL_CLOSE_RANGE as i16
+        && definition_flag(v::_ACTOR_DEFINITION_STALKING_BEHAVIOR_BIT)
+        && m.i16(at(a::STATE_COMBAT_STATUS)) >= 5
+        && !m.bool(at(a::EMOTIONS_BERSERK))
+    {
+        goal = v::_CHARGE_GOAL_STALKING as i16;
+        decision(charge_decision::STALKING_SUCCESS);
+    } else {
+        decision(charge_decision::CLOSE_SUCCESS);
+    }
+
+    data.set_i16(a::STATE_CHARGE_GOAL, goal);
+    if result {
+        Some(data)
+    } else {
+        None
     }
 }

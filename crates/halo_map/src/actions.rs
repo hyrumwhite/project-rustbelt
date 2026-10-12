@@ -7,6 +7,7 @@
 //! file's call function (actions.c's `actions_port_call` forwards them).
 
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, AiStepContext, NONE, prop_get};
+use crate::actor_path;
 use crate::firing_positions as fp;
 use crate::layout::{actor_datum as a, actor_definition as d, actor_variant_definition as var, ai_values as v, prop_datum as p};
 
@@ -135,10 +136,8 @@ pub mod wait_call {
     const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_WAIT as i32) << 8;
     /// `actor_pursuit_find_nearby_actors(actor, a)`.
     pub const FIND_NEARBY_ACTORS: i32 = BASE | 1;
-    /// `actor_move_to_prop(actor, a, 8)`, the result.
-    pub const MOVE_TO_PROP: i32 = BASE | 2;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 3;
+    // BASE | 2 was `MOVE_TO_PROP`, now Rust's (`crate::actor_path`).
+    // BASE | 3 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
     /// `ai_communication_event(a, unit, NONE...)`.
     pub const COMMUNICATION: i32 = BASE | 4;
     /// `seed_random_range(global seed, 300, 600)`, the result.
@@ -167,8 +166,7 @@ pub mod fight_call {
     /// Whether the actor is within its destination tolerance of its current
     /// firing position, the result.
     pub const NEAR_CURRENT_FIRING_POSITION: i32 = BASE | 5;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 6;
+    // BASE | 6 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
     /// A firing position selected (for fighting) and changed to: the new
     /// index the result.
     pub const CHANGE_FIRING_POSITION: i32 = BASE | 7;
@@ -243,12 +241,12 @@ fn wait_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
         }
         if !m.bool(at(a::META_SWARM)) {
             if m.bool(at(a::STATE_WAIT_DESIRE_MOVE)) {
-                let moved = call_full(context, host, wait_call::MOVE_TO_PROP, pursuit_prop_index, 0, &[]).result != 0;
+                let moved = actor_path::actor_move_to_prop(context, host, pursuit_prop_index, 8.0);
                 if !moved {
                     m.set_bool(at(a::STATE_WAIT_MOVE_FAILED), true);
                 }
             } else {
-                call_simple(context, host, wait_call::MOVE_HALT, 0);
+                actor_path::actor_move_halt(context, host);
             }
         }
     }
@@ -416,7 +414,7 @@ fn fight_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                     break 'unreachable;
                 }
                 m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), NONE as i16);
-                call_simple(context, host, fight_call::MOVE_HALT, 0);
+                actor_path::actor_move_halt(context, host);
                 break 'unreachable;
             }
         }
@@ -478,8 +476,7 @@ pub mod alert_call {
     pub const CHOOSE_RANDOM_POSITION: i32 = BASE | 6;
     /// `real_random_range(input[0], input[1])`, in `output[0]`.
     pub const RANDOM_RANGE: i32 = BASE | 7;
-    /// `actor_move_to_move_position(actor, a)`, the result.
-    pub const MOVE_TO_MOVE_POSITION: i32 = BASE | 8;
+    // BASE | 8 was `MOVE_TO_MOVE_POSITION`, now Rust's (`crate::actor_path`).
 }
 
 /// The local enum (action_alert.c's).
@@ -691,7 +688,7 @@ fn alert_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                 }
                 m.set_i16(wait_ticks, c_short(wait_time * 30.0));
                 m.set_bool(must_play, true);
-                moved = call_simple(context, host, alert_call::MOVE_TO_MOVE_POSITION, pending_index as i32) != 0;
+                moved = actor_path::actor_move_to_move_position(context, host, pending_index);
             }
         }
         if !moved {
@@ -717,12 +714,9 @@ pub mod search_call {
     pub const SEARCHING_SAME_POSITION: i32 = BASE | 3;
     /// `encounter_mark_examined_pursuit_position(encounter, actor, a, b)`.
     pub const MARK_EXAMINED: i32 = BASE | 4;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 5;
-    /// `actor_move_to_prop(actor, a, 2.5)`, the result.
-    pub const MOVE_TO_PROP: i32 = BASE | 6;
-    /// `actor_move_to_firing_position(actor, a, NULL)`, the result.
-    pub const MOVE_TO_FIRING_POSITION: i32 = BASE | 7;
+    // BASE | 5 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
+    // BASE | 6 was `MOVE_TO_PROP`, now Rust's (`crate::actor_path`).
+    // BASE | 7 was `MOVE_TO_FIRING_POSITION`, now Rust's (`crate::actor_path`).
 }
 
 /// action_uncover.c's calls.
@@ -929,21 +923,21 @@ fn search_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
     }
 
     if m.bool(at_destination) {
-        call_simple(context, host, search_call::MOVE_HALT, 0);
+        actor_path::actor_move_halt(context, host);
     } else if pursuit_type == 0 {
-        if call_simple(context, host, search_call::MOVE_TO_PROP, m.i32(at(a::TARGET_TARGET_PROP_INDEX))) == 0 {
+        if !actor_path::actor_move_to_prop(context, host, m.i32(at(a::TARGET_TARGET_PROP_INDEX)), 2.5) {
             m.set_bool(done, true);
             m.set_bool(at(a::STATE_SEARCH_SEARCH_FAILED), true);
         }
     } else if pursuit_type == 1 {
         m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), NONE as i16);
         let index = m.i16(at(a::STATE_SEARCH_PURSUIT_FIRING_POSITION_INDEX)) as i32;
-        if call_simple(context, host, search_call::MOVE_TO_FIRING_POSITION, index) == 0 {
+        if !actor_path::actor_move_to_firing_position(context, host, index as i16) {
             m.set_bool(done, true);
             m.set_bool(at(a::STATE_SEARCH_SEARCH_FAILED), true);
         }
     } else {
-        call_simple(context, host, search_call::MOVE_HALT, 0);
+        actor_path::actor_move_halt(context, host);
     }
     m.bool(done)
 }
@@ -1149,12 +1143,9 @@ pub mod guard_call {
     pub const CHANGE_FIRING_POSITION: i32 = BASE | 6;
     /// `real_seed_random_range(global seed, input[0], input[1])`, in `output[0]`.
     pub const RANDOM_RANGE: i32 = BASE | 7;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 8;
-    /// `actor_move_to_point` to the guard point.
-    pub const MOVE_TO_GUARD_POINT: i32 = BASE | 9;
-    /// `actor_move_to_firing_position(actor, a, NULL)`, the result.
-    pub const MOVE_TO_FIRING_POSITION: i32 = BASE | 10;
+    // BASE | 8 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
+    // BASE | 9 was `MOVE_TO_GUARD_POINT`, now Rust's (`crate::actor_path`).
+    // BASE | 10 was `MOVE_TO_FIRING_POSITION`, now Rust's (`crate::actor_path`).
     /// The shout about the dead friend of the prop `a` (with the suspicion it raises).
     pub const SHOUT_DEAD_FRIEND: i32 = BASE | 11;
 }
@@ -1363,9 +1354,15 @@ fn guard_control(context: &AiStepContext, host: &impl AiHost) {
                 let distance = distance_squared(m, at(a::INPUT_BODY_POSITION), at(a::STATE_GUARD_POINT_POSITION));
                 let radius = m.f32(at(a::STATE_GUARD_POINT_RADIUS));
                 if distance < radius * radius {
-                    call_simple(context, host, guard_call::MOVE_HALT, 0);
+                    actor_path::actor_move_halt(context, host);
                 } else {
-                    call_simple(context, host, guard_call::MOVE_TO_GUARD_POINT, 0);
+                    actor_path::actor_move_to_point(
+                        context,
+                        host,
+                        m.vector(at(a::STATE_GUARD_POINT_POSITION)),
+                        m.i32(at(a::STATE_GUARD_POINT_SURFACE_INDEX)),
+                        NONE,
+                    );
                 }
                 distance < 9.0
             }
@@ -1374,7 +1371,7 @@ fn guard_control(context: &AiStepContext, host: &impl AiHost) {
                 if guard_index != NONE as i16 {
                     m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), guard_index);
                     m.set_bool(at(a::FIRING_POSITIONS_CURRENT_POSITION_FOUND_OUTSIDE_RANGE), false);
-                    if call_simple(context, host, guard_call::MOVE_TO_FIRING_POSITION, guard_index as i32) == 0 {
+                    if !actor_path::actor_move_to_firing_position(context, host, guard_index) {
                         fp::discard_firing_position(m, context, guard_index, false);
                         m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), NONE as i16);
                     }
@@ -1384,7 +1381,7 @@ fn guard_control(context: &AiStepContext, host: &impl AiHost) {
             }
             // (0 and 1; the C's assertion ends the game for any other)
             _ => {
-                call_simple(context, host, guard_call::MOVE_HALT, 0);
+                actor_path::actor_move_halt(context, host);
                 true
             }
         };
@@ -1446,10 +1443,8 @@ pub mod flee_call {
     const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_FLEE as i32) << 8;
     /// `unit_start_running_blindly(unit)`.
     pub const RUN_BLINDLY: i32 = BASE | 1;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 2;
-    /// `actor_move_to_firing_position(actor, a, NULL)`, the result.
-    pub const MOVE_TO_FIRING_POSITION: i32 = BASE | 3;
+    // BASE | 2 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
+    // BASE | 3 was `MOVE_TO_FIRING_POSITION`, now Rust's (`crate::actor_path`).
     /// `actor_discard_firing_position(actor, a, FALSE)`.
     pub const DISCARD_FIRING_POSITION: i32 = BASE | 4;
     /// `actor_path_at_destination(actor)`, the result.
@@ -1543,9 +1538,9 @@ fn flee_control(context: &AiStepContext, host: &impl AiHost) {
     let flee_position = at(a::STATE_FLEE_FLEE_FIRING_POSITION_INDEX);
     let current = at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX);
     if m.i16(flee_position) == NONE as i16 {
-        call_simple(context, host, flee_call::MOVE_HALT, 0);
+        actor_path::actor_move_halt(context, host);
     } else if m.bool(at(a::META_TIMESLICE)) {
-        if call_simple(context, host, flee_call::MOVE_TO_FIRING_POSITION, m.i16(flee_position) as i32) != 0 {
+        if actor_path::actor_move_to_firing_position(context, host, m.i16(flee_position)) {
             m.set_i16(current, m.i16(flee_position));
             m.w8(
                 at(a::FIRING_POSITIONS_CURRENT_POSITION_FOUND_OUTSIDE_RANGE),
@@ -1554,7 +1549,7 @@ fn flee_control(context: &AiStepContext, host: &impl AiHost) {
         } else {
             if m.i16(current) != NONE as i16 {
                 fp::discard_firing_position(m, context, m.i16(current), false);
-                call_simple(context, host, flee_call::MOVE_HALT, 0);
+                actor_path::actor_move_halt(context, host);
                 m.set_i16(current, NONE as i16);
             }
             m.set_i16(flee_position, NONE as i16);
@@ -1740,10 +1735,8 @@ pub mod converse_call {
     const BASE: i32 = (crate::layout::ai_values::_ACTOR_ACTION_CONVERSE as i32) << 8;
     /// `prop_get_base_by_unit_index(actor, a, TRUE, TRUE)`, the result.
     pub const BASE_PROP: i32 = BASE | 1;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 2;
-    /// `actor_move_to_prop(actor, a, input[0])`, the result.
-    pub const MOVE_TO_PROP: i32 = BASE | 3;
+    // BASE | 2 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
+    // BASE | 3 was `MOVE_TO_PROP`, now Rust's (`crate::actor_path`).
     /// The actor's prop of its conversation's triggering player (or NONE),
     /// the result.
     pub const PLAYER_PROP: i32 = BASE | 4;
@@ -1776,8 +1769,8 @@ fn converse_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                 }
             }
             if m.bool(in_range) {
-                call_simple(context, host, converse_call::MOVE_HALT, 0);
-            } else if call_full(context, host, converse_call::MOVE_TO_PROP, m.i32(prop_index), 0, &[distance]).result == 0 {
+                actor_path::actor_move_halt(context, host);
+            } else if !actor_path::actor_move_to_prop(context, host, m.i32(prop_index), distance) {
                 m.set_bool(failed, true);
             }
         }
@@ -1821,13 +1814,11 @@ pub mod vehicle_call {
     pub const EVALUATE_SEAT: i32 = BASE | 4;
     /// `unit_enter_seat(unit, its vehicle, its seat)`.
     pub const ENTER_SEAT: i32 = BASE | 5;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 6;
+    // BASE | 6 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
     /// `action_vehicle_find_destination` from the evaluated seat, into the
     /// actor: the result.
     pub const FIND_DESTINATION: i32 = BASE | 7;
-    /// `actor_move_to_point` to the actor's destination, the result.
-    pub const MOVE_TO_DESTINATION: i32 = BASE | 8;
+    // BASE | 8 was `MOVE_TO_DESTINATION`, now Rust's (`crate::actor_path`).
 }
 
 /// `action_vehicle_control`.
@@ -1909,12 +1900,18 @@ fn vehicle_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                             call_simple(context, host, vehicle_call::ENTER_SEAT, 0);
                             m.set_bool(at(a::STATE_VEHICLE_STARTED_ENTRY), true);
                         } else {
-                            call_simple(context, host, vehicle_call::MOVE_HALT, 0);
+                            actor_path::actor_move_halt(context, host);
                         }
                     } else if m.bool(at(a::META_TIMESLICE)) {
                         let mut moving = false;
                         if call_simple(context, host, vehicle_call::FIND_DESTINATION, 0) != 0 {
-                            moving = call_simple(context, host, vehicle_call::MOVE_TO_DESTINATION, 0) != 0;
+                            moving = actor_path::actor_move_to_point(
+                                context,
+                                host,
+                                m.vector(at(a::STATE_VEHICLE_DESTINATION_POINT)),
+                                m.i32(at(a::STATE_VEHICLE_DESTINATION_SURFACE_INDEX)),
+                                m.i32(at(a::STATE_VEHICLE_VEHICLE_INDEX)),
+                            );
                         }
                         let failures = at(a::STATE_VEHICLE_PATHFINDING_FAILURES);
                         if moving {
@@ -1969,12 +1966,10 @@ pub mod charge_call {
     /// `unit_melee_attack_begin(unit, FALSE, input)`, and if it began its
     /// shout at the target's unit `a`: the result.
     pub const MELEE_ATTACK: i32 = BASE | 7;
-    /// `actor_move_to_prop(actor, a, input[0])`, the result.
-    pub const MOVE_TO_PROP: i32 = BASE | 8;
+    // BASE | 8 was `MOVE_TO_PROP`, now Rust's (`crate::actor_path`).
     /// `actor_move_keep_moving_past_destination(actor)`.
     pub const KEEP_MOVING: i32 = BASE | 9;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 10;
+    // BASE | 10 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
     /// `actor_perception_unreachable(actor, a, b)`.
     pub const PERCEPTION_UNREACHABLE: i32 = BASE | 11;
 }
@@ -2425,7 +2420,7 @@ fn charge_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
             let minimum_move_range: f32 = if goal == CHARGE_GOAL_MELEE_LEAPING { 4.0 } else { 1.5 };
             let move_range = if minimum_move_range > target_range { minimum_move_range } else { target_range };
             let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
-            if call_full(context, host, charge_call::MOVE_TO_PROP, target_prop_index, 0, &[move_range]).result != 0 {
+            if actor_path::actor_move_to_prop(context, host, target_prop_index, move_range) {
                 call_simple(context, host, charge_call::KEEP_MOVING, 0);
                 moving = true;
             } else {
@@ -2434,7 +2429,7 @@ fn charge_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
             }
         }
         if !moving {
-            call_simple(context, host, charge_call::MOVE_HALT, 0);
+            actor_path::actor_move_halt(context, host);
         }
         if m.i16(at(a::TARGET_TARGET_TYPE)) >= v::_ACTOR_TARGET_ACKNOWLEDGED_ENEMY as i16 {
             let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
@@ -2492,8 +2487,7 @@ pub mod obey_call {
     pub const UNIT_IS_BUSY: i32 = BASE | 10;
     /// `actor_destination_tolerance(actor)`, in `output[0]`.
     pub const TOLERANCE: i32 = BASE | 11;
-    /// `actor_move_halt(actor)`.
-    pub const MOVE_HALT: i32 = BASE | 12;
+    // BASE | 12 was `MOVE_HALT`, now Rust's (`crate::actor_path`).
     /// `actor_combat_plan_grenade_trajectory` to the command's grenade
     /// target by its trajectory type, the result.
     pub const PLAN_GRENADE: i32 = BASE | 13;
@@ -2506,8 +2500,7 @@ pub mod obey_call {
     pub const BIPED_RELEASE: i32 = BASE | 16;
     /// `actor_look_secondary_stop(actor)`.
     pub const LOOK_SECONDARY_STOP: i32 = BASE | 17;
-    /// `actor_move_to_point` to the command's destination, the result.
-    pub const MOVE_TO_DESTINATION: i32 = BASE | 18;
+    // BASE | 18 was `MOVE_TO_DESTINATION`, now Rust's (`crate::actor_path`).
     /// `actor_move_keep_moving_past_destination(actor)`.
     pub const KEEP_MOVING: i32 = BASE | 19;
     /// `random_range(a, b)`, the result.
@@ -2967,7 +2960,7 @@ fn obey_command_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                 }
             }
             if done {
-                call_simple(context, host, obey_call::MOVE_HALT, 0);
+                actor_path::actor_move_halt(context, host);
             }
             done
         }
@@ -3048,7 +3041,7 @@ fn obey_command_end(context: &AiStepContext, host: &impl AiHost, mut next_comman
     let metadata = control.simple(sc::METADATA_FLAGS);
     match m.i16(definition + command::ATOM_TYPE as u32) {
         atom::GO_TO | atom::GO_TO_AND_FACE => {
-            call_simple(context, host, obey_call::MOVE_HALT, 0);
+            actor_path::actor_move_halt(context, host);
             m.set_bool(control.complex(cc::DESTINATION_VALID), false);
             m.set_bool(control.complex(cc::DESTINATION_FACING), false);
         }
@@ -3151,7 +3144,13 @@ fn obey_command_begin(context: &AiStepContext, host: &impl AiHost) -> bool {
                 m.set_bool(control.complex(cc::DESTINATION_KEEP_MOVING), keep_moving);
                 copy(control.complex(cc::DESTINATION_POINT), destination + point::POSITION as u32);
                 m.w32(control.complex(cc::DESTINATION_SURFACE_INDEX), m.r32(destination + point::SURFACE_INDEX as u32));
-                result = call_simple(context, host, obey_call::MOVE_TO_DESTINATION, 0) != 0;
+                result = actor_path::actor_move_to_point(
+                    context,
+                    host,
+                    m.vector(context.actor + (a::STATE_OBEY_COMPLEX_CONTROL + cc::DESTINATION_POINT) as u32),
+                    m.i32(context.actor + (a::STATE_OBEY_COMPLEX_CONTROL + cc::DESTINATION_SURFACE_INDEX) as u32),
+                    NONE,
+                );
                 if result {
                     if keep_moving {
                         call_simple(context, host, obey_call::KEEP_MOVING, 0);
@@ -3276,7 +3275,7 @@ fn obey_command_begin(context: &AiStepContext, host: &impl AiHost) -> bool {
             if result {
                 let facing = if (0..=3).contains(&modifier) { modifier } else { NONE as i16 };
                 m.set_i16(directmovement + dm::FACING as u32, facing);
-                call_simple(context, host, obey_call::MOVE_HALT, 0);
+                actor_path::actor_move_halt(context, host);
                 clear_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_UPDATE_CONTINUOUSLY_BIT);
                 set_bit(m, flags, OBEY_SIMPLE_DIRECTMOVEMENT_BIT);
             }

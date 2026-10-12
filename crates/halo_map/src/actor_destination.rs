@@ -4,21 +4,20 @@
 //! moving towards (the path's step, ahead of a flying vehicle, or nowhere).
 //!
 //! The actor's datum is the game's memory, worked on in place
-//! ([`crate::ai_actor`]); the path's refresh and clearing, the destination's
-//! test and the errors are the game's, through [`AiHost::call`]
-//! (actor_moving.c's `actor_destination_call`, shared with the C).
+//! ([`crate::ai_actor`]); the path's refresh and clearing and the
+//! destination's test are [`crate::actor_path`]'s; the errors are the game's,
+//! through [`AiHost::call`] (actor_moving.c's `actor_destination_call`,
+//! shared with the C).
 
+use crate::actor_path;
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, AiStepContext};
 use crate::layout::{actor_datum as a, ai_values as v, path_result, path_step};
 
 /// The destination update's calls (halo_sim.h's `_actor_destination_call_*`).
 pub mod call {
-    /// `actor_path_refresh(actor, FALSE, NULL)`.
-    pub const PATH_REFRESH: i32 = 1;
-    /// `actor_test_destination(actor)`.
-    pub const TEST_DESTINATION: i32 = 2;
-    /// `actor_path_clear(actor)`.
-    pub const PATH_CLEAR: i32 = 3;
+    // 1 was `PATH_REFRESH`, now Rust's (`crate::actor_path`).
+    // 2 was `TEST_DESTINATION`, now Rust's (`crate::actor_path`).
+    // 3 was `PATH_CLEAR`, now Rust's (`crate::actor_path`).
     /// The debug error for falling off the end of an unfinished path.
     pub const UNFINISHED_PATH: i32 = 4;
     /// The error for a path walking to tau ceti.
@@ -58,9 +57,9 @@ pub fn actor_destination_update(context: &AiStepContext, host: &impl AiHost) {
         && !m.bool(actor + a::CONTROL_PATH_REFRESHED_THIS_TICK as u32)
         && !m.bool(actor + a::META_DORMANT as u32)
     {
-        call_simple(context, host, call::PATH_REFRESH);
+        actor_path::actor_path_refresh(context, host, false);
     }
-    call_simple(context, host, call::TEST_DESTINATION);
+    actor_path::actor_test_destination(context, host);
 
     if m.bool(valid) {
         loop {
@@ -97,7 +96,7 @@ pub fn actor_destination_update(context: &AiStepContext, host: &impl AiHost) {
 
         if m.bool(movement_complete) {
             if m.bool(path + path_result::STEPS_FINISH_PATH as u32) {
-                call_simple(context, host, call::PATH_CLEAR);
+                actor_path::actor_path_clear(context, host);
             } else {
                 call_simple(context, host, call::UNFINISHED_PATH);
             }
@@ -139,6 +138,6 @@ pub fn actor_destination_update(context: &AiStepContext, host: &impl AiHost) {
         m.set_bool(moving, false);
         m.set_bool(movement_complete, false);
         m.set_bool(actor + a::CONTROL_PATH_AT_DESTINATION as u32, true);
-        call_simple(context, host, call::PATH_CLEAR);
+        actor_path::actor_path_clear(context, host);
     }
 }

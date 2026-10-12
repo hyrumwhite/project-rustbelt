@@ -265,8 +265,7 @@ pub mod call {
     /// action_charge.c's `action_charge_valid_melee_destination` for the goal
     /// `a` and the point `input[0..3]`, the result.
     pub const VALID_MELEE_DESTINATION: i32 = BASE + 95;
-    /// `actor_move_to_prop(actor, a, input[0])`, the result.
-    pub const MOVE_TO_PROP: i32 = BASE + 96;
+    // BASE + 96 was `MOVE_TO_PROP`, now Rust's (`crate::actor_path`).
     /// `actor_move_keep_moving_past_destination(actor)`.
     pub const KEEP_MOVING: i32 = BASE + 97;
     /// action_vehicle.c's `action_vehicle_desirable` of the vehicle `a` to an
@@ -284,8 +283,7 @@ pub mod call {
     /// `a`'s seat [`FIND_IMPROMPTU_SEAT`] found: whether it found one, the
     /// result; the point in `output[0..3]` and its surface `result2`.
     pub const FIND_VEHICLE_DESTINATION: i32 = BASE + 101;
-    /// `actor_move_to_point(actor, input[0..3], a, b)`, the result.
-    pub const MOVE_TO_POINT: i32 = BASE + 102;
+    // BASE + 102 was `MOVE_TO_POINT`, now Rust's (`crate::actor_path`).
     /// `unit_stop_running_blindly` of the actor's unit.
     pub const UNIT_STOP_RUNNING_BLINDLY: i32 = BASE + 103;
     /// `unit_start_running_blindly` of the actor's unit.
@@ -3500,7 +3498,7 @@ pub fn charge_setup(context: &AiStepContext, host: &impl AiHost, goal: i16) -> O
                 let minimum_move_range = if goal == v::_CHARGE_GOAL_MELEE_LEAPING as i16 { 4.0f32 } else { 1.5 };
                 let move_range = if minimum_move_range > target_range { minimum_move_range } else { target_range };
                 let mut valid = false;
-                if call_full(context, host, call::MOVE_TO_PROP, target_prop_index, 0, &[move_range]).result != 0 {
+                if crate::actor_path::actor_move_to_prop(context, host, target_prop_index, move_range) {
                     call_simple(context, host, call::KEEP_MOVING, 0);
                     let center_of_mass = m.vector(prop + p::CENTER_OF_MASS as u32);
                     valid = call_full(context, host, call::VALID_MELEE_DESTINATION, goal as i32, 0, &center_of_mass).result != 0;
@@ -3575,7 +3573,7 @@ pub fn vehicle_setup_impromptu(
     let point = destination.vector();
     data.set_vector(a::STATE_VEHICLE_DESTINATION_POINT, point);
     data.set_i32(a::STATE_VEHICLE_DESTINATION_SURFACE_INDEX, destination.result2);
-    if call_full(context, host, call::MOVE_TO_POINT, destination.result2, vehicle_index, &point).result == 0 {
+    if !crate::actor_path::actor_move_to_point(context, host, point, destination.result2, vehicle_index) {
         return None;
     }
     Some(data)

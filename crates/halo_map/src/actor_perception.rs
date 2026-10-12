@@ -229,6 +229,26 @@ pub mod call {
     pub const DANGER_AUDIBILITY: i32 = 73;
     /// `actor_look_secondary(actor, dangerous object, default, danger)`.
     pub const LOOK_DANGER: i32 = 74;
+    /// `actor_perception_find_prop_pathfinding_location(actor, a)`.
+    pub const FIND_PATHFINDING_LOCATION: i32 = 75;
+    /// The actor's unit's shout that it sighted a grenade, of the danger
+    /// zone's hostility `a`.
+    pub const COMMUNICATE_GRENADE_SIGHTED: i32 = 76;
+    /// `actor_perception_find_killer_prop_index(actor, a, TRUE)`, the result.
+    pub const KILLER_PROP: i32 = 77;
+    /// `actor_look_secondary(actor, newly acknowledged prop, default, a)`.
+    pub const LOOK_ACKNOWLEDGED: i32 = 78;
+    /// The surprise's debug print for the prop `a` (a player's, when
+    /// asked): `b` the level (its low byte), whether it was expected (bit
+    /// 8) and flanked (bit 9).
+    pub const SURPRISE_DEBUG: i32 = 79;
+    /// The actor's unit's shout of an unexpected enemy, the prop `a`'s unit.
+    pub const COMMUNICATE_UNEXPECTED_ENEMY: i32 = 80;
+    /// The medusa cheat: the actor killed, if it's on.
+    pub const MEDUSA: i32 = 81;
+    /// The actor's unit's shout that it sighted (`b`, else found) the
+    /// enemy prop `a`'s unit.
+    pub const COMMUNICATE_SIGHTED_ENEMY: i32 = 82;
 }
 
 /// The status sample's bits ([`call::STATUS_SAMPLE`]): of the unit, its
@@ -719,7 +739,7 @@ fn danger_zone_update(context: &AiStepContext, host: &impl AiHost) {
                 let dive = random(context, host) < m.f32(definition + d::MOVING_GRENADE_DIVE_CHANCE as u32);
                 m.set_bool(allow_dive, dive);
             }
-            call_simple(context, host, call::NOTICED_DANGER, 0);
+            stimulus_noticed_danger_zone(context, host);
         }
     }
 
@@ -752,12 +772,12 @@ fn stimuli_update(
     let none = v::_ACTOR_PERCEPTION_NONE as i16;
 
     if m.bool(at(p::JUST_KILLED)) {
-        call_simple(context, host, call::STIMULUS_JUST_KILLED, index);
+        stimulus_prop_just_killed(context, host, index);
         m.set_bool(at(p::JUST_KILLED), false);
     }
     if m.bool(at(p::JUST_BECAME_VISIBLE)) || (became_acknowledged && m.i16(at(p::VISIBILITY)) > none) {
         let initial_sighting = became_acknowledged && !expected_acknowledgement;
-        call_full(context, host, call::STIMULUS_SIGHTED, index, initial_sighting as i32, 0.0);
+        stimulus_prop_sighted(context, host, index, initial_sighting);
         m.set_bool(at(p::JUST_BECAME_VISIBLE), false);
     }
     let sighted = actor + a::EMOTIONS_SIGHTED_FRIENDLY_PLAYER as u32;
@@ -770,7 +790,7 @@ fn stimuli_update(
     {
         m.set_bool(sighted, true);
         call_simple(context, host, call::SIGHTED_FRIEND_PLAYER, index);
-        call_full(context, host, call::STIMULUS_SIGHTED, index, 0, 0.0);
+        stimulus_prop_sighted(context, host, index, false);
     }
 
     let unit_index = m.i32(actor + a::META_UNIT_INDEX as u32);
@@ -801,9 +821,9 @@ fn stimuli_update(
     let mode = m.i16(actor + a::STATE_MODE as u32);
     if mode < MODE_COMBAT {
         if m.bool(at(p::DEAD)) && !m.bool(at(p::ENEMY)) {
-            call_simple(context, host, call::STIMULUS_FOUND_BODY, index);
+            stimulus_enter_combat_found_body(context, host, index);
         } else if m.bool(at(p::ENEMY)) {
-            call_simple(context, host, call::STIMULUS_PERCEIVED_ENEMY, index);
+            stimulus_enter_combat_perceived_enemy(context, host, index);
         }
     }
 
@@ -1217,7 +1237,8 @@ fn acknowledge(context: &AiStepContext, host: &impl AiHost, prop_index: i32, had
     m.set_bool(prop + p::TRIED_TO_UNCOVER as u32, false);
     m.set_bool(prop + p::ABANDONED_SEARCH as u32, false);
     m.set_bool(prop + p::REFRESH_STIMULI as u32, true);
-    call_full(context, host, call::STIMULUS_ACKNOWLEDGED, prop_index, had_orphan as i32 | (expected as i32) << 1, 0.0);
+    stimulus_prop_acknowledged(context, host, prop_index, expected);
+    let _ = had_orphan;
 }
 
 /// actor_perception.c's `actor_perception_become_acknowledged`: a prop not
@@ -2272,4 +2293,342 @@ pub fn refresh_danger_zone(context: &AiStepContext, host: &impl AiHost) {
     }
     m.set_bool(at(a::DANGER_ZONE_CURRENTLY_PERCEIVED), perceived);
     m.set_bool(at(a::DANGER_ZONE_ATTACHED_TO_US), attached_to_us);
+}
+
+/// actor_stimulus.c's combat transitions (`_actor_stimulus_combat_*`).
+const STIMULUS_COMBAT_BODY: i16 = 2;
+const STIMULUS_COMBAT_DANGER: i16 = 4;
+const STIMULUS_COMBAT_ENEMY: i16 = 6;
+
+/// actor_stimulus.c's surprises (`_actor_surprise_*`).
+const SURPRISE_NONE: i16 = 0;
+const SURPRISE_UNPREPARED_ENEMY_SHOOTING: i16 = 1;
+const SURPRISE_UNPREPARED_ENEMY_CLOSE: i16 = 3;
+const SURPRISE_UNPREPARED_GRENADE: i16 = 4;
+const SURPRISE_UNEXPECTED_ENEMY_CLOSE_SHOOTING: i16 = 6;
+const SURPRISE_UNEXPECTED_ENEMY_CLOSE_FLANKED_SHOOTING: i16 = 7;
+
+/// actor_stimulus.c's panics (`_actor_panic_*`).
+const PANIC_FRIEND_SAME_TYPE_KILLED: i16 = 3;
+const PANIC_FRIEND_LEADER_TYPE_KILLED: i16 = 8;
+
+/// `_actor_definition_flags2_panic_in_groups_bit`.
+const DEFINITION_FLAGS2_PANIC_IN_GROUPS_BIT: u32 = 5;
+
+/// `_actor_combat_status_*` the stimuli compare against.
+const COMBAT_STATUS_DEFINITE: i16 = 3;
+const COMBAT_STATUS_CLEAR_LOS: i16 = 5;
+
+/// A guard point for a combat transition: the point, its surface and the
+/// distance to guard it from.
+type GuardPoint = ([f32; 3], i32, f32);
+
+/// actor_stimulus.c's `actor_stimulus_combat`: a combat transition, if the
+/// actor isn't in combat already and it's no weaker than the one it has.
+#[allow(clippy::too_many_arguments)]
+fn stimulus_combat(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    transition_type: i16,
+    guard_point: Option<GuardPoint>,
+    guard_timer: i32,
+    transition_vector: Option<[f32; 3]>,
+    prop_index: i32,
+    prop_look_timer: i32,
+    prop_look_while_moving: bool,
+) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.i16(at(a::STATE_MODE)) >= MODE_COMBAT {
+        return;
+    }
+    if transition_type < m.i16(at(a::STIMULI_COMBAT_TRANSITION)) {
+        return;
+    }
+    m.set_i16(at(a::STIMULI_COMBAT_TRANSITION), transition_type);
+    match guard_point {
+        None => m.set_bool(at(a::STIMULI_COMBAT_TRANSITION_GUARD_AT_POINT), false),
+        Some((point, surface_index, distance)) => {
+            m.set_bool(at(a::STIMULI_COMBAT_TRANSITION_GUARD_AT_POINT), true);
+            for (i, value) in point.into_iter().enumerate() {
+                m.set_f32(at(a::STIMULI_COMBAT_TRANSITION_GUARD_POINT + 4 * i), value);
+            }
+            m.w32(at(a::STIMULI_COMBAT_TRANSITION_GUARD_POINT_SURFACE_INDEX), surface_index as u32);
+            m.set_f32(at(a::STIMULI_COMBAT_TRANSITION_GUARD_POINT_DISTANCE), distance);
+        }
+    }
+    match transition_vector {
+        None => m.set_bool(at(a::STIMULI_COMBAT_TRANSITION_HAS_VECTOR), false),
+        Some(vector) => {
+            m.set_bool(at(a::STIMULI_COMBAT_TRANSITION_HAS_VECTOR), true);
+            for (i, value) in vector.into_iter().enumerate() {
+                m.set_f32(at(a::STIMULI_COMBAT_TRANSITION_VECTOR + 4 * i), value);
+            }
+        }
+    }
+    m.w32(at(a::STIMULI_COMBAT_TRANSITION_PROP_INDEX), prop_index as u32);
+    m.w32(at(a::STIMULI_COMBAT_TRANSITION_PROP_LOOK_TIMER), prop_look_timer as u32);
+    m.set_bool(at(a::STIMULI_COMBAT_TRANSITION_PROP_LOOK_WHILE_MOVING), prop_look_while_moving);
+    m.w32(at(a::STIMULI_COMBAT_TRANSITION_GUARD_TIMER), guard_timer as u32);
+}
+
+/// actor_stimulus.c's `actor_stimulus_surprise`: a stronger surprise than
+/// the actor has.
+fn stimulus_surprise(context: &AiStepContext, host: &impl AiHost, level: i16, prop_index: i32, vector: Option<[f32; 3]>) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if level > m.i16(at(a::STIMULI_SURPRISE_LEVEL)) {
+        m.set_i16(at(a::STIMULI_SURPRISE_LEVEL), level);
+        m.w32(at(a::STIMULI_SURPRISE_PROP_INDEX), prop_index as u32);
+        match vector {
+            None => m.set_bool(at(a::STIMULI_SURPRISE_HAS_VECTOR), false),
+            Some(vector) => {
+                m.set_bool(at(a::STIMULI_SURPRISE_HAS_VECTOR), true);
+                for (i, value) in vector.into_iter().enumerate() {
+                    m.set_f32(at(a::STIMULI_SURPRISE_VECTOR + 4 * i), value);
+                }
+            }
+        }
+    }
+}
+
+/// actor_stimulus.c's `actor_stimulus_enter_combat_found_body`: the
+/// corpses so far are ignored, and the actor guards the body's place.
+fn stimulus_enter_combat_found_body(context: &AiStepContext, host: &impl AiHost, prop_index: i32) {
+    let m = host.memory();
+    m.w32(context.actor + a::EMOTIONS_CORPSE_IGNORE_TIME as u32, context.game_time as u32);
+    call_simple(context, host, call::FIND_PATHFINDING_LOCATION, prop_index);
+    let prop = prop_get(m, context, prop_index);
+    let point = m.vector(prop + p::PATHFINDING_POINT as u32);
+    let surface_index = m.i32(prop + p::PATHFINDING_SURFACE_INDEX as u32);
+    stimulus_combat(context, host, STIMULUS_COMBAT_BODY, Some((point, surface_index, 1.5)), 90, None, prop_index, 90, true);
+}
+
+/// actor_stimulus.c's `actor_stimulus_enter_combat_perceived_enemy`: the
+/// actor turns to the enemy.
+fn stimulus_enter_combat_perceived_enemy(context: &AiStepContext, host: &impl AiHost, prop_index: i32) {
+    let m = host.memory();
+    let actor_to_prop = m.vector(prop_get(m, context, prop_index) + p::ACTOR_TO_PROP as u32);
+    stimulus_combat(context, host, STIMULUS_COMBAT_ENEMY, None, 90, Some(actor_to_prop), prop_index, 150, false);
+}
+
+/// actor_stimulus.c's `actor_stimulus_noticed_danger_zone` (of the actor's
+/// danger zone): a grenade's shout, the surprise of one close by when not in
+/// combat, and the transition towards it.
+fn stimulus_noticed_danger_zone(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let danger_type = m.i16(at(a::DANGER_ZONE_DANGER_TYPE));
+    let hostility = m.i16(at(a::DANGER_ZONE_HOSTILITY));
+    let position = m.vector(at(a::DANGER_ZONE_POSITION));
+    if m.i32(at(a::META_UNIT_INDEX)) == NONE {
+        return;
+    }
+    if danger_type == DANGER_ZONE_PROJECTILE {
+        call_simple(context, host, call::COMMUNICATE_GRENADE_SIGHTED, hostility as i32);
+    }
+    let head = m.vector(at(a::INPUT_POSITION_HEAD_POSITION));
+    let mut vector = [position[0] - head[0], position[1] - head[1], position[2] - head[2]];
+    let magnitude = crate::features::magnitude_squared3(vector).sqrt();
+    let distance = if !(0.0001 > magnitude.abs()) {
+        let scale = 1.0 / magnitude;
+        vector = [scale * vector[0], scale * vector[1], scale * vector[2]];
+        magnitude
+    } else {
+        0.0
+    };
+    if m.i16(at(a::STATE_MODE)) < MODE_COMBAT
+        && distance < m.f32(context.definition + d::PANIC_SURPRISE_DISTANCE as u32)
+        && danger_type == DANGER_ZONE_PROJECTILE
+    {
+        stimulus_surprise(context, host, SURPRISE_UNPREPARED_GRENADE, NONE, Some(vector));
+    }
+    stimulus_combat(context, host, STIMULUS_COMBAT_DANGER, None, 0, Some(vector), NONE, 0, false);
+}
+
+/// The actor's bytes actor_perception.c's `actor_emotion_flee_with_friends`
+/// reads (through its actor view) of a friend as its active threats, its
+/// friend state and its fighting friends: in this build's `actor_datum`,
+/// `stimuli.panic_type`, the short after `state.mode` and
+/// `state.flee.panic_type`.
+const FLEE_VIEW_ACTIVE_THREAT_COUNT: u32 = 0x308;
+const FLEE_VIEW_FRIEND_STATE: u32 = 0x6C;
+const FLEE_VIEW_FRIEND_FIGHTING_COUNT: u32 = 0xA8;
+
+/// actor_perception.c's `actor_emotion_flee_with_friends`: whether the
+/// actor's friends of its type stand and fight (two or more), else its
+/// chance to flee scaled by how many of them flee.
+fn emotion_flee_with_friends(context: &AiStepContext, host: &impl AiHost, desire_to_flee: &mut f32) -> bool {
+    let m = host.memory();
+    let actor_type = m.i16(context.actor + a::META_TYPE as u32);
+    let mut fighting_friend_count: i16 = 0;
+    let mut fleeing_friend_count: i16 = 0;
+    let mut iterator = PropIterator::new(m, context);
+    while let Some(prop) = iterator.next(m, context) {
+        let friend_actor_index = m.i32(prop + p::ACTOR_INDEX as u32);
+        if prop_acknowledged(m.i16(prop + p::STATE as u32))
+            && !m.bool(prop + p::ENEMY as u32)
+            && m.i16(prop + p::TYPE as u32) == actor_type
+            && friend_actor_index != NONE
+        {
+            let Some(friend) = crate::ai_actor::datum_get(m, context.actor_data, friend_actor_index) else {
+                continue;
+            };
+            if m.i16(friend + FLEE_VIEW_ACTIVE_THREAT_COUNT) > 0
+                || (m.i16(friend + FLEE_VIEW_FRIEND_STATE) == 4 && m.i16(friend + FLEE_VIEW_FRIEND_FIGHTING_COUNT) > 0)
+            {
+                fighting_friend_count = fighting_friend_count.wrapping_add(1);
+            } else if m.bool(prop + p::IN_COMBAT as u32) {
+                fleeing_friend_count = fleeing_friend_count.wrapping_add(1);
+            }
+        }
+    }
+    if fighting_friend_count > 1 {
+        return true;
+    }
+    let modifier = if fleeing_friend_count > 1 {
+        1.0 - (fleeing_friend_count as i32 - 1) as f32 * 0.25
+    } else {
+        1.0 + (1 - fleeing_friend_count as i32) as f32 * 0.5
+    };
+    *desire_to_flee *= if modifier < 0.0 {
+        0.0
+    } else if modifier > 2.0 {
+        2.0
+    } else {
+        modifier
+    };
+    false
+}
+
+/// actor_stimulus.c's `actor_stimulus_prop_just_killed`: the actor has been
+/// in combat; a friend killed may panic it (its leader type, by chance; or
+/// near, by an enemy facing it in view, by chance or as its friends flee),
+/// and an unopposable killer's casualties count.
+fn stimulus_prop_just_killed(context: &AiStepContext, host: &impl AiHost, prop_index: i32) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = context.definition;
+    let prop = prop_get(m, context, prop_index);
+    m.set_bool(at(a::STATE_BEEN_IN_COMBAT), true);
+    if m.bool(prop + p::ENEMY as u32) {
+        return;
+    }
+    let killer_prop_index = call_simple(context, host, call::KILLER_PROP, prop_index);
+    if m.i16(prop + p::TYPE as u32) == m.i16(definition + d::PANIC_PANIC_LEADER_TYPE as u32)
+        && m.i16(at(a::STIMULI_PANIC_TYPE)) < PANIC_FRIEND_LEADER_TYPE_KILLED
+        && random(context, host) < m.f32(definition + d::PANIC_PANIC_CHANCE_LEADER_TYPE_KILLED as u32)
+    {
+        m.set_i16(at(a::STIMULI_PANIC_TYPE), PANIC_FRIEND_LEADER_TYPE_KILLED);
+        m.w32(at(a::STIMULI_PANIC_PROP_INDEX), killer_prop_index as u32);
+    }
+    if m.f32(prop + p::DISTANCE as u32) < 8.0 && killer_prop_index != NONE {
+        let killer = prop_get(m, context, killer_prop_index);
+        if m.bool(killer + p::ENEMY as u32) {
+            if m.i16(killer + p::VISIBILITY as u32) > 0 && m.i8(killer + p::QUANTIZED_FACING as u32) <= 2 {
+                let mut flee_chance = m.f32(definition + d::PANIC_PANIC_CHANCE_FRIEND_KILLED as u32);
+                let panic_in_groups =
+                    (m.r32(definition + d::FLAGS2 as u32) >> DEFINITION_FLAGS2_PANIC_IN_GROUPS_BIT) & 1 != 0;
+                if (panic_in_groups
+                    && context.game_time > m.i32(at(a::EMOTIONS_FLEE_WITH_FRIENDS_DISABLE_TIME))
+                    && emotion_flee_with_friends(context, host, &mut flee_chance))
+                    || random(context, host) < flee_chance
+                {
+                    if m.i16(at(a::STIMULI_PANIC_TYPE)) < PANIC_FRIEND_SAME_TYPE_KILLED {
+                        m.set_i16(at(a::STIMULI_PANIC_TYPE), PANIC_FRIEND_SAME_TYPE_KILLED);
+                        m.w32(at(a::STIMULI_PANIC_PROP_INDEX), killer_prop_index as u32);
+                    }
+                }
+            }
+            if m.bool(killer + p::UNOPPOSABLE_ENEMY as u32) {
+                increment(m, killer + p::UNOPPOSABLE_CASUALTIES_INFLICTED as u32);
+                m.set_i16(killer + p::UNOPPOSABLE_CASUALTY_DECAY_TIMER as u32, 750);
+            }
+        }
+    }
+}
+
+/// actor_stimulus.c's `actor_stimulus_prop_acknowledged` (the reappearance
+/// unused): a live prop draws a look; an enemy may surprise the actor (by
+/// its shooting or nearness when not in combat, or shooting close and
+/// unexpected, from the flank or the front), and if unexpected and unseen
+/// before the actor's sure of combat, it's shouted. A seen enemy player
+/// kills the actor under medusa.
+fn stimulus_prop_acknowledged(context: &AiStepContext, host: &impl AiHost, prop_index: i32, mut expected: bool) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let prop = prop_get(m, context, prop_index);
+    let field = |offset: usize| prop + offset as u32;
+    let surprise_distance = m.f32(context.definition + d::PANIC_SURPRISE_DISTANCE as u32);
+    if !m.bool(field(p::DEAD)) {
+        call_simple(context, host, call::LOOK_ACKNOWLEDGED, prop_index);
+        if m.bool(field(p::ENEMY)) {
+            let mut surprise_level = SURPRISE_NONE;
+            let actor_to_prop = m.vector(field(p::ACTOR_TO_PROP));
+            let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+            let flanked =
+                actor_to_prop[0] * facing[0] + actor_to_prop[1] * facing[1] + actor_to_prop[2] * facing[2] < 0.5;
+            let combat_status = m.i16(at(a::STATE_COMBAT_STATUS));
+            let shooting = m.bool(field(p::SHOOTING));
+            let close = m.f32(field(p::DISTANCE)) < surprise_distance;
+            if combat_status == 0 {
+                expected = false;
+                if m.i16(at(a::STATE_MODE)) < MODE_COMBAT {
+                    if shooting {
+                        surprise_level = SURPRISE_UNPREPARED_ENEMY_SHOOTING;
+                    }
+                    if close {
+                        surprise_level = surprise_level.max(SURPRISE_UNPREPARED_ENEMY_CLOSE);
+                    }
+                }
+            } else if combat_status >= COMBAT_STATUS_CLEAR_LOS && !flanked {
+                expected = true;
+            }
+            if !expected && shooting && close {
+                surprise_level = surprise_level.max(if flanked {
+                    SURPRISE_UNEXPECTED_ENEMY_CLOSE_FLANKED_SHOOTING
+                } else {
+                    SURPRISE_UNEXPECTED_ENEMY_CLOSE_SHOOTING
+                });
+            }
+            call_full(
+                context,
+                host,
+                call::SURPRISE_DEBUG,
+                prop_index,
+                surprise_level as i32 | (expected as i32) << 8 | (flanked as i32) << 9,
+                0.0,
+            );
+            if surprise_level > SURPRISE_NONE {
+                stimulus_surprise(context, host, surprise_level, prop_index, Some(actor_to_prop));
+            }
+            if m.i16(at(a::STATE_COMBAT_STATUS)) < COMBAT_STATUS_DEFINITE
+                && !expected
+                && m.i16(field(p::VISIBILITY)) < 2
+                && m.i32(at(a::META_UNIT_INDEX)) != NONE
+            {
+                call_simple(context, host, call::COMMUNICATE_UNEXPECTED_ENEMY, prop_index);
+            }
+        }
+    }
+    if m.bool(field(p::PLAYER))
+        && m.bool(field(p::ENEMY))
+        && !m.bool(field(p::DEAD))
+        && m.i16(at(a::META_TYPE)) != v::_ACTOR_MOUNTED_WEAPON as i16
+    {
+        call_simple(context, host, call::MEDUSA, 0);
+    }
+}
+
+/// actor_stimulus.c's `actor_stimulus_prop_sighted`: a live enemy sighted
+/// (or found again) is shouted.
+fn stimulus_prop_sighted(context: &AiStepContext, host: &impl AiHost, prop_index: i32, initial_acknowledgement: bool) {
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    if !m.bool(prop + p::DEAD as u32)
+        && m.i32(context.actor + a::META_UNIT_INDEX as u32) != NONE
+        && m.bool(prop + p::ENEMY as u32)
+    {
+        call_full(context, host, call::COMMUNICATE_SIGHTED_ENEMY, prop_index, initial_acknowledgement as i32, 0.0);
+    }
 }

@@ -495,6 +495,15 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        A newly perceived danger draws a look.
      - **The C's side, through `actor_perception_call`:** the object's origin and the sense position to it (kept by the game), the object's details (the encounter's blindness, a vehicle's bounding radius, a projectile's perception radius and fuse, a suicide's dying frames), a unit's active prop, the line of sight, visibility and audibility, and the look.
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in the danger's prediction was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The perception update's stimuli in Rust (`halo_map::actor_perception`): actor_stimulus.c's `actor_stimulus_prop_sighted`, `_prop_just_killed`, `_prop_acknowledged`, `_noticed_danger_zone`, `_enter_combat_perceived_enemy` and `_enter_combat_found_body`, with the combat transition and surprise they set, and actor_perception.c's `actor_emotion_flee_with_friends`.
+     - **What Rust does:**
+       - a combat transition, if the actor isn't in combat yet and the new one is no weaker than the one it has: towards a perceived enemy, a found body (whose place it guards, the corpses so far ignored) or a noticed danger;
+       - a stronger surprise than it has: a grenade close by when not in combat; an enemy acknowledged shooting or close while not in combat, or shooting close and unexpected, from the flank or the front;
+       - a friend killed: the panic of its leader type's death, by chance; or, near, by an enemy facing it in view, by chance or as its friends of its type flee (unless two of them fight on); and an unopposable killer's casualties;
+       - the actor has been in combat.
+     - **The flee check's view:** flee-with-friends reads a friend through the C's actor view, at the offsets of `stimuli.panic_type`, the short after `state.mode`, and `state.flee.panic_type`. Rust reads the same bytes.
+     - **The C's side, through `actor_perception_call`:** the prop's pathfinding location, the killer's prop, the look, the shouts (grenade sighted, unexpected enemy, enemy sighted or found), the surprise's debug print, and the medusa cheat. The rest of actor_stimulus.c answers the game's events (damage, impacts, noise, shooting heard) and stays the game's for now.
+     - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in the perceived enemy's look was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

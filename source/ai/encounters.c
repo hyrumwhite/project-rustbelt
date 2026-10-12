@@ -1754,6 +1754,34 @@ void encounter_squad_timer_expire(
 	return;
 }
 
+boolean encounter_port_squad_timer_expire(
+	long encounter_index,
+	short squad_index)
+{
+	struct encounter_datum *encounter = encounter_get(encounter_index);
+	struct encounter_definition *encounter_definition = TAG_BLOCK_GET_ELEMENT(
+		&global_scenario_get()->ai_encounters, DATUM_INDEX_TO_ABSOLUTE_INDEX(encounter_index), struct encounter_definition);
+	struct squad_datum *squad = encounter_get_squad(encounter, squad_index);
+	struct squad_definition *squad_definition = TAG_BLOCK_GET_ELEMENT(
+		&encounter_definition->squads, squad_index, struct squad_definition);
+
+	squad->delay_timer = 0;
+	if (ai_debug.print_rules)
+		console_printf(FALSE, "%s/%s: delay timer finished", encounter_definition->name, squad_definition->name);
+
+	return TEST_FLAG(squad_definition->flags, _squad_magic_sight_after_timer_bit);
+}
+
+void encounter_port_squad_magic_sight(
+	long encounter_index,
+	short squad_index)
+{
+	ai_scripting_magically_see_players(
+		DATUM_INDEX_NEW(
+			DATUM_INDEX_TO_ABSOLUTE_INDEX(encounter_index),
+			FLAG(_ai_reference_squad_bit) | (squad_index & UNSIGNED_CHAR_MAX)));
+}
+
 void encounters_create_for_new_map(
 	void)
 {
@@ -2480,8 +2508,8 @@ void encounter_call(
 			call->result = seed_random_range(get_global_random_seed_address(), (short)call->a, (short)call->b);
 			break;
 
-		case _encounter_call_squad_timer_expire:
-			encounter_squad_timer_expire(call->a, (short)call->b);
+		case _encounter_call_squad_magic_sight:
+			encounter_port_squad_magic_sight(call->a, (short)call->b);
 			break;
 
 		case _encounter_call_follow_target_count:
@@ -4284,7 +4312,11 @@ static void encounter_update_squads(
 				if (squad->delay_timer > ENCOUNTER_UPDATE_INTERVAL)
 					squad->delay_timer -= ENCOUNTER_UPDATE_INTERVAL;
 				else
-					encounter_call_simple(_encounter_call_squad_timer_expire, NONE, encounter_index, squad_index, NULL); /* port: a call */
+				{
+					/* port: the timer here, the magic sight a call */
+					if (encounter_port_squad_timer_expire(encounter_index, squad_index))
+						encounter_call_simple(_encounter_call_squad_magic_sight, NONE, encounter_index, squad_index, NULL);
+				}
 			}
 			else
 			{

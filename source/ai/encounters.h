@@ -210,6 +210,15 @@ void encounter_force_deactivate(
 void encounter_squad_timer_expire(
 	long encounter_index,
 	short squad_index);
+/* port: encounter_squad_timer_expire in two, as the Rust port does it: the
+timer (and the rules' console line), whether the squad then magically sees
+the players; and that sight, the game's (a call) */
+boolean encounter_port_squad_timer_expire(
+	long encounter_index,
+	short squad_index);
+void encounter_port_squad_magic_sight(
+	long encounter_index,
+	short squad_index);
 boolean encounter_spawn_actor(
 	long encounter_index,
 	short squad_index);

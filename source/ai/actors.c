@@ -4734,6 +4734,7 @@ void actors_port_step_context(
 	context->structure_bsp_index = global_structure_bsp_index;
 	context->encounter_data = (unsigned long)encounter_data;
 	context->pursuit_data = (unsigned long)pursuit_data;
+	context->squad_array = (unsigned long)squad_array;
 }
 
 /* port: the arrays the dispatch steps' checks follow (halo_sim.c): the
@@ -4744,7 +4745,7 @@ long actors_port_step_regions(
 {
 	long count = 0;
 
-	if (maximum < 4 || !encounter_data || !pursuit_data)
+	if (maximum < 5 || !encounter_data || !pursuit_data || !squad_array)
 		return 0;
 	regions[count].address = (unsigned long)encounter_data;
 	regions[count++].size = sizeof(struct data_array);
@@ -4754,6 +4755,8 @@ long actors_port_step_regions(
 	regions[count++].size = sizeof(struct data_array);
 	regions[count].address = (unsigned long)pursuit_data->data;
 	regions[count++].size = pursuit_data->maximum_count * pursuit_data->size;
+	regions[count].address = (unsigned long)squad_array;
+	regions[count++].size = MAXIMUM_SQUADS_PER_MAP * sizeof(struct squad_datum);
 
 	return count;
 }

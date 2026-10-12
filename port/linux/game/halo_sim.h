@@ -922,6 +922,7 @@ struct halo_sim_ai_step_context
 	long structure_bsp_index;
 	unsigned long encounter_data;
 	unsigned long pursuit_data;
+	unsigned long squad_array;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -1261,8 +1262,8 @@ enum
 	_actions_port_handler_call_recent_damaging_prop,
 	_actions_port_handler_call_attached_projectile_prop,
 	_actions_port_handler_call_burning_prop,
-	_actions_port_handler_call_squad_delayed,
-	_actions_port_handler_call_squad_timer_expire,
+	_actions_port_handler_call_squad_delayed, /* now Rust's */
+	_actions_port_handler_call_squad_timer_expire, /* now Rust's */
 	_actions_port_handler_call_conversation_flags,
 	_actions_port_handler_call_animation_impulse,
 	_actions_port_handler_call_communication,
@@ -1287,7 +1288,7 @@ enum
 	_actions_port_handler_call_charge,
 	_actions_port_handler_call_vehicle_definition,
 	_actions_port_handler_call_fight,
-	_actions_port_handler_call_encounter_stand_down,
+	_actions_port_handler_call_encounter_stand_down, /* now Rust's */
 	_actions_port_handler_call_pursuit_desires,
 	_actions_port_handler_call_pursuit_availability,
 	_actions_port_handler_call_find_prop_pathfinding_location,
@@ -1325,7 +1326,7 @@ enum
 	_actions_port_handler_call_vehicle_exists,
 	_actions_port_handler_call_vehicle_setup,
 	_actions_port_handler_call_unit_ready_to_throw,
-	_actions_port_handler_call_mark_grenade_thrown,
+	_actions_port_handler_call_mark_grenade_thrown, /* now Rust's */
 	_actions_port_handler_call_encounter_grenade_timer,
 	_actions_port_handler_call_find_grenade_target,
 	_actions_port_handler_call_collateral_damage,
@@ -1365,6 +1366,7 @@ enum
 	_actions_port_handler_call_retreat_successful,
 	_actions_port_handler_call_playfight_nearby_target,
 	_actions_port_handler_call_pursuit_find_nearby_actors,
+	_actions_port_handler_call_squad_magic_sight,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */
@@ -2289,7 +2291,7 @@ enum
 	_encounter_call_team_is_ally,
 	_encounter_call_spawn_actor,
 	_encounter_call_random_range,
-	_encounter_call_squad_timer_expire,
+	_encounter_call_squad_timer_expire, /* now Rust's but its magic sight */
 	_encounter_call_follow_target_count,
 	_encounter_call_follow_target,
 	_encounter_call_object_origin,
@@ -2305,6 +2307,7 @@ enum
 	_encounter_call_set_actor_active,
 	_encounter_call_verify_activation,
 	_encounter_call_swarm_in_pvs,
+	_encounter_call_squad_magic_sight,
 };
 
 void encounter_call(struct halo_sim_ai_call *call);

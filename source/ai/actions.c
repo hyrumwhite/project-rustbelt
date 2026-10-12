@@ -1217,17 +1217,8 @@ void actions_port_handler_call(
 			break;
 		}
 
-		case _actions_port_handler_call_squad_delayed:
-		{
-			struct encounter_datum *encounter = encounter_get(actor->meta.encounter_index);
-			struct squad_datum *squad = encounter_get_squad(encounter, actor->meta.squad_index);
-
-			call->result = squad->delay_timer > 0;
-			break;
-		}
-
-		case _actions_port_handler_call_squad_timer_expire:
-			encounter_squad_timer_expire(actor->meta.encounter_index, actor->meta.squad_index);
+		case _actions_port_handler_call_squad_magic_sight:
+			encounter_port_squad_magic_sight(actor->meta.encounter_index, actor->meta.squad_index);
 			break;
 
 		case _actions_port_handler_call_conversation_flags:
@@ -1391,10 +1382,6 @@ void actions_port_handler_call(
 			actor_action_change(actor_index, _actor_action_fight, &state);
 			break;
 		}
-
-		case _actions_port_handler_call_encounter_stand_down:
-			call->result = encounter_get(actor->meta.encounter_index)->stand_down ? 1 : 0;
-			break;
 
 		case _actions_port_handler_call_find_prop_pathfinding_location:
 			actor_perception_find_prop_pathfinding_location(actor_index, call->a);
@@ -1668,10 +1655,6 @@ void actions_port_handler_call(
 				!(unit->object.current_body_damage > 0.0f);
 			break;
 		}
-
-		case _actions_port_handler_call_mark_grenade_thrown:
-			encounter_get(actor->meta.encounter_index)->last_grenade_throw_time = game_time_get();
-			break;
 
 		case _actions_port_handler_call_encounter_grenade_timer:
 		{
@@ -2359,11 +2342,13 @@ boolean actor_action_deny_transition(
 
 	if (actor->meta.encounter_index != NONE)
 	{
-		if (actions_port_handler_simple(actor_index, _actions_port_handler_call_squad_delayed, 0))
+		/* port: the squad's timer directly, its magic sight a call */
+		if (encounter_get_squad(encounter_get(actor->meta.encounter_index), actor->meta.squad_index)->delay_timer > 0)
 		{
 			if (actor->state.combat_status >= 5)
 			{
-				actions_port_handler_simple(actor_index, _actions_port_handler_call_squad_timer_expire, 0);
+				if (encounter_port_squad_timer_expire(actor->meta.encounter_index, actor->meta.squad_index))
+					actions_port_handler_simple(actor_index, _actions_port_handler_call_squad_magic_sight, 0);
 			}
 			else
 			{
@@ -3512,7 +3497,7 @@ boolean actor_action_handle_lost_contact(
 	boolean wants_postcombat_guard = FALSE;
 
 	if (actor->meta.encounter_index != NONE &&
-		actions_port_handler_simple(actor_index, _actions_port_handler_call_encounter_stand_down, 0) &&
+		encounter_get(actor->meta.encounter_index)->stand_down && /* port: directly */
 		actor->state.combat_status <= 2 &&
 		!actor->state.artificial_combat_status &&
 		!actor->state.suspicion_combat_status)
@@ -4171,7 +4156,7 @@ boolean actor_action_try_to_throw_grenade(
 				actor->control.grenade_trying_to_throw = FALSE;
 
 				if (actor->meta.encounter_index != NONE)
-					actions_port_handler_simple(actor_index, _actions_port_handler_call_mark_grenade_thrown, 0);
+					encounter_get(actor->meta.encounter_index)->last_grenade_throw_time = game_time_get(); /* port: directly */
 
 				result = TRUE;
 			}

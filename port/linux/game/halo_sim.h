@@ -1102,6 +1102,13 @@ enum
 	_actor_perception_call_projectile_sample,
 	_actor_perception_call_projectile_owner,
 	_actor_perception_call_overflow_warning,
+	_actor_perception_call_danger_sense,
+	_actor_perception_call_danger_details,
+	_actor_perception_call_active_prop_of_unit,
+	_actor_perception_call_danger_line_of_sight,
+	_actor_perception_call_danger_visibility,
+	_actor_perception_call_danger_audibility,
+	_actor_perception_call_look_danger,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's

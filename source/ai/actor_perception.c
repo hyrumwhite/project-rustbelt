@@ -6441,6 +6441,10 @@ static unsigned long actor_perception_port_swarm_pvs[BIT_VECTOR_SIZE_IN_LONGS(MA
 static unsigned long *actor_perception_port_pvs;
 static struct actor_position_data actor_perception_port_test_position;
 
+/* port: the sense position to the danger zone's object, kept between the
+danger zone refresh's calls */
+static struct actor_position_data actor_perception_port_danger_position;
+
 /* port: the actor's sense position kept between the sense-position call
 and the status refresh's (the Rust port's reads only its body position) */
 static struct actor_position_data actor_perception_port_position;
@@ -7347,6 +7351,129 @@ void actor_perception_call(
 				last_refresh_overflow_warning_time = game_time_get();
 			}
 			break;
+
+		case _actor_perception_call_danger_sense:
+		{
+			real_point3d origin;
+
+			object_get_origin(call->a, &origin);
+			actor_perception_find_sense_position(actor_index, &origin, NONE, &actor_perception_port_danger_position);
+			memcpy(call->output, &origin, sizeof(real_point3d));
+			memcpy(call->output + 3, &actor_perception_port_danger_position.body_position, sizeof(real_point3d));
+			break;
+		}
+
+		case _actor_perception_call_danger_details:
+		{
+			struct object_datum *object = object_get(call->a);
+			struct encounter_datum *encounter =
+				actor->meta.encounter_index == NONE ?
+					NULL :
+					encounter_get(actor->meta.encounter_index);
+
+			call->result = encounter != NULL && encounter->blind;
+			call->result2 = NONE;
+			switch (call->b)
+			{
+			case _actor_danger_zone_vehicle:
+				call->output[0] = vehicle_definition_get(object->definition_index)->object.bounding_radius;
+				break;
+
+			case _actor_danger_zone_projectile:
+			{
+				struct projectile_datum *projectile = (struct projectile_datum *)object;
+
+				call->output[0] = projectile_definition_get(object->definition_index)->projectile.ai_perception_radius;
+				call->output[1] = projectile->projectile.detonation_timer;
+				call->output[2] = projectile->projectile.detonation_timer_delta;
+				break;
+			}
+
+			case _actor_danger_zone_suicide:
+			{
+				short animation_state;
+				short frames_remaining =
+					unit_get_animation_frames_remaining(call->a, &animation_state);
+
+				call->result2 = animation_state == _unit_state_dying ? frames_remaining : NONE;
+				break;
+			}
+			}
+			break;
+		}
+
+		case _actor_perception_call_active_prop_of_unit:
+			call->result = prop_get_active_by_unit_index(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_danger_line_of_sight:
+		{
+			struct object_datum *object = object_get(actor->danger_zone.object_index);
+			short cluster_index = object->object.location.cluster_index;
+
+			if (object->object.parent_object_index != NONE)
+			{
+				cluster_index =
+					object_get(object_get_ultimate_parent(actor->danger_zone.object_index))
+						->object.location.cluster_index;
+			}
+			call->result = ai_test_line_of_sight(
+				&actor_perception_port_danger_position.head_position,
+				actor_perception_port_danger_position.body_location.cluster_index,
+				&actor->danger_zone.position,
+				cluster_index,
+				0,
+				FALSE,
+				actor->danger_zone.object_index,
+				actor->input.vehicle_index != NONE);
+			break;
+		}
+
+		case _actor_perception_call_danger_visibility:
+			call->result = actor_visibility_at_point(
+				actor_index,
+				&actor_perception_port_danger_position,
+				&actor->danger_zone.position,
+				0,
+				(short)call->a,
+				TRUE,
+				FALSE,
+				(short)call->b);
+			break;
+
+		case _actor_perception_call_danger_audibility:
+		{
+			struct object_datum *object = object_get(actor->danger_zone.object_index);
+			struct unit_definition *vehicle_definition = vehicle_definition_get(object->definition_index);
+			struct location const *location;
+
+			if (object->object.parent_object_index == NONE)
+				location = &object->object.location;
+			else
+				location = &object_get(object_get_ultimate_parent(actor->danger_zone.object_index))->object.location;
+			call->result = actor_audibility_at_point(
+				actor_index,
+				&actor_perception_port_danger_position,
+				&actor->danger_zone.position,
+				location,
+				vehicle_definition->unit.constant_sound,
+				1.0f,
+				(short)call->a);
+			break;
+		}
+
+		case _actor_perception_call_look_danger:
+		{
+			struct direction_specification direction;
+
+			direction.type = _direction_specification_danger;
+			actor_look_secondary(
+				actor_index,
+				_secondary_look_dangerous_object,
+				_secondary_look_priority_default,
+				&direction);
+			break;
+		}
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -8382,6 +8509,149 @@ static void actor_perception_port_refresh(
 	actor_perception_call_simple(actor_index, _actor_perception_call_marker_end, 0);
 }
 
+/* port: actor_perception_refresh_danger_zone as the Rust port's does it
+(crates/halo_map's actor_perception), asking through actor_perception_call */
+static void actor_perception_port_refresh_danger_zone(
+	long actor_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct object_datum *object;
+	struct halo_sim_ai_call sense;
+	struct halo_sim_ai_call details;
+	real_point3d body;
+	boolean perceived = FALSE;
+	boolean attached_to_us = FALSE;
+	boolean currently_perceived;
+	boolean encounter_blind;
+
+	if (actor->danger_zone.danger_type <= _actor_danger_zone_none)
+		return;
+	object = object_try_and_get(actor->danger_zone.object_index);
+	if (object == NULL)
+	{
+		actor->danger_zone.danger_type = _actor_danger_zone_none;
+		return;
+	}
+
+	actor_perception_port_status_call(actor_index, _actor_perception_call_danger_sense,
+		actor->danger_zone.object_index, 0, &sense);
+	memcpy(&body, sense.output + 3, sizeof(body));
+	memcpy(&actor->danger_zone.position, sense.output, sizeof(real_point3d));
+	actor->danger_zone.velocity = object->object.translational_velocity;
+	actor->danger_zone.current_distance_from_actor =
+		distance3d(&body, &actor->danger_zone.position);
+	midpoint3d(
+		point_from_line3d(
+			&actor->danger_zone.position,
+			&actor->danger_zone.velocity,
+			45.0f,
+			&actor->danger_zone.predict_danger_position),
+		&actor->danger_zone.position,
+		&actor->danger_zone.bounding_sphere_center);
+	actor->danger_zone.bounding_sphere_radius =
+		distance3d(&actor->danger_zone.bounding_sphere_center, &actor->danger_zone.position) +
+		actor->danger_zone.danger_radius;
+
+	currently_perceived = actor->danger_zone.currently_perceived;
+	actor_perception_port_status_call(actor_index, _actor_perception_call_danger_details,
+		actor->danger_zone.object_index, actor->danger_zone.danger_type, &details);
+	encounter_blind = (details.result & 1) != 0;
+	switch (actor->danger_zone.danger_type)
+	{
+	case _actor_danger_zone_vehicle:
+		if (magnitude_squared3d(&actor->danger_zone.velocity) < 0.000044444444065040908f ||
+			actor->danger_zone.current_distance_from_actor > details.output[0] + 10.0f)
+		{
+			actor->danger_zone.danger_type = _actor_danger_zone_none;
+			break;
+		}
+		perceived = currently_perceived;
+		if (!perceived)
+		{
+			long driver = ((struct unit_datum *)object)->unit.driver_object_index;
+			long prop_index = driver != NONE ?
+				actor_perception_call_simple(actor_index, _actor_perception_call_active_prop_of_unit, driver) :
+				NONE;
+
+			if (driver != NONE && prop_index != NONE)
+			{
+				perceived = prop_get(prop_index)->perception >= _actor_perception_full;
+			}
+			else
+			{
+				boolean blind = actor->state.mode == _actor_mode_asleep || encounter_blind;
+				long line_of_sight = actor_perception_call_simple(actor_index, _actor_perception_call_danger_line_of_sight, 0);
+				boolean visible = FALSE;
+
+				if (!blind)
+				{
+					short knowledge = actor_get_perception_knowledge(actor_index, NONE);
+
+					visible = (short)actor_perception_call_full(actor_index, _actor_perception_call_danger_visibility,
+						line_of_sight, knowledge, 0.0f, NULL) >= _actor_perception_full;
+				}
+				if (visible ||
+					(short)actor_perception_call_simple(actor_index, _actor_perception_call_danger_audibility,
+						line_of_sight) >= _actor_perception_full)
+				{
+					perceived = TRUE;
+				}
+			}
+		}
+		break;
+
+	case _actor_danger_zone_projectile:
+		if (actor->meta.unit_index != NONE &&
+			object->object.parent_object_index == actor->meta.unit_index)
+		{
+			attached_to_us = TRUE;
+		}
+		if (details.output[1] > 0.0f && details.output[2] > 0.0f)
+		{
+			actor->danger_zone.projectile.time_until_explosion =
+				(short)fast_ftol((1.0f - details.output[1]) / details.output[2]);
+		}
+		else
+		{
+			actor->danger_zone.projectile.time_until_explosion = NONE;
+		}
+		perceived = currently_perceived || attached_to_us;
+		if (!perceived &&
+			actor->state.mode != _actor_mode_asleep &&
+			!encounter_blind &&
+			actor->danger_zone.current_distance_from_actor < details.output[0])
+		{
+			long line_of_sight = actor_perception_call_simple(actor_index, _actor_perception_call_danger_line_of_sight, 0);
+			short knowledge = actor_get_perception_knowledge(actor_index, NONE);
+
+			if ((short)actor_perception_call_full(actor_index, _actor_perception_call_danger_visibility,
+					line_of_sight, knowledge, 0.0f, NULL) >= _actor_perception_full)
+			{
+				perceived = TRUE;
+			}
+		}
+		break;
+
+	case _actor_danger_zone_suicide:
+		perceived = currently_perceived;
+		if (!perceived)
+		{
+			long prop_index = actor_perception_call_simple(actor_index, _actor_perception_call_active_prop_of_unit,
+				actor->danger_zone.object_index);
+
+			if (prop_index != NONE)
+				perceived = prop_get(prop_index)->perception >= _actor_perception_full;
+		}
+		actor->danger_zone.suicide.time_until_death = (short)details.result2;
+		break;
+	}
+
+	if (perceived && !actor->danger_zone.currently_perceived)
+		actor_perception_call_simple(actor_index, _actor_perception_call_look_danger, 0);
+	actor->danger_zone.currently_perceived = perceived;
+	actor->danger_zone.attached_to_us = attached_to_us;
+}
+
 static real actor_perception_call_random(
 	long actor_index)
 {
@@ -8432,7 +8702,7 @@ static void actor_perception_update_game(
 			actor_perception_port_refresh(actor_index);
 		}
 
-		actor_perception_call_simple(actor_index, _actor_perception_call_refresh_danger_zone, 0);
+		actor_perception_port_refresh_danger_zone(actor_index);
 
 		if (actor->danger_zone.danger_type > _actor_danger_zone_none)
 		{

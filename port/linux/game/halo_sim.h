@@ -2118,6 +2118,18 @@ void halo_sim_path_smooth(void *state, short raw_step_count, void const *raw_ste
 	halo_sim_path_smooth_function game);
 int halo_sim_path_approach_point(void *state, float const *end_point, long end_surface_index, int *straight_line,
 	float *approach_point, unsigned long breakable_surface_flags, halo_sim_path_approach_function game);
+
+/* path.c's path_state_build_path (a path_result is HALO_SIM_PATH_RESULT_SIZE
+bytes): the game's or Rust's, which gathers the discs of the objects in the
+way through the game's `discs_in_sphere` (obstacles_get_discs_in_sphere);
+`build_flags` bit 0 no smoothing, bit 1 no obstacle avoidance (a local
+game's debug settings) */
+#define HALO_SIM_PATH_RESULT_SIZE 0x5C
+typedef void (*halo_sim_path_discs_function)(void *obstacles, float const *center, float radius,
+	float const *movement_direction, long ignore_source_object_index, long ignore_target_object_index);
+int halo_sim_path_build(void *state, void *debug, void *path, unsigned long structure,
+	unsigned long breakable_surface_flags, long build_flags, halo_sim_path_discs_function discs_in_sphere,
+	int (*game)(void *state, void *path));
 void halo_sim_ai_update_check(void);
 void halo_sim_ai_update_note(struct halo_sim_ai_update_call const *call);
 void ai_update_call(struct halo_sim_ai_update_call *call);

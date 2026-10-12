@@ -174,6 +174,7 @@ symbols in this file:
 typedef char path_state_port_size_assert[sizeof(struct path_state) == HALO_SIM_PATH_STATE_SIZE ? 1 : -1];
 typedef char path_debug_storage_port_size_assert[
 	sizeof(struct path_debug_storage) == HALO_SIM_PATH_DEBUG_SIZE ? 1 : -1];
+typedef char path_result_port_size_assert[sizeof(struct path_result) == HALO_SIM_PATH_RESULT_SIZE ? 1 : -1];
 
 /* ---------- constants */
 
@@ -876,10 +877,57 @@ static int path_state_approach_point_game(
 	return result;
 }
 
+/* port: the game's build and its discs, for halo_sim's paths */
+static int path_state_build_path_game(
+	void *state,
+	void *path);
+
+static void path_state_build_path_port_discs_in_sphere(
+	void *obstacles,
+	float const *center,
+	float radius,
+	float const *movement_direction,
+	long ignore_source_object_index,
+	long ignore_target_object_index)
+{
+	obstacles_get_discs_in_sphere(
+		(struct obstacles *)obstacles,
+		(real_point3d const *)center,
+		radius,
+		(real_vector3d const *)movement_direction,
+		ignore_source_object_index,
+		ignore_target_object_index);
+}
+
 boolean path_state_build_path(
 	struct path_state *state,
 	struct path_result *path)
 {
+	/* port: the game's or Rust's (halo_sim's paths) */
+	long build_flags = 0;
+
+	if (game_connection() == _game_connection_local && ai_debug.path_disable_smoothing)
+		build_flags |= 1;
+	if (game_connection() == _game_connection_local && ai_debug.path_disable_obstacle_avoidance)
+		build_flags |= 2;
+
+	return (boolean)halo_sim_path_build(
+		state,
+		state->debug,
+		path,
+		(unsigned long)global_structure_bsp_get(),
+		(unsigned long)breakable_surface_flags_get(),
+		build_flags,
+		path_state_build_path_port_discs_in_sphere,
+		path_state_build_path_game);
+}
+
+static int path_state_build_path_game(
+	void *state_data,
+	void *path_data)
+{
+	struct path_state *state = (struct path_state *)state_data;
+	struct path_result *path = (struct path_result *)path_data;
 	short node_index;
 	struct path_node *node;
 	short raw_step_count;

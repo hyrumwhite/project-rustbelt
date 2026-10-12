@@ -39,6 +39,7 @@ pub mod preprocess;
 pub mod bipeds;
 pub mod damage;
 pub mod damage_update;
+pub mod data_packets;
 pub mod devices;
 pub mod effects;
 pub mod particles;
@@ -63,7 +64,7 @@ pub mod world;
 pub mod world_steps;
 
 /// The interface's version: the game checks it before calling anything.
-pub const VERSION: u32 = 115;
+pub const VERSION: u32 = 116;
 
 /// A level's structure BSP, as the simulation tests it.
 pub(crate) struct Structure {

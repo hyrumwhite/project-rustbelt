@@ -752,7 +752,27 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every perception, combat, decision loop and action update agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out.
        - Planted errors were caught: the cover distance on b30 and a50, the sound distance on b30, the vision angles on b30, and a swarm's sense cluster on d20 and c20. A planted error in the pitch limit went unseen: targets that far above an actor's view are rare.
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
-6. Networking
+6. Networking ← *in progress*
+   - **The way in:** OpenCE's networking is about 35,000 lines: the game's own messages and lockstep client/server (`source/networking`), the port's co-op and distributed netcode (`port/linux/game/network_*.c`), and Bungie's transport. It moves one checkable piece at a time, starting from the bytes on the wire. A system link session on one machine (OpenCE's `HALO_NETWORK_TEST`, host and join on loopback addresses) exercises it, with each machine's per-second player positions compared.
+   - [x] The packet codec in Rust (`halo_map::data_packets`, under `data_packets`): memory/data_packets.c, data_encoding.c and data_packet_groups.c. The game's messages and its key agreement go through it.
+     - **What Rust does:** a packet's struct is described by its definition's fields (bytes, shorts, longs, 64-bit integers, strings, sized data, nested arrays, padding). It is encoded big-endian with its version byte first and its type's header byte last, and decoded back. This is the C's walk exactly:
+       - fields' sizes as verification leaves them
+       - fields a version leaves out
+       - bad counts failing the packet
+       - decoding's byte swap of the received buffer in place
+
+       halo_sim reads the group's definitions where the game holds them.
+     - **The check:** each encoding is compared with Rust's of the same struct: result, error, size and bytes. Each decoding is compared with Rust's of the same received bytes, from copies kept before the game's: the struct, the type, the version, the size and the swapped buffer.
+     - **Found on the way:** the packet table's order doesn't match the message enum for types 8 to 10. The pregame keep-alive (a 2-byte struct) is encoded and decoded with the graceful exit's definition (one long). Its decoding writes two bytes past the struct, onto the caller's message size. The begin-game message, in turn, goes out with only its first short.
+       - Rust keeps this exactly. It writes the caller's size before the struct, as the game does, so the same overrun lands the same way. The check compares the size the game set.
+       - The wire format is left as it is, for now.
+     - **Results:**
+       - In minute-long sessions on Blood Gulch, every encoding (2,048 on the host) and decoding (1,024) agrees on both machines.
+       - A planted error in the 4-byte swap was caught at once. A planted error in a string's length bound went unseen: no string in the traffic fills its field.
+       - **Rust in charge:**
+         - With both machines' codec in Rust, the machines' player positions agree each second as they do with the C. The one difference is a millimetre on the joining player at one tick, in both cases.
+         - A Rust host and a C joiner agree on all 51 seconds, with seven hits dealt across the link.
+         - With all fifty-two systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
 When nothing is left in the 32-bit process, the bridge goes away.
 

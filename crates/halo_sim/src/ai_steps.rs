@@ -167,10 +167,10 @@ fn structure_test_vector(
     point: [f32; 3],
     vector: [f32; 3],
     maximum_t: f32,
-) -> Option<f32> {
+) -> Option<(f32, i32)> {
     let flags_address = if breakable_surfaces { context.breakable_surface_flags } else { 0 };
     let structure = crate::structure(context.structure_bsp_index, flags_address as usize as *const u8)?;
-    structure.collision.test_vector(flags, point, vector, maximum_t).map(|hit| hit.t)
+    structure.collision.test_vector(flags, point, vector, maximum_t).map(|hit| (hit.t, hit.surface as i32))
 }
 
 impl AiHost for LiveHost {
@@ -185,7 +185,7 @@ impl AiHost for LiveHost {
         point: [f32; 3],
         vector: [f32; 3],
         maximum_t: f32,
-    ) -> Option<f32> {
+    ) -> Option<(f32, i32)> {
         structure_test_vector(context, breakable_surfaces, flags, point, vector, maximum_t)
     }
     fn call(&self, call: &mut AiCall) {
@@ -224,7 +224,7 @@ impl AiHost for CheckHost<'_> {
         point: [f32; 3],
         vector: [f32; 3],
         maximum_t: f32,
-    ) -> Option<f32> {
+    ) -> Option<(f32, i32)> {
         structure_test_vector(context, breakable_surfaces, flags, point, vector, maximum_t)
     }
     fn call(&self, call: &mut AiCall) {

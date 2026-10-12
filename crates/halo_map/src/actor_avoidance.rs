@@ -297,7 +297,7 @@ impl Avoidance<'_> {
         if host.structure_test_vector(context, false, flags, self.origin, to_origin, 1.0).is_some() {
             result = OBSTRUCTED_STRUCTURE;
             collision_t = 0.0;
-        } else if let Some(t) = host.structure_test_vector(context, false, flags, ray_origin, ray_direction, 1.0) {
+        } else if let Some((t, _)) = host.structure_test_vector(context, false, flags, ray_origin, ray_direction, 1.0) {
             result = OBSTRUCTED_STRUCTURE;
             collision_t = t;
         }

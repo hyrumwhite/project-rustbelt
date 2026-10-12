@@ -1860,7 +1860,16 @@ fn vehicle_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
         if !vehicle_exists {
             m.w32(vehicle_index, NONE as u32);
             m.set_bool(failed, true);
-        } else if call_simple(context, host, vehicle_call::DESIRABLE, 0) == 0 {
+        } else if !crate::vehicle_choice::desirable(
+            context,
+            host,
+            m.i32(vehicle_index),
+            !m.bool(at(a::STATE_VEHICLE_IMPROMPTU)),
+            m.f32(at(a::STATE_VEHICLE_ATTEMPT_DISTANCE)),
+            m.f32(at(a::STATE_VEHICLE_CONTINUE_DISTANCE)),
+            false,
+            true,
+        ) {
             m.set_bool(failed, true);
         } else {
             let current_time = context.game_time;
@@ -1878,13 +1887,18 @@ fn vehicle_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                 }
             }
             if m.i16(counter) < 8 {
-                let seat = call_full(context, host, vehicle_call::EVALUATE_SEAT, 0, 0, &[]);
-                if seat.result & 1 != 0 {
-                    let mut within_range = seat.result & 2 != 0;
-                    let mut correct_facing = seat.result & 4 != 0;
-                    let could_fake = seat.result & 8 != 0;
-                    let entry_point = [seat.output[0], seat.output[1], seat.output[2]];
-                    let entry_facing = [seat.output[3], seat.output[4], seat.output[5]];
+                let evaluated = crate::vehicle_choice::evaluate_seat(
+                    context,
+                    host,
+                    m.i32(vehicle_index),
+                    m.i16(at(a::STATE_VEHICLE_SEAT_INDEX)),
+                );
+                if let Some(seat) = evaluated {
+                    let mut within_range = seat.within_range;
+                    let mut correct_facing = seat.correct_facing;
+                    let could_fake = seat.could_potentially_fake;
+                    let entry_point = seat.entry_point;
+                    let entry_facing = seat.entry_facing;
                     let fake_timer = at(a::STATE_VEHICLE_FAKE_ENTRY_POTENTIAL_TIMER);
                     if could_fake {
                         m.set_i16(fake_timer, m.i16(fake_timer).wrapping_add(1));
@@ -1904,7 +1918,15 @@ fn vehicle_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                         }
                     } else if m.bool(at(a::META_TIMESLICE)) {
                         let mut moving = false;
-                        if call_simple(context, host, vehicle_call::FIND_DESTINATION, 0) != 0 {
+                        let mut ignore_hint = m.bool(at(a::STATE_VEHICLE_IGNORE_HINT));
+                        let destination =
+                            crate::vehicle_choice::find_destination(context, host, m.i32(vehicle_index), &seat, &mut ignore_hint);
+                        m.set_bool(at(a::STATE_VEHICLE_IGNORE_HINT), ignore_hint);
+                        if let Some((point, surface_index)) = destination {
+                            for (i, component) in point.into_iter().enumerate() {
+                                m.set_f32(at(a::STATE_VEHICLE_DESTINATION_POINT) + 4 * i as u32, component);
+                            }
+                            m.w32(at(a::STATE_VEHICLE_DESTINATION_SURFACE_INDEX), surface_index as u32);
                             moving = actor_path::actor_move_to_point(
                                 context,
                                 host,

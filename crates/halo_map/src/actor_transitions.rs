@@ -3546,13 +3546,12 @@ pub fn vehicle_setup_impromptu(
     if m.i32(at(a::INPUT_VEHICLE_INDEX)) != NONE
         || m.bool(at(a::META_SWARM))
         || m.i16(at(a::STATE_ACTION)) == ACTION_VEHICLE
-        || call_full(context, host, call::VEHICLE_DESIRABLE, vehicle_index, 0, &[attempt_distance, continue_distance]).result
-            == 0
+        || !crate::vehicle_choice::desirable(context, host, vehicle_index, false, attempt_distance, continue_distance, false, false)
     {
         return None;
     }
     data.set_i32(a::STATE_VEHICLE_VEHICLE_INDEX, vehicle_index);
-    let seat_index = call_simple(context, host, call::FIND_IMPROMPTU_SEAT, vehicle_index) as i16;
+    let (seat_index, seat) = crate::vehicle_choice::find_impromptu_seat(context, host, vehicle_index);
     data.set_i16(a::STATE_VEHICLE_SEAT_INDEX, seat_index);
     if seat_index == NONE as i16 {
         return None;
@@ -3561,14 +3560,13 @@ pub fn vehicle_setup_impromptu(
     if call_full(context, host, call::HAS_ENTER_ANIMATION, vehicle_index, seat_index as i32, &[]).result == 0 {
         return None;
     }
-    let destination = call_full(context, host, call::FIND_VEHICLE_DESTINATION, vehicle_index, 0, &[]);
-    if destination.result == 0 {
+    let Some((point, surface_index)) = crate::vehicle_choice::find_destination(context, host, vehicle_index, &seat, &mut false)
+    else {
         return None;
-    }
-    let point = destination.vector();
+    };
     data.set_vector(a::STATE_VEHICLE_DESTINATION_POINT, point);
-    data.set_i32(a::STATE_VEHICLE_DESTINATION_SURFACE_INDEX, destination.result2);
-    if !crate::actor_path::actor_move_to_point(context, host, point, destination.result2, vehicle_index) {
+    data.set_i32(a::STATE_VEHICLE_DESTINATION_SURFACE_INDEX, surface_index);
+    if !crate::actor_path::actor_move_to_point(context, host, point, surface_index, vehicle_index) {
         return None;
     }
     Some(data)

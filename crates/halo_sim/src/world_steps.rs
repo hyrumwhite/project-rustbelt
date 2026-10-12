@@ -94,7 +94,7 @@ impl AiHost for LiveHost {
         // SAFETY: the game's callback
         unsafe { (self.call)(call) };
     }
-    fn structure_test_vector(&self, _: &AiStepContext, _: bool, _: u32, _: [f32; 3], _: [f32; 3], _: f32) -> Option<f32> {
+    fn structure_test_vector(&self, _: &AiStepContext, _: bool, _: u32, _: [f32; 3], _: [f32; 3], _: f32) -> Option<(f32, i32)> {
         None
     }
 }
@@ -138,7 +138,7 @@ impl AiHost for CheckHost<'_> {
     fn memory(&self) -> &dyn AiMemory {
         &GameMemory
     }
-    fn structure_test_vector(&self, _: &AiStepContext, _: bool, _: u32, _: [f32; 3], _: [f32; 3], _: f32) -> Option<f32> {
+    fn structure_test_vector(&self, _: &AiStepContext, _: bool, _: u32, _: [f32; 3], _: [f32; 3], _: f32) -> Option<(f32, i32)> {
         None
     }
     fn call(&self, call: &mut AiCall) {

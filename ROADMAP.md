@@ -691,6 +691,16 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every decision loop agrees in minute-long runs of the levels, with none left out.
        - A planted error in the target's height was caught on b30. One in a player's threat (ten to nine) can't show, since it still clears the minimum count.
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The choice of a vehicle and its seat in Rust (`halo_map::vehicle_choice`, under `actor_dispatch`): action_vehicle.c's `action_vehicle_desirable`, `action_vehicle_evaluate_seat`, `action_vehicle_find_impromptu_seat` and `action_vehicle_find_destination`, for the vehicle transition's impromptu entry and the vehicle action.
+     - **What Rust does:**
+       - A vehicle is worth entering unless it's dead or upturned, too far, or (for a new attempt) moving.
+       - A seat must be free and allowed (noncombatants only where the definition forbids vehicle combat), and not claimed by a friend nearer it. It is weighed by distance and by the variant's gunner or passenger preference, and the best one is chosen.
+       - The destination walks round the vehicle's sphere (or its AI avoidance radius) towards the seat's entrance or hint point, steps sideways when close, and drops onto the ground below (Rust's own structure ray, now giving its surface). It keeps the avoidance's debug record.
+     - **The C's side:** the seats' status (filled, for noncombatants, a gunner's), their entrance and hint points, the vehicle's shape (entrances inside its sphere, its seats' count, its sphere and avoidance radius) and an object's origin are calls in a range of their own (`vehicle_choice_call`, `17 << 8`). The vehicle action and the impromptu entry call the choice directly on both sides, and five old calls are gone.
+     - **Results:**
+       - Every decision loop, action update and action control agrees in minute-long runs of a50, b30, d20, c20 and b40, with none left out.
+       - A planted error in a seat's range was caught on a50. Two others fell in runs where no actor boarded a vehicle, which is timing-dependent there.
+       - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

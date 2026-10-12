@@ -335,6 +335,14 @@ LAYOUT_MEMBER(actor_variant_definition, ranged_combat_surprise_wildfire_time, ra
 LAYOUT_MEMBER(actor_variant_definition, ranged_combat_berserk_melee_abort_range, ranged_combat.berserk_melee_abort_range)
 LAYOUT_MEMBER(actor_debug_info, last_melee_time, last_melee_time)
 LAYOUT_MEMBER(actor_debug_info, last_path_refresh, last_path_refresh)
+LAYOUT_MEMBER(actor_debug_info, last_vehicle_avoidance_time, last_vehicle_avoidance_time)
+LAYOUT_MEMBER(actor_debug_info, field_C8, field_C8)
+LAYOUT_MEMBER(actor_debug_info, field_D4, field_D4)
+LAYOUT_MEMBER(actor_debug_info, field_E0, field_E0)
+LAYOUT_MEMBER(actor_debug_info, field_E4, field_E4)
+LAYOUT_MEMBER(actor_debug_info, field_F0, field_F0)
+LAYOUT_MEMBER(actor_debug_info, field_F4, field_F4)
+LAYOUT_MEMBER(actor_debug_info, field_F8, field_F8)
 LAYOUT_MEMBER(actor_debug_info, field_19C, field_19C)
 LAYOUT_MEMBER(actor_debug_info, avoidance_data, avoidance_data)
 LAYOUT_MEMBER(actor_debug_info, avoidance_type, avoidance_type)
@@ -1249,6 +1257,7 @@ LAYOUT_OFFSET(platoon_datum, current_strength_fraction)
 
 /* the constants (`ai_values`) */
 #define LAYOUT_VALUE(name) const int layout__ai_values__##name = name;
+LAYOUT_VALUE(_actor_variant_definition_prefer_passenger_seat_bit)
 LAYOUT_VALUE(_actor_postcombat_run_to)
 LAYOUT_VALUE(_actor_postcombat_check_friend)
 LAYOUT_VALUE(_actor_postcombat_speak_unscathed)

@@ -83,8 +83,9 @@ pub trait AiHost {
     fn memory(&self) -> &dyn AiMemory;
     fn call(&self, call: &mut AiCall);
     /// `collision_bsp_test_vector` in the step's structure (its collision
-    /// BSP): the hit's t, if any. With `breakable_surfaces`, broken ones are
-    /// passed through; without, every one stands (the game passes none).
+    /// BSP): the hit's t and surface, if any. With `breakable_surfaces`,
+    /// broken ones are passed through; without, every one stands (the game
+    /// passes none).
     fn structure_test_vector(
         &self,
         context: &AiStepContext,
@@ -93,7 +94,7 @@ pub trait AiHost {
         point: [f32; 3],
         vector: [f32; 3],
         maximum_t: f32,
-    ) -> Option<f32>;
+    ) -> Option<(f32, i32)>;
 }
 
 /// Where an actor's step finds what it works on.

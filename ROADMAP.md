@@ -422,6 +422,9 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - after fleeing: cowering (for its panic or hiding time, unless it retreated from an unopposable enemy) at the position it fled to, facing the way it came, or at a new position.
      - **The C's side, through `actions_port_handler_call`:** the prop's pathfinding location, the positions around the guard point, and the cowering time's draw.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the combat-transition guard's aim was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The search and uncover setups in Rust (`halo_map::actor_transitions`): searching for the target, undirected (a swarm) or from a pursuit position, and uncovering the target or from a pursuit position.
+     - **What Rust does:** each sets the pursuit location (the target, nowhere, or the encounter's firing position, read from the scenario's encounter definitions) and marks the actor searching. Lost contact now changes to them itself.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the uncover's ability to search was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

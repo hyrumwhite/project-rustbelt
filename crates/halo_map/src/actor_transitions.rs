@@ -1328,18 +1328,20 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
             m.set_bool(at(a::FIRING_POSITIONS_PURSUIT_COMMUNICATED_LOST_CONTACT), false);
         }
 
-        if options.allow_target_uncover
-            && call_simple(context, host, call::UNCOVER_TARGET, options.allow_target_search as i32) != 0
-        {
-            handled = true;
+        if options.allow_target_uncover {
+            if let Some(data) = uncover_setup_target(context, host, options.allow_target_search) {
+                action_change(context, host, ACTION_UNCOVER, Some(&data));
+                handled = true;
+            }
         }
 
         if !handled {
             call_simple(context, host, call::TRIED_TO_UNCOVER, target_prop_index());
-            if options.allow_target_search
-                && call_simple(context, host, call::SEARCH_TARGET, m.bool(at(a::EMOTIONS_FORCED_TO_CHARGE)) as i32) != 0
-            {
-                handled = true;
+            if options.allow_target_search {
+                if let Some(data) = search_setup_target(context, host, m.bool(at(a::EMOTIONS_FORCED_TO_CHARGE))) {
+                    action_change(context, host, ACTION_SEARCH, Some(&data));
+                    handled = true;
+                }
             }
 
             if !handled {
@@ -1358,10 +1360,11 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
                     m.set_bool(at(a::STATE_SEARCHING), true);
 
                     if swarm {
-                        if options.allow_pursuit_search
-                            && call_simple(context, host, call::SEARCH_UNDIRECTED, pursue_tenacious as i32) != 0
-                        {
-                            handled = true;
+                        if options.allow_pursuit_search {
+                            if let Some(data) = search_setup_undirected(context, host) {
+                                action_change(context, host, ACTION_SEARCH, Some(&data));
+                                handled = true;
+                            }
                         }
                     } else {
                         if action() == ACTION_UNCOVER
@@ -1398,23 +1401,16 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
                         }
 
                         if firing_position_index != NONE as i16 {
-                            if !pursuit_from_uncover
-                                && call_simple(context, host, call::UNCOVER_PURSUIT, firing_position_index as i32) != 0
-                            {
+                            let uncover =
+                                if pursuit_from_uncover { None } else { uncover_setup_pursuit(context, host, firing_position_index) };
+                            if let Some(data) = uncover {
+                                action_change(context, host, ACTION_UNCOVER, Some(&data));
                                 handled = true;
-                            } else if options.allow_pursuit_search
-                                && call_full(
-                                    context,
-                                    host,
-                                    call::SEARCH_PURSUIT,
-                                    firing_position_index as i32,
-                                    pursue_tenacious as i32,
-                                    &[],
-                                )
-                                .result
-                                    != 0
-                            {
-                                handled = true;
+                            } else if options.allow_pursuit_search {
+                                if let Some(data) = search_setup_pursuit(context, host, firing_position_index, pursue_tenacious) {
+                                    action_change(context, host, ACTION_SEARCH, Some(&data));
+                                    handled = true;
+                                }
                             }
                         }
                     }
@@ -3149,4 +3145,123 @@ pub fn guard_setup_from_fleeing(context: &AiStepContext, host: &impl AiHost) -> 
     }
     data.set_i32(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX, NONE);
     data
+}
+
+/// The encounter's firing position `firing_position_index`'s definition.
+fn firing_position_definition(context: &AiStepContext, host: &impl AiHost, firing_position_index: i16) -> u32 {
+    use crate::ai_actor::tag_block_element;
+    use crate::layout::{encounter_definition, firing_position_definition, scenario};
+    let m = host.memory();
+    let encounter = tag_block_element(
+        m,
+        context.scenario + scenario::AI_ENCOUNTERS as u32,
+        m.i32(context.actor + a::META_ENCOUNTER_INDEX as u32) & 0xFFFF,
+        encounter_definition::SIZEOF,
+    );
+    tag_block_element(
+        m,
+        encounter + encounter_definition::FIRING_POSITIONS as u32,
+        firing_position_index as i32,
+        firing_position_definition::SIZEOF,
+    )
+}
+
+/// The pursuit location of the firing position `firing_position_index`, in
+/// the search's or uncover's data (they share it).
+fn set_pursuit_position(context: &AiStepContext, host: &impl AiHost, data: &mut ActionData, firing_position_index: i16) {
+    use crate::layout::firing_position_definition as position;
+    let m = host.memory();
+    let definition = firing_position_definition(context, host, firing_position_index);
+    data.set_i16(a::STATE_SEARCH_PURSUIT_LOCATION_FIRING_POSITION_INDEX, firing_position_index);
+    data.set_i16(a::STATE_SEARCH_PURSUIT_LOCATION_TYPE, v::_PURSUIT_LOCATION_POSITION as i16);
+    data.set_vector(a::STATE_SEARCH_PURSUIT_LOCATION_POSITION, m.vector(definition + position::POSITION as u32));
+    data.set_i32(a::STATE_SEARCH_PURSUIT_LOCATION_SURFACE_INDEX, m.i32(definition + position::SURFACE_INDEX as u32));
+    data.set_i16(a::STATE_SEARCH_PURSUIT_LOCATION_CLUSTER_INDEX, m.i16(definition + position::CLUSTER_INDEX as u32));
+}
+
+/// action_search.c's `action_search_setup_target`: searching for the target
+/// (charging when it must), not as a passenger.
+pub fn search_setup_target(context: &AiStepContext, host: &impl AiHost, must_charge: bool) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) {
+        return None;
+    }
+    let mut data = ActionData::new();
+    data.set_i16(a::STATE_SEARCH_PURSUIT_LOCATION_TYPE, 0);
+    data.set_bool(a::STATE_SEARCH_CHARGING, must_charge);
+    m.set_bool(at(a::STATE_SEARCHING), true);
+    Some(data)
+}
+
+/// action_search.c's `action_search_setup_undirected`: a swarm searches
+/// without a direction.
+pub fn search_setup_undirected(context: &AiStepContext, host: &impl AiHost) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if !m.bool(at(a::META_SWARM)) {
+        return None;
+    }
+    let mut data = ActionData::new();
+    data.set_i16(a::STATE_SEARCH_PURSUIT_LOCATION_TYPE, 2);
+    m.set_bool(at(a::STATE_SEARCHING), true);
+    Some(data)
+}
+
+/// action_search.c's `action_search_setup_pursuit`: searching from a pursuit
+/// position of the encounter (not as a passenger or swarm).
+pub fn search_setup_pursuit(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    firing_position_index: i16,
+    tenacious: bool,
+) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER))
+        || m.bool(at(a::META_SWARM))
+        || m.i32(at(a::META_ENCOUNTER_INDEX)) == NONE
+        || firing_position_index == NONE as i16
+    {
+        return None;
+    }
+    let mut data = ActionData::new();
+    data.set_bool(a::STATE_SEARCH_TENACIOUS, tenacious);
+    set_pursuit_position(context, host, &mut data, firing_position_index);
+    m.set_bool(at(a::STATE_SEARCHING), true);
+    Some(data)
+}
+
+/// action_uncover.c's `action_uncover_setup_target`: uncovering the target
+/// (not as a passenger or swarm).
+pub fn uncover_setup_target(context: &AiStepContext, host: &impl AiHost, able_to_search: bool) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) || m.bool(at(a::META_SWARM)) {
+        return None;
+    }
+    let mut data = ActionData::new();
+    data.set_i16(a::STATE_UNCOVER_PURSUIT_LOCATION_TYPE, 0);
+    data.set_bool(a::STATE_UNCOVER_ABLE_TO_SEARCH, able_to_search);
+    Some(data)
+}
+
+/// action_uncover.c's `action_uncover_setup_pursuit`: uncovering from a
+/// pursuit position of the encounter (not as a passenger or swarm).
+pub fn uncover_setup_pursuit(context: &AiStepContext, host: &impl AiHost, firing_position_index: i16) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER))
+        || m.bool(at(a::META_SWARM))
+        || m.i32(at(a::META_ENCOUNTER_INDEX)) == NONE
+        || firing_position_index == NONE as i16
+    {
+        return None;
+    }
+    let mut data = ActionData::new();
+    set_pursuit_position(context, host, &mut data, firing_position_index);
+    data.set_bool(a::STATE_UNCOVER_PURSUIT_LOCATION_INSPECTED, false);
+    data.set_bool(a::STATE_UNCOVER_ABLE_TO_SEARCH, true);
+    m.set_bool(at(a::STATE_SEARCHING), true);
+    Some(data)
 }

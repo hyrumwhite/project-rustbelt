@@ -640,6 +640,18 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - No encounter stands down or finishes a fight in a probe level's first minute. With the console killing b30's `beach_lz` at tick 900, a planted error in standing down was caught.
        - The post-combat never ran, even with that kill at tick 2400 and a run of two and a half minutes, so it agrees without being exercised.
        - With all forty-nine systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The conversations' update in Rust (`halo_map::conversations`, a new system `conversations`, the second world step): ai_communication.c's `ai_conversation_update`, with `ai_conversation_line_begin`, `ai_conversation_line_perform` and `ai_conversation_line_end`.
+     - **What Rust does:**
+       - Each conversation tries to begin once a second until it can or gives up.
+       - It speaks its lines in turn. Each line finds its speaker, addressee (the player or another participant), sound and delay, and is unspatialized over the radio.
+       - A line waits for its speaker or everyone to come near, for scripted dialogue to end and the speaker to be free, then for the line to finish, its delay to run out and, if it asks, to be told to advance.
+       - The conversation finishes after its last line. Until then it points its participants' attention at the speaker or the addressee as the line's flags ask.
+     - **The C's side:** these calls stay the game's (ai_communication.c's `conversation_call`): beginning a conversation (choosing its participants), finishing it, whether scripted dialogue is playing, a scripted sound and its time, a unit's speech test, and its speech. The line and participant views' offsets are now asserted in the C. The conversations' console lines stay the game's alone.
+     - **Results:**
+       - Every update agrees in minute-long runs of b30, a30, d20, c20, b40 and a50, with none left out. Only a30 (170 calls) and a50 (54) begin conversations early.
+       - A planted error in a line's delay was caught on a30.
+       - Plants in the participants' attention went unseen: the early conversations' lines have no actor speaking to them, so the attention loop agrees without being exercised.
+       - With all fifty systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

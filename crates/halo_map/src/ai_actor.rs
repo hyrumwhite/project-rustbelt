@@ -155,6 +155,8 @@ pub struct WorldContext {
     pub structure: u32,
     pub breakable_surface_flags: u32,
     pub structure_bsp_index: i32,
+    /// `conversation_data` (its `struct data_array`).
+    pub conversation_data: u32,
 }
 
 impl WorldContext {

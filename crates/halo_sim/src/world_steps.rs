@@ -1,5 +1,5 @@
 //! The AI's updates over the game's arrays rather than one actor (the
-//! encounters' update), on the running game: each works on the arrays in
+//! encounters' and the conversations' updates), on the running game: each works on the arrays in
 //! the game's memory, in place, and asks the rest of the game through its
 //! call function in the C.
 //!
@@ -12,6 +12,7 @@
 use std::cell::Cell;
 
 use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext, WorldContext};
+use halo_map::conversations::ai_conversation_update;
 use halo_map::encounters::encounters_update;
 
 use crate::ai_steps::GameMemory;
@@ -173,10 +174,12 @@ impl AiHost for CheckHost<'_> {
 
 /// halo_sim.h's world steps.
 const STEP_ENCOUNTERS: i32 = 0;
+const STEP_CONVERSATIONS: i32 = 1;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
         STEP_ENCOUNTERS => encounters_update(context, host),
+        STEP_CONVERSATIONS => ai_conversation_update(context, host),
         _ => return None,
     }
     Some(())

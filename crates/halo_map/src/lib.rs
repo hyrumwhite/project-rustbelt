@@ -52,6 +52,7 @@ pub mod effects;
 pub mod encounters;
 pub mod particles;
 pub mod contrails;
+pub mod conversations;
 pub mod particle_systems;
 pub mod player_effects;
 pub mod game_tick;

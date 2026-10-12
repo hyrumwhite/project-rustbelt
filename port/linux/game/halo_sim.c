@@ -77,7 +77,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 116
+#define HALO_SIM_VERSION 117
 
 /* ---------- structures */
 
@@ -2060,6 +2060,7 @@ struct halo_sim_world_step_c
 
 typedef long (*halo_sim_world_step_function)(long step, struct halo_sim_world_step_c *call);
 typedef long (*halo_sim_data_packet_function)(struct halo_sim_data_packet_call *call);
+typedef long (*halo_sim_wire_function)(struct halo_sim_wire_call *call);
 
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
@@ -2090,6 +2091,7 @@ static struct
 	halo_sim_collision_test_vector_function collision_test_vector;
 	halo_sim_data_packet_function data_packet_encode;
 	halo_sim_data_packet_function data_packet_decode;
+	halo_sim_wire_function distributed_wire;
 	halo_sim_projectile_function projectile_update;
 	halo_sim_projectile_function projectile_check;
 	halo_sim_biped_physics_function biped_physics;
@@ -2227,6 +2229,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"conversations",
 	"communication",
 	"data_packets",
+	"distributed_wire",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -4900,6 +4903,7 @@ static void halo_sim_initialize(void)
 	halo_sim.world_step_check = (halo_sim_world_step_function)halo_sim_symbol(library, "halo_sim_world_step_check");
 	halo_sim.data_packet_encode = (halo_sim_data_packet_function)halo_sim_symbol(library, "halo_sim_data_packet_encode");
 	halo_sim.data_packet_decode = (halo_sim_data_packet_function)halo_sim_symbol(library, "halo_sim_data_packet_decode");
+	halo_sim.distributed_wire = (halo_sim_wire_function)halo_sim_symbol(library, "halo_sim_distributed_wire");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -4932,7 +4936,7 @@ static void halo_sim_initialize(void)
 		!halo_sim.ai_update || !halo_sim.ai_update_check ||
 		!halo_sim.ai_step || !halo_sim.ai_step_check ||
 		!halo_sim.path || !halo_sim.world_step || !halo_sim.world_step_check ||
-		!halo_sim.data_packet_encode || !halo_sim.data_packet_decode)
+		!halo_sim.data_packet_encode || !halo_sim.data_packet_decode || !halo_sim.distributed_wire)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -5598,6 +5602,64 @@ void halo_sim_data_packet_decode_check(struct halo_sim_data_packet_call const *g
 		}
 	}
 	halo_sim_data_packet_tally(1, same);
+}
+
+/* ---------- distributed wire */
+
+static struct
+{
+	unsigned long compared[_halo_sim_wire_relayed_action_from + 1];
+	unsigned long differed[_halo_sim_wire_relayed_action_from + 1];
+} halo_sim_wire_checks;
+
+int halo_sim_distributed_wire(struct halo_sim_wire_call *call)
+{
+	return halo_sim_mode(_halo_sim_distributed_wire) == _halo_sim_mode_rust && halo_sim.distributed_wire(call) == 0;
+}
+
+void halo_sim_distributed_wire_check(struct halo_sim_wire_call const *game, long output_size)
+{
+	static char const *const names[] =
+	{
+		"", "vector packs", "vector unpacks", "unit vector unpacks", "vitality packs", "vitality unpacks",
+		"angle packs", "angle unpacks", "unit state writes", "unit state reads", "relayed action writes",
+		"relayed action reads", "relayed actions",
+	};
+	struct halo_sim_wire_call call = *game;
+	unsigned char output[256];
+	unsigned long compared;
+	boolean same;
+
+	if (halo_sim_mode(_halo_sim_distributed_wire) != _halo_sim_mode_check || game->kind < 1 ||
+		game->kind > _halo_sim_wire_relayed_action_from || output_size < 0 || output_size > (long)sizeof(output))
+	{
+		return;
+	}
+	memset(output, 0, sizeof(output));
+	call.output = game->output ? output : NULL;
+	call.result = 0;
+	call.real_result = 0.0f;
+	if (halo_sim.distributed_wire(&call) != 0)
+		return;
+	same = call.result == game->result &&
+		memcmp(&call.real_result, &game->real_result, sizeof(float)) == 0 &&
+		(output_size == 0 || memcmp(output, game->output, output_size) == 0);
+	compared = ++halo_sim_wire_checks.compared[game->kind];
+	if (!same && ++halo_sim_wire_checks.differed[game->kind] <= 8)
+	{
+		long offset;
+
+		for (offset = 0; offset < output_size && output[offset] == ((unsigned char const *)game->output)[offset]; offset++)
+			;
+		platform_log("halo_sim: distributed wire: %s differ: game result %ld (%08lx) rust %ld (%08lx); the output first differs at %ld of %ld",
+			names[game->kind], game->result, *(unsigned long const *)&game->real_result, call.result,
+			*(unsigned long const *)&call.real_result, offset, output_size);
+	}
+	if ((compared & (compared - 1)) == 0 && compared >= 64)
+	{
+		platform_log("halo_sim: distributed wire: %lu of %lu %s agree with the game",
+			compared - halo_sim_wire_checks.differed[game->kind], compared, names[game->kind]);
+	}
 }
 
 /* ---------- collision */

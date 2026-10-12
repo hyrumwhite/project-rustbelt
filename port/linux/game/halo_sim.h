@@ -67,6 +67,8 @@ enum
 	_halo_sim_communication,
 	/* the packet codec (memory/data_packet_groups.c), the game's messages' */
 	_halo_sim_data_packets,
+	/* the distributed netcode's wire format (network_distributed.c) */
+	_halo_sim_distributed_wire,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -1736,8 +1738,8 @@ struct halo_sim_data_packet_call
 	/* data_packet_groups.c's error's index, 0 for none */
 	long error;
 	/* decoding's: the caller's size, written (as the game does) before the
-	struct is (a struct shorter than its packet's definition overruns into
-	what lies after it: the pregame keep-alive's) */
+	struct is (a struct shorter than its packet's definition would overrun
+	into what lies after it) */
 	short *encoded_size_reference;
 };
 
@@ -1753,6 +1755,43 @@ game's results (in the call, its buffers as it left them) against Rust's of
 the kept inputs */
 void halo_sim_data_packet_decode_begin(struct halo_sim_data_packet_call const *call);
 void halo_sim_data_packet_decode_check(struct halo_sim_data_packet_call const *game);
+
+/* crates/halo_sim's WireCall: one of network_distributed.c's packers,
+writers or readers (crates/halo_map's distributed_wire) */
+enum
+{
+	_halo_sim_wire_vector_pack = 1,
+	_halo_sim_wire_vector_unpack,
+	_halo_sim_wire_unit_vector_unpack,
+	_halo_sim_wire_vitality_pack,
+	_halo_sim_wire_vitality_unpack,
+	_halo_sim_wire_angle_pack,
+	_halo_sim_wire_angle_unpack,
+	_halo_sim_wire_unit_state_write,
+	_halo_sim_wire_unit_state_read,
+	_halo_sim_wire_relayed_action_write,
+	_halo_sim_wire_relayed_action_read,
+	_halo_sim_wire_relayed_action_from,
+};
+
+struct halo_sim_wire_call
+{
+	long kind;
+	void const *input;
+	void const *end;
+	void *output;
+	long a;
+	long b;
+	float value;
+	long result;
+	float real_result;
+};
+
+/* Rust's (Rust's mode): whether it ran, the call then holding its results */
+int halo_sim_distributed_wire(struct halo_sim_wire_call *call);
+/* in check mode: the game's (its results in the call, output_size bytes
+of them at its output) against Rust's of the same inputs */
+void halo_sim_distributed_wire_check(struct halo_sim_wire_call const *game, long output_size);
 
 void halo_sim_collision_test_vector_check(unsigned long flags, void const *point, void const *vector,
 	long ignore_object_index, int hit, void const *collision);

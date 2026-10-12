@@ -73,6 +73,7 @@ machine (their datum identifiers need not be).
 #include "network_coop.h"
 #include "network_distributed.h"
 #include "network_voice.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <limits.h>
 #include <stdio.h>
@@ -757,7 +758,8 @@ boolean distributed_axes_make_valid(
 	return TRUE;
 }
 
-void distributed_vector_pack(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_vector_pack_game(
 	real_vector3d const *vector,
 	real scale,
 	struct distributed_vector *result)
@@ -780,7 +782,27 @@ void distributed_vector_pack(
 	result->k = (short)parts[2];
 }
 
-void distributed_vector_unpack(
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+void distributed_vector_pack(
+	real_vector3d const *vector,
+	real scale,
+	struct distributed_vector *result)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_vector_pack;
+	call.input = vector;
+	call.value = scale;
+	call.output = result;
+	if (halo_sim_distributed_wire(&call))
+		return;
+	distributed_vector_pack_game(vector, scale, result);
+	halo_sim_distributed_wire_check(&call, sizeof(*result));
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_vector_unpack_game(
 	struct distributed_vector const *vector,
 	real scale,
 	real_vector3d *result)
@@ -790,7 +812,27 @@ void distributed_vector_unpack(
 	result->k = (real)vector->k / scale;
 }
 
-void distributed_unit_vector_unpack(
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+void distributed_vector_unpack(
+	struct distributed_vector const *vector,
+	real scale,
+	real_vector3d *result)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_vector_unpack;
+	call.input = vector;
+	call.value = scale;
+	call.output = result;
+	if (halo_sim_distributed_wire(&call))
+		return;
+	distributed_vector_unpack_game(vector, scale, result);
+	halo_sim_distributed_wire_check(&call, sizeof(*result));
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_unit_vector_unpack_game(
 	struct distributed_vector const *vector,
 	real_vector3d *result)
 {
@@ -806,7 +848,25 @@ void distributed_unit_vector_unpack(
 	}
 }
 
-word distributed_vitality_pack(
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+void distributed_unit_vector_unpack(
+	struct distributed_vector const *vector,
+	real_vector3d *result)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_unit_vector_unpack;
+	call.input = vector;
+	call.output = result;
+	if (halo_sim_distributed_wire(&call))
+		return;
+	distributed_unit_vector_unpack_game(vector, result);
+	halo_sim_distributed_wire_check(&call, sizeof(*result));
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static word distributed_vitality_pack_game(
 	real value)
 {
 	value *= VITALITY_SCALE;
@@ -814,13 +874,47 @@ word distributed_vitality_pack(
 	return (word)(long)floor(value + 0.5f);
 }
 
-real distributed_vitality_unpack(
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+word distributed_vitality_pack(
+	real value)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_vitality_pack;
+	call.value = value;
+	if (halo_sim_distributed_wire(&call))
+		return (word)call.result;
+	call.result = distributed_vitality_pack_game(value);
+	halo_sim_distributed_wire_check(&call, 0);
+	return (word)call.result;
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static real distributed_vitality_unpack_game(
 	word value)
 {
 	return (real)value / VITALITY_SCALE;
 }
 
-short distributed_angle_pack(
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+real distributed_vitality_unpack(
+	word value)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_vitality_unpack;
+	call.a = value;
+	if (halo_sim_distributed_wire(&call))
+		return call.real_result;
+	call.real_result = distributed_vitality_unpack_game(value);
+	halo_sim_distributed_wire_check(&call, 0);
+	return call.real_result;
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static short distributed_angle_pack_game(
 	real angle)
 {
 	real turns = angle / (2.0f * _pi);
@@ -829,7 +923,24 @@ short distributed_angle_pack(
 	return (short)(word)((long)floor(turns * 65536.0f + 0.5f) & 0xFFFF);
 }
 
-real distributed_angle_unpack(
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+short distributed_angle_pack(
+	real angle)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_angle_pack;
+	call.value = angle;
+	if (halo_sim_distributed_wire(&call))
+		return (short)call.result;
+	call.result = distributed_angle_pack_game(angle);
+	halo_sim_distributed_wire_check(&call, 0);
+	return (short)call.result;
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static real distributed_angle_unpack_game(
 	short value,
 	boolean signed_angle)
 {
@@ -838,6 +949,24 @@ real distributed_angle_unpack(
 	if (signed_angle && angle >= _pi)
 		angle -= 2.0f * _pi;
 	return angle;
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+real distributed_angle_unpack(
+	short value,
+	boolean signed_angle)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_angle_unpack;
+	call.a = value;
+	call.b = signed_angle;
+	if (halo_sim_distributed_wire(&call))
+		return call.real_result;
+	call.real_result = distributed_angle_unpack_game(value, signed_angle);
+	halo_sim_distributed_wire_check(&call, 0);
+	return call.real_result;
 }
 
 static void distributed_batch_flush(
@@ -1399,7 +1528,8 @@ rides, (placed) where it is, how fast it moves and which way it faces,
 show, its powerups and camouflage, or (dead) who killed it; what is its
 default is left out (distributed_unit_state_read). The predicted tick is
 its own client's alone (own). */
-static word distributed_unit_state_write(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static word distributed_unit_state_write_game(
 	struct distributed_unit_state const *state,
 	boolean own,
 	byte *buffer)
@@ -1475,9 +1605,30 @@ static word distributed_unit_state_write(
 	return (word)(cursor - buffer);
 }
 
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static word distributed_unit_state_write(
+	struct distributed_unit_state const *state,
+	boolean own,
+	byte *buffer)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_unit_state_write;
+	call.input = state;
+	call.a = own;
+	call.output = buffer;
+	if (halo_sim_distributed_wire(&call))
+		return (word)call.result;
+	call.result = distributed_unit_state_write_game(state, own, buffer);
+	halo_sim_distributed_wire_check(&call, call.result);
+	return (word)call.result;
+}
+
 /* a state from its bytes on the wire, no further than end: the bytes it
 took, 0 for none that make one */
-static word distributed_unit_state_read(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static word distributed_unit_state_read_game(
 	byte const *buffer,
 	byte const *end,
 	struct distributed_unit_state *state)
@@ -1552,6 +1703,26 @@ static word distributed_unit_state_read(
 		return 0;
 	}
 	return (word)(cursor - buffer);
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static word distributed_unit_state_read(
+	byte const *buffer,
+	byte const *end,
+	struct distributed_unit_state *state)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_unit_state_read;
+	call.input = buffer;
+	call.end = end;
+	call.output = state;
+	if (halo_sim_distributed_wire(&call))
+		return (word)call.result;
+	call.result = distributed_unit_state_read_game(buffer, end, state);
+	halo_sim_distributed_wire_check(&call, sizeof(*state));
+	return (word)call.result;
 }
 
 /* moves the unit toward the state (at position) if it is further than
@@ -2434,7 +2605,8 @@ static short distributed_object_cluster(
 
 /* the player's input as the host's tick ran it, in fewer bytes; whether
 their buttons or choices changed in the ticks it carries */
-static boolean distributed_relayed_action_from(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static boolean distributed_relayed_action_from_game(
 	short player_index,
 	struct player_action const **recent,
 	short const *recent_counts,
@@ -2475,12 +2647,35 @@ static boolean distributed_relayed_action_from(
 	return changed;
 }
 
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static boolean distributed_relayed_action_from(
+	short player_index,
+	struct player_action const **recent,
+	short const *recent_counts,
+	struct distributed_relayed_action *relayed)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_relayed_action_from;
+	call.input = recent;
+	call.end = recent_counts;
+	call.a = player_index;
+	call.output = relayed;
+	if (halo_sim_distributed_wire(&call))
+		return (boolean)call.result;
+	call.result = distributed_relayed_action_from_game(player_index, recent, recent_counts, relayed);
+	halo_sim_distributed_wire_check(&call, sizeof(*relayed));
+	return (boolean)call.result;
+}
+
 /* the action's bytes on the wire (at most
 DISTRIBUTED_RELAYED_ACTION_MAXIMUM_SIZE): its player and parts, the
 choices, facing, sticks and trigger, the latest tick's buttons, and those of
 the ticks before only where they differ from the tick after's
 (distributed_relayed_action_read) */
-static word distributed_relayed_action_write(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static word distributed_relayed_action_write_game(
 	struct distributed_relayed_action const *relayed,
 	byte *buffer)
 {
@@ -2510,9 +2705,28 @@ static word distributed_relayed_action_write(
 	return (word)(cursor - buffer);
 }
 
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static word distributed_relayed_action_write(
+	struct distributed_relayed_action const *relayed,
+	byte *buffer)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_relayed_action_write;
+	call.input = relayed;
+	call.output = buffer;
+	if (halo_sim_distributed_wire(&call))
+		return (word)call.result;
+	call.result = distributed_relayed_action_write_game(relayed, buffer);
+	halo_sim_distributed_wire_check(&call, call.result);
+	return (word)call.result;
+}
+
 /* an action from its bytes on the wire, no further than end: the bytes it
 took, 0 for none that make one */
-static word distributed_relayed_action_read(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static word distributed_relayed_action_read_game(
 	byte const *buffer,
 	byte const *end,
 	struct distributed_relayed_action *relayed)
@@ -2547,6 +2761,26 @@ static word distributed_relayed_action_read(
 		}
 	}
 	return (word)(cursor - buffer);
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static word distributed_relayed_action_read(
+	byte const *buffer,
+	byte const *end,
+	struct distributed_relayed_action *relayed)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_relayed_action_read;
+	call.input = buffer;
+	call.end = end;
+	call.output = relayed;
+	if (halo_sim_distributed_wire(&call))
+		return (word)call.result;
+	call.result = distributed_relayed_action_read_game(buffer, end, relayed);
+	halo_sim_distributed_wire_check(&call, sizeof(*relayed));
+	return (word)call.result;
 }
 
 /* (the host) what each client is sent this tick of every player: their unit,

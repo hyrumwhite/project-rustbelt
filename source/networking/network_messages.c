@@ -557,9 +557,14 @@ static struct network_game_message_packet_definitions data_0030aa68 =
 		{ 2, 0, &data_0030aa68.server_machine_rejected },
 		{ 2, 0, &data_0030aa68.server_game_settings_update },
 		{ 2, 0, &data_0030aa68.server_pregame_countdown },
-		{ 2, 0, &data_0030aa68.server_pregame_keep_alive },
+		/* port: in the message types' order (network_messages.h): the begin
+		game, the graceful exit and the keep-alive had each the definition of
+		the one before it, so the begin game went out with 16 bits of its
+		long, and the keep-alive's decoding wrote two bytes past its short
+		(HALO_PORT_NETWORK_VERSION 25) */
 		{ 2, 0, &data_0030aa68.server_begin_game },
 		{ 2, 0, &data_0030aa68.server_graceful_game_exit_pregame },
+		{ 2, 0, &data_0030aa68.server_pregame_keep_alive },
 		{ 6, 0, &data_0030aa68.server_postgame_keep_alive },
 		{ 3, 0, &data_0030aa68.client_join_game_request },
 		{ 3, 0, &data_0030aa68.client_add_player_request_pregame },

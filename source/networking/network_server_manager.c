@@ -2728,9 +2728,8 @@ static void network_game_server_start_late_joiner(
 	struct message_server_begin_game begin_game = { 0 };
 	struct network_message *message;
 
-	/* (the message carries 16 bits: the client has the rest from its first
-	game update; never 0, which is a game starting) */
-	begin_game.unused = MAX(game_time_get() & 0xFFFF, 1);
+	/* (the host's time; never 0, which is a game starting) */
+	begin_game.unused = MAX(game_time_get(), 1);
 	if (!network_game_server_send_game_settings_to_client_machine(server, machine, &server->game, sizeof(server->game)) ||
 		!(message = create_network_game_message(_message_server_begin_game, &begin_game, sizeof(begin_game))) ||
 		!network_game_server_send_message_to_client_machine(server, machine, message))

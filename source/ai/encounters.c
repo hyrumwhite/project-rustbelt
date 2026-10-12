@@ -1065,15 +1065,15 @@ void encounter_update_status(
 	{
 		encounter->post_combat_delay = !post_combat_behavior_pending;
 		if (!encounter->post_combat_delay_timer)
-			encounter_call_simple(_encounter_call_stand_down, NONE, encounter_index, 0, NULL); /* port: a call */
+			encounter_stand_down(encounter_index);
 	}
 	else if (had_visible_enemy && been_in_combat)
 	{
-		encounter_call_simple(_encounter_call_post_combat, NONE, encounter_index, 0, NULL); /* port: a call */
+		encounter_post_combat(encounter_index);
 	}
 	else
 	{
-		encounter_call_simple(_encounter_call_stand_down, NONE, encounter_index, 0, NULL); /* port: a call */
+		encounter_stand_down(encounter_index);
 	}
 
 	if (encounter->original_count > 0)
@@ -2044,7 +2044,7 @@ void encounter_stand_down(
 
 	encounter->stand_down = TRUE;
 	encounter->enemies_defeated = 0;
-	encounter_clear_pursuit(encounter_index);
+	encounter_call_simple(_encounter_call_clear_pursuit, NONE, encounter_index, 0, NULL); /* port: a call */
 
 	encounter_actor_iterator_new(&iterator, encounter_index);
 	while ((actor = encounter_actor_iterator_next(&iterator)) != NULL)
@@ -2065,8 +2065,8 @@ void encounter_stand_down(
 				match_assert("c:\\halo\\SOURCE\\ai\\encounters.c", 2463, parent_prop->orphan_prop_index == prop_iterator.index);
 				parent_prop->orphan_prop_index = NONE;
 
-				actor_switch_props(iterator.index, prop_iterator.index, NONE);
-				prop_delete(iterator.index, prop_iterator.index);
+				/* port: a call */
+				encounter_call_simple(_encounter_call_drop_prop, iterator.index, prop_iterator.index, 0, NULL);
 			}
 		}
 	}
@@ -2345,6 +2345,10 @@ static long encounters_port_world(
 	game's, left as its call made it) */
 	regions[count].address = (unsigned long)actor_data->data;
 	regions[count++].size = actor_data->count * actor_data->size;
+	regions[count].address = (unsigned long)prop_data;
+	regions[count++].size = sizeof(struct data_array);
+	regions[count].address = (unsigned long)prop_data->data;
+	regions[count++].size = prop_data->count * prop_data->size;
 	regions[count].address = (unsigned long)ai_globals;
 	regions[count++].size = sizeof(struct ai_globals);
 	regions[count].address = context->encounters_updated_meter;
@@ -2446,14 +2450,6 @@ void encounter_call(
 			encounters_test_activation();
 			break;
 
-		case _encounter_call_stand_down:
-			encounter_stand_down(call->a);
-			break;
-
-		case _encounter_call_post_combat:
-			encounter_post_combat(call->a);
-			break;
-
 		case _encounter_call_team_is_ally:
 			call->result = game_team_is_ally((short)call->a, (short)call->b) ? 1 : 0;
 			break;
@@ -2497,6 +2493,40 @@ void encounter_call(
 
 		case _encounter_call_stimulus_maneuvering:
 			actor_stimulus_maneuvering(call->actor, (boolean)call->a, (boolean)call->b);
+			break;
+
+		case _encounter_call_player_rating:
+			call->output[0] = ai_communication_get_player_rating(call->a, TRUE, NULL, NULL);
+			break;
+
+		case _encounter_call_random_real:
+			call->output[0] = real_seed_random(get_global_random_seed_address());
+			break;
+
+		case _encounter_call_communication_team:
+			call->result = actor_communication_team(call->actor) ? 1 : 0;
+			break;
+
+		case _encounter_call_prop_active_by_unit:
+			call->result = prop_get_active_by_unit_index(call->actor, call->a);
+			break;
+
+		case _encounter_call_no_corpse_shooting:
+		{
+			struct actor_datum *actor = actor_get(call->actor);
+			struct actor_definition *actor_definition = actor_definition_get(actor->meta.definition_index);
+
+			call->result = TEST_FLAG(actor_definition->flags2, _actor_definition_no_corpse_shooting_bit) ? 1 : 0;
+			break;
+		}
+
+		case _encounter_call_clear_pursuit:
+			encounter_clear_pursuit(call->a);
+			break;
+
+		case _encounter_call_drop_prop:
+			actor_switch_props(call->actor, call->a, NONE);
+			prop_delete(call->actor, call->a);
 			break;
 	}
 	halo_sim_world_event_end(call, opened);
@@ -3037,7 +3067,12 @@ static short encounter_post_combat_select_random_behavior(
 	if (possibility_count > 1)
 	{
 		real current_weight = 0.0f;
-		real selected_weight = real_seed_random(get_global_random_seed_address()) * total_weight;
+		float random_output[6];
+		real selected_weight;
+
+		/* port: a call */
+		encounter_call_simple(_encounter_call_random_real, NONE, 0, 0, random_output);
+		selected_weight = random_output[0] * total_weight;
 
 		for (behavior_index = 0;
 			behavior_index < NUMBER_OF_POST_COMBAT_BEHAVIOR_TYPES;
@@ -3104,8 +3139,13 @@ static void encounter_post_combat(
 
 		if (actor->meta.unit_index != NONE)
 		{
-			real player_rating = ai_communication_get_player_rating(actor->meta.unit_index, TRUE, NULL, NULL);
+			float rating_output[6];
+			real player_rating;
 			struct prop_iterator prop_iterator;
+
+			/* port: a call */
+			encounter_call_simple(_encounter_call_player_rating, NONE, actor->meta.unit_index, 0, rating_output);
+			player_rating = rating_output[0];
 			struct prop_datum *prop;
 
 			prop_iterator_new(&prop_iterator, iterator.index);
@@ -3118,7 +3158,8 @@ static void encounter_post_combat(
 
 					if (prop->enemy)
 					{
-						if (TEST_FLAG(actor_definition->flags2, _actor_definition_no_corpse_shooting_bit) ||
+						/* port: a call */
+						if (encounter_call_simple(_encounter_call_no_corpse_shooting, iterator.index, 0, 0, NULL) ||
 							prop->dead_ticks >= 210)
 						{
 							behavior_index = 1;
@@ -3229,9 +3270,13 @@ static void encounter_post_combat(
 		{
 			if (actor->meta.unit_index != NONE)
 			{
-				real rating = ai_communication_get_player_rating(actor->meta.unit_index, TRUE, NULL, NULL);
+				float rating_output[6];
+				real rating;
 
-				if (!actor_communication_team(reply_iterator.index) &&
+				/* port: calls */
+				encounter_call_simple(_encounter_call_player_rating, NONE, actor->meta.unit_index, 0, rating_output);
+				rating = rating_output[0];
+				if (!encounter_call_simple(_encounter_call_communication_team, reply_iterator.index, 0, 0, NULL) &&
 					rating > 2.0f &&
 					rating > best_actor_rating)
 				{
@@ -3294,9 +3339,13 @@ static void encounter_post_combat(
 						if (closest_distance_squared == REAL_MAX ||
 							distance_squared < closest_distance_squared * closest_distance_squared)
 						{
-							long active_prop_index = prop_get_active_by_unit_index(
+							/* port: a call */
+							long active_prop_index = encounter_call_simple(
+								_encounter_call_prop_active_by_unit,
 								search_iterator.index,
-								behavior_actor->meta.unit_index);
+								behavior_actor->meta.unit_index,
+								0,
+								NULL);
 
 							if (active_prop_index != NONE)
 							{

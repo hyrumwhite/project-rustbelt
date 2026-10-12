@@ -2254,6 +2254,13 @@ enum
 	_encounter_call_object_origin,
 	_encounter_call_actor_change_encounter,
 	_encounter_call_stimulus_maneuvering,
+	_encounter_call_player_rating,
+	_encounter_call_random_real,
+	_encounter_call_communication_team,
+	_encounter_call_prop_active_by_unit,
+	_encounter_call_no_corpse_shooting,
+	_encounter_call_clear_pursuit,
+	_encounter_call_drop_prop,
 };
 
 void encounter_call(struct halo_sim_ai_call *call);

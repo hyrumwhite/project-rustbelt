@@ -465,6 +465,10 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - an acknowledgement restarts the pursuit and refreshes the stimuli.
      - **The C's side, through `actor_perception_call`:** switching from the orphan, deleting it, and the acknowledgement's stimulus.
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the acknowledgement's stimulus refresh was caught on b30. One in the expected acknowledgement's facing (0.5 to 0.4) wasn't: it never changed an outcome. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Prop position refresh in Rust (`halo_map::actor_perception`): actor_perception.c's `prop_position_refresh` as the perception update uses it.
+     - **What Rust does:** an orphan's corpse that has come to rest is cheated to dead (unless it's the target still to be uncovered or searched) and keeps its last position. A swarm's prop picks another of its units every three seconds. The prop's unit is sampled, and the prop's direction and distance from the actor's sense position follow.
+     - **The C's side, through `actor_perception_call`:** whether a corpse has come to rest, the swarm's unit, the unit's sampling (head, body and center, velocity, location, water, vehicle, attachments), the sense position, and the status refresh (next). The sense position is a struct only the game's later checks use: the call returns its body position to Rust and keeps the rest in the game for the status refresh, which in check mode doesn't run for Rust.
+     - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the corpse cheat was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

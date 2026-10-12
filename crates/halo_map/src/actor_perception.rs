@@ -102,6 +102,22 @@ pub mod call {
     /// `actor_stimulus_prop_acknowledged(actor, a, ...)` (`b`: whether it had
     /// an orphan, bit 0, and was expected, bit 1).
     pub const STIMULUS_ACKNOWLEDGED: i32 = 34;
+    /// Whether the prop `a`'s corpse has come to rest (dead, unseated,
+    /// unperceived, still), the result.
+    pub const CORPSE_STOPPED: i32 = 35;
+    /// `actor_perception_unit_from_swarm(a, actor, b, FALSE, ...)`, the
+    /// result.
+    pub const UNIT_FROM_SWARM: i32 = 36;
+    /// The prop `a`'s unit sampled into it (`prop_position_refresh`'s: its
+    /// head, body and center, velocity, location, water, vehicle, the unit
+    /// it's attached to and the units attached to it).
+    pub const SAMPLE_UNIT: i32 = 37;
+    /// `actor_perception_find_sense_position(actor, a's body, a)`: the
+    /// position's body position in `output[0..3]` (the game keeps the rest
+    /// for [`STATUS_REFRESH`]).
+    pub const SENSE_POSITION: i32 = 38;
+    /// `prop_status_refresh(actor, a, ...)` from the [`SENSE_POSITION`] kept.
+    pub const STATUS_REFRESH: i32 = 39;
 }
 
 /// The local enums (actor_perception.c's).
@@ -292,7 +308,10 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                 refresh_position = true;
             }
             if refresh_position {
-                call_full(context, host, call::REFRESH_PROP, index, refresh_status as i32, 0.0);
+                prop_position_refresh(context, host, index, refresh_status);
+                if refresh_status {
+                    call_simple(context, host, call::STATUS_REFRESH, index);
+                }
             }
         }
 
@@ -1107,4 +1126,76 @@ pub fn become_acknowledged(context: &AiStepContext, host: &impl AiHost, prop_ind
     m.set_i16(prop + p::STATE as u32, v::_PROP_STATE_ACKNOWLEDGED as i16);
     acknowledge(context, host, prop_index, had_orphan, expected);
     (true, expected)
+}
+
+/// actor_perception.c's `prop_position_refresh` (not refreshing an orphan's
+/// position): an orphan's corpse that has come to rest is cheated to dead
+/// (unless it's the target still to be uncovered or searched) and keeps its
+/// position; a swarm's prop picks another of its units every three seconds;
+/// the prop's unit is sampled; and the prop's direction and distance from
+/// the actor's sense position follow.
+pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_index: i32, refresh_vehicle: bool) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if !m.bool(at(a::META_ACTIVE)) {
+        return;
+    }
+    let prop = prop_get(m, context, prop_index);
+    let field = |offset: usize| prop + offset as u32;
+    'update: {
+        if prop_orphaned(m.i16(field(p::STATE))) {
+            if m.bool(field(p::ORPHAN_CORPSE_CHEATED)) {
+                break 'update;
+            }
+            let corpse_stopped = call_simple(context, host, call::CORPSE_STOPPED, prop_index) != 0;
+            if m.i32(at(a::TARGET_TARGET_PROP_INDEX)) == prop_index
+                && (!m.bool(field(p::TRIED_TO_UNCOVER)) || !m.bool(field(p::TRIED_TO_SEARCH)))
+            {
+                break 'update;
+            }
+            if !corpse_stopped {
+                break 'update;
+            }
+            m.set_bool(field(p::ORPHAN_CORPSE_CHEATED), true);
+            m.set_bool(field(p::DEAD), true);
+        }
+
+        if m.bool(field(p::SWARM)) && m.i32(field(p::ACTOR_INDEX)) != NONE && refresh_vehicle {
+            let current_time = context.game_time;
+            if m.i32(field(p::SWARM_UNIT_SELECTED_TIME)).wrapping_add(90) <= current_time {
+                m.w32(field(p::SWARM_UNIT_SELECTED_TIME), current_time as u32);
+                let new_unit_index =
+                    call_full(context, host, call::UNIT_FROM_SWARM, m.i32(field(p::ACTOR_INDEX)), m.i32(field(p::UNIT_INDEX)), 0.0)
+                        .result;
+                if new_unit_index != m.i32(field(p::UNIT_INDEX)) {
+                    m.w32(field(p::UNIT_INDEX), new_unit_index as u32);
+                    if prop_orphaned(m.i16(field(p::STATE))) || m.i32(field(p::ORPHAN_PROP_INDEX)) != NONE {
+                        let parent = prop_get(m, context, m.i32(field(p::ORPHAN_PROP_INDEX)));
+                        m.w32(parent + p::UNIT_INDEX as u32, new_unit_index as u32);
+                    }
+                }
+            }
+        }
+
+        call_simple(context, host, call::SAMPLE_UNIT, prop_index);
+    }
+
+    let sense_body = call_full(context, host, call::SENSE_POSITION, prop_index, 0, 0.0).vector();
+    let body = m.vector(field(p::BODY_POSITION));
+    let mut actor_to_prop = [body[0] - sense_body[0], body[1] - sense_body[1], body[2] - sense_body[2]];
+    let magnitude = crate::features::magnitude_squared3(actor_to_prop).sqrt();
+    let distance = if !(0.0001 > magnitude.abs()) {
+        let scale = 1.0 / magnitude;
+        actor_to_prop = [scale * actor_to_prop[0], scale * actor_to_prop[1], scale * actor_to_prop[2]];
+        magnitude
+    } else {
+        0.0
+    };
+    m.set_f32(field(p::DISTANCE), distance);
+    if distance == 0.0 {
+        actor_to_prop = [1.0, 0.0, 0.0];
+    }
+    for (i, value) in actor_to_prop.into_iter().enumerate() {
+        m.set_f32(field(p::ACTOR_TO_PROP) + 4 * i as u32, value);
+    }
 }

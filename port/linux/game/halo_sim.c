@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 91
+#define HALO_SIM_VERSION 92
 
 /* ---------- structures */
 
@@ -9628,6 +9628,10 @@ void halo_sim_ai_step_check(long step, long result)
 				halo_sim_ai_step_checks.prop_addresses[known] = addresses[prop_index];
 				memcpy(halo_sim_ai_step_checks.prop_before[known], (void const *)addresses[prop_index],
 					HALO_SIM_PROP_DATUM_SIZE);
+				/* (it was free as the step began: its identifier zero, so Rust's
+				datum_new finds it where the game's did) */
+				halo_sim_ai_step_checks.prop_before[known][0] = 0;
+				halo_sim_ai_step_checks.prop_before[known][1] = 0;
 				halo_sim_ai_step_checks.prop_count++;
 			}
 		}

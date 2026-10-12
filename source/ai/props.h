@@ -162,6 +162,11 @@ void props_dispose(
 	void);
 void props_dispose_from_old_map(
 	void);
+void prop_port_remove(
+	long actor_index,
+	long prop_index);
+void prop_port_full_warning(
+	void);
 void prop_delete(
 	long actor_index,
 	long prop_index);

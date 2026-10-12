@@ -4021,8 +4021,7 @@ boolean actor_perception_become_acknowledged(
 			/* port: through actor_perception_call, as the Rust port's asks */
 			actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
 				prop->orphan_prop_index, prop_index, 0.0f, NULL);
-			actor_perception_call_full(actor_index, _actor_perception_call_prop_delete,
-				prop->orphan_prop_index, 0, 0.0f, NULL);
+			prop_delete(actor_index, prop->orphan_prop_index);
 			prop->orphan_prop_index = NONE;
 		}
 
@@ -7596,6 +7595,28 @@ void actor_perception_call(
 				NONE,
 				NULL);
 			break;
+
+		case _actor_perception_call_prop_unit_details:
+		{
+			struct unit_datum *unit = unit_get(call->a);
+			struct unit_definition *unit_definition = unit_definition_get(unit->definition_index);
+			short team_index = unit->object.owner_team_index;
+
+			call->result =
+				(game_team_is_enemy(actor->meta.team_index, team_index) ? 1 : 0) |
+				(game_team_is_ally(actor->meta.team_index, team_index) ? 2 : 0) |
+				(game_team_ally_status_changed(actor->meta.team_index, team_index) ? 4 : 0) |
+				(TEST_FLAG(unit->object.damage_flags, _object_dead_bit) ? 8 : 0) |
+				(unit->unit.feign_death_timer == 0 ? 16 : 0) |
+				(unit->object.owner_player_index != NONE ? 32 : 0) |
+				((long)(unsigned short)team_index << 16);
+			call->output[0] = unit_definition->unit.ai_danger_radius;
+			break;
+		}
+
+		case _actor_perception_call_props_full_warning:
+			prop_port_full_warning();
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -8229,6 +8250,153 @@ static void actor_perception_port_status_refresh(
 	return;
 }
 
+/* port: prop_new_unacknowledged as the Rust port's makes a prop
+(crates/halo_map's props), asking through actor_perception_call */
+static long actor_perception_port_prop_new(
+	long actor_index,
+	long unit_index,
+	boolean enemy)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	long prop_index;
+	long worst_prop_index = NONE;
+	long worst_required_prop_index = NONE;
+	real worst_distance = REAL_MAX;
+	real worst_required_distance = REAL_MAX;
+	short required_prop_count = 0;
+	struct prop_iterator iterator;
+	struct prop_datum *prop;
+
+	prop_iterator_new(&iterator, actor_index);
+	while ((prop = prop_iterator_next(&iterator)) != NULL)
+	{
+		boolean replace = FALSE;
+		boolean desire;
+
+		if ((prop->state >= _prop_state_uninspected_orphan &&
+				prop->state <= _prop_state_inspected_orphan) ||
+			prop->orphan_prop_index != NONE)
+		{
+			continue;
+		}
+		desire = actor_perception_desire_prop(actor_index, NONE, prop->unit_index, prop->actor_index,
+			prop->in_use, prop->player, prop->enemy, prop->dead, prop->dead_ticks, prop->suicide_radius,
+			prop->distance * prop->distance, prop->required_ticks, &replace);
+		if (!desire)
+		{
+			if (prop->distance < worst_distance)
+			{
+				worst_prop_index = iterator.index;
+				worst_distance = prop->distance;
+			}
+		}
+		else if (prop->enemy == enemy)
+		{
+			required_prop_count++;
+			if (replace && prop->distance < worst_required_distance)
+			{
+				worst_required_prop_index = iterator.index;
+				worst_required_distance = prop->distance;
+			}
+		}
+	}
+
+	if (worst_prop_index != NONE)
+	{
+		prop_index = worst_prop_index;
+	}
+	else
+	{
+		prop_index = NONE;
+		if (worst_required_prop_index != NONE &&
+			required_prop_count >= (enemy ? 6 : 4))
+		{
+			prop_index = worst_required_prop_index;
+		}
+	}
+
+	if (prop_index == NONE)
+	{
+		prop_index = datum_new(prop_data);
+	}
+	else
+	{
+		short identifier;
+
+		prop = prop_get(prop_index);
+		actor_perception_call_full(actor_index, _actor_perception_call_switch_props, prop_index, NONE, 0.0f, NULL);
+		prop_port_remove(actor_index, prop_index);
+		identifier = prop->identifier;
+		memset(prop, 0, sizeof(*prop));
+		prop->identifier = identifier;
+	}
+
+	if (prop_index == NONE)
+	{
+		actor_perception_call_simple(actor_index, _actor_perception_call_props_full_warning, 0);
+	}
+	else
+	{
+		struct halo_sim_ai_call details;
+
+		prop = prop_get(prop_index);
+		prop->owner_actor_index = actor_index;
+		prop->unit_effect = NONE;
+		prop->ticks_since_damage = NONE;
+		prop->unit_index = unit_index;
+		prop->currently_damaging_me = FALSE;
+		prop->damage_inflicted_on_me = 0.0f;
+		prop->ticks_since_definitely_located = NONE;
+		prop->definitely_located = FALSE;
+		prop->definite_knowledge_source_actor = NONE;
+		prop->last_perceived_time = NONE;
+		prop->last_visible_time = NONE;
+		prop->orphan_corpse_cheated = FALSE;
+		prop->actor_index = NONE;
+		prop->orphan_prop_index = NONE;
+		prop->required_ticks = 0;
+		prop->last_unreachable_time = NONE;
+		if (unit_index != NONE)
+		{
+			struct unit_datum *prop_unit;
+			long bits;
+
+			actor_perception_port_status_call(actor_index, _actor_perception_call_prop_unit_details, unit_index, 0, &details);
+			bits = details.result;
+			prop_unit = unit_get(unit_index);
+			prop->team_index = (short)(bits >> 16);
+			prop->enemy = (bits & 1) != 0;
+			prop->ally = (bits & 2) != 0;
+			prop->ally_status_changed = (bits & 4) != 0;
+			prop->dead = (bits & 8) != 0;
+			prop->suicide_radius = details.output[0];
+			prop->really_dead = prop->dead && (bits & 16) != 0;
+			prop->dead_ticks = prop->dead ? 1000 : 0;
+			prop->player = (bits & 32) != 0;
+			if (prop_unit->unit.swarm_actor_index != NONE)
+			{
+				prop->swarm = TRUE;
+				prop->actor_index = prop_unit->unit.swarm_actor_index;
+				prop->swarm_unit_selected_time = game_time_get();
+			}
+			else
+			{
+				prop->actor_index = prop_unit->unit.actor_index;
+			}
+			if (prop->player)
+				prop->type = 6;
+			else if (prop->actor_index != NONE)
+				prop->type = actor_get(prop->actor_index)->meta.type;
+			else
+				prop->type = NONE;
+		}
+		prop->next_prop_index = actor->meta.first_prop_index;
+		actor->meta.first_prop_index = prop_index;
+	}
+
+	return prop_index;
+}
+
 /* port: actor_perception_refresh as the Rust port's does it (crates/halo_map's
 actor_perception), asking through actor_perception_call */
 static void actor_perception_port_refresh_discard(
@@ -8243,10 +8411,10 @@ static void actor_perception_port_refresh_discard(
 	{
 		actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
 			prop->orphan_prop_index, NONE, 0.0f, NULL);
-		actor_perception_call_simple(actor_index, _actor_perception_call_prop_delete, prop->orphan_prop_index);
+		prop_delete(actor_index, prop->orphan_prop_index);
 	}
 	actor_perception_call_full(actor_index, _actor_perception_call_switch_props, prop_index, NONE, 0.0f, NULL);
-	actor_perception_call_simple(actor_index, _actor_perception_call_prop_delete, prop_index);
+	prop_delete(actor_index, prop_index);
 }
 
 static void actor_perception_port_refresh_test_biped(
@@ -8346,8 +8514,7 @@ static void actor_perception_port_refresh_test_biped(
 		}
 		else
 		{
-			long prop_index = actor_perception_call_full(actor_index, _actor_perception_call_new_prop,
-				unit_index, enemy, 0.0f, NULL);
+			long prop_index = actor_perception_port_prop_new(actor_index, unit_index, enemy);
 
 			if (prop_index != NONE)
 			{
@@ -8573,8 +8740,7 @@ static void actor_perception_port_refresh(
 			{
 				if (enemies.entries[entry_index].prop_index == NONE)
 				{
-					long prop_index = actor_perception_call_full(actor_index, _actor_perception_call_new_prop,
-						enemies.entries[entry_index].unit_index, TRUE, 0.0f, NULL);
+					long prop_index = actor_perception_port_prop_new(actor_index, enemies.entries[entry_index].unit_index, TRUE);
 
 					if (prop_index == NONE)
 						continue;
@@ -8609,8 +8775,7 @@ static void actor_perception_port_refresh(
 			{
 				if (friends.entries[entry_index].prop_index == NONE)
 				{
-					long prop_index = actor_perception_call_full(actor_index, _actor_perception_call_new_prop,
-						friends.entries[entry_index].unit_index, FALSE, 0.0f, NULL);
+					long prop_index = actor_perception_port_prop_new(actor_index, friends.entries[entry_index].unit_index, FALSE);
 
 					if (prop_index == NONE)
 						continue;
@@ -8692,7 +8857,7 @@ static void actor_perception_port_refresh_danger_zone(
 		{
 			long driver = ((struct unit_datum *)object)->unit.driver_object_index;
 			long prop_index = driver != NONE ?
-				actor_perception_call_simple(actor_index, _actor_perception_call_active_prop_of_unit, driver) :
+				prop_get_active_by_unit_index(actor_index, driver) :
 				NONE;
 
 			if (driver != NONE && prop_index != NONE)
@@ -8758,8 +8923,7 @@ static void actor_perception_port_refresh_danger_zone(
 		perceived = currently_perceived;
 		if (!perceived)
 		{
-			long prop_index = actor_perception_call_simple(actor_index, _actor_perception_call_active_prop_of_unit,
-				actor->danger_zone.object_index);
+			long prop_index = prop_get_active_by_unit_index(actor_index, actor->danger_zone.object_index);
 
 			if (prop_index != NONE)
 				perceived = prop_get(prop_index)->perception >= _actor_perception_full;
@@ -9532,7 +9696,7 @@ static void actor_perception_update_game(
 			parent_prop->orphan_prop_index = NONE;
 			actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
 				iterator.index, NONE, 0.0f, NULL);
-			actor_perception_call_simple(actor_index, _actor_perception_call_prop_delete, iterator.index);
+			prop_delete(actor_index, iterator.index);
 		}
 		else if (prop->refresh_stimuli &&
 			prop->state >= _prop_state_becoming_unacknowledged &&

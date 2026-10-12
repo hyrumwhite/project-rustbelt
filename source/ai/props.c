@@ -127,6 +127,10 @@ void props_dispose_from_old_map(
 
 /* ---------- private code */
 
+static void prop_remove(
+	long actor_index,
+	long prop_index);
+
 static void prop_add(
 	long actor_index,
 	long unit_index,
@@ -230,6 +234,21 @@ static void prop_add(
 	}
 
 	return;
+}
+
+/* port: prop_remove and prop_add's warning, for the Rust port's mirror
+(actor_perception.c's actor_perception_port_prop_new) */
+void prop_port_remove(
+	long actor_index,
+	long prop_index)
+{
+	prop_remove(actor_index, prop_index);
+}
+
+void prop_port_full_warning(
+	void)
+{
+	prop_add(NONE, NONE, NONE);
 }
 
 static long prop_new_blank(

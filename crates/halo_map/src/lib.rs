@@ -21,6 +21,7 @@ pub mod actor_input;
 pub mod actor_looking;
 pub mod actor_moving;
 pub mod actor_perception;
+pub mod msvc_qsort;
 pub mod actor_situation;
 pub mod actor_unit_control;
 pub mod actor_transitions;

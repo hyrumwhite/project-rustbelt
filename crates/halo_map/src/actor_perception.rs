@@ -151,6 +151,60 @@ pub mod call {
     pub const UNREACHABLE: i32 = 48;
     /// `actor_look_compute_prop_interest(actor, a)`, `output[0]`.
     pub const LOOK_INTEREST: i32 = 49;
+    /// The refresh's potentially visible set (the actor's cluster's, or its
+    /// swarm's units' together), kept by the game; the result whether
+    /// there is one.
+    pub const REFRESH_PVS: i32 = 50;
+    /// Whether any of the unit `a`'s clusters is in the kept set, the result.
+    pub const PVS_HAS_UNIT: i32 = 51;
+    /// The kept set's next cluster after `a` (NONE to begin), NONE past the
+    /// last; the result.
+    pub const NEXT_PVS_CLUSTER: i32 = 52;
+    /// The cluster `a`'s first collideable (`b` 0) or noncollideable (`b`
+    /// 1) object the result, its reference `result2`.
+    pub const CLUSTER_FIRST_OBJECT: i32 = 53;
+    /// The next object after the reference `a` (of `b`'s kind) the result,
+    /// its reference `result2`.
+    pub const CLUSTER_NEXT_OBJECT: i32 = 54;
+    /// `object_marker_begin()`.
+    pub const MARKER_BEGIN: i32 = 55;
+    /// `object_mark_function(a)`: whether it was newly marked, the result.
+    pub const MARK: i32 = 56;
+    /// `object_marker_end()`.
+    pub const MARKER_END: i32 = 57;
+    /// The swarm actor `a`'s units marked (by its swarm cache, or else, as
+    /// the game does, by the perceiving actor's own swarm list).
+    pub const MARK_SWARM_UNITS: i32 = 58;
+    /// The biped `a`'s origin and the actor's sense position to it (kept by
+    /// the game): its swarm actor the result, its actor `result2`, the
+    /// origin `output[0..3]`, the sense body position `output[3..6]`.
+    pub const BIPED_SENSE: i32 = 59;
+    /// `actor_perception_unit_from_swarm(a, actor, NONE, TRUE, ...)` from
+    /// the kept biped sense position, the result.
+    pub const UNIT_FROM_SWARM_SENSED: i32 = 60;
+    /// The unit `a`: whether it's a player (bit 0), the actor's enemy (bit
+    /// 1), dead (and done feigning, bit 2) and in its melee attack (bit 3)
+    /// the result, its time of death `result2`, its definition's danger
+    /// radius `output[0]`, its origin `output[1..4]`.
+    pub const BIPED_STATUS: i32 = 61;
+    /// `actor_perception_assess_suicide_danger(actor, a, input[0],
+    /// input[1], b, FALSE)`.
+    pub const SUICIDE_DANGER_AT: i32 = 62;
+    /// `prop_new_unacknowledged(actor, a, b)`, the result.
+    pub const NEW_PROP: i32 = 63;
+    /// A driverless vehicle `a`'s danger assessed.
+    pub const VEHICLE_DANGER_UNDRIVEN: i32 = 64;
+    /// Whether the projectile `a` is dangerous (a danger radius, free or
+    /// flagged) the result, its danger radius's bits `result2`, and if so
+    /// its origin `output[0..3]` and the sense body position to it
+    /// `output[3..6]`.
+    pub const PROJECTILE_SAMPLE: i32 = 65;
+    /// The projectile `a`'s owner unit (NONE if not a unit) the result, its
+    /// owner team `result2`, its velocity `output[0..3]`.
+    pub const PROJECTILE_OWNER: i32 = 66;
+    /// The overflow warning (at most each five seconds) for a full list of
+    /// enemies (`a`) or friends.
+    pub const OVERFLOW_WARNING: i32 = 67;
 }
 
 /// The status sample's bits ([`call::STATUS_SAMPLE`]): of the unit, its
@@ -581,7 +635,7 @@ fn danger_zone_update(context: &AiStepContext, host: &impl AiHost) {
     let field = |offset: usize| actor + offset as u32;
 
     if m.bool(field(a::META_TIMESLICE)) {
-        call_simple(context, host, call::REFRESH, 0);
+        perception_refresh(context, host);
     }
     call_simple(context, host, call::REFRESH_DANGER_ZONE, 0);
 
@@ -1678,4 +1732,386 @@ pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_ind
     let look_interest = call_full(context, host, call::LOOK_INTEREST, prop_index, 0, 0.0).output[0];
     m.set_f32(field(p::LOOK_INTEREST), look_interest);
     m.set_bool(field(p::REFRESH_STIMULI), true);
+}
+
+/// A unit the refresh may give a prop (actor_perception.c's
+/// `actor_perception_refresh_entry`).
+#[derive(Clone, Copy)]
+struct RefreshEntry {
+    unit_index: i32,
+    prop_index: i32,
+    priority: f32,
+}
+
+/// The refresh's enemies or friends (`actor_perception_refresh_list`): the
+/// props kept for sure, and the optional ones (at most 128).
+#[derive(Default)]
+struct RefreshList {
+    accepted_count: i16,
+    entries: Vec<RefreshEntry>,
+}
+
+const REFRESH_LIST_SIZE: usize = 128;
+
+/// The object types the refresh looks at.
+const OBJECT_TYPE_BIPED: i16 = 0;
+const OBJECT_TYPE_VEHICLE: i16 = 1;
+const OBJECT_TYPE_PROJECTILE: i16 = 5;
+
+/// The danger zone of a projectile (`_actor_danger_zone_projectile`).
+const DANGER_ZONE_PROJECTILE: i16 = 2;
+
+/// A prop given up: its orphan (if it isn't one) first, each switched from
+/// and deleted.
+fn refresh_discard(context: &AiStepContext, host: &impl AiHost, prop_index: i32) {
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    let orphan_prop_index = m.i32(prop + p::ORPHAN_PROP_INDEX as u32);
+    if !prop_orphaned(m.i16(prop + p::STATE as u32)) && orphan_prop_index != NONE {
+        call_full(context, host, call::SWITCH_PROPS, orphan_prop_index, NONE, 0.0);
+        call_simple(context, host, call::PROP_DELETE, m.i32(prop + p::ORPHAN_PROP_INDEX as u32));
+    }
+    call_full(context, host, call::SWITCH_PROPS, prop_index, NONE, 0.0);
+    call_simple(context, host, call::PROP_DELETE, prop_index);
+}
+
+/// `actor_perception_qsort_compare_optional_props`: nearest first.
+fn compare_optional(a: &RefreshEntry, b: &RefreshEntry) -> std::cmp::Ordering {
+    if a.priority < b.priority {
+        std::cmp::Ordering::Less
+    } else if a.priority > b.priority {
+        std::cmp::Ordering::Greater
+    } else {
+        std::cmp::Ordering::Equal
+    }
+}
+
+fn distance_squared3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    crate::features::magnitude_squared3([b[0] - a[0], b[1] - a[1], b[2] - a[2]])
+}
+
+/// actor_perception.c's `actor_perception_refresh`: which props an actor
+/// keeps and which units it starts to perceive. Its props that it no longer
+/// wants (or whose units aren't in its potentially visible set) are given
+/// up; then each object in the set (and their children) is looked at once:
+/// a biped it wants becomes a prop (an optional one waits on the list), a
+/// driverless vehicle's or a dangerous projectile's danger is assessed (the
+/// nearest projectile becoming the danger zone). Of the optional ones, the
+/// nearest are kept up to four enemies, and friends up to two past the
+/// enemies (at least four props); the rest are given up.
+pub fn perception_refresh(context: &AiStepContext, host: &impl AiHost) {
+    let m = host.memory();
+    let mut enemies = RefreshList::default();
+    let mut friends = RefreshList::default();
+    let pvs = call_simple(context, host, call::REFRESH_PVS, 0) != 0;
+
+    call_simple(context, host, call::MARKER_BEGIN, 0);
+
+    let mut iterator = PropIterator::new(m, context);
+    while let Some(prop) = iterator.next(m, context) {
+        let field = |offset: usize| prop + offset as u32;
+        if prop_orphaned(m.i16(field(p::STATE))) {
+            continue;
+        }
+        let distance = m.f32(field(p::DISTANCE));
+        let distance_squared = distance * distance;
+        let (mut desired, optional) = desire_prop(
+            context,
+            host,
+            NONE as i16,
+            m.i32(field(p::UNIT_INDEX)),
+            m.i32(field(p::ACTOR_INDEX)),
+            m.bool(field(p::IN_USE)),
+            m.bool(field(p::PLAYER)),
+            m.bool(field(p::ENEMY)),
+            m.bool(field(p::DEAD)),
+            m.i16(field(p::DEAD_TICKS)),
+            m.f32(field(p::SUICIDE_RADIUS)),
+            distance_squared,
+            m.i16(field(p::REQUIRED_TICKS)),
+        );
+        if desired && pvs {
+            desired = call_simple(context, host, call::PVS_HAS_UNIT, m.i32(field(p::UNIT_INDEX))) != 0;
+        }
+        if m.bool(field(p::SWARM)) && m.i32(field(p::ACTOR_INDEX)) != NONE {
+            call_simple(context, host, call::MARK_SWARM_UNITS, m.i32(field(p::ACTOR_INDEX)));
+        }
+        call_simple(context, host, call::MARK, m.i32(field(p::UNIT_INDEX)));
+
+        if desired {
+            let enemy = m.bool(field(p::ENEMY));
+            let list = if enemy { &mut enemies } else { &mut friends };
+            if optional {
+                if list.entries.len() < REFRESH_LIST_SIZE {
+                    list.entries.push(RefreshEntry {
+                        unit_index: m.i32(field(p::UNIT_INDEX)),
+                        prop_index: iterator.index,
+                        priority: distance_squared * 0.69444442,
+                    });
+                } else {
+                    call_simple(context, host, call::OVERFLOW_WARNING, enemy as i32);
+                }
+            } else if !m.bool(field(p::DEAD)) {
+                list.accepted_count += 1;
+            }
+        } else {
+            refresh_discard(context, host, iterator.index);
+        }
+    }
+
+    if pvs {
+        let mut cluster_index = call_simple(context, host, call::NEXT_PVS_CLUSTER, NONE);
+        while cluster_index != NONE {
+            for noncollideable in 0..2 {
+                let mut object = call_full(context, host, call::CLUSTER_FIRST_OBJECT, cluster_index, noncollideable, 0.0);
+                while object.result != NONE {
+                    refresh_test_object(context, host, object.result, &mut enemies, &mut friends);
+                    object = call_full(context, host, call::CLUSTER_NEXT_OBJECT, object.result2, noncollideable, 0.0);
+                }
+            }
+            cluster_index = call_simple(context, host, call::NEXT_PVS_CLUSTER, cluster_index);
+        }
+    }
+
+    if !enemies.entries.is_empty() {
+        let mut entry_index = 0usize;
+        if enemies.accepted_count < 4 {
+            crate::msvc_qsort::qsort(&mut enemies.entries, compare_optional);
+            while entry_index < enemies.entries.len() {
+                let entry = enemies.entries[entry_index];
+                if entry.prop_index == NONE {
+                    let prop_index = call_full(context, host, call::NEW_PROP, entry.unit_index, 1, 0.0).result;
+                    if prop_index == NONE {
+                        entry_index += 1;
+                        continue;
+                    }
+                    prop_position_refresh(context, host, prop_index, false);
+                }
+                // the game leaves before passing the entry that reached the
+                // limit, so an existing prop there is given up below
+                enemies.accepted_count += 1;
+                if enemies.accepted_count >= 4 {
+                    break;
+                }
+                entry_index += 1;
+            }
+        }
+        while entry_index < enemies.entries.len() {
+            let prop_index = enemies.entries[entry_index].prop_index;
+            if prop_index != NONE {
+                refresh_discard(context, host, prop_index);
+            }
+            entry_index += 1;
+        }
+    }
+
+    if !friends.entries.is_empty() {
+        let mut entry_index = 0usize;
+        let mut prop_count = enemies.accepted_count.wrapping_add(friends.accepted_count);
+        let maximum_prop_count = (enemies.accepted_count + 2).max(4);
+        if prop_count < maximum_prop_count {
+            crate::msvc_qsort::qsort(&mut friends.entries, compare_optional);
+            while entry_index < friends.entries.len() {
+                let entry = friends.entries[entry_index];
+                if entry.prop_index == NONE {
+                    let prop_index = call_full(context, host, call::NEW_PROP, entry.unit_index, 0, 0.0).result;
+                    if prop_index == NONE {
+                        entry_index += 1;
+                        continue;
+                    }
+                    prop_position_refresh(context, host, prop_index, false);
+                }
+                friends.accepted_count += 1;
+                prop_count += 1;
+                if prop_count >= maximum_prop_count {
+                    break;
+                }
+                entry_index += 1;
+            }
+        }
+        while entry_index < friends.entries.len() {
+            let prop_index = friends.entries[entry_index].prop_index;
+            if prop_index != NONE {
+                refresh_discard(context, host, prop_index);
+            }
+            entry_index += 1;
+        }
+    }
+
+    call_simple(context, host, call::MARKER_END, 0);
+}
+
+/// actor_perception.c's `actor_perception_refresh_test_object`: each object
+/// of a list (and its children) not yet looked at.
+fn refresh_test_object(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    mut object_index: i32,
+    enemies: &mut RefreshList,
+    friends: &mut RefreshList,
+) {
+    use crate::layout::unit_datum as u;
+    let m = host.memory();
+    while object_index != NONE {
+        let Some(object) = crate::ai_actor::object_get(m, context, object_index) else {
+            return;
+        };
+        if call_simple(context, host, call::MARK, object_index) != 0 {
+            match m.i16(object + u::OBJECT_TYPE as u32) {
+                OBJECT_TYPE_BIPED => refresh_test_biped(context, host, object_index, enemies, friends),
+                OBJECT_TYPE_VEHICLE => {
+                    call_simple(context, host, call::VEHICLE_DANGER_UNDRIVEN, object_index);
+                }
+                OBJECT_TYPE_PROJECTILE => refresh_test_projectile(context, host, object_index),
+                _ => {}
+            }
+        }
+        let first_child = m.i32(object + u::OBJECT_FIRST_CHILD_OBJECT_INDEX as u32);
+        if first_child != NONE {
+            refresh_test_object(context, host, first_child, enemies, friends);
+        }
+        object_index = m.i32(object + u::OBJECT_NEXT_OBJECT_INDEX as u32);
+    }
+}
+
+/// A biped (or its swarm's nearest unit) the actor may start to perceive.
+fn refresh_test_biped(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    object_index: i32,
+    enemies: &mut RefreshList,
+    friends: &mut RefreshList,
+) {
+    let sense = call_simple_full(context, host, call::BIPED_SENSE, object_index);
+    let body = [sense.output[3], sense.output[4], sense.output[5]];
+    let mut origin = [sense.output[0], sense.output[1], sense.output[2]];
+    let mut unit_index = object_index;
+    let swarm = sense.result != NONE;
+    let unit_actor_index = if swarm {
+        unit_index = call_simple(context, host, call::UNIT_FROM_SWARM_SENSED, sense.result);
+        sense.result
+    } else {
+        sense.result2
+    };
+    if unit_index == NONE || unit_actor_index == context.actor_index {
+        return;
+    }
+    let status = call_simple_full(context, host, call::BIPED_STATUS, unit_index);
+    if swarm {
+        origin = [status.output[1], status.output[2], status.output[3]];
+    }
+    let player = status.result & 1 != 0;
+    let enemy = status.result & 2 != 0;
+    let dead = status.result & 4 != 0;
+    let melee_attack = status.result & 8 != 0;
+    let time_of_death = status.result2;
+    let dead_ticks: i16 = if !dead {
+        0
+    } else if time_of_death == NONE {
+        0x7FFF
+    } else {
+        (context.game_time as i16).wrapping_sub(time_of_death as i16)
+    };
+    let suicide_radius = status.output[0];
+    let distance_squared = distance_squared3(body, origin);
+
+    if suicide_radius > 0.0 && (dead || melee_attack) {
+        let mut assess = AiCall {
+            kind: call::SUICIDE_DANGER_AT,
+            actor: context.actor_index,
+            a: unit_index,
+            b: enemy as i32,
+            ..AiCall::default()
+        };
+        assess.input[0] = suicide_radius;
+        assess.input[1] = distance_squared.sqrt();
+        host.call(&mut assess);
+    }
+
+    let (desired, optional) = desire_prop(
+        context,
+        host,
+        UNACKNOWLEDGED,
+        unit_index,
+        unit_actor_index,
+        false,
+        player,
+        enemy,
+        dead,
+        dead_ticks,
+        suicide_radius,
+        distance_squared,
+        0,
+    );
+    if desired {
+        let list = if enemy { enemies } else { friends };
+        if optional {
+            if list.entries.len() < REFRESH_LIST_SIZE {
+                list.entries.push(RefreshEntry { unit_index, prop_index: NONE, priority: distance_squared });
+            }
+        } else {
+            let prop_index = call_full(context, host, call::NEW_PROP, unit_index, enemy as i32, 0.0).result;
+            if prop_index != NONE {
+                prop_position_refresh(context, host, prop_index, false);
+                if !dead {
+                    list.accepted_count += 1;
+                }
+            }
+        }
+    }
+}
+
+/// A dangerous projectile near enough (and nearer than the projectile the
+/// actor fears now) becomes its danger zone.
+fn refresh_test_projectile(context: &AiStepContext, host: &impl AiHost, object_index: i32) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let sample = call_simple_full(context, host, call::PROJECTILE_SAMPLE, object_index);
+    if sample.result == 0 {
+        return;
+    }
+    let danger_radius = f32::from_bits(sample.result2 as u32);
+    let origin = [sample.output[0], sample.output[1], sample.output[2]];
+    let body = [sample.output[3], sample.output[4], sample.output[5]];
+    let distance = distance_squared3(body, origin).sqrt();
+    let danger_type = m.i16(at(a::DANGER_ZONE_DANGER_TYPE));
+    if distance < danger_radius + 10.0
+        && (danger_type < DANGER_ZONE_PROJECTILE
+            || (danger_type == DANGER_ZONE_PROJECTILE
+                && m.i32(at(a::DANGER_ZONE_OBJECT_INDEX)) != object_index
+                && distance < m.f32(at(a::DANGER_ZONE_CURRENT_DISTANCE_FROM_ACTOR))))
+    {
+        let owner = call_simple_full(context, host, call::PROJECTILE_OWNER, object_index);
+        for offset in 0..crate::layout::actor_danger_zone::SIZEOF {
+            m.w8(at(a::DANGER_ZONE_DANGER_TYPE + offset), 0);
+        }
+        m.set_i16(at(a::DANGER_ZONE_DANGER_TYPE), DANGER_ZONE_PROJECTILE);
+        m.w32(at(a::DANGER_ZONE_OBJECT_INDEX), object_index as u32);
+        m.set_f32(at(a::DANGER_ZONE_DANGER_RADIUS), danger_radius);
+        for i in 0..3 {
+            m.set_f32(at(a::DANGER_ZONE_INITIAL_POSITION + 4 * i), origin[i]);
+            m.set_f32(at(a::DANGER_ZONE_INITIAL_VELOCITY + 4 * i), owner.output[i]);
+        }
+        m.set_i16(at(a::DANGER_ZONE_ACKNOWLEDGEMENT_TIMER), 30);
+        m.set_bool(at(a::DANGER_ZONE_CURRENTLY_PERCEIVED), false);
+        m.set_i16(at(a::DANGER_ZONE_HOSTILITY), 0);
+        let owner_unit_index = owner.result;
+        if owner_unit_index != NONE {
+            let unit_index = m.i32(at(a::META_UNIT_INDEX));
+            if unit_index == NONE || owner_unit_index != unit_index {
+                let team = m.i16(at(a::META_TEAM_INDEX)) as i32;
+                if call_full(context, host, call::TEAM_IS_ENEMY, team, owner.result2, 0.0).result == 0 {
+                    m.set_i16(at(a::DANGER_ZONE_HOSTILITY), 1);
+                }
+            } else {
+                m.set_i16(at(a::DANGER_ZONE_HOSTILITY), 2);
+            }
+        }
+        m.w32(at(a::DANGER_ZONE_OWNER_UNIT_INDEX), owner_unit_index as u32);
+    }
+}
+
+/// A call of `a` alone, the whole call back.
+fn call_simple_full(context: &AiStepContext, host: &impl AiHost, kind: i32, a: i32) -> AiCall {
+    call_full(context, host, kind, a, 0, 0.0)
 }

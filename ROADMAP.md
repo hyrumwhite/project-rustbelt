@@ -478,6 +478,15 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - then the dangers of its vehicle and suicide, its reachability, the requirement decision put off until now, and its unopposability and target weight.
      - **The C's side, through `actor_perception_call`:** one sample of the unit (its flags, death, actor, animation, velocity and aim, the encounter's blindness and deafness, and the debug switches), the look, the line of sight, visibility and audibility from the kept sense position (whose velocity the sense-position call now returns too), the actor's combat state, the vehicle and suicide dangers, unreachability, and the look interest.
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the quantized distance was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Perception's refresh in Rust (`halo_map::actor_perception`): actor_perception.c's `actor_perception_refresh` and `actor_perception_refresh_test_object`.
+     - **What Rust does:**
+       - the actor's props it no longer wants, or whose units are outside its potentially visible set, are given up (their orphans first);
+       - each object in the set's clusters, and each object's children, is looked at once: a biped it wants (or its swarm's nearest unit) becomes a prop, or waits on the list if it's optional; a suicide's danger is assessed; so is a driverless vehicle's; and a dangerous projectile, if it's near enough and nearer than the projectile the actor fears now, becomes the danger zone (with its owner's hostility);
+       - of the optional props, the nearest are kept: up to four enemies (the game's early exit, which gives up the entry that reached the limit, is kept), then friends up to two past the enemies (at least four props); the rest are given up.
+     - **The sort:** `halo_map::msvc_qsort` is the Windows C runtime's `qsort`, ported. It isn't stable, so it must match the game's order when priorities tie. Its order matched the UCRT's over 200,000 arrays with many ties, both in C (built for 32-bit Windows) and in its own test.
+     - **The C's side, through `actor_perception_call`:** the potentially visible set (kept by the game) and whether a unit is in it; walking it cluster by cluster, and each cluster's collideable and noncollideable objects; the object marker; a biped's sense position and swarm unit; a unit's status; prop creation; the suicide and vehicle dangers; a projectile's danger, sense position and owner; and the overflow warning.
+     - **The check:** the step check now records up to 4,096 calls a step (256 before), because the refresh marks every object in view.
+     - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in the friends' limit was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

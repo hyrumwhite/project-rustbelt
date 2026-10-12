@@ -1747,36 +1747,10 @@ void actions_port_handler_call(
 			break;
 		}
 
-		case _actions_port_handler_call_find_grenade_target:
-		{
-			real_point3d grenade_target;
-			long grenade_target_prop_index;
-			long grenade_ignore_object_index;
-
-			call->result = actor_combat_find_grenade_target(
-				actor_index,
-				&grenade_target,
-				&grenade_target_prop_index,
-				&grenade_ignore_object_index) ? 1 : 0;
-			memcpy(call->output, &grenade_target, sizeof(grenade_target));
-			memcpy(&call->output[3], &grenade_ignore_object_index, sizeof(long));
-			call->result2 = grenade_target_prop_index;
+		case _actions_port_handler_call_playfight_nearby_target:
+			memcpy(call->output, call->input, sizeof(real_point3d));
+			actor_combat_port_find_nearby_target((real_point3d *)call->output);
 			break;
-		}
-
-		case _actions_port_handler_call_collateral_damage:
-		{
-			short enemy_count = 0;
-
-			call->result = actor_combat_check_collateral_damage(
-				actor_index,
-				call->input[0],
-				call->input[1],
-				(real_point3d const *)&call->input[2],
-				&enemy_count) ? 1 : 0;
-			call->result2 = enemy_count;
-			break;
-		}
 
 		case _actions_port_handler_call_plan_grenade_trajectory:
 		{
@@ -3219,30 +3193,36 @@ boolean actor_action_test_grenade(
 		}
 	}
 
+	/* port: the target and the collateral damage make their own calls */
 	memset(&target, 0, sizeof(target));
-	target.kind = _actions_port_handler_call_find_grenade_target;
-	target.actor = actor_index;
-	actions_port_handler_call(&target);
-	if (!target.result)
 	{
-		debug_info->grenade_decision = 6;
-		return FALSE;
+		real_point3d grenade_target;
+		long grenade_target_prop_index;
+		long grenade_ignore_object_index;
+
+		if (!actor_combat_find_grenade_target(actor_index, &grenade_target, &grenade_target_prop_index,
+			&grenade_ignore_object_index))
+		{
+			debug_info->grenade_decision = 6;
+			return FALSE;
+		}
+		memcpy(target.output, &grenade_target, sizeof(grenade_target));
+		memcpy(&target.output[3], &grenade_ignore_object_index, sizeof(long));
+		target.result2 = grenade_target_prop_index;
 	}
 
-	memset(&collateral, 0, sizeof(collateral));
-	collateral.kind = _actions_port_handler_call_collateral_damage;
-	collateral.actor = actor_index;
-	collateral.input[0] = variant_definition->grenade_combat.enemy_radius;
-	collateral.input[1] = variant_definition->grenade_combat.collateral_damage_radius;
-	memcpy(&collateral.input[2], target.output, 3 * sizeof(real));
-	actions_port_handler_call(&collateral);
-	if (!collateral.result)
 	{
-		debug_info->grenade_decision = 8;
-		return FALSE;
-	}
+		short collateral_enemy_count = 0;
 
-	enemy_count = (short)collateral.result2;
+		if (!actor_combat_check_collateral_damage(actor_index, variant_definition->grenade_combat.enemy_radius,
+			variant_definition->grenade_combat.collateral_damage_radius, (real_point3d const *)target.output,
+			&collateral_enemy_count))
+		{
+			debug_info->grenade_decision = 8;
+			return FALSE;
+		}
+		enemy_count = collateral_enemy_count;
+	}
 	if (enemy_count < variant_definition->grenade_combat.minimum_enemy_count)
 	{
 		debug_info->grenade_enemy_count = enemy_count;

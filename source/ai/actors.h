@@ -1231,6 +1231,9 @@ struct weapon_definition *actor_get_weapon_definition(
 	long actor_index);
 struct actor_variant_definition *actor_combat_get_firing_variant_definition(
 	long actor_index);
+/* port: actor_combat.c's playfighting miss, for actions.c's handler call */
+void actor_combat_port_find_nearby_target(
+	real_point3d *target_point);
 boolean actor_combat_find_grenade_target(
 	long actor_index,
 	real_point3d *grenade_target,

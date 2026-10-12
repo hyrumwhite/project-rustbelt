@@ -803,6 +803,13 @@ static boolean actor_combat_build_grenade_trajectory(
 	return result;
 }
 
+/* port: the playfighting miss, for actions.c's handler call */
+void actor_combat_port_find_nearby_target(
+	real_point3d *target_point)
+{
+	actor_combat_find_nearby_target(target_point, 1.5f);
+}
+
 boolean actor_combat_find_grenade_target(
 	long actor_index,
 	real_point3d *grenade_target,
@@ -834,7 +841,15 @@ boolean actor_combat_find_grenade_target(
 
 			if (actor->external_orders.playfighting)
 			{
-				actor_combat_find_nearby_target(grenade_target, 1.5f);
+				/* port: a call */
+				struct halo_sim_ai_call call;
+
+				memset(&call, 0, sizeof(call));
+				call.kind = _actions_port_handler_call_playfight_nearby_target;
+				call.actor = actor_index;
+				memcpy(call.input, grenade_target, sizeof(*grenade_target));
+				actions_port_handler_call(&call);
+				memcpy(grenade_target, call.output, sizeof(*grenade_target));
 			}
 		}
 	}

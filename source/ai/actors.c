@@ -4732,6 +4732,7 @@ void actors_port_step_context(
 	context->structure = (unsigned long)global_structure_bsp_get();
 	context->breakable_surface_flags = (unsigned long)breakable_surface_flags_get();
 	context->structure_bsp_index = global_structure_bsp_index;
+	context->encounter_data = (unsigned long)encounter_data;
 }
 
 /* port: the actor's props' datums, for the AI step checks (halo_sim.c): their

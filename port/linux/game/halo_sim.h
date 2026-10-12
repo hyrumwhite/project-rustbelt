@@ -920,6 +920,7 @@ struct halo_sim_ai_step_context
 	unsigned long structure;
 	unsigned long breakable_surface_flags;
 	long structure_bsp_index;
+	unsigned long encounter_data;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -1361,6 +1362,7 @@ enum
 	_actions_port_handler_call_uncover_debug,
 	_actions_port_handler_call_forget_recent_damage,
 	_actions_port_handler_call_retreat_successful,
+	_actions_port_handler_call_playfight_nearby_target,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

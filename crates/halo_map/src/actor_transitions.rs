@@ -269,6 +269,23 @@ pub mod call {
     pub const MOVE_TO_PROP: i32 = BASE + 96;
     /// `actor_move_keep_moving_past_destination(actor)`.
     pub const KEEP_MOVING: i32 = BASE + 97;
+    /// action_vehicle.c's `action_vehicle_desirable` of the vehicle `a` to an
+    /// actor about to try it (the attempt's and continuing's distances
+    /// `input[0..2]`), the result.
+    pub const VEHICLE_DESIRABLE: i32 = BASE + 98;
+    /// action_vehicle.c's `action_vehicle_find_impromptu_seat` in the vehicle
+    /// `a`: the seat, the result (its entry kept by the game for
+    /// [`FIND_VEHICLE_DESTINATION`]).
+    pub const FIND_IMPROMPTU_SEAT: i32 = BASE + 99;
+    /// `unit_has_animation_to_enter_seat` of the actor's unit, the vehicle `a`
+    /// and the seat `b`, the result.
+    pub const HAS_ENTER_ANIMATION: i32 = BASE + 100;
+    /// action_vehicle.c's `action_vehicle_find_destination` to the vehicle
+    /// `a`'s seat [`FIND_IMPROMPTU_SEAT`] found: whether it found one, the
+    /// result; the point in `output[0..3]` and its surface `result2`.
+    pub const FIND_VEHICLE_DESTINATION: i32 = BASE + 101;
+    /// `actor_move_to_point(actor, input[0..3], a, b)`, the result.
+    pub const MOVE_TO_POINT: i32 = BASE + 102;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -291,6 +308,7 @@ const ACTION_UNCOVER: i16 = 5;
 const ACTION_GUARD: i16 = 6;
 const ACTION_SEARCH: i16 = 7;
 const ACTION_WAIT: i16 = 8;
+const ACTION_VEHICLE: i16 = 9;
 const ACTION_CHARGE: i16 = 10;
 const ACTION_OBEY: i16 = 11;
 const ACTION_AVOID: i16 = 13;
@@ -2294,7 +2312,13 @@ pub fn handle_vehicle_entry(context: &AiStepContext, host: &impl AiHost) -> bool
         }
     }
 
-    call_full(context, host, call::VEHICLE_SETUP, best_vehicle_index, 0, &[attempt_distance, continue_distance]).result != 0
+    match vehicle_setup_impromptu(context, host, best_vehicle_index, attempt_distance, continue_distance) {
+        Some(data) => {
+            action_change(context, host, ACTION_VEHICLE, Some(&data));
+            true
+        }
+        None => false,
+    }
 }
 
 /// actions.c's evade directions (`_actor_evade_*`).
@@ -3503,4 +3527,50 @@ pub fn charge_setup(context: &AiStepContext, host: &impl AiHost, goal: i16) -> O
     } else {
         None
     }
+}
+
+/// action_vehicle.c's `action_vehicle_setup_impromptu`: an actor on foot
+/// (not a swarm, not already at it) gets into a vehicle it wants, at the
+/// best seat it has an animation for, moving to the seat's entry.
+pub fn vehicle_setup_impromptu(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    vehicle_index: i32,
+    attempt_distance: f32,
+    continue_distance: f32,
+) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut data = ActionData::new();
+    data.set_i32(a::STATE_VEHICLE_ATTEMPT_DISTANCE, attempt_distance.to_bits() as i32);
+    data.set_i32(a::STATE_VEHICLE_CONTINUE_DISTANCE, continue_distance.to_bits() as i32);
+    if m.i32(at(a::INPUT_VEHICLE_INDEX)) != NONE
+        || m.bool(at(a::META_SWARM))
+        || m.i16(at(a::STATE_ACTION)) == ACTION_VEHICLE
+        || call_full(context, host, call::VEHICLE_DESIRABLE, vehicle_index, 0, &[attempt_distance, continue_distance]).result
+            == 0
+    {
+        return None;
+    }
+    data.set_i32(a::STATE_VEHICLE_VEHICLE_INDEX, vehicle_index);
+    let seat_index = call_simple(context, host, call::FIND_IMPROMPTU_SEAT, vehicle_index) as i16;
+    data.set_i16(a::STATE_VEHICLE_SEAT_INDEX, seat_index);
+    if seat_index == NONE as i16 {
+        return None;
+    }
+    data.set_bool(a::STATE_VEHICLE_IMPROMPTU, true);
+    if call_full(context, host, call::HAS_ENTER_ANIMATION, vehicle_index, seat_index as i32, &[]).result == 0 {
+        return None;
+    }
+    let destination = call_full(context, host, call::FIND_VEHICLE_DESTINATION, vehicle_index, 0, &[]);
+    if destination.result == 0 {
+        return None;
+    }
+    let point = destination.vector();
+    data.set_vector(a::STATE_VEHICLE_DESTINATION_POINT, point);
+    data.set_i32(a::STATE_VEHICLE_DESTINATION_SURFACE_INDEX, destination.result2);
+    if call_full(context, host, call::MOVE_TO_POINT, destination.result2, vehicle_index, &point).result == 0 {
+        return None;
+    }
+    Some(data)
 }

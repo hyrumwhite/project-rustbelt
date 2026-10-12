@@ -1432,15 +1432,12 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
                             {
                                 let last_perceived_time =
                                     orphan.map_or(NONE, |orphan| m.i32(orphan + p::LAST_PERCEIVED_TIME as u32));
-                                firing_position_index = call_full(
+                                firing_position_index = crate::firing_positions::select_pursuit_position(
                                     context,
                                     host,
-                                    call::SELECT_PURSUIT_POSITION,
-                                    pursue_tenacious as i32,
+                                    pursue_tenacious,
                                     last_perceived_time,
-                                    &[],
-                                )
-                                .result as i16;
+                                );
                             }
                         }
 
@@ -1814,7 +1811,7 @@ const REAL_EPSILON: f32 = 0.0001;
 
 /// real_math.c's `point_to_line_distance_squared3d`: from the point to the
 /// segment from `base` along `height`.
-fn point_to_line_distance_squared(point: [f32; 3], base: [f32; 3], height: [f32; 3]) -> f32 {
+pub(crate) fn point_to_line_distance_squared(point: [f32; 3], base: [f32; 3], height: [f32; 3]) -> f32 {
     let v = vector_from_points(base, point);
     let t = pin_unit(dot(v, height) / magnitude_squared(height));
     magnitude_squared(point_from_line(v, height, -t))
@@ -1823,7 +1820,7 @@ fn point_to_line_distance_squared(point: [f32; 3], base: [f32; 3], height: [f32;
 /// real_math.c's `vector_to_line_distance_squared3d`: between the segment
 /// from `point` along `vector` and the one from `line_point` along
 /// `line_vector`.
-fn vector_to_line_distance_squared(point: [f32; 3], vector: [f32; 3], line_point: [f32; 3], line_vector: [f32; 3]) -> f32 {
+pub(crate) fn vector_to_line_distance_squared(point: [f32; 3], vector: [f32; 3], line_point: [f32; 3], line_vector: [f32; 3]) -> f32 {
     let offset = vector_from_points(point, line_point);
     let mut cross_vector = cross(vector, line_vector);
     let denominator = magnitude_squared_right_associated(cross_vector);
@@ -1995,7 +1992,7 @@ pub fn handle_danger_avoidance(context: &AiStepContext, host: &impl AiHost) -> b
         if destination_within_danger || (path_re_enters_danger && !body_within_danger) {
             let firing_position_index = m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX));
             if firing_position_index != NONE as i16 {
-                call_simple(context, host, call::DISCARD_FIRING_POSITION, firing_position_index as i32);
+                crate::firing_positions::discard_firing_position(m, context, firing_position_index, true);
                 m.set_bool(debug_at(debug::DANGER_ABANDONED_PATH), true);
             }
         }
@@ -2920,7 +2917,7 @@ pub fn action_change(context: &AiStepContext, host: &impl AiHost, new_action: i1
     } else if m.i16(mode) < 3 {
         m.set_i16(mode, 3);
     }
-    call_simple(context, host, call::CLEAR_DISCARDED_FIRING_POSITIONS, 0);
+    crate::firing_positions::clear_discarded_firing_positions(m, context, false);
     let size = ACTION_DATA_SIZES[new_action as usize];
     if let Some(data) = data {
         for (i, &byte) in data.bytes[..size].iter().enumerate() {
@@ -3011,7 +3008,7 @@ const POSTCOMBAT_SHOOT_CORPSE: i16 = 9;
 
 /// real_math.h's `normalize3d`: the vector to unit length (left alone when
 /// too short), and its length (0 then).
-fn normalize3(v: &mut [f32; 3]) -> f32 {
+pub(crate) fn normalize3(v: &mut [f32; 3]) -> f32 {
     let magnitude = magnitude_squared(*v).sqrt();
     if !(REAL_EPSILON > magnitude.abs()) {
         let s = 1.0 / magnitude;
@@ -3328,19 +3325,20 @@ pub fn flee_setup(
     if m.bool(at(a::META_SWARM)) {
         return None;
     }
-    let found = call_full(
-        context,
-        host,
-        call::FIND_FLEE_POSITION,
-        panic_type as i32,
-        panic_prop_index,
-        &[forced_flee_ticks as f32, flee_from_last_visible_location as i32 as f32, allow_occluded_points as i32 as f32],
-    );
-    let flee_firing_position_index = found.result as i16;
+    let search = crate::firing_positions::FleeSearch {
+        panic_type,
+        forced_flee_ticks,
+        flee_from_last_visible_location,
+        allow_occluded_points,
+        flee_prop_index: panic_prop_index,
+        approach_point: [0.0; 3],
+    };
+    let found = crate::firing_positions::find_flee_position(context, host, &search, false);
+    let flee_firing_position_index = found.firing_position_index;
     data.set_i16(a::STATE_FLEE_FLEE_FIRING_POSITION_INDEX, flee_firing_position_index);
-    data.set_bool(a::STATE_FLEE_FLEE_FIRING_POSITION_FOUND_RANDOMLY, found.result2 & 1 != 0);
-    data.set_bool(a::STATE_FLEE_HAS_APPROACH_POINT, found.result2 & 2 != 0);
-    data.set_vector(a::STATE_FLEE_APPROACH_POINT, found.vector());
+    data.set_bool(a::STATE_FLEE_FLEE_FIRING_POSITION_FOUND_RANDOMLY, found.found_randomly);
+    data.set_bool(a::STATE_FLEE_HAS_APPROACH_POINT, found.has_approach_point);
+    data.set_vector(a::STATE_FLEE_APPROACH_POINT, found.approach_point);
     data.set_bool(a::STATE_FLEE_FIND_NEW_FLEE_POSITION, false);
     if flee_firing_position_index != NONE as i16 {
         Some(data)

@@ -522,6 +522,29 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - an orphan takes its prop's knowledge (keeping its own identity and place in the list), uninspected for thirty seconds, with its hint pointing the way the unit went.
      - **The C's side, through `actor_perception_call`:** an object's origin, a vehicle's danger flag, bounding radius and sense position, and a unit's attackers (each one's responsible unit and the damage's time).
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in the orphan's lifespan was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Choosing firing positions in Rust (new in `halo_map::firing_positions`): actor_firing_position.c's `actor_select_firing_position` and `actor_active_select_firing_position`, with their evaluators, `actor_get_firing_position_group`, and the discarded positions; and action_flee.c's `action_flee_find_flee_position`.
+     - **What Rust does:**
+       - it gathers the encounter's positions in the groups the actor's squad allows, leaving out those another actor holds unless the actor is much nearer;
+       - it measures each one's path from the actor and from its target, and scores it by mode (fight, panic, cover, uncover, guard, pursue, avoid) for:
+         - the path's length;
+         - range from the target;
+         - the danger zone's clearance;
+         - friends' and dangerous enemies' lines of fire;
+         - the positions given up lately and the points to avoid;
+         - a flying driver's heading;
+         - for a pursuit, whether and when the encounter looked there;
+       - it sorts the positions with sort.c's `qsort_4byte` (ported) and tests line of sight from the best down, until no position left can beat the best.
+       - The fight, avoidance, guard, uncover and pursuit actions now choose in Rust, and so does the flee (setting up, and finding a new position). Rust also makes the writes when a position is given up, or the given-up list is cleared, in the actions, the emotions and the move update.
+     - **The C's side, through the new `actor_firing_position_call` (call kinds `(14 << 8) | n`):**
+       - the path searches (the actor's, kept for the change, and the target's) and their distances;
+       - 3D paths, lines of sight, a unit's estimated head or gun, and friends' and enemies' aim;
+       - the encounter's owners and pursuit records;
+       - the random draw, the change of position, and the flee's approach point.
+     - **The C mirror:** the original selection, with each of those game queries made through the call, is what the game runs under the check. The C flee search used to pass an uninitialized owner to the change when it found nothing (harmlessly ignored), and now passes NONE.
+     - **Results:**
+       - The dispatch steps (the decision loop and the actions' update and control), the emotion update and the move update agree in minute-long runs of b30, d20, c20, b40 and a50, with none left out.
+       - Planted errors were each caught on b30: the actor's search range, the fight's line-of-sight score, the panic flee's attractor, and the given-up list's wrap.
+       - With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

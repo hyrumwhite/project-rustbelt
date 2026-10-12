@@ -290,7 +290,7 @@ pub fn actor_emotion_update(context: &AiStepContext, host: &impl AiHost) {
     }
 
     if m.bool(at(a::EMOTIONS_MOVING_INTO_PLAYER_LINE_OF_FIRE)) {
-        call(call::DISCARD_FIRING_POSITION, m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX)) as i32, 1);
+        crate::firing_positions::discard_firing_position(m, context, m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX)), true);
         m.set_i16(at(a::EMOTIONS_MOVING_INTO_FIRE_TIMER), 22);
     } else if m.i16(at(a::EMOTIONS_MOVING_INTO_FIRE_TIMER)) > 0 {
         m.set_i16(at(a::EMOTIONS_MOVING_INTO_FIRE_TIMER), m.i16(at(a::EMOTIONS_MOVING_INTO_FIRE_TIMER)) - 1);

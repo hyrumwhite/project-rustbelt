@@ -413,7 +413,7 @@ pub fn actor_move_update(context: &AiStepContext, host: &impl AiHost) {
     }
 
     if clear_firing_positions && !m.bool(moving) {
-        call_simple(context, host, call::CLEAR_DISCARDED_FIRING_POSITIONS, 0);
+        crate::firing_positions::clear_discarded_firing_positions(m, context, true);
     }
     if m.bool(moving) && test_flag(flags, v::_ACTOR_DEFINITION_CANNOT_MOVE_CROUCHING_BIT) {
         crouch = false;

@@ -7,6 +7,7 @@
 //! file's call function (actions.c's `actions_port_call` forwards them).
 
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, AiStepContext, NONE, prop_get};
+use crate::firing_positions as fp;
 use crate::layout::{actor_datum as a, actor_definition as d, actor_variant_definition as var, ai_values as v, prop_datum as p};
 
 /// An action's functions the dispatch runs.
@@ -313,7 +314,7 @@ fn wait_update(context: &AiStepContext, host: &impl AiHost) {
 fn avoid_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
     let m = host.memory();
     if m.bool(context.actor + a::META_TIMESLICE as u32) {
-        call_simple(context, host, avoid_call::CHANGE_FIRING_POSITION, 0);
+        fp::change_to_active_selection(context, host, fp::mode::AVOID);
     }
     m.i16(context.actor + a::DANGER_ZONE_DANGER_TYPE as u32) == 0
 }
@@ -352,7 +353,7 @@ fn fight_update(context: &AiStepContext, host: &impl AiHost) {
             && position_index != NONE as i16
             && !m.bool(at(a::FIRING_POSITIONS_CURRENT_POSITION_FOUND_OUTSIDE_RANGE))
         {
-            call_simple(context, host, fight_call::DISCARD_FIRING_POSITION, position_index as i32);
+            fp::discard_firing_position(m, context, position_index, false);
         }
     }
 }
@@ -421,7 +422,7 @@ fn fight_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
         }
 
         let old_firing_position_index = m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX));
-        let new_firing_position_index = call_simple(context, host, fight_call::CHANGE_FIRING_POSITION, 0) as i16;
+        let new_firing_position_index = fp::change_to_active_selection(context, host, fp::mode::FIGHT);
         let timer = at(a::STATE_FIGHT_FIRING_POSITION_TIMER);
         if new_firing_position_index == NONE as i16 {
             m.set_i16(timer, 0);
@@ -955,9 +956,28 @@ fn uncover_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
     {
         return false;
     }
-    let selected = call_full(context, host, uncover_call::SELECT_FIRING_POSITION, 0, 0, &[]);
-    if selected.result as i16 != NONE as i16 {
-        let line_of_sight = selected.result2 as i16;
+    let mut search = fp::EvaluationContext::new(fp::mode::UNCOVER);
+    if m.i16(at(a::STATE_UNCOVER_PURSUIT_TYPE)) == PURSUIT_LOCATION_POSITION {
+        search.specific_target_enable = true;
+        search.specific_target_point = m.vector(at(a::STATE_UNCOVER_PURSUIT_LOCATION_POSITION));
+        search.specific_target_surface_index = m.i32(at(a::STATE_UNCOVER_PURSUIT_LOCATION_SURFACE_INDEX));
+        search.specific_target_cluster_index = m.i16(at(a::STATE_UNCOVER_PURSUIT_LOCATION_CLUSTER_INDEX));
+    } else {
+        search.use_last_visible_target_position = m.bool(at(a::STATE_UNCOVER_NO_TARGET_SIGHT_AVAILABLE));
+    }
+    let mut candidate = fp::FiringPosition::default();
+    let mut previous_owner = NONE;
+    let mut position_valid = false;
+    let selected_index = fp::active_select_firing_position(
+        context,
+        host,
+        &mut search,
+        &mut candidate,
+        &mut previous_owner,
+        &mut position_valid,
+    );
+    if selected_index != NONE as i16 {
+        let line_of_sight = candidate.line_of_sight;
         if m.i16(at(a::STATE_UNCOVER_PURSUIT_TYPE)) == PURSUIT_LOCATION_TARGET {
             if line_of_sight != v::_AI_LINE_OF_SIGHT_CLEAR as i16 && line_of_sight != v::_AI_LINE_OF_SIGHT_OCCLUDED as i16 {
                 if !m.bool(at(a::STATE_UNCOVER_NO_TARGET_SIGHT_AVAILABLE)) {
@@ -966,7 +986,7 @@ fn uncover_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                 m.set_bool(at(a::STATE_UNCOVER_NO_TARGET_SIGHT_AVAILABLE), true);
             }
         } else if line_of_sight == v::_AI_LINE_OF_SIGHT_CLEAR as i16
-            && call_full(context, host, uncover_call::TOLERANCE, 0, 0, &[]).output[0] > selected.output[0]
+            && call_full(context, host, uncover_call::TOLERANCE, 0, 0, &[]).output[0] > candidate.path_distance_from_actor
         {
             if !m.bool(at(a::STATE_UNCOVER_PURSUIT_LOCATION_INSPECTED)) {
                 call_simple(context, host, uncover_call::DEBUG, 1);
@@ -974,7 +994,7 @@ fn uncover_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
             m.set_bool(at(a::STATE_UNCOVER_PURSUIT_LOCATION_INSPECTED), true);
         }
     }
-    if call_simple(context, host, uncover_call::CHANGE_FIRING_POSITION, 0) as i16 == NONE as i16 {
+    if fp::change_firing_position(context, host, selected_index, previous_owner, position_valid) == NONE as i16 {
         m.set_bool(at(a::STATE_UNCOVER_UNCOVER_EXIT_FAILURE), true);
     }
     false
@@ -1072,7 +1092,7 @@ fn uncover_update(context: &AiStepContext, host: &impl AiHost) {
         m.w32(hold_timer, m.r32(hold_timer).wrapping_add(1));
         if pursuit_type == PURSUIT_LOCATION_TARGET && m.i32(hold_timer) >= 30 {
             let index = m.i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX)) as i32;
-            call_simple(context, host, uncover_call::DISCARD_FIRING_POSITION, index);
+            fp::discard_firing_position(m, context, index as i16, false);
         }
     }
 
@@ -1255,7 +1275,7 @@ fn guard_update(context: &AiStepContext, host: &impl AiHost) {
             let location_type = at(a::STATE_GUARD_GUARD_LOCATION_TYPE);
             if m.i16(location_type) == 3 {
                 let index = m.i16(at(a::STATE_GUARD_GUARD_FIRING_POSITION_INDEX)) as i32;
-                call_simple(context, host, guard_call::DISCARD_FIRING_POSITION, index);
+                fp::discard_firing_position(m, context, index as i16, false);
                 m.set_i16(at(a::STATE_GUARD_GUARD_FIRING_POSITION_INDEX), NONE as i16);
             }
             m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), NONE as i16);
@@ -1291,9 +1311,9 @@ fn guard_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
     }
     if m.bool(at(a::META_TIMESLICE)) && m.bool(find_new) {
         if m.i16(location_type) == 3 && m.i16(current) != NONE as i16 {
-            call_simple(context, host, guard_call::DISCARD_FIRING_POSITION, m.i16(current) as i32);
+            fp::discard_firing_position(m, context, m.i16(current), false);
         }
-        let firing_position_index = call_simple(context, host, guard_call::CHANGE_FIRING_POSITION, 0) as i16;
+        let firing_position_index = fp::change_to_guard_selection(context, host);
         m.set_bool(find_new, false);
         m.set_bool(at(a::STATE_GUARD_HAS_GUARD_DIRECTION), false);
         if firing_position_index == NONE as i16 {
@@ -1355,7 +1375,7 @@ fn guard_control(context: &AiStepContext, host: &impl AiHost) {
                     m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), guard_index);
                     m.set_bool(at(a::FIRING_POSITIONS_CURRENT_POSITION_FOUND_OUTSIDE_RANGE), false);
                     if call_simple(context, host, guard_call::MOVE_TO_FIRING_POSITION, guard_index as i32) == 0 {
-                        call_simple(context, host, guard_call::DISCARD_FIRING_POSITION, guard_index as i32);
+                        fp::discard_firing_position(m, context, guard_index, false);
                         m.set_i16(at(a::FIRING_POSITIONS_CURRENT_POSITION_INDEX), NONE as i16);
                     }
                 }
@@ -1533,7 +1553,7 @@ fn flee_control(context: &AiStepContext, host: &impl AiHost) {
             );
         } else {
             if m.i16(current) != NONE as i16 {
-                call_simple(context, host, flee_call::DISCARD_FIRING_POSITION, m.i16(current) as i32);
+                fp::discard_firing_position(m, context, m.i16(current), false);
                 call_simple(context, host, flee_call::MOVE_HALT, 0);
                 m.set_i16(current, NONE as i16);
             }
@@ -1661,7 +1681,15 @@ fn flee_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                 m.set_bool(unable, true);
                 m.w32(at(a::EMOTIONS_LAST_FLEE_FAILED_TIME), context.game_time as u32);
             } else if m.bool(find_new) {
-                call_simple(context, host, flee_call::FIND_FLEE_POSITION, 0);
+                let search = fp::FleeSearch {
+                    panic_type: m.i16(at(a::STATE_FLEE_PANIC_TYPE)),
+                    forced_flee_ticks: m.i16(at(a::STATE_FLEE_FORCED_FLEE_TICKS)),
+                    flee_from_last_visible_location: m.bool(at(a::STATE_FLEE_FLEE_FROM_LAST_VISIBLE_LOCATION)),
+                    allow_occluded_points: m.bool(at(a::STATE_FLEE_ALLOW_OCCLUDED_POINTS)),
+                    flee_prop_index: m.i32(at(a::STATE_FLEE_FLEE_PROP_INDEX)),
+                    approach_point: m.vector(at(a::STATE_FLEE_APPROACH_POINT)),
+                };
+                fp::find_flee_position(context, host, &search, true);
                 if m.i16(flee_position) == NONE as i16 {
                     m.set_bool(unable, true);
                     m.w32(at(a::EMOTIONS_LAST_FLEE_FAILED_TIME), context.game_time as u32);

@@ -361,6 +361,7 @@ pub mod actor_datum {
     pub const INPUT_POSITION: usize = 0x120;
     pub const INPUT_POSITION_HEAD_POSITION: usize = 0x120;
     pub const INPUT_BODY_POSITION: usize = 0x12c;
+    pub const INPUT_POSITION_BODY_LOCATION_CLUSTER_INDEX: usize = 0x148;
     pub const INPUT_VEHICLE_INDEX: usize = 0x158;
     pub const INPUT_IN_MIDAIR: usize = 0x15c;
     pub const INPUT_UNDERWATER: usize = 0x15d;
@@ -492,6 +493,11 @@ pub mod actor_datum {
     pub const FIRING_POSITIONS_PURSUIT_COMMUNICATED_LOST_CONTACT: usize = 0x3bd;
     pub const FIRING_POSITIONS_PURSUIT_PROP_INDEX: usize = 0x3c0;
     pub const FIRING_POSITIONS_PURSUIT_POSITIONS_COUNT: usize = 0x3c4;
+    pub const FIRING_POSITIONS_NEXT_DISCARDED_FIRING_POSITIONS_ENTRY: usize = 0x3c6;
+    pub const FIRING_POSITIONS_DISCARDED_FIRING_POSITIONS: usize = 0x3c8;
+    pub const FIRING_POSITIONS_LAST_DISCARDED_FIRING_POSITION_VALID: usize = 0x3d8;
+    pub const FIRING_POSITIONS_LAST_DISCARDED_FIRING_POSITION_TEMPORARY: usize = 0x3d9;
+    pub const FIRING_POSITIONS_LAST_DISCARDED_FIRING_POSITION: usize = 0x3dc;
     pub const ORDERS: usize = 0x3e8;
     pub const ORDERS_LOOK_PRIMARY_PRIORITY: usize = 0x3e8;
     pub const ORDERS_LOOK_PRIMARY_DIRECTION_TYPE: usize = 0x3ec;
@@ -734,6 +740,7 @@ pub mod actor_definition {
     pub const DEFENSIVE_EVASION_DANGER_THRESHOLD_DEFENDING: usize = 0x314;
     pub const DEFENSIVE_EVASION_SEEK_COVER_CHANCE: usize = 0x318;
     pub const DEFENSIVE_EVASION_DELAY_TIMER: usize = 0x31c;
+    pub const DEFENSIVE_COVER_MAX_DISTANCE: usize = 0x320;
     pub const DEFENSIVE_COVER_DAMAGE_THRESHOLD: usize = 0x324;
     pub const DEFENSIVE_STALKING_DISCOVERY_TIME: usize = 0x328;
     pub const DEFENSIVE_STALKING_MAX_DISTANCE: usize = 0x32c;
@@ -762,6 +769,14 @@ pub mod actor_definition {
     pub const FIRING_POSITION_GUARD_POSITION_TIME_UPPER_BOUND: usize = 0x3bc;
     pub const FIRING_POSITION_COMBAT_POSITION_TIME_LOWER_BOUND: usize = 0x3c0;
     pub const FIRING_POSITION_COMBAT_POSITION_TIME_UPPER_BOUND: usize = 0x3c4;
+    pub const FIRING_POSITION_OLD_AVOIDANCE_RADIUS: usize = 0x3c8;
+    pub const FIRING_POSITION_FRIEND_AVOIDANCE_RADIUS: usize = 0x3cc;
+}
+
+pub mod actor_discarded_firing_position {
+    pub const SIZEOF: usize = 0x4;
+    pub const TEMPORARY: usize = 0x0;
+    pub const INDEX: usize = 0x2;
 }
 
 pub mod actor_idle_looking {
@@ -1455,6 +1470,7 @@ pub mod equipment_placement {
 pub mod firing_position_definition {
     pub const SIZEOF: usize = 0x18;
     pub const POSITION: usize = 0x0;
+    pub const GROUP_INDEX: usize = 0xc;
     pub const CLUSTER_INDEX: usize = 0xe;
     pub const SURFACE_INDEX: usize = 0x14;
 }
@@ -2179,6 +2195,7 @@ pub mod sky_light {
 
 pub mod squad_definition {
     pub const SIZEOF: usize = 0xe8;
+    pub const FIRING_POSITION_GROUPS: usize = 0x54;
     pub const MOVE_POSITIONS: usize = 0xc4;
 }
 

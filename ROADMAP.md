@@ -824,6 +824,34 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - With all four networking systems in Rust on both machines, the machines' positions differ as with the C: median 3.8 cm against 3.6, largest 14 against 13.
          - With all fifty-four systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
+   - [x] A client's own unit and the host's word on every player's unit in Rust (`halo_map::network_apply`, world steps 6 and 7): network_distributed.c's `distributed_correct_own_unit` and `distributed_handle_unit_state`.
+     - **What Rust does:**
+       - **Own unit:** the client's own unit is corrected only when the host's echo of its prediction is more than 3 m from where it had it at that tick. It moves by the difference, and the ticks noted since move with it. The round trip is smoothed from the echoes. In co-op it is not moved into a BSP not yet loaded.
+       - **Every player's unit:**
+         - How the player died is noted. Dead, its copy is killed once the killing blow has had half a second to come.
+         - Alive, the host's unit becomes the player's once this machine has it, and an old one is killed.
+         - Its seat follows the host's: at once for others, and for a local player once it has disagreed for longer than a round trip and some slack.
+         - Its shields and health, powerups and camouflage are the host's.
+         - On foot, it moves toward the host's position (its own correction for a local player), onto the teleporter it lands on.
+     - **The game's, through calls:**
+       - whether a point has a leaf
+       - whether the client has an object
+       - attaching and detaching a player's unit
+       - killing a unit, with statistics or without
+       - setting a seat
+       - setting the shields' state, which starts their effects
+       - finding a teleporter
+
+       The arguments add the netcode's death and seat records and the player. The regions add the player's datum, those records and every local player's noted positions.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, all 2,048 of the joiner's unit states agree, with their own corrections and applies nested in them. The steps before still agree on the host.
+       - **Planted errors:**
+         - Caught on the joiner: the remote players' tolerance, the seat rule, the round trip's smoothing and the echoed tick.
+         - Unseen: the death wait (the host's killing blow arrives before its state says dead), detaching before attaching (a respawning player's old unit is already detached), and the noted positions' shift (no correction past 3 m came back).
+       - **Rust in charge:**
+         - Over two sessions each, with all networking systems in Rust, the machines' positions differ as with the C: medians 3.9 and 5.0 cm against 6.0 and 5.9.
+         - With all fifty-four systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

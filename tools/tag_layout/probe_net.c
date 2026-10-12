@@ -41,6 +41,8 @@ LAYOUT_MEMBER(weapon_magazine, rounds_loaded, rounds_loaded)
 LAYOUT_MEMBER(player_datum, identifier, identifier)
 LAYOUT_MEMBER(player_datum, unit_index, unit_index)
 LAYOUT_MEMBER(player_datum, powerup_durations, powerup_durations)
+LAYOUT_MEMBER(player_datum, local_player_index, local_player_index)
+LAYOUT_MEMBER(player_datum, teleporter_index, teleporter_index)
 
 /* flags and counts */
 LAYOUT_VALUE(_object_at_rest_bit)

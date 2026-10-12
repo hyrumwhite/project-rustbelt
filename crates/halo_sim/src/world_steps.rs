@@ -185,6 +185,8 @@ const STEP_COMMUNICATION: i32 = 2;
 const STEP_NETWORK_APPLY_STATE: i32 = 3;
 const STEP_NETWORK_OBJECT_CORRECT: i32 = 4;
 const STEP_NETWORK_OBJECT_RECONCILE: i32 = 5;
+const STEP_NETWORK_CORRECT_OWN_UNIT: i32 = 6;
+const STEP_NETWORK_UNIT_STATE: i32 = 7;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -194,6 +196,8 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_APPLY_STATE => halo_map::network_apply::apply_state(context, host),
         STEP_NETWORK_OBJECT_CORRECT => halo_map::network_apply::object_correct(context, host),
         STEP_NETWORK_OBJECT_RECONCILE => halo_map::network_apply::object_reconcile(context, host),
+        STEP_NETWORK_CORRECT_OWN_UNIT => halo_map::network_apply::correct_own_unit(context, host),
+        STEP_NETWORK_UNIT_STATE => halo_map::network_apply::handle_unit_state(context, host),
         _ => return None,
     }
     Some(())

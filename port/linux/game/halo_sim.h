@@ -61,6 +61,7 @@ enum
 	_halo_sim_actor_move,
 	_halo_sim_actor_combat,
 	_halo_sim_actor_dispatch,
+	_halo_sim_paths,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2081,6 +2082,19 @@ ai_update_call); in check mode `checking` is set, ai_update_call notes each
 call (halo_sim_ai_update_note), and halo_sim_ai_update_check compares
 Rust's replay */
 int halo_sim_ai_update(int *checking);
+
+/* the AI's path search (path.c's path_state_find and
+path_state_estimated_distance; crates/halo_map's path): the game's state
+(HALO_SIM_PATH_STATE_SIZE bytes, its debug storage HALO_SIM_PATH_DEBUG_SIZE),
+searched by the game's `game` or Rust's as the paths system runs */
+#define HALO_SIM_PATH_STATE_SIZE 0x1408C
+#define HALO_SIM_PATH_DEBUG_SIZE 0x1CA7C
+int halo_sim_path_find(void *state, void *debug, unsigned long breakable_surface_flags, long structure_bsp_index,
+	int (*game)(void *state));
+int halo_sim_path_estimated_distance(void *state, float const *end_point, long end_surface_index,
+	float *distance, float *closest_approach, float *direction,
+	int (*game)(void *state, float const *end_point, long end_surface_index, float *distance, float *closest_approach,
+		float *direction));
 void halo_sim_ai_update_check(void);
 void halo_sim_ai_update_note(struct halo_sim_ai_update_call const *call);
 void ai_update_call(struct halo_sim_ai_update_call *call);

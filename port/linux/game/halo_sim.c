@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 97
+#define HALO_SIM_VERSION 98
 
 /* ---------- structures */
 
@@ -1970,6 +1970,27 @@ typedef long (*halo_sim_game_tick_function)(struct halo_sim_game_tick_call *call
 typedef long (*halo_sim_hs_function)(struct halo_sim_hs_update_call *call);
 typedef long (*halo_sim_ai_update_function)(struct halo_sim_ai_update_c *call);
 typedef long (*halo_sim_ai_step_function)(long step, struct halo_sim_ai_step_c *call);
+
+/* a path search's (crates/halo_sim's paths::PathCall): `kind` 0 the search
+of `state`, 1 its estimated distance to `end_point` on `end_surface_index`
+(`flags` bit 0 the closest approach wanted, bit 1 the direction) */
+struct halo_sim_path_call
+{
+	unsigned long state;
+	unsigned long breakable_surface_flags;
+	long structure_bsp_index;
+	long kind;
+	real end_point[3];
+	long end_surface_index;
+	long flags;
+	long result;
+	real distance;
+	real closest_approach;
+	real direction[3];
+};
+
+typedef char halo_sim_path_call_size_assert[sizeof(struct halo_sim_path_call) == 60 ? 1 : -1];
+typedef long (*halo_sim_path_function)(struct halo_sim_path_call *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -2063,6 +2084,7 @@ static struct
 	halo_sim_ai_update_function ai_update_check;
 	halo_sim_ai_step_function ai_step;
 	halo_sim_ai_step_function ai_step_check;
+	halo_sim_path_function path;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -2126,6 +2148,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"actor_move",
 	"actor_combat",
 	"actor_dispatch",
+	"paths",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -4730,6 +4753,7 @@ static void halo_sim_initialize(void)
 	halo_sim.ai_update_check = (halo_sim_ai_update_function)halo_sim_symbol(library, "halo_sim_ai_update_check");
 	halo_sim.ai_step = (halo_sim_ai_step_function)halo_sim_symbol(library, "halo_sim_ai_step");
 	halo_sim.ai_step_check = (halo_sim_ai_step_function)halo_sim_symbol(library, "halo_sim_ai_step_check");
+	halo_sim.path = (halo_sim_path_function)halo_sim_symbol(library, "halo_sim_path");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -4760,7 +4784,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.game_tick || !halo_sim.game_tick_check ||
 		!halo_sim.hs_update || !halo_sim.hs_update_check ||
 		!halo_sim.ai_update || !halo_sim.ai_update_check ||
-		!halo_sim.ai_step || !halo_sim.ai_step_check)
+		!halo_sim.ai_step || !halo_sim.ai_step_check ||
+		!halo_sim.path)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -9747,6 +9772,167 @@ void halo_sim_ai_step_check(long step, long result)
 				halo_sim_ai_step_names[step], compared - halo_sim_ai_step_checks.differed[step], compared,
 				halo_sim_ai_step_checks.calls[step], halo_sim_ai_step_checks.skipped[step]);
 	}
+}
+
+/* ---------- the AI's path search */
+
+/* the path checks: the state and debug storage before and after the
+game's, and the comparisons */
+static struct
+{
+	unsigned char state_before[HALO_SIM_PATH_STATE_SIZE];
+	unsigned char state_after[HALO_SIM_PATH_STATE_SIZE];
+	unsigned char debug_before[HALO_SIM_PATH_DEBUG_SIZE];
+	unsigned char debug_after[HALO_SIM_PATH_DEBUG_SIZE];
+	unsigned long compared[2];
+	unsigned long differed[2];
+	unsigned long skipped[2];
+} halo_sim_path_checks;
+
+static char const *const halo_sim_path_names[2] = {"path search", "path estimated distance"};
+
+/* a check's comparison: of what Rust left in the state (and debug
+storage) with the game's after, and of their results; the game's put back */
+static void halo_sim_path_compare(long kind, unsigned char *state, unsigned char *debug, int results_agree)
+{
+	long offset = NONE;
+	long debug_offset = NONE;
+	long index;
+
+	for (index = 0; index < HALO_SIM_PATH_STATE_SIZE; index++)
+	{
+		if (state[index] != halo_sim_path_checks.state_after[index])
+		{
+			offset = index;
+			break;
+		}
+	}
+	if (debug)
+	{
+		for (index = 0; index < HALO_SIM_PATH_DEBUG_SIZE; index++)
+		{
+			if (debug[index] != halo_sim_path_checks.debug_after[index])
+			{
+				debug_offset = index;
+				break;
+			}
+		}
+	}
+	halo_sim_path_checks.compared[kind]++;
+	if (offset != NONE || debug_offset != NONE || !results_agree)
+	{
+		halo_sim_path_checks.differed[kind]++;
+		if (halo_sim_path_checks.differed[kind] <= 8)
+		{
+			platform_log("halo_sim: %s differs: results %s, the state first differs at byte %lx (game %02x rust %02x), the debug storage at %lx",
+				halo_sim_path_names[kind], results_agree ? "agree" : "differ", offset,
+				offset != NONE ? halo_sim_path_checks.state_after[offset] : 0, offset != NONE ? state[offset] : 0,
+				debug_offset);
+		}
+	}
+	memcpy(state, halo_sim_path_checks.state_after, HALO_SIM_PATH_STATE_SIZE);
+	if (debug)
+		memcpy(debug, halo_sim_path_checks.debug_after, HALO_SIM_PATH_DEBUG_SIZE);
+	{
+		unsigned long compared = halo_sim_path_checks.compared[kind];
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu left out)",
+				halo_sim_path_names[kind], compared - halo_sim_path_checks.differed[kind], compared,
+				halo_sim_path_checks.skipped[kind]);
+	}
+}
+
+int halo_sim_path_find(void *state, void *debug, unsigned long breakable_surface_flags, long structure_bsp_index,
+	int (*game)(void *state))
+{
+	short mode = halo_sim_mode(_halo_sim_paths);
+	struct halo_sim_path_call call;
+	int result;
+
+	if (mode == _halo_sim_mode_c)
+		return game(state);
+	memset(&call, 0, sizeof(call));
+	call.state = (unsigned long)state;
+	call.breakable_surface_flags = breakable_surface_flags;
+	call.structure_bsp_index = structure_bsp_index;
+	call.kind = 0;
+	if (mode != _halo_sim_mode_check)
+	{
+		if (halo_sim.path(&call) == 0)
+			return call.result != 0;
+		return game(state);
+	}
+	memcpy(halo_sim_path_checks.state_before, state, HALO_SIM_PATH_STATE_SIZE);
+	if (debug)
+		memcpy(halo_sim_path_checks.debug_before, debug, HALO_SIM_PATH_DEBUG_SIZE);
+	result = game(state);
+	memcpy(halo_sim_path_checks.state_after, state, HALO_SIM_PATH_STATE_SIZE);
+	memcpy(state, halo_sim_path_checks.state_before, HALO_SIM_PATH_STATE_SIZE);
+	if (debug)
+	{
+		memcpy(halo_sim_path_checks.debug_after, debug, HALO_SIM_PATH_DEBUG_SIZE);
+		memcpy(debug, halo_sim_path_checks.debug_before, HALO_SIM_PATH_DEBUG_SIZE);
+	}
+	if (halo_sim.path(&call) != 0)
+	{
+		memcpy(state, halo_sim_path_checks.state_after, HALO_SIM_PATH_STATE_SIZE);
+		if (debug)
+			memcpy(debug, halo_sim_path_checks.debug_after, HALO_SIM_PATH_DEBUG_SIZE);
+		halo_sim_path_checks.skipped[0]++;
+		return result;
+	}
+	halo_sim_path_compare(0, (unsigned char *)state, (unsigned char *)debug, (call.result != 0) == (result != 0));
+
+	return result;
+}
+
+int halo_sim_path_estimated_distance(void *state, float const *end_point, long end_surface_index,
+	float *distance, float *closest_approach, float *direction,
+	int (*game)(void *state, float const *end_point, long end_surface_index, float *distance, float *closest_approach,
+		float *direction))
+{
+	short mode = halo_sim_mode(_halo_sim_paths);
+	struct halo_sim_path_call call;
+	int result;
+	int agree;
+
+	if (mode == _halo_sim_mode_c)
+		return game(state, end_point, end_surface_index, distance, closest_approach, direction);
+	memset(&call, 0, sizeof(call));
+	call.state = (unsigned long)state;
+	call.kind = 1;
+	memcpy(call.end_point, end_point, sizeof(call.end_point));
+	call.end_surface_index = end_surface_index;
+	call.flags = (closest_approach ? 1 : 0) | (direction ? 2 : 0);
+	if (mode != _halo_sim_mode_check)
+	{
+		if (halo_sim.path(&call) != 0)
+			return game(state, end_point, end_surface_index, distance, closest_approach, direction);
+		*distance = call.distance;
+		if (closest_approach)
+			*closest_approach = call.closest_approach;
+		if (direction)
+			memcpy(direction, call.direction, sizeof(call.direction));
+		return call.result != 0;
+	}
+	memcpy(halo_sim_path_checks.state_before, state, HALO_SIM_PATH_STATE_SIZE);
+	result = game(state, end_point, end_surface_index, distance, closest_approach, direction);
+	memcpy(halo_sim_path_checks.state_after, state, HALO_SIM_PATH_STATE_SIZE);
+	memcpy(state, halo_sim_path_checks.state_before, HALO_SIM_PATH_STATE_SIZE);
+	if (halo_sim.path(&call) != 0)
+	{
+		memcpy(state, halo_sim_path_checks.state_after, HALO_SIM_PATH_STATE_SIZE);
+		halo_sim_path_checks.skipped[1]++;
+		return result;
+	}
+	agree = (call.result != 0) == (result != 0) &&
+		memcmp(&call.distance, distance, sizeof(float)) == 0 &&
+		(!closest_approach || memcmp(&call.closest_approach, closest_approach, sizeof(float)) == 0) &&
+		(!direction || memcmp(call.direction, direction, sizeof(call.direction)) == 0);
+	halo_sim_path_compare(1, (unsigned char *)state, NULL, agree);
+
+	return result;
 }
 
 /* ---------- the AI's update */

@@ -167,7 +167,13 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "structures/structure_bsp_definitions.h"
 
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
+
 #include <stddef.h>
+
+typedef char path_state_port_size_assert[sizeof(struct path_state) == HALO_SIM_PATH_STATE_SIZE ? 1 : -1];
+typedef char path_debug_storage_port_size_assert[
+	sizeof(struct path_debug_storage) == HALO_SIM_PATH_DEBUG_SIZE ? 1 : -1];
 
 /* ---------- constants */
 
@@ -1383,6 +1389,15 @@ real path_attractor_weight(
 	return weight;
 }
 
+/* port: the game's estimated distance, for halo_sim_path_estimated_distance */
+static int path_state_estimated_distance_game(
+	void *state,
+	float const *end_point,
+	long end_surface_index,
+	float *distance_reference,
+	float *closest_approach_to_attractor_reference,
+	float *estimated_direction_reference);
+
 boolean path_state_estimated_distance(
 	struct path_state *state,
 	real_point3d const *end_point,
@@ -1391,6 +1406,28 @@ boolean path_state_estimated_distance(
 	real *closest_approach_to_attractor_reference,
 	real_vector3d *estimated_direction_reference)
 {
+	/* port: the game's or Rust's (halo_sim's paths) */
+	return (boolean)halo_sim_path_estimated_distance(
+		state,
+		end_point->n,
+		end_surface_index,
+		distance_reference,
+		closest_approach_to_attractor_reference,
+		estimated_direction_reference ? estimated_direction_reference->n : NULL,
+		path_state_estimated_distance_game);
+}
+
+static int path_state_estimated_distance_game(
+	void *state_data,
+	float const *end_point_data,
+	long end_surface_index,
+	float *distance_reference,
+	float *closest_approach_to_attractor_reference,
+	float *estimated_direction_data)
+{
+	struct path_state *state = (struct path_state *)state_data;
+	real_point3d const *end_point = (real_point3d const *)end_point_data;
+	real_vector3d *estimated_direction_reference = (real_vector3d *)estimated_direction_data;
 	short node_index = path_node_from_hash_table(state, end_surface_index);
 	boolean result = FALSE;
 
@@ -1815,11 +1852,13 @@ static boolean path_state_traverse(
 	return result;
 }
 
+/* port: the game's search, for halo_sim_path_find */
+static int path_state_find_game(
+	void *state_data);
+
 boolean path_state_find(
 	struct path_state *state)
 {
-	boolean result = FALSE;
-
 	if (state->destination_valid)
 	{
 		ai_profile.meters[_ai_meter_path_find].accumulator++;
@@ -1828,6 +1867,21 @@ boolean path_state_find(
 	{
 		ai_profile.meters[_ai_meter_path_flood].accumulator++;
 	}
+
+	/* port: the game's or Rust's (halo_sim's paths) */
+	return (boolean)halo_sim_path_find(
+		state,
+		state->debug,
+		(unsigned long)breakable_surface_flags_get(),
+		global_structure_bsp_index_get(),
+		path_state_find_game);
+}
+
+static int path_state_find_game(
+	void *state_data)
+{
+	struct path_state *state = (struct path_state *)state_data;
+	boolean result = FALSE;
 
 	path_state_reset(state);
 	if (state->debug)

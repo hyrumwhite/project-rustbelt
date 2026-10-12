@@ -3477,6 +3477,39 @@ void actor_emotion_call(
 		case _actor_emotion_call_unopposable_retreat:
 			actor_emotion_unopposable_retreat(call->actor);
 			break;
+
+		case _actor_emotion_call_unit_busy:
+			call->result = unit_is_busy(actor_get(call->actor)->meta.unit_index) ? 1 : 0;
+			break;
+
+		case _actor_emotion_call_has_path:
+			call->result = actor_path_has_path(call->actor) ? 1 : 0;
+			break;
+
+		case _actor_emotion_call_firing_variant:
+			call->result = (long)actor_combat_get_firing_variant_definition(call->actor);
+			break;
+
+		case _actor_emotion_call_unit_shamble_state:
+		{
+			struct unit_datum *unit = unit_get(actor_get(call->actor)->meta.unit_index);
+
+			call->result = unit->unit.animation.state == _unit_state_hard_ping;
+			call->result2 = TEST_FLAG(unit->object.damage_flags, _object_melee_attack_inhibited_bit) ? 1 : 0;
+			break;
+		}
+
+		case _actor_emotion_call_has_ranged_weapon:
+			call->result = actor_has_ranged_weapon(call->actor) ? 1 : 0;
+			break;
+
+		case _actor_emotion_call_random:
+			call->output[0] = real_seed_random(get_global_random_seed_address());
+			break;
+
+		case _actor_emotion_call_random_range:
+			call->output[0] = real_random_range(call->input[0], call->input[1]);
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -3841,7 +3874,7 @@ static void actor_emotion_update_game(
 			break;
 
 		case _defensive_crouch_flood_shamble:
-			crouch = actor_emotion_call_simple(actor_index, _actor_emotion_call_flood_shamble, 0, 0, NULL) != 0;
+			crouch = actor_type_flood_desire_shamble(actor_index);
 			break;
 
 		default:

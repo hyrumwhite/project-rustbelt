@@ -924,6 +924,13 @@ enum
 	_actor_emotion_call_discard_firing_position,
 	_actor_emotion_call_flood_shamble,
 	_actor_emotion_call_unopposable_retreat,
+	_actor_emotion_call_unit_busy,
+	_actor_emotion_call_has_path,
+	_actor_emotion_call_firing_variant,
+	_actor_emotion_call_unit_shamble_state,
+	_actor_emotion_call_has_ranged_weapon,
+	_actor_emotion_call_random,
+	_actor_emotion_call_random_range,
 };
 
 /* the situation update's calls (actor_perception.c's actor_situation_call;

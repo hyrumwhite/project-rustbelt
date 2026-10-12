@@ -32,6 +32,7 @@ symbols in this file:
 #include "actions.h"
 #include "props.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -157,18 +158,40 @@ void flood_decide_action(
 	return;
 }
 
+/* port: what it asks of the rest of the game through actor_perception.c's
+actor_emotion_call, as the Rust port's does (crates/halo_map's
+actor_emotions) */
+static struct halo_sim_ai_call flood_port_call(
+	long actor_index,
+	long kind,
+	real input0,
+	real input1)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.input[0] = input0;
+	call.input[1] = input1;
+	actor_emotion_call(&call);
+
+	return call;
+}
+
 boolean actor_type_flood_desire_shamble(
 	long actor_index)
 {
 	struct actor_datum *actor = actor_get(actor_index);
 	struct actor_variant_definition const *variant =
 		actor_variant_definition_get(actor->meta.variant_definition_index);
-	struct actor_variant_definition const *firing_variant =
-		actor_combat_get_firing_variant_definition(actor_index);
+	struct actor_variant_definition const *firing_variant = (struct actor_variant_definition const *)
+		flood_port_call(actor_index, _actor_emotion_call_firing_variant, 0.0f, 0.0f).result;
 	boolean result = FALSE;
 	boolean crouch_switching = FALSE;
 
-	if (!unit_is_busy(actor->meta.unit_index) && !actor_path_has_path(actor_index))
+	if (!flood_port_call(actor_index, _actor_emotion_call_unit_busy, 0.0f, 0.0f).result &&
+		!flood_port_call(actor_index, _actor_emotion_call_has_path, 0.0f, 0.0f).result)
 	{
 		result = TRUE;
 	}
@@ -182,12 +205,12 @@ boolean actor_type_flood_desire_shamble(
 	}
 	else
 	{
-		struct unit_datum *unit = unit_get(actor->meta.unit_index);
+		struct halo_sim_ai_call unit_state = flood_port_call(actor_index, _actor_emotion_call_unit_shamble_state, 0.0f, 0.0f);
 		struct prop_datum *target_prop = actor->target.target_prop_index == NONE
 			? NULL
 			: prop_get(actor->target.target_prop_index);
 
-		if (unit->unit.animation.state == _unit_state_hard_ping && !actor->emotions.berserk)
+		if (unit_state.result && !actor->emotions.berserk)
 		{
 			result = TRUE;
 		}
@@ -201,7 +224,7 @@ boolean actor_type_flood_desire_shamble(
 		{
 			result = FALSE;
 		}
-		else if (TEST_FLAG(unit->object.damage_flags, _object_melee_attack_inhibited_bit))
+		else if (unit_state.result2)
 		{
 			result = TRUE;
 		}
@@ -212,7 +235,8 @@ boolean actor_type_flood_desire_shamble(
 		{
 			result = FALSE;
 		}
-		else if (!actor_has_ranged_weapon(actor_index) || actor->input.underwater)
+		else if (!flood_port_call(actor_index, _actor_emotion_call_has_ranged_weapon, 0.0f, 0.0f).result ||
+			actor->input.underwater)
 		{
 			result = FALSE;
 		}
@@ -379,7 +403,7 @@ boolean actor_type_flood_desire_shamble(
 				crouch_chance -= 0.5f * adjustment;
 			}
 
-			random_value = real_seed_random(get_global_random_seed_address());
+			random_value = flood_port_call(actor_index, _actor_emotion_call_random, 0.0f, 0.0f).output[0];
 			actor->emotions.crouch_switching_active = TRUE;
 			actor->emotions.crouch_switching_current_value = random_value < crouch_chance;
 			value_changed = TRUE;
@@ -391,15 +415,15 @@ boolean actor_type_flood_desire_shamble(
 
 			if (actor->emotions.crouch_switching_current_value)
 			{
-				change_time = real_random_range(
+				change_time = flood_port_call(actor_index, _actor_emotion_call_random_range,
 					variant->movement_switching.crouch_time_lower_bound,
-					variant->movement_switching.crouch_time_upper_bound);
+					variant->movement_switching.crouch_time_upper_bound).output[0];
 			}
 			else
 			{
-				change_time = real_random_range(
+				change_time = flood_port_call(actor_index, _actor_emotion_call_random_range,
 					variant->movement_switching.run_time_lower_bound,
-					variant->movement_switching.run_time_upper_bound);
+					variant->movement_switching.run_time_upper_bound).output[0];
 			}
 			actor->emotions.crouch_switching_change_timer = (short)MAX(change_time * 30.0f, 31.0f);
 			actor->emotions.crouch_switching_stay_timer = 30;

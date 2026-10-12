@@ -730,7 +730,8 @@ boolean distributed_object_index_valid(
 	return object_index != NONE && DATUM_INDEX_TO_IDENTIFIER(object_index) != 0;
 }
 
-boolean distributed_axes_make_valid(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static boolean distributed_axes_make_valid_game(
 	real_vector3d *forward,
 	real_vector3d *up)
 {
@@ -756,6 +757,34 @@ boolean distributed_axes_make_valid(
 	up->j /= length;
 	up->k /= length;
 	return TRUE;
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+boolean distributed_axes_make_valid(
+	real_vector3d *forward,
+	real_vector3d *up)
+{
+	struct halo_sim_wire_call call;
+	real before[6];
+	real axes[6];
+
+	csmemcpy(before, forward, sizeof(*forward));
+	csmemcpy(before + 3, up, sizeof(*up));
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_axes_make_valid;
+	call.input = before;
+	call.output = axes;
+	if (halo_sim_distributed_wire(&call))
+	{
+		csmemcpy(forward, axes, sizeof(*forward));
+		csmemcpy(up, axes + 3, sizeof(*up));
+		return (boolean)call.result;
+	}
+	call.result = distributed_axes_make_valid_game(forward, up);
+	csmemcpy(axes, forward, sizeof(*forward));
+	csmemcpy(axes + 3, up, sizeof(*up));
+	halo_sim_distributed_wire_check(&call, sizeof(axes));
+	return (boolean)call.result;
 }
 
 /* port: the game's (halo_sim.c checks Rust's against it) */
@@ -1451,7 +1480,8 @@ real distributed_machine_round_trip_ticks(
 
 /* ---------- units */
 
-static void distributed_state_from_player(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_state_from_player_game(
 	short player_index,
 	struct distributed_unit_state *state)
 {
@@ -1519,6 +1549,42 @@ static void distributed_state_from_player(
 		SET_FLAG(state->flags, _distributed_unit_friendly_fire_bit, death->friendly_fire);
 		SET_FLAG(state->flags, _distributed_unit_killed_by_vehicle_bit, death->killed_by_vehicle);
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static void distributed_state_from_player(
+	short player_index,
+	struct distributed_unit_state *state)
+{
+	struct halo_sim_wire_call call;
+	struct halo_sim_wire_player_extras extras;
+	struct halo_sim_wire_game game;
+
+	memset(&extras, 0, sizeof(extras));
+	extras.game_time = game_time_get();
+	extras.server = game_connection() == _game_connection_network_server;
+	extras.tracked = player_index >= 0 && player_index < MAXIMUM_TRACKED_PLAYERS;
+	if (extras.tracked)
+	{
+		extras.prediction_taken_time = distributed_predictions[player_index].taken_time;
+		extras.prediction_taken_host_time = distributed_predictions[player_index].taken_host_time;
+		extras.death_valid = distributed_deaths[player_index].valid;
+		extras.death_killing_player_index = distributed_deaths[player_index].killing_player_index;
+		extras.death_friendly_fire = distributed_deaths[player_index].friendly_fire;
+		extras.death_killed_by_vehicle = distributed_deaths[player_index].killed_by_vehicle;
+	}
+	game.object_header_data = (unsigned long)object_header_data;
+	game.player_data = (unsigned long)player_data;
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_state_from_player;
+	call.a = player_index;
+	call.input = &extras;
+	call.end = &game;
+	call.output = state;
+	if (halo_sim_distributed_wire(&call))
+		return;
+	distributed_state_from_player_game(player_index, state);
+	halo_sim_distributed_wire_check(&call, sizeof(*state));
 }
 
 /* the state's bytes on the wire (at most DISTRIBUTED_UNIT_STATE_MAXIMUM_SIZE):

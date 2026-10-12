@@ -77,7 +77,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 117
+#define HALO_SIM_VERSION 118
 
 /* ---------- structures */
 
@@ -5608,8 +5608,8 @@ void halo_sim_data_packet_decode_check(struct halo_sim_data_packet_call const *g
 
 static struct
 {
-	unsigned long compared[_halo_sim_wire_relayed_action_from + 1];
-	unsigned long differed[_halo_sim_wire_relayed_action_from + 1];
+	unsigned long compared[NUMBER_OF_HALO_SIM_WIRE_KINDS];
+	unsigned long differed[NUMBER_OF_HALO_SIM_WIRE_KINDS];
 } halo_sim_wire_checks;
 
 int halo_sim_distributed_wire(struct halo_sim_wire_call *call)
@@ -5623,7 +5623,8 @@ void halo_sim_distributed_wire_check(struct halo_sim_wire_call const *game, long
 	{
 		"", "vector packs", "vector unpacks", "unit vector unpacks", "vitality packs", "vitality unpacks",
 		"angle packs", "angle unpacks", "unit state writes", "unit state reads", "relayed action writes",
-		"relayed action reads", "relayed actions",
+		"relayed action reads", "relayed actions", "axes made valid", "transforms tested", "vector clamps",
+		"checksums", "object state unpacks", "player states", "object states", "inventories",
 	};
 	struct halo_sim_wire_call call = *game;
 	unsigned char output[256];
@@ -5631,7 +5632,7 @@ void halo_sim_distributed_wire_check(struct halo_sim_wire_call const *game, long
 	boolean same;
 
 	if (halo_sim_mode(_halo_sim_distributed_wire) != _halo_sim_mode_check || game->kind < 1 ||
-		game->kind > _halo_sim_wire_relayed_action_from || output_size < 0 || output_size > (long)sizeof(output))
+		game->kind >= NUMBER_OF_HALO_SIM_WIRE_KINDS || output_size < 0 || output_size > (long)sizeof(output))
 	{
 		return;
 	}

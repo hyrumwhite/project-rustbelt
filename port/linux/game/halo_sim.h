@@ -1772,6 +1772,49 @@ enum
 	_halo_sim_wire_relayed_action_write,
 	_halo_sim_wire_relayed_action_read,
 	_halo_sim_wire_relayed_action_from,
+	_halo_sim_wire_axes_make_valid,
+	_halo_sim_wire_transform_valid,
+	_halo_sim_wire_vector_clamp,
+	_halo_sim_wire_checksum,
+	_halo_sim_wire_object_state_unpack,
+	_halo_sim_wire_state_from_player,
+	_halo_sim_wire_state_from_object,
+	_halo_sim_wire_inventory_from_unit,
+	NUMBER_OF_HALO_SIM_WIRE_KINDS
+};
+
+/* crates/halo_sim's WireTransform: a transform's parts (the velocities
+NULL for none) */
+struct halo_sim_wire_transform
+{
+	void const *position;
+	void const *forward;
+	void const *up;
+	void const *velocity;
+	void const *angular_velocity;
+};
+
+/* crates/halo_map's distributed_wire::Game: where the samplers find the
+objects and players */
+struct halo_sim_wire_game
+{
+	unsigned long object_header_data;
+	unsigned long player_data;
+};
+
+/* crates/halo_map's distributed_wire::PlayerExtras: what a player's state
+takes of the netcode's own tables */
+struct halo_sim_wire_player_extras
+{
+	long game_time;
+	long server;
+	long tracked;
+	long prediction_taken_time;
+	long prediction_taken_host_time;
+	long death_valid;
+	long death_killing_player_index;
+	long death_friendly_fire;
+	long death_killed_by_vehicle;
 };
 
 struct halo_sim_wire_call

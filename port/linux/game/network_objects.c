@@ -64,6 +64,7 @@ same datum index (identifier and all), so that any message can name one:
 #include "cutscene/cinematics.h"
 #include "network_coop.h"
 #include "network_distributed.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <math.h>
 
@@ -620,7 +621,8 @@ static boolean distributed_vector_valid(
 /* whether a message's transform can be: the position finite and within the
 world, the axes a rotation (made exactly one in valid_forward, valid_up),
 the velocities finite */
-static boolean distributed_transform_valid(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static boolean distributed_transform_valid_game(
 	real_point3d const *position,
 	real_vector3d const *forward,
 	real_vector3d const *up,
@@ -640,8 +642,66 @@ static boolean distributed_transform_valid(
 	return distributed_axes_make_valid(valid_forward, valid_up);
 }
 
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static boolean distributed_transform_valid(
+	real_point3d const *position,
+	real_vector3d const *forward,
+	real_vector3d const *up,
+	real_vector3d const *velocity,
+	real_vector3d const *angular_velocity,
+	real_vector3d *valid_forward,
+	real_vector3d *valid_up)
+{
+	struct halo_sim_wire_call call;
+	struct halo_sim_wire_transform transform;
+	real_point3d position_copy;
+	real_vector3d forward_copy;
+	real_vector3d up_copy;
+	real_vector3d velocity_copy;
+	real_vector3d angular_velocity_copy;
+	real valid[6];
+	boolean result;
+
+	if (!position || !forward || !up)
+		return distributed_transform_valid_game(position, forward, up, velocity, angular_velocity, valid_forward, valid_up);
+	/* (kept: a caller's valid axes may be its forward and up) */
+	position_copy = *position;
+	forward_copy = *forward;
+	up_copy = *up;
+	if (velocity)
+		velocity_copy = *velocity;
+	if (angular_velocity)
+		angular_velocity_copy = *angular_velocity;
+	transform.position = &position_copy;
+	transform.forward = &forward_copy;
+	transform.up = &up_copy;
+	transform.velocity = velocity ? &velocity_copy : NULL;
+	transform.angular_velocity = angular_velocity ? &angular_velocity_copy : NULL;
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_transform_valid;
+	call.input = &transform;
+	call.output = valid;
+	csmemcpy(valid, valid_forward, sizeof(*valid_forward));
+	csmemcpy(valid + 3, valid_up, sizeof(*valid_up));
+	if (halo_sim_distributed_wire(&call))
+	{
+		csmemcpy(valid_forward, valid, sizeof(*valid_forward));
+		csmemcpy(valid_up, valid + 3, sizeof(*valid_up));
+		return (boolean)call.result;
+	}
+	result = distributed_transform_valid_game(position, forward, up, velocity, angular_velocity, valid_forward, valid_up);
+	call.result = result;
+	csmemcpy(valid, valid_forward, sizeof(*valid_forward));
+	csmemcpy(valid + 3, valid_up, sizeof(*valid_up));
+	/* (the axes compared where they make a rotation: where they cannot,
+	the callers leave them) */
+	halo_sim_distributed_wire_check(&call, result ? sizeof(valid) : 0);
+	return result;
+}
+
 /* the vector no longer than maximum */
-static void distributed_vector_clamp(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_vector_clamp_game(
 	real_vector3d *vector,
 	real maximum)
 {
@@ -653,6 +713,25 @@ static void distributed_vector_clamp(
 		vector->j *= maximum / length;
 		vector->k *= maximum / length;
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static void distributed_vector_clamp(
+	real_vector3d *vector,
+	real maximum)
+{
+	struct halo_sim_wire_call call;
+	real_vector3d before = *vector;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_vector_clamp;
+	call.input = &before;
+	call.value = maximum;
+	call.output = vector;
+	if (halo_sim_distributed_wire(&call))
+		return;
+	distributed_vector_clamp_game(vector, maximum);
+	halo_sim_distributed_wire_check(&call, sizeof(*vector));
 }
 
 /* Whether the object is a vehicle no player drives in co-op (a Pelican on
@@ -781,7 +860,8 @@ boolean network_objects_reconcile(
 }
 
 /* an object's state as the host sent it, in full */
-static void distributed_object_state_unpack(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_object_state_unpack_game(
 	struct distributed_object_state const *state,
 	real_vector3d *forward,
 	real_vector3d *up,
@@ -796,7 +876,34 @@ static void distributed_object_state_unpack(
 	distributed_vector_unpack(&state->angular_velocity, DISTRIBUTED_ANGULAR_VELOCITY_SCALE, angular_velocity);
 }
 
-static void distributed_state_from_object(
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static void distributed_object_state_unpack(
+	struct distributed_object_state const *state,
+	real_vector3d *forward,
+	real_vector3d *up,
+	real_vector3d *velocity,
+	real_vector3d *angular_velocity)
+{
+	struct halo_sim_wire_call call;
+	real_vector3d vectors[4];
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_object_state_unpack;
+	call.input = state;
+	call.output = vectors;
+	if (!halo_sim_distributed_wire(&call))
+	{
+		distributed_object_state_unpack_game(state, &vectors[0], &vectors[1], &vectors[2], &vectors[3]);
+		halo_sim_distributed_wire_check(&call, sizeof(vectors));
+	}
+	*forward = vectors[0];
+	*up = vectors[1];
+	*velocity = vectors[2];
+	*angular_velocity = vectors[3];
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_state_from_object_game(
 	long object_index,
 	struct distributed_object_state *state)
 {
@@ -814,6 +921,27 @@ static void distributed_state_from_object(
 		&state->translational_velocity);
 	distributed_vector_pack(&object->object.angular_velocity, DISTRIBUTED_ANGULAR_VELOCITY_SCALE,
 		&state->angular_velocity);
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static void distributed_state_from_object(
+	long object_index,
+	struct distributed_object_state *state)
+{
+	struct halo_sim_wire_call call;
+	struct halo_sim_wire_game game;
+
+	game.object_header_data = (unsigned long)object_header_data;
+	game.player_data = (unsigned long)player_data;
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_state_from_object;
+	call.a = object_index;
+	call.end = &game;
+	call.output = state;
+	if (halo_sim_distributed_wire(&call))
+		return;
+	distributed_state_from_object_game(object_index, state);
+	halo_sim_distributed_wire_check(&call, sizeof(*state));
 }
 
 /* the vehicle the player's unit drives, or NONE */
@@ -1489,7 +1617,8 @@ static void distributed_host_send_states(
 	}
 }
 
-static void distributed_inventory_from_unit(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_inventory_from_unit_game(
 	long unit_index,
 	struct distributed_inventory *inventory)
 {
@@ -1527,8 +1656,30 @@ static void distributed_inventory_from_unit(
 	}
 }
 
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static void distributed_inventory_from_unit(
+	long unit_index,
+	struct distributed_inventory *inventory)
+{
+	struct halo_sim_wire_call call;
+	struct halo_sim_wire_game game;
+
+	game.object_header_data = (unsigned long)object_header_data;
+	game.player_data = (unsigned long)player_data;
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_inventory_from_unit;
+	call.a = unit_index;
+	call.end = &game;
+	call.output = inventory;
+	if (halo_sim_distributed_wire(&call))
+		return;
+	distributed_inventory_from_unit_game(unit_index, inventory);
+	halo_sim_distributed_wire_check(&call, sizeof(*inventory));
+}
+
 /* the bytes' checksum (FNV-1a) */
-static unsigned long distributed_checksum(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static unsigned long distributed_checksum_game(
 	void const *data,
 	long size)
 {
@@ -1539,6 +1690,24 @@ static unsigned long distributed_checksum(
 	for (index = 0; index < size; index++)
 		checksum = (checksum ^ bytes[index]) * 16777619UL;
 	return checksum;
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's distributed_wire) */
+static unsigned long distributed_checksum(
+	void const *data,
+	long size)
+{
+	struct halo_sim_wire_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _halo_sim_wire_checksum;
+	call.input = data;
+	call.a = size;
+	if (halo_sim_distributed_wire(&call))
+		return (unsigned long)call.result;
+	call.result = (long)distributed_checksum_game(data, size);
+	halo_sim_distributed_wire_check(&call, 0);
+	return (unsigned long)call.result;
 }
 
 /* the kinds of inventories sent this time */

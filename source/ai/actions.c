@@ -228,6 +228,7 @@ symbols in this file:
 /* ---------- headers */
 
 #include "cseries.h"
+#include "cseries/errors.h"
 #include "actions.h"
 
 #include "actors.h"
@@ -407,6 +408,15 @@ boolean actor_action_try_to_evade(
 void action_flee_port_find_flee_position(
 	long actor_index,
 	struct flee_state_data *state_data);
+
+boolean action_charge_port_valid_melee_destination(
+	long actor_index,
+	short goal,
+	real_point3d *melee_target_point);
+
+static boolean actions_port_charge(
+	long actor_index,
+	short goal);
 
 static long actions_port_handler_simple(
 	long actor_index,
@@ -1889,6 +1899,57 @@ void actions_port_handler_call(
 			break;
 		}
 
+		case _actions_port_handler_call_melee_inhibited:
+			call->result = TEST_FLAG(
+				unit_get(actor->meta.unit_index)->object.damage_flags,
+				_object_melee_attack_inhibited_bit) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_melee_range_and_ticks:
+		{
+			short start_tick = 0;
+			real start_range = 0.0f;
+			short end_tick = 0;
+			real end_range = 0.0f;
+
+			call->result = unit_get_melee_range_and_ticks(
+				actor->meta.unit_index,
+				(boolean)call->a,
+				&start_tick,
+				&start_range,
+				&end_tick,
+				&end_range) ? 1 : 0;
+			if (call->result && !call->b && start_tick == 0)
+			{
+				char const *name = actor_variant_definition_get(
+					actor->meta.variant_definition_index)->actor_reference.name;
+
+				if (name)
+				{
+					error(_error_silent, "actor %s melee animation has no damage keyframe", name);
+				}
+			}
+			call->result2 = (word)start_tick | ((long)(word)end_tick << 16);
+			call->output[0] = start_range;
+			call->output[1] = end_range;
+			break;
+		}
+
+		case _actions_port_handler_call_valid_melee_destination:
+			call->result = action_charge_port_valid_melee_destination(
+				actor_index,
+				(short)call->a,
+				(real_point3d *)call->input) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_move_to_prop:
+			call->result = actor_move_to_prop(actor_index, call->a, call->input[0]) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_keep_moving:
+			actor_move_keep_moving_past_destination(actor_index);
+			break;
+
 		case _actions_port_handler_call_unit_dive_distance:
 			call->output[0] = unit_definition_get(unit_get(actor->meta.unit_index)->definition_index)->unit.dive_distance;
 			break;
@@ -2078,6 +2139,19 @@ static boolean actions_port_guard_find_position(
 
 	action_guard_setup_find_position(actor_index, wait_ticks, &state.guard);
 	actions_port_action_change(actor_index, _actor_action_guard, &state);
+
+	return TRUE;
+}
+
+static boolean actions_port_charge(
+	long actor_index,
+	short goal)
+{
+	struct action_state_data state;
+
+	if (!action_charge_setup(actor_index, goal, &state.charge))
+		return FALSE;
+	actions_port_action_change(actor_index, _actor_action_charge, &state);
 
 	return TRUE;
 }
@@ -3350,7 +3424,7 @@ boolean actor_action_handle_combat_selection(
 					{
 						actor->emotions.last_melee_check_time = current_time;
 
-						if (actions_port_handler_simple(actor_index, _actions_port_handler_call_charge, _charge_goal_melee))
+						if (actions_port_charge(actor_index, _charge_goal_melee))
 							action_changed = TRUE;
 					}
 				}
@@ -3391,7 +3465,7 @@ boolean actor_action_handle_combat_selection(
 				}
 
 				if (begin_charge &&
-					actions_port_handler_simple(actor_index, _actions_port_handler_call_charge, _charge_goal_vehicle_strafing))
+					actions_port_charge(actor_index, _charge_goal_vehicle_strafing))
 				{
 					action_changed = TRUE;
 				}
@@ -3486,7 +3560,7 @@ boolean actor_action_handle_combat_selection(
 			(restart_charge ||
 				actor->state.action != _actor_action_charge))
 		{
-			if (actions_port_handler_simple(actor_index, _actions_port_handler_call_charge, _charge_goal_close_range))
+			if (actions_port_charge(actor_index, _charge_goal_close_range))
 			{
 				action_changed = TRUE;
 			}

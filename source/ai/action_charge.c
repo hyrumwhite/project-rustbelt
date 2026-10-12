@@ -1017,6 +1017,47 @@ static boolean action_charge_valid_melee_destination(
 	return result;
 }
 
+/* port: the setup asks through actions.c's actions_port_handler_call, as
+the Rust port's does (crates/halo_map's actor_transitions) */
+static long action_charge_port_handler(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real const *input,
+	short input_count,
+	real *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	if (input)
+		memcpy(call.input, input, input_count * sizeof(real));
+	actions_port_handler_call(&call);
+	if (output)
+		memcpy(output, call.output, sizeof(call.output));
+
+	return call.result;
+}
+
+static boolean action_charge_valid_melee_destination(
+	long actor_index,
+	short goal,
+	real_point3d *melee_target_point);
+
+/* port: for actions.c's actions_port_handler_call */
+boolean action_charge_port_valid_melee_destination(
+	long actor_index,
+	short goal,
+	real_point3d *melee_target_point)
+{
+	return action_charge_valid_melee_destination(actor_index, goal, melee_target_point);
+}
+
 boolean action_charge_setup(
 	long actor_index,
 	short goal,
@@ -1054,10 +1095,8 @@ boolean action_charge_setup(
 		}
 		else
 		{
-			struct unit_datum *unit = unit_get(actor->meta.unit_index);
-
 			result = FALSE;
-			if (TEST_FLAG(unit->object.damage_flags, _object_melee_attack_inhibited_bit))
+			if (action_charge_port_handler(actor_index, _actions_port_handler_call_melee_inhibited, 0, 0, NULL, 0, NULL))
 			{
 				result = FALSE;
 				debug_info->charge_decision = _charge_melee_inhibited;
@@ -1085,7 +1124,10 @@ boolean action_charge_setup(
 				}
 				else
 				{
-					state_data->leap_possible_if_at_range = real_random() < definition->berserk.melee_leap_chance;
+					real random[6];
+
+					action_charge_port_handler(actor_index, _actions_port_handler_call_random, 0, 0, NULL, 0, random);
+					state_data->leap_possible_if_at_range = random[0] < definition->berserk.melee_leap_chance;
 					leap = state_data->leap_possible_if_at_range;
 					if (prop->distance < definition->berserk.melee_leap_range_lower_bound)
 					{
@@ -1104,14 +1146,20 @@ boolean action_charge_setup(
 					real start_range;
 					short end_tick;
 					real end_range;
+					struct halo_sim_ai_call melee;
+					boolean suicidal = TEST_FLAG(definition->flags, _actor_definition_suicidal_melee_attack_bit);
 
-					if (unit_get_melee_range_and_ticks(
-						actor->meta.unit_index,
-						leap,
-						&start_tick,
-						&start_range,
-						&end_tick,
-						&end_range))
+					memset(&melee, 0, sizeof(melee));
+					melee.kind = _actions_port_handler_call_melee_range_and_ticks;
+					melee.actor = actor_index;
+					melee.a = leap;
+					melee.b = suicidal;
+					actions_port_handler_call(&melee);
+					start_tick = (short)melee.result2;
+					end_tick = (short)(melee.result2 >> 16);
+					start_range = melee.output[0];
+					end_range = melee.output[1];
+					if (melee.result)
 					{
 						boolean valid = FALSE;
 						real target_range;
@@ -1128,13 +1176,7 @@ boolean action_charge_setup(
 						{
 							if (start_tick == 0)
 							{
-								char const *name = actor_variant_definition_get(
-									actor->meta.variant_definition_index)->actor_reference.name;
-
-								if (name)
-								{
-									error(_error_silent, "actor %s melee animation has no damage keyframe", name);
-								}
+								/* port: the warning is the call's */
 								start_range = end_range * 0.5f;
 								start_tick = end_tick / 2;
 							}
@@ -1147,10 +1189,12 @@ boolean action_charge_setup(
 						minimum_move_range = goal == _charge_goal_melee_leaping ? 4.f : 1.5f;
 						move_range = MAX(minimum_move_range, target_range);
 
-						if (actor_move_to_prop(actor_index, actor->target.target_prop_index, move_range))
+						if (action_charge_port_handler(actor_index, _actions_port_handler_call_move_to_prop,
+							actor->target.target_prop_index, 0, &move_range, 1, NULL))
 						{
-							actor_move_keep_moving_past_destination(actor_index);
-							valid = action_charge_valid_melee_destination(actor_index, goal, &prop->center_of_mass);
+							action_charge_port_handler(actor_index, _actions_port_handler_call_keep_moving, 0, 0, NULL, 0, NULL);
+							valid = (boolean)action_charge_port_handler(actor_index, _actions_port_handler_call_valid_melee_destination,
+								goal, 0, (real const *)&prop->center_of_mass, 3, NULL);
 						}
 
 						if (valid)

@@ -1266,6 +1266,11 @@ enum
 	_actions_port_handler_call_nearby_firing_positions_at,
 	_actions_port_handler_call_real_seed_random_range,
 	_actions_port_handler_call_find_flee_position,
+	_actions_port_handler_call_melee_inhibited,
+	_actions_port_handler_call_melee_range_and_ticks,
+	_actions_port_handler_call_valid_melee_destination,
+	_actions_port_handler_call_move_to_prop,
+	_actions_port_handler_call_keep_moving,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

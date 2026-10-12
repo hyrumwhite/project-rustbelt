@@ -45,6 +45,7 @@ same datum index (identifier and all), so that any message can name one:
 #include "cseries.h"
 #include "game/game.h"
 #include "game/game_engine.h"
+#include "scenario/scenario_definitions.h"
 #include "game/players.h"
 #include "networking/network_game_globals.h"
 #include "objects/objects.h"
@@ -758,11 +759,52 @@ void network_apply_call(
 	case _network_apply_call_coop_state:
 		call->result = network_coop_active() ? 1 | (cinematic_in_progress() ? 2 : 0) : 0;
 		break;
+	case _network_apply_call_leaf:
+		call->result = scenario_leaf_index_from_point((real_point3d const *)&call->input[0]);
+		break;
+	case _network_apply_call_client_has:
+		call->result = network_objects_client_has(call->a);
+		break;
+	case _network_apply_call_detach_unit:
+		network_player_detach_unit(call->a);
+		break;
+	case _network_apply_call_attach_unit:
+		network_player_attach_unit(call->a, call->b);
+		break;
+	case _network_apply_call_unit_kill:
+		unit_kill(call->a);
+		break;
+	case _network_apply_call_unit_kill_no_statistics:
+		unit_kill_no_statistics(call->a);
+		break;
+	case _network_apply_call_set_seat:
+		network_objects_set_seat(call->a, call->b, (short)call->input[0]);
+		break;
+	case _network_apply_call_set_damage:
+	{
+		struct damage_network_state damage;
+
+		damage.shield_depleted = (call->b & 1) != 0;
+		damage.shield_charging = (call->b & 2) != 0;
+		damage.shield_over_charging = (call->b & 4) != 0;
+		damage.body_vitality = call->input[0];
+		damage.shield_vitality = call->input[1];
+		damage.current_body_damage = call->input[2];
+		damage.recent_body_damage = call->input[3];
+		damage.current_shield_damage = call->input[4];
+		damage.recent_shield_damage = call->input[5];
+		damage_set_network_state(call->a, &damage);
+		break;
+	}
+	case _network_apply_call_teleporter:
+		call->result = find_netgame_flag((real_point3d const *)&call->input[0], 1.0f, 0.0f,
+			_netgame_flag_teleporter_source, NONE);
+		break;
 	}
 	halo_sim_world_event_end(call, opened);
 }
 
-static long network_apply_coop_state(
+long network_apply_coop_state(
 	void)
 {
 	struct halo_sim_ai_call call;
@@ -770,6 +812,39 @@ static long network_apply_coop_state(
 	memset(&call, 0, sizeof(call));
 	call.kind = _network_apply_call_coop_state;
 	call.actor = NONE;
+	network_apply_call(&call);
+	return call.result;
+}
+
+long network_apply_simple(
+	long kind,
+	long a,
+	long b,
+	float const *input,
+	short input_count)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	if (input && input_count > 0)
+		csmemcpy(call.input, input, input_count * sizeof(float));
+	network_apply_call(&call);
+	return call.result;
+}
+
+long network_apply_leaf(
+	void const *point)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_apply_call_leaf;
+	call.actor = NONE;
+	csmemcpy(&call.input[0], point, sizeof(real_point3d));
 	network_apply_call(&call);
 	return call.result;
 }
@@ -943,22 +1018,54 @@ long network_apply_world(
 	struct halo_sim_network_apply *arguments,
 	struct halo_sim_world_region *regions)
 {
-	struct object_header_datum *header =
-		(struct object_header_datum *)datum_get(object_header_data, arguments->object_index);
+	struct object_header_datum *header = arguments->object_index != NONE ?
+		(struct object_header_datum *)datum_try_and_get(object_header_data, arguments->object_index) : NULL;
 	long count = 0;
 
 	memset(context, 0, sizeof(*context));
 	context->game_time = game_time_get();
 	context->object_header_data = (unsigned long)object_header_data;
+	context->player_data = (unsigned long)player_data;
 	context->arguments = (unsigned long)arguments;
-	regions[count].address = (unsigned long)header->datum;
-	regions[count++].size = header->data_size;
+	if (header)
+	{
+		regions[count].address = (unsigned long)header->datum;
+		regions[count++].size = header->data_size;
+	}
+	if (arguments->player)
+	{
+		regions[count].address = arguments->player;
+		regions[count++].size = player_data->size;
+	}
+	if (arguments->death)
+	{
+		/* (network_distributed.c's struct distributed_death) */
+		regions[count].address = arguments->death;
+		regions[count++].size = 12;
+	}
+	if (arguments->seat_disagreement)
+	{
+		regions[count].address = arguments->seat_disagreement;
+		regions[count++].size = sizeof(short);
+	}
 	regions[count].address = (unsigned long)arguments;
 	regions[count++].size = sizeof(*arguments);
 	if (arguments->corrections)
 	{
 		regions[count].address = arguments->corrections;
 		regions[count++].size = sizeof(long);
+	}
+	if (arguments->own_positions)
+	{
+		/* (network_distributed.c's MAXIMUM_LOCAL_PLAYERS of
+		OWN_POSITION_TICKS of 20 bytes) */
+		regions[count].address = arguments->own_positions;
+		regions[count++].size = MAXIMUM_LOCAL_PLAYERS * 64 * 20;
+	}
+	if (arguments->round_trip)
+	{
+		regions[count].address = arguments->round_trip;
+		regions[count++].size = sizeof(real);
 	}
 	return count;
 }

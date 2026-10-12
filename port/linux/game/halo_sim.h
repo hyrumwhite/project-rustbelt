@@ -2349,6 +2349,8 @@ enum
 	_halo_sim_world_step_network_apply_state,
 	_halo_sim_world_step_network_object_correct,
 	_halo_sim_world_step_network_object_reconcile,
+	_halo_sim_world_step_network_correct_own_unit,
+	_halo_sim_world_step_network_unit_state,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2419,10 +2421,20 @@ struct halo_sim_network_apply
 	unsigned char state[64];
 	/* network_distributed.c's corrections count, 0 for none */
 	unsigned long corrections;
+	/* the local players' noted positions (0 for none), the smoothed round
+	trip, and (distributed_correct_own_unit's) the local player's index */
+	unsigned long own_positions;
+	unsigned long round_trip;
+	long local_player_index;
+	/* distributed_handle_unit_state's: the player's death and seat
+	disagreement (0 for one not tracked), and its datum */
+	unsigned long death;
+	unsigned long seat_disagreement;
+	unsigned long player;
 	long result;
 };
 
-typedef char halo_sim_network_apply_size_assert[sizeof(struct halo_sim_network_apply) == 160 ? 1 : -1];
+typedef char halo_sim_network_apply_size_assert[sizeof(struct halo_sim_network_apply) == 184 ? 1 : -1];
 
 /* network_objects.c's calls (crates/halo_map's network_apply::call) */
 enum
@@ -2430,7 +2442,21 @@ enum
 	_network_apply_call_set_position = 1,
 	_network_apply_call_interpolation,
 	_network_apply_call_coop_state,
+	_network_apply_call_leaf,
+	_network_apply_call_client_has,
+	_network_apply_call_detach_unit,
+	_network_apply_call_attach_unit,
+	_network_apply_call_unit_kill,
+	_network_apply_call_unit_kill_no_statistics,
+	_network_apply_call_set_seat,
+	_network_apply_call_set_damage,
+	_network_apply_call_teleporter,
 };
+
+/* network_objects.c's: the calls the applying's steps share */
+long network_apply_coop_state(void);
+long network_apply_leaf(void const *point);
+long network_apply_simple(long kind, long a, long b, float const *input, short input_count);
 
 /* network_objects.c's: the applying's call function, and its world (the
 object's datum, the arguments, and the corrections count); returns the

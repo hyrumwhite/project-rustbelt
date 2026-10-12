@@ -541,6 +541,11 @@ static struct distributed_own_position
 	real_point3d position;
 } distributed_own_positions[MAXIMUM_LOCAL_PLAYERS][OWN_POSITION_TICKS];
 static real distributed_own_round_trip;
+typedef char distributed_own_position_size_assert[sizeof(struct distributed_own_position) == 20 ? 1 : -1];
+typedef char distributed_death_size_assert[sizeof(struct distributed_death) == 12 &&
+	offsetof(struct distributed_death, killing_player_index) == 2 &&
+	offsetof(struct distributed_death, friendly_fire) == 4 && offsetof(struct distributed_death, killed_by_vehicle) == 5 &&
+	offsetof(struct distributed_death, dead_since) == 8 ? 1 : -1];
 /* the host: the players each machine had when it last told the host that it
 had loaded (a machine new at its index has none of the old one's state) */
 static long distributed_machine_players[HALO_PORT_MAXIMUM_NETWORK_MACHINES][MAXIMUM_LOCAL_PLAYERS];
@@ -1909,7 +1914,7 @@ further than a tolerance from where this machine had it at the tick the
 host has it at (its own prediction come back): moved by the difference,
 keeping what it has done since (no rubber band a round trip long); without
 that tick, from where it is */
-static void distributed_correct_own_unit(
+static void distributed_correct_own_unit_game(
 	struct player_datum const *player,
 	long unit_index,
 	struct distributed_unit_state const *state)
@@ -1920,8 +1925,10 @@ static void distributed_correct_own_unit(
 	/* (co-op: the host has its player in a BSP this machine hasn't loaded
 	yet, the switch still on its way. Moved there, it would fall with no
 	floor under it, so it stays on the floor it has until the BSP loads.) */
-	if (network_coop_active() && scenario_leaf_index_from_point(&state->position) == NONE &&
-		scenario_leaf_index_from_point(&object_get(unit_index)->object.position) != NONE)
+	/* port: co-op's state and the leaves through the applying's calls (the
+	Rust port's, crates/halo_map's network_apply) */
+	if ((network_apply_coop_state() & 1) && network_apply_leaf(&state->position) == NONE &&
+		network_apply_leaf(&object_get(unit_index)->object.position) != NONE)
 	{
 		return;
 	}
@@ -1980,6 +1987,37 @@ static void distributed_correct_own_unit(
 		}
 	}
 	distributed_apply_state(unit_index, state, &position, LOCAL_CORRECTION_TOLERANCE, 0.0f, 0.0f, 0.0f);
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_apply), checked
+against the game's otherwise */
+static void distributed_correct_own_unit(
+	struct player_datum const *player,
+	long unit_index,
+	struct distributed_unit_state const *state)
+{
+	struct halo_sim_network_apply arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[5];
+	long region_count;
+	int checking = FALSE;
+
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.object_index = unit_index;
+	csmemcpy(arguments.state, state, sizeof(arguments.state));
+	arguments.corrections = (unsigned long)&distributed_statistics.corrections;
+	arguments.local_player_index = player->local_player_index;
+	arguments.own_positions = (unsigned long)&distributed_own_positions[0][0];
+	arguments.round_trip = (unsigned long)&distributed_own_round_trip;
+	region_count = network_apply_world(&context, &arguments, regions);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_correct_own_unit, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return;
+	}
+	distributed_correct_own_unit_game(player, unit_index, state);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_correct_own_unit);
 }
 
 /* (a client) its own players' units, to the host */
@@ -2411,7 +2449,7 @@ static void distributed_apply_predictions(
 }
 
 /* (a client) the host's word on a player's unit */
-static void distributed_handle_unit_state(
+static void distributed_handle_unit_state_game(
 	struct distributed_unit_state const *state)
 {
 	struct player_datum *player = distributed_player(state->player_index);
@@ -2449,7 +2487,7 @@ static void distributed_handle_unit_state(
 			if (*dead_since == NONE)
 				*dead_since = game_time_get();
 			else if (game_time_get() - *dead_since >= DEATH_BLOW_WAIT_TICKS)
-				unit_kill_no_statistics(unit_index);
+				network_apply_simple(_network_apply_call_unit_kill_no_statistics, unit_index, 0, NULL, 0);
 		}
 		return;
 	}
@@ -2457,7 +2495,10 @@ static void distributed_handle_unit_state(
 		distributed_deaths[state->player_index].dead_since = NONE;
 	/* spawned on the host: the host's unit is the player's here too, once
 	this machine has it (network_objects.c) */
-	if (state->unit_index == NONE || !network_objects_client_has(state->unit_index) ||
+	/* port: the game's parts through the applying's calls (the Rust
+	port's, crates/halo_map's network_apply) */
+	if (state->unit_index == NONE ||
+		!network_apply_simple(_network_apply_call_client_has, state->unit_index, 0, NULL, 0) ||
 		!object_try_and_get_and_verify_type(state->unit_index, _object_mask_unit) ||
 		TEST_FLAG(object_get(state->unit_index)->object.damage_flags, _object_dead_bit))
 	{
@@ -2466,12 +2507,12 @@ static void distributed_handle_unit_state(
 	if (player->unit_index != state->unit_index)
 	{
 		if (player->unit_index != NONE)
-			network_player_detach_unit(player_index);
-		network_player_attach_unit(player_index, state->unit_index);
+			network_apply_simple(_network_apply_call_detach_unit, player_index, 0, NULL, 0);
+		network_apply_simple(_network_apply_call_attach_unit, player_index, state->unit_index, NULL, 0);
 		/* (a unit of a life this machine missed the end of, no player's
 		now: unit_kill_no_statistics is for players' units only) */
 		if (unit_index != NONE && unit_index != state->unit_index)
-			unit_kill(unit_index);
+			network_apply_simple(_network_apply_call_unit_kill, unit_index, 0, NULL, 0);
 	}
 	unit_index = state->unit_index;
 	/* the seat it rides: a client's own player's, once it has ridden
@@ -2491,7 +2532,9 @@ static void distributed_handle_unit_state(
 		else if (!local || ++*disagreement > MAX(SEAT_DISAGREEMENT_TICKS,
 			(short)ceil(distributed_own_round_trip) + SEAT_DISAGREEMENT_SLACK_TICKS))
 		{
-			network_objects_set_seat(unit_index, state->vehicle_index, state->seat_index);
+			float seat = (float)state->seat_index;
+
+			network_apply_simple(_network_apply_call_set_seat, unit_index, state->vehicle_index, &seat, 1);
 			*disagreement = 0;
 		}
 	}
@@ -2507,7 +2550,19 @@ static void distributed_handle_unit_state(
 		damage.recent_body_damage = distributed_vitality_unpack(state->recent_body_damage);
 		damage.current_shield_damage = distributed_vitality_unpack(state->current_shield_damage);
 		damage.recent_shield_damage = distributed_vitality_unpack(state->recent_shield_damage);
-		damage_set_network_state(unit_index, &damage);
+		{
+			float vitalities[6];
+
+			vitalities[0] = damage.body_vitality;
+			vitalities[1] = damage.shield_vitality;
+			vitalities[2] = damage.current_body_damage;
+			vitalities[3] = damage.recent_body_damage;
+			vitalities[4] = damage.current_shield_damage;
+			vitalities[5] = damage.recent_shield_damage;
+			network_apply_simple(_network_apply_call_set_damage, unit_index,
+				(damage.shield_depleted ? 1 : 0) | (damage.shield_charging ? 2 : 0) | (damage.shield_over_charging ? 4 : 0),
+				vitalities, 6);
+		}
 	}
 	/* the host's powerups (the host decides pickups) */
 	{
@@ -2539,10 +2594,47 @@ static void distributed_handle_unit_state(
 		(game_engine_update_teleporter) */
 		if (distance_squared3d(&before, &object_get(unit_index)->object.position) > 1.0f)
 		{
-			player->teleporter_index = find_netgame_flag(&object_get(unit_index)->object.position, 1.0f, 0.0f,
-				_netgame_flag_teleporter_source, NONE);
+			player->teleporter_index = network_apply_simple(_network_apply_call_teleporter, 0, 0,
+				(float const *)&object_get(unit_index)->object.position, 3);
 		}
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_apply), checked
+against the game's otherwise */
+static void distributed_handle_unit_state(
+	struct distributed_unit_state const *state)
+{
+	struct halo_sim_network_apply arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[9];
+	struct player_datum *player = distributed_player(state->player_index);
+	long region_count;
+	int checking = FALSE;
+
+	if (!player)
+		return;
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.object_index = state->unit_index;
+	csmemcpy(arguments.state, state, sizeof(arguments.state));
+	arguments.corrections = (unsigned long)&distributed_statistics.corrections;
+	arguments.own_positions = (unsigned long)&distributed_own_positions[0][0];
+	arguments.round_trip = (unsigned long)&distributed_own_round_trip;
+	arguments.player = (unsigned long)player;
+	if (state->player_index < MAXIMUM_TRACKED_PLAYERS)
+	{
+		arguments.death = (unsigned long)&distributed_deaths[state->player_index];
+		arguments.seat_disagreement = (unsigned long)&distributed_seat_disagreements[state->player_index];
+	}
+	region_count = network_apply_world(&context, &arguments, regions);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_unit_state, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return;
+	}
+	distributed_handle_unit_state_game(state);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_unit_state);
 }
 
 /* (a client) the host's word on every player's unit */

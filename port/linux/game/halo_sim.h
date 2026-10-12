@@ -62,6 +62,7 @@ enum
 	_halo_sim_actor_combat,
 	_halo_sim_actor_dispatch,
 	_halo_sim_paths,
+	_halo_sim_encounters,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2189,6 +2190,73 @@ enum
 };
 
 void actor_path_call(struct halo_sim_ai_call *call);
+
+/* ---------- the world steps: the AI's updates over the game's arrays, not
+one actor (halo_sim.c; crates/halo_sim's world_steps) */
+
+enum
+{
+	_halo_sim_world_step_encounters = 0,
+	NUMBER_OF_HALO_SIM_WORLD_STEPS
+};
+
+/* memory a world step works on (an array, a data array's header) */
+struct halo_sim_world_region
+{
+	unsigned long address;
+	unsigned long size;
+};
+
+/* crates/halo_map's WorldContext */
+struct halo_sim_world_context
+{
+	long game_time;
+	unsigned long scenario;
+	unsigned long actor_data;
+	unsigned long prop_data;
+	unsigned long object_header_data;
+	unsigned long encounter_data;
+	unsigned long squad_array;
+	unsigned long platoon_array;
+	unsigned long pursuit_data;
+	unsigned long player_data;
+	unsigned long ai_globals;
+	unsigned long encounters_updated_meter;
+	unsigned long structure;
+	unsigned long breakable_surface_flags;
+	long structure_bsp_index;
+};
+
+/* the world step's update in Rust when asked (returns TRUE, done), or the
+game's (FALSE; in check mode `checking`, the game's then runs, its calls
+going through halo_sim_world_event_begin/end, and halo_sim_world_step_check
+compares) */
+int halo_sim_world_step_begin(long step, struct halo_sim_world_context const *context,
+	struct halo_sim_world_region const *regions, long region_count, void (*call)(struct halo_sim_ai_call *call),
+	int *checking);
+int halo_sim_world_event_begin(struct halo_sim_ai_call const *call);
+void halo_sim_world_event_end(struct halo_sim_ai_call const *call, int opened);
+void halo_sim_world_step_check(long step);
+
+/* the encounters' update's calls (encounters.c's encounter_call;
+crates/halo_map's encounters::call) */
+enum
+{
+	_encounter_call_test_activation = 1,
+	_encounter_call_stand_down,
+	_encounter_call_post_combat,
+	_encounter_call_team_is_ally,
+	_encounter_call_spawn_actor,
+	_encounter_call_random_range,
+	_encounter_call_squad_timer_expire,
+	_encounter_call_follow_target_count,
+	_encounter_call_follow_target,
+	_encounter_call_object_origin,
+	_encounter_call_actor_change_encounter,
+	_encounter_call_stimulus_maneuvering,
+};
+
+void encounter_call(struct halo_sim_ai_call *call);
 short actor_firing_position_port_change(long actor_index, short firing_position_index, long previous_owner,
 	int cached_path_available);
 short actor_firing_position_port_change_to_active_selection(long actor_index, short evaluation_mode);

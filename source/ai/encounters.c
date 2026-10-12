@@ -312,6 +312,7 @@ symbols in this file:
 #include "structures/structure_bsp_definitions.h"
 #include "units/units.h"
 #include "coop_enemies.h" /* port: port/linux/game/coop_enemies.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <stddef.h>
 
@@ -571,6 +572,13 @@ static void encounter_update_timers(
 	long encounter_index);
 static short squad_get_actor_type(
 	struct squad_definition *squad_definition);
+/* port: the encounters' update's calls (encounter_call) */
+static long encounter_call_simple(
+	long kind,
+	long actor_index,
+	long a,
+	long b,
+	float *output);
 static boolean encounter_definition_cluster_index_valid(
 	short cluster_index,
 	long bit_vector_size);
@@ -996,7 +1004,8 @@ void encounter_update_status(
 			struct prop_datum *prop = prop_get(actor->target.target_prop_index);
 
 			encounter->enemy_target = TRUE;
-			if (!game_team_is_ally(actor->meta.team_index, prop->team_index))
+			/* port: a call */
+			if (!encounter_call_simple(_encounter_call_team_is_ally, NONE, actor->meta.team_index, prop->team_index, NULL))
 				real_enemy_targeted = TRUE;
 			actor_in_combat(iterator.index);
 			if (actor->state.had_visible_enemy)
@@ -1056,15 +1065,15 @@ void encounter_update_status(
 	{
 		encounter->post_combat_delay = !post_combat_behavior_pending;
 		if (!encounter->post_combat_delay_timer)
-			encounter_stand_down(encounter_index);
+			encounter_call_simple(_encounter_call_stand_down, NONE, encounter_index, 0, NULL); /* port: a call */
 	}
 	else if (had_visible_enemy && been_in_combat)
 	{
-		encounter_post_combat(encounter_index);
+		encounter_call_simple(_encounter_call_post_combat, NONE, encounter_index, 0, NULL); /* port: a call */
 	}
 	else
 	{
-		encounter_stand_down(encounter_index);
+		encounter_call_simple(_encounter_call_stand_down, NONE, encounter_index, 0, NULL); /* port: a call */
 	}
 
 	if (encounter->original_count > 0)
@@ -2293,7 +2302,229 @@ void encounter_create(
 	return;
 }
 
+/* port: where the encounters' update works, for halo_sim's world steps (the
+arrays it changes, and their data arrays' headers); returns the regions'
+count */
+static long encounters_port_world(
+	struct halo_sim_world_context *context,
+	struct halo_sim_world_region *regions)
+{
+	long count = 0;
+
+	memset(context, 0, sizeof(*context));
+	context->game_time = game_time_get();
+	context->scenario = (unsigned long)global_scenario_get();
+	context->actor_data = (unsigned long)actor_data;
+	context->prop_data = (unsigned long)prop_data;
+	context->object_header_data = (unsigned long)object_header_data;
+	context->encounter_data = (unsigned long)encounter_data;
+	context->squad_array = (unsigned long)squad_array;
+	context->platoon_array = (unsigned long)platoon_array;
+	context->pursuit_data = (unsigned long)pursuit_data;
+	context->player_data = (unsigned long)player_data;
+	context->ai_globals = (unsigned long)ai_globals;
+	context->encounters_updated_meter = (unsigned long)&ai_profile.meters[_ai_meter_encounters_updated].accumulator;
+	context->structure = (unsigned long)global_structure_bsp_get();
+	context->structure_bsp_index = global_structure_bsp_index;
+
+	regions[count].address = (unsigned long)encounter_data;
+	regions[count++].size = sizeof(struct data_array);
+	regions[count].address = (unsigned long)encounter_data->data;
+	regions[count++].size = encounter_data->maximum_count * encounter_data->size;
+	regions[count].address = (unsigned long)squad_array;
+	regions[count++].size = MAXIMUM_SQUADS_PER_MAP * sizeof(struct squad_datum);
+	regions[count].address = (unsigned long)platoon_array;
+	regions[count++].size = MAXIMUM_PLATOONS_PER_MAP * sizeof(struct platoon_datum);
+	regions[count].address = (unsigned long)pursuit_data;
+	regions[count++].size = sizeof(struct data_array);
+	regions[count].address = (unsigned long)pursuit_data->data;
+	regions[count++].size = pursuit_data->maximum_count * pursuit_data->size;
+	regions[count].address = (unsigned long)actor_data;
+	regions[count++].size = sizeof(struct data_array);
+	/* (the actors in use as it begins: one an update makes past them is the
+	game's, left as its call made it) */
+	regions[count].address = (unsigned long)actor_data->data;
+	regions[count++].size = actor_data->count * actor_data->size;
+	regions[count].address = (unsigned long)ai_globals;
+	regions[count++].size = sizeof(struct ai_globals);
+	regions[count].address = context->encounters_updated_meter;
+	regions[count++].size = sizeof(short);
+
+	return count;
+}
+
+static void encounters_update_game(
+	void);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c's world steps); in check mode the game's runs and is compared */
 void encounters_update(
+	void)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[16];
+	long region_count = encounters_port_world(&context, regions);
+	int checking = FALSE;
+
+	if (halo_sim_world_step_begin(_halo_sim_world_step_encounters, &context, regions, region_count,
+		encounter_call, &checking))
+	{
+		return;
+	}
+	encounters_update_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_encounters);
+}
+
+/* the follow targets of encounter_update_follow (the encounter's players,
+its unit or its AI's actors), for encounter_call; returns their count */
+static short encounter_follow_targets(
+	long encounter_index,
+	long *target_unit_indices)
+{
+	struct encounter_datum *encounter = encounter_get(encounter_index);
+	short target_count = 0;
+
+	switch (encounter->follow_target_type)
+	{
+	case 1: /* _follow_target_players */
+		{
+			struct data_iterator iterator;
+			struct player_datum *player;
+
+			data_iterator_new(&iterator, player_data);
+			while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
+			{
+				if (player->unit_index != NONE && target_count < MAXIMUM_FOLLOW_TARGET_UNITS)
+					target_unit_indices[target_count++] = player->unit_index;
+			}
+		}
+		break;
+
+	case 2: /* _follow_target_unit */
+		if (object_try_and_get_and_verify_type(encounter->follow_target_unit_index, _object_mask_unit))
+		{
+			target_unit_indices[0] = encounter->follow_target_unit_index;
+			target_count = 1;
+		}
+		else
+		{
+			encounter->follow_target_unit_index = NONE;
+		}
+		break;
+
+	case 3: /* _follow_target_ai */
+		if (encounter->follow_target_ai_index != NONE)
+		{
+			struct ai_script_actor_reference_iterator iterator;
+			struct actor_datum *actor;
+
+			ai_index_actor_iterator_new(encounter->follow_target_ai_index, &iterator);
+			while ((actor = ai_index_actor_iterator_next(&iterator)) != NULL &&
+				target_count < MAXIMUM_FOLLOW_TARGET_UNITS)
+			{
+				target_unit_indices[target_count++] = actor->meta.unit_index;
+			}
+		}
+		break;
+	}
+
+	return target_count;
+}
+
+/* port: what the encounters' update asks of the rest of the game, shared by
+the game's update and the Rust port's (halo_sim.c's world steps); in check
+mode each is recorded */
+void encounter_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _encounter_call_test_activation:
+			encounters_test_activation();
+			break;
+
+		case _encounter_call_stand_down:
+			encounter_stand_down(call->a);
+			break;
+
+		case _encounter_call_post_combat:
+			encounter_post_combat(call->a);
+			break;
+
+		case _encounter_call_team_is_ally:
+			call->result = game_team_is_ally((short)call->a, (short)call->b) ? 1 : 0;
+			break;
+
+		case _encounter_call_spawn_actor:
+			call->result = encounter_spawn_actor(call->a, (short)call->b) ? 1 : 0;
+			break;
+
+		case _encounter_call_random_range:
+			call->result = seed_random_range(get_global_random_seed_address(), (short)call->a, (short)call->b);
+			break;
+
+		case _encounter_call_squad_timer_expire:
+			encounter_squad_timer_expire(call->a, (short)call->b);
+			break;
+
+		case _encounter_call_follow_target_count:
+		{
+			long target_unit_indices[MAXIMUM_FOLLOW_TARGET_UNITS];
+
+			call->result = encounter_follow_targets(call->a, target_unit_indices);
+			break;
+		}
+
+		case _encounter_call_follow_target:
+		{
+			long target_unit_indices[MAXIMUM_FOLLOW_TARGET_UNITS];
+			short count = encounter_follow_targets(call->a, target_unit_indices);
+
+			call->result = call->b >= 0 && call->b < count ? target_unit_indices[call->b] : NONE;
+			break;
+		}
+
+		case _encounter_call_object_origin:
+			object_get_origin(call->a, (real_point3d *)call->output);
+			break;
+
+		case _encounter_call_actor_change_encounter:
+			actor_change_encounter(call->actor, call->a, (short)call->b);
+			break;
+
+		case _encounter_call_stimulus_maneuvering:
+			actor_stimulus_maneuvering(call->actor, (boolean)call->a, (boolean)call->b);
+			break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static long encounter_call_simple(
+	long kind,
+	long actor_index,
+	long a,
+	long b,
+	float *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	call.a = a;
+	call.b = b;
+	encounter_call(&call);
+	if (output)
+		memcpy(output, call.output, sizeof(call.output));
+
+	return call.result;
+}
+
+/* the game's encounters' update, what it asks through encounter_call */
+static void encounters_update_game(
 	void)
 {
 	long time = game_time_get();
@@ -2304,7 +2535,7 @@ void encounters_update(
 	if (time % TICKS_PER_SECOND == 0)
 	{
 		encounters_update_dirty_status();
-		encounters_test_activation();
+		encounter_call_simple(_encounter_call_test_activation, NONE, 0, 0, NULL); /* port: a call */
 	}
 	phase = time % ENCOUNTER_UPDATE_INTERVAL;
 
@@ -3423,7 +3654,7 @@ static void encounter_update_respawn(
 					squad->respawn_actors_left);
 			}
 
-			if (!encounter_spawn_actor(encounter_index, squad_index))
+			if (!encounter_call_simple(_encounter_call_spawn_actor, NONE, encounter_index, squad_index, NULL)) /* port: a call */
 			{
 				if (ai_debug.print_respawn)
 				{
@@ -3465,10 +3696,12 @@ static void encounter_update_respawn(
 
 	if (respawn_squad_count > 0 && !encounter->respawn_delay_ticks)
 	{
-		short respawn_squad_index = seed_random_range(
-			get_global_random_seed_address(),
+		short respawn_squad_index = (short)encounter_call_simple(
+			_encounter_call_random_range,
+			NONE,
 			0,
-			respawn_squad_count);
+			respawn_squad_count,
+			NULL); /* port: a call */
 
 		for (squad_index = 0; squad_index < encounter->squad_count; ++squad_index)
 		{
@@ -3478,7 +3711,7 @@ static void encounter_update_respawn(
 				{
 					respawn_squad_index--;
 				}
-				else if (encounter_spawn_actor(encounter_index, squad_index))
+				else if (encounter_call_simple(_encounter_call_spawn_actor, NONE, encounter_index, squad_index, NULL)) /* port: a call */
 				{
 					if (ai_debug.print_respawn)
 					{
@@ -3608,48 +3841,18 @@ static void encounter_update_follow(
 	short target_count = 0;
 	real_point3d follow_position;
 
-	switch (encounter->follow_target_type)
+	/* port: the follow targets are calls */
+	if (encounter->follow_target_type >= _follow_target_players &&
+		encounter->follow_target_type <= _follow_target_ai)
 	{
-	case _follow_target_players:
-		{
-			struct data_iterator iterator;
-			struct player_datum *player;
+		short target_index;
 
-			data_iterator_new(&iterator, player_data);
-			while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
-			{
-				if (player->unit_index != NONE && target_count < MAXIMUM_FOLLOW_TARGET_UNITS)
-					target_unit_indices[target_count++] = player->unit_index;
-			}
-		}
-		break;
-
-	case _follow_target_unit:
-		if (object_try_and_get_and_verify_type(encounter->follow_target_unit_index, _object_mask_unit))
+		target_count = (short)encounter_call_simple(_encounter_call_follow_target_count, NONE, encounter_index, 0, NULL);
+		for (target_index = 0; target_index < target_count; target_index++)
 		{
-			target_unit_indices[0] = encounter->follow_target_unit_index;
-			target_count = 1;
+			target_unit_indices[target_index] = encounter_call_simple(
+				_encounter_call_follow_target, NONE, encounter_index, target_index, NULL);
 		}
-		else
-		{
-			encounter->follow_target_unit_index = NONE;
-		}
-		break;
-
-	case _follow_target_ai:
-		if (encounter->follow_target_ai_index != NONE)
-		{
-			struct ai_script_actor_reference_iterator iterator;
-			struct actor_datum *actor;
-
-			ai_index_actor_iterator_new(encounter->follow_target_ai_index, &iterator);
-			while ((actor = ai_index_actor_iterator_next(&iterator)) != NULL &&
-				target_count < MAXIMUM_FOLLOW_TARGET_UNITS)
-			{
-				target_unit_indices[target_count++] = actor->meta.unit_index;
-			}
-		}
-		break;
 	}
 
 	if (target_count > 0)
@@ -3735,7 +3938,7 @@ static void encounter_update_follow(
 			if (target_count == 1)
 			{
 				follow_unit_index = target_unit_indices[0];
-				object_get_origin(follow_unit_index, &follow_position);
+				encounter_call_simple(_encounter_call_object_origin, NONE, follow_unit_index, 0, (float *)&follow_position); /* port: a call */
 			}
 			else
 			{
@@ -3748,7 +3951,8 @@ static void encounter_update_follow(
 				for (target_index = 0; target_index < target_count; target_index++)
 				{
 					target_distances_squared[target_index] = REAL_MAX;
-					object_get_origin(target_unit_indices[target_index], &target_positions[target_index]);
+					encounter_call_simple(_encounter_call_object_origin, NONE, target_unit_indices[target_index], 0,
+						(float *)&target_positions[target_index]); /* port: a call */
 				}
 
 				encounter_actor_iterator_new(&iterator, encounter_index);
@@ -3888,7 +4092,8 @@ static void encounter_update_follow(
 							if (BIT_VECTOR_TEST_FLAG(present_squads, actor->meta.squad_index) &&
 								actor->meta.squad_index != best_squad_index)
 							{
-								actor_change_encounter(iterator.index, encounter_index, best_squad_index);
+								encounter_call_simple(_encounter_call_actor_change_encounter, iterator.index, encounter_index,
+									best_squad_index, NULL); /* port: a call */
 							}
 						}
 					}
@@ -3942,11 +4147,14 @@ static void encounter_control_actors(
 
 			if (squad_index >= 0 && squad_index < encounter_definition->squads.count)
 			{
-				actor_change_encounter(iterator.index, encounter_index, squad_index);
-				actor_stimulus_maneuvering(
+				/* port: calls */
+				encounter_call_simple(_encounter_call_actor_change_encounter, iterator.index, encounter_index, squad_index, NULL);
+				encounter_call_simple(
+					_encounter_call_stimulus_maneuvering,
 					iterator.index,
-					TEST_FLAG(platoon_definition->flags, _platoon_advancing_maneuver_bit),
-					TEST_FLAG(platoon_definition->flags, _platoon_flee_upon_maneuver_bit));
+					TEST_FLAG(platoon_definition->flags, _platoon_advancing_maneuver_bit) != 0,
+					TEST_FLAG(platoon_definition->flags, _platoon_flee_upon_maneuver_bit) != 0,
+					NULL);
 			}
 		}
 	}
@@ -3977,7 +4185,7 @@ static void encounter_update_squads(
 				if (squad->delay_timer > ENCOUNTER_UPDATE_INTERVAL)
 					squad->delay_timer -= ENCOUNTER_UPDATE_INTERVAL;
 				else
-					encounter_squad_timer_expire(encounter_index, squad_index);
+					encounter_call_simple(_encounter_call_squad_timer_expire, NONE, encounter_index, squad_index, NULL); /* port: a call */
 			}
 			else
 			{

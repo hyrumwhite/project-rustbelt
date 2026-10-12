@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 103
+#define HALO_SIM_VERSION 104
 
 /* ---------- structures */
 
@@ -2011,6 +2011,44 @@ struct halo_sim_path_call
 
 typedef char halo_sim_path_call_size_assert[sizeof(struct halo_sim_path_call) == 160 ? 1 : -1];
 typedef long (*halo_sim_path_function)(struct halo_sim_path_call *call);
+
+/* crates/halo_sim's WorldEventC: a call, the arrays' checksum before it, and
+its runs of changed bytes */
+struct halo_sim_world_event
+{
+	struct halo_sim_ai_call call;
+	unsigned long checksum;
+	unsigned long run_first;
+	unsigned long run_count;
+};
+
+/* crates/halo_sim's WorldRunC: bytes a call changed, at an offset into the
+regions laid end to end, their new values at `data` in the pool */
+struct halo_sim_world_run
+{
+	unsigned long offset;
+	unsigned long size;
+	unsigned long data;
+};
+
+/* crates/halo_sim's WorldStepC */
+struct halo_sim_world_step_c
+{
+	struct halo_sim_world_context context;
+	void (*call)(struct halo_sim_ai_call *call);
+	struct halo_sim_world_region const *regions;
+	unsigned long region_count;
+	struct halo_sim_world_event const *events;
+	unsigned long event_count;
+	struct halo_sim_world_run const *runs;
+	unsigned long run_count;
+	unsigned char const *pool;
+	long difference_event;
+	long difference_reason;
+};
+
+typedef long (*halo_sim_world_step_function)(long step, struct halo_sim_world_step_c *call);
+
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
 typedef long (*halo_sim_collision_test_vector_function)(struct halo_sim_collision_vector_call const *call,
@@ -2105,6 +2143,8 @@ static struct
 	halo_sim_ai_step_function ai_step;
 	halo_sim_ai_step_function ai_step_check;
 	halo_sim_path_function path;
+	halo_sim_world_step_function world_step;
+	halo_sim_world_step_function world_step_check;
 	long scenario_index;
 	boolean level_loaded;
 } halo_sim;
@@ -2169,6 +2209,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"actor_combat",
 	"actor_dispatch",
 	"paths",
+	"encounters",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -4774,6 +4815,8 @@ static void halo_sim_initialize(void)
 	halo_sim.ai_step = (halo_sim_ai_step_function)halo_sim_symbol(library, "halo_sim_ai_step");
 	halo_sim.ai_step_check = (halo_sim_ai_step_function)halo_sim_symbol(library, "halo_sim_ai_step_check");
 	halo_sim.path = (halo_sim_path_function)halo_sim_symbol(library, "halo_sim_path");
+	halo_sim.world_step = (halo_sim_world_step_function)halo_sim_symbol(library, "halo_sim_world_step");
+	halo_sim.world_step_check = (halo_sim_world_step_function)halo_sim_symbol(library, "halo_sim_world_step_check");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -4805,7 +4848,7 @@ static void halo_sim_initialize(void)
 		!halo_sim.hs_update || !halo_sim.hs_update_check ||
 		!halo_sim.ai_update || !halo_sim.ai_update_check ||
 		!halo_sim.ai_step || !halo_sim.ai_step_check ||
-		!halo_sim.path)
+		!halo_sim.path || !halo_sim.world_step || !halo_sim.world_step_check)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -10329,6 +10372,317 @@ void halo_sim_ai_update_check(void)
 			platform_log("halo_sim: AI update: %lu of %lu agree with the game (%lu actor updates; %lu left out)",
 				compared - halo_sim_ai_update_checks.differed, compared, halo_sim_ai_update_checks.actor_updates,
 				halo_sim_ai_update_checks.skipped);
+	}
+}
+
+/* ---------- the world steps: updates over the game's arrays, not one actor
+
+A world step (the encounters' update) works on several of the game's arrays
+at once. In check mode the game's own update runs first, its calls recorded
+with a checksum of the arrays before each and the bytes each changed; the
+game then puts the arrays back as they began, Rust replays the update on
+them (each call's changes applied as the game's made them), and the game
+compares the arrays Rust leaves with its own, keeping its own. */
+
+#define MAXIMUM_HALO_SIM_WORLD_REGIONS 16
+#define MAXIMUM_HALO_SIM_WORLD_BYTES 0x280000
+#define MAXIMUM_HALO_SIM_WORLD_EVENTS 4096
+#define MAXIMUM_HALO_SIM_WORLD_RUNS 0x10000
+#define MAXIMUM_HALO_SIM_WORLD_POOL 0x200000
+
+static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
+{
+	"encounters update",
+};
+
+static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
+{
+	_halo_sim_encounters,
+};
+
+static struct
+{
+	long step;
+	boolean recording;
+	boolean overflow;
+	long depth;
+	struct halo_sim_world_context context;
+	void (*call)(struct halo_sim_ai_call *call);
+	struct halo_sim_world_region regions[MAXIMUM_HALO_SIM_WORLD_REGIONS];
+	unsigned long region_count;
+	unsigned long total;
+	unsigned char before[MAXIMUM_HALO_SIM_WORLD_BYTES];
+	unsigned char after[MAXIMUM_HALO_SIM_WORLD_BYTES];
+	unsigned char scratch[MAXIMUM_HALO_SIM_WORLD_BYTES];
+	struct halo_sim_world_event events[MAXIMUM_HALO_SIM_WORLD_EVENTS];
+	unsigned long event_count;
+	struct halo_sim_world_run runs[MAXIMUM_HALO_SIM_WORLD_RUNS];
+	unsigned long run_count;
+	unsigned char pool[MAXIMUM_HALO_SIM_WORLD_POOL];
+	unsigned long pool_size;
+	struct halo_sim_world_event *open_event;
+	unsigned long compared[NUMBER_OF_HALO_SIM_WORLD_STEPS];
+	unsigned long differed[NUMBER_OF_HALO_SIM_WORLD_STEPS];
+	unsigned long skipped[NUMBER_OF_HALO_SIM_WORLD_STEPS];
+	unsigned long calls[NUMBER_OF_HALO_SIM_WORLD_STEPS];
+} halo_sim_world_checks;
+
+/* the regions laid end to end, into or out of a copy */
+static void halo_sim_world_copy(unsigned char *copy, boolean save)
+{
+	unsigned long offset = 0;
+	unsigned long region_index;
+
+	for (region_index = 0; region_index < halo_sim_world_checks.region_count; region_index++)
+	{
+		struct halo_sim_world_region const *region = &halo_sim_world_checks.regions[region_index];
+
+		if (save)
+			memcpy(copy + offset, (void const *)region->address, region->size);
+		else
+			memcpy((void *)region->address, copy + offset, region->size);
+		offset += region->size;
+	}
+}
+
+/* crates/halo_sim's world_checksum: FNV-1a over the regions end to end */
+static unsigned long halo_sim_world_checksum(void)
+{
+	unsigned long hash = 2166136261UL;
+	unsigned long region_index;
+
+	for (region_index = 0; region_index < halo_sim_world_checks.region_count; region_index++)
+	{
+		struct halo_sim_world_region const *region = &halo_sim_world_checks.regions[region_index];
+		unsigned char const *bytes = (unsigned char const *)region->address;
+		unsigned long index;
+
+		for (index = 0; index < region->size; index++)
+		{
+			hash ^= bytes[index];
+			hash *= 16777619UL;
+		}
+	}
+
+	return hash;
+}
+
+int halo_sim_world_step_begin(long step, struct halo_sim_world_context const *context,
+	struct halo_sim_world_region const *regions, long region_count, void (*call)(struct halo_sim_ai_call *call),
+	int *checking)
+{
+	short mode = halo_sim_mode(halo_sim_world_step_systems[step]);
+	struct halo_sim_world_step_c step_call;
+	long region_index;
+
+	*checking = FALSE;
+	if (mode == _halo_sim_mode_c)
+		return FALSE;
+	if (mode == _halo_sim_mode_check)
+	{
+		/* (a step within one the game is running isn't checked) */
+		if (halo_sim_world_checks.recording)
+			return FALSE;
+		halo_sim_world_checks.step = step;
+		halo_sim_world_checks.context = *context;
+		halo_sim_world_checks.call = call;
+		halo_sim_world_checks.overflow = region_count > MAXIMUM_HALO_SIM_WORLD_REGIONS;
+		halo_sim_world_checks.region_count = 0;
+		halo_sim_world_checks.total = 0;
+		for (region_index = 0; region_index < region_count && region_index < MAXIMUM_HALO_SIM_WORLD_REGIONS; region_index++)
+		{
+			if (halo_sim_world_checks.total + regions[region_index].size > MAXIMUM_HALO_SIM_WORLD_BYTES)
+			{
+				halo_sim_world_checks.overflow = TRUE;
+				break;
+			}
+			halo_sim_world_checks.regions[halo_sim_world_checks.region_count++] = regions[region_index];
+			halo_sim_world_checks.total += regions[region_index].size;
+		}
+		halo_sim_world_copy(halo_sim_world_checks.before, TRUE);
+		halo_sim_world_checks.event_count = 0;
+		halo_sim_world_checks.run_count = 0;
+		halo_sim_world_checks.pool_size = 0;
+		halo_sim_world_checks.open_event = NULL;
+		halo_sim_world_checks.depth = 0;
+		halo_sim_world_checks.recording = TRUE;
+		*checking = TRUE;
+		return FALSE;
+	}
+	memset(&step_call, 0, sizeof(step_call));
+	step_call.context = *context;
+	step_call.call = call;
+	step_call.difference_event = NONE;
+
+	return halo_sim.world_step(step, &step_call) == 0;
+}
+
+int halo_sim_world_event_begin(struct halo_sim_ai_call const *call)
+{
+	struct halo_sim_world_event *event;
+
+	if (!halo_sim_world_checks.recording)
+		return FALSE;
+	/* (a call within a call is part of it: opened, so its end balances) */
+	if (halo_sim_world_checks.depth++ > 0)
+		return TRUE;
+	if (halo_sim_world_checks.overflow)
+		return TRUE;
+	if (halo_sim_world_checks.event_count >= MAXIMUM_HALO_SIM_WORLD_EVENTS)
+	{
+		halo_sim_world_checks.overflow = TRUE;
+		return TRUE;
+	}
+	event = &halo_sim_world_checks.events[halo_sim_world_checks.event_count++];
+	event->call = *call;
+	event->checksum = halo_sim_world_checksum();
+	event->run_first = halo_sim_world_checks.run_count;
+	event->run_count = 0;
+	halo_sim_world_copy(halo_sim_world_checks.scratch, TRUE);
+	halo_sim_world_checks.open_event = event;
+
+	return TRUE;
+}
+
+/* the runs of bytes the open call changed */
+static void halo_sim_world_event_runs(struct halo_sim_world_event *event)
+{
+	unsigned long offset = 0;
+	unsigned long region_index;
+
+	for (region_index = 0; region_index < halo_sim_world_checks.region_count; region_index++)
+	{
+		struct halo_sim_world_region const *region = &halo_sim_world_checks.regions[region_index];
+		unsigned char const *bytes = (unsigned char const *)region->address;
+		unsigned char const *saved = halo_sim_world_checks.scratch + offset;
+		unsigned long index = 0;
+
+		while (index < region->size)
+		{
+			unsigned long start;
+			struct halo_sim_world_run *run;
+
+			if (bytes[index] == saved[index])
+			{
+				index++;
+				continue;
+			}
+			start = index;
+			while (index < region->size && bytes[index] != saved[index])
+				index++;
+			if (halo_sim_world_checks.run_count >= MAXIMUM_HALO_SIM_WORLD_RUNS ||
+				halo_sim_world_checks.pool_size + (index - start) > MAXIMUM_HALO_SIM_WORLD_POOL)
+			{
+				halo_sim_world_checks.overflow = TRUE;
+				return;
+			}
+			run = &halo_sim_world_checks.runs[halo_sim_world_checks.run_count++];
+			run->offset = offset + start;
+			run->size = index - start;
+			run->data = halo_sim_world_checks.pool_size;
+			memcpy(halo_sim_world_checks.pool + halo_sim_world_checks.pool_size, bytes + start, index - start);
+			halo_sim_world_checks.pool_size += index - start;
+			event->run_count++;
+		}
+		offset += region->size;
+	}
+}
+
+void halo_sim_world_event_end(struct halo_sim_ai_call const *call, int opened)
+{
+	struct halo_sim_world_event *event = halo_sim_world_checks.open_event;
+
+	if (!opened)
+		return;
+	if (--halo_sim_world_checks.depth > 0)
+		return;
+	halo_sim_world_checks.open_event = NULL;
+	if (!event || halo_sim_world_checks.overflow)
+		return;
+	memcpy(event->call.output, call->output, sizeof(event->call.output));
+	event->call.result = call->result;
+	event->call.result2 = call->result2;
+	halo_sim_world_event_runs(event);
+}
+
+void halo_sim_world_step_check(long step)
+{
+	struct halo_sim_world_step_c call;
+	long first_offset = NONE;
+	unsigned long offset;
+
+	if (!halo_sim_world_checks.recording)
+		return;
+	halo_sim_world_checks.recording = FALSE;
+	if (halo_sim_world_checks.overflow)
+	{
+		halo_sim_world_checks.skipped[step]++;
+		return;
+	}
+	halo_sim_world_copy(halo_sim_world_checks.after, TRUE);
+	halo_sim_world_copy(halo_sim_world_checks.before, FALSE);
+	memset(&call, 0, sizeof(call));
+	call.context = halo_sim_world_checks.context;
+	call.call = halo_sim_world_checks.call;
+	call.regions = halo_sim_world_checks.regions;
+	call.region_count = halo_sim_world_checks.region_count;
+	call.events = halo_sim_world_checks.events;
+	call.event_count = halo_sim_world_checks.event_count;
+	call.runs = halo_sim_world_checks.runs;
+	call.run_count = halo_sim_world_checks.run_count;
+	call.pool = halo_sim_world_checks.pool;
+	call.difference_event = NONE;
+	if (halo_sim.world_step_check(step, &call) != 0)
+	{
+		halo_sim_world_copy(halo_sim_world_checks.after, FALSE);
+		halo_sim_world_checks.skipped[step]++;
+		return;
+	}
+	halo_sim_world_copy(halo_sim_world_checks.scratch, TRUE);
+	for (offset = 0; offset < halo_sim_world_checks.total; offset++)
+	{
+		if (halo_sim_world_checks.scratch[offset] != halo_sim_world_checks.after[offset])
+		{
+			first_offset = (long)offset;
+			break;
+		}
+	}
+	halo_sim_world_copy(halo_sim_world_checks.after, FALSE);
+	halo_sim_world_checks.compared[step]++;
+	halo_sim_world_checks.calls[step] += halo_sim_world_checks.event_count;
+	if (call.difference_event != NONE || first_offset != NONE)
+	{
+		halo_sim_world_checks.differed[step]++;
+		if (halo_sim_world_checks.differed[step] <= 8)
+		{
+			long region_index = NONE;
+			long region_offset = first_offset;
+			long kind = call.difference_event != NONE && call.difference_event < (long)halo_sim_world_checks.event_count
+				? halo_sim_world_checks.events[call.difference_event].call.kind : NONE;
+
+			if (first_offset != NONE)
+			{
+				for (region_index = 0; region_index < (long)halo_sim_world_checks.region_count; region_index++)
+				{
+					if (region_offset < (long)halo_sim_world_checks.regions[region_index].size)
+						break;
+					region_offset -= halo_sim_world_checks.regions[region_index].size;
+				}
+			}
+			platform_log("halo_sim: %s differs: call %ld of %lu (kind %lx) reason %ld; the arrays first differ in region %ld at %lx (game %02x rust %02x)",
+				halo_sim_world_step_names[step], call.difference_event, halo_sim_world_checks.event_count, kind,
+				call.difference_reason, region_index, region_offset,
+				first_offset != NONE ? halo_sim_world_checks.after[first_offset] : 0,
+				first_offset != NONE ? halo_sim_world_checks.scratch[first_offset] : 0);
+		}
+	}
+	{
+		unsigned long compared = halo_sim_world_checks.compared[step];
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu calls; %lu left out)",
+				halo_sim_world_step_names[step], compared - halo_sim_world_checks.differed[step], compared,
+				halo_sim_world_checks.calls[step], halo_sim_world_checks.skipped[step]);
 	}
 }
 

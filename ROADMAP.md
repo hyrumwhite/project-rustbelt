@@ -487,6 +487,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **The C's side, through `actor_perception_call`:** the potentially visible set (kept by the game) and whether a unit is in it; walking it cluster by cluster, and each cluster's collideable and noncollideable objects; the object marker; a biped's sense position and swarm unit; a unit's status; prop creation; the suicide and vehicle dangers; a projectile's danger, sense position and owner; and the overflow warning.
      - **The check:** the step check now records up to 4,096 calls a step (256 before), because the refresh marks every object in view.
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in the friends' limit was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The danger zone's refresh in Rust (`halo_map::actor_perception`): actor_perception.c's `actor_perception_refresh_danger_zone`. With it, every function of the perception update is Rust's.
+     - **What Rust does:** the danger zone follows its object, and is forgotten if the object is gone. It tracks the object's position, velocity and distance from the actor, and the sphere the object may sweep in a second and a half. Then it decides whether the actor perceives it:
+       - a vehicle, while it moves nearby: through its driver's prop, or else by sight or sound;
+       - a projectile: if it's attached to the actor, or seen within its perception radius (its fuse is timed);
+       - a suicide: through its prop (its death is timed).
+       A newly perceived danger draws a look.
+     - **The C's side, through `actor_perception_call`:** the object's origin and the sense position to it (kept by the game), the object's details (the encounter's blindness, a vehicle's bounding radius, a projectile's perception radius and fuse, a suicide's dying frames), a unit's active prop, the line of sight, visibility and audibility, and the look.
+     - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. A planted error in the danger's prediction was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

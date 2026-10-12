@@ -155,7 +155,7 @@ fn point_from_line(p: Vector, v: Vector, t: f32) -> Vector {
 }
 
 /// `fast_ftol`: rounds to nearest, ties to even.
-fn fast_ftol(value: f32) -> i32 {
+pub(crate) fn fast_ftol(value: f32) -> i32 {
     let rounded = (value as f64).round_ties_even();
     if (-2_147_483_648.0..2_147_483_648.0).contains(&rounded) { rounded as i32 } else { i32::MIN }
 }

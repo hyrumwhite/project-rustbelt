@@ -205,6 +205,30 @@ pub mod call {
     /// The overflow warning (at most each five seconds) for a full list of
     /// enemies (`a`) or friends.
     pub const OVERFLOW_WARNING: i32 = 67;
+    /// The danger zone object's origin `output[0..3]`, and the actor's
+    /// sense position to it (kept by the game): its body position
+    /// `output[3..6]`.
+    pub const DANGER_SENSE: i32 = 68;
+    /// The danger zone object `a` of the danger type `b`: whether the
+    /// actor's encounter is blind (bit 0) the result; a vehicle's bounding
+    /// radius or a projectile's perception radius `output[0]`; a
+    /// projectile's detonation timer and its delta `output[1..3]`; a
+    /// suicide's ticks until death (NONE unless dying) `result2`.
+    pub const DANGER_DETAILS: i32 = 69;
+    /// `prop_get_active_by_unit_index(actor, a)`, the result.
+    pub const ACTIVE_PROP_OF_UNIT: i32 = 70;
+    /// `ai_test_line_of_sight` from the kept danger sense position to the
+    /// danger zone's position (in its object's, or its ultimate parent's,
+    /// cluster), the result.
+    pub const DANGER_LINE_OF_SIGHT: i32 = 71;
+    /// `actor_visibility_at_point` of the danger zone's position (dark, the
+    /// line of sight `a`, the maximum distance, knowledge `b`), the result.
+    pub const DANGER_VISIBILITY: i32 = 72;
+    /// `actor_audibility_at_point` of the danger zone's vehicle (the line of
+    /// sight `a`), the result.
+    pub const DANGER_AUDIBILITY: i32 = 73;
+    /// `actor_look_secondary(actor, dangerous object, default, danger)`.
+    pub const LOOK_DANGER: i32 = 74;
 }
 
 /// The status sample's bits ([`call::STATUS_SAMPLE`]): of the unit, its
@@ -637,7 +661,7 @@ fn danger_zone_update(context: &AiStepContext, host: &impl AiHost) {
     if m.bool(field(a::META_TIMESLICE)) {
         perception_refresh(context, host);
     }
-    call_simple(context, host, call::REFRESH_DANGER_ZONE, 0);
+    refresh_danger_zone(context, host);
 
     let danger_type = m.i16(field(a::DANGER_ZONE_DANGER_TYPE));
     if danger_type <= v::_ACTOR_DANGER_ZONE_NONE as i16 {
@@ -2114,4 +2138,138 @@ fn refresh_test_projectile(context: &AiStepContext, host: &impl AiHost, object_i
 /// A call of `a` alone, the whole call back.
 fn call_simple_full(context: &AiStepContext, host: &impl AiHost, kind: i32, a: i32) -> AiCall {
     call_full(context, host, kind, a, 0, 0.0)
+}
+
+/// The danger zones' types (`_actor_danger_zone_*`).
+const DANGER_ZONE_NONE: i16 = 0;
+const DANGER_ZONE_SUICIDE: i16 = 1;
+const DANGER_ZONE_VEHICLE: i16 = 3;
+
+/// actor_perception.c's `actor_perception_refresh_danger_zone`: the danger
+/// zone follows its object (gone, it's forgotten): its position, velocity,
+/// distance from the actor and the sphere it may sweep in a second and a
+/// half; then whether the actor perceives it (a vehicle while it moves near:
+/// through its driver's prop, or by sight or sound; a projectile: attached
+/// to the actor, or seen within its perception radius, its fuse timed; a
+/// suicide: through its prop, its death timed), a newly perceived one drawing
+/// a look.
+pub fn refresh_danger_zone(context: &AiStepContext, host: &impl AiHost) {
+    use crate::layout::unit_datum as u;
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let danger_type = m.i16(at(a::DANGER_ZONE_DANGER_TYPE));
+    if danger_type <= DANGER_ZONE_NONE {
+        return;
+    }
+    let object_index = m.i32(at(a::DANGER_ZONE_OBJECT_INDEX));
+    let Some(object) = crate::ai_actor::object_get(m, context, object_index) else {
+        m.set_i16(at(a::DANGER_ZONE_DANGER_TYPE), DANGER_ZONE_NONE);
+        return;
+    };
+
+    let sense = call_full(context, host, call::DANGER_SENSE, object_index, 0, 0.0);
+    let position = [sense.output[0], sense.output[1], sense.output[2]];
+    let body = [sense.output[3], sense.output[4], sense.output[5]];
+    let velocity = m.vector(object + u::OBJECT_TRANSLATIONAL_VELOCITY as u32);
+    let set_vector = |offset: usize, value: [f32; 3]| {
+        for (i, component) in value.into_iter().enumerate() {
+            m.set_f32(at(offset + 4 * i), component);
+        }
+    };
+    set_vector(a::DANGER_ZONE_POSITION, position);
+    set_vector(a::DANGER_ZONE_VELOCITY, velocity);
+    let distance = distance_squared3(body, position).sqrt();
+    m.set_f32(at(a::DANGER_ZONE_CURRENT_DISTANCE_FROM_ACTOR), distance);
+    let predict = [velocity[0] * 45.0 + position[0], velocity[1] * 45.0 + position[1], velocity[2] * 45.0 + position[2]];
+    set_vector(a::DANGER_ZONE_PREDICT_DANGER_POSITION, predict);
+    let center = [
+        (predict[0] + position[0]) * 0.5,
+        (predict[1] + position[1]) * 0.5,
+        (predict[2] + position[2]) * 0.5,
+    ];
+    set_vector(a::DANGER_ZONE_BOUNDING_SPHERE_CENTER, center);
+    m.set_f32(
+        at(a::DANGER_ZONE_BOUNDING_SPHERE_RADIUS),
+        distance_squared3(center, position).sqrt() + m.f32(at(a::DANGER_ZONE_DANGER_RADIUS)),
+    );
+
+    let mut perceived = false;
+    let mut attached_to_us = false;
+    let currently_perceived = m.bool(at(a::DANGER_ZONE_CURRENTLY_PERCEIVED));
+    let details = call_full(context, host, call::DANGER_DETAILS, object_index, danger_type as i32, 0.0);
+    let encounter_blind = details.result & 1 != 0;
+    let mode = m.i16(at(a::STATE_MODE));
+    match danger_type {
+        DANGER_ZONE_VEHICLE => 'vehicle: {
+            if crate::features::magnitude_squared3(velocity) < 0.000044444444065040908
+                || distance > details.output[0] + 10.0
+            {
+                m.set_i16(at(a::DANGER_ZONE_DANGER_TYPE), DANGER_ZONE_NONE);
+                break 'vehicle;
+            }
+            perceived = currently_perceived;
+            if !perceived {
+                let driver = m.i32(object + u::UNIT_DRIVER_OBJECT_INDEX as u32);
+                let prop_index =
+                    if driver != NONE { call_simple(context, host, call::ACTIVE_PROP_OF_UNIT, driver) } else { NONE };
+                if driver != NONE && prop_index != NONE {
+                    perceived = m.i16(prop_get(m, context, prop_index) + p::PERCEPTION as u32) >= PERCEPTION_FULL;
+                } else {
+                    let blind = mode == MODE_ASLEEP || encounter_blind;
+                    let line_of_sight = call_simple(context, host, call::DANGER_LINE_OF_SIGHT, 0);
+                    let visible = !blind && {
+                        let knowledge = perception_knowledge(context, host, NONE);
+                        call_full(context, host, call::DANGER_VISIBILITY, line_of_sight, knowledge as i32, 0.0).result
+                            as i16
+                            >= PERCEPTION_FULL
+                    };
+                    if visible
+                        || call_simple(context, host, call::DANGER_AUDIBILITY, line_of_sight) as i16 >= PERCEPTION_FULL
+                    {
+                        perceived = true;
+                    }
+                }
+            }
+        }
+        DANGER_ZONE_PROJECTILE => {
+            let unit_index = m.i32(at(a::META_UNIT_INDEX));
+            if unit_index != NONE && m.i32(object + u::OBJECT_PARENT_OBJECT_INDEX as u32) == unit_index {
+                attached_to_us = true;
+            }
+            let (timer, delta) = (details.output[1], details.output[2]);
+            let time_until_explosion = if timer > 0.0 && delta > 0.0 {
+                crate::actor_combat::fast_ftol((1.0 - timer) / delta) as i16
+            } else {
+                NONE as i16
+            };
+            m.set_i16(at(a::DANGER_ZONE_PROJECTILE_TIME_UNTIL_EXPLOSION), time_until_explosion);
+            perceived = currently_perceived || attached_to_us;
+            if !perceived && mode != MODE_ASLEEP && !encounter_blind && distance < details.output[0] {
+                let line_of_sight = call_simple(context, host, call::DANGER_LINE_OF_SIGHT, 0);
+                let knowledge = perception_knowledge(context, host, NONE);
+                if call_full(context, host, call::DANGER_VISIBILITY, line_of_sight, knowledge as i32, 0.0).result as i16
+                    >= PERCEPTION_FULL
+                {
+                    perceived = true;
+                }
+            }
+        }
+        DANGER_ZONE_SUICIDE => {
+            perceived = currently_perceived;
+            if !perceived {
+                let prop_index = call_simple(context, host, call::ACTIVE_PROP_OF_UNIT, object_index);
+                if prop_index != NONE {
+                    perceived = m.i16(prop_get(m, context, prop_index) + p::PERCEPTION as u32) >= PERCEPTION_FULL;
+                }
+            }
+            m.set_i16(at(a::DANGER_ZONE_SUICIDE_TIME_UNTIL_DEATH), details.result2 as i16);
+        }
+        _ => {}
+    }
+
+    if perceived && !m.bool(at(a::DANGER_ZONE_CURRENTLY_PERCEIVED)) {
+        call_simple(context, host, call::LOOK_DANGER, 0);
+    }
+    m.set_bool(at(a::DANGER_ZONE_CURRENTLY_PERCEIVED), perceived);
+    m.set_bool(at(a::DANGER_ZONE_ATTACHED_TO_US), attached_to_us);
 }

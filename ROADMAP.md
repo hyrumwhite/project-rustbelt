@@ -399,6 +399,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **The C's side, through `actions_port_handler_call`:** whether the actor may enter a vehicle, the vehicle's driver and origin, the enterable list (whose entries Rust reads in place), and the impromptu vehicle setup. The types' own call route (`actor_type_call`, `actor_type_port.h`) is gone: the game's types call the handlers directly, as Rust's do.
      - **A bug the check caught:** the handler calls' kinds were `BASE | n` with a base of 0x1040, which from the sixty-fourth folds back onto the first (0x1040 | 67 is 0x1043, the flee-always call). The C's sequential enum disagreed, and the check flagged the first vehicle entry that reached the enterable list. They're `BASE + n` now; in Rust mode those calls would have run the wrong C functions.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the vehicle check's interval was caught on b30 and a50. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Five of actions.c's helpers in Rust (`halo_map::actor_transitions`): allowing cover seeking, trying to throw a grenade, the grenade test, trying to evade, and the default state.
+     - **What Rust does:**
+       - cover seeking is allowed except when berserk or a passenger, or (unless the enemy's unopposable or it's playfighting) while the target was seen within the hiding time or before enough damage;
+       - a grenade is thrown once the actor faces its target within 30 degrees, noting the throw in the encounter. The test checks the encounter's grenade timer (scaled by difficulty, doubled when playfighting), the target, the enemies against friends near it, and the trajectory, with the debug record's decision;
+       - evading dodges left or right of a target the actor faces, when the dodge has room and an animation;
+       - the default state (at most every second and a half, or when told): asleep, guarding where it is or finding a position, searching, fleeing, or alert with the state's move position order.
+     - **The C's side, through `actions_port_handler_call`:** the unit's readiness and evade distance, the encounter's grenade timer, the grenade target, collateral damage and trajectory, the evasion direction and animation, and the guard, alert, flee and sleep setups and changes.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the grenade test's decision was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

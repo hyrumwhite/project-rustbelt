@@ -41,7 +41,7 @@ pub mod call {
     pub const SQUAD_TIMER_EXPIRE: i32 = BASE + 8;
     /// The flags of the conversation `a`'s definition, the result.
     pub const CONVERSATION_FLAGS: i32 = BASE + 9;
-    /// `actor_move_animation_impulse(actor, a, input[0..2])`.
+    /// `actor_move_animation_impulse(actor, a, input[0..2])`, the result.
     pub const ANIMATION_IMPULSE: i32 = BASE + 10;
     /// `ai_communication_event(a, unit, b, input[0], NONE, NONE, NULL)`.
     pub const COMMUNICATION: i32 = BASE + 11;
@@ -187,6 +187,43 @@ pub mod call {
     /// attempt's and continuing's distances) and, if it sets up, the change to
     /// the vehicle action: the result.
     pub const VEHICLE_SETUP: i32 = BASE + 69;
+    /// Whether the actor's unit can throw (not busy, not hurt this tick), the
+    /// result.
+    pub const UNIT_READY_TO_THROW: i32 = BASE + 70;
+    /// The actor's encounter's last grenade throw is now.
+    pub const MARK_GRENADE_THROWN: i32 = BASE + 71;
+    /// The actor's encounter's last grenade throw time, the result, and the
+    /// difficulty's grenade timer scale for its team, `output[0]`.
+    pub const ENCOUNTER_GRENADE_TIMER: i32 = BASE + 72;
+    /// `actor_combat_find_grenade_target(actor)`: whether it found one, the
+    /// result; the target in `output[0..3]`, its prop `result2`, and the
+    /// object to ignore in `output[3]`'s bits.
+    pub const FIND_GRENADE_TARGET: i32 = BASE + 73;
+    /// `actor_combat_check_collateral_damage(actor, input[0], input[1],
+    /// input[2..5])`, the result, and the enemies counted, `result2`.
+    pub const COLLATERAL_DAMAGE: i32 = BASE + 74;
+    /// `actor_combat_plan_grenade_trajectory(actor, a, input[0..3], b,
+    /// input[3]'s bits)`, the result.
+    pub const PLAN_GRENADE_TRAJECTORY: i32 = BASE + 75;
+    /// The actor's unit's evade distance, in `output[0]`.
+    pub const UNIT_EVADE_DISTANCE: i32 = BASE + 76;
+    /// `actor_move_try_evasion_direction(actor, input[0..2], input[2])` (a
+    /// random direction, no ledge avoidance), the result; the alignment it
+    /// leaves in `output[0..2]` and the direction in `output[2]`.
+    pub const TRY_EVASION_DIRECTION: i32 = BASE + 77;
+    /// `unit_test_animation_impulse` of the actor's unit and `a`, the result.
+    pub const TEST_ANIMATION_IMPULSE: i32 = BASE + 78;
+    /// `action_guard_setup_current_position` and the change to guard: the
+    /// result.
+    pub const GUARD_CURRENT_POSITION: i32 = BASE + 79;
+    /// `action_guard_setup_find_position(actor, a)` and, if it sets up, the
+    /// change to guard: the result.
+    pub const GUARD_FIND_POSITION_IF: i32 = BASE + 80;
+    /// `action_alert_setup(actor, a, NONE)` and, if it sets up, the change to
+    /// alert: the result.
+    pub const ALERT: i32 = BASE + 81;
+    /// `actor_action_change(actor, sleep, NULL)`.
+    pub const SLEEP: i32 = BASE + 82;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -302,7 +339,7 @@ pub fn handle_initial_action(context: &AiStepContext, host: &impl AiHost) -> boo
     let m = host.memory();
     let at = |offset: usize| context.actor + offset as u32;
     if m.i16(at(a::STATE_ACTION)) == ACTION_NONE && m.i16(at(a::STATE_MODE)) != 0 {
-        call_simple(context, host, call::SET_DEFAULT_STATE, 0) != 0
+        set_default_state(context, host, NONE as i16)
     } else {
         false
     }
@@ -1404,7 +1441,7 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
     }
 
     if !handled && should_return_to_idle {
-        handled = call_simple(context, host, call::SET_DEFAULT_STATE, 0) != 0;
+        handled = set_default_state(context, host, NONE as i16);
     }
 
     if !handled && ACTION_CLASSES[action() as usize] != 1 {
@@ -1481,7 +1518,7 @@ pub fn handle_active_cover_seeking(
     }
     stage(3);
     m.w32(at(a::EMOTIONS_LAST_ACTIVE_COVER_SEEKING_TIME), current_time as u32);
-    if call_simple(context, host, call::ALLOW_COVER_SEEKING, 0) == 0 {
+    if !allow_cover_seeking(context, host, false) {
         return false;
     }
     stage(5);
@@ -1584,7 +1621,7 @@ pub fn handle_evasion(context: &AiStepContext, host: &impl AiHost) -> bool {
             && last_cover_seeking_elapsed()
         {
             m.w32(at(a::EMOTIONS_LAST_DEFENSIVE_COVER_SEEKING_TIME), current_time as u32);
-            if call_simple(context, host, call::ALLOW_COVER_SEEKING, 1) != 0 {
+            if allow_cover_seeking(context, host, true) {
                 if call_full(context, host, call::TRY_TO_SEEK_COVER, 0, 1, &[]).result != 0 {
                     result = true;
                 } else if definition_flag(v::_ACTOR_DEFINITION_PANICKED_BY_UNOPPOSABLE_ENEMY_BIT)
@@ -1650,7 +1687,7 @@ pub fn handle_evasion(context: &AiStepContext, host: &impl AiHost) -> bool {
 
             if !result && prop_dangerous && last_cover_seeking_elapsed() {
                 m.w32(at(a::EMOTIONS_LAST_DEFENSIVE_COVER_SEEKING_TIME), current_time as u32);
-                if call_simple(context, host, call::ALLOW_COVER_SEEKING, 0) != 0
+                if allow_cover_seeking(context, host, false)
                     && call_full(context, host, call::RANDOM, 0, 0, &[]).output[0]
                         < definition(d::DEFENSIVE_EVASION_SEEK_COVER_CHANCE)
                     && call_full(context, host, call::TRY_TO_SEEK_COVER, 0, 1, &[]).result != 0
@@ -1672,7 +1709,7 @@ pub fn handle_evasion(context: &AiStepContext, host: &impl AiHost) -> bool {
             if !result
                 && not_fleeing
                 && m.i16(at(a::EMOTIONS_EVASION_DELAY_TIMER)) == 0
-                && call_simple(context, host, call::TRY_TO_EVADE, 0) != 0
+                && try_to_evade(context, host)
             {
                 m.set_f32(at(a::EMOTIONS_PERCEIVED_DANGER), 0.0);
                 m.set_i16(at(a::EMOTIONS_EVASION_DELAY_TIMER), c_short(definition(d::DEFENSIVE_EVASION_DELAY_TIMER) * 30.0));
@@ -2062,7 +2099,7 @@ pub fn handle_grenade_throwing(context: &AiStepContext, host: &impl AiHost) -> b
             _ => {}
         }
         if m.bool(at(a::CONTROL_GRENADE_TRYING_TO_THROW)) {
-            call_simple(context, host, call::TRY_TO_THROW_GRENADE, 0);
+            try_to_throw_grenade(context, host, false);
         }
     } else {
         m.set_bool(at(a::CONTROL_GRENADE_TRYING_TO_THROW), false);
@@ -2096,10 +2133,10 @@ pub fn consider_grenade(context: &AiStepContext, host: &impl AiHost) -> bool {
             chance *= call_full(context, host, call::GRENADE_CHANCE_SCALE, 0, 0, &[]).output[0];
             m.w32(at(a::CONTROL_GRENADE_LAST_CHECK_TIME), current_time as u32);
             if call_full(context, host, call::RANDOM, 0, 0, &[]).output[0] < chance
-                && call_simple(context, host, call::TEST_GRENADE, 0) != 0
+                && test_grenade(context, host)
             {
                 m.set_bool(at(a::CONTROL_GRENADE_TRYING_TO_THROW), true);
-                call_simple(context, host, call::TRY_TO_THROW_GRENADE, 1);
+                try_to_throw_grenade(context, host, true);
                 result = true;
             }
         }
@@ -2245,4 +2282,309 @@ pub fn handle_vehicle_entry(context: &AiStepContext, host: &impl AiHost) -> bool
     }
 
     call_full(context, host, call::VEHICLE_SETUP, best_vehicle_index, 0, &[attempt_distance, continue_distance]).result != 0
+}
+
+/// actions.c's evade directions (`_actor_evade_*`): right (else left).
+const EVADE_RIGHT: i16 = 1;
+
+/// actions.c's evade animations (`_actor_animation_evade_*`).
+const ANIMATION_EVADE_LEFT: i32 = 6;
+const ANIMATION_EVADE_RIGHT: i32 = 7;
+
+/// actions.c's cosine an actor must face its grenade's target within
+/// (`ACTOR_GRENADE_THROW_MINIMUM_COSINE`).
+const GRENADE_THROW_MINIMUM_COSINE: f32 = 0.866_025_39;
+
+/// Each default state's move position order (actions.c's
+/// `global_state_move_position_orders`).
+const STATE_MOVE_POSITION_ORDERS: [i32; 12] = [0, 0, 0, 1, 2, 3, 4, 5, 0, 0, 0, 0];
+
+/// `actor_action_allow_cover_seeking`: not while berserk or a passenger, nor
+/// (unless fleeing an unopposable enemy, or playfighting) while its target
+/// was seen within the hiding time or is in view, or before enough damage.
+pub fn allow_cover_seeking(context: &AiStepContext, host: &impl AiHost, unopposable: bool) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = |offset: usize| m.f32(context.definition + offset as u32);
+    let mut allow = true;
+    if !unopposable && !m.bool(at(a::EXTERNAL_ORDERS_PLAYFIGHTING)) {
+        let hide_time = definition(d::DEFENSIVE_HIDE_TARGET_NOT_VISIBLE_TIME);
+        if hide_time > 0.0 {
+            if m.i16(at(a::STATE_COMBAT_STATUS)) >= 7 {
+                allow = false;
+            } else {
+                let target_not_visible_ticks = c_short(hide_time * 30.0);
+                let last_visible_time = m.i32(at(a::TARGET_TARGET_LAST_VISIBLE_TIME));
+                if last_visible_time != NONE
+                    && context.game_time < (target_not_visible_ticks as i32).wrapping_add(last_visible_time)
+                {
+                    allow = false;
+                }
+            }
+        }
+        let damage_threshold = definition(d::DEFENSIVE_COVER_DAMAGE_THRESHOLD);
+        if damage_threshold > 0.0 && m.f32(at(a::INPUT_RECENT_BODY_DAMAGE)) < damage_threshold {
+            allow = false;
+        }
+    }
+    if m.bool(at(a::EMOTIONS_BERSERK)) {
+        allow = false;
+    }
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) {
+        allow = false;
+    }
+    allow
+}
+
+/// `actor_action_try_to_throw_grenade`: an actor whose unit can throw (and,
+/// unless its trajectory's known, whose throw still tests) throws once it
+/// faces the target closely enough, noting the throw in its encounter.
+pub fn try_to_throw_grenade(context: &AiStepContext, host: &impl AiHost, known_trajectory: bool) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let trying = at(a::CONTROL_GRENADE_TRYING_TO_THROW);
+    if call_simple(context, host, call::UNIT_READY_TO_THROW, 0) == 0 {
+        return false;
+    }
+    if !known_trajectory && !test_grenade(context, host) {
+        m.set_bool(trying, false);
+    }
+    if !m.bool(trying) {
+        return false;
+    }
+    let target = m.vector(at(a::CONTROL_GRENADE_CURRENT_TARGET));
+    let body = m.vector(at(a::INPUT_BODY_POSITION));
+    let mut to_target = [target[0] - body[0], target[1] - body[1]];
+    let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+    if normalize2(&mut to_target) > 0.0
+        && !(facing[1] * to_target[1] + to_target[0] * facing[0] < GRENADE_THROW_MINIMUM_COSINE)
+    {
+        m.set_bool(at(a::ORDERS_COMBAT_THROW_GRENADE), true);
+        m.set_bool(trying, false);
+        if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE {
+            call_simple(context, host, call::MARK_GRENADE_THROWN, 0);
+        }
+        return true;
+    }
+    false
+}
+
+/// `actor_action_test_grenade`: whether an actor on foot may throw now (its
+/// encounter's grenade timer, scaled by difficulty and doubled when
+/// playfighting, has run out) at a target with enough enemies and no
+/// friends near it, along a trajectory that works. Its debug record notes
+/// the decision.
+pub fn test_grenade(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let variant = |offset: usize| context.variant_definition + offset as u32;
+    let debug_at = |offset: usize| context.debug_info + offset as u32;
+    let decision = |value: i16| m.set_i16(debug_at(debug::GRENADE_DECISION), value);
+    let current_time = context.game_time;
+    m.w32(debug_at(debug::GRENADE_EVAL_TIME), current_time as u32);
+
+    if m.i32(at(a::INPUT_VEHICLE_INDEX)) != NONE {
+        decision(0);
+        return false;
+    }
+
+    if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE {
+        let timer = call_full(context, host, call::ENCOUNTER_GRENADE_TIMER, 0, 0, &[]);
+        let mut throw_delay = timer.output[0] * m.f32(variant(var::GRENADE_COMBAT_ENCOUNTER_GRENADE_TIMEOUT));
+        if m.bool(at(a::EXTERNAL_ORDERS_PLAYFIGHTING)) {
+            throw_delay *= 2.0;
+        }
+        let throw_delay_ticks = (throw_delay * 30.0) as i32;
+        let last_throw_time = timer.result;
+        if last_throw_time != NONE && (throw_delay_ticks as i16 as i32).wrapping_add(last_throw_time) > current_time {
+            decision(5);
+            let timeout = (throw_delay_ticks.wrapping_sub(current_time) as i16).wrapping_add(last_throw_time as i16);
+            m.set_i16(debug_at(debug::GRENADE_ENCOUNTER_TIMEOUT_TICKS), timeout);
+            return false;
+        }
+    }
+
+    let target = call_full(context, host, call::FIND_GRENADE_TARGET, 0, 0, &[]);
+    if target.result == 0 {
+        decision(6);
+        return false;
+    }
+    let grenade_target = [target.output[0], target.output[1], target.output[2]];
+    let collateral = call_full(
+        context,
+        host,
+        call::COLLATERAL_DAMAGE,
+        0,
+        0,
+        &[
+            m.f32(variant(var::GRENADE_COMBAT_ENEMY_RADIUS)),
+            m.f32(variant(var::GRENADE_COMBAT_COLLATERAL_DAMAGE_RADIUS)),
+            grenade_target[0],
+            grenade_target[1],
+            grenade_target[2],
+        ],
+    );
+    if collateral.result == 0 {
+        decision(8);
+        return false;
+    }
+    let enemy_count = collateral.result2 as i16;
+    let minimum_enemy_count = m.i16(variant(var::GRENADE_COMBAT_MINIMUM_ENEMY_COUNT));
+    if enemy_count < minimum_enemy_count {
+        m.set_i16(debug_at(debug::GRENADE_ENEMY_COUNT), enemy_count);
+        decision(7);
+        m.set_i16(debug_at(debug::GRENADE_REQUIRED_ENEMY_COUNT), minimum_enemy_count);
+        return false;
+    }
+    if call_full(
+        context,
+        host,
+        call::PLAN_GRENADE_TRAJECTORY,
+        m.i16(variant(var::GRENADE_COMBAT_TRAJECTORY_TYPE)) as i32,
+        target.result2,
+        &[grenade_target[0], grenade_target[1], grenade_target[2], target.output[3]],
+    )
+    .result
+        != 0
+    {
+        decision(10);
+        return true;
+    }
+    decision(9);
+    false
+}
+
+/// `actor_action_try_to_evade`: an actor on foot, standing, not animating,
+/// with a target it faces (or one straight overhead), dodges left or right
+/// of it as far as its unit evades, when the dodge has room and an
+/// animation.
+pub fn try_to_evade(context: &AiStepContext, host: &impl AiHost) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.i32(at(a::INPUT_VEHICLE_INDEX)) != NONE
+        || call_simple(context, host, call::ANIMATION_BUSY, 0) != 0
+        || m.bool(at(a::CONTROL_MOVING))
+        || m.i32(at(a::TARGET_TARGET_PROP_INDEX)) == NONE
+    {
+        return false;
+    }
+    let evade_distance = call_full(context, host, call::UNIT_EVADE_DISTANCE, 0, 0, &[]).output[0];
+    if !(evade_distance > 0.0) {
+        return false;
+    }
+    let prop = prop_get(m, context, m.i32(at(a::TARGET_TARGET_PROP_INDEX)));
+    let actor_to_prop = m.vector(prop + p::ACTOR_TO_PROP as u32);
+    let attractor = [actor_to_prop[0], actor_to_prop[1]];
+    let facing = m.vector(at(a::INPUT_FACING_VECTOR));
+    let flying = m.r32(context.definition + d::FLAGS as u32) & (1 << v::_ACTOR_DEFINITION_FLYING_BIT) != 0;
+    let dot_check = if flying {
+        Some(dot(actor_to_prop, facing))
+    } else {
+        let mut direction = attractor;
+        if normalize2(&mut direction) > 0.0 { Some(direction[0] * facing[0] + direction[1] * facing[1]) } else { None }
+    };
+    if let Some(dot_facing) = dot_check {
+        if !(dot_facing > 0.4) {
+            return false;
+        }
+    }
+
+    let mut alignment = attractor;
+    normalize2(&mut alignment);
+    let evasion = call_full(context, host, call::TRY_EVASION_DIRECTION, 0, 0, &[alignment[0], alignment[1], evade_distance]);
+    if evasion.result == 0 {
+        return false;
+    }
+    let alignment = [evasion.output[0], evasion.output[1]];
+    let animation = if evasion.output[2] as i16 == EVADE_RIGHT { ANIMATION_EVADE_RIGHT } else { ANIMATION_EVADE_LEFT };
+    call_simple(context, host, call::TEST_ANIMATION_IMPULSE, animation) != 0
+        && call_full(context, host, call::ANIMATION_IMPULSE, animation, 0, &alignment).result != 0
+}
+
+/// `actor_action_set_default_state`: at most every second and a half (or
+/// when told), the actor takes its initial state (once) or default state:
+/// asleep, guarding where it is or finding a position, searching, fleeing,
+/// or alert with its move position order; an actor with no action at all
+/// is alert.
+pub fn set_default_state(context: &AiStepContext, host: &impl AiHost, override_state: i16) -> bool {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let current_time = context.game_time;
+    let action = || m.i16(at(a::STATE_ACTION));
+    let guard_current_position = || call_simple(context, host, call::GUARD_CURRENT_POSITION, 0) != 0;
+    let alert = |order: i32| call_simple(context, host, call::ALERT, order) != 0;
+    let mut changed = false;
+
+    let last_time = m.i32(at(a::STATE_LAST_DEFAULT_STATE_TIME));
+    if !(override_state != NONE as i16 || last_time == NONE || last_time.wrapping_add(45) < current_time) {
+        return false;
+    }
+    m.w32(at(a::STATE_LAST_DEFAULT_STATE_TIME), current_time as u32);
+    let initial_state = m.i16(at(a::STATE_INITIAL_STATE));
+    let default_state = m.i16(at(a::STATE_DEFAULT_STATE));
+    let state = if override_state != NONE as i16 {
+        override_state
+    } else if initial_state != NONE as i16 {
+        m.set_i16(at(a::STATE_INITIAL_STATE), NONE as i16);
+        initial_state
+    } else if default_state == NONE as i16 {
+        0
+    } else {
+        default_state
+    };
+
+    match state {
+        1 => {
+            if m.i16(at(a::STATE_MODE)) != 1 {
+                m.set_i16(at(a::STATE_MODE), 1);
+                call_simple(context, host, call::SLEEP, 0);
+                changed = true;
+            }
+        }
+        8 => {
+            if (action() != ACTION_GUARD || m.i16(at(a::STATE_GUARD_GUARD_LOCATION_TYPE)) != 1) && guard_current_position() {
+                changed = true;
+            }
+        }
+        9 => {
+            if action() == ACTION_GUARD {
+                if m.i16(at(a::STATE_GUARD_GUARD_LOCATION_TYPE)) != 3 {
+                    m.set_bool(at(a::STATE_GUARD_FIND_NEW_GUARD_POSITION), true);
+                }
+            } else if call_simple(context, host, call::GUARD_FIND_POSITION_IF, 0) != 0 {
+                changed = true;
+            }
+        }
+        10 => {
+            if ACTION_CLASSES[action() as usize] != 3 {
+                m.set_i16(at(a::STATE_MODE), 3);
+                m.set_i16(at(a::STATE_ARTIFICIAL_COMBAT_STATUS), 2);
+                m.set_i16(at(a::STATE_COMBAT_STATUS), 2);
+                if !handle_lost_contact(context, host) && guard_current_position() {
+                    changed = true;
+                }
+            }
+        }
+        11 => {
+            if action() != ACTION_FLEE {
+                if call_full(context, host, call::TRY_TO_PANIC, 13, NONE, &[1.0]).result != 0 {
+                    changed = true;
+                } else if action() != ACTION_GUARD && guard_current_position() {
+                    changed = true;
+                }
+            }
+        }
+        0 | 2..=7 => {
+            let order = STATE_MOVE_POSITION_ORDERS[state as usize];
+            if (action() != ACTION_ALERT || m.i16(at(a::STATE_ALERT_MOVE_POSITION_ORDER)) as i32 != order) && alert(order) {
+                changed = true;
+            }
+        }
+        _ => {}
+    }
+
+    if !changed && action() == ACTION_NONE && alert(0) {
+        changed = true;
+    }
+    changed
 }

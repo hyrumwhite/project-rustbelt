@@ -1256,6 +1256,9 @@ enum
 	_actions_port_handler_call_guard_find_position_if,
 	_actions_port_handler_call_alert,
 	_actions_port_handler_call_sleep,
+	_actions_port_handler_call_unit_dive_distance,
+	_actions_port_handler_call_try_evasion_vector,
+	_actions_port_handler_call_evasion_direction,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

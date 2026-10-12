@@ -1813,6 +1813,52 @@ void actions_port_handler_call(
 			actor_action_change(actor_index, _actor_action_sleep, NULL);
 			break;
 
+		case _actions_port_handler_call_unit_dive_distance:
+			call->output[0] = unit_definition_get(unit_get(actor->meta.unit_index)->definition_index)->unit.dive_distance;
+			break;
+
+		case _actions_port_handler_call_try_evasion_vector:
+		{
+			real_vector2d evasion_vector;
+			boolean is_ledge = FALSE;
+			byte collision_result[0x1C];
+
+			evasion_vector.i = call->input[0];
+			evasion_vector.j = call->input[1];
+			call->result = actor_move_try_evasion_vector(
+				actor_index,
+				&evasion_vector,
+				call->input[2],
+				call->input[3],
+				&is_ledge,
+				collision_result) ? 1 : 0;
+			call->result2 = is_ledge != FALSE;
+			break;
+		}
+
+		case _actions_port_handler_call_evasion_direction:
+		{
+			short evade_direction = (short)call->a;
+			real_vector2d alignment_vector;
+			boolean is_ledge;
+			byte collision_result[0x1C];
+
+			alignment_vector.i = call->input[0];
+			alignment_vector.j = call->input[1];
+			call->result = actor_move_try_evasion_direction(
+				actor_index,
+				&alignment_vector,
+				call->input[2],
+				&evade_direction,
+				call->input[3],
+				&is_ledge,
+				collision_result) ? 1 : 0;
+			call->output[0] = alignment_vector.i;
+			call->output[1] = alignment_vector.j;
+			call->output[2] = (real)evade_direction;
+			break;
+		}
+
 		case _actions_port_handler_call_vehicle_exists:
 			call->result = vehicle_try_and_get(call->a) != NULL;
 			break;
@@ -4132,6 +4178,9 @@ boolean actor_action_try_to_dive(
 	real_vector2d *alignment_vector,
 	real maximum_ledge_height)
 {
+	/* port: what it asks of the rest of the game through
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
 	struct actor_debug_info *debug_info =
 		&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
@@ -4145,19 +4194,22 @@ boolean actor_action_try_to_dive(
 	real best_score;
 	struct actor_dive_animation const *possibility;
 	boolean result;
+	real evasion[6];
 
 	debug_info->dive_decision_time = game_time_get();
 
 	if (actor->input.vehicle_index == NONE &&
-		actor_move_try_evasion_direction(
-			actor_index,
-			alignment_vector,
-			dive_distance,
-			&escape_direction,
-			maximum_ledge_height,
-			&dive_off_ledge,
-			collision_result))
+		(evasion[0] = alignment_vector->i,
+			evasion[1] = alignment_vector->j,
+			evasion[2] = dive_distance,
+			evasion[3] = maximum_ledge_height,
+			actions_port_handler(actor_index, _actions_port_handler_call_evasion_direction,
+				escape_direction, 0, evasion, 4, evasion)))
 	{
+		alignment_vector->i = evasion[0];
+		alignment_vector->j = evasion[1];
+		escape_direction = (short)evasion[2];
+
 		switch (escape_direction)
 		{
 		case _actor_evade_left:
@@ -4224,8 +4276,7 @@ boolean actor_action_try_to_dive(
 			if (best_score <
 					animation_desire[possibility->animation_direction] +
 						possibility->score_bias &&
-				unit_test_animation_impulse(
-					actor->meta.unit_index,
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_test_animation_impulse,
 					possibility->animation))
 			{
 				best_animation = possibility->animation;
@@ -4285,21 +4336,15 @@ boolean actor_action_try_to_dive(
 					NULL);
 			}
 
-			result = actor_move_animation_impulse(
-				actor_index,
-				best_animation,
-				&animation_alignment_vector);
+			result = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_animation_impulse,
+				best_animation, 0, (real const *)&animation_alignment_vector, 2, NULL);
 
 			if (result)
 			{
-				ai_communication_event(
-					_ai_communication_dive,
-					actor->meta.unit_index,
-					NONE,
-					NONE,
-					NONE,
-					NONE,
-					NULL);
+				real weapon_state = (real)NONE;
+
+				actions_port_handler(actor_index, _actions_port_handler_call_communication,
+					_ai_communication_dive, NONE, &weapon_state, 1, NULL);
 				debug_info->dive_decision = _dive_success;
 			}
 			else
@@ -4470,8 +4515,7 @@ boolean actor_action_handle_vehicle_entry(
 				prop->player &&
 				!prop->enemy &&
 				prop->vehicle_index != NONE &&
-				actions_port_handler_simple(actor_index, _actions_port_handler_call_allowed_to_enter_vehicle,
-					prop->vehicle_index))
+				actor_action_allowed_to_enter_vehicle(actor_index, prop->vehicle_index))
 			{
 				struct halo_sim_ai_call driver;
 
@@ -4536,8 +4580,7 @@ boolean actor_action_handle_vehicle_entry(
 
 			if (!actions_port_handler_simple(actor_index, _actions_port_handler_call_vehicle_exists,
 					enterable->vehicle_index) ||
-				!actions_port_handler_simple(actor_index, _actions_port_handler_call_allowed_to_enter_vehicle,
-					enterable->vehicle_index))
+				!actor_action_allowed_to_enter_vehicle(actor_index, enterable->vehicle_index))
 			{
 				continue;
 			}
@@ -4651,15 +4694,23 @@ static boolean actor_action_find_escape_from_danger(
 	real_vector2d *alignment_vector_reference,
 	boolean *escape_is_ledge_reference)
 {
+	/* port: what it asks of the rest of the game through
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
-	struct unit_datum *unit = unit_get(actor->meta.unit_index);
-	struct unit_definition *unit_definition =
-		unit_definition_get(unit->definition_index);
 	short escape_direction = NONE;
 	boolean result = FALSE;
 	boolean selected_is_ledge = FALSE;
-	real evade_distance = unit_definition->unit.dive_distance;
+	real evade_distance;
 	real_vector2d alignment_vector;
+	real dive_distance[6];
+
+	actions_port_handler(actor_index, _actions_port_handler_call_unit_dive_distance, 0, 0, NULL, 0, dive_distance);
+	evade_distance = dive_distance[0];
+	/* port: the alignment zeroed (the game's left it unassigned when the
+	unit can't dive; its caller doesn't read it then) */
+	alignment_vector.i = 0.0f;
+	alignment_vector.j = 0.0f;
 
 	match_assert(
 		"c:\\halo\\SOURCE\\ai\\actions.c",
@@ -4737,13 +4788,20 @@ static boolean actor_action_find_escape_from_danger(
 		right_position.z = right_vector.k * evade_distance +
 			actor->input.position.body_position.z;
 
-		left_found = actor_move_try_evasion_vector(
-			actor_index,
-			(real_vector2d const *)&left_vector,
-			evade_distance,
-			ledge_avoidance_distance,
-			&left_is_ledge,
-			collision_result);
+		{
+			struct halo_sim_ai_call evasion;
+
+			memset(&evasion, 0, sizeof(evasion));
+			evasion.kind = _actions_port_handler_call_try_evasion_vector;
+			evasion.actor = actor_index;
+			evasion.input[0] = left_vector.i;
+			evasion.input[1] = left_vector.j;
+			evasion.input[2] = evade_distance;
+			evasion.input[3] = ledge_avoidance_distance;
+			actions_port_handler_call(&evasion);
+			left_found = evasion.result != 0;
+			left_is_ledge = evasion.result2 != 0;
+		}
 		left_distance = point_to_line_distance3d(
 			&left_position,
 			danger_position,
@@ -4751,13 +4809,20 @@ static boolean actor_action_find_escape_from_danger(
 		left_clear = left_found &&
 			left_distance > actor->danger_zone.danger_radius;
 
-		right_found = actor_move_try_evasion_vector(
-			actor_index,
-			(real_vector2d const *)&right_vector,
-			evade_distance,
-			ledge_avoidance_distance,
-			&right_is_ledge,
-			collision_result);
+		{
+			struct halo_sim_ai_call evasion;
+
+			memset(&evasion, 0, sizeof(evasion));
+			evasion.kind = _actions_port_handler_call_try_evasion_vector;
+			evasion.actor = actor_index;
+			evasion.input[0] = right_vector.i;
+			evasion.input[1] = right_vector.j;
+			evasion.input[2] = evade_distance;
+			evasion.input[3] = ledge_avoidance_distance;
+			actions_port_handler_call(&evasion);
+			right_found = evasion.result != 0;
+			right_is_ledge = evasion.result2 != 0;
+		}
 		right_distance = point_to_line_distance3d(
 			&right_position,
 			danger_position,
@@ -5315,17 +5380,12 @@ boolean actor_action_handle_danger_avoidance(
 				boolean escape_found;
 				boolean escape_is_ledge;
 
-				{
-					real escape[6];
-
-					escape_found = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_find_escape,
-						0, 0, NULL, 0, escape);
-					escape_direction = (short)escape[0];
-					escape_distance = escape[1];
-					alignment_vector.i = escape[2];
-					alignment_vector.j = escape[3];
-					escape_is_ledge = escape[4] != 0.0f;
-				}
+				escape_found = actor_action_find_escape_from_danger(
+					actor_index,
+					&escape_direction,
+					&escape_distance,
+					&alignment_vector,
+					&escape_is_ledge);
 
 				if (escape_direction == NONE)
 				{
@@ -5391,14 +5451,12 @@ boolean actor_action_handle_danger_avoidance(
 								_actor_definition_dive_off_ledges_bit) ?
 								8.0f : 0.0f;
 
-						real dive[4];
-
-						dive[0] = escape_distance;
-						dive[1] = alignment_vector.i;
-						dive[2] = alignment_vector.j;
-						dive[3] = ledge_avoidance_distance;
-						result = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_try_to_dive,
-							escape_direction, 0, dive, 4, NULL);
+						result = actor_action_try_to_dive(
+							actor_index,
+							escape_direction,
+							escape_distance,
+							&alignment_vector,
+							ledge_avoidance_distance);
 					}
 					else
 					{

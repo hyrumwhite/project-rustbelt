@@ -1462,16 +1462,9 @@ static void actor_move_vector_avoidance(
 		boolean sharp_turn = FALSE;
 
 		debug_info->field_19C = game_time_get();
-		avoidance_data.structure = global_structure_bsp_get();
-		avoidance_data.bsp = global_collision_bsp_get();
-		avoidance_data.object_index = object_index;
-		object_get_origin(object_index, &avoidance_data.origin);
-		avoidance_data.forward = object->object.forward;
-		avoidance_data.up = object->object.up;
-		cross_product3d(&object->object.up, &object->object.forward, &avoidance_data.left);
-		avoidance_data.avoid_distance = 12.f;
-		avoidance_data.avoid_width = 1.f;
-		actor_move_avoidance_setup(&avoidance_data);
+		/* port: the avoidance data is gathered into the debug info by a call */
+		actor_move_call_simple(actor_index, _actor_move_call_avoidance_setup, object_index);
+		avoidance_data = debug_info->avoidance_data;
 
 		maximum_sense_emergency = 0.f;
 		csmemset(avoidance_weights, 0, sizeof(avoidance_weights));
@@ -3201,21 +3194,22 @@ void actor_move_call(
 
 	switch (call->kind)
 	{
-		case _actor_move_call_vector_avoidance:
+		case _actor_move_call_avoidance_setup:
 		{
-			real_vector3d fake_movement_vector;
-			real_vector3d const *movement_direction = &actor->control.moving_towards_vector;
-			real_vector3d instantaneous_rotation_vector;
-			real emergency_amount;
+			struct vector_avoidance_data *avoidance_data =
+				&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)].avoidance_data;
+			struct object_datum *object = object_get(call->a);
 
-			if (call->a)
-			{
-				scale_vector3d(&actor->input.facing_vector, 3.f, &fake_movement_vector);
-				movement_direction = &fake_movement_vector;
-			}
-			actor_move_vector_avoidance(actor_index, movement_direction, &instantaneous_rotation_vector, &emergency_amount);
-			memcpy(call->output, &instantaneous_rotation_vector, sizeof(instantaneous_rotation_vector));
-			call->output[3] = emergency_amount;
+			avoidance_data->structure = global_structure_bsp_get();
+			avoidance_data->bsp = global_collision_bsp_get();
+			avoidance_data->object_index = call->a;
+			object_get_origin(call->a, &avoidance_data->origin);
+			avoidance_data->forward = object->object.forward;
+			avoidance_data->up = object->object.up;
+			cross_product3d(&object->object.up, &object->object.forward, &avoidance_data->left);
+			avoidance_data->avoid_distance = 12.f;
+			avoidance_data->avoid_width = 1.f;
+			actor_move_avoidance_setup(avoidance_data);
 			break;
 		}
 
@@ -3411,15 +3405,16 @@ static void actor_move_update_game(
 		real rotation_magnitude_squared;
 		real previous_magnitude_squared;
 		real blend;
-		struct halo_sim_ai_call avoidance;
+		real_vector3d fake_movement_vector;
+		real_vector3d const *movement_direction = &actor->control.moving_towards_vector;
 
-		memset(&avoidance, 0, sizeof(avoidance));
-		avoidance.kind = _actor_move_call_vector_avoidance;
-		avoidance.actor = actor_index;
-		avoidance.a = !actor->control.moving;
-		actor_move_call(&avoidance);
-		memcpy(&instantaneous_rotation_vector, avoidance.output, sizeof(instantaneous_rotation_vector));
-		emergency_amount = avoidance.output[3];
+		/* port: the avoidance makes its own calls */
+		if (!actor->control.moving)
+		{
+			scale_vector3d(&actor->input.facing_vector, 3.f, &fake_movement_vector);
+			movement_direction = &fake_movement_vector;
+		}
+		actor_move_vector_avoidance(actor_index, movement_direction, &instantaneous_rotation_vector, &emergency_amount);
 
 		rotation_magnitude_squared = magnitude_squared3d(&instantaneous_rotation_vector);
 		previous_magnitude_squared =

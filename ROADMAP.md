@@ -445,6 +445,10 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - a vehicle's stuck detection starts, a strafing charge uses up a special-fire denial, and a conversation finishes when conversing ends.
      - **The C's side, through `actions_port_handler_call`:** running blindly, finishing the conversation, the draws, the uncover's debug message (its own call, so Rust mode keeps it), forgetting damage and the retreat, and obey's begin and end (its individuals). The change's profile meter moves into the discarded positions' clearing call.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the uncover's time was caught on b30 and d20. One in the search's time wasn't (no search begins in these runs). With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The flood's shamble in Rust (`halo_map::actor_emotions`): actor_type_flood.c's `actor_type_flood_desire_shamble`, the emotion step's defensive crouch for flood forms.
+     - **What Rust does:** a flood form shambles when idle or out of combat, hard pinged or unable to melee. It doesn't when its target's out of its firing range, when it's berserk or charging to melee, or when it has no gun. Otherwise it goes by its variant: always running, always crouching, crouching near its target, or switching between the two on its timers. When its variant says so, it keeps in step with the friends ahead of and behind it, and when it starts switching its chance leans toward what its friends of its type are doing.
+     - **The C's side, through `actor_emotion_call`:** whether the unit's busy, hard pinged or unable to melee, the path, the firing variant, the ranged weapon, and the draws.
+     - **Results:** the emotion step agrees in minute-long runs of d20, c20 and b40, the flood levels. A planted error in the shamble's stay timer was caught on d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

@@ -129,6 +129,8 @@ pub struct AiStepContext {
     pub encounter_data: u32,
     /// `pursuit_data` (its `struct data_array`).
     pub pursuit_data: u32,
+    /// `squad_array` (its first element).
+    pub squad_array: u32,
 }
 
 /// Where an update over the game's arrays (not one actor's step) finds
@@ -199,6 +201,7 @@ impl WorldContext {
             breakable_surface_flags: self.breakable_surface_flags,
             structure_bsp_index: self.structure_bsp_index,
             pursuit_data: self.pursuit_data,
+            squad_array: self.squad_array,
             ..AiStepContext::default()
         }
     }

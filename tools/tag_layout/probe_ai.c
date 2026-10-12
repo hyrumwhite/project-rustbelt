@@ -1259,6 +1259,7 @@ LAYOUT_OFFSET(platoon_datum, current_strength_fraction)
 /* the constants (`ai_values`) */
 #define LAYOUT_VALUE(name) const int layout__ai_values__##name = name;
 LAYOUT_VALUE(_squad_never_search_bit)
+LAYOUT_VALUE(_squad_magic_sight_after_timer_bit)
 LAYOUT_VALUE(_actor_variant_definition_prefer_passenger_seat_bit)
 LAYOUT_VALUE(_actor_postcombat_run_to)
 LAYOUT_VALUE(_actor_postcombat_check_friend)

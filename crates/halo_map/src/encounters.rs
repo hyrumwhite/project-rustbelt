@@ -24,6 +24,25 @@ use crate::layout::{
     scenario, squad_datum as sq, squad_definition as sd, unit_datum as u,
 };
 
+/// `encounter_squad_timer_expire` of the squad (its datum `squad`) but its
+/// magic sight: the timer stops; whether the squad (by its definition's
+/// flag) now magically sees the players, which is the caller's (the game's,
+/// a call). The rules' console line is the game's alone.
+pub fn squad_timer_expire(m: &dyn AiMemory, scenario_address: u32, squad: u32, encounter_index: i32, squad_index: i16) -> bool {
+    let encounter_definition =
+        tag_block_element(m, scenario_address + scenario::AI_ENCOUNTERS as u32, encounter_index & 0xFFFF, ed::SIZEOF);
+    let squad_definition = tag_block_element(m, encounter_definition + ed::SQUADS as u32, squad_index as i32, sd::SIZEOF);
+    m.set_i16(squad + sq::DELAY_TIMER as u32, 0);
+    m.r32(squad_definition + sd::FLAGS as u32) & (1 << v::_SQUAD_MAGIC_SIGHT_AFTER_TIMER_BIT) != 0
+}
+
+/// `encounter_get_squad` of an actor step's context.
+pub fn step_squad(m: &dyn AiMemory, context: &crate::ai_actor::AiStepContext, encounter_index: i32, squad_index: i16) -> u32 {
+    let encounter = datum_get(m, context.encounter_data, encounter_index).unwrap_or(0);
+    let absolute = squad_index.wrapping_add(m.i16(encounter + e::SQUAD_BASE as u32));
+    context.squad_array + absolute as i32 as u32 * sq::SIZEOF as u32
+}
+
 /// The encounters' calls (halo_sim.h's `_encounter_call_*`).
 pub mod call {
     // 1 was `encounters_test_activation`, now Rust's.
@@ -35,6 +54,7 @@ pub mod call {
     pub const SPAWN_ACTOR: i32 = 5;
     /// `seed_random_range(global seed, a, b)`, the result.
     pub const RANDOM_RANGE: i32 = 6;
+    /// (no longer asked: [`squad_timer_expire`] and [`SQUAD_MAGIC_SIGHT`])
     /// `encounter_squad_timer_expire(a, b)`.
     pub const SQUAD_TIMER_EXPIRE: i32 = 7;
     /// How many units the encounter `a` follows (its players, its unit, or
@@ -72,6 +92,9 @@ pub mod call {
     /// Whether any unit of the swarm actor's cached swarm is in the
     /// players' combined PVS, the result.
     pub const SWARM_IN_PVS: i32 = 22;
+    /// `ai_scripting_magically_see_players` of the encounter `a`'s squad `b`
+    /// (its delay timer ran out; [`squad_timer_expire`]).
+    pub const SQUAD_MAGIC_SIGHT: i32 = 23;
 }
 
 const TICKS_PER_SECOND: i32 = 30;
@@ -526,7 +549,9 @@ impl<H: AiHost> Encounters<'_, H> {
                     if delay_timer as i32 > UPDATE_INTERVAL {
                         m.set_i16(squad + sq::DELAY_TIMER as u32, (delay_timer as i32 - UPDATE_INTERVAL) as i16);
                     } else {
-                        self.call(call::SQUAD_TIMER_EXPIRE, NONE, encounter_index, squad_index as i32);
+                        if squad_timer_expire(m, self.context.scenario, squad, encounter_index, squad_index) {
+                            self.call(call::SQUAD_MAGIC_SIGHT, NONE, encounter_index, squad_index as i32);
+                        }
                     }
                 } else {
                     m.set_bool(

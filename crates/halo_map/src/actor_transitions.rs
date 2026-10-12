@@ -35,9 +35,10 @@ pub mod call {
     /// The actor's prop of the unit responsible for its unit's flaming
     /// death (or NONE), the result.
     pub const BURNING_PROP: i32 = BASE + 6;
-    /// Whether the actor's squad's delay timer runs, the result.
+    /// (no longer asked) Whether the actor's squad's delay timer runs, the result.
     pub const SQUAD_DELAYED: i32 = BASE + 7;
-    /// `encounter_squad_timer_expire` of the actor's squad.
+    /// (no longer asked: [`crate::encounters::squad_timer_expire`] and
+    /// [`SQUAD_MAGIC_SIGHT`]) `encounter_squad_timer_expire` of the actor's squad.
     pub const SQUAD_TIMER_EXPIRE: i32 = BASE + 8;
     /// The flags of the conversation `a`'s definition, the result.
     pub const CONVERSATION_FLAGS: i32 = BASE + 9;
@@ -91,7 +92,7 @@ pub mod call {
     pub const VEHICLE_DEFINITION: i32 = BASE + 31;
     /// `action_fight_setup` and `actor_action_change` to fight.
     pub const FIGHT: i32 = BASE + 32;
-    /// Whether the actor's encounter is standing down, the result.
+    /// (no longer asked) Whether the actor's encounter is standing down, the result.
     pub const ENCOUNTER_STAND_DOWN: i32 = BASE + 33;
     /// `encounter_modify_pursuit_desires` of the actor's squad: in `input`
     /// and `output`, whether to pursue tenaciously, the group's restriction,
@@ -190,7 +191,7 @@ pub mod call {
     /// Whether the actor's unit can throw (not busy, not hurt this tick), the
     /// result.
     pub const UNIT_READY_TO_THROW: i32 = BASE + 70;
-    /// The actor's encounter's last grenade throw is now.
+    /// (no longer asked) The actor's encounter's last grenade throw is now.
     pub const MARK_GRENADE_THROWN: i32 = BASE + 71;
     /// The actor's encounter's last grenade throw time, the result, and the
     /// difficulty's grenade timer scale for its team, `output[0]`.
@@ -303,6 +304,9 @@ pub mod call {
     pub const PLAYFIGHT_NEARBY_TARGET: i32 = BASE + 109;
     /// actions.c's `actor_pursuit_find_nearby_actors(actor, a)`, the result.
     pub const PURSUIT_FIND_NEARBY_ACTORS: i32 = BASE + 110;
+    /// `ai_scripting_magically_see_players` of the actor's squad (its delay
+    /// timer ran out).
+    pub const SQUAD_MAGIC_SIGHT: i32 = BASE + 111;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -619,9 +623,13 @@ pub fn deny_transition(context: &AiStepContext, host: &impl AiHost) -> bool {
     if m.i16(at(a::STATE_COMMAND_LIST_INDEX)) != NONE as i16 && m.i16(at(a::STATE_COMMAND_LIST_DELAY_TIMER)) > 0 {
         deny = true;
     }
-    if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE && call_simple(context, host, call::SQUAD_DELAYED, 0) != 0 {
+    let encounter_index = m.i32(at(a::META_ENCOUNTER_INDEX));
+    let squad = || crate::encounters::step_squad(m, context, encounter_index, m.i16(at(a::META_SQUAD_INDEX)));
+    if encounter_index != NONE && m.i16(squad() + crate::layout::squad_datum::DELAY_TIMER as u32) > 0 {
         if m.i16(at(a::STATE_COMBAT_STATUS)) >= 5 {
-            call_simple(context, host, call::SQUAD_TIMER_EXPIRE, 0);
+            if crate::encounters::squad_timer_expire(m, context.scenario, squad(), encounter_index, m.i16(at(a::META_SQUAD_INDEX))) {
+                call_simple(context, host, call::SQUAD_MAGIC_SIGHT, 0);
+            }
         } else {
             deny = true;
         }
@@ -1251,7 +1259,8 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
     let mut wants_postcombat_guard = false;
 
     if encounter_index != NONE
-        && call_simple(context, host, call::ENCOUNTER_STAND_DOWN, 0) != 0
+        && crate::ai_actor::datum_get(m, context.encounter_data, encounter_index)
+            .is_some_and(|encounter| m.bool(encounter + crate::layout::encounter_datum::STAND_DOWN as u32))
         && combat_status() <= 2
         && m.i16(at(a::STATE_ARTIFICIAL_COMBAT_STATUS)) == 0
         && m.i16(at(a::STATE_SUSPICION_COMBAT_STATUS)) == 0
@@ -2395,7 +2404,8 @@ pub fn try_to_throw_grenade(context: &AiStepContext, host: &impl AiHost, known_t
         m.set_bool(at(a::ORDERS_COMBAT_THROW_GRENADE), true);
         m.set_bool(trying, false);
         if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE {
-            call_simple(context, host, call::MARK_GRENADE_THROWN, 0);
+            let encounter = crate::ai_actor::datum_get(m, context.encounter_data, m.i32(at(a::META_ENCOUNTER_INDEX))).unwrap_or(0);
+            m.w32(encounter + crate::layout::encounter_datum::LAST_GRENADE_THROW_TIME as u32, context.game_time as u32);
         }
         return true;
     }

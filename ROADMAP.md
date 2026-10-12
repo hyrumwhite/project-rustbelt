@@ -724,6 +724,17 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every decision loop, action update and action control agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. a30 runs no dispatch in its first minute.
        - A planted error in the examined time was caught on b30 and b40. A planted error in linking a new pursuit was caught on b40; b30 made no new pursuit in that run.
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The encounter's and squad's state in the dispatch in Rust (`halo_map::actor_transitions` and `halo_map::encounters`, under `actor_dispatch` and `encounters`).
+     - **What Rust does:**
+       - It reads whether the encounter stands down and whether the actor's squad is delayed.
+       - It marks the encounter's last grenade throw.
+       - It expires a squad's delay timer (`encounter_squad_timer_expire`), both in transitions and in the encounters' update.
+       - The magic sight that a squad's flag asks for after its timer stays the game's (`ai_scripting_magically_see_players` touches other actors), as a new call made only when the flag is set. The rules' console line is the game's alone.
+     - **The check:** the dispatch steps' check also follows the squads' array (32 KB), and the step context gains `squad_array`. The grenade timer stays a call, since the difficulty's team values are the game's.
+     - **Results:**
+       - Every decision loop, action update, action control and encounters' update agrees in minute-long runs of b30, a30, d20, c20, b40 and a50, with none left out. The decision loop's calls fell by about a third on b30 and by half on a50.
+       - A planted error in the squad timer was caught on d20 by the encounters' update. Transitions' own expiry, by an actor in combat while its squad waits, didn't happen in these runs. A planted error in the grenade mark was caught on b30.
+       - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

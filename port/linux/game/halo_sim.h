@@ -1528,6 +1528,36 @@ enum
 	_action_fight_call_perception_unreachable,
 };
 
+/* the firing position selection's calls ((NUMBER_OF_ACTOR_ACTIONS << 8) | n:
+actor_firing_position.c's actor_firing_position_call; crates/halo_map's
+firing_positions::call) */
+enum
+{
+	_actor_firing_position_call_owners = (14 << 8) | 1,
+	_actor_firing_position_call_owner,
+	_actor_firing_position_call_estimate_position,
+	_actor_firing_position_call_find_prop_pathfinding_location,
+	_actor_firing_position_call_friend_attacking,
+	_actor_firing_position_call_unit_aiming_vector,
+	_actor_firing_position_call_nearby_firing_positions,
+	_actor_firing_position_call_path_3d_available,
+	_actor_firing_position_call_target_path,
+	_actor_firing_position_call_target_distance,
+	_actor_firing_position_call_area_path,
+	_actor_firing_position_call_area_distance,
+	_actor_firing_position_call_random_range,
+	_actor_firing_position_call_firing_variant,
+	_actor_firing_position_call_aiming_blockage,
+	_actor_firing_position_call_weapon_definition,
+	_actor_firing_position_call_vehicle,
+	_actor_firing_position_call_actor_path_3d_available,
+	_actor_firing_position_call_mark_examined,
+	_actor_firing_position_call_already_examined,
+	_actor_firing_position_call_line_of_sight,
+	_actor_firing_position_call_change,
+	_actor_firing_position_call_flee_approach,
+};
+
 /* the object update loop's calls (objects.c's objects_update_call;
 crates/halo_map's objects_update::call) */
 enum
@@ -2083,6 +2113,13 @@ void actor_look_call(struct halo_sim_ai_call *call);
 void actor_move_call(struct halo_sim_ai_call *call);
 void actor_combat_call(struct halo_sim_ai_call *call);
 void actor_dispatch_call(struct halo_sim_ai_call *call);
+void actor_firing_position_call(struct halo_sim_ai_call *call);
+short actor_firing_position_port_change(long actor_index, short firing_position_index, long previous_owner,
+	int cached_path_available);
+short actor_firing_position_port_change_to_active_selection(long actor_index, short evaluation_mode);
+short actor_firing_position_port_change_to_guard_selection(long actor_index);
+short actor_firing_position_port_select_pursuit_position(long actor_index, int tenacious, long last_perceived_time);
+struct path_state *actor_firing_position_port_area_path_state(void);
 int actions_port_ported(short action, long function);
 void actions_port_call(struct halo_sim_ai_call *call);
 void actions_port_handler_call(struct halo_sim_ai_call *call);

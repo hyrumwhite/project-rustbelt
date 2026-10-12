@@ -3651,7 +3651,10 @@ static void actor_move_update_game(
 		&actor->control.desired_facing_vector);
 
 	if (clear_firing_positions && !actor->control.moving)
-		actor_move_call_simple(actor_index, _actor_move_call_clear_discarded_firing_positions, 0);
+	{
+		/* port: the discard's writes are Rust's own too, not a call */
+		actor_clear_discarded_firing_positions(actor_index, TRUE);
+	}
 
 	if (actor->control.moving &&
 		TEST_FLAG(

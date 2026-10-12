@@ -247,8 +247,8 @@ action_fight_update(
 			actor->firing_positions.current_position_index != NONE &&
 			!actor->firing_positions.current_position_found_outside_range)
 		{
-			action_fight_call_simple(actor_index, _action_fight_call_discard_firing_position,
-				actor->firing_positions.current_position_index, 0, 0.0f, 0.0f, NULL);
+			/* port: the discard's writes are Rust's own too, not a call */
+			actor_discard_firing_position(actor_index, actor->firing_positions.current_position_index, FALSE);
 		}
 	}
 
@@ -339,8 +339,9 @@ action_fight_perform(
 				short new_firing_position_index;
 
 				old_firing_position_index = actor->firing_positions.current_position_index;
-				new_firing_position_index = (short)action_fight_call_simple(actor_index,
-					_action_fight_call_change_firing_position, 0, 0, 0.0f, 0.0f, NULL);
+				/* port: the selection's calls are its own */
+				new_firing_position_index = actor_firing_position_port_change_to_active_selection(actor_index,
+					_firing_point_evaluation_mode_fight);
 				if (new_firing_position_index == NONE)
 				{
 					actor->state.action_data.fight.firing_position_timer = 0;

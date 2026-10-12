@@ -814,8 +814,8 @@ action_guard_update(
 
 			if (state_data->guard_location_type == 3)
 			{
-				action_guard_call_simple(actor_index, _action_guard_call_discard_firing_position,
-					state_data->guard_firing_position_index, 0, 0.0f, 0.0f, NULL);
+				/* port: the discard's writes are Rust's own too, not a call */
+				actor_discard_firing_position(actor_index, state_data->guard_firing_position_index, FALSE);
 				state_data->guard_firing_position_index = NONE;
 			}
 
@@ -876,12 +876,12 @@ action_guard_perform(
 		if (state_data->guard_location_type == 3 &&
 			actor->firing_positions.current_position_index != NONE)
 		{
-			action_guard_call_simple(actor_index, _action_guard_call_discard_firing_position,
-				actor->firing_positions.current_position_index, 0, 0.0f, 0.0f, NULL);
+			/* port: the discard's writes are Rust's own too, not a call */
+			actor_discard_firing_position(actor_index, actor->firing_positions.current_position_index, FALSE);
 		}
 
-		firing_position_index = (short)action_guard_call_simple(actor_index,
-			_action_guard_call_change_firing_position, 0, 0, 0.0f, 0.0f, NULL);
+		/* port: the selection's calls are its own */
+		firing_position_index = actor_firing_position_port_change_to_guard_selection(actor_index);
 		state_data->find_new_guard_position = FALSE;
 		state_data->has_guard_direction = FALSE;
 		if (firing_position_index == NONE)
@@ -989,8 +989,8 @@ action_guard_control(
 				if (!action_guard_call_simple(actor_index, _action_guard_call_move_to_firing_position,
 					actor->firing_positions.current_position_index, 0, 0.0f, 0.0f, NULL))
 				{
-					action_guard_call_simple(actor_index, _action_guard_call_discard_firing_position,
-						state_data->guard_firing_position_index, 0, 0.0f, 0.0f, NULL);
+					/* port: the discard's writes are Rust's own too, not a call */
+					actor_discard_firing_position(actor_index, state_data->guard_firing_position_index, FALSE);
 					actor->firing_positions.current_position_index = NONE;
 				}
 			}

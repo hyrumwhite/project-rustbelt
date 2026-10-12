@@ -828,6 +828,7 @@ void actions_port_call(
 		case _actor_action_wait: action_wait_call(call); break;
 		case _actor_action_avoid: action_avoid_call(call); break;
 		case _actor_action_fight: action_fight_call(call); break;
+		case _actor_firing_position_call_owners >> 8: actor_firing_position_call(call); break;
 	}
 }
 
@@ -2184,7 +2185,8 @@ static void actions_port_action_change(
 	{
 		actor->state.mode = 3;
 	}
-	actions_port_handler_simple(actor_index, _actions_port_handler_call_clear_discarded_firing_positions, 0);
+	/* port: the discard's writes are Rust's own too, not a call */
+	actor_clear_discarded_firing_positions(actor_index, FALSE);
 	if (global_action_functions[new_action_type].data_size > 0 && new_action_data)
 	{
 		csmemcpy(
@@ -3908,14 +3910,11 @@ boolean actor_action_handle_lost_contact(
 								actor->firing_positions.pursuit_positions_count <
 									examined_threshold)
 							{
-								firing_position_index = (short)actions_port_handler(
+								/* port: the selection's calls are its own */
+								firing_position_index = actor_firing_position_port_select_pursuit_position(
 									actor_index,
-									_actions_port_handler_call_select_pursuit_position,
 									pursue_tenacious,
-									orphan == NULL ? NONE : orphan->last_perceived_time,
-									NULL,
-									0,
-									NULL);
+									orphan == NULL ? NONE : orphan->last_perceived_time);
 							}
 						}
 
@@ -5615,10 +5614,8 @@ boolean actor_action_handle_danger_avoidance(
 
 			if (firing_position_index != NONE)
 			{
-				actions_port_handler_simple(
-					actor_index,
-					_actions_port_handler_call_discard_firing_position,
-					firing_position_index);
+				/* port: the discard's writes are Rust's own too, not a call */
+				actor_discard_firing_position(actor_index, firing_position_index, TRUE);
 				debug_info->danger_abandoned_path = TRUE;
 			}
 		}

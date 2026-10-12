@@ -250,17 +250,37 @@ boolean action_uncover_perform(
 		!actor->input.vehicle_passenger &&
 		!state_data->uncover_done)
 	{
-		struct halo_sim_ai_call selection;
+		struct firing_position_evaluation_context search;
+		struct firing_position candidate;
+		long previous_owner_actor_index = NONE;
+		boolean position_valid = FALSE;
+		short selected_firing_position_index;
 
-		/* port: the search, the candidate's tests and the change through
-		action_uncover_call */
-		memset(&selection, 0, sizeof(selection));
-		selection.kind = _action_uncover_call_select_firing_position;
-		selection.actor = actor_index;
-		action_uncover_call(&selection);
-		if ((short)selection.result != NONE)
+		/* port: the search's calls are its own (actor_firing_position_call),
+		the change too */
+		csmemset(&search, 0, sizeof(search));
+		search.evaluation_mode = _firing_point_evaluation_mode_uncover;
+		if (state_data->pursuit_location.type == _pursuit_location_position)
 		{
-			short line_of_sight = (short)selection.result2;
+			search.specific_target_enable = TRUE;
+			search.specific_target_point = state_data->pursuit_location.position;
+			search.specific_target_surface_index = state_data->pursuit_location.surface_index;
+			search.specific_target_cluster_index = state_data->pursuit_location.cluster_index;
+		}
+		else
+		{
+			search.use_last_visible_target_position = state_data->no_target_sight_available;
+		}
+		selected_firing_position_index = actor_active_select_firing_position(
+			actor_index,
+			&search,
+			&candidate,
+			&previous_owner_actor_index,
+			NULL,
+			&position_valid);
+		if (selected_firing_position_index != NONE)
+		{
+			short line_of_sight = candidate.line_of_sight;
 
 			if (state_data->pursuit_location.type == _pursuit_location_target)
 			{
@@ -277,7 +297,7 @@ boolean action_uncover_perform(
 				real tolerance;
 
 				action_uncover_call_simple(actor_index, _action_uncover_call_tolerance, 0, 0, &tolerance);
-				if (tolerance > selection.output[0])
+				if (tolerance > candidate.path_distance_from_actor)
 				{
 					if (!state_data->pursuit_location_inspected)
 						action_uncover_call_simple(actor_index, _action_uncover_call_debug, 1, 0, NULL);
@@ -285,7 +305,8 @@ boolean action_uncover_perform(
 				}
 			}
 		}
-		if ((short)action_uncover_call_simple(actor_index, _action_uncover_call_change_firing_position, 0, 0, NULL) == NONE)
+		if (actor_firing_position_port_change(actor_index, selected_firing_position_index, previous_owner_actor_index,
+			position_valid) == NONE)
 		{
 			state_data->uncover_exit_failure = TRUE;
 		}
@@ -557,8 +578,8 @@ void action_uncover_update(
 		if (state_data->pursuit_location.type == _pursuit_location_target &&
 			state_data->current_position_hold_timer >= TICKS_PER_SECOND)
 		{
-			action_uncover_call_simple(actor_index, _action_uncover_call_discard_firing_position,
-				actor->firing_positions.current_position_index, 0, NULL);
+			/* port: the discard's writes are Rust's own too, not a call */
+			actor_discard_firing_position(actor_index, actor->firing_positions.current_position_index, FALSE);
 		}
 	}
 

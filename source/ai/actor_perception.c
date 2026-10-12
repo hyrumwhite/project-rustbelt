@@ -3840,8 +3840,8 @@ static void actor_emotion_update_game(
 
 	if (actor->emotions.moving_into_player_line_of_fire)
 	{
-		actor_emotion_call_simple(actor_index, _actor_emotion_call_discard_firing_position,
-			actor->firing_positions.current_position_index, TRUE, NULL);
+		/* port: the discard's writes are Rust's own too, not a call */
+		actor_discard_firing_position(actor_index, actor->firing_positions.current_position_index, TRUE);
 		actor->emotions.moving_into_fire_timer = 22;
 	}
 	else if (actor->emotions.moving_into_fire_timer > 0)

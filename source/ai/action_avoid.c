@@ -153,7 +153,8 @@ boolean action_avoid_perform(
 	match_assert("c:\\halo\\SOURCE\\ai\\action_avoid.c", 55, !actor->meta.swarm);
 	if (actor->meta.timeslice)
 	{
-		action_avoid_call_simple(actor_index, _action_avoid_call_change_firing_position, 0, 0, 0.0f, 0.0f, NULL);
+		/* port: the selection's calls are its own */
+		actor_firing_position_port_change_to_active_selection(actor_index, _firing_point_evaluation_mode_avoid);
 	}
 
 	return actor->danger_zone.danger_type == 0;

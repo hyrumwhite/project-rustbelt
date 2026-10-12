@@ -156,6 +156,75 @@ void action_flee_modify_color(
 	return;
 }
 
+/* port: actor_firing_position.c's calls the flee's search makes */
+void actor_firing_position_port_find_prop_pathfinding_location(
+	long actor_index,
+	long prop_index);
+boolean actor_firing_position_port_flee_approach(
+	long actor_index,
+	long prop_index,
+	real_point3d const *position,
+	long surface_index,
+	real_point3d *approach_point,
+	boolean *has_approach_point);
+boolean action_flee_port_approach_point(
+	long actor_index,
+	long prop_index,
+	real_point3d const *position,
+	long surface_index,
+	real_point3d *approach_point,
+	boolean *has_approach_point);
+
+/* port: the flee's approach (the path from the prop's pathfinding point to
+the position, to the actor's unit): whether the path was found, and in it
+the approach point; for actor_firing_position.c's call */
+boolean action_flee_port_approach_point(
+	long actor_index,
+	long prop_index,
+	real_point3d const *position,
+	long surface_index,
+	real_point3d *approach_point,
+	boolean *has_approach_point)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct actor_definition *definition = actor_definition_get(actor->meta.definition_index);
+	struct prop_datum *prop = prop_get(prop_index);
+	long target_object_index = prop->vehicle_index != NONE ?
+		prop->vehicle_index : prop->unit_index;
+	struct path_input input;
+	struct path_state state;
+	boolean straight_line;
+
+	path_input_new(
+		&input,
+		definition->moving.pathfinding_radius,
+		FALSE,
+		target_object_index);
+	path_input_set_start(
+		&input,
+		&prop->pathfinding_point,
+		prop->pathfinding_surface_index);
+	path_input_set_target_object(&input, actor->meta.unit_index);
+	path_state_new(&input, &state, NULL);
+	path_state_destination(
+		&state,
+		position,
+		surface_index,
+		0.0f);
+	if (path_state_find(&state))
+	{
+		*has_approach_point = path_state_approach_point(
+			&state,
+			(real_point2d const *)position,
+			surface_index,
+			&straight_line,
+			approach_point);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
 /* respect_direction is not consulted by this build; setup passes FALSE and perform passes TRUE. */
 static void action_flee_find_flee_position(
 	long actor_index,
@@ -164,9 +233,11 @@ static void action_flee_find_flee_position(
 {
 	struct firing_position_evaluation_context search;
 	struct firing_position candidate;
-	long current_owner_actor_index;
+	/* port: none until the selection finds one (the change ignores them
+	without a position; the Rust port's call passes NONE) */
+	long current_owner_actor_index = NONE;
 	struct path_state area_path_state;
-	boolean area_path_state_valid;
+	boolean area_path_state_valid = FALSE;
 	struct actor_datum *actor = actor_get(actor_index);
 	struct actor_definition *definition = actor_definition_get(actor->meta.definition_index);
 
@@ -207,12 +278,12 @@ static void action_flee_find_flee_position(
 		&current_owner_actor_index,
 		&area_path_state,
 		&area_path_state_valid);
-	state_data->flee_firing_position_index = actor_change_firing_position(
+	/* port: the change through the selection's call (crates/halo_map's
+	firing_positions::find_flee_position) */
+	state_data->flee_firing_position_index = actor_firing_position_port_change(
 		actor_index,
 		state_data->flee_firing_position_index,
-		&candidate,
 		current_owner_actor_index,
-		&area_path_state,
 		area_path_state_valid);
 	state_data->flee_firing_position_found_randomly =
 		state_data->flee_firing_position_index != NONE && !area_path_state_valid;
@@ -226,42 +297,26 @@ static void action_flee_find_flee_position(
 		if (prop->state >= _prop_state_becoming_unacknowledged &&
 			prop->state <= _prop_state_acknowledged)
 		{
-			actor_perception_find_prop_pathfinding_location(
+			actor_firing_position_port_find_prop_pathfinding_location(
 				actor_index,
 				state_data->flee_prop_index);
 		}
 
+		/* port: the approach through the call (action_flee_port_approach_point) */
 		{
-			long target_object_index = prop->vehicle_index != NONE ?
-				prop->vehicle_index : prop->unit_index;
-			struct path_input input;
-			struct path_state state;
-			boolean straight_line;
+			real_point3d approach_point = state_data->approach_point;
+			boolean has_approach_point = FALSE;
 
-			path_input_new(
-				&input,
-				definition->moving.pathfinding_radius,
-				FALSE,
-				target_object_index);
-			path_input_set_start(
-				&input,
-				&prop->pathfinding_point,
-				prop->pathfinding_surface_index);
-			path_input_set_target_object(&input, actor->meta.unit_index);
-			path_state_new(&input, &state, NULL);
-			path_state_destination(
-				&state,
+			if (actor_firing_position_port_flee_approach(
+				actor_index,
+				state_data->flee_prop_index,
 				&candidate.definition->position,
 				candidate.definition->surface_index,
-				0.0f);
-			if (path_state_find(&state))
+				&approach_point,
+				&has_approach_point))
 			{
-				state_data->has_approach_point = path_state_approach_point(
-					&state,
-					(real_point2d const *)&candidate.definition->position,
-					candidate.definition->surface_index,
-					&straight_line,
-					&state_data->approach_point);
+				state_data->approach_point = approach_point;
+				state_data->has_approach_point = has_approach_point;
 			}
 		}
 	}
@@ -535,22 +590,9 @@ boolean action_flee_setup(
 		}
 		else if (!actor->meta.swarm)
 		{
-			struct halo_sim_ai_call find;
-
-			memset(&find, 0, sizeof(find));
-			find.kind = _actions_port_handler_call_find_flee_position;
-			find.actor = actor_index;
-			find.a = panic_type;
-			find.b = panic_prop_index;
-			find.input[0] = (real)state_data->forced_flee_ticks;
-			find.input[1] = (real)(flee_from_last_visible_location != FALSE);
-			find.input[2] = (real)(allow_occluded_points != FALSE);
-			actions_port_handler_call(&find);
-			state_data->flee_firing_position_index = (short)find.result;
-			state_data->flee_firing_position_found_randomly = (find.result2 & 1) != 0;
-			state_data->has_approach_point = (find.result2 & 2) != 0;
-			memcpy(&state_data->approach_point, find.output, sizeof(real_point3d));
-			state_data->find_new_flee_position = FALSE;
+			/* port: the search's calls are its own (crates/halo_map's
+			firing_positions::find_flee_position) */
+			action_flee_find_flee_position(actor_index, FALSE, state_data);
 			if (state_data->flee_firing_position_index != NONE)
 			{
 				success = TRUE;
@@ -682,8 +724,8 @@ void action_flee_control(
 		{
 			if (actor->firing_positions.current_position_index != NONE)
 			{
-				action_flee_call_simple(actor_index, _action_flee_call_discard_firing_position,
-					actor->firing_positions.current_position_index, 0, NULL);
+				/* port: the discard's writes are Rust's own too, not a call */
+				actor_discard_firing_position(actor_index, actor->firing_positions.current_position_index, FALSE);
 				action_flee_call_simple(actor_index, _action_flee_call_move_halt, 0, 0, NULL);
 				actor->firing_positions.current_position_index = NONE;
 			}
@@ -853,7 +895,9 @@ boolean action_flee_perform(
 			}
 			else if (state_data->find_new_flee_position)
 			{
-				action_flee_call_simple(actor_index, _action_flee_call_find_flee_position, 0, 0, NULL);
+				/* port: the search's calls are its own (crates/halo_map's
+				firing_positions::find_flee_position) */
+				action_flee_find_flee_position(actor_index, TRUE, state_data);
 				if (state_data->flee_firing_position_index == NONE)
 				{
 					state_data->unable_to_flee = TRUE;

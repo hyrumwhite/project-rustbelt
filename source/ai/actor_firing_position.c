@@ -169,6 +169,7 @@ symbols in this file:
 #include "units/vehicles.h"
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -420,6 +421,390 @@ struct firing_position_post_evaluator const global_post_evaluator_table[]=
 short global_temporary_sort_firing_position_count= 0;
 struct firing_position *global_temporary_sort_firing_position_array= NULL;
 
+/* port: what the selection's calls build, for the calls after (the
+actor's and its target's path searches, the encounter's owners) */
+static struct path_state actor_firing_position_area_path_state;
+static struct path_state actor_firing_position_target_path_state;
+static long actor_firing_position_owners[MAXIMUM_NUMBER_OF_FIRING_POSITIONS_PER_ENCOUNTER];
+
+/* port: actor_firing_position.c's calls the flee's search makes */
+void actor_firing_position_port_find_prop_pathfinding_location(
+	long actor_index,
+	long prop_index);
+boolean actor_firing_position_port_flee_approach(
+	long actor_index,
+	long prop_index,
+	real_point3d const *position,
+	long surface_index,
+	real_point3d *approach_point,
+	boolean *has_approach_point);
+boolean action_flee_port_approach_point(
+	long actor_index,
+	long prop_index,
+	real_point3d const *position,
+	long surface_index,
+	real_point3d *approach_point,
+	boolean *has_approach_point);
+
+/* ---------- port: the selection's calls */
+
+/* what the selection asks of the rest of the game, shared by the game's
+and the Rust port's (crates/halo_map's firing_positions); in check mode each
+is recorded */
+void actor_firing_position_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_ai_event_begin(call);
+	long actor_index = call->actor;
+	struct actor_datum *actor = actor_get(actor_index);
+	real_point3d point;
+
+	point.x = call->input[0];
+	point.y = call->input[1];
+	point.z = call->input[2];
+	switch (call->kind)
+	{
+		case _actor_firing_position_call_owners:
+			ai_profile.meters[_ai_meter_firing_point].accumulator++;
+			encounter_build_firing_position_owner_actor_indices(actor->meta.encounter_index,
+				actor_firing_position_owners);
+			/* (a position the array holds: not NONE, nor past it) */
+			if (VALID_INDEX(actor->firing_positions.current_position_index,
+				(short)NUMBEROF(actor_firing_position_owners)))
+			{
+				actor_firing_position_owners[actor->firing_positions.current_position_index] = NONE;
+			}
+			call->result2 = game_connection() == _game_connection_local && ai_debug.evaluate_all_positions;
+			break;
+
+		case _actor_firing_position_call_owner:
+			call->result = VALID_INDEX(call->a, (long)NUMBEROF(actor_firing_position_owners)) ?
+				actor_firing_position_owners[call->a] : NONE;
+			if (call->result != NONE)
+			{
+				struct actor_datum *owner = actor_get(call->result);
+
+				call->output[0] = owner->input.position.body_position.x;
+				call->output[1] = owner->input.position.body_position.y;
+				call->output[2] = owner->input.position.body_position.z;
+			}
+			break;
+
+		case _actor_firing_position_call_estimate_position:
+		{
+			real_vector3d facing;
+			real_vector3d gun_offset;
+			real_point3d estimated_position;
+
+			facing.i = call->input[3];
+			facing.j = call->input[4];
+			facing.k = call->input[5];
+			gun_offset.i = call->input[6];
+			gun_offset.j = call->input[7];
+			gun_offset.k = call->input[8];
+			unit_estimate_position(actor->meta.unit_index, (short)call->a, &point,
+				(call->b & 1) ? &facing : NULL, (call->b & 2) ? &gun_offset : NULL, &estimated_position);
+			call->output[0] = estimated_position.x;
+			call->output[1] = estimated_position.y;
+			call->output[2] = estimated_position.z;
+			break;
+		}
+
+		case _actor_firing_position_call_find_prop_pathfinding_location:
+			actor_perception_find_prop_pathfinding_location(actor_index, call->a);
+			break;
+
+		case _actor_firing_position_call_friend_attacking:
+		{
+			real_vector3d attack_vector = *global_zero_vector3d;
+
+			call->result = actor_perception_friend_prop_is_attacking(actor_index, call->a, &attack_vector) ? 1 : 0;
+			call->output[0] = attack_vector.i;
+			call->output[1] = attack_vector.j;
+			call->output[2] = attack_vector.k;
+			break;
+		}
+
+		case _actor_firing_position_call_unit_aiming_vector:
+		{
+			real_vector3d aiming_vector;
+
+			unit_get_aiming_vector(call->a, &aiming_vector);
+			call->output[0] = aiming_vector.i;
+			call->output[1] = aiming_vector.j;
+			call->output[2] = aiming_vector.k;
+			break;
+		}
+
+		case _actor_firing_position_call_nearby_firing_positions:
+			call->result = actor_nearby_firing_positions(actor_index, &point, call->a, (short)call->b) ? 1 : 0;
+			break;
+
+		case _actor_firing_position_call_path_3d_available:
+		{
+			real_point3d end_point;
+
+			end_point.x = call->input[4];
+			end_point.y = call->input[5];
+			end_point.z = call->input[6];
+			call->result = path_3d_available(global_structure_bsp_get(), &point, call->input[3], &end_point,
+				NULL, NULL) ? 1 : 0;
+			break;
+		}
+
+		case _actor_firing_position_call_target_path:
+		{
+			struct actor_definition *definition = actor_definition_get(actor->meta.definition_index);
+			struct path_input input;
+
+			path_input_new(
+				&input,
+				definition->moving.pathfinding_radius,
+				actor->emotions.ignorant_of_broken_surfaces,
+				NONE);
+			path_input_set_start(&input, &point, call->a);
+			path_input_set_search_bounds(&input, 20.0f);
+			path_state_new(&input, &actor_firing_position_target_path_state, NULL);
+			path_state_find(&actor_firing_position_target_path_state);
+			break;
+		}
+
+		case _actor_firing_position_call_target_distance:
+		{
+			real distance = REAL_MAX;
+			real_vector3d direction = *global_zero_vector3d;
+
+			path_state_estimated_distance(&actor_firing_position_target_path_state, &point, call->a, &distance,
+				NULL, call->b ? &direction : NULL);
+			call->output[0] = distance;
+			call->output[2] = direction.i;
+			call->output[3] = direction.j;
+			call->output[4] = direction.k;
+			break;
+		}
+
+		case _actor_firing_position_call_area_path:
+		{
+			struct path_input input;
+			real_point3d attractor_point;
+
+			attractor_point.x = call->input[1];
+			attractor_point.y = call->input[2];
+			attractor_point.z = call->input[3];
+			actor_path_input_new(actor_index, &input);
+			path_input_set_search_bounds(&input, call->input[0]);
+			if (call->a)
+			{
+				path_input_set_attractor(&input, &attractor_point, call->input[4], call->b, call->input[5]);
+			}
+			path_state_new(&input, &actor_firing_position_area_path_state, ai_debug_get_path_storage(actor_index));
+			call->result = path_state_find(&actor_firing_position_area_path_state) ? 1 : 0;
+			break;
+		}
+
+		case _actor_firing_position_call_area_distance:
+		{
+			real distance = REAL_MAX;
+			real closest_approach = REAL_MAX;
+			real_vector3d direction = *global_zero_vector3d;
+
+			path_state_estimated_distance(&actor_firing_position_area_path_state, &point, call->a, &distance,
+				&closest_approach, call->b ? &direction : NULL);
+			call->output[0] = distance;
+			call->output[1] = closest_approach;
+			call->output[2] = direction.i;
+			call->output[3] = direction.j;
+			call->output[4] = direction.k;
+			break;
+		}
+
+		case _actor_firing_position_call_random_range:
+			call->result = seed_random_range(get_global_random_seed_address(), 0, (short)call->a);
+			break;
+
+		case _actor_firing_position_call_firing_variant:
+			call->result = (long)actor_combat_get_firing_variant_definition(actor_index);
+			break;
+
+		case _actor_firing_position_call_aiming_blockage:
+		{
+			real_vector3d vector;
+			real_point3d friend_position;
+
+			vector.i = call->input[3];
+			vector.j = call->input[4];
+			vector.k = call->input[5];
+			friend_position.x = call->input[6];
+			friend_position.y = call->input[7];
+			friend_position.z = call->input[8];
+			call->result = actor_perception_aiming_vector_test_blockage(&point, &vector, &friend_position, NULL);
+			break;
+		}
+
+		case _actor_firing_position_call_weapon_definition:
+			call->result = (long)actor_get_weapon_definition(actor_index);
+			break;
+
+		case _actor_firing_position_call_vehicle:
+		{
+			struct unit_datum *vehicle = vehicle_get(call->a);
+			real_point3d origin;
+
+			object_get_origin(call->a, &origin);
+			call->output[0] = origin.x;
+			call->output[1] = origin.y;
+			call->output[2] = origin.z;
+			call->output[3] = vehicle->object.forward.i;
+			call->output[4] = vehicle->object.forward.j;
+			call->output[5] = vehicle->object.forward.k;
+			call->result = magnitude_squared3d(&vehicle->object.translational_velocity) > 1.0f / 144.0f;
+			break;
+		}
+
+		case _actor_firing_position_call_actor_path_3d_available:
+		{
+			real avoidance_distance = 0.0f;
+
+			call->result = actor_path_3d_available(actor_index, &point, &avoidance_distance) ? 1 : 0;
+			call->output[0] = avoidance_distance;
+			break;
+		}
+
+		case _actor_firing_position_call_mark_examined:
+			encounter_mark_examined_pursuit_position(actor->meta.encounter_index, actor_index, (short)call->a,
+				call->b);
+			break;
+
+		case _actor_firing_position_call_already_examined:
+		{
+			short examining_actor_count = 0;
+			long last_examined_time = NONE;
+
+			call->result = encounter_pursuit_position_already_examined(actor->meta.encounter_index, actor_index,
+				(short)call->a, call->b, &examining_actor_count, &last_examined_time) ? 1 : 0;
+			call->result2 = last_examined_time;
+			call->output[0] = (real)examining_actor_count;
+			break;
+		}
+
+		case _actor_firing_position_call_line_of_sight:
+		{
+			real_point3d target_point;
+
+			target_point.x = call->input[3];
+			target_point.y = call->input[4];
+			target_point.z = call->input[5];
+			call->result = ai_test_line_of_sight(&point, (short)(call->a & 0xFFFF), &target_point,
+				(short)(call->a >> 16), (short)call->input[6], call->input[7] != 0.0f, call->b,
+				call->input[8] != 0.0f);
+			break;
+		}
+
+		case _actor_firing_position_call_change:
+			call->result = actor_change_firing_position(actor_index, (short)call->a, NULL, call->b,
+				&actor_firing_position_area_path_state, call->input[0] != 0.0f);
+			break;
+
+		case _actor_firing_position_call_flee_approach:
+		{
+			real_point3d approach_point;
+			real_point3d position;
+			boolean has_approach_point = FALSE;
+
+			approach_point = point;
+			position.x = call->input[3];
+			position.y = call->input[4];
+			position.z = call->input[5];
+			call->result2 = action_flee_port_approach_point(actor_index, call->a, &position, call->b,
+				&approach_point, &has_approach_point) ? 1 : 0;
+			call->result = has_approach_point ? 1 : 0;
+			call->output[0] = approach_point.x;
+			call->output[1] = approach_point.y;
+			call->output[2] = approach_point.z;
+			break;
+		}
+	}
+	halo_sim_ai_event_end(call, opened);
+
+	return;
+}
+
+/* a call of the selection's (inputs from `input`) */
+static long actor_firing_position_port_call(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real const *input,
+	long input_count,
+	struct halo_sim_ai_call *call)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+	call->actor = actor_index;
+	call->a = a;
+	call->b = b;
+	if (input_count > 0)
+	{
+		memcpy(call->input, input, input_count * sizeof(real));
+	}
+	actor_firing_position_call(call);
+
+	return call->result;
+}
+
+static void actor_firing_position_port_estimate_position(
+	long actor_index,
+	short estimate_mode,
+	real_point3d const *point,
+	real_vector3d const *desired_facing,
+	real_vector3d const *desired_gun_offset,
+	real_point3d *estimated_position)
+{
+	struct halo_sim_ai_call call;
+	real input[9] = {0};
+
+	memcpy(&input[0], point->n, 3 * sizeof(real));
+	if (desired_facing)
+	{
+		memcpy(&input[3], desired_facing->n, 3 * sizeof(real));
+	}
+	if (desired_gun_offset)
+	{
+		memcpy(&input[6], desired_gun_offset->n, 3 * sizeof(real));
+	}
+	actor_firing_position_port_call(actor_index, _actor_firing_position_call_estimate_position, estimate_mode,
+		(desired_facing ? 1 : 0) | (desired_gun_offset ? 2 : 0), input, 9, &call);
+	estimated_position->x = call.output[0];
+	estimated_position->y = call.output[1];
+	estimated_position->z = call.output[2];
+}
+
+static short actor_firing_position_port_line_of_sight(
+	long actor_index,
+	real_point3d const *point0,
+	short cluster0,
+	real_point3d const *point1,
+	short cluster1,
+	short mode,
+	boolean test_line_of_fire,
+	long ignore_object_index,
+	boolean ignore_vehicles)
+{
+	struct halo_sim_ai_call call;
+	real input[9];
+
+	memcpy(&input[0], point0->n, 3 * sizeof(real));
+	memcpy(&input[3], point1->n, 3 * sizeof(real));
+	input[6] = (real)mode;
+	input[7] = test_line_of_fire ? 1.0f : 0.0f;
+	input[8] = ignore_vehicles ? 1.0f : 0.0f;
+
+	return (short)actor_firing_position_port_call(actor_index, _actor_firing_position_call_line_of_sight,
+		(long)((unsigned long)(unsigned short)cluster0 | ((unsigned long)(unsigned short)cluster1 << 16)),
+		ignore_object_index, input, 9, &call);
+}
+
 /* ---------- private code */
 
 static void firing_position_store_evaluation_debug(
@@ -493,8 +878,11 @@ static void pre_evaluator_combatmove(
 	struct firing_position *firing_position;
 	short index;
 
+	struct halo_sim_ai_call call;
+
 	actor_get(actor_index);
-	variant_definition= actor_combat_get_firing_variant_definition(actor_index);
+	variant_definition= (struct actor_variant_definition *)actor_firing_position_port_call(actor_index,
+		_actor_firing_position_call_firing_variant, 0, 0, NULL, 0, &call);
 	range_weight= 8.0f;
 
 	if (evaluation_context->has_target)
@@ -541,10 +929,14 @@ static void pre_evaluator_combatmove(
 					if (evaluation_context->attack_vectors[vector_index].type==_firing_position_attack_vector_friend ||
 						evaluation_context->attack_vectors[vector_index].type==_firing_position_attack_vector_friend_player)
 					{
-						short blockage= actor_perception_aiming_vector_test_blockage(
-							&evaluation_context->attack_vectors[vector_index].point,
-							&evaluation_context->attack_vectors[vector_index].vector,
-							&firing_position->definition->position, NULL);
+						real input[9];
+						short blockage;
+
+						memcpy(&input[0], evaluation_context->attack_vectors[vector_index].point.n, 3 * sizeof(real));
+						memcpy(&input[3], evaluation_context->attack_vectors[vector_index].vector.n, 3 * sizeof(real));
+						memcpy(&input[6], firing_position->definition->position.n, 3 * sizeof(real));
+						blockage= (short)actor_firing_position_port_call(actor_index,
+							_actor_firing_position_call_aiming_blockage, 0, 0, input, 9, &call);
 
 						if (evaluation_context->attack_vectors[vector_index].type==_firing_position_attack_vector_friend)
 						{
@@ -603,14 +995,22 @@ static long post_evaluator_global(
 		}
 		else
 		{
-			real avoidance_distance= 0.0f;
-			boolean path_available= actor_path_3d_available(actor_index, &firing_position->definition->position,
-				&avoidance_distance);
+			struct halo_sim_ai_call call;
+			real avoidance_distance;
+			boolean path_available= (boolean)actor_firing_position_port_call(actor_index,
+				_actor_firing_position_call_actor_path_3d_available, 0, 0, firing_position->definition->position.n, 3,
+				&call);
 
+			avoidance_distance= call.output[0];
 			if (path_available)
 			{
-				path_available= path_3d_available(global_structure_bsp_get(), &actor->input.position.body_position,
-					avoidance_distance, &firing_position->definition->position, NULL, NULL);
+				real input[7];
+
+				memcpy(&input[0], actor->input.position.body_position.n, 3 * sizeof(real));
+				input[3]= avoidance_distance;
+				memcpy(&input[4], firing_position->definition->position.n, 3 * sizeof(real));
+				path_available= (boolean)actor_firing_position_port_call(actor_index,
+					_actor_firing_position_call_path_3d_available, 0, 0, input, 7, &call);
 			}
 
 			if (path_available)
@@ -648,19 +1048,26 @@ static long post_evaluator_pursuit(
 	{
 		boolean fresh= TRUE;
 
+		struct halo_sim_ai_call call;
+
 		if (firing_position->line_of_sight==_ai_line_of_sight_clear && firing_position->path_distance_from_actor<6.0f)
 		{
-			encounter_mark_examined_pursuit_position(actor->meta.encounter_index, actor_index,
-				firing_position->original_index, evaluation_context->evaluation_data.pursue.last_perceived_time);
+			actor_firing_position_port_call(actor_index, _actor_firing_position_call_mark_examined,
+				firing_position->original_index, evaluation_context->evaluation_data.pursue.last_perceived_time,
+				NULL, 0, &call);
 			last_examined_time= current_time;
 			examining_actor_count= 7;
 			fresh= FALSE;
 		}
 		else
 		{
-			if (encounter_pursuit_position_already_examined(actor->meta.encounter_index, actor_index,
-				firing_position->original_index, evaluation_context->evaluation_data.pursue.last_perceived_time,
-				&examining_actor_count, &last_examined_time))
+			boolean examined= (boolean)actor_firing_position_port_call(actor_index,
+				_actor_firing_position_call_already_examined, firing_position->original_index,
+				evaluation_context->evaluation_data.pursue.last_perceived_time, NULL, 0, &call);
+
+			last_examined_time= call.result2;
+			examining_actor_count= (short)call.output[0];
+			if (examined)
 			{
 				fresh= FALSE;
 			}
@@ -1289,10 +1696,19 @@ static void pre_evaluator_global(
 
 	if (evaluation_context->directional_driving && actor->input.vehicle_index != NONE)
 	{
-		struct unit_datum *vehicle = vehicle_get(actor->input.vehicle_index);
+		struct halo_sim_ai_call vehicle_call;
 		real_point3d vehicle_origin;
+		real_vector3d vehicle_forward;
+		boolean vehicle_moving;
 
-		object_get_origin(actor->input.vehicle_index, &vehicle_origin);
+		vehicle_moving = (boolean)actor_firing_position_port_call(actor_index, _actor_firing_position_call_vehicle,
+			actor->input.vehicle_index, 0, NULL, 0, &vehicle_call);
+		vehicle_origin.x = vehicle_call.output[0];
+		vehicle_origin.y = vehicle_call.output[1];
+		vehicle_origin.z = vehicle_call.output[2];
+		vehicle_forward.i = vehicle_call.output[3];
+		vehicle_forward.j = vehicle_call.output[4];
+		vehicle_forward.k = vehicle_call.output[5];
 		for (index = 0, firing_position = firing_positions; index < firing_position_count; index++, firing_position++)
 		{
 			if (firing_position->valid)
@@ -1304,11 +1720,10 @@ static void pre_evaluator_global(
 				distance_squared = magnitude_squared3d(&direction);
 				if (!(fabs(distance_squared) < _real_epsilon) && distance_squared < 30.0f * 30.0f)
 				{
-					real alignment = dot_product3d(&direction, &vehicle->object.forward) / square_root(distance_squared);
+					real alignment = dot_product3d(&direction, &vehicle_forward) / square_root(distance_squared);
 					real evaluation;
 
-					if ((evaluation_context->directional_driving_cannot_stop ||
-						magnitude_squared3d(&vehicle->object.translational_velocity) > 1.0f / 144.0f) &&
+					if ((evaluation_context->directional_driving_cannot_stop || vehicle_moving) &&
 						distance_squared < 8.0f * 8.0f &&
 						alignment < 0.70710677f &&
 						firing_position_reject(evaluation_context, firing_position))
@@ -1513,14 +1928,15 @@ static void firing_position_compute_line_of_sight(
 		{
 			real_point3d estimated_position;
 
-			unit_estimate_position(
-				actor->meta.unit_index,
+			actor_firing_position_port_estimate_position(
+				actor_index,
 				_unit_estimate_head_standing,
 				&firing_position->definition->position,
 				NULL,
 				NULL,
 				&estimated_position);
-			firing_position->line_of_sight= ai_test_line_of_sight(
+			firing_position->line_of_sight= actor_firing_position_port_line_of_sight(
+				actor_index,
 				&actor->input.position.head_position,
 				actor->input.position.body_location.cluster_index,
 				&estimated_position,
@@ -1576,9 +1992,9 @@ static void firing_position_compute_line_of_sight(
 			desired_gun_offset= NULL;
 		}
 
-		unit_estimate_position(
-			actor->meta.unit_index,
-			estimate_mode,
+		actor_firing_position_port_estimate_position(
+			actor_index,
+			(short)estimate_mode,
 			&firing_position->definition->position,
 			desired_facing,
 			desired_gun_offset,
@@ -1592,12 +2008,14 @@ static void firing_position_compute_line_of_sight(
 				line_of_sight_mode= _ai_line_of_sight_expand_source;
 			}
 		}
-		firing_position->line_of_sight= ai_test_line_of_sight(
+		/* (port: through the call) */
+		firing_position->line_of_sight= actor_firing_position_port_line_of_sight(
+			actor_index,
 			&estimated_position,
 			firing_position->definition->cluster_index,
 			&evaluation_context->target_line_of_sight_position,
 			evaluation_context->target_cluster_index,
-			line_of_sight_mode,
+			(short)line_of_sight_mode,
 			TRUE,
 			evaluation_context->target_vehicle_index,
 			actor->input.vehicle_index!=NONE);
@@ -1779,22 +2197,19 @@ short actor_select_firing_position(
 			struct encounter_definition);
 		struct firing_position firing_positions[MAXIMUM_NUMBER_OF_FIRING_POSITIONS_PER_ENCOUNTER];
 		long sorted_indices[MAXIMUM_NUMBER_OF_FIRING_POSITIONS_PER_ENCOUNTER];
-		long owner_actor_indices[MAXIMUM_NUMBER_OF_FIRING_POSITIONS_PER_ENCOUNTER];
 		short firing_position_count= 0;
 		boolean any_in_range= FALSE;
+		struct halo_sim_ai_call call;
+		boolean evaluate_all;
 
 		match_assert(
 			"c:\\halo\\SOURCE\\ai\\actor_firing_position.c",
 			1552,
 			!actor->input.vehicle_passenger);
-		ai_profile.meters[_ai_meter_firing_point].accumulator++;
-
-		encounter_build_firing_position_owner_actor_indices(actor->meta.encounter_index, owner_actor_indices);
-		/* port: a position the array holds (not NONE, nor past the array) */
-		if (VALID_INDEX(actor->firing_positions.current_position_index, (short)NUMBEROF(owner_actor_indices)))
-		{
-			owner_actor_indices[actor->firing_positions.current_position_index]= NONE;
-		}
+		/* port: the profile and the owners (and whether every position is
+		evaluated) through the call */
+		actor_firing_position_port_call(actor_index, _actor_firing_position_call_owners, 0, 0, NULL, 0, &call);
+		evaluate_all= (boolean)call.result2;
 
 		evaluation_context->maximum_allowable_range=
 			actor->input.vehicle_driver_type==_actor_vehicle_driver_none ? 15.0f : 80.0f;
@@ -1819,8 +2234,8 @@ short actor_select_firing_position(
 			evaluation_context->target_prop_index= NONE;
 			evaluation_context->target_vehicle_index= NONE;
 			evaluation_context->target_danger_radius= 0.0f;
-			unit_estimate_position(
-				actor->meta.unit_index,
+			actor_firing_position_port_estimate_position(
+				actor_index,
 				_unit_estimate_head_standing,
 				&evaluation_context->target_point,
 				NULL,
@@ -1850,7 +2265,8 @@ short actor_select_firing_position(
 					prop->state>=_prop_state_becoming_unacknowledged &&
 					prop->state<=_prop_state_acknowledged)
 				{
-					actor_perception_find_prop_pathfinding_location(actor_index, target_prop_index);
+					actor_firing_position_port_call(actor_index,
+						_actor_firing_position_call_find_prop_pathfinding_location, target_prop_index, 0, NULL, 0, &call);
 				}
 
 				evaluation_context->has_target= TRUE;
@@ -2006,8 +2422,12 @@ short actor_select_firing_position(
 							{
 								real_vector3d attack_vector;
 
-								if (actor_perception_friend_prop_is_attacking(actor_index, iterator.index, &attack_vector))
+								if (actor_firing_position_port_call(actor_index, _actor_firing_position_call_friend_attacking,
+									iterator.index, 0, NULL, 0, &call))
 								{
+									attack_vector.i= call.output[0];
+									attack_vector.j= call.output[1];
+									attack_vector.k= call.output[2];
 									evaluation_context->attack_vectors[evaluation_context->attack_vector_count].type= prop->player ?
 										_firing_position_attack_vector_friend_player :
 										_firing_position_attack_vector_friend;
@@ -2032,9 +2452,11 @@ short actor_select_firing_position(
 									evaluation_context->attack_vectors[evaluation_context->attack_vector_count].type=
 										_firing_position_attack_vector_dangerous_enemy;
 									evaluation_context->attack_vectors[evaluation_context->attack_vector_count].point= prop->body_position;
-									unit_get_aiming_vector(
-										unit_index,
-										&evaluation_context->attack_vectors[evaluation_context->attack_vector_count].vector);
+									actor_firing_position_port_call(actor_index, _actor_firing_position_call_unit_aiming_vector,
+										unit_index, 0, NULL, 0, &call);
+									evaluation_context->attack_vectors[evaluation_context->attack_vector_count].vector.i= call.output[0];
+									evaluation_context->attack_vectors[evaluation_context->attack_vector_count].vector.j= call.output[1];
+									evaluation_context->attack_vectors[evaluation_context->attack_vector_count].vector.k= call.output[2];
 									evaluation_context->attack_vector_count++;
 									evaluation_context->dangerous_enemy_attack_vector_count++;
 								}
@@ -2092,17 +2514,21 @@ short actor_select_firing_position(
 					}
 					if ((evaluation_context->flying || firing_position_definition->surface_index!=NONE) &&
 						(evaluation_context->evaluation_mode!=_firing_point_evaluation_mode_pursue ||
-							actor_nearby_firing_positions(
+							actor_firing_position_port_call(
 								actor_index,
-								&firing_position_definition->position,
+								_actor_firing_position_call_nearby_firing_positions,
 								firing_position_definition->surface_index,
-								_firing_position_group_when_searching)))
+								_firing_position_group_when_searching,
+								firing_position_definition->position.n,
+								3,
+								&call)))
 					{
 						boolean acceptable= TRUE;
 
-						if (owner_actor_indices[index]!=NONE)
+						if (actor_firing_position_port_call(actor_index, _actor_firing_position_call_owner, index, 0,
+							NULL, 0, &call)!=NONE)
 						{
-							struct actor_datum *owner_actor;
+							real_point3d owner_body_position;
 							real owner_distance;
 							real actor_distance;
 
@@ -2114,9 +2540,11 @@ short actor_select_firing_position(
 								evaluation_context->avoid_points[evaluation_context->avoid_point_count].radius= 4.0f;
 								evaluation_context->avoid_point_count++;
 							}
-							owner_actor= actor_get(owner_actor_indices[index]);
+							owner_body_position.x= call.output[0];
+							owner_body_position.y= call.output[1];
+							owner_body_position.z= call.output[2];
 							owner_distance= distance3d(
-								&owner_actor->input.position.body_position,
+								&owner_body_position,
 								&firing_position_definition->position);
 							actor_distance= distance3d(
 								&actor->input.position.body_position,
@@ -2182,18 +2610,18 @@ short actor_select_firing_position(
 						struct firing_position *firing_position= &firing_positions[index];
 						real_vector3d target_vector;
 
+						real input[7];
+
 						vector_from_points3d(
 							&evaluation_context->target_point,
 							&firing_position->definition->position,
 							&target_vector);
+						memcpy(&input[0], evaluation_context->target_point.n, 3 * sizeof(real));
+						input[3]= 0.0f;
+						memcpy(&input[4], firing_position->definition->position.n, 3 * sizeof(real));
 						if (magnitude_squared3d(&target_vector)<400.0f &&
-							path_3d_available(
-								structure_bsp,
-								&evaluation_context->target_point,
-								0.0f,
-								&firing_position->definition->position,
-								NULL,
-								NULL))
+							actor_firing_position_port_call(actor_index, _actor_firing_position_call_path_3d_available,
+								0, 0, input, 7, &call))
 						{
 							firing_position->path_distance_to_target= normalize3d(&target_vector);
 							if (evaluation_context->find_path_direction_from_target)
@@ -2205,72 +2633,63 @@ short actor_select_firing_position(
 				}
 				else if (evaluation_context->target_pathfinding_surface_index!=NONE)
 				{
-					struct path_input input;
-					struct path_state state;
 					short index;
 
-					path_input_new(
-						&input,
-						definition->moving.pathfinding_radius,
-						actor->emotions.ignorant_of_broken_surfaces,
-						NONE);
-					path_input_set_start(
-						&input,
-						&evaluation_context->target_pathfinding_point,
-						evaluation_context->target_pathfinding_surface_index);
-					path_input_set_search_bounds(&input, 20.0f);
-					path_state_new(&input, &state, NULL);
-					path_state_find(&state);
+					/* port: the target's search, and its distances, through the calls */
+					actor_firing_position_port_call(actor_index, _actor_firing_position_call_target_path,
+						evaluation_context->target_pathfinding_surface_index, 0,
+						evaluation_context->target_pathfinding_point.n, 3, &call);
 					for (index= 0; index<firing_position_count; index++)
 					{
 						struct firing_position *firing_position= &firing_positions[index];
 
-						path_state_estimated_distance(
-							&state,
-							&firing_position->definition->position,
+						actor_firing_position_port_call(actor_index, _actor_firing_position_call_target_distance,
 							firing_position->definition->surface_index,
-							&firing_position->path_distance_to_target,
-							NULL,
-							evaluation_context->find_path_direction_from_target ? &firing_position->path_direction_from_target : NULL);
+							evaluation_context->find_path_direction_from_target ? 1 : 0,
+							firing_position->definition->position.n, 3, &call);
+						firing_position->path_distance_to_target= call.output[0];
+						if (evaluation_context->find_path_direction_from_target)
+						{
+							firing_position->path_direction_from_target.i= call.output[2];
+							firing_position->path_direction_from_target.j= call.output[3];
+							firing_position->path_direction_from_target.k= call.output[4];
+						}
 					}
 				}
 			}
 
 			if (!evaluation_context->flying)
 			{
-				struct path_input input;
+				/* port: the actor's search (kept for the change) through the call */
+				real input[6]= {0};
+				long attractor= 0;
+				long object_index= NONE;
 
-				actor_path_input_new(actor_index, &input);
-				path_input_set_search_bounds(&input, evaluation_context->maximum_search_range);
+				input[0]= evaluation_context->maximum_search_range;
 				if (evaluation_context->attractor_enable && evaluation_context->has_target)
 				{
-					long object_index= NONE;
-
 					if (evaluation_context->target_prop_index!=NONE)
 					{
 						struct prop_datum *target_prop= prop_get(evaluation_context->target_prop_index);
 
 						object_index= target_prop->unit_index;
 					}
-					path_input_set_attractor(
-						&input,
-						&evaluation_context->target_point,
-						evaluation_context->attractor_radius,
-						object_index,
-						evaluation_context->attractor_weight);
+					attractor= 1;
+					memcpy(&input[1], evaluation_context->target_point.n, 3 * sizeof(real));
+					input[4]= evaluation_context->attractor_radius;
+					input[5]= evaluation_context->attractor_weight;
 				}
 				else if (actor->danger_zone.danger_type>_actor_danger_zone_none &&
 					!TEST_FLAG(definition->flags2, _actor_definition_flags2_pathfinding_ignores_danger_bit))
 				{
-					path_input_set_attractor(
-						&input,
-						&actor->danger_zone.position,
-						actor->danger_zone.danger_radius,
-						actor->danger_zone.object_index,
-						10.0f);
+					attractor= 2;
+					object_index= actor->danger_zone.object_index;
+					memcpy(&input[1], actor->danger_zone.position.n, 3 * sizeof(real));
+					input[4]= actor->danger_zone.danger_radius;
+					input[5]= 10.0f;
 				}
-				path_state_new(&input, area_path_state, ai_debug_get_path_storage(actor_index));
-				if (path_state_find(area_path_state))
+				if (actor_firing_position_port_call(actor_index, _actor_firing_position_call_area_path, attractor,
+					object_index, input, 6, &call))
 				{
 					*area_path_state_valid= TRUE;
 				}
@@ -2312,13 +2731,18 @@ short actor_select_firing_position(
 						}
 						else
 						{
-							path_state_estimated_distance(
-								area_path_state,
-								&firing_position->definition->position,
+							actor_firing_position_port_call(actor_index, _actor_firing_position_call_area_distance,
 								firing_position->definition->surface_index,
-								&firing_position->path_distance_from_actor,
-								&firing_position->path_closest_approach_to_target,
-								evaluation_context->find_path_direction_from_actor ? &firing_position->path_direction_from_actor : NULL);
+								evaluation_context->find_path_direction_from_actor ? 1 : 0,
+								firing_position->definition->position.n, 3, &call);
+							firing_position->path_distance_from_actor= call.output[0];
+							firing_position->path_closest_approach_to_target= call.output[1];
+							if (evaluation_context->find_path_direction_from_actor)
+							{
+								firing_position->path_direction_from_actor.i= call.output[2];
+								firing_position->path_direction_from_actor.j= call.output[3];
+								firing_position->path_direction_from_actor.k= call.output[4];
+							}
 						}
 					}
 					if (firing_position->path_distance_from_actor<evaluation_context->maximum_search_range)
@@ -2340,7 +2764,8 @@ short actor_select_firing_position(
 					"c:\\halo\\SOURCE\\ai\\actor_firing_position.c",
 					2108,
 					firing_position_count > 0);
-				best_index= seed_random_range(get_global_random_seed_address(), 0, firing_position_count);
+				best_index= (short)actor_firing_position_port_call(actor_index, _actor_firing_position_call_random_range,
+					firing_position_count, 0, NULL, 0, &call);
 				*area_path_state_valid= FALSE;
 				actor_clear_discarded_firing_positions(actor_index, FALSE);
 				firing_position= &firing_positions[best_index];
@@ -2386,7 +2811,7 @@ short actor_select_firing_position(
 						(evaluation_context->post_evaluation_bounded &&
 							firing_position->evaluation+evaluation_context->post_evaluation_bound<=best_evaluation))
 					{
-						if (game_connection()!=_game_connection_local || !ai_debug.evaluate_all_positions)
+						if (!evaluate_all)
 						{
 							short skipped_index;
 
@@ -2463,9 +2888,11 @@ short actor_select_firing_position(
 					*best_firing_position= firing_positions[best_index];
 				}
 				best_index= firing_positions[best_index].original_index;
+				actor_firing_position_port_call(actor_index, _actor_firing_position_call_owner, best_index, 0, NULL, 0,
+					&call);
 				if (current_owner)
 				{
-					*current_owner= owner_actor_indices[best_index];
+					*current_owner= call.result;
 				}
 			}
 		}
@@ -2661,6 +3088,156 @@ short actor_change_firing_position(
 	return actor->firing_positions.current_position_index;
 }
 
+/* ---------- port: the selections the actions make (crates/halo_map's
+firing_positions; each call of theirs actor_firing_position_call's) */
+
+/* the flee's: the prop's pathfinding location, through the call */
+void actor_firing_position_port_find_prop_pathfinding_location(
+	long actor_index,
+	long prop_index)
+{
+	struct halo_sim_ai_call call;
+
+	actor_firing_position_port_call(actor_index, _actor_firing_position_call_find_prop_pathfinding_location,
+		prop_index, 0, NULL, 0, &call);
+}
+
+/* the flee's: the approach to the position from the prop, through the call
+(whether the path was found; then the point and whether it is one) */
+boolean actor_firing_position_port_flee_approach(
+	long actor_index,
+	long prop_index,
+	real_point3d const *position,
+	long surface_index,
+	real_point3d *approach_point,
+	boolean *has_approach_point)
+{
+	struct halo_sim_ai_call call;
+	real input[6];
+
+	memcpy(&input[0], approach_point->n, 3 * sizeof(real));
+	memcpy(&input[3], position->n, 3 * sizeof(real));
+	actor_firing_position_port_call(actor_index, _actor_firing_position_call_flee_approach, prop_index,
+		surface_index, input, 6, &call);
+	if (call.result2)
+	{
+		*has_approach_point = call.result != 0;
+		approach_point->x = call.output[0];
+		approach_point->y = call.output[1];
+		approach_point->z = call.output[2];
+	}
+
+	return call.result2 != 0;
+}
+
+/* the actor's search the selection made, for the change */
+struct path_state *actor_firing_position_port_area_path_state(
+	void)
+{
+	return &actor_firing_position_area_path_state;
+}
+
+/* actor_change_firing_position to the selection's position, through the call */
+short actor_firing_position_port_change(
+	long actor_index,
+	short firing_position_index,
+	long previous_owner,
+	int cached_path_available)
+{
+	struct halo_sim_ai_call call;
+	real input= cached_path_available ? 1.0f : 0.0f;
+
+	return (short)actor_firing_position_port_call(actor_index, _actor_firing_position_call_change,
+		firing_position_index, previous_owner, &input, 1, &call);
+}
+
+/* the fight's and the avoidance's: the active selection, and the change */
+short actor_firing_position_port_change_to_active_selection(
+	long actor_index,
+	short evaluation_mode)
+{
+	struct firing_position_evaluation_context search;
+	struct firing_position candidate;
+	long previous_owner_actor_index= NONE;
+	boolean position_valid= FALSE;
+	short firing_position_index;
+
+	csmemset(&search, 0, sizeof(search));
+	search.evaluation_mode= evaluation_mode;
+	firing_position_index= actor_active_select_firing_position(
+		actor_index,
+		&search,
+		&candidate,
+		&previous_owner_actor_index,
+		NULL,
+		&position_valid);
+
+	return actor_firing_position_port_change(actor_index, firing_position_index, previous_owner_actor_index,
+		position_valid);
+}
+
+/* the guard's: its groups, outside its range if it must, and the change */
+short actor_firing_position_port_change_to_guard_selection(
+	long actor_index)
+{
+	struct firing_position_evaluation_context search;
+	struct firing_position candidate;
+	long previous_owner_actor_index= NONE;
+	boolean position_valid= FALSE;
+	short firing_position_index;
+
+	csmemset(&search, 0, sizeof(search));
+	search.evaluation_mode= _firing_point_evaluation_mode_guard;
+	search.allowed_position_mask= actor_get_firing_position_group(
+		actor_index,
+		_firing_point_evaluation_mode_guard,
+		_firing_position_group_normal);
+	search.allow_outside_range= TRUE;
+	firing_position_index= actor_select_firing_position(
+		actor_index,
+		&search,
+		&candidate,
+		&previous_owner_actor_index,
+		NULL,
+		&position_valid);
+
+	return actor_firing_position_port_change(actor_index, firing_position_index, previous_owner_actor_index,
+		position_valid);
+}
+
+/* the pursuit's (actions.c's _actions_port_handler_call_select_pursuit_position) */
+short actor_firing_position_port_select_pursuit_position(
+	long actor_index,
+	int tenacious,
+	long last_perceived_time)
+{
+	struct actor_datum *actor= actor_get(actor_index);
+	struct firing_position_evaluation_context search;
+	struct firing_position candidate;
+	long previous_owner_actor_index= NONE;
+	boolean position_valid= FALSE;
+
+	csmemset(&search, 0, sizeof(search));
+	search.evaluation_mode= _firing_point_evaluation_mode_pursue;
+	search.evaluation_data.pursue.orphan_prop_index= actor->target.target_prop_index;
+	search.evaluation_data.pursue.last_perceived_time= last_perceived_time;
+	search.evaluation_data.pursue.tenacious= (boolean)tenacious;
+	search.find_path_direction_from_target= actor->target.target_prop_index != NONE;
+	search.allowed_position_mask= actor_get_firing_position_group(
+		actor_index,
+		_firing_point_evaluation_mode_pursue,
+		_firing_position_group_normal);
+	search.maximum_search_range= 20.0f;
+
+	return actor_select_firing_position(
+		actor_index,
+		&search,
+		&candidate,
+		&previous_owner_actor_index,
+		NULL,
+		&position_valid);
+}
+
 static void pre_evaluator_attack(
 	long actor_index,
 	struct firing_position_evaluation_context *evaluation_context,
@@ -2668,7 +3245,9 @@ static void pre_evaluator_attack(
 	struct firing_position *firing_positions)
 {
 	struct actor_datum *actor = actor_get(actor_index);
-	struct actor_variant_definition *variant_definition = actor_combat_get_firing_variant_definition(actor_index);
+	struct halo_sim_ai_call call;
+	struct actor_variant_definition *variant_definition = (struct actor_variant_definition *)actor_firing_position_port_call(
+		actor_index, _actor_firing_position_call_firing_variant, 0, 0, NULL, 0, &call);
 	struct firing_position *firing_position = firing_positions;
 	short index;
 
@@ -2714,7 +3293,8 @@ static void pre_evaluator_attack(
 					upper_bound = variant_definition->ranged_combat.combat_range_upper_bound;
 				}
 				lower_bound = MAX(lower_bound, evaluation_context->target_danger_radius);
-				weapon = actor_get_weapon_definition(actor_index);
+				weapon = (struct weapon_definition *)actor_firing_position_port_call(actor_index,
+					_actor_firing_position_call_weapon_definition, 0, 0, NULL, 0, &call);
 				if (weapon && weapon->weapon.ai_minimum_target_range > 0.0f)
 				{
 					lower_bound = MAX(lower_bound, weapon->weapon.ai_minimum_target_range);

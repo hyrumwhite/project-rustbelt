@@ -404,6 +404,17 @@ boolean actor_action_test_grenade(
 boolean actor_action_try_to_evade(
 	long actor_index);
 
+static long actions_port_handler_simple(
+	long actor_index,
+	long kind,
+	long a);
+
+static boolean actions_port_handler_try_to_panic(
+	long actor_index,
+	short panic_type,
+	long panic_prop_index,
+	boolean force);
+
 static boolean actor_action_find_escape_from_danger(
 	long actor_index,
 	short *escape_direction_reference,
@@ -966,10 +977,12 @@ boolean actor_action_set_default_state(
 	long actor_index,
 	short override_state)
 {
+	/* port: what it asks of the rest of the game through
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
 	long current_time = game_time_get();
 	boolean changed = FALSE;
-	struct action_state_data action_data;
 
 	if (override_state != NONE ||
 		actor->state.last_default_state_time == NONE ||
@@ -998,7 +1011,7 @@ boolean actor_action_set_default_state(
 			if (actor->state.mode != 1)
 			{
 				actor->state.mode = 1;
-				actor_action_change(actor_index, _actor_action_sleep, NULL);
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_sleep, 0);
 				changed = TRUE;
 			}
 			break;
@@ -1006,9 +1019,8 @@ boolean actor_action_set_default_state(
 		case 8:
 			if ((actor->state.action != _actor_action_guard ||
 				actor->state.action_data.guard.guard_location_type != 1) &&
-				action_guard_setup_current_position(actor_index, &action_data.guard))
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_current_position, 0))
 			{
-				actor_action_change(actor_index, _actor_action_guard, &action_data);
 				changed = TRUE;
 			}
 			break;
@@ -1019,12 +1031,8 @@ boolean actor_action_set_default_state(
 				if (actor->state.action_data.guard.guard_location_type != 3)
 					actor->state.action_data.guard.find_new_guard_position = TRUE;
 			}
-			else if (action_guard_setup_find_position(
-				actor_index,
-				0,
-				&action_data.guard))
+			else if (actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_find_position_if, 0))
 			{
-				actor_action_change(actor_index, _actor_action_guard, &action_data);
 				changed = TRUE;
 			}
 			break;
@@ -1037,9 +1045,8 @@ boolean actor_action_set_default_state(
 				actor->state.combat_status = 2;
 
 				if (!actor_action_handle_lost_contact(actor_index) &&
-					action_guard_setup_current_position(actor_index, &action_data.guard))
+					actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_current_position, 0))
 				{
-					actor_action_change(actor_index, _actor_action_guard, &action_data);
 					changed = TRUE;
 				}
 			}
@@ -1048,22 +1055,13 @@ boolean actor_action_set_default_state(
 		case 11:
 			if (actor->state.action != _actor_action_flee)
 			{
-				if (action_flee_setup(
-					actor_index,
-					13,
-					NONE,
-					TRUE,
-					FALSE,
-					FALSE,
-					&action_data.flee))
+				if (actions_port_handler_try_to_panic(actor_index, 13, NONE, TRUE))
 				{
-					actor_action_change(actor_index, _actor_action_flee, &action_data);
 					changed = TRUE;
 				}
 				else if (actor->state.action != _actor_action_guard &&
-					action_guard_setup_current_position(actor_index, &action_data.guard))
+					actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_current_position, 0))
 				{
-					actor_action_change(actor_index, _actor_action_guard, &action_data);
 					changed = TRUE;
 				}
 			}
@@ -1079,22 +1077,17 @@ boolean actor_action_set_default_state(
 			if ((actor->state.action != _actor_action_alert ||
 				actor->state.action_data.alert.move_position_order !=
 					global_state_move_position_orders[state]) &&
-				action_alert_setup(
-					actor_index,
-					global_state_move_position_orders[state],
-					NONE,
-					&action_data.alert))
+				actions_port_handler_simple(actor_index, _actions_port_handler_call_alert,
+					global_state_move_position_orders[state]))
 			{
-				actor_action_change(actor_index, _actor_action_alert, &action_data);
 				changed = TRUE;
 			}
 			break;
 		}
 
 		if (!changed && actor->state.action == _actor_action_none &&
-			action_alert_setup(actor_index, 0, NONE, &action_data.alert))
+			actions_port_handler_simple(actor_index, _actions_port_handler_call_alert, 0))
 		{
-			actor_action_change(actor_index, _actor_action_alert, &action_data);
 			changed = TRUE;
 		}
 	}
@@ -1196,7 +1189,7 @@ void actions_port_handler_call(
 		}
 
 		case _actions_port_handler_call_animation_impulse:
-			actor_move_animation_impulse(actor_index, (short)call->a, (real_vector2d *)call->input);
+			call->result = actor_move_animation_impulse(actor_index, (short)call->a, (real_vector2d *)call->input) ? 1 : 0;
 			break;
 
 		case _actions_port_handler_call_communication:
@@ -1677,6 +1670,149 @@ void actions_port_handler_call(
 			call->result2 = (long)ai_globals->enterable_vehicles;
 			break;
 
+		case _actions_port_handler_call_unit_ready_to_throw:
+		{
+			struct unit_datum *unit = unit_get(actor->meta.unit_index);
+
+			call->result = !unit_is_busy(actor->meta.unit_index) &&
+				!(unit->object.current_body_damage > 0.0f);
+			break;
+		}
+
+		case _actions_port_handler_call_mark_grenade_thrown:
+			encounter_get(actor->meta.encounter_index)->last_grenade_throw_time = game_time_get();
+			break;
+
+		case _actions_port_handler_call_encounter_grenade_timer:
+		{
+			struct encounter_datum *encounter = encounter_get(actor->meta.encounter_index);
+
+			call->output[0] = game_difficulty_get_team_value(
+				_game_difficulty_value_grenade_timer_scale,
+				encounter->team_index);
+			call->result = encounter->last_grenade_throw_time;
+			break;
+		}
+
+		case _actions_port_handler_call_find_grenade_target:
+		{
+			real_point3d grenade_target;
+			long grenade_target_prop_index;
+			long grenade_ignore_object_index;
+
+			call->result = actor_combat_find_grenade_target(
+				actor_index,
+				&grenade_target,
+				&grenade_target_prop_index,
+				&grenade_ignore_object_index) ? 1 : 0;
+			memcpy(call->output, &grenade_target, sizeof(grenade_target));
+			memcpy(&call->output[3], &grenade_ignore_object_index, sizeof(long));
+			call->result2 = grenade_target_prop_index;
+			break;
+		}
+
+		case _actions_port_handler_call_collateral_damage:
+		{
+			short enemy_count = 0;
+
+			call->result = actor_combat_check_collateral_damage(
+				actor_index,
+				call->input[0],
+				call->input[1],
+				(real_point3d const *)&call->input[2],
+				&enemy_count) ? 1 : 0;
+			call->result2 = enemy_count;
+			break;
+		}
+
+		case _actions_port_handler_call_plan_grenade_trajectory:
+		{
+			long grenade_ignore_object_index;
+
+			memcpy(&grenade_ignore_object_index, &call->input[3], sizeof(long));
+			call->result = actor_combat_plan_grenade_trajectory(
+				actor_index,
+				(short)call->a,
+				(real_point3d const *)call->input,
+				call->b,
+				grenade_ignore_object_index) ? 1 : 0;
+			break;
+		}
+
+		case _actions_port_handler_call_unit_evade_distance:
+			call->output[0] = unit_definition_get(unit_get(actor->meta.unit_index)->definition_index)->unit.evade_distance;
+			break;
+
+		case _actions_port_handler_call_try_evasion_direction:
+		{
+			short evade_direction = _actor_evade_random;
+			real_vector2d alignment_vector;
+			boolean is_ledge;
+			byte collision_result[0x1C];
+
+			alignment_vector.i = call->input[0];
+			alignment_vector.j = call->input[1];
+			call->result = actor_move_try_evasion_direction(
+				actor_index,
+				&alignment_vector,
+				call->input[2],
+				&evade_direction,
+				0.0f,
+				&is_ledge,
+				collision_result) ? 1 : 0;
+			call->output[0] = alignment_vector.i;
+			call->output[1] = alignment_vector.j;
+			call->output[2] = (real)evade_direction;
+			break;
+		}
+
+		case _actions_port_handler_call_test_animation_impulse:
+			call->result = unit_test_animation_impulse(actor->meta.unit_index, (short)call->a) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_guard_current_position:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_guard_setup_current_position(actor_index, &state.guard))
+			{
+				actor_action_change(actor_index, _actor_action_guard, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_guard_find_position_if:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_guard_setup_find_position(actor_index, call->a, &state.guard))
+			{
+				actor_action_change(actor_index, _actor_action_guard, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_alert:
+		{
+			struct action_state_data state;
+
+			call->result = FALSE;
+			if (action_alert_setup(actor_index, call->a, NONE, &state.alert))
+			{
+				actor_action_change(actor_index, _actor_action_alert, &state);
+				call->result = TRUE;
+			}
+			break;
+		}
+
+		case _actions_port_handler_call_sleep:
+			actor_action_change(actor_index, _actor_action_sleep, NULL);
+			break;
+
 		case _actions_port_handler_call_vehicle_exists:
 			call->result = vehicle_try_and_get(call->a) != NULL;
 			break;
@@ -1776,7 +1912,7 @@ boolean actor_action_handle_initial_action(
 	boolean result = FALSE;
 
 	if (actor->state.action == _actor_action_none && actor->state.mode != 0)
-		result = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_set_default_state, 0);
+		result = actor_action_set_default_state(actor_index, NONE);
 
 	return result;
 }
@@ -2519,7 +2655,7 @@ boolean actor_action_handle_active_cover_seeking(
 						debug_info->field_BA = 3;
 						actor->emotions.last_active_cover_seeking_time = current_time;
 
-						if (actions_port_handler_simple(actor_index, _actions_port_handler_call_allow_cover_seeking, FALSE))
+						if (actor_action_allow_cover_seeking(actor_index, FALSE))
 						{
 							debug_info->field_BA = 5;
 							if (actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
@@ -2759,12 +2895,19 @@ void actor_action_change(
 boolean actor_action_test_grenade(
 	long actor_index)
 {
+	/* port: what it asks of the rest of the game through
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
 	struct actor_variant_definition *variant_definition =
 		actor_variant_definition_get(actor->meta.variant_definition_index);
 	long current_time = game_time_get();
 	struct actor_debug_info *debug_info =
 		&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
+	struct halo_sim_ai_call target;
+	struct halo_sim_ai_call collateral;
+	real input[5];
+	short enemy_count;
 
 	debug_info->grenade_eval_time = current_time;
 
@@ -2776,87 +2919,72 @@ boolean actor_action_test_grenade(
 
 	if (actor->meta.encounter_index != NONE)
 	{
-		struct encounter_datum *encounter =
-			encounter_get(actor->meta.encounter_index);
-		real grenade_timeout =
-			variant_definition->grenade_combat.encounter_grenade_timeout;
-		real throw_delay = game_difficulty_get_team_value(
-			_game_difficulty_value_grenade_timer_scale,
-			encounter->team_index) * grenade_timeout;
+		struct halo_sim_ai_call timer;
+		real throw_delay;
 		long throw_delay_ticks;
 
+		memset(&timer, 0, sizeof(timer));
+		timer.kind = _actions_port_handler_call_encounter_grenade_timer;
+		timer.actor = actor_index;
+		actions_port_handler_call(&timer);
+		throw_delay = timer.output[0] * variant_definition->grenade_combat.encounter_grenade_timeout;
 		if (actor->external_orders.playfighting)
 			throw_delay *= 2.0f;
 
 		throw_delay_ticks = (long)(throw_delay * TICKS_PER_SECOND);
-		if (encounter->last_grenade_throw_time != NONE &&
-			(short)throw_delay_ticks + encounter->last_grenade_throw_time >
-				current_time)
+		if (timer.result != NONE &&
+			(short)throw_delay_ticks + timer.result > current_time)
 		{
 			debug_info->grenade_decision = 5;
 			debug_info->grenade_encounter_timeout_ticks =
 				(short)((short)(throw_delay_ticks - current_time) +
-					(short)encounter->last_grenade_throw_time);
+					(short)timer.result);
 			return FALSE;
 		}
 	}
 
+	memset(&target, 0, sizeof(target));
+	target.kind = _actions_port_handler_call_find_grenade_target;
+	target.actor = actor_index;
+	actions_port_handler_call(&target);
+	if (!target.result)
 	{
-	{
-		real_point3d grenade_target;
-		long grenade_target_prop_index;
-		long grenade_ignore_object_index;
-		short enemy_count;
-
-		if (actor_combat_find_grenade_target(
-			actor_index,
-			&grenade_target,
-			&grenade_target_prop_index,
-			&grenade_ignore_object_index))
-		{
-			if (actor_combat_check_collateral_damage(
-				actor_index,
-				variant_definition->grenade_combat.enemy_radius,
-				variant_definition->grenade_combat.collateral_damage_radius,
-				&grenade_target,
-				&enemy_count))
-			{
-				if (enemy_count >=
-					variant_definition->grenade_combat.minimum_enemy_count)
-				{
-					if (actor_combat_plan_grenade_trajectory(
-						actor_index,
-						variant_definition->grenade_combat.trajectory_type,
-						&grenade_target,
-						grenade_target_prop_index,
-						grenade_ignore_object_index))
-					{
-						debug_info->grenade_decision = 10;
-						return TRUE;
-					}
-
-					debug_info->grenade_decision = 9;
-				}
-				else
-				{
-					debug_info->grenade_enemy_count = enemy_count;
-					debug_info->grenade_decision = 7;
-					debug_info->grenade_required_enemy_count =
-						variant_definition->grenade_combat.minimum_enemy_count;
-				}
-			}
-			else
-			{
-				debug_info->grenade_decision = 8;
-			}
-		}
-		else
-		{
-			debug_info->grenade_decision = 6;
-		}
-	}
+		debug_info->grenade_decision = 6;
+		return FALSE;
 	}
 
+	memset(&collateral, 0, sizeof(collateral));
+	collateral.kind = _actions_port_handler_call_collateral_damage;
+	collateral.actor = actor_index;
+	collateral.input[0] = variant_definition->grenade_combat.enemy_radius;
+	collateral.input[1] = variant_definition->grenade_combat.collateral_damage_radius;
+	memcpy(&collateral.input[2], target.output, 3 * sizeof(real));
+	actions_port_handler_call(&collateral);
+	if (!collateral.result)
+	{
+		debug_info->grenade_decision = 8;
+		return FALSE;
+	}
+
+	enemy_count = (short)collateral.result2;
+	if (enemy_count < variant_definition->grenade_combat.minimum_enemy_count)
+	{
+		debug_info->grenade_enemy_count = enemy_count;
+		debug_info->grenade_decision = 7;
+		debug_info->grenade_required_enemy_count =
+			variant_definition->grenade_combat.minimum_enemy_count;
+		return FALSE;
+	}
+
+	memcpy(input, target.output, 4 * sizeof(real));
+	if (actions_port_handler(actor_index, _actions_port_handler_call_plan_grenade_trajectory,
+		variant_definition->grenade_combat.trajectory_type, target.result2, input, 4, NULL))
+	{
+		debug_info->grenade_decision = 10;
+		return TRUE;
+	}
+
+	debug_info->grenade_decision = 9;
 	return FALSE;
 }
 
@@ -3523,7 +3651,7 @@ boolean actor_action_handle_lost_contact(
 
 	if (!handled && should_return_to_idle)
 	{
-		handled = (boolean)actions_port_handler_simple(actor_index, _actions_port_handler_call_set_default_state, 0);
+		handled = actor_action_set_default_state(actor_index, NONE);
 	}
 
 	if (!handled && actor_action_class(actor_index) != _action_class_passive)
@@ -3820,7 +3948,7 @@ boolean actor_action_handle_grenade_throwing(
 		}
 
 		if (actor->control.grenade_trying_to_throw)
-			actions_port_handler_simple(actor_index, _actions_port_handler_call_try_to_throw_grenade, FALSE);
+			actor_action_try_to_throw_grenade(actor_index, FALSE);
 	}
 	else
 	{
@@ -3834,12 +3962,13 @@ boolean actor_action_try_to_throw_grenade(
 	long actor_index,
 	boolean known_trajectory)
 {
+	/* port: what it asks of the rest of the game through
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
-	struct unit_datum *unit = unit_get(actor->meta.unit_index);
 	boolean result = FALSE;
 
-	if (!unit_is_busy(actor->meta.unit_index) &&
-		!(unit->object.current_body_damage > 0.0f))
+	if (actions_port_handler_simple(actor_index, _actions_port_handler_call_unit_ready_to_throw, 0))
 	{
 		if (!known_trajectory && !actor_action_test_grenade(actor_index))
 			actor->control.grenade_trying_to_throw = FALSE;
@@ -3860,17 +3989,11 @@ boolean actor_action_try_to_throw_grenade(
 					to_target.i * actor->input.facing_vector.i <
 					ACTOR_GRENADE_THROW_MINIMUM_COSINE))
 			{
-				long encounter_index;
-
 				actor->orders.combat.throw_grenade = TRUE;
 				actor->control.grenade_trying_to_throw = FALSE;
-				encounter_index = actor->meta.encounter_index;
 
-				if (encounter_index != NONE)
-				{
-					struct encounter_datum *encounter = encounter_get(encounter_index);
-					encounter->last_grenade_throw_time = game_time_get();
-				}
+				if (actor->meta.encounter_index != NONE)
+					actions_port_handler_simple(actor_index, _actions_port_handler_call_mark_grenade_thrown, 0);
 
 				result = TRUE;
 			}
@@ -3918,10 +4041,10 @@ boolean actor_action_consider_grenade(
 				actor->control.grenade_last_check_time = current_time;
 
 				if (actions_port_handler_random(actor_index) < chance &&
-					actions_port_handler_simple(actor_index, _actions_port_handler_call_test_grenade, 0))
+					actor_action_test_grenade(actor_index))
 				{
 					actor->control.grenade_trying_to_throw = TRUE;
-					actions_port_handler_simple(actor_index, _actions_port_handler_call_try_to_throw_grenade, TRUE);
+					actor_action_try_to_throw_grenade(actor_index, TRUE);
 					result = TRUE;
 				}
 			}
@@ -3934,97 +4057,72 @@ boolean actor_action_consider_grenade(
 boolean actor_action_try_to_evade(
 	long actor_index)
 {
+	/* port: what it asks of the rest of the game through
+	actions_port_handler_call, as the Rust port's does (crates/halo_map's
+	actor_transitions) */
 	struct actor_datum *actor = actor_get(actor_index);
-	boolean result = FALSE;
+	struct actor_definition *definition =
+		actor_definition_get(actor->meta.definition_index);
+	real evade_distance;
+	real output[6];
+	struct prop_datum *prop;
+	real_vector2d attractor_vector;
+	real_vector2d alignment_vector;
+	real evasion[6];
+	real input[3];
+	long animation;
 
-	if (actor->input.vehicle_index == NONE &&
-		!actor_move_animation_busy(actor_index) &&
-		!actor->control.moving &&
-		actor->target.target_prop_index != NONE)
+	if (actor->input.vehicle_index != NONE ||
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_animation_busy, 0) ||
+		actor->control.moving ||
+		actor->target.target_prop_index == NONE)
 	{
-		struct actor_definition *definition =
-			actor_definition_get(actor->meta.definition_index);
-		struct unit_datum *unit = unit_get(actor->meta.unit_index);
-		struct unit_definition *unit_definition =
-			unit_definition_get(unit->definition_index);
-		struct prop_datum *prop = prop_get(actor->target.target_prop_index);
+		return FALSE;
+	}
 
-		if (unit_definition->unit.evade_distance > 0.0f)
+	actions_port_handler(actor_index, _actions_port_handler_call_unit_evade_distance, 0, 0, NULL, 0, output);
+	evade_distance = output[0];
+	if (!(evade_distance > 0.0f))
+		return FALSE;
+
+	prop = prop_get(actor->target.target_prop_index);
+	attractor_vector = *(real_vector2d const *)&prop->actor_to_prop;
+	if (TEST_FLAG(definition->flags, _actor_definition_flying_bit))
+	{
+		if (!(dot_product3d(&prop->actor_to_prop, &actor->input.facing_vector) > 0.4f))
+			return FALSE;
+	}
+	else
+	{
+		real_vector2d direction = attractor_vector;
+
+		if (normalize2d(&direction) > 0.0f &&
+			!(dot_product2d(&direction, (real_vector2d const *)&actor->input.facing_vector) > 0.4f))
 		{
-			real_vector2d const *attractor_vector;
-			real dot;
-
-			if (TEST_FLAG(definition->flags, _actor_definition_flying_bit))
-			{
-				attractor_vector = (real_vector2d const *)&prop->actor_to_prop;
-				dot = dot_product3d(
-					&prop->actor_to_prop,
-					&actor->input.facing_vector);
-			}
-			else
-			{
-				attractor_vector = (real_vector2d const *)&prop->actor_to_prop;
-				{
-				real_vector2d direction = *attractor_vector;
-
-				if (!(normalize2d(&direction) > 0.0f))
-					goto try_evade;
-
-				dot = dot_product2d(
-					&direction,
-					(real_vector2d const *)&actor->input.facing_vector);
-				}
-			}
-
-			if (!(dot > 0.4f))
-				goto result_exit;
-
-		try_evade:
-			{
-				short evade_direction = _actor_evade_random;
-				real_vector2d alignment_vector = *attractor_vector;
-				boolean is_ledge;
-				byte collision_result[0x1C];
-
-				normalize2d(&alignment_vector);
-				if (actor_move_try_evasion_direction(
-					actor_index,
-					&alignment_vector,
-					unit_definition->unit.evade_distance,
-					&evade_direction,
-					0.0f,
-					&is_ledge,
-					collision_result))
-				{
-					long animation;
-
-					if (evade_direction == _actor_evade_right)
-						animation = _actor_animation_evade_right;
-					else
-					{
-						match_assert(
-							"c:\\halo\\SOURCE\\ai\\actions.c",
-							3299,
-							evade_direction == _actor_evade_left);
-						animation = _actor_animation_evade_left;
-					}
-
-					if (unit_test_animation_impulse(
-						actor->meta.unit_index,
-						animation))
-					{
-						result = actor_move_animation_impulse(
-							actor_index,
-							animation,
-							&alignment_vector);
-					}
-				}
+			return FALSE;
 		}
 	}
+
+	alignment_vector = attractor_vector;
+	normalize2d(&alignment_vector);
+	input[0] = alignment_vector.i;
+	input[1] = alignment_vector.j;
+	input[2] = evade_distance;
+	if (!actions_port_handler(actor_index, _actions_port_handler_call_try_evasion_direction,
+		0, 0, input, 3, evasion))
+	{
+		return FALSE;
 	}
 
-	result_exit:
-	return result;
+	alignment_vector.i = evasion[0];
+	alignment_vector.j = evasion[1];
+	animation = (short)evasion[2] == _actor_evade_right ?
+		_actor_animation_evade_right :
+		_actor_animation_evade_left;
+
+	return actions_port_handler_simple(actor_index, _actions_port_handler_call_test_animation_impulse, animation) &&
+		actions_port_handler(actor_index, _actions_port_handler_call_animation_impulse,
+			animation, 0, (real const *)&alignment_vector, 2, NULL);
 }
 
 boolean actor_action_try_to_dive(
@@ -4831,7 +4929,7 @@ boolean actor_action_handle_evasion(
 		{
 			actor->emotions.last_defensive_cover_seeking_time = current_time;
 
-			if (actions_port_handler_simple(actor_index, _actions_port_handler_call_allow_cover_seeking, TRUE))
+			if (actor_action_allow_cover_seeking(actor_index, TRUE))
 			{
 				if (actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
 					FALSE, TRUE, NULL, 0, NULL))
@@ -4925,7 +5023,7 @@ boolean actor_action_handle_evasion(
 			{
 				actor->emotions.last_defensive_cover_seeking_time = current_time;
 
-				if (actions_port_handler_simple(actor_index, _actions_port_handler_call_allow_cover_seeking, FALSE) &&
+				if (actor_action_allow_cover_seeking(actor_index, FALSE) &&
 					actions_port_handler_random(actor_index) <
 						definition->defensive.evasion_seek_cover_chance &&
 					actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
@@ -4945,7 +5043,7 @@ boolean actor_action_handle_evasion(
 			if (!result &&
 				not_fleeing &&
 				!actor->emotions.evasion_delay_timer &&
-				actions_port_handler_simple(actor_index, _actions_port_handler_call_try_to_evade, 0))
+				actor_action_try_to_evade(actor_index))
 			{
 				actor->emotions.perceived_danger = 0.0f;
 				actor->emotions.evasion_delay_timer =

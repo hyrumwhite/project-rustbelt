@@ -1243,6 +1243,19 @@ enum
 	_actions_port_handler_call_enterable_vehicles,
 	_actions_port_handler_call_vehicle_exists,
 	_actions_port_handler_call_vehicle_setup,
+	_actions_port_handler_call_unit_ready_to_throw,
+	_actions_port_handler_call_mark_grenade_thrown,
+	_actions_port_handler_call_encounter_grenade_timer,
+	_actions_port_handler_call_find_grenade_target,
+	_actions_port_handler_call_collateral_damage,
+	_actions_port_handler_call_plan_grenade_trajectory,
+	_actions_port_handler_call_unit_evade_distance,
+	_actions_port_handler_call_try_evasion_direction,
+	_actions_port_handler_call_test_animation_impulse,
+	_actions_port_handler_call_guard_current_position,
+	_actions_port_handler_call_guard_find_position_if,
+	_actions_port_handler_call_alert,
+	_actions_port_handler_call_sleep,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

@@ -406,15 +406,37 @@ void action_search_begin(
 
 	if (state_data->pursuit_location.type == 0)
 	{
-		search_time = (long)(real_random_range(
-			definition->pursuit.target_location_time_lower_bound,
-			definition->pursuit.target_location_time_upper_bound)*TICKS_PER_SECOND);
+		{
+			/* port: through actions.c's actions_port_handler_call, as the Rust
+			port's asks for it */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _actions_port_handler_call_real_seed_random_range;
+			call.actor = actor_index;
+			call.a = 0;
+			call.input[0] = definition->pursuit.target_location_time_lower_bound;
+			call.input[1] = definition->pursuit.target_location_time_upper_bound;
+			actions_port_handler_call(&call);
+			search_time = (long)(call.output[0]*TICKS_PER_SECOND);
+		}
 	}
 	else
 	{
-		search_time = (long)(real_random_range(
-			definition->pursuit.pursuit_position_time_lower_bound,
-			definition->pursuit.pursuit_position_time_upper_bound)*TICKS_PER_SECOND);
+		{
+			/* port: through actions.c's actions_port_handler_call, as the Rust
+			port's asks for it */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _actions_port_handler_call_real_seed_random_range;
+			call.actor = actor_index;
+			call.a = 0;
+			call.input[0] = definition->pursuit.pursuit_position_time_lower_bound;
+			call.input[1] = definition->pursuit.pursuit_position_time_upper_bound;
+			actions_port_handler_call(&call);
+			search_time = (long)(call.output[0]*TICKS_PER_SECOND);
+		}
 	}
 	state_data->search_desired_time = search_time;
 	state_data->search_remaining_time = search_time;

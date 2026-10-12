@@ -121,6 +121,15 @@ enum
 
 /* ---------- prototypes */
 
+static long action_charge_port_handler(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	real const *input,
+	short input_count,
+	real *output);
+
 static real action_charge_find_target_range(
 	long actor_index,
 	short goal,
@@ -261,8 +270,11 @@ void action_charge_begin(
 {
 	struct actor_datum *actor = actor_get(actor_index);
 
+	/* port: the firing variant through actions.c's actions_port_handler_call,
+	as the Rust port's asks for it */
 	if (actor->state.action_data.charge.goal == _charge_goal_vehicle_strafing &&
-		actor_combat_get_firing_variant_definition(actor_index)->ranged_combat.special_fire_situation ==
+		((struct actor_variant_definition *)action_charge_port_handler(actor_index,
+			_actions_port_handler_call_firing_variant, 0, 0, NULL, 0, NULL))->ranged_combat.special_fire_situation ==
 			_actor_special_fire_situation_strafing)
 	{
 		short charge_remaining = actor->control.special_fire_deny_attempts;

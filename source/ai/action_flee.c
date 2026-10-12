@@ -111,7 +111,17 @@ void action_flee_end(
 
 	if (actor->meta.unit_index != NONE)
 	{
-		unit_stop_running_blindly(actor->meta.unit_index);
+		{
+			/* port: through actions.c's actions_port_handler_call, as the Rust
+			port's asks for it */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _actions_port_handler_call_unit_stop_running_blindly;
+			call.actor = actor_index;
+			call.a = 0;
+			actions_port_handler_call(&call);
+		}
 	}
 
 	return;
@@ -571,7 +581,17 @@ void action_flee_begin(
 		actor->meta.unit_index != NONE &&
 		action_flee_blind_panic(state_data->panic_type))
 	{
-		unit_start_running_blindly(actor->meta.unit_index);
+		{
+			/* port: through actions.c's actions_port_handler_call, as the Rust
+			port's asks for it */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _actions_port_handler_call_unit_start_running_blindly;
+			call.actor = actor_index;
+			call.a = 0;
+			actions_port_handler_call(&call);
+		}
 	}
 
 	return;

@@ -403,6 +403,35 @@ void action_uncover_modify_color(
 	return;
 }
 
+/* port: the begin's debug message, for actions.c's
+actions_port_handler_call */
+void action_uncover_port_debug(
+	long actor_index,
+	real lower_bound,
+	real upper_bound,
+	real uncover_time)
+{
+	char temporary[256];
+	struct actor_datum *actor = actor_get(actor_index);
+	struct uncover_state_data *state_data = &actor->state.action_data.uncover;
+
+	if (ACTION_UNCOVER_DEBUG_PRINTING_ENABLED())
+	{
+		ai_debug_describe_actor(actor_index, NONE, TRUE, temporary, NUMBEROF(temporary));
+		error(
+			2,
+			"%s: begin %s uncover for [%.1f-%.1f] = %.1f (%sable to search)",
+			temporary,
+			state_data->pursuit_location.type == _pursuit_location_target ? "target" : "pursuit",
+			lower_bound,
+			upper_bound,
+			uncover_time,
+			state_data->able_to_search ? "" : "un");
+	}
+
+	return;
+}
+
 void action_uncover_begin(
 	long actor_index)
 {
@@ -419,25 +448,36 @@ void action_uncover_begin(
 		lower_bound = MAX(lower_bound, definition->pursuit.target_location_time_lower_bound);
 		upper_bound = MAX(upper_bound, definition->pursuit.target_location_time_upper_bound);
 	}
-	uncover_time = real_seed_random_range(
-		get_global_random_seed_address(),
-		lower_bound,
-		upper_bound);
+	{
+		/* port: through actions.c's actions_port_handler_call, as the Rust
+		port's asks for it */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _actions_port_handler_call_real_seed_random_range;
+		call.actor = actor_index;
+		call.a = 0;
+		call.input[0] = lower_bound;
+		call.input[1] = upper_bound;
+		actions_port_handler_call(&call);
+		uncover_time = call.output[0];
+	}
 	state_data->uncover_desired_time = (long)(uncover_time*TICKS_PER_SECOND);
 	state_data->uncover_remaining_time = state_data->uncover_desired_time;
 
-	if (ACTION_UNCOVER_DEBUG_PRINTING_ENABLED())
 	{
-		ai_debug_describe_actor(actor_index, NONE, TRUE, temporary, NUMBEROF(temporary));
-		error(
-			2,
-			"%s: begin %s uncover for [%.1f-%.1f] = %.1f (%sable to search)",
-			temporary,
-			state_data->pursuit_location.type == _pursuit_location_target ? "target" : "pursuit",
-			lower_bound,
-			upper_bound,
-			uncover_time,
-			state_data->able_to_search ? "" : "un");
+		/* port: through actions.c's actions_port_handler_call, as the Rust
+		port's asks for it */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _actions_port_handler_call_uncover_debug;
+		call.actor = actor_index;
+		call.a = 0;
+		call.input[0] = lower_bound;
+		call.input[1] = upper_bound;
+		call.input[2] = uncover_time;
+		actions_port_handler_call(&call);
 	}
 
 	if (state_data->pursuit_location.type == _pursuit_location_target &&
@@ -446,14 +486,19 @@ void action_uncover_begin(
 	{
 		struct prop_datum *prop = prop_get(actor->target.target_prop_index);
 
-		ai_communication_event(
-			21,
-			actor->meta.unit_index,
-			prop->unit_index,
-			NONE,
-			NONE,
-			NONE,
-			NULL);
+		{
+			/* port: through actions.c's actions_port_handler_call, as the Rust
+			port's asks for it */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _actions_port_handler_call_communication;
+			call.actor = actor_index;
+			call.a = 21;
+			call.b = prop->unit_index;
+			call.input[0] = (real)NONE;
+			actions_port_handler_call(&call);
+		}
 	}
 	return;
 }

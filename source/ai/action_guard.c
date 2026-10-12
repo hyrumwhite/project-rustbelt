@@ -382,11 +382,29 @@ action_guard_begin(
 	struct actor_datum *actor = actor_get(actor_index);
 	struct guard_state_data *state_data = &actor->state.action_data.guard;
 
-	actor_perception_forget_recent_damage(actor_index);
+	{
+		/* port: through actions.c's actions_port_handler_call, as the Rust
+		port's asks for it */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _actions_port_handler_call_forget_recent_damage;
+		call.actor = actor_index;
+		call.a = 0;
+		actions_port_handler_call(&call);
+	}
 	actor->state.searching = FALSE;
 	if (state_data->cower_from_retreat)
 	{
-		actor_perception_retreat_successful(actor_index);
+		/* port: through actions.c's actions_port_handler_call, as the Rust
+		port's asks for it */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _actions_port_handler_call_retreat_successful;
+		call.actor = actor_index;
+		call.a = 0;
+		actions_port_handler_call(&call);
 	}
 
 	return;

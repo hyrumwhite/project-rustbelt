@@ -383,10 +383,17 @@ void action_converse_end(
 
 	if (actor->external_orders.conversation_index != NONE)
 	{
-		ai_conversation_finish(
-			actor->external_orders.conversation_index,
-			FALSE,
-			FALSE);
+		{
+			/* port: through actions.c's actions_port_handler_call, as the Rust
+			port's asks for it */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _actions_port_handler_call_conversation_finish;
+			call.actor = actor_index;
+			call.a = actor->external_orders.conversation_index;
+			actions_port_handler_call(&call);
+		}
 	}
 
 	return;

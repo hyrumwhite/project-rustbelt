@@ -1276,6 +1276,12 @@ enum
 	_actions_port_handler_call_has_enter_animation,
 	_actions_port_handler_call_find_vehicle_destination,
 	_actions_port_handler_call_move_to_point,
+	_actions_port_handler_call_unit_stop_running_blindly,
+	_actions_port_handler_call_unit_start_running_blindly,
+	_actions_port_handler_call_conversation_finish,
+	_actions_port_handler_call_uncover_debug,
+	_actions_port_handler_call_forget_recent_damage,
+	_actions_port_handler_call_retreat_successful,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

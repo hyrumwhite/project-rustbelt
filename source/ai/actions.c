@@ -424,6 +424,12 @@ boolean action_vehicle_port_desirable(
 	real attempt_distance,
 	real continue_distance);
 
+void action_uncover_port_debug(
+	long actor_index,
+	real lower_bound,
+	real upper_bound,
+	real uncover_time);
+
 short action_vehicle_port_find_impromptu_seat(
 	long actor_index,
 	long vehicle_index);
@@ -1862,13 +1868,13 @@ void actions_port_handler_call(
 		{
 			void (*handler)(long actor_index) = global_action_functions[call->a].end;
 
-			ai_profile.meters[_ai_meter_action_change].accumulator++;
 			if (handler)
 				handler(actor_index);
 			break;
 		}
 
 		case _actions_port_handler_call_clear_discarded_firing_positions:
+			ai_profile.meters[_ai_meter_action_change].accumulator++;
 			actor_clear_discarded_firing_positions(actor_index, FALSE);
 			break;
 
@@ -1996,6 +2002,30 @@ void actions_port_handler_call(
 
 		case _actions_port_handler_call_move_to_point:
 			call->result = actor_move_to_point(actor_index, (real_point3d *)call->input, call->a, call->b) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_unit_stop_running_blindly:
+			unit_stop_running_blindly(actor->meta.unit_index);
+			break;
+
+		case _actions_port_handler_call_unit_start_running_blindly:
+			unit_start_running_blindly(actor->meta.unit_index);
+			break;
+
+		case _actions_port_handler_call_conversation_finish:
+			ai_conversation_finish(call->a, FALSE, FALSE);
+			break;
+
+		case _actions_port_handler_call_uncover_debug:
+			action_uncover_port_debug(actor_index, call->input[0], call->input[1], call->input[2]);
+			break;
+
+		case _actions_port_handler_call_forget_recent_damage:
+			actor_perception_forget_recent_damage(actor_index);
+			break;
+
+		case _actions_port_handler_call_retreat_successful:
+			actor_perception_retreat_successful(actor_index);
 			break;
 
 		case _actions_port_handler_call_unit_dive_distance:
@@ -2141,7 +2171,10 @@ static void actions_port_action_change(
 {
 	struct actor_datum *actor = actor_get(actor_index);
 
-	actions_port_handler_simple(actor_index, _actions_port_handler_call_action_end, actor->state.action);
+	if (actor->state.action == _actor_action_obey)
+		actions_port_handler_simple(actor_index, _actions_port_handler_call_action_end, actor->state.action);
+	else if (global_action_functions[actor->state.action].end)
+		global_action_functions[actor->state.action].end(actor_index);
 	if (global_action_functions[new_action_type].action_class == 0)
 	{
 		if (actor->state.mode >= 3)
@@ -2161,8 +2194,10 @@ static void actions_port_action_change(
 	}
 	actor->state.action = new_action_type;
 	actor->state.action_changed = TRUE;
-	if (global_action_functions[new_action_type].begin)
+	if (new_action_type == _actor_action_obey)
 		actions_port_handler_simple(actor_index, _actions_port_handler_call_action_begin, new_action_type);
+	else if (global_action_functions[new_action_type].begin)
+		global_action_functions[new_action_type].begin(actor_index);
 
 	return;
 }

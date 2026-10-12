@@ -854,3 +854,824 @@ pub fn path_state_estimated_distance(
     }
     (true, distance, closest_approach_to_attractor, direction)
 }
+
+// ---------- path_structure_bsp.c: the 2D tests over the structure's surfaces
+
+/// path_structure_bsp.h's `struct path_collision_result`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PathCollisionResult {
+    pub collision: i32,
+    pub point: [f32; 3],
+    pub surface_index: i32,
+    pub edge_index: i32,
+    pub t: f32,
+}
+
+/// collision_bsp.h's `struct collision_surface_test_line2d_result`.
+#[derive(Debug, Clone, Copy)]
+struct SurfaceLine2d {
+    enter_t: f32,
+    enter_edge_index: i32,
+    enter_surface_index: i32,
+    exit_t: f32,
+    exit_edge_index: i32,
+    exit_surface_index: i32,
+}
+
+/// path_structure_bsp.h's `struct structure_test_ray2d_result`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Ray2dResult {
+    pub distance: f32,
+    pub surface_index: i32,
+    pub edge_index: i32,
+}
+
+const REAL_MIN: f32 = -3.4028235e38;
+const TEST_PILL_ENDPOINT_NEAR_WALL_OK: u32 = 1 << 0;
+
+fn cross2(a: [f32; 2], b: [f32; 2]) -> f32 {
+    a[0] * b[1] - a[1] * b[0]
+}
+
+fn vector2(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [b[0] - a[0], b[1] - a[1]]
+}
+
+/// real_math.h's `point_from_line2d`.
+fn point_from_line2(p: [f32; 2], v: [f32; 2], t: f32) -> [f32; 2] {
+    [t * v[0] + p[0], t * v[1] + p[1]]
+}
+
+fn magnitude2(v: [f32; 2]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
+}
+
+/// real_math.h's `normalize2d`.
+fn normalize2(v: &mut [f32; 2]) -> f32 {
+    let magnitude = magnitude2(*v);
+    if !(REAL_EPSILON > (magnitude - 0.0).abs()) {
+        let s = 1.0 / magnitude;
+        *v = [s * v[0], s * v[1]];
+        magnitude
+    } else {
+        0.0
+    }
+}
+
+/// The 2D structure tests' world: a structure BSP and the breakable
+/// surfaces' flags.
+pub struct Structure<'a> {
+    bsp: Bsp<'a>,
+    breakable_surface_flags: u32,
+}
+
+impl<'a> Structure<'a> {
+    pub fn new(m: &'a dyn AiMemory, structure: u32, breakable_surface_flags: u32) -> Self {
+        Structure { bsp: Bsp::new(m, structure), breakable_surface_flags }
+    }
+
+    fn m(&self) -> &dyn AiMemory {
+        self.bsp.m
+    }
+
+    /// `path_pathfinding_surface`: NONE reads the byte before the array, as
+    /// the game does; any other index past it is no walkable surface.
+    fn pathfinding_surface(&self, surface_index: i32) -> u8 {
+        let block = self.bsp.structure + sb::PATHFINDING_SURFACES as u32;
+        let count = self.m().i32(block + tb::COUNT as u32);
+        if (surface_index == NONE && count > 0) || (surface_index >= 0 && surface_index < count) {
+            self.m().r8(self.m().r32(block + tb::ADDRESS as u32).wrapping_add(surface_index as u32))
+        } else {
+            0
+        }
+    }
+
+    /// Whether a breakable surface stands (`BIT_VECTOR_TEST_FLAG` of the
+    /// flags).
+    fn breakable_standing(&self, surface_index: i32) -> bool {
+        let index = self.m().r8(self.bsp.surface(surface_index) + cs::BREAKABLE_SURFACE_INDEX as u32) as u32;
+        self.m().r32(self.breakable_surface_flags + (index >> 5) * 4) & (1 << (index & 31)) != 0
+    }
+
+    fn project(&self, surface_index: i32, point: [f32; 2]) -> [f32; 3] {
+        self.bsp.surface_project_point2d(surface_index, PROJECTION_Z, true, point)
+    }
+
+    /// collision_bsp.c's `collision_surface_test_line2d` (vertically): where
+    /// the line through `point` along `direction` enters and leaves the
+    /// surface.
+    fn surface_test_line2d(&self, surface_index: i32, point: [f32; 2], direction: [f32; 2]) -> SurfaceLine2d {
+        let m = self.m();
+        let bsp = &self.bsp;
+        let mut result = SurfaceLine2d {
+            enter_t: REAL_MIN,
+            enter_edge_index: NONE,
+            enter_surface_index: NONE,
+            exit_t: f32::MAX,
+            exit_edge_index: NONE,
+            exit_surface_index: NONE,
+        };
+        if !bsp.valid_surface_index(surface_index) {
+            return result;
+        }
+        let first_edge_index = m.i32(bsp.surface(surface_index) + cs::FIRST_EDGE_INDEX as u32);
+        let mut edge_index = first_edge_index;
+        if !bsp.edge_ring_continues(edge_index, 0) {
+            return result;
+        }
+        let mut edge_count: i16 = 0;
+        loop {
+            let edge = bsp.edge(edge_index);
+            let reverse = bsp.edge_surface(edge, 1) == surface_index;
+            let vertex0 = bsp.vertex(bsp.edge_vertex(edge, 0));
+            let vertex1 = bsp.vertex(bsp.edge_vertex(edge, 1));
+            let edge_vector = [vertex1[0] - vertex0[0], vertex1[1] - vertex0[1]];
+            let point_vector = [point[0] - vertex0[0], point[1] - vertex0[1]];
+            let edge_cross = cross2(direction, edge_vector);
+            let mut point_cross = cross2(edge_vector, point_vector);
+            let far_surface = bsp.edge_surface(edge, usize::from(!reverse));
+            if edge_cross != 0.0 {
+                point_cross /= edge_cross;
+                if (edge_cross < 0.0) != reverse {
+                    if point_cross > result.enter_t {
+                        result.enter_t = point_cross;
+                        result.enter_edge_index = edge_index;
+                        result.enter_surface_index = far_surface;
+                    }
+                } else if point_cross < result.exit_t {
+                    result.exit_t = point_cross;
+                    result.exit_edge_index = edge_index;
+                    result.exit_surface_index = far_surface;
+                }
+            } else if (point_cross < 0.0) != reverse {
+                result.enter_t = f32::MAX;
+                result.enter_edge_index = edge_index;
+                result.enter_surface_index = far_surface;
+                result.exit_t = REAL_MIN;
+                result.exit_edge_index = edge_index;
+                result.exit_surface_index = far_surface;
+            }
+            edge_index = bsp.edge_next(edge, usize::from(reverse));
+            if edge_index == first_edge_index {
+                break;
+            }
+            edge_count += 1;
+            if !bsp.edge_ring_continues(edge_index, edge_count) {
+                break;
+            }
+        }
+        result
+    }
+
+    /// A surface the ray crosses into, if (unless they're ignored)
+    /// unbroken.
+    fn surface_unbroken(&self, surface_index: i32, ignore_broken_surfaces: bool) -> bool {
+        if !ignore_broken_surfaces && self.pathfinding_surface(surface_index) & PATHFINDING_SURFACE_BREAKABLE != 0 {
+            return self.breakable_standing(surface_index);
+        }
+        true
+    }
+
+    /// `structure_test_ray2d`: how far the ray goes over the pathfinding
+    /// surfaces, up to `distance` (whether it stopped short, at an edge).
+    pub fn test_ray2d(
+        &self,
+        ignore_broken_surfaces: bool,
+        point: [f32; 2],
+        mut surface_index: i32,
+        direction: [f32; 2],
+        distance: f32,
+    ) -> (bool, Ray2dResult) {
+        let mut surface_result = self.surface_test_line2d(surface_index, point, direction);
+        let surface_count = self.bsp.block_count(cb::SURFACES);
+        let mut surface_step_count = 0;
+        loop {
+            let mut next_surface_index = NONE;
+            if distance < surface_result.enter_t
+                && self.pathfinding_surface(surface_result.enter_surface_index) != 0
+                && self.surface_unbroken(surface_result.enter_surface_index, ignore_broken_surfaces)
+            {
+                next_surface_index = surface_result.enter_surface_index;
+            }
+            if next_surface_index == NONE
+                && distance > surface_result.exit_t
+                && self.pathfinding_surface(surface_result.exit_surface_index) != 0
+                && self.surface_unbroken(surface_result.exit_surface_index, ignore_broken_surfaces)
+            {
+                next_surface_index = surface_result.exit_surface_index;
+            }
+            if next_surface_index == NONE {
+                break;
+            }
+            surface_step_count += 1;
+            if surface_step_count > surface_count {
+                break;
+            }
+            surface_index = next_surface_index;
+            surface_result = self.surface_test_line2d(surface_index, point, direction);
+        }
+        if distance < surface_result.enter_t {
+            return (
+                true,
+                Ray2dResult { distance: surface_result.enter_t, surface_index, edge_index: surface_result.enter_edge_index },
+            );
+        }
+        if distance > surface_result.exit_t {
+            return (
+                true,
+                Ray2dResult { distance: surface_result.exit_t, surface_index, edge_index: surface_result.exit_edge_index },
+            );
+        }
+        (false, Ray2dResult { distance, surface_index, edge_index: NONE })
+    }
+
+    /// `structure_surfaces_are_equivalent`: whether the two surfaces are at
+    /// the same height (within 0.05) over the point.
+    pub fn surfaces_are_equivalent(&self, destination_point: [f32; 2], destination_surface_index: i32, test_surface_index: i32) -> bool {
+        if destination_surface_index == NONE || test_surface_index == NONE {
+            return false;
+        }
+        let destination = self.project(destination_surface_index, destination_point);
+        let test = self.project(test_surface_index, destination_point);
+        ((destination[2] - test[2]) as f64).abs() < 0.05f32 as f64
+    }
+
+    /// The blocked result: at p0, on no surface.
+    fn blocked(&self, p0: [f32; 2], p0_surface_index: i32) -> PathCollisionResult {
+        PathCollisionResult { collision: 1, point: self.project(p0_surface_index, p0), surface_index: NONE, edge_index: NONE, t: 0.0 }
+    }
+
+    /// `structure_test_line2d`: whether the line from p0 to p1 is blocked
+    /// on the walkable surfaces (and where), or reaches p1's surface (or,
+    /// with NONE, wherever it ends).
+    pub fn test_line2d(
+        &self,
+        ignore_broken_surfaces: bool,
+        p0: [f32; 2],
+        p0_surface_index: i32,
+        p1: [f32; 2],
+        p1_surface_index: i32,
+    ) -> (bool, PathCollisionResult) {
+        let m = self.m();
+        let bsp = &self.bsp;
+        let surface_count = bsp.block_count(cb::SURFACES);
+        let vertex_count = bsp.block_count(cb::VERTICES);
+        let mut surface_index = p0_surface_index;
+        let mut recursed = false;
+        let p0p1 = vector2(p0, p1);
+        let mut surface_step_count = 0;
+        'surfaces: loop {
+            surface_step_count += 1;
+            if surface_step_count > 2 * surface_count || !bsp.valid_surface_index(surface_index) {
+                return (true, self.blocked(p0, p0_surface_index));
+            }
+            let surface = bsp.surface(surface_index);
+            let first_edge_index = m.i32(surface + cs::FIRST_EDGE_INDEX as u32);
+            let mut edge_index = first_edge_index;
+            let mut point_in_surface = [0.0f32; 3];
+            let mut edge_count: i16 = 0;
+            let mut crossed_any = false;
+            let mut reached_target = false;
+            loop {
+                if !bsp.edge_ring_continues(edge_index, edge_count) {
+                    return (true, self.blocked(p0, p0_surface_index));
+                }
+                let edge = bsp.edge(edge_index);
+                let vertices = [bsp.edge_vertex(edge, 0), bsp.edge_vertex(edge, 1)];
+                if !vertices.iter().all(|&v| v >= 0 && v < vertex_count) {
+                    return (true, self.blocked(p0, p0_surface_index));
+                }
+                let on_right_side = surface_index == bsp.edge_surface(edge, 1);
+                let vertex0 = bsp.vertex(vertices[usize::from(!on_right_side)]);
+                let vertex1 = bsp.vertex(vertices[usize::from(on_right_side)]);
+                let e0 = [vertex0[0], vertex0[1]];
+                let e1 = [vertex1[0], vertex1[1]];
+                let e0e1 = vector2(e0, e1);
+                let e0p1 = vector2(e0, p1);
+                let p0e0 = vector2(p0, e0);
+                let p0e1 = vector2(p0, e1);
+                let far_surface = bsp.edge_surface(edge, usize::from(!on_right_side));
+                if far_surface == p1_surface_index {
+                    reached_target = true;
+                }
+                point_in_surface[0] += vertex0[0];
+                point_in_surface[1] += vertex0[1];
+                point_in_surface[2] += vertex0[2];
+                edge_count += 1;
+                if cross2(e0e1, e0p1) > 0.0 {
+                    crossed_any = true;
+                    if cross2(p0p1, p0e0) > 0.0 && cross2(p0e1, p0p1) > 0.0 {
+                        let next_pathfinding_surface = self.pathfinding_surface(far_surface);
+                        let mut passable = next_pathfinding_surface & PATHFINDING_SURFACE_WALKABLE != 0;
+                        if !ignore_broken_surfaces && passable && next_pathfinding_surface & PATHFINDING_SURFACE_BREAKABLE != 0 {
+                            passable = self.breakable_standing(far_surface);
+                        }
+                        if passable {
+                            surface_index = far_surface;
+                            continue 'surfaces;
+                        }
+                        let t = (cross2(e0e1, p0e0) - magnitude2(e0e1) * (1.0 / 128.0)) / cross2(e0e1, p0p1);
+                        let p2d = point_from_line2(p0, p0p1, t);
+                        return (
+                            true,
+                            PathCollisionResult { collision: 1, point: self.project(surface_index, p2d), surface_index, edge_index, t },
+                        );
+                    }
+                }
+                edge_index = bsp.edge_next(edge, usize::from(on_right_side));
+                if edge_index == first_edge_index {
+                    if crossed_any {
+                        point_in_surface[0] /= edge_count as f32;
+                        point_in_surface[1] /= edge_count as f32;
+                        if !recursed && self.pathfinding_surface(surface_index) != 0 {
+                            let (blocked, p0_result) =
+                                self.test_line2d(ignore_broken_surfaces, [point_in_surface[0], point_in_surface[1]], surface_index, p0, NONE);
+                            if !blocked {
+                                recursed = true;
+                                surface_index = p0_result.surface_index;
+                                continue 'surfaces;
+                            }
+                        }
+                        return (true, self.blocked(p0, p0_surface_index));
+                    }
+                    if surface_index == p1_surface_index || reached_target || p1_surface_index == NONE {
+                        return (
+                            false,
+                            PathCollisionResult { collision: 0, point: self.project(surface_index, p1), surface_index, edge_index: NONE, t: 1.0 },
+                        );
+                    }
+                    return (true, self.blocked(p0, p0_surface_index));
+                }
+            }
+        }
+    }
+
+    /// `structure_surface_index_from_point`: the surface under `point`, as
+    /// the line from the known point reaches it (the point moved to where
+    /// it stops).
+    pub fn surface_index_from_point(&self, ignore_broken_surfaces: bool, known_point: [f32; 2], known_surface_index: i32, point: &mut [f32; 2]) -> i32 {
+        if known_surface_index == NONE {
+            return NONE;
+        }
+        let (_, result) = self.test_line2d(ignore_broken_surfaces, known_point, known_surface_index, *point, NONE);
+        *point = [result.point[0], result.point[1]];
+        if result.surface_index == NONE { known_surface_index } else { result.surface_index }
+    }
+
+    /// One side of `structure_test_pill2d`: its line, and whether its
+    /// collision counts.
+    #[allow(clippy::too_many_arguments)]
+    fn pill_side(
+        &self,
+        ignore_broken_surfaces: bool,
+        side_p0: [f32; 2],
+        side_p0_surface_index: i32,
+        side_p1: [f32; 2],
+        side_p1_surface_index: i32,
+        p1: [f32; 2],
+        p1_surface_index: i32,
+        flags: u32,
+    ) -> PathCollisionResult {
+        if side_p0_surface_index == NONE {
+            // (the rest zero, as the C now starts it)
+            return PathCollisionResult::default();
+        }
+        let (blocked, mut result) = self.test_line2d(ignore_broken_surfaces, side_p0, side_p0_surface_index, side_p1, side_p1_surface_index);
+        if blocked
+            && result.surface_index != NONE
+            && flags & TEST_PILL_ENDPOINT_NEAR_WALL_OK == 0
+            && !self.test_line2d(ignore_broken_surfaces, [result.point[0], result.point[1]], result.surface_index, p1, p1_surface_index).0
+        {
+            result.collision = 0;
+        }
+        result
+    }
+
+    /// `structure_test_pill2d`: whether a circle of `radius` swept from p0
+    /// to p1 is blocked (its two sides' lines; a collision within the
+    /// radius of p1 doesn't count). With no direction, `previous` is the
+    /// result (the C leaves it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_pill2d(
+        &self,
+        ignore_broken_surfaces: bool,
+        p0: [f32; 2],
+        p0_surface_index: i32,
+        p1: [f32; 2],
+        p1_surface_index: i32,
+        radius: f32,
+        flags: u32,
+        previous: PathCollisionResult,
+    ) -> (bool, PathCollisionResult) {
+        let direction = vector2(p0, p1);
+        let mut perpendicular = [-direction[1], direction[0]];
+        if !(normalize2(&mut perpendicular) > 0.0) {
+            return (false, previous);
+        }
+        let mut left_p0 = point_from_line2(p0, perpendicular, radius);
+        let left_p0_surface_index = self.surface_index_from_point(ignore_broken_surfaces, p0, p0_surface_index, &mut left_p0);
+        let mut left_p1 = point_from_line2(p1, perpendicular, radius);
+        let left_p1_surface_index = self.surface_index_from_point(ignore_broken_surfaces, p1, p1_surface_index, &mut left_p1);
+        let mut right_p0 = point_from_line2(p0, perpendicular, -radius);
+        let right_p0_surface_index = self.surface_index_from_point(ignore_broken_surfaces, p0, p0_surface_index, &mut right_p0);
+        let mut right_p1 = point_from_line2(p1, perpendicular, -radius);
+        let right_p1_surface_index = self.surface_index_from_point(ignore_broken_surfaces, p1, p1_surface_index, &mut right_p1);
+        let left = self.pill_side(ignore_broken_surfaces, left_p0, left_p0_surface_index, left_p1, left_p1_surface_index, p1, p1_surface_index, flags);
+        let right =
+            self.pill_side(ignore_broken_surfaces, right_p0, right_p0_surface_index, right_p1, right_p1_surface_index, p1, p1_surface_index, flags);
+        let best = match (left.collision != 0, right.collision != 0) {
+            (true, true) => Some(if left.t < right.t { left } else { right }),
+            (true, false) => Some(left),
+            (false, true) => Some(right),
+            (false, false) => None,
+        };
+        match best {
+            Some(best) if !(distance_squared2(&best.point, p1) < radius * radius) => (true, best),
+            _ => (false, left),
+        }
+    }
+}
+
+fn distance_squared2(point: &[f32; 3], p1: [f32; 2]) -> f32 {
+    let v = [p1[0] - point[0], p1[1] - point[1]];
+    v[0] * v[0] + v[1] * v[1]
+}
+
+/// `path_state_approach_point`: on the search's path to the point's
+/// surface, the furthest node back the point sees in a straight line (the
+/// start, if it sees that), and whether it is the start.
+pub fn path_state_approach_point(
+    m: &dyn AiMemory,
+    state: u32,
+    breakable_surface_flags: u32,
+    end_point: [f32; 2],
+    end_surface_index: i32,
+) -> Option<(bool, [f32; 3])> {
+    let state = State { m, state };
+    let mut node_index = state.node_from_hash_table(end_surface_index);
+    if node_index == NONE as i16 {
+        return None;
+    }
+    let structure = Structure::new(m, state.structure(), breakable_surface_flags);
+    let ignore_broken_surfaces = m.bool(state.input(pi::IGNORE_BROKEN_SURFACES));
+    let mut node = state.node(node_index);
+    loop {
+        let parent_node_index = m.i16(node + pn::PARENT_NODE_INDEX as u32);
+        if parent_node_index == NONE as i16 {
+            break;
+        }
+        let parent = state.node(parent_node_index);
+        let parent_entry = m.vector(parent + pn::ENTRY_POINT as u32);
+        if structure
+            .test_line2d(ignore_broken_surfaces, end_point, end_surface_index, [parent_entry[0], parent_entry[1]], m.i32(parent + pn::SURFACE_INDEX as u32))
+            .0
+        {
+            break;
+        }
+        node_index = parent_node_index;
+        node = state.node(node_index);
+    }
+    if m.i16(node + pn::PARENT_NODE_INDEX as u32) == NONE as i16 {
+        Some((true, m.vector(state.input(pi::START_POINT))))
+    } else {
+        Some((false, m.vector(node + pn::ENTRY_POINT as u32)))
+    }
+}
+
+// ---------- path_smoothing.c: the raw path's corners cut
+
+/// path.h's `struct path_step`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PathStep {
+    pub surface_index: i32,
+    pub point: [f32; 3],
+}
+
+const MAXIMUM_SMOOTHED_PATH_STEPS: usize = 4;
+/// real_math.c's `global_left2d`.
+const LEFT2D: [f32; 2] = [0.0, 1.0];
+
+/// real_math.c's `signed_angle_between_vectors2d` (its arccosine the
+/// double one).
+fn signed_angle_between_vectors2d(a: [f32; 2], b: [f32; 2]) -> f32 {
+    let dot = a[0] * b[0] + a[1] * b[1];
+    let pinned = if dot < -1.0 {
+        -1.0
+    } else if dot > 1.0 {
+        1.0
+    } else {
+        dot
+    };
+    let mut result = (pinned as f64).acos() as f32;
+    if (a[0] * b[1]) - (a[1] * b[0]) < 0.0 {
+        result = -result;
+    }
+    result
+}
+
+impl Structure<'_> {
+    /// `path_smoothing_edge_valid`: an edge of the bsp, with vertices that
+    /// are the bsp's.
+    fn smoothing_edge_valid(&self, edge_index: i32) -> bool {
+        let bsp = &self.bsp;
+        if !(edge_index >= 0 && edge_index < bsp.block_count(cb::EDGES)) {
+            return false;
+        }
+        let edge = bsp.edge(edge_index);
+        let vertex_count = bsp.block_count(cb::VERTICES);
+        (0..2).all(|which| {
+            let vertex = bsp.edge_vertex(edge, which);
+            vertex >= 0 && vertex < vertex_count
+        })
+    }
+
+    /// path_smoothing.c's `surface_is_walkable`.
+    fn surface_is_walkable(&self, surface_index: i32, ignore_broken_surfaces: bool) -> bool {
+        let block = self.bsp.structure + sb::PATHFINDING_SURFACES as u32;
+        let count = self.m().i32(block + tb::COUNT as u32);
+        if surface_index == NONE && count <= 0 {
+            return false;
+        }
+        if surface_index != NONE && !(surface_index >= 0 && surface_index < count) {
+            return false;
+        }
+        let flags = self.m().r8(self.m().r32(block + tb::ADDRESS as u32).wrapping_add(surface_index as u32));
+        let mut walkable = flags & PATHFINDING_SURFACE_WALKABLE != 0;
+        if !ignore_broken_surfaces && walkable && flags & PATHFINDING_SURFACE_BREAKABLE != 0 {
+            walkable = self.breakable_standing(surface_index);
+        }
+        walkable
+    }
+
+    /// `find_turning_point`: walking the unwalkable boundary from the edge
+    /// (clockwise or not), the corner the circle around the point must turn
+    /// about.
+    fn find_turning_point(
+        &self,
+        point: [f32; 2],
+        radius: f32,
+        first_edge_index: i32,
+        clockwise: bool,
+        ignore_broken_surfaces: bool,
+    ) -> Option<[f32; 2]> {
+        let bsp = &self.bsp;
+        let edge_total = bsp.block_count(cb::EDGES);
+        let mut starting_vertex_index = NONE;
+        let mut loop_reference_vertex_index = NONE;
+        let mut edge_index = first_edge_index;
+        let mut boundary_step_count = 0;
+        loop {
+            boundary_step_count += 1;
+            if boundary_step_count > 2 * edge_total + 1 {
+                return None;
+            }
+            if !self.smoothing_edge_valid(edge_index) {
+                return None;
+            }
+            let mut collision_edge = bsp.edge(edge_index);
+            let side_flag = self.surface_is_walkable(bsp.edge_surface(collision_edge, 0), ignore_broken_surfaces);
+            let vertex_a = bsp.vertex(bsp.edge_vertex(collision_edge, usize::from(side_flag)));
+            let vertex_b = bsp.vertex(bsp.edge_vertex(collision_edge, usize::from(!side_flag)));
+            let edge_dx = vertex_b[0] - vertex_a[0];
+            let edge_dy = vertex_b[1] - vertex_a[1];
+            let mut edge_direction = [edge_dy, -edge_dx];
+            let mut valid = false;
+            normalize2(&mut edge_direction);
+            let positive_point = point_from_line2(point, edge_direction, radius);
+            let negative_point = point_from_line2(point, edge_direction, -radius);
+            let vertex_to_positive = [vertex_a[0] - positive_point[0], vertex_a[1] - positive_point[1]];
+            let vertex_to_negative = [vertex_a[0] - negative_point[0], vertex_a[1] - negative_point[1]];
+            let side_test = vertex_to_positive[1] * edge_dy + vertex_to_positive[0] * edge_dx < 0.0;
+            if side_test == clockwise && vertex_to_positive[0] * edge_dy - vertex_to_positive[1] * edge_dx < 0.0 {
+                valid = true;
+            }
+            if vertex_to_negative[0] * edge_dy - vertex_to_negative[1] * edge_dx < 0.0 {
+                valid = true;
+            }
+            if starting_vertex_index == NONE {
+                valid = true;
+            }
+            let xor_flag = valid != side_flag;
+            let next_vertex_index = bsp.edge_vertex(collision_edge, usize::from(xor_flag == clockwise));
+            if next_vertex_index == loop_reference_vertex_index {
+                let vertex = bsp.vertex(next_vertex_index);
+                return Some([vertex[0], vertex[1]]);
+            }
+            if next_vertex_index == starting_vertex_index {
+                return None;
+            }
+            if starting_vertex_index == NONE {
+                starting_vertex_index = next_vertex_index;
+            }
+            let chain_start_edge_index = edge_index;
+            let mut fan_step_count = 0;
+            loop {
+                fan_step_count += 1;
+                if fan_step_count > edge_total {
+                    return None;
+                }
+                let matches_end = next_vertex_index == bsp.edge_vertex(collision_edge, 1);
+                let candidate_surface_index = bsp.edge_surface(collision_edge, usize::from(!matches_end));
+                let refined_side = self.surface_is_walkable(candidate_surface_index, ignore_broken_surfaces);
+                if refined_side == clockwise {
+                    break;
+                }
+                edge_index = bsp.edge_next(collision_edge, usize::from(!matches_end));
+                if !self.smoothing_edge_valid(edge_index) {
+                    return None;
+                }
+                collision_edge = bsp.edge(edge_index);
+                if edge_index == chain_start_edge_index {
+                    return None;
+                }
+            }
+            loop_reference_vertex_index = next_vertex_index;
+        }
+    }
+}
+
+/// `find_tangent_point`: where the line from the point touches the circle
+/// (on the clockwise side or not), or the circle's point towards it.
+fn find_tangent_point(point: [f32; 2], center: [f32; 2], radius: f32, clockwise: bool) -> [f32; 2] {
+    let center_to_point = vector2(center, point);
+    let distance_squared = center_to_point[0] * center_to_point[0] + center_to_point[1] * center_to_point[1];
+    let inverse_distance_squared = radius / distance_squared;
+    let mut tangent_length = distance_squared - radius * radius;
+    if tangent_length > 0.0 {
+        tangent_length = tangent_length.sqrt();
+        let tangent_points = [
+            [
+                (center_to_point[0] * radius + center_to_point[1] * tangent_length) * inverse_distance_squared + center[0],
+                (center_to_point[1] * radius - center_to_point[0] * tangent_length) * inverse_distance_squared + center[1],
+            ],
+            [
+                (center_to_point[0] * radius - center_to_point[1] * tangent_length) * inverse_distance_squared + center[0],
+                (center_to_point[1] * radius + center_to_point[0] * tangent_length) * inverse_distance_squared + center[1],
+            ],
+        ];
+        let tangent_vectors = [vector2(point, tangent_points[0]), vector2(point, tangent_points[1])];
+        tangent_points[usize::from((cross2(tangent_vectors[0], tangent_vectors[1]) > 0.0) != clockwise)]
+    } else {
+        let mut radius_vector = vector2(center, point);
+        if normalize2(&mut radius_vector) == 0.0 {
+            radius_vector = LEFT2D;
+        }
+        point_from_line2(center, radius_vector, radius)
+    }
+}
+
+/// `find_avoidance_point`: where the two tangents meet (or, too far out, a
+/// radius on from the first tangent point).
+fn find_avoidance_point(tangent_points: &[[f32; 2]; 2], center: [f32; 2], start_point: [f32; 2], radius: f32) -> [f32; 2] {
+    let center_to_tangent = [vector2(center, tangent_points[0]), vector2(center, tangent_points[1])];
+    let cross = cross2(center_to_tangent[0], center_to_tangent[1]);
+    if !((cross as f64).abs() < REAL_EPSILON as f64) {
+        let scale = radius * radius / cross;
+        let avoidance_j = (center_to_tangent[0][0] - center_to_tangent[1][0]) * scale + center[1];
+        let avoidance_i = center[0] - (center_to_tangent[0][1] - center_to_tangent[1][1]) * scale;
+        let direction = [avoidance_i - center[0], avoidance_j - center[1]];
+        if !(direction[0] * direction[0] + direction[1] * direction[1] > radius * radius * 4.0) {
+            return [avoidance_i, avoidance_j];
+        }
+    }
+    let mut direction = [tangent_points[0][0] - start_point[0], tangent_points[0][1] - start_point[1]];
+    let mut magnitude = ((direction[0] * direction[0] + direction[1] * direction[1]) as f64).sqrt() as f32;
+    if !(REAL_EPSILON > (magnitude - 0.0).abs()) {
+        let scale = 1.0 / magnitude;
+        direction = [direction[0] * scale, direction[1] * scale];
+    } else {
+        magnitude = 0.0;
+    }
+    if magnitude == 0.0 {
+        direction = LEFT2D;
+    }
+    [direction[0] * radius + tangent_points[0][0], direction[1] * radius + tangent_points[0][1]]
+}
+
+/// `choose_turning_point`: the turning point whose detour turns least
+/// (whether it is the clockwise one).
+fn choose_turning_point(
+    start_point: [f32; 2],
+    clockwise_turning_point: [f32; 2],
+    counterclockwise_turning_point: [f32; 2],
+    unobstructed_path_point: [f32; 2],
+    obstructed_path_point: [f32; 2],
+) -> (bool, [f32; 2]) {
+    let normalized = |a: [f32; 2], b: [f32; 2]| {
+        let mut v = vector2(a, b);
+        normalize2(&mut v);
+        v
+    };
+    let start_to_clockwise = normalized(clockwise_turning_point, start_point);
+    let clockwise_to_unobstructed = normalized(clockwise_turning_point, unobstructed_path_point);
+    let clockwise_to_obstructed = normalized(clockwise_turning_point, obstructed_path_point);
+    let start_to_counterclockwise = normalized(counterclockwise_turning_point, start_point);
+    let counterclockwise_to_unobstructed = normalized(counterclockwise_turning_point, unobstructed_path_point);
+    let counterclockwise_to_obstructed = normalized(counterclockwise_turning_point, obstructed_path_point);
+    let clockwise_turn = signed_angle_between_vectors2d(clockwise_to_unobstructed, clockwise_to_obstructed)
+        + signed_angle_between_vectors2d(start_to_clockwise, clockwise_to_unobstructed);
+    let counterclockwise_turn = signed_angle_between_vectors2d(counterclockwise_to_unobstructed, counterclockwise_to_obstructed);
+    if clockwise_turn > -(counterclockwise_turn + signed_angle_between_vectors2d(start_to_counterclockwise, counterclockwise_to_unobstructed)) {
+        (true, clockwise_turning_point)
+    } else {
+        (false, counterclockwise_turning_point)
+    }
+}
+
+/// `path_smooth`: from the start, past the raw steps a 0.3 circle can
+/// sweep to in a line, turning about the corners that block it (four
+/// steps at most; whether the smoothed steps finish the path is cleared
+/// when they don't).
+pub fn path_smooth(
+    m: &dyn AiMemory,
+    state: u32,
+    breakable_surface_flags: u32,
+    raw_steps: &[PathStep],
+    steps_finish_path: &mut bool,
+) -> Vec<PathStep> {
+    if raw_steps.len() <= 1 {
+        return raw_steps.iter().take(1).copied().collect();
+    }
+    let state = State { m, state };
+    let structure = Structure::new(m, state.structure(), breakable_surface_flags);
+    let ignore_broken_surfaces = m.bool(state.input(pi::IGNORE_BROKEN_SURFACES));
+    let start_point = m.vector(state.input(pi::START_POINT));
+    let mut current_position = [start_point[0], start_point[1]];
+    let mut current_surface_index = m.i32(state.input(pi::START_SURFACE_INDEX));
+    let mut smoothed: Vec<PathStep> = Vec::new();
+    let mut step_index = 1;
+    let mut collision_result = PathCollisionResult::default();
+    let finishes = 'smoothing: loop {
+        let mut collision_step_index: Option<usize> = None;
+        let mut collision_edge_index = NONE;
+        let mut collision_active = false;
+        for (i, raw_step) in raw_steps.iter().enumerate().skip(step_index) {
+            let (blocked, result) = structure.test_pill2d(
+                ignore_broken_surfaces,
+                current_position,
+                current_surface_index,
+                [raw_step.point[0], raw_step.point[1]],
+                raw_step.surface_index,
+                0.3,
+                TEST_PILL_ENDPOINT_NEAR_WALL_OK,
+                collision_result,
+            );
+            collision_result = result;
+            if blocked {
+                if !collision_active {
+                    collision_edge_index = collision_result.edge_index;
+                    collision_step_index = Some(i);
+                    collision_active = true;
+                }
+            } else if collision_active {
+                collision_step_index = None;
+                collision_edge_index = NONE;
+                collision_active = false;
+            }
+        }
+        if !collision_active || collision_edge_index == NONE {
+            break 'smoothing true;
+        }
+        let collision_step_index = collision_step_index.unwrap_or(0);
+        let clockwise_turning_point =
+            structure.find_turning_point(current_position, 0.3, collision_edge_index, true, ignore_broken_surfaces);
+        let counterclockwise_turning_point =
+            structure.find_turning_point(current_position, 0.3, collision_edge_index, false, ignore_broken_surfaces);
+        let (Some(clockwise_turning_point), Some(counterclockwise_turning_point)) =
+            (clockwise_turning_point, counterclockwise_turning_point)
+        else {
+            break 'smoothing false;
+        };
+        let unobstructed = raw_steps[collision_step_index - 1].point;
+        let obstructed = raw_steps[collision_step_index].point;
+        let (chose_clockwise, chosen_center) = choose_turning_point(
+            current_position,
+            clockwise_turning_point,
+            counterclockwise_turning_point,
+            [unobstructed[0], unobstructed[1]],
+            [obstructed[0], obstructed[1]],
+        );
+        let tangent_points = [
+            find_tangent_point(current_position, chosen_center, 0.35, chose_clockwise),
+            find_tangent_point([obstructed[0], obstructed[1]], chosen_center, 0.35, !chose_clockwise),
+        ];
+        let avoidance_point = find_avoidance_point(&tangent_points, chosen_center, current_position, 0.35);
+        let known_point = current_position;
+        current_position = avoidance_point;
+        current_surface_index =
+            structure.surface_index_from_point(ignore_broken_surfaces, known_point, current_surface_index, &mut current_position);
+        smoothed.push(PathStep { surface_index: current_surface_index, point: structure.project(current_surface_index, current_position) });
+        if smoothed.len() >= MAXIMUM_SMOOTHED_PATH_STEPS {
+            break 'smoothing false;
+        }
+        step_index = collision_step_index;
+    };
+    if finishes {
+        smoothed.push(raw_steps[raw_steps.len() - 1]);
+    } else {
+        *steps_finish_path = false;
+    }
+    smoothed
+}

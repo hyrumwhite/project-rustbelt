@@ -553,6 +553,19 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every search and estimated distance agrees in minute-long runs of b30, d20, b40 and a50, with none left out (c20 searched no paths in its first minute).
        - Planted errors in the attractor's cost and in the distance within which the nearest point of a surface is found were each caught on b30.
        - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The paths' 2D tests, smoothing and approach point in Rust (`halo_map::path`, under `paths`): path_structure_bsp.c's `structure_test_line2d`, `structure_test_pill2d` and `structure_surface_index_from_point` (with `structure_test_ray2d` and `structure_surfaces_are_equivalent`, ported for the obstacle avoidance to come), collision_bsp.c's `collision_surface_test_line2d`, path_smoothing.c's `path_smooth`, and path.c's `path_state_approach_point`.
+     - **What Rust does:**
+       - The line test walks the walkable surfaces from edge to edge until it reaches the far point's surface, or stops a 128th of the edge short of an unwalkable (or broken) neighbour. Where its first surface doesn't lead back to the start, it retries once from the surface's centre.
+       - The pill test runs a line along each side of a swept circle and keeps the nearer blocking one (one within the radius of the end doesn't count).
+       - The smoothing sweeps a 0.3 circle from the start to the furthest raw step it can reach. When a wall blocks it, it walks the unwalkable boundary both ways to the corners it must turn about, takes the one that turns least (from arccosines, the C's double `acos`), and steps to where its 0.35 tangents meet, four steps at most.
+       - The approach point is the furthest node back along the search's path that the point sees in a straight line.
+     - **The C's side:** each goes through a halo_sim.c hook that runs the game's or Rust's. Under the check the hook runs both and compares their results: the collision result without its padding (the game leaves the caller's bytes there), the smoothed steps, the approach point.
+     - **A C fix:** the pill test's side results start from zeros. A side whose start is on no surface set only its collision flag, and the game could copy the stack's leftovers out as the result.
+     - **Results:**
+       - Every test agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out: 16,384 to 65,536 line tests, and 128 to 512 smoothings, on each of b30, d20, b40 and a50.
+       - On b30 every line and pill test was clear, so a planted error at a blocking edge (its 128th) went unseen there; it was caught on d20, b40 and a50.
+       - A planted error in the smoothing's tangent radius was caught on d20.
+       - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

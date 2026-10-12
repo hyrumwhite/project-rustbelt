@@ -1855,6 +1855,18 @@ void actions_port_handler_call(
 			call->result = seed_random_range(get_global_random_seed_address(), (short)call->a, (short)call->b);
 			break;
 
+		case _actions_port_handler_call_nearby_firing_positions_at:
+			call->result = actor_nearby_firing_positions(
+				actor_index,
+				(real_point3d const *)call->input,
+				call->a,
+				_firing_position_group_when_searching) ? 1 : 0;
+			break;
+
+		case _actions_port_handler_call_real_seed_random_range:
+			call->output[0] = real_seed_random_range(get_global_random_seed_address(), call->input[0], call->input[1]);
+			break;
+
 		case _actions_port_handler_call_unit_dive_distance:
 			call->output[0] = unit_definition_get(unit_get(actor->meta.unit_index)->definition_index)->unit.dive_distance;
 			break;
@@ -3810,9 +3822,15 @@ boolean actor_action_handle_lost_contact(
 		{
 			handled = TRUE;
 		}
-		else if (actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_postcombat, 0))
+		else
 		{
-			handled = TRUE;
+			struct action_state_data state;
+
+			if (action_guard_setup_postcombat(actor_index, &state.guard))
+			{
+				actions_port_action_change(actor_index, _actor_action_guard, &state);
+				handled = TRUE;
+			}
 		}
 	}
 
@@ -3855,7 +3873,10 @@ boolean actor_action_handle_done_fleeing(
 	if (actor->state.action == _actor_action_flee &&
 		actor->state.action_data.flee.done_fleeing)
 	{
-		actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_from_fleeing, 0);
+		struct action_state_data state;
+
+		action_guard_setup_from_fleeing(actor_index, &actor->state.action_data.flee, &state.guard);
+		actions_port_action_change(actor_index, _actor_action_guard, &state);
 		result = TRUE;
 	}
 
@@ -4010,8 +4031,12 @@ boolean actor_action_handle_combat_transition(
 	{
 		actor->state.mode = 3;
 
-		if (!actions_port_handler_simple(actor_index, _actions_port_handler_call_guard_from_combat_transition, 0))
-			actor_action_handle_combat_selection(actor_index);
+		{
+			struct action_state_data state;
+
+			action_guard_setup_from_combat_transition(actor_index, &state.guard);
+			actions_port_action_change(actor_index, _actor_action_guard, &state);
+		}
 
 		actor->stimuli.combat_transition = 0;
 		result = TRUE;

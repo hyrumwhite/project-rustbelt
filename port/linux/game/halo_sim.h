@@ -1263,6 +1263,8 @@ enum
 	_actions_port_handler_call_clear_discarded_firing_positions,
 	_actions_port_handler_call_action_begin,
 	_actions_port_handler_call_seed_random_range,
+	_actions_port_handler_call_nearby_firing_positions_at,
+	_actions_port_handler_call_real_seed_random_range,
 };
 
 /* the actions' functions (actions.c's actions_port_ported) */

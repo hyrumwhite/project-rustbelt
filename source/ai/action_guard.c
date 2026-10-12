@@ -182,9 +182,17 @@ action_guard_setup_postcombat(
 			goto done;
 		}
 
-		actor_perception_find_prop_pathfinding_location(
-			actor_index,
-			actor->external_orders.postcombat_prop_index);
+		{
+			/* port: through actions.c's actions_port_handler_call, as the
+			Rust port's asks for it */
+			struct halo_sim_ai_call find;
+
+			memset(&find, 0, sizeof(find));
+			find.kind = _actions_port_handler_call_find_prop_pathfinding_location;
+			find.actor = actor_index;
+			find.a = actor->external_orders.postcombat_prop_index;
+			actions_port_handler_call(&find);
+		}
 		state_data->guard_location_type = 2;
 		state_data->guard_point.position = prop->pathfinding_point;
 		state_data->guard_point.surface_index = prop->pathfinding_surface_index;
@@ -212,12 +220,17 @@ action_guard_setup_from_combat_transition(
 			45,
 			actor->stimuli.combat_transition);
 
+		/* port: the positions through actions.c's actions_port_handler_call,
+		as the Rust port's asks for them */
+		struct halo_sim_ai_call nearby;
+
+		memset(&nearby, 0, sizeof(nearby));
+		nearby.kind = _actions_port_handler_call_nearby_firing_positions_at;
+		nearby.actor = actor_index;
+		nearby.a = actor->stimuli.combat_transition_guard_point_surface_index;
+		memcpy(nearby.input, &actor->stimuli.combat_transition_guard_point, sizeof(real_point3d));
 		if (actor->stimuli.combat_transition_guard_at_point &&
-			actor_nearby_firing_positions(
-				actor_index,
-				&actor->stimuli.combat_transition_guard_point,
-				actor->stimuli.combat_transition_guard_point_surface_index,
-				_firing_position_group_when_searching))
+			(actions_port_handler_call(&nearby), nearby.result))
 		{
 			state_data->guard_location_type = 2;
 			state_data->guard_point.position = actor->stimuli.combat_transition_guard_point;
@@ -297,21 +310,33 @@ action_guard_setup_from_fleeing(
 			{
 				real upper_bound = definition->panic.cower_time_upper_bound;
 				real lower_bound = definition->panic.cower_time_lower_bound;
+				struct halo_sim_ai_call draw;
 
-				state_data->cower_ticks = (short)(real_seed_random_range(
-					get_global_random_seed_address(),
-					lower_bound,
-					upper_bound) * 30.f);
+				/* port: the draw through actions.c's actions_port_handler_call,
+				as the Rust port's asks for it */
+				memset(&draw, 0, sizeof(draw));
+				draw.kind = _actions_port_handler_call_real_seed_random_range;
+				draw.actor = actor_index;
+				draw.input[0] = lower_bound;
+				draw.input[1] = upper_bound;
+				actions_port_handler_call(&draw);
+				state_data->cower_ticks = (short)(draw.output[0] * 30.f);
 			}
 			else
 			{
 				real upper_bound = definition->defensive.hide_time_upper_bound;
 				real lower_bound = definition->defensive.hide_time_lower_bound;
+				struct halo_sim_ai_call draw;
 
-				state_data->cower_ticks = (short)(real_seed_random_range(
-					get_global_random_seed_address(),
-					lower_bound,
-					upper_bound) * 30.f);
+				/* port: the draw through actions.c's actions_port_handler_call,
+				as the Rust port's asks for it */
+				memset(&draw, 0, sizeof(draw));
+				draw.kind = _actions_port_handler_call_real_seed_random_range;
+				draw.actor = actor_index;
+				draw.input[0] = lower_bound;
+				draw.input[1] = upper_bound;
+				actions_port_handler_call(&draw);
+				state_data->cower_ticks = (short)(draw.output[0] * 30.f);
 			}
 		}
 

@@ -577,6 +577,18 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every build agrees in minute-long runs of b30, d20, b40 and a50 (128 to 512 on each), with none left out.
        - A planted error in the discs' tangent margin was caught on b30 and d20.
        - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The movement's calculation in Rust (`halo_map::actor_moving`, under `actor_move`): actor_moving.c's `actor_move_calculate_movement`, with `actor_move_calculate_controlled_by_aiming` and `actor_move_calculate_free`. The move update no longer hands it to the game.
+     - **What Rust does:**
+       - It picks the facing: the override's (forward, back, left or right of the movement), a free facing for flyers sidestepping, the side nearest a forced aim that turns least, or straight along the movement.
+       - It lets the actor move only when it faces close enough to the way it goes. The margin tightens to 0.95 when a 0.4 line ahead on the walkable surfaces is blocked (Rust's own `structure_test_line2d`).
+       - It marks the movement complete within the destination tolerance and eases the throttle down inside the stopping distance.
+       - For a vehicle with AI steering (the banshee), it clamps the turn and holds an oversteer angle until the turn drops below its lower bound. The angles use the C's double `acos`, `sin` and `cos`.
+     - **The C's side:** the step context now carries the structure and the breakable surface flags. Four new calls are the game's: finding the pathfinding location, the destination tolerance, the stopping distances (the vehicle's and the flying biped's definitions) and the debug switch that turns oversteer off. The game's calculation makes the same calls in the same order. The `print_oversteer` console lines stay the game's alone.
+     - **Results:**
+       - Every move step agrees in minute-long runs of b30, d20, c20, b40 and a50 (4,096 to 32,768 on each), with none left out.
+       - No AI steers in the first minute of any probe level, and only the banshee's tag has AI steering (the ghost and warthog have none). A console command at tick 300 (`HALO_SIM_HS_COMMAND`) seats the `beach_banshee` encounter in b30's two banshees. With them flying, every step still agrees, and planted errors in the steered angle and its clamp were caught.
+       - Planted errors in the forward throttle (b30) and in choosing a side under a forced aim (b30 and d20) were caught. One in the blocked-wall facing margin (0.95 to 0.97) went unseen in a minute of b30 and d20.
+       - With all forty-eight systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

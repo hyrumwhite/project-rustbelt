@@ -106,6 +106,10 @@ pub struct AiStepContext {
     pub variant_definition: u32,
     /// The scenario (`global_scenario_get`).
     pub scenario: u32,
+    /// The structure (`global_structure_bsp_get`).
+    pub structure: u32,
+    /// Which breakable surfaces still stand (`breakable_surface_flags_get`).
+    pub breakable_surface_flags: u32,
 }
 
 /// `datum_get`: the datum's address (None for one unused or changed).

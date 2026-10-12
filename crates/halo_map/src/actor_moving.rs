@@ -4,14 +4,16 @@
 //! hovering, flying, stuck) or its state (riding, animating, asleep, in
 //! midair, throwing a grenade, keeping out of a player's fire) holds it
 //! still or frees it, its facing when still, its berserk shout and its
-//! jumps and leaps.
+//! jumps and leaps, and the movement's calculation (`actor_move_calculate_movement`:
+//! the facing, the throttle and the steering towards the moving vector).
 //!
 //! The actor's datum, definition and vehicle are the game's memory, worked
-//! on in place ([`crate::ai_actor`]); the vector avoidance, the movement's
-//! calculation, the vehicle's definition and stuckness, the path, the
-//! firing positions, the unit's crouch, jump and leap, its animation and
-//! the shouts are the game's, through [`AiHost::call`] (actor_moving.c's
-//! `actor_move_call`, shared with the C).
+//! on in place ([`crate::ai_actor`]); the vector avoidance, the vehicle's
+//! definition and stuckness, the path, the pathfinding location, the
+//! destination tolerance and stopping distances, the firing positions, the
+//! unit's crouch, jump and leap, its animation and the shouts are the
+//! game's, through [`AiHost::call`] (actor_moving.c's `actor_move_call`,
+//! shared with the C).
 
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, AiStepContext, NONE, object_get, prop_get};
 use crate::layout::{actor_animation_orders, actor_datum as a, actor_definition as d, ai_values as v, prop_datum as p, vehicle_datum};
@@ -29,11 +31,7 @@ pub mod call {
     pub const VEHICLE_DEFINITION: i32 = 3;
     /// `vehicle_stuck(a)`: the result, its direction in `output`.
     pub const VEHICLE_STUCK: i32 = 4;
-    /// `actor_move_calculate_movement` into the actor (`a`: in 3d, free
-    /// movement, all moving turns in bits 0-2; `b`: the facing override;
-    /// `input`: the free distance squared, steering angle, oversteer bounds,
-    /// rotation emergency and throttle).
-    pub const CALCULATE_MOVEMENT: i32 = 5;
+    // 5 was `actor_move_calculate_movement`, now Rust's ([`calculate_movement`]).
     /// `actor_clear_discarded_firing_positions(actor, TRUE)`.
     pub const CLEAR_DISCARDED_FIRING_POSITIONS: i32 = 6;
     /// Whether a local game's debug forces a crouch, the result.
@@ -50,6 +48,15 @@ pub mod call {
     pub const LEAP_BEGIN: i32 = 12;
     /// The leap's shout.
     pub const LEAP_SHOUT: i32 = 13;
+    /// `actor_find_pathfinding_location(actor)`.
+    pub const FIND_PATHFINDING_LOCATION: i32 = 14;
+    /// `actor_destination_tolerance(actor)`, in `output[0]`.
+    pub const DESTINATION_TOLERANCE: i32 = 15;
+    /// `actor_get_stopping_distances(actor)`: the current and maximum in
+    /// `output[0..2]`.
+    pub const STOPPING_DISTANCES: i32 = 16;
+    /// Whether a local game's debug disables oversteer, the result.
+    pub const OVERSTEER_DISABLE: i32 = 17;
 }
 
 const EPSILON: f32 = 0.0001;
@@ -377,20 +384,21 @@ pub fn actor_move_update(context: &AiStepContext, host: &impl AiHost) {
 
     let movement_complete = at(a::CONTROL_MOVEMENT_COMPLETE);
     if m.bool(moving) && !m.bool(movement_complete) {
-        call_full(
+        calculate_movement(
             context,
             host,
-            call::CALCULATE_MOVEMENT,
-            move_in_3d as i32 | (free_movement as i32) << 1 | (allow_all_moving_turns as i32) << 2,
-            override_facing as i32,
-            &[
+            Movement {
+                move_in_3d,
+                override_facing,
+                free_movement,
                 free_movement_distance_squared,
+                allow_all_moving_turns,
                 steering_maximum_angle,
                 oversteer_minimum_angle,
                 oversteer_maximum_angle,
                 rotation_emergency_amount,
                 maximum_throttle,
-            ],
+            },
         );
         if m.bool(movement_complete) {
             m.set_bool(moving, false);
@@ -487,4 +495,368 @@ pub fn actor_move_update(context: &AiStepContext, host: &impl AiHost) {
 
 fn call_simple_output(context: &AiStepContext, host: &impl AiHost, kind: i32, a: i32) -> [f32; 6] {
     call_full(context, host, kind, a, 0, &[]).output
+}
+
+/// actor_moving.c's facings.
+const FACING_FORWARD: i16 = 0;
+const FACING_BACKWARD: i16 = 1;
+const FACING_LEFT: i16 = 2;
+const FACING_RIGHT: i16 = 3;
+const FACING_FREE: i16 = 4;
+
+/// What the move update asks of [`calculate_movement`].
+struct Movement {
+    move_in_3d: bool,
+    override_facing: i16,
+    free_movement: bool,
+    free_movement_distance_squared: f32,
+    allow_all_moving_turns: bool,
+    steering_maximum_angle: f32,
+    oversteer_minimum_angle: f32,
+    oversteer_maximum_angle: f32,
+    rotation_emergency_amount: f32,
+    maximum_throttle: f32,
+}
+
+fn dot(a: Vector, b: Vector) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// C's `MIN`.
+fn min(a: f32, b: f32) -> f32 {
+    if a > b { b } else { a }
+}
+
+/// C's `MAX`.
+fn max(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+/// `actor_move_calculate_movement`: the facing, its direction and the
+/// throttle towards the actor's moving vector, whether the facing thwarts
+/// the movement and whether it is complete, into the actor's control and
+/// output.
+fn calculate_movement(context: &AiStepContext, host: &impl AiHost, movement: Movement) {
+    let m = host.memory();
+    let actor = context.actor;
+    let at = |offset: usize| actor + offset as u32;
+    let move_in_3d = movement.move_in_3d;
+    let mut maximum_throttle = movement.maximum_throttle;
+    let mut oversteer_minimum_angle = movement.oversteer_minimum_angle;
+    let mut oversteer_maximum_angle = movement.oversteer_maximum_angle;
+    let desired_movement_vector = m.vector(at(a::CONTROL_MOVING_TOWARDS_VECTOR));
+    let input_facing = m.vector(at(a::INPUT_FACING_VECTOR));
+    let forced_by_aiming = m.bool(at(a::CONTROL_MOVING_FORCED_BY_AIMING));
+    let mut facing_vector;
+    let mut free_throttle = [0.0f32; 3];
+    let mut minimum_facing_dot = 0.8660254f32;
+    let mut facing_direction;
+
+    if m.bool(at(a::ORDERS_MOVE_MOVE_FACE_EXACTLY)) {
+        m.set_bool(at(a::CONTROL_FACE_EXACTLY), true);
+    }
+
+    if (FACING_FORWARD..=FACING_RIGHT).contains(&movement.override_facing) {
+        facing_direction = movement.override_facing;
+        let mut movement_vector = desired_movement_vector;
+        if !move_in_3d {
+            movement_vector[2] = 0.0;
+        }
+        if normalize3(&mut movement_vector) == 0.0 {
+            movement_vector = input_facing;
+        }
+        facing_vector = match movement.override_facing {
+            FACING_FORWARD => movement_vector,
+            FACING_BACKWARD => [-movement_vector[0], -movement_vector[1], movement_vector[2]],
+            FACING_LEFT => [-movement_vector[1], movement_vector[0], movement_vector[2]],
+            _ => [movement_vector[1], -movement_vector[0], movement_vector[2]],
+        };
+        if movement.free_movement {
+            free_throttle = calculate_free(move_in_3d, movement_vector, facing_vector);
+            facing_direction = FACING_FREE;
+        }
+    } else {
+        let movement_distance_squared = magnitude_squared(desired_movement_vector);
+        if movement_distance_squared > 0.8f32 * 0.8f32 {
+            minimum_facing_dot = m.f32(context.definition + d::MOVING_RUNTIME_BEGIN_MOVEMENT_ANGLE_COSINE as u32);
+        }
+
+        if movement.free_movement && movement_distance_squared < movement.free_movement_distance_squared {
+            let mut movement_vector = desired_movement_vector;
+            let mut face_actor_facing = false;
+
+            if forced_by_aiming {
+                facing_vector = m.vector(at(a::CONTROL_MOVING_FORCED_AIM_DIRECTION));
+                if m.i16(at(a::INPUT_VEHICLE_DRIVER_TYPE)) > v::_ACTOR_VEHICLE_DRIVER_NONE as i16 {
+                    face_actor_facing = true;
+                }
+            } else {
+                facing_vector = input_facing;
+            }
+
+            if !move_in_3d {
+                movement_vector[2] = 0.0;
+                facing_vector[2] = 0.0;
+            }
+            if normalize3(&mut facing_vector) == 0.0 {
+                facing_vector = input_facing;
+            }
+            if normalize3(&mut movement_vector) == 0.0 {
+                movement_vector = facing_vector;
+            }
+
+            let free_facing_vector = if face_actor_facing {
+                let mut actor_facing_vector = input_facing;
+                if !move_in_3d {
+                    actor_facing_vector[2] = 0.0;
+                }
+                if normalize3(&mut actor_facing_vector) == 0.0 {
+                    actor_facing_vector = facing_vector;
+                }
+                actor_facing_vector
+            } else {
+                facing_vector
+            };
+            free_throttle = calculate_free(move_in_3d, movement_vector, free_facing_vector);
+            facing_direction = FACING_FREE;
+        } else if forced_by_aiming {
+            (facing_vector, facing_direction) = calculate_controlled_by_aiming(
+                move_in_3d,
+                desired_movement_vector,
+                m.vector(at(a::CONTROL_MOVING_FORCED_AIM_DIRECTION)),
+                input_facing,
+            );
+        } else {
+            facing_vector = desired_movement_vector;
+            if !move_in_3d {
+                facing_vector[2] = 0.0;
+            }
+            if normalize3(&mut facing_vector) == 0.0 {
+                facing_vector = input_facing;
+            }
+            facing_direction = FACING_FORWARD;
+        }
+    }
+
+    let facing_dot = dot(facing_vector, input_facing);
+
+    let facing_allows_movement = if movement.allow_all_moving_turns
+        || m.i16(at(a::OUTPUT_MOVEMENT_TYPE)) == v::_ACTOR_MOVEMENT_TYPE_FLAMING as i16
+    {
+        true
+    } else {
+        if !m.bool(at(a::STATE_FLYING)) {
+            call_simple(context, host, call::FIND_PATHFINDING_LOCATION, 0);
+            let pathfinding_surface_index = m.i32(at(a::INPUT_PATHFINDING_SURFACE_INDEX));
+            if pathfinding_surface_index != NONE {
+                let f = m.vector(at(a::INPUT_FACING_VECTOR));
+                let movement_direction = match facing_direction {
+                    FACING_FORWARD => Some([f[0], f[1]]),
+                    FACING_BACKWARD => Some([-f[0], -f[1]]),
+                    FACING_LEFT => Some([f[1], -f[0]]),
+                    FACING_RIGHT => Some([-f[1], f[0]]),
+                    _ => None,
+                };
+                if let Some(mut direction) = movement_direction
+                    && normalize2(&mut direction) > 0.0
+                {
+                    let body = m.vector(at(a::INPUT_BODY_POSITION));
+                    let test_point = [body[0] + 0.4 * direction[0], body[1] + 0.4 * direction[1]];
+                    let structure = crate::path::Structure::new(m, context.structure, context.breakable_surface_flags);
+                    let (blocked, _) = structure.test_line2d(
+                        m.bool(at(a::EMOTIONS_IGNORANT_OF_BROKEN_SURFACES)),
+                        [body[0], body[1]],
+                        pathfinding_surface_index,
+                        test_point,
+                        NONE,
+                    );
+                    if blocked {
+                        minimum_facing_dot = max(minimum_facing_dot, 0.95);
+                    }
+                }
+            }
+        }
+        facing_dot > minimum_facing_dot
+    };
+
+    let destination_tolerance = call_simple_output(context, host, call::DESTINATION_TOLERANCE, 0)[0];
+    let movement_distance_squared = magnitude_squared(desired_movement_vector);
+    m.set_bool(
+        at(a::CONTROL_MOVEMENT_COMPLETE),
+        movement_distance_squared < destination_tolerance * destination_tolerance,
+    );
+
+    let stopping = call_simple_output(context, host, call::STOPPING_DISTANCES, 0);
+    let (current_stopping_distance, maximum_stopping_distance) = (stopping[0], stopping[1]);
+    if !m.bool(at(a::CONTROL_PATH_DESTINATION_KEEP_MOVING))
+        && movement_distance_squared < current_stopping_distance * current_stopping_distance
+    {
+        let movement_distance = movement_distance_squared.sqrt();
+        if movement_distance > maximum_stopping_distance + 0.05 && current_stopping_distance > maximum_stopping_distance {
+            maximum_throttle = min(
+                maximum_throttle,
+                (movement_distance - maximum_stopping_distance) / (current_stopping_distance - maximum_stopping_distance),
+            );
+        } else {
+            maximum_throttle = 0.0;
+        }
+    }
+
+    let mut throttle = [0.0f32; 3];
+    if facing_allows_movement {
+        match facing_direction {
+            FACING_FORWARD => throttle[0] = 1.0,
+            FACING_BACKWARD => throttle[0] = -1.0,
+            FACING_LEFT => throttle[1] = -1.0,
+            FACING_RIGHT => throttle[1] = 1.0,
+            FACING_FREE => throttle = free_throttle,
+            _ => {}
+        }
+        throttle = [throttle[0] * maximum_throttle, throttle[1] * maximum_throttle, throttle[2] * maximum_throttle];
+        m.set_bool(at(a::CONTROL_MOVEMENT_THWARTED), false);
+    } else {
+        m.set_bool(at(a::CONTROL_FACE_EXACTLY), true);
+        m.set_bool(at(a::CONTROL_MOVEMENT_THWARTED), true);
+    }
+
+    if call_simple(context, host, call::OVERSTEER_DISABLE, 0) != 0 {
+        oversteer_maximum_angle = 0.0;
+        oversteer_minimum_angle = 0.0;
+    }
+
+    let steering_maximum_angle = movement.steering_maximum_angle;
+    if steering_maximum_angle > 0.0 || oversteer_maximum_angle > 0.0 {
+        let angle = if facing_dot >= 1.0 {
+            0.0
+        } else if facing_dot <= -1.0 {
+            std::f32::consts::PI
+        } else {
+            // arccosine: the C's double acos
+            (facing_dot as f64).acos() as f32
+        };
+
+        let mut steering_angle = angle;
+        if steering_maximum_angle > 0.0 {
+            let rotation_emergency_amount = movement.rotation_emergency_amount;
+            let mut minimum_steering_angle = steering_maximum_angle * rotation_emergency_amount;
+            let mut maximum_steering_angle = steering_maximum_angle;
+            if rotation_emergency_amount > 1.0 {
+                maximum_steering_angle = min(rotation_emergency_amount, 1.5) * steering_maximum_angle;
+            }
+            minimum_steering_angle = min(angle * 3.0, minimum_steering_angle);
+            // C's PIN
+            steering_angle = if steering_angle < minimum_steering_angle {
+                minimum_steering_angle
+            } else if steering_angle > maximum_steering_angle {
+                maximum_steering_angle
+            } else {
+                steering_angle
+            };
+        }
+
+        let oversteer = at(a::CONTROL_FACE_EXACTLY_OVERSTEER_ANGLE);
+        if steering_angle > m.f32(oversteer) {
+            if m.bool(at(a::CONTROL_FACE_EXACTLY)) && steering_angle > oversteer_minimum_angle {
+                m.set_f32(oversteer, min(steering_angle, oversteer_maximum_angle));
+            }
+        } else if m.f32(oversteer) > 0.0 {
+            if steering_angle < oversteer_minimum_angle {
+                m.set_f32(oversteer, 0.0);
+            } else {
+                steering_angle = m.f32(oversteer);
+            }
+        }
+
+        let angle_adjustment = steering_angle - angle;
+        if angle_adjustment.abs() > EPSILON {
+            let f = m.vector(at(a::INPUT_FACING_VECTOR));
+            let mut rotation_axis = [
+                f[1] * facing_vector[2] - f[2] * facing_vector[1],
+                f[2] * facing_vector[0] - f[0] * facing_vector[2],
+                f[0] * facing_vector[1] - f[1] * facing_vector[0],
+            ];
+            if normalize3(&mut rotation_axis) > 0.0 {
+                // sine and cosine: the C's double sin and cos
+                let adjustment = angle_adjustment as f64;
+                facing_vector =
+                    rotate_about_axis(facing_vector, rotation_axis, adjustment.sin() as f32, adjustment.cos() as f32);
+            }
+        }
+    }
+
+    m.set_i16(at(a::CONTROL_MOVING_FACING_DIRECTION), facing_direction);
+    set_vector(m, at(a::CONTROL_DESIRED_FACING_VECTOR), facing_vector);
+    set_vector(m, at(a::OUTPUT_THROTTLE), throttle);
+}
+
+/// `actor_move_calculate_controlled_by_aiming`: of forward, backward, left
+/// and right of the movement, the direction nearest the forced aim that
+/// turns least.
+fn calculate_controlled_by_aiming(
+    move_in_3d: bool,
+    movement_vector: Vector,
+    forced_aim_direction: Vector,
+    current_facing_vector: Vector,
+) -> (Vector, i16) {
+    let mut directions = [[0.0f32; 3]; 4];
+    directions[0] = movement_vector;
+    if move_in_3d {
+        if normalize3(&mut directions[0]) == 0.0 {
+            directions[0] = current_facing_vector;
+        }
+        directions[2] = [0.0; 3];
+    } else {
+        directions[0][2] = 0.0;
+        if normalize3(&mut directions[0]) == 0.0 {
+            directions[0] = current_facing_vector;
+        }
+        directions[2] = [-directions[0][1], directions[0][0], 0.0];
+    }
+    directions[1] = [-directions[0][0], -directions[0][1], -directions[0][2]];
+    directions[3] = [-directions[2][0], -directions[2][1], -directions[2][2]];
+
+    let mut best_direction = NONE as i16;
+    let mut best_aim_dot = 0.0f32;
+    let mut best_facing_dot = 0.0f32;
+    for direction in FACING_FORWARD..FACING_FREE {
+        let d = directions[direction as usize];
+        let (aim_dot, facing_dot) = if move_in_3d {
+            (dot(d, forced_aim_direction), dot(d, current_facing_vector))
+        } else {
+            (
+                d[0] * forced_aim_direction[0] + d[1] * forced_aim_direction[1],
+                d[0] * current_facing_vector[0] + d[1] * current_facing_vector[1],
+            )
+        };
+        let better = if aim_dot > best_aim_dot {
+            facing_dot > best_facing_dot || best_facing_dot < 0.5
+        } else {
+            facing_dot > best_facing_dot && aim_dot > 0.5
+        };
+        if best_direction == NONE as i16 || better {
+            best_direction = direction;
+            best_aim_dot = aim_dot;
+            best_facing_dot = facing_dot;
+        }
+    }
+
+    (directions[best_direction as usize], best_direction)
+}
+
+/// `actor_move_calculate_free`: the throttle along the movement in the
+/// facing's axes.
+fn calculate_free(move_in_3d: bool, movement_direction: Vector, facing_direction: Vector) -> Vector {
+    let mut throttle = if move_in_3d {
+        let (left, up) = crate::biped::flying_axes(facing_direction);
+        [dot(movement_direction, facing_direction), dot(movement_direction, left), dot(movement_direction, up)]
+    } else {
+        let perpendicular = [-facing_direction[1], facing_direction[0]];
+        [
+            movement_direction[0] * facing_direction[0] + movement_direction[1] * facing_direction[1],
+            movement_direction[0] * perpendicular[0] + movement_direction[1] * perpendicular[1],
+            0.0,
+        ]
+    };
+    normalize3(&mut throttle);
+    throttle
 }

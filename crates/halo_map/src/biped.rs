@@ -112,7 +112,7 @@ pub const COLLISION_FLAGS_DEAD: u32 = 0xc0a0;
 const SKIP_PLAYER_BIPEDS: u32 = 1 << 23;
 
 /// `biped_build_flying_axes`: left and up for a flying biped's forward.
-fn flying_axes(forward: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+pub(crate) fn flying_axes(forward: [f32; 3]) -> ([f32; 3], [f32; 3]) {
     let mut up = UP;
     let mut left = cross3(up, forward);
     if normalize3(&mut left) == 0.0 {

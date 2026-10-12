@@ -69,7 +69,7 @@ pub struct WorldStepC {
 
 /// halo_sim.c's `halo_sim_world_checksum`: FNV-1a over the regions end to
 /// end.
-fn world_checksum(regions: &[WorldRegionC]) -> u32 {
+pub(crate) fn world_checksum(regions: &[WorldRegionC]) -> u32 {
     let mut hash = 2166136261u32;
     for region in regions {
         // SAFETY: the game's memory the region names
@@ -116,21 +116,26 @@ impl CheckHost<'_> {
     }
 
     /// Writes bytes at an offset into the regions laid end to end.
-    fn write(&self, mut offset: u32, bytes: &[u8]) {
-        for region in self.regions {
-            if offset < region.size {
-                // SAFETY: the game's memory the region names, within it
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        (region.address + offset) as usize as *mut u8,
-                        bytes.len().min((region.size - offset) as usize),
-                    )
-                };
-                return;
-            }
-            offset -= region.size;
+    fn write(&self, offset: u32, bytes: &[u8]) {
+        world_write(self.regions, offset, bytes);
+    }
+}
+
+/// Writes bytes at an offset into the regions laid end to end.
+pub(crate) fn world_write(regions: &[WorldRegionC], mut offset: u32, bytes: &[u8]) {
+    for region in regions {
+        if offset < region.size {
+            // SAFETY: the game's memory the region names, within it
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    (region.address + offset) as usize as *mut u8,
+                    bytes.len().min((region.size - offset) as usize),
+                )
+            };
+            return;
         }
+        offset -= region.size;
     }
 }
 
@@ -192,7 +197,7 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
 ///
 /// # Safety
 /// `pointer` must hold `count` elements for the slice's life.
-unsafe fn slice_of<'a, T>(pointer: *const T, count: u32) -> &'a [T] {
+pub(crate) unsafe fn slice_of<'a, T>(pointer: *const T, count: u32) -> &'a [T] {
     if pointer.is_null() || count == 0 {
         &[]
     } else {

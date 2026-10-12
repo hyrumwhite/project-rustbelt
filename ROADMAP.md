@@ -711,6 +711,19 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every decision loop agrees in minute-long runs of the levels, with none left out.
        - A planted error in the actor's coordination was caught on b30, where the availability runs about ten times a minute. Planted errors in the limits went unseen: the counts stayed far below them.
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The examined pursuit positions in Rust (`halo_map::pursuits`, under `actor_dispatch`): encounters.c's `encounter_find_pursuit`, `encounter_mark_examined_pursuit_position` and `encounter_pursuit_position_already_examined`.
+     - **What Rust does:**
+       - It keeps each encounter's list of searched firing positions, with when each was last examined and by which actors (up to six).
+       - A position not examined since the target was last seen is reset, and a new one is made from the pursuits' data array.
+       - Firing positions, search and uncover now mark and test positions directly instead of through calls.
+     - **The check:** the dispatch steps' check now also follows the encounters' and pursuits' arrays, headers and elements (about 24 KB).
+       - Each recorded call stores the arrays' checksum before it and its runs of changed bytes, as the world steps do.
+       - The game's arrays are put back for Rust's replay (a mismatch before a call is reason 7), then compared byte for byte with the game's.
+       - The step context gains `pursuit_data`.
+     - **Results:**
+       - Every decision loop, action update and action control agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out. a30 runs no dispatch in its first minute.
+       - A planted error in the examined time was caught on b30 and b40. A planted error in linking a new pursuit was caught on b40; b30 made no new pursuit in that run.
+       - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

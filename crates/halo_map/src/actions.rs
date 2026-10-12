@@ -908,13 +908,11 @@ fn search_perform(context: &AiStepContext, host: &impl AiHost) -> bool {
                 last_perceived_time = m.i32(prop_get(m, context, target_prop_index) + p::LAST_PERCEIVED_TIME as u32);
             }
             if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE {
-                call_full(
+                crate::pursuits::mark_examined(
+                    m,
                     context,
-                    host,
-                    search_call::MARK_EXAMINED,
-                    m.i16(at(a::STATE_SEARCH_PURSUIT_FIRING_POSITION_INDEX)) as i32,
+                    m.i16(at(a::STATE_SEARCH_PURSUIT_FIRING_POSITION_INDEX)),
                     last_perceived_time,
-                    &[],
                 );
             }
         } else if nearby_searching_actor_count > 0 {

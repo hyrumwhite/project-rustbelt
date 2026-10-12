@@ -51,6 +51,7 @@ pub mod damage_update;
 pub mod devices;
 pub mod effects;
 pub mod encounters;
+pub mod pursuits;
 pub mod particles;
 pub mod contrails;
 pub mod conversations;

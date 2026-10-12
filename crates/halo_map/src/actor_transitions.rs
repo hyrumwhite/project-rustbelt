@@ -1450,16 +1450,7 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
                         let last_perceived_time =
                             orphan.map_or(NONE, |orphan| m.i32(orphan + p::LAST_PERCEIVED_TIME as u32));
                         if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE
-                            && call_full(
-                                context,
-                                host,
-                                call::MARK_EXAMINED,
-                                firing_position_index as i32,
-                                last_perceived_time,
-                                &[],
-                            )
-                            .result
-                                != 0
+                            && crate::pursuits::mark_examined(m, context, firing_position_index, last_perceived_time)
                         {
                             let count = at(a::FIRING_POSITIONS_PURSUIT_POSITIONS_COUNT);
                             if m.i16(count) == 0 {

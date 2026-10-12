@@ -1003,29 +1003,25 @@ fn post_evaluator_pursuit(
     let examining_actor_count: i16;
     let mut fresh = true;
     if firing_position.line_of_sight == LINE_OF_SIGHT_CLEAR && firing_position.path_distance_from_actor < 6.0 {
-        call_full(
+        crate::pursuits::mark_examined(
+            host.memory(),
             context,
-            host,
-            call::MARK_EXAMINED,
-            firing_position.original_index as i32,
+            firing_position.original_index,
             evaluation_context.pursue_last_perceived_time,
-            &[],
         );
         last_examined_time = current_time;
         examining_actor_count = 7;
         fresh = false;
     } else {
-        let examined = call_full(
+        let (examined, count, time) = crate::pursuits::already_examined(
+            host.memory(),
             context,
-            host,
-            call::ALREADY_EXAMINED,
-            firing_position.original_index as i32,
+            firing_position.original_index,
             evaluation_context.pursue_last_perceived_time,
-            &[],
         );
-        last_examined_time = examined.result2;
-        examining_actor_count = examined.output[0] as i16;
-        if examined.result != 0 {
+        last_examined_time = time;
+        examining_actor_count = count;
+        if examined {
             fresh = false;
         }
     }

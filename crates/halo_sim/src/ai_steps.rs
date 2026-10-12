@@ -24,6 +24,7 @@ use halo_map::actor_situation::actor_situation_update;
 use halo_map::actor_unit_control::actor_unit_control;
 use halo_map::actor_upkeep::{actor_clear_orders, actor_clear_output, actor_get_timeslice};
 use halo_map::ai_actor::{AiCall, AiHost, AiMemory, AiStepContext, PropIterator};
+use crate::world_steps::{slice_of, world_checksum, world_write, WorldRegionC, WorldRunC};
 
 /// `sizeof(struct actor_datum)`.
 pub const ACTOR_DATUM_SIZE: usize = halo_map::layout::actor_datum::SIZEOF;
@@ -101,13 +102,19 @@ pub struct AiEventC {
     /// The head of the actor's debug info before and after the call.
     pub debug_before: [u8; ACTOR_DEBUG_HEAD_SIZE],
     pub debug_after: [u8; ACTOR_DEBUG_HEAD_SIZE],
+    /// For a step that follows the game's arrays: their checksum before the
+    /// call ([`world_checksum`]) and its runs of changed bytes.
+    pub region_checksum: u32,
+    pub run_first: u32,
+    pub run_count: u32,
 }
 
 /// A step: where it works, what it returns (for the steps that return
 /// something: the timeslice and the general update), and in check mode the
 /// game's calls and the first that differs (-1 for none) and why (1 its
 /// kind, 2 its arguments, 3 the actor before it, 4 more calls than the
-/// game's, 5 fewer, 6 the actor's props before it).
+/// game's, 5 fewer, 6 the actor's props before it, 7 the followed arrays
+/// before it).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct AiStepC {
@@ -122,6 +129,14 @@ pub struct AiStepC {
     pub props: i32,
     pub deltas: *const AiPropDeltaC,
     pub delta_count: u32,
+    /// The game's arrays the step's check follows besides the actor and its
+    /// props (the encounters and pursuits, for the dispatch steps), and the
+    /// calls' runs of changes to them.
+    pub regions: *const WorldRegionC,
+    pub region_count: u32,
+    pub runs: *const WorldRunC,
+    pub run_count: u32,
+    pub pool: *const u8,
 }
 
 /// The game's memory, in this process.
@@ -200,6 +215,9 @@ struct CheckHost<'a> {
     deltas: &'a [AiPropDeltaC],
     actor: u32,
     events: &'a [AiEventC],
+    regions: &'a [WorldRegionC],
+    runs: &'a [WorldRunC],
+    pool: *const u8,
     next: Cell<usize>,
     difference: Cell<Option<(usize, i32)>>,
 }
@@ -246,6 +264,17 @@ impl AiHost for CheckHost<'_> {
         }
         if self.props && props_checksum(&GameMemory, &self.context) != event.prop_checksum {
             self.differ(index, 6);
+        }
+        if !self.regions.is_empty() {
+            if world_checksum(self.regions) != event.region_checksum {
+                self.differ(index, 7);
+            }
+            let first = event.run_first as usize;
+            for run in self.runs.get(first..first + event.run_count as usize).unwrap_or(&[]) {
+                // SAFETY: the run's bytes in the game's pool
+                let bytes = unsafe { std::slice::from_raw_parts(self.pool.add(run.data as usize), run.size as usize) };
+                world_write(self.regions, run.offset, bytes);
+            }
         }
         // SAFETY: the actor's datum in the game's memory
         let actor = unsafe { std::slice::from_raw_parts_mut(self.actor as usize as *mut u8, ACTOR_DATUM_SIZE) };
@@ -418,6 +447,11 @@ pub unsafe extern "C" fn halo_sim_ai_step_check(step: i32, step_call: *mut AiSte
         deltas,
         actor: step_call.context.actor,
         events,
+        // SAFETY: the game's recording, as described
+        regions: unsafe { slice_of(step_call.regions, step_call.region_count) },
+        // SAFETY: as above
+        runs: unsafe { slice_of(step_call.runs, step_call.run_count) },
+        pool: step_call.pool,
         next: Cell::new(0),
         difference: Cell::new(None),
     };

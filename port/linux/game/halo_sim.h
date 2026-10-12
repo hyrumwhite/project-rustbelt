@@ -69,6 +69,8 @@ enum
 	_halo_sim_data_packets,
 	/* the distributed netcode's wire format (network_distributed.c) */
 	_halo_sim_distributed_wire,
+	/* a client's applying of the host's state (network_objects.c) */
+	_halo_sim_network_apply,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2344,6 +2346,9 @@ enum
 	_halo_sim_world_step_encounters = 0,
 	_halo_sim_world_step_conversations,
 	_halo_sim_world_step_communication,
+	_halo_sim_world_step_network_apply_state,
+	_halo_sim_world_step_network_object_correct,
+	_halo_sim_world_step_network_object_reconcile,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2389,7 +2394,50 @@ struct halo_sim_world_context
 	unsigned long dialogue_events;
 	unsigned long communication_selected;
 	unsigned long communication_flags;
+	/* the step's own arguments (a struct; 0 for none) */
+	unsigned long arguments;
 };
+
+/* crates/halo_map's network_apply::Arguments: a client's applying of the
+host's state, its arguments (by value) and result */
+struct halo_sim_network_apply
+{
+	long object_index;
+	float position[3];
+	float forward[3];
+	float up[3];
+	float velocity[3];
+	float angular_velocity[3];
+	long has_velocity;
+	long has_angular_velocity;
+	float tolerance;
+	float blend_distance;
+	float maximum_speed;
+	float maximum_fall_speed;
+	/* (distributed_apply_state's: network_distributed.c's struct
+	distributed_unit_state) */
+	unsigned char state[64];
+	/* network_distributed.c's corrections count, 0 for none */
+	unsigned long corrections;
+	long result;
+};
+
+typedef char halo_sim_network_apply_size_assert[sizeof(struct halo_sim_network_apply) == 160 ? 1 : -1];
+
+/* network_objects.c's calls (crates/halo_map's network_apply::call) */
+enum
+{
+	_network_apply_call_set_position = 1,
+	_network_apply_call_interpolation,
+	_network_apply_call_coop_state,
+};
+
+/* network_objects.c's: the applying's call function, and its world (the
+object's datum, the arguments, and the corrections count); returns the
+regions' count */
+void network_apply_call(struct halo_sim_ai_call *call);
+long network_apply_world(struct halo_sim_world_context *context, struct halo_sim_network_apply *arguments,
+	struct halo_sim_world_region *regions);
 
 /* the world step's update in Rust when asked (returns TRUE, done), or the
 game's (FALSE; in check mode `checking`, the game's then runs, its calls

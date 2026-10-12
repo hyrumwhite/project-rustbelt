@@ -338,6 +338,7 @@ struct distributed_player_input
 	unsigned short control_flags[DISTRIBUTED_INPUT_HISTORY];
 };
 
+typedef char distributed_unit_state_size_assert[sizeof(struct distributed_unit_state) == 64 ? 1 : -1];
 typedef char distributed_player_input_size_assert[
 	sizeof(struct distributed_player_input) == 12 + 0x20 + 2 * DISTRIBUTED_INPUT_HISTORY ? 1 : -1];
 typedef char distributed_player_input_action_offset_assert[
@@ -1795,7 +1796,7 @@ static word distributed_unit_state_read(
 tolerance from it: within blend_distance part of the way, further all of it,
 no faster than maximum_speed across and up and maximum_fall_speed down (0
 for any); FALSE for a state that cannot be */
-static boolean distributed_apply_state(
+static boolean distributed_apply_state_game(
 	long unit_index,
 	struct distributed_unit_state const *state,
 	real_point3d const *position,
@@ -1838,6 +1839,45 @@ static boolean distributed_apply_state(
 	if (network_objects_reconcile(unit_index, position, &forward, &up, &velocity, NULL, blend_distance))
 		distributed_statistics.corrections++;
 	return TRUE;
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_apply), checked
+against the game's otherwise */
+static boolean distributed_apply_state(
+	long unit_index,
+	struct distributed_unit_state const *state,
+	real_point3d const *position,
+	real tolerance,
+	real blend_distance,
+	real maximum_speed,
+	real maximum_fall_speed)
+{
+	struct halo_sim_network_apply arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	long region_count;
+	int checking = FALSE;
+
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.object_index = unit_index;
+	csmemcpy(arguments.position, position, sizeof(*position));
+	csmemcpy(arguments.state, state, sizeof(arguments.state));
+	arguments.tolerance = tolerance;
+	arguments.blend_distance = blend_distance;
+	arguments.maximum_speed = maximum_speed;
+	arguments.maximum_fall_speed = maximum_fall_speed;
+	arguments.corrections = (unsigned long)&distributed_statistics.corrections;
+	region_count = network_apply_world(&context, &arguments, regions);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_apply_state, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return (boolean)arguments.result;
+	}
+	arguments.result = distributed_apply_state_game(unit_index, state, position, tolerance, blend_distance,
+		maximum_speed, maximum_fall_speed);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_apply_state);
+	return (boolean)arguments.result;
 }
 
 /* (a client) where its own players' units are this tick, noted */

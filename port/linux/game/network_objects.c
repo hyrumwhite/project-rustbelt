@@ -739,16 +739,91 @@ its flight path): nothing on a client steers it, so its copy is kept at rest
 there (no physics of its own) and moved only to where the host has it. In
 multiplayer an empty vehicle (one bailed out of, or tumbling) keeps its own
 physics between updates. */
-static boolean distributed_vehicle_unsteered(
-	long object_index)
+/* port: the applying's calls into the game (the Rust port's,
+crates/halo_map's network_apply), recorded in check mode */
+void network_apply_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_apply_call_set_position:
+		object_set_position(call->a, (real_point3d const *)&call->input[0], (real_vector3d const *)&call->input[3],
+			(real_vector3d const *)&call->input[6]);
+		break;
+	case _network_apply_call_interpolation:
+		render_interpolation_correct_object(call->a, (real_vector3d const *)&call->input[0]);
+		break;
+	case _network_apply_call_coop_state:
+		call->result = network_coop_active() ? 1 | (cinematic_in_progress() ? 2 : 0) : 0;
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static long network_apply_coop_state(
+	void)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_apply_call_coop_state;
+	call.actor = NONE;
+	network_apply_call(&call);
+	return call.result;
+}
+
+static void network_apply_set_position(
+	long object_index,
+	real_point3d const *position,
+	real_vector3d const *forward,
+	real_vector3d const *up)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_apply_call_set_position;
+	call.actor = NONE;
+	call.a = object_index;
+	csmemcpy(&call.input[0], position, sizeof(*position));
+	csmemcpy(&call.input[3], forward, sizeof(*forward));
+	csmemcpy(&call.input[6], up, sizeof(*up));
+	network_apply_call(&call);
+}
+
+static void network_apply_interpolation(
+	long object_index,
+	real_vector3d const *offset)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_apply_call_interpolation;
+	call.actor = NONE;
+	call.a = object_index;
+	csmemcpy(&call.input[0], offset, sizeof(*offset));
+	network_apply_call(&call);
+}
+
+/* (co-op's state given: network_apply_coop_state) */
+static boolean distributed_vehicle_unsteered_with(
+	long object_index,
+	long coop_state)
 {
 	struct unit_datum *vehicle;
 
-	if (!network_coop_active() || object_get(object_index)->object.type != _object_type_vehicle)
+	if (!(coop_state & 1) || object_get(object_index)->object.type != _object_type_vehicle)
 		return FALSE;
 	vehicle = unit_get(object_index);
 	return vehicle->unit.driver_object_index == NONE ||
 		unit_get(vehicle->unit.driver_object_index)->unit.player_index == NONE;
+}
+
+static boolean distributed_vehicle_unsteered(
+	long object_index)
+{
+	return distributed_vehicle_unsteered_with(object_index, network_apply_coop_state());
 }
 
 /* Whether a client puts its copy exactly where the host has it, rather than
@@ -757,7 +832,9 @@ closing on it: an unsteered vehicle, and anything in a co-op cutscene
 static boolean distributed_object_follows_host(
 	long object_index)
 {
-	return (network_coop_active() && cinematic_in_progress()) || distributed_vehicle_unsteered(object_index);
+	long coop_state = network_apply_coop_state();
+
+	return ((coop_state & 1) && (coop_state & 2)) || distributed_vehicle_unsteered_with(object_index, coop_state);
 }
 
 /* (the transform checked) */
@@ -776,18 +853,18 @@ static void distributed_object_move(
 	offset.i = object->object.position.x - position->x;
 	offset.j = object->object.position.y - position->y;
 	offset.k = object->object.position.z - position->z;
-	object_set_position(object_index, position, forward, up);
+	network_apply_set_position(object_index, position, forward, up);
 	if (velocity)
 		object->object.translational_velocity = *velocity;
 	if (angular_velocity)
 		object->object.angular_velocity = *angular_velocity;
 	if (!distributed_object_follows_host(object_index))
-		render_interpolation_correct_object(object_index, &offset);
+		network_apply_interpolation(object_index, &offset);
 	if (distributed_vehicle_unsteered(object_index))
 		SET_FLAG(object->object.flags, _object_at_rest_bit, TRUE);
 }
 
-void network_objects_correct(
+static void network_objects_correct_game(
 	long object_index,
 	real_point3d const *position,
 	real_vector3d const *forward,
@@ -802,7 +879,7 @@ void network_objects_correct(
 		distributed_object_move(object_index, position, &valid_forward, &valid_up, velocity, angular_velocity);
 }
 
-boolean network_objects_reconcile(
+static boolean network_objects_reconcile_game(
 	long object_index,
 	real_point3d const *position,
 	real_vector3d const *forward,
@@ -846,9 +923,9 @@ boolean network_objects_reconcile(
 		offset.i = object->object.position.x - blended.x;
 		offset.j = object->object.position.y - blended.y;
 		offset.k = object->object.position.z - blended.z;
-		object_set_position(object_index, &blended, &valid_forward, &valid_up);
+		network_apply_set_position(object_index, &blended, &valid_forward, &valid_up);
 		if (!distributed_object_follows_host(object_index))
-			render_interpolation_correct_object(object_index, &offset);
+			network_apply_interpolation(object_index, &offset);
 	}
 	if (velocity)
 		object->object.translational_velocity = *velocity;
@@ -857,6 +934,125 @@ boolean network_objects_reconcile(
 	if (distributed_vehicle_unsteered(object_index))
 		SET_FLAG(object->object.flags, _object_at_rest_bit, TRUE);
 	return FALSE;
+}
+
+/* port: the applying's world (halo_sim.c's world steps): the object's datum,
+the arguments and the corrections count */
+long network_apply_world(
+	struct halo_sim_world_context *context,
+	struct halo_sim_network_apply *arguments,
+	struct halo_sim_world_region *regions)
+{
+	struct object_header_datum *header =
+		(struct object_header_datum *)datum_get(object_header_data, arguments->object_index);
+	long count = 0;
+
+	memset(context, 0, sizeof(*context));
+	context->game_time = game_time_get();
+	context->object_header_data = (unsigned long)object_header_data;
+	context->arguments = (unsigned long)arguments;
+	regions[count].address = (unsigned long)header->datum;
+	regions[count++].size = header->data_size;
+	regions[count].address = (unsigned long)arguments;
+	regions[count++].size = sizeof(*arguments);
+	if (arguments->corrections)
+	{
+		regions[count].address = arguments->corrections;
+		regions[count++].size = sizeof(long);
+	}
+	return count;
+}
+
+static void network_apply_arguments(
+	struct halo_sim_network_apply *arguments,
+	long object_index,
+	real_point3d const *position,
+	real_vector3d const *forward,
+	real_vector3d const *up,
+	real_vector3d const *velocity,
+	real_vector3d const *angular_velocity)
+{
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->object_index = object_index;
+	csmemcpy(arguments->position, position, sizeof(*position));
+	csmemcpy(arguments->forward, forward, sizeof(*forward));
+	csmemcpy(arguments->up, up, sizeof(*up));
+	if (velocity)
+	{
+		csmemcpy(arguments->velocity, velocity, sizeof(*velocity));
+		arguments->has_velocity = TRUE;
+	}
+	if (angular_velocity)
+	{
+		csmemcpy(arguments->angular_velocity, angular_velocity, sizeof(*angular_velocity));
+		arguments->has_angular_velocity = TRUE;
+	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_apply), checked
+against the game's otherwise */
+void network_objects_correct(
+	long object_index,
+	real_point3d const *position,
+	real_vector3d const *forward,
+	real_vector3d const *up,
+	real_vector3d const *velocity,
+	real_vector3d const *angular_velocity)
+{
+	struct halo_sim_network_apply arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	long region_count;
+	int checking = FALSE;
+
+	if (!position || !forward || !up)
+	{
+		network_objects_correct_game(object_index, position, forward, up, velocity, angular_velocity);
+		return;
+	}
+	network_apply_arguments(&arguments, object_index, position, forward, up, velocity, angular_velocity);
+	region_count = network_apply_world(&context, &arguments, regions);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_object_correct, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return;
+	}
+	network_objects_correct_game(object_index, position, forward, up, velocity, angular_velocity);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_object_correct);
+}
+
+boolean network_objects_reconcile(
+	long object_index,
+	real_point3d const *position,
+	real_vector3d const *forward,
+	real_vector3d const *up,
+	real_vector3d const *velocity,
+	real_vector3d const *angular_velocity,
+	real blend_distance)
+{
+	struct halo_sim_network_apply arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	long region_count;
+	int checking = FALSE;
+
+	if (!position || !forward || !up)
+		return network_objects_reconcile_game(object_index, position, forward, up, velocity, angular_velocity,
+			blend_distance);
+	network_apply_arguments(&arguments, object_index, position, forward, up, velocity, angular_velocity);
+	arguments.blend_distance = blend_distance;
+	region_count = network_apply_world(&context, &arguments, regions);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_object_reconcile, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return (boolean)arguments.result;
+	}
+	arguments.result = network_objects_reconcile_game(object_index, position, forward, up, velocity, angular_velocity,
+		blend_distance);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_object_reconcile);
+	return (boolean)arguments.result;
 }
 
 /* an object's state as the host sent it, in full */

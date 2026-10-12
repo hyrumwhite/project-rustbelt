@@ -3509,6 +3509,7 @@ boolean actor_action_handle_lost_contact(
 	/* port: what it asks of the rest of the game through
 	actions_port_handler_call, as the Rust port's does (crates/halo_map's
 	actor_transitions) */
+	struct action_state_data action_data;
 	struct actor_datum *actor = actor_get(actor_index);
 	struct actor_definition *definition =
 		actor_definition_get(actor->meta.definition_index);
@@ -3664,8 +3665,9 @@ boolean actor_action_handle_lost_contact(
 		}
 
 		if (allow_target_uncover &&
-			actions_port_handler_simple(actor_index, _actions_port_handler_call_uncover_target, allow_target_search))
+			action_uncover_setup_target(actor_index, allow_target_search, &action_data.uncover))
 		{
+			actions_port_action_change(actor_index, _actor_action_uncover, &action_data);
 			handled = TRUE;
 		}
 
@@ -3675,9 +3677,9 @@ boolean actor_action_handle_lost_contact(
 				actor->target.target_prop_index);
 
 			if (allow_target_search &&
-				actions_port_handler_simple(actor_index, _actions_port_handler_call_search_target,
-					actor->emotions.forced_to_charge))
+				action_search_setup_target(actor_index, actor->emotions.forced_to_charge, &action_data.search))
 			{
+				actions_port_action_change(actor_index, _actor_action_search, &action_data);
 				handled = TRUE;
 			}
 
@@ -3708,9 +3710,9 @@ boolean actor_action_handle_lost_contact(
 					if (actor->meta.swarm)
 					{
 						if (allow_pursuit_search &&
-							actions_port_handler_simple(actor_index, _actions_port_handler_call_search_undirected,
-								pursue_tenacious))
+							action_search_setup_undirected(actor_index, pursue_tenacious, &action_data.search))
 						{
+							actions_port_action_change(actor_index, _actor_action_search, &action_data);
 							handled = TRUE;
 						}
 					}
@@ -3753,15 +3755,16 @@ boolean actor_action_handle_lost_contact(
 						if (firing_position_index != NONE)
 						{
 							if (!pursuit_from_uncover &&
-								actions_port_handler_simple(actor_index, _actions_port_handler_call_uncover_pursuit,
-									firing_position_index))
+								action_uncover_setup_pursuit(actor_index, firing_position_index, &action_data.uncover))
 							{
+								actions_port_action_change(actor_index, _actor_action_uncover, &action_data);
 								handled = TRUE;
 							}
 							else if (allow_pursuit_search &&
-								actions_port_handler(actor_index, _actions_port_handler_call_search_pursuit,
-									firing_position_index, pursue_tenacious, NULL, 0, NULL))
+								action_search_setup_pursuit(actor_index, firing_position_index, pursue_tenacious,
+									&action_data.search))
 							{
+								actions_port_action_change(actor_index, _actor_action_search, &action_data);
 								handled = TRUE;
 							}
 						}

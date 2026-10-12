@@ -437,6 +437,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **What Rust does:** an actor on foot (not a swarm, not already boarding) gets into a vehicle it wants, at the best seat it has an animation for, moving to the seat's entry.
      - **The C's side, through `actions_port_handler_call`:** whether the vehicle's desirable, the best seat, the entry animation, the destination by the seat's entry, and the move. Port wrappers expose action_vehicle.c's static helpers. The seat's entry point, facing and hint stay in the game between finding the seat and its destination: Rust never reads them, and in check mode neither call runs for it.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. The setup isn't reached in these runs: no enterable vehicle matches, and no player drives near a marine, so planted errors in it (the impromptu flag, the desirability's distances) weren't caught. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The actions' begins and ends in Rust (`halo_map::actor_transitions`): action_*.c's `action_*_begin` and `action_*_end`, all but obey's.
+     - **What Rust does:**
+       - fleeing: its timer restarts, a panic stops the search, and a blind panic starts the unit running blindly; ending it stops that;
+       - uncovering and searching: their times drawn from the actor's pursuit bounds (an uncover that can't search waits at least the target-location time), the uncover shouting when it starts on a target;
+       - guarding: forgetting recent damage, ending the search, and a successful retreat; a post-combat guard's end clears its orders;
+       - a vehicle's stuck detection starts, a strafing charge uses up a special-fire denial, and a conversation finishes when conversing ends.
+     - **The C's side, through `actions_port_handler_call`:** running blindly, finishing the conversation, the draws, the uncover's debug message (its own call, so Rust mode keeps it), forgetting damage and the retreat, and obey's begin and end (its individuals). The change's profile meter moves into the discarded positions' clearing call.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the uncover's time was caught on b30 and d20. One in the search's time wasn't (no search begins in these runs). With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

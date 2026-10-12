@@ -233,12 +233,12 @@ pub mod call {
     /// input[3])`, the result; the alignment it leaves in `output[0..2]` and
     /// the direction in `output[2]`.
     pub const EVASION_DIRECTION: i32 = BASE + 85;
-    /// The start of `actor_action_change`: its profile meter, and the end of
-    /// the actor's action `a`.
+    /// The end of the action `a` (obey's, the rest are Rust's).
     pub const ACTION_END: i32 = BASE + 86;
-    /// `actor_clear_discarded_firing_positions(actor, FALSE)`.
+    /// `actor_clear_discarded_firing_positions(actor, FALSE)`, and the
+    /// change's profile meter.
     pub const CLEAR_DISCARDED_FIRING_POSITIONS: i32 = BASE + 87;
-    /// The begin of the action `a`.
+    /// The begin of the action `a` (obey's, the rest are Rust's).
     pub const ACTION_BEGIN: i32 = BASE + 88;
     /// `seed_random_range(global seed, a, b)`, the result.
     pub const SEED_RANDOM_RANGE: i32 = BASE + 89;
@@ -286,6 +286,19 @@ pub mod call {
     pub const FIND_VEHICLE_DESTINATION: i32 = BASE + 101;
     /// `actor_move_to_point(actor, input[0..3], a, b)`, the result.
     pub const MOVE_TO_POINT: i32 = BASE + 102;
+    /// `unit_stop_running_blindly` of the actor's unit.
+    pub const UNIT_STOP_RUNNING_BLINDLY: i32 = BASE + 103;
+    /// `unit_start_running_blindly` of the actor's unit.
+    pub const UNIT_START_RUNNING_BLINDLY: i32 = BASE + 104;
+    /// `ai_conversation_finish(a, FALSE, FALSE)`.
+    pub const CONVERSATION_FINISH: i32 = BASE + 105;
+    /// The uncover's begin's debug message (when `ai_debug.print_uncovering`)
+    /// of its bounds `input[0..2]` and time `input[2]`.
+    pub const UNCOVER_DEBUG: i32 = BASE + 106;
+    /// `actor_perception_forget_recent_damage(actor)`.
+    pub const FORGET_RECENT_DAMAGE: i32 = BASE + 107;
+    /// `actor_perception_retreat_successful(actor)`.
+    pub const RETREAT_SUCCESSFUL: i32 = BASE + 108;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -311,6 +324,7 @@ const ACTION_WAIT: i16 = 8;
 const ACTION_VEHICLE: i16 = 9;
 const ACTION_CHARGE: i16 = 10;
 const ACTION_OBEY: i16 = 11;
+const ACTION_CONVERSE: i16 = 12;
 const ACTION_AVOID: i16 = 13;
 
 /// Each action's class (actions.c's `global_action_functions`).
@@ -2840,11 +2854,8 @@ pub fn try_to_dive(
     result
 }
 
-/// Each action's data's size, and whether it has a begin (actions.c's
-/// `global_action_functions`).
+/// Each action's data's size (actions.c's `global_action_functions`).
 const ACTION_DATA_SIZES: [usize; 14] = [0, 0, 92, 4, 48, 52, 68, 44, 24, 76, 56, 132, 20, 4];
-const ACTION_HAS_BEGIN: [bool; 14] =
-    [false, false, true, true, true, true, true, true, true, true, true, true, true, true];
 
 /// An action's data, as a setup fills it in for [`action_change`] (the
 /// game's `action_state_data`), from zeros.
@@ -2900,8 +2911,7 @@ impl Default for ActionData {
 pub fn action_change(context: &AiStepContext, host: &impl AiHost, new_action: i16, data: Option<&ActionData>) {
     let m = host.memory();
     let at = |offset: usize| context.actor + offset as u32;
-    let action = m.i16(at(a::STATE_ACTION));
-    call_simple(context, host, call::ACTION_END, action as i32);
+    action_end(context, host, m.i16(at(a::STATE_ACTION)));
     let mode = at(a::STATE_MODE);
     if ACTION_CLASSES[new_action as usize] == 0 {
         if m.i16(mode) >= 3 {
@@ -2919,9 +2929,7 @@ pub fn action_change(context: &AiStepContext, host: &impl AiHost, new_action: i1
     }
     m.set_i16(at(a::STATE_ACTION), new_action);
     m.set_bool(at(a::STATE_ACTION_CHANGED), true);
-    if ACTION_HAS_BEGIN[new_action as usize] {
-        call_simple(context, host, call::ACTION_BEGIN, new_action as i32);
-    }
+    action_begin(context, host, new_action);
 }
 
 /// action_alert.c's `action_alert_setup`: the move position order (none
@@ -3573,4 +3581,133 @@ pub fn vehicle_setup_impromptu(
         return None;
     }
     Some(data)
+}
+
+/// action_charge.c's special fire situation of strafing
+/// (`_actor_special_fire_situation_strafing`).
+const SPECIAL_FIRE_SITUATION_STRAFING: i16 = 3;
+
+/// The end of the actor's action (action_*.c's `action_*_end`): a fleeing
+/// unit stops running blindly, a post-combat guard's orders clear, and a
+/// conversation finishes.
+fn action_end(context: &AiStepContext, host: &impl AiHost, action: i16) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    match action {
+        ACTION_FLEE => {
+            if m.i32(at(a::META_UNIT_INDEX)) != NONE {
+                call_simple(context, host, call::UNIT_STOP_RUNNING_BLINDLY, 0);
+            }
+        }
+        ACTION_GUARD => {
+            if m.bool(at(a::STATE_GUARD_POST_COMBAT)) {
+                m.set_i16(at(a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE), 0);
+                m.w32(at(a::EXTERNAL_ORDERS_POSTCOMBAT_PROP_INDEX), NONE as u32);
+            }
+        }
+        ACTION_OBEY => {
+            call_simple(context, host, call::ACTION_END, ACTION_OBEY as i32);
+        }
+        ACTION_CONVERSE => {
+            let conversation_index = m.i32(at(a::EXTERNAL_ORDERS_CONVERSATION_INDEX));
+            if conversation_index != NONE {
+                call_simple(context, host, call::CONVERSATION_FINISH, conversation_index);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The begin of the actor's new action (action_*.c's `action_*_begin`).
+fn action_begin(context: &AiStepContext, host: &impl AiHost, action: i16) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = |offset: usize| m.f32(context.definition + offset as u32);
+    match action {
+        ACTION_FLEE => {
+            // action_flee.c's `action_flee_begin`
+            m.w32(at(a::STATE_FLEE_FLEE_TIMER), 0);
+            let panic_type = m.i16(at(a::STATE_FLEE_PANIC_TYPE));
+            if panic_type > PANIC_NONE {
+                m.set_bool(at(a::STATE_SEARCHING), false);
+            }
+            if m.i16(at(a::STATE_FLEE_FLEE_STATIONARY_TICKS)) == 0
+                && m.i32(at(a::META_UNIT_INDEX)) != NONE
+                && crate::actions::flee_blind_panic(m.i16(at(a::STATE_FLEE_PANIC_TYPE)))
+            {
+                call_simple(context, host, call::UNIT_START_RUNNING_BLINDLY, 0);
+            }
+        }
+        ACTION_UNCOVER => {
+            // action_uncover.c's `action_uncover_begin`
+            let mut lower_bound = definition(d::PURSUIT_UNCOVER_DELAY_TIME_LOWER_BOUND);
+            let mut upper_bound = definition(d::PURSUIT_UNCOVER_DELAY_TIME_UPPER_BOUND);
+            if !m.bool(at(a::STATE_UNCOVER_ABLE_TO_SEARCH)) {
+                let target_lower = definition(d::PURSUIT_TARGET_LOCATION_TIME_LOWER_BOUND);
+                let target_upper = definition(d::PURSUIT_TARGET_LOCATION_TIME_UPPER_BOUND);
+                lower_bound = if lower_bound > target_lower { lower_bound } else { target_lower };
+                upper_bound = if upper_bound > target_upper { upper_bound } else { target_upper };
+            }
+            let uncover_time =
+                call_full(context, host, call::REAL_SEED_RANDOM_RANGE, 0, 0, &[lower_bound, upper_bound]).output[0];
+            let desired_time = (uncover_time * 30.0) as i32;
+            m.w32(at(a::STATE_UNCOVER_UNCOVER_DESIRED_TIME), desired_time as u32);
+            m.w32(at(a::STATE_UNCOVER_UNCOVER_REMAINING_TIME), desired_time as u32);
+            call_full(context, host, call::UNCOVER_DEBUG, 0, 0, &[lower_bound, upper_bound, uncover_time]);
+            let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+            if m.i16(at(a::STATE_UNCOVER_PURSUIT_LOCATION_TYPE)) == 0
+                && target_prop_index != NONE
+                && m.i16(at(a::STATE_COMBAT_STATUS)) < 3
+            {
+                let prop = prop_get(m, context, target_prop_index);
+                call_full(context, host, call::COMMUNICATION, 21, m.i32(prop + p::UNIT_INDEX as u32), &[NONE as f32]);
+            }
+        }
+        ACTION_GUARD => {
+            // action_guard.c's `action_guard_begin`
+            call_simple(context, host, call::FORGET_RECENT_DAMAGE, 0);
+            m.set_bool(at(a::STATE_SEARCHING), false);
+            if m.bool(at(a::STATE_GUARD_COWER_FROM_RETREAT)) {
+                call_simple(context, host, call::RETREAT_SUCCESSFUL, 0);
+            }
+        }
+        ACTION_SEARCH => {
+            // action_search.c's `action_search_begin`
+            let (lower, upper) = if m.i16(at(a::STATE_SEARCH_PURSUIT_LOCATION_TYPE)) == 0 {
+                (definition(d::PURSUIT_TARGET_LOCATION_TIME_LOWER_BOUND), definition(d::PURSUIT_TARGET_LOCATION_TIME_UPPER_BOUND))
+            } else {
+                (definition(d::PURSUIT_PURSUIT_POSITION_TIME_LOWER_BOUND), definition(d::PURSUIT_PURSUIT_POSITION_TIME_UPPER_BOUND))
+            };
+            let time = call_full(context, host, call::REAL_SEED_RANDOM_RANGE, 0, 0, &[lower, upper]).output[0];
+            let search_time = (time * 30.0) as i32;
+            m.w32(at(a::STATE_SEARCH_SEARCH_DESIRED_TIME), search_time as u32);
+            m.w32(at(a::STATE_SEARCH_SEARCH_REMAINING_TIME), search_time as u32);
+        }
+        ACTION_VEHICLE => {
+            // action_vehicle.c's `action_vehicle_begin`
+            m.set_i16(at(a::STATE_VEHICLE_STUCK_DETECTION_COUNTER), 0);
+            m.w32(at(a::STATE_VEHICLE_STUCK_DETECTION_TIME), context.game_time as u32);
+            let body = m.vector(at(a::INPUT_BODY_POSITION));
+            for (i, value) in body.into_iter().enumerate() {
+                m.set_f32(at(a::STATE_VEHICLE_STUCK_DETECTION_POINT) + 4 * i as u32, value);
+            }
+        }
+        ACTION_CHARGE => {
+            // action_charge.c's `action_charge_begin`
+            if m.i16(at(a::STATE_CHARGE_GOAL)) == v::_CHARGE_GOAL_VEHICLE_STRAFING as i16 {
+                let firing_variant = call_simple(context, host, call::FIRING_VARIANT, 0) as u32;
+                if m.i16(firing_variant + var::RANGED_COMBAT_SPECIAL_FIRE_SITUATION as u32) == SPECIAL_FIRE_SITUATION_STRAFING {
+                    let attempts = at(a::CONTROL_SPECIAL_FIRE_DENY_ATTEMPTS);
+                    let remaining = m.i16(attempts);
+                    if remaining > 0 {
+                        m.set_i16(attempts, remaining - 1);
+                    }
+                }
+            }
+        }
+        ACTION_OBEY => {
+            call_simple(context, host, call::ACTION_BEGIN, ACTION_OBEY as i32);
+        }
+        _ => {}
+    }
 }

@@ -371,6 +371,17 @@ static void actor_move_calculate_movement(
 	boolean *movement_thwarted,
 	boolean *movement_complete);
 
+/* port: the move update's calls (actor_move_call) */
+static long actor_move_call_simple(
+	long actor_index,
+	long kind,
+	long a);
+
+static void actor_move_call_output(
+	long actor_index,
+	long kind,
+	float *output);
+
 /* ---------- globals */
 
 real const sense_ray_length = 1.f;
@@ -2638,7 +2649,8 @@ static void actor_move_calculate_movement(
 		{
 			long pathfinding_surface_index;
 
-			actor_find_pathfinding_location(actor_index);
+			/* port: a call */
+			actor_move_call_simple(actor_index, _actor_move_call_find_pathfinding_location, 0);
 			pathfinding_surface_index = actor->input.pathfinding_surface_index;
 			if (pathfinding_surface_index != NONE)
 			{
@@ -2717,17 +2729,25 @@ static void actor_move_calculate_movement(
 	}
 
 	{
-		real destination_tolerance = actor_destination_tolerance(actor_index);
+		/* port: a call */
+		float tolerance_output[6];
+		real destination_tolerance;
 
+		actor_move_call_output(actor_index, _actor_move_call_destination_tolerance, tolerance_output);
+		destination_tolerance = tolerance_output[0];
 		movement_distance_squared = magnitude_squared3d(desired_movement_vector);
 		*movement_complete =
 			movement_distance_squared < destination_tolerance*destination_tolerance;
 	}
 
-	actor_get_stopping_distances(
-		actor_index,
-		&current_stopping_distance,
-		&maximum_stopping_distance);
+	{
+		/* port: a call */
+		float stopping_output[6];
+
+		actor_move_call_output(actor_index, _actor_move_call_stopping_distances, stopping_output);
+		current_stopping_distance = stopping_output[0];
+		maximum_stopping_distance = stopping_output[1];
+	}
 	if (!actor->control.path.destination_orders.keep_moving &&
 		movement_distance_squared < current_stopping_distance*current_stopping_distance)
 	{
@@ -2796,7 +2816,8 @@ static void actor_move_calculate_movement(
 		*movement_thwarted = TRUE;
 	}
 
-	if (game_connection() == _game_connection_local && ai_debug.oversteer_disable)
+	/* port: a call */
+	if (actor_move_call_simple(actor_index, _actor_move_call_oversteer_disable, 0))
 	{
 		oversteer_maximum_angle = 0.f;
 		oversteer_minimum_angle = 0.f;
@@ -3138,26 +3159,6 @@ void actor_move_call(
 			call->result = vehicle_stuck(call->a, (real_vector3d *)call->output) ? 1 : 0;
 			break;
 
-		case _actor_move_call_calculate_movement:
-			actor_move_calculate_movement(
-				actor_index,
-				(call->a & 1) != 0,
-				(short)call->b,
-				(call->a & 2) != 0,
-				call->input[0],
-				(call->a & 4) != 0,
-				call->input[1],
-				call->input[2],
-				call->input[3],
-				call->input[4],
-				call->input[5],
-				&actor->control.moving_towards_vector,
-				&actor->control.desired_facing_vector,
-				&actor->control.moving_facing_direction,
-				&actor->output.throttle,
-				&actor->control.movement_thwarted,
-				&actor->control.movement_complete);
-			break;
 
 		case _actor_move_call_clear_discarded_firing_positions:
 			actor_clear_discarded_firing_positions(actor_index, TRUE);
@@ -3205,6 +3206,22 @@ void actor_move_call(
 				NONE,
 				NULL);
 			break;
+
+		case _actor_move_call_find_pathfinding_location:
+			actor_find_pathfinding_location(actor_index);
+			break;
+
+		case _actor_move_call_destination_tolerance:
+			call->output[0] = actor_destination_tolerance(actor_index);
+			break;
+
+		case _actor_move_call_stopping_distances:
+			actor_get_stopping_distances(actor_index, &call->output[0], &call->output[1]);
+			break;
+
+		case _actor_move_call_oversteer_disable:
+			call->result = game_connection() == _game_connection_local && ai_debug.oversteer_disable;
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -3225,6 +3242,20 @@ static long actor_move_call_simple(
 	actor_move_call(&call);
 
 	return call.result;
+}
+
+static void actor_move_call_output(
+	long actor_index,
+	long kind,
+	float *output)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor_index;
+	actor_move_call(&call);
+	memcpy(output, call.output, sizeof(call.output));
 }
 
 static void actor_move_update_game(
@@ -3606,20 +3637,25 @@ static void actor_move_update_game(
 
 	if (actor->control.moving && !actor->control.movement_complete)
 	{
-		struct halo_sim_ai_call movement;
-
-		memset(&movement, 0, sizeof(movement));
-		movement.kind = _actor_move_call_calculate_movement;
-		movement.actor = actor_index;
-		movement.a = (move_in_3d ? 1 : 0) | (free_movement ? 2 : 0) | (allow_all_moving_turns ? 4 : 0);
-		movement.b = override_facing;
-		movement.input[0] = free_movement_distance_squared;
-		movement.input[1] = steering_maximum_angle;
-		movement.input[2] = oversteer_minimum_angle;
-		movement.input[3] = oversteer_maximum_angle;
-		movement.input[4] = rotation_emergency_amount;
-		movement.input[5] = maximum_throttle;
-		actor_move_call(&movement);
+		/* port: the calculation makes its own calls */
+		actor_move_calculate_movement(
+			actor_index,
+			move_in_3d,
+			override_facing,
+			free_movement,
+			free_movement_distance_squared,
+			allow_all_moving_turns,
+			steering_maximum_angle,
+			oversteer_minimum_angle,
+			oversteer_maximum_angle,
+			rotation_emergency_amount,
+			maximum_throttle,
+			&actor->control.moving_towards_vector,
+			&actor->control.desired_facing_vector,
+			&actor->control.moving_facing_direction,
+			&actor->output.throttle,
+			&actor->control.movement_thwarted,
+			&actor->control.movement_complete);
 		if (actor->control.movement_complete)
 			actor->control.moving = FALSE;
 	}

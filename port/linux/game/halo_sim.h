@@ -913,6 +913,9 @@ struct halo_sim_ai_step_context
 	unsigned long debug_info;
 	unsigned long variant_definition;
 	unsigned long scenario;
+	/* global_structure_bsp_get and breakable_surface_flags_get */
+	unsigned long structure;
+	unsigned long breakable_surface_flags;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -1170,6 +1173,10 @@ enum
 	_actor_move_call_unit_control_jump,
 	_actor_move_call_leap_begin,
 	_actor_move_call_leap_shout,
+	_actor_move_call_find_pathfinding_location,
+	_actor_move_call_destination_tolerance,
+	_actor_move_call_stopping_distances,
+	_actor_move_call_oversteer_disable,
 };
 
 /* the combat update's calls (actor_combat.c's actor_combat_call;

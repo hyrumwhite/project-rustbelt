@@ -305,6 +305,7 @@ symbols in this file:
 #include "items/projectiles.h"
 #include "items/weapons.h"
 #include "objects/damage.h"
+#include "physics/breakable_surfaces.h"
 #include "saved games/game_state.h"
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
@@ -4728,6 +4729,8 @@ void actors_port_step_context(
 	context->debug_info = (unsigned long)&actor_debug_array[DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index)];
 	context->variant_definition = (unsigned long)actor_variant_definition_get(actor->meta.variant_definition_index);
 	context->scenario = (unsigned long)global_scenario_get();
+	context->structure = (unsigned long)global_structure_bsp_get();
+	context->breakable_surface_flags = (unsigned long)breakable_surface_flags_get();
 }
 
 /* port: the actor's props' datums, for the AI step checks (halo_sim.c): their

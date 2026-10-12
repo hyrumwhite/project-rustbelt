@@ -1513,14 +1513,6 @@ void actions_port_handler_call(
 			break;
 		}
 
-		case _actions_port_handler_call_mark_examined:
-			call->result = encounter_mark_examined_pursuit_position(
-				actor->meta.encounter_index,
-				actor_index,
-				(short)call->a,
-				call->b) ? 1 : 0;
-			break;
-
 		case _actions_port_handler_call_wait:
 		{
 			struct action_state_data state;
@@ -3766,9 +3758,10 @@ boolean actor_action_handle_lost_contact(
 						long last_perceived_time = orphan == NULL ?
 							NONE : orphan->last_perceived_time;
 
+						/* port: directly */
 						if (actor->meta.encounter_index != NONE &&
-							actions_port_handler(actor_index, _actions_port_handler_call_mark_examined,
-								firing_position_index, last_perceived_time, NULL, 0, NULL))
+							encounter_mark_examined_pursuit_position(actor->meta.encounter_index, actor_index,
+								firing_position_index, last_perceived_time))
 						{
 							if (actor->firing_positions.pursuit_positions_count == 0)
 							{

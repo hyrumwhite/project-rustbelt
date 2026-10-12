@@ -108,14 +108,6 @@ void action_search_call(
 		case _action_search_call_searching_same_position:
 			call->result = actors_searching_same_position(actor_index, call->a) ? 1 : 0;
 			break;
-
-		case _action_search_call_mark_examined:
-			encounter_mark_examined_pursuit_position(
-				actor->meta.encounter_index,
-				actor_index,
-				(short)call->a,
-				call->b);
-			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -524,8 +516,9 @@ boolean action_search_perform(
 				}
 				if (actor->meta.encounter_index != NONE)
 				{
-					action_search_call_simple(actor_index, _action_search_call_mark_examined,
-						state_data->pursuit_location.firing_position_index, last_perceived_time, NULL);
+					/* port: directly */
+					encounter_mark_examined_pursuit_position(actor->meta.encounter_index, actor_index,
+						state_data->pursuit_location.firing_position_index, last_perceived_time);
 				}
 			}
 			else if (nearby_searching_actor_count > 0)

@@ -670,23 +670,6 @@ void actor_firing_position_call(
 			break;
 		}
 
-		case _actor_firing_position_call_mark_examined:
-			encounter_mark_examined_pursuit_position(actor->meta.encounter_index, actor_index, (short)call->a,
-				call->b);
-			break;
-
-		case _actor_firing_position_call_already_examined:
-		{
-			short examining_actor_count = 0;
-			long last_examined_time = NONE;
-
-			call->result = encounter_pursuit_position_already_examined(actor->meta.encounter_index, actor_index,
-				(short)call->a, call->b, &examining_actor_count, &last_examined_time) ? 1 : 0;
-			call->result2 = last_examined_time;
-			call->output[0] = (real)examining_actor_count;
-			break;
-		}
-
 		case _actor_firing_position_call_line_of_sight:
 		{
 			real_point3d target_point;
@@ -1052,21 +1035,21 @@ static long post_evaluator_pursuit(
 
 		if (firing_position->line_of_sight==_ai_line_of_sight_clear && firing_position->path_distance_from_actor<6.0f)
 		{
-			actor_firing_position_port_call(actor_index, _actor_firing_position_call_mark_examined,
-				firing_position->original_index, evaluation_context->evaluation_data.pursue.last_perceived_time,
-				NULL, 0, &call);
+			/* port: directly */
+			encounter_mark_examined_pursuit_position(actor->meta.encounter_index, actor_index,
+				firing_position->original_index, evaluation_context->evaluation_data.pursue.last_perceived_time);
 			last_examined_time= current_time;
 			examining_actor_count= 7;
 			fresh= FALSE;
 		}
 		else
 		{
-			boolean examined= (boolean)actor_firing_position_port_call(actor_index,
-				_actor_firing_position_call_already_examined, firing_position->original_index,
-				evaluation_context->evaluation_data.pursue.last_perceived_time, NULL, 0, &call);
+			/* port: directly */
+			boolean examined= encounter_pursuit_position_already_examined(actor->meta.encounter_index,
+				actor_index, firing_position->original_index,
+				evaluation_context->evaluation_data.pursue.last_perceived_time, &examining_actor_count,
+				&last_examined_time);
 
-			last_examined_time= call.result2;
-			examining_actor_count= (short)call.output[0];
 			if (examined)
 			{
 				fresh= FALSE;

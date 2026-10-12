@@ -921,6 +921,7 @@ struct halo_sim_ai_step_context
 	unsigned long breakable_surface_flags;
 	long structure_bsp_index;
 	unsigned long encounter_data;
+	unsigned long pursuit_data;
 };
 
 /* the emotion update's calls (actor_perception.c's actor_emotion_call;
@@ -1298,7 +1299,7 @@ enum
 	_actions_port_handler_call_select_pursuit_position,
 	_actions_port_handler_call_uncover_pursuit,
 	_actions_port_handler_call_search_pursuit,
-	_actions_port_handler_call_mark_examined,
+	_actions_port_handler_call_mark_examined, /* now Rust's (pursuits) */
 	_actions_port_handler_call_wait,
 	_actions_port_handler_call_guard_postcombat,
 	_actions_port_handler_call_guard_find_position,
@@ -1407,7 +1408,7 @@ enum
 	_action_search_call_communication = (7 << 8) | 1,
 	_action_search_call_sees_pursuit_location,
 	_action_search_call_searching_same_position,
-	_action_search_call_mark_examined,
+	_action_search_call_mark_examined, /* now Rust's (pursuits) */
 	_action_search_call_move_halt,
 	_action_search_call_move_to_prop,
 	_action_search_call_move_to_firing_position,
@@ -1567,8 +1568,8 @@ enum
 	_actor_firing_position_call_weapon_definition,
 	_actor_firing_position_call_vehicle,
 	_actor_firing_position_call_actor_path_3d_available,
-	_actor_firing_position_call_mark_examined,
-	_actor_firing_position_call_already_examined,
+	_actor_firing_position_call_mark_examined, /* now Rust's (pursuits) */
+	_actor_firing_position_call_already_examined, /* now Rust's (pursuits) */
 	_actor_firing_position_call_line_of_sight,
 	_actor_firing_position_call_change,
 	_actor_firing_position_call_flee_approach,
@@ -2229,6 +2230,13 @@ struct halo_sim_world_region
 	unsigned long address;
 	unsigned long size;
 };
+
+/* the game's arrays an actor's step's check follows besides the actor and its
+props (the encounters and pursuits, for the dispatch steps); returns their
+count */
+long actors_port_step_regions(
+	struct halo_sim_world_region *regions,
+	long maximum);
 
 /* crates/halo_map's WorldContext */
 struct halo_sim_world_context

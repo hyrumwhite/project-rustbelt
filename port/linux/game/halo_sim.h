@@ -2228,6 +2228,9 @@ struct halo_sim_world_context
 	unsigned long breakable_surface_flags;
 	long structure_bsp_index;
 	unsigned long conversation_data;
+	unsigned long combined_pvs;
+	long structure_cluster_count;
+	unsigned long activation_flags;
 };
 
 /* the world step's update in Rust when asked (returns TRUE, done), or the
@@ -2264,6 +2267,9 @@ enum
 	_encounter_call_no_corpse_shooting,
 	_encounter_call_clear_pursuit,
 	_encounter_call_drop_prop,
+	_encounter_call_set_actor_active,
+	_encounter_call_verify_activation,
+	_encounter_call_swarm_in_pvs,
 };
 
 void encounter_call(struct halo_sim_ai_call *call);

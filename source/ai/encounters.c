@@ -1149,7 +1149,7 @@ void encounterless_activate(
 		0x720,
 		actor->meta.encounterless);
 	actor->meta.encounterless_active_timer = 90;
-	actor_set_active(actor_index, TRUE);
+	encounter_call_simple(_encounter_call_set_actor_active, actor_index, TRUE, 0, NULL); /* port: a call */
 
 	return;
 }
@@ -2327,6 +2327,9 @@ static long encounters_port_world(
 	context->structure = (unsigned long)global_structure_bsp_get();
 	context->structure_bsp_index = global_structure_bsp_index;
 	context->conversation_data = (unsigned long)conversation_data;
+	context->combined_pvs = (unsigned long)players_get_combined_pvs();
+	context->structure_cluster_count = global_structure_bsp_get() ? global_structure_bsp_get()->clusters.count : 0;
+	context->activation_flags = (game_in_editor() ? 1 : 0) | (ai_debug.force_all_active ? 2 : 0);
 
 	regions[count].address = (unsigned long)encounter_data;
 	regions[count++].size = sizeof(struct data_array);
@@ -2447,10 +2450,6 @@ void encounter_call(
 
 	switch (call->kind)
 	{
-		case _encounter_call_test_activation:
-			encounters_test_activation();
-			break;
-
 		case _encounter_call_team_is_ally:
 			call->result = game_team_is_ally((short)call->a, (short)call->b) ? 1 : 0;
 			break;
@@ -2529,6 +2528,37 @@ void encounter_call(
 			actor_switch_props(call->actor, call->a, NONE);
 			prop_delete(call->actor, call->a);
 			break;
+
+		case _encounter_call_set_actor_active:
+			actor_set_active(call->actor, (boolean)call->a);
+			break;
+
+		case _encounter_call_verify_activation:
+			actor_verify_activation(call->actor);
+			break;
+
+		case _encounter_call_swarm_in_pvs:
+		{
+			struct actor_datum *actor = actor_get(call->actor);
+			struct swarm_datum *swarm = swarm_get(actor->meta.swarm_cache_index);
+			unsigned long const *combined_pvs = players_get_combined_pvs();
+			short i;
+
+			call->result = 0;
+			for (i = 0; i < swarm->unit_count; ++i)
+			{
+				long ultimate_parent_index = object_get_ultimate_parent(swarm->unit_indices[i]);
+				struct object_datum *parent_object = object_get(ultimate_parent_index);
+				short cluster_index = parent_object->object.location.cluster_index;
+
+				if (cluster_index != NONE && BIT_VECTOR_TEST_FLAG(combined_pvs, cluster_index))
+				{
+					call->result = 1;
+					break;
+				}
+			}
+			break;
+		}
 	}
 	halo_sim_world_event_end(call, opened);
 }
@@ -2566,7 +2596,7 @@ static void encounters_update_game(
 	if (time % TICKS_PER_SECOND == 0)
 	{
 		encounters_update_dirty_status();
-		encounter_call_simple(_encounter_call_test_activation, NONE, 0, 0, NULL); /* port: a call */
+		encounters_test_activation();
 	}
 	phase = time % ENCOUNTER_UPDATE_INTERVAL;
 
@@ -2959,7 +2989,7 @@ static boolean encounter_activate(
 
 			encounter_actor_iterator_new(&iterator, encounter_index);
 			while (encounter_actor_iterator_next(&iterator))
-				actor_set_active(iterator.index, TRUE);
+				encounter_call_simple(_encounter_call_set_actor_active, iterator.index, TRUE, 0, NULL); /* port: a call */
 		}
 
 		encounter->last_active_time = game_time_get();
@@ -2976,14 +3006,15 @@ static void encounter_deactivate(
 	struct actor_datum *actor;
 
 	encounter_get(encounter_index)->active = FALSE;
-	encounter_clear_pursuit(encounter_index);
+	/* port: calls */
+	encounter_call_simple(_encounter_call_clear_pursuit, NONE, encounter_index, 0, NULL);
 
 	encounter_actor_iterator_new(&iterator, encounter_index);
 	while ((actor = encounter_actor_iterator_next(&iterator)) != NULL)
 	{
 		if (actor->meta.active)
-			actor_set_active(iterator.index, FALSE);
-		actor_verify_activation(iterator.index);
+			encounter_call_simple(_encounter_call_set_actor_active, iterator.index, FALSE, 0, NULL);
+		encounter_call_simple(_encounter_call_verify_activation, iterator.index, 0, 0, NULL);
 	}
 
 	return;
@@ -4260,7 +4291,7 @@ static void encounterless_deactivate(
 
 	match_assert("c:\\halo\\SOURCE\\ai\\encounters.c", 1838, actor->meta.encounterless);
 	actor->meta.encounterless_active_timer = 0;
-	actor_set_active(actor_index, FALSE);
+	encounter_call_simple(_encounter_call_set_actor_active, actor_index, FALSE, 0, NULL); /* port: a call */
 
 	return;
 }
@@ -4308,21 +4339,9 @@ static void encounters_test_activation(
 			}
 			else
 			{
-				struct swarm_datum *swarm = swarm_get(actor->meta.swarm_cache_index);
-				short i;
-
-				for (i = 0; i < swarm->unit_count; ++i)
-				{
-					long ultimate_parent_index = object_get_ultimate_parent(swarm->unit_indices[i]);
-					struct object_datum *parent_object = object_get(ultimate_parent_index);
-					short cluster_index = parent_object->object.location.cluster_index;
-
-					if (cluster_index != NONE && BIT_VECTOR_TEST_FLAG(combined_pvs, cluster_index))
-					{
-						actor->meta.dormant_desire = FALSE;
-						break;
-					}
-				}
+				/* port: a call */
+				if (encounter_call_simple(_encounter_call_swarm_in_pvs, actor_index, 0, 0, NULL))
+					actor->meta.dormant_desire = FALSE;
 			}
 		}
 		else
@@ -4355,7 +4374,7 @@ static void encounters_test_activation(
 			encounterless_deactivate(actor_index);
 		}
 
-		actor_verify_activation(actor_index);
+		encounter_call_simple(_encounter_call_verify_activation, actor_index, 0, 0, NULL); /* port: a call */
 	}
 
 	data_iterator_new(&iterator, encounter_data);

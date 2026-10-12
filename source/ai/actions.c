@@ -404,6 +404,10 @@ boolean actor_action_test_grenade(
 boolean actor_action_try_to_evade(
 	long actor_index);
 
+void action_flee_port_find_flee_position(
+	long actor_index,
+	struct flee_state_data *state_data);
+
 static long actions_port_handler_simple(
 	long actor_index,
 	long kind,
@@ -1867,6 +1871,24 @@ void actions_port_handler_call(
 			call->output[0] = real_seed_random_range(get_global_random_seed_address(), call->input[0], call->input[1]);
 			break;
 
+		case _actions_port_handler_call_find_flee_position:
+		{
+			struct flee_state_data flee;
+
+			csmemset(&flee, 0, sizeof(flee));
+			flee.forced_flee_ticks = (short)call->input[0];
+			flee.flee_firing_position_index = NONE;
+			flee.panic_type = (short)call->a;
+			flee.flee_from_last_visible_location = call->input[1] != 0.0f;
+			flee.allow_occluded_points = call->input[2] != 0.0f;
+			flee.flee_prop_index = call->b;
+			action_flee_port_find_flee_position(actor_index, &flee);
+			call->result = flee.flee_firing_position_index;
+			call->result2 = (flee.flee_firing_position_found_randomly ? 1 : 0) | (flee.has_approach_point ? 2 : 0);
+			memcpy(call->output, &flee.approach_point, sizeof(real_point3d));
+			break;
+		}
+
 		case _actions_port_handler_call_unit_dive_distance:
 			call->output[0] = unit_definition_get(unit_get(actor->meta.unit_index)->definition_index)->unit.dive_distance;
 			break;
@@ -1987,10 +2009,7 @@ static boolean actions_port_handler_try_to_panic(
 	long panic_prop_index,
 	boolean force)
 {
-	real force_input = (real)force;
-
-	return (boolean)actions_port_handler(actor_index, _actions_port_handler_call_try_to_panic,
-		panic_type, panic_prop_index, &force_input, 1, NULL);
+	return actor_action_try_to_panic(actor_index, panic_type, panic_prop_index, force);
 }
 
 static real actions_port_handler_random(
@@ -2763,12 +2782,11 @@ boolean actor_action_handle_panic_transition(
 				goto done;
 			}
 
-			{
-				real force_input = (real)force;
-
-				result = (boolean)actions_port_handler(actor_index, _actions_port_handler_call_try_to_panic,
-					actor->stimuli.panic_type, actor->stimuli.panic_prop_index, &force_input, 1, NULL);
-			}
+			result = actor_action_try_to_panic(
+				actor_index,
+				actor->stimuli.panic_type,
+				actor->stimuli.panic_prop_index,
+				force);
 		}
 	}
 
@@ -2830,8 +2848,7 @@ boolean actor_action_handle_active_cover_seeking(
 						if (actor_action_allow_cover_seeking(actor_index, FALSE))
 						{
 							debug_info->field_BA = 5;
-							if (actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
-								TRUE, FALSE, NULL, 0, NULL))
+							if (actor_action_try_to_seek_cover(actor_index, TRUE, FALSE))
 							{
 								debug_info->field_BA = 6;
 								result = TRUE;
@@ -3251,14 +3268,7 @@ boolean actor_action_handle_combat_selection(
 				if (prop_distance >
 					firing_variant->ranged_combat.combat_range_upper_bound)
 				{
-					action_changed = (boolean)actions_port_handler(
-						actor_index,
-						_actions_port_handler_call_try_to_seek_cover,
-						FALSE,
-						FALSE,
-						NULL,
-						0,
-						NULL);
+					action_changed = actor_action_try_to_seek_cover(actor_index, FALSE, FALSE);
 				}
 
 				if (!action_changed)
@@ -4529,7 +4539,7 @@ boolean actor_action_try_to_panic(
 		FALSE,
 		&state.flee))
 	{
-		actor_action_change(actor_index, _actor_action_flee, &state);
+		actions_port_action_change(actor_index, _actor_action_flee, &state);
 		result = TRUE;
 	}
 
@@ -5144,8 +5154,7 @@ boolean actor_action_handle_evasion(
 
 			if (actor_action_allow_cover_seeking(actor_index, TRUE))
 			{
-				if (actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
-					FALSE, TRUE, NULL, 0, NULL))
+				if (actor_action_try_to_seek_cover(actor_index, FALSE, TRUE))
 				{
 					result = TRUE;
 				}
@@ -5239,8 +5248,7 @@ boolean actor_action_handle_evasion(
 				if (actor_action_allow_cover_seeking(actor_index, FALSE) &&
 					actions_port_handler_random(actor_index) <
 						definition->defensive.evasion_seek_cover_chance &&
-					actions_port_handler(actor_index, _actions_port_handler_call_try_to_seek_cover,
-						FALSE, TRUE, NULL, 0, NULL))
+					actor_action_try_to_seek_cover(actor_index, FALSE, TRUE))
 				{
 					long target_unit_index = actions_port_handler_simple(actor_index,
 						_actions_port_handler_call_target_unit, 0);
@@ -5288,7 +5296,7 @@ boolean actor_action_try_to_seek_cover(
 		allow_occluded_points,
 		&state.flee))
 	{
-		actor_action_change(actor_index, _actor_action_flee, &state);
+		actions_port_action_change(actor_index, _actor_action_flee, &state);
 		result = TRUE;
 	}
 

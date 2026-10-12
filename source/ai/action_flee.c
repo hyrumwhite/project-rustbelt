@@ -452,6 +452,31 @@ boolean action_flee_blind_panic(
 		panic_type <= _actor_panic_burning_to_death;
 }
 
+/* port: the draw through actions.c's actions_port_handler_call */
+static real action_flee_port_random(
+	long actor_index)
+{
+	struct halo_sim_ai_call draw;
+
+	memset(&draw, 0, sizeof(draw));
+	draw.kind = _actions_port_handler_call_random;
+	draw.actor = actor_index;
+	actions_port_handler_call(&draw);
+
+	return draw.output[0];
+}
+
+/* port: the flee position's search for a flee being set up, for actions.c's
+actions_port_handler_call */
+void action_flee_port_find_flee_position(
+	long actor_index,
+	struct flee_state_data *state_data)
+{
+	action_flee_find_flee_position(actor_index, FALSE, state_data);
+
+	return;
+}
+
 boolean action_flee_setup(
 	long actor_index,
 	short panic_type,
@@ -478,20 +503,44 @@ boolean action_flee_setup(
 		state_data->allow_occluded_points = allow_occluded_points;
 		state_data->flee_prop_index = panic_prop_index;
 
+		/* port: what it asks of the rest of the game through actions.c's
+		actions_port_handler_call, as the Rust port's does (crates/halo_map's
+		actor_transitions) */
 		if (panic_prop_index != NONE)
 		{
-			actor_situation_try_new_target(actor_index, panic_prop_index);
+			struct halo_sim_ai_call target;
+
+			memset(&target, 0, sizeof(target));
+			target.kind = _actions_port_handler_call_try_new_target;
+			target.actor = actor_index;
+			target.a = panic_prop_index;
+			actions_port_handler_call(&target);
 		}
 
 		if (action_flee_blind_panic(panic_type) &&
-			real_seed_random(get_global_random_seed_address()) < 0.4f)
+			action_flee_port_random(actor_index) < 0.4f)
 		{
 			state_data->flee_stationary_ticks = 45;
 			success = TRUE;
 		}
 		else if (!actor->meta.swarm)
 		{
-			action_flee_find_flee_position(actor_index, FALSE, state_data);
+			struct halo_sim_ai_call find;
+
+			memset(&find, 0, sizeof(find));
+			find.kind = _actions_port_handler_call_find_flee_position;
+			find.actor = actor_index;
+			find.a = panic_type;
+			find.b = panic_prop_index;
+			find.input[0] = (real)state_data->forced_flee_ticks;
+			find.input[1] = (real)(flee_from_last_visible_location != FALSE);
+			find.input[2] = (real)(allow_occluded_points != FALSE);
+			actions_port_handler_call(&find);
+			state_data->flee_firing_position_index = (short)find.result;
+			state_data->flee_firing_position_found_randomly = (find.result2 & 1) != 0;
+			state_data->has_approach_point = (find.result2 & 2) != 0;
+			memcpy(&state_data->approach_point, find.output, sizeof(real_point3d));
+			state_data->find_new_flee_position = FALSE;
 			if (state_data->flee_firing_position_index != NONE)
 			{
 				success = TRUE;

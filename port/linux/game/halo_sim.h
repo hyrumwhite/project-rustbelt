@@ -1109,6 +1109,14 @@ enum
 	_actor_perception_call_danger_visibility,
 	_actor_perception_call_danger_audibility,
 	_actor_perception_call_look_danger,
+	_actor_perception_call_find_pathfinding_location,
+	_actor_perception_call_communicate_grenade_sighted,
+	_actor_perception_call_killer_prop,
+	_actor_perception_call_look_acknowledged,
+	_actor_perception_call_surprise_debug,
+	_actor_perception_call_communicate_unexpected_enemy,
+	_actor_perception_call_medusa,
+	_actor_perception_call_communicate_sighted_enemy,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's

@@ -261,6 +261,8 @@ symbols in this file:
 #include "encounters.h"
 #include "game/game.h"
 #include "game/game_allegiance.h"
+#include "game/cheats.h" /* port: the medusa call */
+#include "main/console.h" /* port: the surprise call */
 #include "items/projectile_definitions.h"
 #include "items/projectiles.h"
 #include "items/weapon_definitions.h"
@@ -1286,6 +1288,11 @@ static long actor_perception_call_full(
 	real input,
 	real *output);
 
+static void actor_perception_port_stimulus_prop_acknowledged(
+	long actor_index,
+	long prop_index,
+	boolean expected_acknowledgement);
+
 void actor_perception_acknowledge(
 	long actor_index,
 	long prop_index,
@@ -1307,8 +1314,7 @@ void actor_perception_acknowledge(
 	prop->refresh_stimuli = TRUE;
 
 	/* port: through actor_perception_call, as the Rust port's asks */
-	actor_perception_call_full(actor_index, _actor_perception_call_stimulus_acknowledged,
-		prop_index, (had_orphan ? 1 : 0) | (expected_acknowledgement ? 2 : 0), 0.0f, NULL);
+	actor_perception_port_stimulus_prop_acknowledged(actor_index, prop_index, expected_acknowledgement);
 
 	return;
 }
@@ -7474,6 +7480,122 @@ void actor_perception_call(
 				&direction);
 			break;
 		}
+
+		case _actor_perception_call_find_pathfinding_location:
+			actor_perception_find_prop_pathfinding_location(actor_index, call->a);
+			break;
+
+		case _actor_perception_call_communicate_grenade_sighted:
+		{
+			long communication_hostility = NONE;
+
+			switch ((short)call->a)
+			{
+			case _actor_danger_hostility_enemy:
+				communication_hostility = _comm_hostility_enemy;
+				break;
+			case _actor_danger_hostility_friend:
+				communication_hostility = _comm_hostility_friend;
+				break;
+			case _actor_danger_hostility_self:
+				communication_hostility = _comm_hostility_self;
+				break;
+			}
+			ai_communication_event(
+				_ai_communication_grenade_sighted,
+				actor->meta.unit_index,
+				NONE,
+				communication_hostility,
+				NONE,
+				NONE,
+				NULL);
+			break;
+		}
+
+		case _actor_perception_call_killer_prop:
+			call->result = actor_perception_find_killer_prop_index(actor_index, call->a, TRUE);
+			break;
+
+		case _actor_perception_call_look_acknowledged:
+		{
+			struct direction_specification direction;
+
+			direction.type = _direction_specification_prop;
+			direction.prop_index = call->a;
+			actor_look_secondary(
+				actor_index,
+				_secondary_look_newly_acknowledged_prop,
+				_secondary_look_priority_default,
+				&direction);
+			break;
+		}
+
+		case _actor_perception_call_surprise_debug:
+		{
+			struct prop_datum *surprising = prop_get(call->a);
+
+			if (ai_debug.print_surprise && surprising->player)
+			{
+				struct actor_definition *definition = actor_definition_get(actor->meta.definition_index);
+				char const *surprise_names[] =
+				{
+					"none",
+					"enemy-shoot",
+					"impact",
+					"enemy-close",
+					"grenade",
+					"damage",
+					"unexp-close-shoot",
+					"unexp-behind-shoot",
+				};
+				short surprise_level = (short)(call->b & 0xFF);
+				boolean expected_acknowledgement = (call->b & (1 << 8)) != 0;
+				boolean flanked = (call->b & (1 << 9)) != 0;
+
+				console_printf(
+					FALSE,
+					"%s %d: surprise %s: %s %sexp %s %sshoot %s (%.1f%c%.1f)",
+					actor_type_get_name((word)actor->meta.type),
+					DATUM_INDEX_TO_ABSOLUTE_INDEX(actor_index),
+					surprise_names[surprise_level],
+					!actor->state.combat_status ? "noncom" : "combat",
+					expected_acknowledgement ? "" : "un",
+					flanked ? "flank" : "front",
+					surprising->shooting ? "" : "not",
+					surprising->distance < definition->panic.surprise_distance ? "close" : "far",
+					surprising->distance,
+					surprising->distance < definition->panic.surprise_distance ? '<' : '>',
+					definition->panic.surprise_distance);
+			}
+			break;
+		}
+
+		case _actor_perception_call_communicate_unexpected_enemy:
+			ai_communication_event(
+				_ai_communication_unexpected_enemy,
+				actor->meta.unit_index,
+				prop_get(call->a)->unit_index,
+				_comm_hostility_enemy,
+				NONE,
+				NONE,
+				NULL);
+			break;
+
+		case _actor_perception_call_medusa:
+			if (cheat.medusa)
+				actor_kill(actor_index, FALSE, TRUE);
+			break;
+
+		case _actor_perception_call_communicate_sighted_enemy:
+			ai_communication_event(
+				call->b ? _ai_communication_sighted_enemy : _ai_communication_found_enemy,
+				actor->meta.unit_index,
+				prop_get(call->a)->unit_index,
+				_comm_hostility_enemy,
+				NONE,
+				NONE,
+				NULL);
+			break;
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -8662,6 +8784,230 @@ static real actor_perception_call_random(
 	return result;
 }
 
+/* port: the stimuli the perception update gives (actor_stimulus.c's) as the
+Rust port's gives them (crates/halo_map's actor_perception), asking through
+actor_perception_call */
+static void actor_perception_port_stimulus_combat(
+	long actor_index,
+	short transition_type,
+	real_point3d const *guard_point,
+	long guard_point_surface_index,
+	real guard_distance,
+	long guard_timer,
+	real_vector3d const *transition_vector,
+	long prop_index,
+	long prop_look_timer,
+	boolean prop_look_while_moving)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	if (actor->state.mode >= _actor_mode_combat)
+		return;
+	if (transition_type < actor->stimuli.combat_transition)
+		return;
+	actor->stimuli.combat_transition = transition_type;
+	if (!guard_point)
+	{
+		actor->stimuli.combat_transition_guard_at_point = FALSE;
+	}
+	else
+	{
+		actor->stimuli.combat_transition_guard_at_point = TRUE;
+		actor->stimuli.combat_transition_guard_point = *guard_point;
+		actor->stimuli.combat_transition_guard_point_surface_index = guard_point_surface_index;
+		actor->stimuli.combat_transition_guard_point_distance = guard_distance;
+	}
+	if (!transition_vector)
+	{
+		actor->stimuli.combat_transition_has_vector = FALSE;
+	}
+	else
+	{
+		actor->stimuli.combat_transition_has_vector = TRUE;
+		actor->stimuli.combat_transition_vector = *transition_vector;
+	}
+	actor->stimuli.combat_transition_prop_index = prop_index;
+	actor->stimuli.combat_transition_prop_look_timer = prop_look_timer;
+	actor->stimuli.combat_transition_prop_look_while_moving = prop_look_while_moving;
+	actor->stimuli.combat_transition_guard_timer = guard_timer;
+}
+
+static void actor_perception_port_stimulus_found_body(
+	long actor_index,
+	long prop_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct prop_datum *prop;
+
+	actor->emotions.corpse_ignore_time = game_time_get();
+	actor_perception_call_simple(actor_index, _actor_perception_call_find_pathfinding_location, prop_index);
+	prop = prop_get(prop_index);
+	actor_perception_port_stimulus_combat(actor_index, 2, &prop->pathfinding_point,
+		prop->pathfinding_surface_index, 1.5f, 90, NULL, prop_index, 90, TRUE);
+}
+
+static void actor_perception_port_stimulus_perceived_enemy(
+	long actor_index,
+	long prop_index)
+{
+	struct prop_datum *prop = prop_get(prop_index);
+
+	actor_perception_port_stimulus_combat(actor_index, 6, NULL, NONE, 0.0f, 90,
+		&prop->actor_to_prop, prop_index, 150, FALSE);
+}
+
+static void actor_perception_port_stimulus_noticed_danger_zone(
+	long actor_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct actor_definition *definition = actor_definition_get(actor->meta.definition_index);
+	short danger_type = actor->danger_zone.danger_type;
+	short hostility = actor->danger_zone.hostility;
+	real_point3d position = actor->danger_zone.position;
+	real_vector3d vector;
+	real distance;
+
+	if (actor->meta.unit_index == NONE)
+		return;
+	if (danger_type == _actor_danger_zone_projectile)
+		actor_perception_call_simple(actor_index, _actor_perception_call_communicate_grenade_sighted, hostility);
+	distance = normalize3d(vector_from_points3d(&actor->input.position.head_position, &position, &vector));
+	if (actor->state.mode < _actor_mode_combat &&
+		distance < definition->panic.surprise_distance &&
+		danger_type == _actor_danger_zone_projectile)
+	{
+		actor_stimulus_surprise(actor_index, 4, NONE, &vector);
+	}
+	actor_perception_port_stimulus_combat(actor_index, 4, NULL, NONE, 0.0f, 0, &vector, NONE, 0, FALSE);
+}
+
+static void actor_perception_port_stimulus_just_killed(
+	long actor_index,
+	long prop_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct actor_definition *definition = actor_definition_get(actor->meta.definition_index);
+	struct prop_datum *prop = prop_get(prop_index);
+	long killer_prop_index;
+
+	actor->state.been_in_combat = TRUE;
+	if (prop->enemy)
+		return;
+	killer_prop_index = actor_perception_call_simple(actor_index, _actor_perception_call_killer_prop, prop_index);
+	if (prop->type == definition->panic.panic_leader_type &&
+		actor->stimuli.panic_type < 8 &&
+		actor_perception_call_random(actor_index) < definition->panic.panic_chance_leader_type_killed)
+	{
+		actor->stimuli.panic_type = 8;
+		actor->stimuli.panic_prop_index = killer_prop_index;
+	}
+	if (prop->distance < 8.0f && killer_prop_index != NONE)
+	{
+		struct prop_datum *killer_prop = prop_get(killer_prop_index);
+
+		if (killer_prop->enemy)
+		{
+			if (killer_prop->visibility > 0 && killer_prop->quantized_facing <= 2)
+			{
+				real flee_chance = definition->panic.panic_chance_friend_killed;
+
+				if ((TEST_FLAG(definition->flags2, 5) &&
+						game_time_get() > actor->emotions.flee_with_friends_disable_time &&
+						actor_emotion_flee_with_friends(actor_index, &flee_chance)) ||
+					actor_perception_call_random(actor_index) < flee_chance)
+				{
+					if (actor->stimuli.panic_type < 3)
+					{
+						actor->stimuli.panic_type = 3;
+						actor->stimuli.panic_prop_index = killer_prop_index;
+					}
+				}
+			}
+			if (killer_prop->unopposable_enemy)
+			{
+				killer_prop->unopposable_casualties_inflicted++;
+				killer_prop->unopposable_casualty_decay_timer = 750;
+			}
+		}
+	}
+}
+
+static void actor_perception_port_stimulus_prop_acknowledged(
+	long actor_index,
+	long prop_index,
+	boolean expected_acknowledgement)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct actor_definition *definition = actor_definition_get(actor->meta.definition_index);
+	struct prop_datum *prop = prop_get(prop_index);
+
+	if (!prop->dead)
+	{
+		actor_perception_call_simple(actor_index, _actor_perception_call_look_acknowledged, prop_index);
+		if (prop->enemy)
+		{
+			short surprise_level = 0;
+			boolean flanked = dot_product3d(&prop->actor_to_prop, &actor->input.facing_vector) < 0.5f;
+			short combat_status = actor->state.combat_status;
+			boolean shooting = prop->shooting;
+			boolean close = prop->distance < definition->panic.surprise_distance;
+
+			if (!combat_status)
+			{
+				expected_acknowledgement = FALSE;
+				if (actor->state.mode < _actor_mode_combat)
+				{
+					if (shooting)
+						surprise_level = 1;
+					if (close)
+						surprise_level = MAX(surprise_level, 3);
+				}
+			}
+			else if (combat_status >= 5 && !flanked)
+			{
+				expected_acknowledgement = TRUE;
+			}
+			if (!expected_acknowledgement && shooting && close)
+				surprise_level = MAX(surprise_level, flanked ? 7 : 6);
+			actor_perception_call_full(actor_index, _actor_perception_call_surprise_debug, prop_index,
+				surprise_level | ((expected_acknowledgement ? 1 : 0) << 8) | ((flanked ? 1 : 0) << 9), 0.0f, NULL);
+			if (surprise_level > 0)
+				actor_stimulus_surprise(actor_index, surprise_level, prop_index, &prop->actor_to_prop);
+			if (actor->state.combat_status < 3 &&
+				!expected_acknowledgement &&
+				prop->visibility < 2 &&
+				actor->meta.unit_index != NONE)
+			{
+				actor_perception_call_simple(actor_index, _actor_perception_call_communicate_unexpected_enemy, prop_index);
+			}
+		}
+	}
+	if (prop->player &&
+		prop->enemy &&
+		!prop->dead &&
+		actor->meta.type != _actor_mounted_weapon)
+	{
+		actor_perception_call_simple(actor_index, _actor_perception_call_medusa, 0);
+	}
+}
+
+static void actor_perception_port_stimulus_prop_sighted(
+	long actor_index,
+	long prop_index,
+	boolean initial_acknowledgement)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct prop_datum *prop = prop_get(prop_index);
+
+	if (!prop->dead &&
+		actor->meta.unit_index != NONE &&
+		prop->enemy)
+	{
+		actor_perception_call_full(actor_index, _actor_perception_call_communicate_sighted_enemy, prop_index,
+			initial_acknowledgement, 0.0f, NULL);
+	}
+}
+
 static void actor_perception_update_game(
 	long actor_index);
 
@@ -8776,7 +9122,7 @@ static void actor_perception_update_game(
 								definition->moving.grenade_dive_chance;
 					}
 
-					actor_perception_call_simple(actor_index, _actor_perception_call_noticed_danger, 0);
+					actor_perception_port_stimulus_noticed_danger_zone(actor_index);
 				}
 			}
 
@@ -9194,7 +9540,7 @@ static void actor_perception_update_game(
 		{
 			if (prop->just_killed)
 			{
-				actor_perception_call_simple(actor_index, _actor_perception_call_stimulus_just_killed, iterator.index);
+				actor_perception_port_stimulus_just_killed(actor_index, iterator.index);
 				prop->just_killed = FALSE;
 			}
 
@@ -9203,8 +9549,8 @@ static void actor_perception_update_game(
 			{
 				boolean initial_sighting = became_acknowledged && !expected_acknowledgement;
 
-				actor_perception_call_full(actor_index, _actor_perception_call_stimulus_sighted,
-					iterator.index, initial_sighting, 0.0f, NULL);
+				actor_perception_port_stimulus_prop_sighted(actor_index,
+					iterator.index, initial_sighting);
 				prop->just_became_visible = FALSE;
 			}
 
@@ -9217,8 +9563,8 @@ static void actor_perception_update_game(
 			{
 				actor->emotions.sighted_friendly_player = TRUE;
 				actor_perception_call_simple(actor_index, _actor_perception_call_sighted_friend_player, iterator.index);
-				actor_perception_call_full(actor_index, _actor_perception_call_stimulus_sighted,
-					iterator.index, FALSE, 0.0f, NULL);
+				actor_perception_port_stimulus_prop_sighted(actor_index,
+					iterator.index, FALSE);
 			}
 
 			if (actor->meta.unit_index != NONE &&
@@ -9243,11 +9589,11 @@ static void actor_perception_update_game(
 			{
 				if (prop->dead && !prop->enemy)
 				{
-					actor_perception_call_simple(actor_index, _actor_perception_call_stimulus_found_body, iterator.index);
+					actor_perception_port_stimulus_found_body(actor_index, iterator.index);
 				}
 				else if (prop->enemy)
 				{
-					actor_perception_call_simple(actor_index, _actor_perception_call_stimulus_perceived_enemy, iterator.index);
+					actor_perception_port_stimulus_perceived_enemy(actor_index, iterator.index);
 				}
 			}
 

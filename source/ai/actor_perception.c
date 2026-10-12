@@ -1292,6 +1292,10 @@ static void actor_perception_port_stimulus_prop_acknowledged(
 	long actor_index,
 	long prop_index,
 	boolean expected_acknowledgement);
+static void actor_perception_port_switch_props(
+	long actor_index,
+	long old_prop_index,
+	long new_prop_index);
 
 void actor_perception_acknowledge(
 	long actor_index,
@@ -4019,8 +4023,7 @@ boolean actor_perception_become_acknowledged(
 				orphan->unopposable_casualty_decay_timer;
 
 			/* port: through actor_perception_call, as the Rust port's asks */
-			actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
-				prop->orphan_prop_index, prop_index, 0.0f, NULL);
+			actor_perception_port_switch_props(actor_index, prop->orphan_prop_index, prop_index);
 			prop_delete(actor_index, prop->orphan_prop_index);
 			prop->orphan_prop_index = NONE;
 		}
@@ -7617,6 +7620,22 @@ void actor_perception_call(
 		case _actor_perception_call_props_full_warning:
 			prop_port_full_warning();
 			break;
+
+		case _actor_perception_call_switch_swarm_targets:
+		{
+			struct swarm_datum *swarm = swarm_get(actor->meta.swarm_cache_index);
+			short component_index;
+
+			for (component_index = 0; component_index < swarm->unit_count; component_index++)
+			{
+				struct swarm_component_datum *component =
+					swarm_component_get(swarm->component_indices[component_index]);
+
+				if (component->combat_target_prop_index == call->a)
+					component->combat_target_prop_index = call->b;
+			}
+			break;
+		}
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -8250,6 +8269,87 @@ static void actor_perception_port_status_refresh(
 	return;
 }
 
+/* port: actor_switch_props (actors.c's, with actions.c's
+actor_action_replace_prop) as the Rust port's switches props
+(crates/halo_map's props), asking through actor_perception_call */
+static void actor_perception_port_switch_props(
+	long actor_index,
+	long old_prop_index,
+	long new_prop_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	if (actor->target.target_prop_index == old_prop_index)
+	{
+		actor->target.target_prop_index = new_prop_index;
+		if (new_prop_index == NONE)
+			actor->target.target_type = _actor_target_none;
+	}
+	if (actor->control.current_fire_target_type == 1 &&
+		actor->control.current_fire_target_prop_index == old_prop_index)
+	{
+		actor->control.current_fire_target_prop_index = new_prop_index;
+		if (new_prop_index == NONE)
+			actor->control.current_fire_target_type = 0;
+	}
+	if (actor->control.grenade_current_prop_index == old_prop_index)
+		actor->control.grenade_current_prop_index = new_prop_index;
+	if (actor->stimuli.surprise_prop_index == old_prop_index)
+		actor->stimuli.surprise_prop_index = new_prop_index;
+	if (actor->stimuli.panic_prop_index == old_prop_index)
+		actor->stimuli.panic_prop_index = new_prop_index;
+	if (actor->stimuli.combat_transition_prop_index == old_prop_index)
+		actor->stimuli.combat_transition_prop_index = new_prop_index;
+	if (actor->emotions.unopposable_retreat_prop_index == old_prop_index)
+	{
+		if (new_prop_index == NONE)
+			actor->emotions.unopposable_retreat_timer = 0;
+		actor->emotions.unopposable_retreat_prop_index = new_prop_index;
+	}
+	if (actor->external_orders.pursuit_group_prop_index == old_prop_index)
+		actor->external_orders.pursuit_group_prop_index = new_prop_index;
+	if (actor->external_orders.postcombat_prop_index == old_prop_index)
+	{
+		actor->external_orders.postcombat_prop_index = new_prop_index;
+		if (new_prop_index == NONE)
+			actor->external_orders.postcombat_type = _actor_postcombat_none;
+	}
+	if (actor->control.path.destination_orders.destination_type == _destination_prop &&
+		actor->control.path.destination_orders.prop.prop_index == old_prop_index)
+	{
+		if (new_prop_index == NONE)
+		{
+			actor->control.path.destination_orders.destination_type = _destination_none;
+			actor->control.path.destination_orders.ignore_target_object_index = NONE;
+		}
+		else
+		{
+			actor->control.path.destination_orders.prop.prop_index = new_prop_index;
+		}
+	}
+	if (actor->control.secondary_look_direction.type == _direction_specification_prop &&
+		actor->control.secondary_look_direction.prop_index == old_prop_index)
+	{
+		actor->control.secondary_look_direction.prop_index = new_prop_index;
+	}
+	if (actor->control.idle_major_direction.type == _direction_specification_prop &&
+		actor->control.idle_major_direction.prop_index == old_prop_index)
+	{
+		actor->control.idle_major_direction.prop_index = new_prop_index;
+	}
+	if (actor->control.idle_minor_direction.type == _direction_specification_prop &&
+		actor->control.idle_minor_direction.prop_index == old_prop_index)
+	{
+		actor->control.idle_minor_direction.prop_index = new_prop_index;
+	}
+	if (actor->meta.swarm && actor->meta.swarm_cache_index != NONE)
+	{
+		actor_perception_call_full(actor_index, _actor_perception_call_switch_swarm_targets,
+			old_prop_index, new_prop_index, 0.0f, NULL);
+	}
+	actor_action_replace_prop(actor_index, old_prop_index, new_prop_index);
+}
+
 /* port: prop_new_unacknowledged as the Rust port's makes a prop
 (crates/halo_map's props), asking through actor_perception_call */
 static long actor_perception_port_prop_new(
@@ -8324,7 +8424,7 @@ static long actor_perception_port_prop_new(
 		short identifier;
 
 		prop = prop_get(prop_index);
-		actor_perception_call_full(actor_index, _actor_perception_call_switch_props, prop_index, NONE, 0.0f, NULL);
+		actor_perception_port_switch_props(actor_index, prop_index, NONE);
 		prop_port_remove(actor_index, prop_index);
 		identifier = prop->identifier;
 		memset(prop, 0, sizeof(*prop));
@@ -8409,11 +8509,10 @@ static void actor_perception_port_refresh_discard(
 			prop->state > _prop_state_inspected_orphan) &&
 		prop->orphan_prop_index != NONE)
 	{
-		actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
-			prop->orphan_prop_index, NONE, 0.0f, NULL);
+		actor_perception_port_switch_props(actor_index, prop->orphan_prop_index, NONE);
 		prop_delete(actor_index, prop->orphan_prop_index);
 	}
-	actor_perception_call_full(actor_index, _actor_perception_call_switch_props, prop_index, NONE, 0.0f, NULL);
+	actor_perception_port_switch_props(actor_index, prop_index, NONE);
 	prop_delete(actor_index, prop_index);
 }
 
@@ -9586,8 +9685,7 @@ static void actor_perception_update_game(
 							_actor_perception_call_orphan_transition, iterator.index);
 					}
 
-					actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
-						iterator.index, orphan_prop_index, 0.0f, NULL);
+					actor_perception_port_switch_props(actor_index, iterator.index, orphan_prop_index);
 					new_state = _prop_state_unacknowledged;
 				}
 			}
@@ -9602,8 +9700,7 @@ static void actor_perception_update_game(
 				}
 				else
 				{
-					actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
-						iterator.index, NONE, 0.0f, NULL);
+					actor_perception_port_switch_props(actor_index, iterator.index, NONE);
 					new_state = _prop_state_unacknowledged;
 				}
 			}
@@ -9694,8 +9791,7 @@ static void actor_perception_update_game(
 			struct prop_datum *parent_prop = prop_get(prop->parent_prop_index);
 
 			parent_prop->orphan_prop_index = NONE;
-			actor_perception_call_full(actor_index, _actor_perception_call_switch_props,
-				iterator.index, NONE, 0.0f, NULL);
+			actor_perception_port_switch_props(actor_index, iterator.index, NONE);
 			prop_delete(actor_index, iterator.index);
 		}
 		else if (prop->refresh_stimuli &&

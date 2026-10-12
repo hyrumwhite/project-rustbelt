@@ -1119,6 +1119,7 @@ enum
 	_actor_perception_call_communicate_sighted_enemy,
 	_actor_perception_call_prop_unit_details,
 	_actor_perception_call_props_full_warning,
+	_actor_perception_call_switch_swarm_targets,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's

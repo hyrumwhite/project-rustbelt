@@ -2326,6 +2326,7 @@ static long encounters_port_world(
 	context->encounters_updated_meter = (unsigned long)&ai_profile.meters[_ai_meter_encounters_updated].accumulator;
 	context->structure = (unsigned long)global_structure_bsp_get();
 	context->structure_bsp_index = global_structure_bsp_index;
+	context->conversation_data = (unsigned long)conversation_data;
 
 	regions[count].address = (unsigned long)encounter_data;
 	regions[count++].size = sizeof(struct data_array);

@@ -752,6 +752,20 @@ struct scenario_conversation_line_view
 	struct tag_reference dialogue[MAXIMUM_DIALOGUE_VARIANTS_PER_CONVERSATION_PARTICIPANT];
 };
 
+/* port: the views' offsets crates/halo_map's conversations reads */
+typedef char scenario_conversation_line_view_size_assert[
+	sizeof(struct scenario_conversation_line_view) == 0x7C ? 1 : -1];
+typedef char scenario_conversation_line_view_delay_time_offset_assert[
+	offsetof(struct scenario_conversation_line_view, delay_time) == 0xC ? 1 : -1];
+typedef char scenario_conversation_line_view_dialogue_offset_assert[
+	offsetof(struct scenario_conversation_line_view, dialogue) == 0x1C ? 1 : -1];
+typedef char scenario_conversation_line_view_tag_reference_assert[
+	sizeof(struct tag_reference) == 0x10 && offsetof(struct tag_reference, index) == 0xC ? 1 : -1];
+typedef char scenario_conversation_participant_view_size_assert[
+	sizeof(struct scenario_conversation_participant_view) == 0x54 ? 1 : -1];
+typedef char scenario_conversation_participant_view_selection_type_offset_assert[
+	offsetof(struct scenario_conversation_participant_view, selection_type) == 0x4 ? 1 : -1];
+
 struct dialogue_event_status
 {
 	long last_time_spoken;
@@ -955,6 +969,11 @@ static void ai_communication_look_secondary_at_object(
 	long object_index);
 static boolean ai_conversation_line_begin(
 	long conversation_index);
+/* port: the conversations' update's calls (conversation_call) */
+static long conversation_call_simple(
+	long kind,
+	long a,
+	long b);
 static boolean ai_conversation_line_perform(
 	long conversation_index);
 static void ai_conversation_line_end(
@@ -5470,7 +5489,8 @@ static boolean ai_conversation_line_perform(
 					}
 				}
 
-				if (sound_scripted_dialog_is_playing())
+				/* port: calls, here and below */
+				if (conversation_call_simple(_conversation_call_scripted_dialog_playing, 0, 0))
 				{
 					busy = TRUE;
 				}
@@ -5481,61 +5501,21 @@ static boolean ai_conversation_line_perform(
 					if (speaking_unit_index == NONE ||
 						conversation->line_unspatialized)
 					{
-						scripted_sound_new(
-							conversation->line_sound_index,
-							NONE,
-							1.0f);
+						conversation_call_simple(_conversation_call_scripted_sound_new, conversation->line_sound_index, 0);
 					}
 					else
 					{
-						speech_sound_definition_index = conversation->line_sound_index;
-						vocalization_type = NONE;
-						play_type = unit_test_speech(
+						play_type = (short)conversation_call_simple(
+							_conversation_call_test_speech,
 							speaking_unit_index,
-							_ai_communication_priority_yell,
-							FALSE,
-							TRUE,
-							NULL,
-							&vocalization_type,
-							&speech_sound_definition_index);
+							conversation->line_sound_index);
 						if (play_type == TRUE)
 						{
 							busy = TRUE;
 						}
 						else if (play_type > 0)
 						{
-							struct unit_speech_item speech_item;
-							long line_sound_index;
-
-							csmemset(&speech_item, 0, sizeof(speech_item));
-							line_sound_index = conversation->line_sound_index;
-							speech_item.vocalization_type = NONE;
-							speech_item.ai.communication_type = NONE;
-							speech_item.ai.damage_category = NONE;
-							speech_item.ai.dialogue_type_index = NONE;
-							speech_item.ai.target_unit_index =
-								conversation->line_address_unit_index;
-							speech_item.priority = _ai_communication_priority_yell;
-							speech_item.sound_definition_index = line_sound_index;
-							speech_item.ai.look_priority = TRUE;
-							speech_item.ai.look_type = _ai_information_look_unit;
-							speech_item.ai.look_data.unit.unit_index =
-								conversation->line_unit_index;
-							speech_item.ai.information_type = _ai_information_none;
-
-							if (ai_print_conversations)
-							{
-								console_printf(
-									FALSE,
-									"%s: speak %s",
-									definition->name,
-									tag_get_name(line_sound_index));
-							}
-
-							unit_speak(
-								conversation->line_unit_index,
-								play_type,
-								&speech_item);
+							conversation_call_simple(_conversation_call_speak, conversation_index, play_type);
 						}
 					}
 				}
@@ -5557,7 +5537,7 @@ static boolean ai_conversation_line_perform(
 					sound_definition_index = conversation->line_sound_index;
 					conversation->line_finished =
 						sound_definition_index == NONE ||
-							scripted_sound_time(sound_definition_index) == 0;
+							conversation_call_simple(_conversation_call_scripted_sound_time, sound_definition_index, 0) == 0;
 				}
 				else
 				{
@@ -5706,7 +5686,180 @@ boolean ai_conversation(
 	return result;
 }
 
+/* port: what the conversations' update asks of the rest of the game, shared
+by the game's update and the Rust port's (halo_sim.c's world steps); in check
+mode each is recorded */
+void conversation_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+		case _conversation_call_begin:
+		{
+			boolean continue_trying = TRUE;
+
+			call->result = ai_conversation_begin(call->a, &continue_trying) ? 1 : 0;
+			call->result2 = continue_trying ? 1 : 0;
+			break;
+		}
+
+		case _conversation_call_finish:
+			ai_conversation_finish(call->a, (call->b & 1) != 0, (call->b & 2) != 0);
+			break;
+
+		case _conversation_call_scripted_dialog_playing:
+			call->result = sound_scripted_dialog_is_playing() ? 1 : 0;
+			break;
+
+		case _conversation_call_scripted_sound_new:
+			scripted_sound_new(call->a, NONE, 1.0f);
+			break;
+
+		case _conversation_call_test_speech:
+		{
+			long speech_sound_definition_index = call->b;
+			short vocalization_type = NONE;
+
+			call->result = unit_test_speech(
+				call->a,
+				_ai_communication_priority_yell,
+				FALSE,
+				TRUE,
+				NULL,
+				&vocalization_type,
+				&speech_sound_definition_index);
+			break;
+		}
+
+		case _conversation_call_speak:
+		{
+			struct conversation_datum *conversation = ai_conversation_driver_get(call->a);
+			struct ai_conversation *definition = TAG_BLOCK_GET_ELEMENT(
+				&global_scenario_get()->ai_conversations,
+				conversation->scenario_conversation_index,
+				struct ai_conversation);
+			short play_type = (short)call->b;
+			struct unit_speech_item speech_item;
+			long line_sound_index;
+
+			csmemset(&speech_item, 0, sizeof(speech_item));
+			line_sound_index = conversation->line_sound_index;
+			speech_item.vocalization_type = NONE;
+			speech_item.ai.communication_type = NONE;
+			speech_item.ai.damage_category = NONE;
+			speech_item.ai.dialogue_type_index = NONE;
+			speech_item.ai.target_unit_index =
+				conversation->line_address_unit_index;
+			speech_item.priority = _ai_communication_priority_yell;
+			speech_item.sound_definition_index = line_sound_index;
+			speech_item.ai.look_priority = TRUE;
+			speech_item.ai.look_type = _ai_information_look_unit;
+			speech_item.ai.look_data.unit.unit_index =
+				conversation->line_unit_index;
+			speech_item.ai.information_type = _ai_information_none;
+
+			if (ai_print_conversations)
+			{
+				console_printf(
+					FALSE,
+					"%s: speak %s",
+					definition->name,
+					tag_get_name(line_sound_index));
+			}
+
+			unit_speak(
+				conversation->line_unit_index,
+				play_type,
+				&speech_item);
+			break;
+		}
+
+		case _conversation_call_scripted_sound_time:
+			call->result = scripted_sound_time(call->a);
+			break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static long conversation_call_simple(
+	long kind,
+	long a,
+	long b)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	conversation_call(&call);
+
+	return call.result;
+}
+
+/* port: where the conversations' update works, for halo_sim's world steps;
+returns the regions' count */
+static long ai_conversation_port_world(
+	struct halo_sim_world_context *context,
+	struct halo_sim_world_region *regions)
+{
+	long count = 0;
+
+	memset(context, 0, sizeof(*context));
+	context->game_time = game_time_get();
+	context->scenario = (unsigned long)global_scenario_get();
+	context->actor_data = (unsigned long)actor_data;
+	context->prop_data = (unsigned long)prop_data;
+	context->object_header_data = (unsigned long)object_header_data;
+	context->ai_globals = (unsigned long)ai_globals;
+	context->conversation_data = (unsigned long)conversation_data;
+
+	regions[count].address = (unsigned long)conversation_data;
+	regions[count++].size = sizeof(struct data_array);
+	regions[count].address = (unsigned long)conversation_data->data;
+	regions[count++].size = conversation_data->maximum_count * conversation_data->size;
+	regions[count].address = (unsigned long)actor_data;
+	regions[count++].size = sizeof(struct data_array);
+	regions[count].address = (unsigned long)actor_data->data;
+	regions[count++].size = actor_data->count * actor_data->size;
+	regions[count].address = (unsigned long)prop_data;
+	regions[count++].size = sizeof(struct data_array);
+	regions[count].address = (unsigned long)prop_data->data;
+	regions[count++].size = prop_data->count * prop_data->size;
+	regions[count].address = (unsigned long)ai_globals;
+	regions[count++].size = sizeof(struct ai_globals);
+
+	return count;
+}
+
+static void ai_conversation_update_game(
+	void);
+
+/* port: the Rust port's update in place of the game's when asked
+(halo_sim.c's world steps); in check mode the game's runs and is compared */
 void ai_conversation_update(
+	void)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[16];
+	long region_count = ai_conversation_port_world(&context, regions);
+	int checking = FALSE;
+
+	if (halo_sim_world_step_begin(_halo_sim_world_step_conversations, &context, regions, region_count,
+		conversation_call, &checking))
+	{
+		return;
+	}
+	ai_conversation_update_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_conversations);
+}
+
+/* the game's conversations' update, what it asks through conversation_call */
+static void ai_conversation_update_game(
 	void)
 {
 	struct data_iterator iterator;
@@ -5739,7 +5892,15 @@ void ai_conversation_update(
 						definition->name);
 				}
 
-				ai_conversation_begin(iterator.datum_index, &continue_trying);
+				/* port: a call */
+				struct halo_sim_ai_call call;
+
+				memset(&call, 0, sizeof(call));
+				call.kind = _conversation_call_begin;
+				call.actor = NONE;
+				call.a = iterator.datum_index;
+				conversation_call(&call);
+				continue_trying = call.result2 != 0;
 			}
 
 			if (!conversation->begun && !continue_trying)
@@ -5752,7 +5913,7 @@ void ai_conversation_update(
 						definition->name);
 				}
 
-				ai_conversation_finish(iterator.datum_index, TRUE, FALSE);
+				conversation_call_simple(_conversation_call_finish, iterator.datum_index, 1); /* port: a call */
 			}
 		}
 
@@ -5792,7 +5953,7 @@ void ai_conversation_update(
 
 		if (conversation->finished)
 		{
-			ai_conversation_finish(iterator.datum_index, FALSE, TRUE);
+			conversation_call_simple(_conversation_call_finish, iterator.datum_index, 2); /* port: a call */
 		}
 		else if (conversation->begun)
 		{

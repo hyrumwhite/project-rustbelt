@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 105
+#define HALO_SIM_VERSION 106
 
 /* ---------- structures */
 
@@ -2210,6 +2210,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"actor_dispatch",
 	"paths",
 	"encounters",
+	"conversations",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -10393,11 +10394,13 @@ compares the arrays Rust leaves with its own, keeping its own. */
 static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 {
 	"encounters update",
+	"conversations update",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 {
 	_halo_sim_encounters,
+	_halo_sim_conversations,
 };
 
 static struct

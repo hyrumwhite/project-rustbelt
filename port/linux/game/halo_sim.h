@@ -63,6 +63,7 @@ enum
 	_halo_sim_actor_dispatch,
 	_halo_sim_paths,
 	_halo_sim_encounters,
+	_halo_sim_conversations,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2197,6 +2198,7 @@ one actor (halo_sim.c; crates/halo_sim's world_steps) */
 enum
 {
 	_halo_sim_world_step_encounters = 0,
+	_halo_sim_world_step_conversations,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2225,6 +2227,7 @@ struct halo_sim_world_context
 	unsigned long structure;
 	unsigned long breakable_surface_flags;
 	long structure_bsp_index;
+	unsigned long conversation_data;
 };
 
 /* the world step's update in Rust when asked (returns TRUE, done), or the
@@ -2264,6 +2267,21 @@ enum
 };
 
 void encounter_call(struct halo_sim_ai_call *call);
+
+/* the conversations' update's calls (ai_communication.c's conversation_call;
+crates/halo_map's conversations::call) */
+enum
+{
+	_conversation_call_begin = 1,
+	_conversation_call_finish,
+	_conversation_call_scripted_dialog_playing,
+	_conversation_call_scripted_sound_new,
+	_conversation_call_test_speech,
+	_conversation_call_speak,
+	_conversation_call_scripted_sound_time,
+};
+
+void conversation_call(struct halo_sim_ai_call *call);
 short actor_firing_position_port_change(long actor_index, short firing_position_index, long previous_owner,
 	int cached_path_available);
 short actor_firing_position_port_change_to_active_selection(long actor_index, short evaluation_mode);

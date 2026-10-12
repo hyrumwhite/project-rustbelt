@@ -415,6 +415,13 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **What Rust does:** a change ends the actor's action, moves its mode out of combat for a noncombat action (into it for the rest), clears its discarded firing positions, copies in the new action's data (by actions.c's table of sizes) and begins it. A setup builds the new action's data from zeros, as the game's setups do (they clear their struct first), in an `ActionData` the change copies.
      - **The C's side, through `actions_port_handler_call`:** each action's end (with the change's profile meter) and begin, the discarded positions' clearing, and the wait's random query timer. The game does these changes the same way where Rust does (`actions_port_action_change`); its own `actor_action_change` stays for the rest of the game.
      - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the find-position guard's location type was caught on d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] The guard's post-combat, combat-transition and after-fleeing setups in Rust (`halo_map::actor_transitions`).
+     - **What Rust does:**
+       - after combat: guarding (not as a flying driver), going to the post-combat prop's pathfinding point (to run to it, check it or shoot its corpse) and looking at it;
+       - as combat begins: guarding at the point it was given (if it has positions to search from), where it stands facing what alerted it for a while, or a new position; shouting about a dead friend and looking at what alerted it;
+       - after fleeing: cowering (for its panic or hiding time, unless it retreated from an unopposable enemy) at the position it fled to, facing the way it came, or at a new position.
+     - **The C's side, through `actions_port_handler_call`:** the prop's pathfinding location, the positions around the guard point, and the cowering time's draw.
+     - **Results:** every step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the combat-transition guard's aim was caught on b30 and d20. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

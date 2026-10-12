@@ -242,6 +242,12 @@ pub mod call {
     pub const ACTION_BEGIN: i32 = BASE + 88;
     /// `seed_random_range(global seed, a, b)`, the result.
     pub const SEED_RANDOM_RANGE: i32 = BASE + 89;
+    /// `actor_nearby_firing_positions` around the point `input[0..3]` on the
+    /// surface `a`, for searching: the result.
+    pub const NEARBY_FIRING_POSITIONS_AT: i32 = BASE + 90;
+    /// `real_seed_random_range(global seed, input[0], input[1])`, in
+    /// `output[0]`.
+    pub const REAL_SEED_RANDOM_RANGE: i32 = BASE + 91;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -740,7 +746,8 @@ pub fn handle_done_fleeing(context: &AiStepContext, host: &impl AiHost) -> bool 
     let m = host.memory();
     let at = |offset: usize| context.actor + offset as u32;
     if m.i16(at(a::STATE_ACTION)) == ACTION_FLEE && m.bool(at(a::STATE_FLEE_DONE_FLEEING)) {
-        call_simple(context, host, call::GUARD_FROM_FLEEING, 0);
+        let data = guard_setup_from_fleeing(context, host);
+        action_change(context, host, ACTION_GUARD, Some(&data));
         true
     } else {
         false
@@ -861,9 +868,8 @@ pub fn handle_combat_transition(context: &AiStepContext, host: &impl AiHost) -> 
     let at = |offset: usize| context.actor + offset as u32;
     if m.i16(at(a::STATE_MODE)) < 3 && m.i16(at(a::STIMULI_COMBAT_TRANSITION)) != 0 {
         m.set_i16(at(a::STATE_MODE), 3);
-        if call_simple(context, host, call::GUARD_FROM_COMBAT_TRANSITION, 0) == 0 {
-            combat_selection(context, host);
-        }
+        let data = guard_setup_from_combat_transition(context, host);
+        action_change(context, host, ACTION_GUARD, Some(&data));
         m.set_i16(at(a::STIMULI_COMBAT_TRANSITION), 0);
         true
     } else {
@@ -1455,7 +1461,8 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
     if !handled && wants_postcombat_guard {
         if action() == ACTION_GUARD && m.bool(at(a::STATE_GUARD_POST_COMBAT)) {
             handled = true;
-        } else if call_simple(context, host, call::GUARD_POSTCOMBAT, 0) != 0 {
+        } else if let Some(data) = guard_setup_postcombat(context, host) {
+            action_change(context, host, ACTION_GUARD, Some(&data));
             handled = true;
         }
     }
@@ -2966,6 +2973,176 @@ pub fn guard_setup_find_position(context: &AiStepContext, host: &impl AiHost, wa
             data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);
             data.set_bool(a::STATE_GUARD_HAS_GUARD_DIRECTION, true);
             data.set_vector(a::STATE_GUARD_GUARD_DIRECTION, m.vector(at(a::INPUT_FACING_VECTOR)));
+        }
+    } else {
+        data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);
+    }
+    data.set_i32(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX, NONE);
+    data
+}
+
+/// actors.h's post-combat orders (`_actor_postcombat_*`) a guard goes to.
+const POSTCOMBAT_RUN_TO: i16 = 6;
+const POSTCOMBAT_CHECK_ENEMY: i16 = 7;
+const POSTCOMBAT_CHECK_FRIEND: i16 = 8;
+const POSTCOMBAT_SHOOT_CORPSE: i16 = 9;
+
+/// real_math.h's `normalize3d`: the vector to unit length (left alone when
+/// too short), and its length (0 then).
+fn normalize3(v: &mut [f32; 3]) -> f32 {
+    let magnitude = magnitude_squared(*v).sqrt();
+    if !(REAL_EPSILON > magnitude.abs()) {
+        let s = 1.0 / magnitude;
+        *v = [s * v[0], s * v[1], s * v[2]];
+        magnitude
+    } else {
+        0.0
+    }
+}
+
+/// action_guard.c's `action_guard_setup_postcombat`: guarding after combat
+/// (not a flying driver's), going to the post-combat prop's pathfinding
+/// point to run to it, check it or shoot its corpse, and looking at it.
+pub fn guard_setup_postcombat(context: &AiStepContext, host: &impl AiHost) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut data = ActionData::new();
+    data.set_i16(a::STATE_GUARD_WAIT_TICKS, 120);
+    data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);
+    data.set_bool(a::STATE_GUARD_POST_COMBAT, true);
+    data.set_i32(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX, NONE);
+
+    let postcombat_prop_index = m.i32(at(a::EXTERNAL_ORDERS_POSTCOMBAT_PROP_INDEX));
+    if m.i16(at(a::INPUT_VEHICLE_DRIVER_TYPE)) == 4 {
+        return None;
+    }
+    if !m.bool(at(a::INPUT_VEHICLE_PASSENGER)) && !m.bool(at(a::META_SWARM)) && postcombat_prop_index != NONE {
+        let prop = prop_get(m, context, postcombat_prop_index);
+        data.set_i32(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX, postcombat_prop_index);
+        data.set_i16(a::STATE_GUARD_LOOK_TICKS, 120);
+        data.set_bool(a::STATE_GUARD_GUARD_LOOK_UNTIL_REACHED_POINT, true);
+        let radius = match m.i16(at(a::EXTERNAL_ORDERS_POSTCOMBAT_TYPE)) {
+            POSTCOMBAT_RUN_TO => 2.0f32,
+            POSTCOMBAT_CHECK_ENEMY | POSTCOMBAT_CHECK_FRIEND => 1.0,
+            POSTCOMBAT_SHOOT_CORPSE => 1.5,
+            _ => return Some(data),
+        };
+        data.set_i32(a::STATE_GUARD_GUARD_POINT_RADIUS, radius.to_bits() as i32);
+        call_simple(context, host, call::FIND_PROP_PATHFINDING_LOCATION, postcombat_prop_index);
+        data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 2);
+        data.set_vector(a::STATE_GUARD_GUARD_POINT_POSITION, m.vector(prop + p::PATHFINDING_POINT as u32));
+        data.set_i32(a::STATE_GUARD_GUARD_POINT_SURFACE_INDEX, m.i32(prop + p::PATHFINDING_SURFACE_INDEX as u32));
+    }
+    Some(data)
+}
+
+/// action_guard.c's `action_guard_setup_from_combat_transition`: guarding as
+/// combat begins, at the point it was given (if it has positions to search
+/// from), or where it stands facing what alerted it for a while, or a new
+/// position; shouting about a dead friend, and looking at what alerted it.
+pub fn guard_setup_from_combat_transition(context: &AiStepContext, host: &impl AiHost) -> ActionData {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut data = ActionData::new();
+    let wait_ticks = m.i32(at(a::STIMULI_COMBAT_TRANSITION_GUARD_TIMER)) as i16;
+    data.set_i16(a::STATE_GUARD_WAIT_TICKS, wait_ticks);
+
+    if !m.bool(at(a::INPUT_VEHICLE_PASSENGER)) && !m.bool(at(a::META_SWARM)) {
+        let guard_point = m.vector(at(a::STIMULI_COMBAT_TRANSITION_GUARD_POINT));
+        let guard_surface_index = m.i32(at(a::STIMULI_COMBAT_TRANSITION_GUARD_POINT_SURFACE_INDEX));
+        if m.bool(at(a::STIMULI_COMBAT_TRANSITION_GUARD_AT_POINT))
+            && call_full(context, host, call::NEARBY_FIRING_POSITIONS_AT, guard_surface_index, 0, &guard_point).result != 0
+        {
+            data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 2);
+            data.set_vector(a::STATE_GUARD_GUARD_POINT_POSITION, m.vector(at(a::STIMULI_COMBAT_TRANSITION_GUARD_POINT)));
+            data.set_i32(
+                a::STATE_GUARD_GUARD_POINT_SURFACE_INDEX,
+                m.i32(at(a::STIMULI_COMBAT_TRANSITION_GUARD_POINT_SURFACE_INDEX)),
+            );
+            data.set_i32(a::STATE_GUARD_GUARD_POINT_RADIUS, m.r32(at(a::STIMULI_COMBAT_TRANSITION_GUARD_POINT_DISTANCE)) as i32);
+        } else if wait_ticks > 0 {
+            data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);
+            let has_vector = m.bool(at(a::STIMULI_COMBAT_TRANSITION_HAS_VECTOR));
+            data.set_bool(a::STATE_GUARD_HAS_GUARD_DIRECTION, has_vector);
+            data.set_bool(a::STATE_GUARD_AIM_IN_GUARD_DIRECTION, false);
+            if has_vector {
+                let mut direction = m.vector(at(a::STIMULI_COMBAT_TRANSITION_VECTOR));
+                let magnitude = normalize3(&mut direction);
+                data.set_vector(a::STATE_GUARD_GUARD_DIRECTION, direction);
+                if magnitude == 0.0 {
+                    data.set_bool(a::STATE_GUARD_HAS_GUARD_DIRECTION, false);
+                }
+            }
+        } else {
+            data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 0);
+            data.set_bool(a::STATE_GUARD_FIND_NEW_GUARD_POSITION, true);
+        }
+    } else {
+        data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);
+    }
+
+    let transition_prop_index = m.i32(at(a::STIMULI_COMBAT_TRANSITION_PROP_INDEX));
+    if m.i16(at(a::STIMULI_COMBAT_TRANSITION)) == 2 {
+        data.set_bool(a::STATE_GUARD_SHOUT_ABOUT_DEAD_FRIEND, true);
+        data.set_i32(a::STATE_GUARD_SHOUT_DEAD_FRIEND_PROP_INDEX, transition_prop_index);
+    }
+    data.set_i32(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX, transition_prop_index);
+    if transition_prop_index != NONE {
+        data.set_i16(a::STATE_GUARD_LOOK_TICKS, m.i32(at(a::STIMULI_COMBAT_TRANSITION_PROP_LOOK_TIMER)) as i16);
+        data.set_bool(
+            a::STATE_GUARD_GUARD_LOOK_UNTIL_REACHED_POINT,
+            m.bool(at(a::STIMULI_COMBAT_TRANSITION_PROP_LOOK_WHILE_MOVING)),
+        );
+    }
+    data
+}
+
+/// action_guard.c's `action_guard_setup_from_fleeing`: a fled actor cowers
+/// (as long as its panic or hiding time, unless it retreated from an
+/// unopposable enemy) at the position it fled to, facing the way it came,
+/// or at a new position.
+pub fn guard_setup_from_fleeing(context: &AiStepContext, host: &impl AiHost) -> ActionData {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let definition = |offset: usize| m.f32(context.definition + offset as u32);
+    let mut data = ActionData::new();
+    if !m.bool(at(a::INPUT_VEHICLE_PASSENGER)) && !m.bool(at(a::META_SWARM)) {
+        data.set_i16(a::STATE_GUARD_WAIT_TICKS, 0);
+        data.set_bool(a::STATE_GUARD_COWER, true);
+        data.set_i16(a::STATE_GUARD_COWER_TICKS, 0);
+        let cower_panicked = m.i16(at(a::STATE_FLEE_PANIC_TYPE)) > 0;
+        data.set_bool(a::STATE_GUARD_COWER_PANICKED, cower_panicked);
+        let cower_from_retreat = m.i16(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_TIMER)) > 0 && !cower_panicked;
+        data.set_bool(a::STATE_GUARD_COWER_FROM_RETREAT, cower_from_retreat);
+        if !cower_from_retreat {
+            let (lower, upper) = if cower_panicked {
+                (definition(d::PANIC_COWER_TIME_LOWER_BOUND), definition(d::PANIC_COWER_TIME_UPPER_BOUND))
+            } else {
+                (definition(d::DEFENSIVE_HIDE_TIME_LOWER_BOUND), definition(d::DEFENSIVE_HIDE_TIME_UPPER_BOUND))
+            };
+            let time = call_full(context, host, call::REAL_SEED_RANDOM_RANGE, 0, 0, &[lower, upper]).output[0];
+            data.set_i16(a::STATE_GUARD_COWER_TICKS, c_short(time * 30.0));
+        }
+
+        let flee_firing_position_index = m.i16(at(a::STATE_FLEE_FLEE_FIRING_POSITION_INDEX));
+        if flee_firing_position_index == NONE as i16 {
+            data.set_bool(a::STATE_GUARD_FIND_NEW_GUARD_POSITION, true);
+            data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 0);
+        } else {
+            data.set_bool(a::STATE_GUARD_FIND_NEW_GUARD_POSITION, false);
+            data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 3);
+            data.set_i16(a::STATE_GUARD_GUARD_FIRING_POSITION_INDEX, flee_firing_position_index);
+            if m.bool(at(a::STATE_FLEE_HAS_APPROACH_POINT)) {
+                data.set_bool(a::STATE_GUARD_HAS_GUARD_DIRECTION, true);
+                data.set_bool(a::STATE_GUARD_AIM_IN_GUARD_DIRECTION, true);
+                let mut direction =
+                    vector_from_points(m.vector(at(a::INPUT_BODY_POSITION)), m.vector(at(a::STATE_FLEE_APPROACH_POINT)));
+                let magnitude = normalize3(&mut direction);
+                data.set_vector(a::STATE_GUARD_GUARD_DIRECTION, direction);
+                if magnitude == 0.0 {
+                    data.set_bool(a::STATE_GUARD_HAS_GUARD_DIRECTION, false);
+                }
+            }
         }
     } else {
         data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);

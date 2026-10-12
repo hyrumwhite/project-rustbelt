@@ -12,6 +12,9 @@
 //! the game through [`AiHost::call`], and the structure's rays through
 //! [`AiHost::structure_test_vector`].
 
+// (the tables are the C's own values, as it writes them)
+#![allow(clippy::approx_constant, clippy::excessive_precision)]
+
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, AiStepContext, NONE, object_get};
 use crate::collision::flags as test_flags;
 use crate::layout::{

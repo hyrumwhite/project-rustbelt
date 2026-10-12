@@ -63,6 +63,8 @@ symbols in this file:
 #include "memory/byte_swapping.h"
 
 #include "cseries/cseries.h"
+#include "math/real_math.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -86,6 +88,36 @@ struct packet_header_byte_swap_data
 /* ---------- globals */
 
 static char const *global_data_packet_groups_error_string = NULL;
+
+/* port: the errors by the index the Rust port gives them (crates/halo_map's
+data_packets::Error) */
+static char const *const data_packet_group_errors[] =
+{
+	NULL,
+	"couldn't append header to encoded packet",
+	"couldn't encode packet",
+	"got packet with no header",
+	"got packet with bad type",
+	"got packet with mismatched class",
+	"got packet which wouldn't decode",
+};
+
+/* port: the size the game's decoding set, for the check */
+static short data_packet_group_decoded_size;
+
+static long data_packet_group_error_index(
+	char const *error)
+{
+	long index;
+
+	for (index = 0; index < NUMBEROF(data_packet_group_errors); index++)
+	{
+		if (data_packet_group_errors[index] == error)
+			return index;
+	}
+
+	return NONE;
+}
 
 static struct packet_header_byte_swap_data packet_header_bs =
 {
@@ -167,7 +199,7 @@ boolean data_packet_group_append_packet_header(
 	}
 	else
 	{
-		error = "couldn't append header to encoded packet";
+		error = data_packet_group_errors[1];
 	}
 
 	global_data_packet_groups_error_string = error;
@@ -175,7 +207,100 @@ boolean data_packet_group_append_packet_header(
 	return error==NULL;
 }
 
+static boolean data_packet_group_encode_packet_game(
+	struct data_packet_group_definition *group_definition,
+	void const *decoded_packet,
+	void *encoded_packet,
+	short *encoded_packet_size,
+	short packet_type,
+	long packet_version);
+static boolean data_packet_group_decode_packet_game(
+	struct data_packet_group_definition *group_definition,
+	void *decoded_packet,
+	const void *encoded_packet,
+	short *encoded_packet_size,
+	short *packet_type,
+	short *packet_version,
+	short expected_packet_class);
+
+/* port: the Rust port's codec in Rust's mode; in check mode the game's,
+checked against Rust's (halo_sim.c) */
 boolean data_packet_group_encode_packet(
+	struct data_packet_group_definition *group_definition,
+	void const *decoded_packet,
+	void *encoded_packet,
+	short *encoded_packet_size,
+	short packet_type,
+	long packet_version)
+{
+	struct halo_sim_data_packet_call call;
+	boolean result;
+
+	memset(&call, 0, sizeof(call));
+	call.group = group_definition;
+	call.decoded = (void *)decoded_packet;
+	call.encoded = encoded_packet;
+	call.packet_type = packet_type;
+	call.version = packet_version;
+	if (halo_sim_data_packet_encode(&call))
+	{
+		*encoded_packet_size = call.encoded_size;
+		global_data_packet_groups_error_string = data_packet_group_errors[call.error];
+		return call.error == 0;
+	}
+	result = data_packet_group_encode_packet_game(group_definition, decoded_packet, encoded_packet,
+		encoded_packet_size, packet_type, packet_version);
+	call.encoded_size = *encoded_packet_size;
+	call.error = data_packet_group_error_index(global_data_packet_groups_error_string);
+	halo_sim_data_packet_encode_check(&call);
+
+	return result;
+}
+
+boolean data_packet_group_decode_packet(
+	struct data_packet_group_definition *group_definition,
+	void *decoded_packet,
+	const void *encoded_packet,
+	short *encoded_packet_size,
+	short *packet_type,
+	short *packet_version,
+	short expected_packet_class)
+{
+	struct halo_sim_data_packet_call call;
+	boolean result;
+
+	memset(&call, 0, sizeof(call));
+	call.group = group_definition;
+	call.decoded = decoded_packet;
+	call.encoded = (void *)encoded_packet;
+	call.encoded_size = *encoded_packet_size;
+	call.packet_type = *packet_type;
+	call.packet_version = *packet_version;
+	call.expected_packet_class = expected_packet_class;
+	call.encoded_size_reference = encoded_packet_size;
+	if (halo_sim_data_packet_decode(&call))
+	{
+		*packet_type = call.packet_type;
+		*packet_version = call.packet_version;
+		global_data_packet_groups_error_string = data_packet_group_errors[call.error];
+		return call.error == 0;
+	}
+	halo_sim_data_packet_decode_begin(&call);
+	data_packet_group_decoded_size = *encoded_packet_size;
+	result = data_packet_group_decode_packet_game(group_definition, decoded_packet, encoded_packet,
+		encoded_packet_size, packet_type, packet_version, expected_packet_class);
+	/* (the size the game set, before a struct shorter than its packet's
+	definition overran onto it) */
+	call.encoded_size = data_packet_group_decoded_size;
+	call.packet_type = *packet_type;
+	call.packet_version = *packet_version;
+	call.error = data_packet_group_error_index(global_data_packet_groups_error_string);
+	halo_sim_data_packet_decode_check(&call);
+
+	return result;
+}
+
+static boolean data_packet_group_encode_packet_game(
 	struct data_packet_group_definition *group_definition,
 	void const *decoded_packet,
 	void *encoded_packet,
@@ -218,7 +343,7 @@ boolean data_packet_group_encode_packet(
 	}
 	else
 	{
-		error = "couldn't encode packet";
+		error = data_packet_group_errors[2];
 	}
 
 	global_data_packet_groups_error_string = error;
@@ -226,7 +351,7 @@ boolean data_packet_group_encode_packet(
 	return error==NULL;
 }
 
-boolean data_packet_group_decode_packet(
+static boolean data_packet_group_decode_packet_game(
 	struct data_packet_group_definition *group_definition,
 	void *decoded_packet,
 	void const *encoded_packet,
@@ -264,6 +389,7 @@ boolean data_packet_group_decode_packet(
 			if (packet->packet_class == expected_packet_class)
 			{
 				--*encoded_packet_size;
+				data_packet_group_decoded_size = *encoded_packet_size;
 
 				if (!packet->definition ||
 					data_packet_decode(
@@ -278,22 +404,22 @@ boolean data_packet_group_decode_packet(
 				}
 				else
 				{
-					error = "got packet which wouldn't decode";
+					error = data_packet_group_errors[6];
 				}
 			}
 			else
 			{
-				error = "got packet with mismatched class";
+				error = data_packet_group_errors[5];
 			}
 		}
 		else
 		{
-			error = "got packet with bad type";
+			error = data_packet_group_errors[4];
 		}
 	}
 	else
 	{
-		error = "got packet with no header";
+		error = data_packet_group_errors[3];
 	}
 
 	global_data_packet_groups_error_string = error;

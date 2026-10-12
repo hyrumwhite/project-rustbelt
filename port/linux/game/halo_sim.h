@@ -65,6 +65,8 @@ enum
 	_halo_sim_encounters,
 	_halo_sim_conversations,
 	_halo_sim_communication,
+	/* the packet codec (memory/data_packet_groups.c), the game's messages' */
+	_halo_sim_data_packets,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -1719,6 +1721,39 @@ void halo_sim_pose_preprocess_check(long object_index, short node_count, void co
 mode the Rust port's ray test, on the running game's objects (through the
 host's callbacks), compared with the game's result (flags as the caller
 passed them) */
+/* crates/halo_sim's DataPacketCall: a packet's encoding or decoding by a
+data_packet_group_definition (memory/data_packet_groups.c) */
+struct halo_sim_data_packet_call
+{
+	void const *group;
+	void *decoded;
+	void *encoded;
+	short encoded_size;
+	short packet_type;
+	short packet_version;
+	short expected_packet_class;
+	long version;
+	/* data_packet_groups.c's error's index, 0 for none */
+	long error;
+	/* decoding's: the caller's size, written (as the game does) before the
+	struct is (a struct shorter than its packet's definition overruns into
+	what lies after it: the pregame keep-alive's) */
+	short *encoded_size_reference;
+};
+
+/* the packet codec in Rust (Rust's mode): whether it ran, the call then
+holding its results */
+int halo_sim_data_packet_encode(struct halo_sim_data_packet_call *call);
+int halo_sim_data_packet_decode(struct halo_sim_data_packet_call *call);
+/* in check mode: the game's encoding (its result in the call) against
+Rust's of the same packet */
+void halo_sim_data_packet_encode_check(struct halo_sim_data_packet_call const *game);
+/* in check mode: the decoding's inputs kept before the game's runs, then the
+game's results (in the call, its buffers as it left them) against Rust's of
+the kept inputs */
+void halo_sim_data_packet_decode_begin(struct halo_sim_data_packet_call const *call);
+void halo_sim_data_packet_decode_check(struct halo_sim_data_packet_call const *game);
+
 void halo_sim_collision_test_vector_check(unsigned long flags, void const *point, void const *vector,
 	long ignore_object_index, int hit, void const *collision);
 

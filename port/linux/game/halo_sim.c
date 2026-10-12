@@ -17,6 +17,7 @@ bit for bit; differences are counted and the first few logged.
 
 #include "cseries.h"
 #include "cache/cache_files.h"
+#include "memory/data_packet_groups.h"
 #include "cache/physical_memory_map.h"
 #include "physics/breakable_surfaces.h"
 #include "game/game.h"
@@ -76,7 +77,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 115
+#define HALO_SIM_VERSION 116
 
 /* ---------- structures */
 
@@ -2058,6 +2059,7 @@ struct halo_sim_world_step_c
 };
 
 typedef long (*halo_sim_world_step_function)(long step, struct halo_sim_world_step_c *call);
+typedef long (*halo_sim_data_packet_function)(struct halo_sim_data_packet_call *call);
 
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
@@ -2086,6 +2088,8 @@ static struct
 	halo_sim_pose_preprocess_function pose_preprocess;
 	halo_sim_set_host_function set_host;
 	halo_sim_collision_test_vector_function collision_test_vector;
+	halo_sim_data_packet_function data_packet_encode;
+	halo_sim_data_packet_function data_packet_decode;
 	halo_sim_projectile_function projectile_update;
 	halo_sim_projectile_function projectile_check;
 	halo_sim_biped_physics_function biped_physics;
@@ -2222,6 +2226,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"encounters",
 	"conversations",
 	"communication",
+	"data_packets",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -2978,6 +2983,22 @@ static struct
 	unsigned long collisions;
 	unsigned long events_compared;
 } halo_sim_projectile_checks;
+
+/* the packet codec's checks: its comparisons, and a decoding's inputs kept
+for Rust's (the game's decoding swaps the encoded bytes in place) */
+#define MAXIMUM_HALO_SIM_DATA_PACKET_SIZE 0x10000
+static struct
+{
+	unsigned long compared[2];
+	unsigned long differed[2];
+	unsigned char encoded[MAXIMUM_HALO_SIM_DATA_PACKET_SIZE];
+	unsigned char decoded[MAXIMUM_HALO_SIM_DATA_PACKET_SIZE];
+	short encoded_size;
+	short decoded_size;
+	short packet_type;
+	short packet_version;
+	boolean kept;
+} halo_sim_data_packet_checks;
 
 /* the collision checks' comparisons */
 static struct
@@ -4877,6 +4898,8 @@ static void halo_sim_initialize(void)
 	halo_sim.path = (halo_sim_path_function)halo_sim_symbol(library, "halo_sim_path");
 	halo_sim.world_step = (halo_sim_world_step_function)halo_sim_symbol(library, "halo_sim_world_step");
 	halo_sim.world_step_check = (halo_sim_world_step_function)halo_sim_symbol(library, "halo_sim_world_step_check");
+	halo_sim.data_packet_encode = (halo_sim_data_packet_function)halo_sim_symbol(library, "halo_sim_data_packet_encode");
+	halo_sim.data_packet_decode = (halo_sim_data_packet_function)halo_sim_symbol(library, "halo_sim_data_packet_decode");
 	if (!halo_sim.load_map || !halo_sim.point_physics || !halo_sim.set_tag_cache || !halo_sim.pose_orientations ||
 		!halo_sim.pose_matrices || !halo_sim.pose_preprocess || !halo_sim.set_host || !halo_sim.collision_test_vector ||
 		!halo_sim.projectile_update || !halo_sim.projectile_check || !halo_sim.biped_physics ||
@@ -4908,7 +4931,8 @@ static void halo_sim_initialize(void)
 		!halo_sim.hs_update || !halo_sim.hs_update_check ||
 		!halo_sim.ai_update || !halo_sim.ai_update_check ||
 		!halo_sim.ai_step || !halo_sim.ai_step_check ||
-		!halo_sim.path || !halo_sim.world_step || !halo_sim.world_step_check)
+		!halo_sim.path || !halo_sim.world_step || !halo_sim.world_step_check ||
+		!halo_sim.data_packet_encode || !halo_sim.data_packet_decode)
 	{
 		platform_log("halo_sim: %s lacks an entry point; the game's own simulation runs", path);
 		return;
@@ -5427,6 +5451,153 @@ void halo_sim_pose_preprocess_check(long object_index, short node_count, void co
 	if (!same)
 		halo_sim_pose_report(2, object_index, node_count, node_index);
 	halo_sim_pose_tally(2);
+}
+
+/* ---------- packet codec */
+
+/* the size of the struct the encoded packet's header names, 0 for none
+(data_packet_group_decode_packet's lookup) */
+static short halo_sim_data_packet_decoded_size(struct data_packet_group_definition const *group,
+	unsigned char const *encoded, short encoded_size)
+{
+	char packet_type;
+
+	if (encoded_size < 1)
+		return 0;
+	packet_type = (char)encoded[encoded_size - 1];
+	if (packet_type < 0 || packet_type >= group->packet_type_count || !group->packets[packet_type].definition)
+		return 0;
+
+	return group->packets[packet_type].definition->size;
+}
+
+int halo_sim_data_packet_encode(struct halo_sim_data_packet_call *call)
+{
+	return halo_sim_mode(_halo_sim_data_packets) == _halo_sim_mode_rust && halo_sim.data_packet_encode(call) == 0;
+}
+
+int halo_sim_data_packet_decode(struct halo_sim_data_packet_call *call)
+{
+	return halo_sim_mode(_halo_sim_data_packets) == _halo_sim_mode_rust && halo_sim.data_packet_decode(call) == 0;
+}
+
+static void halo_sim_data_packet_tally(long which, boolean same)
+{
+	static char const *const names[2] = { "encoded", "decoded" };
+	unsigned long compared;
+
+	compared = ++halo_sim_data_packet_checks.compared[which];
+	if (!same)
+		halo_sim_data_packet_checks.differed[which]++;
+	if ((compared & (compared - 1)) == 0 && compared >= 16)
+	{
+		platform_log("halo_sim: data packets: %lu of %lu %s agree with the game",
+			compared - halo_sim_data_packet_checks.differed[which], compared, names[which]);
+	}
+}
+
+void halo_sim_data_packet_encode_check(struct halo_sim_data_packet_call const *game)
+{
+	struct data_packet_group_definition const *group = (struct data_packet_group_definition const *)game->group;
+	struct halo_sim_data_packet_call call = *game;
+	boolean same;
+
+	if (halo_sim_mode(_halo_sim_data_packets) != _halo_sim_mode_check ||
+		group->maximum_encoded_packet_size > MAXIMUM_HALO_SIM_DATA_PACKET_SIZE)
+	{
+		return;
+	}
+	call.encoded = halo_sim_data_packet_checks.encoded;
+	call.encoded_size = 0;
+	call.error = 0;
+	if (halo_sim.data_packet_encode(&call) != 0)
+		return;
+	same = call.error == game->error && call.encoded_size == game->encoded_size &&
+		(game->encoded_size <= 0 || memcmp(call.encoded, game->encoded, game->encoded_size) == 0);
+	if (!same && halo_sim_data_packet_checks.differed[0] < 8)
+	{
+		platform_log("halo_sim: data packets: encoding type %d differs: game size %d error %ld, rust size %d error %ld",
+			game->packet_type, game->encoded_size, game->error, call.encoded_size, call.error);
+	}
+	halo_sim_data_packet_tally(0, same);
+}
+
+void halo_sim_data_packet_decode_begin(struct halo_sim_data_packet_call const *call)
+{
+	struct data_packet_group_definition const *group = (struct data_packet_group_definition const *)call->group;
+	short decoded_size;
+
+	halo_sim_data_packet_checks.kept = FALSE;
+	if (halo_sim_mode(_halo_sim_data_packets) != _halo_sim_mode_check ||
+		call->encoded_size < 0 || call->encoded_size > MAXIMUM_HALO_SIM_DATA_PACKET_SIZE)
+	{
+		return;
+	}
+	decoded_size = halo_sim_data_packet_decoded_size(group, call->encoded, call->encoded_size);
+	if (decoded_size < 0)
+		return;
+	memcpy(halo_sim_data_packet_checks.encoded, call->encoded, call->encoded_size);
+	memcpy(halo_sim_data_packet_checks.decoded, call->decoded, decoded_size);
+	halo_sim_data_packet_checks.encoded_size = call->encoded_size;
+	halo_sim_data_packet_checks.decoded_size = decoded_size;
+	halo_sim_data_packet_checks.packet_type = call->packet_type;
+	halo_sim_data_packet_checks.packet_version = call->packet_version;
+	halo_sim_data_packet_checks.kept = TRUE;
+}
+
+void halo_sim_data_packet_decode_check(struct halo_sim_data_packet_call const *game)
+{
+	struct halo_sim_data_packet_call call = *game;
+	short encoded_size = halo_sim_data_packet_checks.encoded_size;
+	short decoded_size = halo_sim_data_packet_checks.decoded_size;
+	boolean same;
+
+	if (!halo_sim_data_packet_checks.kept)
+		return;
+	halo_sim_data_packet_checks.kept = FALSE;
+	call.encoded = halo_sim_data_packet_checks.encoded;
+	call.decoded = halo_sim_data_packet_checks.decoded;
+	call.encoded_size_reference = NULL;
+	call.encoded_size = encoded_size;
+	call.packet_type = halo_sim_data_packet_checks.packet_type;
+	call.packet_version = halo_sim_data_packet_checks.packet_version;
+	call.error = 0;
+	if (halo_sim.data_packet_decode(&call) != 0)
+		return;
+	/* (what each left: its results, the struct, and the encoded bytes as
+	its byte swaps left them) */
+	same = call.error == game->error && call.encoded_size == game->encoded_size &&
+		call.packet_type == game->packet_type && call.packet_version == game->packet_version &&
+		memcmp(call.decoded, game->decoded, decoded_size) == 0 &&
+		memcmp(call.encoded, game->encoded, encoded_size) == 0;
+	if (!same && halo_sim_data_packet_checks.differed[1] < 8)
+	{
+		short offset;
+
+		platform_log("halo_sim: data packets: decoding %d bytes differs: game type %d version %d error %ld, rust type %d version %d error %ld",
+			encoded_size, game->packet_type, game->packet_version, game->error, call.packet_type, call.packet_version,
+			call.error);
+		platform_log("halo_sim:   sizes: game %d rust %d, struct %d", game->encoded_size, call.encoded_size, decoded_size);
+		for (offset = 0; offset < decoded_size; offset++)
+		{
+			if (((unsigned char const *)call.decoded)[offset] != ((unsigned char const *)game->decoded)[offset])
+			{
+				platform_log("halo_sim:   the struct (%d bytes) first differs at %d: game %02x rust %02x", decoded_size, offset,
+					((unsigned char const *)game->decoded)[offset], ((unsigned char const *)call.decoded)[offset]);
+				break;
+			}
+		}
+		for (offset = 0; offset < encoded_size; offset++)
+		{
+			if (((unsigned char const *)call.encoded)[offset] != ((unsigned char const *)game->encoded)[offset])
+			{
+				platform_log("halo_sim:   the encoded bytes first differ at %d: game %02x rust %02x", offset,
+					((unsigned char const *)game->encoded)[offset], ((unsigned char const *)call.encoded)[offset]);
+				break;
+			}
+		}
+	}
+	halo_sim_data_packet_tally(1, same);
 }
 
 /* ---------- collision */

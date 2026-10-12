@@ -469,6 +469,15 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
      - **What Rust does:** an orphan's corpse that has come to rest is cheated to dead (unless it's the target still to be uncovered or searched) and keeps its last position. A swarm's prop picks another of its units every three seconds. The prop's unit is sampled, and the prop's direction and distance from the actor's sense position follow.
      - **The C's side, through `actor_perception_call`:** whether a corpse has come to rest, the swarm's unit, the unit's sampling (head, body and center, velocity, location, water, vehicle, attachments), the sense position, and the status refresh (next). The sense position is a struct only the game's later checks use: the call returns its body position to Rust and keeps the rest in the game for the status refresh, which in check mode doesn't run for Rust.
      - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the corpse cheat was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+   - [x] Prop status refresh in Rust (`halo_map::actor_perception`): actor_perception.c's `prop_status_refresh`.
+     - **What Rust does:**
+       - whether the prop is ignored, or is the preferred target (by the actor's desired encounter, squad or platoon, with the game's squad and platoon swap kept, or a player);
+       - its speed, closing speed, distance and facing, each quantized (an acknowledged prop that starts moving draws a look);
+       - an orphan's visibility (searching);
+       - for a unit: its lighting, flying, camouflage, flashlight, death, actor and combat state; a friend's death or combat noticed in passing; then visibility (whether to use the maximum distance, with the knowledge), audibility and ineffability, and the perception they make; and whether it's definitely located (seen, or a friend is shooting at it);
+       - then the dangers of its vehicle and suicide, its reachability, the requirement decision put off until now, and its unopposability and target weight.
+     - **The C's side, through `actor_perception_call`:** one sample of the unit (its flags, death, actor, animation, velocity and aim, the encounter's blindness and deafness, and the debug switches), the look, the line of sight, visibility and audibility from the kept sense position (whose velocity the sense-position call now returns too), the actor's combat state, the vehicle and suicide dangers, unreachability, and the look interest.
+     - **Results:** the perception step agrees in minute-long runs of b30, d20, c20, b40 and a50. A planted error in the quantized distance was caught on b30. With all forty-seven systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 6. Networking
 
 When nothing is left in the 32-bit process, the bridge goes away.

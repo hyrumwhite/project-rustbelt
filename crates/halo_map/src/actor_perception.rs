@@ -113,11 +113,64 @@ pub mod call {
     /// it's attached to and the units attached to it).
     pub const SAMPLE_UNIT: i32 = 37;
     /// `actor_perception_find_sense_position(actor, a's body, a)`: the
-    /// position's body position in `output[0..3]` (the game keeps the rest
-    /// for [`STATUS_REFRESH`]).
+    /// position's body position in `output[0..3]` and its velocity in
+    /// `output[3..6]` (the game keeps the rest for the status refresh's
+    /// line of sight, visibility, audibility and vehicle danger).
     pub const SENSE_POSITION: i32 = 38;
-    /// `prop_status_refresh(actor, a, ...)` from the [`SENSE_POSITION`] kept.
+    /// `prop_status_refresh(actor, a, ...)` from the [`SENSE_POSITION`] kept
+    /// (the game's whole refresh; no longer asked).
     pub const STATUS_REFRESH: i32 = 39;
+    /// The prop `a`'s unit as the status refresh reads it: the
+    /// [`super::sample`] bits the result, the unit's actor (its swarm's, if
+    /// it has one) `result2`, its velocity `output[0..3]` and its aiming
+    /// vector `output[3..6]`.
+    pub const STATUS_SAMPLE: i32 = 40;
+    /// `actor_look_secondary(actor, started moving prop, default, a)`.
+    pub const LOOK_STARTED_MOVING: i32 = 41;
+    /// `ai_test_line_of_sight` from the kept sense position to the prop
+    /// `a`'s head, the result.
+    pub const LINE_OF_SIGHT: i32 = 42;
+    /// `actor_visibility_at_point` of the prop `a`'s head from the kept sense
+    /// position, with its line of sight: `b` the lighting (its low byte),
+    /// whether to use the maximum distance (bit 8), whether it's a player
+    /// (bit 9) and the knowledge (from bit 16); the result.
+    pub const VISIBILITY: i32 = 43;
+    /// Whether the actor `a` is noncombat (bit 0), in combat (bit 1) and
+    /// fighting (bit 2), the result.
+    pub const COMBAT_STATE: i32 = 44;
+    /// `actor_audibility_at_point` of the prop `a` (its vehicle's or unit's
+    /// constant sound) from the kept sense position, the result.
+    pub const AUDIBILITY: i32 = 45;
+    /// `actor_perception_assess_vehicle_danger` of the prop `a`'s vehicle,
+    /// `b` whether it's perceived fully.
+    pub const VEHICLE_DANGER: i32 = 46;
+    /// `actor_perception_assess_suicide_danger` of the prop `a`'s unit, `b`
+    /// whether it's perceived fully.
+    pub const SUICIDE_DANGER: i32 = 47;
+    /// `actor_perception_unreachable(actor, a, FALSE)`.
+    pub const UNREACHABLE: i32 = 48;
+    /// `actor_look_compute_prop_interest(actor, a)`, `output[0]`.
+    pub const LOOK_INTEREST: i32 = 49;
+}
+
+/// The status sample's bits ([`call::STATUS_SAMPLE`]): of the unit, its
+/// encounter and the debug switches (a local game's).
+pub mod sample {
+    pub const IGNORED_BY_ACTORS: i32 = 1 << 0;
+    pub const PREFERRED_TARGET: i32 = 1 << 1;
+    pub const DEBUG_IGNORE_PLAYER: i32 = 1 << 2;
+    pub const ENCOUNTER_BLIND: i32 = 1 << 3;
+    pub const FLYING: i32 = 1 << 4;
+    pub const ACTIVE_CAMOUFLAGE: i32 = 1 << 5;
+    pub const FLASHLIGHT: i32 = 1 << 6;
+    pub const DEAD: i32 = 1 << 7;
+    pub const FEIGN_DEATH_OVER: i32 = 1 << 8;
+    pub const SWARM: i32 = 1 << 9;
+    pub const DEBUG_BLIND: i32 = 1 << 10;
+    pub const DEBUG_INVISIBLE_PLAYER: i32 = 1 << 11;
+    pub const DEBUG_DEAF: i32 = 1 << 12;
+    pub const ENCOUNTER_DEAF: i32 = 1 << 13;
+    pub const MELEE_ATTACK: i32 = 1 << 14;
 }
 
 /// The local enums (actor_perception.c's).
@@ -308,9 +361,9 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                 refresh_position = true;
             }
             if refresh_position {
-                prop_position_refresh(context, host, index, refresh_status);
+                let sense_velocity = prop_position_refresh(context, host, index, refresh_status);
                 if refresh_status {
-                    call_simple(context, host, call::STATUS_REFRESH, index);
+                    prop_status_refresh(context, host, index, sense_velocity);
                 }
             }
         }
@@ -1133,12 +1186,13 @@ pub fn become_acknowledged(context: &AiStepContext, host: &impl AiHost, prop_ind
 /// (unless it's the target still to be uncovered or searched) and keeps its
 /// position; a swarm's prop picks another of its units every three seconds;
 /// the prop's unit is sampled; and the prop's direction and distance from
-/// the actor's sense position follow.
-pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_index: i32, refresh_vehicle: bool) {
+/// the actor's sense position follow. The sense position's velocity, for
+/// the status refresh.
+pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_index: i32, refresh_vehicle: bool) -> [f32; 3] {
     let m = host.memory();
     let at = |offset: usize| context.actor + offset as u32;
     if !m.bool(at(a::META_ACTIVE)) {
-        return;
+        return [0.0; 3];
     }
     let prop = prop_get(m, context, prop_index);
     let field = |offset: usize| prop + offset as u32;
@@ -1180,7 +1234,8 @@ pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_i
         call_simple(context, host, call::SAMPLE_UNIT, prop_index);
     }
 
-    let sense_body = call_full(context, host, call::SENSE_POSITION, prop_index, 0, 0.0).vector();
+    let sense = call_full(context, host, call::SENSE_POSITION, prop_index, 0, 0.0);
+    let sense_body = sense.vector();
     let body = m.vector(field(p::BODY_POSITION));
     let mut actor_to_prop = [body[0] - sense_body[0], body[1] - sense_body[1], body[2] - sense_body[2]];
     let magnitude = crate::features::magnitude_squared3(actor_to_prop).sqrt();
@@ -1198,4 +1253,429 @@ pub fn prop_position_refresh(context: &AiStepContext, host: &impl AiHost, prop_i
     for (i, value) in actor_to_prop.into_iter().enumerate() {
         m.set_f32(field(p::ACTOR_TO_PROP) + 4 * i as u32, value);
     }
+    [sense.output[3], sense.output[4], sense.output[5]]
+}
+
+/// actor_perception.c's local enums the status refresh uses.
+const MODE_ASLEEP: i16 = 1;
+const DESIRED_TARGET_AI: i16 = 1;
+const DESIRED_TARGET_PLAYER: i16 = 2;
+const UNIT_EFFECT_BUMP: i16 = 0;
+const LIGHTING_BRIGHT: i8 = 2;
+const PERCEPTION_NONE: i16 = 0;
+const PERCEPTION_PARTIAL: i16 = 1;
+const PERCEPTION_UNMISTAKABLE: i16 = 3;
+const TICKS_PER_SECOND: f32 = 30.0;
+
+/// The [`call::VISIBILITY`] of the prop's head.
+fn visibility(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    prop_index: i32,
+    lighting: i8,
+    use_maximum_distance: bool,
+    player: bool,
+    knowledge: i16,
+) -> i16 {
+    let b = lighting as u8 as i32 | (use_maximum_distance as i32) << 8 | (player as i32) << 9 | (knowledge as i32) << 16;
+    call_full(context, host, call::VISIBILITY, prop_index, b, 0.0).result as i16
+}
+
+/// actor_perception.c's `prop_status_refresh`, from the sense position
+/// [`prop_position_refresh`] found: whether the prop's ignored or the
+/// preferred target; its speed, closing speed, distance and facing,
+/// quantized (an acknowledged prop starting to move draws a look); its line
+/// of sight; then an orphan's visibility (searching) or a unit's state
+/// (lighting, flying, camouflage, flashlight, death, actor and combat, a
+/// friend's death or combat noticed in passing), visibility, audibility and
+/// ineffability, the perception they make and whether it's located; and
+/// last the dangers of its vehicle and suicide, its reachability, the
+/// requirement decision left for now, and its unopposability, target
+/// weight and look interest.
+pub fn prop_status_refresh(context: &AiStepContext, host: &impl AiHost, prop_index: i32, sense_velocity: [f32; 3]) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if !m.bool(at(a::META_ACTIVE)) {
+        return;
+    }
+    let prop = prop_get(m, context, prop_index);
+    let field = |offset: usize| prop + offset as u32;
+    let game_time = context.game_time;
+    let status = call_full(context, host, call::STATUS_SAMPLE, prop_index, 0, 0.0);
+    let bits = status.result;
+    let has = |bit: i32| bits & bit != 0;
+    let mode = m.i16(at(a::STATE_MODE));
+    let blind = has(sample::ENCOUNTER_BLIND) || mode == MODE_ASLEEP;
+
+    m.set_bool(field(p::IGNORE), has(sample::IGNORED_BY_ACTORS));
+    if m.bool(field(p::PLAYER)) && has(sample::DEBUG_IGNORE_PLAYER) {
+        m.set_bool(field(p::IGNORE), true);
+    }
+
+    if m.bool(field(p::ENEMY)) {
+        m.set_bool(field(p::PREFERRED_TARGET), has(sample::PREFERRED_TARGET));
+        match m.i16(at(a::EXTERNAL_ORDERS_DESIRED_TARGET_TYPE)) {
+            DESIRED_TARGET_AI => {
+                let prop_actor_index = m.i32(field(p::ACTOR_INDEX));
+                let desired = m.i32(at(a::EXTERNAL_ORDERS_DESIRED_TARGET_AI_INDEX));
+                if prop_actor_index != NONE && desired != NONE {
+                    if let Some(prop_actor) = crate::ai_actor::datum_get(m, context.actor_data, prop_actor_index) {
+                        if m.i32(prop_actor + a::META_ENCOUNTER_INDEX as u32) & 0xFFFF == desired & 0xFFFF {
+                            let group = ((desired as u32 >> 16) & 0xFF) as i16;
+                            // the game's swap: a squad reference compares the
+                            // platoon, a platoon reference the squad
+                            match desired as u32 >> 30 {
+                                0 => m.set_bool(field(p::PREFERRED_TARGET), true),
+                                2 => {
+                                    if group == m.i16(prop_actor + a::META_PLATOON_INDEX as u32) {
+                                        m.set_bool(field(p::PREFERRED_TARGET), true);
+                                    }
+                                }
+                                1 => {
+                                    if group == m.i16(prop_actor + a::META_SQUAD_INDEX as u32) {
+                                        m.set_bool(field(p::PREFERRED_TARGET), true);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            DESIRED_TARGET_PLAYER => {
+                if m.bool(field(p::PLAYER)) {
+                    m.set_bool(field(p::PREFERRED_TARGET), true);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let previous_quantized_speed = m.i8(field(p::QUANTIZED_SPEED)) as i16;
+    let velocity = [status.output[0], status.output[1], status.output[2]];
+    let speed = crate::features::magnitude_squared3(velocity).sqrt();
+    let quantized_speed: i8 = if speed < 0.1 / TICKS_PER_SECOND {
+        0
+    } else if speed < 0.5 / TICKS_PER_SECOND {
+        1
+    } else if speed < 1.0 / TICKS_PER_SECOND {
+        2
+    } else {
+        3
+    };
+    m.w8(field(p::QUANTIZED_SPEED), quantized_speed as u8);
+
+    let actor_to_prop = m.vector(field(p::ACTOR_TO_PROP));
+    let relative_velocity =
+        [velocity[0] - sense_velocity[0], velocity[1] - sense_velocity[1], velocity[2] - sense_velocity[2]];
+    let closing_speed = -(relative_velocity[0] * actor_to_prop[0]
+        + relative_velocity[1] * actor_to_prop[1]
+        + relative_velocity[2] * actor_to_prop[2]);
+    let quantized_closing_speed: i8 = if closing_speed < -1.0 / TICKS_PER_SECOND {
+        0
+    } else if closing_speed < -0.5 / TICKS_PER_SECOND {
+        1
+    } else if closing_speed < -0.1 / TICKS_PER_SECOND {
+        2
+    } else if closing_speed < 0.1 / TICKS_PER_SECOND {
+        3
+    } else if closing_speed < 0.5 / TICKS_PER_SECOND {
+        4
+    } else if closing_speed < 1.0 / TICKS_PER_SECOND {
+        5
+    } else {
+        6
+    };
+    m.w8(field(p::QUANTIZED_CLOSING_SPEED), quantized_closing_speed as u8);
+
+    if prop_acknowledged(m.i16(field(p::STATE))) && previous_quantized_speed <= 1 && quantized_speed > 1 {
+        call_simple(context, host, call::LOOK_STARTED_MOVING, prop_index);
+    }
+
+    let distance = m.f32(field(p::DISTANCE));
+    let quantized_distance: i8 = if distance < 1.0 {
+        0
+    } else if distance < 6.0 {
+        1
+    } else if distance < 10.0 {
+        2
+    } else if distance < 30.0 {
+        3
+    } else {
+        4
+    };
+    m.w8(field(p::QUANTIZED_DISTANCE), quantized_distance as u8);
+
+    let aiming = [status.output[3], status.output[4], status.output[5]];
+    let facing = -(aiming[0] * actor_to_prop[0] + aiming[1] * actor_to_prop[1] + aiming[2] * actor_to_prop[2]);
+    let facing_distance = if facing <= 0.0 {
+        f32::MAX
+    } else if facing >= 1.0 {
+        0.0
+    } else {
+        (1.0 - facing * facing).sqrt() * distance
+    };
+    let quantized_facing: i8 = if facing > 0.99250001 || facing_distance < 0.5 {
+        0
+    } else if facing > 0.90630001 || facing_distance < 1.5 {
+        1
+    } else if facing > 0.5 {
+        2
+    } else if facing > 0.0 {
+        3
+    } else {
+        4
+    };
+    m.w8(field(p::QUANTIZED_FACING), quantized_facing as u8);
+
+    let unit_effect = m.i16(field(p::UNIT_EFFECT));
+    m.set_bool(field(p::SHOOTING), unit_effect == UNIT_EFFECT_SHOOTING);
+
+    let set_perceptions_none = || {
+        m.set_i16(field(p::PERCEPTION), PERCEPTION_NONE);
+        m.set_i16(field(p::INEFFABILITY), PERCEPTION_NONE);
+        m.set_i16(field(p::AUDIBILITY), PERCEPTION_NONE);
+        m.set_i16(field(p::VISIBILITY), PERCEPTION_NONE);
+    };
+
+    if prop_orphaned(m.i16(field(p::STATE))) {
+        let line_of_sight = call_simple(context, host, call::LINE_OF_SIGHT, prop_index) as i16;
+        m.set_i16(field(p::LINE_OF_SIGHT), line_of_sight);
+        if m.bool(field(p::IGNORE)) || blind {
+            set_perceptions_none();
+        } else {
+            let visibility =
+                visibility(context, host, prop_index, m.i8(field(p::LIGHTING)), true, false, KNOWLEDGE_SEARCHING);
+            m.set_i16(field(p::VISIBILITY), visibility);
+            m.set_i16(field(p::AUDIBILITY), PERCEPTION_NONE);
+            m.set_i16(field(p::INEFFABILITY), PERCEPTION_NONE);
+            m.set_i16(field(p::PERCEPTION), visibility);
+        }
+    } else {
+        let mut noticed = false;
+        let enemy = m.bool(field(p::ENEMY));
+        let player = m.bool(field(p::PLAYER));
+        let line_of_sight = call_simple(context, host, call::LINE_OF_SIGHT, prop_index) as i16;
+        m.set_i16(field(p::LINE_OF_SIGHT), line_of_sight);
+        m.w8(field(p::LIGHTING), LIGHTING_BRIGHT as u8);
+        m.set_bool(field(p::FLYING), has(sample::FLYING));
+        m.set_bool(field(p::ACTIVE_CAMOUFLAGE), has(sample::ACTIVE_CAMOUFLAGE));
+        m.set_bool(field(p::FLASHLIGHT), has(sample::FLASHLIGHT));
+
+        let dead = has(sample::DEAD);
+        let really_dead = dead && has(sample::FEIGN_DEATH_OVER);
+        let just_killed = dead && !m.bool(field(p::DEAD));
+        m.set_bool(field(p::JUST_KILLED), just_killed);
+        m.set_bool(field(p::DEAD), dead);
+        m.set_bool(field(p::REALLY_DEAD), really_dead);
+        if just_killed && !enemy && mode < MODE_COMBAT {
+            noticed = true;
+        }
+        if dead {
+            m.set_i16(field(p::REQUIRED_TICKS), 0);
+        }
+
+        let unit_actor_index = status.result2;
+        let swarm = has(sample::SWARM);
+        if unit_actor_index != m.i32(field(p::ACTOR_INDEX)) {
+            m.set_bool(field(p::SWARM), swarm);
+            m.w32(field(p::ACTOR_INDEX), unit_actor_index as u32);
+            let orphan_prop_index = m.i32(field(p::ORPHAN_PROP_INDEX));
+            if orphan_prop_index != NONE {
+                let orphan = prop_get(m, context, orphan_prop_index);
+                m.w32(orphan + p::ACTOR_INDEX as u32, unit_actor_index as u32);
+                m.set_bool(orphan + p::SWARM as u32, swarm);
+            }
+        }
+
+        let (noncombat, in_combat, fighting);
+        if unit_actor_index == NONE {
+            noncombat = false;
+            in_combat = false;
+            fighting = !m.bool(field(p::DEAD));
+        } else {
+            let state = call_simple(context, host, call::COMBAT_STATE, m.i32(field(p::ACTOR_INDEX)));
+            noncombat = state & 1 != 0;
+            in_combat = state & 2 != 0;
+            fighting = state & 4 != 0;
+            if in_combat && !m.bool(field(p::IN_COMBAT)) && !enemy && mode < MODE_COMBAT {
+                noticed = true;
+            }
+        }
+        m.set_bool(field(p::NONCOMBAT), noncombat);
+        m.set_bool(field(p::IN_COMBAT), in_combat);
+        m.set_bool(field(p::FIGHTING), fighting);
+
+        let lighting = || if m.bool(field(p::FLASHLIGHT)) { LIGHTING_BRIGHT } else { m.i8(field(p::LIGHTING)) };
+        if noticed {
+            let mut visibility_noticed = PERCEPTION_NONE;
+            if !blind {
+                let knowledge = perception_knowledge(context, host, prop_index);
+                visibility_noticed = visibility(context, host, prop_index, lighting(), true, false, knowledge);
+            }
+            if visibility_noticed < PERCEPTION_FULL {
+                m.set_i16(field(p::PERCEPTION), visibility_noticed);
+                m.set_i16(field(p::VISIBILITY), visibility_noticed);
+                m.set_i16(field(p::STATE), UNACKNOWLEDGED);
+            }
+        }
+
+        if m.bool(field(p::IGNORE)) {
+            set_perceptions_none();
+        } else {
+            let mut invisible = blind;
+            if has(sample::DEBUG_BLIND) || (has(sample::DEBUG_INVISIBLE_PLAYER) && player) {
+                invisible = true;
+            }
+            if m.bool(field(p::ACTIVE_CAMOUFLAGE)) {
+                invisible = enemy || (player && distance > 4.0);
+            }
+            if invisible {
+                m.set_i16(field(p::VISIBILITY), PERCEPTION_NONE);
+                m.set_bool(field(p::JUST_BECAME_VISIBLE), false);
+            } else {
+                let mut use_maximum_distance = true;
+                if m.i16(at(a::INPUT_VEHICLE_DRIVER_TYPE)) == v::_ACTOR_VEHICLE_DRIVER_DIRECTIONAL_FLYING as i16
+                    || m.i16(at(a::META_TYPE)) == v::_ACTOR_MOUNTED_WEAPON as i16
+                {
+                    use_maximum_distance = false;
+                } else if !enemy {
+                    use_maximum_distance = false;
+                    if mode < MODE_COMBAT && (m.bool(field(p::DEAD)) || m.bool(field(p::IN_COMBAT))) {
+                        use_maximum_distance = true;
+                    }
+                } else if prop_acknowledged(m.i16(field(p::STATE))) {
+                    use_maximum_distance = false;
+                }
+                let lighting = lighting();
+                let knowledge = perception_knowledge(context, host, prop_index);
+                let visible = visibility(context, host, prop_index, lighting, use_maximum_distance, player, knowledge);
+                m.set_bool(
+                    field(p::JUST_BECAME_VISIBLE),
+                    m.i16(field(p::VISIBILITY)) == PERCEPTION_NONE && visible > PERCEPTION_NONE,
+                );
+                m.set_i16(field(p::VISIBILITY), visible);
+                if visible != PERCEPTION_NONE {
+                    let head = m.vector(field(p::HEAD_POSITION));
+                    for (i, value) in head.into_iter().enumerate() {
+                        m.set_f32(field(p::LAST_VISIBLE_HEAD_POSITION) + 4 * i as u32, value);
+                    }
+                    m.w32(field(p::LAST_VISIBLE_TIME), game_time as u32);
+                }
+            }
+
+            if has(sample::DEBUG_DEAF) || has(sample::ENCOUNTER_DEAF) {
+                m.set_i16(field(p::AUDIBILITY), PERCEPTION_NONE);
+            } else if unit_effect == UNIT_EFFECT_SHOOTING || unit_effect == UNIT_EFFECT_DEATH_SCREAM {
+                m.set_i16(field(p::AUDIBILITY), PERCEPTION_UNMISTAKABLE);
+            } else {
+                let audibility = call_simple(context, host, call::AUDIBILITY, prop_index) as i16;
+                m.set_i16(field(p::AUDIBILITY), audibility);
+            }
+
+            let mut ineffability = PERCEPTION_NONE;
+            if unit_effect == UNIT_EFFECT_BUMP {
+                ineffability = PERCEPTION_UNMISTAKABLE;
+            }
+            let line_of_sight = m.i16(field(p::LINE_OF_SIGHT));
+            if m.bool(field(p::FLASHLIGHT))
+                && m.i8(field(p::QUANTIZED_FACING)) <= 2
+                && m.i8(field(p::QUANTIZED_DISTANCE)) <= 2
+                && (line_of_sight == v::_AI_LINE_OF_SIGHT_CLEAR as i16 || line_of_sight == v::_AI_LINE_OF_SIGHT_OCCLUDED as i16)
+            {
+                ineffability = ineffability.max(PERCEPTION_PARTIAL);
+            }
+            m.set_i16(field(p::INEFFABILITY), ineffability);
+
+            let mut perception =
+                m.i16(field(p::VISIBILITY)).max(m.i16(field(p::AUDIBILITY)).max(ineffability));
+            if perception == PERCEPTION_PARTIAL && prop_acknowledged(m.i16(field(p::STATE))) {
+                perception = PERCEPTION_FULL;
+            }
+            m.set_i16(field(p::PERCEPTION), perception);
+        }
+
+        if m.i16(field(p::PERCEPTION)) != PERCEPTION_NONE {
+            let body = m.vector(field(p::BODY_POSITION));
+            for (i, value) in body.into_iter().enumerate() {
+                m.set_f32(field(p::LAST_PERCEIVED_BODY_POSITION) + 4 * i as u32, value);
+            }
+            m.w32(field(p::LAST_PERCEIVED_TIME), game_time as u32);
+        }
+
+        if prop_acknowledged(m.i16(field(p::STATE))) {
+            let located = m.i16(field(p::VISIBILITY)) >= PERCEPTION_FULL || {
+                let source_index = m.i32(field(p::DEFINITE_KNOWLEDGE_SOURCE_ACTOR));
+                m.bool(field(p::DEFINITELY_LOCATED))
+                    && source_index != NONE
+                    && crate::ai_actor::datum_get(m, context.actor_data, source_index).is_some_and(|source| {
+                        let source_target = m.i32(source + a::TARGET_TARGET_PROP_INDEX as u32);
+                        m.i16(source + a::TARGET_TARGET_TYPE as u32) >= v::_ACTOR_TARGET_VISIBLE_ENEMY as i16
+                            && source_target != NONE
+                            && m.bool(source + a::ORDERS_COMBAT_SHOOT_AT_TARGET as u32)
+                            && m.i32(prop_get(m, context, source_target) + p::UNIT_INDEX as u32)
+                                == m.i32(field(p::UNIT_INDEX))
+                    })
+            };
+            if located {
+                m.set_bool(field(p::DEFINITELY_LOCATED), true);
+                m.set_i16(field(p::TICKS_SINCE_DEFINITELY_LOCATED), 0);
+            }
+        }
+    }
+
+    let perceived_fully = m.i16(field(p::PERCEPTION)) >= PERCEPTION_FULL;
+    if m.bool(field(p::DANGEROUS_VEHICLE_DRIVER)) {
+        call_full(context, host, call::VEHICLE_DANGER, prop_index, perceived_fully as i32, 0.0);
+    }
+    if m.f32(field(p::SUICIDE_RADIUS)) > 0.0 && (m.bool(field(p::DEAD)) || has(sample::MELEE_ATTACK)) {
+        call_full(context, host, call::SUICIDE_DANGER, prop_index, perceived_fully as i32, 0.0);
+    }
+
+    if m.bool(field(p::ENEMY)) && prop_acknowledged(m.i16(field(p::STATE))) {
+        let distance = m.f32(field(p::DISTANCE));
+        if (call_simple(context, host, call::HAS_RANGED_WEAPON, 0) != 0
+            && distance < m.f32(at(a::CONTROL_WEAPON_MAXIMUM_RANGE)))
+            || ((m.i32(context.definition + d::FLAGS as u32) >> v::_ACTOR_DEFINITION_SUICIDAL_MELEE_ATTACK_BIT) & 1 != 0
+                && distance < m.f32(context.definition + d::BERSERK_MELEE_ATTACK_RANGE as u32))
+        {
+            call_simple(context, host, call::UNREACHABLE, prop_index);
+        }
+    }
+
+    let last_unreachable_time = m.i32(field(p::LAST_UNREACHABLE_TIME));
+    if last_unreachable_time != NONE && last_unreachable_time.wrapping_add(150) < game_time {
+        call_simple(context, host, call::UNREACHABLE, prop_index);
+    }
+
+    if m.bool(field(p::DELAY_REQUIREMENT_DECISION)) {
+        let distance = m.f32(field(p::DISTANCE));
+        let (desire, _) = desire_prop(
+            context,
+            host,
+            NONE as i16,
+            m.i32(field(p::UNIT_INDEX)),
+            m.i32(field(p::ACTOR_INDEX)),
+            m.bool(field(p::IN_USE)),
+            m.bool(field(p::PLAYER)),
+            m.bool(field(p::ENEMY)),
+            m.bool(field(p::DEAD)),
+            m.i16(field(p::DEAD_TICKS)),
+            m.f32(field(p::SUICIDE_RADIUS)),
+            distance * distance,
+            0,
+        );
+        if !desire {
+            m.set_i16(field(p::REQUIRED_TICKS), 0);
+        }
+        m.set_bool(field(p::DELAY_REQUIREMENT_DECISION), false);
+    }
+
+    let unopposable = compute_prop_unopposable(context, host, prop_index);
+    m.set_bool(field(p::UNOPPOSABLE_ENEMY), unopposable);
+    let target_weight = compute_prop_target_weight(context, host, prop_index);
+    m.set_f32(field(p::TARGET_WEIGHT), target_weight);
+    let look_interest = call_full(context, host, call::LOOK_INTEREST, prop_index, 0, 0.0).output[0];
+    m.set_f32(field(p::LOOK_INTEREST), look_interest);
+    m.set_bool(field(p::REFRESH_STIMULI), true);
 }

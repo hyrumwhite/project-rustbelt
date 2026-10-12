@@ -1120,6 +1120,9 @@ enum
 	_actor_perception_call_prop_unit_details,
 	_actor_perception_call_props_full_warning,
 	_actor_perception_call_switch_swarm_targets,
+	_actor_perception_call_object_origin,
+	_actor_perception_call_vehicle_danger_sample,
+	_actor_perception_call_attacker,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's

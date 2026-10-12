@@ -167,6 +167,9 @@ void prop_port_remove(
 	long prop_index);
 void prop_port_full_warning(
 	void);
+long prop_port_orphan_transition(
+	long actor_index,
+	long parent_prop_index);
 void prop_delete(
 	long actor_index,
 	long prop_index);

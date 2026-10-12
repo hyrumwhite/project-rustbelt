@@ -7636,6 +7636,50 @@ void actor_perception_call(
 			}
 			break;
 		}
+
+		case _actor_perception_call_object_origin:
+		{
+			real_point3d origin;
+
+			object_get_origin(call->a, &origin);
+			memcpy(call->output, &origin, sizeof(real_point3d));
+			break;
+		}
+
+		case _actor_perception_call_vehicle_danger_sample:
+		{
+			struct unit_datum *vehicle = vehicle_get(call->a);
+			struct actor_perception_vehicle_definition_view *vehicle_definition =
+				(struct actor_perception_vehicle_definition_view *)vehicle_definition_get(vehicle->definition_index);
+			real_point3d origin;
+
+			call->result = TEST_FLAG(vehicle_definition->danger_zone_flags, 7) ? 1 : 0;
+			memcpy(&call->result2, &vehicle_definition->bounding_radius, sizeof(real));
+			object_get_origin(call->a, &origin);
+			memcpy(call->output, &origin, sizeof(real_point3d));
+			if (call->b)
+			{
+				memcpy(call->output + 3, &actor_perception_port_position.body_position, sizeof(real_point3d));
+			}
+			else
+			{
+				struct actor_position_data sampled_position;
+
+				actor_perception_find_sense_position(actor_index, &origin, NONE, &sampled_position);
+				memcpy(call->output + 3, &sampled_position.body_position, sizeof(real_point3d));
+			}
+			break;
+		}
+
+		case _actor_perception_call_attacker:
+		{
+			struct unit_datum *unit = unit_get(call->a);
+			long *attacker_object_index = &unit->unit.attackers[call->b].object_index;
+
+			call->result2 = attacker_object_index[-2];
+			call->result = ai_get_responsible_unit(*attacker_object_index, TRUE);
+			break;
+		}
 	}
 	halo_sim_ai_event_end(call, opened);
 
@@ -7780,6 +7824,19 @@ update_actor_to_prop:
 /* port: prop_status_refresh as the Rust port's does it (crates/halo_map's
 actor_perception), asking through actor_perception_call from the sense
 position the position refresh kept */
+static boolean actor_perception_port_assess_suicide_danger(
+	long actor_index,
+	long object_index,
+	real suicide_radius,
+	real distance,
+	boolean enemy,
+	boolean visible);
+static boolean actor_perception_port_assess_vehicle_danger(
+	long actor_index,
+	long vehicle_index,
+	boolean mark,
+	boolean kept_position);
+
 static long actor_perception_port_status_call(
 	long actor_index,
 	long kind,
@@ -8209,14 +8266,13 @@ static void actor_perception_port_status_refresh(
 	perceived_fully = prop->perception >= _actor_perception_full;
 	if (prop->dangerous_vehicle_driver)
 	{
-		actor_perception_port_status_call(actor_index, _actor_perception_call_vehicle_danger,
-			prop_index, perceived_fully, &call);
+		actor_perception_port_assess_vehicle_danger(actor_index, prop->vehicle_index, perceived_fully, TRUE);
 	}
 	if (prop->suicide_radius > 0.0f &&
 		(prop->dead || (bits & (1 << 14)) != 0))
 	{
-		actor_perception_port_status_call(actor_index, _actor_perception_call_suicide_danger,
-			prop_index, perceived_fully, &call);
+		actor_perception_port_assess_suicide_danger(actor_index, prop->unit_index, prop->suicide_radius,
+			prop->distance, prop->enemy, perceived_fully);
 	}
 
 	if (prop->enemy &&
@@ -8227,14 +8283,14 @@ static void actor_perception_port_status_refresh(
 			(TEST_FLAG(definition->flags, _actor_definition_suicidal_melee_attack_bit) &&
 				prop->distance < definition->berserk.melee_attack_range))
 		{
-			actor_perception_call_simple(actor_index, _actor_perception_call_unreachable, prop_index);
+			actor_perception_unreachable(actor_index, prop_index, FALSE);
 		}
 	}
 
 	if (prop->last_unreachable_time != NONE &&
 		prop->last_unreachable_time + 150 < game_time)
 	{
-		actor_perception_call_simple(actor_index, _actor_perception_call_unreachable, prop_index);
+		actor_perception_unreachable(actor_index, prop_index, FALSE);
 	}
 
 	if (prop->delay_requirement_decision)
@@ -8267,6 +8323,143 @@ static void actor_perception_port_status_refresh(
 	prop->refresh_stimuli = TRUE;
 
 	return;
+}
+
+/* port: the dangers' assessments and the killer's prop as the Rust port's
+(crates/halo_map's actor_perception), asking through actor_perception_call */
+static boolean actor_perception_port_assess_suicide_danger(
+	long actor_index,
+	long object_index,
+	real suicide_radius,
+	real distance,
+	boolean enemy,
+	boolean visible)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	if (suicide_radius + 10.0f > distance &&
+		(actor->danger_zone.danger_type < 1 ||
+			(actor->danger_zone.danger_type == 1 &&
+				actor->danger_zone.object_index != object_index &&
+				distance < actor->danger_zone.current_distance_from_actor)))
+	{
+		struct halo_sim_ai_call origin;
+		struct unit_datum *unit;
+
+		actor_perception_port_status_call(actor_index, _actor_perception_call_object_origin, object_index, 0, &origin);
+		unit = unit_get(object_index);
+		csmemset(&actor->danger_zone, 0, sizeof(actor->danger_zone));
+		actor->danger_zone.danger_type = 1;
+		actor->danger_zone.object_index = object_index;
+		actor->danger_zone.danger_radius = suicide_radius;
+		memcpy(&actor->danger_zone.initial_position, origin.output, sizeof(real_point3d));
+		actor->danger_zone.initial_velocity = unit->object.translational_velocity;
+		actor->danger_zone.acknowledgement_timer = 6;
+		actor->danger_zone.currently_perceived = visible;
+		actor->danger_zone.hostility = !enemy;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+static boolean actor_perception_port_assess_vehicle_danger(
+	long actor_index,
+	long vehicle_index,
+	boolean mark,
+	boolean kept_position)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct unit_datum *vehicle;
+	struct halo_sim_ai_call sample;
+	real bounding_radius;
+	real_point3d origin;
+	real_point3d body;
+	real distance;
+
+	if (actor->input.vehicle_index != NONE)
+		return FALSE;
+	vehicle = (struct unit_datum *)object_get(vehicle_index);
+	actor_perception_port_status_call(actor_index, _actor_perception_call_vehicle_danger_sample,
+		vehicle_index, kept_position, &sample);
+	if (!sample.result ||
+		!(magnitude_squared3d(&vehicle->object.translational_velocity) > 0.0011111111380159855f))
+	{
+		return FALSE;
+	}
+	memcpy(&bounding_radius, &sample.result2, sizeof(real));
+	memcpy(&origin, sample.output, sizeof(origin));
+	memcpy(&body, sample.output + 3, sizeof(body));
+	distance = distance3d(&body, &origin);
+	if (!(distance < bounding_radius + 10.0f))
+		return FALSE;
+	if (!(actor->danger_zone.danger_type < _actor_danger_zone_vehicle ||
+		(actor->danger_zone.danger_type == _actor_danger_zone_vehicle &&
+			actor->danger_zone.object_index != vehicle_index &&
+			distance < actor->danger_zone.current_distance_from_actor)))
+	{
+		return FALSE;
+	}
+	csmemset(&actor->danger_zone, 0, sizeof(actor->danger_zone));
+	actor->danger_zone.object_index = vehicle_index;
+	actor->danger_zone.danger_type = _actor_danger_zone_vehicle;
+	actor->danger_zone.owner_unit_index = vehicle->unit.driver_object_index;
+	actor->danger_zone.danger_radius = bounding_radius;
+	actor->danger_zone.initial_position = origin;
+	actor->danger_zone.initial_velocity = vehicle->object.translational_velocity;
+	actor->danger_zone.acknowledgement_timer = 20;
+	actor->danger_zone.currently_perceived = mark;
+	actor->danger_zone.hostility = 0;
+	if (actor->danger_zone.owner_unit_index != NONE)
+	{
+		struct unit_datum *driver = unit_get(vehicle->unit.driver_object_index);
+
+		if (!actor_perception_call_full(actor_index, _actor_perception_call_team_is_enemy,
+				actor->meta.team_index, driver->object.owner_team_index, 0.0f, NULL))
+		{
+			actor->danger_zone.hostility = 1;
+		}
+	}
+
+	return TRUE;
+}
+
+static long actor_perception_port_find_killer_prop_index(
+	long actor_index,
+	long prop_index,
+	boolean enemies_only)
+{
+	long unit_index = prop_get(prop_index)->unit_index;
+	long killer_prop_index = NONE;
+	long most_recent_damage_time = 0;
+	long attacker_index;
+
+	for (attacker_index = 0; attacker_index < MAXIMUM_ATTACKERS_PER_UNIT; attacker_index++)
+	{
+		struct halo_sim_ai_call attacker;
+
+		actor_perception_port_status_call(actor_index, _actor_perception_call_attacker, unit_index, attacker_index, &attacker);
+		if (attacker.result != NONE)
+		{
+			long current_prop_index = prop_get_active_by_unit_index(actor_index, attacker.result);
+
+			if (current_prop_index != NONE)
+			{
+				struct prop_datum *current_prop = prop_get(current_prop_index);
+
+				if (current_prop->state >= _prop_state_becoming_unacknowledged &&
+					current_prop->state <= _prop_state_acknowledged &&
+					(current_prop->enemy || !enemies_only) &&
+					attacker.result2 > most_recent_damage_time)
+				{
+					killer_prop_index = current_prop_index;
+					most_recent_damage_time = attacker.result2;
+				}
+			}
+		}
+	}
+
+	return killer_prop_index;
 }
 
 /* port: actor_switch_props (actors.c's, with actions.c's
@@ -8572,16 +8765,8 @@ static void actor_perception_port_refresh_test_biped(
 
 	if (suicide_radius > 0.0f && (dead || melee_attack))
 	{
-		struct halo_sim_ai_call assess;
-
-		memset(&assess, 0, sizeof(assess));
-		assess.kind = _actor_perception_call_suicide_danger_at;
-		assess.actor = actor_index;
-		assess.a = unit_index;
-		assess.b = enemy;
-		assess.input[0] = suicide_radius;
-		assess.input[1] = square_root(distance_squared);
-		actor_perception_call(&assess);
+		actor_perception_port_assess_suicide_danger(actor_index, unit_index, suicide_radius,
+			square_root(distance_squared), enemy, FALSE);
 	}
 
 	if (actor_perception_desire_prop(
@@ -8702,7 +8887,8 @@ static void actor_perception_port_refresh_test_object(
 				break;
 
 			case _object_type_vehicle:
-				actor_perception_call_simple(actor_index, _actor_perception_call_vehicle_danger_undriven, object_index);
+				if (((struct unit_datum *)object)->unit.driver_object_index == NONE)
+					actor_perception_port_assess_vehicle_danger(actor_index, object_index, FALSE, FALSE);
 				break;
 
 			case _object_type_projectile:
@@ -9156,7 +9342,7 @@ static void actor_perception_port_stimulus_just_killed(
 	actor->state.been_in_combat = TRUE;
 	if (prop->enemy)
 		return;
-	killer_prop_index = actor_perception_call_simple(actor_index, _actor_perception_call_killer_prop, prop_index);
+	killer_prop_index = actor_perception_port_find_killer_prop_index(actor_index, prop_index, TRUE);
 	if (prop->type == definition->panic.panic_leader_type &&
 		actor->stimuli.panic_type < 8 &&
 		actor_perception_call_random(actor_index) < definition->panic.panic_chance_leader_type_killed)
@@ -9681,8 +9867,12 @@ static void actor_perception_update_game(
 
 					if (actor_perception_port_desire_orphan(actor_index, iterator.index))
 					{
-						orphan_prop_index = actor_perception_call_simple(actor_index,
-							_actor_perception_call_orphan_transition, iterator.index);
+						actor_perception_port_position_refresh(actor_index, iterator.index, FALSE);
+						actor_perception_call_simple(actor_index, _actor_perception_call_find_pathfinding_location,
+							iterator.index);
+						orphan_prop_index = prop_port_orphan_transition(actor_index, iterator.index);
+						if (orphan_prop_index == NONE)
+							actor_perception_call_simple(actor_index, _actor_perception_call_props_full_warning, 0);
 					}
 
 					actor_perception_port_switch_props(actor_index, iterator.index, orphan_prop_index);

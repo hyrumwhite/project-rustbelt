@@ -517,6 +517,30 @@ long prop_orphan_transition(
 	return prop_index;
 }
 
+/* port: prop_orphan_transition without prop_add's warning when the props
+are full (the Rust port's mirror asks for it through actor_perception_call) */
+long prop_port_orphan_transition(
+	long actor_index,
+	long parent_prop_index)
+{
+	long prop_index = datum_new(prop_data);
+
+	if (prop_index != NONE)
+	{
+		struct prop_datum *parent_prop;
+		struct prop_datum *prop;
+
+		prop_add(actor_index, NONE, prop_index);
+		parent_prop = prop_get(parent_prop_index);
+		prop = prop_get(prop_index);
+		prop_setup_orphan(actor_index, prop_index, parent_prop_index);
+		parent_prop->orphan_prop_index = prop_index;
+		prop->parent_prop_index = parent_prop_index;
+	}
+
+	return prop_index;
+}
+
 long prop_orphan_from_friend(
 	long actor_index,
 	long unacknowledged_prop_index,

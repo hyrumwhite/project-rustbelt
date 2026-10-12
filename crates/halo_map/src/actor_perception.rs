@@ -88,6 +88,17 @@ pub mod call {
     /// friendly by 0, 3, 6; acknowledged, orphaned, unacknowledged by 0, 1,
     /// 2).
     pub const PROFILE: i32 = 29;
+    /// The dead prop's encounter's corpse ignore time, the result; the unit
+    /// `a`'s time of death, `result2`; whether the encounter sees an enemy
+    /// (bit 0), has one alive (bit 1) or stands down (bit 2), `output[0]`.
+    pub const DEAD_PROP_STATE: i32 = 30;
+    /// `actor_has_ranged_weapon(actor)`, the result.
+    pub const HAS_RANGED_WEAPON: i32 = 31;
+    /// `actor_get_weapon_definition(actor)`, its address the result.
+    pub const WEAPON_DEFINITION: i32 = 32;
+    /// `actor_combat_get_firing_variant_definition(actor)`, its address the
+    /// result.
+    pub const FIRING_VARIANT: i32 = 33;
 }
 
 /// The local enums (actor_perception.c's).
@@ -353,7 +364,7 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                     let offset = [body[0] - last[0], body[1] - last[1]];
                     if m.i16(at(p::TICKS_UNTIL_ORPHAN)) == 0 || offset[0] * offset[0] + offset[1] * offset[1] > 1.0 {
                         let mut orphan_prop_index = NONE;
-                        if call_simple(context, host, call::DESIRE_ORPHAN, index) != 0 {
+                        if desire_orphan(context, host, index) {
                             orphan_prop_index = call_simple(context, host, call::ORPHAN_TRANSITION, index);
                         }
                         call_full(context, host, call::SWITCH_PROPS, index, orphan_prop_index, 0.0);
@@ -363,7 +374,7 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
             }
             ACKNOWLEDGED => {
                 if perception == none {
-                    if call_simple(context, host, call::DESIRE_ORPHAN, index) != 0 {
+                    if desire_orphan(context, host, index) {
                         new_state = BECOMING_UNACKNOWLEDGED;
                     } else {
                         call_full(context, host, call::SWITCH_PROPS, index, NONE, 0.0);
@@ -426,9 +437,9 @@ pub fn actor_perception_update(context: &AiStepContext, host: &impl AiHost) {
                 _ => {}
             }
             m.set_i16(at(p::STATE), new_state);
-            let unopposable = call_simple(context, host, call::UNOPPOSABLE, index);
+            let unopposable = compute_prop_unopposable(context, host, index) as i32;
             m.w8(at(p::UNOPPOSABLE_ENEMY), unopposable as u8);
-            let target_weight = call_full(context, host, call::TARGET_WEIGHT, index, 0, 0.0).output[0];
+            let target_weight = compute_prop_target_weight(context, host, index);
             m.set_f32(at(p::TARGET_WEIGHT), target_weight);
         }
 
@@ -664,4 +675,298 @@ fn stimuli_update(
             }
         }
     }
+}
+
+/// Each action's class (actions.c's `global_action_functions`).
+const ACTION_CLASSES: [i16; 14] = [0, 0, 0, 4, 2, 3, 1, 3, 3, 2, 4, 2, 2, 2];
+
+/// The prop states of an orphan (`_prop_state_uninspected_orphan`,
+/// `_prop_state_inspected_orphan`).
+fn prop_orphaned(state: i16) -> bool {
+    state >= v::_PROP_STATE_UNINSPECTED_ORPHAN as i16 && state <= v::_PROP_STATE_INSPECTED_ORPHAN as i16
+}
+
+/// actor_perception.c's `actor_perception_desire_prop`: whether the actor
+/// wants a prop of a unit (the `desired_target_state` it'd be in, NONE as
+/// it is), and whether it's too far to keep when crowded. An orphan only of
+/// a live enemy; a player always; not of an inactive or dormant actor; one
+/// in use or required; none past forty units; a corpse while its encounter
+/// hasn't come to ignore it (near, if the encounter's quiet), always for a
+/// suicide's, not an enemy's long dead, not in combat, else near; an enemy
+/// always (too far past six units), a friend near (too far past four, or in
+/// combat, unless coordinating a pursuit).
+#[allow(clippy::too_many_arguments)]
+pub fn desire_prop(
+    context: &AiStepContext,
+    host: &impl AiHost,
+    desired_target_state: i16,
+    unit_index: i32,
+    prop_actor_index: i32,
+    in_use: bool,
+    player: bool,
+    enemy: bool,
+    dead: bool,
+    dead_ticks: i16,
+    suicide_radius: f32,
+    distance_squared: f32,
+    required_ticks: i16,
+) -> (bool, bool) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let related_actor =
+        if prop_actor_index == NONE { None } else { crate::ai_actor::datum_get(m, context.actor_data, prop_actor_index) };
+    let mut too_far = false;
+    let desire = 'done: {
+        if (!enemy || dead) && prop_orphaned(desired_target_state) {
+            false
+        } else if player {
+            true
+        } else if related_actor.is_some_and(|related| !m.bool(related + a::META_ACTIVE as u32) || m.bool(related + a::META_DORMANT as u32)) {
+            false
+        } else if desired_target_state == NONE as i16 && (in_use || required_ticks > 0) {
+            true
+        } else if distance_squared > 1600.0 {
+            false
+        } else if dead {
+            if m.i32(at(a::META_ENCOUNTER_INDEX)) != NONE {
+                let state = call_full(context, host, call::DEAD_PROP_STATE, unit_index, 0, 0.0);
+                let mut ignore_time = state.result;
+                let actor_ignore_time = m.i32(at(a::EMOTIONS_CORPSE_IGNORE_TIME));
+                if ignore_time <= actor_ignore_time {
+                    ignore_time = actor_ignore_time;
+                }
+                let time_of_death = state.result2;
+                if ignore_time != NONE && (time_of_death == NONE || time_of_death < ignore_time) {
+                    break 'done false;
+                }
+                let flags = state.output[0] as i32;
+                if flags & 0b111 == 0 {
+                    break 'done distance_squared < 225.0;
+                }
+            }
+            if suicide_radius > 0.0 {
+                true
+            } else if enemy && dead_ticks > 150 {
+                false
+            } else if ACTION_CLASSES[m.i16(at(a::STATE_ACTION)) as usize] > 1 {
+                false
+            } else {
+                let maximum_distance_squared = if !enemy && m.i16(at(a::STATE_MODE)) < 3 { 64.0 } else { 16.0 };
+                distance_squared < maximum_distance_squared
+            }
+        } else if enemy {
+            too_far = distance_squared > 36.0;
+            true
+        } else {
+            too_far = if m.i16(at(a::STATE_COMBAT_STATUS)) >= 4 {
+                true
+            } else if m.bool(at(a::EXTERNAL_ORDERS_PURSUIT_IS_COORDINATOR)) {
+                false
+            } else {
+                distance_squared > 16.0
+            };
+            distance_squared < 225.0
+        }
+    };
+    (desire, too_far)
+}
+
+/// Whether the actor wants the prop `prop_index` as an uninspected orphan.
+fn desire_orphan(context: &AiStepContext, host: &impl AiHost, prop_index: i32) -> bool {
+    let m = host.memory();
+    let prop = prop_get(m, context, prop_index);
+    let distance = m.f32(prop + p::DISTANCE as u32);
+    desire_prop(
+        context,
+        host,
+        v::_PROP_STATE_UNINSPECTED_ORPHAN as i16,
+        m.i32(prop + p::UNIT_INDEX as u32),
+        m.i32(prop + p::ACTOR_INDEX as u32),
+        m.bool(prop + p::IN_USE as u32),
+        m.bool(prop + p::PLAYER as u32),
+        m.bool(prop + p::ENEMY as u32),
+        m.bool(prop + p::DEAD as u32),
+        m.i16(prop + p::DEAD_TICKS as u32),
+        m.f32(prop + p::SUICIDE_RADIUS as u32),
+        distance * distance,
+        m.i16(prop + p::REQUIRED_TICKS as u32),
+    )
+    .0
+}
+
+/// The actor's bytes actor_perception.c's `actor_compute_prop_unopposable`
+/// reads (through its actor view) as whether it's searching, flying and a
+/// passenger: in this build's `actor_datum`, `situation.visible_reachable_enemies`,
+/// `input.vehicle_gunner` and `situation.area_fire_support_friends`.
+const UNOPPOSABLE_VIEW_SEARCHING: u32 = 0x1ED;
+const UNOPPOSABLE_VIEW_FLYING: u32 = 0x161;
+const UNOPPOSABLE_VIEW_VEHICLE_PASSENGER: u32 = 0x202;
+
+/// actor_perception.c's `actor_compute_prop_unopposable`: whether a seen
+/// live enemy is one the actor can't fight (unreachable, a vehicle's gunner
+/// or dangerous driver, or a mounted weapon), its trigger cleared and the
+/// actor's retreat from it ended when it no longer is.
+pub fn compute_prop_unopposable(context: &AiStepContext, host: &impl AiHost, prop_index: i32) -> bool {
+    let m = host.memory();
+    let actor = context.actor;
+    let at = |offset: usize| actor + offset as u32;
+    let prop = prop_get(m, context, prop_index);
+    let state = m.i16(prop + p::STATE as u32);
+    let seen = (2..=3).contains(&state);
+    let mut result = false;
+    if seen && m.bool(prop + p::ENEMY as u32) && !m.bool(prop + p::DEAD as u32) {
+        if m.i16(prop + p::UNREACHABLE_TICKS as u32) != 0
+            && (m.i32(at(a::TARGET_TARGET_PROP_INDEX)) == prop_index || !m.bool(actor + UNOPPOSABLE_VIEW_SEARCHING))
+        {
+            result = true;
+        } else if (m.bool(prop + p::VEHICLE_GUNNER as u32) || m.bool(prop + p::DANGEROUS_VEHICLE_DRIVER as u32))
+            && !m.bool(actor + UNOPPOSABLE_VIEW_FLYING)
+            && !m.bool(actor + UNOPPOSABLE_VIEW_VEHICLE_PASSENGER)
+        {
+            result = true;
+        } else if m.i16(prop + p::TYPE as u32) == 15 {
+            result = true;
+        }
+    }
+    if m.bool(prop + p::UNOPPOSABLE_ENEMY as u32) && !result {
+        m.set_i16(prop + p::UNOPPOSABLE_TRIGGER_HYSTERESIS as u32, 0);
+        m.set_i16(prop + p::UNOPPOSABLE_TRIGGER_THRESHOLD as u32, 0);
+        m.set_i16(prop + p::UNOPPOSABLE_TRIGGER_TIMER as u32, 0);
+    }
+    if seen
+        && !result
+        && m.i16(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_TIMER)) > 0
+        && m.i32(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_PROP_INDEX)) == prop_index
+    {
+        m.set_i16(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_TIMER), 0);
+        m.w32(at(a::EMOTIONS_UNOPPOSABLE_RETREAT_PROP_INDEX), NONE as u32);
+    }
+    m.set_bool(prop + p::UNOPPOSABLE_ENEMY as u32, result);
+    result
+}
+
+/// actor_perception.c's weapon definition's minimum target range (its view's).
+const WEAPON_MINIMUM_TARGET_RANGE: u32 = 0x40C;
+
+/// actor_perception.c's `actor_compute_prop_target_weight`: how much the
+/// actor wants a prop as its target: none for an ignored, friendly, unseen,
+/// long dead or mounted-weapon prop; else ten for each point of its range
+/// (by the actor's weapon or melee reach), its knowledge (damaging it, seen,
+/// shooting at it, located), being the target in combat and preferred, plus
+/// a nearness term and (with no target) a player's or preferred orphan's
+/// bonus.
+pub fn compute_prop_target_weight(context: &AiStepContext, host: &impl AiHost, prop_index: i32) -> f32 {
+    use crate::layout::actor_variant_definition as var;
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let prop = prop_get(m, context, prop_index);
+    let field = |offset: usize| prop + offset as u32;
+    let state = m.i16(field(p::STATE));
+    let dead = m.bool(field(p::DEAD));
+    if m.bool(field(p::IGNORE))
+        || !m.bool(field(p::ENEMY))
+        || (0..=1).contains(&state)
+        || (dead && m.i16(field(p::DEAD_TICKS)) >= 150)
+        || m.i16(field(p::TYPE)) == 15
+    {
+        return 0.0;
+    }
+    let distance = m.f32(field(p::DISTANCE));
+    let swarm = m.bool(at(a::META_SWARM));
+    let unreachable_ticks = m.i16(field(p::UNREACHABLE_TICKS));
+    let inspected_orphan = v::_PROP_STATE_INSPECTED_ORPHAN as i16;
+    let underwater_differs = m.bool(field(p::UNDERWATER)) != m.bool(at(a::INPUT_UNDERWATER));
+
+    let mut range_weight: i16;
+    'range: {
+        if swarm || unreachable_ticks > 0 {
+            range_weight = 0;
+            break 'range;
+        }
+        if call_simple(context, host, call::HAS_RANGED_WEAPON, 0) == 0 {
+            let maximum_range = m.f32(context.variant_definition
+                + if m.bool(at(a::EMOTIONS_BERSERK)) {
+                    var::RANGED_COMBAT_MELEE_RANGE
+                } else {
+                    var::RANGED_COMBAT_BERSERK_MELEE_RANGE
+                } as u32);
+            if distance < 2.0 {
+                range_weight = 5;
+                if state != inspected_orphan {
+                    break 'range;
+                }
+            }
+            if m.i32(field(p::VEHICLE_INDEX)) != NONE {
+                range_weight = 0;
+            } else if m.bool(field(p::FLYING)) && m.f32(context.definition + d::BERSERK_MELEE_LEAP_VELOCITY as u32) == 0.0 {
+                range_weight = 0;
+            } else if underwater_differs {
+                range_weight = 1;
+            } else if distance < maximum_range {
+                range_weight = 3;
+            } else {
+                range_weight = 2;
+            }
+        } else {
+            let weapon_definition = call_simple(context, host, call::WEAPON_DEFINITION, 0) as u32;
+            let firing_variant = call_simple(context, host, call::FIRING_VARIANT, 0) as u32;
+            if weapon_definition != 0 && distance < m.f32(weapon_definition + WEAPON_MINIMUM_TARGET_RANGE) {
+                range_weight = 2;
+                break 'range;
+            }
+            if underwater_differs {
+                range_weight = 2;
+                break 'range;
+            }
+            if distance < 2.0 && state != inspected_orphan {
+                range_weight = 5;
+                break 'range;
+            }
+            range_weight = if distance < m.f32(firing_variant + var::RANGED_COMBAT_COMBAT_RANGE_UPPER_BOUND as u32) {
+                3
+            } else if distance < m.f32(firing_variant + var::RANGED_COMBAT_MAXIMUM_FIRING_RANGE as u32) {
+                2
+            } else {
+                1
+            };
+        }
+    }
+
+    let knowledge_weight: i16 = if dead {
+        1
+    } else if !swarm && m.bool(field(p::CURRENTLY_DAMAGING_ME)) && unreachable_ticks == 0 {
+        6
+    } else if (2..=3).contains(&state) {
+        let line_of_sight = m.i16(field(p::LINE_OF_SIGHT));
+        if swarm {
+            4
+        } else if unreachable_ticks > 0 || (line_of_sight != 0 && line_of_sight != 1) {
+            3
+        } else if m.bool(field(p::SHOOTING)) && m.i8(field(p::QUANTIZED_FACING)) <= 1 {
+            5
+        } else {
+            4
+        }
+    } else if m.bool(field(p::DEFINITELY_LOCATED)) {
+        3
+    } else {
+        (state == v::_PROP_STATE_UNINSPECTED_ORPHAN as i16) as i16 + 1
+    };
+
+    let mut target_weight: i32 = 0;
+    let mut preferred_weight: i32 = 0;
+    let mut bonus_weight = 0.0f32;
+    let target_prop_index = m.i32(at(a::TARGET_TARGET_PROP_INDEX));
+    if target_prop_index == NONE {
+        if m.bool(field(p::PLAYER)) || prop_index == m.i32(at(a::META_INTERESTING_ORPHAN_INDEX)) {
+            bonus_weight = 3.0;
+        }
+    } else if prop_index == target_prop_index && m.i16(at(a::STATE_COMBAT_STATUS)) >= 3 {
+        target_weight = 1;
+    }
+    if m.bool(field(p::PREFERRED_TARGET)) {
+        preferred_weight = 2;
+    }
+    target_weight = (target_weight as i16 as i32 + preferred_weight as i16 as i32) + (knowledge_weight as i32 + range_weight as i32);
+    target_weight as f32 * 10.0 + (5.0 / (distance * 0.1 + 1.0) + bonus_weight)
 }

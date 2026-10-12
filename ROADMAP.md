@@ -810,6 +810,20 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - The items made and removed nearly match the C's.
          - With all fifty-three systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
+   - [x] A client applying the host's state in Rust (`halo_map::network_apply`, under `network_apply`): network_distributed.c's `distributed_apply_state`, network_objects.c's `network_objects_correct`, `network_objects_reconcile` and `distributed_object_move`.
+     - **What Rust does:**
+       - A unit is moved toward where the host has it, when further than the tolerance, with its velocity held to how fast it may go across, up and down.
+       - An object is put where the host has it: all the way when further than the blend distance, or when it follows the host (an unsteered vehicle, a co-op cutscene). Otherwise it goes halfway, with its drawing smoothed over the move.
+       - Its velocities and at-rest flag are written in the object's datum.
+     - **The game's, through calls (`network_apply_call`):** setting the object's position (`object_set_position`, which moves it among the clusters), smoothing its drawing, and whether co-op and a cutscene are on. The C's own versions make the same calls in the same order.
+     - **The check:** the encounters' world steps, generalised. The world context gains an `arguments` pointer: each step's arguments are taken by value, and its result is written back in a compared region. The regions are the object's datum, the arguments and the corrections count. Nested steps (a reconcile within an apply) are part of the outer one.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, every apply and reconcile agrees on both machines, with none left out: 1,024 applies on each, 256 and 128 reconciles. The object correct, for predicted vehicles alone, didn't come up.
+       - Planted errors in the halfway blend, the drawing correction's condition and the angular velocity's write were caught on both machines. One in the fall-speed clamp went unseen: no client predicted a fall faster than the host's bound.
+       - **Rust in charge:**
+         - With all four networking systems in Rust on both machines, the machines' positions differ as with the C: median 3.8 cm against 3.6, largest 14 against 13.
+         - With all fifty-four systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

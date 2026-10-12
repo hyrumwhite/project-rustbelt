@@ -182,12 +182,18 @@ impl AiHost for CheckHost<'_> {
 const STEP_ENCOUNTERS: i32 = 0;
 const STEP_CONVERSATIONS: i32 = 1;
 const STEP_COMMUNICATION: i32 = 2;
+const STEP_NETWORK_APPLY_STATE: i32 = 3;
+const STEP_NETWORK_OBJECT_CORRECT: i32 = 4;
+const STEP_NETWORK_OBJECT_RECONCILE: i32 = 5;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
         STEP_ENCOUNTERS => encounters_update(context, host),
         STEP_CONVERSATIONS => ai_conversation_update(context, host),
         STEP_COMMUNICATION => ai_communication_event(context, host),
+        STEP_NETWORK_APPLY_STATE => halo_map::network_apply::apply_state(context, host),
+        STEP_NETWORK_OBJECT_CORRECT => halo_map::network_apply::object_correct(context, host),
+        STEP_NETWORK_OBJECT_RECONCILE => halo_map::network_apply::object_reconcile(context, host),
         _ => return None,
     }
     Some(())

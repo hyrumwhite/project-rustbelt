@@ -194,6 +194,8 @@ pub struct WorldContext {
     /// Bit 0 a local game's debug suppressing the event's type, bit 1 its
     /// dialogue timeouts disabled.
     pub communication_flags: u32,
+    /// The step's own arguments (a struct the game passes; 0 for none).
+    pub arguments: u32,
 }
 
 impl WorldContext {

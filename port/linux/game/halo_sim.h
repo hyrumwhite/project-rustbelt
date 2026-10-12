@@ -1074,6 +1074,16 @@ enum
 	_actor_perception_call_sample_unit,
 	_actor_perception_call_sense_position,
 	_actor_perception_call_status_refresh,
+	_actor_perception_call_status_sample,
+	_actor_perception_call_look_started_moving,
+	_actor_perception_call_line_of_sight,
+	_actor_perception_call_visibility,
+	_actor_perception_call_combat_state,
+	_actor_perception_call_audibility,
+	_actor_perception_call_vehicle_danger,
+	_actor_perception_call_suicide_danger,
+	_actor_perception_call_unreachable,
+	_actor_perception_call_look_interest,
 };
 
 /* the look update's calls (actor_looking.c's actor_look_call; crates/halo_map's

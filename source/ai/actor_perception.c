@@ -6909,11 +6909,176 @@ void actor_perception_call(
 				call->a,
 				&actor_perception_port_position);
 			memcpy(call->output, &actor_perception_port_position.body_position, sizeof(real_point3d));
+			memcpy(call->output + 3, &actor_perception_port_position.velocity, sizeof(real_vector3d));
 			break;
 		}
 
 		case _actor_perception_call_status_refresh:
 			prop_status_refresh(actor_index, call->a, &actor_perception_port_position);
+			break;
+
+		case _actor_perception_call_status_sample:
+		{
+			struct prop_datum *sampled = prop_get(call->a);
+			struct unit_datum *unit = unit_get(sampled->unit_index);
+			struct encounter_datum *encounter =
+				actor->meta.encounter_index == NONE ?
+					NULL :
+					encounter_get(actor->meta.encounter_index);
+			boolean local = game_connection() == _game_connection_local;
+			long unit_actor_index = unit->unit.swarm_actor_index;
+			real_vector3d sampled_velocity;
+			real_vector3d aiming_vector;
+			long bits = 0;
+
+			if (TEST_FLAG(unit->unit.flags, _unit_ignored_by_actors_bit))
+				bits |= 1 << 0;
+			if (TEST_FLAG(unit->unit.flags, _unit_preferred_target_bit))
+				bits |= 1 << 1;
+			if (local && ai_debug.ignore_player)
+				bits |= 1 << 2;
+			if (encounter != NULL && encounter->blind)
+				bits |= 1 << 3;
+			if (unit->object.type == _object_type_biped &&
+				TEST_FLAG(biped_definition_get(unit->definition_index)->biped.flags, _biped_flying_bit))
+			{
+				bits |= 1 << 4;
+			}
+			if (unit->unit.active_camouflage > 0.5f)
+				bits |= 1 << 5;
+			if (TEST_FLAG(unit->unit.flags, _unit_integrated_light_on_bit))
+				bits |= 1 << 6;
+			if (TEST_FLAG(unit->object.damage_flags, _object_dead_bit))
+				bits |= 1 << 7;
+			if (unit->unit.feign_death_timer == 0)
+				bits |= 1 << 8;
+			if (unit_actor_index != NONE)
+				bits |= 1 << 9;
+			else
+				unit_actor_index = unit->unit.actor_index;
+			if (local && ai_debug.blind)
+				bits |= 1 << 10;
+			if (local && ai_debug.invisible_player)
+				bits |= 1 << 11;
+			if (local && ai_debug.deaf)
+				bits |= 1 << 12;
+			if (encounter != NULL && encounter->deaf)
+				bits |= 1 << 13;
+			if (unit->unit.animation.state == _unit_state_melee_attack)
+				bits |= 1 << 14;
+
+			object_get_velocities(sampled->unit_index, &sampled_velocity, NULL);
+			unit_get_aiming_vector(sampled->unit_index, &aiming_vector);
+			memcpy(call->output, &sampled_velocity, sizeof(real_vector3d));
+			memcpy(call->output + 3, &aiming_vector, sizeof(real_vector3d));
+			call->result = bits;
+			call->result2 = unit_actor_index;
+			break;
+		}
+
+		case _actor_perception_call_look_started_moving:
+		{
+			struct direction_specification direction;
+
+			direction.type = _direction_specification_prop;
+			direction.prop_index = call->a;
+			actor_look_secondary(
+				actor_index,
+				_secondary_look_started_moving_prop,
+				_secondary_look_priority_default,
+				&direction);
+			break;
+		}
+
+		case _actor_perception_call_line_of_sight:
+		{
+			struct prop_datum *seen = prop_get(call->a);
+
+			call->result = ai_test_line_of_sight(
+				&actor_perception_port_position.head_position,
+				actor_perception_port_position.body_location.cluster_index,
+				&seen->head_position,
+				seen->body_location.cluster_index,
+				seen->player && seen->enemy ? _ai_line_of_sight_expand_target : _ai_line_of_sight_normal,
+				FALSE,
+				seen->vehicle_index,
+				actor->input.vehicle_index != NONE);
+			break;
+		}
+
+		case _actor_perception_call_visibility:
+		{
+			struct prop_datum *seen = prop_get(call->a);
+
+			call->result = actor_visibility_at_point(
+				actor_index,
+				&actor_perception_port_position,
+				&seen->head_position,
+				(char)(call->b & 0xFF),
+				seen->line_of_sight,
+				(boolean)((call->b >> 8) & 1),
+				(boolean)((call->b >> 9) & 1),
+				(short)(call->b >> 16));
+			break;
+		}
+
+		case _actor_perception_call_combat_state:
+			call->result =
+				(actor_is_noncombat(call->a) ? 1 : 0) |
+				(actor_in_combat(call->a) ? 2 : 0) |
+				(actor_is_fighting(call->a) ? 4 : 0);
+			break;
+
+		case _actor_perception_call_audibility:
+		{
+			struct prop_datum *heard = prop_get(call->a);
+			long sound_unit_index =
+				heard->vehicle_index != NONE ?
+					heard->vehicle_index :
+					heard->unit_index;
+			struct unit_datum *sound_unit = unit_get(sound_unit_index);
+			struct unit_definition *sound_unit_definition =
+				unit_definition_get(sound_unit->definition_index);
+
+			call->result = actor_audibility_at_point(
+				actor_index,
+				&actor_perception_port_position,
+				&heard->body_position,
+				&heard->body_location,
+				sound_unit_definition->unit.constant_sound,
+				1.0f,
+				heard->line_of_sight);
+			break;
+		}
+
+		case _actor_perception_call_vehicle_danger:
+			actor_perception_assess_vehicle_danger(
+				actor_index,
+				prop_get(call->a)->vehicle_index,
+				(boolean)call->b,
+				&actor_perception_port_position);
+			break;
+
+		case _actor_perception_call_suicide_danger:
+		{
+			struct prop_datum *suicide = prop_get(call->a);
+
+			actor_perception_assess_suicide_danger(
+				actor_index,
+				suicide->unit_index,
+				suicide->suicide_radius,
+				suicide->distance,
+				suicide->enemy,
+				(boolean)call->b);
+			break;
+		}
+
+		case _actor_perception_call_unreachable:
+			actor_perception_unreachable(actor_index, call->a, FALSE);
+			break;
+
+		case _actor_perception_call_look_interest:
+			call->output[0] = actor_look_compute_prop_interest(actor_index, call->a);
 			break;
 	}
 	halo_sim_ai_event_end(call, opened);
@@ -7052,6 +7217,498 @@ update_actor_to_prop:
 	prop->distance = distance;
 	if (prop->distance == 0.0f)
 		prop->actor_to_prop = *global_forward3d;
+
+	return;
+}
+
+/* port: prop_status_refresh as the Rust port's does it (crates/halo_map's
+actor_perception), asking through actor_perception_call from the sense
+position the position refresh kept */
+static long actor_perception_port_status_call(
+	long actor_index,
+	long kind,
+	long a,
+	long b,
+	struct halo_sim_ai_call *call)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+	call->actor = actor_index;
+	call->a = a;
+	call->b = b;
+	actor_perception_call(call);
+
+	return call->result;
+}
+
+static short actor_perception_port_visibility(
+	long actor_index,
+	long prop_index,
+	char lighting,
+	boolean use_maximum_distance,
+	boolean player,
+	short knowledge)
+{
+	struct halo_sim_ai_call call;
+
+	return (short)actor_perception_port_status_call(actor_index, _actor_perception_call_visibility, prop_index,
+		(long)(unsigned char)lighting | ((use_maximum_distance ? 1 : 0) << 8) | ((player ? 1 : 0) << 9) |
+			((long)knowledge << 16),
+		&call);
+}
+
+static void actor_perception_port_status_refresh(
+	long actor_index,
+	long prop_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+	struct actor_definition *definition;
+	struct prop_datum *prop;
+	struct halo_sim_ai_call status;
+	struct halo_sim_ai_call call;
+	long bits;
+	long game_time;
+	boolean blind;
+	short previous_quantized_speed;
+	real_vector3d velocity;
+	real_vector3d relative_velocity;
+	real_vector3d aiming;
+	real speed;
+	real closing_speed;
+	real facing;
+	real facing_distance;
+	short unit_effect;
+	boolean perceived_fully;
+
+	if (!actor->meta.active)
+		return;
+
+	definition = actor_definition_get(actor->meta.definition_index);
+	prop = prop_get(prop_index);
+	game_time = game_time_get();
+	bits = actor_perception_port_status_call(actor_index, _actor_perception_call_status_sample, prop_index, 0, &status);
+	blind = (bits & (1 << 3)) != 0 || actor->state.mode == _actor_mode_asleep;
+
+	prop->ignore = (bits & (1 << 0)) != 0;
+	if (prop->player && (bits & (1 << 2)) != 0)
+		prop->ignore = TRUE;
+
+	if (prop->enemy)
+	{
+		prop->preferred_target = (bits & (1 << 1)) != 0;
+
+		switch (actor->external_orders.desired_target_type)
+		{
+		case _desired_target_ai:
+			if (prop->actor_index != NONE &&
+				actor->external_orders.desired_target_ai_index != NONE)
+			{
+				struct actor_datum *prop_actor = actor_get(prop->actor_index);
+
+				if (DATUM_INDEX_TO_ABSOLUTE_INDEX(prop_actor->meta.encounter_index) == DATUM_INDEX_TO_ABSOLUTE_INDEX(actor->external_orders.desired_target_ai_index))
+				{
+					/* the game's swap preserved (see prop_status_refresh) */
+					switch ((unsigned long)actor->external_orders.desired_target_ai_index >> 30)
+					{
+					case _ai_reference_type_encounter:
+						prop->preferred_target = TRUE;
+						break;
+
+					case _ai_reference_type_squad:
+						if ((short)(((unsigned long)actor->external_orders.desired_target_ai_index >> 16) & UNSIGNED_CHAR_MAX) ==
+							prop_actor->meta.platoon_index)
+						{
+							prop->preferred_target = TRUE;
+						}
+						break;
+
+					case _ai_reference_type_platoon:
+						if ((short)(((unsigned long)actor->external_orders.desired_target_ai_index >> 16) & UNSIGNED_CHAR_MAX) ==
+							prop_actor->meta.squad_index)
+						{
+							prop->preferred_target = TRUE;
+						}
+						break;
+					}
+				}
+			}
+			break;
+
+		case _desired_target_player:
+			if (prop->player)
+				prop->preferred_target = TRUE;
+			break;
+		}
+	}
+
+	previous_quantized_speed = prop->quantized_speed;
+	memcpy(&velocity, status.output, sizeof(velocity));
+	speed = magnitude3d(&velocity);
+	if (speed < 0.1f / TICKS_PER_SECOND)
+		prop->quantized_speed = 0;
+	else if (speed < 0.5f / TICKS_PER_SECOND)
+		prop->quantized_speed = 1;
+	else if (speed < 1.0f / TICKS_PER_SECOND)
+		prop->quantized_speed = 2;
+	else
+		prop->quantized_speed = 3;
+
+	closing_speed =
+		-dot_product3d(
+			subtract_vectors3d(&velocity, &actor_perception_port_position.velocity, &relative_velocity),
+			&prop->actor_to_prop);
+	if (closing_speed < -1.0f / TICKS_PER_SECOND)
+		prop->quantized_closing_speed = 0;
+	else if (closing_speed < -0.5f / TICKS_PER_SECOND)
+		prop->quantized_closing_speed = 1;
+	else if (closing_speed < -0.1f / TICKS_PER_SECOND)
+		prop->quantized_closing_speed = 2;
+	else if (closing_speed < 0.1f / TICKS_PER_SECOND)
+		prop->quantized_closing_speed = 3;
+	else if (closing_speed < 0.5f / TICKS_PER_SECOND)
+		prop->quantized_closing_speed = 4;
+	else if (closing_speed < 1.0f / TICKS_PER_SECOND)
+		prop->quantized_closing_speed = 5;
+	else
+		prop->quantized_closing_speed = 6;
+
+	if (prop_acknowledged(prop) &&
+		previous_quantized_speed <= 1 &&
+		prop->quantized_speed > 1)
+	{
+		actor_perception_port_status_call(actor_index, _actor_perception_call_look_started_moving, prop_index, 0, &call);
+	}
+
+	if (prop->distance < 1.0f)
+		prop->quantized_distance = 0;
+	else if (prop->distance < 6.0f)
+		prop->quantized_distance = 1;
+	else if (prop->distance < 10.0f)
+		prop->quantized_distance = 2;
+	else if (prop->distance < 30.0f)
+		prop->quantized_distance = 3;
+	else
+		prop->quantized_distance = 4;
+
+	memcpy(&aiming, status.output + 3, sizeof(aiming));
+	facing = -dot_product3d(&aiming, &prop->actor_to_prop);
+	if (facing <= 0.0f)
+		facing_distance = REAL_MAX;
+	else if (facing >= 1.0f)
+		facing_distance = 0.0f;
+	else
+		facing_distance = square_root(1.0f - facing * facing) * prop->distance;
+
+	if (facing > 0.99250001f || facing_distance < 0.5f)
+		prop->quantized_facing = 0;
+	else if (facing > 0.90630001f || facing_distance < 1.5f)
+		prop->quantized_facing = 1;
+	else if (facing > 0.5f)
+		prop->quantized_facing = 2;
+	else if (facing > 0.0f)
+		prop->quantized_facing = 3;
+	else
+		prop->quantized_facing = 4;
+
+	unit_effect = prop->unit_effect;
+	prop->shooting = unit_effect == _ai_unit_effect_shooting;
+
+	if (prop->state >= _prop_state_uninspected_orphan &&
+		prop->state <= _prop_state_inspected_orphan)
+	{
+		prop->line_of_sight = (short)actor_perception_port_status_call(actor_index,
+			_actor_perception_call_line_of_sight, prop_index, 0, &call);
+		if (prop->ignore || blind)
+		{
+			prop->perception = _actor_perception_none;
+			prop->ineffability = _actor_perception_none;
+			prop->audibility = _actor_perception_none;
+			prop->visibility = _actor_perception_none;
+		}
+		else
+		{
+			short visibility = actor_perception_port_visibility(actor_index, prop_index,
+				prop->lighting, TRUE, FALSE, _actor_knowledge_searching);
+
+			prop->visibility = visibility;
+			prop->audibility = _actor_perception_none;
+			prop->ineffability = _actor_perception_none;
+			prop->perception = visibility;
+		}
+	}
+	else
+	{
+		boolean noticed = FALSE;
+		boolean enemy = prop->enemy;
+		boolean player = prop->player;
+		boolean dead;
+		boolean really_dead;
+		boolean just_killed;
+		long unit_actor_index;
+		boolean swarm;
+		boolean noncombat;
+		boolean in_combat;
+		boolean fighting;
+
+		prop->line_of_sight = (short)actor_perception_port_status_call(actor_index,
+			_actor_perception_call_line_of_sight, prop_index, 0, &call);
+		prop->lighting = _prop_lighting_bright;
+		prop->flying = (bits & (1 << 4)) != 0;
+		prop->active_camouflage = (bits & (1 << 5)) != 0;
+		prop->flashlight = (bits & (1 << 6)) != 0;
+
+		dead = (bits & (1 << 7)) != 0;
+		really_dead = dead && (bits & (1 << 8)) != 0;
+		just_killed = dead && !prop->dead;
+		prop->just_killed = just_killed;
+		prop->dead = dead;
+		prop->really_dead = really_dead;
+		if (just_killed && !enemy && actor->state.mode < _actor_mode_combat)
+			noticed = TRUE;
+		if (dead)
+			prop->required_ticks = 0;
+
+		unit_actor_index = status.result2;
+		swarm = (bits & (1 << 9)) != 0;
+		if (unit_actor_index != prop->actor_index)
+		{
+			prop->swarm = swarm;
+			prop->actor_index = unit_actor_index;
+			if (prop->orphan_prop_index != NONE)
+			{
+				struct prop_datum *orphan = prop_get(prop->orphan_prop_index);
+
+				orphan->actor_index = unit_actor_index;
+				orphan->swarm = swarm;
+			}
+		}
+
+		if (unit_actor_index == NONE)
+		{
+			noncombat = FALSE;
+			in_combat = FALSE;
+			fighting = !prop->dead;
+		}
+		else
+		{
+			long state = actor_perception_port_status_call(actor_index, _actor_perception_call_combat_state,
+				prop->actor_index, 0, &call);
+
+			noncombat = (state & 1) != 0;
+			in_combat = (state & 2) != 0;
+			fighting = (state & 4) != 0;
+			if (in_combat && !prop->in_combat && !enemy && actor->state.mode < _actor_mode_combat)
+				noticed = TRUE;
+		}
+		prop->noncombat = noncombat;
+		prop->in_combat = in_combat;
+		prop->fighting = fighting;
+
+		if (noticed)
+		{
+			short visibility = _actor_perception_none;
+
+			if (!blind)
+			{
+				char lighting = prop->flashlight ? _prop_lighting_bright : prop->lighting;
+				short knowledge = actor_get_perception_knowledge(actor_index, prop_index);
+
+				visibility = actor_perception_port_visibility(actor_index, prop_index,
+					lighting, TRUE, FALSE, knowledge);
+			}
+			if (visibility < _actor_perception_full)
+			{
+				prop->perception = visibility;
+				prop->visibility = visibility;
+				prop->state = _prop_state_unacknowledged;
+			}
+		}
+
+		if (prop->ignore)
+		{
+			prop->perception = _actor_perception_none;
+			prop->ineffability = _actor_perception_none;
+			prop->audibility = _actor_perception_none;
+			prop->visibility = _actor_perception_none;
+		}
+		else
+		{
+			boolean invisible = blind;
+			short ineffability;
+			short perception;
+
+			if ((bits & (1 << 10)) != 0 || ((bits & (1 << 11)) != 0 && player))
+				invisible = TRUE;
+			if (prop->active_camouflage)
+				invisible = enemy || (player && prop->distance > 4.0f);
+
+			if (invisible)
+			{
+				prop->visibility = _actor_perception_none;
+				prop->just_became_visible = FALSE;
+			}
+			else
+			{
+				boolean use_maximum_distance = TRUE;
+				char lighting;
+				short knowledge;
+				short visible;
+
+				if (actor->input.vehicle_driver_type == _actor_vehicle_driver_directional_flying ||
+					actor->meta.type == _actor_mounted_weapon)
+				{
+					use_maximum_distance = FALSE;
+				}
+				else if (!enemy)
+				{
+					use_maximum_distance = FALSE;
+					if (actor->state.mode < _actor_mode_combat &&
+						(prop->dead || prop->in_combat))
+					{
+						use_maximum_distance = TRUE;
+					}
+				}
+				else if (prop_acknowledged(prop))
+				{
+					use_maximum_distance = FALSE;
+				}
+
+				lighting = prop->flashlight ? _prop_lighting_bright : prop->lighting;
+				knowledge = actor_get_perception_knowledge(actor_index, prop_index);
+				visible = actor_perception_port_visibility(actor_index, prop_index,
+					lighting, use_maximum_distance, player, knowledge);
+				prop->just_became_visible =
+					prop->visibility == _actor_perception_none &&
+					visible > _actor_perception_none;
+				prop->visibility = visible;
+				if (visible != _actor_perception_none)
+				{
+					prop->last_visible_head_position = prop->head_position;
+					prop->last_visible_time = game_time;
+				}
+			}
+
+			if ((bits & (1 << 12)) != 0 || (bits & (1 << 13)) != 0)
+			{
+				prop->audibility = _actor_perception_none;
+			}
+			else if (unit_effect == _ai_unit_effect_shooting ||
+				unit_effect == _ai_unit_effect_death_scream)
+			{
+				prop->audibility = _actor_perception_unmistakable;
+			}
+			else
+			{
+				prop->audibility = (short)actor_perception_port_status_call(actor_index,
+					_actor_perception_call_audibility, prop_index, 0, &call);
+			}
+
+			ineffability = _actor_perception_none;
+			if (unit_effect == _ai_unit_effect_bump)
+				ineffability = _actor_perception_unmistakable;
+			if (prop->flashlight &&
+				prop->quantized_facing <= 2 &&
+				prop->quantized_distance <= 2 &&
+				(prop->line_of_sight == _ai_line_of_sight_clear ||
+					prop->line_of_sight == _ai_line_of_sight_occluded))
+			{
+				ineffability = MAX(ineffability, _actor_perception_partial);
+			}
+			prop->ineffability = ineffability;
+
+			perception = MAX(prop->visibility, MAX(prop->audibility, ineffability));
+			if (perception == _actor_perception_partial &&
+				prop_acknowledged(prop))
+			{
+				perception = _actor_perception_full;
+			}
+			prop->perception = perception;
+		}
+
+		if (prop->perception != _actor_perception_none)
+		{
+			prop->last_perceived_body_position = prop->body_position;
+			prop->last_perceived_time = game_time;
+		}
+
+		if (prop_acknowledged(prop))
+		{
+			struct actor_datum *source_actor;
+
+			if (prop->visibility >= _actor_perception_full ||
+				(prop->definitely_located &&
+					prop->definite_knowledge_source_actor != NONE &&
+					(source_actor = actor_try_and_get(prop->definite_knowledge_source_actor)) != NULL &&
+					source_actor->target.target_type >= _actor_target_visible_enemy &&
+					source_actor->target.target_prop_index != NONE &&
+					source_actor->orders.combat.shoot_at_target &&
+					prop_get(source_actor->target.target_prop_index)->unit_index == prop->unit_index))
+			{
+				prop->definitely_located = TRUE;
+				prop->ticks_since_definitely_located = 0;
+			}
+		}
+	}
+
+	perceived_fully = prop->perception >= _actor_perception_full;
+	if (prop->dangerous_vehicle_driver)
+	{
+		actor_perception_port_status_call(actor_index, _actor_perception_call_vehicle_danger,
+			prop_index, perceived_fully, &call);
+	}
+	if (prop->suicide_radius > 0.0f &&
+		(prop->dead || (bits & (1 << 14)) != 0))
+	{
+		actor_perception_port_status_call(actor_index, _actor_perception_call_suicide_danger,
+			prop_index, perceived_fully, &call);
+	}
+
+	if (prop->enemy &&
+		prop_acknowledged(prop))
+	{
+		if ((actor_perception_call_simple(actor_index, _actor_perception_call_has_ranged_weapon, 0) &&
+				prop->distance < actor->control.weapon_maximum_range) ||
+			(TEST_FLAG(definition->flags, _actor_definition_suicidal_melee_attack_bit) &&
+				prop->distance < definition->berserk.melee_attack_range))
+		{
+			actor_perception_call_simple(actor_index, _actor_perception_call_unreachable, prop_index);
+		}
+	}
+
+	if (prop->last_unreachable_time != NONE &&
+		prop->last_unreachable_time + 150 < game_time)
+	{
+		actor_perception_call_simple(actor_index, _actor_perception_call_unreachable, prop_index);
+	}
+
+	if (prop->delay_requirement_decision)
+	{
+		if (!actor_perception_desire_prop(
+				actor_index,
+				NONE,
+				prop->unit_index,
+				prop->actor_index,
+				prop->in_use,
+				prop->player,
+				prop->enemy,
+				prop->dead,
+				prop->dead_ticks,
+				prop->suicide_radius,
+				actor_perception_distance_squared(prop->distance),
+				0,
+				NULL))
+		{
+			prop->required_ticks = 0;
+		}
+
+		prop->delay_requirement_decision = FALSE;
+	}
+
+	prop->unopposable_enemy = actor_compute_prop_unopposable(actor_index, prop_index);
+	prop->target_weight = actor_compute_prop_target_weight(actor_index, prop_index);
+	actor_perception_port_status_call(actor_index, _actor_perception_call_look_interest, prop_index, 0, &call);
+	prop->look_interest = call.output[0];
+	prop->refresh_stimuli = TRUE;
 
 	return;
 }
@@ -7369,10 +8026,7 @@ static void actor_perception_update_game(
 			{
 				actor_perception_port_position_refresh(actor_index, iterator.index, refresh_status);
 				if (refresh_status)
-				{
-					actor_perception_call_full(actor_index, _actor_perception_call_status_refresh,
-						iterator.index, 0, 0.0f, NULL);
-				}
+					actor_perception_port_status_refresh(actor_index, iterator.index);
 			}
 		}
 

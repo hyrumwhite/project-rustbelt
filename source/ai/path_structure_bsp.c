@@ -41,6 +41,7 @@ symbols in this file:
 #include "physics/collision_bsp.h"
 #include "physics/collision_bsp_definitions.h"
 #include "structures/structure_bsp_definitions.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -284,6 +285,26 @@ boolean structure_surfaces_are_equivalent(
 	return result;
 }
 
+/* port: the game's tests, for halo_sim's paths */
+static int structure_test_line2d_game(
+	void const *structure,
+	int ignore_broken_surfaces,
+	float const *p0,
+	long p0_surface_index,
+	float const *p1,
+	long p1_surface_index,
+	void *result);
+static int structure_test_pill2d_game(
+	void const *structure,
+	int ignore_broken_surfaces,
+	float const *p0,
+	long p0_surface_index,
+	float const *p1,
+	long p1_surface_index,
+	float radius,
+	unsigned long flags,
+	void *result);
+
 boolean structure_test_line2d(
 	struct structure_bsp const *structure,
 	boolean ignore_broken_surfaces,
@@ -293,6 +314,33 @@ boolean structure_test_line2d(
 	long p1_surface_index,
 	struct path_collision_result *result)
 {
+	/* port: the game's or Rust's (halo_sim's paths) */
+	return (boolean)halo_sim_path_test_line2d(
+		structure,
+		ignore_broken_surfaces,
+		p0->n,
+		p0_surface_index,
+		p1->n,
+		p1_surface_index,
+		result,
+		(unsigned long)breakable_surface_flags_get(),
+		structure_test_line2d_game);
+}
+
+static int structure_test_line2d_game(
+	void const *structure_data,
+	int ignore_broken_surfaces_flag,
+	float const *p0_data,
+	long p0_surface_index,
+	float const *p1_data,
+	long p1_surface_index,
+	void *result_data)
+{
+	struct structure_bsp const *structure = (struct structure_bsp const *)structure_data;
+	boolean ignore_broken_surfaces = (boolean)ignore_broken_surfaces_flag;
+	real_point2d const *p0 = (real_point2d const *)p0_data;
+	real_point2d const *p1 = (real_point2d const *)p1_data;
+	struct path_collision_result *result = (struct path_collision_result *)result_data;
 	struct collision_bsp const *bsp = TAG_BLOCK_GET_ELEMENT(&structure->collision_bsp, 0, struct collision_bsp);
 	long const *breakable_surface_flags = (long const *)breakable_surface_flags_get();
 	long surface_index = p0_surface_index;
@@ -621,6 +669,37 @@ boolean structure_test_pill2d(
 	unsigned long flags,
 	struct path_collision_result *result)
 {
+	/* port: the game's or Rust's (halo_sim's paths) */
+	return (boolean)halo_sim_path_test_pill2d(
+		structure,
+		ignore_broken_surfaces,
+		p0->n,
+		p0_surface_index,
+		p1->n,
+		p1_surface_index,
+		radius,
+		flags,
+		result,
+		(unsigned long)breakable_surface_flags_get(),
+		structure_test_pill2d_game);
+}
+
+static int structure_test_pill2d_game(
+	void const *structure_data,
+	int ignore_broken_surfaces_flag,
+	float const *p0_data,
+	long p0_surface_index,
+	float const *p1_data,
+	long p1_surface_index,
+	float radius,
+	unsigned long flags,
+	void *result_data)
+{
+	struct structure_bsp const *structure = (struct structure_bsp const *)structure_data;
+	boolean ignore_broken_surfaces = (boolean)ignore_broken_surfaces_flag;
+	real_point2d const *p0 = (real_point2d const *)p0_data;
+	real_point2d const *p1 = (real_point2d const *)p1_data;
+	struct path_collision_result *result = (struct path_collision_result *)result_data;
 	boolean collision = FALSE;
 	real_vector2d direction;
 	real_vector2d perpendicular;
@@ -641,6 +720,12 @@ boolean structure_test_pill2d(
 		struct path_collision_result right_result;
 		struct path_collision_result endpoint_result;
 		struct path_collision_result *best_result;
+
+		/* port: the sides' results start from zeros (a side whose p0 is on no
+		surface sets only its collision; the game then copied the stack's
+		leftovers, see below) */
+		memset(&left_result, 0, sizeof(left_result));
+		memset(&right_result, 0, sizeof(right_result));
 
 		left_p0_surface_index = structure_surface_index_from_point(
 			structure,

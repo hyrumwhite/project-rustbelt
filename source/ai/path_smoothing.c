@@ -46,6 +46,7 @@ symbols in this file:
 #include "physics/collision_bsp.h"
 #include "physics/collision_bsp_definitions.h"
 #include "structures/structure_bsp_definitions.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -531,6 +532,15 @@ static boolean find_turning_point(
 }
 
 #line 27 "c:\\halo\\SOURCE\\ai\\path_smoothing.c"
+/* port: the game's smoothing, for halo_sim's paths */
+static void path_smooth_game(
+	void *state,
+	short raw_step_count,
+	void const *raw_steps,
+	short *smoothed_step_count,
+	void *smoothed_steps,
+	int *steps_finish_path);
+
 void path_smooth(
 	struct path_state *state,
 	short raw_step_count,
@@ -539,6 +549,32 @@ void path_smooth(
 	struct path_step *smoothed_steps,
 	boolean *steps_finish_path)
 {
+	/* port: the game's or Rust's (halo_sim's paths) */
+	int finish = *steps_finish_path;
+
+	halo_sim_path_smooth(
+		state,
+		raw_step_count,
+		raw_steps,
+		smoothed_step_count,
+		smoothed_steps,
+		&finish,
+		(unsigned long)breakable_surface_flags_get(),
+		path_smooth_game);
+	*steps_finish_path = (boolean)finish;
+}
+
+static void path_smooth_game(
+	void *state_data,
+	short raw_step_count,
+	void const *raw_steps_data,
+	short *smoothed_step_count,
+	void *smoothed_steps_data,
+	int *steps_finish_path)
+{
+	struct path_state *state = (struct path_state *)state_data;
+	struct path_step const *raw_steps = (struct path_step const *)raw_steps_data;
+	struct path_step *smoothed_steps = (struct path_step *)smoothed_steps_data;
 	real_point2d current_position;
 	long current_surface_index;
 	short smoothed_count;

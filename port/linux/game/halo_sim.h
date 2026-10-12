@@ -2095,6 +2095,29 @@ int halo_sim_path_estimated_distance(void *state, float const *end_point, long e
 	float *distance, float *closest_approach, float *direction,
 	int (*game)(void *state, float const *end_point, long end_surface_index, float *distance, float *closest_approach,
 		float *direction));
+
+/* path_structure_bsp.c's 2D tests, path_smoothing.c's smoothing and path.c's
+approach point, the same way (a path_collision_result is 28 bytes, a
+path_step 16) */
+typedef int (*halo_sim_path_line2d_function)(void const *structure, int ignore_broken_surfaces, float const *p0,
+	long p0_surface_index, float const *p1, long p1_surface_index, void *result);
+typedef int (*halo_sim_path_pill2d_function)(void const *structure, int ignore_broken_surfaces, float const *p0,
+	long p0_surface_index, float const *p1, long p1_surface_index, float radius, unsigned long flags, void *result);
+typedef void (*halo_sim_path_smooth_function)(void *state, short raw_step_count, void const *raw_steps,
+	short *smoothed_step_count, void *smoothed_steps, int *steps_finish_path);
+typedef int (*halo_sim_path_approach_function)(void *state, float const *end_point, long end_surface_index,
+	int *straight_line, float *approach_point);
+int halo_sim_path_test_line2d(void const *structure, int ignore_broken_surfaces, float const *p0,
+	long p0_surface_index, float const *p1, long p1_surface_index, void *result, unsigned long breakable_surface_flags,
+	halo_sim_path_line2d_function game);
+int halo_sim_path_test_pill2d(void const *structure, int ignore_broken_surfaces, float const *p0,
+	long p0_surface_index, float const *p1, long p1_surface_index, float radius, unsigned long flags, void *result,
+	unsigned long breakable_surface_flags, halo_sim_path_pill2d_function game);
+void halo_sim_path_smooth(void *state, short raw_step_count, void const *raw_steps, short *smoothed_step_count,
+	void *smoothed_steps, int *steps_finish_path, unsigned long breakable_surface_flags,
+	halo_sim_path_smooth_function game);
+int halo_sim_path_approach_point(void *state, float const *end_point, long end_surface_index, int *straight_line,
+	float *approach_point, unsigned long breakable_surface_flags, halo_sim_path_approach_function game);
 void halo_sim_ai_update_check(void);
 void halo_sim_ai_update_note(struct halo_sim_ai_update_call const *call);
 void ai_update_call(struct halo_sim_ai_update_call *call);

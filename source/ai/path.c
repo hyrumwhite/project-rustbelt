@@ -777,6 +777,14 @@ boolean path_3d_build_path(
 	return path->valid;
 }
 
+/* port: the game's approach point, for halo_sim's paths */
+static int path_state_approach_point_game(
+	void *state,
+	float const *end_point,
+	long end_surface_index,
+	int *straight_line_reference,
+	float *approach_point_reference);
+
 boolean path_state_approach_point(
 	struct path_state *state,
 	real_point2d const *end_point,
@@ -784,6 +792,33 @@ boolean path_state_approach_point(
 	boolean *straight_line_reference,
 	real_point3d *approach_point_reference)
 {
+	/* port: the game's or Rust's (halo_sim's paths) */
+	int straight_line = *straight_line_reference;
+	boolean result = (boolean)halo_sim_path_approach_point(
+		state,
+		end_point->n,
+		end_surface_index,
+		&straight_line,
+		approach_point_reference->n,
+		(unsigned long)breakable_surface_flags_get(),
+		path_state_approach_point_game);
+
+	*straight_line_reference = (boolean)straight_line;
+	return result;
+}
+
+static int path_state_approach_point_game(
+	void *state_data,
+	float const *end_point_data,
+	long end_surface_index,
+	int *straight_line_data,
+	float *approach_point_data)
+{
+	struct path_state *state = (struct path_state *)state_data;
+	real_point2d const *end_point = (real_point2d const *)end_point_data;
+	boolean straight_line = (boolean)*straight_line_data;
+	boolean *straight_line_reference = &straight_line;
+	real_point3d *approach_point_reference = (real_point3d *)approach_point_data;
 	short node_index = path_node_from_hash_table(state, end_surface_index);
 	boolean result = FALSE;
 
@@ -837,6 +872,7 @@ boolean path_state_approach_point(
 		result = TRUE;
 	}
 
+	*straight_line_data = straight_line;
 	return result;
 }
 

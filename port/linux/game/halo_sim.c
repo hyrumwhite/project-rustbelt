@@ -76,7 +76,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 98
+#define HALO_SIM_VERSION 99
 
 /* ---------- structures */
 
@@ -1987,9 +1987,25 @@ struct halo_sim_path_call
 	real distance;
 	real closest_approach;
 	real direction[3];
+	/* the 2D tests' (kinds 2, the line, and 3, the pill), the smoothing's
+	(4) and the approach point's (5) */
+	unsigned long structure;
+	long ignore_broken_surfaces;
+	real p0[2];
+	long p0_surface_index;
+	real p1[2];
+	long p1_surface_index;
+	real radius;
+	unsigned long test_flags;
+	unsigned char collision[28];
+	unsigned long raw_steps;
+	long raw_step_count;
+	unsigned long smoothed_steps;
+	long smoothed_step_count;
+	long steps_finish_path;
 };
 
-typedef char halo_sim_path_call_size_assert[sizeof(struct halo_sim_path_call) == 60 ? 1 : -1];
+typedef char halo_sim_path_call_size_assert[sizeof(struct halo_sim_path_call) == 148 ? 1 : -1];
 typedef long (*halo_sim_path_function)(struct halo_sim_path_call *call);
 typedef long (*halo_sim_garbage_function)(short *lifetime_ticks);
 typedef long (*halo_sim_scenery_function)(struct halo_sim_scenery_call *call);
@@ -9784,12 +9800,212 @@ static struct
 	unsigned char state_after[HALO_SIM_PATH_STATE_SIZE];
 	unsigned char debug_before[HALO_SIM_PATH_DEBUG_SIZE];
 	unsigned char debug_after[HALO_SIM_PATH_DEBUG_SIZE];
-	unsigned long compared[2];
-	unsigned long differed[2];
-	unsigned long skipped[2];
+	unsigned long compared[6];
+	unsigned long differed[6];
+	unsigned long skipped[6];
 } halo_sim_path_checks;
 
-static char const *const halo_sim_path_names[2] = {"path search", "path estimated distance"};
+static char const *const halo_sim_path_names[6] =
+{
+	"path search",
+	"path estimated distance",
+	"path line test",
+	"path pill test",
+	"path smoothing",
+	"path approach point",
+};
+
+/* a check's comparison of results alone (the kinds that leave no state) */
+static void halo_sim_path_compare_results(long kind, int agree)
+{
+	halo_sim_path_checks.compared[kind]++;
+	if (!agree)
+	{
+		halo_sim_path_checks.differed[kind]++;
+		if (halo_sim_path_checks.differed[kind] <= 8)
+			platform_log("halo_sim: %s differs", halo_sim_path_names[kind]);
+	}
+	{
+		unsigned long compared = halo_sim_path_checks.compared[kind];
+
+		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
+			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu left out)",
+				halo_sim_path_names[kind], compared - halo_sim_path_checks.differed[kind], compared,
+				halo_sim_path_checks.skipped[kind]);
+	}
+}
+
+/* whether two path_collision_results agree: the collision byte and the
+fields after its padding (which the game leaves as the caller's) */
+static int halo_sim_path_collision_equal(unsigned char const *a, unsigned char const *b)
+{
+	return a[0] == b[0] && memcmp(a + 4, b + 4, 24) == 0;
+}
+
+/* a 2D test's call (kind 2 or 3) */
+static void halo_sim_path_2d_call(struct halo_sim_path_call *call, long kind, void const *structure,
+	int ignore_broken_surfaces, float const *p0, long p0_surface_index, float const *p1, long p1_surface_index,
+	void const *result, unsigned long breakable_surface_flags)
+{
+	memset(call, 0, sizeof(*call));
+	call->kind = kind;
+	call->structure = (unsigned long)structure;
+	call->breakable_surface_flags = breakable_surface_flags;
+	call->ignore_broken_surfaces = ignore_broken_surfaces ? 1 : 0;
+	memcpy(call->p0, p0, sizeof(call->p0));
+	call->p0_surface_index = p0_surface_index;
+	memcpy(call->p1, p1, sizeof(call->p1));
+	call->p1_surface_index = p1_surface_index;
+	memcpy(call->collision, result, sizeof(call->collision));
+}
+
+int halo_sim_path_test_line2d(void const *structure, int ignore_broken_surfaces, float const *p0,
+	long p0_surface_index, float const *p1, long p1_surface_index, void *result, unsigned long breakable_surface_flags,
+	halo_sim_path_line2d_function game)
+{
+	short mode = halo_sim_mode(_halo_sim_paths);
+	struct halo_sim_path_call call;
+	int game_result;
+
+	if (mode == _halo_sim_mode_c)
+		return game(structure, ignore_broken_surfaces, p0, p0_surface_index, p1, p1_surface_index, result);
+	halo_sim_path_2d_call(&call, 2, structure, ignore_broken_surfaces, p0, p0_surface_index, p1, p1_surface_index,
+		result, breakable_surface_flags);
+	if (mode != _halo_sim_mode_check)
+	{
+		if (halo_sim.path(&call) != 0)
+			return game(structure, ignore_broken_surfaces, p0, p0_surface_index, p1, p1_surface_index, result);
+		memcpy(result, call.collision, sizeof(call.collision));
+		return call.result != 0;
+	}
+	game_result = game(structure, ignore_broken_surfaces, p0, p0_surface_index, p1, p1_surface_index, result);
+	if (halo_sim.path(&call) != 0)
+	{
+		halo_sim_path_checks.skipped[2]++;
+		return game_result;
+	}
+	halo_sim_path_compare_results(2, (call.result != 0) == (game_result != 0) &&
+		halo_sim_path_collision_equal(call.collision, (unsigned char const *)result));
+
+	return game_result;
+}
+
+int halo_sim_path_test_pill2d(void const *structure, int ignore_broken_surfaces, float const *p0,
+	long p0_surface_index, float const *p1, long p1_surface_index, float radius, unsigned long flags, void *result,
+	unsigned long breakable_surface_flags, halo_sim_path_pill2d_function game)
+{
+	short mode = halo_sim_mode(_halo_sim_paths);
+	struct halo_sim_path_call call;
+	int game_result;
+
+	if (mode == _halo_sim_mode_c)
+		return game(structure, ignore_broken_surfaces, p0, p0_surface_index, p1, p1_surface_index, radius, flags, result);
+	halo_sim_path_2d_call(&call, 3, structure, ignore_broken_surfaces, p0, p0_surface_index, p1, p1_surface_index,
+		result, breakable_surface_flags);
+	call.radius = radius;
+	call.test_flags = flags;
+	if (mode != _halo_sim_mode_check)
+	{
+		if (halo_sim.path(&call) != 0)
+			return game(structure, ignore_broken_surfaces, p0, p0_surface_index, p1, p1_surface_index, radius, flags,
+				result);
+		memcpy(result, call.collision, sizeof(call.collision));
+		return call.result != 0;
+	}
+	game_result = game(structure, ignore_broken_surfaces, p0, p0_surface_index, p1, p1_surface_index, radius, flags,
+		result);
+	if (halo_sim.path(&call) != 0)
+	{
+		halo_sim_path_checks.skipped[3]++;
+		return game_result;
+	}
+	halo_sim_path_compare_results(3, (call.result != 0) == (game_result != 0) &&
+		halo_sim_path_collision_equal(call.collision, (unsigned char const *)result));
+
+	return game_result;
+}
+
+void halo_sim_path_smooth(void *state, short raw_step_count, void const *raw_steps, short *smoothed_step_count,
+	void *smoothed_steps, int *steps_finish_path, unsigned long breakable_surface_flags,
+	halo_sim_path_smooth_function game)
+{
+	short mode = halo_sim_mode(_halo_sim_paths);
+	struct halo_sim_path_call call;
+	unsigned char rust_steps[4 * 16];
+	int finish_before = *steps_finish_path;
+
+	if (mode == _halo_sim_mode_c)
+	{
+		game(state, raw_step_count, raw_steps, smoothed_step_count, smoothed_steps, steps_finish_path);
+		return;
+	}
+	memset(&call, 0, sizeof(call));
+	call.kind = 4;
+	call.state = (unsigned long)state;
+	call.breakable_surface_flags = breakable_surface_flags;
+	call.raw_steps = (unsigned long)raw_steps;
+	call.raw_step_count = raw_step_count;
+	call.smoothed_steps = (unsigned long)(mode == _halo_sim_mode_check ? (void *)rust_steps : smoothed_steps);
+	call.steps_finish_path = finish_before;
+	if (mode != _halo_sim_mode_check)
+	{
+		if (halo_sim.path(&call) != 0)
+		{
+			game(state, raw_step_count, raw_steps, smoothed_step_count, smoothed_steps, steps_finish_path);
+			return;
+		}
+		*smoothed_step_count = (short)call.smoothed_step_count;
+		*steps_finish_path = call.steps_finish_path;
+		return;
+	}
+	game(state, raw_step_count, raw_steps, smoothed_step_count, smoothed_steps, steps_finish_path);
+	if (halo_sim.path(&call) != 0)
+	{
+		halo_sim_path_checks.skipped[4]++;
+		return;
+	}
+	halo_sim_path_compare_results(4, call.smoothed_step_count == *smoothed_step_count &&
+		(call.steps_finish_path != 0) == (*steps_finish_path != 0) &&
+		memcmp(rust_steps, smoothed_steps, (size_t)*smoothed_step_count * 16) == 0);
+}
+
+int halo_sim_path_approach_point(void *state, float const *end_point, long end_surface_index, int *straight_line,
+	float *approach_point, unsigned long breakable_surface_flags, halo_sim_path_approach_function game)
+{
+	short mode = halo_sim_mode(_halo_sim_paths);
+	struct halo_sim_path_call call;
+	int game_result;
+
+	if (mode == _halo_sim_mode_c)
+		return game(state, end_point, end_surface_index, straight_line, approach_point);
+	memset(&call, 0, sizeof(call));
+	call.kind = 5;
+	call.state = (unsigned long)state;
+	call.breakable_surface_flags = breakable_surface_flags;
+	memcpy(call.p0, end_point, sizeof(call.p0));
+	call.p0_surface_index = end_surface_index;
+	call.steps_finish_path = *straight_line;
+	memcpy(call.collision + 4, approach_point, 12);
+	if (mode != _halo_sim_mode_check)
+	{
+		if (halo_sim.path(&call) != 0)
+			return game(state, end_point, end_surface_index, straight_line, approach_point);
+		*straight_line = call.steps_finish_path;
+		memcpy(approach_point, call.collision + 4, 12);
+		return call.result != 0;
+	}
+	game_result = game(state, end_point, end_surface_index, straight_line, approach_point);
+	if (halo_sim.path(&call) != 0)
+	{
+		halo_sim_path_checks.skipped[5]++;
+		return game_result;
+	}
+	halo_sim_path_compare_results(5, (call.result != 0) == (game_result != 0) &&
+		(!game_result || ((call.steps_finish_path != 0) == (*straight_line != 0) &&
+			memcmp(call.collision + 4, approach_point, 12) == 0)));
+
+	return game_result;
+}
 
 /* a check's comparison: of what Rust left in the state (and debug
 storage) with the game's after, and of their results; the game's put back */

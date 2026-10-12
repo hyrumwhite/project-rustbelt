@@ -233,6 +233,15 @@ pub mod call {
     /// input[3])`, the result; the alignment it leaves in `output[0..2]` and
     /// the direction in `output[2]`.
     pub const EVASION_DIRECTION: i32 = BASE + 85;
+    /// The start of `actor_action_change`: its profile meter, and the end of
+    /// the actor's action `a`.
+    pub const ACTION_END: i32 = BASE + 86;
+    /// `actor_clear_discarded_firing_positions(actor, FALSE)`.
+    pub const CLEAR_DISCARDED_FIRING_POSITIONS: i32 = BASE + 87;
+    /// The begin of the action `a`.
+    pub const ACTION_BEGIN: i32 = BASE + 88;
+    /// `seed_random_range(global seed, a, b)`, the result.
+    pub const SEED_RANDOM_RANGE: i32 = BASE + 89;
 }
 
 /// The difficulty values [`call::DIFFICULTY`] reads.
@@ -247,6 +256,7 @@ const VEHICLE_AI_STRAFING_STOP_RANGE: u32 = 0x394;
 
 /// The actions (actions.h's `_actor_action_*`).
 const ACTION_NONE: i16 = 0;
+const ACTION_SLEEP: i16 = 1;
 const ACTION_ALERT: i16 = 2;
 const ACTION_FIGHT: i16 = 3;
 const ACTION_FLEE: i16 = 4;
@@ -256,6 +266,7 @@ const ACTION_SEARCH: i16 = 7;
 const ACTION_WAIT: i16 = 8;
 const ACTION_CHARGE: i16 = 10;
 const ACTION_OBEY: i16 = 11;
+const ACTION_AVOID: i16 = 13;
 
 /// Each action's class (actions.c's `global_action_functions`).
 const ACTION_CLASSES: [i16; 14] = [0, 0, 0, 4, 2, 3, 1, 3, 3, 2, 4, 2, 2, 2];
@@ -1081,7 +1092,7 @@ pub fn handle_combat_selection(context: &AiStepContext, host: &impl AiHost) -> b
         }
 
         if !desires_charge && !action_changed && action() != ACTION_FIGHT {
-            call_simple(context, host, call::FIGHT, 0);
+            action_change(context, host, ACTION_FIGHT, Some(&ActionData::new()));
             action_changed = true;
         }
     }
@@ -1430,11 +1441,11 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
                     if m.i16(at(a::FIRING_POSITIONS_PURSUIT_POSITIONS_COUNT)) > 0 && m.i32(at(a::META_UNIT_INDEX)) != NONE {
                         communicate(19, NONE);
                     }
-                    if !swarm
-                        && options.wait_after_pursuit
-                        && call_simple(context, host, call::WAIT, options.allow_pursuit as i32) != 0
-                    {
-                        handled = true;
+                    if !swarm && options.wait_after_pursuit {
+                        if let Some(data) = wait_setup(context, host, options.allow_pursuit) {
+                            action_change(context, host, ACTION_WAIT, Some(&data));
+                            handled = true;
+                        }
                     }
                 }
             }
@@ -1461,7 +1472,8 @@ pub fn handle_lost_contact(context: &AiStepContext, host: &impl AiHost) -> bool 
                 0
             };
         call_simple(context, host, call::ABANDONED_SEARCH, target_prop_index());
-        call_simple(context, host, call::GUARD_FIND_POSITION, find_position_delay);
+        let data = guard_setup_find_position(context, host, find_position_delay);
+        action_change(context, host, ACTION_GUARD, Some(&data));
         handled = true;
     }
 
@@ -2068,7 +2080,8 @@ pub fn handle_danger_avoidance(context: &AiStepContext, host: &impl AiHost) -> b
         && !m.bool(at(a::EMOTIONS_FORCED_TO_CHARGE))
     {
         let action_class = ACTION_CLASSES[m.i16(at(a::STATE_ACTION)) as usize];
-        if (action_class == 1 || action_class == 3) && call_simple(context, host, call::AVOID, 0) != 0 {
+        if action_class == 1 || action_class == 3 {
+            action_change(context, host, ACTION_AVOID, Some(&ActionData::new()));
             result = true;
         }
     }
@@ -2518,8 +2531,16 @@ pub fn set_default_state(context: &AiStepContext, host: &impl AiHost, override_s
     let at = |offset: usize| context.actor + offset as u32;
     let current_time = context.game_time;
     let action = || m.i16(at(a::STATE_ACTION));
-    let guard_current_position = || call_simple(context, host, call::GUARD_CURRENT_POSITION, 0) != 0;
-    let alert = |order: i32| call_simple(context, host, call::ALERT, order) != 0;
+    let guard_current_position = || {
+        let data = guard_setup_current_position(context, host);
+        action_change(context, host, ACTION_GUARD, Some(&data));
+        true
+    };
+    let alert = |order: i32| {
+        let data = alert_setup(context, host, order, NONE as i16);
+        action_change(context, host, ACTION_ALERT, Some(&data));
+        true
+    };
     let mut changed = false;
 
     let last_time = m.i32(at(a::STATE_LAST_DEFAULT_STATE_TIME));
@@ -2544,7 +2565,7 @@ pub fn set_default_state(context: &AiStepContext, host: &impl AiHost, override_s
         1 => {
             if m.i16(at(a::STATE_MODE)) != 1 {
                 m.set_i16(at(a::STATE_MODE), 1);
-                call_simple(context, host, call::SLEEP, 0);
+                action_change(context, host, ACTION_SLEEP, None);
                 changed = true;
             }
         }
@@ -2558,7 +2579,9 @@ pub fn set_default_state(context: &AiStepContext, host: &impl AiHost, override_s
                 if m.i16(at(a::STATE_GUARD_GUARD_LOCATION_TYPE)) != 3 {
                     m.set_bool(at(a::STATE_GUARD_FIND_NEW_GUARD_POSITION), true);
                 }
-            } else if call_simple(context, host, call::GUARD_FIND_POSITION_IF, 0) != 0 {
+            } else {
+                let data = guard_setup_find_position(context, host, 0);
+                action_change(context, host, ACTION_GUARD, Some(&data));
                 changed = true;
             }
         }
@@ -2794,4 +2817,159 @@ pub fn try_to_dive(
         decision(DIVE_ANIMATION_FAILURE);
     }
     result
+}
+
+/// Each action's data's size, and whether it has a begin (actions.c's
+/// `global_action_functions`).
+const ACTION_DATA_SIZES: [usize; 14] = [0, 0, 92, 4, 48, 52, 68, 44, 24, 76, 56, 132, 20, 4];
+const ACTION_HAS_BEGIN: [bool; 14] =
+    [false, false, true, true, true, true, true, true, true, true, true, true, true, true];
+
+/// An action's data, as a setup fills it in for [`action_change`] (the
+/// game's `action_state_data`), from zeros.
+pub struct ActionData {
+    bytes: [u8; 132],
+}
+
+impl ActionData {
+    pub fn new() -> Self {
+        ActionData { bytes: [0; 132] }
+    }
+
+    /// The data's byte at the actor's field `actor_offset`
+    /// (`actor_datum`'s `state.action_data` member).
+    fn index(actor_offset: usize) -> usize {
+        actor_offset - a::STATE_ACTION_DATA
+    }
+
+    fn set_bytes(&mut self, actor_offset: usize, bytes: &[u8]) {
+        let index = Self::index(actor_offset);
+        self.bytes[index..index + bytes.len()].copy_from_slice(bytes);
+    }
+
+    pub fn set_bool(&mut self, actor_offset: usize, value: bool) {
+        self.set_bytes(actor_offset, &[value as u8]);
+    }
+
+    pub fn set_i16(&mut self, actor_offset: usize, value: i16) {
+        self.set_bytes(actor_offset, &value.to_le_bytes());
+    }
+
+    pub fn set_i32(&mut self, actor_offset: usize, value: i32) {
+        self.set_bytes(actor_offset, &value.to_le_bytes());
+    }
+
+    pub fn set_vector(&mut self, actor_offset: usize, value: [f32; 3]) {
+        for (i, component) in value.into_iter().enumerate() {
+            self.set_bytes(actor_offset + 4 * i, &component.to_bits().to_le_bytes());
+        }
+    }
+}
+
+impl Default for ActionData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// actions.c's `actor_action_change`: the actor's action ends, its mode
+/// follows the new action's class (out of combat for a noncombat action,
+/// into it for the rest), its discarded firing positions clear, and the new
+/// action (with its data) begins.
+pub fn action_change(context: &AiStepContext, host: &impl AiHost, new_action: i16, data: Option<&ActionData>) {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let action = m.i16(at(a::STATE_ACTION));
+    call_simple(context, host, call::ACTION_END, action as i32);
+    let mode = at(a::STATE_MODE);
+    if ACTION_CLASSES[new_action as usize] == 0 {
+        if m.i16(mode) >= 3 {
+            m.set_i16(mode, 2);
+        }
+    } else if m.i16(mode) < 3 {
+        m.set_i16(mode, 3);
+    }
+    call_simple(context, host, call::CLEAR_DISCARDED_FIRING_POSITIONS, 0);
+    let size = ACTION_DATA_SIZES[new_action as usize];
+    if let Some(data) = data {
+        for (i, &byte) in data.bytes[..size].iter().enumerate() {
+            m.w8(at(a::STATE_ACTION_DATA) + i as u32, byte);
+        }
+    }
+    m.set_i16(at(a::STATE_ACTION), new_action);
+    m.set_bool(at(a::STATE_ACTION_CHANGED), true);
+    if ACTION_HAS_BEGIN[new_action as usize] {
+        call_simple(context, host, call::ACTION_BEGIN, new_action as i32);
+    }
+}
+
+/// action_alert.c's `action_alert_setup`: the move position order (none
+/// for a swarm) and the first move position.
+pub fn alert_setup(context: &AiStepContext, host: &impl AiHost, move_position_order: i32, initial_move_position_index: i16) -> ActionData {
+    let m = host.memory();
+    let mut data = ActionData::new();
+    let order = if m.bool(context.actor + a::META_SWARM as u32) { 0 } else { move_position_order };
+    data.set_i16(a::STATE_ALERT_MOVE_POSITION_ORDER, order as i16);
+    data.set_i16(a::STATE_ALERT_TARGET_MOVE_POSITION_INDEX, NONE as i16);
+    data.set_i16(a::STATE_ALERT_PENDING_MOVE_POSITION_INDEX, initial_move_position_index);
+    data.set_bool(a::STATE_ALERT_MOVE_POSITION_INCREASING, true);
+    data.set_i16(a::STATE_ALERT_WAIT_TICKS, 0);
+    data.set_bool(a::STATE_ALERT_MUST_PLAY_ANIMATION, false);
+    data
+}
+
+/// action_wait.c's `action_wait_setup`: waiting (not as a passenger), its
+/// look and query timers.
+pub fn wait_setup(context: &AiStepContext, host: &impl AiHost, was_actively_searching: bool) -> Option<ActionData> {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    if m.bool(at(a::INPUT_VEHICLE_PASSENGER)) {
+        return None;
+    }
+    let mut data = ActionData::new();
+    data.set_bool(a::STATE_WAIT_WAITING_AS_COORDINATOR, m.bool(at(a::EXTERNAL_ORDERS_PURSUIT_IS_COORDINATOR)));
+    data.set_bool(a::STATE_WAIT_WAS_ACTIVELY_SEARCHING, was_actively_searching);
+    data.set_i32(a::STATE_WAIT_ENTRY_TIME, context.game_time);
+    data.set_i16(a::STATE_WAIT_EXIT_TIMER, 0);
+    data.set_i16(a::STATE_WAIT_LOOK_TIMER, 120);
+    data.set_bool(a::STATE_WAIT_DESIRE_MOVE, true);
+    let query_timer = call_full(context, host, call::SEED_RANDOM_RANGE, 300, 600, &[]).result;
+    data.set_i16(a::STATE_WAIT_QUERY_TIMER, query_timer as i16);
+    Some(data)
+}
+
+/// action_guard.c's `action_guard_setup_current_position`: guarding where
+/// the actor stands, facing as it does.
+pub fn guard_setup_current_position(context: &AiStepContext, host: &impl AiHost) -> ActionData {
+    let m = host.memory();
+    let mut data = ActionData::new();
+    data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);
+    data.set_bool(a::STATE_GUARD_HAS_GUARD_DIRECTION, true);
+    data.set_vector(a::STATE_GUARD_GUARD_DIRECTION, m.vector(context.actor + a::INPUT_FACING_VECTOR as u32));
+    data.set_i32(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX, NONE);
+    data
+}
+
+/// action_guard.c's `action_guard_setup_find_position`: guarding a new
+/// position (at once, or where it stands for `wait_ticks` first); a
+/// passenger or swarm guards where it is.
+pub fn guard_setup_find_position(context: &AiStepContext, host: &impl AiHost, wait_ticks: i32) -> ActionData {
+    let m = host.memory();
+    let at = |offset: usize| context.actor + offset as u32;
+    let mut data = ActionData::new();
+    if !m.bool(at(a::INPUT_VEHICLE_PASSENGER)) && !m.bool(at(a::META_SWARM)) {
+        data.set_i16(a::STATE_GUARD_WAIT_TICKS, wait_ticks as i16);
+        if wait_ticks as i16 == 0 {
+            data.set_bool(a::STATE_GUARD_FIND_NEW_GUARD_POSITION, true);
+            data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 0);
+        } else {
+            data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);
+            data.set_bool(a::STATE_GUARD_HAS_GUARD_DIRECTION, true);
+            data.set_vector(a::STATE_GUARD_GUARD_DIRECTION, m.vector(at(a::INPUT_FACING_VECTOR)));
+        }
+    } else {
+        data.set_i16(a::STATE_GUARD_GUARD_LOCATION_TYPE, 1);
+    }
+    data.set_i32(a::STATE_GUARD_GUARD_LOOK_PROP_INDEX, NONE);
+    data
 }

@@ -26,7 +26,8 @@ use crate::data_array::{DATA_COUNT, DATA_DATA, DATA_SIZE};
 use crate::distributed_wire::{self as wire, UNIT_SCALE};
 use crate::layout::{
     coop_events as ce, coop_host_attachment as at, coop_host_looping_sound as ls, coop_host_nav_point as np,
-    coop_host_queue as hq, coop_sent_device as sd, coop_sent_look as sl, coop_sent_transform as st, device_datum as dd,
+    coop_host_queue as hq, coop_presentation_inputs as pi, coop_sent_device as sd, coop_sent_look as sl,
+    coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
     distributed_coop_device_group as dg,
     distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_names as on,
     distributed_coop_object_names_message as cn, distributed_coop_screen_effect_message as se, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
@@ -874,4 +875,222 @@ pub fn host_screen_effect(context: &WorldContext, host: &impl AiHost) {
     }
     let mut call = AiCall { kind: SEND_SCREEN_EFFECT, actor: NONE, ..AiCall::default() };
     host.call(&mut call);
+}
+
+// ---------- the skip vote and the presentation
+
+/// network_coop.c's presentation calls (halo_sim.h's
+/// `_network_coop_world_call_*`).
+mod presentation_call {
+    /// Logs that the cutscene can be skipped.
+    pub const LOG_SKIPPABLE: i32 = 9;
+    /// Skips the cinematic, `a` of `b` machines voting.
+    pub const SKIP_CINEMATIC: i32 = 10;
+    /// The presentation's message to every client.
+    pub const SEND_PRESENTATION: i32 = 11;
+}
+
+/// halo_sim.h's `struct halo_sim_network_coop_presentation`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PresentationArguments {
+    pub inputs: u32,
+    pub skip_vote: u32,
+    pub message: u32,
+    pub now: i32,
+}
+
+/// network_coop.c's `SKIP_VOTE_HELD_TICKS`: the host forgets a client's
+/// skip vote it hasn't heard again for this long (a second).
+const SKIP_VOTE_HELD_TICKS: i32 = 30;
+/// network_coop.c's `FIELD_OF_VIEW_SCALE`: the field of view (radians) is
+/// sent as a word, scaled by this.
+const FIELD_OF_VIEW_SCALE: f32 = 10000.0;
+
+struct Presentation<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    a: PresentationArguments,
+}
+
+impl<H: AiHost> Presentation<'_, H> {
+    fn call(&self, kind: i32, a: i32, b: i32) {
+        let mut call = AiCall { kind, actor: NONE, a, b, ..AiCall::default() };
+        self.host.call(&mut call);
+    }
+
+    fn input(&self, offset: usize) -> u32 {
+        self.a.inputs + offset as u32
+    }
+
+    fn vote(&self, offset: usize) -> u32 {
+        self.a.skip_vote + offset as u32
+    }
+
+    /// network_coop.c's `skip_vote_clear`.
+    fn skip_vote_clear(&self) {
+        let m = self.m;
+        m.w8(self.vote(sv::VOTED), 0);
+        m.set_i16(self.vote(sv::VOTES), 0);
+        for index in 0..nv::HALO_PORT_MAXIMUM_NETWORK_MACHINES as u32 {
+            m.w32(self.vote(sv::CLIENT_HEARD_TIMES) + 4 * index, NONE as u32);
+            m.w32(self.vote(sv::CLIENT_VOTE_TIMES) + 4 * index, NONE as u32);
+        }
+    }
+
+    /// network_coop.c's `host_count_skip_votes`: skips the cinematic when
+    /// more than half the machines showing it have voted (one still loading,
+    /// or joined since it began, has no say until it shows it).
+    fn count_skip_votes(&self) {
+        let m = self.m;
+        let now = self.a.now;
+        let skippable = m.r8(self.input(pi::SKIPPABLE)) != 0;
+        let was_offered = m.r8(self.vote(sv::OFFERED)) != 0;
+        // (the save the script makes as the cutscene becomes skippable is
+        // waited for: reverting earlier would go back to the one before)
+        if !skippable {
+            m.w8(self.vote(sv::SKIP_SAVE_WRITTEN), 0);
+        } else if m.r8(self.input(pi::SAVING_MAP)) == 0 {
+            m.w8(self.vote(sv::SKIP_SAVE_WRITTEN), 1);
+        }
+        let offered = skippable && m.r8(self.vote(sv::SKIP_SAVE_WRITTEN)) != 0 && now >= m.i32(self.vote(sv::COOLDOWN_UNTIL));
+        m.w8(self.vote(sv::OFFERED), offered as u8);
+        if offered && !was_offered {
+            self.call(presentation_call::LOG_SKIPPABLE, 0, 0);
+        }
+        if !offered {
+            self.skip_vote_clear();
+            m.set_i16(self.vote(sv::VOTERS), 0);
+            m.w8(self.vote(sv::REQUESTED), 0);
+            return;
+        }
+        // (already requested: main.c skips at the end of this frame)
+        if m.r8(self.vote(sv::REQUESTED)) != 0 {
+            return;
+        }
+        // (the host votes too, unless it is a dedicated server with no player)
+        let mut voters = (m.r8(self.input(pi::LOCAL_PLAYER)) != 0) as i16;
+        let mut votes = (m.r8(self.vote(sv::VOTED)) != 0) as i16;
+        for index in 0..m.i16(self.input(pi::MACHINE_COUNT)).max(0) as u32 {
+            let machine_index = m.i32(self.input(pi::MACHINE_INDICES) + 4 * index) as u32;
+            let heard_time = m.i32(self.vote(sv::CLIENT_HEARD_TIMES) + 4 * machine_index);
+            let vote_time = m.i32(self.vote(sv::CLIENT_VOTE_TIMES) + 4 * machine_index);
+            if heard_time == NONE || now - heard_time > SKIP_VOTE_HELD_TICKS {
+                continue;
+            }
+            voters += 1;
+            if vote_time != NONE && now - vote_time <= SKIP_VOTE_HELD_TICKS {
+                votes += 1;
+            }
+        }
+        m.set_i16(self.vote(sv::VOTERS), voters);
+        m.set_i16(self.vote(sv::VOTES), votes);
+        if votes as i32 * 2 > voters as i32 {
+            m.w8(self.vote(sv::REQUESTED), 1);
+            self.call(presentation_call::SKIP_CINEMATIC, votes as i32, voters as i32);
+        }
+    }
+
+    fn vector(&self, offset: usize) -> [f32; 3] {
+        let at = self.input(offset);
+        [self.m.f32(at), self.m.f32(at + 4), self.m.f32(at + 8)]
+    }
+
+    /// network_coop.c's `host_presentation`: what the host shows, from what
+    /// was gathered of its game.
+    fn presentation(&self) {
+        let m = self.m;
+        let p = self.a.message + pm::PRESENTATION as u32;
+        let flag = |bit: usize, on: bool| {
+            if on {
+                m.w8(p + dp::FLAGS as u32, m.r8(p + dp::FLAGS as u32) | 1 << bit);
+            }
+        };
+        let input = |offset: usize| m.r8(self.input(offset)) != 0;
+        for offset in 0..dp::SIZEOF as u32 {
+            m.w8(p + offset, 0);
+        }
+        flag(nv::_PRESENTATION_CINEMATIC_BIT, input(pi::CINEMATIC));
+        flag(nv::_PRESENTATION_LETTERBOX_BIT, input(pi::LETTERBOX));
+        m.w16(p + dp::FADE_TICKS as u32, m.r16(self.input(pi::FADE_TICKS)));
+        let fade_start_time = m.i32(self.input(pi::FADE_START_TIME));
+        m.w32(p + dp::FADE_START_TIME as u32, fade_start_time as u32);
+        flag(nv::_PRESENTATION_FADING_OUT_BIT, input(pi::FADING_OUT));
+        for (index, part) in self.vector(pi::FADE_COLOR).into_iter().enumerate() {
+            m.w8(p + dp::FADE_COLOR as u32 + index as u32, (part.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        }
+        let elapsed = self.a.now.wrapping_sub(fade_start_time);
+        m.set_i16(p + dp::FADE_ELAPSED as u32, elapsed.clamp(0, i16::MAX as i32) as i16);
+        if input(pi::CAMERA_VALID) {
+            let position = self.vector(pi::CAMERA_POSITION);
+            for (index, part) in position.iter().enumerate() {
+                m.set_f32(p + dp::CAMERA_POSITION as u32 + 4 * index as u32, *part);
+            }
+            for (from, to) in [(pi::CAMERA_FORWARD, dp::CAMERA_FORWARD), (pi::CAMERA_UP, dp::CAMERA_UP)] {
+                for (index, part) in wire::vector_pack(self.vector(from), UNIT_SCALE).into_iter().enumerate() {
+                    m.set_i16(p + to as u32 + 2 * index as u32, part);
+                }
+            }
+            let field_of_view = m.f32(self.input(pi::CAMERA_FIELD_OF_VIEW)) * FIELD_OF_VIEW_SCALE + 0.5;
+            m.w16(p + dp::CAMERA_FIELD_OF_VIEW as u32, field_of_view.clamp(1.0, u16::MAX as f32) as u16);
+            let object_index = m.i32(self.input(pi::CAMERA_OBJECT_INDEX));
+            m.w32(p + dp::CAMERA_OBJECT_INDEX as u32, object_index as u32);
+            if object_index != NONE {
+                if let Some(header) = crate::ai_actor::datum_get(m, self.context.object_header_data, object_index) {
+                    let object = m.r32(header + oh::DATUM as u32) + ud::OBJECT_POSITION as u32;
+                    for (index, part) in position.iter().enumerate() {
+                        m.set_f32(p + dp::CAMERA_OBJECT_OFFSET as u32 + 4 * index as u32, part - m.f32(object + 4 * index as u32));
+                    }
+                }
+            }
+        } else {
+            m.w32(p + dp::CAMERA_OBJECT_INDEX as u32, NONE as u32);
+        }
+        m.w8(p + dp::CAMERA_SCRIPTED as u32, input(pi::CAMERA_SCRIPTED) as u8);
+        m.w8(p + dp::INPUT_DISABLED as u32, input(pi::INPUT_DISABLED) as u8);
+        m.w8(p + dp::SCRIPTED_SHAKE as u32, input(pi::SCRIPTED_SHAKE) as u8);
+        m.w8(p + dp::PLAYERS_VITALITY_SET as u32, input(pi::PLAYERS_VITALITY_SET) as u8);
+        m.set_i16(p + dp::ACTIVATING_CLUSTER as u32, m.i16(self.input(pi::ACTIVATING_CLUSTER)).wrapping_add(1));
+        for (from, to) in [
+            (pi::PLAYERS_MAXIMUM_BODY_VITALITY, dp::PLAYERS_MAXIMUM_BODY_VITALITY),
+            (pi::PLAYERS_MAXIMUM_SHIELD_VITALITY, dp::PLAYERS_MAXIMUM_SHIELD_VITALITY),
+            (pi::UNIT_HUD_FLAGS, dp::UNIT_HUD_FLAGS),
+            (pi::WEAPON_HUD_FLAGS, dp::WEAPON_HUD_FLAGS),
+            (pi::TIMER_REFERENCE_TIME, dp::TIMER_REFERENCE_TIME),
+        ] {
+            m.w32(p + to as u32, m.r32(self.input(from)));
+        }
+        for index in 0..nv::GAME_ALLEGIANCE_BITVECTOR_LONGS as u32 {
+            m.w32(p + dp::ALLY_TEAMS as u32 + 4 * index, m.r32(self.input(pi::ALLY_TEAMS) + 4 * index));
+            m.w32(p + dp::FRIENDLY_TEAMS as u32 + 4 * index, m.r32(self.input(pi::FRIENDLY_TEAMS) + 4 * index));
+        }
+        flag(nv::_PRESENTATION_SKIPPABLE_BIT, m.r8(self.vote(sv::OFFERED)) != 0);
+        m.w8(p + dp::SKIP_VOTES as u32, m.i16(self.vote(sv::VOTES)).min(255) as u8);
+        m.w8(p + dp::SKIP_VOTERS as u32, m.i16(self.vote(sv::VOTERS)).min(255) as u8);
+        flag(nv::_PRESENTATION_SHOW_HUD_BIT, input(pi::SHOW_HUD));
+        flag(nv::_PRESENTATION_SHOW_HELP_TEXT_BIT, input(pi::SHOW_HELP_TEXT));
+        flag(nv::_PRESENTATION_TIMER_PAUSED_BIT, input(pi::TIMER_PAUSED));
+        flag(nv::_PRESENTATION_TIMER_ENABLED_BIT, input(pi::TIMER_ENABLED));
+        for (from, to) in [
+            (pi::TIMER_TICKS, dp::TIMER_TICKS),
+            (pi::TIMER_FLASH_CUTOFF, dp::TIMER_FLASH_CUTOFF),
+            (pi::TIMER_X, dp::TIMER_X),
+            (pi::TIMER_Y, dp::TIMER_Y),
+            (pi::TIMER_CORNER, dp::TIMER_CORNER),
+        ] {
+            m.w16(p + to as u32, m.r16(self.input(from)));
+        }
+    }
+}
+
+/// The world step of co-op's host counting the cutscene skip vote and
+/// sending its presentation each tick.
+pub fn host_presentation(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: PresentationArguments = arguments(context, m);
+    let presentation = Presentation { context, host, m, a };
+    presentation.count_skip_votes();
+    presentation.presentation();
+    presentation.call(presentation_call::SEND_PRESENTATION, 0, 0);
 }

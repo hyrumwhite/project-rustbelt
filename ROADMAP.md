@@ -1169,6 +1169,17 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - All four planted errors were caught: a name's bit, the BSP, the resend and the state last sent. A console command started a screen effect so that its changes are sent: `(begin (cinematic_screen_effect_start true) (cinematic_screen_effect_set_convolution 1 2 0 4 2))`.
        - **Rust in charge:** in co-op on a30, with all networking systems in Rust, the positions differ by a median of 12.3 cm, within the C's 8.0 to 15.9, and both machines end with the host's count of items.
 
+   - [x] Co-op's host skip vote and presentation in Rust (`halo_map::network_coop`, world step 36): network_coop.c's `host_count_skip_votes` and `host_presentation`, and sending the presentation.
+     - **What Rust does:**
+       - **The skip vote:** a cutscene is offered for skipping once the script's save at its start is written, and not during the cooldown after a skip. The host counts itself (with a local player) and each client heard showing the cutscene within the last second; a vote counts for a second. It skips when more than half have voted.
+       - **The presentation**, each tick: the cinematic and letterbox flags, the fade (its color rounded to bytes, its ticks elapsed capped), the camera (position, packed forward and up, field of view as a word, and the moving vehicle it films with the camera's offset from it), the scripted camera and input, the screen shake, the players' maximum vitality, the active cluster, allegiances, the skip vote's tally, and the scripts' HUD settings and timer.
+     - **The game's:** what the vote and the presentation read of the game is gathered before the step (`host_presentation_inputs`, struct `coop_presentation_inputs`). Skipping (`main_skip_cinematic`), its logs and sending go through calls. The presentation, its message and the skip vote moved to network_coop_records.h.
+     - **Results:**
+       - In 100-second co-op sessions on a30 and b30, every tick agrees, with none left out. The test bot's A presses are skip votes during the opening cutscenes.
+       - Seven of eight planted errors were caught: the vote's hold time and majority (a30, a10), the fade color, the active cluster, the field of view, the HUD flag (a30), and the camera object's offset (b30's Pelican flies by the camera).
+       - One went unseen: waiting for the save before offering the skip (no save happened during a skippable cutscene).
+       - **Rust in charge:** in co-op on a30, with all networking systems in Rust, the positions differ by a median of 7.8 cm, within the C's 8.0 to 15.9 (a hair under), and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

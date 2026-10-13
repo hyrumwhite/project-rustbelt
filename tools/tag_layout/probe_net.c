@@ -9,6 +9,7 @@ distributed_state_from_object and distributed_inventory_from_unit).
 #include "objects/objects.h"
 #include "objects/object_types.h"
 #include "units/units.h"
+#include "units/vehicle_datum.h"
 #include "items/weapons.h"
 #include "items/items.h"
 #include "items/weapon_definitions.h"
@@ -187,6 +188,23 @@ LAYOUT_SIZE(objects_host_vehicle_prediction)
 LAYOUT_MEMBER(objects_host_vehicle_prediction, accepted_vehicle_index, accepted_vehicle_index)
 LAYOUT_MEMBER(objects_host_vehicle_prediction, accepted_time, accepted_time)
 LAYOUT_MEMBER(objects_host_vehicle_prediction, accepted_host_time, accepted_host_time)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, valid, valid)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, machine_index, machine_index)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, state, state)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, accepted_host_position, accepted_host_position)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, anchor_time, anchor_time)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, anchor_host_time, anchor_host_time)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, anchor_position, anchor_position)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, accepted_velocity, accepted_velocity)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, speed_time, speed_time)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, speeds, speeds)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, ground_vehicle_index, ground_vehicle_index)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, ground_time, ground_time)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, rest_vehicle_index, rest_vehicle_index)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, rest_position, rest_position)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, ground_height, ground_height)
+LAYOUT_MEMBER(objects_host_vehicle_prediction, ground_rise_speed, ground_rise_speed)
+LAYOUT_MEMBER(vehicle_datum, vehicle_airborne_ticks, vehicle.airborne_ticks)
 LAYOUT_SIZE(distributed_damage_animation)
 LAYOUT_SIZE(objects_host_damage_animation)
 LAYOUT_MEMBER(objects_host_damage_animation, animation, animation)

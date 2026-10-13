@@ -963,6 +963,23 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - With all networking systems in Rust on both machines, the machines' positions differ as with the C (median 5.8 cm against 5.8, largest 19.1 against 19.2). Both machines end with the same count of items, and every hit reported is dealt.
          - With all fifty-six systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second. The exception is one of d20's 31,000 biped updates: the game's record of it has the biped's position as relative to the seat it was just put in.
 
+   - [x] The host taking its clients' word on the vehicles they drive in Rust (`halo_map::network_host`, world step 18): network_objects.c's `network_objects_apply_vehicle_predictions`, with `network_objects_note_vehicle_ground` and `network_objects_vehicle_below_ceiling`.
+     - **What Rust does:** each tick, for each client's player driving a vehicle, the latest place the client says it has the vehicle is taken when all of these hold:
+       - The player still drives it, and a co-op client has the host's BSP.
+       - It is within 5 world units of the host's copy.
+       - It is no higher in the air than a thing thrown up as fast as the vehicle left the ground would be by now (the client's round trip and jitter allowed). Boats, planes, Banshees and turrets are exempt.
+       - It is no further from the last one taken than the vehicle goes in the client's ticks since, at twice its tag's top speed or as fast as the host's own ticks sent it lately (less what it took of the client beyond that top speed). The client's clock counts no more than the host's.
+       - **Taking it:** the velocities are held to those speeds, and the host's copy is reconciled to the client's word. A copy at rest that the client moved, or says moves, wakes. Which of the client's ticks the host has it at is noted, for the states the host sends back.
+     - **The game's, through calls:** whether a machine has the player, whether a co-op player has the BSP, a machine's round trip, the vehicle tag's type and top speeds, and the reconcile (itself Rust's under `network_apply`). The gravity is passed in the arguments. The prediction being taken goes in the arguments for the reconcile to read.
+     - **The check:** the regions are the arguments, the host's predictions records and each predicted vehicle's datum.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a driven vehicle and a pickup, all 2,048 ticks agree, with none left out (1,500 calls).
+       - Planted errors were caught in the client tick noted, the anchor's span, the rise speed off the ground, the velocity given to the reconcile and the wake from rest.
+       - Two went unseen: the thrown-speed allowance (the vehicle never went faster than twice its top speed) and the accept tolerance cut to 1 world unit (the client's word was always that close).
+       - **Rust in charge:**
+         - With all networking systems in Rust on both machines, the machines' positions differ as with the C (median 6.1 cm against 5.8, largest 18.3 against 19.2). Both machines end with the same count of items, and every hit reported is dealt.
+         - Every probe check agrees on the five levels and a50 as before.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

@@ -2134,3 +2134,217 @@ pub fn apply_predictions(context: &WorldContext, host: &impl AiHost) {
     let a: PredictionArguments = unsafe { std::mem::transmute(bytes) };
     Predictions { context, host, m, a }.apply();
 }
+
+// ---------- the host's periodic sends
+
+/// network_distributed.c's sends' calls (halo_sim.h's `_network_sends_call_*`).
+pub mod sends_call {
+    /// The message, of its type `b & 0xff`, count `(b >> 8) & 0xff` and size
+    /// `b >> 16`: to every client as `actor` says (`a` NONE), or to the
+    /// machine `a` reliably.
+    pub const SEND: i32 = 1;
+    /// `distributed_player_ping(a)`.
+    pub const PING: i32 = 2;
+}
+
+/// halo_sim.h's `struct halo_sim_network_sends`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SendsArguments {
+    pub sent_statistics: u32,
+    pub statistics_cursor: u32,
+    pub statistics_due: u32,
+    pub pickups: u32,
+    pub pickup_count: u32,
+    pub player_machines: u32,
+    pub message: u32,
+    pub statistics_type: i16,
+    pub pings_type: i16,
+    pub pickups_type: i16,
+    pub statistics_limit: i16,
+    pub pings_limit: i16,
+    pub to_clients: i16,
+}
+
+/// network_distributed.c's intervals: statistics every half second (a
+/// change; and a few players' each second whatever they are), pings every
+/// two seconds.
+const STATISTICS_INTERVAL_TICKS: i32 = 15;
+const STATISTICS_REFRESH_TICKS: i32 = TICKS_PER_SECOND;
+const STATISTICS_REFRESH_PLAYERS: i16 = 16;
+const PING_INTERVAL_TICKS: i32 = 2 * TICKS_PER_SECOND;
+const UNKNOWN_PING: i32 = 0xffff;
+/// `struct distributed_player_statistics`: the player, a pad, the game's
+/// statistics; `struct distributed_player_ping`; `struct distributed_pickup`.
+const STATISTICS_SIZE: u32 = crate::layout::game_statistics::SIZEOF as u32;
+const PLAYER_STATISTICS_SIZE: u32 = 4 + STATISTICS_SIZE;
+const PING_SIZE: u32 = 4;
+const PICKUP_SIZE: u32 = 8;
+
+struct Sends<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    a: SendsArguments,
+}
+
+impl<H: AiHost> Sends<'_, H> {
+    fn send(&self, machine_index: i32, destination: i16, kind: i16, count: i16, size: u32) {
+        let b = (kind as i32 & 0xff) | ((count as i32 & 0xff) << 8) | ((size as i32) << 16);
+        let mut call = AiCall { kind: sends_call::SEND, actor: destination as i32, a: machine_index, b, ..AiCall::default() };
+        self.host.call(&mut call);
+    }
+
+    /// network_distributed.c's `distributed_player`.
+    fn player(&self, player_index: i16) -> Option<u32> {
+        use crate::data_array::DATA_MAXIMUM_COUNT;
+        let m = self.m;
+        let data = self.context.player_data;
+        if player_index < 0 || player_index >= m.r16(data + DATA_MAXIMUM_COUNT) as i16 {
+            return None;
+        }
+        let player = m.r32(data + DATA_DATA) + player_index as u32 * m.r16(data + DATA_SIZE) as i16 as u32;
+        (m.i16(player + pd::IDENTIFIER as u32) != 0).then_some(player)
+    }
+
+    /// network_distributed.c's `distributed_player_machine`.
+    fn player_machine(&self, player_index: i16) -> i32 {
+        if (0..MAXIMUM_TRACKED_PLAYERS).contains(&player_index) {
+            self.m.i32(self.a.player_machines + 4 * player_index as u32)
+        } else {
+            NONE
+        }
+    }
+
+    /// network_distributed.c's `distributed_send_statistics`: each player's
+    /// statistics that changed since last sent, and (refreshing) a few
+    /// players' whatever they are, round them all.
+    fn send_statistics(&self, refresh: bool) {
+        let m = self.m;
+        let a = &self.a;
+        let mut count: i16 = 0;
+        let mut refreshed = if refresh { 0 } else { STATISTICS_REFRESH_PLAYERS };
+        // (where this round starts: the cursor moves past the last player it
+        // refreshed, which must not shift the players this round visits)
+        let first = m.i16(a.statistics_cursor);
+        for step in 0..MAXIMUM_TRACKED_PLAYERS {
+            let player_index = ((first as i32 + step as i32) % MAXIMUM_TRACKED_PLAYERS as i32) as i16;
+            let Some(player) = self.player(player_index) else { continue };
+            let statistics: Vec<u8> =
+                (0..STATISTICS_SIZE).map(|offset| m.r8(player + pd::STATISTICS as u32 + offset)).collect();
+            let checksum = wire::checksum(&statistics);
+            let sent = a.sent_statistics + 4 * player_index as u32;
+            if checksum == m.r32(sent) {
+                if refreshed >= STATISTICS_REFRESH_PLAYERS {
+                    continue;
+                }
+                refreshed += 1;
+                m.set_i16(a.statistics_cursor, ((player_index + 1) % MAXIMUM_TRACKED_PLAYERS) as i16);
+            }
+            m.w32(sent, checksum);
+            let entry = a.message + HEADER + count as u32 * PLAYER_STATISTICS_SIZE;
+            m.set_i16(entry, player_index);
+            m.set_i16(entry + 2, 0);
+            write_bytes(m, entry + 4, &statistics);
+            count += 1;
+            if count == a.statistics_limit {
+                self.send(NONE, a.to_clients, a.statistics_type, count, HEADER + count as u32 * PLAYER_STATISTICS_SIZE);
+                count = 0;
+            }
+        }
+        if count != 0 {
+            self.send(NONE, a.to_clients, a.statistics_type, count, HEADER + count as u32 * PLAYER_STATISTICS_SIZE);
+        }
+    }
+
+    /// network_distributed.c's `distributed_send_pings`: every player's
+    /// ping, for the scoreboard.
+    fn send_pings(&self) {
+        let m = self.m;
+        let a = &self.a;
+        let mut count: i16 = 0;
+        for player_index in 0..MAXIMUM_TRACKED_PLAYERS {
+            let mut call = AiCall { kind: sends_call::PING, actor: NONE, a: player_index as i32, ..AiCall::default() };
+            self.host.call(&mut call);
+            let ping = call.result;
+            if self.player(player_index).is_none() {
+                continue;
+            }
+            let entry = a.message + HEADER + count as u32 * PING_SIZE;
+            m.w8(entry, player_index as u8);
+            m.w8(entry + 1, 0);
+            m.w16(entry + 2, if ping == NONE { UNKNOWN_PING as u16 } else { ping.min(UNKNOWN_PING - 1) as u16 });
+            count += 1;
+            if count == a.pings_limit {
+                self.send(NONE, a.to_clients, a.pings_type, count, HEADER + count as u32 * PING_SIZE);
+                count = 0;
+            }
+        }
+        if count != 0 {
+            self.send(NONE, a.to_clients, a.pings_type, count, HEADER + count as u32 * PING_SIZE);
+        }
+    }
+
+    /// The tick's statistics and pings (network_distributed_tick's).
+    fn statistics_and_pings(&self) {
+        let m = self.m;
+        let now = self.context.game_time;
+        if m.r8(self.a.statistics_due) != 0 || now % STATISTICS_INTERVAL_TICKS == 0 {
+            self.send_statistics(now % STATISTICS_REFRESH_TICKS == 0);
+        }
+        m.w8(self.a.statistics_due, 0);
+        if now % PING_INTERVAL_TICKS == 0 {
+            self.send_pings();
+        }
+    }
+
+    /// network_distributed.c's `distributed_send_pickups`: what players on
+    /// other machines picked up this tick, to each machine once with all of
+    /// its players'.
+    fn send_pickups(&self) {
+        let m = self.m;
+        let a = &self.a;
+        let pickup_count = m.i16(a.pickup_count);
+        let pickup = |index: i16| a.pickups + index as u32 * PICKUP_SIZE;
+        let machine_of = |index: i16| self.player_machine(m.r8(pickup(index)) as i16);
+        for index in 0..pickup_count.max(0) {
+            let machine_index = machine_of(index);
+            if machine_index == NONE || (0..index).any(|other| machine_of(other) == machine_index) {
+                continue;
+            }
+            let mut count: i16 = 0;
+            for other in index..pickup_count {
+                if machine_of(other) == machine_index {
+                    let entry = a.message + HEADER + count as u32 * PICKUP_SIZE;
+                    for offset in 0..PICKUP_SIZE {
+                        m.w8(entry + offset, m.r8(pickup(other) + offset));
+                    }
+                    count += 1;
+                }
+            }
+            self.send(machine_index, 1, a.pickups_type, count, HEADER + count as u32 * PICKUP_SIZE);
+        }
+        m.set_i16(a.pickup_count, 0);
+    }
+}
+
+fn sends<'a, H: AiHost>(context: &'a WorldContext, host: &'a H) -> Sends<'a, H> {
+    let m = host.memory();
+    let mut bytes = [0u8; std::mem::size_of::<SendsArguments>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    let a: SendsArguments = unsafe { std::mem::transmute(bytes) };
+    Sends { context, host, m, a }
+}
+
+/// The world step of the host's statistics and pings each tick.
+pub fn statistics(context: &WorldContext, host: &impl AiHost) {
+    sends(context, host).statistics_and_pings();
+}
+
+/// The world step of the host's pickups each tick.
+pub fn pickups(context: &WorldContext, host: &impl AiHost) {
+    sends(context, host).send_pickups();
+}

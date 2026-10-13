@@ -1079,6 +1079,18 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - All six planted errors were caught: the throttle's clamp, the round trip's average and jitter, and the relayed throttle, trigger and pitch.
        - **Rust in charge:** with all networking systems in Rust (fifty-eight systems in all), the machines' positions differ by a median of 4.7 and 3.8 cm over two sessions (largest 18.0 and 10.3), within the C's range. Both machines end with the same count of items, and every hit reported is dealt.
 
+   - [x] The host's periodic sends in Rust (`halo_map::network_host`, world steps 27 and 28): network_distributed.c's `distributed_send_statistics`, `_send_pings` and `_send_pickups`, as its tick runs them.
+     - **What Rust does:**
+       - **Statistics:** every half second (or at once after a kill), each player's statistics that changed since they were last sent (by their checksum). On each second's round, 16 players' go whatever they are, from a cursor round them all, so one lost message is made good.
+       - **Pings:** every two seconds, every player's ping, for the scoreboard.
+       - **Pickups:** what players on other machines picked up this tick, to each player's machine reliably, once with all of its players'.
+     - **The game's, through calls (`network_sends_call`):** sending (one buffer the check sees) and a player's ping.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, all 2,048 ticks of statistics and pings agree, with none left out.
+       - All four planted errors were caught: the refreshed players, the cursor, a ping's value and the interval.
+       - The pickups agree, but none was made in these sessions: the test's pickup moves the joiner onto a weapon, but it isn't taken in this build.
+       - **Rust in charge:** with all networking systems in Rust, both machines show the same scores. The positions differ by a median of 6.3 cm (largest 21.0), within the C's range, both machines end with the same count of items, and every hit reported is dealt.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

@@ -208,6 +208,7 @@ const STEP_NETWORK_HANDLE_INPUTS: i32 = 25;
 const STEP_NETWORK_HANDLE_ACTIONS: i32 = 26;
 const STEP_NETWORK_STATISTICS: i32 = 27;
 const STEP_NETWORK_PICKUPS: i32 = 28;
+const STEP_NETWORK_CLIENT_SENDS: i32 = 29;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -240,6 +241,7 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_HANDLE_ACTIONS => halo_map::network_input::handle_actions(context, host),
         STEP_NETWORK_STATISTICS => halo_map::network_host::statistics(context, host),
         STEP_NETWORK_PICKUPS => halo_map::network_host::pickups(context, host),
+        STEP_NETWORK_CLIENT_SENDS => halo_map::network_input::client_sends(context, host),
         _ => return None,
     }
     Some(())

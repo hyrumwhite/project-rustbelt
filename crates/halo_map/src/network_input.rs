@@ -274,3 +274,230 @@ pub fn handle_inputs(context: &WorldContext, host: &impl AiHost) {
 pub fn handle_actions(context: &WorldContext, host: &impl AiHost) {
     input(context, host).handle_actions();
 }
+
+// ---------- a client's sends each tick
+
+/// network_distributed.c's client sends' calls (halo_sim.h's
+/// `_network_client_sends_call_*`).
+pub mod sends_call {
+    /// `update_client_distributed_input(a)` into the arguments' tick, action
+    /// and buttons: whether there is one.
+    pub const LOCAL_INPUT: i32 = 1;
+    /// The arguments' message, its type `b & 0xff`, count `(b >> 8) & 0xff`
+    /// and size `b >> 16`, where `actor` says.
+    pub const SEND: i32 = 2;
+    /// `distributed_state_from_player(a)` into the arguments' state.
+    pub const STATE: i32 = 3;
+    /// The packer begun for the sender `a`'s messages of type `b`.
+    pub const PACKER_BEGIN: i32 = 4;
+    /// The arguments' entry, of `b` bytes, into the packer.
+    pub const PACKER_ADD: i32 = 5;
+    /// The packer's message so far into the batch.
+    pub const PACKER_FLUSH: i32 = 6;
+}
+
+/// halo_sim.h's `struct halo_sim_network_client_sends`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClientSendsArguments {
+    pub own_positions: u32,
+    pub host_time: i32,
+    pub structure_bsp_index: i32,
+    pub lie_ticks: i32,
+    pub local_players: [i32; 4],
+    pub inputs_type: i16,
+    pub predictions_type: i16,
+    pub to_host: i16,
+    pub host_sender: i16,
+    pub tick: i32,
+    pub action: PlayerAction,
+    pub control_flags: [u16; 4],
+    pub state: [u8; 64],
+    pub entry: [u8; 64],
+    pub message: [u8; 8 + 4 * 52],
+}
+
+const _: () = assert!(std::mem::size_of::<ClientSendsArguments>() == 4 * 4 + 16 + 8 + 4 + 0x20 + 8 + 64 + 64 + 216);
+
+/// network_distributed.c's `OWN_POSITION_TICKS` and `struct
+/// distributed_own_position`'s size.
+const OWN_POSITION_TICKS: i32 = 64;
+const OWN_POSITION_SIZE: u32 = 20;
+/// The tests' lie: a step aside, up, down, a dash (network_distributed.c's).
+const LIE_OFFSETS: [[f32; 3]; 4] = [[2.5, 0.0, 0.0], [0.0, 0.0, 2.5], [0.0, 0.0, -2.5], [1.0, 1.0, 0.0]];
+
+struct ClientSends<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    address: u32,
+    a: ClientSendsArguments,
+}
+
+impl<H: AiHost> ClientSends<'_, H> {
+    fn call(&self, kind: i32, a: i32, b: i32) -> AiCall {
+        let mut call = AiCall { kind, actor: NONE, a, b, ..AiCall::default() };
+        self.host.call(&mut call);
+        call
+    }
+
+    fn field(&self, offset: usize) -> u32 {
+        self.address + offset as u32
+    }
+
+    fn object(&self, object_index: i32) -> Option<u32> {
+        crate::ai_actor::datum_get(self.m, self.context.object_header_data, object_index)
+            .map(|header| self.m.r32(header + crate::layout::object_header_datum::DATUM as u32))
+    }
+
+    /// network_distributed.c's `distributed_living_unit`.
+    fn living_unit(&self, player: Option<u32>) -> i32 {
+        let Some(player) = player else { return NONE };
+        let unit_index = self.m.i32(player + pd::UNIT_INDEX as u32);
+        match self.object(unit_index) {
+            Some(unit)
+                if unit_index != NONE
+                    && self.m.r16(unit + crate::layout::unit_datum::OBJECT_DAMAGE_FLAGS as u32) as u32
+                        & (1 << crate::layout::net_values::_OBJECT_DEAD_BIT)
+                        == 0 =>
+            {
+                unit_index
+            }
+            _ => NONE,
+        }
+    }
+
+    fn parent(&self, unit_index: i32) -> i32 {
+        self.m.i32(self.object(unit_index).unwrap_or(0) + crate::layout::unit_datum::OBJECT_PARENT_OBJECT_INDEX as u32)
+    }
+
+    /// network_distributed.c's `distributed_note_own_positions`: where its
+    /// own players' units are this tick (not riding: a rider's is its
+    /// seat's).
+    fn note_own_positions(&self) {
+        let m = self.m;
+        let now = self.context.game_time;
+        for (local_player_index, &player_index) in self.a.local_players.iter().enumerate() {
+            let player = if player_index != NONE {
+                crate::ai_actor::datum_get(m, self.context.player_data, player_index)
+            } else {
+                None
+            };
+            let mut unit_index = self.living_unit(player);
+            let own = self.a.own_positions
+                + (local_player_index as u32 * OWN_POSITION_TICKS as u32 + (now & (OWN_POSITION_TICKS - 1)) as u32) * OWN_POSITION_SIZE;
+            if unit_index != NONE && self.parent(unit_index) != NONE {
+                unit_index = NONE;
+            }
+            m.w32(own, now as u32);
+            m.w32(own + 4, unit_index as u32);
+            if unit_index != NONE {
+                let object = self.object(unit_index).unwrap_or(0);
+                for part in 0..3u32 {
+                    m.w32(own + 8 + 4 * part, m.r32(object + crate::layout::unit_datum::OBJECT_POSITION as u32 + 4 * part));
+                }
+            }
+        }
+    }
+
+    /// network_distributed.c's `distributed_client_send_inputs`: its own
+    /// players' input of the tick just run, with the buttons of the ticks
+    /// before it, to the host.
+    fn send_inputs(&self) {
+        let m = self.m;
+        let a = &self.a;
+        let message = self.field(std::mem::offset_of!(ClientSendsArguments, message));
+        let mut count: u32 = 0;
+        for (local_player_index, &player_index) in a.local_players.iter().enumerate() {
+            let entry = message + 8 + count * 52;
+            if player_index == NONE {
+                continue;
+            }
+            for offset in 0..52 {
+                m.w8(entry + offset, 0);
+            }
+            if self.call(sends_call::LOCAL_INPUT, local_player_index as i32, 0).result as u8 == 0 {
+                continue;
+            }
+            m.w32(entry + 4, m.r32(self.field(std::mem::offset_of!(ClientSendsArguments, tick))));
+            for offset in 0..0x20 {
+                m.w8(entry + 12 + offset, m.r8(self.field(std::mem::offset_of!(ClientSendsArguments, action)) + offset));
+            }
+            for offset in 0..8 {
+                m.w8(entry + 44 + offset, m.r8(self.field(std::mem::offset_of!(ClientSendsArguments, control_flags)) + offset));
+            }
+            m.w8(entry, player_index as u8);
+            m.w8(entry + 1, a.structure_bsp_index as u8);
+            m.w32(entry + 8, a.host_time as u32);
+            count += 1;
+        }
+        if count != 0 {
+            let b = (a.inputs_type as i32 & 0xff) | ((count as i32) << 8) | (((8 + count * 52) as i32) << 16);
+            let mut call = AiCall { kind: sends_call::SEND, actor: a.to_host as i32, a: 0, b, ..AiCall::default() };
+            self.host.call(&mut call);
+        }
+    }
+
+    /// network_distributed.c's `distributed_client_send_predictions`: its
+    /// own players' units on foot, where they are, to the host.
+    fn send_predictions(&self) {
+        use crate::data_array::{DATA_COUNT, DATA_DATA, DATA_SIZE};
+        let m = self.m;
+        let a = &self.a;
+        let now = self.context.game_time;
+        self.call(sends_call::PACKER_BEGIN, a.host_sender as i32, a.predictions_type as i32);
+        let data = self.context.player_data;
+        let size = m.r16(data + DATA_SIZE) as i16 as u32;
+        for player_index in 0..m.r16(data + DATA_COUNT) as i16 as u32 {
+            let player = m.r32(data + DATA_DATA) + player_index * size;
+            if m.i16(player + pd::IDENTIFIER as u32) == 0 {
+                continue;
+            }
+            let unit_index = self.living_unit(Some(player));
+            // a client speaks for its own players only, where they are
+            if m.i16(player + pd::LOCAL_PLAYER_INDEX as u32) == NONE as i16 || unit_index == NONE || self.parent(unit_index) != NONE {
+                continue;
+            }
+            self.call(sends_call::STATE, player_index as i32, 0);
+            let state_address = self.field(std::mem::offset_of!(ClientSendsArguments, state));
+            let mut bytes = [0u8; 64];
+            for (offset, byte) in bytes.iter_mut().enumerate() {
+                *byte = m.r8(state_address + offset as u32);
+            }
+            // SAFETY: plain data of its size
+            let mut state: wire::UnitState = unsafe { std::mem::transmute(bytes) };
+            // (the tests' lie, every so often for three ticks)
+            if a.lie_ticks > 0 && now % a.lie_ticks < 3 {
+                let offset = LIE_OFFSETS[((now / a.lie_ticks) % 4) as usize];
+                for part in 0..3 {
+                    state.position[part] = (f32::from_bits(state.position[part]) + offset[part]).to_bits();
+                }
+            }
+            let mut entry = [0u8; 64];
+            let written = wire::unit_state_write(&state, true, &mut entry) as usize;
+            let entry_address = self.field(std::mem::offset_of!(ClientSendsArguments, entry));
+            for (offset, &byte) in entry[..written].iter().enumerate() {
+                m.w8(entry_address + offset as u32, byte);
+            }
+            self.call(sends_call::PACKER_ADD, 0, written as i32);
+        }
+        self.call(sends_call::PACKER_FLUSH, 0, 0);
+    }
+}
+
+/// The world step of a client's sends each tick (network_distributed.c's
+/// `distributed_note_own_positions`, `distributed_client_send_inputs` and
+/// `distributed_client_send_predictions`).
+pub fn client_sends(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let mut bytes = [0u8; std::mem::size_of::<ClientSendsArguments>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    let a: ClientSendsArguments = unsafe { std::mem::transmute(bytes) };
+    let sends = ClientSends { context, host, m, address: context.arguments, a };
+    sends.note_own_positions();
+    sends.send_inputs();
+    sends.send_predictions();
+}

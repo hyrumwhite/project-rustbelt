@@ -1091,6 +1091,17 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - The pickups agree, but none was made in these sessions: the test's pickup moves the joiner onto a weapon, but it isn't taken in this build.
        - **Rust in charge:** with all networking systems in Rust, both machines show the same scores. The positions differ by a median of 6.3 cm (largest 21.0), within the C's range, both machines end with the same count of items, and every hit reported is dealt.
 
+   - [x] A client's sends each tick in Rust (`halo_map::network_input`, world step 29): network_distributed.c's `distributed_note_own_positions`, `distributed_client_send_inputs` and `distributed_client_send_predictions`.
+     - **What Rust does:**
+       - **Its own players' positions:** where each local player's unit is this tick is noted, for the host's word on it to be measured against later (not when riding, where it is its seat's).
+       - **Input:** its players' input of the tick just run, with the buttons of the ticks before it, the structure BSP it has loaded and the latest host tick it has heard of, to the host.
+       - **Predictions:** its players' units on foot, where it has them, to the host. The tests' lie (`HALO_NETWORK_TEST_LIE`) is applied here, its period passed in the arguments.
+     - **The game's, through calls (`network_client_sends_call`):** the local input (the update client's), the unit state's sampling (Rust's under `distributed_wire`), sending and the packer. The local players, the BSP and the host's latest tick are taken as the tick begins.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a client lying every 4 seconds, all 2,048 of the joiner's ticks agree, with none left out.
+       - All four planted errors were caught: the noted positions' slot, the input's host tick, its buttons and the lie's turn.
+       - **Rust in charge:** with all networking systems in Rust, the machines' positions differ by a median of 3.8 cm with an honest client and 6.2 cm with a lying one, within the C's range (the host corrects the liar 28 times, as with the C). Both machines end with the same count of items, and every hit reported is dealt.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

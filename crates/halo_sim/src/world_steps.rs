@@ -213,6 +213,8 @@ const STEP_NETWORK_CLIENT_CLOCK: i32 = 30;
 const STEP_NETWORK_COOP_WORLD: i32 = 31;
 const STEP_NETWORK_COOP_DEVICE_GROUPS: i32 = 32;
 const STEP_NETWORK_COOP_QUEUE: i32 = 33;
+const STEP_NETWORK_COOP_OBJECT_NAMES: i32 = 34;
+const STEP_NETWORK_COOP_SCREEN_EFFECT: i32 = 35;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -250,6 +252,8 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_COOP_WORLD => halo_map::network_coop::host_world(context, host),
         STEP_NETWORK_COOP_DEVICE_GROUPS => halo_map::network_coop::host_device_groups(context, host),
         STEP_NETWORK_COOP_QUEUE => halo_map::network_coop::host_queue(context, host),
+        STEP_NETWORK_COOP_OBJECT_NAMES => halo_map::network_coop::host_object_names(context, host),
+        STEP_NETWORK_COOP_SCREEN_EFFECT => halo_map::network_coop::host_screen_effect(context, host),
         _ => return None,
     }
     Some(())

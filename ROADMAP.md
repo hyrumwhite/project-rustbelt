@@ -1159,6 +1159,16 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - All nine planted errors were caught. a30's own scripts catch the looping sounds' start and stop, an attach, the objective's resend, the events' sends and their numbers. The hooks catch a nav point's offset, a broken surface's BSP and the surfaces' rotation.
        - **Rust in charge:** in co-op on a30, with all networking systems in Rust and surfaces broken, the positions differ by a median of 12.4 to 13.3 cm, within the C's 8.0 to 15.9, and both machines end with the host's count of items.
 
+   - [x] Co-op's host sending its object names and screen effect in Rust (`halo_map::network_coop`, world steps 34 and 35): network_coop.c's `host_send_object_names` and `host_send_screen_effect`.
+     - **What Rust does:**
+       - **Object names:** every half second (and on a join), one bit for each scenario object name the host has an object of, with its structure BSP. A client deletes the named objects the host lacks.
+       - **Screen effect:** the scripts' full-screen effects (blur, warp, light enhancement, desaturation, video), when they change and with the resent state.
+     - **The game's:** the names' objects are read from objects.c's name list, through a new accessor (`object_name_list_port_get`). The rasterizer's screen effect is read before the step, and sending goes through calls. The messages moved to network_coop_records.h.
+     - **Results:**
+       - In 100-second co-op sessions on a30, every tick of both steps agrees, with none left out.
+       - All four planted errors were caught: a name's bit, the BSP, the resend and the state last sent. A console command started a screen effect so that its changes are sent: `(begin (cinematic_screen_effect_start true) (cinematic_screen_effect_set_convolution 1 2 0 4 2))`.
+       - **Rust in charge:** in co-op on a30, with all networking systems in Rust, the positions differ by a median of 12.3 cm, within the C's 8.0 to 15.9, and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

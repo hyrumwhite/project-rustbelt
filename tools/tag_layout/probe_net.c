@@ -25,6 +25,8 @@ distributed_state_from_object and distributed_inventory_from_unit).
 #include "network_distributed.h"
 #include "network_objects_records.h"
 #include "network_distributed_records.h"
+#include "scenario/scenario.h"
+#include "rasterizer/rasterizer_cinematics.h"
 #include "network_coop_records.h"
 #include "network_coop.h"
 #include "devices/devices.h"
@@ -408,6 +410,13 @@ LAYOUT_VALUE(_coop_attach)
 LAYOUT_VALUE(_coop_sound_looping_start)
 LAYOUT_VALUE(_coop_sound_looping_stop)
 LAYOUT_VALUE(_coop_hud_objective)
+LAYOUT_SIZE(distributed_coop_object_names)
+LAYOUT_MEMBER(distributed_coop_object_names, structure_bsp_index, structure_bsp_index)
+LAYOUT_MEMBER(distributed_coop_object_names, name_count, name_count)
+LAYOUT_MEMBER(distributed_coop_object_names, present, present)
+LAYOUT_MEMBER(distributed_coop_object_names_message, names, names)
+LAYOUT_MEMBER(distributed_coop_screen_effect_message, state, state)
+LAYOUT_VALUE(MAXIMUM_OBJECT_NAMES_PER_SCENARIO)
 LAYOUT_SIZE(distributed_damage_animation)
 LAYOUT_SIZE(objects_host_damage_animation)
 LAYOUT_MEMBER(objects_host_damage_animation, animation, animation)

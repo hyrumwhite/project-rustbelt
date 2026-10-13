@@ -28,7 +28,8 @@ use crate::layout::{
     coop_events as ce, coop_host_attachment as at, coop_host_looping_sound as ls, coop_host_nav_point as np,
     coop_host_queue as hq, coop_sent_device as sd, coop_sent_look as sl, coop_sent_transform as st, device_datum as dd,
     distributed_coop_device_group as dg,
-    distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
+    distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_names as on,
+    distributed_coop_object_names_message as cn, distributed_coop_screen_effect_message as se, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
     net_values as nv, object_header_datum as oh, unit_datum as ud,
 };
 
@@ -790,4 +791,87 @@ pub fn host_queue(context: &WorldContext, host: &impl AiHost) {
     queue.hud_state();
     queue.broken_surfaces();
     queue.events();
+}
+
+// ---------- the object names and the screen effect
+
+/// network_coop.c's object names' and screen effect's calls (halo_sim.h's
+/// `_network_coop_world_call_*`): their messages to every client.
+const SEND_OBJECT_NAMES: i32 = 7;
+const SEND_SCREEN_EFFECT: i32 = 8;
+
+/// halo_sim.h's `struct halo_sim_network_coop_object_names`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectNamesArguments {
+    pub object_name_list: u32,
+    pub name_count: i32,
+    pub structure_bsp_index: i32,
+    pub message: u32,
+}
+
+/// halo_sim.h's `struct halo_sim_network_coop_screen_effect`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenEffectArguments {
+    pub refresh: i32,
+    pub state: u32,
+    pub sent: u32,
+    pub message: u32,
+    pub state_size: i32,
+}
+
+/// The step's arguments, read from the game's memory.
+fn arguments<T: Copy>(context: &WorldContext, m: &dyn AiMemory) -> T {
+    let mut bytes = vec![0u8; std::mem::size_of::<T>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const T) }
+}
+
+/// The world step of co-op's host sending which scenario object names it
+/// has an object of (network_coop.c's `host_send_object_names`): one bit
+/// each, for a client to delete those it has and the host hasn't.
+pub fn host_object_names(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ObjectNamesArguments = arguments(context, m);
+    let names = a.message + cn::NAMES as u32;
+    for offset in 0..on::SIZEOF as u32 {
+        m.w8(names + offset, 0);
+    }
+    m.set_i16(names + on::STRUCTURE_BSP_INDEX as u32, a.structure_bsp_index as i16);
+    let count = a.name_count.min(nv::MAXIMUM_OBJECT_NAMES_PER_SCENARIO as i32) as i16;
+    m.set_i16(names + on::NAME_COUNT as u32, count);
+    for name_index in 0..count.max(0) as u32 {
+        // (objects.c's object_index_from_name_index)
+        if m.i32(a.object_name_list + 4 * name_index) != NONE {
+            let byte = names + on::PRESENT as u32 + name_index / 8;
+            m.w8(byte, m.r8(byte) | 1 << (name_index % 8));
+        }
+    }
+    let mut call = AiCall { kind: SEND_OBJECT_NAMES, actor: NONE, ..AiCall::default() };
+    host.call(&mut call);
+}
+
+/// The world step of co-op's host sending the scripts' screen effect
+/// (network_coop.c's `host_send_screen_effect`): when it changed, and with
+/// the resent state.
+pub fn host_screen_effect(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ScreenEffectArguments = arguments(context, m);
+    let size = a.state_size as u32;
+    let state = a.message + se::STATE as u32;
+    for offset in 0..size {
+        m.w8(state + offset, m.r8(a.state + offset));
+    }
+    if a.refresh == 0 && (0..size).all(|offset| m.r8(state + offset) == m.r8(a.sent + offset)) {
+        return;
+    }
+    for offset in 0..size {
+        m.w8(a.sent + offset, m.r8(state + offset));
+    }
+    let mut call = AiCall { kind: SEND_SCREEN_EFFECT, actor: NONE, ..AiCall::default() };
+    host.call(&mut call);
 }

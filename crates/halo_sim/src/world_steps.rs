@@ -191,6 +191,11 @@ const STEP_NETWORK_OBJECT_STATE: i32 = 8;
 const STEP_NETWORK_INVENTORY: i32 = 9;
 const STEP_NETWORK_OBJECT_CHANGE: i32 = 10;
 const STEP_NETWORK_HIT_REPORT: i32 = 11;
+const STEP_NETWORK_DAMAGE_BOOKKEEPING: i32 = 12;
+const STEP_NETWORK_DAMAGE_REPLAY: i32 = 13;
+const STEP_NETWORK_DAMAGE_DEALS: i32 = 14;
+const STEP_NETWORK_DAMAGE_PLAYER_EFFECT: i32 = 15;
+const STEP_NETWORK_DAMAGE_AFTERMATH: i32 = 16;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -206,6 +211,11 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_INVENTORY => halo_map::network_apply::apply_inventory(context, host),
         STEP_NETWORK_OBJECT_CHANGE => halo_map::network_apply::handle_change(context, host),
         STEP_NETWORK_HIT_REPORT => halo_map::network_damage::handle_report(context, host),
+        STEP_NETWORK_DAMAGE_BOOKKEEPING => halo_map::network_damage::bookkeeping(context, host),
+        STEP_NETWORK_DAMAGE_REPLAY => halo_map::network_damage::replay(context, host),
+        STEP_NETWORK_DAMAGE_DEALS => halo_map::network_damage::deals(context, host),
+        STEP_NETWORK_DAMAGE_PLAYER_EFFECT => halo_map::network_damage::player_effect(context, host),
+        STEP_NETWORK_DAMAGE_AFTERMATH => halo_map::network_damage::aftermath(context, host),
         _ => return None,
     }
     Some(())

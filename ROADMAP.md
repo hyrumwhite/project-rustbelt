@@ -920,6 +920,29 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - With all networking systems in Rust, every report the joiner sends is dealt, as with the C, and the machines' positions differ as with the C (median 5.7 cm against 5.8).
          - With all fifty-five systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
+   - [x] The rest of the netcode's damage in Rust (`halo_map::network_damage`, under `network_damage`, world steps 12–16): the host's bookkeeping each tick, a client's replay of the host's events, and damage.c's three hooks.
+     - **What Rust does:**
+       - **The host's bookkeeping** (step 12): each player's recent weapons (and their vehicle's, when they drive or gun it), their unarmed blow and when they last drove; where each player's unit and vehicle are each tick, and every few ticks their trail point (position, speed, the size of what they ride); and where each of the tick's damage events goes (a player effect to its player's machine; damage to a unit to its player's, its riders' and its owner's machines; anything else to all).
+       - **A client's replay of one event** (step 13): the event's numbers checked and its damage made as this machine has it. Then the local player's screen effect; a unit's flinch and the rest of its damage, but not its death; a biped's killing blow whole, with the host's killer, their score, friendly fire, by vehicle and a telefrag; or destructible scenery's damage.
+       - **Whether this machine deals damage** (`network_damage_deals`, step 14): a client deals none unless it carries out the host's word. It shows a weapon's own shake of its own player at once, and reports its own player's hits on the host's objects. The host deals all but a client's player's damage (which their machine reports), unless it is dealing that report or the machine has left. Where damage isn't dealt, what it would show is filled in: the material struck (or the shield's) and how much of it is left, through what the object rides.
+       - **The host's events** (steps 15 and 16): a client's player's screen effect (not a weapon's own shake), and an object damaged (destructible scenery's; a unit's, with a killing blow's killer as the host noted it, kept within the last 64 events of the tick).
+     - **The game's, through calls (`network_damage_call`, 11 new):** a unit's unarmed blow, a player's machine, whether the client has an object, the replays (player effect, aftermath, kill, static), setting and getting a death, the telefrag notice and a player's score. A kill's replay sets the C's replaying statics around the call.
+     - **The check:**
+       - One arguments struct (`HookArguments`) serves the five steps: the event or the caller's damage and indices, the hook's numbers, the connection, and the addresses of network_damage.c's records.
+       - The regions are the records each step writes: the players' records, history, trails and destinations; the tick's events and their count; the caller's damage and a client's reports; and the count replayed.
+       - A replayed kill changes the biped and its player before Rust reads them, so the replay's regions also hold the objects, their memory pool and the players, as the object changes' do.
+       - The wire's damage made into the game's is shared with the report check, now from any address.
+     - **Results:**
+       - In a 90-second session with shooting, kills and a vehicle, every step agrees with none left out: 2,048 bookkeeping ticks (13,057 calls), 32 player effects, 16 aftermaths, 64 of the host's and 64 of the joiner's deals, and 32 replays (three of them the joiner's deaths).
+       - On b30 and a50 the single-player hooks agree too (512 deals, 128 aftermaths).
+       - Planted errors were caught in a weapon's unarmed time, a report's host time, a player effect's total, an aftermath's body damage, a replayed death's friendly fire and a shield's material scale.
+       - The bookkeeping first differed in write order only: C zeroes a destination's count before it asks for the owner's machine, and so does Rust now.
+       - Not exercised: destructible scenery, telefrags, events past the tick's limit and a machine that has left.
+       - **Rust in charge:**
+         - With all networking systems in Rust, the joiner's three deaths are replayed (31 events) and every report is dealt, as with the C. The machines' positions differ as with the C (median 4.3 cm against 4.0).
+         - With all fifty-five systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+     - **The crash log** now names the module and offset of the faulting address and of the code addresses on the stack, so a crash in halo_sim.dll can be found in its symbols.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

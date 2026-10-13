@@ -200,6 +200,7 @@ const STEP_NETWORK_HOST_TICK: i32 = 17;
 const STEP_NETWORK_VEHICLE_PREDICTIONS: i32 = 18;
 const STEP_NETWORK_PLAN_PLAYERS: i32 = 19;
 const STEP_NETWORK_SEND_PLAYERS: i32 = 20;
+const STEP_NETWORK_CLIENT_TICK: i32 = 21;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -224,6 +225,7 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_VEHICLE_PREDICTIONS => halo_map::network_host::vehicle_predictions(context, host),
         STEP_NETWORK_PLAN_PLAYERS => halo_map::network_host::plan_players(context, host),
         STEP_NETWORK_SEND_PLAYERS => halo_map::network_host::send_players(context, host),
+        STEP_NETWORK_CLIENT_TICK => halo_map::network_apply::client_tick(context, host),
         _ => return None,
     }
     Some(())

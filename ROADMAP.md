@@ -1007,6 +1007,25 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Planted errors in the own-player flag, the input's send bit and the update number's prefix were all caught.
        - **Rust in charge:** with all networking systems in Rust on both machines, the machines' positions differ by a median of 3.6 cm (largest 10.2), within the C's range. Both machines end with the same count of items, and every hit reported is dealt.
 
+   - [x] A client's tick of the host's objects in Rust (`halo_map::network_apply`, world step 21): network_objects.c's `network_objects_client_tick`, with `distributed_client_remove_own_objects`, `_ready_picked_up_weapons`, `_note_own_inventories`, `_send_vehicles` and `_carry_unsteered_vehicles`.
+     - **What Rust does:**
+       - **Asking for the objects:** until the host has told it all its objects, the client asks for them, less often the longer the host takes, saying when one of them failed since it last asked.
+       - **Removing its own:** once told all, it deletes the objects of the host's kinds that the host never told of (what its own simulation made: a dying unit's grenades). These are the ones made since the last tick, or all of them when it can't say which.
+       - **Picked-up weapons:** a weapon its player picked up (the host said so) is readied once the unit has it, unless the trigger is held.
+       - **Own inventories:** what its players carry is noted, and when they threw a grenade or fired or reloaded a weapon.
+       - **Its vehicles:** the vehicles its players drive go to the host with this tick, and where they were is noted.
+       - **Unsteered vehicles:** in co-op, each vehicle no player drives keeps moving at the velocity the host last sent, turned as physics turns it.
+       - **Identity:** who it is goes to the host once it has asked.
+     - **The game's, through the applying's calls:** sending the client's message (one buffer the check sees), setting a desired weapon, sending its identity, and the deletes and moves as before. The local players are taken as the tick begins.
+       - The client's scalars are one struct (`objects_client_state`), and its records' types are in network_objects_records.h.
+       - The own-inventory note gained its comparing form.
+     - **The check:** the regions are the arguments, the client's records (its state, new objects, the host's objects it has, picked-up weapons, own vehicles and inventories), the statistics, the message, and the objects, players and object pool (deletes).
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, all 2,048 of the joiner's ticks agree, with none left out.
+       - Planted errors were caught in the grenade comparison, the vehicle's tick and, in a longer session where the client removed two of its own objects, the removal count.
+       - Two went unseen: the asking's back-off (the host answered the first asking) and the reload test (a reload changes the rounds, which are compared too). The unsteered vehicles move only in co-op.
+       - **Rust in charge:** with all networking systems in Rust on both machines, the machines' positions differ by a median of 3.7 to 4.4 cm (largest 9.7 to 10.0) over two sessions, within the C's range. Both machines end with the same count of items, and every hit reported is dealt.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

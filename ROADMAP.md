@@ -879,6 +879,31 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - With all networking systems in Rust, the machines' positions differ as with the C: median 4.9 cm against 6.3.
          - With all fifty-four systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
+   - [x] A client applying the host's object changes in Rust (`halo_map::network_apply`, world step 10): network_objects.c's handling of each change, with `distributed_client_create`, `_change_valid`, `_apply_change`, `_delete` and `_own_object`.
+     - **What Rust does:**
+       - **Validating a create:** the change must be a networked kind, its definition a tag of the group its type says, of a team the game has (a flag's or ball's by the game type), its colors numbers, its transform one that can be.
+       - **Creating:** an object already at the index, the same one, is put where the host has it (unless carried, or this machine's own). Another there is deleted first. A create not at its index is undone and asked for again. A new unit's grenades wait for the host's inventories.
+       - **Applying the look:** colors (those drawn held to 0 to 1), the shader's permutation, the regions' permutations the model has. Carried, it leaves the world; a body is killed with nothing to show of it.
+       - **Deleting:** an item is let go of, a unit's host weapons dropped, its riders taken out, its player's binding undone, and any player's prompt on it cleared.
+     - **The game's, through calls:**
+       - making the object: the placement from the change, at the host's index
+       - deleting at once
+       - a failed create's retry
+       - releasing an item
+       - getting out of a seat
+       - garbage
+       - leaving the world
+
+       The tags (object, its type's group, the weapon's flag bit, the model's regions) are read in Rust.
+     - **The check:** a made object's datum isn't known when the step begins. So the regions are the objects' headers, the objects' memory pool as far as it is used (allocation only appends; 64 KB of room for one more), the pool itself, the players, the client's entry for the object and the statistics. A new accessor in objects.c gives the pool.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup (90 objects made, 46 deleted), every one of the joiner's object changes agrees, with none left out, alongside the unit states, object states and inventories.
+       - Planted errors in a new unit's grenades, the creates' count and the client's entry were caught.
+       - One in the regions' permutations went unseen: the host's are those object_new gives here.
+       - **Rust in charge:**
+         - With all networking systems in Rust, the machines' positions differ as with the C (median 5.9 cm against 4.8), and the joiner ends with the host's count of items.
+         - With all fifty-four systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

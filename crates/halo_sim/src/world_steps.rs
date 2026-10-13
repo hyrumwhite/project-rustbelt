@@ -189,6 +189,7 @@ const STEP_NETWORK_CORRECT_OWN_UNIT: i32 = 6;
 const STEP_NETWORK_UNIT_STATE: i32 = 7;
 const STEP_NETWORK_OBJECT_STATE: i32 = 8;
 const STEP_NETWORK_INVENTORY: i32 = 9;
+const STEP_NETWORK_OBJECT_CHANGE: i32 = 10;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -202,6 +203,7 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_UNIT_STATE => halo_map::network_apply::handle_unit_state(context, host),
         STEP_NETWORK_OBJECT_STATE => halo_map::network_apply::handle_object_state(context, host),
         STEP_NETWORK_INVENTORY => halo_map::network_apply::apply_inventory(context, host),
+        STEP_NETWORK_OBJECT_CHANGE => halo_map::network_apply::handle_change(context, host),
         _ => return None,
     }
     Some(())

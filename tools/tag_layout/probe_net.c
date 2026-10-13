@@ -13,6 +13,8 @@ distributed_state_from_object and distributed_inventory_from_unit).
 #include "items/items.h"
 #include "items/weapon_definitions.h"
 #include "game/players.h"
+#include "objects/object_definitions.h"
+#include "models/model_definitions.h"
 
 #include <stddef.h>
 
@@ -42,6 +44,19 @@ LAYOUT_MEMBER(weapon_magazine, rounds_loaded, rounds_loaded)
 LAYOUT_MEMBER(weapon_magazine, state, state)
 LAYOUT_MEMBER(weapon_datum, weapon_game_time_last_fired, weapon.game_time_last_fired)
 LAYOUT_MEMBER(unit_datum, unit_desired_weapon_index, unit.desired_weapon_index)
+LAYOUT_MEMBER(unit_datum, object_next_object_index, object.next_object_index)
+LAYOUT_MEMBER(unit_datum, object_first_child_object_index, object.first_child_object_index)
+LAYOUT_MEMBER(unit_datum, object_forced_shader_permutation_index, object.forced_shader_permutation_index)
+LAYOUT_MEMBER(unit_datum, object_region_permutations, object.region_permutations)
+LAYOUT_MEMBER(unit_datum, object_base_change_colors, object.base_change_colors)
+LAYOUT_MEMBER(unit_datum, object_outgoing_change_colors, object.outgoing_change_colors)
+LAYOUT_MEMBER(player_datum, action_object_index, action_object_index)
+LAYOUT_MEMBER(player_datum, action_result, action_result)
+LAYOUT_MEMBER(object_definition, object_type, object.type)
+LAYOUT_MEMBER(object_definition, object_model, object.model)
+LAYOUT_SIZE(model_region)
+LAYOUT_MEMBER(model_region, permutations, permutations)
+LAYOUT_MEMBER(model, regions, regions)
 LAYOUT_MEMBER(_weapon_definition, magazines, magazines)
 LAYOUT_MEMBER(weapon_magazine_definition, rounds_total_initial, rounds_total_initial)
 LAYOUT_MEMBER(weapon_magazine_definition, rounds_total_maximum, rounds_total_maximum)
@@ -67,6 +82,15 @@ LAYOUT_VALUE(_object_mask_vehicle)
 LAYOUT_VALUE(_object_connected_to_map_bit)
 LAYOUT_VALUE(_item_attached_to_unit_bit)
 LAYOUT_VALUE(_magazine_reloading)
+#define MAXIMUM_TRACKED_OBJECTS HALO_PORT_MAXIMUM_OBJECTS_PER_MAP
+#define MAXIMUM_TRACKED_PLAYERS HALO_PORT_MAXIMUM_NETWORK_PLAYERS
+LAYOUT_VALUE(MAXIMUM_TRACKED_OBJECTS)
+LAYOUT_VALUE(MAXIMUM_TRACKED_PLAYERS)
+LAYOUT_VALUE(_object_mask_equipment)
+LAYOUT_VALUE(_object_type_biped)
+LAYOUT_VALUE(_object_type_equipment)
+LAYOUT_VALUE(MAXIMUM_REGIONS_PER_OBJECT)
+LAYOUT_VALUE(NUMBER_OF_OBJECT_CHANGE_COLORS)
 LAYOUT_VALUE(_object_mask_weapon)
 LAYOUT_VALUE(_object_type_weapon)
 LAYOUT_VALUE(_unit_active_camouflaged_bit)

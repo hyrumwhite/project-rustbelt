@@ -62,6 +62,25 @@ pub mod call {
     pub const RELEASE_ITEM: i32 = 18;
     /// `unit_network_add_weapon(a, b, input[0])`.
     pub const ADD_WEAPON: i32 = 19;
+    /// Whether the game type is capture the flag, the result.
+    pub const CTF_GAME: i32 = 20;
+    /// The object made from the change at `a` (as the host's: its
+    /// placement, its index), its axes `input[0..6]`: its index (or none,
+    /// or another's), the result.
+    pub const CREATE: i32 = 21;
+    /// network_objects.c's `distributed_client_create_failed`.
+    pub const CREATE_FAILED: i32 = 22;
+    /// `object_delete_immediately(a)` (the client's own deleting).
+    pub const DELETE_IMMEDIATELY: i32 = 23;
+    /// network_objects.c's `distributed_client_release_item(a, TRUE)` (any
+    /// unit carrying the item forgets it).
+    pub const RELEASE_ITEM_DELETING: i32 = 24;
+    /// `unit_exit_seat_end(a)`.
+    pub const EXIT_SEAT_END: i32 = 25;
+    /// `object_set_garbage(a, b)`.
+    pub const SET_GARBAGE: i32 = 26;
+    /// `object_disconnect_from_map(a)`.
+    pub const DISCONNECT: i32 = 27;
 }
 
 /// halo_sim.h's `struct halo_sim_network_apply`: a step's arguments (taken
@@ -109,10 +128,16 @@ pub struct Arguments {
     pub own_inventories: u32,
     pub tag_instances: u32,
     pub tag_count: i32,
+    /// An object change's: the change (network_objects.c's `struct
+    /// distributed_object_change`), its entry of `objects_client_has`, and
+    /// `objects_statistics`.
+    pub change: u32,
+    pub has: u32,
+    pub statistics: u32,
     pub result: i32,
 }
 
-const _: () = assert!(std::mem::size_of::<Arguments>() == 4 + 15 * 4 + 8 + 16 + 64 + 8 + 44);
+const _: () = assert!(std::mem::size_of::<Arguments>() == 4 + 15 * 4 + 8 + 16 + 64 + 8 + 56);
 
 /// The arguments' result's offset.
 const RESULT: u32 = (std::mem::size_of::<Arguments>() - 4) as u32;
@@ -1037,6 +1062,357 @@ impl<H: AiHost> Apply<'_, H> {
     }
 }
 
+/// network_objects.c's `struct distributed_object_change`.
+mod change {
+    pub const CHANGE: u32 = 0;
+    pub const FLAGS: u32 = 1;
+    pub const FORCED_SHADER_PERMUTATION_INDEX: u32 = 3;
+    pub const OBJECT_INDEX: u32 = 4;
+    pub const DEFINITION_INDEX: u32 = 8;
+    pub const OWNER_TEAM_INDEX: u32 = 12;
+    pub const POSITION: u32 = 16;
+    pub const FORWARD: u32 = 28;
+    pub const UP: u32 = 40;
+    pub const TRANSLATIONAL_VELOCITY: u32 = 52;
+    pub const ANGULAR_VELOCITY: u32 = 64;
+    pub const CHANGE_COLORS: u32 = 76;
+    pub const REGION_PERMUTATIONS: u32 = 124;
+    /// `_object_change_create`, `_delete`.
+    pub const CREATE: u8 = 0;
+    pub const DELETE: u8 = 1;
+    /// `_distributed_object_carried_bit`, `_dead_bit`.
+    pub const CARRIED: u8 = 1 << 0;
+    pub const DEAD: u8 = 1 << 2;
+}
+
+/// network_objects.c's `objects_statistics`.
+mod statistics {
+    pub const CREATES: u32 = 0;
+    pub const DELETES: u32 = 4;
+    pub const CREATE_FAILURES: u32 = 8;
+}
+
+/// network_distributed.h's `MAXIMUM_TRACKED_OBJECTS` and
+/// `MAXIMUM_TRACKED_PLAYERS`, and network_objects.c's flag and ball teams.
+const MAXIMUM_TRACKED_OBJECTS: i32 = crate::layout::net_values::MAXIMUM_TRACKED_OBJECTS as i32;
+const MAXIMUM_TRACKED_PLAYERS: i16 = crate::layout::net_values::MAXIMUM_TRACKED_PLAYERS as i16;
+const CTF_FLAG_TEAMS: i16 = 2;
+const ODDBALL_TEAMS: i16 = 16;
+
+impl<H: AiHost> Apply<'_, H> {
+    /// cache_files.c's `tag_index_is_group`: the index a loaded tag's, of
+    /// the group (or one it inherits from).
+    fn tag_index_is_group(&self, arguments: &Arguments, tag_index: i32, group_tag: u32) -> bool {
+        let m = self.m;
+        let absolute_index = tag_index as i16;
+        if tag_index == NONE || arguments.tag_instances == 0 || absolute_index < 0 || absolute_index as i32 >= arguments.tag_count {
+            return false;
+        }
+        let instance = arguments.tag_instances + absolute_index as u32 * 0x20;
+        m.i32(instance + 0xc) == tag_index
+            && m.r32(instance + 0x14) != 0
+            && (m.r32(instance) == group_tag || m.r32(instance + 4) == group_tag || m.r32(instance + 8) == group_tag)
+    }
+
+    fn tags(arguments: &Arguments) -> crate::ai_actor::AiStepContext {
+        crate::ai_actor::AiStepContext {
+            tag_instances: arguments.tag_instances,
+            tag_count: arguments.tag_count,
+            ..crate::ai_actor::AiStepContext::default()
+        }
+    }
+
+    fn count(&self, arguments: &Arguments, offset: u32) {
+        if arguments.statistics != 0 {
+            let address = arguments.statistics + offset;
+            self.m.w32(address, self.m.r32(address).wrapping_add(1));
+        }
+    }
+
+    /// network_objects.c's `distributed_client_own_object`: this machine's
+    /// own player's unit, or the vehicle it drives.
+    fn own_object(&self, object_index: i32) -> bool {
+        let m = self.m;
+        let object = self.object(object_index);
+        if (nv::_OBJECT_MASK_UNIT as u32) & (1 << m.r8(object + ud::OBJECT_TYPE as u32)) == 0 {
+            return false;
+        }
+        let mut unit_index = object_index;
+        if m.i16(object + ud::OBJECT_TYPE as u32) == crate::layout::ai_values::_OBJECT_TYPE_VEHICLE as i16 {
+            unit_index = m.i32(object + ud::UNIT_DRIVER_OBJECT_INDEX as u32);
+        }
+        unit_index != NONE && self.player_is_local(m.i32(self.object(unit_index) + ud::UNIT_PLAYER_INDEX as u32))
+    }
+
+    /// network_objects.c's `distributed_client_change_valid`: whether the
+    /// host's object can be made (a networked kind, its definition of the
+    /// group its type says, of a team the game has, its colors numbers, its
+    /// transform one that can be), and its axes made a rotation.
+    fn change_valid(&self, arguments: &Arguments, at: u32) -> Option<([f32; 3], [f32; 3])> {
+        use crate::layout::ai_values as av;
+        let m = self.m;
+        let object_index = m.i32(at + change::OBJECT_INDEX);
+        let definition_index = m.i32(at + change::DEFINITION_INDEX);
+        if object_index == NONE || (object_index >> 16) as i16 == 0 || !self.tag_index_is_group(arguments, definition_index, crate::fourcc(b"obje")) {
+            return None;
+        }
+        let tags = Self::tags(arguments);
+        let definition = crate::sensing::tag_get(m, &tags, crate::fourcc(b"obje"), definition_index).unwrap_or(0);
+        let object_type = m.i16(definition + crate::layout::object_definition::OBJECT_TYPE as u32);
+        let group_tag = match object_type as usize {
+            nv::_OBJECT_TYPE_BIPED => crate::fourcc(b"bipd"),
+            av::_OBJECT_TYPE_VEHICLE => crate::fourcc(b"vehi"),
+            nv::_OBJECT_TYPE_WEAPON => crate::fourcc(b"weap"),
+            nv::_OBJECT_TYPE_EQUIPMENT => crate::fourcc(b"eqip"),
+            _ => return None,
+        };
+        let networked = (nv::_OBJECT_MASK_BIPED | nv::_OBJECT_MASK_VEHICLE | nv::_OBJECT_MASK_WEAPON | nv::_OBJECT_MASK_EQUIPMENT) as u32;
+        if networked & (1 << object_type) == 0 || !self.tag_index_is_group(arguments, definition_index, group_tag) {
+            return None;
+        }
+        let weapon_is_flag = || {
+            crate::sensing::tag_get(m, &tags, WEAPON_TAG, definition_index).is_some_and(|weapon| {
+                (m.r32(weapon + (crate::layout::weapon_definition::WEAPON + crate::layout::_weapon_definition::FLAGS) as u32) >> 3) & 1 != 0
+            })
+        };
+        let is_weapon = object_type as usize == nv::_OBJECT_TYPE_WEAPON;
+        let mut team_count = MAXIMUM_TRACKED_PLAYERS;
+        if is_weapon && weapon_is_flag() {
+            team_count = if self.call(call::CTF_GAME, 0, &[]).result != 0 { CTF_FLAG_TEAMS } else { ODDBALL_TEAMS };
+        }
+        let owner_team_index = m.i16(at + change::OWNER_TEAM_INDEX);
+        if owner_team_index != NONE as i16 && (owner_team_index < 0 || owner_team_index >= team_count) {
+            return None;
+        }
+        if is_weapon && weapon_is_flag() && owner_team_index == NONE as i16 {
+            return None;
+        }
+        for index in 0..12u32 {
+            let value = m.f32(at + change::CHANGE_COLORS + 4 * index);
+            if value - value != 0.0 {
+                return None;
+            }
+        }
+        let mut valid = [0.0; 6];
+        transform_valid(
+            m.vector(at + change::POSITION),
+            m.vector(at + change::FORWARD),
+            m.vector(at + change::UP),
+            Some(m.vector(at + change::TRANSLATIONAL_VELOCITY)),
+            Some(m.vector(at + change::ANGULAR_VELOCITY)),
+            &mut valid,
+        )
+        .then(|| split(valid))
+    }
+
+    /// network_objects.c's `distributed_client_apply_change`: the host's
+    /// word on an object made or found here: its colors (those drawn held
+    /// to 0 to 1), its shader's permutation, its regions' permutations (those
+    /// its model has), not garbage; carried, out of the world; a body,
+    /// killed with nothing to show of it.
+    fn apply_change(&self, arguments: &Arguments, object_index: i32, at: u32) {
+        let m = self.m;
+        let object = self.object(object_index);
+        let field = |offset: usize| object + offset as u32;
+        for index in 0..12u32 {
+            let value = m.f32(at + change::CHANGE_COLORS + 4 * index);
+            m.set_f32(field(ud::OBJECT_BASE_CHANGE_COLORS) + 4 * index, value);
+        }
+        let forced = m.r8(at + change::FORCED_SHADER_PERMUTATION_INDEX);
+        if forced != 0 {
+            m.set_i16(field(ud::OBJECT_FORCED_SHADER_PERMUTATION_INDEX), forced as i16);
+        }
+        for index in 0..12u32 {
+            let value = m.f32(at + change::CHANGE_COLORS + 4 * index);
+            // (PIN: below the floor the floor, else MIN of it and the ceiling)
+            let pinned = if value < 0.0 { 0.0 } else if value > 1.0 { 1.0 } else { value };
+            m.set_f32(field(ud::OBJECT_OUTGOING_CHANGE_COLORS) + 4 * index, pinned);
+        }
+        let tags = Self::tags(arguments);
+        let definition_index = m.i32(field(ud::DEFINITION_INDEX));
+        let model_index = crate::sensing::tag_get(m, &tags, crate::fourcc(b"obje"), definition_index)
+            .map_or(0, |definition| m.i32(definition + crate::layout::object_definition::OBJECT_MODEL as u32 + 0xc));
+        let model = if model_index != NONE { crate::sensing::tag_get(m, &tags, crate::fourcc(b"mode"), model_index) } else { None };
+        if let Some(model) = model {
+            let regions = model + crate::layout::model::REGIONS as u32;
+            let count = crate::ai_actor::tag_block_count(m, regions).min(nv::MAXIMUM_REGIONS_PER_OBJECT as i32);
+            for region_index in 0..count {
+                let region = crate::ai_actor::tag_block_element(m, regions, region_index, crate::layout::model_region::SIZEOF);
+                let permutation_index = m.r8(at + change::REGION_PERMUTATIONS + region_index as u32);
+                if permutation_index == 0xff
+                    || (permutation_index as i32) < crate::ai_actor::tag_block_count(m, region + crate::layout::model_region::PERMUTATIONS as u32)
+                {
+                    m.w8(field(ud::OBJECT_REGION_PERMUTATIONS) + region_index as u32, permutation_index);
+                }
+            }
+        }
+        let mut garbage = AiCall { kind: call::SET_GARBAGE, actor: NONE, a: object_index, b: 0, ..AiCall::default() };
+        self.host.call(&mut garbage);
+        let flags = m.r8(at + change::FLAGS);
+        let connected = m.r32(field(ud::OBJECT_FLAGS)) & (1 << nv::_OBJECT_CONNECTED_TO_MAP_BIT) != 0;
+        if flags & change::CARRIED != 0 && connected && m.i32(field(ud::OBJECT_PARENT_OBJECT_INDEX)) == NONE {
+            self.call(call::DISCONNECT, object_index, &[]);
+            self.call(call::SET_VISIBILITY, object_index, &[]);
+        }
+        let unit = (nv::_OBJECT_MASK_UNIT as u32) & (1 << m.r8(field(ud::OBJECT_TYPE))) != 0;
+        if flags & change::DEAD != 0 && unit && !self.dead(object) {
+            self.call(call::UNIT_KILL_SILENT, object_index, &[]);
+            self.call(call::UNIT_KILL_NO_STATISTICS, object_index, &[]);
+            self.call(call::DAMAGE_UPDATE, object_index, &[]);
+        }
+    }
+
+    /// network_objects.c's `distributed_client_delete`: an object deleted,
+    /// what refers to it undone first (an item let go of, a unit's host
+    /// weapons dropped, its riders out, its player's binding, any player's
+    /// prompt on it).
+    fn delete(&self, object_index: i32) {
+        let m = self.m;
+        let Some(object) = self.try_object(object_index) else { return };
+        let type_bit = 1u32 << m.r8(object + ud::OBJECT_TYPE as u32);
+        if (nv::_OBJECT_MASK_ITEM as u32) & type_bit != 0 {
+            self.call(call::RELEASE_ITEM_DELETING, object_index, &[]);
+        }
+        if (nv::_OBJECT_MASK_UNIT as u32) & type_bit != 0 {
+            for slot in 0..4u32 {
+                let weapon_index = m.i32(object + ud::UNIT_WEAPON_OBJECT_INDICES as u32 + 4 * slot);
+                if weapon_index != NONE && self.call(call::CLIENT_HAS, weapon_index, &[]).result != 0 {
+                    let mut drop = AiCall { kind: call::DROP_WEAPON, actor: NONE, a: object_index, b: slot as i32, ..AiCall::default() };
+                    self.host.call(&mut drop);
+                }
+            }
+            let mut child_index = m.i32(object + ud::OBJECT_FIRST_CHILD_OBJECT_INDEX as u32);
+            while child_index != NONE {
+                let child = self.object(child_index);
+                let next_index = m.i32(child + ud::OBJECT_NEXT_OBJECT_INDEX as u32);
+                if (nv::_OBJECT_MASK_UNIT as u32) & (1 << m.r8(child + ud::OBJECT_TYPE as u32)) != 0
+                    && m.i16(child + ud::UNIT_PARENT_SEAT_INDEX as u32) != NONE as i16
+                {
+                    self.call(call::EXIT_SEAT_END, child_index, &[]);
+                }
+                child_index = next_index;
+            }
+            let player_index = m.i32(object + ud::UNIT_PLAYER_INDEX as u32);
+            if player_index != NONE
+                && datum_get(m, self.context.player_data, player_index)
+                    .is_some_and(|player| m.i32(player + pd::UNIT_INDEX as u32) == object_index)
+            {
+                self.call(call::DETACH_UNIT, player_index, &[]);
+            }
+        }
+        {
+            use crate::data_array::{DATA_COUNT, DATA_DATA, DATA_SIZE};
+            let data = self.context.player_data;
+            let size = m.r16(data + DATA_SIZE) as i16 as u32;
+            for index in 0..m.r16(data + DATA_COUNT) as i16 as u32 {
+                let player = m.r32(data + DATA_DATA) + index * size;
+                if m.i16(player + pd::IDENTIFIER as u32) != 0 && m.i32(player + pd::ACTION_OBJECT_INDEX as u32) == object_index {
+                    m.set_i16(player + pd::ACTION_RESULT as u32, 0);
+                    m.w32(player + pd::ACTION_OBJECT_INDEX as u32, NONE as u32);
+                }
+            }
+        }
+        self.call(call::DELETE_IMMEDIATELY, object_index, &[]);
+    }
+
+    /// network_objects.c's `distributed_client_create`: the host's object
+    /// made here at its own index. One already there, the same, is put
+    /// where the host has it (unless carried, or this machine's own);
+    /// another there is deleted first. A create that fails (not at its
+    /// index) is undone and asked for again.
+    fn create(&self, arguments: &Arguments, at: u32) {
+        use crate::data_array::{DATA_DATA, DATA_MAXIMUM_COUNT, DATA_SIZE};
+        let m = self.m;
+        let object_index = m.i32(at + change::OBJECT_INDEX);
+        let absolute_index = object_index & 0xffff;
+        let header_data = self.context.object_header_data;
+        let maximum_count = m.r16(header_data + DATA_MAXIMUM_COUNT) as i16 as i32;
+        let valid = if absolute_index < 0 || absolute_index >= MAXIMUM_TRACKED_OBJECTS || absolute_index >= maximum_count {
+            None
+        } else {
+            self.change_valid(arguments, at)
+        };
+        let Some((forward, up)) = valid else {
+            self.count(arguments, statistics::CREATE_FAILURES);
+            return;
+        };
+        let header = m.r32(header_data + DATA_DATA) + absolute_index as u32 * m.r16(header_data + DATA_SIZE) as i16 as u32;
+        let identifier = m.i16(header);
+        if identifier != 0 {
+            let existing_index = (identifier as i32) << 16 | absolute_index;
+            let existing = self.try_object(existing_index);
+            if existing_index == object_index
+                && existing.is_some_and(|existing| m.i32(existing + ud::DEFINITION_INDEX as u32) == m.i32(at + change::DEFINITION_INDEX))
+            {
+                let existing = existing.unwrap_or(0);
+                m.w32(arguments.has, existing_index as u32);
+                if m.r8(at + change::FLAGS) & change::CARRIED == 0
+                    && m.i32(existing + ud::OBJECT_PARENT_OBJECT_INDEX as u32) == NONE
+                    && m.r32(existing + ud::OBJECT_FLAGS as u32) & (1 << nv::_OBJECT_CONNECTED_TO_MAP_BIT) != 0
+                    && !self.own_object(existing_index)
+                {
+                    self.object_move(
+                        existing_index,
+                        m.vector(at + change::POSITION),
+                        forward,
+                        up,
+                        Some(m.vector(at + change::TRANSLATIONAL_VELOCITY)),
+                        Some(m.vector(at + change::ANGULAR_VELOCITY)),
+                    );
+                }
+                self.apply_change(arguments, existing_index, at);
+                return;
+            }
+            self.delete(existing_index);
+            m.w32(arguments.has, NONE as u32);
+            if m.i16(header) != 0 {
+                self.call(call::CREATE_FAILED, 0, &[]);
+                return;
+            }
+        }
+        let mut axes = [0.0; 6];
+        axes[0..3].copy_from_slice(&forward);
+        axes[3..6].copy_from_slice(&up);
+        let created = self.call(call::CREATE, at as i32, &axes).result;
+        self.count(arguments, statistics::CREATES);
+        if created != object_index {
+            if created != NONE {
+                self.call(call::DELETE_IMMEDIATELY, created, &[]);
+            }
+            self.call(call::CREATE_FAILED, 0, &[]);
+            return;
+        }
+        m.w32(arguments.has, created as u32);
+        let object = self.object(created);
+        if (nv::_OBJECT_MASK_UNIT as u32) & (1 << m.r8(object + ud::OBJECT_TYPE as u32)) != 0 {
+            m.w8(object + ud::UNIT_GRENADE_COUNTS as u32, 0);
+            m.w8(object + ud::UNIT_GRENADE_COUNTS as u32 + 1, 0);
+        }
+        self.apply_change(arguments, created, at);
+    }
+
+    /// network_objects.c's `network_objects_handle_changes`, of one change:
+    /// a create, or a delete of an object this machine has of the host's.
+    fn handle_change(&self, arguments: &Arguments) {
+        let m = self.m;
+        let at = arguments.change;
+        let object_index = m.i32(at + change::OBJECT_INDEX);
+        let absolute_index = object_index & 0xffff;
+        if object_index == NONE || (object_index >> 16) as i16 == 0 || absolute_index >= MAXIMUM_TRACKED_OBJECTS || arguments.has == 0 {
+            return;
+        }
+        match m.r8(at + change::CHANGE) {
+            change::CREATE => self.create(arguments, at),
+            change::DELETE if m.i32(arguments.has) == object_index => {
+                self.count(arguments, statistics::DELETES);
+                self.delete(object_index);
+                m.w32(arguments.has, NONE as u32);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// network_objects.c's `_distributed_object_predicted_bit`.
 const OBJECT_PREDICTED: u8 = 1 << 3;
 
@@ -1094,6 +1470,12 @@ pub fn object_correct(context: &WorldContext, host: &impl AiHost) {
 pub fn apply_inventory(context: &WorldContext, host: &impl AiHost) {
     let (apply, arguments) = begin(context, host);
     apply.apply_inventory(&arguments);
+}
+
+/// The world step of network_objects.c's handling of an object change.
+pub fn handle_change(context: &WorldContext, host: &impl AiHost) {
+    let (apply, arguments) = begin(context, host);
+    apply.handle_change(&arguments);
 }
 
 /// The world step of network_objects.c's handling of an object's state.

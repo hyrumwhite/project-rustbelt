@@ -2373,6 +2373,7 @@ enum
 	_halo_sim_world_step_network_client_tick,
 	_halo_sim_world_step_network_client_asked,
 	_halo_sim_world_step_network_handle_message,
+	_halo_sim_world_step_network_apply_predictions,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2837,6 +2838,40 @@ enum
 };
 
 void network_message_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_host::PredictionArguments: the host taking its
+clients' predictions of their players on foot: the records
+(network_distributed_records.h) and the gravity */
+struct halo_sim_network_predictions
+{
+	unsigned long predictions;
+	unsigned long accepted;
+	unsigned long host_speeds;
+	float gravity;
+};
+
+/* network_distributed.c's prediction calls (crates/halo_map's
+network_host::prediction_call) */
+enum
+{
+	/* distributed_machine_round_trip_ticks of the player a's machine,
+	output[0] */
+	_network_predictions_call_round_trip = 1,
+	/* network_coop_player_has_structure_bsp(a) */
+	_network_predictions_call_coop_has_structure_bsp,
+	/* distributed_apply_state of the unit a to the player b's prediction,
+	its speeds input[0..2]: whether taken */
+	_network_predictions_call_apply_state,
+	/* the game globals' player speeds forward, back, sideways and the
+	double speed multiplier, output[0..4]; the result 1 if there are any,
+	and 2 if players are double speed */
+	_network_predictions_call_player_speeds,
+	/* the biped tag a's jump velocity and standing and crouching heights,
+	output[0..3] */
+	_network_predictions_call_biped_definition,
+};
+
+void network_predictions_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

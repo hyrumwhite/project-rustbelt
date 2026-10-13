@@ -74,6 +74,7 @@ machine (their datum identifiers need not be).
 #include "network_distributed.h"
 #include "network_voice.h"
 #include "network_distributed_records.h"
+#include <stdlib.h>
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <limits.h>
@@ -287,40 +288,7 @@ enum
 /* shields, health and the damage they show in 16 bits: 0 to 4 */
 #define VITALITY_SCALE 16384.0f
 
-/* a player's unit, as this machine has it (its bytes on the wire are fewer:
-distributed_unit_state_write) */
-struct distributed_unit_state
-{
-	byte player_index;
-	byte flags;
-	/* (dead) the player who killed it, NO_PLAYER for none */
-	byte killing_player_index;
-	byte unit_flags;
-	/* the player's unit (the host's), NONE for none */
-	long unit_index;
-	/* the vehicle it rides and its seat, NONE for none */
-	long vehicle_index;
-	short seat_index;
-	/* how camouflaged the unit is, of 255 */
-	byte active_camouflage;
-	byte pad;
-	real_point3d position;
-	struct distributed_vector velocity;
-	struct distributed_vector forward;
-	struct distributed_vector up;
-	/* (_distributed_unit_predicted_bit) the client's tick, its low 16 bits */
-	short predicted_time;
-	/* (VITALITY_SCALE) */
-	word body_vitality;
-	word shield_vitality;
-	/* what the shields' and the HUD's effects show */
-	word current_body_damage;
-	word recent_body_damage;
-	word current_shield_damage;
-	word recent_shield_damage;
-	/* the player's powerups: how long each has left */
-	short powerup_durations[NUMBER_OF_PLAYER_POWERUPS];
-};
+/* (struct distributed_unit_state: network_distributed_records.h) */
 
 /* a client's player's input at one of its ticks, with the buttons of the
 ticks before it */
@@ -491,28 +459,12 @@ static short distributed_seat_disagreements[MAXIMUM_TRACKED_PLAYERS];
 
 /* the host: each client's player's latest prediction, taken at the next
 tick, and the client's tick of the one taken last and when */
-static struct
-{
-	boolean valid;
-	long time;
-	struct distributed_unit_state state;
-	long taken_time;
-	long taken_host_time;
-} distributed_predictions[MAXIMUM_TRACKED_PLAYERS];
+static struct distributed_prediction distributed_predictions[MAXIMUM_TRACKED_PLAYERS];
 /* the host: the anchor, where it took each client's player to be (one
 taken, a newer once a second: the next may be no further from it than the
 player moves in the client's ticks since), at which of the client's ticks
 and its own; and when it last took one, and where that left its unit */
-static struct
-{
-	boolean valid;
-	long unit_index;
-	long time;
-	long host_time;
-	real_point3d position;
-	long taken_host_time;
-	real_point3d taken_host_position;
-} distributed_accepted[MAXIMUM_TRACKED_PLAYERS];
+static struct distributed_accepted_prediction distributed_accepted[MAXIMUM_TRACKED_PLAYERS];
 /* ... what its own ticks did to its copy of each client's player's unit on
 foot, beyond the client's word it took (an explosion's throw, a jump): how
 fast they sent it, and how fast up, the most of this span of
@@ -522,21 +474,7 @@ the unit was on the ground then; where it last had the unit on the ground
 (or where it started: a new life, a ride's end, a teleporter) and the
 highest it has had it since; and those speeds kept through a flight begun
 while it had them (a throw's flight outlasting the span) */
-static struct distributed_host_speed
-{
-	long time;
-	real speeds[2];
-	real rises[2];
-	real flight_speed;
-	real flight_rise;
-	long unit_index;
-	real_vector3d velocity;
-	boolean grounded;
-	real ground_height;
-	real top_height;
-	/* the last tick it had the unit on the ground (or where it started) */
-	long ground_time;
-} distributed_host_speeds[MAXIMUM_TRACKED_PLAYERS];
+static struct distributed_host_speed distributed_host_speeds[MAXIMUM_TRACKED_PLAYERS];
 /* a client: where each of its own players' units was at its last ticks,
 and how long the host takes to have them (ticks) */
 static struct distributed_own_position
@@ -2047,6 +1985,29 @@ static void distributed_client_send_predictions(
 			continue;
 		}
 		distributed_state_from_player((short)DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.datum_index), &state);
+		/* (the automated tests: HALO_NETWORK_TEST_LIE=<seconds>, a false word
+		every so often for three ticks (a step aside, up, down, a dash), for
+		the host's refusals to be checked) */
+		{
+			static long lie_ticks = NONE;
+
+			if (lie_ticks == NONE)
+			{
+				char const *value = getenv("HALO_NETWORK_TEST_LIE");
+
+				lie_ticks = value ? atol(value) * TICKS_PER_SECOND : 0;
+			}
+			if (lie_ticks > 0 && game_time_get() % lie_ticks < 3)
+			{
+				static real const offsets[4][3] = { { 2.5f, 0.0f, 0.0f }, { 0.0f, 0.0f, 2.5f }, { 0.0f, 0.0f, -2.5f },
+					{ 1.0f, 1.0f, 0.0f } };
+				short which = (short)((game_time_get() / lie_ticks) % 4);
+
+				state.position.x += offsets[which][0];
+				state.position.y += offsets[which][1];
+				state.position.z += offsets[which][2];
+			}
+		}
 		distributed_packer_add(&distributed_packer, entry, distributed_unit_state_write(&state, TRUE, entry));
 	}
 	distributed_packer_flush(&distributed_packer);
@@ -2082,6 +2043,79 @@ static void distributed_handle_predictions(
 		distributed_predictions[state.player_index].time = time;
 		distributed_predictions[state.player_index].state = state;
 	}
+}
+
+/* port: the host's taking of its clients' predictions is Rust's in Rust's
+mode (crates/halo_map's network_host): the game's parts through these calls,
+the gravity as the tick begins */
+static struct halo_sim_network_predictions distributed_prediction_arguments;
+
+void network_predictions_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_predictions_call_round_trip:
+		call->output[0] = distributed_machine_round_trip_ticks(distributed_player_machine((short)call->a));
+		break;
+	case _network_predictions_call_coop_has_structure_bsp:
+		call->result = network_coop_player_has_structure_bsp(call->a);
+		break;
+	case _network_predictions_call_apply_state:
+	{
+		struct distributed_unit_state const *state = &distributed_predictions[call->b].state;
+
+		call->result = distributed_apply_state(call->a, state, &state->position, 0.0f, HOST_BLEND_DISTANCE,
+			call->input[0], call->input[1]);
+		break;
+	}
+	case _network_predictions_call_player_speeds:
+	{
+		struct game_globals *globals = scenario_get_game_globals();
+
+		call->result = game_players_are_double_speed() ? 2 : 0;
+		if (globals && globals->player_information.count > 0)
+		{
+			struct game_globals_player_information *information = TAG_BLOCK_GET_ELEMENT(&globals->player_information, 0,
+				struct game_globals_player_information);
+
+			call->result |= 1;
+			call->output[0] = information->run_forward_speed;
+			call->output[1] = information->run_backward_speed;
+			call->output[2] = information->run_sideways_speed;
+			call->output[3] = information->double_speed_multiplier;
+		}
+		break;
+	}
+	case _network_predictions_call_biped_definition:
+	{
+		struct biped_definition *definition = biped_definition_get(call->a);
+
+		call->output[0] = definition->biped.jump_velocity;
+		call->output[1] = definition->biped.collision_height_standing;
+		call->output[2] = definition->biped.collision_height_crouching;
+		break;
+	}
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static struct halo_sim_ai_call network_predictions_simple(
+	long kind,
+	long a,
+	long b)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	network_predictions_call(&call);
+	return call;
 }
 
 /* (the host) how fast a client's player's unit on foot may go, a tick, and
@@ -2127,7 +2161,7 @@ static void distributed_on_foot_bound(
 	struct biped_datum *biped = (struct biped_datum *)object_try_and_get_and_verify_type(unit_index,
 		_object_mask_biped);
 	struct player_datum *player = distributed_player(player_index);
-	struct game_globals *globals = scenario_get_game_globals();
+	real gravity = distributed_prediction_arguments.gravity;
 	long now = game_time_get();
 	real_vector3d const *velocity = &object->object.translational_velocity;
 	real host_speed = (real)sqrt(velocity->i * velocity->i + velocity->j * velocity->j + velocity->k * velocity->k);
@@ -2173,26 +2207,30 @@ static void distributed_on_foot_bound(
 		noted->rises[1] = noted->rises[0];
 		noted->rises[0] = 0.0f;
 	}
-	/* (as bipeds.c moves a player: forward or back and sideways at once) */
-	if (globals && globals->player_information.count > 0)
+	/* (as bipeds.c moves a player: forward or back and sideways at once;
+	port: the tag through the calls) */
 	{
-		struct game_globals_player_information *information = TAG_BLOCK_GET_ELEMENT(&globals->player_information, 0,
-			struct game_globals_player_information);
-		real forward = MAX(information->run_forward_speed, information->run_backward_speed);
-		real sideways = information->run_sideways_speed;
+		struct halo_sim_ai_call speeds = network_predictions_simple(_network_predictions_call_player_speeds, 0, 0);
 
-		run_speed = (real)sqrt(forward * forward + sideways * sideways) / TICKS_PER_SECOND;
-		if (game_players_are_double_speed() && information->double_speed_multiplier > 1.0f)
-			run_speed *= information->double_speed_multiplier;
+		if (speeds.result & 1)
+		{
+			real forward = MAX(speeds.output[0], speeds.output[1]);
+			real sideways = speeds.output[2];
+
+			run_speed = (real)sqrt(forward * forward + sideways * sideways) / TICKS_PER_SECOND;
+			if ((speeds.result & 2) && speeds.output[3] > 1.0f)
+				run_speed *= speeds.output[3];
+		}
 	}
 	if (player && player->speed_multiplier > 1.0f)
 		run_speed *= player->speed_multiplier;
 	if (biped)
 	{
-		struct biped_definition *definition = biped_definition_get(biped->definition_index);
+		struct halo_sim_ai_call definition = network_predictions_simple(_network_predictions_call_biped_definition,
+			biped->definition_index, 0);
 
-		jump_speed = definition->biped.jump_velocity;
-		crouch_rise = definition->biped.collision_height_standing - definition->biped.collision_height_crouching;
+		jump_speed = definition.output[0];
+		crouch_rise = definition.output[1] - definition.output[2];
 	}
 	base_speed = PREDICTED_ON_FOOT_SPEED_SCALE * (real)sqrt(run_speed * run_speed + jump_speed * jump_speed);
 	/* (so written that a tag's speed not a number is none) */
@@ -2247,8 +2285,8 @@ static void distributed_on_foot_bound(
 		rise_speed += jump_speed;
 	rise_speed += MAX(jump_speed, run_speed);
 	bound->rise = UNIT_WORLD_BOUND;
-	if (biped && global_gravity > 0.0f)
-		bound->rise = rise_speed * rise_speed / (2.0f * global_gravity) + crouch_rise + PREDICTED_RISE_TOLERANCE;
+	if (biped && gravity > 0.0f)
+		bound->rise = rise_speed * rise_speed / (2.0f * gravity) + crouch_rise + PREDICTED_RISE_TOLERANCE;
 	bound->rise_speed = rise_speed;
 	bound->rise_base = crouch_rise + PREDICTED_RISE_TOLERANCE;
 	bound->airborne_ticks = noted->grounded ? 0 : now - noted->ground_time;
@@ -2266,9 +2304,10 @@ static real distributed_on_foot_fall_speed(
 {
 	real drop = bound->top_height - height;
 	real speed = bound->speed;
+	real gravity = distributed_prediction_arguments.gravity;
 
-	if (drop > 0.0f && global_gravity > 0.0f)
-		speed += (real)sqrt(2.0f * global_gravity * drop);
+	if (drop > 0.0f && gravity > 0.0f)
+		speed += (real)sqrt(2.0f * gravity * drop);
 	return MIN(speed, MAXIMUM_PREDICTED_SPEED);
 }
 
@@ -2283,15 +2322,16 @@ static real distributed_on_foot_ceiling(
 	struct distributed_on_foot_bound const *bound)
 {
 	real rise = bound->rise;
-	/* (a round trip a client makes long gains it no more than this) */
-	real ticks = (real)bound->airborne_ticks -
-		MIN(distributed_machine_round_trip_ticks(distributed_player_machine(player_index)),
-			(real)PREDICTION_CEILING_LEAD_TICKS) -
+	real gravity = distributed_prediction_arguments.gravity;
+	/* (a round trip a client makes long gains it no more than this; port:
+	through the calls) */
+	real round_trip = network_predictions_simple(_network_predictions_call_round_trip, player_index, 0).output[0];
+	real ticks = (real)bound->airborne_ticks - MIN(round_trip, (real)PREDICTION_CEILING_LEAD_TICKS) -
 		(real)PREDICTION_JITTER_TICKS;
 
-	if (bound->airborne_ticks > 0 && ticks > 0.0f && global_gravity > 0.0f)
+	if (bound->airborne_ticks > 0 && ticks > 0.0f && gravity > 0.0f)
 	{
-		real ceiling = bound->rise_base + bound->rise_speed * ticks - 0.5f * global_gravity * ticks * ticks;
+		real ceiling = bound->rise_base + bound->rise_speed * ticks - 0.5f * gravity * ticks * ticks;
 
 		if (ceiling < rise)
 			rise = ceiling;
@@ -2367,9 +2407,22 @@ static void distributed_take_prediction(
 	{
 		return;
 	}
-	/* (the client told which of its ticks the host has it at) */
-	if (distributed_apply_state(unit_index, state, &state->position, 0.0f, HOST_BLEND_DISTANCE, bound->speed,
-		distributed_on_foot_fall_speed(bound, state->position.z)))
+	/* (the client told which of its ticks the host has it at; port: through
+	the calls) */
+	{
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_predictions_call_apply_state;
+		call.actor = NONE;
+		call.a = unit_index;
+		call.b = player_index;
+		call.input[0] = bound->speed;
+		call.input[1] = distributed_on_foot_fall_speed(bound, state->position.z);
+		network_predictions_call(&call);
+		if (!call.result)
+			return;
+	}
 	{
 		distributed_predictions[player_index].taken_time = distributed_predictions[player_index].time;
 		distributed_predictions[player_index].taken_host_time = now;
@@ -2399,7 +2452,8 @@ than it climbs or jumps; its velocity is no faster. A teleporter moves the
 host's own unit too, further than it moves since the last taken: it is
 measured from where the host has it only, a new anchor (as it is after a
 new life, or a ride). */
-static void distributed_apply_predictions(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_apply_predictions_game(
 	void)
 {
 	short player_index;
@@ -2436,7 +2490,8 @@ static void distributed_apply_predictions(
 			falls there with no floor under it) */
 			if (unit_index != NONE && unit_index == state->unit_index &&
 				unit_get(unit_index)->unit.player_index != NONE &&
-				network_coop_player_has_structure_bsp(unit_get(unit_index)->unit.player_index))
+				network_predictions_simple(_network_predictions_call_coop_has_structure_bsp,
+					unit_get(unit_index)->unit.player_index, 0).result)
 			{
 				distributed_take_prediction(player_index, unit_index, &bound);
 			}
@@ -2451,6 +2506,71 @@ static void distributed_apply_predictions(
 				distributed_host_speeds[player_index].top_height = object->object.position.z;
 		}
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_host), checked
+against the game's otherwise. Its world: the arguments, the records, and
+the units the predictions name (moved). */
+static void distributed_apply_predictions(
+	void)
+{
+	struct halo_sim_network_predictions *arguments = &distributed_prediction_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[16];
+	long region_count = 0;
+	int checking = FALSE;
+	short player_index;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->predictions = (unsigned long)&distributed_predictions[0];
+	arguments->accepted = (unsigned long)&distributed_accepted[0];
+	arguments->host_speeds = (unsigned long)&distributed_host_speeds[0];
+	arguments->gravity = global_gravity;
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)&distributed_predictions[0];
+	regions[region_count++].size = sizeof(distributed_predictions);
+	regions[region_count].address = (unsigned long)&distributed_accepted[0];
+	regions[region_count++].size = sizeof(distributed_accepted);
+	regions[region_count].address = (unsigned long)&distributed_host_speeds[0];
+	regions[region_count++].size = sizeof(distributed_host_speeds);
+	for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
+	{
+		struct object_header_datum *header;
+		long other;
+
+		if (!distributed_predictions[player_index].valid)
+			continue;
+		header = (struct object_header_datum *)datum_try_and_get(object_header_data,
+			distributed_predictions[player_index].state.unit_index);
+		if (!header || !header->datum)
+			continue;
+		for (other = 4; other < region_count && regions[other].address != (unsigned long)header->datum; other++);
+		if (other < region_count)
+			continue;
+		/* (more than there is room for: the region count tells the check,
+		which leaves the step out) */
+		if (region_count == 16)
+		{
+			region_count++;
+			break;
+		}
+		regions[region_count].address = (unsigned long)header->datum;
+		regions[region_count++].size = header->data_size;
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_apply_predictions, &context, regions, region_count,
+		network_predictions_call, &checking))
+	{
+		return;
+	}
+	distributed_apply_predictions_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_apply_predictions);
 }
 
 /* (a client) the host's word on a player's unit */

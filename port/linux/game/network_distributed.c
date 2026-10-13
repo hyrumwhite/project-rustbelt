@@ -3002,6 +3002,10 @@ after it (distributed_host_send_players). */
 network_host), recorded in check mode, and what the plan takes of the game
 as the tick begins */
 static struct halo_sim_network_plan distributed_plan_arguments;
+/* ... and of the sending of what it planned */
+static struct halo_sim_network_send_players distributed_send_arguments;
+typedef char distributed_send_entry_assert[sizeof(distributed_send_arguments.entry) >= DISTRIBUTED_UNIT_STATE_MAXIMUM_SIZE &&
+	sizeof(distributed_send_arguments.entry) >= DISTRIBUTED_RELAYED_ACTION_MAXIMUM_SIZE ? 1 : -1];
 static struct player_action const *distributed_plan_recent[DISTRIBUTED_INPUT_HISTORY];
 static short distributed_plan_recent_counts[DISTRIBUTED_INPUT_HISTORY];
 
@@ -3031,6 +3035,17 @@ void network_plan_call(
 	case _network_plan_call_sees:
 		call->result = BIT_VECTOR_TEST_FLAG(structure_bsp_get_cluster_pvs(global_structure_bsp_get(), (short)call->a),
 			(short)call->b) != 0;
+		break;
+	case _network_plan_call_packer_begin:
+		distributed_packer_begin(&distributed_packer, (short)call->a, (byte)call->b,
+			call->actor ? &distributed_host_update_number : NULL,
+			(word)(call->actor ? sizeof(distributed_host_update_number) : 0));
+		break;
+	case _network_plan_call_packer_add:
+		distributed_packer_add(&distributed_packer, distributed_send_arguments.entry, (word)call->b);
+		break;
+	case _network_plan_call_packer_flush:
+		distributed_packer_flush(&distributed_packer);
 		break;
 	}
 	halo_sim_world_event_end(call, opened);
@@ -3343,45 +3358,91 @@ static void distributed_host_plan_players(
 
 /* (the host) to each client what distributed_host_plan_players decided, the
 input before the units, as the host's tick had them */
+/* port: the game's (halo_sim.c checks Rust's against it): the entries
+written into the arguments, the packer through the plan's calls */
+static void distributed_host_send_players_game(
+	void)
+{
+	struct halo_sim_network_send_players const *arguments = &distributed_send_arguments;
+	short machine_number;
+
+	for (machine_number = 0; machine_number < arguments->machine_count; machine_number++)
+	{
+		long machine_index = arguments->machine_indices[machine_number];
+		short player_index;
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_plan_call_packer_begin;
+		call.actor = TRUE;
+		call.a = machine_index;
+		call.b = _distributed_message_relayed_actions;
+		network_plan_call(&call);
+		for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
+		{
+			if (TEST_FLAG(distributed_sends[machine_index][player_index], _distributed_send_action_bit))
+			{
+				network_plan_simple(_network_plan_call_packer_add, 0,
+					distributed_relayed_action_write(&distributed_host_actions[player_index],
+						distributed_send_arguments.entry));
+			}
+		}
+		network_plan_simple(_network_plan_call_packer_flush, 0, 0);
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_plan_call_packer_begin;
+		call.actor = FALSE;
+		call.a = machine_index;
+		call.b = _distributed_message_unit_states;
+		network_plan_call(&call);
+		for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
+		{
+			if (TEST_FLAG(distributed_sends[machine_index][player_index], _distributed_send_state_bit))
+			{
+				network_plan_simple(_network_plan_call_packer_add, 0,
+					distributed_unit_state_write(&distributed_host_states[player_index],
+						distributed_player_machines[player_index] == machine_index, distributed_send_arguments.entry));
+			}
+		}
+		network_plan_simple(_network_plan_call_packer_flush, 0, 0);
+	}
+}
+
+/* (the host) to each client what distributed_host_plan_players decided, the
+input before the units, as the host's tick had them */
+/* port: Rust's in Rust's mode (crates/halo_map's network_host), checked
+against the game's otherwise; its world the arguments (the entry packed) */
 static void distributed_host_send_players(
 	void)
 {
-	long machine_indices[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	short machine_count = distributed_client_machines(machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
-	short machine_number;
+	struct halo_sim_network_send_players *arguments = &distributed_send_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[1];
+	int checking = FALSE;
 
-	for (machine_number = 0; machine_number < machine_count; machine_number++)
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->sends = (unsigned long)&distributed_sends[0][0];
+	arguments->states = (unsigned long)&distributed_host_states[0];
+	arguments->actions = (unsigned long)&distributed_host_actions[0];
+	arguments->player_machines = (unsigned long)&distributed_player_machines[0];
+	arguments->relayed_type = _distributed_message_relayed_actions;
+	arguments->unit_type = _distributed_message_unit_states;
+	arguments->machine_count = distributed_client_machines((long *)arguments->machine_indices,
+		HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_send_players, &context, regions, 1,
+		network_plan_call, &checking))
 	{
-		long machine_index = machine_indices[machine_number];
-		short player_index;
-
-		distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_relayed_actions,
-			&distributed_host_update_number, sizeof(distributed_host_update_number));
-		for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
-		{
-			byte entry[DISTRIBUTED_RELAYED_ACTION_MAXIMUM_SIZE];
-
-			if (TEST_FLAG(distributed_sends[machine_index][player_index], _distributed_send_action_bit))
-			{
-				distributed_packer_add(&distributed_packer, entry,
-					distributed_relayed_action_write(&distributed_host_actions[player_index], entry));
-			}
-		}
-		distributed_packer_flush(&distributed_packer);
-		distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_unit_states, NULL, 0);
-		for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
-		{
-			byte entry[DISTRIBUTED_UNIT_STATE_MAXIMUM_SIZE];
-
-			if (TEST_FLAG(distributed_sends[machine_index][player_index], _distributed_send_state_bit))
-			{
-				distributed_packer_add(&distributed_packer, entry,
-					distributed_unit_state_write(&distributed_host_states[player_index],
-						distributed_player_machines[player_index] == machine_index, entry));
-			}
-		}
-		distributed_packer_flush(&distributed_packer);
+		return;
 	}
+	distributed_host_send_players_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_send_players);
 }
 
 /* (a client) the host's input for its players, for the others it drives:

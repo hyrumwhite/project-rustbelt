@@ -2367,6 +2367,7 @@ enum
 	_halo_sim_world_step_network_host_tick,
 	_halo_sim_world_step_network_vehicle_predictions,
 	_halo_sim_world_step_network_plan_players,
+	_halo_sim_world_step_network_send_players,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2700,7 +2701,33 @@ enum
 	/* whether the cluster a sees the cluster b (the map's potentially
 	visible set) */
 	_network_plan_call_sees,
+	/* the host's packer begun for the machine a's messages of type b,
+	with the update number first if actor */
+	_network_plan_call_packer_begin,
+	/* the send's entry of b bytes into the packer */
+	_network_plan_call_packer_add,
+	/* the packer's message so far into the batch */
+	_network_plan_call_packer_flush,
 };
+
+/* crates/halo_map's network_host::SendArguments: the host's sending of what
+it planned each client is sent of each player: the plan's records, the
+messages' types, the client machines, and the entry being packed */
+struct halo_sim_network_send_players
+{
+	unsigned long sends;
+	unsigned long states;
+	unsigned long actions;
+	unsigned long player_machines;
+	short relayed_type;
+	short unit_type;
+	long machine_count;
+	long machine_indices[128];
+	unsigned char entry[64];
+};
+
+typedef char halo_sim_network_send_players_size_assert[
+	sizeof(struct halo_sim_network_send_players) == 4 * 4 + 4 + 4 + 128 * 4 + 64 ? 1 : -1];
 
 void network_plan_call(struct halo_sim_ai_call *call);
 

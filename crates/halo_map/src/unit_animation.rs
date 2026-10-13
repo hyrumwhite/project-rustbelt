@@ -162,7 +162,11 @@ pub struct UnitAnimationState {
     pub action: i8,
     pub overlay_action: i8,
     pub base_seat_index: i8,
-    pub pad: i8,
+    /// Set when the update starts an interpolation: `object_start_interpolation`
+    /// also keeps the object's node orientations as they are, to blend from,
+    /// which the game does when it takes the state back (halo_sim.c). Not the
+    /// unit's: the game's state has it clear.
+    pub interpolation_started: i8,
     pub pad2: i16,
     pub object_animation_graph_index: u32,
 }
@@ -501,6 +505,7 @@ fn slot(animations: &[i16], index: i16) -> i16 {
 
 /// `object_start_interpolation`'s counters.
 fn start_interpolation(s: &mut UnitAnimationState, frame_count: i16) {
+    s.interpolation_started = 1;
     if frame_count as i32 >= s.interpolation_frame_count as i32 - s.interpolation_frame_index as i32 {
         s.interpolation_frame_index = 0;
         s.interpolation_frame_count = frame_count;

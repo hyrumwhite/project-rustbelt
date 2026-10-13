@@ -11,13 +11,14 @@
 //! mouse play the game (forwarded through the bridge; F12 lets go), so the
 //! game's own window can stay in the background.
 
-use crate::level::{halo_affine, halo_to_bevy_affine, AnimatedModel, LevelAssets, LevelBuilder};
+use crate::level::{halo_affine, halo_to_bevy_affine, AnimatedModel, LevelAssets, LevelBuilder, TracedMesh};
 use crate::material::{HaloEnvironmentMaterial, HaloTransparentMaterial, NeutralDetail};
 use bevy::{
     camera_controller::free_camera::FreeCamera,
     math::Affine3A,
     platform::collections::HashMap,
     prelude::*,
+    solari::prelude::RaytracingMesh3d,
 };
 use halo_bridge::{Bridge, Snapshot, OBJECT_FIRST_PERSON, OBJECT_HIDDEN, OBJECT_MODEL};
 use std::{sync::Arc, time::Duration};
@@ -184,6 +185,10 @@ struct Tracked {
     camouflaged: bool,
     model: Arc<AnimatedModel>,
     nodes: Vec<Option<Entity>>,
+    /// The rays' entities for its bending parts (`AnimatedModel::traced_skins`),
+    /// and the node transforms they were last skinned to.
+    skins: Vec<Entity>,
+    skinned_to: Vec<Mat4>,
 }
 
 /// The game's objects drawn so far, by object datum index.
@@ -256,8 +261,11 @@ fn sync_objects(
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
     mut flat_normal: Local<Option<Handle<Image>>>,
+    mut timing: Local<SyncTiming>,
 ) {
     let Some(snapshot) = &link.latest else { return };
+    let started = std::time::Instant::now();
+    timing.frame(snapshot.frame_index);
     let flat_normal = flat_normal.get_or_insert_with(|| images.add(crate::material::flat_normal_image())).clone();
     let to_bevy = halo_to_bevy_affine();
     let from_bevy = to_bevy.inverse();
@@ -310,7 +318,8 @@ fn sync_objects(
                 objects.modelless.insert(key, ());
                 continue;
             };
-            let (root, nodes) = builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, camouflaged(object), assets);
+            let (root, nodes, skins) =
+                builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, camouflaged(object), assets);
             objects.tracked.insert(
                 object.object_index,
                 Tracked {
@@ -321,12 +330,14 @@ fn sync_objects(
                     camouflaged: camouflaged(object),
                     model,
                     nodes,
+                    skins,
+                    skinned_to: Vec::new(),
                 },
             );
             // newly spawned entities take their transforms next frame
             continue;
         }
-        let tracked = &objects.tracked[&object.object_index];
+        let Some(tracked) = objects.tracked.get_mut(&object.object_index) else { continue };
         if let Ok(mut v) = visibility.get_mut(tracked.root) {
             // (the first-person unit as the game leaves it out: drawn, its
             // body would close round the camera and shade the first-person
@@ -341,15 +352,36 @@ fn sync_objects(
             }
         }
         let nodes = snapshot.object_nodes(object);
+        let mut node_matrices = Vec::with_capacity(tracked.nodes.len());
         for (index, entity) in tracked.nodes.iter().enumerate() {
-            let (Some(entity), Some(node), Some(default_inverse)) =
-                (entity, nodes.get(index), tracked.model.default_inverses.get(index))
-            else {
+            let (Some(node), Some(default_inverse)) = (nodes.get(index), tracked.model.default_inverses.get(index)) else {
+                node_matrices.push(Mat4::IDENTITY);
                 continue;
             };
-            if let Ok(mut transform) = transforms.get_mut(*entity) {
-                *transform = node_transform(node, default_inverse, &to_bevy, &from_bevy);
+            let matrix = node_matrix(node, default_inverse, &to_bevy, &from_bevy);
+            node_matrices.push(matrix);
+            if let Some(entity) = entity
+                && let Ok(mut transform) = transforms.get_mut(*entity)
+            {
+                *transform = Transform::from_matrix(matrix);
             }
+        }
+        // the rays' copies of the bending parts, skinned again when the
+        // nodes moved (and not for a hidden object, which the rays don't see)
+        if !tracked.skins.is_empty()
+            && object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) == 0
+            && tracked.skinned_to != node_matrices
+        {
+            // (a new mesh each time: Solari queues each mesh's acceleration
+            // structure for compaction once, and one changed in place every
+            // frame is queued again before that is done)
+            for (skin, &entity) in tracked.model.traced_skins.iter().zip(&tracked.skins) {
+                timing.skins += 1;
+                timing.skinned_vertices += skin.vertex_count() as u64;
+                let mesh = assets.meshes.add(skin.mesh(&node_matrices));
+                commands.entity(entity).insert((RaytracingMesh3d(mesh.clone()), TracedMesh(mesh)));
+            }
+            tracked.skinned_to = node_matrices;
         }
     }
 
@@ -361,6 +393,58 @@ fn sync_objects(
         }
         keep
     });
+    timing.busy += started.elapsed();
+    timing.report();
+}
+
+/// `HALO_RT_FRAME_LOG`: logs every few seconds how often the viewer drew,
+/// how many of the game's frames it showed, and what sync_objects cost.
+#[derive(Default)]
+struct SyncTiming {
+    since: Option<std::time::Instant>,
+    frames: u32,
+    /// frames that showed the same game frame as the one before, and game
+    /// frames never shown
+    repeated: u32,
+    skipped: u32,
+    last_game_frame: u32,
+    busy: Duration,
+    skins: u32,
+    skinned_vertices: u64,
+}
+
+impl SyncTiming {
+    fn frame(&mut self, game_frame: u32) {
+        self.frames += 1;
+        if game_frame == self.last_game_frame {
+            self.repeated += 1;
+        } else if self.last_game_frame != 0 && game_frame > self.last_game_frame + 1 {
+            self.skipped += game_frame - self.last_game_frame - 1;
+        }
+        self.last_game_frame = game_frame;
+    }
+
+    fn report(&mut self) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var_os("HALO_RT_FRAME_LOG").is_some()) {
+            return;
+        }
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        let elapsed = since.elapsed().as_secs_f32();
+        if elapsed < 3.0 {
+            return;
+        }
+        info!(
+            "frames: {:.0}/s drawn, {} repeated a game frame, {} game frames not shown; sync_objects {:.2} ms a frame; {:.0} skins ({:.0}k vertices) a second",
+            self.frames as f32 / elapsed,
+            self.repeated,
+            self.skipped,
+            self.busy.as_secs_f32() * 1000.0 / self.frames.max(1) as f32,
+            self.skins as f32 / elapsed,
+            self.skinned_vertices as f32 / elapsed / 1000.0
+        );
+        *self = SyncTiming { last_game_frame: self.last_game_frame, ..default() };
+    }
 }
 
 /// Whether an object draws as camouflaged (the game's own fades in; this
@@ -372,7 +456,7 @@ fn camouflaged(object: &halo_bridge::Object) -> bool {
 /// A node's draw transform in Bevy space: the game's node matrix times the
 /// node's default inverse (model space to world), conjugated by the Halo to
 /// Bevy change of space (the meshes are already in Bevy space).
-fn node_transform(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy: &Affine3A, from_bevy: &Affine3A) -> Transform {
+fn node_matrix(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy: &Affine3A, from_bevy: &Affine3A) -> Mat4 {
     let world = halo_affine(&halo_map::model::Matrix4x3 {
         scale: node.scale,
         forward: node.forward,
@@ -380,7 +464,7 @@ fn node_transform(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy:
         up: node.up,
         position: node.position,
     });
-    Transform::from_matrix(Mat4::from(*to_bevy * world * *default_inverse * *from_bevy))
+    Mat4::from(*to_bevy * world * *default_inverse * *from_bevy)
 }
 
 /// Shows only the BSP the game is in (and the placed light fixtures of it),

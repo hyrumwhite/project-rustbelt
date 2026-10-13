@@ -25,6 +25,28 @@ fn main() {
                     })
                     .collect();
                 println!("  {} / {}: {}", region.name, permutation.name, counts.join(" "));
+                // the triangles whose winding (clockwise from the front, the
+                // game's) faces away from their vertices' normals
+                let top = permutation.geometry_indices[halo_map::model::HIGHEST_DETAIL];
+                if top >= 0 {
+                    for (part_index, part) in model.geometry(top as usize).unwrap_or_default().iter().enumerate() {
+                        let mut against = 0;
+                        for t in part.indices.chunks_exact(3) {
+                            let [a, b, c] = [t[0], t[1], t[2]].map(|i| part.vertices[i as usize]);
+                            let e1 = [b.position[0] - a.position[0], b.position[1] - a.position[1], b.position[2] - a.position[2]];
+                            let e2 = [c.position[0] - a.position[0], c.position[1] - a.position[1], c.position[2] - a.position[2]];
+                            let face = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                            let normal: Vec<f32> = (0..3).map(|k| a.normal[k] + b.normal[k] + c.normal[k]).collect();
+                            // (clockwise from the front: the cross product points back)
+                            if face[0] * normal[0] + face[1] * normal[1] + face[2] * normal[2] > 0.0 {
+                                against += 1;
+                            }
+                        }
+                        if against > 0 {
+                            println!("    part {part_index} (shader {}): {against} of {} triangles wound against their normals", part.shader_index, part.indices.len() / 3);
+                        }
+                    }
+                }
             }
         }
     }

@@ -88,6 +88,9 @@ struct Args {
     /// (`<name>_<frame>.png` beside it)
     #[argh(option)]
     screenshot_every: Option<u32>,
+    /// with --screenshot-every, the frame to start at
+    #[argh(option, default = "0")]
+    screenshot_from: u32,
     /// draw a running OpenCE game (its objects and camera) instead of the
     /// map's placements; the map is the game's (start OpenCE with
     /// HALO_BEVY_BRIDGE=1)
@@ -786,6 +789,7 @@ fn screenshot_and_exit(
     if let (Some(every), Some(path)) = (args.screenshot_every, &args.screenshot)
         && every > 0
         && *frames % every == 0
+        && *frames >= args.screenshot_from
         && *frames < args.screenshot_after
     {
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();

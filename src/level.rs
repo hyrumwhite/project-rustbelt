@@ -139,9 +139,13 @@ type ModelMeshes = Vec<(Handle<Mesh>, Surface, usize)>;
 /// [`LevelBuilder::animated_model`]).
 pub struct AnimatedModel {
     pub name: String,
-    /// Split by node and rigid, for the rays (Solari traces no skinned
-    /// meshes); with `skinned`, the camera sees those instead.
+    /// The parts whose every triangle follows one node wholly, split by node
+    /// and rigid, for the rays (Solari traces no skinned meshes); with
+    /// `skinned`, the camera sees those instead.
     pieces: Vec<ModelPiece>,
+    /// The parts that bend between nodes, for the rays: skinned here each
+    /// time the nodes move, so that they keep to the surface the camera sees.
+    pub traced_skins: Vec<TracedSkin>,
     skinned: Vec<SkinnedPart>,
     /// Identity, one per node: the nodes' transforms already include their
     /// default inverse.
@@ -169,6 +173,60 @@ struct SkinnedPart {
 /// How far inside a skinned model its rigid ray-traced copy sits (world
 /// units: 2 cm).
 const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
+
+/// How far inside the camera's skinned surface the rays' skinned copy sits
+/// (meters): the two are skinned alike, but on different processors.
+const TRACED_SKIN_INSET: f32 = 0.005;
+
+/// A model part that bends between nodes, as the rays see it: its vertices
+/// at rest (Bevy space) with their two nodes and weights, skinned by
+/// [`TracedSkin::mesh`] to the nodes' current transforms.
+pub struct TracedSkin {
+    positions: Vec<Vec3>,
+    normals: Vec<Vec3>,
+    tangents: Vec<Vec4>,
+    uvs: Vec<[f32; 2]>,
+    joints: Vec<[u16; 2]>,
+    weights: Vec<[f32; 2]>,
+    /// Counter-clockwise (Bevy's front faces).
+    indices: Vec<u32>,
+    surface: Surface,
+    shader: Option<u32>,
+}
+
+impl TracedSkin {
+    pub fn vertex_count(&self) -> usize {
+        self.positions.len()
+    }
+
+    /// The part skinned to the nodes' transforms (Bevy space, each node's
+    /// default inverse included), as the camera's skinned mesh is: each
+    /// vertex blended between its two nodes by their weights.
+    pub fn mesh(&self, nodes: &[Mat4]) -> Mesh {
+        let node = |index: u16| nodes.get(index as usize).copied().unwrap_or(Mat4::IDENTITY);
+        let count = self.positions.len();
+        let (mut positions, mut normals, mut tangents) =
+            (Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count));
+        for i in 0..count {
+            let ([a, b], [wa, wb]) = (self.joints[i], self.weights[i]);
+            let (ma, mb) = (node(a), node(b));
+            let (p, n, t) = (self.positions[i], self.normals[i], self.tangents[i]);
+            let normal = (wa * ma.transform_vector3(n) + wb * mb.transform_vector3(n)).normalize_or_zero();
+            let position = wa * ma.transform_point3(p) + wb * mb.transform_point3(p) - normal * TRACED_SKIN_INSET;
+            let tangent =
+                (wa * ma.transform_vector3(t.truncate()) + wb * mb.transform_vector3(t.truncate())).normalize_or_zero();
+            positions.push(position.to_array());
+            normals.push(normal.to_array());
+            tangents.push(tangent.extend(t.w).to_array());
+        }
+        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs.clone())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, tangents)
+            .with_inserted_indices(Indices::U32(self.indices.clone()))
+    }
+}
 
 /// What a mesh entity is for.
 enum MeshUse {
@@ -442,7 +500,7 @@ impl LevelBuilder {
                     tangent: v.tangent,
                     texcoord: [v.texcoord[0] + uv_offset[0] / uv_scale[0].max(1e-6), v.texcoord[1] + uv_offset[1] / uv_scale[1].max(1e-6)],
                 });
-                let mesh = assets.meshes.add(build_mesh(vertices, &part.indices, uv_scale));
+                let mesh = assets.meshes.add(build_model_mesh(vertices, &part.indices, uv_scale));
                 commands.spawn((
                     Name::new(format!("{} layer {layer}", info.name)),
                     Mesh3d(mesh),
@@ -510,7 +568,8 @@ impl LevelBuilder {
         self.spawn_mesh_as(commands, parent, name, mesh, surface, mode);
     }
 
-    /// Spawns a mesh for the camera, for the rays, or both (see [`MeshUse`]).
+    /// Spawns a mesh for the camera, for the rays, or both (see [`MeshUse`]);
+    /// the rays' entity, if any.
     fn spawn_mesh_as(
         &mut self,
         commands: &mut Commands,
@@ -519,7 +578,7 @@ impl LevelBuilder {
         mesh: Handle<Mesh>,
         surface: &Surface,
         mode: MeshUse,
-    ) {
+    ) -> Option<Entity> {
         let (traced_use, raster_use) = match &mode {
             MeshUse::Both => (true, true),
             MeshUse::Traced => (true, false),
@@ -556,7 +615,7 @@ impl LevelBuilder {
                     self.stats.meshes += 1;
                     self.stats.transparent_meshes += 1;
                 }
-                return;
+                return None;
             }
         };
         let mut traced = None;
@@ -598,6 +657,7 @@ impl LevelBuilder {
             }
         }
         self.stats.meshes += 1;
+        traced
     }
 
     /// A model's meshes split by node, for an object the game moves (see
@@ -636,6 +696,7 @@ impl LevelBuilder {
         let cache = self.cache.clone();
         let model = Model::load(&cache, datum)?;
         let mut pieces = Vec::new();
+        let mut traced_skins = Vec::new();
         let mut skinned = Vec::new();
         for geometry in model.geometries_for(permutations, model::HIGHEST_DETAIL) {
             for part in model.geometry(geometry)? {
@@ -652,8 +713,79 @@ impl LevelBuilder {
                     self.stats.skipped_transparent += 1;
                     continue;
                 };
+                let last_node = model.nodes.len().saturating_sub(1) as u16;
+                let joints: Vec<[u16; 4]> = part
+                    .vertices
+                    .iter()
+                    .map(|v| [(v.nodes[0] as u16).min(last_node), (v.nodes[1] as u16).min(last_node), 0, 0])
+                    .collect();
+                let weights: Vec<[f32; 4]> = part
+                    .vertices
+                    .iter()
+                    .map(|v| {
+                        let (a, b) = (v.node_weights[0].max(0.0), v.node_weights[1].max(0.0));
+                        let total = a + b;
+                        if total > 0.0 { [a / total, b / total, 0.0, 0.0] } else { [1.0, 0.0, 0.0, 0.0] }
+                    })
+                    .collect();
+                // (a vertex's one node, where it follows only that)
+                let sole_node = |index: u32| {
+                    let (j, w) = (joints[index as usize], weights[index as usize]);
+                    if w[1] == 0.0 || j[0] == j[1] {
+                        Some(j[0])
+                    } else if w[0] == 0.0 {
+                        Some(j[1])
+                    } else {
+                        None
+                    }
+                };
+                let rigid = part.indices.chunks_exact(3).all(|t| {
+                    let node = sole_node(t[0]);
+                    node.is_some() && sole_node(t[1]) == node && sole_node(t[2]) == node
+                });
+                if !rigid {
+                    let source: Vec<SourceVertex> = part
+                        .vertices
+                        .iter()
+                        .map(|v| SourceVertex {
+                            position: v.position,
+                            normal: v.normal,
+                            binormal: v.binormal,
+                            tangent: v.tangent,
+                            texcoord: v.texcoord,
+                        })
+                        .collect();
+                    let rest = build_model_mesh(source.into_iter(), &part.indices, shader.uv_scale);
+                    let vec3s = |attribute| match rest.attribute(attribute) {
+                        Some(VertexAttributeValues::Float32x3(values)) => values.iter().map(|&v| Vec3::from(v)).collect(),
+                        _ => Vec::new(),
+                    };
+                    let tangents = match rest.attribute(Mesh::ATTRIBUTE_TANGENT) {
+                        Some(VertexAttributeValues::Float32x4(values)) => values.iter().map(|&v| Vec4::from(v)).collect(),
+                        _ => Vec::new(),
+                    };
+                    let uvs = match rest.attribute(Mesh::ATTRIBUTE_UV_0) {
+                        Some(VertexAttributeValues::Float32x2(values)) => values.clone(),
+                        _ => Vec::new(),
+                    };
+                    let indices = match rest.indices() {
+                        Some(Indices::U32(indices)) => indices.clone(),
+                        _ => Vec::new(),
+                    };
+                    traced_skins.push(TracedSkin {
+                        positions: vec3s(Mesh::ATTRIBUTE_POSITION),
+                        normals: vec3s(Mesh::ATTRIBUTE_NORMAL),
+                        tangents,
+                        uvs,
+                        joints: joints.iter().map(|j| [j[0], j[1]]).collect(),
+                        weights: weights.iter().map(|w| [w[0], w[1]]).collect(),
+                        indices,
+                        surface: surface.clone(),
+                        shader: shader_ref.datum,
+                    });
+                }
                 let mut by_node: HashMap<usize, Vec<u32>> = HashMap::default();
-                for triangle in part.indices.chunks_exact(3) {
+                for triangle in part.indices.chunks_exact(3).filter(|_| rigid) {
                     let v = &part.vertices[triangle[0] as usize];
                     let node = if v.node_weights[0] >= v.node_weights[1] { v.nodes[0] } else { v.nodes[1] } as usize;
                     by_node.entry(node.min(model.nodes.len().saturating_sub(1))).or_default().extend_from_slice(triangle);
@@ -676,27 +808,12 @@ impl LevelBuilder {
                     ..v
                 };
                 for (node, indices) in by_node {
-                    let mesh = assets.meshes.add(build_mesh(source().map(inset), &indices, shader.uv_scale));
+                    let mesh = assets.meshes.add(build_model_mesh(source().map(inset), &indices, shader.uv_scale));
                     pieces.push(ModelPiece { node, mesh, surface: surface.clone(), shader: shader_ref.datum });
                 }
                 // the whole part, skinned: each vertex follows its nodes by
                 // their weights, so joints bend without seams
-                let last_node = model.nodes.len().saturating_sub(1) as u16;
-                let joints: Vec<[u16; 4]> = part
-                    .vertices
-                    .iter()
-                    .map(|v| [(v.nodes[0] as u16).min(last_node), (v.nodes[1] as u16).min(last_node), 0, 0])
-                    .collect();
-                let weights: Vec<[f32; 4]> = part
-                    .vertices
-                    .iter()
-                    .map(|v| {
-                        let (a, b) = (v.node_weights[0].max(0.0), v.node_weights[1].max(0.0));
-                        let total = a + b;
-                        if total > 0.0 { [a / total, b / total, 0.0, 0.0] } else { [1.0, 0.0, 0.0, 0.0] }
-                    })
-                    .collect();
-                let mesh = build_mesh(source(), &part.indices, shader.uv_scale)
+                let mesh = build_model_mesh(source(), &part.indices, shader.uv_scale)
                     .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(joints))
                     .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, weights);
                 skinned.push(SkinnedPart { mesh: assets.meshes.add(mesh), surface: surface.clone(), shader: shader_ref.datum });
@@ -705,7 +822,7 @@ impl LevelBuilder {
         let default_inverses: Vec<Affine3A> = model.nodes.iter().map(|n| halo_affine(&n.default_inverse)).collect();
         let inverse_bindposes =
             assets.inverse_bindposes.add(SkinnedMeshInverseBindposes::from(vec![Mat4::IDENTITY; default_inverses.len().max(1)]));
-        Ok(AnimatedModel { name: model.name, pieces, skinned, inverse_bindposes, default_inverses })
+        Ok(AnimatedModel { name: model.name, pieces, traced_skins, skinned, inverse_bindposes, default_inverses })
     }
 
     /// Spawns an animated model: a root, an entity per node it draws (whose
@@ -718,7 +835,7 @@ impl LevelBuilder {
         change_colors: &[[f32; 3]; 4],
         camouflaged: bool,
         assets: &mut LevelAssets,
-    ) -> (Entity, Vec<Option<Entity>>) {
+    ) -> (Entity, Vec<Option<Entity>>, Vec<Entity>) {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
         self.adopt(commands, root);
         // every node, as the skinned parts' joints
@@ -747,22 +864,33 @@ impl LevelBuilder {
                     ));
                 }
             }
-            return (root, nodes.into_iter().map(Some).collect());
+            return (root, nodes.into_iter().map(Some).collect(), Vec::new());
         }
         // the rays see the rigid pieces; the camera sees the skinned parts
         for piece in &model.pieces {
             let surface = self.coloured_surface(&piece.surface, piece.shader, change_colors, assets);
             let mode = if raster && model.skinned.is_empty() { MeshUse::Both } else { MeshUse::Traced };
-            self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
+            let _ = self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
+        }
+        // the bending parts, the object's own entities (in the world: the
+        // root stays put), given a mesh skinned anew as its nodes move
+        // (crate::bridge)
+        let rest = vec![Mat4::IDENTITY; model.default_inverses.len()];
+        let mut skins = Vec::new();
+        for skin in &model.traced_skins {
+            let surface = self.coloured_surface(&skin.surface, skin.shader, change_colors, assets);
+            let mesh = assets.meshes.add(skin.mesh(&rest));
+            skins.extend(self.spawn_mesh_as(commands, root, model.name.clone(), mesh, &surface, MeshUse::Traced));
         }
         if raster {
             for part in &model.skinned {
                 let surface = self.coloured_surface(&part.surface, part.shader, change_colors, assets);
                 let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
-                self.spawn_mesh_as(commands, root, model.name.clone(), part.mesh.clone(), &surface, MeshUse::Raster(Some(skin)));
+                let _ =
+                    self.spawn_mesh_as(commands, root, model.name.clone(), part.mesh.clone(), &surface, MeshUse::Raster(Some(skin)));
             }
         }
-        (root, nodes.into_iter().map(Some).collect())
+        (root, nodes.into_iter().map(Some).collect(), skins)
     }
 
     /// A model's meshes at the highest level of detail, made once per
@@ -820,7 +948,7 @@ impl LevelBuilder {
                     tangent: v.tangent,
                     texcoord: v.texcoord,
                 });
-                let mesh = assets.meshes.add(build_mesh(vertices, &part.indices, shader.uv_scale));
+                let mesh = assets.meshes.add(build_model_mesh(vertices, &part.indices, shader.uv_scale));
                 out.push((mesh, surface, part.indices.len() / 3));
             }
         }
@@ -977,6 +1105,15 @@ impl LevelBuilder {
         // the ray-traced surface gets the bump map too, where it tiles as the
         // base map does (StandardMaterial has one set of texture coordinates)
         let mut material = material;
+        // a model shader's cut-out (the game's alpha test, reference 0x7f, on
+        // the base map's alpha: leaves, grilles) and its two sides
+        if info.environment.is_none() && info.alpha_tested && base_color_texture.is_some() {
+            material.alpha_mode = AlphaMode::Mask(0.5);
+        }
+        if info.two_sided {
+            material.double_sided = true;
+            material.cull_mode = None;
+        }
         if let Some(environment) = &info.environment {
             let base_size = info.base_map.and_then(|b| b.datum).and_then(|d| bitmap_size(&self.cache, d));
             if let Some((normal_map, scale)) = self.bump_map(environment, base_size, assets.images)
@@ -1288,8 +1425,20 @@ fn placement_transform(placement: &Placement) -> Transform {
 /// Halo triangles as a Solari-compatible mesh: positions, normals, UV0 and
 /// tangents, u32 indices, no UV1.
 fn build_mesh(vertices: impl Iterator<Item = SourceVertex>, indices: &[u32], uv_scale: [f32; 2]) -> Mesh {
+    build_mesh_oriented(vertices, indices, uv_scale, false)
+}
+
+/// [`build_mesh`] for a model's part, its triangles turned to face their
+/// vertices' normals (see below).
+fn build_model_mesh(vertices: impl Iterator<Item = SourceVertex>, indices: &[u32], uv_scale: [f32; 2]) -> Mesh {
+    build_mesh_oriented(vertices, indices, uv_scale, true)
+}
+
+fn build_mesh_oriented(vertices: impl Iterator<Item = SourceVertex>, indices: &[u32], uv_scale: [f32; 2], orient: bool) -> Mesh {
     let (mut positions, mut normals, mut uvs, mut tangents) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut sources = Vec::new();
     for v in vertices {
+        sources.push((Vec3::from(v.position), Vec3::from(v.normal)));
         positions.push(halo_to_bevy(v.position, METERS_PER_WORLD_UNIT));
         normals.push(halo_to_bevy(v.normal, 1.0));
         uvs.push([v.texcoord[0] * uv_scale[0], v.texcoord[1] * uv_scale[1]]);
@@ -1299,8 +1448,21 @@ fn build_mesh(vertices: impl Iterator<Item = SourceVertex>, indices: &[u32], uv_
         tangents.push([x, y, z, handedness]);
     }
     // Halo's triangles are clockwise seen from the front (Direct3D);
-    // Bevy's front faces are counter-clockwise.
-    let indices: Vec<u32> = indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
+    // Bevy's front faces are counter-clockwise. A few are wound against
+    // their vertices' normals (a model's handful): the game culls them where
+    // they face the camera and lights them by their normals where they face
+    // away, where the rays' lighting finds them black; turned to face their
+    // normals (models only), they fill their holes and stay unseen from
+    // behind.
+    let indices: Vec<u32> = indices
+        .chunks_exact(3)
+        .flat_map(|t| {
+            let corner = |i: u32| sources.get(i as usize).copied().unwrap_or_default();
+            let ((a, na), (b, nb), (c, nc)) = (corner(t[0]), corner(t[1]), corner(t[2]));
+            // (clockwise from the front: the cross product points back)
+            if orient && (b - a).cross(c - a).dot(na + nb + nc) > 0.0 { [t[0], t[1], t[2]] } else { [t[0], t[2], t[1]] }
+        })
+        .collect();
 
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)

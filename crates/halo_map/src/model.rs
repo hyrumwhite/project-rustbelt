@@ -236,7 +236,8 @@ fn decode_vertex(b: &[u8], uv_scale: [f32; 2]) -> Vertex {
     let u = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
     let s = |o: usize| i16::from_le_bytes([b[o], b[o + 1]]);
     // node indices are stored ×3 (rasterizer_geometry_uncompress_vertices)
-    let weight = s(30) as u8 as f32 / 255.0;
+    // the first node's weight, of 32767 (rasterizer_geometry_uncompress_vertices)
+    let weight = (s(30) as f32 / 32767.0).clamp(0.0, 1.0);
     Vertex {
         position: [f(0), f(4), f(8)],
         normal: math::unpack_vector_11_11_10(u(12)),

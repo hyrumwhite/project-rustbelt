@@ -234,8 +234,11 @@ pub struct ShaderInfo {
     pub self_illumination_map: Option<TagRef>,
     /// `shader_environment` type (normal, blended, specular-mask-in-alpha).
     pub environment_type: Option<i16>,
-    /// `shader_environment` alpha-tested flag.
+    /// Alpha-tested: an environment shader by its flag (the bump map's alpha
+    /// cuts it out), a model shader unless flagged otherwise (the base map's).
     pub alpha_tested: bool,
+    /// Drawn without back-face culling (a model shader's two-sided flags).
+    pub two_sided: bool,
     pub uv_scale: [f32; 2],
     /// For transparent generic and chicago shaders.
     pub transparent: Option<TransparentInfo>,
@@ -280,6 +283,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         self_illumination_map: None,
         environment_type: None,
         alpha_tested: false,
+        two_sided: false,
         uv_scale: [1.0, 1.0],
         transparent: None,
         self_illumination: None,
@@ -361,6 +365,12 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
     } else if tag.group == groups::SHADER_MODEL {
         use layout::shader_model_definition as m;
         info.base_map = present(root.reference(m::BASE_MAP)?);
+        // shader_model flags (rasterizer_xbox_models.c): bit 1 two-sided, 2
+        // not alpha-tested, 3 alpha-blended decal, 5 two-sided without
+        // culling; the base map's alpha cuts the rest out
+        let flags = root.u16(m::FLAGS)?;
+        info.alpha_tested = flags & (1 << 2 | 1 << 3) == 0;
+        info.two_sided = flags & (1 << 1 | 1 << 5) != 0;
         info.multipurpose_map = present(root.reference(m::MULTIPURPOSE_MAP)?);
         // (0 none, 1-4 A-D)
         let source = root.i16(m::CHANGE_COLOR_SOURCE)?;

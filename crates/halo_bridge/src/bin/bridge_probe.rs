@@ -1537,6 +1537,9 @@ impl CollisionCheck {
             let (result, effects) = halo_map::unit_animation::unit_update_animation(unit_graph_index, &graph, &inputs, &mut state, None);
             // (a destroyed unit's state isn't read after)
             let compare_state = record.side_effects & halo_map::unit_animation::side_effects::DESTROYED == 0;
+            // (whether it started an interpolation is Rust's word to the game,
+            // not the unit's)
+            let state = halo_map::unit_animation::UnitAnimationState { interpolation_started: 0, ..state };
             if (!compare_state || state == record.after) && effects == record.side_effects && result == record.result {
                 self.animation_agreed += 1;
                 let (b, a) = (&record.before, &record.after);

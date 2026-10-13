@@ -1035,6 +1035,23 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - The asking again never came up.
        - **Rust in charge:** with a late joiner and all networking systems in Rust, both machines end with the same items, made and deleted as with the C (146 and 101 on the host). The joiner's seconds fall a few ticks off the host's (2 in the C's session, 3 in the Rust's), so their positions compare only roughly: median 24.7 cm against the C's 18.5.
 
+   - [x] The netcode's messages handled in Rust (`halo_map::network_messages`, system `network_messages`, world step 23): network_distributed.c's `network_distributed_handle_message`, the front door every message of the distributed netcode comes through.
+     - **What Rust does:**
+       - Voice chat's messages go to voice chat (in the lobby too), and none are taken between games.
+       - **A batch** (a tick's unreliable messages to one machine, in one datagram) is taken apart, and each message is handled as if it came alone: no batch in a batch, none longer than a datagram.
+       - **Each message** must be of a kind there is, with the bytes its count of entries needs (and one entry for the kinds whose handlers read one). It must come the way its kind goes: from a client to the host, or from the host to a client, which notes the host's latest tick. A message of a kind sent every tick that is older than the sender's latest of that kind is dropped (a killing blow sent again reliably is not, unless it came in a batch).
+       - The host notes a client's clock by its messages' ticks, and takes no prediction from a client whose game runs fast.
+     - **The game's, through calls (`network_message_call`):** voice chat, the client's clock (its speed-hack check: notices, logs, kicks) and the handlers, which are mostly Rust's own steps.
+       - The kinds' entry sizes, which kinds a client sends, which need an entry and which are dropped when old are tables in the step's arguments, from the game's own switches (now functions).
+       - A batch's message is taken apart into a buffer in the arguments, so the check compares it.
+       - A message handled while one is (a handler's) is handled as the game's, inside it.
+     - **The check:** the regions are the arguments (with the batch's buffer), the host's latest tick, the received count, the batch flag and the senders' latest ticks.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, every message agrees on both machines, with none left out (13,248 calls on the host, 12,864 on the joiner).
+       - Planted errors were caught in the batch flag, the host's latest tick, the entries' size check and the received count.
+       - One went unseen: dropping a message as old as the sender's latest (each kind went once a tick to each machine).
+       - **Rust in charge:** with all networking systems in Rust on both machines (fifty-seven systems in all), the machines' positions differ by a median of 5.6 and 7.1 cm over two sessions (largest 18.4 and 22.4), within the C's range. Both machines end with the same count of items, and every hit reported is dealt. Every probe check agrees on the five levels and a50 as before.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

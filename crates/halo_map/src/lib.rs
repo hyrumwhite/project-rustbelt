@@ -30,6 +30,7 @@ pub mod distributed_wire;
 pub mod network_apply;
 pub mod network_damage;
 pub mod network_host;
+pub mod network_messages;
 pub mod props;
 pub mod firing_positions;
 pub mod path;

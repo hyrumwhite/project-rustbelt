@@ -26,6 +26,7 @@ use crate::data_array::{DATA_COUNT, DATA_DATA, DATA_SIZE};
 use crate::distributed_wire::{self as wire, UNIT_SCALE};
 use crate::layout::{
     coop_sent_device as sd, coop_sent_look as sl, coop_sent_transform as st, device_datum as dd,
+    distributed_coop_device_group as dg,
     distributed_coop_device_state as ds, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
     net_values as nv, object_header_datum as oh, unit_datum as ud,
 };
@@ -270,4 +271,239 @@ pub fn host_world(context: &WorldContext, host: &impl AiHost) {
     world.send_transforms();
     world.send_device_states();
     world.send_looks();
+}
+
+// ---------- the device groups
+
+/// network_coop.c's device group calls (halo_sim.h's
+/// `_network_coop_world_call_send_device_groups`): the groups' message, of
+/// `b` entries, to every client.
+const SEND_DEVICE_GROUPS: i32 = 2;
+
+/// halo_sim.h's `struct halo_sim_network_coop_device_groups`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceGroupsArguments {
+    pub joined: i32,
+    pub host_devices: u32,
+    pub device_groups: u32,
+    pub scenario_group_count: i32,
+    pub network_flags: i32,
+    pub runtime_bit: i32,
+}
+
+/// network_coop.c's group limits: the groups told apart, those a change
+/// goes in, and those each rotation adds a tick.
+const MAXIMUM_DEVICE_GROUPS: i32 = 1024;
+const MAXIMUM_DEVICE_GROUPS_PER_MESSAGE: i16 = 64;
+const DEVICE_GROUP_SENDS: u8 = 3;
+const DEVICE_GROUP_REFRESHES_PER_TICK: i32 = 8;
+/// devices.c's `struct device_group_datum` (devices.c asserts it): its
+/// flags and value.
+const GROUP_FLAGS: u32 = 2;
+const GROUP_VALUE: u32 = 4;
+/// network_coop.c's `_device_group_role_*`.
+const ROLE_POWER: u8 = 0;
+
+struct DeviceGroups<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    a: DeviceGroupsArguments,
+}
+
+impl<H: AiHost> DeviceGroups<'_, H> {
+    /// devices.c's `device_group_network_get`: the group's value, its flags
+    /// a client takes, and whether it is a device's own (made at run time).
+    fn group(&self, group_index: i16) -> Option<(f32, u16, bool)> {
+        if group_index == NONE as i16 {
+            return None;
+        }
+        let group = crate::ai_actor::datum_get(self.m, self.a.device_groups, group_index as i32)?;
+        let flags = self.m.r16(group + GROUP_FLAGS);
+        Some((
+            self.m.f32(group + GROUP_VALUE),
+            flags & self.a.network_flags as u16,
+            flags as u32 & (1 << self.a.runtime_bit) != 0,
+        ))
+    }
+
+    fn entry(&self, index: i16) -> u32 {
+        use crate::layout::{coop_host_devices as hd, distributed_coop_device_groups_message as gm};
+        self.a.host_devices + hd::MESSAGE as u32 + gm::GROUPS as u32 + index as u32 * dg::SIZEOF as u32
+    }
+
+    /// network_coop.c's `device_group_state`: the group's value, flags and
+    /// snap count into the entry (none for a group there isn't).
+    fn state(&self, group_index: i16, entry: u32) -> bool {
+        use crate::layout::coop_host_devices as hd;
+        let m = self.m;
+        if !(0..MAXIMUM_DEVICE_GROUPS).contains(&(group_index as i32)) {
+            return false;
+        }
+        let Some((value, flags, _)) = self.group(group_index) else { return false };
+        m.set_f32(entry + dg::VALUE as u32, value);
+        m.w8(entry + dg::FLAGS as u32, flags as u8);
+        m.w8(entry + dg::SNAPS as u32, m.r8(self.a.host_devices + hd::SNAP_COUNTS as u32 + group_index as u32));
+        m.w8(entry + dg::CHANGED as u32, 0);
+        true
+    }
+
+    /// network_coop.c's `device_group_entries`: every device group, the
+    /// scenario's first, then each device's own; their group indices.
+    fn entries(&self) -> Vec<i16> {
+        let m = self.m;
+        let mut group_indices = Vec::new();
+        let mut group_index: i16 = 0;
+        while (group_index as i32) < self.a.scenario_group_count && (group_indices.len() as i32) < MAXIMUM_DEVICE_GROUPS {
+            let entry = self.entry(group_indices.len() as i16);
+            m.set_i16(entry + dg::GROUP_INDEX as u32, group_index);
+            m.set_i16(entry + dg::NAME_INDEX as u32, NONE as i16);
+            m.w32(entry + dg::OBJECT_INDEX as u32, NONE as u32);
+            m.w32(entry + dg::DEFINITION_INDEX as u32, NONE as u32);
+            m.w8(entry + dg::ROLE as u32, ROLE_POWER);
+            if self.state(group_index, entry) {
+                group_indices.push(group_index);
+            }
+            group_index += 1;
+        }
+        let data = self.context.object_header_data;
+        let size = m.r16(data + DATA_SIZE) as i16 as u32;
+        for absolute_index in 0..m.r16(data + DATA_COUNT) as i16 as u32 {
+            let header = m.r32(data + DATA_DATA) + absolute_index * size;
+            let identifier = m.i16(header);
+            if identifier == 0 || (nv::_OBJECT_MASK_DEVICE as u32) & (1 << m.r8(header + oh::TYPE as u32)) == 0 {
+                continue;
+            }
+            let object_index = (identifier as i32) << 16 | absolute_index as i32;
+            let device = m.r32(header + oh::DATUM as u32);
+            let groups = [m.i16(device + dd::DEVICE_POWER_GROUP_INDEX as u32), m.i16(device + dd::DEVICE_POSITION_GROUP_INDEX as u32)];
+            for (role, &group) in groups.iter().enumerate() {
+                if group_indices.len() as i32 >= MAXIMUM_DEVICE_GROUPS {
+                    break;
+                }
+                // (scenario groups were listed above)
+                if !self.group(group).is_some_and(|(_, _, runtime)| runtime) {
+                    continue;
+                }
+                let entry = self.entry(group_indices.len() as i16);
+                m.set_i16(entry + dg::GROUP_INDEX as u32, NONE as i16);
+                m.w16(entry + dg::NAME_INDEX as u32, m.r16(device + ud::OBJECT_NAME_INDEX as u32));
+                m.w32(entry + dg::OBJECT_INDEX as u32, object_index as u32);
+                m.w32(entry + dg::DEFINITION_INDEX as u32, m.r32(device + ud::DEFINITION_INDEX as u32));
+                m.w8(entry + dg::ROLE as u32, role as u8);
+                if self.state(group, entry) {
+                    group_indices.push(group);
+                }
+            }
+        }
+        group_indices
+    }
+
+    /// network_coop.c's `host_send_device_groups`: the groups that changed
+    /// (three times each), and the next few in each rotation: one through
+    /// every group, and a quicker one through those moved since the map
+    /// loaded (what a late joiner lacks).
+    fn send(&self) {
+        use crate::layout::coop_host_devices as hd;
+        let m = self.m;
+        let devices = self.a.host_devices;
+        let started = devices + hd::STARTED as u32;
+        let values = |group: i16| devices + hd::VALUES as u32 + 4 * group as u32;
+        let byte = |offset: usize, group: i16| devices + offset as u32 + group as u32;
+        let refresh_next = devices + hd::REFRESH_NEXT as u32;
+        let moved_refresh_next = devices + hd::MOVED_REFRESH_NEXT as u32;
+        let group_indices = self.entries();
+        let count = group_indices.len() as i32;
+        let mut moved_count: i32 = 0;
+        for (index, &group) in group_indices.iter().enumerate() {
+            let entry = self.entry(index as i16);
+            let value = m.f32(entry + dg::VALUE as u32);
+            let flags = m.r8(entry + dg::FLAGS as u32);
+            let snaps = m.r8(entry + dg::SNAPS as u32);
+            if m.r8(started) == 0
+                || value != m.f32(values(group))
+                || flags != m.r8(byte(hd::FLAGS, group))
+                || snaps != m.r8(byte(hd::SNAPS, group))
+            {
+                m.set_f32(values(group), value);
+                m.w8(byte(hd::FLAGS, group), flags);
+                m.w8(byte(hd::SNAPS, group), snaps);
+                // (clients loaded the same map: the starting state isn't sent)
+                if m.r8(started) != 0 {
+                    m.w8(byte(hd::SENDS, group), DEVICE_GROUP_SENDS);
+                    m.w8(byte(hd::MOVED, group), 1);
+                }
+            }
+            if m.r8(byte(hd::MOVED, group)) != 0 {
+                moved_count += 1;
+            }
+        }
+        if m.i16(refresh_next) as i32 >= count {
+            m.set_i16(refresh_next, 0);
+        }
+        if m.i16(moved_refresh_next) as i32 >= moved_count {
+            m.set_i16(moved_refresh_next, 0);
+        }
+        let (next, moved_next) = (m.i16(refresh_next) as i32, m.i16(moved_refresh_next) as i32);
+        let mut moved_index: i32 = 0;
+        let mut sent: i16 = 0;
+        for (index, &group) in group_indices.iter().enumerate() {
+            let entry = self.entry(index as i16);
+            let mut refresh = (index as i32 - next + count) % count < DEVICE_GROUP_REFRESHES_PER_TICK;
+            if m.r8(byte(hd::MOVED, group)) != 0 {
+                refresh = refresh
+                    || self.a.joined != 0
+                    || (moved_index - moved_next + moved_count) % moved_count < DEVICE_GROUP_REFRESHES_PER_TICK;
+                moved_index += 1;
+            }
+            let sends = m.r8(byte(hd::SENDS, group));
+            let changed = sends != 0;
+            m.w8(entry + dg::CHANGED as u32, changed as u8);
+            if changed {
+                m.w8(byte(hd::SENDS, group), sends - 1);
+            } else if !refresh {
+                continue;
+            }
+            let to = self.entry(sent);
+            if to != entry {
+                for offset in 0..dg::SIZEOF as u32 {
+                    m.w8(to + offset, m.r8(entry + offset));
+                }
+            }
+            sent += 1;
+        }
+        m.w8(started, 1);
+        m.set_i16(refresh_next, if count != 0 { ((next + DEVICE_GROUP_REFRESHES_PER_TICK) % count) as i16 } else { 0 });
+        m.set_i16(
+            moved_refresh_next,
+            if moved_count != 0 { ((moved_next + DEVICE_GROUP_REFRESHES_PER_TICK) % moved_count) as i16 } else { 0 },
+        );
+        // (in messages of at most 64, each moved to the front over those
+        // already sent)
+        let mut index: i16 = 0;
+        while index < sent {
+            let message_count = (sent - index).min(MAXIMUM_DEVICE_GROUPS_PER_MESSAGE);
+            if index > 0 {
+                for offset in 0..message_count as u32 * dg::SIZEOF as u32 {
+                    m.w8(self.entry(0) + offset, m.r8(self.entry(index) + offset));
+                }
+            }
+            let mut call = AiCall { kind: SEND_DEVICE_GROUPS, actor: NONE, b: message_count as i32, ..AiCall::default() };
+            self.host.call(&mut call);
+            index += MAXIMUM_DEVICE_GROUPS_PER_MESSAGE;
+        }
+    }
+}
+
+/// The world step of co-op's host sending its device groups.
+pub fn host_device_groups(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let mut bytes = [0u8; std::mem::size_of::<DeviceGroupsArguments>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    let a: DeviceGroupsArguments = unsafe { std::mem::transmute(bytes) };
+    DeviceGroups { context, host, m, a }.send();
 }

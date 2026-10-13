@@ -1130,6 +1130,18 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Two went unseen: the transforms' move and turn thresholds (a10's scenery jumps; none creep).
        - **Rust in charge:** in co-op on a10 and a30, with all networking systems in Rust (sixty systems in all), both machines end with the host's count of items. The positions on a30 differ by a median of 11.3 cm, between two C sessions' 8.0 and 15.9 cm.
 
+   - [x] Co-op's host sending its device groups in Rust (`halo_map::network_coop`, world step 32): network_coop.c's `host_send_device_groups`, with `device_group_entries` and `device_group_state`.
+     - **What Rust does:** the device groups are the values the scripts set that doors, elevators and lights aim at: the scenario's groups, and each device's own. Each tick the host sends every client:
+       - each group that changed, three times;
+       - the next eight in a rotation through every group;
+       - the next eight in a quicker rotation through those moved since the map loaded, which is what a late joiner lacks (and on a join, all of those).
+       - A group's value, the flags a client takes and its count of immediate sets go with it. Clients loaded the same map, so the starting state isn't sent.
+     - **The game's, through calls:** sending the groups' message. The groups themselves are read from the game's device-groups data array. Its flags' mask and runtime bit come from a new accessor in devices.c (`device_group_network_masks`), and the records' types moved to network_coop_records.h.
+     - **Results:**
+       - In 100-second co-op sessions on a10 (doors moved by a console command) and a30, all 2,048 ticks agree, with none left out (a message each tick).
+       - All four planted errors were caught: the rotation's step, a change's sends, the flags' mask and the moved rotation.
+       - **Rust in charge:** in co-op on a30, with all networking systems in Rust, the positions differ by a median of 7.8 cm (largest 19.1), within the C's 8.0 to 15.9, and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

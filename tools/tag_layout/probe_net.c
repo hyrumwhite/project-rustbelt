@@ -23,6 +23,7 @@ distributed_state_from_object and distributed_inventory_from_unit).
 #include "network_damage_records.h"
 #include "network_distributed.h"
 #include "network_objects_records.h"
+#include "network_distributed_records.h"
 
 #include <stddef.h>
 
@@ -205,6 +206,19 @@ LAYOUT_MEMBER(objects_host_vehicle_prediction, rest_position, rest_position)
 LAYOUT_MEMBER(objects_host_vehicle_prediction, ground_height, ground_height)
 LAYOUT_MEMBER(objects_host_vehicle_prediction, ground_rise_speed, ground_rise_speed)
 LAYOUT_MEMBER(vehicle_datum, vehicle_airborne_ticks, vehicle.airborne_ticks)
+/* the host's records of its players (network_distributed_records.h) */
+LAYOUT_SIZE(distributed_sent_unit)
+LAYOUT_MEMBER(distributed_sent_unit, flags, flags)
+LAYOUT_MEMBER(distributed_sent_unit, unit_index, unit_index)
+LAYOUT_MEMBER(distributed_sent_unit, vehicle_index, vehicle_index)
+LAYOUT_MEMBER(distributed_sent_unit, seat_index, seat_index)
+LAYOUT_SIZE(distributed_viewer)
+LAYOUT_MEMBER(distributed_viewer, valid, valid)
+LAYOUT_MEMBER(distributed_viewer, cluster_index, cluster_index)
+LAYOUT_MEMBER(distributed_viewer, position, position)
+LAYOUT_MEMBER(distributed_viewer, aim, aim)
+LAYOUT_MEMBER(unit_datum, unit_current_zoom_level, unit.current_zoom_level)
+LAYOUT_MEMBER(unit_datum, object_location_cluster_index, object.location.cluster_index)
 LAYOUT_SIZE(distributed_damage_animation)
 LAYOUT_SIZE(objects_host_damage_animation)
 LAYOUT_MEMBER(objects_host_damage_animation, animation, animation)

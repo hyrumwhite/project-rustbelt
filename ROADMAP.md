@@ -980,6 +980,25 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - With all networking systems in Rust on both machines, the machines' positions differ as with the C (median 6.1 cm against 5.8, largest 18.3 against 19.2). Both machines end with the same count of items, and every hit reported is dealt.
          - Every probe check agrees on the five levels and a50 as before.
 
+   - [x] The host's plan of what each client is sent of each player in Rust (`halo_map::network_host`, world step 19): network_distributed.c's `distributed_host_plan_players`.
+     - **What Rust does:** each tick, for every player:
+       - their unit state and input are sampled, and whether their life, unit, ride or seat changed since last sent is noted;
+       - for each client, the player goes:
+         - every tick when near the client's players (25 world units), then every second, third or fourth tick by distance;
+         - every sixth tick when out of their sight (the map's potentially visible set) or dead;
+         - at once when they come into sight or change;
+         - at least every second tick when a client's player aims near them, every tick through a scope.
+       - A client's own players' units go every tick and their input never. A player who has left goes only on a change. A client whose players are dead watches from where they last were alive.
+     - **The game's, through calls (`network_plan_call`):** the unit state's sampling (`distributed_state_from_player`, Rust's under `distributed_wire`), an origin, the relayed input's (`distributed_relayed_action_from`, Rust's under `distributed_wire`) and whether one cluster sees another. The update the tick ran, how many players' input it has, the map's cluster count and the client machines and their players are in the arguments. The host's records' types moved to network_distributed_records.h.
+     - **The check:** the regions are the arguments, the sends, the sight records, the viewers, the units last sent, the states, the actions, the players' machines and the update number.
+     - **Results:**
+       - In 90-second sessions on Blood Gulch (scripted play, shooting, kills, a vehicle and a pickup) and Prisoner (a small indoor map with shooting and kills), every plan agrees, with none left out (12,913 calls on Prisoner's 2,048 ticks).
+       - Planted errors were caught in the send on coming into sight, the input's send on a change and, on Prisoner, where the host's player died, the hidden period.
+       - Three went unseen:
+         - the middle distance's bound and the aim's cosine (two players stay close or far, never between, and the aim is consulted only past 25 world units);
+         - the seat in the change test (a seat changes with the vehicle).
+       - **Rust in charge:** with all networking systems in Rust on both machines, the machines' positions differ as with the C. Over three sessions each the medians were 5.2 to 7.4 cm for the Rust and 3.7 to 5.8 cm for the C, and the largest 17.2 to 20.0 cm against 9.7 to 19.2 cm. Both machines end with the same count of items, and every hit reported is dealt. Every probe check agrees on the five levels and a50 as before.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

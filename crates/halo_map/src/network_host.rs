@@ -1185,3 +1185,348 @@ pub fn host_tick(context: &WorldContext, host: &impl AiHost) {
     }
     host.send_damage_animations();
 }
+
+// ---------- the players
+
+/// network_distributed.c's plan calls (halo_sim.h's `_network_plan_call_*`).
+pub mod plan_call {
+    /// `distributed_state_from_player(a)` into the plan's states.
+    pub const STATE: i32 = 1;
+    /// `object_get_origin(a)`, `output[0..3]`.
+    pub const ORIGIN: i32 = 2;
+    /// `distributed_relayed_action_from(a)` into the plan's actions: whether
+    /// it changed (the result).
+    pub const ACTION: i32 = 3;
+    /// Whether the cluster `a` sees the cluster `b` (the map's potentially
+    /// visible set), the result.
+    pub const SEES: i32 = 4;
+}
+
+/// halo_sim.h's `struct halo_sim_network_plan`: the plan's arguments.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PlanArguments {
+    pub sends: u32,
+    pub seen: u32,
+    pub viewers: u32,
+    pub sent_units: u32,
+    pub states: u32,
+    pub player_machines: u32,
+    pub update_number: u32,
+    pub update_number_value: i32,
+    /// How many players' input the tick's update has (NONE: none).
+    pub recent_count: i32,
+    pub cluster_count: i32,
+    pub machine_count: i32,
+    pub machine_indices: [i32; MAXIMUM_MACHINES],
+    pub player_lists: [[i32; MAXIMUM_LOCAL_PLAYERS]; MAXIMUM_MACHINES],
+}
+
+const _: () = assert!(std::mem::size_of::<PlanArguments>() == 11 * 4 + 128 * 4 + 128 * 16);
+
+/// network_distributed.c's distances and cosines: those near a client's
+/// players every tick, further every second to fourth, out of sight every
+/// sixth; one aimed near at least every second tick, through a scope every
+/// tick.
+const NEAR_PLAYER_DISTANCE: f32 = 25.0;
+const MIDDLE_PLAYER_DISTANCE: f32 = 60.0;
+const FAR_PLAYER_DISTANCE: f32 = 120.0;
+const AIMED_AT_COSINE: f32 = 0.819;
+const SCOPED_AT_COSINE: f32 = 0.940;
+const HIDDEN_PLAYER_PERIOD_TICKS: i16 = 6;
+
+/// `_distributed_send_state_bit` and the rest.
+const SEND_STATE: u8 = 1 << 0;
+const SEND_ACTION: u8 = 1 << 1;
+const SEND_SEES: u8 = 1 << 2;
+
+/// `struct distributed_unit_state`'s offsets (network_distributed.c asserts
+/// them), and `_distributed_unit_predicted_bit`.
+mod unit_state {
+    pub const SIZEOF: u32 = 64;
+    pub const FLAGS: u32 = 1;
+    pub const UNIT_INDEX: u32 = 4;
+    pub const VEHICLE_INDEX: u32 = 8;
+    pub const SEAT_INDEX: u32 = 12;
+    pub const PREDICTED: u8 = crate::distributed_wire::unit_flag::PREDICTED;
+}
+
+struct Plan<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    arguments: PlanArguments,
+}
+
+/// What the plan found of a player this tick.
+#[derive(Clone, Copy, Default)]
+struct PlannedPlayer {
+    present: bool,
+    quit: bool,
+    placed: bool,
+    changed: bool,
+    has_action: bool,
+    action_changed: bool,
+    origin: [f32; 3],
+    cluster: i16,
+}
+
+impl<H: AiHost> Plan<'_, H> {
+    fn call(&self, kind: i32, a: i32, b: i32) -> AiCall {
+        let mut call = AiCall { kind, actor: NONE, a, b, ..AiCall::default() };
+        self.host.call(&mut call);
+        call
+    }
+
+    fn object(&self, object_index: i32) -> Option<u32> {
+        datum_get(self.m, self.context.object_header_data, object_index).map(|header| self.m.r32(header + oh::DATUM as u32))
+    }
+
+    /// network_distributed.c's `distributed_player`: the player at an
+    /// absolute index.
+    fn player(&self, player_index: i16) -> Option<u32> {
+        use crate::data_array::DATA_MAXIMUM_COUNT;
+        let m = self.m;
+        let data = self.context.player_data;
+        if player_index < 0 || player_index >= m.r16(data + DATA_MAXIMUM_COUNT) as i16 {
+            return None;
+        }
+        let player = m.r32(data + DATA_DATA) + player_index as u32 * m.r16(data + DATA_SIZE) as i16 as u32;
+        (m.i16(player + pd::IDENTIFIER as u32) != 0).then_some(player)
+    }
+
+    /// network_distributed.c's `distributed_living_unit`.
+    fn living_unit(&self, player: Option<u32>) -> i32 {
+        let Some(player) = player else { return NONE };
+        let unit_index = self.m.i32(player + pd::UNIT_INDEX as u32);
+        match self.object(unit_index) {
+            Some(unit)
+                if unit_index != NONE
+                    && self.m.r16(unit + ud::OBJECT_DAMAGE_FLAGS as u32) as u32 & (1 << nv::_OBJECT_DEAD_BIT) == 0 =>
+            {
+                unit_index
+            }
+            _ => NONE,
+        }
+    }
+
+    /// network_distributed.c's `distributed_object_cluster`: the cluster of
+    /// what the object rides, all the way up.
+    fn object_cluster(&self, object_index: i32) -> i16 {
+        let mut object = self.object(object_index).unwrap_or(0);
+        loop {
+            let parent = self.m.i32(object + ud::OBJECT_PARENT_OBJECT_INDEX as u32);
+            if parent == NONE {
+                break;
+            }
+            object = self.object(parent).unwrap_or(0);
+        }
+        self.m.i16(object + ud::OBJECT_LOCATION_CLUSTER_INDEX as u32)
+    }
+
+    /// A player list's entry's absolute index (NONE for none).
+    fn list_index(player_index: i32) -> i16 {
+        if player_index != NONE { player_index as i16 } else { NONE as i16 }
+    }
+
+    fn viewer(&self, machine_index: i32, index: usize) -> u32 {
+        use crate::layout::distributed_viewer as dv;
+        self.arguments.viewers + (machine_index as u32 * MAXIMUM_LOCAL_PLAYERS as u32 + index as u32) * dv::SIZEOF as u32
+    }
+
+    fn seen(&self, machine_index: i32, player_index: i16) -> u32 {
+        self.arguments.seen + machine_index as u32 * MAXIMUM_TRACKED_PLAYERS as u32 + player_index as u32
+    }
+
+    /// network_distributed.c's `distributed_host_plan_players`.
+    fn plan(&self) {
+        use crate::layout::{distributed_sent_unit as su, distributed_viewer as dv};
+        let m = self.m;
+        let a = &self.arguments;
+        let now = self.context.game_time;
+        let cluster_count = a.cluster_count as i16;
+        let machine_count = (a.machine_count as i16).max(0) as usize;
+        m.w32(a.update_number, a.update_number_value as u32);
+        for offset in (0..(MAXIMUM_MACHINES * MAXIMUM_TRACKED_PLAYERS as usize) as u32).step_by(4) {
+            m.w32(a.sends + offset, 0);
+        }
+        // (the client each player is on)
+        for player_index in 0..MAXIMUM_TRACKED_PLAYERS as u32 {
+            m.w32(a.player_machines + 4 * player_index, NONE as u32);
+        }
+        for machine_number in 0..machine_count {
+            for &entry in &a.player_lists[machine_number] {
+                let index = Self::list_index(entry);
+                if index >= 0 && index < MAXIMUM_TRACKED_PLAYERS {
+                    m.w32(a.player_machines + 4 * index as u32, a.machine_indices[machine_number] as u32);
+                }
+            }
+        }
+        let mut players = [PlannedPlayer::default(); MAXIMUM_TRACKED_PLAYERS as usize];
+        for player_index in 0..MAXIMUM_TRACKED_PLAYERS {
+            let planned = &mut players[player_index as usize];
+            let player = self.player(player_index);
+            planned.present = player.is_some();
+            let Some(player) = player else { continue };
+            planned.quit = m.r8(player + pd::QUIT_OUT_OF_GAME as u32) != 0;
+            self.call(plan_call::STATE, player_index as i32, 0);
+            let unit_index = self.living_unit(Some(player));
+            if unit_index != NONE {
+                planned.origin = self.call(plan_call::ORIGIN, unit_index, 0).vector();
+                planned.cluster = self.object_cluster(unit_index);
+                planned.placed = true;
+            }
+            let state = a.states + player_index as u32 * unit_state::SIZEOF;
+            let sent = a.sent_units + player_index as u32 * su::SIZEOF as u32;
+            // (the predicted bit is its own client's alone)
+            let flags = m.r8(state + unit_state::FLAGS) & !unit_state::PREDICTED;
+            planned.changed = m.r8(sent + su::FLAGS as u32) != flags
+                || m.r32(sent + su::UNIT_INDEX as u32) != m.r32(state + unit_state::UNIT_INDEX)
+                || m.r32(sent + su::VEHICLE_INDEX as u32) != m.r32(state + unit_state::VEHICLE_INDEX)
+                || m.r16(sent + su::SEAT_INDEX as u32) != m.r16(state + unit_state::SEAT_INDEX);
+            m.w8(sent + su::FLAGS as u32, flags);
+            m.w32(sent + su::UNIT_INDEX as u32, m.r32(state + unit_state::UNIT_INDEX));
+            m.w32(sent + su::VEHICLE_INDEX as u32, m.r32(state + unit_state::VEHICLE_INDEX));
+            m.w16(sent + su::SEAT_INDEX as u32, m.r16(state + unit_state::SEAT_INDEX));
+            if planned.placed && a.recent_count != NONE && (player_index as i32) < a.recent_count {
+                planned.has_action = true;
+                planned.action_changed = self.call(plan_call::ACTION, player_index as i32, 0).result != 0;
+            }
+        }
+        for machine_number in 0..machine_count {
+            let machine_index = a.machine_indices[machine_number];
+            let player_list = &a.player_lists[machine_number];
+            let mut viewers: Vec<([f32; 3], i16, [f32; 3], bool)> = Vec::new();
+            // its players where they are, or were when last alive
+            for (index, &entry) in player_list.iter().enumerate() {
+                let viewer_index = Self::list_index(entry);
+                let viewer = self.viewer(machine_index, index);
+                let mut scoped = false;
+                if viewer_index < 0 || viewer_index >= MAXIMUM_TRACKED_PLAYERS {
+                    m.w8(viewer + dv::VALID as u32, 0);
+                } else if players[viewer_index as usize].placed {
+                    let planned = &players[viewer_index as usize];
+                    let unit = self.object(self.living_unit(self.player(viewer_index))).unwrap_or(0);
+                    m.w8(viewer + dv::VALID as u32, 1);
+                    m.set_i16(viewer + dv::CLUSTER_INDEX as u32, planned.cluster);
+                    for part in 0..3u32 {
+                        m.set_f32(viewer + dv::POSITION as u32 + 4 * part, planned.origin[part as usize]);
+                        m.w32(viewer + dv::AIM as u32 + 4 * part, m.r32(unit + ud::UNIT_AIMING_VECTOR as u32 + 4 * part));
+                    }
+                    // (NONE unzoomed: a char)
+                    scoped = m.i8(unit + ud::UNIT_CURRENT_ZOOM_LEVEL as u32) >= 0;
+                }
+                if m.r8(viewer + dv::VALID as u32) == 0 {
+                    continue;
+                }
+                viewers.push((
+                    m.vector(viewer + dv::POSITION as u32),
+                    m.i16(viewer + dv::CLUSTER_INDEX as u32),
+                    m.vector(viewer + dv::AIM as u32),
+                    scoped,
+                ));
+            }
+            for player_index in 0..MAXIMUM_TRACKED_PLAYERS {
+                let planned = &players[player_index as usize];
+                let own = m.i32(a.player_machines + 4 * player_index as u32) == machine_index;
+                let sends = a.sends + machine_index as u32 * MAXIMUM_TRACKED_PLAYERS as u32 + player_index as u32;
+                let seen_address = self.seen(machine_index, player_index);
+                let mut send = false;
+                let mut seen = true;
+                let mut period: i16 = 1;
+                if !planned.present || (planned.quit && !own && !planned.changed) {
+                    continue;
+                }
+                if !own && !planned.placed {
+                    // (dead, or not yet spawned: a spawn is a change, sent at once)
+                    period = HIDDEN_PLAYER_PERIOD_TICKS;
+                    m.w8(seen_address, 1);
+                } else if !own && !viewers.is_empty() {
+                    let to = planned.cluster;
+                    let mut distances_squared = [0.0f32; MAXIMUM_LOCAL_PLAYERS];
+                    let mut sees = [false; MAXIMUM_LOCAL_PLAYERS];
+                    let mut nearest = -1.0f32;
+                    let mut visible = false;
+                    for (index, &(position, cluster, _, _)) in viewers.iter().enumerate() {
+                        let dx = planned.origin[0] - position[0];
+                        let dy = planned.origin[1] - position[1];
+                        let dz = planned.origin[2] - position[2];
+                        distances_squared[index] = dx * dx + dy * dy + dz * dz;
+                        if nearest < 0.0 || distances_squared[index] < nearest {
+                            nearest = distances_squared[index];
+                        }
+                        // (outside the map's clusters: in sight, to be safe)
+                        sees[index] = cluster < 0
+                            || cluster >= cluster_count
+                            || to < 0
+                            || to >= cluster_count
+                            || self.call(plan_call::SEES, cluster as i32, to as i32).result != 0;
+                        visible |= sees[index];
+                    }
+                    period = if !visible {
+                        HIDDEN_PLAYER_PERIOD_TICKS
+                    } else if nearest < NEAR_PLAYER_DISTANCE * NEAR_PLAYER_DISTANCE {
+                        1
+                    } else if nearest < MIDDLE_PLAYER_DISTANCE * MIDDLE_PLAYER_DISTANCE {
+                        2
+                    } else if nearest < FAR_PLAYER_DISTANCE * FAR_PLAYER_DISTANCE {
+                        3
+                    } else {
+                        4
+                    };
+                    // (came into sight: at once)
+                    if visible && m.r8(seen_address) == 0 {
+                        send = true;
+                    }
+                    m.w8(seen_address, visible as u8);
+                    seen = visible;
+                    // aimed near, when not sent this tick otherwise
+                    if !send && !planned.changed && period > 1 && (now + player_index as i32) % period as i32 != 0 {
+                        let mut aimed_period = HIDDEN_PLAYER_PERIOD_TICKS;
+                        for (index, &(position, _, aim, scoped)) in viewers.iter().enumerate() {
+                            if !sees[index] {
+                                continue;
+                            }
+                            let along = (planned.origin[0] - position[0]) * aim[0]
+                                + (planned.origin[1] - position[1]) * aim[1]
+                                + (planned.origin[2] - position[2]) * aim[2];
+                            if along > 0.0 && scoped && along * along >= SCOPED_AT_COSINE * SCOPED_AT_COSINE * distances_squared[index] {
+                                aimed_period = 1;
+                            } else if along > 0.0 && along * along >= AIMED_AT_COSINE * AIMED_AT_COSINE * distances_squared[index] {
+                                aimed_period = aimed_period.min(2);
+                            }
+                        }
+                        period = period.min(aimed_period);
+                    }
+                } else {
+                    m.w8(seen_address, 1);
+                }
+                send |= planned.changed || (now + player_index as i32) % period as i32 == 0;
+                let mut flags = m.r8(sends);
+                if seen || own {
+                    flags |= SEND_SEES;
+                }
+                if send || own {
+                    flags |= SEND_STATE;
+                }
+                if !own && planned.has_action && (send || planned.action_changed) {
+                    flags |= SEND_ACTION;
+                }
+                m.w8(sends, flags);
+            }
+        }
+    }
+}
+
+/// The world step of the host's plan of what each client is sent of each
+/// player this tick (network_distributed.c's `distributed_host_plan_players`).
+pub fn plan_players(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let mut bytes = [0u8; std::mem::size_of::<PlanArguments>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    let arguments: PlanArguments = unsafe { std::mem::transmute(bytes) };
+    Plan { context, host, m, arguments }.plan();
+}

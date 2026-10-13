@@ -166,7 +166,8 @@ enum
 	DEVICE_GROUP_REFRESHES_PER_TICK = 8,
 
 	OBJECT_NAMES_INTERVAL_TICKS = TICKS_PER_SECOND / 2,
-	OBJECT_NAME_BYTES = MAXIMUM_OBJECT_NAMES_PER_SCENARIO / 8,
+	/* (network_coop_records.h's) */
+	OBJECT_NAME_BYTES = COOP_OBJECT_NAME_BYTES,
 	/* the types network_objects.c syncs; the object names sync skips them */
 	NETWORKED_OBJECT_TYPES = _object_mask_biped | _object_mask_vehicle | _object_mask_weapon | _object_mask_equipment,
 
@@ -299,19 +300,7 @@ device's own group it is NONE, and the device is found by name_index, or
 
 /* (struct distributed_coop_device_groups_message: network_coop_records.h) */
 
-/* one bit per scenario object name: whether the host has that object */
-struct distributed_coop_object_names
-{
-	short structure_bsp_index;
-	short name_count;
-	byte present[OBJECT_NAME_BYTES];
-};
-
-struct distributed_coop_object_names_message
-{
-	struct distributed_message_header header;
-	struct distributed_coop_object_names names;
-};
+/* (struct distributed_coop_object_names and its message: network_coop_records.h) */
 
 /* Where one of the host's scenery or machines is. Scripts move them (a
 cutscene's drop pod) and nothing else tells a client. Found as the
@@ -929,6 +918,16 @@ static union
 } coop_world_message;
 static struct halo_sim_network_coop_world coop_world_arguments;
 
+/* port: the object names' and screen effect's messages (the Rust port's
+steps fill them), the screen effect as the rasterizer has it and as last
+sent, and the steps' arguments */
+static struct distributed_coop_object_names_message coop_object_names_message;
+static struct distributed_coop_screen_effect_message coop_screen_effect_message;
+static struct rasterizer_screen_effect_port_state host_screen_effect;
+static struct rasterizer_screen_effect_port_state host_sent_screen_effect;
+static struct halo_sim_network_coop_object_names coop_object_names_arguments;
+static struct halo_sim_network_coop_screen_effect coop_screen_effect_arguments;
+
 void network_coop_world_call(
 	struct halo_sim_ai_call *call)
 {
@@ -968,6 +967,14 @@ void network_coop_world_call(
 		break;
 	case _network_coop_world_call_log_events_full:
 		error(_error_silent, "co-op: event queue full; an event of kind %d is not sent", call->a);
+		break;
+	case _network_coop_world_call_send_object_names:
+		send_to_clients(&coop_object_names_message, _distributed_message_coop_object_names, 1,
+			sizeof(coop_object_names_message.names));
+		break;
+	case _network_coop_world_call_send_screen_effect:
+		send_to_clients(&coop_screen_effect_message, _distributed_message_coop_screen_effect, 1,
+			sizeof(coop_screen_effect_message.state));
 		break;
 	}
 	halo_sim_world_event_end(call, opened);
@@ -1222,25 +1229,75 @@ light enhancement, desaturation, the video effect) are state the host's
 scripts set and a client's never do. The host sends it when it changes and
 every OBJECT_REFRESH_TICKS, for a client that joined since or missed it. */
 
-struct distributed_coop_screen_effect_message
+/* (struct distributed_coop_screen_effect_message: network_coop_records.h) */
+
+/* (host: the state last sent, host_sent_screen_effect, with the world's
+calls) */
+
+/* port: the game's (halo_sim.c checks Rust's against it), of the state the
+rasterizer has (host_screen_effect) */
+static void host_send_screen_effect_game(
+	void)
 {
-	struct distributed_message_header header;
-	struct rasterizer_screen_effect_port_state state;
-};
+	struct distributed_coop_screen_effect_message *message = &coop_screen_effect_message;
 
-/* host: the state last sent */
-static struct rasterizer_screen_effect_port_state host_sent_screen_effect;
+	message->state = host_screen_effect;
+	if (!coop_screen_effect_arguments.refresh &&
+		!csmemcmp(&message->state, &host_sent_screen_effect, sizeof(message->state)))
+	{
+		return;
+	}
+	host_sent_screen_effect = message->state;
+	/* port: through the world's calls (the Rust port's) */
+	{
+		struct halo_sim_ai_call call;
 
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_send_screen_effect;
+		call.actor = NONE;
+		network_coop_world_call(&call);
+	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the state, the state
+last sent and the message. */
 static void host_send_screen_effect(
 	void)
 {
-	struct distributed_coop_screen_effect_message message;
+	struct halo_sim_network_coop_screen_effect *arguments = &coop_screen_effect_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
 
-	rasterizer_screen_effect_port_get(&message.state);
-	if (!host_resend.refresh && !csmemcmp(&message.state, &host_sent_screen_effect, sizeof(message.state)))
+	rasterizer_screen_effect_port_get(&host_screen_effect);
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->refresh = host_resend.refresh;
+	arguments->state = (unsigned long)&host_screen_effect;
+	arguments->sent = (unsigned long)&host_sent_screen_effect;
+	arguments->message = (unsigned long)&coop_screen_effect_message;
+	arguments->state_size = sizeof(host_screen_effect);
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&host_screen_effect;
+	regions[1].size = sizeof(host_screen_effect);
+	regions[2].address = (unsigned long)&host_sent_screen_effect;
+	regions[2].size = sizeof(host_sent_screen_effect);
+	regions[3].address = (unsigned long)&coop_screen_effect_message;
+	regions[3].size = sizeof(coop_screen_effect_message);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_screen_effect, &context, regions, 4,
+		network_coop_world_call, &checking))
+	{
 		return;
-	host_sent_screen_effect = message.state;
-	send_to_clients(&message, _distributed_message_coop_screen_effect, 1, sizeof(message.state));
+	}
+	host_send_screen_effect_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_screen_effect);
 }
 
 word network_coop_screen_effect_entry_size(
@@ -1296,22 +1353,66 @@ static struct coop_host_queue host_queue;
 /* port: ... and the arguments of their resends and the events' sending */
 static struct halo_sim_network_coop_queue coop_queue_arguments;
 
-static void host_send_object_names(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_object_names_game(
 	void)
 {
-	struct distributed_coop_object_names_message message;
-	struct distributed_coop_object_names *names = &message.names;
+	struct distributed_coop_object_names *names = &coop_object_names_message.names;
 	short name_index;
 
 	csmemset(names, 0, sizeof(*names));
-	names->structure_bsp_index = global_structure_bsp_index_get();
-	names->name_count = (short)MIN(global_scenario_get()->object_names.count, MAXIMUM_OBJECT_NAMES_PER_SCENARIO);
+	names->structure_bsp_index = (short)coop_object_names_arguments.structure_bsp_index;
+	names->name_count = (short)MIN(coop_object_names_arguments.name_count, MAXIMUM_OBJECT_NAMES_PER_SCENARIO);
 	for (name_index = 0; name_index < names->name_count; name_index++)
 	{
 		if (object_index_from_name_index(name_index) != NONE)
 			names->present[name_index / 8] |= (byte)(1 << (name_index % 8));
 	}
-	send_to_clients(&message, _distributed_message_coop_object_names, 1, sizeof(message.names));
+	/* port: through the world's calls (the Rust port's) */
+	{
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_send_object_names;
+		call.actor = NONE;
+		network_coop_world_call(&call);
+	}
+}
+
+/* host: which scenario object names its objects have, for the clients to
+delete theirs without */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments and the message. */
+static void host_send_object_names(
+	void)
+{
+	struct halo_sim_network_coop_object_names *arguments = &coop_object_names_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	int checking = FALSE;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->object_name_list = (unsigned long)object_name_list_port_get();
+	arguments->name_count = global_scenario_get()->object_names.count;
+	arguments->structure_bsp_index = global_structure_bsp_index_get();
+	arguments->message = (unsigned long)&coop_object_names_message;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_object_names_message;
+	regions[1].size = sizeof(coop_object_names_message);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_object_names, &context, regions, 2,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_object_names_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_object_names);
 }
 
 static void skip_vote_clear(

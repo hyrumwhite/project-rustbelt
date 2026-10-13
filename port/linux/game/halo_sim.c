@@ -10895,6 +10895,8 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network coop world",
 	"network coop device groups",
 	"network coop queue",
+	"network coop object names",
+	"network coop screen effect",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10930,6 +10932,8 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_host,
 	_halo_sim_network_input,
 	_halo_sim_network_clock,
+	_halo_sim_network_coop,
+	_halo_sim_network_coop,
 	_halo_sim_network_coop,
 	_halo_sim_network_coop,
 	_halo_sim_network_coop,

@@ -253,4 +253,28 @@ struct coop_host_queue
 	short pad;
 };
 
+/* the scenario object names' bits (network_coop.c's OBJECT_NAME_BYTES) */
+#define COOP_OBJECT_NAME_BYTES (MAXIMUM_OBJECT_NAMES_PER_SCENARIO / 8)
+
+/* one bit per scenario object name: whether the host has that object */
+struct distributed_coop_object_names
+{
+	short structure_bsp_index;
+	short name_count;
+	byte present[COOP_OBJECT_NAME_BYTES];
+};
+
+struct distributed_coop_object_names_message
+{
+	struct distributed_message_header header;
+	struct distributed_coop_object_names names;
+};
+
+/* the scripts' full-screen effects, as the host's rasterizer has them */
+struct distributed_coop_screen_effect_message
+{
+	struct distributed_message_header header;
+	struct rasterizer_screen_effect_port_state state;
+};
+
 #endif

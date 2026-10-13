@@ -2389,6 +2389,8 @@ enum
 	_halo_sim_world_step_network_coop_world,
 	_halo_sim_world_step_network_coop_device_groups,
 	_halo_sim_world_step_network_coop_queue,
+	_halo_sim_world_step_network_coop_object_names,
+	_halo_sim_world_step_network_coop_screen_effect,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3070,6 +3072,35 @@ enum
 	_network_coop_world_call_surface_broken,
 	/* logs that the event queue is full (an event of kind a not sent) */
 	_network_coop_world_call_log_events_full,
+	/* the object names' message to every client */
+	_network_coop_world_call_send_object_names,
+	/* the screen effect's message to every client */
+	_network_coop_world_call_send_screen_effect,
+};
+
+/* crates/halo_map's network_coop::ObjectNamesArguments: co-op's host
+sending which scenario object names it has: the game's object of each name
+(object_name_list_port_get), the scenario's count of names, the structure BSP
+and the message (network_coop_records.h) */
+struct halo_sim_network_coop_object_names
+{
+	unsigned long object_name_list;
+	long name_count;
+	long structure_bsp_index;
+	unsigned long message;
+};
+
+/* crates/halo_map's network_coop::ScreenEffectArguments: co-op's host
+sending the scripts' screen effect: whether to resend, the state the
+rasterizer has, the state last sent, the message (network_coop_records.h) and
+the state's size */
+struct halo_sim_network_coop_screen_effect
+{
+	long refresh;
+	unsigned long state;
+	unsigned long sent;
+	unsigned long message;
+	long state_size;
 };
 
 /* crates/halo_map's network_coop::QueueArguments: co-op's host resending

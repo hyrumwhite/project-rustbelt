@@ -1678,6 +1678,12 @@ long object_index_from_name_index(
 	return name_index>=0 && name_index<MAXIMUM_OBJECT_NAMES_PER_SCENARIO ? object_name_list[name_index] : NONE;
 }
 
+long const *object_name_list_port_get(
+	void)
+{
+	return object_name_list;
+}
+
 void objects_disconnect_from_structure_bsp(
 	void)
 {

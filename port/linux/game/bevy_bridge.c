@@ -62,8 +62,8 @@ static struct bevy_bridge_shared *bevy_bridge_shared;
 static boolean bevy_bridge_failed;
 static unsigned long bevy_bridge_frame_index;
 
-/* models drawn outside the object list since the last frame (the
-first-person weapon and hands), shared with the next */
+/* models drawn outside the object list this frame (the first-person weapon
+and hands), shared with it */
 #define MAXIMUM_RECORDED_MODELS 4
 #define MAXIMUM_RECORDED_MODEL_NODES 64
 static struct
@@ -652,7 +652,8 @@ void bevy_bridge_export_frame(
 		}
 	}
 
-	/* the models the last frame drew by themselves */
+	/* the models this frame drew by themselves (the first-person weapon and
+	hands: render.c exports the frame once its windows are drawn) */
 	{
 		short recorded;
 

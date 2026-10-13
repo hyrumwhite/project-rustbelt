@@ -626,9 +626,6 @@ void render_frame(
 	parameters.game_time_sec = render_interpolation_game_time_sec(game_time_get());
 	rasterizer_frame_begin(&parameters);
 	rasterizer_windows_begin();
-	/* port: the frame's world for a Bevy renderer, when one is set up
-	(port/linux/game/bevy_bridge.c) */
-	bevy_bridge_export_frame(windoze, window_count);
 
 	for (window_index = 0; window_index < window_count; window_index++)
 	{
@@ -662,6 +659,11 @@ void render_frame(
 
 		render_nonplayer_frame(window, window_type);
 	}
+	/* port: the frame's world for a Bevy renderer, when one is set up
+	(port/linux/game/bevy_bridge.c): once the windows are drawn, so that the
+	first-person weapon and hands it records are this frame's (with this
+	frame's camera), and before the frame ends, where the overlay is taken */
+	bevy_bridge_export_frame(windoze, window_count);
 
 	halo_screen_ui_offset(TRUE);
 	progress_bar_eachframe();

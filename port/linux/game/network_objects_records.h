@@ -138,6 +138,39 @@ struct objects_host_damage_animation
 	short sends;
 };
 
+/* a client: whether the host has told it all its objects, when it last
+asked for them and how long until it asks again, whether it failed to make
+one since it last asked (it says so when it asks again), how many of its own
+objects it made since the last tick (of any kind: those of the kinds the
+host has go), and whether to look through all the objects instead (the
+host's all told, too many made, or made where it cannot say) */
+struct objects_client_state
+{
+	boolean synchronized;
+	boolean ask_again;
+	boolean check_all;
+	short new_object_count;
+	long ready_time;
+	long ready_interval;
+};
+
+/* a client's own players' vehicles where they were at its last ticks */
+struct distributed_own_vehicle
+{
+	long time;
+	long vehicle_index;
+	real_point3d position;
+};
+
+/* the weapon a client's own player last picked up (the host said so), its
+unit and when, until it is readied (definition NONE: none) */
+struct distributed_picked_up_weapon
+{
+	long unit_index;
+	long definition_index;
+	long time;
+};
+
 /* for the automated tests' reports (network_test.c) */
 struct objects_statistics
 {

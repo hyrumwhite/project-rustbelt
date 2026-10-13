@@ -335,20 +335,13 @@ static struct
 kinds the host has go), and whether to look through all the objects
 instead (the host's all told, too many made, or made where it cannot say) */
 static long objects_client_new_objects[MAXIMUM_CLIENT_NEW_OBJECTS];
-static short objects_client_new_object_count;
-static boolean objects_client_check_all;
 /* ... the lowest of its own indices that may be free (those below it
 taken), and the object array's count when it last made an object (NONE:
 not known; another count, an object deleted since: from the first) */
 static long objects_client_local_free_index;
 static long objects_client_object_count;
 /* ... where the vehicles its own players drive were at its last ticks */
-static struct distributed_own_vehicle
-{
-	long time;
-	long vehicle_index;
-	real_point3d position;
-} objects_client_own_vehicles[MAXIMUM_LOCAL_PLAYERS][OWN_VEHICLE_POSITION_TICKS];
+static struct distributed_own_vehicle objects_client_own_vehicles[MAXIMUM_LOCAL_PLAYERS][OWN_VEHICLE_POSITION_TICKS];
 /* ... what its own players' units carried at the last tick, and when they
 last threw a grenade of each kind, and fired or reloaded each weapon
 (NONE: not while it has had it) */
@@ -370,20 +363,13 @@ typedef char distributed_own_inventory_size_assert[sizeof(struct distributed_own
 	offsetof(struct distributed_own_inventory, weapon_times) == 80 ? 1 : -1];
 /* ... the weapon each of them last picked up (the host said so), its unit
 and when, until it is readied (definition NONE: none) */
-static struct distributed_picked_up_weapon
-{
-	long unit_index;
-	long definition_index;
-	long time;
-} objects_client_picked_up_weapons[MAXIMUM_LOCAL_PLAYERS];
+static struct distributed_picked_up_weapon objects_client_picked_up_weapons[MAXIMUM_LOCAL_PLAYERS];
 /* ... whether it failed to make one of the host's objects since it last
 asked for them (it says so when it asks again) */
-static boolean objects_client_ask_again;
 /* ... all of them (the host said so), when it last asked for them and how
 long until it asks again */
-static boolean objects_client_synchronized;
-static long objects_client_ready_time;
-static long objects_client_ready_interval;
+/* ... (network_objects_records.h) */
+static struct objects_client_state objects_client;
 /* ... when it last failed to make one (NONE: not since the host last told
 it all), and how long it waits after the next failure */
 static long objects_client_failed_time;
@@ -454,16 +440,16 @@ long network_objects_new_object_index(
 				objects_client_local_identifier = 1;
 			object_index = ((long)objects_client_local_identifier << 16) | absolute_index;
 			/* (of the kinds the host has, it goes: looked at next tick) */
-			if (objects_client_new_object_count < MAXIMUM_CLIENT_NEW_OBJECTS)
-				objects_client_new_objects[objects_client_new_object_count++] = object_index;
+			if (objects_client.new_object_count < MAXIMUM_CLIENT_NEW_OBJECTS)
+				objects_client_new_objects[objects_client.new_object_count++] = object_index;
 			else
-				objects_client_check_all = TRUE;
+				objects_client.check_all = TRUE;
 			return object_index;
 		}
 	}
 	/* (the upper half full: the first free, anywhere) */
 	objects_client_local_free_index = object_header_data->maximum_count;
-	objects_client_check_all = TRUE;
+	objects_client.check_all = TRUE;
 	return NONE;
 }
 
@@ -664,6 +650,12 @@ struct memory_pool *objects_memory_pool(void);
 /* cache_files.c's loaded tags' table */
 void *cache_files_tag_instances(long *count);
 
+/* port: what the client's tick sends goes out of here (its calls), and
+what it takes of the game as it begins (network_objects_client_tick) */
+static struct distributed_object_state_message objects_client_message;
+static struct halo_sim_network_client_tick objects_client_tick_arguments;
+static void network_client_send(short destination, byte type, short count, word size);
+
 /* port: the applying's calls into the game (the Rust port's,
 crates/halo_map's network_apply), recorded in check mode */
 void network_apply_call(
@@ -785,6 +777,16 @@ void network_apply_call(
 		break;
 	case _network_apply_call_disconnect:
 		object_disconnect_from_map(call->a);
+		break;
+	case _network_apply_call_client_send:
+		distributed_send(&objects_client_message, (byte)(call->b & 0xFF), (short)((call->b >> 8) & 0xFF),
+			(word)((unsigned long)call->b >> 16), (short)call->a);
+		break;
+	case _network_apply_call_set_desired_weapon:
+		player_control_set_desired_weapon(call->a, (short)call->b);
+		break;
+	case _network_apply_call_send_identity:
+		distributed_client_send_identity();
 		break;
 	case _network_apply_call_teleporter:
 		call->result = find_netgame_flag((real_point3d const *)&call->input[0], 1.0f, 0.0f,
@@ -2891,13 +2893,13 @@ static void distributed_client_create_failed(
 {
 	objects_statistics.create_failures++;
 	/* (not asked since the last: that asking covers this one) */
-	if (objects_client_failed_time != NONE && objects_client_ready_time <= objects_client_failed_time)
+	if (objects_client_failed_time != NONE && objects_client.ready_time <= objects_client_failed_time)
 		return;
-	objects_client_ask_again = TRUE;
+	objects_client.ask_again = TRUE;
 	objects_client_failed_time = game_time_get();
-	objects_client_synchronized = FALSE;
-	objects_client_ready_time = game_time_get();
-	objects_client_ready_interval = objects_client_retry_ticks;
+	objects_client.synchronized = FALSE;
+	objects_client.ready_time = game_time_get();
+	objects_client.ready_interval = objects_client_retry_ticks;
 	objects_client_retry_ticks = MIN(2 * objects_client_retry_ticks, CLIENT_RETRY_MAXIMUM_TICKS);
 }
 
@@ -3213,12 +3215,12 @@ void network_objects_handle_synchronized(
 	asks again) */
 	if (objects_client_failed_time != NONE)
 	{
-		if (objects_client_ready_time <= objects_client_failed_time)
+		if (objects_client.ready_time <= objects_client_failed_time)
 			return;
 		objects_client_failed_time = NONE;
 		objects_client_retry_ticks = CLIENT_RETRY_TICKS;
 	}
-	objects_client_synchronized = TRUE;
+	objects_client.synchronized = TRUE;
 }
 
 /* a vehicle this machine's own player drives where the host has it, the
@@ -3762,7 +3764,7 @@ static void distributed_client_ready_picked_up_weapons(
 	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
 	{
 		struct distributed_picked_up_weapon *picked_up = &objects_client_picked_up_weapons[local_player_index];
-		long player_index = local_player_get_player_index(local_player_index);
+		long player_index = objects_client_tick_arguments.local_players[local_player_index];
 		struct player_datum *player = player_index != NONE ? player_try_and_get(player_index) : NULL;
 		long unit_index = distributed_living_unit(player);
 		struct unit_datum *unit;
@@ -3789,7 +3791,7 @@ static void distributed_client_ready_picked_up_weapons(
 			continue;
 		if (!TEST_FLAG(unit->unit.control_flags, _unit_control_weapon_primary_trigger_bit))
 		{
-			player_control_set_desired_weapon(unit_index, weapon_slot);
+			network_apply_simple(_network_apply_call_set_desired_weapon, unit_index, weapon_slot, NULL, 0);
 			unit->unit.desired_weapon_index = weapon_slot;
 		}
 		picked_up->definition_index = NONE;
@@ -3868,13 +3870,13 @@ the host tells back, with where it has them), and where they are noted */
 static void distributed_client_send_vehicles(
 	void)
 {
-	struct distributed_object_state_message message;
+	struct distributed_object_state_message *message = &objects_client_message;
 	short count = 0;
 	short local_player_index;
 
 	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
 	{
-		long player_index = local_player_get_player_index(local_player_index);
+		long player_index = objects_client_tick_arguments.local_players[local_player_index];
 		struct player_datum *player = player_index != NONE ? player_try_and_get(player_index) : NULL;
 		long vehicle_index = player ? distributed_driven_vehicle(player) : NONE;
 		struct distributed_own_vehicle *own =
@@ -3890,13 +3892,13 @@ static void distributed_client_send_vehicles(
 		if (vehicle_index == NONE)
 			continue;
 		own->position = object_get(vehicle_index)->object.position;
-		distributed_state_from_object(vehicle_index, &message.states[count]);
-		message.states[count++].time = (short)(word)game_time_get();
+		distributed_state_from_object(vehicle_index, &message->states[count]);
+		message->states[count++].time = (short)(word)game_time_get();
 	}
 	if (count)
 	{
-		distributed_send(&message, _distributed_message_vehicle_prediction, count,
-			(word)(sizeof(message.header) + count * sizeof(struct distributed_object_state)), _distributed_to_host);
+		network_client_send(_distributed_to_host, _distributed_message_vehicle_prediction, count,
+			(word)(sizeof(message->header) + count * sizeof(struct distributed_object_state)));
 	}
 }
 
@@ -3909,7 +3911,7 @@ static void distributed_client_note_own_inventories(
 
 	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
 	{
-		long player_index = local_player_get_player_index(local_player_index);
+		long player_index = objects_client_tick_arguments.local_players[local_player_index];
 		struct player_datum *player = player_index != NONE ? player_try_and_get(player_index) : NULL;
 		long unit_index = distributed_living_unit(player);
 
@@ -3929,12 +3931,12 @@ static void distributed_client_remove_own_objects(
 {
 	short index;
 
-	if (objects_client_check_all)
+	if (objects_client.check_all)
 	{
 		struct object_iterator iterator;
 
-		objects_client_check_all = FALSE;
-		objects_client_new_object_count = 0;
+		objects_client.check_all = FALSE;
+		objects_client.new_object_count = 0;
 		object_iterator_new(&iterator, NETWORKED_OBJECT_TYPES, 0);
 		while (object_iterator_next(&iterator))
 		{
@@ -3947,7 +3949,7 @@ static void distributed_client_remove_own_objects(
 		}
 		return;
 	}
-	for (index = 0; index < objects_client_new_object_count; index++)
+	for (index = 0; index < objects_client.new_object_count; index++)
 	{
 		long object_index = objects_client_new_objects[index];
 
@@ -3959,7 +3961,7 @@ static void distributed_client_remove_own_objects(
 		objects_statistics.own_objects_removed++;
 		distributed_client_delete(object_index);
 	}
-	objects_client_new_object_count = 0;
+	objects_client.new_object_count = 0;
 }
 
 /* Client: keeps each AI-driven vehicle (such as a Pelican on its flight
@@ -4002,43 +4004,136 @@ static void distributed_client_carry_unsteered_vehicles(
 			matrix4x3_transform_vector(&rotation, &object->object.forward, &forward);
 			matrix4x3_transform_vector(&rotation, &object->object.up, &up);
 		}
+		/* port: through the applying's calls (the Rust port's) */
 		if (distributed_transform_valid(&position, &forward, &up, NULL, NULL, &forward, &up))
-			object_set_position(iterator.index, &position, &forward, &up);
+			network_apply_set_position(iterator.index, &position, &forward, &up);
 	}
 }
 
-void network_objects_client_tick(
+/* the message in objects_client_message, of its type and count, where
+destination says */
+static void network_client_send(
+	short destination,
+	byte type,
+	short count,
+	word size)
+{
+	network_apply_simple(_network_apply_call_client_send, destination,
+		(long)type | ((long)(count & 0xFF) << 8) | ((long)size << 16), NULL, 0);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void network_objects_client_tick_game(
 	void)
 {
 	/* (loaded: the host's objects, please; flagged when one of them failed
 	since it last asked) */
-	if (!objects_client_synchronized &&
-		(objects_client_ready_time == NONE || game_time_get() - objects_client_ready_time >= objects_client_ready_interval))
+	if (!objects_client.synchronized &&
+		(objects_client.ready_time == NONE || game_time_get() - objects_client.ready_time >= objects_client.ready_interval))
 	{
-		struct distributed_message_header message;
-
 		/* (asked, less often the longer the host takes: a slow link does
 		not queue up the asking) */
-		if (objects_client_ready_time != NONE)
-			objects_client_ready_interval = MIN(2 * objects_client_ready_interval, CLIENT_READY_MAXIMUM_INTERVAL_TICKS);
-		objects_client_ready_time = game_time_get();
-		distributed_send(&message, _distributed_message_client_ready, objects_client_ask_again ? 1 : 0,
-			(word)sizeof(message), _distributed_to_host_reliably);
-		objects_client_ask_again = FALSE;
+		if (objects_client.ready_time != NONE)
+			objects_client.ready_interval = MIN(2 * objects_client.ready_interval, CLIENT_READY_MAXIMUM_INTERVAL_TICKS);
+		objects_client.ready_time = game_time_get();
+		network_client_send(_distributed_to_host_reliably, _distributed_message_client_ready,
+			objects_client.ask_again ? 1 : 0, (word)sizeof(objects_client_message.header));
+		objects_client.ask_again = FALSE;
 	}
-	if (objects_client_synchronized)
+	if (objects_client.synchronized)
 		distributed_client_remove_own_objects();
 	/* (too many to look at one by one later: all of them) */
-	else if (objects_client_new_object_count >= MAXIMUM_CLIENT_NEW_OBJECTS)
-		objects_client_check_all = TRUE;
+	else if (objects_client.new_object_count >= MAXIMUM_CLIENT_NEW_OBJECTS)
+		objects_client.check_all = TRUE;
 	distributed_client_ready_picked_up_weapons();
 	distributed_client_note_own_inventories();
 	distributed_client_send_vehicles();
 	distributed_client_carry_unsteered_vehicles();
 	/* (who it is, as its Discord told it: once its ready went, which makes
 	it a machine the host takes messages of) */
-	if (objects_client_ready_time != NONE)
-		distributed_client_send_identity();
+	if (objects_client.ready_time != NONE)
+		network_apply_simple(_network_apply_call_send_identity, 0, 0, NULL, 0);
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_apply), checked
+against the game's otherwise. Its world: the arguments, the client's
+records, the message, and the objects and players (deleted, moved). */
+void network_objects_client_tick(
+	void)
+{
+	struct halo_sim_network_client_tick *arguments = &objects_client_tick_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[16];
+	struct memory_pool *pool = objects_memory_pool();
+	long region_count = 0;
+	int checking = FALSE;
+	short local_player_index;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->state = (unsigned long)&objects_client;
+	arguments->new_objects = (unsigned long)&objects_client_new_objects[0];
+	arguments->has = (unsigned long)&objects_client_has[0];
+	arguments->picked_up_weapons = (unsigned long)&objects_client_picked_up_weapons[0];
+	arguments->own_vehicles = (unsigned long)&objects_client_own_vehicles[0][0];
+	arguments->own_inventories = (unsigned long)&objects_client_own_inventories[0];
+	arguments->statistics = (unsigned long)&objects_statistics;
+	arguments->message = (unsigned long)&objects_client_message;
+	arguments->ready_type = _distributed_message_client_ready;
+	arguments->prediction_type = _distributed_message_vehicle_prediction;
+	arguments->to_host = _distributed_to_host;
+	arguments->to_host_reliably = _distributed_to_host_reliably;
+	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
+		arguments->local_players[local_player_index] = local_player_get_player_index(local_player_index);
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)&objects_client;
+	regions[region_count++].size = sizeof(objects_client);
+	regions[region_count].address = (unsigned long)&objects_client_new_objects[0];
+	regions[region_count++].size = sizeof(objects_client_new_objects);
+	regions[region_count].address = (unsigned long)&objects_client_has[0];
+	regions[region_count++].size = sizeof(objects_client_has);
+	regions[region_count].address = (unsigned long)&objects_client_picked_up_weapons[0];
+	regions[region_count++].size = sizeof(objects_client_picked_up_weapons);
+	regions[region_count].address = (unsigned long)&objects_client_own_vehicles[0][0];
+	regions[region_count++].size = sizeof(objects_client_own_vehicles);
+	regions[region_count].address = (unsigned long)&objects_client_own_inventories[0];
+	regions[region_count++].size = sizeof(objects_client_own_inventories);
+	regions[region_count].address = (unsigned long)&objects_statistics;
+	regions[region_count++].size = sizeof(objects_statistics);
+	regions[region_count].address = (unsigned long)&objects_client_message;
+	regions[region_count++].size = sizeof(objects_client_message);
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	regions[region_count].address = (unsigned long)player_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)player_data->data;
+	regions[region_count++].size = player_data->maximum_count * player_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_client_tick, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return;
+	}
+	network_objects_client_tick_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_client_tick);
 }
 
 /* ---------- the game */
@@ -4076,18 +4171,18 @@ void network_objects_new_game(
 		objects_host_vehicle_predictions[index].ground_vehicle_index = NONE;
 		objects_host_vehicle_predictions[index].rest_vehicle_index = NONE;
 	}
-	objects_client_synchronized = FALSE;
-	objects_client_ready_time = NONE;
-	objects_client_ready_interval = CLIENT_READY_INTERVAL_TICKS;
+	objects_client.synchronized = FALSE;
+	objects_client.ready_time = NONE;
+	objects_client.ready_interval = CLIENT_READY_INTERVAL_TICKS;
 	objects_client_failed_time = NONE;
 	objects_client_retry_ticks = CLIENT_RETRY_TICKS;
-	objects_client_ask_again = FALSE;
+	objects_client.ask_again = FALSE;
 	objects_client_local_allocation = FALSE;
 	objects_client_creating_index = NONE;
 	objects_client_creating = FALSE;
 	objects_client_deleting = FALSE;
-	objects_client_new_object_count = 0;
-	objects_client_check_all = TRUE;
+	objects_client.new_object_count = 0;
+	objects_client.check_all = TRUE;
 	objects_client_local_free_index = LOCAL_OBJECTS_FIRST_INDEX;
 	objects_client_object_count = NONE;
 	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)

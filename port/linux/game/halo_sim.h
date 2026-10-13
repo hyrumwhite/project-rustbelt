@@ -2368,6 +2368,7 @@ enum
 	_halo_sim_world_step_network_vehicle_predictions,
 	_halo_sim_world_step_network_plan_players,
 	_halo_sim_world_step_network_send_players,
+	_halo_sim_world_step_network_client_tick,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2497,7 +2498,38 @@ enum
 	_network_apply_call_exit_seat_end,
 	_network_apply_call_set_garbage,
 	_network_apply_call_disconnect,
+	/* (the client's tick) the message in network_objects.c's
+	objects_client_message, its type b & 0xff, count (b >> 8) & 0xff and size
+	b >> 16, where a says (distributed_send) */
+	_network_apply_call_client_send,
+	/* player_control_set_desired_weapon(a, b) */
+	_network_apply_call_set_desired_weapon,
+	/* distributed_client_send_identity() */
+	_network_apply_call_send_identity,
 };
+
+/* crates/halo_map's network_apply::ClientTickArguments: a client's tick of
+the host's objects: its records (network_objects.c and
+network_objects_records.h), the message it sends, the messages' types and
+destinations, and its local players as the tick began */
+struct halo_sim_network_client_tick
+{
+	unsigned long state;
+	unsigned long new_objects;
+	unsigned long has;
+	unsigned long picked_up_weapons;
+	unsigned long own_vehicles;
+	unsigned long own_inventories;
+	unsigned long statistics;
+	unsigned long message;
+	short ready_type;
+	short prediction_type;
+	short to_host;
+	short to_host_reliably;
+	long local_players[4];
+};
+
+typedef char halo_sim_network_client_tick_size_assert[sizeof(struct halo_sim_network_client_tick) == 8 * 4 + 4 * 2 + 16 ? 1 : -1];
 
 /* network_distributed.c's smoothed round trip */
 unsigned long network_distributed_round_trip_address(void);

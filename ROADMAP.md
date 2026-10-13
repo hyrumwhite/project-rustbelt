@@ -904,6 +904,22 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - With all networking systems in Rust, the machines' positions differ as with the C (median 5.9 cm against 4.8), and the joiner ends with the host's count of items.
          - With all fifty-four systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
+   - [x] The host checking clients' hit reports in Rust (`halo_map::network_damage`, under `network_damage`, world step 11): network_damage.c's `distributed_report_valid` and its helpers, and `network_damage_handle_reports`.
+     - **What Rust does:**
+       - **What the player could deal**, found by walking the tags: their recent weapons (melee blows, their own detonations and overheating, their triggers' projectiles at their fastest rate), their unarmed blow, the vehicle they drove, a grenade the host saw them throw. Projectiles' impacts and detonations and their effects' parts are followed four deep, with how far from the firer (a projectile's flight by range, speed, timer and gravity).
+       - **Checking the report:** it must be of that machine's player, at one of the host's objects (or destructible scenery), with numbers and indices the game can take, made lately. It must be of the shape the game gives it (at a point, a melee blow from the striker, a collision from the vehicle they drove), no harder than it can be, its origin at the target, a thrown grenade's explosion once, and paid for from the player's hits at the weapon's rate (an explosion's other objects that tick come free). It must come from where the host had the player (their history, their trail since it was fired) and hit the target about where the host had it when the shooter saw it.
+       - **Making the damage:** the report becomes the damage the host deals: its flags, an explosion's direction and fall-off as the game gives them, the player's team, and the owner object theirs.
+     - **The game's, through calls (`network_damage_call`):** whether the machine has the player, its round trip, objects' origins, velocities, maximum vitality and nodes, a point's location, and dealing the damage (`object_cause_damage`, itself Rust's under `damage`). The game's tag walk keeps its cache; Rust walks the tags each time and finds what the cache holds.
+     - **Records:** the host's damage records' types moved to network_damage_records.h, so the netcode probe has their layouts. The regions are the report's arguments (the damage made among them), its player's records and the counts.
+     - **Results:**
+       - In a 90-second session with a hit every 3 seconds, every report agrees and is dealt (24), with none left out.
+       - Planted errors in the damage's direction, its team and a trigger's rate (in the hits it costs) were caught.
+       - Two went unseen: the hits' refill (a hit every 3 seconds leaves the bucket full) and the trail's interval slack (the shots were well within reach).
+       - Not exercised: explosions, melee blows, vehicle collisions and rejected reports. The scripted hits are a weapon's at a point.
+       - **Rust in charge:**
+         - With all networking systems in Rust, every report the joiner sends is dealt, as with the C, and the machines' positions differ as with the C (median 5.7 cm against 5.8).
+         - With all fifty-five systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

@@ -73,6 +73,7 @@ machine (their datum identifiers need not be).
 #include "network_coop.h"
 #include "network_distributed.h"
 #include "network_voice.h"
+#include "network_distributed_records.h"
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <limits.h>
@@ -339,6 +340,10 @@ struct distributed_player_input
 };
 
 typedef char distributed_unit_state_size_assert[sizeof(struct distributed_unit_state) == 64 ? 1 : -1];
+/* (crates/halo_map's network_host reads these of the plan's states) */
+typedef char distributed_unit_state_offsets_assert[offsetof(struct distributed_unit_state, flags) == 1 &&
+	offsetof(struct distributed_unit_state, unit_index) == 4 && offsetof(struct distributed_unit_state, vehicle_index) == 8 &&
+	offsetof(struct distributed_unit_state, seat_index) == 12 ? 1 : -1];
 typedef char distributed_player_input_size_assert[
 	sizeof(struct distributed_player_input) == 12 + 0x20 + 2 * DISTRIBUTED_INPUT_HISTORY ? 1 : -1];
 typedef char distributed_player_input_action_offset_assert[
@@ -551,26 +556,14 @@ had loaded (a machine new at its index has none of the old one's state) */
 static long distributed_machine_players[HALO_PORT_MAXIMUM_NETWORK_MACHINES][MAXIMUM_LOCAL_PLAYERS];
 /* the host: what each player's unit was last sent as (a change goes to
 every client at once) */
-static struct
-{
-	byte flags;
-	long unit_index;
-	long vehicle_index;
-	short seat_index;
-} distributed_sent_units[MAXIMUM_TRACKED_PLAYERS];
+static struct distributed_sent_unit distributed_sent_units[MAXIMUM_TRACKED_PLAYERS];
 
 /* the host: whether each client's players could see each player last tick
 (one who comes into sight is sent at once) */
 static boolean distributed_seen[HALO_PORT_MAXIMUM_NETWORK_MACHINES][MAXIMUM_TRACKED_PLAYERS];
 /* the host: where each client's players were when last alive (a client
 whose players are dead watches from there) */
-static struct distributed_viewer
-{
-	boolean valid;
-	short cluster_index;
-	real_point3d position;
-	real_vector3d aim;
-} distributed_viewers[HALO_PORT_MAXIMUM_NETWORK_MACHINES][MAXIMUM_LOCAL_PLAYERS];
+static struct distributed_viewer distributed_viewers[HALO_PORT_MAXIMUM_NETWORK_MACHINES][MAXIMUM_LOCAL_PLAYERS];
 /* the host, this tick: every player's unit and input, what each client is
 sent of each player (decided before the damage, which goes where the
 players it hurt do), and the client each player is on (NONE for none: the
@@ -3005,7 +2998,62 @@ and no dead player's input (it drives nothing). A client whose players are
 dead watches from where they last were alive. Decided before the damage is
 sent (network_damage.c), which goes where the players it hurt do; sent
 after it (distributed_host_send_players). */
-static void distributed_host_plan_players(
+/* port: the plan's calls into the game (the Rust port's, crates/halo_map's
+network_host), recorded in check mode, and what the plan takes of the game
+as the tick begins */
+static struct halo_sim_network_plan distributed_plan_arguments;
+static struct player_action const *distributed_plan_recent[DISTRIBUTED_INPUT_HISTORY];
+static short distributed_plan_recent_counts[DISTRIBUTED_INPUT_HISTORY];
+
+typedef char distributed_plan_machines_assert[
+	sizeof(distributed_plan_arguments.machine_indices) / sizeof(distributed_plan_arguments.machine_indices[0]) ==
+		HALO_PORT_MAXIMUM_NETWORK_MACHINES &&
+	sizeof(distributed_plan_arguments.player_lists[0]) / sizeof(distributed_plan_arguments.player_lists[0][0]) ==
+		MAXIMUM_LOCAL_PLAYERS ? 1 : -1];
+
+void network_plan_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_plan_call_state:
+		distributed_state_from_player((short)call->a, &distributed_host_states[call->a]);
+		break;
+	case _network_plan_call_origin:
+		object_get_origin(call->a, (real_point3d *)&call->output[0]);
+		break;
+	case _network_plan_call_action:
+		call->result = distributed_relayed_action_from((short)call->a, distributed_plan_recent,
+			distributed_plan_recent_counts, &distributed_host_actions[call->a]);
+		break;
+	case _network_plan_call_sees:
+		call->result = BIT_VECTOR_TEST_FLAG(structure_bsp_get_cluster_pvs(global_structure_bsp_get(), (short)call->a),
+			(short)call->b) != 0;
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static long network_plan_simple(
+	long kind,
+	long a,
+	long b)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	network_plan_call(&call);
+	return call.result;
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_host_plan_players_game(
 	void)
 {
 	static boolean present[MAXIMUM_TRACKED_PLAYERS];
@@ -3016,30 +3064,22 @@ static void distributed_host_plan_players(
 	static real_point3d origins[MAXIMUM_TRACKED_PLAYERS];
 	static short clusters[MAXIMUM_TRACKED_PLAYERS];
 	static boolean placed[MAXIMUM_TRACKED_PLAYERS];
-	long machine_indices[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	short machine_count = distributed_client_machines(machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
-	struct structure_bsp *structure_bsp = global_structure_bsp_get();
-	short cluster_count = structure_bsp ? (short)structure_bsp->clusters.count : 0;
+	struct halo_sim_network_plan const *arguments = &distributed_plan_arguments;
+	long *machine_indices = (long *)arguments->machine_indices;
+	short machine_count = (short)arguments->machine_count;
+	short cluster_count = (short)arguments->cluster_count;
 	long now = game_time_get();
-	struct player_action const *recent[DISTRIBUTED_INPUT_HISTORY];
-	short recent_counts[DISTRIBUTED_INPUT_HISTORY];
 	short player_index;
 	short machine_number;
-	short history;
 
-	distributed_host_update_number = update_server_ticked_update_number();
-	for (history = 0; history < DISTRIBUTED_INPUT_HISTORY; history++)
-	{
-		recent[history] = distributed_host_update_number != NONE ?
-			update_server_update_actions(distributed_host_update_number - history, &recent_counts[history]) : NULL;
-	}
+	distributed_host_update_number = arguments->update_number_value;
 	csmemset(distributed_sends, 0, sizeof(distributed_sends));
 	/* (the client each player is on) */
 	for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
 		distributed_player_machines[player_index] = NONE;
 	for (machine_number = 0; machine_number < machine_count; machine_number++)
 	{
-		long *player_list = machine_get_player_list(machine_indices[machine_number]);
+		long *player_list = (long *)arguments->player_lists[machine_number];
 		short local_player_index;
 
 		for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
@@ -3063,11 +3103,19 @@ static void distributed_host_plan_players(
 		if (!player)
 			continue;
 		quit[player_index] = player->quit_out_of_game;
-		distributed_state_from_player(player_index, state);
+		/* port: through the plan's calls (the Rust port's) */
+		network_plan_simple(_network_plan_call_state, player_index, 0);
 		unit_index = distributed_living_unit(player);
 		if (unit_index != NONE)
 		{
-			object_get_origin(unit_index, &origins[player_index]);
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_plan_call_origin;
+			call.actor = NONE;
+			call.a = unit_index;
+			network_plan_call(&call);
+			csmemcpy(&origins[player_index], &call.output[0], sizeof(origins[player_index]));
 			clusters[player_index] = distributed_object_cluster(unit_index);
 			placed[player_index] = TRUE;
 		}
@@ -3081,19 +3129,18 @@ static void distributed_host_plan_players(
 		distributed_sent_units[player_index].unit_index = state->unit_index;
 		distributed_sent_units[player_index].vehicle_index = state->vehicle_index;
 		distributed_sent_units[player_index].seat_index = state->seat_index;
-		if (placed[player_index] && recent[0] && player_index < recent_counts[0])
+		if (placed[player_index] && arguments->recent_count != NONE && player_index < arguments->recent_count)
 		{
 			has_action[player_index] = TRUE;
-			action_changed[player_index] = distributed_relayed_action_from(player_index, recent, recent_counts,
-				&distributed_host_actions[player_index]);
+			action_changed[player_index] = (boolean)network_plan_simple(_network_plan_call_action, player_index, 0);
 		}
 	}
 	for (machine_number = 0; machine_number < machine_count; machine_number++)
 	{
 		long machine_index = machine_indices[machine_number];
-		long *player_list = machine_get_player_list(machine_index);
+		long *player_list = (long *)arguments->player_lists[machine_number];
 		real_point3d viewers[MAXIMUM_LOCAL_PLAYERS];
-		unsigned long *viewer_pvs[MAXIMUM_LOCAL_PLAYERS];
+		short viewer_clusters[MAXIMUM_LOCAL_PLAYERS];
 		real_vector3d viewer_aims[MAXIMUM_LOCAL_PLAYERS];
 		boolean viewer_scoped[MAXIMUM_LOCAL_PLAYERS];
 		short viewer_count = 0;
@@ -3124,8 +3171,7 @@ static void distributed_host_plan_players(
 			if (!viewer->valid)
 				continue;
 			viewers[viewer_count] = viewer->position;
-			viewer_pvs[viewer_count] = viewer->cluster_index >= 0 && viewer->cluster_index < cluster_count ?
-				structure_bsp_get_cluster_pvs(structure_bsp, viewer->cluster_index) : NULL;
+			viewer_clusters[viewer_count] = viewer->cluster_index;
 			viewer_aims[viewer_count] = viewer->aim;
 			viewer_scoped[viewer_count++] = scoped;
 		}
@@ -3163,9 +3209,11 @@ static void distributed_host_plan_players(
 					distances_squared[index] = dx * dx + dy * dy + dz * dz;
 					if (nearest < 0.0f || distances_squared[index] < nearest)
 						nearest = distances_squared[index];
-					/* (outside the map's clusters: in sight, to be safe) */
-					sees[index] = !viewer_pvs[index] || to < 0 || to >= cluster_count ||
-						BIT_VECTOR_TEST_FLAG(viewer_pvs[index], to);
+					/* (outside the map's clusters: in sight, to be safe; the map's
+					potentially visible set through the plan's calls) */
+					sees[index] = viewer_clusters[index] < 0 || viewer_clusters[index] >= cluster_count ||
+						to < 0 || to >= cluster_count ||
+						network_plan_simple(_network_plan_call_sees, viewer_clusters[index], to);
 					visible |= sees[index];
 				}
 				period = !visible ? HIDDEN_PLAYER_PERIOD_TICKS :
@@ -3219,6 +3267,78 @@ static void distributed_host_plan_players(
 				SET_FLAG(*sends, _distributed_send_action_bit, TRUE);
 		}
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_host), checked
+against the game's otherwise. Its world: the arguments and what the plan
+writes. */
+static void distributed_host_plan_players(
+	void)
+{
+	struct halo_sim_network_plan *arguments = &distributed_plan_arguments;
+	struct structure_bsp *structure_bsp = global_structure_bsp_get();
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[9];
+	long region_count = 0;
+	int checking = FALSE;
+	short machine_number;
+	short history;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->sends = (unsigned long)&distributed_sends[0][0];
+	arguments->seen = (unsigned long)&distributed_seen[0][0];
+	arguments->viewers = (unsigned long)&distributed_viewers[0][0];
+	arguments->sent_units = (unsigned long)&distributed_sent_units[0];
+	arguments->states = (unsigned long)&distributed_host_states[0];
+	arguments->player_machines = (unsigned long)&distributed_player_machines[0];
+	arguments->update_number = (unsigned long)&distributed_host_update_number;
+	arguments->update_number_value = update_server_ticked_update_number();
+	for (history = 0; history < DISTRIBUTED_INPUT_HISTORY; history++)
+	{
+		distributed_plan_recent[history] = arguments->update_number_value != NONE ?
+			update_server_update_actions(arguments->update_number_value - history,
+				&distributed_plan_recent_counts[history]) : NULL;
+	}
+	arguments->recent_count = distributed_plan_recent[0] ? distributed_plan_recent_counts[0] : NONE;
+	arguments->cluster_count = structure_bsp ? structure_bsp->clusters.count : 0;
+	arguments->machine_count = distributed_client_machines((long *)arguments->machine_indices,
+		HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	for (machine_number = 0; machine_number < arguments->machine_count; machine_number++)
+	{
+		csmemcpy(arguments->player_lists[machine_number], machine_get_player_list(arguments->machine_indices[machine_number]),
+			sizeof(arguments->player_lists[machine_number]));
+	}
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)&distributed_sends[0][0];
+	regions[region_count++].size = sizeof(distributed_sends);
+	regions[region_count].address = (unsigned long)&distributed_seen[0][0];
+	regions[region_count++].size = sizeof(distributed_seen);
+	regions[region_count].address = (unsigned long)&distributed_viewers[0][0];
+	regions[region_count++].size = sizeof(distributed_viewers);
+	regions[region_count].address = (unsigned long)&distributed_sent_units[0];
+	regions[region_count++].size = sizeof(distributed_sent_units);
+	regions[region_count].address = (unsigned long)&distributed_host_states[0];
+	regions[region_count++].size = sizeof(distributed_host_states);
+	regions[region_count].address = (unsigned long)&distributed_host_actions[0];
+	regions[region_count++].size = sizeof(distributed_host_actions);
+	regions[region_count].address = (unsigned long)&distributed_player_machines[0];
+	regions[region_count++].size = sizeof(distributed_player_machines);
+	regions[region_count].address = (unsigned long)&distributed_host_update_number;
+	regions[region_count++].size = sizeof(distributed_host_update_number);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_plan_players, &context, regions, region_count,
+		network_plan_call, &checking))
+	{
+		return;
+	}
+	distributed_host_plan_players_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_plan_players);
 }
 
 /* (the host) to each client what distributed_host_plan_players decided, the

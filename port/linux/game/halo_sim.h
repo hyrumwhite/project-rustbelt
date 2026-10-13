@@ -2366,6 +2366,7 @@ enum
 	_halo_sim_world_step_network_damage_aftermath,
 	_halo_sim_world_step_network_host_tick,
 	_halo_sim_world_step_network_vehicle_predictions,
+	_halo_sim_world_step_network_plan_players,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2661,6 +2662,47 @@ typedef char halo_sim_network_vehicle_predictions_size_assert[
 	sizeof(struct halo_sim_network_vehicle_predictions) == 8 + 15 * 4 ? 1 : -1];
 
 void network_host_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_host::PlanArguments: the host's plan of what
+each client is sent of each player a tick: its records
+(network_distributed.c, network_distributed_records.h), the update the
+tick ran and how many players' input it has (NONE: none), the map's cluster
+count, and the client machines and their players as the tick began */
+struct halo_sim_network_plan
+{
+	unsigned long sends;
+	unsigned long seen;
+	unsigned long viewers;
+	unsigned long sent_units;
+	unsigned long states;
+	unsigned long player_machines;
+	unsigned long update_number;
+	long update_number_value;
+	long recent_count;
+	long cluster_count;
+	long machine_count;
+	long machine_indices[128];
+	long player_lists[128][4];
+};
+
+typedef char halo_sim_network_plan_size_assert[sizeof(struct halo_sim_network_plan) == 11 * 4 + 128 * 4 + 128 * 16 ? 1 : -1];
+
+/* network_distributed.c's plan calls (crates/halo_map's network_host::plan_call) */
+enum
+{
+	/* distributed_state_from_player(a) into the plan's states */
+	_network_plan_call_state = 1,
+	/* object_get_origin(a), output[0..3] */
+	_network_plan_call_origin,
+	/* distributed_relayed_action_from(a) into the plan's actions: whether
+	it changed */
+	_network_plan_call_action,
+	/* whether the cluster a sees the cluster b (the map's potentially
+	visible set) */
+	_network_plan_call_sees,
+};
+
+void network_plan_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

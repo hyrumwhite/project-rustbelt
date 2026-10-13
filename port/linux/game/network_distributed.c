@@ -1824,6 +1824,68 @@ static boolean distributed_apply_state(
 }
 
 /* (a client) where its own players' units are this tick, noted */
+/* port: the client's sends each tick are Rust's in Rust's mode (crates/
+halo_map's network_input): its local players' input, its players' states
+and what it packs pass through the arguments, the game's parts through these
+calls */
+static struct halo_sim_network_client_sends distributed_client_sends_arguments;
+
+typedef char distributed_client_sends_assert[
+	sizeof(distributed_client_sends_arguments.action) == sizeof(struct player_action) &&
+	sizeof(distributed_client_sends_arguments.state) == sizeof(struct distributed_unit_state) &&
+	sizeof(distributed_client_sends_arguments.entry) >= DISTRIBUTED_UNIT_STATE_MAXIMUM_SIZE &&
+	sizeof(distributed_client_sends_arguments.message) ==
+		sizeof(struct distributed_message_header) + MAXIMUM_LOCAL_PLAYERS * sizeof(struct distributed_player_input) ? 1 : -1];
+
+void network_client_sends_call(
+	struct halo_sim_ai_call *call)
+{
+	struct halo_sim_network_client_sends *arguments = &distributed_client_sends_arguments;
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_client_sends_call_local_input:
+		call->result = update_client_distributed_input((short)call->a, &arguments->tick,
+			(struct player_action *)arguments->action, arguments->control_flags);
+		break;
+	case _network_client_sends_call_send:
+		distributed_send(arguments->message, (byte)(call->b & 0xFF), (short)((call->b >> 8) & 0xFF),
+			(word)((unsigned long)call->b >> 16), (short)call->actor);
+		break;
+	case _network_client_sends_call_state:
+		distributed_state_from_player((short)call->a, (struct distributed_unit_state *)arguments->state);
+		break;
+	case _network_client_sends_call_packer_begin:
+		distributed_packer_begin(&distributed_packer, (short)call->a, (byte)call->b, NULL, 0);
+		break;
+	case _network_client_sends_call_packer_add:
+		distributed_packer_add(&distributed_packer, arguments->entry, (word)call->b);
+		break;
+	case _network_client_sends_call_packer_flush:
+		distributed_packer_flush(&distributed_packer);
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static long network_client_sends_simple(
+	long kind,
+	long a,
+	long b,
+	long actor)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor;
+	call.a = a;
+	call.b = b;
+	network_client_sends_call(&call);
+	return call.result;
+}
+
 static void distributed_note_own_positions(
 	void)
 {
@@ -1831,7 +1893,7 @@ static void distributed_note_own_positions(
 
 	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
 	{
-		long player_index = local_player_get_player_index(local_player_index);
+		long player_index = distributed_client_sends_arguments.local_players[local_player_index];
 		struct player_datum *player = player_index != NONE ? player_try_and_get(player_index) : NULL;
 		long unit_index = distributed_living_unit(player);
 		struct distributed_own_position *own =
@@ -1962,16 +2024,17 @@ static void distributed_correct_own_unit(
 static void distributed_client_send_predictions(
 	void)
 {
+	struct halo_sim_network_client_sends *arguments = &distributed_client_sends_arguments;
 	struct data_iterator iterator;
 	struct player_datum *player;
 
-	distributed_packer_begin(&distributed_packer, HOST_SENDER, _distributed_message_player_prediction, NULL, 0);
+	network_client_sends_simple(_network_client_sends_call_packer_begin, HOST_SENDER,
+		_distributed_message_player_prediction, NONE);
 	data_iterator_new(&iterator, player_data);
 	while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
 	{
 		long unit_index = distributed_living_unit(player);
 		struct distributed_unit_state state;
-		byte entry[DISTRIBUTED_UNIT_STATE_MAXIMUM_SIZE];
 
 		/* a client speaks for its own players only, where they are */
 		if (player->local_player_index == NONE || unit_index == NONE ||
@@ -1979,33 +2042,89 @@ static void distributed_client_send_predictions(
 		{
 			continue;
 		}
-		distributed_state_from_player((short)DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.datum_index), &state);
+		/* port: through the sends' calls (the Rust port's) */
+		network_client_sends_simple(_network_client_sends_call_state,
+			(short)DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.datum_index), 0, NONE);
+		csmemcpy(&state, arguments->state, sizeof(state));
 		/* (the automated tests: HALO_NETWORK_TEST_LIE=<seconds>, a false word
 		every so often for three ticks (a step aside, up, down, a dash), for
 		the host's refusals to be checked) */
+		if (arguments->lie_ticks > 0 && game_time_get() % arguments->lie_ticks < 3)
 		{
-			static long lie_ticks = NONE;
+			static real const offsets[4][3] = { { 2.5f, 0.0f, 0.0f }, { 0.0f, 0.0f, 2.5f }, { 0.0f, 0.0f, -2.5f },
+				{ 1.0f, 1.0f, 0.0f } };
+			short which = (short)((game_time_get() / arguments->lie_ticks) % 4);
 
-			if (lie_ticks == NONE)
-			{
-				char const *value = getenv("HALO_NETWORK_TEST_LIE");
-
-				lie_ticks = value ? atol(value) * TICKS_PER_SECOND : 0;
-			}
-			if (lie_ticks > 0 && game_time_get() % lie_ticks < 3)
-			{
-				static real const offsets[4][3] = { { 2.5f, 0.0f, 0.0f }, { 0.0f, 0.0f, 2.5f }, { 0.0f, 0.0f, -2.5f },
-					{ 1.0f, 1.0f, 0.0f } };
-				short which = (short)((game_time_get() / lie_ticks) % 4);
-
-				state.position.x += offsets[which][0];
-				state.position.y += offsets[which][1];
-				state.position.z += offsets[which][2];
-			}
+			state.position.x += offsets[which][0];
+			state.position.y += offsets[which][1];
+			state.position.z += offsets[which][2];
 		}
-		distributed_packer_add(&distributed_packer, entry, distributed_unit_state_write(&state, TRUE, entry));
+		network_client_sends_simple(_network_client_sends_call_packer_add, 0,
+			distributed_unit_state_write(&state, TRUE, arguments->entry), NONE);
 	}
-	distributed_packer_flush(&distributed_packer);
+	network_client_sends_simple(_network_client_sends_call_packer_flush, 0, 0, NONE);
+}
+
+static void distributed_client_send_inputs(void);
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_client_sends_game(
+	void)
+{
+	distributed_note_own_positions();
+	distributed_client_send_inputs();
+	distributed_client_send_predictions();
+}
+
+/* (a client) where its own players are noted, and their input and where
+they are, to the host */
+/* port: Rust's in Rust's mode (crates/halo_map's network_input), checked
+against the game's otherwise; its world the arguments and the noted
+positions */
+static void distributed_client_sends(
+	void)
+{
+	struct halo_sim_network_client_sends *arguments = &distributed_client_sends_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	int checking = FALSE;
+	short local_player_index;
+	static long lie_ticks = NONE;
+
+	if (lie_ticks == NONE)
+	{
+		char const *value = getenv("HALO_NETWORK_TEST_LIE");
+
+		lie_ticks = value ? atol(value) * TICKS_PER_SECOND : 0;
+	}
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->own_positions = (unsigned long)&distributed_own_positions[0][0];
+	arguments->host_time = distributed_host_time;
+	arguments->structure_bsp_index = global_structure_bsp_index_get();
+	arguments->lie_ticks = lie_ticks;
+	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
+		arguments->local_players[local_player_index] = local_player_get_player_index(local_player_index);
+	arguments->inputs_type = _distributed_message_player_inputs;
+	arguments->predictions_type = _distributed_message_player_prediction;
+	arguments->to_host = _distributed_to_host;
+	arguments->host_sender = HOST_SENDER;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&distributed_own_positions[0][0];
+	regions[1].size = sizeof(distributed_own_positions);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_client_sends, &context, regions, 2,
+		network_client_sends_call, &checking))
+	{
+		return;
+	}
+	distributed_client_sends_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_client_sends);
 }
 
 /* (the host) a client's own players: the latest of each, taken at the next
@@ -2784,33 +2903,37 @@ of the ticks before it, to the host */
 static void distributed_client_send_inputs(
 	void)
 {
-	struct
-	{
-		struct distributed_message_header header;
-		struct distributed_player_input inputs[MAXIMUM_LOCAL_PLAYERS];
-	} message;
+	struct halo_sim_network_client_sends *arguments = &distributed_client_sends_arguments;
+	struct distributed_player_input *inputs =
+		(struct distributed_player_input *)(arguments->message + sizeof(struct distributed_message_header));
 	short count = 0;
 	short local_player_index;
 
 	for (local_player_index = 0; local_player_index < MAXIMUM_LOCAL_PLAYERS; local_player_index++)
 	{
-		long player_index = local_player_get_player_index(local_player_index);
-		struct distributed_player_input *input = &message.inputs[count];
+		long player_index = arguments->local_players[local_player_index];
+		struct distributed_player_input *input = &inputs[count];
 
 		if (player_index == NONE)
 			continue;
 		csmemset(input, 0, sizeof(*input));
-		if (!update_client_distributed_input(local_player_index, &input->tick, &input->action, input->control_flags))
+		/* port: through the sends' calls (the Rust port's) */
+		if (!network_client_sends_simple(_network_client_sends_call_local_input, local_player_index, 0, NONE))
 			continue;
+		input->tick = arguments->tick;
+		csmemcpy(&input->action, arguments->action, sizeof(input->action));
+		csmemcpy(input->control_flags, arguments->control_flags, sizeof(input->control_flags));
 		input->player_index = distributed_player_to_byte(player_index);
-		input->structure_bsp_index = (byte)global_structure_bsp_index_get();
-		input->host_time = distributed_host_time;
+		input->structure_bsp_index = (byte)arguments->structure_bsp_index;
+		input->host_time = arguments->host_time;
 		count++;
 	}
 	if (count)
 	{
-		distributed_send(&message, _distributed_message_player_inputs, count,
-			(word)(sizeof(message.header) + count * sizeof(struct distributed_player_input)), _distributed_to_host);
+		network_client_sends_simple(_network_client_sends_call_send, 0,
+			(long)_distributed_message_player_inputs | ((long)count << 8) |
+				((long)(sizeof(struct distributed_message_header) + count * sizeof(struct distributed_player_input)) << 16),
+			_distributed_to_host);
 	}
 }
 
@@ -4421,9 +4544,7 @@ void network_distributed_tick(
 	}
 	else if (connection == _game_connection_network_client)
 	{
-		distributed_note_own_positions();
-		distributed_client_send_inputs();
-		distributed_client_send_predictions();
+		distributed_client_sends();
 		network_objects_client_tick();
 		network_damage_client_tick();
 		network_coop_client_tick();

@@ -2380,6 +2380,7 @@ enum
 	_halo_sim_world_step_network_handle_actions,
 	_halo_sim_world_step_network_statistics,
 	_halo_sim_world_step_network_pickups,
+	_halo_sim_world_step_network_client_sends,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2951,6 +2952,55 @@ enum
 };
 
 void network_sends_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_input::ClientSendsArguments: a client's sends
+each tick: the noted positions, the host's latest tick it had, its
+structure BSP, the tests' lie's period (HALO_NETWORK_TEST_LIE), its local
+players, the messages' kinds; and the local input, the player's state, the
+entry packed and the inputs' message the calls pass */
+struct halo_sim_network_client_sends
+{
+	unsigned long own_positions;
+	long host_time;
+	long structure_bsp_index;
+	long lie_ticks;
+	long local_players[4];
+	short inputs_type;
+	short predictions_type;
+	short to_host;
+	short host_sender;
+	long tick;
+	unsigned char action[0x20];
+	unsigned short control_flags[4];
+	unsigned char state[64];
+	unsigned char entry[64];
+	unsigned char message[8 + 4 * 52];
+};
+
+typedef char halo_sim_network_client_sends_size_assert[
+	sizeof(struct halo_sim_network_client_sends) == 4 * 4 + 16 + 8 + 4 + 0x20 + 8 + 64 + 64 + 216 ? 1 : -1];
+
+/* network_distributed.c's client sends' calls (crates/halo_map's
+network_input::sends_call) */
+enum
+{
+	/* update_client_distributed_input(a) into the arguments' tick, action
+	and buttons: whether there is one */
+	_network_client_sends_call_local_input = 1,
+	/* the arguments' message, its type b & 0xff, count (b >> 8) & 0xff and
+	size b >> 16, where actor says */
+	_network_client_sends_call_send,
+	/* distributed_state_from_player(a) into the arguments' state */
+	_network_client_sends_call_state,
+	/* the packer begun for the sender a's messages of type b */
+	_network_client_sends_call_packer_begin,
+	/* the arguments' entry, of b bytes, into the packer */
+	_network_client_sends_call_packer_add,
+	/* the packer's message so far into the batch */
+	_network_client_sends_call_packer_flush,
+};
+
+void network_client_sends_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

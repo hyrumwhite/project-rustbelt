@@ -14,8 +14,8 @@
 //! [`AiHost::call`] (network_objects.c's `network_apply_call`).
 
 use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, NONE, WorldContext, datum_get};
-use crate::distributed_wire::{UNIT_SCALE, UnitState, VELOCITY_SCALE, axes_make_valid, transform_valid, vector_unpack};
-use crate::layout::{net_values as nv, player_datum as pd, unit_datum as ud};
+use crate::distributed_wire::{ObjectState, UNIT_SCALE, UnitState, VELOCITY_SCALE, axes_make_valid, transform_valid, vector_unpack};
+use crate::layout::{net_values as nv, player_datum as pd, unit_datum as ud, weapon_datum as wd, weapon_magazine as wm};
 
 /// network_objects.c's calls (halo_sim.h's `_network_apply_call_*`).
 pub mod call {
@@ -47,6 +47,21 @@ pub mod call {
     /// `find_netgame_flag(input[0..3], 1, 0, teleporter source, NONE)`, the
     /// result.
     pub const TELEPORTER: i32 = 12;
+    /// `unit_kill_silent(a)`.
+    pub const UNIT_KILL_SILENT: i32 = 13;
+    /// `object_damage_update(a)`.
+    pub const DAMAGE_UPDATE: i32 = 14;
+    /// `object_reconnect_to_map(a, NULL)`.
+    pub const RECONNECT: i32 = 15;
+    /// `object_set_visibility(a, b)`.
+    pub const SET_VISIBILITY: i32 = 16;
+    /// `unit_network_drop_weapon(a, b)`.
+    pub const DROP_WEAPON: i32 = 17;
+    /// network_objects.c's `distributed_client_release_item(a, FALSE)`
+    /// (any unit carrying the item drops it).
+    pub const RELEASE_ITEM: i32 = 18;
+    /// `unit_network_add_weapon(a, b, input[0])`.
+    pub const ADD_WEAPON: i32 = 19;
 }
 
 /// halo_sim.h's `struct halo_sim_network_apply`: a step's arguments (taken
@@ -82,10 +97,22 @@ pub struct Arguments {
     pub death: u32,
     pub seat_disagreement: u32,
     pub player: u32,
+    /// The local players' noted vehicles (network_objects.c's
+    /// `objects_client_own_vehicles`, 0 for none).
+    pub own_vehicles: u32,
+    /// The object's entry of network_objects.c's `objects_client_dead` (0
+    /// for none).
+    pub dead: u32,
+    /// The local players' own inventories (network_objects.c's
+    /// `objects_client_own_inventories`, 0 for none), and the loaded tags'
+    /// table and count (`cache_files_tag_instances`).
+    pub own_inventories: u32,
+    pub tag_instances: u32,
+    pub tag_count: i32,
     pub result: i32,
 }
 
-const _: () = assert!(std::mem::size_of::<Arguments>() == 4 + 15 * 4 + 8 + 16 + 64 + 8 + 24);
+const _: () = assert!(std::mem::size_of::<Arguments>() == 4 + 15 * 4 + 8 + 16 + 64 + 8 + 44);
 
 /// The arguments' result's offset.
 const RESULT: u32 = (std::mem::size_of::<Arguments>() - 4) as u32;
@@ -205,12 +232,19 @@ impl<H: AiHost> Apply<'_, H> {
     }
 
     /// `network_objects_correct`: put where the host has it, if that can be.
-    fn correct(&self, arguments: &Arguments) {
-        let (velocity, angular_velocity) = optional_velocities(arguments);
+    fn correct(
+        &self,
+        object_index: i32,
+        position: [f32; 3],
+        forward: [f32; 3],
+        up: [f32; 3],
+        velocity: Option<[f32; 3]>,
+        angular_velocity: Option<[f32; 3]>,
+    ) {
         let mut valid = [0.0; 6];
-        if transform_valid(arguments.position, arguments.forward, arguments.up, velocity, angular_velocity, &mut valid) {
+        if transform_valid(position, forward, up, velocity, angular_velocity, &mut valid) {
             let (forward, up) = split(valid);
-            self.object_move(arguments.object_index, arguments.position, forward, up, velocity, angular_velocity);
+            self.object_move(object_index, position, forward, up, velocity, angular_velocity);
         }
     }
 
@@ -576,6 +610,443 @@ impl<H: AiHost> Apply<'_, H> {
     }
 }
 
+/// network_objects.c's tolerances, its noted vehicles' size, and the wait
+/// before a biped the host says is dead dies here without its blow.
+const REMOTE_OBJECT_TOLERANCE: f32 = 0.05;
+const REMOTE_OBJECT_ANGLE_TOLERANCE: f32 = 0.98;
+const REMOTE_VEHICLE_BLEND_DISTANCE: f32 = 2.0;
+const LOCAL_VEHICLE_TOLERANCE: f32 = 4.0;
+const OWN_VEHICLE_POSITION_TICKS: i32 = 64;
+const DEAD_BIPED_FALLBACK_TICKS: i32 = 15;
+
+impl<H: AiHost> Apply<'_, H> {
+    fn of_types(&self, object_index: i32, mask: u32) -> Option<u32> {
+        self.try_object(object_index).filter(|&object| mask & (1 << self.m.r8(object + ud::OBJECT_TYPE as u32)) != 0)
+    }
+
+    /// network_distributed.c's `distributed_player_is_local` (the player's
+    /// datum index).
+    fn player_is_local(&self, player_index: i32) -> bool {
+        player_index != NONE
+            && datum_get(self.m, self.context.player_data, player_index)
+                .is_some_and(|player| self.m.i16(player + pd::LOCAL_PLAYER_INDEX as u32) != NONE as i16)
+    }
+
+    /// network_objects.c's `distributed_client_dead_biped`: a biped no
+    /// player's, the host says is dead, killed with nothing to show once
+    /// the host has said so for a while (its entry in `dead`).
+    fn dead_biped(&self, object_index: i32, dead: u32) {
+        let m = self.m;
+        let Some(unit) = self.of_types(object_index, nv::_OBJECT_MASK_BIPED as u32) else { return };
+        if self.dead(unit) || m.i32(unit + ud::UNIT_PLAYER_INDEX as u32) != NONE || dead == 0 {
+            return;
+        }
+        let now = self.context.game_time;
+        if m.i32(dead) != object_index {
+            m.w32(dead, object_index as u32);
+            m.w32(dead + 4, now as u32);
+        } else if now.wrapping_sub(m.i32(dead + 4)) >= DEAD_BIPED_FALLBACK_TICKS {
+            self.call(call::UNIT_KILL_SILENT, object_index, &[]);
+            self.call(call::UNIT_KILL_NO_STATISTICS, object_index, &[]);
+            self.call(call::DAMAGE_UPDATE, object_index, &[]);
+        }
+    }
+
+    /// network_objects.c's `distributed_client_dead_vehicle`.
+    fn dead_vehicle(&self, object_index: i32) {
+        let Some(vehicle) = self.of_types(object_index, nv::_OBJECT_MASK_VEHICLE as u32) else { return };
+        if self.dead(vehicle) {
+            return;
+        }
+        self.call(call::UNIT_KILL_NO_STATISTICS, object_index, &[]);
+        self.call(call::DAMAGE_UPDATE, object_index, &[]);
+    }
+
+    /// network_objects.c's `distributed_client_correct_own_vehicle`: the
+    /// vehicle this machine's player drives, where the host has it, if
+    /// further than a tolerance from where this machine had it at the
+    /// tick the host has it at: moved by the difference (turned and going
+    /// as it drives it), the ticks noted since moved with it. FALSE
+    /// without that tick.
+    fn correct_own_vehicle(&self, vehicle_index: i32, player_index: i32, state: &ObjectState, arguments: &Arguments) -> bool {
+        let m = self.m;
+        let local = match datum_get(m, self.context.player_data, player_index) {
+            Some(player) => m.i16(player + pd::LOCAL_PLAYER_INDEX as u32) as i32,
+            None => NONE,
+        };
+        let now = self.context.game_time;
+        let time = now.wrapping_sub((now as u16).wrapping_sub(state.time as u16) as i32);
+        if state.flags & OBJECT_PREDICTED == 0 || !(0..MAXIMUM_LOCAL_PLAYERS).contains(&local) || arguments.own_vehicles == 0 {
+            return false;
+        }
+        let table = arguments.own_vehicles + local as u32 * OWN_VEHICLE_POSITION_TICKS as u32 * OWN_POSITION_SIZE;
+        let own = table + (time & (OWN_VEHICLE_POSITION_TICKS - 1)) as u32 * OWN_POSITION_SIZE;
+        if m.i32(own) != time || m.i32(own + 4) != vehicle_index {
+            return false;
+        }
+        let position = state.position.map(f32::from_bits);
+        let noted = m.vector(own + 8);
+        let mut error = [position[0] - noted[0], position[1] - noted[1], position[2] - noted[2]];
+        if error[0] * error[0] + error[1] * error[1] + error[2] * error[2] <= LOCAL_VEHICLE_TOLERANCE * LOCAL_VEHICLE_TOLERANCE {
+            return true;
+        }
+        let object = self.object(vehicle_index);
+        let before = m.vector(object + ud::OBJECT_POSITION as u32);
+        let forward = m.vector(object + ud::OBJECT_FORWARD as u32);
+        let up = m.vector(object + ud::OBJECT_UP as u32);
+        self.correct(vehicle_index, [before[0] + error[0], before[1] + error[1], before[2] + error[2]], forward, up, None, None);
+        if arguments.corrections != 0 {
+            m.w32(arguments.corrections, m.r32(arguments.corrections).wrapping_add(1));
+        }
+        let after = m.vector(object + ud::OBJECT_POSITION as u32);
+        error = [after[0] - before[0], after[1] - before[1], after[2] - before[2]];
+        for index in 0..OWN_VEHICLE_POSITION_TICKS as u32 {
+            let entry = table + index * OWN_POSITION_SIZE;
+            if m.i32(entry + 4) == vehicle_index {
+                for part in 0..3 {
+                    let address = entry + 8 + 4 * part;
+                    m.set_f32(address, m.f32(address) + error[part as usize]);
+                }
+            }
+        }
+        true
+    }
+
+    fn set_at_rest(&self, object: u32, at_rest: bool) {
+        let flags = object + ud::OBJECT_FLAGS as u32;
+        let bit = 1 << nv::_OBJECT_AT_REST_BIT;
+        self.m.w32(flags, if at_rest { self.m.r32(flags) | bit } else { self.m.r32(flags) & !bit });
+    }
+
+    /// network_objects.c's `network_objects_handle_states`, of one state: a
+    /// copy the host says is dead killed (a biped's, a vehicle's); an item
+    /// made carried that never was here put in the world; one in the world
+    /// moved toward where the host has it (a vehicle this machine drives
+    /// by its own prediction come back), at rest as the host has it.
+    fn handle_object_state(&self, arguments: &Arguments) {
+        use crate::distributed_wire::{object_flag, object_state_unpack};
+        let m = self.m;
+        let state = object_state(arguments);
+        let object_index = state.object_index;
+        if object_index == NONE || (object_index >> 16) as i16 == 0 || self.call(call::CLIENT_HAS, object_index, &[]).result == 0 {
+            return;
+        }
+        let object = self.object(object_index);
+        let at = |offset: usize| object + offset as u32;
+        if state.flags & object_flag::DEAD != 0 {
+            self.dead_biped(object_index, arguments.dead);
+            self.dead_vehicle(object_index);
+            if self.try_object(object_index).is_none() {
+                return;
+            }
+        }
+        let connected = |m: &dyn AiMemory| m.r32(at(ud::OBJECT_FLAGS)) & (1 << nv::_OBJECT_CONNECTED_TO_MAP_BIT) != 0;
+        if (nv::_OBJECT_MASK_ITEM as u32) & (1 << m.r8(at(ud::OBJECT_TYPE))) != 0
+            && m.i32(at(ud::OBJECT_PARENT_OBJECT_INDEX)) == NONE
+            && !connected(m)
+            && m.r32(object + crate::layout::item_datum::ITEM_FLAGS as u32) & (1 << nv::_ITEM_ATTACHED_TO_UNIT_BIT) == 0
+        {
+            self.call(call::RECONNECT, object_index, &[]);
+            let mut visible = AiCall { kind: call::SET_VISIBILITY, actor: NONE, a: object_index, b: 1, ..AiCall::default() };
+            self.host.call(&mut visible);
+        }
+        if m.i32(at(ud::OBJECT_PARENT_OBJECT_INDEX)) != NONE || !connected(m) {
+            return;
+        }
+        let [forward, up, velocity, angular_velocity] = object_state_unpack(&state);
+        let position = state.position.map(f32::from_bits);
+        let mut valid = [0.0; 6];
+        if !transform_valid(position, forward, up, None, None, &mut valid) {
+            return;
+        }
+        let (forward, up) = split(valid);
+        let mut tolerance = REMOTE_OBJECT_TOLERANCE;
+        let mut angle_tolerance = REMOTE_OBJECT_ANGLE_TOLERANCE;
+        let mut blend_distance = REMOTE_BLEND_DISTANCE;
+        let mut own_vehicle = false;
+        if state.flags & object_flag::AT_REST != 0 {
+            blend_distance = 0.0;
+        }
+        if m.i16(at(ud::OBJECT_TYPE)) == crate::layout::ai_values::_OBJECT_TYPE_VEHICLE as i16 {
+            if blend_distance > 0.0 {
+                blend_distance = REMOTE_VEHICLE_BLEND_DISTANCE;
+            }
+            if self.vehicle_unsteered(object_index) {
+                tolerance = 0.0;
+                angle_tolerance = 2.0;
+            }
+            let driver = m.i32(at(ud::UNIT_DRIVER_OBJECT_INDEX));
+            if driver != NONE {
+                let player_index = m.i32(self.object(driver) + ud::UNIT_PLAYER_INDEX as u32);
+                if self.player_is_local(player_index) {
+                    if self.correct_own_vehicle(object_index, player_index, &state, arguments) {
+                        return;
+                    }
+                    tolerance = LOCAL_VEHICLE_TOLERANCE;
+                    angle_tolerance = -1.0;
+                    blend_distance = 0.0;
+                    own_vehicle = true;
+                }
+            }
+        }
+        let at_rest = state.flags & object_flag::AT_REST != 0 || self.vehicle_unsteered(object_index);
+        if !own_vehicle {
+            self.set_at_rest(object, at_rest);
+        }
+        let here = m.vector(at(ud::OBJECT_POSITION));
+        let d = [position[0] - here[0], position[1] - here[1], position[2] - here[2]];
+        let object_forward = m.vector(at(ud::OBJECT_FORWARD));
+        let object_up = m.vector(at(ud::OBJECT_UP));
+        if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= tolerance * tolerance
+            && forward[0] * object_forward[0] + forward[1] * object_forward[1] + forward[2] * object_forward[2] >= angle_tolerance
+            && up[0] * object_up[0] + up[1] * object_up[1] + up[2] * object_up[2] >= angle_tolerance
+        {
+            return;
+        }
+        if self.reconcile(object_index, position, forward, up, Some(velocity), Some(angular_velocity), blend_distance)
+            && arguments.corrections != 0
+        {
+            m.w32(arguments.corrections, m.r32(arguments.corrections).wrapping_add(1));
+        }
+        if own_vehicle {
+            self.set_at_rest(object, at_rest);
+        }
+    }
+}
+
+/// network_objects.c's `struct distributed_own_inventory`: its unit, its
+/// grenades and when it last threw each, its weapons, their rounds, when
+/// each last fired and when this machine last did anything with it.
+mod own {
+    pub const SIZEOF: u32 = 96;
+    pub const UNIT_INDEX: u32 = 0;
+    pub const GRENADE_COUNTS: u32 = 4;
+    pub const GRENADE_TIMES: u32 = 8;
+    pub const WEAPON_INDICES: u32 = 16;
+    pub const ROUNDS: u32 = 32;
+    pub const FIRED_TIMES: u32 = 64;
+    pub const WEAPON_TIMES: u32 = 80;
+}
+
+/// network_objects.c's inventory limits and waits.
+const INVENTORY_INTERVAL_TICKS: i32 = 3;
+const OWN_INVENTORY_MARGIN_TICKS: i32 = 2;
+const DEFAULT_OWN_ROUND_TRIP_TICKS: f32 = 6.0;
+const MAXIMUM_OWN_ROUND_TRIP_TICKS: f32 = 60.0;
+const MAXIMUM_INVENTORY_GRENADES: i8 = 16;
+const AGE_SCALE: f32 = 65535.0;
+const WEAPON_TAG: u32 = crate::fourcc(b"weap");
+
+impl<H: AiHost> Apply<'_, H> {
+    /// `weapon_try_and_get`.
+    fn weapon(&self, weapon_index: i32) -> Option<u32> {
+        if weapon_index == NONE { None } else { self.of_types(weapon_index, nv::_OBJECT_MASK_WEAPON as u32) }
+    }
+
+    /// network_objects.c's `distributed_client_own_settled`: whether the
+    /// host has had a round trip (and its inventories' interval) since this
+    /// machine last did that with its own player's unit (NONE: never).
+    fn own_settled(&self, arguments: &Arguments, time: i32) -> bool {
+        if time == NONE {
+            return true;
+        }
+        let mut round_trip = self.m.f32(arguments.round_trip);
+        if !(round_trip > 0.0) {
+            round_trip = DEFAULT_OWN_ROUND_TRIP_TICKS;
+        }
+        if round_trip > MAXIMUM_OWN_ROUND_TRIP_TICKS {
+            round_trip = MAXIMUM_OWN_ROUND_TRIP_TICKS;
+        }
+        self.context.game_time.wrapping_sub(time)
+            > (round_trip as f64).ceil() as i32 + INVENTORY_INTERVAL_TICKS + OWN_INVENTORY_MARGIN_TICKS
+    }
+
+    /// network_objects.c's `distributed_client_note_own_inventory`, not
+    /// compared (what the host changed is not this machine's doing).
+    fn note_own_inventory(&self, own_inventory: u32, unit_index: i32) {
+        let m = self.m;
+        let unit = self.object(unit_index);
+        if m.i32(own_inventory + own::UNIT_INDEX) != unit_index {
+            m.w32(own_inventory + own::UNIT_INDEX, unit_index as u32);
+            for grenade_type in 0..2 {
+                m.w32(own_inventory + own::GRENADE_TIMES + 4 * grenade_type, NONE as u32);
+            }
+            for slot in 0..4 {
+                m.w32(own_inventory + own::WEAPON_INDICES + 4 * slot, NONE as u32);
+                m.w32(own_inventory + own::WEAPON_TIMES + 4 * slot, NONE as u32);
+            }
+        }
+        for grenade_type in 0..2 {
+            m.w8(own_inventory + own::GRENADE_COUNTS + grenade_type, m.r8(unit + ud::UNIT_GRENADE_COUNTS as u32 + grenade_type));
+        }
+        for slot in 0..4u32 {
+            let weapon_index = m.i32(unit + ud::UNIT_WEAPON_OBJECT_INDICES as u32 + 4 * slot);
+            let Some(weapon) = self.weapon(weapon_index) else {
+                m.w32(own_inventory + own::WEAPON_INDICES + 4 * slot, NONE as u32);
+                continue;
+            };
+            if m.i32(own_inventory + own::WEAPON_INDICES + 4 * slot) != weapon_index {
+                m.w32(own_inventory + own::WEAPON_INDICES + 4 * slot, weapon_index as u32);
+                m.w32(own_inventory + own::WEAPON_TIMES + 4 * slot, NONE as u32);
+            }
+            m.w32(own_inventory + own::FIRED_TIMES + 4 * slot, m.r32(weapon + wd::WEAPON_GAME_TIME_LAST_FIRED as u32));
+            for magazine in 0..2u32 {
+                let state = weapon + wd::WEAPON_MAGAZINES as u32 + magazine * wm::SIZEOF as u32;
+                let rounds = own_inventory + own::ROUNDS + 8 * slot + 4 * magazine;
+                m.set_i16(rounds, m.i16(state + wm::ROUNDS_TOTAL as u32));
+                m.set_i16(rounds + 2, m.i16(state + wm::ROUNDS_LOADED as u32));
+            }
+        }
+    }
+
+    /// network_objects.c's `distributed_client_apply_inventory`: the unit
+    /// carries what the host's does. Its weapons slot for slot (once this
+    /// machine has them); the weapon in hand (a local player's own choice,
+    /// unless gone); the rounds (no more than the magazines hold; a local
+    /// player's only once the host has had a round trip since it used the
+    /// weapon) and age; the grenades (a local player's when fewer, or once
+    /// the host has seen the last it threw).
+    fn apply_inventory(&self, arguments: &Arguments) {
+        let m = self.m;
+        // SAFETY: the unit state's 64 bytes hold the inventory's 64
+        let inventory: crate::distributed_wire::Inventory =
+            unsafe { std::ptr::read_unaligned(&arguments.state as *const UnitState as *const crate::distributed_wire::Inventory) };
+        let unit_index = inventory.unit_index;
+        if self.call(call::CLIENT_HAS, unit_index, &[]).result == 0
+            || self.of_types(unit_index, nv::_OBJECT_MASK_UNIT as u32).is_none()
+        {
+            return;
+        }
+        let unit = self.object(unit_index);
+        let at = |offset: usize| unit + offset as u32;
+        if self.dead(unit) {
+            return;
+        }
+        let player_index = m.i32(at(ud::UNIT_PLAYER_INDEX));
+        let local = self.player_is_local(player_index);
+        let mut own_inventory = None;
+        if local && arguments.own_inventories != 0 {
+            let player = datum_get(m, self.context.player_data, player_index).unwrap_or(0);
+            let local_player_index = m.i16(player + pd::LOCAL_PLAYER_INDEX as u32) as i32;
+            if (0..MAXIMUM_LOCAL_PLAYERS).contains(&local_player_index) {
+                let entry = arguments.own_inventories + local_player_index as u32 * own::SIZEOF;
+                if m.i32(entry + own::UNIT_INDEX) == unit_index {
+                    own_inventory = Some(entry);
+                }
+            }
+        }
+        let weapons = |slot: u32| at(ud::UNIT_WEAPON_OBJECT_INDICES) + 4 * slot;
+        for slot in 0..4u32 {
+            let wanted_index = inventory.weapon_indices[slot as usize];
+            let weapon_index = m.i32(weapons(slot));
+            if weapon_index == wanted_index {
+                continue;
+            }
+            if wanted_index != NONE
+                && (self.call(call::CLIENT_HAS, wanted_index, &[]).result == 0
+                    || self.of_types(wanted_index, nv::_OBJECT_MASK_WEAPON as u32).is_none())
+            {
+                continue;
+            }
+            if weapon_index != NONE {
+                let mut drop = AiCall { kind: call::DROP_WEAPON, actor: NONE, a: unit_index, b: slot as i32, ..AiCall::default() };
+                self.host.call(&mut drop);
+            }
+            if wanted_index != NONE {
+                self.call(call::RELEASE_ITEM, wanted_index, &[]);
+                let mut add = AiCall { kind: call::ADD_WEAPON, actor: NONE, a: unit_index, b: wanted_index, ..AiCall::default() };
+                add.input[0] = slot as f32;
+                self.host.call(&mut add);
+            }
+        }
+        let current = inventory.current_weapon_index as i16;
+        let unit_current = m.i16(at(ud::UNIT_CURRENT_WEAPON_INDEX));
+        if (0..4).contains(&current)
+            && unit_current != current
+            && (!local || unit_current == NONE as i16 || m.i32(weapons(unit_current as u16 as u32)) == NONE)
+        {
+            m.set_i16(at(ud::UNIT_DESIRED_WEAPON_INDEX), current);
+        }
+        let tags = crate::ai_actor::AiStepContext {
+            tag_instances: arguments.tag_instances,
+            tag_count: arguments.tag_count,
+            ..crate::ai_actor::AiStepContext::default()
+        };
+        for slot in 0..4u32 {
+            let weapon_index = m.i32(weapons(slot));
+            let Some(weapon) = self.weapon(weapon_index) else { continue };
+            if weapon_index != inventory.weapon_indices[slot as usize] {
+                continue;
+            }
+            if let Some(own_inventory) = own_inventory {
+                if m.i32(own_inventory + own::WEAPON_INDICES + 4 * slot) == weapon_index
+                    && !self.own_settled(arguments, m.i32(own_inventory + own::WEAPON_TIMES + 4 * slot))
+                {
+                    continue;
+                }
+            }
+            let definition_index = m.i32(weapon + ud::DEFINITION_INDEX as u32);
+            let magazines = crate::sensing::tag_get(m, &tags, WEAPON_TAG, definition_index)
+                .map(|definition| definition + (crate::layout::weapon_definition::WEAPON + crate::layout::_weapon_definition::MAGAZINES) as u32);
+            let magazine_count = magazines.map_or(0, |block| crate::ai_actor::tag_block_count(m, block));
+            for magazine in 0..2i32 {
+                if magazine >= magazine_count {
+                    break;
+                }
+                use crate::layout::weapon_magazine_definition as md;
+                let definition = crate::ai_actor::tag_block_element(m, magazines.unwrap_or(0), magazine, md::SIZEOF);
+                let initial = m.i16(definition + md::ROUNDS_TOTAL_INITIAL as u32);
+                let maximum = m.i16(definition + md::ROUNDS_TOTAL_MAXIMUM as u32);
+                let total_maximum = if maximum > initial { maximum } else { initial };
+                let loaded_maximum = m.i16(definition + md::ROUNDS_LOADED_MAXIMUM as u32);
+                let total = inventory.rounds_total[slot as usize][magazine as usize];
+                let loaded = inventory.rounds_loaded[slot as usize][magazine as usize];
+                let state = weapon + wd::WEAPON_MAGAZINES as u32 + magazine as u32 * wm::SIZEOF as u32;
+                m.set_i16(state + wm::ROUNDS_TOTAL as u32, if total < 0 { 0 } else if total > total_maximum { total_maximum } else { total });
+                m.set_i16(
+                    state + wm::ROUNDS_LOADED as u32,
+                    if loaded < 0 { 0 } else if loaded > loaded_maximum { loaded_maximum } else { loaded },
+                );
+            }
+            m.set_f32(weapon + wd::WEAPON_AGE as u32, inventory.age[slot as usize] as f32 / AGE_SCALE);
+        }
+        for grenade_type in 0..2u32 {
+            let wanted = inventory.grenade_counts[grenade_type as usize];
+            let count = if wanted < 0 {
+                0
+            } else if wanted > MAXIMUM_INVENTORY_GRENADES {
+                MAXIMUM_INVENTORY_GRENADES
+            } else {
+                wanted
+            };
+            let address = at(ud::UNIT_GRENADE_COUNTS) + grenade_type;
+            let take = match own_inventory {
+                None => true,
+                Some(own_inventory) => {
+                    count < m.r8(address) as i8
+                        || self.own_settled(arguments, m.i32(own_inventory + own::GRENADE_TIMES + 4 * grenade_type))
+                }
+            };
+            if take {
+                m.w8(address, count as u8);
+            }
+        }
+        if let Some(own_inventory) = own_inventory {
+            self.note_own_inventory(own_inventory, unit_index);
+        }
+    }
+}
+
+/// network_objects.c's `_distributed_object_predicted_bit`.
+const OBJECT_PREDICTED: u8 = 1 << 3;
+
+/// The object state an object's step takes (in the arguments' state's
+/// bytes).
+fn object_state(arguments: &Arguments) -> crate::distributed_wire::ObjectState {
+    // SAFETY: the unit state's 64 bytes hold the object state's 44
+    unsafe { std::ptr::read_unaligned(&arguments.state as *const UnitState as *const crate::distributed_wire::ObjectState) }
+}
+
 fn split(axes: [f32; 6]) -> ([f32; 3], [f32; 3]) {
     ([axes[0], axes[1], axes[2]], [axes[3], axes[4], axes[5]])
 }
@@ -615,7 +1086,20 @@ pub fn correct_own_unit(context: &WorldContext, host: &impl AiHost) {
 /// The world step of `network_objects_correct`.
 pub fn object_correct(context: &WorldContext, host: &impl AiHost) {
     let (apply, arguments) = begin(context, host);
-    apply.correct(&arguments);
+    let (velocity, angular_velocity) = optional_velocities(&arguments);
+    apply.correct(arguments.object_index, arguments.position, arguments.forward, arguments.up, velocity, angular_velocity);
+}
+
+/// The world step of network_objects.c's `distributed_client_apply_inventory`.
+pub fn apply_inventory(context: &WorldContext, host: &impl AiHost) {
+    let (apply, arguments) = begin(context, host);
+    apply.apply_inventory(&arguments);
+}
+
+/// The world step of network_objects.c's handling of an object's state.
+pub fn handle_object_state(context: &WorldContext, host: &impl AiHost) {
+    let (apply, arguments) = begin(context, host);
+    apply.handle_object_state(&arguments);
 }
 
 /// The world step of `network_objects_reconcile`.

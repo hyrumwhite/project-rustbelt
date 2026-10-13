@@ -852,6 +852,33 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - Over two sessions each, with all networking systems in Rust, the machines' positions differ as with the C: medians 3.9 and 5.0 cm against 6.0 and 5.9.
          - With all fifty-four systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
 
+   - [x] A client applying the host's object states and inventories in Rust (`halo_map::network_apply`, world steps 8 and 9): network_objects.c's handling of each object state (with `distributed_client_correct_own_vehicle`, `_dead_biped` and `_dead_vehicle`) and `distributed_client_apply_inventory` (with `_note_own_inventory` and `_own_settled`).
+     - **What Rust does:**
+       - **Object states:**
+         - A copy the host says is dead is killed: a vehicle at once; a biped no player's once its killing blow has had a while to come.
+         - An item made carried that never was here is put in the world.
+         - An object in the world is moved toward the host's position unless it is close enough and turned the same way. A vehicle uses a wider blend; an unsteered one follows every move.
+         - The vehicle this machine's player drives is corrected against its own prediction come back, its noted ticks moved with it.
+         - Its at-rest flag is the host's.
+       - **Inventories:**
+         - The unit's weapons match the host's slot for slot, once this machine has them.
+         - The weapon in hand is the host's (a local player's own choice unless that is gone).
+         - The rounds are held to the weapon tag's magazines. A local player's are the host's only once the host has had a round trip since it used the weapon. The weapon's age is the host's.
+         - The grenades are the host's: a local player's when fewer, or once the host has seen the last it threw.
+         - The local player's own record is noted afresh.
+     - **The game's, through calls:** killing silently, the damage update, putting an item back in the world and showing it, dropping, releasing and adding a weapon.
+       - The arguments add the noted vehicles, the dead bipeds' entry, the own inventories and the tag table (the weapon tag's magazines).
+       - The regions add those, and every weapon the unit carries or is given.
+       - New accessors give network_distributed.c's corrections count and round trip.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, all 8,192 of the joiner's object states and 256 inventories agree, with none left out.
+       - **Planted errors:**
+         - Caught: the angle tolerance, the at-rest flag, the loaded rounds and the own record's fired time.
+         - Unseen: the vehicle blend (none came 2 to 2.5 m off), an item's reconnection (none placed after being made carried), the settle margin, and the grenade rule (no grenade counts changed).
+       - **Rust in charge:**
+         - With all networking systems in Rust, the machines' positions differ as with the C: median 4.9 cm against 6.3.
+         - With all fifty-four systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

@@ -10,6 +10,8 @@ distributed_state_from_object and distributed_inventory_from_unit).
 #include "objects/object_types.h"
 #include "units/units.h"
 #include "items/weapons.h"
+#include "items/items.h"
+#include "items/weapon_definitions.h"
 #include "game/players.h"
 
 #include <stddef.h>
@@ -33,9 +35,17 @@ LAYOUT_MEMBER(unit_datum, unit_weapon_object_indices, unit.weapon_object_indices
 /* a weapon */
 LAYOUT_MEMBER(weapon_datum, weapon_magazines, weapon.magazines)
 LAYOUT_MEMBER(weapon_datum, weapon_age, weapon.age)
+LAYOUT_MEMBER(item_datum, item_flags, item.flags)
 LAYOUT_SIZE(weapon_magazine)
 LAYOUT_MEMBER(weapon_magazine, rounds_total, rounds_total)
 LAYOUT_MEMBER(weapon_magazine, rounds_loaded, rounds_loaded)
+LAYOUT_MEMBER(weapon_magazine, state, state)
+LAYOUT_MEMBER(weapon_datum, weapon_game_time_last_fired, weapon.game_time_last_fired)
+LAYOUT_MEMBER(unit_datum, unit_desired_weapon_index, unit.desired_weapon_index)
+LAYOUT_MEMBER(_weapon_definition, magazines, magazines)
+LAYOUT_MEMBER(weapon_magazine_definition, rounds_total_initial, rounds_total_initial)
+LAYOUT_MEMBER(weapon_magazine_definition, rounds_total_maximum, rounds_total_maximum)
+LAYOUT_MEMBER(weapon_magazine_definition, rounds_loaded_maximum, rounds_loaded_maximum)
 
 /* a player */
 LAYOUT_MEMBER(player_datum, identifier, identifier)
@@ -51,6 +61,13 @@ LAYOUT_VALUE(_object_shield_depleted_bit)
 LAYOUT_VALUE(_object_shield_charging_bit)
 LAYOUT_VALUE(_object_shield_over_charging_bit)
 LAYOUT_VALUE(_object_mask_unit)
+LAYOUT_VALUE(_object_mask_item)
+LAYOUT_VALUE(_object_mask_biped)
+LAYOUT_VALUE(_object_mask_vehicle)
+LAYOUT_VALUE(_object_connected_to_map_bit)
+LAYOUT_VALUE(_item_attached_to_unit_bit)
+LAYOUT_VALUE(_magazine_reloading)
+LAYOUT_VALUE(_object_mask_weapon)
 LAYOUT_VALUE(_object_type_weapon)
 LAYOUT_VALUE(_unit_active_camouflaged_bit)
 LAYOUT_VALUE(_unit_super_camouflaged_bit)

@@ -962,6 +962,14 @@ void hud_render_nav_points(
 				break;
 			}
 
+			/* port: how it draws (on screen, occluded) is worked out by the
+			tick's update, for a player with a unit then. A network client's
+			unit can come from its host between ticks, and the frames before
+			the next would draw with none and halt (custom_render_nav_point
+			asserts it): until then it waits. */
+			if (nav_point->screen_type==NONE)
+				continue;
+
 			position.z += nav_point->z_offset;
 			custom_render_nav_point(
 				local_player_index,

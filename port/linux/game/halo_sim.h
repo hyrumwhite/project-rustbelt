@@ -81,6 +81,8 @@ enum
 	_halo_sim_network_input,
 	/* the host's check of its clients' clocks (network_distributed.c) */
 	_halo_sim_network_clock,
+	/* network co-op (network_coop.c) */
+	_halo_sim_network_coop,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2384,6 +2386,7 @@ enum
 	_halo_sim_world_step_network_pickups,
 	_halo_sim_world_step_network_client_sends,
 	_halo_sim_world_step_network_client_clock,
+	_halo_sim_world_step_network_coop_world,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3032,6 +3035,31 @@ enum
 };
 
 void network_clock_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_coop::WorldArguments: co-op's host sending the
+world's changes each tick: whether it resends what ever changed, its records
+(network_coop_records.h), the message and its kinds */
+struct halo_sim_network_coop_world
+{
+	long refresh;
+	unsigned long sent_transforms;
+	unsigned long sent_devices;
+	unsigned long sent_looks;
+	unsigned long message;
+	short transforms_type;
+	short device_states_type;
+	short looks_type;
+	short pad;
+};
+
+/* network_coop.c's world calls (crates/halo_map's network_coop::call) */
+enum
+{
+	/* the message, of the type a, b entries of actor bytes, to every client */
+	_network_coop_world_call_send = 1,
+};
+
+void network_coop_world_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

@@ -114,6 +114,8 @@ index and tag, since the map placed them at the same index everywhere.
 #include "coop_spectate.h"
 #include "network_coop.h"
 #include "network_distributed.h"
+#include "network_coop_records.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 /* ---------- constants */
 
@@ -383,16 +385,7 @@ struct distributed_coop_object_names_message
 /* Where one of the host's scenery or machines is. Scripts move them (a
 cutscene's drop pod) and nothing else tells a client. Found as the
 scenery animations' are (object_find). */
-struct distributed_coop_object_transform
-{
-	short name_index;
-	short pad;
-	long object_index;
-	long definition_index;
-	real_point3d position;
-	struct distributed_vector forward;
-	struct distributed_vector up;
-};
+/* (struct distributed_coop_object_transform: network_coop_records.h) */
 
 #define MAXIMUM_OBJECT_TRANSFORMS_PER_MESSAGE 64
 #define COOP_MOVED_OBJECTS (_object_mask_scenery | _object_mask_machine)
@@ -406,15 +399,7 @@ struct distributed_coop_object_transforms_message
 /* How one of the host's objects looks: the permutation of each region of
 its model (NONE for none) and its scale. The scripts change them (a
 helmet off, a ship scaled) and so does damage. */
-struct distributed_coop_object_look
-{
-	short name_index;
-	short pad;
-	long object_index;
-	long definition_index;
-	byte region_permutations[MAXIMUM_REGIONS_PER_OBJECT];
-	real scale;
-};
+/* (struct distributed_coop_object_look: network_coop_records.h) */
 
 #define MAXIMUM_OBJECT_LOOKS_PER_MESSAGE 64
 
@@ -932,16 +917,7 @@ static void host_send_device_groups(
 /* Where one of the host's devices is: its position (open, closed, how far
 up an elevator has gone) and power, which the device groups' values only
 aim it at. Found as the scenery animations' are (object_find). */
-struct distributed_coop_device_state
-{
-	short name_index;
-	byte moving;
-	byte pad;
-	long object_index;
-	long definition_index;
-	real position;
-	real power;
-};
+/* (struct distributed_coop_device_state: network_coop_records.h) */
 
 #define MAXIMUM_DEVICE_STATES_PER_MESSAGE 64
 
@@ -958,13 +934,7 @@ travel, 0 to 1) */
 
 /* host: each device's position and power as last sent, by its absolute
 index, and whether they have changed since the map placed it */
-static struct
-{
-	long object_index;
-	boolean moved;
-	real position;
-	real power;
-} host_sent_devices[MAXIMUM_OBJECTS_PER_MAP];
+static struct coop_sent_device host_sent_devices[MAXIMUM_OBJECTS_PER_MAP];
 
 /* host: the structure BSP each client player's machine last said it has,
 NONE before its first input */
@@ -972,10 +942,51 @@ static short host_player_structure_bsps[MAXIMUM_TRACKED_PLAYERS];
 
 /* host, each tick: the devices that moved or changed power (and, with the
 resent state, all that ever have) */
+/* port: the host's world sends are Rust's in Rust's mode (crates/
+halo_map's network_coop): what they send goes out of one message at a time,
+through this call */
+static union
+{
+	struct distributed_coop_device_states_message device_states;
+	struct distributed_coop_object_transforms_message transforms;
+	struct distributed_coop_object_looks_message looks;
+} coop_world_message;
+static struct halo_sim_network_coop_world coop_world_arguments;
+
+void network_coop_world_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_coop_world_call_send:
+		send_to_clients(&coop_world_message, (byte)call->a, (short)call->b, (word)call->actor);
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+/* the message, of its type, count and entry size, to every client */
+static void coop_world_send(
+	byte type,
+	short count,
+	word entry_size)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_coop_world_call_send;
+	call.actor = entry_size;
+	call.a = type;
+	call.b = count;
+	network_coop_world_call(&call);
+}
+
 static void host_send_device_states(
 	void)
 {
-	struct distributed_coop_device_states_message message;
+	struct distributed_coop_device_states_message *message = &coop_world_message.device_states;
 	struct object_iterator iterator;
 	struct device_datum *device;
 	short count = 0;
@@ -1000,12 +1011,12 @@ static void host_send_device_states(
 		}
 		changed = host_sent_devices[absolute_index].position != device->device.position ||
 			host_sent_devices[absolute_index].power != device->device.power;
-		if (!changed && !(host_resend.refresh && host_sent_devices[absolute_index].moved))
+		if (!changed && !(coop_world_arguments.refresh && host_sent_devices[absolute_index].moved))
 			continue;
 		host_sent_devices[absolute_index].moved = TRUE;
 		host_sent_devices[absolute_index].position = device->device.position;
 		host_sent_devices[absolute_index].power = device->device.power;
-		state = &message.states[count++];
+		state = &message->states[count++];
 		state->name_index = device->object.name_index;
 		state->moving = (byte)(device->device.position_velocity != 0.0f);
 		state->pad = 0;
@@ -1015,30 +1026,24 @@ static void host_send_device_states(
 		state->power = device->device.power;
 		if (count == MAXIMUM_DEVICE_STATES_PER_MESSAGE)
 		{
-			send_to_clients(&message, _distributed_message_coop_device_states, count, sizeof(message.states[0]));
+			coop_world_send(_distributed_message_coop_device_states, count, sizeof(message->states[0]));
 			count = 0;
 		}
 	}
 	if (count > 0)
-		send_to_clients(&message, _distributed_message_coop_device_states, count, sizeof(message.states[0]));
+		coop_world_send(_distributed_message_coop_device_states, count, sizeof(message->states[0]));
 }
 
 /* host: where each scenery or machine was last sent, by its absolute
 index, and whether it has moved since the map placed it */
-static struct
-{
-	long object_index;
-	boolean moved;
-	real_point3d position;
-	real_vector3d forward;
-} host_sent_transforms[MAXIMUM_OBJECTS_PER_MAP];
+static struct coop_sent_transform host_sent_transforms[MAXIMUM_OBJECTS_PER_MAP];
 
 /* host, each tick: the scenery and machines that moved (and, every
 OBJECT_REFRESH_TICKS, all that ever have) */
 static void host_send_object_transforms(
 	void)
 {
-	struct distributed_coop_object_transforms_message message;
+	struct distributed_coop_object_transforms_message *message = &coop_world_message.transforms;
 	struct object_iterator iterator;
 	struct object_datum *object;
 	short count = 0;
@@ -1064,12 +1069,12 @@ static void host_send_object_transforms(
 		}
 		moving = distance_squared3d(&host_sent_transforms[absolute_index].position, &object->object.position) >= 0.0001f ||
 			dot_product3d(&host_sent_transforms[absolute_index].forward, &object->object.forward) <= 0.9999f;
-		if (!moving && !(host_resend.refresh && host_sent_transforms[absolute_index].moved))
+		if (!moving && !(coop_world_arguments.refresh && host_sent_transforms[absolute_index].moved))
 			continue;
 		host_sent_transforms[absolute_index].moved = TRUE;
 		host_sent_transforms[absolute_index].position = object->object.position;
 		host_sent_transforms[absolute_index].forward = object->object.forward;
-		transform = &message.transforms[count++];
+		transform = &message->transforms[count++];
 		transform->name_index = object->object.name_index;
 		transform->pad = 0;
 		transform->object_index = iterator.index;
@@ -1079,30 +1084,24 @@ static void host_send_object_transforms(
 		distributed_vector_pack(&object->object.up, DISTRIBUTED_UNIT_SCALE, &transform->up);
 		if (count == MAXIMUM_OBJECT_TRANSFORMS_PER_MESSAGE)
 		{
-			send_to_clients(&message, _distributed_message_coop_object_transforms, count, sizeof(message.transforms[0]));
+			coop_world_send(_distributed_message_coop_object_transforms, count, sizeof(message->transforms[0]));
 			count = 0;
 		}
 	}
 	if (count > 0)
-		send_to_clients(&message, _distributed_message_coop_object_transforms, count, sizeof(message.transforms[0]));
+		coop_world_send(_distributed_message_coop_object_transforms, count, sizeof(message->transforms[0]));
 }
 
 /* host: how each object looked when last sent, by its absolute index, and
 whether that has changed since it was made */
-static struct
-{
-	long object_index;
-	boolean changed;
-	byte region_permutations[MAXIMUM_REGIONS_PER_OBJECT];
-	real scale;
-} host_sent_looks[MAXIMUM_OBJECTS_PER_MAP];
+static struct coop_sent_look host_sent_looks[MAXIMUM_OBJECTS_PER_MAP];
 
 /* host, each tick: the objects whose looks changed (and, every
 OBJECT_REFRESH_TICKS, all whose looks ever have) */
 static void host_send_object_looks(
 	void)
 {
-	struct distributed_coop_object_looks_message message;
+	struct distributed_coop_object_looks_message *message = &coop_world_message.looks;
 	struct object_iterator iterator;
 	struct object_datum *object;
 	short count = 0;
@@ -1129,13 +1128,13 @@ static void host_send_object_looks(
 		changing = host_sent_looks[absolute_index].scale != object->object.scale ||
 			csmemcmp(host_sent_looks[absolute_index].region_permutations, object->object.region_permutations,
 				sizeof(object->object.region_permutations));
-		if (!changing && !(host_resend.refresh && host_sent_looks[absolute_index].changed))
+		if (!changing && !(coop_world_arguments.refresh && host_sent_looks[absolute_index].changed))
 			continue;
 		host_sent_looks[absolute_index].changed = TRUE;
 		host_sent_looks[absolute_index].scale = object->object.scale;
 		csmemcpy(host_sent_looks[absolute_index].region_permutations, object->object.region_permutations,
 			sizeof(object->object.region_permutations));
-		look = &message.looks[count++];
+		look = &message->looks[count++];
 		look->name_index = object->object.name_index;
 		look->pad = 0;
 		look->object_index = iterator.index;
@@ -1144,12 +1143,70 @@ static void host_send_object_looks(
 		look->scale = object->object.scale;
 		if (count == MAXIMUM_OBJECT_LOOKS_PER_MESSAGE)
 		{
-			send_to_clients(&message, _distributed_message_coop_object_looks, count, sizeof(message.looks[0]));
+			coop_world_send(_distributed_message_coop_object_looks, count, sizeof(message->looks[0]));
 			count = 0;
 		}
 	}
 	if (count > 0)
-		send_to_clients(&message, _distributed_message_coop_object_looks, count, sizeof(message.looks[0]));
+		coop_world_send(_distributed_message_coop_object_looks, count, sizeof(message->looks[0]));
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_world_game(
+	void)
+{
+	host_send_object_transforms();
+	host_send_device_states();
+	host_send_object_looks();
+}
+
+/* host, each tick: the scenery and machines that moved, the devices that
+moved or changed power, the objects whose looks changed (and, with the
+resent state, all that ever have) */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the message and the
+records as far as the objects reach. */
+static void host_send_world(
+	void)
+{
+	struct halo_sim_network_coop_world *arguments = &coop_world_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[5];
+	long reach = MIN((long)object_header_data->count, (long)MAXIMUM_OBJECTS_PER_MAP);
+	int checking = FALSE;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->refresh = host_resend.refresh;
+	arguments->sent_transforms = (unsigned long)&host_sent_transforms[0];
+	arguments->sent_devices = (unsigned long)&host_sent_devices[0];
+	arguments->sent_looks = (unsigned long)&host_sent_looks[0];
+	arguments->message = (unsigned long)&coop_world_message;
+	arguments->transforms_type = _distributed_message_coop_object_transforms;
+	arguments->device_states_type = _distributed_message_coop_device_states;
+	arguments->looks_type = _distributed_message_coop_object_looks;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_world_message;
+	regions[1].size = sizeof(coop_world_message);
+	regions[2].address = (unsigned long)&host_sent_transforms[0];
+	regions[2].size = reach * sizeof(host_sent_transforms[0]);
+	regions[3].address = (unsigned long)&host_sent_devices[0];
+	regions[3].size = reach * sizeof(host_sent_devices[0]);
+	regions[4].address = (unsigned long)&host_sent_looks[0];
+	regions[4].size = reach * sizeof(host_sent_looks[0]);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_world, &context, regions, 5,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_world_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_world);
 }
 
 /* ---------- the cinematic screen effect
@@ -2631,9 +2688,7 @@ void network_coop_host_tick(
 	host_send_device_groups();
 	if (host_resend.joined || game_time_get() % OBJECT_NAMES_INTERVAL_TICKS == 0)
 		host_send_object_names();
-	host_send_object_transforms();
-	host_send_device_states();
-	host_send_object_looks();
+	host_send_world();
 	host_send_screen_effect();
 	host_send_attachments();
 	host_send_looping_sounds();

@@ -79,6 +79,8 @@ enum
 	_halo_sim_network_messages,
 	/* the netcode's input handled (network_distributed.c) */
 	_halo_sim_network_input,
+	/* the host's check of its clients' clocks (network_distributed.c) */
+	_halo_sim_network_clock,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2381,6 +2383,7 @@ enum
 	_halo_sim_world_step_network_statistics,
 	_halo_sim_world_step_network_pickups,
 	_halo_sim_world_step_network_client_sends,
+	_halo_sim_world_step_network_client_clock,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3001,6 +3004,34 @@ enum
 };
 
 void network_client_sends_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_messages::ClockArguments: the host's check of a
+client machine's clock, by the tick its message was stamped with: the
+machine, the tick, the time (milliseconds), whether the message came over
+its stream, and the clocks (network_distributed_records.h) */
+struct halo_sim_network_clock
+{
+	long machine_index;
+	long tick;
+	unsigned long now;
+	long stream;
+	unsigned long clocks;
+};
+
+/* network_distributed.c's clock calls (crates/halo_map's
+network_messages::clock_call): of the machine a, its rate input[0] and its
+ticks ahead b */
+enum
+{
+	/* its game runs fast: logged */
+	_network_clock_call_log_fast = 1,
+	/* ... for long, its stream says so too: told, logged a cheater, dropped */
+	_network_clock_call_drop,
+	/* ... its datagrams alone say so: logged, unverified */
+	_network_clock_call_log_unverified,
+};
+
+void network_clock_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

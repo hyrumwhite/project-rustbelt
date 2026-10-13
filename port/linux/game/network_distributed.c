@@ -545,17 +545,7 @@ static struct distributed_client_identity distributed_client_identities[HALO_POR
 /* a client: its Discord user as last sent this game, and whether it was */
 static struct distributed_client_identity distributed_sent_identity;
 static boolean distributed_identity_sent;
-static struct distributed_client_clock
-{
-	long latest_tick;
-	long window_tick;
-	unsigned long window_time;
-	short fast_windows;
-	boolean fast;
-	boolean ahead_on_stream;
-	/* (its datagrams' word logged, unverified, while they go on saying so) */
-	boolean logged_unverified;
-} distributed_client_clocks[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+static struct distributed_client_clock distributed_client_clocks[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 /* the host: whether the message being handled came over its machine's
 stream (network_distributed_handle_stream_message) */
 static boolean distributed_handling_stream_message;
@@ -1073,6 +1063,22 @@ static void distributed_fill_header(
 	header->type = type;
 	header->count = (byte)count;
 	header->game_time = game_time_get();
+	/* (the automated tests: HALO_NETWORK_TEST_FAST=<seconds>, a client
+	whose game runs a quarter fast from then on, as its messages' ticks say:
+	the host's speed check (distributed_note_client_clock) refuses its
+	predictions and drops it) */
+	{
+		static long fast_ticks = NONE;
+
+		if (fast_ticks == NONE)
+		{
+			char const *value = getenv("HALO_NETWORK_TEST_FAST");
+
+			fast_ticks = value ? atol(value) * TICKS_PER_SECOND : 0;
+		}
+		if (fast_ticks > 0 && game_connection() == _game_connection_network_client && header->game_time > fast_ticks)
+			header->game_time += (header->game_time - fast_ticks) / 4;
+	}
 	header->header = 0;
 	build_message_header(&header->header, size, 2, 0);
 	distributed_statistics.sent++;
@@ -4963,22 +4969,115 @@ void network_distributed_kick(
 	}
 }
 
+/* port: the clock check is Rust's in Rust's mode (crates/halo_map's
+network_messages): what it does of a client running fast (the logs, the
+notice, the cheaters' record, the kick) through these calls */
+static struct halo_sim_network_clock distributed_clock_arguments;
+
+void network_clock_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+	long machine_index = call->a;
+	real rate = call->input[0];
+	long ahead = call->b;
+	struct distributed_client_clock *clock = &distributed_client_clocks[machine_index];
+
+	(void)clock;
+	switch (call->kind)
+	{
+	case _network_clock_call_log_fast:
+	{
+		error(_error_log, "machine #%ld's game runs %.2f times as fast as this host's (%ld ticks ahead): "
+			"its players' predictions refused", machine_index, rate, ahead);
+		break;
+	}
+	case _network_clock_call_drop:
+	{
+		error(_error_log, "machine #%ld's game ran %.2f times as fast as this host's for %d seconds "
+			"(%ld ticks ahead): dropped", machine_index, rate,
+			CLIENT_CLOCK_FAST_WINDOWS * CLIENT_CLOCK_WINDOW_MILLISECONDS / 1000, ahead);
+		{
+			char names[64];
+			char discord_id[DISCORD_ID_SIZE];
+			char discord_name[DISCORD_NAME_SIZE];
+			char discord[DISCORD_ID_SIZE + DISCORD_NAME_SIZE + 16] = "";
+			char reason[96];
+			char text[MAXIMUM_NOTICE_LENGTH];
+
+			distributed_machine_player_names(machine_index, names, sizeof(names));
+			p2p_discord_sanitize(discord_id, sizeof(discord_id),
+				distributed_client_identities[machine_index].discord_id, 0);
+			p2p_discord_sanitize(discord_name, sizeof(discord_name),
+				distributed_client_identities[machine_index].discord_name, 1);
+			if (discord_id[0] || discord_name[0])
+				snprintf(discord, sizeof(discord), " (Discord: %s, %s)", discord_name, discord_id);
+			snprintf(reason, sizeof(reason), "speed hack (game ran %.2f times as fast)", rate);
+			snprintf(text, sizeof(text), "%s%s kicked by the host: their game ran %.2f times as fast (a speed hack)",
+				names, discord, rate);
+			distributed_send_notice(text);
+			distributed_log_cheater(machine_index, names, reason);
+		}
+		network_game_server_kick_machine(machine_index, TRUE);
+		break;
+	}
+	case _network_clock_call_log_unverified:
+	{
+		char names[64];
+		char reason[96];
+		char address[32];
+
+		error(_error_log, "machine #%ld's datagrams said its game ran %.2f times as fast as this host's "
+			"for %d seconds (%ld ticks ahead), its stream not: not dropped (unverified)", machine_index, rate,
+			CLIENT_CLOCK_FAST_WINDOWS * CLIENT_CLOCK_WINDOW_MILLISECONDS / 1000, ahead);
+		distributed_machine_player_names(machine_index, names, sizeof(names));
+		snprintf(reason, sizeof(reason), "unverified speed hack (its datagrams only, not dropped: "
+			"game ran %.2f times as fast)", rate);
+		distributed_machine_address_text(machine_index, address, sizeof(address));
+		distributed_write_player_record(CHEATERS_FILE, address, machine_index, names, reason);
+		break;
+	}
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static void network_clock_action(
+	long kind,
+	long machine_index,
+	real rate,
+	long ahead)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = machine_index;
+	call.b = ahead;
+	call.input[0] = rate;
+	network_clock_call(&call);
+}
+
 /* (the host) a client machine's tick, which one of its messages is
 stamped with: its clock measured, each window, against the host's; one
 whose game runs fast (distributed_client_clock) has its players'
 predictions refused, and if it goes on, is dropped */
-static void distributed_note_client_clock(
-	long machine_index,
-	long tick)
+/* port: the game's (halo_sim.c checks Rust's against it): the machine, its
+tick and the time as the arguments have them */
+static void distributed_note_client_clock_game(
+	void)
 {
+	struct halo_sim_network_clock const *arguments = &distributed_clock_arguments;
+	long machine_index = arguments->machine_index;
+	long tick = arguments->tick;
 	struct distributed_client_clock *clock;
-	unsigned long now = system_milliseconds();
+	unsigned long now = arguments->now;
 	unsigned long elapsed;
 
 	if (machine_index < 0 || machine_index >= HALO_PORT_MAXIMUM_NETWORK_MACHINES)
 		return;
 	clock = &distributed_client_clocks[machine_index];
-	if (distributed_handling_stream_message && tick - game_time_get() > CLIENT_CLOCK_AHEAD_TICKS)
+	if (arguments->stream && tick - game_time_get() > CLIENT_CLOCK_AHEAD_TICKS)
 		clock->ahead_on_stream = TRUE;
 	if (clock->window_tick == NONE)
 	{
@@ -5006,36 +5105,11 @@ static void distributed_note_client_clock(
 		}
 		else if (++clock->fast_windows == 1)
 		{
-			error(_error_log, "machine #%ld's game runs %.2f times as fast as this host's (%ld ticks ahead): "
-				"its players' predictions refused", machine_index, rate, ahead);
+			network_clock_action(_network_clock_call_log_fast, machine_index, rate, ahead);
 		}
 		else if (clock->fast_windows >= CLIENT_CLOCK_FAST_WINDOWS && clock->ahead_on_stream)
 		{
-			error(_error_log, "machine #%ld's game ran %.2f times as fast as this host's for %d seconds "
-				"(%ld ticks ahead): dropped", machine_index, rate,
-				CLIENT_CLOCK_FAST_WINDOWS * CLIENT_CLOCK_WINDOW_MILLISECONDS / 1000, ahead);
-			{
-				char names[64];
-				char discord_id[DISCORD_ID_SIZE];
-				char discord_name[DISCORD_NAME_SIZE];
-				char discord[DISCORD_ID_SIZE + DISCORD_NAME_SIZE + 16] = "";
-				char reason[96];
-				char text[MAXIMUM_NOTICE_LENGTH];
-
-				distributed_machine_player_names(machine_index, names, sizeof(names));
-				p2p_discord_sanitize(discord_id, sizeof(discord_id),
-					distributed_client_identities[machine_index].discord_id, 0);
-				p2p_discord_sanitize(discord_name, sizeof(discord_name),
-					distributed_client_identities[machine_index].discord_name, 1);
-				if (discord_id[0] || discord_name[0])
-					snprintf(discord, sizeof(discord), " (Discord: %s, %s)", discord_name, discord_id);
-				snprintf(reason, sizeof(reason), "speed hack (game ran %.2f times as fast)", rate);
-				snprintf(text, sizeof(text), "%s%s kicked by the host: their game ran %.2f times as fast (a speed hack)",
-					names, discord, rate);
-				distributed_send_notice(text);
-				distributed_log_cheater(machine_index, names, reason);
-			}
-			network_game_server_kick_machine(machine_index, TRUE);
+			network_clock_action(_network_clock_call_drop, machine_index, rate, ahead);
 			clock->fast_windows = 0;
 			clock->ahead_on_stream = FALSE;
 		}
@@ -5049,24 +5123,47 @@ static void distributed_note_client_clock(
 			clock->fast_windows = CLIENT_CLOCK_FAST_WINDOWS;
 			if (!clock->logged_unverified)
 			{
-				char names[64];
-				char reason[96];
-				char address[32];
-
-				error(_error_log, "machine #%ld's datagrams said its game ran %.2f times as fast as this host's "
-					"for %d seconds (%ld ticks ahead), its stream not: not dropped (unverified)", machine_index, rate,
-					CLIENT_CLOCK_FAST_WINDOWS * CLIENT_CLOCK_WINDOW_MILLISECONDS / 1000, ahead);
-				distributed_machine_player_names(machine_index, names, sizeof(names));
-				snprintf(reason, sizeof(reason), "unverified speed hack (its datagrams only, not dropped: "
-					"game ran %.2f times as fast)", rate);
-				distributed_machine_address_text(machine_index, address, sizeof(address));
-				distributed_write_player_record(CHEATERS_FILE, address, machine_index, names, reason);
+				network_clock_action(_network_clock_call_log_unverified, machine_index, rate, ahead);
 				clock->logged_unverified = TRUE;
 			}
 		}
 	}
 	clock->window_tick = clock->latest_tick;
 	clock->window_time = now;
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_messages),
+checked against the game's otherwise; its world the arguments and the
+clocks */
+static void distributed_note_client_clock(
+	long machine_index,
+	long tick)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	int checking = FALSE;
+
+	memset(&distributed_clock_arguments, 0, sizeof(distributed_clock_arguments));
+	distributed_clock_arguments.machine_index = machine_index;
+	distributed_clock_arguments.tick = tick;
+	distributed_clock_arguments.now = system_milliseconds();
+	distributed_clock_arguments.stream = distributed_handling_stream_message;
+	distributed_clock_arguments.clocks = (unsigned long)&distributed_client_clocks[0];
+	regions[0].address = (unsigned long)&distributed_clock_arguments;
+	regions[0].size = sizeof(distributed_clock_arguments);
+	regions[1].address = (unsigned long)&distributed_client_clocks[0];
+	regions[1].size = sizeof(distributed_client_clocks);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.arguments = (unsigned long)&distributed_clock_arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_client_clock, &context, regions, 2,
+		network_clock_call, &checking))
+	{
+		return;
+	}
+	distributed_note_client_clock_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_client_clock);
 }
 
 /* whether a client machine's game runs fast (distributed_note_client_clock):

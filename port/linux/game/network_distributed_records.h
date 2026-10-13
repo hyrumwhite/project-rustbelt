@@ -124,4 +124,18 @@ struct distributed_input_facing
 	real_euler_angles2d facing;
 };
 
+/* the host: each client machine's clock, measured each window against its
+own, whether its game runs fast, for how many windows, whether its stream
+said so too, and whether its datagrams' word was logged, unverified */
+struct distributed_client_clock
+{
+	long latest_tick;
+	long window_tick;
+	unsigned long window_time;
+	short fast_windows;
+	boolean fast;
+	boolean ahead_on_stream;
+	boolean logged_unverified;
+};
+
 #endif

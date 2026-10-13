@@ -71,6 +71,8 @@ enum
 	_halo_sim_distributed_wire,
 	/* a client's applying of the host's state (network_objects.c) */
 	_halo_sim_network_apply,
+	/* the host's checking of clients' hit reports (network_damage.c) */
+	_halo_sim_network_damage,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2354,6 +2356,7 @@ enum
 	_halo_sim_world_step_network_object_state,
 	_halo_sim_world_step_network_inventory,
 	_halo_sim_world_step_network_object_change,
+	_halo_sim_world_step_network_hit_report,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2487,6 +2490,42 @@ enum
 
 /* network_distributed.c's smoothed round trip */
 unsigned long network_distributed_round_trip_address(void);
+
+/* crates/halo_map's network_damage::Arguments: a client's hit report the
+host checks, the host's records of its player, and the damage it deals */
+struct halo_sim_network_report
+{
+	unsigned char report[0x6C];
+	long machine_index;
+	unsigned long player_record;
+	unsigned long explosions;
+	unsigned long trail;
+	unsigned long history;
+	unsigned long game_globals;
+	float gravity;
+	unsigned long tag_instances;
+	long tag_count;
+	unsigned char damage[0x54];
+	unsigned long rejected;
+	unsigned long dealt;
+};
+
+typedef char halo_sim_network_report_size_assert[sizeof(struct halo_sim_network_report) == 0x6C + 36 + 0x54 + 8 ? 1 : -1];
+
+/* network_damage.c's calls (crates/halo_map's network_damage::call) */
+enum
+{
+	_network_damage_call_machine_has_player = 1,
+	_network_damage_call_maximum_body_vitality,
+	_network_damage_call_has_node,
+	_network_damage_call_round_trip,
+	_network_damage_call_origin,
+	_network_damage_call_velocity,
+	_network_damage_call_location,
+	_network_damage_call_deal,
+};
+
+void network_damage_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

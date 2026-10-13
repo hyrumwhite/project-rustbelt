@@ -77,7 +77,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 124
+#define HALO_SIM_VERSION 125
 
 /* ---------- structures */
 
@@ -2231,6 +2231,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"data_packets",
 	"distributed_wire",
 	"network_apply",
+	"network_damage",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -10850,6 +10851,7 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network object state",
 	"network inventory",
 	"network object change",
+	"network hit report",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10865,6 +10867,7 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_apply,
 	_halo_sim_network_apply,
 	_halo_sim_network_apply,
+	_halo_sim_network_damage,
 };
 
 static struct

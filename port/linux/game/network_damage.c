@@ -56,6 +56,8 @@ being hit looks and feels like on the clients).
 #include "scenario/scenario.h"
 #include "units/units.h"
 #include "network_distributed.h"
+#include "network_damage_records.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <math.h>
 
@@ -87,7 +89,6 @@ enum
 	/* the weapons a player has carried lately, whose damage the host takes
 	from them (a grenade lands, a rocket arrives, after its thrower has
 	died or dropped the launcher) */
-	MAXIMUM_RECENT_WEAPONS = 8,
 	RECENT_WEAPON_TICKS = 10 * TICKS_PER_SECOND,
 	/* the grenades a player has thrown lately, as the host's own game threw
 	them, whose damage the host takes from them: each goes off once, within
@@ -95,7 +96,6 @@ enum
 	MAXIMUM_TRACKED_PLAYERS); one that hits nothing is kept the whole time,
 	so this is more than a player throws in it, infinite grenades and all
 	(a throw takes most of a second); past it the oldest gives way */
-	MAXIMUM_GRENADE_THROWS = 32,
 	/* a player's hits: a bucket of this many seconds of fire, filling at a
 	second a second, a hit taking what one of its weapon's projectiles
 	takes to fire (at twice the weapon's fastest rate: a shotgun's
@@ -110,7 +110,6 @@ enum
 	EFFECT_HITS_PER_SECOND = 4,
 	/* the explosions' hits of a tick told apart, a player's (an explosion
 	and an object each) */
-	MAXIMUM_EXPLOSIONS_PER_TICK = 64,
 	/* what weapons and grenades deal, remembered (a power of two) */
 	DAMAGE_RATE_CACHE_SIZE = 1024,
 	/* the damage events kept for killing blows */
@@ -119,7 +118,6 @@ enum
 	MAXIMUM_TAG_DEPTH = 4,
 	/* the ticks of where players' units and vehicles were, a power of two
 	(about a second) */
-	TARGET_HISTORY_TICKS = 32,
 	/* ... looked back over beyond the host's tick a report was made at (the
 	frame drawn a tick behind, the report's own tick) */
 	TARGET_HISTORY_SLACK_TICKS = 3,
@@ -133,13 +131,11 @@ enum
 	/* where each player's unit was, every so many ticks, and how many of
 	those are kept (a power of two: about thirteen seconds; what they fire
 	outlives the history: a rocket's flight, a grenade its thrower) */
-	PLAYER_TRAIL_INTERVAL_TICKS = 3,
 	/* ... looked over from no earlier than the report's machine's round
 	trip and this before now (a report made longer ago, sent again after a
 	loss, has its shooter where they were then; one that says it was made
 	long ago does not look further back than that) */
 	PLAYER_TRAIL_REPORT_SLACK_TICKS = TICKS_PER_SECOND,
-	PLAYER_TRAIL_POINTS = 128,
 	PLAYER_TRAIL_TICKS = PLAYER_TRAIL_INTERVAL_TICKS * PLAYER_TRAIL_POINTS,
 };
 
@@ -331,84 +327,30 @@ struct distributed_hit_report_message
 how many ticks from when it is fired, and for how many of them what it
 fires is carried at its firer's own speed (a grenade thrown on the run); a
 distance below 0 where the tags do not bound it */
-struct damage_reach
-{
-	real distance;
-	real ticks;
-	real carried_ticks;
-};
+/* (struct damage_reach: network_damage_records.h) */
 
 /* the vehicle damage in the globals' falling damage block, as vehicles.c
 has it */
-struct distributed_falling_damage
-{
-	byte unused0[0x2c];
-	struct tag_reference maximum_distance_damage;
-	struct tag_reference vehicle_hit_environment_damage_effect;
-	struct tag_reference vehicle_killed_unit_damage_effect;
-	struct tag_reference vehicle_collision_damage;
-	struct tag_reference flaming_death_damage;
-};
+/* (struct distributed_falling_damage: network_damage_records.h) */
 
 /* ---------- globals */
 
 /* the host: the damage dealt this tick */
 static struct distributed_damage_event damage_events[MAXIMUM_DAMAGE_EVENTS_PER_TICK];
 static short damage_event_count;
-/* ... dealing a client's report */
-static boolean damage_dealing_report;
+/* ... dealing a client's report (declared above) */
 /* ... each player's weapons of late, and hits left */
-static struct
-{
-	long definition_indices[MAXIMUM_RECENT_WEAPONS];
-	long times[MAXIMUM_RECENT_WEAPONS];
-	/* (the grenades thrown, not yet gone off: NONE for none) */
-	long throw_times[MAXIMUM_GRENADE_THROWS];
-	short throw_types[MAXIMUM_GRENADE_THROWS];
-	long driven_time;
-	/* (the blow of the player's unit with no weapon: units.c's
-	unit_unarmed_melee_damage) */
-	long unarmed_melee_damage_index;
-	long unarmed_time;
-	real hit_seconds;
-	long hit_seconds_time;
-} damage_players[MAXIMUM_TRACKED_PLAYERS];
+static struct damage_player_record damage_players[MAXIMUM_TRACKED_PLAYERS];
 /* ... the explosions whose hits came this tick, each paid for once, and
 the objects each hit (each once), each player's */
-static struct
-{
-	long time;
-	short count;
-	struct
-	{
-		long definition_index;
-		real_point3d epicenter;
-		long object_index;
-	} explosions[MAXIMUM_EXPLOSIONS_PER_TICK];
-} damage_explosions[MAXIMUM_TRACKED_PLAYERS];
+static struct damage_explosion_record damage_explosions[MAXIMUM_TRACKED_PLAYERS];
 /* ... where each player's unit and vehicle were at each of the last ticks
 (and whether they drove it) */
-static struct damage_history_tick
-{
-	long time;
-	struct
-	{
-		long object_index;
-		real_point3d position;
-		real speed;
-		boolean driving;
-	} objects[MAXIMUM_TRACKED_PLAYERS][2];
-} damage_history[TARGET_HISTORY_TICKS];
+static struct damage_history_tick damage_history[TARGET_HISTORY_TICKS];
 /* ... and where each player's living unit was every few ticks, longer (NONE
 for no time: none), how fast it or its vehicle went, and the size of the
 vehicle it rode */
-static struct damage_trail_point
-{
-	long time;
-	real_point3d position;
-	real speed;
-	real radius;
-} damage_trails[MAXIMUM_TRACKED_PLAYERS][PLAYER_TRAIL_POINTS];
+static struct damage_trail_point damage_trails[MAXIMUM_TRACKED_PLAYERS][PLAYER_TRAIL_POINTS];
 /* ... what each weapon or grenade deals, as the tags have it (their walk
 is long): the hits a second of a damage effect from it, how it deals it
 (the _damage_source flags), and how far from its firer */
@@ -442,6 +384,72 @@ and its killer and their score after it (NONE: none) */
 static boolean damage_replaying_kill;
 static long damage_replaying_killer;
 static long damage_replaying_killer_score;
+
+static boolean damage_dealing_report;
+
+/* ---------- port: the report's calls into the game (the Rust port's,
+crates/halo_map's network_damage), recorded in check mode */
+
+/* cache_files.c's loaded tags' table */
+void *cache_files_tag_instances(long *count);
+
+void network_damage_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_damage_call_machine_has_player:
+		call->result = distributed_machine_has_player(call->a, (short)call->b);
+		break;
+	case _network_damage_call_maximum_body_vitality:
+		call->output[0] = object_get_maximum_body_vitality(call->a, TRUE);
+		break;
+	case _network_damage_call_has_node:
+		call->result = object_has_node(call->a, (short)call->b);
+		break;
+	case _network_damage_call_round_trip:
+		call->output[0] = distributed_machine_round_trip_ticks(call->a);
+		break;
+	case _network_damage_call_origin:
+		object_get_origin(call->a, (real_point3d *)&call->output[0]);
+		break;
+	case _network_damage_call_velocity:
+		object_get_velocities(call->a, (real_vector3d *)&call->output[0], NULL);
+		break;
+	case _network_damage_call_location:
+		scenario_location_from_point((struct location *)call->b, (real_point3d const *)&call->input[0]);
+		break;
+	case _network_damage_call_deal:
+		damage_dealing_report = TRUE;
+		object_cause_damage((struct damage_data *)call->b, call->a, (short)call->input[3], (short)call->input[4],
+			(short)call->input[5], call->input[6] != 0.0f ? (real_vector3d const *)&call->input[0] : NULL);
+		damage_dealing_report = FALSE;
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static struct halo_sim_ai_call network_damage_call_simple(
+	long kind,
+	long a,
+	long b,
+	float const *input,
+	short input_count)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	if (input && input_count > 0)
+		csmemcpy(call.input, input, input_count * sizeof(float));
+	network_damage_call(&call);
+	return call;
+}
 
 /* ---------- common */
 
@@ -495,7 +503,9 @@ static boolean distributed_damage_to_data(
 	the materials' modifiers) */
 	if (damage->material_type >= 0 && damage->material_type < NUMBER_OF_MATERIAL_TYPES)
 		result->material_type = damage->material_type;
-	scenario_location_from_point(&result->location, &result->epicenter);
+	/* port: through the report's calls (the Rust port's) */
+	network_damage_call_simple(_network_damage_call_location, 0, (long)&result->location,
+		(float const *)&result->epicenter, 3);
 	return TRUE;
 }
 
@@ -504,7 +514,7 @@ static boolean static_target(
 	long object_index)
 {
 	return object_try_and_get_and_verify_type(object_index, STATIC_TARGET_TYPES) &&
-		object_get_maximum_body_vitality(object_index, TRUE) > 0.0f;
+		network_damage_call_simple(_network_damage_call_maximum_body_vitality, object_index, 0, NULL, 0).output[0] > 0.0f;
 }
 
 /* ---------- object_cause_damage (damage.c) */
@@ -1513,7 +1523,8 @@ static boolean distributed_player_could_fire(
 {
 	real ticks = reach->ticks;
 	long earliest;
-	long latest_made = game_time_get() - (long)distributed_machine_round_trip_ticks(machine_index) -
+	long latest_made = game_time_get() -
+		(long)network_damage_call_simple(_network_damage_call_round_trip, machine_index, 0, NULL, 0).output[0] -
 		PLAYER_TRAIL_REPORT_SLACK_TICKS;
 	short index;
 
@@ -1621,8 +1632,11 @@ static boolean distributed_damage_indices_valid(
 	struct collision_model *collision_model = collision_model_index != NONE ?
 		collision_model_definition_get(collision_model_index) : NULL;
 
-	if (node_index != NONE && (node_index < 0 || !object_has_node(object_index, node_index)))
+	if (node_index != NONE &&
+		(node_index < 0 || !network_damage_call_simple(_network_damage_call_has_node, object_index, node_index, NULL, 0).result))
+	{
 		return FALSE;
+	}
 	if (region_index != NONE && (region_index < 0 || region_index >= MAXIMUM_REGIONS_PER_OBJECT ||
 		!collision_model || region_index >= collision_model->resistance.regions.count))
 	{
@@ -1768,7 +1782,8 @@ static boolean distributed_report_valid(
 
 	/* that machine's player */
 	if (player_index == NO_PLAYER || player_index >= MAXIMUM_TRACKED_PLAYERS ||
-		!(player = distributed_player(player_index)) || !distributed_machine_has_player(machine_index, player_index))
+		!(player = distributed_player(player_index)) ||
+		!network_damage_call_simple(_network_damage_call_machine_has_player, machine_index, player_index, NULL, 0).result)
 	{
 		return FALSE;
 	}
@@ -1896,9 +1911,18 @@ static boolean distributed_report_valid(
 		real_vector3d velocity;
 		real tolerance;
 
-		object_get_origin(report->object_index, &origin);
+		/* port: through the report's calls (the Rust port's) */
+		{
+			struct halo_sim_ai_call got = network_damage_call_simple(_network_damage_call_origin, report->object_index, 0, NULL, 0);
+
+			csmemcpy(&origin, got.output, sizeof(origin));
+		}
 		/* (a rider's own velocity is not kept: what it rides has it) */
-		object_get_velocities(report->object_index, &velocity, NULL);
+		{
+			struct halo_sim_ai_call got = network_damage_call_simple(_network_damage_call_velocity, report->object_index, 0, NULL, 0);
+
+			csmemcpy(&velocity, got.output, sizeof(velocity));
+		}
 		tolerance = REPORT_TARGET_TOLERANCE + REPORT_TARGET_LEAD_TICKS *
 			(real)sqrt(velocity.i * velocity.i + velocity.j * velocity.j + velocity.k * velocity.k);
 		if (!(distributed_distance_squared(&report->target_position, &origin) <= tolerance * tolerance))
@@ -1920,7 +1944,11 @@ static boolean distributed_report_valid(
 		real_point3d origin;
 		real distance;
 
-		object_get_origin(report->object_index, &origin);
+		{
+			struct halo_sim_ai_call got = network_damage_call_simple(_network_damage_call_origin, report->object_index, 0, NULL, 0);
+
+			csmemcpy(&origin, got.output, sizeof(origin));
+		}
 		damage->direction.i = report->target_position.x + target->object.bounding_sphere_center.x - origin.x -
 			damage->epicenter.x;
 		damage->direction.j = report->target_position.y + target->object.bounding_sphere_center.y - origin.y -
@@ -1951,6 +1979,90 @@ static boolean distributed_report_valid(
 	return TRUE;
 }
 
+/* port: a report at a time, the game's (its parts through the report's
+calls, the Rust port's: crates/halo_map's network_damage); the damage it
+deals made in the arguments' */
+static void network_damage_handle_report_game(
+	long machine_index,
+	struct distributed_hit_report const *report,
+	struct halo_sim_network_report *arguments)
+{
+	struct damage_data *damage = (struct damage_data *)arguments->damage;
+
+	if (!distributed_report_valid(machine_index, report, damage))
+	{
+		damage_rejected_reports++;
+		return;
+	}
+	damage_dealt_reports++;
+	{
+		float input[7];
+
+		csmemcpy(&input[0], &report->object_normal, sizeof(report->object_normal));
+		input[3] = (float)report->node_index;
+		input[4] = (float)report->region_index;
+		input[5] = (float)report->material_index;
+		input[6] = report->has_normal ? 1.0f : 0.0f;
+		network_damage_call_simple(_network_damage_call_deal, report->object_index, (long)damage, input, 7);
+	}
+}
+
+/* port: Rust's in Rust's mode, checked against the game's otherwise: its
+world the arguments, the report's player's records and the counts */
+static void network_damage_handle_report(
+	long machine_index,
+	struct distributed_hit_report const *report)
+{
+	struct halo_sim_network_report arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[5];
+	long region_count = 0;
+	short player_index = report->damage.owner_player_index;
+	int checking = FALSE;
+
+	memset(&arguments, 0, sizeof(arguments));
+	csmemcpy(arguments.report, report, sizeof(*report));
+	arguments.machine_index = machine_index;
+	if (player_index != NO_PLAYER && player_index < MAXIMUM_TRACKED_PLAYERS)
+	{
+		arguments.player_record = (unsigned long)&damage_players[player_index];
+		arguments.explosions = (unsigned long)&damage_explosions[player_index];
+		arguments.trail = (unsigned long)&damage_trails[player_index][0];
+	}
+	arguments.history = (unsigned long)&damage_history[0];
+	arguments.game_globals = (unsigned long)scenario_get_game_globals();
+	arguments.gravity = global_gravity;
+	arguments.tag_instances = (unsigned long)cache_files_tag_instances(&arguments.tag_count);
+	arguments.rejected = (unsigned long)&damage_rejected_reports;
+	arguments.dealt = (unsigned long)&damage_dealt_reports;
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&arguments;
+	regions[region_count].address = (unsigned long)&arguments;
+	regions[region_count++].size = sizeof(arguments);
+	if (arguments.player_record)
+	{
+		regions[region_count].address = arguments.player_record;
+		regions[region_count++].size = sizeof(struct damage_player_record);
+		regions[region_count].address = arguments.explosions;
+		regions[region_count++].size = sizeof(struct damage_explosion_record);
+	}
+	regions[region_count].address = arguments.rejected;
+	regions[region_count++].size = sizeof(long);
+	regions[region_count].address = arguments.dealt;
+	regions[region_count++].size = sizeof(long);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_hit_report, &context, regions, region_count,
+		network_damage_call, &checking))
+	{
+		return;
+	}
+	network_damage_handle_report_game(machine_index, report, &arguments);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_hit_report);
+}
+
 void network_damage_handle_reports(
 	long machine_index,
 	void const *entries,
@@ -1960,21 +2072,7 @@ void network_damage_handle_reports(
 	short index;
 
 	for (index = 0; index < count; index++)
-	{
-		struct distributed_hit_report const *report = &reports[index];
-		struct damage_data damage;
-
-		if (!distributed_report_valid(machine_index, report, &damage))
-		{
-			damage_rejected_reports++;
-			continue;
-		}
-		damage_dealt_reports++;
-		damage_dealing_report = TRUE;
-		object_cause_damage(&damage, report->object_index, report->node_index, report->region_index,
-			report->material_index, report->has_normal ? &report->object_normal : NULL);
-		damage_dealing_report = FALSE;
-	}
+		network_damage_handle_report(machine_index, &reports[index]);
 }
 
 /* where each damage event of this tick goes: a player effect to its

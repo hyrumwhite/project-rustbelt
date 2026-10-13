@@ -999,6 +999,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - the seat in the change test (a seat changes with the vehicle).
        - **Rust in charge:** with all networking systems in Rust on both machines, the machines' positions differ as with the C. Over three sessions each the medians were 5.2 to 7.4 cm for the Rust and 3.7 to 5.8 cm for the C, and the largest 17.2 to 20.0 cm against 9.7 to 19.2 cm. Both machines end with the same count of items, and every hit reported is dealt. Every probe check agrees on the five levels and a50 as before.
 
+   - [x] The host's sending of what it planned in Rust (`halo_map::network_host`, world step 20): network_distributed.c's `distributed_host_send_players`.
+     - **What Rust does:** to each client, the relayed input of each player planned for it (after the tick's update number), then their unit states, its own players' with the tick it predicted them at. Each entry is written by the wire format's writers (`distributed_wire`).
+     - **The game's, through calls:** the host's packer (`distributed_packer_begin`, `_add`, `_flush`), which fills each message to the batch's room. The entry being packed is in the step's arguments, so the check compares its bytes.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, all 2,048 sends agree, with none left out (13,048 calls), alongside steps 17 to 19.
+       - Planted errors in the own-player flag, the input's send bit and the update number's prefix were all caught.
+       - **Rust in charge:** with all networking systems in Rust on both machines, the machines' positions differ by a median of 3.6 cm (largest 10.2), within the C's range. Both machines end with the same count of items, and every hit reported is dealt.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

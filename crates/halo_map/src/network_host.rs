@@ -1530,3 +1530,87 @@ pub fn plan_players(context: &WorldContext, host: &impl AiHost) {
     let arguments: PlanArguments = unsafe { std::mem::transmute(bytes) };
     Plan { context, host, m, arguments }.plan();
 }
+
+/// halo_sim.h's `struct halo_sim_network_send_players`: the arguments of
+/// the host's sending of what it planned, and the entry being packed.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SendArguments {
+    pub sends: u32,
+    pub states: u32,
+    pub actions: u32,
+    pub player_machines: u32,
+    pub relayed_type: i16,
+    pub unit_type: i16,
+    pub machine_count: i32,
+    pub machine_indices: [i32; MAXIMUM_MACHINES],
+    pub entry: [u8; 64],
+}
+
+const _: () = assert!(std::mem::size_of::<SendArguments>() == 4 * 4 + 4 + 4 + 128 * 4 + 64);
+
+/// The plan's packer calls (halo_sim.h's `_network_plan_call_packer_*`).
+mod packer_call {
+    /// The packer begun for the machine `a`'s messages of type `b`, with
+    /// the update number first if `actor`.
+    pub const BEGIN: i32 = 5;
+    /// The entry in the arguments, of `b` bytes, into the packer.
+    pub const ADD: i32 = 6;
+    /// The packer's message so far into the batch.
+    pub const FLUSH: i32 = 7;
+}
+
+/// The world step of the host's sending of what it planned
+/// (network_distributed.c's `distributed_host_send_players`): to each
+/// client, the input of the players planned for it, then their units.
+pub fn send_players(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let mut bytes = [0u8; std::mem::size_of::<SendArguments>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    let a: SendArguments = unsafe { std::mem::transmute(bytes) };
+    let entry_address = context.arguments + std::mem::offset_of!(SendArguments, entry) as u32;
+    let call = |kind: i32, actor: i32, a: i32, b: i32| {
+        let mut call = AiCall { kind, actor, a, b, ..AiCall::default() };
+        host.call(&mut call);
+    };
+    // (the entry's bytes into the arguments, as many as it has, and in)
+    let add = |entry: &[u8]| {
+        write_bytes(m, entry_address, entry);
+        call(packer_call::ADD, NONE, 0, entry.len() as i32);
+    };
+    let read = |address: u32, size: usize| (0..size).map(|offset| m.r8(address + offset as u32)).collect::<Vec<u8>>();
+    for &machine_index in &a.machine_indices[..(a.machine_count.max(0) as usize).min(MAXIMUM_MACHINES)] {
+        let sends = a.sends + machine_index as u32 * MAXIMUM_TRACKED_PLAYERS as u32;
+        call(packer_call::BEGIN, 1, machine_index, a.relayed_type as i32);
+        for player_index in 0..MAXIMUM_TRACKED_PLAYERS as u32 {
+            if m.r8(sends + player_index) & SEND_ACTION == 0 {
+                continue;
+            }
+            let size = std::mem::size_of::<wire::RelayedAction>();
+            let bytes: [u8; 20] = read(a.actions + player_index * size as u32, size).try_into().unwrap();
+            // SAFETY: plain data of its size
+            let relayed: wire::RelayedAction = unsafe { std::mem::transmute(bytes) };
+            let mut entry = [0u8; 64];
+            let written = wire::relayed_action_write(&relayed, &mut entry) as usize;
+            add(&entry[..written]);
+        }
+        call(packer_call::FLUSH, NONE, 0, 0);
+        call(packer_call::BEGIN, 0, machine_index, a.unit_type as i32);
+        for player_index in 0..MAXIMUM_TRACKED_PLAYERS as u32 {
+            if m.r8(sends + player_index) & SEND_STATE == 0 {
+                continue;
+            }
+            let bytes: [u8; 64] = read(a.states + player_index * unit_state::SIZEOF, 64).try_into().unwrap();
+            // SAFETY: plain data of its size
+            let state: wire::UnitState = unsafe { std::mem::transmute(bytes) };
+            let own = m.i32(a.player_machines + 4 * player_index) == machine_index;
+            let mut entry = [0u8; 64];
+            let written = wire::unit_state_write(&state, own, &mut entry) as usize;
+            add(&entry[..written]);
+        }
+        call(packer_call::FLUSH, NONE, 0, 0);
+    }
+}

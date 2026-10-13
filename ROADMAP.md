@@ -943,6 +943,26 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
          - With all fifty-five systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
      - **The crash log** now names the module and offset of the faulting address and of the code addresses on the stack, so a crash in halo_sim.dll can be found in its symbols.
 
+   - [x] The host sending its objects each tick in Rust (`halo_map::network_host`, system `network_host`, world step 17): network_objects.c's `network_objects_host_tick`, with `distributed_host_update_objects`, `_find_viewers`, `_object_period`, `_send_states`, `_send_inventories` and `_send_damage_animations`.
+     - **What Rust does:**
+       - **Objects made and deleted:** each networked object the host hasn't told its clients of goes to all of them reliably (what it is, where, how it looks, carried or dead). Each it told of that is gone, or has another in its place, is deleted.
+       - **Viewers:** each client machine's players' living units, where they are and the vehicles they drive, and where every player's unit is (for a machine with none).
+       - **States:** a moving object goes to each client as often as it is near the client's players (every tick within 25 world units, then every second, third or fourth tick, in the object's turn). The vehicle a client drives goes every third tick with which of the client's ticks the host has it at. One come to rest goes to every client three times, eight ticks apart, and four at rest go each tick, round them all.
+       - **Inventories** (every third tick): a change of weapons or grenades, or none sent for a second, goes to every client. A change of ammunition alone goes to the unit's own client at once and to the others as often as its place goes to them.
+       - **Damage animations:** the host's flinch and death picks, each in three ticks' messages.
+     - **The game's, through calls (`network_host_call`):** sending the message (to a machine, or to every client reliably or not) and an object's origin.
+       - Every message goes out of one buffer (`objects_host_message`), so the check sees each message's bytes as they are sent.
+       - What the step reads of the netcode is taken as the tick begins and passed in its arguments: the client machines and their players, and a co-op cutscene's camera. The C reads the same arguments.
+       - The host's records moved to network_objects_records.h, so the netcode probe has their layouts.
+     - **The check:** the regions are the arguments, the message, the told objects and their count, the resting cursor, the moving flags and rest times, the inventories' records, the viewers, the statistics and the damage animations.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, all 2,048 of the host's ticks agree, with none left out (7,795 calls).
+       - Planted errors were caught in a change's team, a rest state's spacing and window, the predicted tick of a client's own vehicle, the weapons' checksum and a damage animation's sends.
+       - One went unseen: the middle distance's bound (no moving object came 48 to 60 world units from the nearest player).
+       - **Rust in charge:**
+         - With all networking systems in Rust on both machines, the machines' positions differ as with the C (median 5.8 cm against 5.8, largest 19.1 against 19.2). Both machines end with the same count of items, and every hit reported is dealt.
+         - With all fifty-six systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second. The exception is one of d20's 31,000 biped updates: the game's record of it has the biped's position as relative to the seat it was just put in.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

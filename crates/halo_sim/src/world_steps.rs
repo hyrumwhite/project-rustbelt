@@ -196,6 +196,7 @@ const STEP_NETWORK_DAMAGE_REPLAY: i32 = 13;
 const STEP_NETWORK_DAMAGE_DEALS: i32 = 14;
 const STEP_NETWORK_DAMAGE_PLAYER_EFFECT: i32 = 15;
 const STEP_NETWORK_DAMAGE_AFTERMATH: i32 = 16;
+const STEP_NETWORK_HOST_TICK: i32 = 17;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -216,6 +217,7 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_DAMAGE_DEALS => halo_map::network_damage::deals(context, host),
         STEP_NETWORK_DAMAGE_PLAYER_EFFECT => halo_map::network_damage::player_effect(context, host),
         STEP_NETWORK_DAMAGE_AFTERMATH => halo_map::network_damage::aftermath(context, host),
+        STEP_NETWORK_HOST_TICK => halo_map::network_host::host_tick(context, host),
         _ => return None,
     }
     Some(())

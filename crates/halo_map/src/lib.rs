@@ -29,6 +29,7 @@ pub mod data_packets;
 pub mod distributed_wire;
 pub mod network_apply;
 pub mod network_damage;
+pub mod network_host;
 pub mod props;
 pub mod firing_positions;
 pub mod path;

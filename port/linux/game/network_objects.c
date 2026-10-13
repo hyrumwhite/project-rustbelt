@@ -314,11 +314,7 @@ static struct objects_host_inventory objects_host_inventories[MAXIMUM_TRACKED_OB
 static struct objects_host_viewers objects_host_viewers;
 /* ... each machine it has told all its objects: when, and which players it
 had then (another machine in its place has others) */
-static struct
-{
-	long time;
-	long player_indices[MAXIMUM_LOCAL_PLAYERS];
-} objects_host_machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+static struct objects_host_machine objects_host_machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 /* ... each client's player's latest vehicle prediction, taken at the next
 tick (network_objects_records.h) */
 static struct objects_host_vehicle_prediction objects_host_vehicle_predictions[MAXIMUM_TRACKED_PLAYERS];
@@ -1403,6 +1399,8 @@ void network_host_call(
 
 		if (call->a == NONE)
 			distributed_send(&objects_host_message, type, count, size, (short)call->actor);
+		else if (call->actor)
+			distributed_send_to_machine_reliably(call->a, &objects_host_message, type, count, size);
 		else
 			distributed_send_to_machine(call->a, &objects_host_message, type, count, size);
 		break;
@@ -1471,7 +1469,8 @@ static void network_host_send(
 
 	memset(&call, 0, sizeof(call));
 	call.kind = _network_host_call_send;
-	call.actor = machine_index == NONE ? destination : 0;
+	/* (to a machine: whether reliably) */
+	call.actor = destination;
 	call.a = machine_index;
 	call.b = (long)type | ((long)(count & 0xFF) << 8) | ((long)size << 16);
 	network_host_call(&call);
@@ -1706,22 +1705,23 @@ static short distributed_object_send_rank(
 and word that that is all of them; asked again, only the word (they are on
 their way ahead of it), unless it failed to make one since it last asked
 (again) */
-void network_objects_client_asked(
-	long machine_index,
-	boolean again)
+/* port: the game's (halo_sim.c checks Rust's against it): the machine and
+its players as the arguments have them, the messages through the host's
+calls */
+static void network_objects_client_asked_game(
+	void)
 {
-	struct distributed_object_change_message message;
+	struct distributed_object_change_message *changes = &objects_host_message.changes;
+	struct halo_sim_network_host const *arguments = &objects_host_arguments;
+	long machine_index = arguments->asked_machine;
 	short count = 0;
 	short limit = MIN(MAXIMUM_ENTRIES_PER_MESSAGE, RELIABLE_ENTRIES(struct distributed_object_change));
 	long absolute_index;
 	short rank;
-	long *player_list;
+	long const *player_list = arguments->asked_players;
 
-	if (machine_index < 0 || machine_index >= HALO_PORT_MAXIMUM_NETWORK_MACHINES)
-		return;
-	player_list = machine_get_player_list(machine_index);
 	/* (another machine in its place has other players) */
-	if ((again && game_time_get() - objects_host_machines[machine_index].time >= HOST_OBJECTS_RESEND_TICKS) ||
+	if ((arguments->asked_again && game_time_get() - objects_host_machines[machine_index].time >= HOST_OBJECTS_RESEND_TICKS) ||
 		objects_host_machines[machine_index].time == NONE ||
 		csmemcmp(objects_host_machines[machine_index].player_indices, player_list,
 			sizeof(objects_host_machines[machine_index].player_indices)) != 0)
@@ -1732,8 +1732,8 @@ void network_objects_client_asked(
 	}
 	else
 	{
-		distributed_send_to_machine_reliably(machine_index, &message, _distributed_message_objects_synchronized, 0,
-			(word)sizeof(message.header));
+		network_host_send(machine_index, TRUE, _distributed_message_objects_synchronized, 0,
+			(word)sizeof(changes->header));
 		return;
 	}
 	distributed_host_update_objects();
@@ -1751,22 +1751,61 @@ void network_objects_client_asked(
 
 			if (object_index == NONE || distributed_object_send_rank(object_index) != rank)
 				continue;
-			distributed_change_from_object(object_index, &message.changes[count]);
+			distributed_change_from_object(object_index, &changes->changes[count]);
 			if (++count == limit)
 			{
-				distributed_send_to_machine_reliably(machine_index, &message, _distributed_message_object_changes, count,
-					(word)(sizeof(message.header) + count * sizeof(struct distributed_object_change)));
+				network_host_send(machine_index, TRUE, _distributed_message_object_changes, count,
+					(word)(sizeof(changes->header) + count * sizeof(struct distributed_object_change)));
 				count = 0;
 			}
 		}
 	}
 	if (count)
 	{
-		distributed_send_to_machine_reliably(machine_index, &message, _distributed_message_object_changes, count,
-			(word)(sizeof(message.header) + count * sizeof(struct distributed_object_change)));
+		network_host_send(machine_index, TRUE, _distributed_message_object_changes, count,
+			(word)(sizeof(changes->header) + count * sizeof(struct distributed_object_change)));
 	}
-	distributed_send_to_machine_reliably(machine_index, &message, _distributed_message_objects_synchronized, 0,
-		(word)sizeof(message.header));
+	network_host_send(machine_index, TRUE, _distributed_message_objects_synchronized, 0, (word)sizeof(changes->header));
+}
+
+static void distributed_host_arguments(void);
+static long distributed_host_regions(struct halo_sim_world_region *regions);
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_host), checked
+against the game's otherwise; its world the host tick's and the machines
+told */
+void network_objects_client_asked(
+	long machine_index,
+	boolean again)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[16];
+	long region_count;
+	int checking = FALSE;
+
+	if (machine_index < 0 || machine_index >= HALO_PORT_MAXIMUM_NETWORK_MACHINES)
+		return;
+	distributed_host_arguments();
+	objects_host_arguments.asked_machine = machine_index;
+	objects_host_arguments.asked_again = again;
+	csmemcpy(objects_host_arguments.asked_players, machine_get_player_list(machine_index),
+		sizeof(objects_host_arguments.asked_players));
+	region_count = distributed_host_regions(regions);
+	regions[region_count].address = (unsigned long)&objects_host_machines[0];
+	regions[region_count++].size = sizeof(objects_host_machines);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&objects_host_arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_client_asked, &context, regions, region_count,
+		network_host_call, &checking))
+	{
+		return;
+	}
+	network_objects_client_asked_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_client_asked);
 }
 
 /* the host's object at an absolute index whose state goes to its clients
@@ -2714,6 +2753,9 @@ static void distributed_host_arguments(
 	arguments->inventory_limit = MIN(MAXIMUM_ENTRIES_PER_MESSAGE, DATAGRAM_ENTRIES(struct distributed_inventory));
 	arguments->to_clients = _distributed_to_clients;
 	arguments->to_clients_reliably = _distributed_to_clients_reliably;
+	arguments->host_machines = (unsigned long)&objects_host_machines[0];
+	arguments->synchronized_type = _distributed_message_objects_synchronized;
+	arguments->asked_machine = NONE;
 	arguments->machine_count = distributed_client_machines(arguments->machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
 	for (machine_number = 0; machine_number < arguments->machine_count; machine_number++)
 	{

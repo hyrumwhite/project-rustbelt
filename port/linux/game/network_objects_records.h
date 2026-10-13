@@ -85,6 +85,14 @@ struct objects_host_viewers
 	struct objects_host_viewer_machine machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 };
 
+/* a machine the host has told all its objects: when, and which players it
+had then (another machine in its place has others) */
+struct objects_host_machine
+{
+	long time;
+	long player_indices[MAXIMUM_LOCAL_PLAYERS];
+};
+
 /* a client's player's latest vehicle prediction, taken at the next tick;
 the vehicle it last took (NONE: none), at which of the client's ticks and its
 own, and where that left the host's copy; and the anchor predictions are

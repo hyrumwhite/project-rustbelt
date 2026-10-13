@@ -2369,6 +2369,7 @@ enum
 	_halo_sim_world_step_network_plan_players,
 	_halo_sim_world_step_network_send_players,
 	_halo_sim_world_step_network_client_tick,
+	_halo_sim_world_step_network_client_asked,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2660,13 +2661,26 @@ struct halo_sim_network_host
 	long player_lists[128][4];
 	long coop_cinematic;
 	float camera[3];
+	/* (a client's asking for the objects, network_objects_client_asked)
+	the machines told all (network_objects_records.h), the word that that
+	is all, and the machine asking, whether again, and its players */
+	unsigned long host_machines;
+	short synchronized_type;
+	short pad2;
+	long asked_machine;
+	long asked_again;
+	long asked_players[4];
 };
 
-typedef char halo_sim_network_host_size_assert[sizeof(struct halo_sim_network_host) == 12 * 4 + 10 * 2 + 4 + 128 * 4 + 128 * 16 + 16 ? 1 : -1];
+typedef char halo_sim_network_host_size_assert[sizeof(struct halo_sim_network_host) ==
+	12 * 4 + 10 * 2 + 4 + 128 * 4 + 128 * 16 + 16 + 4 + 4 + 8 + 16 ? 1 : -1];
 
 /* network_objects.c's host calls (crates/halo_map's network_host::call) */
 enum
 {
+	/* the message, of its type b & 0xff, count (b >> 8) & 0xff and size
+	b >> 16: to the machine a (reliably if actor), or with a NONE where
+	actor says */
 	_network_host_call_send = 1,
 	_network_host_call_origin,
 	_network_host_call_machine_has_player,

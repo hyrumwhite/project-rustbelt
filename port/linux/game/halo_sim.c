@@ -10879,6 +10879,7 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network plan players",
 	"network send players",
 	"network client tick",
+	"network client asked",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10905,6 +10906,7 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_host,
 	_halo_sim_network_host,
 	_halo_sim_network_apply,
+	_halo_sim_network_host,
 };
 
 static struct

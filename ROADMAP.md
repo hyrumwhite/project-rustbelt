@@ -1026,6 +1026,15 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Two went unseen: the asking's back-off (the host answered the first asking) and the reload test (a reload changes the rounds, which are compared too). The unsteered vehicles move only in co-op.
        - **Rust in charge:** with all networking systems in Rust on both machines, the machines' positions differ by a median of 3.7 to 4.4 cm (largest 9.7 to 10.0) over two sessions, within the C's range. Both machines end with the same count of items, and every hit reported is dealt.
 
+   - [x] The host's answer to a client asking for its objects in Rust (`halo_map::network_host`, world step 22): network_objects.c's `network_objects_client_asked`.
+     - **What Rust does:** a client that has loaded gets every object the host has, players' units first, then vehicles, other units and the rest, and then word that that is all. Every unit's inventory goes again with the next inventories. Asked again, it gets only the word (the objects are on their way), unless it failed to make one, at most once in ten seconds, or another machine has taken its place.
+     - **The game's, through the host's calls:** sending to the machine reliably (the send call gained it). The machine's players are taken as the step begins. The step's arguments are the host tick's with the machine asking added, and the machines told are in network_objects_records.h.
+     - **Results:**
+       - Every answer agrees: a client joining at the start, and one joining 40 seconds into the game.
+       - Planted errors in the order (vehicles last), the inventories' reset (with the late joiner, whose units carry something) and the word's reliability were caught.
+       - The asking again never came up.
+       - **Rust in charge:** with a late joiner and all networking systems in Rust, both machines end with the same items, made and deleted as with the C (146 and 101 on the host). The joiner's seconds fall a few ticks off the host's (2 in the C's session, 3 in the Rust's), so their positions compare only roughly: median 24.7 cm against the C's 18.5.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

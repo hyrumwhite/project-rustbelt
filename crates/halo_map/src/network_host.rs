@@ -101,9 +101,18 @@ pub struct Arguments {
     pub player_lists: [[i32; MAXIMUM_LOCAL_PLAYERS]; MAXIMUM_MACHINES],
     pub coop_cinematic: i32,
     pub camera: [f32; 3],
+    /// (a client's asking for the objects) the machines told all, the word
+    /// that that is all, and the machine asking, whether again, and its
+    /// players.
+    pub host_machines: u32,
+    pub synchronized_type: i16,
+    pub pad2: i16,
+    pub asked_machine: i32,
+    pub asked_again: i32,
+    pub asked_players: [i32; MAXIMUM_LOCAL_PLAYERS],
 }
 
-const _: () = assert!(std::mem::size_of::<Arguments>() == 12 * 4 + 10 * 2 + 4 + 128 * 4 + 128 * 16 + 16);
+const _: () = assert!(std::mem::size_of::<Arguments>() == 12 * 4 + 10 * 2 + 4 + 128 * 4 + 128 * 16 + 16 + 4 + 4 + 8 + 16);
 
 /// halo_sim.h's `struct halo_sim_network_vehicle_predictions`: the
 /// vehicle predictions' arguments, and the prediction being taken.
@@ -133,6 +142,7 @@ const TICKS_PER_SECOND: i32 = 30;
 const INVENTORY_INTERVAL_TICKS: i32 = 3;
 const INVENTORY_REFRESH_TICKS: i32 = TICKS_PER_SECOND;
 const EMPTY_INVENTORY_TICKS: i32 = 3 * INVENTORY_REFRESH_TICKS;
+const HOST_OBJECTS_RESEND_TICKS: i32 = 10 * TICKS_PER_SECOND;
 const RESTING_STATES_PER_TICK: i16 = 4;
 const REST_STATE_REPEATS: i32 = 3;
 const REST_STATE_REPEAT_TICKS: i32 = 8;
@@ -254,10 +264,11 @@ impl<H: AiHost> Host<'_, H> {
     }
 
     /// The message in the buffer, of its type and count, to the machine
-    /// (NONE: where `destination` says).
+    /// (reliably if `destination` is 1), or with the machine NONE where
+    /// `destination` says.
     fn send(&self, machine_index: i32, destination: i16, kind: i16, count: i16, size: u32) {
         let b = (kind as i32 & 0xff) | ((count as i32 & 0xff) << 8) | ((size as i32) << 16);
-        self.call(call::SEND, machine_index, b, if machine_index == NONE { destination as i32 } else { 0 });
+        self.call(call::SEND, machine_index, b, destination as i32);
     }
 
     fn game(&self) -> wire::Game {
@@ -1170,6 +1181,81 @@ pub fn vehicle_predictions(context: &WorldContext, host: &impl AiHost) {
     // SAFETY: plain data of its size
     let arguments: VehicleArguments = unsafe { std::mem::transmute(bytes) };
     Vehicles { context, host, m, arguments }.apply();
+}
+
+impl<H: AiHost> Host<'_, H> {
+    /// network_objects.c's `distributed_object_send_rank`: the order a
+    /// loaded client gets the host's objects in, most needed first: players'
+    /// units, vehicles, other units, then everything else.
+    fn send_rank(&self, object_index: i32) -> i16 {
+        let object = self.object(object_index).unwrap_or(0);
+        let kind = self.object_type(object);
+        if kind == crate::layout::ai_values::_OBJECT_TYPE_VEHICLE as u32 {
+            return 1;
+        }
+        if (nv::_OBJECT_MASK_UNIT as u32) & (1 << kind) != 0 {
+            return if self.m.i32(object + ud::UNIT_PLAYER_INDEX as u32) != NONE { 0 } else { 2 };
+        }
+        3
+    }
+
+    /// network_objects.c's `network_objects_client_asked`: a client has
+    /// loaded the game: every object the host has, to it alone, and word
+    /// that that is all of them; asked again, only the word, unless it
+    /// failed to make one since (another machine in its place has other
+    /// players).
+    fn client_asked(&self) {
+        use crate::layout::objects_host_machine as hm;
+        let m = self.m;
+        let a = &self.arguments;
+        let now = self.now();
+        let machine_index = a.asked_machine;
+        let machine = a.host_machines + machine_index as u32 * hm::SIZEOF as u32;
+        let time = m.i32(machine + hm::TIME as u32);
+        let players_differ = (0..MAXIMUM_LOCAL_PLAYERS as u32)
+            .any(|index| m.i32(machine + hm::PLAYER_INDICES as u32 + 4 * index) != a.asked_players[index as usize]);
+        if (a.asked_again != 0 && now.wrapping_sub(time) >= HOST_OBJECTS_RESEND_TICKS) || time == NONE || players_differ {
+            m.w32(machine + hm::TIME as u32, now as u32);
+            for (index, &player) in a.asked_players.iter().enumerate() {
+                m.w32(machine + hm::PLAYER_INDICES as u32 + 4 * index as u32, player as u32);
+            }
+        } else {
+            self.send(machine_index, 1, a.synchronized_type, 0, HEADER);
+            return;
+        }
+        self.update_objects();
+        for absolute_index in 0..self.told_count() {
+            // (what every unit carries, with the next of them)
+            m.w32(self.inventory(absolute_index) + inv::CHECKSUM as u32, 0);
+            m.w32(self.inventory(absolute_index) + inv::WEAPONS_CHECKSUM as u32, 0);
+        }
+        let mut count: i16 = 0;
+        for rank in 0..4 {
+            for absolute_index in 0..self.told_count() {
+                let object_index = m.i32(self.told(absolute_index));
+                if object_index == NONE || self.send_rank(object_index) != rank {
+                    continue;
+                }
+                self.change_from_object(object_index, self.change_entry(count));
+                count += 1;
+                if count == a.change_limit {
+                    self.send(machine_index, 1, a.change_type, count, HEADER + count as u32 * ch::SIZEOF as u32);
+                    count = 0;
+                }
+            }
+        }
+        if count != 0 {
+            self.send(machine_index, 1, a.change_type, count, HEADER + count as u32 * ch::SIZEOF as u32);
+        }
+        self.send(machine_index, 1, a.synchronized_type, 0, HEADER);
+    }
+}
+
+/// The world step of the host's answer to a client asking for its objects
+/// (network_objects.c's `network_objects_client_asked`).
+pub fn client_asked(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    Host { context, host, m, arguments: arguments(m, context.arguments) }.client_asked();
 }
 
 /// The world step of the host's tick (network_objects.c's

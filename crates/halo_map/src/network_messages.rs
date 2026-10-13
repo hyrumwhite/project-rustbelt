@@ -215,3 +215,116 @@ pub fn handle_message(context: &WorldContext, host: &impl AiHost) {
     let messages = Messages { host, m, address: context.arguments, a };
     messages.handle(a.machine_index, 0, a.size as u16);
 }
+
+// ---------- a client's clock (the host's speed check)
+
+/// network_distributed.c's clock calls (halo_sim.h's
+/// `_network_clock_call_*`): of the machine `a`, its rate `input[0]` and
+/// its ticks ahead `b`.
+pub mod clock_call {
+    /// Its game runs fast: logged.
+    pub const LOG_FAST: i32 = 1;
+    /// ... for long, its stream says so too: told, logged a cheater, dropped.
+    pub const DROP: i32 = 2;
+    /// ... its datagrams alone say so: logged, unverified.
+    pub const LOG_UNVERIFIED: i32 = 3;
+}
+
+/// halo_sim.h's `struct halo_sim_network_clock`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClockArguments {
+    pub machine_index: i32,
+    pub tick: i32,
+    pub now: u32,
+    pub stream: i32,
+    pub clocks: u32,
+}
+
+/// network_distributed.c's clock limits: a window of two seconds; a game
+/// faster than a tenth over, half a second ahead, runs fast; for five
+/// windows, it is dropped.
+const CLIENT_CLOCK_WINDOW_MILLISECONDS: u32 = 2000;
+const CLIENT_CLOCK_FAST_RATE: f32 = 1.1;
+const CLIENT_CLOCK_AHEAD_TICKS: i32 = 15;
+const CLIENT_CLOCK_FAST_WINDOWS: i16 = 5;
+const TICKS_PER_SECOND: f32 = 30.0;
+const MAXIMUM_MACHINES: i32 = 128;
+
+/// The world step of the host's check of a client's clock
+/// (network_distributed.c's `distributed_note_client_clock`): its ticks
+/// measured each window against the host's time; one whose game runs fast
+/// has its players' predictions refused, and if it goes on, is dropped (on
+/// its stream's word too: its datagrams alone, which another machine could
+/// send as from it, only log it, unverified).
+pub fn client_clock(context: &WorldContext, host: &impl AiHost) {
+    use crate::layout::distributed_client_clock as cc;
+    let m = host.memory();
+    let mut bytes = [0u8; std::mem::size_of::<ClockArguments>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    let a: ClockArguments = unsafe { std::mem::transmute(bytes) };
+    let action = |kind: i32, rate: f32, ahead: i32| {
+        let mut call = AiCall { kind, actor: NONE, a: a.machine_index, b: ahead, ..AiCall::default() };
+        call.input[0] = rate;
+        host.call(&mut call);
+    };
+    if !(0..MAXIMUM_MACHINES).contains(&a.machine_index) {
+        return;
+    }
+    let now_tick = context.game_time;
+    let clock = a.clocks + a.machine_index as u32 * cc::SIZEOF as u32;
+    let latest = clock + cc::LATEST_TICK as u32;
+    let window_tick = clock + cc::WINDOW_TICK as u32;
+    let window_time = clock + cc::WINDOW_TIME as u32;
+    let fast_windows = clock + cc::FAST_WINDOWS as u32;
+    let ahead_on_stream = clock + cc::AHEAD_ON_STREAM as u32;
+    let logged_unverified = clock + cc::LOGGED_UNVERIFIED as u32;
+    if a.stream != 0 && a.tick.wrapping_sub(now_tick) > CLIENT_CLOCK_AHEAD_TICKS {
+        m.w8(ahead_on_stream, 1);
+    }
+    if m.i32(window_tick) == NONE {
+        m.w32(latest, a.tick as u32);
+        m.w32(window_tick, a.tick as u32);
+        m.w32(window_time, a.now);
+        return;
+    }
+    if a.tick > m.i32(latest) {
+        m.w32(latest, a.tick as u32);
+    }
+    let elapsed = a.now.wrapping_sub(m.r32(window_time));
+    if elapsed < CLIENT_CLOCK_WINDOW_MILLISECONDS {
+        return;
+    }
+    let rate = m.i32(latest).wrapping_sub(m.i32(window_tick)) as f32 / (elapsed as f32 * TICKS_PER_SECOND / 1000.0);
+    let ahead = m.i32(latest).wrapping_sub(now_tick);
+    let fast = rate > CLIENT_CLOCK_FAST_RATE && ahead > CLIENT_CLOCK_AHEAD_TICKS;
+    m.w8(clock + cc::FAST as u32, fast as u8);
+    if !fast {
+        m.set_i16(fast_windows, 0);
+        m.w8(ahead_on_stream, 0);
+        m.w8(logged_unverified, 0);
+    } else {
+        let windows = m.i16(fast_windows) + 1;
+        m.set_i16(fast_windows, windows);
+        if windows == 1 {
+            action(clock_call::LOG_FAST, rate, ahead);
+        } else if windows >= CLIENT_CLOCK_FAST_WINDOWS && m.r8(ahead_on_stream) != 0 {
+            action(clock_call::DROP, rate, ahead);
+            m.set_i16(fast_windows, 0);
+            m.w8(ahead_on_stream, 0);
+        } else if windows >= CLIENT_CLOCK_FAST_WINDOWS {
+            // (its datagrams' word alone: kept, its predictions refused,
+            // logged once, unverified)
+            m.set_i16(fast_windows, CLIENT_CLOCK_FAST_WINDOWS);
+            if m.r8(logged_unverified) == 0 {
+                action(clock_call::LOG_UNVERIFIED, rate, ahead);
+                m.w8(logged_unverified, 1);
+            }
+        }
+    }
+    m.w32(window_tick, m.r32(latest));
+    m.w32(window_time, a.now);
+}

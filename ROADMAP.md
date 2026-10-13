@@ -1102,6 +1102,19 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - All four planted errors were caught: the noted positions' slot, the input's host tick, its buttons and the lie's turn.
        - **Rust in charge:** with all networking systems in Rust, the machines' positions differ by a median of 3.8 cm with an honest client and 6.2 cm with a lying one, within the C's range (the host corrects the liar 28 times, as with the C). Both machines end with the same count of items, and every hit reported is dealt.
 
+   - [x] The host's speed check of its clients' clocks in Rust (`halo_map::network_messages`, system `network_clock`, world step 30): network_distributed.c's `distributed_note_client_clock`.
+     - **What Rust does:** each client's messages are stamped with its tick, and the host measures them against its own time in two-second windows.
+       - A client whose game runs more than a tenth fast, and half a second ahead, has its players' predictions refused.
+       - After five such windows it is dropped as a speed hacker, but only when its stream (which no other machine can send as it) says so too.
+       - On its datagrams' word alone, which another machine could forge from its address to have it banned, it stays, refused, and is logged once as unverified.
+     - **The game's, through calls (`network_clock_call`):** the logs, the notice to every client, the cheaters' record and the kick. The time (milliseconds) and whether the message came over the stream are in the arguments, and the clocks' type is in network_distributed_records.h. It runs inside the message step, so it has a system of its own.
+     - **A fast client for the tests:** `HALO_NETWORK_TEST_FAST=<seconds>` has a client stamp its messages from then on as if its game ran a quarter fast. The host must flag it, then drop it.
+       - **Note:** a drop writes the host's bans.txt and cheaters.txt in the data folder, and the test's ban keeps the joiner out of later sessions until it is deleted.
+     - **Results:**
+       - In a 90-second honest session all 4,096 clock notes agree with no call. With the fast client they all agree as it is flagged (1.25 times as fast) and dropped ten seconds later.
+       - All four planted errors were caught with the fast client: the fast rate, the windows to a drop, the window's length and the stream's word.
+       - **Rust in charge:** with all networking systems in Rust (fifty-nine systems in all), the fast client is flagged and kicked as with the C. In an honest session the machines' positions differ by a median of 5.3 cm (largest 25.9), both machines end with the same count of items, and every hit reported is dealt.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

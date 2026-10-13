@@ -19,7 +19,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
 };
-use halo_bridge::{Bridge, Snapshot, OBJECT_HIDDEN, OBJECT_MODEL};
+use halo_bridge::{Bridge, Snapshot, OBJECT_FIRST_PERSON, OBJECT_HIDDEN, OBJECT_MODEL};
 use std::{sync::Arc, time::Duration};
 
 /// Starts OpenCE on the map at `map_path`: its data root is the folder that
@@ -328,7 +328,14 @@ fn sync_objects(
         }
         let tracked = &objects.tracked[&object.object_index];
         if let Ok(mut v) = visibility.get_mut(tracked.root) {
-            let wanted = if object.flags & OBJECT_HIDDEN != 0 { Visibility::Hidden } else { Visibility::Inherited };
+            // (the first-person unit as the game leaves it out: drawn, its
+            // body would close round the camera and shade the first-person
+            // weapon and hands, which sit inside it)
+            let wanted = if object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) != 0 {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
             if *v != wanted {
                 *v = wanted;
             }

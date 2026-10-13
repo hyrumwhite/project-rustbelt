@@ -84,6 +84,10 @@ struct Args {
     /// how many frames to render before the screenshot (default 300)
     #[argh(option, default = "300")]
     screenshot_after: u32,
+    /// with --screenshot, also save one every this many frames until then
+    /// (`<name>_<frame>.png` beside it)
+    #[argh(option)]
+    screenshot_every: Option<u32>,
     /// draw a running OpenCE game (its objects and camera) instead of the
     /// map's placements; the map is the game's (start OpenCE with
     /// HALO_BEVY_BRIDGE=1)
@@ -779,6 +783,15 @@ fn screenshot_and_exit(
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     *frames += 1;
+    if let (Some(every), Some(path)) = (args.screenshot_every, &args.screenshot)
+        && every > 0
+        && *frames % every == 0
+        && *frames < args.screenshot_after
+    {
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let numbered = path.with_file_name(format!("{stem}_{:06}.png", *frames));
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(numbered));
+    }
     if *frames == args.screenshot_after
         && let Some(path) = args.screenshot.clone()
     {

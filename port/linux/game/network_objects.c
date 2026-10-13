@@ -1375,6 +1375,8 @@ static union
 } objects_host_message;
 
 static struct halo_sim_network_host objects_host_arguments;
+/* ... and of the clients' vehicle predictions taken */
+static struct halo_sim_network_vehicle_predictions objects_host_vehicle_arguments;
 
 typedef char network_objects_host_machines_assert[
 	sizeof(objects_host_arguments.machine_indices) / sizeof(objects_host_arguments.machine_indices[0]) ==
@@ -1406,8 +1408,52 @@ void network_host_call(
 	case _network_host_call_origin:
 		object_get_origin(call->a, (real_point3d *)&call->output[0]);
 		break;
+	case _network_host_call_machine_has_player:
+		call->result = distributed_machine_has_player(call->a, (short)call->b);
+		break;
+	case _network_host_call_coop_has_structure_bsp:
+		call->result = network_coop_player_has_structure_bsp(call->a);
+		break;
+	case _network_host_call_round_trip:
+		call->output[0] = distributed_machine_round_trip_ticks(call->a);
+		break;
+	case _network_host_call_vehicle_definition:
+	{
+		struct vehicle_definition const *definition = vehicle_specific_definition_get(call->a);
+
+		call->result = definition->vehicle_type;
+		call->output[0] = definition->maximum_forward_speed;
+		call->output[1] = definition->maximum_reverse_speed;
+		break;
+	}
+	case _network_host_call_reconcile:
+	{
+		struct halo_sim_network_vehicle_predictions const *arguments = &objects_host_vehicle_arguments;
+
+		call->result = network_objects_reconcile(call->a, (real_point3d const *)arguments->position,
+			(real_vector3d const *)arguments->forward, (real_vector3d const *)arguments->up,
+			(real_vector3d const *)arguments->velocity, (real_vector3d const *)arguments->angular_velocity,
+			HOST_VEHICLE_BLEND_DISTANCE);
+		break;
+	}
 	}
 	halo_sim_world_event_end(call, opened);
+}
+
+static long network_host_simple(
+	long kind,
+	long a,
+	long b)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	network_host_call(&call);
+	return call.result;
 }
 
 /* the message in objects_host_message, of its type and count, to that
@@ -2326,9 +2372,11 @@ static boolean network_objects_vehicle_below_ceiling(
 	real_point3d const *position)
 {
 	struct vehicle_datum *vehicle = vehicle_datum_get(vehicle_index);
-	short type = vehicle_specific_definition_get(vehicle->definition_index)->vehicle_type;
+	/* port: the tag through the host's calls (the Rust port's) */
+	short type = (short)network_host_simple(_network_host_call_vehicle_definition, vehicle->definition_index, 0);
 	real ticks;
 	real ceiling;
+	real gravity = objects_host_vehicle_arguments.gravity;
 
 	if (type == _vehicle_type_human_boat || type == _vehicle_type_human_plane ||
 		type == _vehicle_type_alien_fighter || type == _vehicle_type_turret ||
@@ -2337,15 +2385,25 @@ static boolean network_objects_vehicle_below_ceiling(
 	{
 		return TRUE;
 	}
-	ticks = (real)(game_time_get() - objects_host_vehicle_predictions[player_index].ground_time) -
-		MIN(distributed_machine_round_trip_ticks(objects_host_vehicle_predictions[player_index].machine_index),
-			(real)VEHICLE_PREDICTION_CEILING_LEAD_TICKS) -
-		(real)VEHICLE_PREDICTION_JITTER_TICKS;
-	if (!(ticks > 0.0f) || !(global_gravity > 0.0f))
+	{
+		struct halo_sim_ai_call call;
+		real round_trip;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_host_call_round_trip;
+		call.actor = NONE;
+		call.a = objects_host_vehicle_predictions[player_index].machine_index;
+		network_host_call(&call);
+		round_trip = call.output[0];
+		ticks = (real)(game_time_get() - objects_host_vehicle_predictions[player_index].ground_time) -
+			MIN(round_trip, (real)VEHICLE_PREDICTION_CEILING_LEAD_TICKS) -
+			(real)VEHICLE_PREDICTION_JITTER_TICKS;
+	}
+	if (!(ticks > 0.0f) || !(gravity > 0.0f))
 		return TRUE;
 	ceiling = VEHICLE_PREDICTION_RISE_TOLERANCE +
 		(objects_host_vehicle_predictions[player_index].ground_rise_speed + PREDICTED_VEHICLE_SPEED_MARGIN) * ticks -
-		0.5f * global_gravity * ticks * ticks;
+		0.5f * gravity * ticks * ticks;
 	/* (so written that a position not a number is not below) */
 	return position->z - objects_host_vehicle_predictions[player_index].ground_height <= ceiling;
 }
@@ -2366,7 +2424,8 @@ the host's copy too, further than it goes since the last taken: it is
 measured from where the host has it only, a new anchor. In the air it is
 no higher than network_objects_vehicle_below_ceiling says. Which of the
 client's ticks the host has it at is noted, to tell the client. */
-void network_objects_apply_vehicle_predictions(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void network_objects_apply_vehicle_predictions_game(
 	void)
 {
 	long now = game_time_get();
@@ -2392,13 +2451,14 @@ void network_objects_apply_vehicle_predictions(
 		driver = unit_get(vehicle->unit.driver_object_index);
 		if (driver->unit.player_index == NONE ||
 			DATUM_INDEX_TO_ABSOLUTE_INDEX(driver->unit.player_index) != player_index ||
-			!distributed_machine_has_player(objects_host_vehicle_predictions[player_index].machine_index, player_index))
+			!network_host_simple(_network_host_call_machine_has_player,
+				objects_host_vehicle_predictions[player_index].machine_index, player_index))
 		{
 			continue;
 		}
 		/* (not from a co-op client still loading the host's BSP: the
 		vehicle falls there with no ground under it) */
-		if (!network_coop_player_has_structure_bsp(driver->unit.player_index))
+		if (!network_host_simple(_network_host_call_coop_has_structure_bsp, driver->unit.player_index, 0))
 			continue;
 		dx = state->position.x - vehicle->object.position.x;
 		dy = state->position.y - vehicle->object.position.y;
@@ -2412,14 +2472,21 @@ void network_objects_apply_vehicle_predictions(
 			continue;
 		/* (how fast it may go, a tick) */
 		{
-			struct vehicle_definition const *definition = vehicle_specific_definition_get(vehicle->definition_index);
-			real top_speed = 2.0f * MAX(definition->maximum_forward_speed, definition->maximum_reverse_speed);
+			struct halo_sim_ai_call definition;
+			real top_speed;
 			real_vector3d const *host_velocity = &vehicle->object.translational_velocity;
 			real host_speed = (real)sqrt(host_velocity->i * host_velocity->i + host_velocity->j * host_velocity->j +
 				host_velocity->k * host_velocity->k);
 			long *speed_time = &objects_host_vehicle_predictions[player_index].speed_time;
 			real *speeds = objects_host_vehicle_predictions[player_index].speeds;
 
+			/* port: the tag through the host's calls (the Rust port's) */
+			memset(&definition, 0, sizeof(definition));
+			definition.kind = _network_host_call_vehicle_definition;
+			definition.actor = NONE;
+			definition.a = vehicle->definition_index;
+			network_host_call(&definition);
+			top_speed = 2.0f * MAX(definition.output[0], definition.output[1]);
 			/* (so written that a tag's speed not a number is none) */
 			if (!(top_speed >= 0.0f))
 				top_speed = 0.0f;
@@ -2495,8 +2562,13 @@ void network_objects_apply_vehicle_predictions(
 		{
 			real_point3d previous_position = vehicle->object.position;
 
-			network_objects_reconcile(state->object_index, &state->position, &forward, &up, &velocity,
-				&angular_velocity, HOST_VEHICLE_BLEND_DISTANCE);
+			/* port: through the host's calls (the Rust port's) */
+			csmemcpy(objects_host_vehicle_arguments.position, &state->position, sizeof(state->position));
+			csmemcpy(objects_host_vehicle_arguments.forward, &forward, sizeof(forward));
+			csmemcpy(objects_host_vehicle_arguments.up, &up, sizeof(up));
+			csmemcpy(objects_host_vehicle_arguments.velocity, &velocity, sizeof(velocity));
+			csmemcpy(objects_host_vehicle_arguments.angular_velocity, &angular_velocity, sizeof(angular_velocity));
+			network_host_simple(_network_host_call_reconcile, state->object_index, 0);
 			/* (a copy at rest runs no physics, and so neither falls nor
 			counts its ticks in the air: one the client moved from where it
 			came to rest (a little at a time too), or says moves, wakes, and
@@ -2538,6 +2610,64 @@ void network_objects_apply_vehicle_predictions(
 			objects_host_vehicle_predictions[player_index].anchor_position = state->position;
 		}
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_host), checked
+against the game's otherwise. Its world: the arguments, the predictions, and
+the vehicles they name (moved, woken). */
+void network_objects_apply_vehicle_predictions(
+	void)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[16];
+	long region_count = 0;
+	int checking = FALSE;
+	short player_index;
+
+	memset(&objects_host_vehicle_arguments, 0, sizeof(objects_host_vehicle_arguments));
+	objects_host_vehicle_arguments.predictions = (unsigned long)&objects_host_vehicle_predictions[0];
+	objects_host_vehicle_arguments.gravity = global_gravity;
+	regions[region_count].address = (unsigned long)&objects_host_vehicle_arguments;
+	regions[region_count++].size = sizeof(objects_host_vehicle_arguments);
+	regions[region_count].address = (unsigned long)&objects_host_vehicle_predictions[0];
+	regions[region_count++].size = sizeof(objects_host_vehicle_predictions);
+	for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
+	{
+		struct object_header_datum *header;
+		long other;
+
+		if (!objects_host_vehicle_predictions[player_index].valid)
+			continue;
+		header = (struct object_header_datum *)datum_try_and_get(object_header_data,
+			objects_host_vehicle_predictions[player_index].state.object_index);
+		if (!header || !header->datum)
+			continue;
+		for (other = 2; other < region_count && regions[other].address != (unsigned long)header->datum; other++);
+		if (other < region_count)
+			continue;
+		/* (more than there is room for: the region count tells the check,
+		which leaves the step out) */
+		if (region_count == 16)
+		{
+			region_count++;
+			break;
+		}
+		regions[region_count].address = (unsigned long)header->datum;
+		regions[region_count++].size = header->data_size;
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&objects_host_vehicle_arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_vehicle_predictions, &context, regions, region_count,
+		network_host_call, &checking))
+	{
+		return;
+	}
+	network_objects_apply_vehicle_predictions_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_vehicle_predictions);
 }
 
 /* port: the game's (halo_sim.c checks Rust's against it) */

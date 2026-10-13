@@ -10875,6 +10875,7 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network damage player effect",
 	"network damage aftermath",
 	"network host tick",
+	"network vehicle predictions",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10896,6 +10897,7 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_damage,
 	_halo_sim_network_damage,
 	_halo_sim_network_damage,
+	_halo_sim_network_host,
 	_halo_sim_network_host,
 };
 

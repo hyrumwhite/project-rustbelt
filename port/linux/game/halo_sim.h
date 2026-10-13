@@ -2365,6 +2365,7 @@ enum
 	_halo_sim_world_step_network_damage_player_effect,
 	_halo_sim_world_step_network_damage_aftermath,
 	_halo_sim_world_step_network_host_tick,
+	_halo_sim_world_step_network_vehicle_predictions,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2634,7 +2635,30 @@ enum
 {
 	_network_host_call_send = 1,
 	_network_host_call_origin,
+	_network_host_call_machine_has_player,
+	_network_host_call_coop_has_structure_bsp,
+	_network_host_call_round_trip,
+	_network_host_call_vehicle_definition,
+	_network_host_call_reconcile,
 };
+
+/* crates/halo_map's network_host::VehicleArguments: the host taking its
+clients' predictions of the vehicles they drive: the records
+(network_objects_records.h), the gravity, and the prediction being taken
+(network_objects_reconcile's, network_host_call's) */
+struct halo_sim_network_vehicle_predictions
+{
+	unsigned long predictions;
+	float gravity;
+	float position[3];
+	float forward[3];
+	float up[3];
+	float velocity[3];
+	float angular_velocity[3];
+};
+
+typedef char halo_sim_network_vehicle_predictions_size_assert[
+	sizeof(struct halo_sim_network_vehicle_predictions) == 8 + 15 * 4 ? 1 : -1];
 
 void network_host_call(struct halo_sim_ai_call *call);
 

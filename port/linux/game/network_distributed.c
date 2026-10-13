@@ -3864,14 +3864,71 @@ void network_distributed_player_picked_up(
 
 /* (the host) each machine what its players picked up (no other machine
 shows it) */
-static void distributed_send_pickups(
-	void)
+/* port: the host's periodic sends are Rust's in Rust's mode (crates/
+halo_map's network_host): what they send goes out of one message at a time,
+through these calls */
+static union
 {
+	struct distributed_statistics_message statistics;
+	struct distributed_pings_message pings;
 	struct
 	{
 		struct distributed_message_header header;
 		struct distributed_pickup pickups[MAXIMUM_PICKUPS_PER_TICK];
-	} message;
+	} pickups;
+} distributed_sends_message;
+static struct halo_sim_network_sends distributed_sends_arguments;
+
+void network_sends_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_sends_call_send:
+	{
+		byte type = (byte)(call->b & 0xFF);
+		short count = (short)((call->b >> 8) & 0xFF);
+		word size = (word)((unsigned long)call->b >> 16);
+
+		if (call->a == NONE)
+			distributed_send(&distributed_sends_message, type, count, size, (short)call->actor);
+		else
+			distributed_send_to_machine_reliably(call->a, &distributed_sends_message, type, count, size);
+		break;
+	}
+	case _network_sends_call_ping:
+		call->result = distributed_player_ping((short)call->a);
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+/* the message, of its type and count, to every client as destination says
+(machine NONE), or to the machine reliably */
+static void network_sends_send(
+	long machine_index,
+	short destination,
+	byte type,
+	short count,
+	word size)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_sends_call_send;
+	call.actor = destination;
+	call.a = machine_index;
+	call.b = (long)type | ((long)(count & 0xFF) << 8) | ((long)size << 16);
+	network_sends_call(&call);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_send_pickups_game(
+	void)
+{
+	struct distributed_pickup *message_pickups = distributed_sends_message.pickups.pickups;
 	short index;
 
 	for (index = 0; index < distributed_pickup_count; index++)
@@ -3891,10 +3948,10 @@ static void distributed_send_pickups(
 		for (other = index; other < distributed_pickup_count; other++)
 		{
 			if (distributed_player_machine(distributed_pickups[other].player_index) == machine_index)
-				message.pickups[count++] = distributed_pickups[other];
+				message_pickups[count++] = distributed_pickups[other];
 		}
-		distributed_send_to_machine_reliably(machine_index, &message, _distributed_message_pickups, count,
-			(word)(sizeof(message.header) + count * sizeof(struct distributed_pickup)));
+		network_sends_send(machine_index, TRUE, _distributed_message_pickups, count,
+			(word)(sizeof(struct distributed_message_header) + count * sizeof(struct distributed_pickup)));
 	}
 	distributed_pickup_count = 0;
 }
@@ -3917,37 +3974,44 @@ static unsigned long distributed_checksum(
 
 /* (the host) every player's ping (distributed_player_ping), for the
 clients' scoreboards */
+/* port: the game's (halo_sim.c checks Rust's against it) */
 static void distributed_send_pings(
 	void)
 {
-	struct distributed_pings_message message;
+	struct distributed_pings_message *message = &distributed_sends_message.pings;
 	short limit = MIN(MAXIMUM_PINGS_PER_MESSAGE, RELIABLE_ENTRIES(struct distributed_player_ping));
 	short count = 0;
 	short player_index;
 
 	for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
 	{
-		long ping = distributed_player_ping(player_index);
+		long ping;
+		struct halo_sim_ai_call call;
 
+		/* port: through the sends' calls (the Rust port's) */
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_sends_call_ping;
+		call.actor = NONE;
+		call.a = player_index;
+		network_sends_call(&call);
+		ping = call.result;
 		if (!distributed_player(player_index))
 			continue;
-		message.players[count].player_index = (byte)player_index;
-		message.players[count].pad = 0;
-		message.players[count].milliseconds = ping == NONE ? UNKNOWN_PING : (word)MIN(ping, UNKNOWN_PING - 1);
+		message->players[count].player_index = (byte)player_index;
+		message->players[count].pad = 0;
+		message->players[count].milliseconds = ping == NONE ? UNKNOWN_PING : (word)MIN(ping, UNKNOWN_PING - 1);
 		count++;
 		if (count == limit)
 		{
-			distributed_send(&message, _distributed_message_pings, count,
-				(word)(sizeof(message.header) + count * sizeof(struct distributed_player_ping)),
-				_distributed_to_clients);
+			network_sends_send(NONE, _distributed_to_clients, _distributed_message_pings, count,
+				(word)(sizeof(message->header) + count * sizeof(struct distributed_player_ping)));
 			count = 0;
 		}
 	}
 	if (count)
 	{
-		distributed_send(&message, _distributed_message_pings, count,
-			(word)(sizeof(message.header) + count * sizeof(struct distributed_player_ping)),
-			_distributed_to_clients);
+		network_sends_send(NONE, _distributed_to_clients, _distributed_message_pings, count,
+			(word)(sizeof(message->header) + count * sizeof(struct distributed_player_ping)));
 	}
 }
 
@@ -4003,7 +4067,7 @@ all (a client that lost a change has it again within eight seconds) */
 static void distributed_send_statistics(
 	boolean refresh)
 {
-	struct distributed_statistics_message message;
+	struct distributed_statistics_message *message = &distributed_sends_message.statistics;
 	short limit = MIN(MAXIMUM_STATISTICS_PER_MESSAGE, RELIABLE_ENTRIES(struct distributed_player_statistics));
 	short count = 0;
 	short refreshed = refresh ? 0 : STATISTICS_REFRESH_PLAYERS;
@@ -4029,24 +4093,121 @@ static void distributed_send_statistics(
 			distributed_statistics_cursor = (short)((player_index + 1) % MAXIMUM_TRACKED_PLAYERS);
 		}
 		distributed_sent_statistics[player_index] = checksum;
-		message.players[count].player_index = player_index;
-		message.players[count].pad = 0;
-		message.players[count].statistics = player->statistics;
+		message->players[count].player_index = player_index;
+		message->players[count].pad = 0;
+		message->players[count].statistics = player->statistics;
 		count++;
 		if (count == limit)
 		{
-			distributed_send(&message, _distributed_message_player_statistics, count,
-				(word)(sizeof(message.header) + count * sizeof(struct distributed_player_statistics)),
-				_distributed_to_clients);
+			network_sends_send(NONE, _distributed_to_clients, _distributed_message_player_statistics, count,
+				(word)(sizeof(message->header) + count * sizeof(struct distributed_player_statistics)));
 			count = 0;
 		}
 	}
 	if (count)
 	{
-		distributed_send(&message, _distributed_message_player_statistics, count,
-			(word)(sizeof(message.header) + count * sizeof(struct distributed_player_statistics)),
-			_distributed_to_clients);
+		network_sends_send(NONE, _distributed_to_clients, _distributed_message_player_statistics, count,
+			(word)(sizeof(message->header) + count * sizeof(struct distributed_player_statistics)));
 	}
+}
+
+/* the arguments of the host's periodic sends, and their world */
+static long distributed_sends_world(
+	struct halo_sim_world_context *context,
+	struct halo_sim_world_region *regions)
+{
+	struct halo_sim_network_sends *arguments = &distributed_sends_arguments;
+	long count = 0;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->sent_statistics = (unsigned long)&distributed_sent_statistics[0];
+	arguments->statistics_cursor = (unsigned long)&distributed_statistics_cursor;
+	arguments->statistics_due = (unsigned long)&distributed_statistics_due;
+	arguments->pickups = (unsigned long)&distributed_pickups[0];
+	arguments->pickup_count = (unsigned long)&distributed_pickup_count;
+	arguments->player_machines = (unsigned long)&distributed_player_machines[0];
+	arguments->message = (unsigned long)&distributed_sends_message;
+	arguments->statistics_type = _distributed_message_player_statistics;
+	arguments->pings_type = _distributed_message_pings;
+	arguments->pickups_type = _distributed_message_pickups;
+	arguments->statistics_limit = MIN(MAXIMUM_STATISTICS_PER_MESSAGE, RELIABLE_ENTRIES(struct distributed_player_statistics));
+	arguments->pings_limit = MIN(MAXIMUM_PINGS_PER_MESSAGE, RELIABLE_ENTRIES(struct distributed_player_ping));
+	arguments->to_clients = _distributed_to_clients;
+	regions[count].address = (unsigned long)arguments;
+	regions[count++].size = sizeof(*arguments);
+	regions[count].address = (unsigned long)&distributed_sends_message;
+	regions[count++].size = sizeof(distributed_sends_message);
+	regions[count].address = (unsigned long)&distributed_sent_statistics[0];
+	regions[count++].size = sizeof(distributed_sent_statistics);
+	regions[count].address = (unsigned long)&distributed_statistics_cursor;
+	regions[count++].size = sizeof(distributed_statistics_cursor);
+	regions[count].address = (unsigned long)&distributed_statistics_due;
+	regions[count++].size = sizeof(distributed_statistics_due);
+	regions[count].address = (unsigned long)&distributed_pickups[0];
+	regions[count++].size = sizeof(distributed_pickups);
+	regions[count].address = (unsigned long)&distributed_pickup_count;
+	regions[count++].size = sizeof(distributed_pickup_count);
+	memset(context, 0, sizeof(*context));
+	context->game_time = game_time_get();
+	context->object_header_data = (unsigned long)object_header_data;
+	context->player_data = (unsigned long)player_data;
+	context->arguments = (unsigned long)arguments;
+	return count;
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_send_statistics_and_pings_game(
+	void)
+{
+	if (distributed_statistics_due || game_time_get() % STATISTICS_INTERVAL_TICKS == 0)
+		distributed_send_statistics(game_time_get() % STATISTICS_REFRESH_TICKS == 0);
+	distributed_statistics_due = FALSE;
+	if (game_time_get() % PING_INTERVAL_TICKS == 0)
+		distributed_send_pings();
+}
+
+/* (the host) the players' statistics (a change, and a few players' each
+second, round them all) and pings (every two seconds), to every client */
+/* port: Rust's in Rust's mode (crates/halo_map's network_host), checked
+against the game's otherwise */
+static void distributed_send_statistics_and_pings(
+	void)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[7];
+	long region_count = distributed_sends_world(&context, regions);
+	int checking = FALSE;
+
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_statistics, &context, regions, region_count,
+		network_sends_call, &checking))
+	{
+		return;
+	}
+	distributed_send_statistics_and_pings_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_statistics);
+}
+
+/* (the host) what players on other machines picked up this tick, to each
+player's machine */
+/* port: Rust's in Rust's mode (crates/halo_map's network_host), checked
+against the game's otherwise */
+static void distributed_send_pickups(
+	void)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[7];
+	long region_count = distributed_sends_world(&context, regions);
+	int checking = FALSE;
+
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_pickups, &context, regions, region_count,
+		network_sends_call, &checking))
+	{
+		return;
+	}
+	distributed_send_pickups_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_pickups);
 }
 
 /* every player's statistics, to a machine that has loaded (the others', and
@@ -4242,11 +4403,7 @@ void network_distributed_tick(
 		network_objects_host_tick();
 		distributed_host_plan_players();
 		network_damage_host_tick();
-		if (distributed_statistics_due || game_time_get() % STATISTICS_INTERVAL_TICKS == 0)
-			distributed_send_statistics(game_time_get() % STATISTICS_REFRESH_TICKS == 0);
-		distributed_statistics_due = FALSE;
-		if (game_time_get() % PING_INTERVAL_TICKS == 0)
-			distributed_send_pings();
+		distributed_send_statistics_and_pings();
 		/* (before the players, so clients load a new BSP before they hear
 		where the host moved everyone into it) */
 		if (network_coop_active() && (global_structure_bsp_index_get() != distributed_sent_structure_bsp_index ||

@@ -2378,6 +2378,8 @@ enum
 	_halo_sim_world_step_network_apply_predictions,
 	_halo_sim_world_step_network_handle_inputs,
 	_halo_sim_world_step_network_handle_actions,
+	_halo_sim_world_step_network_statistics,
+	_halo_sim_world_step_network_pickups,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2916,6 +2918,39 @@ enum
 };
 
 void network_input_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_host::SendsArguments: the host's periodic sends
+(statistics, pings, pickups): their records (network_distributed.c), the
+players' machines, the message, its kinds and how many entries each takes */
+struct halo_sim_network_sends
+{
+	unsigned long sent_statistics;
+	unsigned long statistics_cursor;
+	unsigned long statistics_due;
+	unsigned long pickups;
+	unsigned long pickup_count;
+	unsigned long player_machines;
+	unsigned long message;
+	short statistics_type;
+	short pings_type;
+	short pickups_type;
+	short statistics_limit;
+	short pings_limit;
+	short to_clients;
+};
+
+/* network_distributed.c's sends' calls (crates/halo_map's network_host::sends_call) */
+enum
+{
+	/* the message, of its type b & 0xff, count (b >> 8) & 0xff and size
+	b >> 16: to every client as actor says (a NONE), or to the machine a
+	reliably */
+	_network_sends_call_send = 1,
+	/* distributed_player_ping(a) */
+	_network_sends_call_ping,
+};
+
+void network_sends_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

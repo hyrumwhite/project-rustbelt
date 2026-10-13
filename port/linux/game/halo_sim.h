@@ -2351,6 +2351,8 @@ enum
 	_halo_sim_world_step_network_object_reconcile,
 	_halo_sim_world_step_network_correct_own_unit,
 	_halo_sim_world_step_network_unit_state,
+	_halo_sim_world_step_network_object_state,
+	_halo_sim_world_step_network_inventory,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2431,10 +2433,19 @@ struct halo_sim_network_apply
 	unsigned long death;
 	unsigned long seat_disagreement;
 	unsigned long player;
+	/* network_objects.c's: the local players' noted vehicles (0 for none),
+	and the object's entry of the dead bipeds (0 for none) */
+	unsigned long own_vehicles;
+	unsigned long dead;
+	/* the local players' own inventories (0 for none), and the loaded tags'
+	table and count */
+	unsigned long own_inventories;
+	unsigned long tag_instances;
+	long tag_count;
 	long result;
 };
 
-typedef char halo_sim_network_apply_size_assert[sizeof(struct halo_sim_network_apply) == 184 ? 1 : -1];
+typedef char halo_sim_network_apply_size_assert[sizeof(struct halo_sim_network_apply) == 204 ? 1 : -1];
 
 /* network_objects.c's calls (crates/halo_map's network_apply::call) */
 enum
@@ -2451,7 +2462,20 @@ enum
 	_network_apply_call_set_seat,
 	_network_apply_call_set_damage,
 	_network_apply_call_teleporter,
+	_network_apply_call_unit_kill_silent,
+	_network_apply_call_damage_update,
+	_network_apply_call_reconnect,
+	_network_apply_call_set_visibility,
+	_network_apply_call_drop_weapon,
+	_network_apply_call_release_item,
+	_network_apply_call_add_weapon,
 };
+
+/* network_distributed.c's smoothed round trip */
+unsigned long network_distributed_round_trip_address(void);
+
+/* network_distributed.c's corrections count */
+unsigned long network_distributed_corrections_address(void);
 
 /* network_objects.c's: the calls the applying's steps share */
 long network_apply_coop_state(void);

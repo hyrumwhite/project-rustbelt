@@ -676,6 +676,18 @@ void network_distributed_statistics(
 	*corrections = distributed_statistics.corrections;
 }
 
+unsigned long network_distributed_round_trip_address(
+	void)
+{
+	return (unsigned long)&distributed_own_round_trip;
+}
+
+unsigned long network_distributed_corrections_address(
+	void)
+{
+	return (unsigned long)&distributed_statistics.corrections;
+}
+
 void distributed_count_correction(
 	void)
 {

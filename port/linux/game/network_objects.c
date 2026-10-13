@@ -285,6 +285,8 @@ struct distributed_object_state
 	struct distributed_vector angular_velocity;
 };
 
+typedef char distributed_object_state_size_assert[sizeof(struct distributed_object_state) == 44 ? 1 : -1];
+
 struct distributed_inventory
 {
 	long unit_index;
@@ -300,6 +302,8 @@ struct distributed_inventory
 };
 
 #define AGE_SCALE 65535.0f
+
+typedef char distributed_inventory_size_assert[sizeof(struct distributed_inventory) == 64 ? 1 : -1];
 
 struct distributed_object_change_message
 {
@@ -445,6 +449,12 @@ static struct distributed_own_inventory
 	long fired_times[MAXIMUM_WEAPONS_PER_UNIT];
 	long weapon_times[MAXIMUM_WEAPONS_PER_UNIT];
 } objects_client_own_inventories[MAXIMUM_LOCAL_PLAYERS];
+typedef char distributed_own_inventory_size_assert[sizeof(struct distributed_own_inventory) == 96 &&
+	offsetof(struct distributed_own_inventory, grenade_times) == 8 &&
+	offsetof(struct distributed_own_inventory, weapon_indices) == 16 &&
+	offsetof(struct distributed_own_inventory, rounds) == 32 &&
+	offsetof(struct distributed_own_inventory, fired_times) == 64 &&
+	offsetof(struct distributed_own_inventory, weapon_times) == 80 ? 1 : -1];
 /* ... the weapon each of them last picked up (the host said so), its unit
 and when, until it is readied (definition NONE: none) */
 static struct distributed_picked_up_weapon
@@ -740,6 +750,10 @@ its flight path): nothing on a client steers it, so its copy is kept at rest
 there (no physics of its own) and moved only to where the host has it. In
 multiplayer an empty vehicle (one bailed out of, or tumbling) keeps its own
 physics between updates. */
+static void distributed_client_release_item(long item_index, boolean deleting);
+/* cache_files.c's loaded tags' table */
+void *cache_files_tag_instances(long *count);
+
 /* port: the applying's calls into the game (the Rust port's,
 crates/halo_map's network_apply), recorded in check mode */
 void network_apply_call(
@@ -796,6 +810,27 @@ void network_apply_call(
 		damage_set_network_state(call->a, &damage);
 		break;
 	}
+	case _network_apply_call_unit_kill_silent:
+		unit_kill_silent(call->a);
+		break;
+	case _network_apply_call_damage_update:
+		object_damage_update(call->a);
+		break;
+	case _network_apply_call_reconnect:
+		object_reconnect_to_map(call->a, NULL);
+		break;
+	case _network_apply_call_set_visibility:
+		object_set_visibility(call->a, (boolean)call->b);
+		break;
+	case _network_apply_call_drop_weapon:
+		unit_network_drop_weapon(call->a, (short)call->b);
+		break;
+	case _network_apply_call_release_item:
+		distributed_client_release_item(call->a, FALSE);
+		break;
+	case _network_apply_call_add_weapon:
+		unit_network_add_weapon(call->a, call->b, (short)call->input[0]);
+		break;
 	case _network_apply_call_teleporter:
 		call->result = find_netgame_flag((real_point3d const *)&call->input[0], 1.0f, 0.0f,
 			_netgame_flag_teleporter_source, NONE);
@@ -1047,6 +1082,21 @@ long network_apply_world(
 	{
 		regions[count].address = arguments->seat_disagreement;
 		regions[count++].size = sizeof(short);
+	}
+	if (arguments->own_vehicles)
+	{
+		regions[count].address = arguments->own_vehicles;
+		regions[count++].size = sizeof(objects_client_own_vehicles);
+	}
+	if (arguments->dead)
+	{
+		regions[count].address = arguments->dead;
+		regions[count++].size = sizeof(objects_client_dead[0]);
+	}
+	if (arguments->own_inventories)
+	{
+		regions[count].address = arguments->own_inventories;
+		regions[count++].size = sizeof(objects_client_own_inventories);
 	}
 	regions[count].address = (unsigned long)arguments;
 	regions[count++].size = sizeof(*arguments);
@@ -2926,9 +2976,10 @@ static void distributed_client_dead_biped(
 	}
 	else if (game_time_get() - objects_client_dead[absolute_index].time >= DEAD_BIPED_FALLBACK_TICKS)
 	{
-		unit_kill_silent(object_index);
-		unit_kill_no_statistics(object_index);
-		object_damage_update(object_index);
+		/* port: through the applying's calls (the Rust port's) */
+		network_apply_simple(_network_apply_call_unit_kill_silent, object_index, 0, NULL, 0);
+		network_apply_simple(_network_apply_call_unit_kill_no_statistics, object_index, 0, NULL, 0);
+		network_apply_simple(_network_apply_call_damage_update, object_index, 0, NULL, 0);
 	}
 }
 
@@ -2942,8 +2993,142 @@ static void distributed_client_dead_vehicle(
 
 	if (!vehicle || TEST_FLAG(vehicle->object.damage_flags, _object_dead_bit))
 		return;
-	unit_kill_no_statistics(object_index);
-	object_damage_update(object_index);
+	/* port: through the applying's calls (the Rust port's) */
+	network_apply_simple(_network_apply_call_unit_kill_no_statistics, object_index, 0, NULL, 0);
+	network_apply_simple(_network_apply_call_damage_update, object_index, 0, NULL, 0);
+}
+
+/* port: a state at a time, the game's (its parts through the applying's
+calls, the Rust port's: crates/halo_map's network_apply) */
+static void network_objects_handle_state_game(
+	struct distributed_object_state const *state)
+{
+	struct object_datum *object;
+	real tolerance = REMOTE_OBJECT_TOLERANCE;
+	real angle_tolerance = REMOTE_OBJECT_ANGLE_TOLERANCE;
+	real blend_distance = REMOTE_BLEND_DISTANCE;
+	real_vector3d forward, up, velocity, angular_velocity;
+	real dx, dy, dz;
+	boolean own_vehicle = FALSE;
+	boolean at_rest;
+
+	if (!distributed_object_index_valid(state->object_index) ||
+		!network_apply_simple(_network_apply_call_client_has, state->object_index, 0, NULL, 0))
+		return;
+	object = object_get(state->object_index);
+	if (TEST_FLAG(state->flags, _distributed_object_dead_bit))
+	{
+		distributed_client_dead_biped(state->object_index);
+		distributed_client_dead_vehicle(state->object_index);
+		/* (a body its tag destroys at once is gone) */
+		if (!object_try_and_get_and_verify_type(state->object_index, _object_mask_all))
+			return;
+	}
+	/* (an item made carried whose unit never had it here, placed on the
+	host: in the world, seen) */
+	if (TEST_FLAG(_object_mask_item, object->object.type) && object->object.parent_object_index == NONE &&
+		!TEST_FLAG(object->object.flags, _object_connected_to_map_bit) &&
+		!TEST_FLAG(item_get(state->object_index)->item.flags, _item_attached_to_unit_bit))
+	{
+		network_apply_simple(_network_apply_call_reconnect, state->object_index, 0, NULL, 0);
+		network_apply_simple(_network_apply_call_set_visibility, state->object_index, TRUE, NULL, 0);
+	}
+	if (object->object.parent_object_index != NONE ||
+		!TEST_FLAG(object->object.flags, _object_connected_to_map_bit))
+	{
+		return;
+	}
+	distributed_object_state_unpack(state, &forward, &up, &velocity, &angular_velocity);
+	if (!distributed_transform_valid(&state->position, &forward, &up, NULL, NULL, &forward, &up))
+		return;
+	/* (come to rest: all of the way, drawn gliding, not half of it and
+	left there) */
+	if (TEST_FLAG(state->flags, _distributed_object_at_rest_bit))
+		blend_distance = 0.0f;
+	/* (a vehicle this machine's own player drives is its own) */
+	if (object->object.type == _object_type_vehicle)
+	{
+		struct unit_datum *vehicle = unit_get(state->object_index);
+
+		if (blend_distance > 0.0f)
+			blend_distance = REMOTE_VEHICLE_BLEND_DISTANCE;
+		/* (one no player drives follows every move the host sends, however small) */
+		if (distributed_vehicle_unsteered(state->object_index))
+		{
+			tolerance = 0.0f;
+			angle_tolerance = 2.0f;
+		}
+		if (vehicle->unit.driver_object_index != NONE &&
+			distributed_player_is_local(unit_get(vehicle->unit.driver_object_index)->unit.player_index))
+		{
+			if (distributed_client_correct_own_vehicle(state->object_index,
+				unit_get(vehicle->unit.driver_object_index)->unit.player_index, state))
+			{
+				return;
+			}
+			tolerance = LOCAL_VEHICLE_TOLERANCE;
+			/* (turned as it drives it) */
+			angle_tolerance = -1.0f;
+			blend_distance = 0.0f;
+			own_vehicle = TRUE;
+		}
+	}
+	/* (at rest as the host has it, however close: a copy left at rest
+	while the host's falls hangs there; but not one this machine drives,
+	which the host's word, a round trip old, would stop as it sets off) */
+	at_rest = TEST_FLAG(state->flags, _distributed_object_at_rest_bit) || distributed_vehicle_unsteered(state->object_index);
+	if (!own_vehicle)
+		SET_FLAG(object->object.flags, _object_at_rest_bit, at_rest);
+	dx = state->position.x - object->object.position.x;
+	dy = state->position.y - object->object.position.y;
+	dz = state->position.z - object->object.position.z;
+	/* (close enough where it is, and turned as it is: one at rest too) */
+	if (dx * dx + dy * dy + dz * dz <= tolerance * tolerance &&
+		forward.i * object->object.forward.i + forward.j * object->object.forward.j +
+			forward.k * object->object.forward.k >= angle_tolerance &&
+		up.i * object->object.up.i + up.j * object->object.up.j + up.k * object->object.up.k >= angle_tolerance)
+	{
+		return;
+	}
+	if (network_objects_reconcile(state->object_index, &state->position, &forward, &up, &velocity,
+		&angular_velocity, blend_distance))
+	{
+		distributed_count_correction();
+	}
+	/* (one it drives, put where the host has it, is as the host has it) */
+	if (own_vehicle)
+		SET_FLAG(object->object.flags, _object_at_rest_bit, at_rest);
+}
+
+/* port: Rust's in Rust's mode, checked against the game's otherwise */
+static void network_objects_handle_state(
+	struct distributed_object_state const *state)
+{
+	struct halo_sim_network_apply arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[9];
+	long region_count;
+	int checking = FALSE;
+
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.object_index = state->object_index;
+	csmemcpy(arguments.state, state, sizeof(*state));
+	arguments.corrections = network_distributed_corrections_address();
+	arguments.own_vehicles = (unsigned long)&objects_client_own_vehicles[0][0];
+	if (state->object_index != NONE &&
+		DATUM_INDEX_TO_ABSOLUTE_INDEX(state->object_index) < MAXIMUM_TRACKED_OBJECTS)
+	{
+		arguments.dead = (unsigned long)&objects_client_dead[DATUM_INDEX_TO_ABSOLUTE_INDEX(state->object_index)];
+	}
+	region_count = network_apply_world(&context, &arguments, regions);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_object_state, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return;
+	}
+	network_objects_handle_state_game(state);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_object_state);
 }
 
 void network_objects_handle_states(
@@ -2954,103 +3139,7 @@ void network_objects_handle_states(
 	short index;
 
 	for (index = 0; index < count; index++)
-	{
-		struct distributed_object_state const *state = &states[index];
-		struct object_datum *object;
-		real tolerance = REMOTE_OBJECT_TOLERANCE;
-		real angle_tolerance = REMOTE_OBJECT_ANGLE_TOLERANCE;
-		real blend_distance = REMOTE_BLEND_DISTANCE;
-		real_vector3d forward, up, velocity, angular_velocity;
-		real dx, dy, dz;
-		boolean own_vehicle = FALSE;
-		boolean at_rest;
-
-		if (!distributed_object_index_valid(state->object_index) || !network_objects_client_has(state->object_index))
-			continue;
-		object = object_get(state->object_index);
-		if (TEST_FLAG(state->flags, _distributed_object_dead_bit))
-		{
-			distributed_client_dead_biped(state->object_index);
-			distributed_client_dead_vehicle(state->object_index);
-			/* (a body its tag destroys at once is gone) */
-			if (!object_try_and_get_and_verify_type(state->object_index, _object_mask_all))
-				continue;
-		}
-		/* (an item made carried whose unit never had it here, placed on the
-		host: in the world, seen) */
-		if (TEST_FLAG(_object_mask_item, object->object.type) && object->object.parent_object_index == NONE &&
-			!TEST_FLAG(object->object.flags, _object_connected_to_map_bit) &&
-			!TEST_FLAG(item_get(state->object_index)->item.flags, _item_attached_to_unit_bit))
-		{
-			object_reconnect_to_map(state->object_index, NULL);
-			object_set_visibility(state->object_index, TRUE);
-		}
-		if (object->object.parent_object_index != NONE ||
-			!TEST_FLAG(object->object.flags, _object_connected_to_map_bit))
-		{
-			continue;
-		}
-		distributed_object_state_unpack(state, &forward, &up, &velocity, &angular_velocity);
-		if (!distributed_transform_valid(&state->position, &forward, &up, NULL, NULL, &forward, &up))
-			continue;
-		/* (come to rest: all of the way, drawn gliding, not half of it and
-		left there) */
-		if (TEST_FLAG(state->flags, _distributed_object_at_rest_bit))
-			blend_distance = 0.0f;
-		/* (a vehicle this machine's own player drives is its own) */
-		if (object->object.type == _object_type_vehicle)
-		{
-			struct unit_datum *vehicle = unit_get(state->object_index);
-
-			if (blend_distance > 0.0f)
-				blend_distance = REMOTE_VEHICLE_BLEND_DISTANCE;
-			/* (one no player drives follows every move the host sends, however small) */
-			if (distributed_vehicle_unsteered(state->object_index))
-			{
-				tolerance = 0.0f;
-				angle_tolerance = 2.0f;
-			}
-			if (vehicle->unit.driver_object_index != NONE &&
-				distributed_player_is_local(unit_get(vehicle->unit.driver_object_index)->unit.player_index))
-			{
-				if (distributed_client_correct_own_vehicle(state->object_index,
-					unit_get(vehicle->unit.driver_object_index)->unit.player_index, state))
-				{
-					continue;
-				}
-				tolerance = LOCAL_VEHICLE_TOLERANCE;
-				/* (turned as it drives it) */
-				angle_tolerance = -1.0f;
-				blend_distance = 0.0f;
-				own_vehicle = TRUE;
-			}
-		}
-		/* (at rest as the host has it, however close: a copy left at rest
-		while the host's falls hangs there; but not one this machine drives,
-		which the host's word, a round trip old, would stop as it sets off) */
-		at_rest = TEST_FLAG(state->flags, _distributed_object_at_rest_bit) || distributed_vehicle_unsteered(state->object_index);
-		if (!own_vehicle)
-			SET_FLAG(object->object.flags, _object_at_rest_bit, at_rest);
-		dx = state->position.x - object->object.position.x;
-		dy = state->position.y - object->object.position.y;
-		dz = state->position.z - object->object.position.z;
-		/* (close enough where it is, and turned as it is: one at rest too) */
-		if (dx * dx + dy * dy + dz * dz <= tolerance * tolerance &&
-			forward.i * object->object.forward.i + forward.j * object->object.forward.j +
-				forward.k * object->object.forward.k >= angle_tolerance &&
-			up.i * object->object.up.i + up.j * object->object.up.j + up.k * object->object.up.k >= angle_tolerance)
-		{
-			continue;
-		}
-		if (network_objects_reconcile(state->object_index, &state->position, &forward, &up, &velocity,
-			&angular_velocity, blend_distance))
-		{
-			distributed_count_correction();
-		}
-		/* (one it drives, put where the host has it, is as the host has it) */
-		if (own_vehicle)
-			SET_FLAG(object->object.flags, _object_at_rest_bit, at_rest);
-	}
+		network_objects_handle_state(&states[index]);
 }
 
 /* what this machine's own player's unit carries now noted (it is that
@@ -3142,7 +3231,7 @@ static boolean distributed_client_own_settled(
 }
 
 /* the unit carries what the host's does */
-static void distributed_client_apply_inventory(
+static void distributed_client_apply_inventory_game(
 	struct distributed_inventory const *inventory)
 {
 	struct unit_datum *unit;
@@ -3150,7 +3239,9 @@ static void distributed_client_apply_inventory(
 	boolean local;
 	short weapon_slot;
 
-	if (!network_objects_client_has(inventory->unit_index) ||
+	/* port: the game's parts through the applying's calls (the Rust port's,
+	crates/halo_map's network_apply) */
+	if (!network_apply_simple(_network_apply_call_client_has, inventory->unit_index, 0, NULL, 0) ||
 		!object_try_and_get_and_verify_type(inventory->unit_index, _object_mask_unit))
 	{
 		return;
@@ -3182,16 +3273,19 @@ static void distributed_client_apply_inventory(
 			continue;
 		/* (not here yet: as it is, until it is) */
 		if (wanted_index != NONE &&
-			(!network_objects_client_has(wanted_index) || !object_try_and_get_and_verify_type(wanted_index, _object_mask_weapon)))
+			(!network_apply_simple(_network_apply_call_client_has, wanted_index, 0, NULL, 0) ||
+				!object_try_and_get_and_verify_type(wanted_index, _object_mask_weapon)))
 		{
 			continue;
 		}
 		if (weapon_index != NONE)
-			unit_network_drop_weapon(inventory->unit_index, weapon_slot);
+			network_apply_simple(_network_apply_call_drop_weapon, inventory->unit_index, weapon_slot, NULL, 0);
 		if (wanted_index != NONE)
 		{
-			distributed_client_release_item(wanted_index, FALSE);
-			unit_network_add_weapon(inventory->unit_index, wanted_index, weapon_slot);
+			float slot = (float)weapon_slot;
+
+			network_apply_simple(_network_apply_call_release_item, wanted_index, 0, NULL, 0);
+			network_apply_simple(_network_apply_call_add_weapon, inventory->unit_index, wanted_index, &slot, 1);
 		}
 	}
 	/* the weapon in hand: a client's own player chooses its own, unless its
@@ -3258,6 +3352,58 @@ static void distributed_client_apply_inventory(
 	/* (what the host changed here is not this machine's doing) */
 	if (own)
 		distributed_client_note_own_inventory(own, inventory->unit_index, FALSE);
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_apply), checked
+against the game's otherwise: its world the unit's and the weapons' (those
+it carries and those it is given) */
+static void distributed_client_apply_inventory(
+	struct distributed_inventory const *inventory)
+{
+	struct halo_sim_network_apply arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[16];
+	struct unit_datum *unit;
+	long region_count;
+	long weapon_indices[2 * MAXIMUM_WEAPONS_PER_UNIT];
+	short weapon_count = 0;
+	short index;
+	int checking = FALSE;
+
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.object_index = inventory->unit_index;
+	csmemcpy(arguments.state, inventory, sizeof(*inventory));
+	arguments.round_trip = network_distributed_round_trip_address();
+	arguments.own_inventories = (unsigned long)&objects_client_own_inventories[0];
+	arguments.tag_instances = (unsigned long)cache_files_tag_instances(&arguments.tag_count);
+	region_count = network_apply_world(&context, &arguments, regions);
+	unit = (struct unit_datum *)object_try_and_get_and_verify_type(inventory->unit_index, _object_mask_unit);
+	for (index = 0; index < MAXIMUM_WEAPONS_PER_UNIT; index++)
+	{
+		weapon_indices[weapon_count++] = inventory->weapon_indices[index];
+		weapon_indices[weapon_count++] = unit ? unit->unit.weapon_object_indices[index] : NONE;
+	}
+	for (index = 0; index < weapon_count && region_count < NUMBEROF(regions); index++)
+	{
+		struct object_header_datum *header = weapon_indices[index] != NONE ?
+			(struct object_header_datum *)datum_try_and_get(object_header_data, weapon_indices[index]) : NULL;
+		short other;
+
+		for (other = 0; other < index && weapon_indices[other] != weapon_indices[index]; other++)
+			;
+		if (!header || other < index)
+			continue;
+		regions[region_count].address = (unsigned long)header->datum;
+		regions[region_count++].size = header->data_size;
+	}
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_inventory, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return;
+	}
+	distributed_client_apply_inventory_game(inventory);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_inventory);
 }
 
 /* a client's own player picked up a weapon (network_player_show_pickup) */

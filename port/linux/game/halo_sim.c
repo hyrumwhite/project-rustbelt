@@ -77,7 +77,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 121
+#define HALO_SIM_VERSION 123
 
 /* ---------- structures */
 
@@ -10847,6 +10847,8 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network object reconcile",
 	"network correct own unit",
 	"network unit state",
+	"network object state",
+	"network inventory",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10854,6 +10856,8 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_encounters,
 	_halo_sim_conversations,
 	_halo_sim_communication,
+	_halo_sim_network_apply,
+	_halo_sim_network_apply,
 	_halo_sim_network_apply,
 	_halo_sim_network_apply,
 	_halo_sim_network_apply,

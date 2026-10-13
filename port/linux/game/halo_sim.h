@@ -75,6 +75,8 @@ enum
 	_halo_sim_network_damage,
 	/* the host's sending of its objects each tick (network_objects.c) */
 	_halo_sim_network_host,
+	/* the netcode's messages handled (network_distributed.c) */
+	_halo_sim_network_messages,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2370,6 +2372,7 @@ enum
 	_halo_sim_world_step_network_send_players,
 	_halo_sim_world_step_network_client_tick,
 	_halo_sim_world_step_network_client_asked,
+	_halo_sim_world_step_network_handle_message,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2776,6 +2779,64 @@ typedef char halo_sim_network_send_players_size_assert[
 	sizeof(struct halo_sim_network_send_players) == 4 * 4 + 4 + 4 + 128 * 4 + 64 ? 1 : -1];
 
 void network_plan_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_messages::Arguments: a message of the netcode
+handled: its sender (NONE: the host), where it is and its size, whether a
+game is on and this machine's connection, the records it writes, the
+message kinds' numbers, and each kind's least entry and what it is
+(_network_message_kind_*); and a batch's message being handled */
+struct halo_sim_network_message
+{
+	long machine_index;
+	unsigned long message;
+	long size;
+	long in_progress;
+	long connection;
+	long server_connection;
+	long client_connection;
+	unsigned long host_time;
+	unsigned long received;
+	unsigned long handling_batch;
+	unsigned long received_times;
+	short batch_type;
+	short message_types;
+	short damage_events_type;
+	short player_prediction_type;
+	short vehicle_prediction_type;
+	short message_header_size;
+	short senders;
+	short host_sender;
+	short buffer_size;
+	short pad;
+	short entry_sizes[96];
+	unsigned char kinds[96];
+	unsigned char buffer[1204];
+};
+
+typedef char halo_sim_network_message_size_assert[sizeof(struct halo_sim_network_message) ==
+	11 * 4 + 10 * 2 + 96 * 2 + 96 + 1204 ? 1 : -1];
+
+enum
+{
+	_network_message_kind_from_client = 1 << 0,
+	_network_message_kind_needs_entry = 1 << 1,
+	_network_message_kind_stale = 1 << 2,
+};
+
+/* network_distributed.c's message calls (crates/halo_map's
+network_messages::call): b names the message (0 the one handled, 1 the
+batch's in the buffer), actor its size */
+enum
+{
+	/* network_voice_handles_message, and if so handled: the result */
+	_network_message_call_voice = 1,
+	/* distributed_note_client_clock(a, b): whether its game runs fast */
+	_network_message_call_clock,
+	/* the message to its handler, from the machine a */
+	_network_message_call_dispatch,
+};
+
+void network_message_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

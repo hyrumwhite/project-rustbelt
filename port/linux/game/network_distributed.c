@@ -4011,14 +4011,12 @@ void network_distributed_tick(
 
 /* whether an unreliable message of the kind is older than one had already
 (then it is dropped: the newer has overtaken it) */
-static boolean distributed_message_stale(
-	long machine_index,
-	struct distributed_message_header const *header)
+/* whether a message of the kind is dropped when older than the sender's
+latest of it */
+static boolean distributed_message_stale_kind(
+	byte type)
 {
-	short sender = machine_index == NONE ? HOST_SENDER : (short)machine_index;
-	long *latest;
-
-	switch (header->type)
+	switch (type)
 	{
 	case _distributed_message_player_prediction:
 	case _distributed_message_unit_states:
@@ -4044,10 +4042,21 @@ static boolean distributed_message_stale(
 	case _distributed_message_coop_screen_effect:
 	case _distributed_message_coop_device_states:
 	case _distributed_message_votekick_status:
-		break;
+		return TRUE;
 	default:
 		return FALSE;
 	}
+}
+
+static boolean distributed_message_stale(
+	long machine_index,
+	struct distributed_message_header const *header)
+{
+	short sender = machine_index == NONE ? HOST_SENDER : (short)machine_index;
+	long *latest;
+
+	if (!distributed_message_stale_kind(header->type))
+		return FALSE;
 	if (sender < 0 || sender >= MAXIMUM_SENDERS)
 		return TRUE;
 	latest = &distributed_received_times[sender][header->type];
@@ -4530,100 +4539,51 @@ not overtaken by the newer damage sent with the ticks since
 (distributed_message_stale) */
 static boolean distributed_handling_batch;
 
-/* a message of the distributed kind; machine_index is the sender's on the
-host, NONE on a client */
-void network_distributed_handle_message(
-	long machine_index,
-	word const *message,
-	word size)
+/* a message kind's entries: the least each takes (those of a size of their
+own: their least here, and each read no further than the message's end) */
+static word distributed_message_entry_size(
+	byte type)
 {
-	struct distributed_message_header header;
-	void const *entries = (byte const *)message + sizeof(header);
-	short index;
-	word entry_size;
-
-	/* (voice chat's, in the lobby too: network_voice.c) */
-	if (network_voice_handles_message(message, size))
-	{
-		network_voice_handle_message(machine_index, message, size);
-		return;
-	}
-	/* (none between games: loading, or in the menus) */
-	if (size < sizeof(header) || !game_in_progress())
-		return;
-	csmemcpy(&header, message, sizeof(header));
-	/* a tick's messages in one: each as if it came alone */
-	if (header.type == _distributed_message_batch)
-	{
-		word offset = sizeof(header);
-
-		while (offset + sizeof(word) <= size)
-		{
-			word buffer[(sizeof(message_header) + DATAGRAM_MAXIMUM_SIZE + 1) / sizeof(word)];
-			word length;
-
-			csmemcpy(&length, (byte const *)message + offset, sizeof(word));
-			offset += sizeof(word);
-			if (length > size - offset || length < sizeof(header) - sizeof(message_header) ||
-				sizeof(message_header) + length > sizeof(buffer))
-			{
-				break;
-			}
-			csmemcpy(buffer, message, sizeof(message_header));
-			csmemcpy((byte *)buffer + sizeof(message_header), (byte const *)message + offset, length);
-			offset += length;
-			/* (no batch in a batch) */
-			if (((struct distributed_message_header const *)buffer)->type != _distributed_message_batch)
-			{
-				distributed_handling_batch = TRUE;
-				network_distributed_handle_message(machine_index, buffer, (word)(sizeof(message_header) + length));
-				distributed_handling_batch = FALSE;
-			}
-		}
-		return;
-	}
-	/* (entries of a size of their own: their least here, and each read no
-	further than the message's end) */
-	switch (header.type)
+	switch (type)
 	{
 	case _distributed_message_player_prediction:
-	case _distributed_message_unit_states: entry_size = DISTRIBUTED_UNIT_STATE_MINIMUM_SIZE; break;
-	case _distributed_message_player_statistics: entry_size = sizeof(struct distributed_player_statistics); break;
-	case _distributed_message_pings: entry_size = sizeof(struct distributed_player_ping); break;
-	case _distributed_message_actor_states: entry_size = network_actors_entry_size(); break;
-	case _distributed_message_structure_bsp: entry_size = sizeof(struct distributed_structure_bsp); break;
-	case _distributed_message_coop_presentation: entry_size = network_coop_presentation_entry_size(); break;
-	case _distributed_message_coop_events: entry_size = network_coop_event_entry_size(); break;
-	case _distributed_message_coop_skip_vote: entry_size = network_coop_skip_vote_entry_size(); break;
-	case _distributed_message_coop_device_groups: entry_size = network_coop_device_group_entry_size(); break;
-	case _distributed_message_coop_object_names: entry_size = network_coop_object_names_entry_size(); break;
-	case _distributed_message_coop_object_transforms: entry_size = network_coop_object_transform_entry_size(); break;
-	case _distributed_message_actor_damage: entry_size = network_actors_damage_entry_size(); break;
-	case _distributed_message_coop_object_looks: entry_size = network_coop_object_look_entry_size(); break;
-	case _distributed_message_damage_animations: entry_size = network_objects_damage_animation_entry_size(); break;
-	case _distributed_message_coop_screen_effect: entry_size = network_coop_screen_effect_entry_size(); break;
-	case _distributed_message_coop_device_states: entry_size = network_coop_device_state_entry_size(); break;
-	case _distributed_message_pickups: entry_size = sizeof(struct distributed_pickup); break;
-	case _distributed_message_votekick: entry_size = network_votekick_request_entry_size(); break;
-	case _distributed_message_votekick_status: entry_size = network_votekick_status_entry_size(); break;
-	case _distributed_message_player_inputs: entry_size = sizeof(struct distributed_player_input); break;
-	case _distributed_message_relayed_actions: entry_size = DISTRIBUTED_RELAYED_ACTION_MINIMUM_SIZE; break;
+	case _distributed_message_unit_states: return DISTRIBUTED_UNIT_STATE_MINIMUM_SIZE;
+	case _distributed_message_player_statistics: return sizeof(struct distributed_player_statistics);
+	case _distributed_message_pings: return sizeof(struct distributed_player_ping);
+	case _distributed_message_actor_states: return network_actors_entry_size();
+	case _distributed_message_structure_bsp: return sizeof(struct distributed_structure_bsp);
+	case _distributed_message_coop_presentation: return network_coop_presentation_entry_size();
+	case _distributed_message_coop_events: return network_coop_event_entry_size();
+	case _distributed_message_coop_skip_vote: return network_coop_skip_vote_entry_size();
+	case _distributed_message_coop_device_groups: return network_coop_device_group_entry_size();
+	case _distributed_message_coop_object_names: return network_coop_object_names_entry_size();
+	case _distributed_message_coop_object_transforms: return network_coop_object_transform_entry_size();
+	case _distributed_message_actor_damage: return network_actors_damage_entry_size();
+	case _distributed_message_coop_object_looks: return network_coop_object_look_entry_size();
+	case _distributed_message_damage_animations: return network_objects_damage_animation_entry_size();
+	case _distributed_message_coop_screen_effect: return network_coop_screen_effect_entry_size();
+	case _distributed_message_coop_device_states: return network_coop_device_state_entry_size();
+	case _distributed_message_pickups: return sizeof(struct distributed_pickup);
+	case _distributed_message_votekick: return network_votekick_request_entry_size();
+	case _distributed_message_votekick_status: return network_votekick_status_entry_size();
+	case _distributed_message_player_inputs: return sizeof(struct distributed_player_input);
+	case _distributed_message_relayed_actions: return DISTRIBUTED_RELAYED_ACTION_MINIMUM_SIZE;
 	case _distributed_message_game_state:
 	case _distributed_message_objects_synchronized:
 	case _distributed_message_notice:
-	case _distributed_message_client_ready: entry_size = 0; break;
-	case _distributed_message_client_identity: entry_size = sizeof(struct distributed_client_identity); break;
+	case _distributed_message_client_ready: return 0;
+	case _distributed_message_client_identity: return sizeof(struct distributed_client_identity);
 	case _distributed_message_damage_events:
-	case _distributed_message_hit_reports: entry_size = network_damage_entry_size(header.type); break;
-	default: entry_size = network_objects_entry_size(header.type); break;
+	case _distributed_message_hit_reports: return network_damage_entry_size(type);
+	default: return network_objects_entry_size(type);
 	}
-	if (header.type == 0 || header.type >= NUMBER_OF_DISTRIBUTED_MESSAGES ||
-		size < sizeof(header) + header.count * entry_size)
-	{
-		return;
-	}
-	/* (the kinds whose handlers read one entry: not without it) */
-	switch (header.type)
+}
+
+/* the kinds whose handlers read one entry: not without it */
+static boolean distributed_message_needs_entry(
+	byte type)
+{
+	switch (type)
 	{
 	case _distributed_message_structure_bsp:
 	case _distributed_message_coop_presentation:
@@ -4631,16 +4591,17 @@ void network_distributed_handle_message(
 	case _distributed_message_coop_skip_vote:
 	case _distributed_message_votekick:
 	case _distributed_message_votekick_status:
-		if (header.count < 1)
-			return;
-		break;
+		return TRUE;
 	default:
-		break;
+		return FALSE;
 	}
-	distributed_statistics.received++;
+}
 
-	/* (each kind from the host, or from a client) */
-	switch (header.type)
+/* the kinds a client sends the host (the others the host sends) */
+static boolean distributed_message_from_client(
+	byte type)
+{
+	switch (type)
 	{
 	case _distributed_message_player_prediction:
 	case _distributed_message_client_ready:
@@ -4650,36 +4611,42 @@ void network_distributed_handle_message(
 	case _distributed_message_player_inputs:
 	case _distributed_message_coop_skip_vote:
 	case _distributed_message_votekick:
-		if (machine_index == NONE || game_connection() != _game_connection_network_server)
-			return;
-		break;
+		return TRUE;
 	default:
-		if (game_connection() != _game_connection_network_client)
-			return;
-		/* (the host's latest tick, which this client's input messages tell
-		it back) */
-		if (distributed_host_time == NONE || header.game_time > distributed_host_time)
-			distributed_host_time = header.game_time;
-		break;
+		return FALSE;
 	}
-	if ((distributed_handling_batch || header.type != _distributed_message_damage_events) &&
-		distributed_message_stale(machine_index, &header))
-	{
-		return;
-	}
-	/* (the host: a client's clock, by its messages' ticks; and its players'
-	predictions not taken while its game runs fast) */
-	if (machine_index != NONE)
-	{
-		distributed_note_client_clock(machine_index, header.game_time);
-		if ((header.type == _distributed_message_player_prediction ||
-				header.type == _distributed_message_vehicle_prediction) &&
-			distributed_machine_clock_fast(machine_index))
-		{
-			return;
-		}
-	}
+}
 
+/* port: the message's handling is Rust's in Rust's mode (crates/halo_map's
+network_messages): the message is in the arguments' (or, a batch's, in
+their buffer), the handlers are the game's through network_message_call */
+static struct halo_sim_network_message distributed_message_arguments;
+static long distributed_message_depth;
+
+typedef char distributed_message_buffer_assert[
+	sizeof(distributed_message_arguments.buffer) >= sizeof(message_header) + DATAGRAM_MAXIMUM_SIZE + 1 &&
+	NUMBER_OF_DISTRIBUTED_MESSAGES <= sizeof(distributed_message_arguments.kinds) ? 1 : -1];
+
+/* the message a call names: the one handled (0) or the batch's in the
+buffer (1) */
+static word const *distributed_message_named(
+	long which)
+{
+	return which ? (word const *)distributed_message_arguments.buffer :
+		(word const *)distributed_message_arguments.message;
+}
+
+/* a message, past its checks, to its handler */
+static void distributed_message_dispatch(
+	long machine_index,
+	word const *message,
+	word size)
+{
+	struct distributed_message_header header;
+	void const *entries = (byte const *)message + sizeof(header);
+	short index;
+
+	csmemcpy(&header, message, sizeof(header));
 	switch (header.type)
 	{
 	case _distributed_message_player_prediction:
@@ -4862,6 +4829,224 @@ void network_distributed_handle_message(
 		break;
 	}
 	}
+}
+
+void network_message_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_message_call_voice:
+	{
+		word const *message = distributed_message_named(call->b);
+
+		call->result = network_voice_handles_message(message, (word)call->actor);
+		if (call->result)
+			network_voice_handle_message(call->a, message, (word)call->actor);
+		break;
+	}
+	case _network_message_call_clock:
+		distributed_note_client_clock(call->a, call->b);
+		call->result = distributed_machine_clock_fast(call->a);
+		break;
+	case _network_message_call_dispatch:
+		distributed_message_dispatch(call->a, distributed_message_named(call->b), (word)call->actor);
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static long network_message_simple(
+	long kind,
+	long a,
+	long b,
+	long actor)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor;
+	call.a = a;
+	call.b = b;
+	network_message_call(&call);
+	return call.result;
+}
+
+/* a message of the distributed kind; machine_index is the sender's on the
+host, NONE on a client (which: the message the arguments name, or a batch's
+in their buffer) */
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_handle_message_game(
+	long machine_index,
+	long which,
+	word size)
+{
+	struct halo_sim_network_message *arguments = &distributed_message_arguments;
+	word const *message = distributed_message_named(which);
+	struct distributed_message_header header;
+	word entry_size;
+
+	/* (voice chat's, in the lobby too: network_voice.c) */
+	if (network_message_simple(_network_message_call_voice, machine_index, which, size))
+		return;
+	/* (none between games: loading, or in the menus) */
+	if (size < sizeof(header) || !arguments->in_progress)
+		return;
+	csmemcpy(&header, message, sizeof(header));
+	/* a tick's messages in one: each as if it came alone */
+	if (header.type == _distributed_message_batch)
+	{
+		word offset = sizeof(header);
+
+		while (offset + sizeof(word) <= size)
+		{
+			word length;
+
+			csmemcpy(&length, (byte const *)message + offset, sizeof(word));
+			offset += sizeof(word);
+			if (length > size - offset || length < sizeof(header) - sizeof(message_header) ||
+				sizeof(message_header) + length > (word)arguments->buffer_size)
+			{
+				break;
+			}
+			csmemcpy(arguments->buffer, message, sizeof(message_header));
+			csmemcpy(arguments->buffer + sizeof(message_header), (byte const *)message + offset, length);
+			offset += length;
+			/* (no batch in a batch) */
+			if (((struct distributed_message_header const *)arguments->buffer)->type != _distributed_message_batch)
+			{
+				distributed_handling_batch = TRUE;
+				distributed_handle_message_game(machine_index, 1, (word)(sizeof(message_header) + length));
+				distributed_handling_batch = FALSE;
+			}
+		}
+		return;
+	}
+	entry_size = header.type < NUMBER_OF_DISTRIBUTED_MESSAGES ? arguments->entry_sizes[header.type] : 0;
+	if (header.type == 0 || header.type >= NUMBER_OF_DISTRIBUTED_MESSAGES ||
+		size < sizeof(header) + header.count * entry_size)
+	{
+		return;
+	}
+	if ((arguments->kinds[header.type] & _network_message_kind_needs_entry) && header.count < 1)
+		return;
+	distributed_statistics.received++;
+	/* (each kind from the host, or from a client) */
+	if (arguments->kinds[header.type] & _network_message_kind_from_client)
+	{
+		if (machine_index == NONE || arguments->connection != _game_connection_network_server)
+			return;
+	}
+	else
+	{
+		if (arguments->connection != _game_connection_network_client)
+			return;
+		/* (the host's latest tick, which this client's input messages tell
+		it back) */
+		if (distributed_host_time == NONE || header.game_time > distributed_host_time)
+			distributed_host_time = header.game_time;
+	}
+	if ((distributed_handling_batch || header.type != _distributed_message_damage_events) &&
+		distributed_message_stale(machine_index, &header))
+	{
+		return;
+	}
+	/* (the host: a client's clock, by its messages' ticks; and its players'
+	predictions not taken while its game runs fast) */
+	if (machine_index != NONE)
+	{
+		boolean fast = (boolean)network_message_simple(_network_message_call_clock, machine_index, header.game_time, NONE);
+
+		if ((header.type == _distributed_message_player_prediction ||
+				header.type == _distributed_message_vehicle_prediction) && fast)
+		{
+			return;
+		}
+	}
+	network_message_simple(_network_message_call_dispatch, machine_index, which, size);
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_messages), checked
+against the game's otherwise. Its world: the arguments (the batch's buffer
+among them), the host's latest tick, the received count, the batch flag and
+the senders' latest ticks. */
+void network_distributed_handle_message(
+	long machine_index,
+	word const *message,
+	word size)
+{
+	struct halo_sim_network_message *arguments = &distributed_message_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[5];
+	int checking = FALSE;
+	short type;
+
+	/* (a handler's message handled while one is: as the game's, in it) */
+	if (distributed_message_depth > 0)
+	{
+		struct halo_sim_network_message saved = *arguments;
+
+		arguments->message = (unsigned long)message;
+		distributed_message_depth++;
+		distributed_handle_message_game(machine_index, 0, size);
+		distributed_message_depth--;
+		*arguments = saved;
+		return;
+	}
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->machine_index = machine_index;
+	arguments->message = (unsigned long)message;
+	arguments->size = size;
+	arguments->in_progress = game_in_progress();
+	arguments->connection = game_connection();
+	arguments->server_connection = _game_connection_network_server;
+	arguments->client_connection = _game_connection_network_client;
+	arguments->host_time = (unsigned long)&distributed_host_time;
+	arguments->received = (unsigned long)&distributed_statistics.received;
+	arguments->handling_batch = (unsigned long)&distributed_handling_batch;
+	arguments->received_times = (unsigned long)&distributed_received_times[0][0];
+	arguments->batch_type = _distributed_message_batch;
+	arguments->message_types = NUMBER_OF_DISTRIBUTED_MESSAGES;
+	arguments->damage_events_type = _distributed_message_damage_events;
+	arguments->player_prediction_type = _distributed_message_player_prediction;
+	arguments->vehicle_prediction_type = _distributed_message_vehicle_prediction;
+	arguments->message_header_size = sizeof(message_header);
+	arguments->senders = MAXIMUM_SENDERS;
+	arguments->host_sender = HOST_SENDER;
+	arguments->buffer_size = (short)(((sizeof(message_header) + DATAGRAM_MAXIMUM_SIZE + 1) / sizeof(word)) * sizeof(word));
+	for (type = 0; type < NUMBER_OF_DISTRIBUTED_MESSAGES; type++)
+	{
+		arguments->entry_sizes[type] = (short)distributed_message_entry_size((byte)type);
+		arguments->kinds[type] =
+			(distributed_message_from_client((byte)type) ? _network_message_kind_from_client : 0) |
+			(distributed_message_needs_entry((byte)type) ? _network_message_kind_needs_entry : 0) |
+			(distributed_message_stale_kind((byte)type) ? _network_message_kind_stale : 0);
+	}
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&distributed_host_time;
+	regions[1].size = sizeof(distributed_host_time);
+	regions[2].address = (unsigned long)&distributed_statistics.received;
+	regions[2].size = sizeof(distributed_statistics.received);
+	regions[3].address = (unsigned long)&distributed_handling_batch;
+	regions[3].size = sizeof(distributed_handling_batch);
+	regions[4].address = (unsigned long)&distributed_received_times[0][0];
+	regions[4].size = sizeof(distributed_received_times);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.arguments = (unsigned long)arguments;
+	distributed_message_depth++;
+	if (!halo_sim_world_step_begin(_halo_sim_world_step_network_handle_message, &context, regions, 5,
+		network_message_call, &checking))
+	{
+		distributed_handle_message_game(machine_index, 0, size);
+		if (checking)
+			halo_sim_world_step_check(_halo_sim_world_step_network_handle_message);
+	}
+	distributed_message_depth--;
 }
 
 /* (the host: network_server_message_handler.c) a client machine's message

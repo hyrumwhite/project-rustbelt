@@ -1067,6 +1067,18 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Two went unseen: the rise tolerance (a lie 2.5 world units up is refused either way) and the thrown-speed allowance (nobody was thrown).
        - **Rust in charge:** with the lying client and all networking systems in Rust, the host corrects the client 30 times against the C's 28, and the machines' positions differ by a median of 5.7 cm against 6.1 (largest 19.9 against 18.9). Both machines end with the same count of items, and every hit reported is dealt.
 
+   - [x] The netcode's input handled in Rust (`halo_map::network_input`, system `network_input`, world steps 25 and 26): network_distributed.c's `distributed_handle_inputs` and `distributed_handle_actions`.
+     - **What Rust does:**
+       - **The host** takes a client's players' input (each tick's, with the buttons of the ticks before it): only that machine's players', the sticks and the trigger held to a controller's. In co-op the input counts in the scripts' action tests as a local player's does, its turn the short way round.
+       - **The round trip:** once a message the host measures how long a message takes the client and back, by the latest host tick the client had heard of. It is smoothed as TCP smooths its own: an eighth for the average, a quarter for the jitter. Every correction and prediction limit reads it.
+       - **A client** takes the host's relayed input of the players it drives: the update, then each player's buttons, facing, sticks, trigger and choices, unpacked from the wire.
+     - **The game's, through calls (`network_input_call`):** handing the input on to the update server or client, the action tests and the co-op BSP note. The action handed on is in the step's arguments, and the facings' and round trips' types are in network_distributed_records.h.
+     - **Their own system:** the handlers run inside the message step (23), where a nested step isn't checked, so they have a system of their own to check apart.
+     - **Results:**
+       - In a 90-second session with scripted play, shooting, kills, a vehicle and a pickup, all 2,048 of the host's inputs and 1,024 of the joiner's relayed actions agree, with none left out.
+       - All six planted errors were caught: the throttle's clamp, the round trip's average and jitter, and the relayed throttle, trigger and pitch.
+       - **Rust in charge:** with all networking systems in Rust (fifty-eight systems in all), the machines' positions differ by a median of 4.7 and 3.8 cm over two sessions (largest 18.0 and 10.3), within the C's range. Both machines end with the same count of items, and every hit reported is dealt.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

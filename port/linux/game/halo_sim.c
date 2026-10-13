@@ -488,7 +488,8 @@ struct halo_sim_unit_animation_state
 	char action;
 	char overlay_action;
 	char base_seat_index;
-	char pad;
+	/* (Rust's: it started an interpolation, halo_sim_unit_animation_state_store) */
+	char interpolation_started;
 	short pad2;
 	unsigned long object_animation_graph_index;
 };
@@ -3801,6 +3802,18 @@ static void halo_sim_unit_animation_state_store(long unit_index, struct halo_sim
 	unit->unit.animation.overlay_action = state->overlay_action;
 	unit->unit.animation.base_seat_index = state->base_seat_index;
 	unit->object.animation.animation_graph_index = state->object_animation_graph_index;
+	/* an interpolation Rust started: the node orientations to blend from
+	(object_start_interpolation's copy; the update moves no node, so they
+	are as they were when it started) */
+	if (state->interpolation_started)
+	{
+		struct object_definition *definition = object_definition_get(unit->definition_index);
+		short node_count = model_definition_get(definition->object.model.index)->nodes.count;
+
+		memcpy(object_header_block_get(unit_index, &unit->object.original_node_orientations),
+			object_header_block_get(unit_index, &unit->object.node_orientations),
+			sizeof(real_orientation) * node_count);
+	}
 }
 
 /* a unit's update state, from the unit */
@@ -6785,6 +6798,9 @@ void halo_sim_unit_animation_check(long unit_index, short result)
 	halo_sim_unit_animation_state_load(unit_index, &game);
 	halo_sim_unit_animation_checks.compared++;
 	halo_sim_unit_animation_checks.effects += call.effects != 0;
+	/* (whether Rust started an interpolation is its word to the game, not the
+	unit's) */
+	call.state.interpolation_started = 0;
 	if (memcmp(&call.state, &game, sizeof(game)) != 0 || call.result != result)
 	{
 		halo_sim_unit_animation_checks.differed++;

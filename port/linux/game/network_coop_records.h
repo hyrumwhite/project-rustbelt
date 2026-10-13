@@ -124,4 +124,133 @@ struct coop_sent_look
 	real scale;
 };
 
+/* the host's events queued, each sent in this many ticks' messages
+(network_coop.c's MAXIMUM_QUEUED_EVENTS, EVENT_SENDS) */
+#define COOP_MAXIMUM_QUEUED_EVENTS 128
+#define COOP_EVENT_SENDS 3
+
+/* distributed_coop_event.kind */
+enum
+{
+	_coop_event_sound,
+	_coop_event_title,
+	_coop_event_hud,
+	_coop_event_player_effect,
+	_coop_event_nav_point,
+	_coop_event_unit_animation,
+	_coop_event_scenery_animation,
+	_coop_event_effect,
+	_coop_event_attach,
+	/* the host skipped the cutscene: a client stops its dialogue */
+	/* the host reverted to its last saved state */
+	_coop_event_reverted,
+	/* a unit opened (value TRUE) or closed: a dropship's doors */
+	_coop_event_unit_open,
+	/* a breakable surface broke: value its index, frame its BSP, reals the
+	damage's epicenter */
+	_coop_event_surface_broken,
+};
+
+/* distributed_coop_event.type of an attach event */
+enum
+{
+	_coop_attach,
+	_coop_detach,
+};
+
+/* Something that happens once. Which fields mean what depends on the kind:
+
+	sound             type: _coop_sound_ kind; tag_index; object_index (the source, or NONE); reals[0]: scale
+	title             value: title index; reals[0]: delay in seconds
+	hud               type: _coop_hud_ kind; value
+	player_effect     type: _coop_player_effect_ kind; reals: the function's arguments
+	nav_point         type: _coop_nav_point_ kind; value: nav index (NONE to deactivate);
+	                  target: team or unit; object_index: cutscene flag or object; reals[0]: offset
+	unit_animation    object_index: unit; tag_index: graph (NONE: stop); value: animation;
+	                  frame; interpolate
+	scenery_animation object_index, name_index, definition_index: the scenery; tag_index: graph;
+	                  value: animation; frame */
+struct distributed_coop_event
+{
+	byte kind;
+	byte type;
+	word number;
+	short value;
+	short frame;
+	short name_index;
+	byte interpolate;
+	byte pad;
+	long object_index;
+	long target;
+	long tag_index;
+	long definition_index;
+	real reals[3];
+};
+
+/* host: events still to be sent; client: the last one applied */
+struct coop_events
+{
+	struct distributed_coop_event events[COOP_MAXIMUM_QUEUED_EVENTS];
+	short sends[COOP_MAXIMUM_QUEUED_EVENTS];
+	short count;
+	word next_number;
+	word applied_number;
+	boolean applied_any;
+};
+
+#define COOP_MAXIMUM_ATTACHMENTS 32
+#define COOP_MAXIMUM_NAV_POINTS 16
+#define COOP_MAXIMUM_LOOPING_SOUNDS 32
+
+/* host: what its scripts have attached, sent again every
+OBJECT_REFRESH_TICKS for a client that joined since */
+struct coop_host_attachment
+{
+	long parent_index;
+	long child_index;
+	short parent_marker_index;
+	short child_marker_index;
+};
+
+/* host: a nav point active, as the note was given */
+struct coop_host_nav_point
+{
+	short kind;
+	short nav_index;
+	long target;
+	long marker;
+	real vertical_offset;
+};
+
+/* host: the HUD state the scripts set that a late joiner would lack: the
+objective and the nav points active, resent by host_send_hud_state */
+struct coop_host_hud_state
+{
+	short objective;
+	short nav_point_count;
+	struct coop_host_nav_point nav_points[COOP_MAXIMUM_NAV_POINTS];
+};
+
+/* host: a looping sound the scripts have started (music, ambience), resent
+every OBJECT_REFRESH_TICKS so a late joiner hears it */
+struct coop_host_looping_sound
+{
+	long definition_index;
+	long object_index;
+	real scale;
+};
+
+/* host: the scripts' state a late joiner would lack, and where the broken
+surfaces' resend goes on from */
+struct coop_host_queue
+{
+	struct coop_host_attachment attachments[COOP_MAXIMUM_ATTACHMENTS];
+	short attachment_count;
+	short looping_sound_count;
+	struct coop_host_looping_sound looping_sounds[COOP_MAXIMUM_LOOPING_SOUNDS];
+	struct coop_host_hud_state hud_state;
+	short broken_surface_cursor;
+	short pad;
+};
+
 #endif

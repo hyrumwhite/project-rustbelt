@@ -10894,6 +10894,7 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network client clock",
 	"network coop world",
 	"network coop device groups",
+	"network coop queue",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10929,6 +10930,7 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_host,
 	_halo_sim_network_input,
 	_halo_sim_network_clock,
+	_halo_sim_network_coop,
 	_halo_sim_network_coop,
 	_halo_sim_network_coop,
 };
@@ -11270,6 +11272,16 @@ int halo_sim_hs_begin(long operation, long expression, long *result, int *checki
 			halo_sim_hs_checks.command_run = TRUE;
 			platform_log("halo_sim: evaluating the command %s: %s", command,
 				hs_compile_and_evaluate(command) ? "compiled" : "didn't compile");
+		}
+		/* (and for testing network co-op's broken surfaces, which no script
+		breaks: HALO_SIM_BREAK_SURFACES, that many of the structure's
+		breakable surfaces broken then too) */
+		if (halo_sim_hs_checks.command_run && getenv("HALO_SIM_BREAK_SURFACES"))
+		{
+			short count = (short)atoi(getenv("HALO_SIM_BREAK_SURFACES"));
+
+			platform_log("halo_sim: breaking %d breakable surfaces of %d", count,
+				breakable_surfaces_port_break_first(count));
 		}
 	}
 	if (mode == _halo_sim_mode_c)

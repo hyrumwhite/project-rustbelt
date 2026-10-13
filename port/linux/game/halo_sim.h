@@ -2388,6 +2388,7 @@ enum
 	_halo_sim_world_step_network_client_clock,
 	_halo_sim_world_step_network_coop_world,
 	_halo_sim_world_step_network_coop_device_groups,
+	_halo_sim_world_step_network_coop_queue,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3060,6 +3061,30 @@ enum
 	_network_coop_world_call_send = 1,
 	/* the device groups' message, of b entries, to every client */
 	_network_coop_world_call_send_device_groups,
+	/* the events' message, of the first b events queued, to every client */
+	_network_coop_world_call_send_events,
+	/* whether the looping sound (a, a tag) is no longer playing: result */
+	_network_coop_world_call_looping_sound_stopped,
+	/* whether the breakable surface a of the structure is broken: result,
+	and its centroid: output[0..2] */
+	_network_coop_world_call_surface_broken,
+	/* logs that the event queue is full (an event of kind a not sent) */
+	_network_coop_world_call_log_events_full,
+};
+
+/* crates/halo_map's network_coop::QueueArguments: co-op's host resending
+the scripts' state and sending its events: whether to resend and whether a
+machine joined, the events (struct coop_events) and the host's records
+(struct coop_host_queue), the structure BSP and its count of breakable
+surfaces */
+struct halo_sim_network_coop_queue
+{
+	long refresh;
+	long joined;
+	unsigned long events;
+	unsigned long queue;
+	long structure_bsp_index;
+	long surface_count;
 };
 
 /* crates/halo_map's network_coop::DeviceGroupsArguments: co-op's host

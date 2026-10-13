@@ -153,9 +153,9 @@ enum
 	/* the field of view (radians) is sent as a word, scaled by this */
 	FIELD_OF_VIEW_SCALE = 10000,
 
-	MAXIMUM_QUEUED_EVENTS = 128,
-	/* each event is sent in this many ticks' messages */
-	EVENT_SENDS = 3,
+	/* (network_coop_records.h's) */
+	MAXIMUM_QUEUED_EVENTS = COOP_MAXIMUM_QUEUED_EVENTS,
+	EVENT_SENDS = COOP_EVENT_SENDS,
 
 	/* the size of devices.c's device group array (devices_initialize's;
 	every index into the arrays below is checked against this too) */
@@ -185,27 +185,8 @@ enum
 /* (devices.c's literal count: a change there is one here) */
 typedef char device_groups_count_assert[MAXIMUM_DEVICE_GROUPS == 1024 && MAXIMUM_DEVICE_GROUPS == COOP_MAXIMUM_DEVICE_GROUPS ? 1 : -1];
 
-/* distributed_coop_event.kind */
-enum
-{
-	_coop_event_sound,
-	_coop_event_title,
-	_coop_event_hud,
-	_coop_event_player_effect,
-	_coop_event_nav_point,
-	_coop_event_unit_animation,
-	_coop_event_scenery_animation,
-	_coop_event_effect,
-	_coop_event_attach,
-	/* the host skipped the cutscene: a client stops its dialogue */
-	/* the host reverted to its last saved state */
-	_coop_event_reverted,
-	/* a unit opened (value TRUE) or closed: a dropship's doors */
-	_coop_event_unit_open,
-	/* a breakable surface broke: value its index, frame its BSP, reals the
-	damage's epicenter */
-	_coop_event_surface_broken,
-};
+
+/* (distributed_coop_event.kind and an attach's type: network_coop_records.h) */
 
 /* distributed_coop_event.type of an effect: at a cutscene flag (value), or on
 an object's marker (value: its index in the object's model's markers) */
@@ -215,12 +196,6 @@ enum
 	_coop_effect_on_marker,
 };
 
-/* distributed_coop_event.type of an attach event */
-enum
-{
-	_coop_attach,
-	_coop_detach,
-};
 
 /* which of a device's two groups an entry is */
 enum
@@ -307,34 +282,7 @@ struct distributed_coop_presentation_message
 	struct distributed_coop_presentation presentation;
 };
 
-/* Something that happens once. Which fields mean what depends on the kind:
-
-	sound             type: _coop_sound_ kind; tag_index; object_index (the source, or NONE); reals[0]: scale
-	title             value: title index; reals[0]: delay in seconds
-	hud               type: _coop_hud_ kind; value
-	player_effect     type: _coop_player_effect_ kind; reals: the function's arguments
-	nav_point         type: _coop_nav_point_ kind; value: nav index (NONE to deactivate);
-	                  target: team or unit; object_index: cutscene flag or object; reals[0]: offset
-	unit_animation    object_index: unit; tag_index: graph (NONE: stop); value: animation;
-	                  frame; interpolate
-	scenery_animation object_index, name_index, definition_index: the scenery; tag_index: graph;
-	                  value: animation; frame */
-struct distributed_coop_event
-{
-	byte kind;
-	byte type;
-	word number;
-	short value;
-	short frame;
-	short name_index;
-	byte interpolate;
-	byte pad;
-	long object_index;
-	long target;
-	long tag_index;
-	long definition_index;
-	real reals[3];
-};
+/* (struct distributed_coop_event: network_coop_records.h) */
 
 struct distributed_coop_events_message
 {
@@ -432,16 +380,9 @@ static struct
 	long played_time;
 } coop_presentation;
 
-/* host: events still to be sent; client: the last one applied */
-static struct
-{
-	struct distributed_coop_event events[MAXIMUM_QUEUED_EVENTS];
-	short sends[MAXIMUM_QUEUED_EVENTS];
-	short count;
-	word next_number;
-	word applied_number;
-	boolean applied_any;
-} coop_events;
+/* host: events still to be sent; client: the last one applied
+(network_coop_records.h) */
+static struct coop_events coop_events;
 
 /* host: each device group as last sent (network_coop_records.h) */
 static struct coop_host_devices host_devices;
@@ -656,7 +597,14 @@ static struct distributed_coop_event *event_new(
 		return NULL;
 	if (coop_events.count == MAXIMUM_QUEUED_EVENTS)
 	{
-		error(_error_silent, "co-op: event queue full; an event of kind %d is not sent", kind);
+		/* port: through the world's calls (the Rust port's) */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_log_events_full;
+		call.actor = NONE;
+		call.a = kind;
+		network_coop_world_call(&call);
 		return NULL;
 	}
 	event = &coop_events.events[coop_events.count];
@@ -677,13 +625,20 @@ static struct distributed_coop_event *event_new(
 static void host_send_events(
 	void)
 {
-	struct distributed_coop_events_message message;
 	short index;
 
 	if (!coop_events.count)
 		return;
-	csmemcpy(message.events, coop_events.events, coop_events.count * sizeof(message.events[0]));
-	send_to_clients(&message, _distributed_message_coop_events, coop_events.count, sizeof(message.events[0]));
+	/* port: through the world's calls (the Rust port's) */
+	{
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_send_events;
+		call.actor = NONE;
+		call.b = coop_events.count;
+		network_coop_world_call(&call);
+	}
 	/* drop the ones sent EVENT_SENDS times, keeping the rest in order */
 	for (index = 0; index < coop_events.count; )
 	{
@@ -987,6 +942,32 @@ void network_coop_world_call(
 	case _network_coop_world_call_send_device_groups:
 		send_to_clients(&host_devices.message, _distributed_message_coop_device_groups, (short)call->b,
 			sizeof(host_devices.message.groups[0]));
+		break;
+	case _network_coop_world_call_send_events:
+	{
+		static struct distributed_coop_events_message message;
+
+		csmemcpy(message.events, coop_events.events, call->b * sizeof(message.events[0]));
+		send_to_clients(&message, _distributed_message_coop_events, (short)call->b, sizeof(message.events[0]));
+		break;
+	}
+	case _network_coop_world_call_looping_sound_stopped:
+		call->result = looping_sound_definition_get(call->a)->runtime_scripting_sound_index == NONE;
+		break;
+	case _network_coop_world_call_surface_broken:
+		call->result = !breakable_surface_extant((short)call->a);
+		if (call->result)
+		{
+			struct structure_breakable_surface *surface = TAG_BLOCK_GET_ELEMENT(
+				&global_structure_bsp_get()->breakable_surfaces, call->a, struct structure_breakable_surface);
+
+			call->output[0] = surface->centroid.x;
+			call->output[1] = surface->centroid.y;
+			call->output[2] = surface->centroid.z;
+		}
+		break;
+	case _network_coop_world_call_log_events_full:
+		error(_error_silent, "co-op: event queue full; an event of kind %d is not sent", call->a);
 		break;
 	}
 	halo_sim_world_event_end(call, opened);
@@ -1308,58 +1289,12 @@ void network_coop_handle_screen_effect(
 	rasterizer_screen_effect_port_set(&state);
 }
 
-/* host: what its scripts have attached, sent again every
-OBJECT_REFRESH_TICKS for a client that joined since */
-enum
-{
-	MAXIMUM_ATTACHMENTS = 32,
-};
-
-static struct
-{
-	long parent_index;
-	long child_index;
-	short parent_marker_index;
-	short child_marker_index;
-} host_attachments[MAXIMUM_ATTACHMENTS];
-static short host_attachment_count;
-
-/* host: the HUD state the scripts set that a late joiner would lack: the
-objective, and the nav points active (their kind, nav index, target, marker
-and offset as the note was given), resent by host_send_hud_state */
-enum
-{
-	MAXIMUM_NAV_POINTS = 16,
-};
-
-static struct
-{
-	short objective;
-	short nav_point_count;
-	struct
-	{
-		short kind;
-		short nav_index;
-		long target;
-		long marker;
-		real vertical_offset;
-	} nav_points[MAXIMUM_NAV_POINTS];
-} host_hud_state;
-
-/* host: the looping sounds the scripts have started (music, ambience).
-They are resent every OBJECT_REFRESH_TICKS so a late joiner hears them. */
-enum
-{
-	MAXIMUM_LOOPING_SOUNDS = 32,
-};
-
-static struct
-{
-	long definition_index;
-	long object_index;
-	real scale;
-} host_looping_sounds[MAXIMUM_LOOPING_SOUNDS];
-static short host_looping_sound_count;
+/* host: what its scripts have attached, the HUD state they set and the
+looping sounds they started, which a late joiner would lack, and the broken
+surfaces' resend's place (network_coop_records.h) */
+static struct coop_host_queue host_queue;
+/* port: ... and the arguments of their resends and the events' sending */
+static struct halo_sim_network_coop_queue coop_queue_arguments;
 
 static void host_send_object_names(
 	void)
@@ -2032,10 +1967,10 @@ void network_coop_new_game(
 	csmemset(&host_sent_screen_effect, 0, sizeof(host_sent_screen_effect));
 	csmemset(&host_resend, 0, sizeof(host_resend));
 	csmemset(&players_vitality, 0, sizeof(players_vitality));
-	host_attachment_count = 0;
-	host_looping_sound_count = 0;
-	host_hud_state.objective = NONE;
-	host_hud_state.nav_point_count = 0;
+	host_queue.attachment_count = 0;
+	host_queue.looping_sound_count = 0;
+	host_queue.hud_state.objective = NONE;
+	host_queue.hud_state.nav_point_count = 0;
 	skip_vote_clear();
 	skip_vote.offered = FALSE;
 	skip_vote.voters = 0;
@@ -2162,15 +2097,15 @@ void network_coop_note_device_snap(
 		host_devices.snap_counts[group_index]++;
 }
 
-/* index of the looping sound in host_looping_sounds, or NONE */
+/* index of the looping sound in host_queue.looping_sounds, or NONE */
 static short host_looping_sound_find(
 	long definition_index)
 {
 	short index;
 
-	for (index = 0; index < host_looping_sound_count; index++)
+	for (index = 0; index < host_queue.looping_sound_count; index++)
 	{
-		if (host_looping_sounds[index].definition_index == definition_index)
+		if (host_queue.looping_sounds[index].definition_index == definition_index)
 			return index;
 	}
 	return NONE;
@@ -2184,27 +2119,35 @@ static void host_send_looping_sounds(
 {
 	short index = 0;
 
-	while (index < host_looping_sound_count)
+	while (index < host_queue.looping_sound_count)
 	{
-		long definition_index = host_looping_sounds[index].definition_index;
+		long definition_index = host_queue.looping_sounds[index].definition_index;
 		struct distributed_coop_event *event;
 
-		if (looping_sound_definition_get(definition_index)->runtime_scripting_sound_index == NONE)
+		/* port: through the world's calls (the Rust port's) */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_looping_sound_stopped;
+		call.actor = NONE;
+		call.a = definition_index;
+		network_coop_world_call(&call);
+		if (call.result)
 		{
 			if ((event = event_new(_coop_event_sound)) != NULL)
 			{
 				event->type = _coop_sound_looping_stop;
 				event->tag_index = definition_index;
 			}
-			host_looping_sounds[index] = host_looping_sounds[--host_looping_sound_count];
+			host_queue.looping_sounds[index] = host_queue.looping_sounds[--host_queue.looping_sound_count];
 			continue;
 		}
-		if (host_resend.refresh && (event = event_new(_coop_event_sound)) != NULL)
+		if (coop_queue_arguments.refresh && (event = event_new(_coop_event_sound)) != NULL)
 		{
 			event->type = _coop_sound_looping_start;
 			event->tag_index = definition_index;
-			event->object_index = host_looping_sounds[index].object_index;
-			event->reals[0] = host_looping_sounds[index].scale;
+			event->object_index = host_queue.looping_sounds[index].object_index;
+			event->reals[0] = host_queue.looping_sounds[index].scale;
 		}
 		index++;
 	}
@@ -2229,17 +2172,17 @@ void network_coop_note_sound(
 	index = host_looping_sound_find(definition_index);
 	if (kind == _coop_sound_looping_stop && index != NONE)
 	{
-		host_looping_sounds[index] = host_looping_sounds[--host_looping_sound_count];
+		host_queue.looping_sounds[index] = host_queue.looping_sounds[--host_queue.looping_sound_count];
 	}
 	else if (kind == _coop_sound_looping_start)
 	{
-		if (index == NONE && host_looping_sound_count < MAXIMUM_LOOPING_SOUNDS)
-			index = host_looping_sound_count++;
+		if (index == NONE && host_queue.looping_sound_count < COOP_MAXIMUM_LOOPING_SOUNDS)
+			index = host_queue.looping_sound_count++;
 		if (index != NONE)
 		{
-			host_looping_sounds[index].definition_index = definition_index;
-			host_looping_sounds[index].object_index = object_index;
-			host_looping_sounds[index].scale = scale;
+			host_queue.looping_sounds[index].definition_index = definition_index;
+			host_queue.looping_sounds[index].object_index = object_index;
+			host_queue.looping_sounds[index].scale = scale;
 		}
 	}
 }
@@ -2270,7 +2213,7 @@ void network_coop_note_hud(
 	saying so comes a little after the event, so the event carries it) */
 	event->frame = (short)hud_scripted_globals->show_hud_help_text;
 	if (kind == _coop_hud_objective)
-		host_hud_state.objective = value;
+		host_queue.hud_state.objective = value;
 }
 
 void network_coop_note_player_effect(
@@ -2319,31 +2262,31 @@ void network_coop_note_nav_point(
 	if (!coop_host())
 		return;
 	send_nav_point(kind, nav_index, target, marker, vertical_offset);
-	for (index = 0; index < host_hud_state.nav_point_count; index++)
+	for (index = 0; index < host_queue.hud_state.nav_point_count; index++)
 	{
-		if (host_hud_state.nav_points[index].kind == kind && host_hud_state.nav_points[index].target == target &&
-			host_hud_state.nav_points[index].marker == marker)
+		if (host_queue.hud_state.nav_points[index].kind == kind && host_queue.hud_state.nav_points[index].target == target &&
+			host_queue.hud_state.nav_points[index].marker == marker)
 		{
 			break;
 		}
 	}
 	if (nav_index == NONE)
 	{
-		if (index < host_hud_state.nav_point_count)
-			host_hud_state.nav_points[index] = host_hud_state.nav_points[--host_hud_state.nav_point_count];
+		if (index < host_queue.hud_state.nav_point_count)
+			host_queue.hud_state.nav_points[index] = host_queue.hud_state.nav_points[--host_queue.hud_state.nav_point_count];
 		return;
 	}
-	if (index == host_hud_state.nav_point_count)
+	if (index == host_queue.hud_state.nav_point_count)
 	{
-		if (index == MAXIMUM_NAV_POINTS)
+		if (index == COOP_MAXIMUM_NAV_POINTS)
 			return;
-		host_hud_state.nav_point_count++;
+		host_queue.hud_state.nav_point_count++;
 	}
-	host_hud_state.nav_points[index].kind = kind;
-	host_hud_state.nav_points[index].nav_index = nav_index;
-	host_hud_state.nav_points[index].target = target;
-	host_hud_state.nav_points[index].marker = marker;
-	host_hud_state.nav_points[index].vertical_offset = vertical_offset;
+	host_queue.hud_state.nav_points[index].kind = kind;
+	host_queue.hud_state.nav_points[index].nav_index = nav_index;
+	host_queue.hud_state.nav_points[index].target = target;
+	host_queue.hud_state.nav_points[index].marker = marker;
+	host_queue.hud_state.nav_points[index].vertical_offset = vertical_offset;
 }
 
 /* host: the active nav points again (host_resend), and the objective to a
@@ -2353,23 +2296,23 @@ static void host_send_hud_state(
 {
 	short index;
 
-	if (!host_resend.refresh)
+	if (!coop_queue_arguments.refresh)
 		return;
-	if (host_resend.joined && host_hud_state.objective != NONE)
+	if (coop_queue_arguments.joined && host_queue.hud_state.objective != NONE)
 	{
 		struct distributed_coop_event *event = event_new(_coop_event_hud);
 
 		if (event)
 		{
 			event->type = _coop_hud_objective;
-			event->value = host_hud_state.objective;
+			event->value = host_queue.hud_state.objective;
 		}
 	}
-	for (index = 0; index < host_hud_state.nav_point_count; index++)
+	for (index = 0; index < host_queue.hud_state.nav_point_count; index++)
 	{
-		send_nav_point(host_hud_state.nav_points[index].kind, host_hud_state.nav_points[index].nav_index,
-			host_hud_state.nav_points[index].target, host_hud_state.nav_points[index].marker,
-			host_hud_state.nav_points[index].vertical_offset);
+		send_nav_point(host_queue.hud_state.nav_points[index].kind, host_queue.hud_state.nav_points[index].nav_index,
+			host_queue.hud_state.nav_points[index].target, host_queue.hud_state.nav_points[index].marker,
+			host_queue.hud_state.nav_points[index].vertical_offset);
 	}
 }
 
@@ -2469,15 +2412,15 @@ static void send_attach(
 	event->frame = child_marker_index;
 }
 
-/* the child's attachment in host_attachments, or NONE */
+/* the child's attachment in host_queue.attachments, or NONE */
 static short host_attachment_find(
 	long child_index)
 {
 	short index;
 
-	for (index = 0; index < host_attachment_count; index++)
+	for (index = 0; index < host_queue.attachment_count; index++)
 	{
-		if (host_attachments[index].child_index == child_index)
+		if (host_queue.attachments[index].child_index == child_index)
 			return index;
 	}
 	return NONE;
@@ -2488,20 +2431,20 @@ static void host_send_attachments(
 {
 	short index = 0;
 
-	if (!host_resend.refresh)
+	if (!coop_queue_arguments.refresh)
 		return;
-	while (index < host_attachment_count)
+	while (index < host_queue.attachment_count)
 	{
-		struct object_datum *child = object_try_and_get(host_attachments[index].child_index);
+		struct object_datum *child = object_try_and_get(host_queue.attachments[index].child_index);
 
 		/* the child is gone or has a new parent: forget it */
-		if (!child || child->object.parent_object_index != host_attachments[index].parent_index)
+		if (!child || child->object.parent_object_index != host_queue.attachments[index].parent_index)
 		{
-			host_attachments[index] = host_attachments[--host_attachment_count];
+			host_queue.attachments[index] = host_queue.attachments[--host_queue.attachment_count];
 			continue;
 		}
-		send_attach(_coop_attach, host_attachments[index].parent_index, host_attachments[index].parent_marker_index,
-			host_attachments[index].child_index, host_attachments[index].child_marker_index);
+		send_attach(_coop_attach, host_queue.attachments[index].parent_index, host_queue.attachments[index].parent_marker_index,
+			host_queue.attachments[index].child_index, host_queue.attachments[index].child_marker_index);
 		index++;
 	}
 }
@@ -2524,14 +2467,14 @@ void network_coop_note_attach(
 	index = host_attachment_find(child_index);
 	if (index == NONE)
 	{
-		if (host_attachment_count == MAXIMUM_ATTACHMENTS)
+		if (host_queue.attachment_count == COOP_MAXIMUM_ATTACHMENTS)
 			return;
-		index = host_attachment_count++;
+		index = host_queue.attachment_count++;
 	}
-	host_attachments[index].parent_index = parent_index;
-	host_attachments[index].child_index = child_index;
-	host_attachments[index].parent_marker_index = parent_marker_index;
-	host_attachments[index].child_marker_index = child_marker_index;
+	host_queue.attachments[index].parent_index = parent_index;
+	host_queue.attachments[index].child_index = child_index;
+	host_queue.attachments[index].parent_marker_index = parent_marker_index;
+	host_queue.attachments[index].child_marker_index = child_marker_index;
 }
 
 void network_coop_note_detach(
@@ -2545,7 +2488,7 @@ void network_coop_note_detach(
 	send_attach(_coop_detach, parent_index, NONE, child_index, NONE);
 	index = host_attachment_find(child_index);
 	if (index != NONE)
-		host_attachments[index] = host_attachments[--host_attachment_count];
+		host_queue.attachments[index] = host_queue.attachments[--host_queue.attachment_count];
 }
 
 void network_coop_note_effect(
@@ -2582,28 +2525,36 @@ static void host_send_broken_surfaces(
 	void)
 {
 	enum { SURFACES_PER_REFRESH = 8 };
-	static short cursor;
-	struct structure_bsp *structure_bsp = global_structure_bsp_get();
-	short count = (short)structure_bsp->breakable_surfaces.count;
+	short cursor = host_queue.broken_surface_cursor;
+	short count = (short)coop_queue_arguments.surface_count;
 	short sent = 0;
 	short step;
 
-	if (!host_resend.refresh || count <= 0)
+	if (!coop_queue_arguments.refresh || count <= 0)
 		return;
 	for (step = 0; step < count && sent < SURFACES_PER_REFRESH; step++)
 	{
 		short index = (short)((cursor + step) % count);
+		/* port: through the world's calls (the Rust port's) */
+		struct halo_sim_ai_call call;
 
-		if (!breakable_surface_extant(index))
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_surface_broken;
+		call.actor = NONE;
+		call.a = index;
+		network_coop_world_call(&call);
+		if (call.result)
 		{
-			struct structure_breakable_surface *surface = TAG_BLOCK_GET_ELEMENT(&structure_bsp->breakable_surfaces,
-				index, struct structure_breakable_surface);
+			real_point3d centroid;
 
-			network_coop_note_surface_broken(index, &surface->centroid);
+			centroid.x = call.output[0];
+			centroid.y = call.output[1];
+			centroid.z = call.output[2];
+			network_coop_note_surface_broken(index, &centroid);
 			sent++;
 		}
 	}
-	cursor = (short)((cursor + step) % count);
+	host_queue.broken_surface_cursor = (short)((cursor + step) % count);
 }
 
 void network_coop_note_object_effect(
@@ -2696,6 +2647,59 @@ boolean network_coop_skip_vote_status(
 	return TRUE;
 }
 
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_queue_game(
+	void)
+{
+	host_send_attachments();
+	host_send_looping_sounds();
+	host_send_hud_state();
+	host_send_broken_surfaces();
+	host_send_events();
+}
+
+/* host, each tick: what a late joiner lacks of the scripts' attachments,
+looping sounds and HUD state, and a few broken surfaces, again (with the
+resent state), and the events queued sent */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the events and the
+host's records. */
+static void host_send_queue(
+	void)
+{
+	struct halo_sim_network_coop_queue *arguments = &coop_queue_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	int checking = FALSE;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->refresh = host_resend.refresh;
+	arguments->joined = host_resend.joined;
+	arguments->events = (unsigned long)&coop_events;
+	arguments->queue = (unsigned long)&host_queue;
+	arguments->structure_bsp_index = global_structure_bsp_index;
+	arguments->surface_count = global_structure_bsp_get()->breakable_surfaces.count;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_events;
+	regions[1].size = sizeof(coop_events);
+	regions[2].address = (unsigned long)&host_queue;
+	regions[2].size = sizeof(host_queue);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_queue, &context, regions, 3,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_queue_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_queue);
+}
+
 /* host, after each tick */
 void network_coop_host_tick(
 	void)
@@ -2715,11 +2719,7 @@ void network_coop_host_tick(
 		host_send_object_names();
 	host_send_world();
 	host_send_screen_effect();
-	host_send_attachments();
-	host_send_looping_sounds();
-	host_send_hud_state();
-	host_send_broken_surfaces();
-	host_send_events();
+	host_send_queue();
 }
 
 /* client, after each tick */

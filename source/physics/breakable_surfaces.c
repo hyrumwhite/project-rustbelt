@@ -336,6 +336,21 @@ void breakable_surface_port_break(
 	breakable_surface_effect(breakable_surface_index, &damage, breakable_surface->collision_surface_index);
 }
 
+short breakable_surfaces_port_break_first(
+	short count)
+{
+	struct structure_bsp *structure_bsp = global_structure_bsp_get();
+	short index;
+
+	for (index = 0; index < count && index < structure_bsp->breakable_surfaces.count; index++)
+	{
+		breakable_surface_port_break(index, &TAG_BLOCK_GET_ELEMENT(&structure_bsp->breakable_surfaces, index,
+			struct structure_breakable_surface)->centroid);
+	}
+
+	return (short)structure_bsp->breakable_surfaces.count;
+}
+
 /* ---------- private code */
 
 /* port: whether a structure bsp index (the scenario's, from the map) and a

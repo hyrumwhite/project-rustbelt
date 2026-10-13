@@ -80,6 +80,11 @@ nothing if it is already broken */
 void breakable_surface_port_break(
 	short breakable_surface_index,
 	real_point3d const *epicenter);
+/* port: for the tests (halo_sim.c's HALO_SIM_BREAK_SURFACES): breaks the
+structure's first `count` breakable surfaces from their middles; the count
+it has */
+short breakable_surfaces_port_break_first(
+	short count);
 void breakable_surfaces_initialize(
 	void);
 void breakable_surfaces_dispose(

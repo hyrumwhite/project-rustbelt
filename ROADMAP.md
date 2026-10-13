@@ -1142,6 +1142,23 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - All four planted errors were caught: the rotation's step, a change's sends, the flags' mask and the moved rotation.
        - **Rust in charge:** in co-op on a30, with all networking systems in Rust, the positions differ by a median of 7.8 cm (largest 19.1), within the C's 8.0 to 15.9, and both machines end with the host's count of items.
 
+   - [x] Co-op's host event queue and resends in Rust (`halo_map::network_coop`, world step 33): network_coop.c's `host_send_attachments`, `host_send_looping_sounds`, `host_send_hud_state`, `host_send_broken_surfaces` and `host_send_events`, with `event_new` and `send_attach`.
+     - **What Rust does:** the host queues each thing that happens once (a sound, a title, a HUD change, a nav point, an attach, a broken surface) and sends the queue each tick, each event in three ticks' messages. With the resent state (a machine joined, or every two seconds), it queues again what a late joiner would lack:
+       - what the scripts attached, forgetting a child that is gone or has a new parent;
+       - the looping sounds they started (music, ambience), and a stop for one that ended without the scripts stopping it;
+       - the nav points active, and the objective to a machine that joined;
+       - the next eight broken surfaces, round them all.
+     - **The game's, through calls:** sending the events, whether a looping sound still plays, whether a surface is broken (and its centroid), and the full queue's log. The event, the queue and the host's records moved to network_coop_records.h.
+     - **Test hooks:**
+       - `HALO_SIM_BREAK_SURFACES=<n>` breaks the structure's first n breakable surfaces when the console command runs (a30 has 3; a10 and b30 have none), since no script breaks them.
+       - A nav point comes from the command `(activate_team_nav_point_object default player (list_get (players) 0) 0.5)`.
+       - `HOST_ONLY_COMMAND=1` in the test script keeps the command off the joiner.
+     - **A crash found and fixed (hud_nav_points.c):** with a nav point active, a co-op client halted on custom_render_nav_point's assertion as its player spawned. How a nav point draws is worked out in the tick's HUD update, only for a player with a unit then, and a client's unit comes from the host between ticks. Now a nav point not yet worked out waits a tick to draw.
+     - **Results:**
+       - In 100-second co-op sessions on a30, all 2,048 ticks agree, with none left out, with and without the hooks.
+       - All nine planted errors were caught. a30's own scripts catch the looping sounds' start and stop, an attach, the objective's resend, the events' sends and their numbers. The hooks catch a nav point's offset, a broken surface's BSP and the surfaces' rotation.
+       - **Rust in charge:** in co-op on a30, with all networking systems in Rust and surfaces broken, the positions differ by a median of 12.4 to 13.3 cm, within the C's 8.0 to 15.9, and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

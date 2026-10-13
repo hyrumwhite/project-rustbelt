@@ -25,9 +25,10 @@ use crate::ai_actor::{AiCall, AiHost, AiMemory, AiMemoryExt, NONE, WorldContext}
 use crate::data_array::{DATA_COUNT, DATA_DATA, DATA_SIZE};
 use crate::distributed_wire::{self as wire, UNIT_SCALE};
 use crate::layout::{
-    coop_sent_device as sd, coop_sent_look as sl, coop_sent_transform as st, device_datum as dd,
+    coop_events as ce, coop_host_attachment as at, coop_host_looping_sound as ls, coop_host_nav_point as np,
+    coop_host_queue as hq, coop_sent_device as sd, coop_sent_look as sl, coop_sent_transform as st, device_datum as dd,
     distributed_coop_device_group as dg,
-    distributed_coop_device_state as ds, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
+    distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
     net_values as nv, object_header_datum as oh, unit_datum as ud,
 };
 
@@ -506,4 +507,287 @@ pub fn host_device_groups(context: &WorldContext, host: &impl AiHost) {
     // SAFETY: plain data of its size
     let a: DeviceGroupsArguments = unsafe { std::mem::transmute(bytes) };
     DeviceGroups { context, host, m, a }.send();
+}
+
+// ---------- the events, and the scripts' state resent
+
+/// network_coop.c's queue calls (halo_sim.h's `_network_coop_world_call_*`).
+mod queue_call {
+    /// The events' message, of the first `b` queued, to every client.
+    pub const SEND_EVENTS: i32 = 3;
+    /// Whether the looping sound (`a`, a tag) is no longer playing:
+    /// `result`.
+    pub const LOOPING_SOUND_STOPPED: i32 = 4;
+    /// Whether the structure's breakable surface `a` is broken: `result`,
+    /// and its centroid: `output[0..3]`.
+    pub const SURFACE_BROKEN: i32 = 5;
+    /// Logs that the queue is full (an event of kind `a` not sent).
+    pub const LOG_EVENTS_FULL: i32 = 6;
+}
+
+/// halo_sim.h's `struct halo_sim_network_coop_queue`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct QueueArguments {
+    pub refresh: i32,
+    pub joined: i32,
+    pub events: u32,
+    pub queue: u32,
+    pub structure_bsp_index: i32,
+    pub surface_count: i32,
+}
+
+/// network_coop.c's `host_send_broken_surfaces`: the broken surfaces
+/// resent each refresh.
+const SURFACES_PER_REFRESH: i16 = 8;
+
+struct Queue<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    a: QueueArguments,
+}
+
+impl<H: AiHost> Queue<'_, H> {
+    fn call(&self, kind: i32, a: i32, b: i32) -> AiCall {
+        let mut call = AiCall { kind, actor: NONE, a, b, ..AiCall::default() };
+        self.host.call(&mut call);
+        call
+    }
+
+    /// `object_try_and_get`: the object's datum.
+    fn object(&self, object_index: i32) -> Option<u32> {
+        crate::ai_actor::datum_get(self.m, self.context.object_header_data, object_index)
+            .map(|header| self.m.r32(header + oh::DATUM as u32))
+    }
+
+    fn count(&self) -> u32 {
+        self.a.events + ce::COUNT as u32
+    }
+
+    fn event(&self, index: i16) -> u32 {
+        self.a.events + ce::EVENTS as u32 + index as u32 * ev::SIZEOF as u32
+    }
+
+    fn send(&self, index: i16) -> u32 {
+        self.a.events + ce::SENDS as u32 + 2 * index as u32
+    }
+
+    /// network_coop.c's `event_new`: a new event of the kind, to be filled
+    /// in (none with the queue full).
+    fn event_new(&self, kind: usize) -> Option<u32> {
+        let m = self.m;
+        let count = m.i16(self.count());
+        if count as usize == nv::COOP_MAXIMUM_QUEUED_EVENTS {
+            self.call(queue_call::LOG_EVENTS_FULL, kind as i32, 0);
+            return None;
+        }
+        let event = self.event(count);
+        for offset in 0..ev::SIZEOF as u32 {
+            m.w8(event + offset, 0);
+        }
+        m.w8(event + ev::KIND as u32, kind as u8);
+        let number = m.r16(self.a.events + ce::NEXT_NUMBER as u32).wrapping_add(1);
+        m.w16(self.a.events + ce::NEXT_NUMBER as u32, number);
+        m.w16(event + ev::NUMBER as u32, number);
+        for field in [ev::OBJECT_INDEX, ev::TARGET, ev::TAG_INDEX, ev::DEFINITION_INDEX] {
+            m.w32(event + field as u32, NONE as u32);
+        }
+        m.set_i16(event + ev::NAME_INDEX as u32, NONE as i16);
+        m.set_i16(self.send(count), 0);
+        m.set_i16(self.count(), count + 1);
+        Some(event)
+    }
+
+    /// network_coop.c's `send_attach`: an attach, with the markers' indices.
+    fn send_attach(&self, kind: usize, parent_index: i32, parent_marker_index: i16, child_index: i32, child_marker_index: i16) {
+        let m = self.m;
+        let (Some(parent), Some(child)) = (self.object(parent_index), self.object(child_index)) else { return };
+        let Some(event) = self.event_new(nv::_COOP_EVENT_ATTACH) else { return };
+        m.w8(event + ev::TYPE as u32, kind as u8);
+        m.w32(event + ev::OBJECT_INDEX as u32, parent_index as u32);
+        m.w16(event + ev::NAME_INDEX as u32, m.r16(parent + ud::OBJECT_NAME_INDEX as u32));
+        m.w32(event + ev::DEFINITION_INDEX as u32, m.r32(parent + ud::DEFINITION_INDEX as u32));
+        m.w32(event + ev::TARGET as u32, child_index as u32);
+        m.w32(event + ev::TAG_INDEX as u32, m.r32(child + ud::DEFINITION_INDEX as u32));
+        m.set_f32(event + ev::REALS as u32, m.i16(child + ud::OBJECT_NAME_INDEX as u32) as f32);
+        m.set_i16(event + ev::VALUE as u32, parent_marker_index);
+        m.set_i16(event + ev::FRAME as u32, child_marker_index);
+    }
+
+    /// Removes a record from a list of them, its last put in its place.
+    fn remove(&self, records: u32, size: u32, count_at: u32, index: i16) {
+        let count = self.m.i16(count_at) - 1;
+        self.m.set_i16(count_at, count);
+        for offset in 0..size {
+            self.m.w8(records + index as u32 * size + offset, self.m.r8(records + count as u32 * size + offset));
+        }
+    }
+
+    /// network_coop.c's `host_send_attachments`.
+    fn attachments(&self) {
+        let m = self.m;
+        if self.a.refresh == 0 {
+            return;
+        }
+        let records = self.a.queue + hq::ATTACHMENTS as u32;
+        let count_at = self.a.queue + hq::ATTACHMENT_COUNT as u32;
+        let mut index: i16 = 0;
+        while index < m.i16(count_at) {
+            let attachment = records + index as u32 * at::SIZEOF as u32;
+            let parent_index = m.i32(attachment + at::PARENT_INDEX as u32);
+            let child_index = m.i32(attachment + at::CHILD_INDEX as u32);
+            // (the child is gone or has a new parent: forget it)
+            let child = self.object(child_index);
+            if !child.is_some_and(|child| m.i32(child + ud::OBJECT_PARENT_OBJECT_INDEX as u32) == parent_index) {
+                self.remove(records, at::SIZEOF as u32, count_at, index);
+                continue;
+            }
+            self.send_attach(
+                nv::_COOP_ATTACH,
+                parent_index,
+                m.i16(attachment + at::PARENT_MARKER_INDEX as u32),
+                child_index,
+                m.i16(attachment + at::CHILD_MARKER_INDEX as u32),
+            );
+            index += 1;
+        }
+    }
+
+    /// network_coop.c's `host_send_looping_sounds`: a looping sound that
+    /// stopped without the scripts stopping it is stopped on the clients;
+    /// the rest are started again with the resent state.
+    fn looping_sounds(&self) {
+        let m = self.m;
+        let records = self.a.queue + hq::LOOPING_SOUNDS as u32;
+        let count_at = self.a.queue + hq::LOOPING_SOUND_COUNT as u32;
+        let mut index: i16 = 0;
+        while index < m.i16(count_at) {
+            let sound = records + index as u32 * ls::SIZEOF as u32;
+            let definition_index = m.i32(sound + ls::DEFINITION_INDEX as u32);
+            if self.call(queue_call::LOOPING_SOUND_STOPPED, definition_index, 0).result != 0 {
+                if let Some(event) = self.event_new(nv::_COOP_EVENT_SOUND) {
+                    m.w8(event + ev::TYPE as u32, nv::_COOP_SOUND_LOOPING_STOP as u8);
+                    m.w32(event + ev::TAG_INDEX as u32, definition_index as u32);
+                }
+                self.remove(records, ls::SIZEOF as u32, count_at, index);
+                continue;
+            }
+            if self.a.refresh != 0 {
+                if let Some(event) = self.event_new(nv::_COOP_EVENT_SOUND) {
+                    m.w8(event + ev::TYPE as u32, nv::_COOP_SOUND_LOOPING_START as u8);
+                    m.w32(event + ev::TAG_INDEX as u32, definition_index as u32);
+                    m.w32(event + ev::OBJECT_INDEX as u32, m.r32(sound + ls::OBJECT_INDEX as u32));
+                    m.set_f32(event + ev::REALS as u32, m.f32(sound + ls::SCALE as u32));
+                }
+            }
+            index += 1;
+        }
+    }
+
+    /// network_coop.c's `host_send_hud_state`: the nav points active again,
+    /// and the objective to a machine that joined.
+    fn hud_state(&self) {
+        let m = self.m;
+        if self.a.refresh == 0 {
+            return;
+        }
+        let objective = m.i16(self.a.queue + hq::HUD_OBJECTIVE as u32);
+        if self.a.joined != 0 && objective != NONE as i16 {
+            if let Some(event) = self.event_new(nv::_COOP_EVENT_HUD) {
+                m.w8(event + ev::TYPE as u32, nv::_COOP_HUD_OBJECTIVE as u8);
+                m.set_i16(event + ev::VALUE as u32, objective);
+            }
+        }
+        for index in 0..m.i16(self.a.queue + hq::NAV_POINT_COUNT as u32) {
+            let nav_point = self.a.queue + hq::NAV_POINTS as u32 + index as u32 * np::SIZEOF as u32;
+            // (network_coop.c's send_nav_point)
+            if let Some(event) = self.event_new(nv::_COOP_EVENT_NAV_POINT) {
+                m.w8(event + ev::TYPE as u32, m.i16(nav_point + np::KIND as u32) as u8);
+                m.w16(event + ev::VALUE as u32, m.r16(nav_point + np::NAV_INDEX as u32));
+                m.w32(event + ev::TARGET as u32, m.r32(nav_point + np::TARGET as u32));
+                m.w32(event + ev::OBJECT_INDEX as u32, m.r32(nav_point + np::MARKER as u32));
+                m.set_f32(event + ev::REALS as u32, m.f32(nav_point + np::VERTICAL_OFFSET as u32));
+            }
+        }
+    }
+
+    /// network_coop.c's `host_send_broken_surfaces`: a few broken surfaces
+    /// again each refresh, round them all (`network_coop_note_surface_broken`'s
+    /// events, broken from their middle).
+    fn broken_surfaces(&self) {
+        let m = self.m;
+        let count = self.a.surface_count as i16;
+        if self.a.refresh == 0 || count <= 0 {
+            return;
+        }
+        let cursor_at = self.a.queue + hq::BROKEN_SURFACE_CURSOR as u32;
+        let cursor = m.i16(cursor_at) as i32;
+        let mut sent: i16 = 0;
+        let mut step: i16 = 0;
+        while step < count && sent < SURFACES_PER_REFRESH {
+            let index = ((cursor + step as i32) % count as i32) as i16;
+            let call = self.call(queue_call::SURFACE_BROKEN, index as i32, 0);
+            if call.result != 0 {
+                if let Some(event) = self.event_new(nv::_COOP_EVENT_SURFACE_BROKEN) {
+                    m.set_i16(event + ev::VALUE as u32, index);
+                    m.set_i16(event + ev::FRAME as u32, self.a.structure_bsp_index as i16);
+                    for (axis, &value) in call.vector().iter().enumerate() {
+                        m.set_f32(event + ev::REALS as u32 + 4 * axis as u32, value);
+                    }
+                }
+                sent += 1;
+            }
+            step += 1;
+        }
+        m.set_i16(cursor_at, ((cursor + step as i32) % count as i32) as i16);
+    }
+
+    /// network_coop.c's `host_send_events`: the events queued, each kept
+    /// for `EVENT_SENDS` ticks' messages.
+    fn events(&self) {
+        let m = self.m;
+        let mut count = m.i16(self.count());
+        if count == 0 {
+            return;
+        }
+        self.call(queue_call::SEND_EVENTS, 0, count as i32);
+        // (dropping the ones sent their times, the rest kept in order)
+        let mut index: i16 = 0;
+        while index < count {
+            let sends = m.i16(self.send(index)) + 1;
+            m.set_i16(self.send(index), sends);
+            if (sends as usize) < nv::COOP_EVENT_SENDS {
+                index += 1;
+                continue;
+            }
+            count -= 1;
+            m.set_i16(self.count(), count);
+            for offset in 0..(count - index) as u32 * ev::SIZEOF as u32 {
+                m.w8(self.event(index) + offset, m.r8(self.event(index + 1) + offset));
+            }
+            for offset in 0..(count - index) as u32 * 2 {
+                m.w8(self.send(index) + offset, m.r8(self.send(index + 1) + offset));
+            }
+        }
+    }
+}
+
+/// The world step of co-op's host resending the scripts' state (what they
+/// attached, the looping sounds they started, the HUD state they set, a few
+/// broken surfaces) and sending its events each tick.
+pub fn host_queue(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let mut bytes = [0u8; std::mem::size_of::<QueueArguments>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    let a: QueueArguments = unsafe { std::mem::transmute(bytes) };
+    let queue = Queue { context, host, m, a };
+    queue.attachments();
+    queue.looping_sounds();
+    queue.hud_state();
+    queue.broken_surfaces();
+    queue.events();
 }

@@ -65,6 +65,7 @@ same datum index (identifier and all), so that any message can name one:
 #include "cutscene/cinematics.h"
 #include "network_coop.h"
 #include "network_distributed.h"
+#include "network_objects_records.h"
 #include "memory/memory_pool.h"
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
@@ -248,43 +249,9 @@ enum
 	_distributed_object_predicted_bit,
 };
 
-struct distributed_object_change
-{
-	byte change;
-	byte flags;
-	byte owner_player_index;
-	/* which bitmap of its shaders it draws with, when not its tag's (0). An
-	AI unit's actor variant sets it after the unit is made
-	(actor_customize_unit): the Elite major's and commander's armor are 1
-	and 2. Builds before it sent 0 here. */
-	byte forced_shader_permutation_index;
-	long object_index;
-	long definition_index;
-	short owner_team_index;
-	short variant_number;
-	real_point3d position;
-	real_vector3d forward;
-	real_vector3d up;
-	real_vector3d translational_velocity;
-	real_vector3d angular_velocity;
-	real_rgb_color change_colors[NUMBER_OF_OBJECT_CHANGE_COLORS];
-	byte region_permutations[MAXIMUM_REGIONS_PER_OBJECT];
-};
+/* (struct distributed_object_change: network_objects_records.h) */
 
-struct distributed_object_state
-{
-	long object_index;
-	byte flags;
-	byte pad;
-	/* the client's tick, its low 16 bits: a vehicle prediction's, and
-	(_distributed_object_predicted_bit) the one the host has it at */
-	short time;
-	real_point3d position;
-	struct distributed_vector forward;
-	struct distributed_vector up;
-	struct distributed_vector translational_velocity;
-	struct distributed_vector angular_velocity;
-};
+/* (struct distributed_object_state: network_objects_records.h) */
 
 typedef char distributed_object_state_size_assert[sizeof(struct distributed_object_state) == 44 ? 1 : -1];
 typedef char distributed_object_change_size_assert[sizeof(struct distributed_object_change) == 132 &&
@@ -341,37 +308,10 @@ rest (NONE: not since it was told of), to send it to every client
 (REST_STATE_REPEATS) */
 static boolean objects_host_state_moving[MAXIMUM_TRACKED_OBJECTS];
 static long objects_host_rest_times[MAXIMUM_TRACKED_OBJECTS];
-/* ... what each unit's inventory was last sent as (in all, and its weapons
-and grenades), when to every client, and when its ammunition alone last
-changed (NONE: not since); when it last carried anything (NONE: never) */
-static struct
-{
-	unsigned long checksum;
-	unsigned long weapons_checksum;
-	long time;
-	long ammunition_time;
-	long carried_time;
-} objects_host_inventories[MAXIMUM_TRACKED_OBJECTS];
-/* ... each client machine, found once a tick: where its players' living
-units are, those units, and the vehicles they drive (with the player's
-absolute index); and where every player's living unit is, for a machine
-with none (dead or joining, it watches one of them) */
-static struct
-{
-	short count;
-	long indices[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	short player_unit_count;
-	real_point3d player_unit_origins[MAXIMUM_TRACKED_PLAYERS];
-	struct
-	{
-		short unit_count;
-		long unit_indices[MAXIMUM_LOCAL_PLAYERS];
-		real_point3d origins[MAXIMUM_LOCAL_PLAYERS];
-		short vehicle_count;
-		long vehicle_indices[MAXIMUM_LOCAL_PLAYERS];
-		short vehicle_player_indices[MAXIMUM_LOCAL_PLAYERS];
-	} machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-} objects_host_viewers;
+/* ... what each unit's inventory was last sent as (network_objects_records.h) */
+static struct objects_host_inventory objects_host_inventories[MAXIMUM_TRACKED_OBJECTS];
+/* ... each client machine, found once a tick (network_objects_records.h) */
+static struct objects_host_viewers objects_host_viewers;
 /* ... each machine it has told all its objects: when, and which players it
 had then (another machine in its place has others) */
 static struct
@@ -380,39 +320,8 @@ static struct
 	long player_indices[MAXIMUM_LOCAL_PLAYERS];
 } objects_host_machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 /* ... each client's player's latest vehicle prediction, taken at the next
-tick; the vehicle it last took (NONE: none), at which of the client's ticks
-and its own, and where that left the host's copy; and the anchor
-predictions are measured from: one it took, at which of the client's ticks
-and its own, and where the client had it; the velocity it took (what its
-next tick started from); and how fast its own ticks sent the vehicle beyond
-the client's word, the most of this span of VEHICLE_PREDICTION_SPEED_TICKS
-and of the one before */
-static struct
-{
-	boolean valid;
-	long machine_index;
-	struct distributed_object_state state;
-	long accepted_vehicle_index;
-	word accepted_time;
-	long accepted_host_time;
-	real_point3d accepted_host_position;
-	word anchor_time;
-	long anchor_host_time;
-	real_point3d anchor_position;
-	real_vector3d accepted_velocity;
-	long speed_time;
-	real speeds[2];
-	/* the vehicle it last had on the ground (NONE: none), how high, and how
-	fast up it went as it left it, and when (network_objects_note_vehicle_ground) */
-	long ground_vehicle_index;
-	long ground_time;
-	/* the vehicle whose copy was at rest when it last took its word (NONE:
-	none), and where it came to rest */
-	long rest_vehicle_index;
-	real_point3d rest_position;
-	real ground_height;
-	real ground_rise_speed;
-} objects_host_vehicle_predictions[MAXIMUM_TRACKED_PLAYERS];
+tick (network_objects_records.h) */
+static struct objects_host_vehicle_prediction objects_host_vehicle_predictions[MAXIMUM_TRACKED_PLAYERS];
 /* a client: the host's objects it has, by absolute index */
 static long objects_client_has[MAXIMUM_TRACKED_OBJECTS];
 /* ... the bipeds, no player's, the host said were dead while they lived
@@ -489,13 +398,7 @@ static boolean objects_client_creating;
 static boolean objects_client_deleting;
 
 /* for the automated tests' reports (network_test.c) */
-static struct
-{
-	long creates;
-	long deletes;
-	long create_failures;
-	long own_objects_removed;
-} objects_statistics;
+static struct objects_statistics objects_statistics;
 
 void network_distributed_item_statistics(
 	long *creates,
@@ -1381,15 +1284,7 @@ enum
 	DAMAGE_ANIMATION_KEPT_TICKS = 2 * TICKS_PER_SECOND,
 };
 
-/* type: units.h's _unit_damage_animation_soft_ping and the rest; number:
-the pick's, so a client tells a pick sent again from a new one */
-struct distributed_damage_animation
-{
-	long unit_index;
-	short animation_index;
-	byte type;
-	byte number;
-};
+/* (struct distributed_damage_animation: network_objects_records.h) */
 
 struct distributed_damage_animations_message
 {
@@ -1398,11 +1293,7 @@ struct distributed_damage_animations_message
 };
 
 /* host: the picks still to be sent */
-static struct
-{
-	struct distributed_damage_animation animation;
-	short sends;
-} host_damage_animations[MAXIMUM_QUEUED_DAMAGE_ANIMATIONS];
+static struct objects_host_damage_animation host_damage_animations[MAXIMUM_QUEUED_DAMAGE_ANIMATIONS];
 static short host_damage_animation_count;
 static byte host_damage_animation_number;
 
@@ -1465,24 +1356,122 @@ short network_objects_damage_animation(
 	return animation_index;
 }
 
+/* ---------- the host's tick through Rust
+
+port: network_objects_host_tick is a world step (halo_sim.c's; crates/
+halo_map's network_host): Rust's in Rust's mode, the game's checked against
+it otherwise. What it sends goes out of one message at a time
+(objects_host_message), through the host's calls, which the check records
+with the bytes as they are; where objects are is the game's too. What it
+reads of the netcode and the camera is taken as the tick begins
+(objects_host_arguments). */
+
+static union
+{
+	struct distributed_object_change_message changes;
+	struct distributed_object_state_message states;
+	struct distributed_inventory_message inventories;
+	struct distributed_damage_animations_message damage_animations;
+} objects_host_message;
+
+static struct halo_sim_network_host objects_host_arguments;
+
+typedef char network_objects_host_machines_assert[
+	sizeof(objects_host_arguments.machine_indices) / sizeof(objects_host_arguments.machine_indices[0]) ==
+		HALO_PORT_MAXIMUM_NETWORK_MACHINES &&
+	sizeof(objects_host_arguments.player_lists[0]) / sizeof(objects_host_arguments.player_lists[0][0]) ==
+		MAXIMUM_LOCAL_PLAYERS ? 1 : -1];
+
+/* port: the host's calls into the game (the Rust port's, crates/halo_map's
+network_host), recorded in check mode */
+void network_host_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_host_call_send:
+	{
+		byte type = (byte)(call->b & 0xFF);
+		short count = (short)((call->b >> 8) & 0xFF);
+		word size = (word)((unsigned long)call->b >> 16);
+
+		if (call->a == NONE)
+			distributed_send(&objects_host_message, type, count, size, (short)call->actor);
+		else
+			distributed_send_to_machine(call->a, &objects_host_message, type, count, size);
+		break;
+	}
+	case _network_host_call_origin:
+		object_get_origin(call->a, (real_point3d *)&call->output[0]);
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+/* the message in objects_host_message, of its type and count, to that
+client machine (NONE: where destination says) */
+static void network_host_send(
+	long machine_index,
+	short destination,
+	byte type,
+	short count,
+	word size)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_host_call_send;
+	call.actor = machine_index == NONE ? destination : 0;
+	call.a = machine_index;
+	call.b = (long)type | ((long)(count & 0xFF) << 8) | ((long)size << 16);
+	network_host_call(&call);
+}
+
+static void network_host_origin(
+	long object_index,
+	real_point3d *origin)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_host_call_origin;
+	call.actor = NONE;
+	call.a = object_index;
+	network_host_call(&call);
+	csmemcpy(origin, &call.output[0], sizeof(*origin));
+}
+
+/* whether a co-op cutscene is on, and the camera it films through */
+static void distributed_host_note_view(
+	void)
+{
+	objects_host_arguments.coop_cinematic = network_coop_active() && cinematic_in_progress();
+	if (objects_host_arguments.coop_cinematic)
+		csmemcpy(objects_host_arguments.camera, &observer_get_camera(0)->position, sizeof(objects_host_arguments.camera));
+	else
+		csmemset(objects_host_arguments.camera, 0, sizeof(objects_host_arguments.camera));
+}
+
 /* host, each tick: the picks still to be sent, to every client */
 static void distributed_host_send_damage_animations(
 	void)
 {
-	struct distributed_damage_animations_message message;
+	struct distributed_damage_animations_message *message = &objects_host_message.damage_animations;
 	short count = 0;
 	short index;
 
 	for (index = 0; index < host_damage_animation_count; index++)
 	{
-		message.animations[count++] = host_damage_animations[index].animation;
+		message->animations[count++] = host_damage_animations[index].animation;
 		if (--host_damage_animations[index].sends <= 0)
 			host_damage_animations[index--] = host_damage_animations[--host_damage_animation_count];
 	}
 	if (count > 0)
 	{
-		distributed_send(&message, _distributed_message_damage_animations, count,
-			(word)(sizeof(message.header) + count * sizeof(message.animations[0])), _distributed_to_clients);
+		network_host_send(NONE, _distributed_to_clients, _distributed_message_damage_animations, count,
+			(word)(sizeof(message->header) + count * sizeof(message->animations[0])));
 	}
 }
 
@@ -1575,7 +1564,7 @@ static void distributed_host_update_objects(
 	void)
 {
 	static boolean seen[MAXIMUM_TRACKED_OBJECTS];
-	struct distributed_object_change_message message;
+	struct distributed_object_change_message *changes = &objects_host_message.changes;
 	short count = 0;
 	short limit = MIN(MAXIMUM_ENTRIES_PER_MESSAGE, RELIABLE_ENTRIES(struct distributed_object_change));
 	struct object_iterator iterator;
@@ -1595,15 +1584,14 @@ static void distributed_host_update_objects(
 		/* (another object in the same place: that one is gone) */
 		if (objects_host_told[absolute_index] != NONE)
 		{
-			csmemset(&message.changes[count], 0, sizeof(message.changes[count]));
-			message.changes[count].change = _object_change_delete;
-			message.changes[count].object_index = objects_host_told[absolute_index];
+			csmemset(&changes->changes[count], 0, sizeof(changes->changes[count]));
+			changes->changes[count].change = _object_change_delete;
+			changes->changes[count].object_index = objects_host_told[absolute_index];
 			objects_statistics.deletes++;
 			if (++count == limit)
 			{
-				distributed_send(&message, _distributed_message_object_changes, count,
-					(word)(sizeof(message.header) + count * sizeof(struct distributed_object_change)),
-					_distributed_to_clients_reliably);
+				network_host_send(NONE, _distributed_to_clients_reliably, _distributed_message_object_changes, count,
+					(word)(sizeof(changes->header) + count * sizeof(struct distributed_object_change)));
 				count = 0;
 			}
 		}
@@ -1611,12 +1599,11 @@ static void distributed_host_update_objects(
 		if (absolute_index >= objects_host_told_count)
 			objects_host_told_count = absolute_index + 1;
 		objects_statistics.creates++;
-		distributed_change_from_object(iterator.index, &message.changes[count]);
+		distributed_change_from_object(iterator.index, &changes->changes[count]);
 		if (++count == limit)
 		{
-			distributed_send(&message, _distributed_message_object_changes, count,
-				(word)(sizeof(message.header) + count * sizeof(struct distributed_object_change)),
-				_distributed_to_clients_reliably);
+			network_host_send(NONE, _distributed_to_clients_reliably, _distributed_message_object_changes, count,
+				(word)(sizeof(changes->header) + count * sizeof(struct distributed_object_change)));
 			count = 0;
 		}
 	}
@@ -1624,24 +1611,22 @@ static void distributed_host_update_objects(
 	{
 		if (objects_host_told[absolute_index] == NONE || seen[absolute_index])
 			continue;
-		csmemset(&message.changes[count], 0, sizeof(message.changes[count]));
-		message.changes[count].change = _object_change_delete;
-		message.changes[count].object_index = objects_host_told[absolute_index];
+		csmemset(&changes->changes[count], 0, sizeof(changes->changes[count]));
+		changes->changes[count].change = _object_change_delete;
+		changes->changes[count].object_index = objects_host_told[absolute_index];
 		objects_host_told[absolute_index] = NONE;
 		objects_statistics.deletes++;
 		if (++count == limit)
 		{
-			distributed_send(&message, _distributed_message_object_changes, count,
-				(word)(sizeof(message.header) + count * sizeof(struct distributed_object_change)),
-				_distributed_to_clients_reliably);
+			network_host_send(NONE, _distributed_to_clients_reliably, _distributed_message_object_changes, count,
+				(word)(sizeof(changes->header) + count * sizeof(struct distributed_object_change)));
 			count = 0;
 		}
 	}
 	if (count)
 	{
-		distributed_send(&message, _distributed_message_object_changes, count,
-			(word)(sizeof(message.header) + count * sizeof(struct distributed_object_change)),
-			_distributed_to_clients_reliably);
+		network_host_send(NONE, _distributed_to_clients_reliably, _distributed_message_object_changes, count,
+			(word)(sizeof(changes->header) + count * sizeof(struct distributed_object_change)));
 	}
 }
 
@@ -1772,8 +1757,12 @@ static void distributed_host_find_viewers(
 	struct data_iterator iterator;
 	struct player_datum *player;
 
-	objects_host_viewers.count = distributed_client_machines(objects_host_viewers.indices,
-		HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	short index;
+
+	/* (distributed_client_machines, as the tick began) */
+	objects_host_viewers.count = (short)objects_host_arguments.machine_count;
+	for (index = 0; index < objects_host_viewers.count; index++)
+		objects_host_viewers.indices[index] = objects_host_arguments.machine_indices[index];
 	objects_host_viewers.player_unit_count = 0;
 	data_iterator_new(&iterator, player_data);
 	while ((player = data_iterator_next(&iterator)) != NULL &&
@@ -1783,13 +1772,13 @@ static void distributed_host_find_viewers(
 
 		if (unit_index != NONE)
 		{
-			object_get_origin(unit_index,
+			network_host_origin(unit_index,
 				&objects_host_viewers.player_unit_origins[objects_host_viewers.player_unit_count++]);
 		}
 	}
 	for (machine_number = 0; machine_number < objects_host_viewers.count; machine_number++)
 	{
-		long *player_list = machine_get_player_list(objects_host_viewers.indices[machine_number]);
+		long *player_list = objects_host_arguments.player_lists[machine_number];
 		short local_player_index;
 
 		objects_host_viewers.machines[machine_number].unit_count = 0;
@@ -1806,7 +1795,7 @@ static void distributed_host_find_viewers(
 				continue;
 			count = objects_host_viewers.machines[machine_number].unit_count++;
 			objects_host_viewers.machines[machine_number].unit_indices[count] = unit_index;
-			object_get_origin(unit_index, &objects_host_viewers.machines[machine_number].origins[count]);
+			network_host_origin(unit_index, &objects_host_viewers.machines[machine_number].origins[count]);
 			if (vehicle_index != NONE)
 			{
 				count = objects_host_viewers.machines[machine_number].vehicle_count++;
@@ -1841,12 +1830,11 @@ static short distributed_host_object_period(
 	/* in a co-op cutscene every client looks through the host's camera, so
 	what it films is sent as often as what's next to the client's players
 	(b30's sword Elite walking out of the door) */
-	if (network_coop_active() && cinematic_in_progress())
+	if (objects_host_arguments.coop_cinematic)
 	{
-		real_point3d const *camera = &observer_get_camera(0)->position;
-		real dx = position->x - camera->x;
-		real dy = position->y - camera->y;
-		real dz = position->z - camera->z;
+		real dx = position->x - objects_host_arguments.camera[0];
+		real dy = position->y - objects_host_arguments.camera[1];
+		real dz = position->z - objects_host_arguments.camera[2];
 
 		nearest = dx * dx + dy * dy + dz * dz;
 	}
@@ -1876,6 +1864,8 @@ short network_objects_send_period(
 {
 	short machine_number;
 
+	/* (the view now: the netcode's actors ask between ticks) */
+	distributed_host_note_view();
 	for (machine_number = 0; machine_number < objects_host_viewers.count; machine_number++)
 	{
 		if (objects_host_viewers.indices[machine_number] == machine_index)
@@ -1915,7 +1905,7 @@ static void distributed_host_send_states(
 	/* (one come to rest may be in its turn too) */
 	static struct distributed_object_state states[MAXIMUM_TRACKED_OBJECTS + RESTING_STATES_PER_TICK];
 	static byte kinds[MAXIMUM_TRACKED_OBJECTS + RESTING_STATES_PER_TICK];
-	struct distributed_object_state_message message;
+	struct distributed_object_state_message *message = &objects_host_message.states;
 	short limit = MIN(MAXIMUM_ENTRIES_PER_MESSAGE, DATAGRAM_ENTRIES(struct distributed_object_state));
 	short resting = 0;
 	long told_count = objects_host_told_count;
@@ -1965,7 +1955,7 @@ static void distributed_host_send_states(
 
 		for (index = 0; index < state_count; index++)
 		{
-			struct distributed_object_state *state = &message.states[count];
+			struct distributed_object_state *state = &message->states[count];
 			short own_vehicle = NONE;
 			short vehicle_number;
 
@@ -2009,15 +1999,15 @@ static void distributed_host_send_states(
 			}
 			if (++count == limit)
 			{
-				distributed_send_to_machine(machine_index, &message, _distributed_message_object_states, count,
-					(word)(sizeof(message.header) + count * sizeof(struct distributed_object_state)));
+				network_host_send(machine_index, 0, _distributed_message_object_states, count,
+					(word)(sizeof(message->header) + count * sizeof(struct distributed_object_state)));
 				count = 0;
 			}
 		}
 		if (count)
 		{
-			distributed_send_to_machine(machine_index, &message, _distributed_message_object_states, count,
-				(word)(sizeof(message.header) + count * sizeof(struct distributed_object_state)));
+			network_host_send(machine_index, 0, _distributed_message_object_states, count,
+				(word)(sizeof(message->header) + count * sizeof(struct distributed_object_state)));
 		}
 	}
 }
@@ -2139,7 +2129,7 @@ static void distributed_host_send_inventories(
 	static struct distributed_inventory inventories[MAXIMUM_TRACKED_OBJECTS];
 	static byte kinds[MAXIMUM_TRACKED_OBJECTS];
 	static real_point3d origins[MAXIMUM_TRACKED_OBJECTS];
-	struct distributed_inventory_message message;
+	struct distributed_inventory_message *message = &objects_host_message.inventories;
 	short limit = MIN(MAXIMUM_ENTRIES_PER_MESSAGE, DATAGRAM_ENTRIES(struct distributed_inventory));
 	long inventory_count = 0;
 	long round = game_time_get() / INVENTORY_INTERVAL_TICKS;
@@ -2201,7 +2191,7 @@ static void distributed_host_send_inventories(
 		objects_host_inventories[absolute_index].checksum = checksum;
 		objects_host_inventories[absolute_index].weapons_checksum = weapons_checksum;
 		kinds[inventory_count] = kind;
-		object_get_origin(iterator.index, &origins[inventory_count]);
+		network_host_origin(iterator.index, &origins[inventory_count]);
 		inventory_count++;
 	}
 	for (machine_number = 0; machine_number < objects_host_viewers.count; machine_number++)
@@ -2241,18 +2231,18 @@ static void distributed_host_send_inventories(
 					}
 				}
 			}
-			message.inventories[count] = inventories[index];
+			message->inventories[count] = inventories[index];
 			if (++count == limit)
 			{
-				distributed_send_to_machine(machine_index, &message, _distributed_message_inventories, count,
-					(word)(sizeof(message.header) + count * sizeof(struct distributed_inventory)));
+				network_host_send(machine_index, 0, _distributed_message_inventories, count,
+					(word)(sizeof(message->header) + count * sizeof(struct distributed_inventory)));
 				count = 0;
 			}
 		}
 		if (count)
 		{
-			distributed_send_to_machine(machine_index, &message, _distributed_message_inventories, count,
-				(word)(sizeof(message.header) + count * sizeof(struct distributed_inventory)));
+			network_host_send(machine_index, 0, _distributed_message_inventories, count,
+				(word)(sizeof(message->header) + count * sizeof(struct distributed_inventory)));
 		}
 	}
 }
@@ -2550,7 +2540,8 @@ void network_objects_apply_vehicle_predictions(
 	}
 }
 
-void network_objects_host_tick(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void network_objects_host_tick_game(
 	void)
 {
 	distributed_host_update_objects();
@@ -2559,6 +2550,108 @@ void network_objects_host_tick(
 	if (game_time_get() % INVENTORY_INTERVAL_TICKS == 0)
 		distributed_host_send_inventories();
 	distributed_host_send_damage_animations();
+}
+
+/* the tick's arguments: the records, the messages' types and sizes, the
+client machines and their players, and the view */
+static void distributed_host_arguments(
+	void)
+{
+	struct halo_sim_network_host *arguments = &objects_host_arguments;
+	short machine_number;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->told = (unsigned long)&objects_host_told[0];
+	arguments->told_count = (unsigned long)&objects_host_told_count;
+	arguments->resting_cursor = (unsigned long)&objects_host_resting_cursor;
+	arguments->state_moving = (unsigned long)&objects_host_state_moving[0];
+	arguments->rest_times = (unsigned long)&objects_host_rest_times[0];
+	arguments->inventories = (unsigned long)&objects_host_inventories[0];
+	arguments->viewers = (unsigned long)&objects_host_viewers;
+	arguments->vehicle_predictions = (unsigned long)&objects_host_vehicle_predictions[0];
+	arguments->statistics = (unsigned long)&objects_statistics;
+	arguments->damage_animations = (unsigned long)&host_damage_animations[0];
+	arguments->damage_animation_count = (unsigned long)&host_damage_animation_count;
+	arguments->message = (unsigned long)&objects_host_message;
+	arguments->change_type = _distributed_message_object_changes;
+	arguments->state_type = _distributed_message_object_states;
+	arguments->inventory_type = _distributed_message_inventories;
+	arguments->damage_animation_type = _distributed_message_damage_animations;
+	arguments->change_limit = MIN(MAXIMUM_ENTRIES_PER_MESSAGE, RELIABLE_ENTRIES(struct distributed_object_change));
+	arguments->state_limit = MIN(MAXIMUM_ENTRIES_PER_MESSAGE, DATAGRAM_ENTRIES(struct distributed_object_state));
+	arguments->inventory_limit = MIN(MAXIMUM_ENTRIES_PER_MESSAGE, DATAGRAM_ENTRIES(struct distributed_inventory));
+	arguments->to_clients = _distributed_to_clients;
+	arguments->to_clients_reliably = _distributed_to_clients_reliably;
+	arguments->machine_count = distributed_client_machines(arguments->machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	for (machine_number = 0; machine_number < arguments->machine_count; machine_number++)
+	{
+		csmemcpy(arguments->player_lists[machine_number], machine_get_player_list(arguments->machine_indices[machine_number]),
+			sizeof(arguments->player_lists[machine_number]));
+	}
+	distributed_host_note_view();
+}
+
+/* port: the tick's world (halo_sim.c's world steps): the records it writes,
+the message and the arguments. The objects' records go as far as the told
+or the objects reach. */
+static long distributed_host_regions(
+	struct halo_sim_world_region *regions)
+{
+	long reach = MIN(MAX(objects_host_told_count, (long)object_header_data->count), (long)MAXIMUM_TRACKED_OBJECTS);
+	long count = 0;
+
+	regions[count].address = (unsigned long)&objects_host_arguments;
+	regions[count++].size = sizeof(objects_host_arguments);
+	regions[count].address = (unsigned long)&objects_host_message;
+	regions[count++].size = sizeof(objects_host_message);
+	regions[count].address = (unsigned long)&objects_host_told[0];
+	regions[count++].size = reach * sizeof(objects_host_told[0]);
+	regions[count].address = (unsigned long)&objects_host_told_count;
+	regions[count++].size = sizeof(objects_host_told_count);
+	regions[count].address = (unsigned long)&objects_host_resting_cursor;
+	regions[count++].size = sizeof(objects_host_resting_cursor);
+	regions[count].address = (unsigned long)&objects_host_state_moving[0];
+	regions[count++].size = reach * sizeof(objects_host_state_moving[0]);
+	regions[count].address = (unsigned long)&objects_host_rest_times[0];
+	regions[count++].size = reach * sizeof(objects_host_rest_times[0]);
+	regions[count].address = (unsigned long)&objects_host_inventories[0];
+	regions[count++].size = reach * sizeof(objects_host_inventories[0]);
+	regions[count].address = (unsigned long)&objects_host_viewers;
+	regions[count++].size = sizeof(objects_host_viewers);
+	regions[count].address = (unsigned long)&objects_statistics;
+	regions[count++].size = sizeof(objects_statistics);
+	regions[count].address = (unsigned long)&host_damage_animations[0];
+	regions[count++].size = sizeof(host_damage_animations);
+	regions[count].address = (unsigned long)&host_damage_animation_count;
+	regions[count++].size = sizeof(host_damage_animation_count);
+	return count;
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_host), checked
+against the game's otherwise */
+void network_objects_host_tick(
+	void)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[12];
+	long region_count;
+	int checking = FALSE;
+
+	distributed_host_arguments();
+	region_count = distributed_host_regions(regions);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&objects_host_arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_host_tick, &context, regions, region_count,
+		network_host_call, &checking))
+	{
+		return;
+	}
+	network_objects_host_tick_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_host_tick);
 }
 
 /* ---------- a client */

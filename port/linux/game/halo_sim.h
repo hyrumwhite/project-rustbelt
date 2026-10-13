@@ -73,6 +73,8 @@ enum
 	_halo_sim_network_apply,
 	/* the host's checking of clients' hit reports (network_damage.c) */
 	_halo_sim_network_damage,
+	/* the host's sending of its objects each tick (network_objects.c) */
+	_halo_sim_network_host,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2362,6 +2364,7 @@ enum
 	_halo_sim_world_step_network_damage_deals,
 	_halo_sim_world_step_network_damage_player_effect,
 	_halo_sim_world_step_network_damage_aftermath,
+	_halo_sim_world_step_network_host_tick,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2586,6 +2589,54 @@ typedef char halo_sim_network_damage_hook_size_assert[
 	sizeof(struct halo_sim_network_damage_hook) == 0x6C + 0x54 + 8 + 8 + 12 + 24 + 4 + 16 + 48 + 4 ? 1 : -1];
 
 void network_damage_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_host::Arguments: the host's objects sent a
+tick, its records (network_objects.c and network_objects_records.h), the
+messages' types and how many entries each takes, the client machines and
+their players as the tick began, and whether a co-op cutscene films through
+the host's camera */
+struct halo_sim_network_host
+{
+	unsigned long told;
+	unsigned long told_count;
+	unsigned long resting_cursor;
+	unsigned long state_moving;
+	unsigned long rest_times;
+	unsigned long inventories;
+	unsigned long viewers;
+	unsigned long vehicle_predictions;
+	unsigned long statistics;
+	unsigned long damage_animations;
+	unsigned long damage_animation_count;
+	/* the message being sent (network_objects.c's objects_host_message) */
+	unsigned long message;
+	short change_type;
+	short state_type;
+	short inventory_type;
+	short damage_animation_type;
+	short change_limit;
+	short state_limit;
+	short inventory_limit;
+	short to_clients;
+	short to_clients_reliably;
+	short pad;
+	long machine_count;
+	long machine_indices[128];
+	long player_lists[128][4];
+	long coop_cinematic;
+	float camera[3];
+};
+
+typedef char halo_sim_network_host_size_assert[sizeof(struct halo_sim_network_host) == 12 * 4 + 10 * 2 + 4 + 128 * 4 + 128 * 16 + 16 ? 1 : -1];
+
+/* network_objects.c's host calls (crates/halo_map's network_host::call) */
+enum
+{
+	_network_host_call_send = 1,
+	_network_host_call_origin,
+};
+
+void network_host_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

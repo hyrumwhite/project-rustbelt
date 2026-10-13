@@ -28,6 +28,7 @@ pub mod data_array;
 pub mod data_packets;
 pub mod distributed_wire;
 pub mod network_apply;
+pub mod network_coop;
 pub mod network_damage;
 pub mod network_host;
 pub mod network_input;

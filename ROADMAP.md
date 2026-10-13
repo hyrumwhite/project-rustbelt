@@ -1115,6 +1115,21 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - All four planted errors were caught with the fast client: the fast rate, the windows to a drop, the window's length and the stream's word.
        - **Rust in charge:** with all networking systems in Rust (fifty-nine systems in all), the fast client is flagged and kicked as with the C. In an honest session the machines' positions differ by a median of 5.3 cm (largest 25.9), both machines end with the same count of items, and every hit reported is dealt.
 
+   - [x] Co-op's host sending the world's changes in Rust (`halo_map::network_coop`, new system `network_coop`, world step 31): network_coop.c's `host_send_object_transforms`, `host_send_device_states` and `host_send_object_looks`, the first of co-op.
+     - **The test harness:** a co-op session on one machine is the network test's `coop` variant on a campaign level: `HALO_NETWORK_TEST=host:levels\a30\a30:coop` (built with printf in bash, where `\\$map` in double quotes escapes the `$`).
+     - **What Rust does:** each tick the host sends every client what changed of the world its scripts and machines move.
+       - **Scenery and machines** that moved since last sent (by a hundredth of a world unit, or turned): where they are and how they face.
+       - **Devices** whose position or power changed: doors, elevators, a light bridge.
+       - **Objects** whose look changed: their regions' permutations (a broken part) or their scale.
+       - An object first seen is where and how the map placed it on every machine, so nothing goes for it. With the resent state (a machine joined, or every two seconds), everything that ever changed goes again.
+     - **The game's, through calls (`network_coop_world_call`):** sending (one buffer the check sees). The records' and entries' types moved to network_coop_records.h.
+     - **Results:**
+       - In 100 to 240-second co-op sessions on a10, a30, b30, c40 and d40, every tick agrees, with none left out.
+       - The devices were moved by a console command (`HALO_SIM_HS_COMMAND="(begin (device_set_position cryo_door_1 1) (device_set_power cryo_door_2 0))"`), since the bots leave none moving in that time.
+       - Planted errors were caught in the looks' resend (a30), a transform's up vector (a10, d40), and a device's moving flag and its power (a10, with the command).
+       - Two went unseen: the transforms' move and turn thresholds (a10's scenery jumps; none creep).
+       - **Rust in charge:** in co-op on a10 and a30, with all networking systems in Rust (sixty systems in all), both machines end with the host's count of items. The positions on a30 differ by a median of 11.3 cm, between two C sessions' 8.0 and 15.9 cm.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

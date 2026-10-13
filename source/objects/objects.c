@@ -199,6 +199,14 @@ static const struct object_memory_release_function object_memory_release_procs[3
 };
 static long *object_name_list = NULL;
 static struct memory_pool *object_memory_pool = NULL;
+
+/* port: the objects' memory pool, for the Rust port's checks (halo_sim.c's
+world steps follow what it holds) */
+struct memory_pool *objects_memory_pool(
+	void)
+{
+	return object_memory_pool;
+}
 static struct object_globals *object_globals = NULL;
 
 boolean debug_objects_names;

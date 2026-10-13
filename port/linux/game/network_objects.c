@@ -65,6 +65,7 @@ same datum index (identifier and all), so that any message can name one:
 #include "cutscene/cinematics.h"
 #include "network_coop.h"
 #include "network_distributed.h"
+#include "memory/memory_pool.h"
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <math.h>
@@ -286,6 +287,9 @@ struct distributed_object_state
 };
 
 typedef char distributed_object_state_size_assert[sizeof(struct distributed_object_state) == 44 ? 1 : -1];
+typedef char distributed_object_change_size_assert[sizeof(struct distributed_object_change) == 132 &&
+	offsetof(struct distributed_object_change, change_colors) == 76 &&
+	offsetof(struct distributed_object_change, region_permutations) == 124 ? 1 : -1];
 
 struct distributed_inventory
 {
@@ -751,6 +755,9 @@ there (no physics of its own) and moved only to where the host has it. In
 multiplayer an empty vehicle (one bailed out of, or tumbling) keeps its own
 physics between updates. */
 static void distributed_client_release_item(long item_index, boolean deleting);
+static void distributed_client_create_failed(void);
+/* objects.c's memory pool */
+struct memory_pool *objects_memory_pool(void);
 /* cache_files.c's loaded tags' table */
 void *cache_files_tag_instances(long *count);
 
@@ -830,6 +837,51 @@ void network_apply_call(
 		break;
 	case _network_apply_call_add_weapon:
 		unit_network_add_weapon(call->a, call->b, (short)call->input[0]);
+		break;
+	case _network_apply_call_ctf_game:
+		call->result = game_engine_get_variant()->game_engine_index == game_engine_ctf;
+		break;
+	case _network_apply_call_create:
+	{
+		struct distributed_object_change const *change = (struct distributed_object_change const *)call->a;
+		struct object_placement_data placement;
+
+		object_placement_data_new(&placement, change->definition_index, NONE);
+		placement.owner_player_index = distributed_player_from_byte(change->owner_player_index);
+		placement.owner_team_index = change->owner_team_index;
+		placement.variant_number = change->variant_number;
+		placement.position = change->position;
+		csmemcpy(&placement.forward, &call->input[0], sizeof(placement.forward));
+		csmemcpy(&placement.up, &call->input[3], sizeof(placement.up));
+		placement.translational_velocity = change->translational_velocity;
+		placement.angular_velocity = change->angular_velocity;
+		csmemcpy(placement.change_colors, change->change_colors, sizeof(placement.change_colors));
+		objects_client_creating_index = change->object_index;
+		objects_client_creating = TRUE;
+		call->result = object_new(&placement);
+		objects_client_creating = FALSE;
+		objects_client_creating_index = NONE;
+		break;
+	}
+	case _network_apply_call_create_failed:
+		distributed_client_create_failed();
+		break;
+	case _network_apply_call_delete_immediately:
+		objects_client_deleting = TRUE;
+		object_delete_immediately(call->a);
+		objects_client_deleting = FALSE;
+		break;
+	case _network_apply_call_release_item_deleting:
+		distributed_client_release_item(call->a, TRUE);
+		break;
+	case _network_apply_call_exit_seat_end:
+		unit_exit_seat_end(call->a);
+		break;
+	case _network_apply_call_set_garbage:
+		object_set_garbage(call->a, (boolean)call->b);
+		break;
+	case _network_apply_call_disconnect:
+		object_disconnect_from_map(call->a);
 		break;
 	case _network_apply_call_teleporter:
 		call->result = find_netgame_flag((real_point3d const *)&call->input[0], 1.0f, 0.0f,
@@ -2545,8 +2597,10 @@ static void distributed_client_delete(
 
 	if (!object)
 		return;
+	/* port: the game's parts through the applying's calls (the Rust port's,
+	crates/halo_map's network_apply) */
 	if (TEST_FLAG(_object_mask_item, object->object.type))
-		distributed_client_release_item(object_index, TRUE);
+		network_apply_simple(_network_apply_call_release_item_deleting, object_index, 0, NULL, 0);
 	if (TEST_FLAG(_object_mask_unit, object->object.type))
 	{
 		struct unit_datum *unit = unit_get(object_index);
@@ -2560,9 +2614,10 @@ static void distributed_client_delete(
 		for (weapon_slot = 0; weapon_slot < MAXIMUM_WEAPONS_PER_UNIT; weapon_slot++)
 		{
 			if (unit->unit.weapon_object_indices[weapon_slot] != NONE &&
-				network_objects_client_has(unit->unit.weapon_object_indices[weapon_slot]))
+				network_apply_simple(_network_apply_call_client_has, unit->unit.weapon_object_indices[weapon_slot], 0,
+					NULL, 0))
 			{
-				unit_network_drop_weapon(object_index, weapon_slot);
+				network_apply_simple(_network_apply_call_drop_weapon, object_index, weapon_slot, NULL, 0);
 			}
 		}
 		child_index = unit->object.first_child_object_index;
@@ -2574,14 +2629,14 @@ static void distributed_client_delete(
 			if (TEST_FLAG(_object_mask_unit, object_get(child_index)->object.type) &&
 				unit_get(child_index)->unit.parent_seat_index != NONE)
 			{
-				unit_exit_seat_end(child_index);
+				network_apply_simple(_network_apply_call_exit_seat_end, child_index, 0, NULL, 0);
 			}
 			child_index = next_index;
 		}
 		if (unit->unit.player_index != NONE && player_try_and_get(unit->unit.player_index) &&
 			player_get(unit->unit.player_index)->unit_index == object_index)
 		{
-			network_player_detach_unit(unit->unit.player_index);
+			network_apply_simple(_network_apply_call_detach_unit, unit->unit.player_index, 0, NULL, 0);
 		}
 	}
 	/* (a player's action on it, the prompt the hud draws: deleted between
@@ -2601,9 +2656,7 @@ static void distributed_client_delete(
 			}
 		}
 	}
-	objects_client_deleting = TRUE;
-	object_delete_immediately(object_index);
-	objects_client_deleting = FALSE;
+	network_apply_simple(_network_apply_call_delete_immediately, object_index, 0, NULL, 0);
 }
 
 /* a create failed (the object pool full, its place not to be had): all of
@@ -2739,24 +2792,25 @@ as it is) */
 				object->object.region_permutations[region_index] = permutation_index;
 		}
 	}
-	object_set_garbage(object_index, FALSE);
+	/* port: the game's parts through the applying's calls */
+	network_apply_simple(_network_apply_call_set_garbage, object_index, FALSE, NULL, 0);
 	/* (in a unit's inventory: the next inventories put it there) */
 	if (TEST_FLAG(change->flags, _distributed_object_carried_bit) &&
 		TEST_FLAG(object->object.flags, _object_connected_to_map_bit) &&
 		object->object.parent_object_index == NONE)
 	{
-		object_disconnect_from_map(object_index);
-		object_set_visibility(object_index, FALSE);
+		network_apply_simple(_network_apply_call_disconnect, object_index, 0, NULL, 0);
+		network_apply_simple(_network_apply_call_set_visibility, object_index, FALSE, NULL, 0);
 	}
 	/* (a body: dead on the host before this machine had it, killed here
 	with nothing to show or count of it) */
 	if (TEST_FLAG(change->flags, _distributed_object_dead_bit) && TEST_FLAG(_object_mask_unit, object->object.type) &&
 		!TEST_FLAG(object->object.damage_flags, _object_dead_bit))
 	{
-		unit_kill_silent(object_index);
-		unit_kill_no_statistics(object_index);
+		network_apply_simple(_network_apply_call_unit_kill_silent, object_index, 0, NULL, 0);
+		network_apply_simple(_network_apply_call_unit_kill_no_statistics, object_index, 0, NULL, 0);
 		/* (at once: a body where no player is may not be updated for long) */
-		object_damage_update(object_index);
+		network_apply_simple(_network_apply_call_damage_update, object_index, 0, NULL, 0);
 	}
 }
 
@@ -2765,7 +2819,6 @@ static void distributed_client_create(
 {
 	long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(change->object_index);
 	struct datum_header const *header;
-	struct object_placement_data placement;
 	real_vector3d forward, up;
 	long object_index;
 
@@ -2806,35 +2859,24 @@ static void distributed_client_create(
 		objects_client_has[absolute_index] = NONE;
 		if (header->identifier)
 		{
-			distributed_client_create_failed();
+			network_apply_simple(_network_apply_call_create_failed, 0, 0, NULL, 0);
 			return;
 		}
 	}
-	object_placement_data_new(&placement, change->definition_index, NONE);
-	placement.owner_player_index = distributed_player_from_byte(change->owner_player_index);
-	placement.owner_team_index = change->owner_team_index;
-	placement.variant_number = change->variant_number;
-	placement.position = change->position;
-	placement.forward = forward;
-	placement.up = up;
-	placement.translational_velocity = change->translational_velocity;
-	placement.angular_velocity = change->angular_velocity;
-	csmemcpy(placement.change_colors, change->change_colors, sizeof(placement.change_colors));
-	objects_client_creating_index = change->object_index;
-	objects_client_creating = TRUE;
-	object_index = object_new(&placement);
-	objects_client_creating = FALSE;
-	objects_client_creating_index = NONE;
+	/* port: made through the applying's calls (the Rust port's) */
+	{
+		float axes[6];
+
+		csmemcpy(&axes[0], &forward, sizeof(forward));
+		csmemcpy(&axes[3], &up, sizeof(up));
+		object_index = network_apply_simple(_network_apply_call_create, (long)change, 0, axes, 6);
+	}
 	objects_statistics.creates++;
 	if (object_index != change->object_index)
 	{
 		if (object_index != NONE)
-		{
-			objects_client_deleting = TRUE;
-			object_delete_immediately(object_index);
-			objects_client_deleting = FALSE;
-		}
-		distributed_client_create_failed();
+			network_apply_simple(_network_apply_call_delete_immediately, object_index, 0, NULL, 0);
+		network_apply_simple(_network_apply_call_create_failed, 0, 0, NULL, 0);
 		return;
 	}
 	objects_client_has[absolute_index] = object_index;
@@ -2847,6 +2889,89 @@ static void distributed_client_create(
 	distributed_client_apply_change(object_index, change);
 }
 
+/* port: a change at a time, the game's */
+static void network_objects_handle_change_game(
+	struct distributed_object_change const *change)
+{
+	long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(change->object_index);
+
+	if (!distributed_object_index_valid(change->object_index) ||
+		absolute_index < 0 || absolute_index >= MAXIMUM_TRACKED_OBJECTS)
+	{
+		return;
+	}
+	if (change->change == _object_change_create)
+	{
+		distributed_client_create(change);
+	}
+	else if (change->change == _object_change_delete &&
+		objects_client_has[absolute_index] == change->object_index)
+	{
+		objects_statistics.deletes++;
+		distributed_client_delete(change->object_index);
+		objects_client_has[absolute_index] = NONE;
+	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_apply), checked
+against the game's otherwise: its world the objects' headers and memory
+(as far as they are used, and room for one more), the players, the entry of
+the objects it has, and the statistics */
+static void network_objects_handle_change(
+	struct distributed_object_change const *change)
+{
+	struct halo_sim_network_apply arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[16];
+	struct memory_pool *pool = objects_memory_pool();
+	long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(change->object_index);
+	long region_count;
+	int checking = FALSE;
+
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.object_index = NONE;
+	arguments.change = (unsigned long)change;
+	if (change->object_index != NONE && absolute_index >= 0 && absolute_index < MAXIMUM_TRACKED_OBJECTS)
+		arguments.has = (unsigned long)&objects_client_has[absolute_index];
+	arguments.statistics = (unsigned long)&objects_statistics;
+	arguments.tag_instances = (unsigned long)cache_files_tag_instances(&arguments.tag_count);
+	region_count = network_apply_world(&context, &arguments, regions);
+	if (arguments.has)
+	{
+		regions[region_count].address = arguments.has;
+		regions[region_count++].size = sizeof(long);
+	}
+	regions[region_count].address = arguments.statistics;
+	regions[region_count++].size = sizeof(objects_statistics);
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	regions[region_count].address = (unsigned long)player_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)player_data->data;
+	regions[region_count++].size = player_data->maximum_count * player_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_object_change, &context, regions, region_count,
+		network_apply_call, &checking))
+	{
+		return;
+	}
+	network_objects_handle_change_game(change);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_object_change);
+}
+
 void network_objects_handle_changes(
 	void const *entries,
 	short count)
@@ -2855,27 +2980,7 @@ void network_objects_handle_changes(
 	short index;
 
 	for (index = 0; index < count; index++)
-	{
-		struct distributed_object_change const *change = &changes[index];
-		long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(change->object_index);
-
-		if (!distributed_object_index_valid(change->object_index) ||
-			absolute_index < 0 || absolute_index >= MAXIMUM_TRACKED_OBJECTS)
-		{
-			continue;
-		}
-		if (change->change == _object_change_create)
-		{
-			distributed_client_create(change);
-		}
-		else if (change->change == _object_change_delete &&
-			objects_client_has[absolute_index] == change->object_index)
-		{
-			objects_statistics.deletes++;
-			distributed_client_delete(change->object_index);
-			objects_client_has[absolute_index] = NONE;
-		}
-	}
+		network_objects_handle_change(&changes[index]);
 }
 
 void network_objects_handle_synchronized(

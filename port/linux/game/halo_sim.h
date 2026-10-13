@@ -2353,6 +2353,7 @@ enum
 	_halo_sim_world_step_network_unit_state,
 	_halo_sim_world_step_network_object_state,
 	_halo_sim_world_step_network_inventory,
+	_halo_sim_world_step_network_object_change,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2442,10 +2443,15 @@ struct halo_sim_network_apply
 	unsigned long own_inventories;
 	unsigned long tag_instances;
 	long tag_count;
+	/* an object change's: the change, its entry of the objects the client
+	has, and the objects' statistics */
+	unsigned long change;
+	unsigned long has;
+	unsigned long statistics;
 	long result;
 };
 
-typedef char halo_sim_network_apply_size_assert[sizeof(struct halo_sim_network_apply) == 204 ? 1 : -1];
+typedef char halo_sim_network_apply_size_assert[sizeof(struct halo_sim_network_apply) == 216 ? 1 : -1];
 
 /* network_objects.c's calls (crates/halo_map's network_apply::call) */
 enum
@@ -2469,6 +2475,14 @@ enum
 	_network_apply_call_drop_weapon,
 	_network_apply_call_release_item,
 	_network_apply_call_add_weapon,
+	_network_apply_call_ctf_game,
+	_network_apply_call_create,
+	_network_apply_call_create_failed,
+	_network_apply_call_delete_immediately,
+	_network_apply_call_release_item_deleting,
+	_network_apply_call_exit_seat_end,
+	_network_apply_call_set_garbage,
+	_network_apply_call_disconnect,
 };
 
 /* network_distributed.c's smoothed round trip */

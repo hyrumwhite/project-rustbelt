@@ -1700,3 +1700,437 @@ pub fn send_players(context: &WorldContext, host: &impl AiHost) {
         call(packer_call::FLUSH, NONE, 0, 0);
     }
 }
+
+// ---------- the players' predictions on foot
+
+/// network_distributed.c's prediction calls (halo_sim.h's
+/// `_network_predictions_call_*`).
+pub mod prediction_call {
+    /// `distributed_machine_round_trip_ticks` of the player `a`'s machine,
+    /// `output[0]`.
+    pub const ROUND_TRIP: i32 = 1;
+    /// `network_coop_player_has_structure_bsp(a)`, the result.
+    pub const COOP_HAS_STRUCTURE_BSP: i32 = 2;
+    /// `distributed_apply_state` of the unit `a` to the player `b`'s
+    /// prediction, its speeds `input[0..2]`: whether taken.
+    pub const APPLY_STATE: i32 = 3;
+    /// The game globals' player speeds forward, back, sideways and the
+    /// double speed multiplier, `output[0..4]`; the result 1 if there are
+    /// any, and 2 if players are double speed.
+    pub const PLAYER_SPEEDS: i32 = 4;
+    /// The biped tag `a`'s jump velocity and standing and crouching
+    /// heights, `output[0..3]`.
+    pub const BIPED_DEFINITION: i32 = 5;
+}
+
+/// halo_sim.h's `struct halo_sim_network_predictions`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PredictionArguments {
+    pub predictions: u32,
+    pub accepted: u32,
+    pub host_speeds: u32,
+    pub gravity: f32,
+}
+
+/// network_distributed.c's on-foot limits.
+const PREDICTION_JITTER_TICKS: i32 = 6;
+const PREDICTION_CEILING_LEAD_TICKS: f32 = 15.0;
+const PREDICTION_ANCHOR_TICKS: i32 = TICKS_PER_SECOND;
+const PREDICTION_SPEED_TICKS: i32 = PREDICTION_ANCHOR_TICKS + 60;
+const HOST_ACCEPT_TOLERANCE: f32 = 3.5;
+const MAXIMUM_PREDICTED_SPEED: f32 = 2.0;
+const PREDICTED_ON_FOOT_SPEED_SCALE: f32 = 2.0;
+const PREDICTED_ON_FOOT_SPEED_MARGIN: f32 = 0.05;
+const PREDICTED_RISE_TOLERANCE: f32 = 1.0;
+/// network_distributed.h's.
+const HOST_BLEND_DISTANCE: f32 = 0.25;
+const UNIT_WORLD_BOUND: f32 = 32768.0;
+/// `SCHAR_MAX`: the most a biped's airborne ticks count.
+const SCHAR_MAX: i8 = 127;
+/// `struct distributed_unit_state`'s position.
+const UNIT_STATE_POSITION: u32 = 16;
+
+/// network_distributed.c's `struct distributed_on_foot_bound`: how fast a
+/// client's player's unit on foot may go, a tick, and how high.
+#[derive(Clone, Copy, Default)]
+struct OnFootBound {
+    speed: f32,
+    top_height: f32,
+    rise: f32,
+    rise_speed: f32,
+    rise_base: f32,
+    airborne_ticks: i32,
+}
+
+struct Predictions<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    a: PredictionArguments,
+}
+
+impl<H: AiHost> Predictions<'_, H> {
+    fn call(&self, kind: i32, a: i32, b: i32, input: &[f32]) -> AiCall {
+        let mut call = AiCall { kind, actor: NONE, a, b, ..AiCall::default() };
+        call.input[..input.len()].copy_from_slice(input);
+        self.host.call(&mut call);
+        call
+    }
+
+    fn object(&self, object_index: i32) -> Option<u32> {
+        datum_get(self.m, self.context.object_header_data, object_index).map(|header| self.m.r32(header + oh::DATUM as u32))
+    }
+
+    /// network_distributed.c's `distributed_player`.
+    fn player(&self, player_index: i16) -> Option<u32> {
+        use crate::data_array::DATA_MAXIMUM_COUNT;
+        let m = self.m;
+        let data = self.context.player_data;
+        if player_index < 0 || player_index >= m.r16(data + DATA_MAXIMUM_COUNT) as i16 {
+            return None;
+        }
+        let player = m.r32(data + DATA_DATA) + player_index as u32 * m.r16(data + DATA_SIZE) as i16 as u32;
+        (m.i16(player + pd::IDENTIFIER as u32) != 0).then_some(player)
+    }
+
+    /// network_distributed.c's `distributed_living_unit`.
+    fn living_unit(&self, player: Option<u32>) -> i32 {
+        let Some(player) = player else { return NONE };
+        let unit_index = self.m.i32(player + pd::UNIT_INDEX as u32);
+        match self.object(unit_index) {
+            Some(unit)
+                if unit_index != NONE
+                    && self.m.r16(unit + ud::OBJECT_DAMAGE_FLAGS as u32) as u32 & (1 << nv::_OBJECT_DEAD_BIT) == 0 =>
+            {
+                unit_index
+            }
+            _ => NONE,
+        }
+    }
+
+    fn prediction(&self, player_index: i16) -> u32 {
+        self.a.predictions + player_index as u32 * crate::layout::distributed_prediction::SIZEOF as u32
+    }
+
+    fn accepted(&self, player_index: i16) -> u32 {
+        self.a.accepted + player_index as u32 * crate::layout::distributed_accepted_prediction::SIZEOF as u32
+    }
+
+    fn noted(&self, player_index: i16) -> u32 {
+        self.a.host_speeds + player_index as u32 * crate::layout::distributed_host_speed::SIZEOF as u32
+    }
+
+    fn write_vector(&self, address: u32, v: [f32; 3]) {
+        for (part, value) in v.iter().enumerate() {
+            self.m.set_f32(address + 4 * part as u32, *value);
+        }
+    }
+
+    /// network_distributed.c's `distributed_on_foot_bound`.
+    fn on_foot_bound(&self, player_index: i16, unit_index: i32) -> OnFootBound {
+        use crate::layout::distributed_host_speed as hs;
+        let m = self.m;
+        let now = self.context.game_time;
+        let gravity = self.a.gravity;
+        let noted = self.noted(player_index);
+        let object = self.object(unit_index).unwrap_or(0);
+        let biped = self
+            .object(unit_index)
+            .filter(|&object| (nv::_OBJECT_MASK_BIPED as u32) & (1 << m.r8(object + ud::OBJECT_TYPE as u32)) != 0);
+        let player = self.player(player_index);
+        let velocity = m.vector(object + ud::OBJECT_TRANSLATIONAL_VELOCITY as u32);
+        let position = m.vector(object + ud::OBJECT_POSITION as u32);
+        let mut host_speed = length(velocity);
+        let mut taken_speed = length(m.vector(noted + hs::VELOCITY as u32));
+        let mut run_speed = 0.0f32;
+        let mut jump_speed = 0.0f32;
+        let mut crouch_rise = 0.0f32;
+        // (a unit new on foot, a new life or a ride's end: all its speed its
+        // ticks', from where it is)
+        if m.i32(noted + hs::UNIT_INDEX as u32) != unit_index {
+            m.w32(noted + hs::UNIT_INDEX as u32, unit_index as u32);
+            self.write_vector(noted + hs::VELOCITY as u32, [0.0; 3]);
+            m.w8(noted + hs::GROUNDED as u32, 0);
+            m.set_f32(noted + hs::FLIGHT_SPEED as u32, 0.0);
+            m.set_f32(noted + hs::FLIGHT_RISE as u32, 0.0);
+            m.set_f32(noted + hs::GROUND_HEIGHT as u32, position[2]);
+            m.set_f32(noted + hs::TOP_HEIGHT as u32, position[2]);
+            m.w32(noted + hs::GROUND_TIME as u32, now as u32);
+            taken_speed = 0.0;
+        }
+        // (the most of each span)
+        let speeds = noted + hs::SPEEDS as u32;
+        let rises = noted + hs::RISES as u32;
+        let time = m.i32(noted + hs::TIME as u32);
+        if now < time || now.wrapping_sub(time) >= 2 * PREDICTION_SPEED_TICKS {
+            m.w32(noted + hs::TIME as u32, now as u32);
+            for offset in [0, 4] {
+                m.set_f32(speeds + offset, 0.0);
+                m.set_f32(rises + offset, 0.0);
+            }
+        } else if now.wrapping_sub(time) >= PREDICTION_SPEED_TICKS {
+            m.w32(noted + hs::TIME as u32, now as u32);
+            m.set_f32(speeds + 4, m.f32(speeds));
+            m.set_f32(speeds, 0.0);
+            m.set_f32(rises + 4, m.f32(rises));
+            m.set_f32(rises, 0.0);
+        }
+        // (as bipeds.c moves a player: forward or back and sideways at once)
+        let player_speeds = self.call(prediction_call::PLAYER_SPEEDS, 0, 0, &[]);
+        if player_speeds.result & 1 != 0 {
+            let forward = max(player_speeds.output[0], player_speeds.output[1]);
+            let sideways = player_speeds.output[2];
+            run_speed = ((forward * forward + sideways * sideways) as f64).sqrt() as f32 / TICKS_PER_SECOND as f32;
+            if player_speeds.result & 2 != 0 && player_speeds.output[3] > 1.0 {
+                run_speed *= player_speeds.output[3];
+            }
+        }
+        if let Some(player) = player {
+            let multiplier = m.f32(player + pd::SPEED_MULTIPLIER as u32);
+            if multiplier > 1.0 {
+                run_speed *= multiplier;
+            }
+        }
+        if let Some(biped) = biped {
+            let definition = self.call(prediction_call::BIPED_DEFINITION, m.i32(biped + ud::DEFINITION_INDEX as u32), 0, &[]);
+            jump_speed = definition.output[0];
+            crouch_rise = definition.output[1] - definition.output[2];
+        }
+        let mut base_speed = PREDICTED_ON_FOOT_SPEED_SCALE * ((run_speed * run_speed + jump_speed * jump_speed) as f64).sqrt() as f32;
+        // (so written that a tag's speed not a number is none)
+        if !(base_speed >= 0.0) {
+            base_speed = 0.0;
+        }
+        if !(jump_speed >= 0.0) {
+            jump_speed = 0.0;
+        }
+        if !(crouch_rise >= 0.0) {
+            crouch_rise = 0.0;
+        }
+        // (what its tick sent it, noted)
+        if taken_speed > base_speed {
+            host_speed -= taken_speed - base_speed;
+        }
+        let mut added_rise = max(velocity[2], 0.0) - max(m.f32(noted + hs::VELOCITY as u32 + 8), 0.0);
+        if m.r8(noted + hs::GROUNDED as u32) != 0 {
+            added_rise -= jump_speed;
+        }
+        if host_speed > m.f32(speeds) {
+            m.set_f32(speeds, host_speed);
+        }
+        if added_rise > m.f32(rises) {
+            m.set_f32(rises, added_rise);
+        }
+        // (how high: where it is on the ground, or the highest since; in the
+        // air, a throw's speeds kept till it lands)
+        let grounded = biped.is_none_or(|biped| {
+            m.r32(biped + crate::layout::biped_datum::BIPED_FLAGS as u32) & (1 << nv::_BIPED_AIRBORNE_BIT) == 0
+        });
+        m.w8(noted + hs::GROUNDED as u32, grounded as u8);
+        if grounded {
+            m.set_f32(noted + hs::GROUND_HEIGHT as u32, position[2]);
+            m.w32(noted + hs::GROUND_TIME as u32, now as u32);
+        }
+        if grounded || position[2] > m.f32(noted + hs::TOP_HEIGHT as u32) {
+            m.set_f32(noted + hs::TOP_HEIGHT as u32, position[2]);
+        }
+        let flight_speed = noted + hs::FLIGHT_SPEED as u32;
+        let flight_rise = noted + hs::FLIGHT_RISE as u32;
+        if grounded || m.i8(biped.unwrap_or(0) + crate::layout::biped_datum::BIPED_AIRBORNE_TICKS as u32) >= SCHAR_MAX {
+            m.set_f32(flight_speed, 0.0);
+            m.set_f32(flight_rise, 0.0);
+        } else {
+            m.set_f32(flight_speed, max(m.f32(flight_speed), max(m.f32(speeds), m.f32(speeds + 4))));
+            m.set_f32(flight_rise, max(m.f32(flight_rise), max(m.f32(rises), m.f32(rises + 4))));
+        }
+        let mut bound = OnFootBound::default();
+        bound.speed = max(base_speed, max(max(m.f32(speeds), m.f32(speeds + 4)), m.f32(flight_speed)));
+        // (some: none is no bound)
+        bound.speed = max(bound.speed, PREDICTED_ON_FOOT_SPEED_MARGIN);
+        bound.speed = min(bound.speed, MAXIMUM_PREDICTED_SPEED);
+        bound.top_height = m.f32(noted + hs::TOP_HEIGHT as u32);
+        // (a jump's rise, as fast up as it or a run up a slope is)
+        let mut rise_speed = max(max(m.f32(rises), m.f32(rises + 4)), m.f32(flight_rise));
+        if rise_speed > 0.0 {
+            rise_speed += jump_speed;
+        }
+        rise_speed += max(jump_speed, run_speed);
+        bound.rise = UNIT_WORLD_BOUND;
+        if biped.is_some() && gravity > 0.0 {
+            bound.rise = rise_speed * rise_speed / (2.0 * gravity) + crouch_rise + PREDICTED_RISE_TOLERANCE;
+        }
+        bound.rise_speed = rise_speed;
+        bound.rise_base = crouch_rise + PREDICTED_RISE_TOLERANCE;
+        bound.airborne_ticks = if grounded { 0 } else { now.wrapping_sub(m.i32(noted + hs::GROUND_TIME as u32)) };
+        if !(bound.rise >= 0.0) {
+            bound.rise = UNIT_WORLD_BOUND;
+        }
+        bound
+    }
+
+    /// network_distributed.c's `distributed_on_foot_fall_speed`.
+    fn fall_speed(&self, bound: &OnFootBound, height: f32) -> f32 {
+        let gravity = self.a.gravity;
+        let drop = bound.top_height - height;
+        let mut speed = bound.speed;
+        if drop > 0.0 && gravity > 0.0 {
+            speed += ((2.0 * gravity * drop) as f64).sqrt() as f32;
+        }
+        min(speed, MAXIMUM_PREDICTED_SPEED)
+    }
+
+    /// network_distributed.c's `distributed_on_foot_ceiling`.
+    fn ceiling(&self, player_index: i16, bound: &OnFootBound) -> f32 {
+        let gravity = self.a.gravity;
+        let mut rise = bound.rise;
+        let round_trip = self.call(prediction_call::ROUND_TRIP, player_index as i32, 0, &[]).output[0];
+        let ticks = bound.airborne_ticks as f32 - min(round_trip, PREDICTION_CEILING_LEAD_TICKS) - PREDICTION_JITTER_TICKS as f32;
+        if bound.airborne_ticks > 0 && ticks > 0.0 && gravity > 0.0 {
+            let ceiling = bound.rise_base + bound.rise_speed * ticks - 0.5 * gravity * ticks * ticks;
+            if ceiling < rise {
+                rise = ceiling;
+            }
+        }
+        rise
+    }
+
+    /// network_distributed.c's `distributed_on_foot_move_valid`.
+    fn move_valid(&self, bound: &OnFootBound, from: [f32; 3], to: [f32; 3], ticks: i32) -> bool {
+        let (dx, dy, dz) = (to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+        let rise = if dz > 0.0 { dz } else { 0.0 };
+        let reach = min(bound.speed + PREDICTED_ON_FOOT_SPEED_MARGIN, MAXIMUM_PREDICTED_SPEED) * ticks as f32 + HOST_BLEND_DISTANCE;
+        let fall_reach =
+            min(self.fall_speed(bound, to[2]) + PREDICTED_ON_FOOT_SPEED_MARGIN, MAXIMUM_PREDICTED_SPEED) * ticks as f32 + HOST_BLEND_DISTANCE;
+        // (so written that a position not a number is not within)
+        dx * dx + dy * dy + rise * rise <= reach * reach && -dz <= fall_reach
+    }
+
+    /// network_distributed.c's `distributed_take_prediction`.
+    fn take_prediction(&self, player_index: i16, unit_index: i32, bound: &OnFootBound) {
+        use crate::layout::{distributed_accepted_prediction as ap, distributed_host_speed as hs, distributed_prediction as pr};
+        let m = self.m;
+        let now = self.context.game_time;
+        let prediction = self.prediction(player_index);
+        let accepted = self.accepted(player_index);
+        let noted = self.noted(player_index);
+        let object = self.object(unit_index).unwrap_or(0);
+        let state_position = m.vector(prediction + pr::STATE as u32 + UNIT_STATE_POSITION);
+        let position = m.vector(object + ud::OBJECT_POSITION as u32);
+        if !(distance_squared(state_position, position) <= HOST_ACCEPT_TOLERANCE * HOST_ACCEPT_TOLERANCE) {
+            return;
+        }
+        if m.r8(accepted + ap::VALID as u32) != 0 {
+            let ticks = m
+                .i32(prediction + pr::TIME as u32)
+                .wrapping_sub(m.i32(accepted + ap::TIME as u32))
+                .min(now.wrapping_sub(m.i32(accepted + ap::HOST_TIME as u32)) + PREDICTION_JITTER_TICKS);
+            // (the host's own unit moved further than a unit moves since the
+            // last taken: taken from where it is, a new anchor, and its
+            // height where it starts)
+            if !self.move_valid(
+                bound,
+                m.vector(accepted + ap::TAKEN_HOST_POSITION as u32),
+                position,
+                now.wrapping_sub(m.i32(accepted + ap::TAKEN_HOST_TIME as u32)),
+            ) {
+                m.w8(accepted + ap::VALID as u32, 0);
+                m.set_f32(noted + hs::GROUND_HEIGHT as u32, position[2]);
+                m.set_f32(noted + hs::TOP_HEIGHT as u32, position[2]);
+                m.w32(noted + hs::GROUND_TIME as u32, now as u32);
+            } else if ticks <= 0 || !self.move_valid(bound, m.vector(accepted + ap::POSITION as u32), state_position, ticks) {
+                return;
+            }
+        }
+        // (no higher above where the host last had it on the ground than a
+        // jump, or a throw, takes it, and in the air falling)
+        if !(state_position[2] - m.f32(noted + hs::GROUND_HEIGHT as u32) <= self.ceiling(player_index, bound)) {
+            return;
+        }
+        let fall_speed = self.fall_speed(bound, state_position[2]);
+        if self.call(prediction_call::APPLY_STATE, unit_index, player_index as i32, &[bound.speed, fall_speed]).result == 0 {
+            return;
+        }
+        m.w32(prediction + pr::TAKEN_TIME as u32, m.r32(prediction + pr::TIME as u32));
+        m.w32(prediction + pr::TAKEN_HOST_TIME as u32, now as u32);
+        // (a new anchor: the first, one a second on, or after a jump)
+        if m.r8(accepted + ap::VALID as u32) == 0
+            || now.wrapping_sub(m.i32(accepted + ap::HOST_TIME as u32)) >= PREDICTION_ANCHOR_TICKS
+        {
+            m.w8(accepted + ap::VALID as u32, 1);
+            m.w32(accepted + ap::UNIT_INDEX as u32, unit_index as u32);
+            m.w32(accepted + ap::TIME as u32, m.r32(prediction + pr::TIME as u32));
+            m.w32(accepted + ap::HOST_TIME as u32, now as u32);
+            self.write_vector(accepted + ap::POSITION as u32, state_position);
+        }
+        m.w32(accepted + ap::TAKEN_HOST_TIME as u32, now as u32);
+        self.write_vector(accepted + ap::TAKEN_HOST_POSITION as u32, m.vector(object + ud::OBJECT_POSITION as u32));
+    }
+
+    /// network_distributed.c's `distributed_apply_predictions`.
+    fn apply(&self) {
+        use crate::layout::{distributed_accepted_prediction as ap, distributed_host_speed as hs, distributed_prediction as pr};
+        let m = self.m;
+        for player_index in 0..MAXIMUM_TRACKED_PLAYERS {
+            let prediction = self.prediction(player_index);
+            let accepted = self.accepted(player_index);
+            let noted = self.noted(player_index);
+            if m.r8(prediction + pr::VALID as u32) == 0
+                && m.r8(accepted + ap::VALID as u32) == 0
+                && m.i32(noted + hs::UNIT_INDEX as u32) == NONE
+            {
+                continue;
+            }
+            let mut unit_index = self.living_unit(self.player(player_index));
+            if unit_index != NONE && m.i32(self.object(unit_index).unwrap_or(0) + ud::OBJECT_PARENT_OBJECT_INDEX as u32) != NONE {
+                unit_index = NONE;
+            }
+            if m.r8(accepted + ap::VALID as u32) != 0 && m.i32(accepted + ap::UNIT_INDEX as u32) != unit_index {
+                m.w8(accepted + ap::VALID as u32, 0);
+            }
+            // (how fast it may go, what the host's tick did to its own copy
+            // noted before the client's word is taken; riding or dead, noted
+            // afresh on foot)
+            let bound = if unit_index != NONE {
+                self.on_foot_bound(player_index, unit_index)
+            } else {
+                m.w32(noted + hs::UNIT_INDEX as u32, NONE as u32);
+                OnFootBound::default()
+            };
+            if m.r8(prediction + pr::VALID as u32) != 0 {
+                m.w8(prediction + pr::VALID as u32, 0);
+                m.w32(prediction + pr::TAKEN_HOST_TIME as u32, NONE as u32);
+                // (of the unit it has now, and not from a co-op client still
+                // loading the host's BSP)
+                if unit_index != NONE && unit_index == m.i32(prediction + pr::STATE as u32 + 4) {
+                    let unit_player = m.i32(self.object(unit_index).unwrap_or(0) + ud::UNIT_PLAYER_INDEX as u32);
+                    if unit_player != NONE && self.call(prediction_call::COOP_HAS_STRUCTURE_BSP, unit_player, 0, &[]).result != 0 {
+                        self.take_prediction(player_index, unit_index, &bound);
+                    }
+                }
+            }
+            // (what the host's next tick starts from)
+            if unit_index != NONE {
+                let object = self.object(unit_index).unwrap_or(0);
+                self.write_vector(noted + hs::VELOCITY as u32, m.vector(object + ud::OBJECT_TRANSLATIONAL_VELOCITY as u32));
+                let height = m.f32(object + ud::OBJECT_POSITION as u32 + 8);
+                if height > m.f32(noted + hs::TOP_HEIGHT as u32) {
+                    m.set_f32(noted + hs::TOP_HEIGHT as u32, height);
+                }
+            }
+        }
+    }
+}
+
+/// The world step of the host taking its clients' predictions of their
+/// players on foot (network_distributed.c's `distributed_apply_predictions`).
+pub fn apply_predictions(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let mut bytes = [0u8; std::mem::size_of::<PredictionArguments>()];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = m.r8(context.arguments + index as u32);
+    }
+    // SAFETY: plain data of its size
+    let a: PredictionArguments = unsafe { std::mem::transmute(bytes) };
+    Predictions { context, host, m, a }.apply();
+}

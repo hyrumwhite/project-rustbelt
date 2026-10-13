@@ -1052,6 +1052,21 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - One went unseen: dropping a message as old as the sender's latest (each kind went once a tick to each machine).
        - **Rust in charge:** with all networking systems in Rust on both machines (fifty-seven systems in all), the machines' positions differ by a median of 5.6 and 7.1 cm over two sessions (largest 18.4 and 22.4), within the C's range. Both machines end with the same count of items, and every hit reported is dealt. Every probe check agrees on the five levels and a50 as before.
 
+   - [x] The host taking its clients' word on their players on foot in Rust (`halo_map::network_host`, world step 24): network_distributed.c's `distributed_apply_predictions`, with `distributed_on_foot_bound`, `_on_foot_fall_speed`, `_on_foot_ceiling`, `_on_foot_move_valid` and `_take_prediction`.
+     - **What Rust does:** each tick, for each client's player on foot, the latest place the client says it has them is taken when all of these hold:
+       - It is within 3.5 world units of the host's copy.
+       - It is no further from the last one taken than the player goes in the client's ticks since. Across and up that is twice as fast as they run and jump (or as fast as the host's own ticks sent the copy lately, an explosion's throw); down, as fast as a fall from the highest point since they were on the ground.
+       - It is no higher above where the host last had them on the ground than a jump (or a throw) takes them, and in the air falling since.
+       - **Taking it:** the host's copy is moved there (closed by half when a little off), its velocity held to those speeds, and the anchor noted once a second. A teleport, a new life or a ride's end starts it afresh from where the host has the player.
+     - **The game's, through calls (`network_predictions_call`):** a player's machine's round trip, a co-op player's BSP, the state's apply (`distributed_apply_state`, Rust's under `network_apply`), and the tags' speeds (the game globals' run speeds and double speed, the biped's jump and heights). The gravity is in the arguments, and the records' types moved to network_distributed_records.h.
+     - **A lying client for the tests:** `HALO_NETWORK_TEST_LIE=<seconds>` has a client send a false place every so many seconds for three ticks: a step aside, up, down, or a dash. That puts the host's refusals in the check.
+     - **The check:** the regions are the arguments, the predictions, the anchors, the host's noted speeds and each predicted unit's datum.
+     - **Results:**
+       - In 90-second sessions with scripted play, shooting, kills, a vehicle and a pickup, with an honest client and with one lying every 4 seconds, all 2,048 ticks agree, with none left out.
+       - Planted errors were caught in the run speed and the anchor's span (honest client), and in the fall check and the accept tolerance (the lying client).
+       - Two went unseen: the rise tolerance (a lie 2.5 world units up is refused either way) and the thrown-speed allowance (nobody was thrown).
+       - **Rust in charge:** with the lying client and all networking systems in Rust, the host corrects the client 30 times against the C's 28, and the machines' positions differ by a median of 5.7 cm against 6.1 (largest 19.9 against 18.9). Both machines end with the same count of items, and every hit reported is dealt.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

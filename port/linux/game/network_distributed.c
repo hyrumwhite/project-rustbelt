@@ -562,12 +562,7 @@ static boolean distributed_handling_stream_message;
 /* a client: the host's latest tick it has had a message of */
 static long distributed_host_time = NONE;
 /* the host: each client's round trip, in ticks, and its jitter */
-static struct
-{
-	boolean valid;
-	real average;
-	real deviation;
-} distributed_round_trips[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+static struct distributed_round_trip distributed_round_trips[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 /* a client: each player's ping as the host last told it (UNKNOWN_PING: not
 told) */
 static word distributed_player_pings[MAXIMUM_TRACKED_PLAYERS];
@@ -2821,11 +2816,102 @@ static void distributed_client_send_inputs(
 
 /* (the host, in co-op) where each client player's input last faced, by
 absolute index: how far it turns between inputs is its looking around */
-static struct
+static struct distributed_input_facing distributed_input_facings[MAXIMUM_TRACKED_PLAYERS];
+
+/* port: the input's handling is Rust's in Rust's mode (crates/halo_map's
+network_input): the game's parts through these calls, the action handed on
+in the arguments */
+static struct halo_sim_network_input distributed_input_arguments;
+
+typedef char distributed_input_action_assert[
+	sizeof(distributed_input_arguments.action) == sizeof(struct player_action) &&
+	sizeof(distributed_input_arguments.control_flags) == DISTRIBUTED_INPUT_HISTORY * sizeof(unsigned short) ? 1 : -1];
+
+void network_input_call(
+	struct halo_sim_ai_call *call)
 {
-	boolean valid;
-	real_euler_angles2d facing;
-} distributed_input_facings[MAXIMUM_TRACKED_PLAYERS];
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_input_call_machine_has_player:
+		call->result = distributed_machine_has_player(call->a, (short)call->b);
+		break;
+	case _network_input_call_note_actions:
+	{
+		real_euler_angles2d turn;
+		real_vector2d throttle;
+
+		turn.yaw = call->input[0];
+		turn.pitch = call->input[1];
+		throttle.i = call->input[2];
+		throttle.j = call->input[3];
+		player_control_action_test_note((unsigned long)call->a, &turn, &throttle, call->input[4]);
+		break;
+	}
+	case _network_input_call_note_structure_bsp:
+		network_coop_note_player_structure_bsp((short)call->a, (byte)call->b);
+		break;
+	case _network_input_call_hand_on:
+	{
+		struct distributed_player_input const *input =
+			&((struct distributed_player_input const *)distributed_input_arguments.data)[call->b];
+
+		update_server_handle_distributed_input(call->a, input->tick, (struct player_action const *)distributed_input_arguments.action,
+			input->control_flags, DISTRIBUTED_INPUT_HISTORY);
+		break;
+	}
+	case _network_input_call_relayed:
+		update_client_handle_relayed_action((byte)call->a, call->b,
+			(struct player_action const *)distributed_input_arguments.action, distributed_input_arguments.control_flags,
+			DISTRIBUTED_INPUT_HISTORY);
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static long network_input_simple(
+	long kind,
+	long a,
+	long b)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	network_input_call(&call);
+	return call.result;
+}
+
+/* port: a step's world: the arguments and the records it writes */
+static void distributed_input_step(
+	long step,
+	void (*game)(void))
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	int checking = FALSE;
+
+	regions[0].address = (unsigned long)&distributed_input_arguments;
+	regions[0].size = sizeof(distributed_input_arguments);
+	regions[1].address = (unsigned long)&distributed_input_facings[0];
+	regions[1].size = sizeof(distributed_input_facings);
+	regions[2].address = (unsigned long)&distributed_round_trips[0];
+	regions[2].size = sizeof(distributed_round_trips);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&distributed_input_arguments;
+	if (halo_sim_world_step_begin(step, &context, regions, 3, network_input_call, &checking))
+		return;
+	game();
+	if (checking)
+		halo_sim_world_step_check(step);
+}
 
 /* (the host, in co-op) a client player's input counted in the scripts'
 action tests, as a local player's is (player_control_action_test_note) */
@@ -2847,16 +2933,33 @@ static void distributed_note_input_actions(
 	}
 	distributed_input_facings[player_index].valid = TRUE;
 	distributed_input_facings[player_index].facing = action->desired_facing;
-	player_control_action_test_note(action->control_flags, &turn, &action->throttle, action->primary_trigger);
+	/* port: through the input's calls (the Rust port's) */
+	{
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_input_call_note_actions;
+		call.actor = NONE;
+		call.a = (long)action->control_flags;
+		call.input[0] = turn.yaw;
+		call.input[1] = turn.pitch;
+		call.input[2] = action->throttle.i;
+		call.input[3] = action->throttle.j;
+		call.input[4] = action->primary_trigger;
+		network_input_call(&call);
+	}
 }
 
 /* (the host) a client's players' input, and from it (once a message) how
 long a message takes that client and back */
-static void distributed_handle_inputs(
-	long machine_index,
-	struct distributed_player_input const *inputs,
-	short count)
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_handle_inputs_game(
+	void)
 {
+	struct halo_sim_network_input *arguments = &distributed_input_arguments;
+	long machine_index = arguments->machine_index;
+	struct distributed_player_input const *inputs = (struct distributed_player_input const *)arguments->data;
+	short count = (short)arguments->count;
 	long host_time = NONE;
 	short index;
 
@@ -2867,7 +2970,7 @@ static void distributed_handle_inputs(
 		struct player_action action;
 
 		if (input->player_index >= MAXIMUM_TRACKED_PLAYERS ||
-			!distributed_machine_has_player(machine_index, input->player_index))
+			!network_input_simple(_network_input_call_machine_has_player, machine_index, input->player_index))
 		{
 			continue;
 		}
@@ -2879,12 +2982,13 @@ static void distributed_handle_inputs(
 		action.throttle.i = PIN(action.throttle.i, -1.0f, 1.0f);
 		action.throttle.j = PIN(action.throttle.j, -1.0f, 1.0f);
 		action.primary_trigger = PIN(action.primary_trigger, 0.0f, 1.0f);
+		csmemcpy(arguments->action, &action, sizeof(action));
 		/* (a spectator's buttons pick whom it watches: not counted) */
-		if (network_coop_active() && player->unit_index != NONE)
+		if (arguments->coop_active && player->unit_index != NONE)
 			distributed_note_input_actions(input->player_index, &action);
-		network_coop_note_player_structure_bsp(input->player_index, input->structure_bsp_index);
-		update_server_handle_distributed_input(DATUM_INDEX_NEW(input->player_index, player->identifier), input->tick,
-			&action, input->control_flags, DISTRIBUTED_INPUT_HISTORY);
+		/* port: through the input's calls (the Rust port's) */
+		network_input_simple(_network_input_call_note_structure_bsp, input->player_index, input->structure_bsp_index);
+		network_input_simple(_network_input_call_hand_on, DATUM_INDEX_NEW(input->player_index, player->identifier), index);
 		if (input->host_time != NONE && (host_time == NONE || input->host_time > host_time))
 			host_time = input->host_time;
 	}
@@ -2913,6 +3017,25 @@ static void distributed_handle_inputs(
 			}
 		}
 	}
+}
+
+/* (the host) a client's players' input, and from it (once a message) how
+long a message takes that client and back */
+/* port: Rust's in Rust's mode (crates/halo_map's network_input), checked
+against the game's otherwise */
+static void distributed_handle_inputs(
+	long machine_index,
+	struct distributed_player_input const *inputs,
+	short count)
+{
+	memset(&distributed_input_arguments, 0, sizeof(distributed_input_arguments));
+	distributed_input_arguments.machine_index = machine_index;
+	distributed_input_arguments.data = (unsigned long)inputs;
+	distributed_input_arguments.count = count;
+	distributed_input_arguments.facings = (unsigned long)&distributed_input_facings[0];
+	distributed_input_arguments.round_trips = (unsigned long)&distributed_round_trips[0];
+	distributed_input_arguments.coop_active = network_coop_active();
+	distributed_input_step(_halo_sim_world_step_network_handle_inputs, distributed_handle_inputs_game);
 }
 
 /* the cluster the object (or what it rides) is in, NONE for none */
@@ -3567,11 +3690,13 @@ static void distributed_host_send_players(
 
 /* (a client) the host's input for its players, for the others it drives:
 the host's update, then each player's */
-static void distributed_handle_actions(
-	byte const *data,
-	byte const *end,
-	short count)
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void distributed_handle_actions_game(
+	void)
 {
+	byte const *data = (byte const *)distributed_input_arguments.data;
+	byte const *end = (byte const *)distributed_input_arguments.end;
+	short count = (short)distributed_input_arguments.count;
 	long update_number;
 	short index;
 
@@ -3596,9 +3721,31 @@ static void distributed_handle_actions(
 		action.desired_weapon_index = relayed.desired_weapon_index;
 		action.desired_grenade_index = relayed.desired_grenade_index;
 		action.desired_zoom_level = relayed.desired_zoom_level;
-		update_client_handle_relayed_action(relayed.player_index, update_number, &action,
-			relayed.control_flags, DISTRIBUTED_INPUT_HISTORY);
+		/* port: through the input's calls (the Rust port's) */
+		csmemcpy(distributed_input_arguments.action, &action, sizeof(action));
+		csmemcpy(distributed_input_arguments.control_flags, relayed.control_flags,
+			sizeof(distributed_input_arguments.control_flags));
+		network_input_simple(_network_input_call_relayed, relayed.player_index, update_number);
 	}
+}
+
+/* (a client) the host's input for its players, for the others it drives:
+the host's update, then each player's */
+/* port: Rust's in Rust's mode (crates/halo_map's network_input), checked
+against the game's otherwise */
+static void distributed_handle_actions(
+	byte const *data,
+	byte const *end,
+	short count)
+{
+	memset(&distributed_input_arguments, 0, sizeof(distributed_input_arguments));
+	distributed_input_arguments.machine_index = NONE;
+	distributed_input_arguments.data = (unsigned long)data;
+	distributed_input_arguments.end = (unsigned long)end;
+	distributed_input_arguments.count = count;
+	distributed_input_arguments.facings = (unsigned long)&distributed_input_facings[0];
+	distributed_input_arguments.round_trips = (unsigned long)&distributed_round_trips[0];
+	distributed_input_step(_halo_sim_world_step_network_handle_actions, distributed_handle_actions_game);
 }
 
 /* ---------- deaths */

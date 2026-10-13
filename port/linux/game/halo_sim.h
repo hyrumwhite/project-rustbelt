@@ -77,6 +77,8 @@ enum
 	_halo_sim_network_host,
 	/* the netcode's messages handled (network_distributed.c) */
 	_halo_sim_network_messages,
+	/* the netcode's input handled (network_distributed.c) */
+	_halo_sim_network_input,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2374,6 +2376,8 @@ enum
 	_halo_sim_world_step_network_client_asked,
 	_halo_sim_world_step_network_handle_message,
 	_halo_sim_world_step_network_apply_predictions,
+	_halo_sim_world_step_network_handle_inputs,
+	_halo_sim_world_step_network_handle_actions,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2872,6 +2876,46 @@ enum
 };
 
 void network_predictions_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_input::Arguments: the host taking a client's
+players' input (the inputs at data, count of them, from the machine), or a
+client the host's relayed input (its bytes data to end, count entries);
+the records (network_distributed_records.h), whether co-op is on, and the
+action (and its ticks' buttons) handed on */
+struct halo_sim_network_input
+{
+	long machine_index;
+	unsigned long data;
+	unsigned long end;
+	long count;
+	unsigned long facings;
+	unsigned long round_trips;
+	long coop_active;
+	unsigned char action[0x20];
+	unsigned short control_flags[4];
+};
+
+typedef char halo_sim_network_input_size_assert[sizeof(struct halo_sim_network_input) == 7 * 4 + 0x20 + 8 ? 1 : -1];
+
+/* network_distributed.c's input calls (crates/halo_map's network_input::call) */
+enum
+{
+	/* distributed_machine_has_player(a, b) */
+	_network_input_call_machine_has_player = 1,
+	/* player_control_action_test_note(a, the turn input[0..2], the throttle
+	input[2..4], the trigger input[4]) */
+	_network_input_call_note_actions,
+	/* network_coop_note_player_structure_bsp(a, b) */
+	_network_input_call_note_structure_bsp,
+	/* update_server_handle_distributed_input of the player a, the input b's
+	tick and buttons, the arguments' action */
+	_network_input_call_hand_on,
+	/* update_client_handle_relayed_action of the player a, the update b,
+	the arguments' action and buttons */
+	_network_input_call_relayed,
+};
+
+void network_input_call(struct halo_sim_ai_call *call);
 
 /* network_distributed.c's corrections count */
 unsigned long network_distributed_corrections_address(void);

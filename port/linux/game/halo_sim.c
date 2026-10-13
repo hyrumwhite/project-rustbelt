@@ -2235,6 +2235,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"network_damage",
 	"network_host",
 	"network_messages",
+	"network_input",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -10883,6 +10884,8 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network client asked",
 	"network handle message",
 	"network apply predictions",
+	"network handle inputs",
+	"network handle actions",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10912,6 +10915,8 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_host,
 	_halo_sim_network_messages,
 	_halo_sim_network_host,
+	_halo_sim_network_input,
+	_halo_sim_network_input,
 };
 
 static struct

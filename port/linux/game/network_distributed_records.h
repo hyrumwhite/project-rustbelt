@@ -108,4 +108,20 @@ struct distributed_host_speed
 	long ground_time;
 };
 
+/* the host: each client's round trip, in ticks, and its jitter */
+struct distributed_round_trip
+{
+	boolean valid;
+	real average;
+	real deviation;
+};
+
+/* the host, in co-op: where each client player's input last faced (how far
+it turns between inputs is its looking around) */
+struct distributed_input_facing
+{
+	boolean valid;
+	real_euler_angles2d facing;
+};
+
 #endif

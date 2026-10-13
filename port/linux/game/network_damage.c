@@ -56,6 +56,7 @@ being hit looks and feels like on the clients).
 #include "scenario/scenario.h"
 #include "units/units.h"
 #include "network_distributed.h"
+#include "memory/memory_pool.h"
 #include "network_damage_records.h"
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
@@ -127,7 +128,6 @@ enum
 	REPORT_MAXIMUM_AGE_TICKS = 3 * TICKS_PER_SECOND,
 	/* the players whose machines a unit's damage goes to, told (the unit's,
 	its riders', its owner's): with more, it goes to every machine */
-	MAXIMUM_EVENT_PLAYERS = 8,
 	/* where each player's unit was, every so many ticks, and how many of
 	those are kept (a power of two: about thirteen seconds; what they fire
 	outlives the history: a rocket's flight, a grenade its thrower) */
@@ -364,12 +364,7 @@ static struct damage_rate_cache_entry
 } damage_rate_cache[DAMAGE_RATE_CACHE_SIZE];
 /* ... the players each damage event of this tick goes to the machines of
 (NONE for every machine), and the machine of its owner */
-static struct
-{
-	short player_count;
-	short player_indices[MAXIMUM_EVENT_PLAYERS];
-	long owner_machine_index;
-} damage_event_destinations[MAXIMUM_DAMAGE_EVENTS_PER_TICK];
+static struct damage_event_destination damage_event_destinations[MAXIMUM_DAMAGE_EVENTS_PER_TICK];
 /* for the automated tests' reports (network_test.c) */
 static long damage_rejected_reports;
 static long damage_dealt_reports;
@@ -392,6 +387,8 @@ crates/halo_map's network_damage), recorded in check mode */
 
 /* cache_files.c's loaded tags' table */
 void *cache_files_tag_instances(long *count);
+/* objects.c's memory pool */
+struct memory_pool *objects_memory_pool(void);
 
 void network_damage_call(
 	struct halo_sim_ai_call *call)
@@ -426,6 +423,56 @@ void network_damage_call(
 		object_cause_damage((struct damage_data *)call->b, call->a, (short)call->input[3], (short)call->input[4],
 			(short)call->input[5], call->input[6] != 0.0f ? (real_vector3d const *)&call->input[0] : NULL);
 		damage_dealing_report = FALSE;
+		break;
+	case _network_damage_call_unarmed_melee_damage:
+		call->result = unit_unarmed_melee_damage(call->a);
+		break;
+	case _network_damage_call_player_machine:
+		call->result = distributed_player_machine((short)call->a);
+		break;
+	case _network_damage_call_replay_player_effect:
+		damage_replay_player_effect(call->a, (struct damage_data *)call->b, call->input[0]);
+		break;
+	case _network_damage_call_replay_aftermath:
+		damage_replay_aftermath(call->a, (struct damage_data *)call->b, *(unsigned long const *)&call->input[0],
+			call->input[1], call->input[2], call->input[3], (short)call->input[4]);
+		break;
+	case _network_damage_call_set_death:
+		distributed_set_death((short)call->a, (byte)call->input[0], call->input[1] != 0.0f, call->input[2] != 0.0f);
+		break;
+	case _network_damage_call_replay_kill:
+		damage_replaying_kill = TRUE;
+		damage_replaying_killer = *(long const *)&call->input[3];
+		damage_replaying_killer_score = *(long const *)&call->input[4];
+		damage_replay_kill(call->a, (struct damage_data *)call->b, (short)call->input[0], (short)call->input[1],
+			(short)call->input[2]);
+		damage_replaying_kill = FALSE;
+		damage_replaying_killer = NONE;
+		break;
+	case _network_damage_call_telefragged:
+		players_show_telefragged(call->a);
+		break;
+	case _network_damage_call_replay_static:
+		damage_replay_static(call->a, (struct damage_data *)call->b, (short)call->input[0], (short)call->input[1],
+			(short)call->input[2]);
+		break;
+	case _network_damage_call_get_death:
+	{
+		byte killing_player_index = NO_PLAYER;
+		boolean friendly_fire = FALSE;
+		boolean killed_by_vehicle = FALSE;
+
+		call->result = distributed_get_death((short)call->a, &killing_player_index, &friendly_fire, &killed_by_vehicle);
+		call->output[0] = (float)killing_player_index;
+		call->output[1] = friendly_fire ? 1.0f : 0.0f;
+		call->output[2] = killed_by_vehicle ? 1.0f : 0.0f;
+		break;
+	}
+	case _network_damage_call_score:
+		call->result = game_engine_network_player_score(call->a);
+		break;
+	case _network_damage_call_client_has:
+		call->result = network_objects_client_has(call->a);
 		break;
 	}
 	halo_sim_world_event_end(call, opened);
@@ -635,16 +682,20 @@ players' hits instead), the host all but its clients' players' (but for
 their reports); authorized: a client carrying out the host's word. Where it
 does not, what the damage would show is filled in (the damage is
 object_cause_damage's own). */
-boolean network_damage_deals(
-	struct damage_data const *damage,
-	long object_index,
-	short node_index,
-	short region_index,
-	short material_index,
-	real_vector3d const *object_normal,
-	boolean authorized)
+/* port: the game's (Rust's network_damage::deals), its arguments the
+hook's: its calls Rust's, in Rust's order */
+static boolean network_damage_deals_game(
+	struct halo_sim_network_damage_hook *hook)
 {
-	if (game_connection() == _game_connection_network_client)
+	struct damage_data const *damage = (struct damage_data const *)hook->damage_address;
+	long object_index = hook->object_index;
+	short node_index = hook->node_index;
+	short region_index = hook->region_index;
+	short material_index = hook->material_index;
+	real_vector3d const *object_normal = hook->has_normal ? (real_vector3d const *)hook->normal : NULL;
+	boolean authorized = hook->authorized;
+
+	if (hook->connection == _game_connection_network_client)
 	{
 		struct unit_datum *unit;
 
@@ -658,26 +709,32 @@ boolean network_damage_deals(
 			distributed_living_unit(player_try_and_get(unit->unit.player_index)) == object_index &&
 			distributed_damage_is_recoil(damage, object_index))
 		{
-			struct damage_data effect = *damage;
+			float total_damage = 0.0f;
 
-			damage_replay_player_effect(unit->unit.player_index, &effect, 0.0f);
+			/* (a copy, the hook's) */
+			csmemcpy(hook->damage, damage, sizeof(*damage));
+			network_damage_call_simple(_network_damage_call_replay_player_effect, unit->unit.player_index,
+				(long)hook->damage, &total_damage, 1);
 		}
 		/* a hit of this machine's own player's, on the host's object */
 		if (distributed_player_is_local(damage->owner_player_index) &&
-			(network_objects_client_has(object_index) || static_target(object_index)) &&
+			(network_damage_call_simple(_network_damage_call_client_has, object_index, 0, NULL, 0).result ||
+				static_target(object_index)) &&
 			damage_report_count < MAXIMUM_HIT_REPORTS_PER_TICK)
 		{
 			struct distributed_hit_report *report = &damage_reports[damage_report_count++];
+			struct halo_sim_ai_call origin;
 
 			csmemset(report, 0, sizeof(*report));
 			report->object_index = object_index;
 			distributed_damage_from_data(damage, &report->damage);
 			/* (in the world: a rider's own position is its seat's) */
-			object_get_origin(object_index, &report->target_position);
+			origin = network_damage_call_simple(_network_damage_call_origin, object_index, 0, NULL, 0);
+			csmemcpy(&report->target_position, origin.output, sizeof(report->target_position));
 			report->node_index = node_index;
 			report->region_index = region_index;
 			report->material_index = material_index;
-			report->host_time = distributed_latest_host_time();
+			report->host_time = hook->host_time;
 			if (object_normal)
 			{
 				report->object_normal = *object_normal;
@@ -689,19 +746,148 @@ boolean network_damage_deals(
 	}
 	/* (a client's player's, whose machine reports it; but one whose machine
 	has left deals it here: their grenades and rockets still in flight) */
-	if (game_connection() == _game_connection_network_server && !damage_dealing_report &&
+	if (hook->connection == _game_connection_network_server && !hook->dealing_report &&
 		damage->owner_player_index != NONE && !distributed_player_is_local(damage->owner_player_index))
 	{
 		struct player_datum *owner = player_try_and_get(damage->owner_player_index);
 
 		if (owner && !owner->quit_out_of_game &&
-			distributed_player_machine((short)DATUM_INDEX_TO_ABSOLUTE_INDEX(damage->owner_player_index)) != NONE)
+			network_damage_call_simple(_network_damage_call_player_machine,
+				DATUM_INDEX_TO_ABSOLUTE_INDEX(damage->owner_player_index), 0, NULL, 0).result != NONE)
 		{
 			distributed_damage_material((struct damage_data *)damage, object_index, material_index);
 			return FALSE;
 		}
 	}
 	return TRUE;
+}
+
+/* port: the hooks' arguments: the records, and the world they work on */
+static void network_damage_hook_new(
+	struct halo_sim_network_damage_hook *hook,
+	struct halo_sim_world_context *context)
+{
+	memset(hook, 0, sizeof(*hook));
+	hook->connection = game_connection();
+	hook->dealing_report = damage_dealing_report;
+	hook->players = (unsigned long)&damage_players[0];
+	hook->history = (unsigned long)&damage_history[0];
+	hook->trails = (unsigned long)&damage_trails[0][0];
+	hook->events = (unsigned long)&damage_events[0];
+	hook->event_count = (unsigned long)&damage_event_count;
+	hook->destinations = (unsigned long)&damage_event_destinations[0];
+	hook->reports = (unsigned long)&damage_reports[0];
+	hook->report_count = (unsigned long)&damage_report_count;
+	hook->replayed = (unsigned long)&damage_replayed_events;
+	hook->game_globals = (unsigned long)scenario_get_game_globals();
+	hook->tag_instances = (unsigned long)cache_files_tag_instances(&hook->tag_count);
+	memset(context, 0, sizeof(*context));
+	context->game_time = game_time_get();
+	context->object_header_data = (unsigned long)object_header_data;
+	context->player_data = (unsigned long)player_data;
+	context->arguments = (unsigned long)hook;
+}
+
+/* port: a hook's step, Rust's in Rust's mode (TRUE), else the game's to run
+and then halo_sim_world_check_hook's to check */
+static boolean network_damage_hook_begin(
+	long step,
+	struct halo_sim_network_damage_hook *hook,
+	struct halo_sim_world_context *context,
+	struct halo_sim_world_region *regions,
+	long region_count,
+	int *checking)
+{
+	regions[region_count].address = (unsigned long)hook;
+	regions[region_count++].size = sizeof(*hook);
+	return halo_sim_world_step_begin(step, context, regions, region_count, network_damage_call, checking);
+}
+
+/* the world a step's calls change, which it reads after them (a client's
+replay of a killing blow its biped and player): the objects and their pool,
+and the players */
+static long network_damage_world_regions(
+	struct halo_sim_world_region *regions)
+{
+	struct memory_pool *pool = objects_memory_pool();
+	long count = 0;
+
+	regions[count].address = (unsigned long)object_header_data;
+	regions[count++].size = sizeof(struct data_array);
+	regions[count].address = (unsigned long)object_header_data->data;
+	regions[count++].size = object_header_data->maximum_count * object_header_data->size;
+	regions[count].address = (unsigned long)player_data;
+	regions[count++].size = sizeof(struct data_array);
+	regions[count].address = (unsigned long)player_data->data;
+	regions[count++].size = player_data->maximum_count * player_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[count].address = (unsigned long)pool;
+		regions[count++].size = sizeof(*pool);
+		regions[count].address = (unsigned long)pool->base_address;
+		regions[count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	return count;
+}
+
+/* the event regions the host's hooks write */
+static long network_damage_event_regions(
+	struct halo_sim_world_region *regions)
+{
+	regions[0].address = (unsigned long)&damage_events[0];
+	regions[0].size = sizeof(damage_events);
+	regions[1].address = (unsigned long)&damage_event_count;
+	regions[1].size = sizeof(damage_event_count);
+	return 2;
+}
+
+/* port: Rust's in Rust's mode, checked against the game's otherwise: the
+hook, the caller's damage (its material filled in), and a client's reports */
+boolean network_damage_deals(
+	struct damage_data const *damage,
+	long object_index,
+	short node_index,
+	short region_index,
+	short material_index,
+	real_vector3d const *object_normal,
+	boolean authorized)
+{
+	struct halo_sim_network_damage_hook hook;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
+
+	network_damage_hook_new(&hook, &context);
+	hook.damage_address = (unsigned long)damage;
+	hook.object_index = object_index;
+	hook.node_index = node_index;
+	hook.region_index = region_index;
+	hook.material_index = material_index;
+	if (object_normal)
+	{
+		hook.has_normal = TRUE;
+		csmemcpy(hook.normal, object_normal, sizeof(hook.normal));
+	}
+	hook.authorized = authorized;
+	if (hook.connection == _game_connection_network_client)
+		hook.host_time = distributed_latest_host_time();
+	regions[0].address = (unsigned long)damage;
+	regions[0].size = sizeof(*damage);
+	regions[1].address = (unsigned long)&damage_reports[0];
+	regions[1].size = sizeof(damage_reports);
+	regions[2].address = (unsigned long)&damage_report_count;
+	regions[2].size = sizeof(damage_report_count);
+	if (!network_damage_hook_begin(_halo_sim_world_step_network_damage_deals, &hook, &context, regions, 3, &checking))
+	{
+		hook.result = network_damage_deals_game(&hook);
+		if (checking)
+			halo_sim_world_step_check(_halo_sim_world_step_network_damage_deals);
+	}
+	return hook.result != 0;
 }
 
 /* whether a client replaying the host's killing blow leaves out its
@@ -725,7 +911,7 @@ boolean network_damage_killer_score(
 }
 
 /* the host: a player's screen shaken and flashed by damage */
-void network_damage_player_effect(
+static void network_damage_player_effect_game(
 	long player_index,
 	struct damage_data const *damage,
 	real total_damage)
@@ -779,7 +965,7 @@ static struct distributed_damage_event *damage_event_new(
 	return event;
 }
 
-void network_damage_aftermath(
+static void network_damage_aftermath_game(
 	long object_index,
 	struct damage_data const *damage,
 	unsigned long being_damaged_flags,
@@ -834,13 +1020,19 @@ void network_damage_aftermath(
 		event->kind = _damage_event_kill;
 		/* (no killer when the game noted none: a death it did not score, or
 		no player's) */
-		if (victim_player_index == NONE ||
-			!distributed_get_death((short)DATUM_INDEX_TO_ABSOLUTE_INDEX(victim_player_index),
-				&event->player_index, &friendly_fire, &killed_by_vehicle))
+		struct halo_sim_ai_call death;
+
+		event->player_index = NO_PLAYER;
+		if (victim_player_index != NONE)
 		{
-			event->player_index = NO_PLAYER;
-			friendly_fire = FALSE;
-			killed_by_vehicle = FALSE;
+			death = network_damage_call_simple(_network_damage_call_get_death,
+				DATUM_INDEX_TO_ABSOLUTE_INDEX(victim_player_index), 0, NULL, 0);
+			if (death.result)
+			{
+				event->player_index = (byte)(long)death.output[0];
+				friendly_fire = death.output[1] != 0.0f;
+				killed_by_vehicle = death.output[2] != 0.0f;
+			}
 		}
 		SET_FLAG(event->kill_flags, _damage_event_friendly_fire_bit, friendly_fire);
 		SET_FLAG(event->kill_flags, _damage_event_killed_by_vehicle_bit, killed_by_vehicle);
@@ -851,9 +1043,76 @@ void network_damage_aftermath(
 			long killer = distributed_player_from_byte(event->player_index);
 
 			if (killer != NONE)
-				event->killer_score = game_engine_network_player_score(killer);
+				event->killer_score = network_damage_call_simple(_network_damage_call_score, killer, 0, NULL, 0).result;
 		}
 	}
+}
+
+/* port: Rust's in Rust's mode, checked against the game's otherwise: the
+hook and the tick's events */
+void network_damage_player_effect(
+	long player_index,
+	struct damage_data const *damage,
+	real total_damage)
+{
+	struct halo_sim_network_damage_hook hook;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	int checking = FALSE;
+
+	network_damage_hook_new(&hook, &context);
+	hook.damage_address = (unsigned long)damage;
+	hook.player_index = player_index;
+	hook.total_damage = total_damage;
+	if (network_damage_hook_begin(_halo_sim_world_step_network_damage_player_effect, &hook, &context, regions,
+		network_damage_event_regions(regions), &checking))
+	{
+		return;
+	}
+	network_damage_player_effect_game(player_index, damage, total_damage);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_damage_player_effect);
+}
+
+void network_damage_aftermath(
+	long object_index,
+	struct damage_data const *damage,
+	unsigned long being_damaged_flags,
+	real shield_damage,
+	real body_damage,
+	real body_damage_multiplier,
+	short body_part,
+	short node_index,
+	short region_index,
+	short material_index,
+	long victim_player_index)
+{
+	struct halo_sim_network_damage_hook hook;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	int checking = FALSE;
+
+	network_damage_hook_new(&hook, &context);
+	hook.damage_address = (unsigned long)damage;
+	hook.object_index = object_index;
+	hook.being_damaged_flags = being_damaged_flags;
+	hook.shield_damage = shield_damage;
+	hook.body_damage = body_damage;
+	hook.body_damage_multiplier = body_damage_multiplier;
+	hook.body_part = body_part;
+	hook.node_index = node_index;
+	hook.region_index = region_index;
+	hook.material_index = material_index;
+	hook.player_index = victim_player_index;
+	if (network_damage_hook_begin(_halo_sim_world_step_network_damage_aftermath, &hook, &context, regions,
+		network_damage_event_regions(regions), &checking))
+	{
+		return;
+	}
+	network_damage_aftermath_game(object_index, damage, being_damaged_flags, shield_damage, body_damage,
+		body_damage_multiplier, body_part, node_index, region_index, material_index, victim_player_index);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_damage_aftermath);
 }
 
 /* ---------- the host */
@@ -1334,12 +1593,16 @@ static void distributed_note_targets(
 		{
 			long object_index = tick->objects[player_index][slot].object_index;
 			real_vector3d velocity;
+			struct halo_sim_ai_call call;
 
 			if (object_index == NONE)
 				continue;
-			object_get_origin(object_index, &tick->objects[player_index][slot].position);
+			call = network_damage_call_simple(_network_damage_call_origin, object_index, 0, NULL, 0);
+			csmemcpy(&tick->objects[player_index][slot].position, call.output,
+				sizeof(tick->objects[player_index][slot].position));
 			/* (a rider's own velocity is not kept: what it rides has it) */
-			object_get_velocities(object_index, &velocity, NULL);
+			call = network_damage_call_simple(_network_damage_call_velocity, object_index, 0, NULL, 0);
+			csmemcpy(&velocity, call.output, sizeof(velocity));
 			tick->objects[player_index][slot].speed = (real)sqrt(velocity.i * velocity.i + velocity.j * velocity.j +
 				velocity.k * velocity.k);
 		}
@@ -1565,7 +1828,8 @@ static void distributed_note_weapons(
 
 		if (player_index >= MAXIMUM_TRACKED_PLAYERS || unit_index == NONE)
 			continue;
-		damage_players[player_index].unarmed_melee_damage_index = unit_unarmed_melee_damage(unit_index);
+		damage_players[player_index].unarmed_melee_damage_index =
+			network_damage_call_simple(_network_damage_call_unarmed_melee_damage, unit_index, 0, NULL, 0).result;
 		damage_players[player_index].unarmed_time = game_time_get();
 		units[0] = unit_index;
 		units[1] = object_get(unit_index)->object.parent_object_index;
@@ -2108,8 +2372,8 @@ static void distributed_note_event_destinations(
 		}
 		if (event->damage.owner_player_index != NO_PLAYER)
 		{
-			damage_event_destinations[index].owner_machine_index =
-				distributed_player_machine(event->damage.owner_player_index);
+			damage_event_destinations[index].owner_machine_index = network_damage_call_simple(
+				_network_damage_call_player_machine, event->damage.owner_player_index, 0, NULL, 0).result;
 		}
 		/* (a player's body, living or dead) */
 		unit = (struct unit_datum *)object_try_and_get_and_verify_type(event->object_index, _object_mask_unit);
@@ -2232,6 +2496,37 @@ static void distributed_send_kills_reliably(
 	}
 }
 
+/* port: the host's bookkeeping a tick, Rust's in Rust's mode, checked
+against the game's otherwise: the records it keeps */
+static void network_damage_bookkeeping(
+	void)
+{
+	struct halo_sim_network_damage_hook hook;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[5];
+	int checking = FALSE;
+
+	network_damage_hook_new(&hook, &context);
+	regions[0].address = (unsigned long)&damage_players[0];
+	regions[0].size = sizeof(damage_players);
+	regions[1].address = (unsigned long)&damage_history[0];
+	regions[1].size = sizeof(damage_history);
+	regions[2].address = (unsigned long)&damage_trails[0][0];
+	regions[2].size = sizeof(damage_trails);
+	regions[3].address = (unsigned long)&damage_event_destinations[0];
+	regions[3].size = sizeof(damage_event_destinations);
+	if (network_damage_hook_begin(_halo_sim_world_step_network_damage_bookkeeping, &hook, &context, regions, 4,
+		&checking))
+	{
+		return;
+	}
+	distributed_note_weapons();
+	distributed_note_targets();
+	distributed_note_event_destinations();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_damage_bookkeeping);
+}
+
 void network_damage_host_tick(
 	void)
 {
@@ -2243,9 +2538,7 @@ void network_damage_host_tick(
 	short machine_number;
 
 	distributed_log_reports();
-	distributed_note_weapons();
-	distributed_note_targets();
-	distributed_note_event_destinations();
+	network_damage_bookkeeping();
 	for (machine_number = 0; machine_number < machine_count; machine_number++)
 	{
 		long machine_index = machine_indices[machine_number];
@@ -2276,6 +2569,107 @@ void network_damage_host_tick(
 
 /* ---------- a client */
 
+/* port: the game's (Rust's network_damage::replay), of the hook's event
+into the hook's damage: its calls Rust's, in Rust's order */
+static void network_damage_replay_game(
+	struct halo_sim_network_damage_hook *hook)
+{
+	struct distributed_damage_event const *event = (struct distributed_damage_event const *)hook->entry;
+	struct damage_data *damage = (struct damage_data *)hook->damage;
+
+	if (!distributed_damage_numbers_valid(&event->damage) || !distributed_damage_to_data(&event->damage, damage) ||
+		!distributed_real_valid(event->shield_damage) || !distributed_real_valid(event->body_damage) ||
+		!distributed_real_valid(event->body_damage_multiplier) || !distributed_real_valid(event->total_damage))
+	{
+		return;
+	}
+	damage_replayed_events++;
+	switch (event->kind)
+	{
+	case _damage_event_player_effect:
+	{
+		long player_index = distributed_player_from_byte(event->player_index);
+
+		if (distributed_player_is_local(player_index))
+		{
+			network_damage_call_simple(_network_damage_call_replay_player_effect, player_index, (long)damage,
+				&event->total_damage, 1);
+		}
+		break;
+	}
+	case _damage_event_aftermath:
+		if (network_damage_call_simple(_network_damage_call_client_has, event->object_index, 0, NULL, 0).result &&
+			object_try_and_get_and_verify_type(event->object_index, _object_mask_unit))
+		{
+			/* (what harm it did the units' states bring: no death from here) */
+			unsigned long flags = event->being_damaged_flags &
+				~(FLAG(_object_being_damaged_body_depleted_bit) | FLAG(_object_being_damaged_killed_instantly_bit));
+			float input[5];
+
+			*(unsigned long *)&input[0] = flags;
+			input[1] = event->shield_damage;
+			input[2] = event->body_damage;
+			input[3] = event->body_damage_multiplier;
+			input[4] = (float)event->body_part;
+			network_damage_call_simple(_network_damage_call_replay_aftermath, event->object_index, (long)damage, input, 5);
+		}
+		break;
+	case _damage_event_kill:
+		/* (a biped's: a vehicle's riders the blow would kill too) */
+		if (network_damage_call_simple(_network_damage_call_client_has, event->object_index, 0, NULL, 0).result &&
+			object_try_and_get_and_verify_type(event->object_index, _object_mask_biped) &&
+			!TEST_FLAG(object_get(event->object_index)->object.damage_flags, _object_dead_bit) &&
+			distributed_damage_indices_valid(event->object_index, event->node_index, event->region_index,
+				event->material_index))
+		{
+			struct unit_datum *unit = unit_get(event->object_index);
+			/* (the blow's aftermath takes the unit's player from it) */
+			long victim_player_index = unit->unit.player_index;
+			long killer = event->player_index != NO_PLAYER ? distributed_player_from_byte(event->player_index) : NONE;
+			float input[5];
+
+			if (unit->unit.player_index != NONE)
+			{
+				input[0] = (float)event->player_index;
+				input[1] = TEST_FLAG(event->kill_flags, _damage_event_friendly_fire_bit) ? 1.0f : 0.0f;
+				input[2] = TEST_FLAG(event->kill_flags, _damage_event_killed_by_vehicle_bit) ? 1.0f : 0.0f;
+				network_damage_call_simple(_network_damage_call_set_death,
+					DATUM_INDEX_TO_ABSOLUTE_INDEX(unit->unit.player_index), 0, input, 3);
+			}
+			/* (no player's, an actor's: nothing of it counted here, the
+			host's statistics come as they are) */
+			else
+			{
+				SET_FLAG(damage->flags, _damage_no_statistics_bit, TRUE);
+			}
+			input[0] = (float)event->node_index;
+			input[1] = (float)event->region_index;
+			input[2] = (float)event->material_index;
+			*(long *)&input[3] = killer;
+			*(long *)&input[4] = event->killer_score;
+			network_damage_call_simple(_network_damage_call_replay_kill, event->object_index, (long)damage, input, 5);
+			if (victim_player_index != NONE && TEST_FLAG(event->kill_flags, _damage_event_telefragged_bit))
+				network_damage_call_simple(_network_damage_call_telefragged, victim_player_index, 0, NULL, 0);
+		}
+		break;
+	case _damage_event_static:
+		if (distributed_object_index_valid(event->object_index) && static_target(event->object_index) &&
+			distributed_damage_indices_valid(event->object_index, event->node_index, event->region_index,
+				event->material_index))
+		{
+			float input[3];
+
+			input[0] = (float)event->node_index;
+			input[1] = (float)event->region_index;
+			input[2] = (float)event->material_index;
+			network_damage_call_simple(_network_damage_call_replay_static, event->object_index, (long)damage, input, 3);
+		}
+		break;
+	}
+}
+
+/* port: each event Rust's in Rust's mode, checked against the game's
+otherwise: the hook (its event and damage) and the count replayed */
 void network_damage_handle_events(
 	void const *entries,
 	short count)
@@ -2285,83 +2679,25 @@ void network_damage_handle_events(
 
 	for (index = 0; index < count; index++)
 	{
-		struct distributed_damage_event const *event = &events[index];
-		struct damage_data damage;
+		struct halo_sim_network_damage_hook hook;
+		struct halo_sim_world_context context;
+		struct halo_sim_world_region regions[8];
+		long region_count;
+		int checking = FALSE;
 
-		if (!distributed_damage_numbers_valid(&event->damage) || !distributed_damage_to_data(&event->damage, &damage) ||
-			!distributed_real_valid(event->shield_damage) || !distributed_real_valid(event->body_damage) ||
-			!distributed_real_valid(event->body_damage_multiplier) || !distributed_real_valid(event->total_damage))
+		network_damage_hook_new(&hook, &context);
+		csmemcpy(hook.entry, &events[index], sizeof(events[index]));
+		region_count = network_damage_world_regions(regions);
+		regions[region_count].address = (unsigned long)&damage_replayed_events;
+		regions[region_count++].size = sizeof(damage_replayed_events);
+		if (network_damage_hook_begin(_halo_sim_world_step_network_damage_replay, &hook, &context, regions,
+			region_count, &checking))
 		{
 			continue;
 		}
-		damage_replayed_events++;
-		switch (event->kind)
-		{
-		case _damage_event_player_effect:
-		{
-			long player_index = distributed_player_from_byte(event->player_index);
-
-			if (distributed_player_is_local(player_index))
-				damage_replay_player_effect(player_index, &damage, event->total_damage);
-			break;
-		}
-		case _damage_event_aftermath:
-			if (network_objects_client_has(event->object_index) &&
-				object_try_and_get_and_verify_type(event->object_index, _object_mask_unit))
-			{
-				/* (what harm it did the units' states bring: no death from here) */
-				damage_replay_aftermath(event->object_index, &damage,
-					event->being_damaged_flags &
-						~(FLAG(_object_being_damaged_body_depleted_bit) | FLAG(_object_being_damaged_killed_instantly_bit)),
-					event->shield_damage, event->body_damage, event->body_damage_multiplier, event->body_part);
-			}
-			break;
-		case _damage_event_kill:
-			/* (a biped's: a vehicle's riders the blow would kill too) */
-			if (network_objects_client_has(event->object_index) &&
-				object_try_and_get_and_verify_type(event->object_index, _object_mask_biped) &&
-				!TEST_FLAG(object_get(event->object_index)->object.damage_flags, _object_dead_bit) &&
-				distributed_damage_indices_valid(event->object_index, event->node_index, event->region_index,
-					event->material_index))
-			{
-				struct unit_datum *unit = unit_get(event->object_index);
-				/* (the blow's aftermath takes the unit's player from it) */
-				long victim_player_index = unit->unit.player_index;
-
-				if (unit->unit.player_index != NONE)
-				{
-					distributed_set_death((short)DATUM_INDEX_TO_ABSOLUTE_INDEX(unit->unit.player_index),
-						event->player_index, TEST_FLAG(event->kill_flags, _damage_event_friendly_fire_bit),
-						TEST_FLAG(event->kill_flags, _damage_event_killed_by_vehicle_bit));
-				}
-				/* (no player's, an actor's: nothing of it counted here, the
-				host's statistics come as they are) */
-				else
-				{
-					SET_FLAG(damage.flags, _damage_no_statistics_bit, TRUE);
-				}
-				damage_replaying_kill = TRUE;
-				damage_replaying_killer = event->player_index != NO_PLAYER ?
-					distributed_player_from_byte(event->player_index) : NONE;
-				damage_replaying_killer_score = event->killer_score;
-				damage_replay_kill(event->object_index, &damage, event->node_index, event->region_index,
-					event->material_index);
-				damage_replaying_kill = FALSE;
-				damage_replaying_killer = NONE;
-				if (victim_player_index != NONE && TEST_FLAG(event->kill_flags, _damage_event_telefragged_bit))
-					players_show_telefragged(victim_player_index);
-			}
-			break;
-		case _damage_event_static:
-			if (distributed_object_index_valid(event->object_index) && static_target(event->object_index) &&
-				distributed_damage_indices_valid(event->object_index, event->node_index, event->region_index,
-					event->material_index))
-			{
-				damage_replay_static(event->object_index, &damage, event->node_index, event->region_index,
-					event->material_index);
-			}
-			break;
-		}
+		network_damage_replay_game(&hook);
+		if (checking)
+			halo_sim_world_step_check(_halo_sim_world_step_network_damage_replay);
 	}
 }
 

@@ -803,6 +803,24 @@ static void crash_line(const char *format, ...)
 	write_to_error_file(line, 1);
 }
 
+/* the module an address is in, and where it is loaded (a DLL's crash: its
+own symbols find the line from the offset) */
+static void crash_module_line(const char *what, DWORD address)
+{
+	HMODULE module = NULL;
+	char name[MAX_PATH];
+	const char *base_name;
+
+	if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		(LPCSTR)(UINT_PTR)address, &module) || !module || !GetModuleFileNameA(module, name, sizeof(name)))
+	{
+		return;
+	}
+	base_name = strrchr(name, '\\') ? strrchr(name, '\\') + 1 : name;
+	crash_line("crash: %s %08lx is %s+%lx (loaded at %p)", what, address, base_name,
+		address - (DWORD)(UINT_PTR)module, (void *)module);
+}
+
 static LONG WINAPI crash_filter(EXCEPTION_POINTERS *exception)
 {
 	static volatile LONG crashed_thread = 0;
@@ -833,6 +851,18 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *exception)
 	{
 		crash_line("crash: stack %08lx %08lx %08lx %08lx %08lx %08lx",
 			stack[0], stack[1], stack[2], stack[3], stack[4], stack[5]);
+	}
+	crash_module_line("eip", context->Eip);
+	if (!IsBadReadPtr(stack, 16 * sizeof(DWORD)))
+	{
+		int index;
+
+		/* (return addresses on the stack, for code without frame pointers) */
+		for (index = 0; index < 16; index++)
+		{
+			if (stack[index] >= 0x10000)
+				crash_module_line("stack word", stack[index]);
+		}
 	}
 	{
 		/* the EBP frame chain (the game keeps frame pointers) */

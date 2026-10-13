@@ -23,6 +23,8 @@ enum
 	those are kept */
 	PLAYER_TRAIL_INTERVAL_TICKS = 3,
 	PLAYER_TRAIL_POINTS = 128,
+	/* the players whose machines a unit's damage goes to, told */
+	MAXIMUM_EVENT_PLAYERS = 8,
 };
 
 /* how far from its firer what a source deals goes off (world units), in
@@ -95,6 +97,15 @@ struct damage_trail_point
 	real_point3d position;
 	real speed;
 	real radius;
+};
+
+/* the players each damage event of this tick goes to the machines of (NONE
+for every machine), and the machine of its owner */
+struct damage_event_destination
+{
+	short player_count;
+	short player_indices[MAXIMUM_EVENT_PLAYERS];
+	long owner_machine_index;
 };
 
 /* the vehicle damage in the globals' falling damage block, as vehicles.c

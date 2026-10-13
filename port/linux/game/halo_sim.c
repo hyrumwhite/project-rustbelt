@@ -77,7 +77,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 /* ---------- constants */
 
 /* the interface version this side speaks (crates/halo_sim's VERSION) */
-#define HALO_SIM_VERSION 125
+#define HALO_SIM_VERSION 126
 
 /* ---------- structures */
 
@@ -10852,6 +10852,11 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network inventory",
 	"network object change",
 	"network hit report",
+	"network damage bookkeeping",
+	"network damage replay",
+	"network damage deals",
+	"network damage player effect",
+	"network damage aftermath",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10867,6 +10872,11 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_apply,
 	_halo_sim_network_apply,
 	_halo_sim_network_apply,
+	_halo_sim_network_damage,
+	_halo_sim_network_damage,
+	_halo_sim_network_damage,
+	_halo_sim_network_damage,
+	_halo_sim_network_damage,
 	_halo_sim_network_damage,
 };
 

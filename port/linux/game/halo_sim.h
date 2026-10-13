@@ -2357,6 +2357,11 @@ enum
 	_halo_sim_world_step_network_inventory,
 	_halo_sim_world_step_network_object_change,
 	_halo_sim_world_step_network_hit_report,
+	_halo_sim_world_step_network_damage_bookkeeping,
+	_halo_sim_world_step_network_damage_replay,
+	_halo_sim_world_step_network_damage_deals,
+	_halo_sim_world_step_network_damage_player_effect,
+	_halo_sim_world_step_network_damage_aftermath,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -2523,7 +2528,62 @@ enum
 	_network_damage_call_velocity,
 	_network_damage_call_location,
 	_network_damage_call_deal,
+	_network_damage_call_unarmed_melee_damage,
+	_network_damage_call_player_machine,
+	_network_damage_call_replay_player_effect,
+	_network_damage_call_replay_aftermath,
+	_network_damage_call_set_death,
+	_network_damage_call_replay_kill,
+	_network_damage_call_telefragged,
+	_network_damage_call_replay_static,
+	_network_damage_call_get_death,
+	_network_damage_call_score,
+	_network_damage_call_client_has,
 };
+
+/* crates/halo_map's network_damage::HookArguments: network_damage.c's other
+steps (the host's bookkeeping, a client's replay of an event, and damage.c's
+hooks), and the records they keep */
+struct halo_sim_network_damage_hook
+{
+	unsigned char entry[0x6C];
+	unsigned char damage[0x54];
+	unsigned long damage_address;
+	long object_index;
+	short node_index;
+	short region_index;
+	short material_index;
+	short has_normal;
+	float normal[3];
+	long authorized;
+	unsigned long being_damaged_flags;
+	float shield_damage;
+	float body_damage;
+	float body_damage_multiplier;
+	float total_damage;
+	short body_part;
+	short pad;
+	long player_index;
+	long connection;
+	long host_time;
+	long dealing_report;
+	unsigned long players;
+	unsigned long history;
+	unsigned long trails;
+	unsigned long events;
+	unsigned long event_count;
+	unsigned long destinations;
+	unsigned long reports;
+	unsigned long report_count;
+	unsigned long replayed;
+	unsigned long game_globals;
+	unsigned long tag_instances;
+	long tag_count;
+	long result;
+};
+
+typedef char halo_sim_network_damage_hook_size_assert[
+	sizeof(struct halo_sim_network_damage_hook) == 0x6C + 0x54 + 8 + 8 + 12 + 24 + 4 + 16 + 48 + 4 ? 1 : -1];
 
 void network_damage_call(struct halo_sim_ai_call *call);
 

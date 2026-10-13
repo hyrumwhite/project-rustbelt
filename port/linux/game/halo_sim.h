@@ -2387,6 +2387,7 @@ enum
 	_halo_sim_world_step_network_client_sends,
 	_halo_sim_world_step_network_client_clock,
 	_halo_sim_world_step_network_coop_world,
+	_halo_sim_world_step_network_coop_device_groups,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3057,6 +3058,22 @@ enum
 {
 	/* the message, of the type a, b entries of actor bytes, to every client */
 	_network_coop_world_call_send = 1,
+	/* the device groups' message, of b entries, to every client */
+	_network_coop_world_call_send_device_groups,
+};
+
+/* crates/halo_map's network_coop::DeviceGroupsArguments: co-op's host
+sending its device groups: whether a machine joined, the groups as last sent
+(network_coop_records.h), the game's device groups (a data array), the
+scenario's count, and the groups' flags a client takes and the runtime bit */
+struct halo_sim_network_coop_device_groups
+{
+	long joined;
+	unsigned long host_devices;
+	unsigned long device_groups;
+	long scenario_group_count;
+	long network_flags;
+	long runtime_bit;
 };
 
 void network_coop_world_call(struct halo_sim_ai_call *call);

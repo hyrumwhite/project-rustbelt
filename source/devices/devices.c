@@ -719,6 +719,16 @@ boolean device_group_network_get(
 	return TRUE;
 }
 
+/* port: the flags a group's network state carries and its runtime bit, for
+co-op's Rust port (network_coop.c's host_send_device_groups) */
+void device_group_network_masks(
+	word *network_flags,
+	short *runtime_bit)
+{
+	*network_flags = DEVICE_GROUP_NETWORK_FLAGS;
+	*runtime_bit = _device_group_runtime_bit;
+}
+
 /* port: a co-op client applies the host's group state. snap jumps the
 devices to the value; otherwise they move there as usual. */
 void device_group_network_set(

@@ -47,6 +47,53 @@ struct distributed_coop_device_state
 	real power;
 };
 
+/* the device groups a level has, told apart (network_coop.c's
+MAXIMUM_DEVICE_GROUPS) */
+#define COOP_MAXIMUM_DEVICE_GROUPS 1024
+
+/* one of the host's device groups, a scenario's (group_index) or a
+device's own (its object and role) */
+struct distributed_coop_device_group
+{
+	short group_index;
+	short name_index;
+	long object_index;
+	long definition_index;
+	byte role;
+	byte flags;
+	/* counts the host's immediate sets (wraps at 256) */
+	byte snaps;
+	/* sent because it changed, rather than in the rotation */
+	byte changed;
+	real value;
+};
+
+#define MAXIMUM_DEVICE_GROUPS_PER_MESSAGE 64
+
+struct distributed_coop_device_groups_message
+{
+	struct distributed_message_header header;
+	struct distributed_coop_device_group groups[COOP_MAXIMUM_DEVICE_GROUPS];
+};
+
+/* host: each device group as last sent, indexed by group */
+struct coop_host_devices
+{
+	/* false until the first tick, which records the map's starting state */
+	boolean started;
+	real values[COOP_MAXIMUM_DEVICE_GROUPS];
+	byte flags[COOP_MAXIMUM_DEVICE_GROUPS];
+	byte snaps[COOP_MAXIMUM_DEVICE_GROUPS];
+	/* ticks this group is still to be sent as a change */
+	byte sends[COOP_MAXIMUM_DEVICE_GROUPS];
+	/* immediate sets so far (devices.c calls network_coop_note_device_snap) */
+	byte snap_counts[COOP_MAXIMUM_DEVICE_GROUPS];
+	/* whether this group has changed since the map loaded */
+	boolean moved[COOP_MAXIMUM_DEVICE_GROUPS];
+	short refresh_next, moved_refresh_next;
+	struct distributed_coop_device_groups_message message;
+};
+
 /* the host: where each scenery or machine was last sent, by its absolute
 index, and whether it has moved since the map placed it */
 struct coop_sent_transform

@@ -183,7 +183,7 @@ enum
 };
 
 /* (devices.c's literal count: a change there is one here) */
-typedef char device_groups_count_assert[MAXIMUM_DEVICE_GROUPS == 1024 ? 1 : -1];
+typedef char device_groups_count_assert[MAXIMUM_DEVICE_GROUPS == 1024 && MAXIMUM_DEVICE_GROUPS == COOP_MAXIMUM_DEVICE_GROUPS ? 1 : -1];
 
 /* distributed_coop_event.kind */
 enum
@@ -345,28 +345,11 @@ struct distributed_coop_events_message
 /* A device group's state. group_index is set for a scenario group. For a
 device's own group it is NONE, and the device is found by name_index, or
 (unnamed) by object_index and definition_index. */
-struct distributed_coop_device_group
-{
-	short group_index;
-	short name_index;
-	long object_index;
-	long definition_index;
-	byte role;
-	byte flags;
-	/* counts the host's immediate sets (wraps at 256) */
-	byte snaps;
-	/* sent because it changed, rather than in the rotation */
-	byte changed;
-	real value;
-};
+/* (struct distributed_coop_device_group: network_coop_records.h) */
 
-#define MAXIMUM_DEVICE_GROUPS_PER_MESSAGE 64
+/* (MAXIMUM_DEVICE_GROUPS_PER_MESSAGE: network_coop_records.h) */
 
-struct distributed_coop_device_groups_message
-{
-	struct distributed_message_header header;
-	struct distributed_coop_device_group groups[MAXIMUM_DEVICE_GROUPS];
-};
+/* (struct distributed_coop_device_groups_message: network_coop_records.h) */
 
 /* one bit per scenario object name: whether the host has that object */
 struct distributed_coop_object_names
@@ -460,23 +443,10 @@ static struct
 	boolean applied_any;
 } coop_events;
 
-/* host: each device group as last sent, indexed by group */
-static struct
-{
-	/* false until the first tick, which records the map's starting state */
-	boolean started;
-	real values[MAXIMUM_DEVICE_GROUPS];
-	byte flags[MAXIMUM_DEVICE_GROUPS];
-	byte snaps[MAXIMUM_DEVICE_GROUPS];
-	/* ticks this group is still to be sent as a change */
-	byte sends[MAXIMUM_DEVICE_GROUPS];
-	/* immediate sets so far (devices.c calls network_coop_note_device_snap) */
-	byte snap_counts[MAXIMUM_DEVICE_GROUPS];
-	/* whether this group has changed since the map loaded */
-	boolean moved[MAXIMUM_DEVICE_GROUPS];
-	short refresh_next, moved_refresh_next;
-	struct distributed_coop_device_groups_message message;
-} host_devices;
+/* host: each device group as last sent (network_coop_records.h) */
+static struct coop_host_devices host_devices;
+/* port: ... and the arguments of its sending (host_send_device_groups) */
+static struct halo_sim_network_coop_device_groups coop_device_groups_arguments;
 
 /* The players' maximum vitality, once the scripts have set a player's: on
 the host as they set it, on a client as the host's presentation has it.
@@ -546,6 +516,8 @@ static struct
 /* ---------- prototypes */
 
 static void client_play_presentation(void);
+/* devices.c */
+void device_group_network_masks(word *network_flags, short *runtime_bit);
 /* unit_scripting_commands.c */
 void unit_scripting_set_current_vitality_of(long unit_index, real body_vitality, real shield_vitality);
 
@@ -841,7 +813,8 @@ one through every group, and a quicker one through the groups that have
 moved since the map loaded. A late joiner loaded the same map, so those are
 the ones it lacks, and a level's few moved devices (a light bridge) reach it
 within a tick or two instead of after a pass through hundreds. */
-static void host_send_device_groups(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_device_groups_game(
 	void)
 {
 	static short group_indices[MAXIMUM_DEVICE_GROUPS];
@@ -885,7 +858,7 @@ static void host_send_device_groups(
 
 		if (host_devices.moved[group_index])
 		{
-			refresh = refresh || host_resend.joined ||
+			refresh = refresh || coop_device_groups_arguments.joined ||
 				(moved_index - host_devices.moved_refresh_next + moved_count) % moved_count < DEVICE_GROUP_REFRESHES_PER_TICK;
 			moved_index++;
 		}
@@ -909,9 +882,57 @@ static void host_send_device_groups(
 
 		if (index > 0)
 			csmemcpy(entries, &entries[index], message_count * sizeof(entries[0]));
-		send_to_clients(&host_devices.message, _distributed_message_coop_device_groups, message_count,
-			sizeof(entries[0]));
+		/* port: through the world's calls (the Rust port's) */
+		{
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_world_call_send_device_groups;
+			call.actor = NONE;
+			call.b = message_count;
+			network_coop_world_call(&call);
+		}
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise; its world the arguments and the groups as
+last sent (the message among them) */
+static void host_send_device_groups(
+	void)
+{
+	struct halo_sim_network_coop_device_groups *arguments = &coop_device_groups_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	int checking = FALSE;
+	word network_flags;
+	short runtime_bit;
+
+	device_group_network_masks(&network_flags, &runtime_bit);
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->joined = host_resend.joined;
+	arguments->host_devices = (unsigned long)&host_devices;
+	arguments->device_groups = (unsigned long)device_groups_data;
+	arguments->scenario_group_count = global_scenario_get()->device_groups.count;
+	arguments->network_flags = network_flags;
+	arguments->runtime_bit = runtime_bit;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&host_devices;
+	regions[1].size = sizeof(host_devices);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_device_groups, &context, regions, 2,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_device_groups_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_device_groups);
 }
 
 /* Where one of the host's devices is: its position (open, closed, how far
@@ -962,6 +983,10 @@ void network_coop_world_call(
 	{
 	case _network_coop_world_call_send:
 		send_to_clients(&coop_world_message, (byte)call->a, (short)call->b, (word)call->actor);
+		break;
+	case _network_coop_world_call_send_device_groups:
+		send_to_clients(&host_devices.message, _distributed_message_coop_device_groups, (short)call->b,
+			sizeof(host_devices.message.groups[0]));
 		break;
 	}
 	halo_sim_world_event_end(call, opened);

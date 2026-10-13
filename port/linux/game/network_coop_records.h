@@ -277,4 +277,145 @@ struct distributed_coop_screen_effect_message
 	struct rasterizer_screen_effect_port_state state;
 };
 
+/* distributed_coop_presentation.flags */
+enum
+{
+	_presentation_cinematic_bit = 0,
+	_presentation_letterbox_bit,
+	_presentation_fading_out_bit,
+	_presentation_skippable_bit,
+	_presentation_show_hud_bit,
+	_presentation_show_help_text_bit,
+	_presentation_timer_paused_bit,
+	_presentation_timer_enabled_bit,
+};
+
+/* what the host shows: the cinematic, fades and letterbox, its camera, the
+skip vote, the scripts' HUD settings and timer, allegiances */
+struct distributed_coop_presentation
+{
+	byte flags;
+	byte fade_color[3];
+	short fade_ticks;
+	/* ticks since the fade began, capped at SHORT_MAX */
+	short fade_elapsed;
+	/* the host's game time when the fade began; a new value means a new fade */
+	long fade_start_time;
+	real_point3d camera_position;
+	struct distributed_vector camera_forward;
+	struct distributed_vector camera_up;
+	word camera_field_of_view;
+	/* the skip vote: machines that voted, out of how many */
+	byte skip_votes;
+	byte skip_voters;
+	/* the scripts' HUD settings (hud_unit.c, hud_weapon.c) */
+	long unit_hud_flags;
+	long weapon_hud_flags;
+	/* the script timer (hud_messaging.c); the clocks agree, so its
+	reference time means the same on every machine */
+	long timer_reference_time;
+	short timer_ticks;
+	short timer_flash_cutoff;
+	short timer_x;
+	short timer_y;
+	short timer_corner;
+	/* whether the scripts have the host's camera (camera_control): else a
+	cutscene leaves it with the player, and a client spectates */
+	byte camera_scripted;
+	/* whether the scripts hold the players' controls (player_enable_input) */
+	byte input_disabled;
+	/* the object the camera films (camera_object_get) and the camera's
+	offset from it: a client puts its camera by its own copy, which its
+	timing may have a tick from the host's */
+	long camera_object_index;
+	real_vector3d camera_object_offset;
+	/* whether the scripts' screen shake is running on the host. A client
+	whose shake outlives it (the stop was skipped with a cutscene, or lost)
+	ends its own. */
+	byte scripted_shake;
+	/* whether the scripts have set the players' maximum vitality, and to
+	what (network_coop_set_players_vitality) */
+	byte players_vitality_set;
+	/* the cluster the scripts keep active (object_pvs_activate) plus one,
+	0 for none: a cutscene filmed far from every player (b30's Elite at the
+	shaft door) is active on the clients too. Plus one so the zeroed padding
+	of a host without it reads as none. */
+	short activating_cluster;
+	real players_maximum_body_vitality;
+	real players_maximum_shield_vitality;
+	/* which teams are allies and friends (game_allegiance.c): the scripts
+	make them, so a client's would leave the marines its enemies */
+	unsigned long ally_teams[GAME_ALLEGIANCE_BITVECTOR_LONGS];
+	unsigned long friendly_teams[GAME_ALLEGIANCE_BITVECTOR_LONGS];
+};
+
+struct distributed_coop_presentation_message
+{
+	struct distributed_message_header header;
+	struct distributed_coop_presentation presentation;
+};
+
+/* The cutscene skip vote. The host records when it last heard from each
+client that is showing the cutscene, and when that client last voted. A
+client keeps the host's latest tally for display. */
+struct coop_skip_vote
+{
+	boolean voted;
+	boolean offered;
+	short votes;
+	short voters;
+	long client_heard_times[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+	long client_vote_times[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+	/* host: no voting before this game time (set after a skip) */
+	long cooldown_until;
+	/* host: the vote passed and main_skip_cinematic was called once */
+	boolean requested;
+	/* host: the save the script makes as the cutscene becomes skippable is
+	written (a skip reverts to it) */
+	boolean skip_save_written;
+};
+
+/* what the skip vote and the presentation read of the host's game
+(network_coop.c's host_presentation_inputs) */
+struct coop_presentation_inputs
+{
+	/* the client machines, by index */
+	long machine_indices[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+	short machine_count;
+	/* a cinematic in progress that can be skipped; the map saving; a local
+	player */
+	boolean skippable;
+	boolean saving_map;
+	boolean local_player;
+	boolean cinematic;
+	boolean letterbox;
+	boolean fading_out;
+	/* the camera of local player 0 (observer_get_camera), if any */
+	boolean camera_valid;
+	boolean camera_scripted;
+	boolean input_disabled;
+	boolean scripted_shake;
+	boolean players_vitality_set;
+	boolean show_hud;
+	boolean show_help_text;
+	short fade_ticks;
+	long fade_start_time;
+	real_rgb_color fade_color;
+	real_point3d camera_position;
+	real_vector3d camera_forward;
+	real_vector3d camera_up;
+	real camera_field_of_view;
+	long camera_object_index;
+	/* objects_get_activating_cluster_index (NONE for none) */
+	short activating_cluster;
+	short pad;
+	real players_maximum_body_vitality;
+	real players_maximum_shield_vitality;
+	unsigned long ally_teams[GAME_ALLEGIANCE_BITVECTOR_LONGS];
+	unsigned long friendly_teams[GAME_ALLEGIANCE_BITVECTOR_LONGS];
+	long unit_hud_flags;
+	long weapon_hud_flags;
+	struct hud_timer_state timer;
+};
+
 #endif

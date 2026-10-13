@@ -2391,6 +2391,7 @@ enum
 	_halo_sim_world_step_network_coop_queue,
 	_halo_sim_world_step_network_coop_object_names,
 	_halo_sim_world_step_network_coop_screen_effect,
+	_halo_sim_world_step_network_coop_presentation,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3076,6 +3077,24 @@ enum
 	_network_coop_world_call_send_object_names,
 	/* the screen effect's message to every client */
 	_network_coop_world_call_send_screen_effect,
+	/* logs that the cutscene can be skipped */
+	_network_coop_world_call_log_skippable,
+	/* skips the cinematic, a of b machines voting (main_skip_cinematic) */
+	_network_coop_world_call_skip_cinematic,
+	/* the presentation's message to every client */
+	_network_coop_world_call_send_presentation,
+};
+
+/* crates/halo_map's network_coop::PresentationArguments: co-op's host
+counting the skip vote and sending its presentation: what they read of the
+game (struct coop_presentation_inputs), the skip vote (struct coop_skip_vote),
+the message (network_coop_records.h) and the game time */
+struct halo_sim_network_coop_presentation
+{
+	unsigned long inputs;
+	unsigned long skip_vote;
+	unsigned long message;
+	long now;
 };
 
 /* crates/halo_map's network_coop::ObjectNamesArguments: co-op's host

@@ -205,83 +205,13 @@ enum
 	_device_group_role_position,
 };
 
-/* distributed_coop_presentation.flags */
-enum
-{
-	_presentation_cinematic_bit = 0,
-	_presentation_letterbox_bit,
-	_presentation_fading_out_bit,
-	_presentation_skippable_bit,
-	_presentation_show_hud_bit,
-	_presentation_show_help_text_bit,
-	_presentation_timer_paused_bit,
-	_presentation_timer_enabled_bit,
-};
+/* (distributed_coop_presentation.flags: network_coop_records.h) */
 
 /* ---------- structures */
 
-struct distributed_coop_presentation
-{
-	byte flags;
-	byte fade_color[3];
-	short fade_ticks;
-	/* ticks since the fade began, capped at SHORT_MAX */
-	short fade_elapsed;
-	/* the host's game time when the fade began; a new value means a new fade */
-	long fade_start_time;
-	real_point3d camera_position;
-	struct distributed_vector camera_forward;
-	struct distributed_vector camera_up;
-	word camera_field_of_view;
-	/* the skip vote: machines that voted, out of how many */
-	byte skip_votes;
-	byte skip_voters;
-	/* the scripts' HUD settings (hud_unit.c, hud_weapon.c) */
-	long unit_hud_flags;
-	long weapon_hud_flags;
-	/* the script timer (hud_messaging.c); the clocks agree, so its
-	reference time means the same on every machine */
-	long timer_reference_time;
-	short timer_ticks;
-	short timer_flash_cutoff;
-	short timer_x;
-	short timer_y;
-	short timer_corner;
-	/* whether the scripts have the host's camera (camera_control): else a
-	cutscene leaves it with the player, and a client spectates */
-	byte camera_scripted;
-	/* whether the scripts hold the players' controls (player_enable_input) */
-	byte input_disabled;
-	/* the object the camera films (camera_object_get) and the camera's
-	offset from it: a client puts its camera by its own copy, which its
-	timing may have a tick from the host's */
-	long camera_object_index;
-	real_vector3d camera_object_offset;
-	/* whether the scripts' screen shake is running on the host. A client
-	whose shake outlives it (the stop was skipped with a cutscene, or lost)
-	ends its own. */
-	byte scripted_shake;
-	/* whether the scripts have set the players' maximum vitality, and to
-	what (network_coop_set_players_vitality) */
-	byte players_vitality_set;
-	/* the cluster the scripts keep active (object_pvs_activate) plus one,
-	0 for none: a cutscene filmed far from every player (b30's Elite at the
-	shaft door) is active on the clients too. Plus one so the zeroed padding
-	of a host without it reads as none. */
-	short activating_cluster;
-	real players_maximum_body_vitality;
-	real players_maximum_shield_vitality;
-	/* which teams are allies and friends (game_allegiance.c): the scripts
-	make them, so a client's would leave the marines its enemies */
-	unsigned long ally_teams[GAME_ALLEGIANCE_BITVECTOR_LONGS];
-	unsigned long friendly_teams[GAME_ALLEGIANCE_BITVECTOR_LONGS];
-};
+/* (struct distributed_coop_presentation: network_coop_records.h) */
 
-struct distributed_coop_presentation_message
-{
-	struct distributed_message_header header;
-	struct distributed_coop_presentation presentation;
-};
+/* (struct distributed_coop_presentation_message: network_coop_records.h) */
 
 /* (struct distributed_coop_event: network_coop_records.h) */
 
@@ -423,25 +353,8 @@ static struct
 /* client: the object names that differed from the host's last time */
 static byte client_names_differing[OBJECT_NAME_BYTES];
 
-/* The cutscene skip vote. The host records when it last heard from each
-client that is showing the cutscene, and when that client last voted. A
-client keeps the host's latest tally for display. */
-static struct
-{
-	boolean voted;
-	boolean offered;
-	short votes;
-	short voters;
-	long client_heard_times[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	long client_vote_times[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	/* host: no voting before this game time (set after a skip) */
-	long cooldown_until;
-	/* host: the vote passed and main_skip_cinematic was called once */
-	boolean requested;
-	/* host: the save the script makes as the cutscene becomes skippable is
-	written (a skip reverts to it) */
-	boolean skip_save_written;
-} skip_vote;
+/* the cutscene skip vote (network_coop_records.h) */
+static struct coop_skip_vote skip_vote;
 
 /* ---------- prototypes */
 
@@ -927,6 +840,11 @@ static struct rasterizer_screen_effect_port_state host_screen_effect;
 static struct rasterizer_screen_effect_port_state host_sent_screen_effect;
 static struct halo_sim_network_coop_object_names coop_object_names_arguments;
 static struct halo_sim_network_coop_screen_effect coop_screen_effect_arguments;
+/* port: the presentation's message, what it and the skip vote read of the
+game, and their step's arguments */
+static struct distributed_coop_presentation_message coop_presentation_message;
+static struct coop_presentation_inputs coop_presentation_inputs;
+static struct halo_sim_network_coop_presentation coop_presentation_arguments;
 
 void network_coop_world_call(
 	struct halo_sim_ai_call *call)
@@ -976,8 +894,35 @@ void network_coop_world_call(
 		send_to_clients(&coop_screen_effect_message, _distributed_message_coop_screen_effect, 1,
 			sizeof(coop_screen_effect_message.state));
 		break;
+	case _network_coop_world_call_log_skippable:
+		error(_error_silent, "co-op: the cutscene can be skipped");
+		break;
+	case _network_coop_world_call_skip_cinematic:
+		error(_error_silent, "co-op: skipping the cutscene (%d of %d voted)", call->a, call->b);
+		main_skip_cinematic();
+		break;
+	case _network_coop_world_call_send_presentation:
+		send_to_clients(&coop_presentation_message, _distributed_message_coop_presentation, 1,
+			sizeof(coop_presentation_message.presentation));
+		break;
 	}
 	halo_sim_world_event_end(call, opened);
+}
+
+/* the call of the kind, with a and b */
+static void coop_presentation_call(
+	long kind,
+	long a,
+	long b)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	network_coop_world_call(&call);
 }
 
 /* the message, of its type, count and entry size, to every client */
@@ -1432,13 +1377,16 @@ static void skip_vote_clear(
 /* host: counts the votes to skip the cinematic, and skips when more than
 half the machines showing it have voted (one still loading, or joined since
 it began, has no say until it shows it) */
+/* port: the game's (halo_sim.c checks Rust's against it), of the inputs
+gathered (host_presentation_inputs) */
 static void host_count_skip_votes(
 	void)
 {
-	long machine_indices[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	short machine_count = distributed_client_machines(machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
-	long now = game_time_get();
-	boolean skippable = cinematic_in_progress() && cinematic_can_be_skipped();
+	struct coop_presentation_inputs const *inputs = &coop_presentation_inputs;
+	long const *machine_indices = inputs->machine_indices;
+	short machine_count = inputs->machine_count;
+	long now = coop_presentation_arguments.now;
+	boolean skippable = inputs->skippable;
 	boolean was_offered = skip_vote.offered;
 	short index;
 
@@ -1448,11 +1396,11 @@ static void host_count_skip_votes(
 	vote, since the skip cancels it, as in a solo game. */
 	if (!skippable)
 		skip_vote.skip_save_written = FALSE;
-	else if (!main_saving_map())
+	else if (!inputs->saving_map)
 		skip_vote.skip_save_written = TRUE;
 	skip_vote.offered = skippable && skip_vote.skip_save_written && now >= skip_vote.cooldown_until;
 	if (skip_vote.offered && !was_offered)
-		error(_error_silent, "co-op: the cutscene can be skipped");
+		coop_presentation_call(_network_coop_world_call_log_skippable, 0, 0);
 	if (!skip_vote.offered)
 	{
 		skip_vote_clear();
@@ -1464,7 +1412,7 @@ static void host_count_skip_votes(
 	if (skip_vote.requested)
 		return;
 	/* the host votes too, unless it is a dedicated server with no player */
-	skip_vote.voters = local_player_get_next(NONE) != NONE ? 1 : 0;
+	skip_vote.voters = inputs->local_player ? 1 : 0;
 	skip_vote.votes = skip_vote.voted ? 1 : 0;
 	for (index = 0; index < machine_count; index++)
 	{
@@ -1479,9 +1427,8 @@ static void host_count_skip_votes(
 	}
 	if (skip_vote.votes * 2 > skip_vote.voters)
 	{
-		error(_error_silent, "co-op: skipping the cutscene (%d of %d voted)", skip_vote.votes, skip_vote.voters);
 		skip_vote.requested = TRUE;
-		main_skip_cinematic();
+		coop_presentation_call(_network_coop_world_call_skip_cinematic, skip_vote.votes, skip_vote.voters);
 	}
 }
 
@@ -1527,68 +1474,158 @@ static long camera_object_get(
 }
 
 /* host: the presentation sent to every client this tick */
+/* port: the game's (halo_sim.c checks Rust's against it), of the inputs
+gathered (host_presentation_inputs) */
 static void host_presentation(
 	struct distributed_coop_presentation *presentation)
 {
-	struct observer_result const *camera = observer_get_camera(0);
-	struct hud_timer_state timer;
-	real_rgb_color fade_color;
-	boolean fading_out;
+	struct coop_presentation_inputs const *inputs = &coop_presentation_inputs;
 	long elapsed;
 
 	csmemset(presentation, 0, sizeof(*presentation));
-	SET_FLAG(presentation->flags, _presentation_cinematic_bit, cinematic_in_progress());
-	SET_FLAG(presentation->flags, _presentation_letterbox_bit, cinematic_globals->show_letterbox);
-	player_effect_port_screen_fade_get(&fade_color, &presentation->fade_ticks, &fading_out,
-		&presentation->fade_start_time);
-	SET_FLAG(presentation->flags, _presentation_fading_out_bit, fading_out);
-	presentation->fade_color[0] = (byte)(PIN(fade_color.red, 0.0f, 1.0f) * 255.0f + 0.5f);
-	presentation->fade_color[1] = (byte)(PIN(fade_color.green, 0.0f, 1.0f) * 255.0f + 0.5f);
-	presentation->fade_color[2] = (byte)(PIN(fade_color.blue, 0.0f, 1.0f) * 255.0f + 0.5f);
-	elapsed = game_time_get() - presentation->fade_start_time;
+	SET_FLAG(presentation->flags, _presentation_cinematic_bit, inputs->cinematic);
+	SET_FLAG(presentation->flags, _presentation_letterbox_bit, inputs->letterbox);
+	presentation->fade_ticks = inputs->fade_ticks;
+	presentation->fade_start_time = inputs->fade_start_time;
+	SET_FLAG(presentation->flags, _presentation_fading_out_bit, inputs->fading_out);
+	presentation->fade_color[0] = (byte)(PIN(inputs->fade_color.red, 0.0f, 1.0f) * 255.0f + 0.5f);
+	presentation->fade_color[1] = (byte)(PIN(inputs->fade_color.green, 0.0f, 1.0f) * 255.0f + 0.5f);
+	presentation->fade_color[2] = (byte)(PIN(inputs->fade_color.blue, 0.0f, 1.0f) * 255.0f + 0.5f);
+	elapsed = coop_presentation_arguments.now - presentation->fade_start_time;
 	presentation->fade_elapsed = (short)PIN(elapsed, 0, SHORT_MAX);
-	if (camera)
+	if (inputs->camera_valid)
 	{
-		presentation->camera_position = camera->position;
-		distributed_vector_pack(&camera->forward, DISTRIBUTED_UNIT_SCALE, &presentation->camera_forward);
-		distributed_vector_pack(&camera->up, DISTRIBUTED_UNIT_SCALE, &presentation->camera_up);
+		presentation->camera_position = inputs->camera_position;
+		distributed_vector_pack(&inputs->camera_forward, DISTRIBUTED_UNIT_SCALE, &presentation->camera_forward);
+		distributed_vector_pack(&inputs->camera_up, DISTRIBUTED_UNIT_SCALE, &presentation->camera_up);
 		presentation->camera_field_of_view =
-			(word)PIN(camera->field_of_view * FIELD_OF_VIEW_SCALE + 0.5f, 1, UNSIGNED_SHORT_MAX);
-		presentation->camera_object_index = camera_object_get(camera);
+			(word)PIN(inputs->camera_field_of_view * FIELD_OF_VIEW_SCALE + 0.5f, 1, UNSIGNED_SHORT_MAX);
+		presentation->camera_object_index = inputs->camera_object_index;
 		if (presentation->camera_object_index != NONE)
 		{
-			vector_from_points3d(&object_get(presentation->camera_object_index)->object.position, &camera->position,
-				&presentation->camera_object_offset);
+			vector_from_points3d(&object_get(presentation->camera_object_index)->object.position,
+				&inputs->camera_position, &presentation->camera_object_offset);
 		}
 	}
 	else
 		presentation->camera_object_index = NONE;
 
-	presentation->camera_scripted = (byte)(*director_camera_scripted != FALSE);
-	presentation->input_disabled = (byte)!player_input_enabled();
-	presentation->scripted_shake = (byte)player_effect_port_scripted_active();
-	presentation->players_vitality_set = (byte)players_vitality.set;
-	presentation->activating_cluster = (short)(objects_get_activating_cluster_index() + 1);
-	presentation->players_maximum_body_vitality = players_vitality.maximum_body;
-	presentation->players_maximum_shield_vitality = players_vitality.maximum_shield;
-	game_allegiance_get_teams(presentation->ally_teams, presentation->friendly_teams);
+	presentation->camera_scripted = (byte)inputs->camera_scripted;
+	presentation->input_disabled = (byte)inputs->input_disabled;
+	presentation->scripted_shake = (byte)inputs->scripted_shake;
+	presentation->players_vitality_set = (byte)inputs->players_vitality_set;
+	presentation->activating_cluster = (short)(inputs->activating_cluster + 1);
+	presentation->players_maximum_body_vitality = inputs->players_maximum_body_vitality;
+	presentation->players_maximum_shield_vitality = inputs->players_maximum_shield_vitality;
+	csmemcpy(presentation->ally_teams, inputs->ally_teams, sizeof(presentation->ally_teams));
+	csmemcpy(presentation->friendly_teams, inputs->friendly_teams, sizeof(presentation->friendly_teams));
 	SET_FLAG(presentation->flags, _presentation_skippable_bit, skip_vote.offered);
 	presentation->skip_votes = (byte)MIN(skip_vote.votes, 255);
 	presentation->skip_voters = (byte)MIN(skip_vote.voters, 255);
 
-	SET_FLAG(presentation->flags, _presentation_show_hud_bit, hud_scripted_globals->show_hud);
-	SET_FLAG(presentation->flags, _presentation_show_help_text_bit, hud_scripted_globals->show_hud_help_text);
-	presentation->unit_hud_flags = hud_unit_port_script_flags();
-	presentation->weapon_hud_flags = hud_weapon_port_script_flags();
-	hud_messaging_port_timer_get(&timer);
-	SET_FLAG(presentation->flags, _presentation_timer_paused_bit, timer.paused);
-	SET_FLAG(presentation->flags, _presentation_timer_enabled_bit, timer.enabled);
-	presentation->timer_reference_time = timer.reference_time;
-	presentation->timer_ticks = timer.ticks;
-	presentation->timer_flash_cutoff = timer.flash_cutoff;
-	presentation->timer_x = timer.x;
-	presentation->timer_y = timer.y;
-	presentation->timer_corner = timer.corner;
+	SET_FLAG(presentation->flags, _presentation_show_hud_bit, inputs->show_hud);
+	SET_FLAG(presentation->flags, _presentation_show_help_text_bit, inputs->show_help_text);
+	presentation->unit_hud_flags = inputs->unit_hud_flags;
+	presentation->weapon_hud_flags = inputs->weapon_hud_flags;
+	SET_FLAG(presentation->flags, _presentation_timer_paused_bit, inputs->timer.paused);
+	SET_FLAG(presentation->flags, _presentation_timer_enabled_bit, inputs->timer.enabled);
+	presentation->timer_reference_time = inputs->timer.reference_time;
+	presentation->timer_ticks = inputs->timer.ticks;
+	presentation->timer_flash_cutoff = inputs->timer.flash_cutoff;
+	presentation->timer_x = inputs->timer.x;
+	presentation->timer_y = inputs->timer.y;
+	presentation->timer_corner = inputs->timer.corner;
+}
+
+/* port: what the skip vote and the presentation read of the game, gathered
+before their step */
+static void host_presentation_inputs(
+	struct coop_presentation_inputs *inputs)
+{
+	struct observer_result const *camera = observer_get_camera(0);
+
+	csmemset(inputs, 0, sizeof(*inputs));
+	inputs->machine_count = distributed_client_machines(inputs->machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	inputs->skippable = cinematic_in_progress() && cinematic_can_be_skipped();
+	inputs->saving_map = main_saving_map();
+	inputs->local_player = local_player_get_next(NONE) != NONE;
+	inputs->cinematic = cinematic_in_progress();
+	inputs->letterbox = cinematic_globals->show_letterbox;
+	player_effect_port_screen_fade_get(&inputs->fade_color, &inputs->fade_ticks, &inputs->fading_out,
+		&inputs->fade_start_time);
+	inputs->camera_valid = camera != NULL;
+	if (camera)
+	{
+		inputs->camera_position = camera->position;
+		inputs->camera_forward = camera->forward;
+		inputs->camera_up = camera->up;
+		inputs->camera_field_of_view = camera->field_of_view;
+		inputs->camera_object_index = camera_object_get(camera);
+	}
+	inputs->camera_scripted = *director_camera_scripted != FALSE;
+	inputs->input_disabled = !player_input_enabled();
+	inputs->scripted_shake = player_effect_port_scripted_active() != FALSE;
+	inputs->players_vitality_set = players_vitality.set;
+	inputs->activating_cluster = (short)objects_get_activating_cluster_index();
+	inputs->players_maximum_body_vitality = players_vitality.maximum_body;
+	inputs->players_maximum_shield_vitality = players_vitality.maximum_shield;
+	game_allegiance_get_teams(inputs->ally_teams, inputs->friendly_teams);
+	inputs->show_hud = hud_scripted_globals->show_hud;
+	inputs->show_help_text = hud_scripted_globals->show_hud_help_text;
+	inputs->unit_hud_flags = hud_unit_port_script_flags();
+	inputs->weapon_hud_flags = hud_weapon_port_script_flags();
+	hud_messaging_port_timer_get(&inputs->timer);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_presentation_game(
+	void)
+{
+	host_count_skip_votes();
+	host_presentation(&coop_presentation_message.presentation);
+	coop_presentation_call(_network_coop_world_call_send_presentation, 0, 0);
+}
+
+/* host, each tick: counts the skip vote and sends the presentation (the
+cutscene camera, fades, letterbox, the scripts' HUD and allegiances) */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the inputs gathered,
+the skip vote and the message. */
+static void host_send_presentation(
+	void)
+{
+	struct halo_sim_network_coop_presentation *arguments = &coop_presentation_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
+
+	host_presentation_inputs(&coop_presentation_inputs);
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->inputs = (unsigned long)&coop_presentation_inputs;
+	arguments->skip_vote = (unsigned long)&skip_vote;
+	arguments->message = (unsigned long)&coop_presentation_message;
+	arguments->now = game_time_get();
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_presentation_inputs;
+	regions[1].size = sizeof(coop_presentation_inputs);
+	regions[2].address = (unsigned long)&skip_vote;
+	regions[2].size = sizeof(skip_vote);
+	regions[3].address = (unsigned long)&coop_presentation_message;
+	regions[3].size = sizeof(coop_presentation_message);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_presentation, &context, regions, 4,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_presentation_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_presentation);
 }
 
 static void client_cinematic_end(
@@ -2805,16 +2842,12 @@ static void host_send_queue(
 void network_coop_host_tick(
 	void)
 {
-	struct distributed_coop_presentation_message message;
-
 	if (!coop_game())
 		return;
 	host_resend_update();
 	players_vitality_keep();
 	coop_enemies_update();
-	host_count_skip_votes();
-	host_presentation(&message.presentation);
-	send_to_clients(&message, _distributed_message_coop_presentation, 1, sizeof(message.presentation));
+	host_send_presentation();
 	host_send_device_groups();
 	if (host_resend.joined || game_time_get() % OBJECT_NAMES_INTERVAL_TICKS == 0)
 		host_send_object_names();

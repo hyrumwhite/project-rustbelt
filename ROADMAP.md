@@ -752,7 +752,7 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Every perception, combat, decision loop and action update agrees in minute-long runs of b30, d20, c20, b40 and a50, with none left out.
        - Planted errors were caught: the cover distance on b30 and a50, the sound distance on b30, the vision angles on b30, and a swarm's sense cluster on d20 and c20. A planted error in the pitch limit went unseen: targets that far above an actor's view are rare.
        - With all fifty-one systems in Rust, every probe check agrees on the five levels and a50 at 144 frames a second.
-6. Networking ← *in progress*
+6. Networking ✅
    - **The way in:** OpenCE's networking is about 35,000 lines: the game's own messages and lockstep client/server (`source/networking`), the port's co-op and distributed netcode (`port/linux/game/network_*.c`), and Bungie's transport. It moves one checkable piece at a time, starting from the bytes on the wire. A system link session on one machine (OpenCE's `HALO_NETWORK_TEST`, host and join on loopback addresses) exercises it, with each machine's per-second player positions compared.
    - [x] The packet codec in Rust (`halo_map::data_packets`, under `data_packets`): memory/data_packets.c, data_encoding.c and data_packet_groups.c. The game's messages and its key agreement go through it.
      - **What Rust does:** a packet's struct is described by its definition's fields (bytes, shorts, longs, 64-bit integers, strings, sized data, nested arrays, padding). It is encoded big-endian with its version byte first and its type's header byte last, and decoded back. This is the C's walk exactly:

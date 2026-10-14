@@ -70,7 +70,8 @@ struct Args {
     #[argh(switch)]
     pathtracer: bool,
     /// start the camera at x,y,z[,yaw,pitch]: Halo world units and degrees
-    /// (press P in the viewer to print the current view in this form)
+    /// (press P in the viewer to print the current view in this form; with
+    /// --bridge or --opence, the camera starts detached from the game there)
     #[argh(option, from_str_fn(parse_camera))]
     camera: Option<[f32; 5]>,
     /// don't turn light fixtures into light sources
@@ -130,6 +131,19 @@ struct Args {
     /// in a build carrying the game, only view the map (no game)
     #[argh(switch)]
     viewer: bool,
+    /// with --opence, leave glass and water in the game's overlay instead of
+    /// drawing them here, ray traced
+    #[argh(switch)]
+    game_glass: bool,
+}
+
+impl Args {
+    /// Whether this viewer draws glass and water itself while the game shares
+    /// its overlay: the game it starts leaves them out of the overlay
+    /// (game.bevy_bridge_viewer_glass).
+    fn viewer_glass(&self) -> bool {
+        self.opence.is_some() && !self.no_overlay && !self.game_glass
+    }
 }
 
 fn parse_camera(value: &str) -> Result<[f32; 5], String> {
@@ -259,7 +273,7 @@ fn main() -> AppExit {
         match {
             bridge_name = bridge::own_bridge_name();
             let simulation = args.simulation.as_deref().map(|systems| bridge::Simulation { systems, dll: simulation_dll.as_deref() });
-            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, simulation)
+            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, args.viewer_glass(), simulation)
         } {
             // (stops the game when the viewer exits, or gives up on it)
             Ok(child) => game_process = Some(bridge::GameProcess(child)),
@@ -324,6 +338,9 @@ fn main() -> AppExit {
         app.insert_resource(link)
             .add_plugins((bridge::BridgePlugin, lights::DynamicLightsPlugin))
             .add_systems(PreUpdate, follow_level);
+        if args.camera.is_some() {
+            app.insert_resource(bridge::FollowGame(false));
+        }
         if overlay {
             app.add_plugins(overlay::OverlayPlugin);
         }
@@ -495,8 +512,10 @@ fn load_level(
     builder.fixture_lights = !args.no_fixture_lights;
     builder.show_light_proxies = args.show_light_proxies;
     builder.matte = args.matte;
-    // (the game's overlay has them)
+    // (the game's overlay has them; but glass and water, when this viewer
+    // draws them)
     builder.skip_transparent = overlay;
+    builder.draw_blended = !overlay || args.viewer_glass();
     if let Err(e) = builder.spawn_bsps(args.bsp, !args.pathtracer, &mut commands, &mut assets) {
         error!("loading {}: {e}", cache.header.name);
     }
@@ -614,8 +633,9 @@ fn setup_camera(
     } else {
         camera.insert(SolarikLighting::default());
     }
-    // a bridged camera follows the game's until F detaches it
-    if !args.bridge {
+    // a bridged camera follows the game's until F8 detaches it (or, with
+    // --camera, starts detached there)
+    if !args.bridge || args.camera.is_some() {
         camera.insert(FreeCamera { walk_speed: 6.0, run_speed: 25.0, ..default() });
     }
 

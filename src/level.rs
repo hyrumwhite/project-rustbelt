@@ -274,8 +274,11 @@ pub struct LevelBuilder {
     pub show_light_proxies: bool,
     /// Ignore Halo's reflection settings: every surface a rough dielectric.
     pub matte: bool,
-    /// Leave out transparent surfaces (the game's overlay draws them).
+    /// Leave out transparent surfaces (the game's overlay draws them)...
     pub skip_transparent: bool,
+    /// ... but glass and water (thin panes Solarik ray traces), when the
+    /// game leaves those out of its overlay.
+    pub draw_blended: bool,
     /// The parent of everything this level spawns, so that despawning it
     /// unloads the level (when the bridged game changes level).
     pub root: Option<Entity>,
@@ -307,6 +310,7 @@ impl LevelBuilder {
             show_light_proxies: false,
             matte: false,
             skip_transparent: false,
+            draw_blended: true,
             root: None,
             stats: LevelStats { map_name: cache.header.name.clone(), ..default() },
             cache,
@@ -595,7 +599,11 @@ impl LevelBuilder {
         let surface = match surface {
             Surface::Solid(solid) => solid,
             Surface::Transparent(_) | Surface::Blended(_) => {
-                if raster_use && !self.skip_transparent {
+                let skipped = match surface {
+                    Surface::Blended(_) => !self.draw_blended,
+                    _ => self.skip_transparent,
+                };
+                if raster_use && !skipped {
                     let mut drawn = commands.spawn((
                         Name::new(name),
                         Mesh3d(mesh.clone()),
@@ -870,10 +878,13 @@ impl LevelBuilder {
             }
             return (root, nodes.into_iter().map(Some).collect(), Vec::new());
         }
-        // the rays see the rigid pieces; the camera sees the skinned parts
+        // the rays see the rigid pieces; the camera sees the skinned parts,
+        // but glass and water: a pane both see, which Solarik ray traces
+        // and composites for the camera as the map's own panes
         for piece in &model.pieces {
             let surface = self.coloured_surface(&piece.surface, piece.shader, change_colors, assets);
-            let mode = if raster && model.skinned.is_empty() { MeshUse::Both } else { MeshUse::Traced };
+            let pane = matches!(surface, Surface::Blended(_));
+            let mode = if raster && (model.skinned.is_empty() || pane) { MeshUse::Both } else { MeshUse::Traced };
             let _ = self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
         }
         // the bending parts, the object's own entities (in the world: the
@@ -884,10 +895,15 @@ impl LevelBuilder {
         for skin in &model.traced_skins {
             let surface = self.coloured_surface(&skin.surface, skin.shader, change_colors, assets);
             let mesh = assets.meshes.add(skin.mesh(&rest));
-            skins.extend(self.spawn_mesh_as(commands, root, model.name.clone(), mesh, &surface, MeshUse::Traced));
+            let mode = if raster && matches!(surface, Surface::Blended(_)) { MeshUse::Both } else { MeshUse::Traced };
+            skins.extend(self.spawn_mesh_as(commands, root, model.name.clone(), mesh, &surface, mode));
         }
         if raster {
             for part in &model.skinned {
+                // (its panes are drawn above)
+                if matches!(part.surface, Surface::Blended(_)) {
+                    continue;
+                }
                 let surface = self.coloured_surface(&part.surface, part.shader, change_colors, assets);
                 let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
                 let _ =

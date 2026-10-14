@@ -34,8 +34,9 @@ pub struct Simulation<'a> {
 /// Starts OpenCE on the map at `map_path`: its data root is the folder that
 /// holds the maps folder, the level is the map's scenario, the bridge is on
 /// and (unless `show`) its window is hidden. With `overlay`, it shares its
-/// overlay (`crate::overlay`), drawing at the viewer's window size. With
-/// `simulation`, those systems run in Rust. Its output goes to
+/// overlay (`crate::overlay`), drawing at the viewer's window size, and
+/// with `viewer_glass` leaves glass and water out of it (the viewer draws
+/// them). With `simulation`, those systems run in Rust. Its output goes to
 /// `halo_rt_opence-<viewer process id>.log` in the temporary folder.
 pub fn launch_game(
     exe: &std::path::Path,
@@ -44,6 +45,7 @@ pub fn launch_game(
     bridge_name: &str,
     show: bool,
     overlay: bool,
+    viewer_glass: bool,
     simulation: Option<Simulation>,
 ) -> std::io::Result<std::process::Child> {
     use std::io::{Error, ErrorKind};
@@ -86,6 +88,10 @@ pub fn launch_game(
     if overlay {
         let (width, height) = crate::overlay::WINDOW_SIZE;
         command.env("HALO_BEVY_BRIDGE_OVERLAY", "1").env("HALO_WINDOW_SIZE", format!("{width}x{height}"));
+        // (glass and water: the viewer's, ray traced)
+        if viewer_glass {
+            command.env("HALO_BEVY_BRIDGE_VIEWER_GLASS", "1");
+        }
     }
     let start = if start_on_map { format!("on {scenario}") } else { "at its menus".to_string() };
     eprintln!("starting OpenCE {start} (data root {}; its log: {})", data_root.display(), log_path.display());

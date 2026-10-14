@@ -84,7 +84,7 @@ Playing needs OpenCE built from its `bevy-bridge` branch, which shares the game'
 cargo run --release --features dlss -- b30 --opence ..\OpenCE-bevy\build\windows\halo.exe
 ```
 
-The game starts hidden on the level (the map's folder's parent is its data root) and stops when you close the viewer. With `--menu` it starts at its own menus instead (`cargo run --release --features dlss -- --opence ..\OpenCE-bevy\build\windows\halo.exe --menu`), shown in the viewer. Pick a campaign level or a multiplayer game there. The viewer follows the game from level to level: the next campaign level, the menus, each game of a multiplayer session. The game's log is `halo_rt_opence-<viewer process id>.log` in the temporary folder; the viewer prints its path.
+The game starts hidden on the level (the map's folder's parent is its data root) and stops when you close the viewer. With `--menu` it starts at its own menus instead (`cargo run --release --features dlss -- --opence ..\OpenCE-bevy\build\windows\halo.exe --menu`), shown in the viewer. Pick a campaign level or a multiplayer game there. Glass and water are drawn here, ray traced by Solarik (the game leaves them out of its overlay, `game.bevy_bridge_viewer_glass`); `--game-glass` gives them back to the game. They reflect fully once the camera settles, and fade toward their tint under fast camera motion, such as a flyover. The viewer follows the game from level to level: the next campaign level, the menus, each game of a multiplayer session. The game's log is `halo_rt_opence-<viewer process id>.log` in the temporary folder; the viewer prints its path.
 
 | Key | Action |
 | --- | --- |

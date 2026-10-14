@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 30;
+pub const VERSION: u32 = 31;
 pub const VEHICLE_UPDATE_RECORDS: usize = 512;
 pub const VEHICLE_PHYSICS_RECORDS: usize = 256;
 pub const MASS_POINTS: usize = 8192;
@@ -870,7 +870,8 @@ struct OverlayHeader {
     frame_index: u32,
     width: u32,
     height: u32,
-    reserved: [u32; 4],
+    multiply: u32,
+    reserved: [u32; 3],
 }
 
 #[repr(C)]
@@ -922,7 +923,8 @@ struct Shared {
     mass_points: [[u8; 304]; MASS_POINTS],
     vehicle_update_record_count: u32,
     vehicle_update_records: [VehicleUpdateRecord; VEHICLE_UPDATE_RECORDS],
-    overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
+    // (each overlay's picture, then its multiply's)
+    overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4 * 2]; OVERLAYS],
 }
 
 /// The layout is the game's, measured there; keep these in step with
@@ -968,12 +970,16 @@ impl Snapshot {
 }
 
 /// An overlay picture's size and the frame it shows; its pixels are RGBA,
-/// 8 bits a channel, sRGB, premultiplied, the top row first.
+/// 8 bits a channel, sRGB, premultiplied, the top row first. With
+/// `multiply`, as many pixels again follow: what the game's multiplying
+/// blends do to the world, as half the factor (128: nothing), display
+/// encoded, for the world to be multiplied by twice it under the picture.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Overlay {
     pub frame_index: u32,
     pub width: u32,
     pub height: u32,
+    pub multiply: bool,
 }
 
 #[derive(Debug)]
@@ -1463,11 +1469,13 @@ impl Bridge {
                     frame_index: std::ptr::read_volatile(&(*header).frame_index),
                     width: std::ptr::read_volatile(&(*header).width),
                     height: std::ptr::read_volatile(&(*header).height),
+                    multiply: std::ptr::read_volatile(&(*header).multiply) != 0,
                 };
-                let bytes = overlay.width as usize * overlay.height as usize * 4;
-                if bytes == 0 || bytes > OVERLAY_MAXIMUM_PIXELS * 4 {
+                let picture = overlay.width as usize * overlay.height as usize * 4;
+                if picture == 0 || picture > OVERLAY_MAXIMUM_PIXELS * 4 {
                     return None;
                 }
+                let bytes = if overlay.multiply { picture * 2 } else { picture };
                 pixels.resize(bytes, 0);
                 std::ptr::copy_nonoverlapping((*self.shared).overlay_pixels[latest].as_ptr(), pixels.as_mut_ptr(), bytes);
                 fence(Ordering::Acquire);

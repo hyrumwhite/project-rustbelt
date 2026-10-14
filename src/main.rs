@@ -326,6 +326,8 @@ fn main() -> AppExit {
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
         .add_systems(Update, (start_camera, sync_sky_light))
         .init_resource::<ResetHistory>()
+        .init_resource::<level::PeriodicTables>()
+        .add_systems(Update, level::animate_self_illumination.after(apply_lighting))
         .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, reset_history_on_cuts.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));

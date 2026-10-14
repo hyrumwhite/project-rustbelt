@@ -343,7 +343,7 @@ fn sync_objects(
                 continue;
             };
             let (root, nodes, skins) =
-                builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, camouflaged(object), assets);
+                builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, camouflaged(object), object.object_index, assets);
             objects.tracked.insert(
                 object.object_index,
                 Tracked {

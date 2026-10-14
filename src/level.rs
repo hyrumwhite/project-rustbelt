@@ -29,6 +29,66 @@ use halo_map::{
 };
 use std::sync::Arc;
 
+/// An object's model shaders whose self-illumination animates
+/// (`shader::ModelSelfIlluminationAnimation`): each its own copy of the
+/// shader's material, whose emissive [`animate_self_illumination`] sets
+/// every frame, the object's phase, and the object's change colours.
+#[derive(Component, Clone)]
+pub struct AnimatedSelfIllumination {
+    pub materials: Vec<(Handle<StandardMaterial>, shader::ModelSelfIlluminationAnimation)>,
+    pub phase: f32,
+    pub change_colors: [[f32; 3]; 4],
+}
+
+/// The game's periodic functions, for the animations evaluated here.
+#[derive(Resource)]
+pub struct PeriodicTables(pub [[u8; 1024]; 12]);
+
+impl Default for PeriodicTables {
+    fn default() -> Self {
+        PeriodicTables(halo_map::object_functions::periodic_function_tables())
+    }
+}
+
+/// Each animated model shader's emissive: its colour between the bounds by
+/// its periodic function (rasterizer_xbox_models.c), times the object's
+/// change colour when it says, at the lighting's emissive scale.
+pub fn animate_self_illumination(
+    time: Res<Time>,
+    tables: Res<PeriodicTables>,
+    settings: Res<crate::LightingSettings>,
+    objects: Query<&AnimatedSelfIllumination>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let functions = halo_map::object_functions::FunctionTables {
+        periodic: std::array::from_fn(|index| Some(&tables.0[index])),
+        // (the transition functions aren't used here; any table will do)
+        transition: std::array::from_fn(|_| Some(&tables.0[0])),
+    };
+    let seconds = time.elapsed_secs();
+    for object in &objects {
+        for (material, animation) in &object.materials {
+            let phase = if animation.random_phase { object.phase } else { 0.0 };
+            let fraction = functions.periodic(animation.function, seconds / animation.period + phase);
+            let mut color = Vec3::from(animation.lower) + (Vec3::from(animation.upper) - Vec3::from(animation.lower)) * fraction;
+            if let Some(source) = animation.color_source {
+                color *= Vec3::from(object.change_colors[source]).clamp(Vec3::ZERO, Vec3::ONE);
+            }
+            let radiance = color * SELF_ILLUMINATION_RADIANCE * settings.emissive_scale;
+            if let Some(mut material) = materials.get_mut(material) {
+                material.emissive = LinearRgba::rgb(radiance.x, radiance.y, radiance.z);
+            }
+        }
+    }
+}
+
+/// rasterizer_xbox_models.c's self-illumination phase: the first of the
+/// object's random numbers, seeded by its object index.
+pub fn self_illumination_phase(object_index: u32) -> f32 {
+    let seed = object_index.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    (seed >> 16) as f32 / 65535.0
+}
+
 /// A level material that emits light; its emissive strength follows
 /// [`crate::LightingSettings::emissive_scale`].
 #[derive(Component, Clone)]
@@ -846,9 +906,28 @@ impl LevelBuilder {
         raster: bool,
         change_colors: &[[f32; 3]; 4],
         camouflaged: bool,
+        object_index: u32,
         assets: &mut LevelAssets,
     ) -> (Entity, Vec<Option<Entity>>, Vec<Entity>) {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
+        // the shaders whose self-illumination animates: a copy of each one's
+        // material for this object (its phase is its own)
+        let mut animated: Vec<(Handle<StandardMaterial>, shader::ModelSelfIlluminationAnimation)> = Vec::new();
+        let mut animated_by_shader: HashMap<u32, Surface> = HashMap::new();
+        let mut animate = |builder: &mut Self, surface: Surface, shader: Option<u32>, assets: &mut LevelAssets| -> Surface {
+            let (Surface::Solid(solid), Some(shader)) = (&surface, shader) else { return surface };
+            if let Some(copy) = animated_by_shader.get(&shader) {
+                return copy.clone();
+            }
+            let info = shader::shader_info(&builder.cache, TagRef { group: 0, datum: Some(shader) }).ok().flatten();
+            let Some(animation) = info.and_then(|i| i.model_self_illumination_animation) else { return surface };
+            let Some(material) = assets.materials.get(&solid.standard).cloned() else { return surface };
+            let handle = assets.materials.add(material);
+            animated.push((handle.clone(), animation));
+            let copy = Surface::Solid(SolidSurface { standard: handle, ..solid.clone() });
+            animated_by_shader.insert(shader, copy.clone());
+            copy
+        };
         self.adopt(commands, root);
         // every node, as the skinned parts' joints
         let nodes: Vec<Entity> = (0..model.default_inverses.len().max(1))
@@ -883,6 +962,7 @@ impl LevelBuilder {
         // and composites for the camera as the map's own panes
         for piece in &model.pieces {
             let surface = self.coloured_surface(&piece.surface, piece.shader, change_colors, assets);
+            let surface = animate(self, surface, piece.shader, assets);
             let pane = matches!(surface, Surface::Blended(_));
             let mode = if raster && (model.skinned.is_empty() || pane) { MeshUse::Both } else { MeshUse::Traced };
             let _ = self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
@@ -894,6 +974,7 @@ impl LevelBuilder {
         let mut skins = Vec::new();
         for skin in &model.traced_skins {
             let surface = self.coloured_surface(&skin.surface, skin.shader, change_colors, assets);
+            let surface = animate(self, surface, skin.shader, assets);
             let mesh = assets.meshes.add(skin.mesh(&rest));
             let mode = if raster && matches!(surface, Surface::Blended(_)) { MeshUse::Both } else { MeshUse::Traced };
             skins.extend(self.spawn_mesh_as(commands, root, model.name.clone(), mesh, &surface, mode));
@@ -905,10 +986,18 @@ impl LevelBuilder {
                     continue;
                 }
                 let surface = self.coloured_surface(&part.surface, part.shader, change_colors, assets);
+                let surface = animate(self, surface, part.shader, assets);
                 let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
                 let _ =
                     self.spawn_mesh_as(commands, root, model.name.clone(), part.mesh.clone(), &surface, MeshUse::Raster(Some(skin)));
             }
+        }
+        if !animated.is_empty() {
+            commands.entity(root).insert(AnimatedSelfIllumination {
+                materials: animated,
+                phase: self_illumination_phase(object_index),
+                change_colors: *change_colors,
+            });
         }
         (root, nodes.into_iter().map(Some).collect(), skins)
     }

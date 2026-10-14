@@ -3468,6 +3468,8 @@ pub mod shader_model_definition {
     pub const CHANGE_COLOR_SOURCE: usize = 0x4c;
     pub const SELF_ILLUMINATION_FLAGS: usize = 0x6c;
     pub const SELF_ILLUMINATION_COLOR_SOURCE: usize = 0x70;
+    pub const SELF_ILLUMINATION_ANIMATION_FUNCTION: usize = 0x72;
+    pub const SELF_ILLUMINATION_ANIMATION_PERIOD: usize = 0x74;
     pub const SELF_ILLUMINATION_COLOR_LOWER_BOUND: usize = 0x78;
     pub const SELF_ILLUMINATION_COLOR_UPPER_BOUND: usize = 0x84;
     pub const MAP_U_SCALE: usize = 0x9c;

@@ -233,6 +233,21 @@ pub struct EnvironmentSelfIlluminationAnimation {
     pub phases: [f32; 3],
 }
 
+/// How a `shader_model`'s self-illumination animates (its pass in
+/// rasterizer_xbox_models.c): its colour between the lower and upper bounds
+/// by its periodic function of time / period + phase, the phase each
+/// object's own (random from its object index) unless flagged, then times
+/// one of the object's change colours (`color_source`, 0-3 for A-D).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelSelfIlluminationAnimation {
+    pub lower: [f32; 3],
+    pub upper: [f32; 3],
+    pub function: i16,
+    pub period: f32,
+    pub random_phase: bool,
+    pub color_source: Option<usize>,
+}
+
 /// A `shader_environment`'s texture animation
 /// (`shader_environment_texture_animation_evaluate`): each texture
 /// coordinate offset by its periodic function of time / period, times its
@@ -282,6 +297,9 @@ pub struct ShaderInfo {
     pub water: Option<Water>,
     /// `shader_environment`'s self-illumination animation (with a map).
     pub self_illumination_animation: Option<EnvironmentSelfIlluminationAnimation>,
+    /// `shader_model`'s self-illumination animation (with a multipurpose
+    /// map).
+    pub model_self_illumination_animation: Option<ModelSelfIlluminationAnimation>,
     /// `shader_environment`'s texture animation (when it moves).
     pub texture_animation: Option<TextureAnimation>,
 }
@@ -325,6 +343,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         glass: None,
         water: None,
         self_illumination_animation: None,
+        model_self_illumination_animation: None,
         texture_animation: None,
     };
 
@@ -442,6 +461,16 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         {
             info.self_illumination =
                 Some(SelfIllumination::Model { multipurpose_map, color_lower: lower, color_upper: upper });
+            let color_source = root.i16(m::SELF_ILLUMINATION_COLOR_SOURCE)?;
+            info.model_self_illumination_animation = Some(ModelSelfIlluminationAnimation {
+                lower,
+                upper,
+                function: root.i16(m::SELF_ILLUMINATION_ANIMATION_FUNCTION)?,
+                period: nonzero(root.f32(m::SELF_ILLUMINATION_ANIMATION_PERIOD)?),
+                // (flag 0: no random phase)
+                random_phase: root.u16(m::SELF_ILLUMINATION_FLAGS)? & 1 == 0,
+                color_source: (1..=4).contains(&color_source).then(|| color_source as usize - 1),
+            });
         }
         info.reflection = Some(Reflection {
             perpendicular_brightness: root.f32(m::PERPENDICULAR_BRIGHTNESS)?,

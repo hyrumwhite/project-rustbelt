@@ -160,6 +160,7 @@ symbols in this file:
 #include "game/game_globals.h"
 #include "math/periodic_functions.h"
 #include "tag_files/tag_groups.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 /* January retains the stock XDK D3DINLINE out-of-line wrappers emitted by
  * the real device calls below. Keep the stock definitions intact. */
@@ -1502,6 +1503,15 @@ void rasterizer_transparent_geometry_group_draw(
 					else if (pass > 0)
 					{
 						break;
+					}
+
+					/* port: glass and water are bevy-rt-test's viewer's when it
+					draws them itself, ray traced (game.bevy_bridge_viewer_glass) */
+					if ((group->shader->base.type == _shader_type_transparent_water ||
+							group->shader->base.type == _shader_type_transparent_glass) &&
+						bevy_bridge_viewer_draws_glass())
+					{
+						continue;
 					}
 
 					switch (group->shader->base.type)

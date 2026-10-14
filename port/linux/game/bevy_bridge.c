@@ -706,6 +706,15 @@ boolean bevy_bridge_overlay_enabled(void)
 	return shared && shared->overlay_enabled;
 }
 
+boolean bevy_bridge_viewer_draws_glass(void)
+{
+	static int viewer_glass = -1;
+
+	if (viewer_glass < 0)
+		viewer_glass = config_boolean("game.bevy_bridge_viewer_glass") != 0;
+	return viewer_glass && bevy_bridge_overlay_enabled();
+}
+
 unsigned char *bevy_bridge_overlay_begin(
 	unsigned long width,
 	unsigned long height)

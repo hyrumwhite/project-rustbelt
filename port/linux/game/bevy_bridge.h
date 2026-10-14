@@ -33,6 +33,9 @@ boolean bevy_bridge_listener(
 /* with game.bevy_bridge_overlay on: TRUE (the renderer draws the opaque
 world itself, so render_window draws it only into the depth buffer) */
 boolean bevy_bridge_overlay_enabled(void);
+/* with game.bevy_bridge_viewer_glass on too: TRUE (the renderer draws glass
+and water itself, ray traced, so the game leaves them out of its overlay) */
+boolean bevy_bridge_viewer_draws_glass(void);
 
 /* the overlay buffer to fill with a width x height picture
 (bevy_bridge_protocol.h), or NULL; bevy_bridge_overlay_commit shares it */

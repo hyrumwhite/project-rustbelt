@@ -1378,8 +1378,6 @@ checksum = "bff34eb29ff4b8a8688bc7299f14fb6b597461ca80fec03ed7d22939ab33e48f"
 [[package]]
 name = "bevy_pbr"
 version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb760932d1e683e7c00011f5c99e4e1cc893646a3a7b7224da6daf9bfa94853d"
 dependencies = [
  "arrayvec",
  "bevy_app",
@@ -1407,7 +1405,9 @@ dependencies = [
  "bevy_transform",
  "bevy_utils",
  "bitflags 2.13.2",
+ "blake3",
  "bytemuck",
+ "cc",
  "derive_more",
  "fixedbitset",
  "indexmap",
@@ -1547,8 +1547,6 @@ dependencies = [
 [[package]]
 name = "bevy_render"
 version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f438a921fd3ef82cc09ccf5e0cd8f1214dcae6286890f9d4acba0409d9a61a8"
 dependencies = [
  "async-channel",
  "bevy_app",
@@ -1712,6 +1710,38 @@ dependencies = [
  "derive_more",
  "tracing",
  "wgpu",
+]
+
+[[package]]
+name = "bevy_solarik"
+version = "0.1.0"
+dependencies = [
+ "bevy_anti_alias",
+ "bevy_app",
+ "bevy_asset",
+ "bevy_camera",
+ "bevy_color",
+ "bevy_core_pipeline",
+ "bevy_derive",
+ "bevy_diagnostic",
+ "bevy_ecs",
+ "bevy_extract",
+ "bevy_image",
+ "bevy_material",
+ "bevy_math",
+ "bevy_mesh",
+ "bevy_pbr",
+ "bevy_platform",
+ "bevy_post_process",
+ "bevy_reflect",
+ "bevy_render",
+ "bevy_shader",
+ "bevy_transform",
+ "bevy_utils",
+ "blake3",
+ "bytemuck",
+ "derive_more",
+ "tracing",
 ]
 
 [[package]]
@@ -3188,6 +3218,7 @@ version = "0.1.0"
 dependencies = [
  "argh",
  "bevy",
+ "bevy_solarik",
  "chacha20",
  "halo_bridge",
  "halo_map",
@@ -6220,8 +6251,6 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14c018fce9b6270aa203c2fdd56f3cce996713534bd757e4ea58c8560b121f14"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -6281,8 +6310,6 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
 dependencies = [
  "android_system_properties",
  "arrayvec",

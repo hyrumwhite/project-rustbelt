@@ -26,10 +26,10 @@ use bevy::{
     light::EnvironmentMapLight,
     prelude::*,
     render::{diagnostic::RenderDiagnosticsPlugin, render_resource::TextureUsages, renderer::RenderDevice, settings::WgpuFeatures},
-    solari::{
-        pathtracer::{Pathtracer, PathtracingPlugin},
-        prelude::{SolariLighting, SolariPlugins},
-    },
+};
+use bevy_solarik::{
+    pathtracer::{Pathtracer, PathtracingPlugin},
+    prelude::{SolarikLighting, SolarikPlugins},
 };
 use halo_map::{
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
@@ -264,7 +264,7 @@ fn main() -> AppExit {
     #[cfg(feature = "dlss")]
     app.insert_resource(DlssProjectId(bevy::asset::uuid::uuid!("3f1d6a2e-8a4b-4f5e-9c3d-1b2a7e6f0d91")));
 
-    app.add_plugins((default_plugins(&args, overlay), SolariPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
+    app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))
         .insert_resource(saved.as_ref().map_or_else(LightingSettings::default, |s| s.lighting.clone()))
@@ -524,7 +524,7 @@ fn setup_camera(
     if args.pathtracer {
         camera.insert(Pathtracer::default());
     } else {
-        camera.insert(SolariLighting::default());
+        camera.insert(SolarikLighting::default());
     }
     // a bridged camera follows the game's until F detaches it
     if !args.bridge {
@@ -625,11 +625,10 @@ fn follow_level(
 }
 
 
-/// `[`/`]` emissive, `-`/`=` sun, `9`/`0` sky, `,`/`.` exposure, R ReSTIR.
+/// `[`/`]` emissive, `-`/`=` sun, `9`/`0` sky, `,`/`.` exposure.
 fn adjust_lighting(
     keys: Res<ButtonInput<KeyCode>>,
     mut settings: ResMut<LightingSettings>,
-    mut solari: Query<&mut SolariLighting>,
 ) {
     let step = 1.25;
     let scale = |up: KeyCode, down: KeyCode, value: &mut f32| {
@@ -649,11 +648,6 @@ fn adjust_lighting(
     }
     if keys.just_pressed(KeyCode::Comma) {
         s.exposure_ev100 -= 0.5;
-    }
-    if keys.just_pressed(KeyCode::KeyR) {
-        for mut solari in &mut solari {
-            solari.restir = !solari.restir;
-        }
     }
     if keys.any_just_pressed([
         KeyCode::BracketRight,
@@ -736,7 +730,7 @@ fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With
 /// that already renders is not enough: it stays off.)
 const CAMERA_START_FRAME: u32 = 30;
 
-fn start_camera(mut frames: Local<u32>, mut camera: Single<&mut Camera, With<SolariLighting>>) {
+fn start_camera(mut frames: Local<u32>, mut camera: Single<&mut Camera, With<SolarikLighting>>) {
     *frames += 1;
     if *frames == CAMERA_START_FRAME {
         camera.is_active = true;
@@ -746,7 +740,7 @@ fn start_camera(mut frames: Local<u32>, mut camera: Single<&mut Camera, With<Sol
 #[cfg(feature = "dlss")]
 fn toggle_dlss_rr(
     key_input: Res<ButtonInput<KeyCode>>,
-    camera: Single<(Entity, Has<Dlss<DlssRayReconstructionFeature>>), With<SolariLighting>>,
+    camera: Single<(Entity, Has<Dlss<DlssRayReconstructionFeature>>), With<SolarikLighting>>,
     dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
     mut commands: Commands,
 ) {
@@ -846,7 +840,6 @@ fn update_control_text(
     mut text: Single<&mut Text, With<ControlText>>,
     settings: Res<LightingSettings>,
     stats: Option<Res<LevelStats>>,
-    solari: Single<&SolariLighting>,
     link: Option<ResMut<bridge::BridgeLink>>,
     bridged: Option<Res<bridge::BridgeObjects>>,
     follow: Option<Res<bridge::FollowGame>>,
@@ -855,7 +848,7 @@ fn update_control_text(
     time: Res<Time>,
     mut rate: Local<(f32, u32)>,
     #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
-    #[cfg(feature = "dlss")] dlss_camera: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolariLighting>>,
+    #[cfg(feature = "dlss")] dlss_camera: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
 ) {
     let mut s = String::new();
     if let (Some(mut link), Some(bridged), Some(follow)) = (link, bridged, follow) {
@@ -903,7 +896,6 @@ fn update_control_text(
     }
     s += &format!("[ ]: emissive {:.0}   - =: sun {:.0}   9 0: sky {:.0}   , .: exposure EV {:.1}\n",
         settings.emissive_scale, settings.sun_scale, settings.sky_scale, settings.exposure_ev100);
-    s += if solari.restir { "R: disable ReSTIR" } else { "R: enable ReSTIR" };
 
     #[cfg(feature = "dlss")]
     if dlss_rr_supported.is_some() {
@@ -926,7 +918,7 @@ fn update_control_text(
 fn update_performance_text(
     mut text: Single<&mut Text, With<PerformanceText>>,
     diagnostics: Res<DiagnosticsStore>,
-    #[cfg(feature = "dlss")] dlss_camera: Query<Has<Dlss<DlssRayReconstructionFeature>>, With<SolariLighting>>,
+    #[cfg(feature = "dlss")] dlss_camera: Query<Has<Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
 ) {
     text.0.clear();
     let mut total = 0.0;
@@ -936,9 +928,12 @@ fn update_performance_text(
             total += value;
         }
     };
-    add("Light tiles", "render/solari_lighting/presample_light_tiles/elapsed_gpu");
-    add("World cache", "render/solari_lighting/world_cache/elapsed_gpu");
-    add("Lighting", "render/solari_lighting/lighting/elapsed_gpu");
+    add("Sky distribution", "render/solarik_lighting/sky_distribution/elapsed_gpu");
+    add("Light tiles", "render/solarik_lighting/presample_light_tiles/elapsed_gpu");
+    add("World cache", "render/solarik_lighting/world_cache/elapsed_gpu");
+    add("Direct", "render/solarik_lighting/direct_lighting/elapsed_gpu");
+    add("Diffuse indirect", "render/solarik_lighting/diffuse_indirect_lighting/elapsed_gpu");
+    add("Specular indirect", "render/solarik_lighting/specular_indirect_lighting/elapsed_gpu");
     #[cfg(feature = "dlss")]
     if matches!(dlss_camera.single(), Ok(true)) {
         add("DLSS-RR", "render/dlss_ray_reconstruction/elapsed_gpu");

@@ -13,12 +13,12 @@
 
 use crate::level::{halo_affine, halo_to_bevy_affine, AnimatedModel, LevelAssets, LevelBuilder, TracedMesh};
 use crate::material::{HaloEnvironmentMaterial, HaloTransparentMaterial, NeutralDetail};
+use bevy_solarik::prelude::RaytracingMesh3d;
 use bevy::{
     camera_controller::free_camera::FreeCamera,
     math::Affine3A,
     platform::collections::HashMap,
     prelude::*,
-    solari::prelude::RaytracingMesh3d,
 };
 use halo_bridge::{Bridge, Snapshot, OBJECT_FIRST_PERSON, OBJECT_HIDDEN, OBJECT_MODEL};
 use std::{sync::Arc, time::Duration};

@@ -6,7 +6,8 @@
 //! in pools and reused frame to frame; unused ones leave the scene.
 
 use crate::{bridge::BridgeLink, level::TracedMesh, LightingSettings};
-use bevy::{prelude::*, solari::prelude::RaytracingMesh3d};
+use bevy::prelude::*;
+use bevy_solarik::prelude::RaytracingMesh3d;
 use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 
 /// The proxies' size (metres).

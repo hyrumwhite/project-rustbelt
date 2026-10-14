@@ -7,6 +7,7 @@ use crate::{
     },
     textures::TextureCache,
 };
+use bevy_solarik::prelude::RaytracingMesh3d;
 use bevy::{
     asset::RenderAssetUsages,
     ecs::system::EntityCommands,
@@ -17,7 +18,6 @@ use bevy::{
     math::Affine3A,
     platform::collections::HashMap,
     prelude::*,
-    solari::prelude::RaytracingMesh3d,
 };
 use halo_map::{
     bsp,

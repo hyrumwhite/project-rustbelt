@@ -5,7 +5,8 @@
 //! viewer's, not the game's.
 
 use crate::LightingSettings;
-use bevy::{prelude::*, solari::prelude::SolariLighting};
+use bevy::prelude::*;
+use bevy_solarik::prelude::SolarikLighting;
 use std::path::PathBuf;
 
 #[cfg(feature = "dlss")]
@@ -57,7 +58,7 @@ impl SavedSettings {
     fn defaults() -> Self {
         SavedSettings {
             lighting: LightingSettings::default(),
-            restir: SolariLighting::default().restir,
+            restir: true,
             dlss_rr: true,
             dlss_quality: "Auto".into(),
             show_stats: true,
@@ -124,7 +125,6 @@ fn quality_by_name(name: &str) -> Option<DlssPerfQualityMode> {
 enum Row {
     DlssRr,
     DlssQuality,
-    Restir,
     Sun,
     Sky,
     Emissive,
@@ -152,7 +152,6 @@ fn spawn_panel(mut commands: Commands) {
     let rows = [
         Row::DlssRr,
         Row::DlssQuality,
-        Row::Restir,
         Row::Sun,
         Row::Sky,
         Row::Emissive,
@@ -265,8 +264,7 @@ fn press_buttons(
     mut pressed: ResMut<PressedButtons>,
     mut panel: ResMut<OptionsPanel>,
     mut lighting: ResMut<LightingSettings>,
-    mut solari: Query<&mut SolariLighting>,
-    #[cfg(feature = "dlss")] camera: Query<(Entity, Option<&mut Dlss<DlssRayReconstructionFeature>>), With<SolariLighting>>,
+    #[cfg(feature = "dlss")] camera: Query<(Entity, Option<&mut Dlss<DlssRayReconstructionFeature>>), With<SolarikLighting>>,
     #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssRayReconstructionSupported>>,
     mut commands: Commands,
 ) {
@@ -281,11 +279,6 @@ fn press_buttons(
             Row::Exposure => lighting.exposure_ev100 += 0.5 * direction as f32,
             Row::Reset => *lighting = LightingSettings::default(),
             Row::Stats => panel.show_stats = !panel.show_stats,
-            Row::Restir => {
-                for mut solari in &mut solari {
-                    solari.restir = !solari.restir;
-                }
-            }
             #[cfg(feature = "dlss")]
             Row::DlssRr => {
                 if dlss_supported.is_some() {
@@ -329,8 +322,7 @@ fn set_dlss_rr(commands: &mut Commands, camera: Entity, on: bool, quality: Optio
 fn label_rows(
     panel: Res<OptionsPanel>,
     lighting: Res<LightingSettings>,
-    solari: Query<&SolariLighting>,
-    #[cfg(feature = "dlss")] dlss: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolariLighting>>,
+    #[cfg(feature = "dlss")] dlss: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
     #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssRayReconstructionSupported>>,
     mut labels: Query<(&RowLabel, &mut Text)>,
 ) {
@@ -338,7 +330,6 @@ fn label_rows(
         return;
     }
     let on_off = |on: bool| if on { "on" } else { "off" };
-    let restir = solari.iter().next().is_some_and(|s| s.restir);
     #[cfg(feature = "dlss")]
     let (rr, quality) = match (dlss_supported.is_some(), dlss.iter().next().flatten()) {
         (false, _) => ("not supported on this GPU".to_string(), "-".to_string()),
@@ -351,7 +342,6 @@ fn label_rows(
         text.0 = match row {
             Row::DlssRr => format!("DLSS Ray Reconstruction: {rr}"),
             Row::DlssQuality => format!("DLSS quality: {quality}"),
-            Row::Restir => format!("ReSTIR: {}", on_off(restir)),
             Row::Sun => format!("Sun: {:.0}", lighting.sun_scale),
             Row::Sky => format!("Sky: {:.0}", lighting.sky_scale),
             Row::Emissive => format!("Emissive: {:.0}", lighting.emissive_scale),
@@ -371,17 +361,17 @@ fn apply_saved(
     mut commands: Commands,
     pending: Option<Res<PendingSettings>>,
     mut panel: ResMut<OptionsPanel>,
-    mut solari: Query<(Entity, &Camera, &mut SolariLighting)>,
+    solari: Query<(Entity, &Camera), With<SolarikLighting>>,
     #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssRayReconstructionSupported>>,
     #[cfg(feature = "dlss")] mut dlss: Query<&mut Dlss<DlssRayReconstructionFeature>>,
 ) {
     let Some(pending) = pending else { return };
-    let Some((entity, camera, mut lighting)) = solari.iter_mut().next() else { return };
+    let Some((entity, camera)) = solari.iter().next() else { return };
     if !camera.is_active {
         return;
     }
     let saved = &pending.0;
-    lighting.restir = saved.restir;
+    // (Solarik has no ReSTIR switch: the saved one is kept, unused)
     panel.show_stats = saved.show_stats;
     // (DLSS is on the camera from the start, as it has to be: added to a
     // camera that already renders, it stays off; so the saved quality is
@@ -419,8 +409,7 @@ fn save_settings(
     pending: Option<Res<PendingSettings>>,
     panel: Res<OptionsPanel>,
     lighting: Res<LightingSettings>,
-    solari: Query<&SolariLighting>,
-    #[cfg(feature = "dlss")] dlss: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolariLighting>>,
+    #[cfg(feature = "dlss")] dlss: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
 ) {
     *since += time.delta_secs();
     if *since < 1.0 || pending.is_some() {
@@ -436,7 +425,7 @@ fn save_settings(
     let (dlss_rr, dlss_quality) = (true, "Auto".to_string());
     let current = SavedSettings {
         lighting: lighting.clone(),
-        restir: solari.iter().next().is_none_or(|s| s.restir),
+        restir: last.as_ref().is_none_or(|l| l.restir),
         dlss_rr,
         dlss_quality,
         show_stats: panel.show_stats,

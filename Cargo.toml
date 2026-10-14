@@ -13,18 +13,30 @@ description = "Halo: Combat Evolved maps rendered with Bevy Solari ray tracing a
 default = []
 # NVIDIA DLSS (Ray Reconstruction denoising + upscaling). Requires the DLSS SDK,
 # Vulkan SDK and clang at build time — see README.md.
-dlss = ["bevy/dlss"]
+dlss = ["bevy/dlss", "bevy_solarik/dlss"]
 
 [dependencies]
 halo_map = { path = "crates/halo_map" }
 halo_bridge = { path = "crates/halo_bridge" }
-bevy = { version = "0.20.0", features = ["bevy_solari", "https", "free_camera"] }
+bevy = { version = "=0.20.0", features = ["https", "free_camera"] }
+# Solarik, a fork of bevy_solari (glass, alpha-masked foliage, point and spot
+# lights, sky lighting, a reference pathtracer that keeps accumulating), as a
+# sibling checkout of https://github.com/AlrikOlson/bevy_solarik
+bevy_solarik = { path = "../bevy_solarik" }
 argh = "0.1.12"
 
 [dev-dependencies]
 # examples/solari_demo.rs
 chacha20 = { version = "0.10.0", default-features = false, features = ["rng"] }
 rand = "0.10.0"
+
+# Solarik's forks of Bevy's renderer and wgpu, which it needs Bevy's own
+# crates to use too (a dependency's patches aren't inherited)
+[patch.crates-io]
+bevy_render = { path = "../bevy_solarik/vendor/bevy_render" }
+bevy_pbr = { path = "../bevy_solarik/vendor/bevy_pbr" }
+wgpu-core = { path = "../bevy_solarik/vendor/wgpu-core" }
+wgpu-hal = { path = "../bevy_solarik/vendor/wgpu-hal" }
 
 # Fast-ish iteration: light optimization for our code, full optimization for deps.
 [profile.dev]

@@ -83,9 +83,9 @@ pub struct Placement {
     pub not_automatic: bool,
     /// Permutation index per model region.
     pub region_permutations: [u8; 8],
-    /// A light fixture's light: colour and intensity, as the lightmapper
+    /// A light fixture's light: colour, intensity and angles, as the lightmapper
     /// used them.
-    pub light: Option<([f32; 3], f32)>,
+    pub light: Option<FixtureLight>,
 }
 
 impl Placement {
@@ -145,7 +145,12 @@ pub fn placements(cache: &CacheFile) -> Result<Vec<Placement>> {
                 region_permutations,
                 light: if kind == ObjectKind::LightFixture {
                     use layout::scenario_light_fixture_datum as l;
-                    Some((element.vec3(l::COLOR)?, element.f32(l::INTENSITY)?))
+                    Some(FixtureLight {
+                        color: element.vec3(l::COLOR)?,
+                        intensity: element.f32(l::INTENSITY)?,
+                        falloff_angle: element.f32(l::FALLOFF_ANGLE)?,
+                        cutoff_angle: element.f32(l::CUTOFF_ANGLE)?,
+                    })
                 } else {
                     None
                 },
@@ -153,6 +158,18 @@ pub fn placements(cache: &CacheFile) -> Result<Vec<Placement>> {
         }
     }
     Ok(out)
+}
+
+/// A light fixture's light (device_light_fixtures.h's
+/// `scenario_light_fixture_datum`): it shines along the fixture's forward
+/// axis, fully within `falloff_angle` of it and fading out to
+/// `cutoff_angle` (radians; pi or more for every way).
+#[derive(Debug, Clone, Copy)]
+pub struct FixtureLight {
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub falloff_angle: f32,
+    pub cutoff_angle: f32,
 }
 
 /// The model of an object definition tag (any object group).

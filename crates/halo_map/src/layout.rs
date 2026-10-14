@@ -3033,6 +3033,8 @@ pub mod scenario_light_fixture_datum {
     pub const SIZEOF: usize = 0x48;
     pub const COLOR: usize = 0x30;
     pub const INTENSITY: usize = 0x3c;
+    pub const FALLOFF_ANGLE: usize = 0x40;
+    pub const CUTOFF_ANGLE: usize = 0x44;
 }
 
 pub mod scenario_object_datum {

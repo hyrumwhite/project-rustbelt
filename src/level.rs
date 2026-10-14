@@ -54,14 +54,15 @@ const SKY_SCALE: f32 = 1.0;
 const SKY_BIAS: f32 = -1.0e8;
 const SKY_LAYER_BIAS: f32 = 1.0e6;
 
-/// Light fixtures become small emissive spheres (Solari lights only with
-/// emissive geometry, directional lights and the environment).
+/// Light fixtures become point lights, a sphere this size (metres).
 const LIGHT_PROXY_RADIUS: f32 = 0.12;
 /// How far in front of its fixture (metres) a light sits, clear of the wall.
 const LIGHT_PROXY_OFFSET: f32 = 0.3;
 /// Radiance per unit of fixture intensity, relative to shader radiosity
 /// power (a fixture's sphere is far smaller than a glowing panel).
 const LIGHT_PROXY_RADIANCE: f32 = 4000.0;
+/// How far a fixture's light reaches (metres): Halo's fixtures give none.
+const FIXTURE_LIGHT_RANGE: f32 = 30.0;
 /// Radiance of fully self-illuminated texels, relative to radiosity power
 /// (with the default emissive scale and exposure, about display white).
 const SELF_ILLUMINATION_RADIANCE: f32 = 2.5;
@@ -418,11 +419,11 @@ impl LevelBuilder {
                 self.spawn_mesh(commands, object, name.clone(), mesh, &surface, raster);
                 self.stats.object_triangles += triangles;
             }
-            if let Some((color, intensity)) = placement.light
-                && intensity > 0.0
+            if let Some(light) = placement.light
+                && light.intensity > 0.0
                 && self.fixture_lights
             {
-                self.spawn_light_proxy(commands, object, Vec3::from(color) * intensity, assets);
+                self.spawn_fixture_light(commands, object, Vec3::from(light.color) * light.intensity, assets);
             }
             self.stats.objects += 1;
         }
@@ -515,43 +516,39 @@ impl LevelBuilder {
         Ok(())
     }
 
-    /// An invisible emissive sphere in front of a light fixture: it lights
-    /// the ray-traced scene (and shows in reflections) but is never rasterized.
-    fn spawn_light_proxy(
+    /// A light fixture's light: a point light just in front of it, as
+    /// bright as the emissive sphere that stood in for it under Solari (a
+    /// sphere of radiance L and radius r is L π r² candela, 4π times that in
+    /// lumens). With `show_light_proxies` the camera sees that sphere too.
+    fn spawn_fixture_light(
         &mut self,
         commands: &mut Commands,
         object: Entity,
         light: Vec3,
         assets: &mut LevelAssets,
     ) {
-        let mesh = self
-            .light_proxy
-            .get_or_insert_with(|| {
-                assets.meshes.add(
-                    Sphere::new(LIGHT_PROXY_RADIUS)
-                        .mesh()
-                        .build()
-                        .with_generated_tangents()
-                        .expect("sphere has normals and UVs"),
-                )
-            })
-            .clone();
-        let material = assets.materials.add(StandardMaterial { base_color: Color::BLACK, ..default() });
-        let mut proxy = commands.spawn((
+        let power = light * LIGHT_PROXY_RADIANCE * sphere_lumens_per_radiance(LIGHT_PROXY_RADIUS);
+        let mut source = commands.spawn((
             Name::new("light fixture light"),
-            RaytracingMesh3d(mesh.clone()),
-            TracedMesh(mesh.clone()),
-            Visibility::Inherited,
-            MeshMaterial3d(material),
-            EmissiveSurface { radiance: light * LIGHT_PROXY_RADIANCE },
+            PointLight { radius: LIGHT_PROXY_RADIUS, range: FIXTURE_LIGHT_RANGE, shadow_maps_enabled: false, ..default() },
+            LightSource { power },
             // object space is Bevy-converted Halo space: Halo forward (+x) is +x
             Transform::from_xyz(LIGHT_PROXY_OFFSET, 0.0, 0.0),
             ChildOf(object),
         ));
         if self.show_light_proxies {
-            proxy.insert(Mesh3d(mesh));
+            let mesh = self
+                .light_proxy
+                .get_or_insert_with(|| assets.meshes.add(Sphere::new(LIGHT_PROXY_RADIUS).mesh().build()))
+                .clone();
+            let material = assets.materials.add(StandardMaterial {
+                base_color: Color::BLACK,
+                emissive: LinearRgba::rgb(light.x, light.y, light.z) * LIGHT_PROXY_RADIANCE,
+                unlit: true,
+                ..default()
+            });
+            source.insert((Mesh3d(mesh), MeshMaterial3d(material)));
         }
-        self.stats.emissive_meshes += 1;
         self.stats.lights += 1;
     }
 
@@ -1402,6 +1399,32 @@ const FOLIAGE_TRANSMISSION: f32 = 0.4;
 fn is_foliage(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     ["\\trees\\", "\\plants\\", "leaves", "leaf", "vine", "bush", "fern", "palm"].iter().any(|word| name.contains(word))
+}
+
+/// A point or spot light the emissive scale applies to: its power (lumens
+/// per channel) at a scale of one.
+#[derive(Component)]
+pub struct LightSource {
+    pub power: Vec3,
+}
+
+impl LightSource {
+    /// The light's colour and intensity (lumens) at the emissive scale.
+    pub fn color_and_intensity(&self, scale: f32) -> (Color, f32) {
+        let peak = self.power.max_element();
+        if peak <= 0.0 {
+            return (Color::BLACK, 0.0);
+        }
+        let color = self.power / peak;
+        (Color::linear_rgb(color.x, color.y, color.z), peak * scale)
+    }
+}
+
+/// A light the size of a sphere of radius `radius` (metres): its lumens
+/// per unit of the sphere's surface radiance (π r² candela, 4π lumens per
+/// candela, as bevy_pbr counts for point and spot lights alike).
+pub fn sphere_lumens_per_radiance(radius: f32) -> f32 {
+    std::f32::consts::PI * radius * radius * 4.0 * std::f32::consts::PI
 }
 
 /// Keeps the sky centred on the camera.

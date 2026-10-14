@@ -35,7 +35,7 @@ use halo_map::{
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
     scenario, CacheFile,
 };
-use level::{EmissiveSurface, LevelAssets, LevelBuilder, LevelStats};
+use level::{EmissiveSurface, LevelAssets, LevelBuilder, LevelStats, LightSource};
 use material::{HaloEnvironmentMaterial, HaloMaterialsPlugin, HaloTransparentMaterial, NeutralDetail};
 use std::path::PathBuf;
 
@@ -672,9 +672,13 @@ fn apply_lighting(
     mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
     mut suns: Query<&mut DirectionalLight>,
     mut cameras: Query<(&mut Exposure, Option<&mut EnvironmentMapLight>, Option<&mut Skybox>)>,
+    mut point_lights: Query<(&LightSource, &mut PointLight)>,
 ) {
     if !settings.is_changed() {
         return;
+    }
+    for (source, mut light) in &mut point_lights {
+        (light.color, light.intensity) = source.color_and_intensity(settings.emissive_scale);
     }
     let emissive = |surface: &EmissiveSurface| {
         let radiance = surface.radiance * settings.emissive_scale;

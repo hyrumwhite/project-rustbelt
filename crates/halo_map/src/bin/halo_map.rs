@@ -268,7 +268,7 @@ fn objects(cache: &CacheFile, list: bool) -> CliResult {
                 p.rotation[0].to_degrees(),
                 p.on_bsp_flags,
                 if p.not_automatic { " (scripted)" } else { "" },
-                p.light.map(|(c, i)| format!(" light {c:?} x{i}")).unwrap_or_default()
+                p.light.map(|l| format!(" light {:?} x{} falloff {:.2} cutoff {:.2}", l.color, l.intensity, l.falloff_angle, l.cutoff_angle)).unwrap_or_default()
             );
         }
     }

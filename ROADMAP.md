@@ -1247,6 +1247,18 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - In 100-second co-op sessions on a30 with a screen effect started on the host (`(begin (cinematic_screen_effect_start true) (cinematic_screen_effect_set_convolution 1 2 0 4 2))`, host only), every message agrees on the joining machine, with none left out.
        - Three of six planted errors were caught: the slot, and the convolution type's and extra passes' limits. Three went unseen: a presentation already played past and the newest tick's test (loopback delivers in order), and one with a higher pass limit (the script's passes are within it).
 
+   - [x] A co-op client's tick in Rust (`halo_map::network_coop`, world step 44): network_coop.c's `network_coop_client_tick`, `client_play_presentation` and `client_presentation_apply`, with `client_watch_host_from_behind`, `client_cinematic_end`, `client_host_camera_set` and the client's `players_vitality_keep`. With it, all of network_coop.c runs in Rust.
+     - **What Rust does:** each tick, on a co-op client:
+       - **the host's presentation** played one a tick, two ticks behind the newest heard (two a tick when further behind; restarting when far off): the players' input, the scripts' vitality and allegiances, the camera shake ended with the host's, the cinematic started or ended, the host's camera used while its scripts control it (or with nobody to watch), the letterbox, the active cluster;
+       - **the camera:** the host's, placed by this machine's copy of the moving vehicle it films, or (with nobody to watch) eased behind and above the host's eyes, its up rebuilt when the look is too steep (`observer_up_from_forward`); its field of view held to an observer's;
+       - **each new fade** started, backdated to when the host began it; the **skip vote's** tally; the **HUD** state;
+       - every player's unit kept at the vitality the host's scripts set; the cinematic ended, the host's camera let go and input given back when the host is quiet for two seconds; the skip vote sent while a skip is offered.
+     - **The game's, through calls:** each engine function the tick ends in (input, allegiances, the shake, the cinematic, the director's camera, the letterbox, the active cluster, the scripted camera, the fade, the HUD state, sending the vote). What it reads of the game (the cinematic in progress, the spectating, the shake) is gathered before the step (struct `coop_client_tick_inputs`). The real-math helpers it uses (`normalize3d`, `points_interpolate`, `vectors_interpolate`, `valid_real_vector3d_axes2`) are ported with it.
+     - **Results:**
+       - In 100-second co-op sessions on a30 (with the players' vitality set on the host and respawns) and b30 and a30 with a 40-second late join, every tick agrees on the joining machine, with none left out.
+       - Five of eight planted errors were caught: the presentation delay, the catching up, the fade's backdating, the vitality kept and the active cluster. Three went unseen: the view behind the host's easing and its rebuilt up (no session left a player with nobody to watch), and the letterbox's flag (a30's cinematic always shows it).
+       - **Rust in charge**, with the whole of co-op in Rust: on a30 the positions differ by a median of 12.2 to 12.5 cm (the C's 8.3 to 12.9), on b30 with a late join 4.0 cm, and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

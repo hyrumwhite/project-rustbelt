@@ -29,6 +29,7 @@ use crate::layout::{
     coop_host_queue as hq, coop_host_resend as hr, coop_players_vitality as pv, coop_presentation_inputs as pi,
     coop_player_unit as cpu, coop_resend_inputs as ri, player_datum as pd, coop_sent_device as sd, coop_sent_look as sl,
     coop_client_devices as cd, coop_client_presentation as cp, coop_client_script_sounds as ss,
+    coop_client_tick_inputs as ti,
     rasterizer_screen_effect_port_state as se_state, coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
     distributed_coop_device_group as dg,
     distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_names as on,
@@ -2091,4 +2092,392 @@ pub fn client_messages(context: &WorldContext, host: &impl AiHost) {
     }
     let mut call = AiCall { kind: SET_SCREEN_EFFECT, actor: NONE, ..AiCall::default() };
     host.call(&mut call);
+}
+
+// ---------- a client's tick
+
+/// network_coop.c's client tick calls (halo_sim.h's
+/// `_network_coop_client_call_*`, after the screen effect's).
+mod tick_call {
+    pub const INPUT_ENABLE: i32 = 31;
+    pub const ALLEGIANCE: i32 = 32;
+    pub const SHAKE_END: i32 = 33;
+    pub const CINEMATIC_START: i32 = 34;
+    pub const CINEMATIC_STOP: i32 = 35;
+    pub const HOST_CAMERA: i32 = 36;
+    pub const LETTERBOX: i32 = 37;
+    pub const ACTIVATING_CLUSTER: i32 = 38;
+    pub const CAMERA: i32 = 39;
+    pub const FADE: i32 = 40;
+    pub const HUD_STATE: i32 = 41;
+    pub const SKIP_VOTE: i32 = 42;
+}
+
+/// halo_sim.h's `struct halo_sim_network_coop_client_tick`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClientTickArguments {
+    pub inputs: u32,
+    pub presentation: u32,
+    pub skip_vote: u32,
+    pub vitality: u32,
+}
+
+/// network_coop.c's presentation timing: a client ends the cinematic after
+/// this long without hearing from the host, and plays the host's
+/// presentations about this many ticks behind the newest it has.
+const PRESENTATION_SILENCE_TICKS: i32 = 60;
+const PRESENTATION_DELAY_TICKS: i32 = 2;
+/// network_coop.c's `CAMERA_OBJECT_DISTANCE`: the farthest an object the
+/// cutscene camera films can be from it.
+const CAMERA_OBJECT_DISTANCE: f32 = 8.0;
+/// network_coop.c's field of view limits (an observer's).
+const CAMERA_MINIMUM_FIELD_OF_VIEW: f32 = 0.001;
+const CAMERA_MAXIMUM_FIELD_OF_VIEW: f32 = PI / 2.0;
+/// network_coop.c's view behind the host for a player with nothing to
+/// watch: its distance behind and above the host's eyes, and the share of
+/// the way it eases there each tick.
+const WATCH_HOST_DISTANCE: f32 = 3.0;
+const WATCH_HOST_HEIGHT: f32 = 1.0;
+const WATCH_HOST_FOLLOW: f32 = 0.2;
+/// real_math.h's `_real_epsilon` and `_pi`.
+const REAL_EPSILON: f32 = 0.0001;
+const PI: f32 = std::f32::consts::PI;
+
+type Vector3 = [f32; 3];
+
+fn dot(a: Vector3, b: Vector3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// real_math.h's `normalize3d`: the magnitude, the vector made unit length
+/// unless it is about zero.
+fn normalize3d(v: &mut Vector3) -> f32 {
+    let magnitude = dot(*v, *v).sqrt();
+    if !(REAL_EPSILON > magnitude.abs()) {
+        let scale = 1.0 / magnitude;
+        *v = v.map(|part| part * scale);
+        magnitude
+    } else {
+        0.0
+    }
+}
+
+/// real_math.c's `points_interpolate` and `vectors_interpolate`.
+fn interpolate(a: Vector3, b: Vector3, t: f32) -> Vector3 {
+    let one_minus_t = 1.0 - t;
+    [0, 1, 2].map(|index| one_minus_t * a[index] + t * b[index])
+}
+
+/// real_math.h's `valid_realcmp`.
+fn valid_realcmp(a: f32, b: f32) -> bool {
+    let y = a - b;
+    y.is_finite() && y.abs() < 0.001
+}
+
+/// real_math.h's `valid_real_vector3d_axes2`.
+fn valid_axes2(forward: Vector3, up: Vector3) -> bool {
+    valid_realcmp(dot(forward, forward), 1.0) && valid_realcmp(dot(up, up), 1.0) && valid_realcmp(dot(forward, up), 0.0)
+}
+
+/// observer.c's `observer_up_from_forward`: up square to the look, level
+/// to the side.
+fn up_from_forward(forward: Vector3) -> Vector3 {
+    let mut right = [forward[1], -forward[0], 0.0];
+    if normalize3d(&mut right) == 0.0 {
+        right = [1.0, 0.0, 0.0];
+    }
+    // (real_math.h's cross_product3d of right and forward)
+    [
+        right[1] * forward[2] - right[2] * forward[1],
+        right[2] * forward[0] - right[0] * forward[2],
+        right[0] * forward[1] - right[1] * forward[0],
+    ]
+}
+
+struct ClientTick<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    a: ClientTickArguments,
+}
+
+impl<H: AiHost> ClientTick<'_, H> {
+    fn call(&self, kind: i32, actor: i32, a: i32, b: i32, input: &[f32]) {
+        let mut call = AiCall { kind, actor, a, b, ..AiCall::default() };
+        call.input[..input.len()].copy_from_slice(input);
+        self.host.call(&mut call);
+    }
+
+    fn p(&self, field: usize) -> u32 {
+        self.a.presentation + field as u32
+    }
+
+    fn input(&self, field: usize) -> bool {
+        self.m.r8(self.a.inputs + field as u32) != 0
+    }
+
+    fn vector(&self, at: u32) -> Vector3 {
+        [self.m.f32(at), self.m.f32(at + 4), self.m.f32(at + 8)]
+    }
+
+    fn set_vector(&self, at: u32, v: Vector3) {
+        for (index, part) in v.iter().enumerate() {
+            self.m.set_f32(at + 4 * index as u32, *part);
+        }
+    }
+
+    /// network_coop.c's `client_cinematic_end`.
+    fn cinematic_end(&self) {
+        let m = self.m;
+        if m.r8(self.p(cp::CINEMATIC_STARTED)) == 0 {
+            return;
+        }
+        m.w8(self.p(cp::CINEMATIC_STARTED), 0);
+        self.call(tick_call::CINEMATIC_STOP, NONE, 0, 0, &[]);
+    }
+
+    /// network_coop.c's `client_host_camera_set`.
+    fn host_camera_set(&self, host_camera: bool) {
+        let m = self.m;
+        if (m.r8(self.p(cp::HOST_CAMERA)) != 0) == host_camera {
+            return;
+        }
+        m.w8(self.p(cp::HOST_CAMERA), host_camera as u8);
+        self.call(tick_call::HOST_CAMERA, NONE, host_camera as i32, 0, &[]);
+    }
+
+    /// network_coop.c's `client_watch_host_from_behind`: the view eased
+    /// toward a spot behind and above the host's eyes, level with where it
+    /// looks; whether it makes a camera.
+    fn watch_host_from_behind(&self, position: &mut Vector3, forward: &mut Vector3, up: &mut Vector3) -> bool {
+        let m = self.m;
+        let mut level = [forward[0], forward[1], 0.0];
+        if normalize3d(&mut level) == 0.0 {
+            level = *forward;
+        }
+        // (real_math.h's point_from_line3d)
+        let mut behind = [0, 1, 2].map(|index| level[index] * -WATCH_HOST_DISTANCE + position[index]);
+        behind[2] += WATCH_HOST_HEIGHT;
+        let at_position = self.p(cp::WATCHING_HOST_POSITION);
+        let at_forward = self.p(cp::WATCHING_HOST_FORWARD);
+        if m.r8(self.p(cp::WATCHING_HOST_VALID)) == 0 {
+            m.w8(self.p(cp::WATCHING_HOST_VALID), 1);
+            self.set_vector(at_position, behind);
+            self.set_vector(at_forward, *forward);
+        } else {
+            self.set_vector(at_position, interpolate(self.vector(at_position), behind, WATCH_HOST_FOLLOW));
+            self.set_vector(at_forward, interpolate(self.vector(at_forward), *forward, WATCH_HOST_FOLLOW));
+        }
+        let mut watched_forward = self.vector(at_forward);
+        let magnitude = normalize3d(&mut watched_forward);
+        self.set_vector(at_forward, watched_forward);
+        if magnitude == 0.0 {
+            return false;
+        }
+        *position = self.vector(at_position);
+        // (world up is not square to a host looking up or down: up rebuilt
+        // from the look when that pair would fail the camera's check)
+        let mut axes = [watched_forward[0], watched_forward[1], watched_forward[2], 0.0, 0.0, 1.0];
+        let valid = wire::axes_make_valid(&mut axes);
+        *forward = [axes[0], axes[1], axes[2]];
+        *up = [axes[3], axes[4], axes[5]];
+        if !valid {
+            *up = up_from_forward(*forward);
+        }
+        valid_axes2(*forward, *up)
+    }
+
+    /// network_coop.c's `client_presentation_apply`: the host's
+    /// presentation kept in the slot.
+    fn apply(&self, slot: u32) {
+        let m = self.m;
+        let pres = self.p(cp::BUFFERED) + slot * dp::SIZEOF as u32;
+        let flags = m.r8(pres + dp::FLAGS as u32);
+        let flag = |bit: usize| flags & (1 << bit) != 0;
+        let byte = |field: usize| m.r8(pres + field as u32) != 0;
+        let cinematic = flag(nv::_PRESENTATION_CINEMATIC_BIT);
+        self.call(tick_call::INPUT_ENABLE, NONE, !byte(dp::INPUT_DISABLED) as i32, 0, &[]);
+        let body = m.f32(pres + dp::PLAYERS_MAXIMUM_BODY_VITALITY as u32);
+        let shield = m.f32(pres + dp::PLAYERS_MAXIMUM_SHIELD_VITALITY as u32);
+        if byte(dp::PLAYERS_VITALITY_SET) && wire::real_valid(body) && wire::real_valid(shield) && body > 0.0 && shield >= 0.0 {
+            m.w8(self.a.vitality + pv::SET as u32, 1);
+            m.set_f32(self.a.vitality + pv::MAXIMUM_BODY as u32, body);
+            m.set_f32(self.a.vitality + pv::MAXIMUM_SHIELD as u32, shield);
+        }
+        self.call(tick_call::ALLEGIANCE, NONE, slot as i32, 0, &[]);
+        if !byte(dp::SCRIPTED_SHAKE) && self.input(ti::SCRIPTED_SHAKE) {
+            self.call(tick_call::SHAKE_END, NONE, 0, 0, &[]);
+        }
+        // (a machine that joined mid-cutscene may already have started it)
+        let started_at = self.p(cp::CINEMATIC_STARTED);
+        if cinematic && m.r8(started_at) == 0 {
+            if !self.input(ti::CINEMATIC_IN_PROGRESS) {
+                self.call(tick_call::CINEMATIC_START, NONE, 0, 0, &[]);
+            }
+            m.w8(started_at, 1);
+        } else if !cinematic {
+            self.cinematic_end();
+        }
+        let started = m.r8(started_at) != 0;
+        let camera_scripted = byte(dp::CAMERA_SCRIPTED);
+        self.host_camera_set((started && camera_scripted && !self.input(ti::WATCHING_RIDER)) || self.input(ti::NOTHING_TO_WATCH));
+        if started {
+            self.call(tick_call::LETTERBOX, NONE, flag(nv::_PRESENTATION_LETTERBOX_BIT) as i32, 0, &[]);
+        }
+        let cluster = m.i16(pres + dp::ACTIVATING_CLUSTER as u32).wrapping_sub(1);
+        self.call(tick_call::ACTIVATING_CLUSTER, NONE, cluster as i32, 0, &[]);
+        if m.r8(self.p(cp::HOST_CAMERA)) != 0 {
+            let packed = |at: u32| [m.i16(at), m.i16(at + 2), m.i16(at + 4)];
+            let mut forward = wire::vector_unpack(packed(pres + dp::CAMERA_FORWARD as u32), UNIT_SCALE);
+            let mut up = wire::vector_unpack(packed(pres + dp::CAMERA_UP as u32), UNIT_SCALE);
+            let mut position = self.vector(pres + dp::CAMERA_POSITION as u32);
+            let object_index = m.i32(pres + dp::CAMERA_OBJECT_INDEX as u32);
+            let filmed = if object_index != NONE && object_index >> 16 != 0 {
+                crate::ai_actor::datum_get(m, self.context.object_header_data, object_index).map(|header| m.r32(header + oh::DATUM as u32))
+            } else {
+                None
+            };
+            // (the camera placed relative to this machine's copy of the
+            // filmed object, which may be a tick behind the host's)
+            let offset = self.vector(pres + dp::CAMERA_OBJECT_OFFSET as u32);
+            if let Some(filmed) = filmed
+                && offset.iter().all(|part| wire::real_valid(*part))
+                && dot(offset, offset) < CAMERA_OBJECT_DISTANCE * CAMERA_OBJECT_DISTANCE * 4.0
+            {
+                let origin = self.vector(filmed + ud::OBJECT_POSITION as u32);
+                position = [0, 1, 2].map(|index| offset[index] * 1.0 + origin[index]);
+            }
+            let mut axes = [forward[0], forward[1], forward[2], up[0], up[1], up[2]];
+            if wire::point_valid(position, CAMERA_WORLD_BOUND) && wire::axes_make_valid(&mut axes) {
+                forward = [axes[0], axes[1], axes[2]];
+                up = [axes[3], axes[4], axes[5]];
+                let mut camera_ready = true;
+                if !(started && camera_scripted) {
+                    camera_ready = self.watch_host_from_behind(&mut position, &mut forward, &mut up);
+                }
+                if camera_ready && valid_axes2(forward, up) {
+                    let field_of_view = pin(
+                        m.r16(pres + dp::CAMERA_FIELD_OF_VIEW as u32) as f32 / FIELD_OF_VIEW_SCALE,
+                        CAMERA_MINIMUM_FIELD_OF_VIEW,
+                        CAMERA_MAXIMUM_FIELD_OF_VIEW,
+                    );
+                    let mut input = [0.0; 9];
+                    input[..3].copy_from_slice(&position);
+                    input[3..6].copy_from_slice(&forward);
+                    input[6..].copy_from_slice(&up);
+                    self.call(tick_call::CAMERA, NONE, 0, field_of_view.to_bits() as i32, &input);
+                }
+            }
+        } else {
+            m.w8(self.p(cp::WATCHING_HOST_VALID), 0);
+        }
+        // (each new fade started, backdated to when the host started it)
+        let fade_start_time = m.i32(pres + dp::FADE_START_TIME as u32);
+        if fade_start_time != m.i32(self.p(cp::FADE_START_TIME)) {
+            let color = [0, 1, 2].map(|index| m.r8(pres + dp::FADE_COLOR as u32 + index) as f32 / 255.0);
+            let start = m.i32(self.a.inputs + ti::NOW as u32) - m.i16(pres + dp::FADE_ELAPSED as u32) as i32;
+            let ticks = m.i16(pres + dp::FADE_TICKS as u32) as i32;
+            self.call(tick_call::FADE, start, ticks, flag(nv::_PRESENTATION_FADING_OUT_BIT) as i32, &color);
+            m.w32(self.p(cp::FADE_START_TIME), fade_start_time as u32);
+        }
+        let vote = self.a.skip_vote;
+        m.w8(vote + sv::OFFERED as u32, flag(nv::_PRESENTATION_SKIPPABLE_BIT) as u8);
+        m.set_i16(vote + sv::VOTES as u32, m.r8(pres + dp::SKIP_VOTES as u32) as i16);
+        m.set_i16(vote + sv::VOTERS as u32, m.r8(pres + dp::SKIP_VOTERS as u32) as i16);
+        self.call(tick_call::HUD_STATE, NONE, slot as i32, 0, &[]);
+    }
+
+    /// network_coop.c's `client_play_presentation`: one presentation a
+    /// tick, about PRESENTATION_DELAY_TICKS behind the newest, catching up
+    /// two at a time when further behind.
+    fn play_presentation(&self) {
+        let m = self.m;
+        if m.r8(self.p(cp::HEARD_ANY)) == 0 {
+            return;
+        }
+        let newest = m.i32(self.p(cp::NEWEST_TIME));
+        let played_at = self.p(cp::PLAYED_TIME);
+        let lag = newest.wrapping_sub(m.i32(played_at));
+        if m.r8(self.p(cp::PLAYING)) == 0 || lag > PRESENTATION_BUFFER_COUNT || lag < -PRESENTATION_BUFFER_COUNT {
+            m.w32(played_at, newest.wrapping_sub(PRESENTATION_DELAY_TICKS) as u32);
+        } else if lag > PRESENTATION_DELAY_TICKS + 1 {
+            m.w32(played_at, m.i32(played_at).wrapping_add(2) as u32);
+        } else if lag > 0 {
+            m.w32(played_at, m.i32(played_at).wrapping_add(1) as u32);
+        } else {
+            return;
+        }
+        m.w8(self.p(cp::PLAYING), 1);
+        let played = m.i32(played_at);
+        let mut best: Option<(i32, u32)> = None;
+        for index in 0..PRESENTATION_BUFFER_COUNT as u32 {
+            let time = m.i32(self.p(cp::BUFFERED_TIMES) + 4 * index);
+            if time <= played && time > played - PRESENTATION_BUFFER_COUNT && time > best.map_or(NONE, |(t, _)| t) {
+                best = Some((time, index));
+            }
+        }
+        if let Some((_, slot)) = best {
+            self.apply(slot);
+        }
+    }
+
+    /// network_coop.c's `players_vitality_keep`, a client's: every player's
+    /// unit at the maximum vitality the host's scripts set.
+    fn vitality_keep(&self) {
+        let m = self.m;
+        if m.r8(self.a.vitality + pv::SET as u32) == 0 {
+            return;
+        }
+        let body = m.f32(self.a.vitality + pv::MAXIMUM_BODY as u32);
+        let shield = m.f32(self.a.vitality + pv::MAXIMUM_SHIELD as u32);
+        let data = self.context.player_data;
+        let size = m.r16(data + DATA_SIZE) as i16 as u32;
+        for player_index in 0..m.r16(data + DATA_COUNT) as i16 as u32 {
+            let player = m.r32(data + DATA_DATA) + player_index * size;
+            if m.i16(player + pd::IDENTIFIER as u32) == 0 {
+                continue;
+            }
+            let unit_index = m.i32(player + pd::UNIT_INDEX as u32);
+            let Some(header) = crate::ai_actor::datum_get(m, self.context.object_header_data, unit_index) else { continue };
+            let unit = m.r32(header + oh::DATUM as u32);
+            let body_at = unit + ud::OBJECT_MAXIMUM_BODY_VITALITY as u32;
+            let shield_at = unit + ud::OBJECT_MAXIMUM_SHIELD_VITALITY as u32;
+            if m.f32(body_at) == body && m.f32(shield_at) == shield {
+                continue;
+            }
+            m.set_f32(body_at, body);
+            m.set_f32(shield_at, shield);
+        }
+    }
+
+    /// network_coop.c's `network_coop_client_tick`.
+    fn run(&self) {
+        let m = self.m;
+        self.play_presentation();
+        self.vitality_keep();
+        let now = m.i32(self.a.inputs + ti::NOW as u32);
+        if now.wrapping_sub(m.i32(self.p(cp::HEARD_TIME))) > PRESENTATION_SILENCE_TICKS {
+            self.cinematic_end();
+            self.host_camera_set(false);
+            self.call(tick_call::INPUT_ENABLE, NONE, 1, 0, &[]);
+        }
+        // (sent every tick while a skip is offered, voted or not: the host
+        // only counts machines it hears from)
+        let vote = self.a.skip_vote;
+        if !(m.r8(vote + sv::OFFERED as u32) != 0 && m.r8(self.p(cp::CINEMATIC_STARTED)) != 0) {
+            m.w8(vote + sv::VOTED as u32, 0);
+        } else {
+            self.call(tick_call::SKIP_VOTE, NONE, (m.r8(vote + sv::VOTED as u32) != 0) as i32, 0, &[]);
+        }
+    }
+}
+
+/// The world step of a co-op client's tick: the host's presentation played
+/// in its turn, the players' vitality kept, the cinematic ended when the
+/// host goes quiet, and the skip vote sent while a skip is offered.
+pub fn client_tick(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ClientTickArguments = arguments(context, m);
+    ClientTick { context, host, m, a }.run();
 }

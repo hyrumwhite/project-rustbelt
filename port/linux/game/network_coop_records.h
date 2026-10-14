@@ -460,4 +460,11 @@ struct coop_players_vitality
 	real maximum_shield;
 };
 
+/* client: the host's snap count last seen for each of its groups */
+struct coop_client_devices
+{
+	byte snaps[COOP_MAXIMUM_DEVICE_GROUPS];
+	boolean seen[COOP_MAXIMUM_DEVICE_GROUPS];
+};
+
 #endif

@@ -324,12 +324,9 @@ that updates them and keeps the players' vitality (host_resend_and_vitality) */
 static struct coop_resend_inputs coop_resend_inputs;
 static struct halo_sim_network_coop_resend coop_resend_arguments;
 
-/* client: the host's snap count last seen for each of its groups */
-static struct
-{
-	byte snaps[MAXIMUM_DEVICE_GROUPS];
-	boolean seen[MAXIMUM_DEVICE_GROUPS];
-} client_devices;
+/* client: the host's snap count last seen for each of its groups
+(network_coop_records.h) */
+static struct coop_client_devices client_devices;
 
 /* client: the script sounds (impulse ones: dialogue) it played lately,
 which a skipped cutscene stops */
@@ -3053,6 +3050,15 @@ void network_coop_client_call(
 	case _network_coop_client_call_set_scale:
 		objects_scripting_set_scale(call->actor, call->input[0], 0);
 		break;
+	case _network_coop_client_call_set_device_group:
+		device_group_network_set((short)call->actor, call->input[0], (word)call->a, (boolean)call->b);
+		break;
+	case _network_coop_client_call_create_named:
+		object_new_by_name((short)call->actor);
+		break;
+	case _network_coop_client_call_delete:
+		object_delete(call->actor);
+		break;
 	}
 	halo_sim_world_event_end(call, opened);
 }
@@ -3315,15 +3321,14 @@ void network_coop_handle_skip_vote(
 	skip_vote.client_vote_times[machine_index] = vote->voted ? game_time_get() : NONE;
 }
 
-void network_coop_handle_device_groups(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_device_groups_game(
 	void const *entries,
 	short count)
 {
 	struct distributed_coop_device_group const *groups = entries;
 	short index;
 
-	if (!coop_client())
-		return;
 	for (index = 0; index < count; index++)
 	{
 		struct distributed_coop_device_group const *entry = &groups[index];
@@ -3343,23 +3348,85 @@ void network_coop_handle_device_groups(
 		snap = (client_devices.seen[group_index] && entry->snaps != client_devices.snaps[group_index]) ||
 			(!entry->changed && value != here);
 		if (snap || value != here || entry->flags != (byte)flags)
-			device_group_network_set(group_index, value, entry->flags, snap);
+		{
+			/* port: (through the world's calls, the Rust port's) */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_client_call_set_device_group;
+			call.actor = group_index;
+			call.a = entry->flags;
+			call.b = snap;
+			call.input[0] = value;
+			network_coop_client_call(&call);
+		}
 		client_devices.snaps[group_index] = entry->snaps;
 		client_devices.seen[group_index] = TRUE;
 	}
 }
 
+/* client: the host's device groups, each as the host has it (jumping there
+when the host did, or when a rotation's entry disagrees: a change missed, or
+a late join) */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the snap counts seen
+and the game's device groups (which the calls change). */
+void network_coop_handle_device_groups(
+	void const *entries,
+	short count)
+{
+	struct halo_sim_network_coop_client_devices arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
+	word network_flags;
+	short runtime_bit;
+
+	if (!coop_client())
+		return;
+	device_group_network_masks(&network_flags, &runtime_bit);
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.count = count;
+	arguments.entries = (unsigned long)entries;
+	arguments.client_devices = (unsigned long)&client_devices;
+	arguments.device_groups = (unsigned long)device_groups_data;
+	arguments.scenario_group_count = global_scenario_get()->device_groups.count;
+	arguments.network_flags = network_flags;
+	arguments.runtime_bit = runtime_bit;
+	arguments.object_name_list = (unsigned long)object_name_list_port_get();
+	regions[0].address = (unsigned long)&arguments;
+	regions[0].size = sizeof(arguments);
+	regions[1].address = (unsigned long)&client_devices;
+	regions[1].size = sizeof(client_devices);
+	regions[2].address = (unsigned long)device_groups_data;
+	regions[2].size = sizeof(struct data_array);
+	regions[3].address = (unsigned long)device_groups_data->data;
+	regions[3].size = device_groups_data->maximum_count * device_groups_data->size;
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_devices, &context, regions, 4,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	client_apply_device_groups_game(entries, count);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_devices);
+}
+
 /* Client: creates or deletes named scenery and devices to match the host.
 A difference must show up twice in a row, on the same BSP, so a message
 that crosses a BSP switch or a script's create can't cause a false one. */
-void network_coop_handle_object_names(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_object_names_game(
 	void const *entries)
 {
 	struct distributed_coop_object_names const *names = entries;
 	short name_index;
 
-	if (!coop_client())
-		return;
 	if (names->structure_bsp_index != global_structure_bsp_index_get() ||
 		names->name_count != MIN(global_scenario_get()->object_names.count, MAXIMUM_OBJECT_NAMES_PER_SCENARIO))
 	{
@@ -3386,11 +3453,77 @@ void network_coop_handle_object_names(
 			continue;
 		}
 		*differing &= (byte)~bit;
-		if (host_has)
-			object_new_by_name(name_index);
-		else if (!object_holds_player(object_index))
-			object_delete(object_index);
+		/* port: (through the world's calls, the Rust port's) */
+		if (host_has || !object_holds_player(object_index))
+		{
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = host_has ? _network_coop_client_call_create_named : _network_coop_client_call_delete;
+			call.actor = host_has ? name_index : object_index;
+			network_coop_client_call(&call);
+		}
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the differences
+seen, the names' objects, and the objects (which the calls make and
+delete). */
+void network_coop_handle_object_names(
+	void const *entries)
+{
+	struct halo_sim_network_coop_client_names arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[7];
+	struct memory_pool *pool = objects_memory_pool();
+	struct scenario *scenario = global_scenario_get();
+	long region_count = 0;
+	int checking = FALSE;
+
+	if (!coop_client())
+		return;
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.names = (unsigned long)entries;
+	arguments.differing = (unsigned long)client_names_differing;
+	arguments.object_name_list = (unsigned long)object_name_list_port_get();
+	arguments.scenario_names = (unsigned long)scenario->object_names.address;
+	arguments.scenario_name_count = scenario->object_names.count;
+	arguments.structure_bsp_index = global_structure_bsp_index_get();
+	regions[region_count].address = (unsigned long)&arguments;
+	regions[region_count++].size = sizeof(arguments);
+	regions[region_count].address = (unsigned long)client_names_differing;
+	regions[region_count++].size = sizeof(client_names_differing);
+	regions[region_count].address = arguments.object_name_list;
+	regions[region_count++].size = MAXIMUM_OBJECT_NAMES_PER_SCENARIO * sizeof(long);
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_names, &context, regions, region_count,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	client_apply_object_names_game(entries);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_names);
 }
 
 /* client: applies each event once, in order */

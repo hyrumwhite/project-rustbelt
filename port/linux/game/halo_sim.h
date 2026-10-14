@@ -2395,6 +2395,8 @@ enum
 	_halo_sim_world_step_network_coop_resend,
 	_halo_sim_world_step_coop_enemies,
 	_halo_sim_world_step_network_coop_client_world,
+	_halo_sim_world_step_network_coop_client_devices,
+	_halo_sim_world_step_network_coop_client_names,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3105,6 +3107,46 @@ enum
 	_network_coop_client_call_set_permutation,
 	/* the object (actor) scaled to input[0] (objects_scripting_set_scale) */
 	_network_coop_client_call_set_scale,
+	/* the device group (actor) set to input[0] with the flags a, jumping
+	there if b (device_group_network_set) */
+	_network_coop_client_call_set_device_group,
+	/* the object of the scenario's name actor made (object_new_by_name) */
+	_network_coop_client_call_create_named,
+	/* the object (actor) deleted (object_delete) */
+	_network_coop_client_call_delete,
+};
+
+/* crates/halo_map's network_coop::ClientNamesArguments: a co-op client
+matching its host's named objects: the host's names (struct
+distributed_coop_object_names), the differences seen last time (a bit per
+name), the game's object of each name, the scenario's names (struct
+scenario_object_name) and their count, and the structure BSP */
+struct halo_sim_network_coop_client_names
+{
+	unsigned long names;
+	unsigned long differing;
+	unsigned long object_name_list;
+	unsigned long scenario_names;
+	long scenario_name_count;
+	long structure_bsp_index;
+};
+
+/* crates/halo_map's network_coop::ClientDevicesArguments: a co-op client
+applying its host's device groups: the count and the entries
+(network_coop_records.h's), the snap counts seen (struct
+coop_client_devices), the game's device groups (a data array), the
+scenario's count of them, the flags a group's network state carries and the
+runtime bit, and the game's object of each name */
+struct halo_sim_network_coop_client_devices
+{
+	long count;
+	unsigned long entries;
+	unsigned long client_devices;
+	unsigned long device_groups;
+	long scenario_group_count;
+	long network_flags;
+	long runtime_bit;
+	unsigned long object_name_list;
 };
 
 /* which of the host's world changes a client applies */

@@ -87,6 +87,8 @@ enum
 	_halo_sim_network_actors,
 	/* the players' vote to kick a player (network_votekick.c) */
 	_halo_sim_network_votekick,
+	/* voice chat (network_voice.c) */
+	_halo_sim_network_voice,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2413,6 +2415,9 @@ enum
 	_halo_sim_world_step_network_votekick_host_tick,
 	_halo_sim_world_step_network_votekick_status,
 	_halo_sim_world_step_network_votekick_machine,
+	_halo_sim_world_step_network_voice_update,
+	_halo_sim_world_step_network_voice_message,
+	_halo_sim_world_step_network_voice_joined,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3400,6 +3405,55 @@ enum
 };
 
 void network_votekick_call(struct halo_sim_ai_call *call);
+
+/* network_voice.c's steps' calls (crates/halo_map's network_voice::call) */
+enum
+{
+	/* the texts' settings message to the machine a, over its stream:
+	result, whether sent */
+	_network_voice_call_send_config = 1,
+	/* the texts' relayed frame (b bytes) to the machine a */
+	_network_voice_call_send_down,
+	/* the texts' frame to the host (b bytes) */
+	_network_voice_call_send_up,
+	/* the packet at the address b (input[2] bytes) of the machine a's frame
+	actor played at the gain input[0] and pan input[1] (voice_audio_play) */
+	_network_voice_call_play,
+	/* the microphone open if a (voice_audio_microphone) */
+	_network_voice_call_microphone,
+	/* the microphone's next frame read: result, whether there was one */
+	_network_voice_call_read_frame,
+	/* the frame's level: output[0] */
+	_network_voice_call_level,
+	/* the frame encoded at the bit rate a into the texts' packet, at most b
+	bytes: result, its length */
+	_network_voice_call_encode,
+	/* the voices heard forgotten (voice_audio_forget_all) */
+	_network_voice_call_forget_all,
+	/* the voices' volume input[0] (voice_audio_set_volume) */
+	_network_voice_call_set_volume,
+	/* push to talk held: result */
+	_network_voice_call_push_to_talk_held,
+	/* a new key (random, not 0) for the machine slot a */
+	_network_voice_call_new_key,
+};
+
+void network_voice_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_voice::Arguments: a step of voice chat: the
+machine (a message's sender, NONE on a client; a machine joined), the
+message and its size, voice chat's records (struct voice_state,
+network_voice_records.h), its messages (struct voice_texts) and what it
+reads of the game (struct voice_inputs) */
+struct halo_sim_network_voice
+{
+	long machine_index;
+	unsigned long message;
+	long size;
+	unsigned long state;
+	unsigned long texts;
+	unsigned long inputs;
+};
 
 /* struct halo_sim_network_votekick kinds: a request's (a client's message,
 the host's own machine's), and the host's server's questions */

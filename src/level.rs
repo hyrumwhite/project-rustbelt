@@ -1120,6 +1120,13 @@ impl LevelBuilder {
         if info.two_sided {
             material.double_sided = true;
             material.cull_mode = None;
+            // leaves let light through: Solarik's thin foliage, for a
+            // two-sided cut-out of a plant (not a grille); deferred, which
+            // Bevy's automatic choice isn't for transmission
+            if material.alpha_mode == AlphaMode::Mask(0.5) && is_foliage(&info.name) {
+                material.diffuse_transmission = FOLIAGE_TRANSMISSION;
+                material.opaque_render_method = bevy::material::OpaqueRendererMethod::Deferred;
+            }
         }
         if let Some(environment) = &info.environment {
             let base_size = info.base_map.and_then(|b| b.datum).and_then(|d| bitmap_size(&self.cache, d));
@@ -1385,6 +1392,16 @@ fn sky_layer_map(info: &ShaderInfo) -> Option<shader::TransparentMap> {
         .rev()
         .min_by(|a, b| (a.uv_scale[0] * a.uv_scale[1]).total_cmp(&(b.uv_scale[0] * b.uv_scale[1])))
         .copied()
+}
+
+/// The share of the light a leaf lets through to its other side.
+const FOLIAGE_TRANSMISSION: f32 = 0.4;
+
+/// Whether a shader (by its tag name) is a plant's: trees, plants and
+/// vines, which Halo keeps under `scenery\trees` and `scenery\plants`.
+fn is_foliage(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["\\trees\\", "\\plants\\", "leaves", "leaf", "vine", "bush", "fern", "palm"].iter().any(|word| name.contains(word))
 }
 
 /// Keeps the sky centred on the camera.

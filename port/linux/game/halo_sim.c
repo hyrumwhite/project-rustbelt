@@ -2163,6 +2163,9 @@ static struct
 	halo_sim_world_step_function world_step;
 	halo_sim_world_step_function world_step_check;
 	long scenario_index;
+	/* (the level's own name too: every map's scenario has the same tag
+	index, so the index alone misses a change of level) */
+	char scenario_name[256];
 	boolean level_loaded;
 } halo_sim;
 
@@ -4998,13 +5001,16 @@ static void halo_sim_initialize(void)
 /* the level's map file, read by the DLL once a level */
 static boolean halo_sim_level_loaded(void)
 {
-	if (global_scenario_index != halo_sim.scenario_index)
+	char const *scenario_name = global_scenario_index != NONE ? tag_get_name(global_scenario_index) : "";
+
+	if (global_scenario_index != halo_sim.scenario_index || strcmp(scenario_name, halo_sim.scenario_name))
 	{
 		char xbox_path[256] = "";
 		char path[1024] = "";
 		long count = -1;
 
 		halo_sim.scenario_index = global_scenario_index;
+		strncpy(halo_sim.scenario_name, scenario_name, sizeof(halo_sim.scenario_name) - 1);
 		halo_sim.level_loaded = FALSE;
 		if (global_scenario_index != NONE &&
 			snprintf(xbox_path, sizeof(xbox_path), "%s%s.map", cache_files_map_directory(),

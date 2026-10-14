@@ -428,3 +428,58 @@ mod evaluate_tests {
         assert_eq!(out, [0.25, 0.5, 0.0, 0.5]);
     }
 }
+
+/// How far either side of the plasma's animated value
+/// [`environment_plasma_band`] reaches.
+pub const PLASMA_BAND_REACH: f32 = 0.1;
+
+/// The environment shader's plasma self-illumination (its lightmap pass,
+/// rasterizer_xbox_environment.c): where the self-illumination map's alpha
+/// is near the plasma function's value, the blue channel lights with the
+/// plasma's "on" colour over its "off" one. This is that band's strength,
+/// from the game's own combiner program, at `samples` distances from the
+/// value (0 to `PLASMA_BAND_REACH`; the distance wraps round 0 and 1): 1 at
+/// the value, 0 beyond about 0.08.
+pub fn environment_plasma_band(samples: usize) -> Vec<f32> {
+    let mut program = CombinerProgram { stage_count: 6, flags: 0x11100, final_abcd: 0x0A0F000C, final_efg: 0x1C011800, ..Default::default() };
+    let words = [
+        (0x1120B920, 0x00000C00, 0x1920B120, 0x00000C00),
+        (0xDCDCCCCC, 0x00024C00, 0x20200000, 0x00002080),
+        (0x1C1C0920, 0x000000C9, 0x09010902, 0x000030CD),
+        (0x00005C5C, 0x00004C00, 0x0C010D02, 0x00000D00),
+        (0x34201408, 0x00000C00, 0x011C0220, 0x00000C00),
+        (0x00000000, 0x00000000, 0x0C190D20, 0x00000C00),
+    ];
+    for (stage, (alpha_inputs, alpha_outputs, rgb_inputs, rgb_outputs)) in words.into_iter().enumerate() {
+        program.alpha_inputs[stage] = alpha_inputs;
+        program.alpha_outputs[stage] = alpha_outputs;
+        program.rgb_inputs[stage] = rgb_inputs;
+        program.rgb_outputs[stage] = rgb_outputs;
+    }
+    // (the value at the middle; the primary and secondary colours black, the
+    // plasma's on white and off black; no lightmap, so the result is the
+    // self-illumination alone)
+    program.constant0[0] = [0.0, 0.0, 0.0, 0.5];
+    program.constant0[2] = [1.0, 0.0, 0.0, 0.0];
+    program.constant1[2] = [0.0, 1.0, 0.0, 0.0];
+    program.constant0[4] = [1.0, 1.0, 1.0, 0.0];
+    (0..samples)
+        .map(|index| {
+            let distance = PLASMA_BAND_REACH * index as f32 / (samples - 1).max(1) as f32;
+            evaluate(&program, [[0.5, 0.5, 1.0, 1.0], [0.0, 0.0, 1.0, 0.5 + distance], [0.0; 4], [0.0; 4]])[2]
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod plasma_tests {
+    use super::*;
+
+    #[test]
+    fn band_peaks_at_the_value() {
+        let band = environment_plasma_band(41);
+        assert_eq!(band[0], 1.0);
+        // (0.02 from it, about half; 0.1, none)
+        assert!(band[40] == 0.0 && band[8] > 0.4 && band[8] < 0.6);
+    }
+}

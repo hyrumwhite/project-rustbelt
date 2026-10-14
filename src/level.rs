@@ -1332,6 +1332,33 @@ impl LevelBuilder {
             DetailFunction::Multiply => 1,
             DetailFunction::DoubleBiasedAdd => 2,
         };
+        // the self-illumination and textures as they animate
+        let mut params = HaloEnvironmentParams::default();
+        let mut self_illumination_map = assets.flat_normal.clone();
+        if let (Some(animation), Some(shader::SelfIllumination::Environment { map, .. })) =
+            (info.self_illumination_animation, info.self_illumination)
+            && let Some(image) = map.datum.and_then(|datum| self.textures.get(&self.cache, datum, 0, false, assets.images))
+        {
+            self_illumination_map = image;
+            flags |= crate::material::ENVIRONMENT_ANIMATED_ILLUMINATION;
+            for channel in 0..3 {
+                params.illumination_on[channel] = Vec3::from(animation.on_colors[channel]).extend(0.0);
+                params.illumination_off[channel] = Vec3::from(animation.off_colors[channel]).extend(0.0);
+            }
+            let [primary, secondary, plasma] = animation.functions.map(|f| f.max(0) as u32);
+            params.illumination_functions = UVec4::new(primary, secondary, plasma, 0);
+            params.illumination_periods = Vec3::from(animation.periods).extend(1.0);
+            params.illumination_phases = Vec3::from(animation.phases).extend(0.0);
+            let band = halo_map::combiner::environment_plasma_band(crate::material::PLASMA_BAND_SAMPLES);
+            for (index, samples) in band.chunks(4).enumerate() {
+                params.plasma_band[index] = Vec4::from_slice(samples);
+            }
+        }
+        if let Some(animation) = info.texture_animation {
+            flags |= crate::material::ENVIRONMENT_TEXTURE_ANIMATION;
+            params.texture_functions = UVec4::new(animation.functions[0].max(0) as u32, animation.functions[1].max(0) as u32, 0, 0);
+            params.texture_animation = Vec4::new(animation.periods[0], animation.periods[1], animation.scales[0], animation.scales[1]);
+        }
         let mut base = standard.clone();
         if flags & crate::material::ENVIRONMENT_ALPHA_TESTED != 0 {
             base.alpha_mode = AlphaMode::Mask(0.5);
@@ -1348,12 +1375,15 @@ impl LevelBuilder {
                         function(environment.micro_detail_function),
                         flags,
                     ),
+                    ..params
                 },
                 base_map,
                 primary_detail_map: primary,
                 secondary_detail_map: secondary,
                 micro_detail_map: micro,
                 bump_map,
+                self_illumination_map,
+                periodic_tables: crate::material::PERIODIC_TABLES.get().cloned().unwrap_or_default(),
             },
         })
     }

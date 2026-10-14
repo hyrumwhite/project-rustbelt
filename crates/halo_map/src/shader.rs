@@ -213,8 +213,35 @@ pub enum SelfIllumination {
     /// map, tinted by a colour animated between two bounds.
     Model { multipurpose_map: TagRef, color_lower: [f32; 3], color_upper: [f32; 3] },
     /// `shader_environment`: the self-illumination map's red, green and blue
-    /// channels weight the primary, secondary and plasma "on" colours.
+    /// channels weight the primary, secondary and plasma "on" colours (see
+    /// [`EnvironmentSelfIlluminationAnimation`] for how they animate).
     Environment { map: TagRef, primary: [f32; 3], secondary: [f32; 3], plasma: [f32; 3] },
+}
+
+/// How a `shader_environment`'s self-illumination animates (its lightmap
+/// pass): the primary and secondary colours between their "off" and "on"
+/// colours by their periodic functions; the plasma, its "off" colour with
+/// its "on" colour where the map's alpha is near its function's value. Each
+/// function of (time + phase) / period; in the order primary, secondary,
+/// plasma.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnvironmentSelfIlluminationAnimation {
+    pub on_colors: [[f32; 3]; 3],
+    pub off_colors: [[f32; 3]; 3],
+    pub functions: [i16; 3],
+    pub periods: [f32; 3],
+    pub phases: [f32; 3],
+}
+
+/// A `shader_environment`'s texture animation
+/// (`shader_environment_texture_animation_evaluate`): each texture
+/// coordinate offset by its periodic function of time / period, times its
+/// scale.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextureAnimation {
+    pub functions: [i16; 2],
+    pub periods: [f32; 2],
+    pub scales: [f32; 2],
 }
 
 /// What the renderer needs from a shader so far.
@@ -253,6 +280,10 @@ pub struct ShaderInfo {
     pub reflection: Option<Reflection>,
     pub glass: Option<Glass>,
     pub water: Option<Water>,
+    /// `shader_environment`'s self-illumination animation (with a map).
+    pub self_illumination_animation: Option<EnvironmentSelfIlluminationAnimation>,
+    /// `shader_environment`'s texture animation (when it moves).
+    pub texture_animation: Option<TextureAnimation>,
 }
 
 fn nonzero(v: f32) -> f32 {
@@ -293,6 +324,8 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         reflection: None,
         glass: None,
         water: None,
+        self_illumination_animation: None,
+        texture_animation: None,
     };
 
     if tag.group == groups::SHADER_ENVIRONMENT {
@@ -361,6 +394,33 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
                 secondary: colors[1],
                 plasma: colors[2],
             });
+            info.self_illumination_animation = Some(EnvironmentSelfIlluminationAnimation {
+                on_colors: colors,
+                off_colors: [root.vec3(e::PRIMARY_OFF_COLOR)?, root.vec3(e::SECONDARY_OFF_COLOR)?, root.vec3(e::PLASMA_OFF_COLOR)?],
+                functions: [
+                    root.i16(e::PRIMARY_ANIMATION_FUNCTION)?,
+                    root.i16(e::SECONDARY_ANIMATION_FUNCTION)?,
+                    root.i16(e::PLASMA_ANIMATION_FUNCTION)?,
+                ],
+                periods: [
+                    nonzero(root.f32(e::PRIMARY_ANIMATION_PERIOD)?),
+                    nonzero(root.f32(e::SECONDARY_ANIMATION_PERIOD)?),
+                    nonzero(root.f32(e::PLASMA_ANIMATION_PERIOD)?),
+                ],
+                phases: [
+                    root.f32(e::PRIMARY_ANIMATION_PHASE)?,
+                    root.f32(e::SECONDARY_ANIMATION_PHASE)?,
+                    root.f32(e::PLASMA_ANIMATION_PHASE)?,
+                ],
+            });
+        }
+        let texture_animation = TextureAnimation {
+            functions: [root.i16(e::U_ANIMATION_FUNCTION)?, root.i16(e::V_ANIMATION_FUNCTION)?],
+            periods: [nonzero(root.f32(e::U_ANIMATION_PERIOD)?), nonzero(root.f32(e::V_ANIMATION_PERIOD)?)],
+            scales: [root.f32(e::U_ANIMATION_SCALE)?, root.f32(e::V_ANIMATION_SCALE)?],
+        };
+        if texture_animation.scales.iter().any(|&s| s != 0.0) {
+            info.texture_animation = Some(texture_animation);
         }
     } else if tag.group == groups::SHADER_MODEL {
         use layout::shader_model_definition as m;

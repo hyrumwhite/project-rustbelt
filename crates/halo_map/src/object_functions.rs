@@ -29,7 +29,7 @@ const NUMBER_OF_OBJECT_CHANGE_COLORS: usize = 4;
 
 // periodic functions
 const PERIODIC_FUNCTION_ONE: i16 = 0;
-const NUMBER_OF_PERIODIC_FUNCTIONS: usize = 12;
+pub const NUMBER_OF_PERIODIC_FUNCTIONS: usize = 12;
 const SLIDE_PERIODIC_FUNCTION_FLAGS: u32 = (1 << 6) | (1 << 7);
 // transition functions
 const TRANSITION_FUNCTION_LINEAR: i16 = 0;
@@ -448,4 +448,87 @@ pub fn object_compute_change_colors(definition: &ObjectFunctionsDefinition, stat
             *c = pin01(*c);
         }
     }
+}
+
+/// periodic_functions.c's `PERIODIC_FUNCTION_TABLE_SIZE`.
+pub const PERIODIC_FUNCTION_TABLE_SIZE: usize = 1024;
+
+/// The periodic functions' tables, as `periodic_functions_initialize` builds
+/// them when the game starts: each function's 1024 samples, scaled to 0..255
+/// (but the slides'), from the global random numbers seeded 0x20F3F660 (each
+/// table first draws its variable period's x positions). The game's own, for
+/// a renderer to evaluate the functions as `FunctionTables::periodic` does
+/// without the game.
+pub fn periodic_function_tables() -> [[u8; PERIODIC_FUNCTION_TABLE_SIZE]; NUMBER_OF_PERIODIC_FUNCTIONS] {
+    const PI: f32 = 3.1415927;
+    let mut seed: u32 = 0x20F3_F660;
+    // (real_random: the global seed's next, over 65535)
+    let mut real_random = move || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 16) as f32 / 65535.0
+    };
+    let size = PERIODIC_FUNCTION_TABLE_SIZE;
+    let mut tables = [[0u8; PERIODIC_FUNCTION_TABLE_SIZE]; NUMBER_OF_PERIODIC_FUNCTIONS];
+    for (function_type, table) in tables.iter_mut().enumerate() {
+        // periodic_function_build_variable_period_x_table
+        let mut x_table = [0.0f32; PERIODIC_FUNCTION_TABLE_SIZE];
+        let mut sum = 0.0f32;
+        for (index, x) in x_table.iter_mut().enumerate() {
+            *x = sum;
+            let i = index as f32;
+            let first = real_random() * 0.25 + 0.25;
+            let second = ((8.2 * PI * i / size as f32) as f64).cos() as f32 + 1.0;
+            let second = second * real_random();
+            let third = ((10.2 * PI * i / size as f32) as f64).cos() as f32 + 1.0;
+            let third = third * real_random();
+            let fourth = ((14.6 * PI * i / size as f32) as f64).cos() as f32 + 1.0;
+            let fourth = fourth * real_random();
+            sum += first + second + third + fourth;
+        }
+        for x in &mut x_table {
+            *x /= sum;
+        }
+        let fraction = |v: f32| (v as f64 % 1.0) as f32;
+        let cos = |v: f32| (v as f64).cos() as f32;
+        let sin = |v: f32| (v as f64).sin() as f32;
+        let mut values = [0.0f32; PERIODIC_FUNCTION_TABLE_SIZE];
+        let (mut minimum, mut maximum) = (f32::MAX, f32::MIN);
+        for (index, value) in values.iter_mut().enumerate() {
+            let x = index as f32 * 0.027343748;
+            let random_x = x_table[index] * 28.0;
+            let diagonal = |v: f32| {
+                let v = fraction(v);
+                if v < 0.5 { v * 2.0 } else { 1.0 - (v - 0.5) * 2.0 }
+            };
+            let result = match function_type {
+                0 => 1.0,
+                1 => 0.0,
+                2 => cos(x * 6.2831855),
+                3 => cos(random_x * 6.2831855),
+                4 => diagonal(x),
+                5 => diagonal(random_x),
+                6 => fraction(x),
+                7 => fraction(random_x),
+                8 => real_random(),
+                9 | 10 => {
+                    let fast = cos(x * 25.132742);
+                    let slow = cos(x * 0.89759791);
+                    (slow * fast + cos(x * 43.9823) * sin(x * 1.5707964)) * 0.5 + sin(x * PI) * cos(x * 6.2831855)
+                }
+                _ => {
+                    let v = fraction(random_x);
+                    v * v
+                }
+            };
+            maximum = maximum.max(result);
+            minimum = minimum.min(result);
+            *value = result;
+        }
+        let range = if SLIDE_PERIODIC_FUNCTION_FLAGS & (1 << function_type) != 0 { 0.0 } else { maximum - minimum };
+        for (byte, value) in table.iter_mut().zip(values) {
+            let result = if range != 0.0 { (value - minimum) / range } else { value };
+            *byte = ((result * 255.0) as i32).clamp(0, 255) as u8;
+        }
+    }
+    tables
 }

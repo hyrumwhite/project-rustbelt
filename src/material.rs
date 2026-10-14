@@ -29,6 +29,8 @@ impl Plugin for HaloMaterialsPlugin {
         ));
         let grey = app.world_mut().resource_mut::<Assets<Image>>().add(neutral_detail_image());
         app.insert_resource(NeutralDetail(grey));
+        let tables = app.world_mut().resource_mut::<Assets<Image>>().add(periodic_tables_image());
+        let _ = PERIODIC_TABLES.set(tables);
     }
 }
 
@@ -61,6 +63,28 @@ fn neutral_detail_image() -> Image {
     )
 }
 
+/// The game's periodic functions' tables (`halo_map::object_functions::
+/// periodic_function_tables`), a row of 1024 samples per function, for the
+/// environment shaders' animations (`halo_environment.wesl`).
+pub static PERIODIC_TABLES: std::sync::OnceLock<Handle<Image>> = std::sync::OnceLock::new();
+
+fn periodic_tables_image() -> Image {
+    let tables = halo_map::object_functions::periodic_function_tables();
+    let mut image = Image::new(
+        Extent3d { width: tables[0].len() as u32, height: tables.len() as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        tables.concat(),
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = bevy::image::ImageSampler::nearest();
+    image
+}
+
+/// How many samples of the plasma's band (`halo_map::combiner::
+/// environment_plasma_band`) the environment material carries.
+pub const PLASMA_BAND_SAMPLES: usize = 64;
+
 #[derive(ShaderType, Debug, Clone, Default, Reflect)]
 pub struct HaloEnvironmentParams {
     /// Primary detail scale (xy), secondary detail scale (zw).
@@ -70,6 +94,20 @@ pub struct HaloEnvironmentParams {
     /// x: detail mixed by base alpha (blended types), y: detail function,
     /// z: micro detail function, w: flags (see `halo_environment.wesl`).
     pub modes: UVec4,
+    /// The self-illumination's animation: the primary, secondary and plasma
+    /// "on" and "off" colours, their periodic functions (xyz), periods and
+    /// phases (seconds).
+    pub illumination_on: [Vec4; 3],
+    pub illumination_off: [Vec4; 3],
+    pub illumination_functions: UVec4,
+    pub illumination_periods: Vec4,
+    pub illumination_phases: Vec4,
+    /// The texture animation: u and v's periodic functions (xy); their
+    /// periods (xy) and scales (zw).
+    pub texture_functions: UVec4,
+    pub texture_animation: Vec4,
+    /// The plasma's band, `PLASMA_BAND_SAMPLES` of it, 4 to a vector.
+    pub plasma_band: [Vec4; PLASMA_BAND_SAMPLES / 4],
 }
 
 /// `shader_environment`'s diffuse layers (see `halo_environment.wesl`).
@@ -93,12 +131,24 @@ pub struct HaloEnvironment {
     #[texture(109)]
     #[sampler(110)]
     pub bump_map: Handle<Image>,
+    /// The self-illumination map (linear), with
+    /// `ENVIRONMENT_ANIMATED_ILLUMINATION`.
+    #[texture(111)]
+    #[sampler(112)]
+    pub self_illumination_map: Handle<Image>,
+    /// [`PERIODIC_TABLES`].
+    #[texture(113)]
+    pub periodic_tables: Handle<Image>,
 }
 
 /// `HaloEnvironmentParams::modes.w` bits.
 pub const ENVIRONMENT_HAS_BUMP_MAP: u32 = 1 << 0;
 /// The bump map's alpha cuts the surface out.
 pub const ENVIRONMENT_ALPHA_TESTED: u32 = 1 << 1;
+/// The self-illumination animates (`HaloEnvironmentParams::illumination_*`).
+pub const ENVIRONMENT_ANIMATED_ILLUMINATION: u32 = 1 << 2;
+/// The textures move (`HaloEnvironmentParams::texture_*`).
+pub const ENVIRONMENT_TEXTURE_ANIMATION: u32 = 1 << 3;
 
 const SHADER: &str = "embedded://halo_rt/shaders/halo_environment.wesl";
 

@@ -2394,6 +2394,7 @@ enum
 	_halo_sim_world_step_network_coop_presentation,
 	_halo_sim_world_step_network_coop_resend,
 	_halo_sim_world_step_coop_enemies,
+	_halo_sim_world_step_network_coop_client_world,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3089,6 +3090,45 @@ enum
 	_network_coop_world_call_log_joined,
 	/* sets the unit's (a) maximum vitality to the players' (object_initialize_vitality) */
 	_network_coop_world_call_initialize_vitality,
+};
+
+/* network_coop.c's client world calls (crates/halo_map's network_coop) */
+enum
+{
+	/* the device (actor) set to the power input[0], and moved to the
+	position input[1] if a (device_port_set_state) */
+	_network_coop_client_call_device_state = 1,
+	/* the object (actor) placed at input[0..2] facing input[3..5] with up
+	input[6..8] (object_set_position) */
+	_network_coop_client_call_set_position,
+	/* the object's (actor) region a's permutation set to b */
+	_network_coop_client_call_set_permutation,
+	/* the object (actor) scaled to input[0] (objects_scripting_set_scale) */
+	_network_coop_client_call_set_scale,
+};
+
+/* which of the host's world changes a client applies */
+enum
+{
+	_coop_client_world_device_states,
+	_coop_client_world_object_transforms,
+	_coop_client_world_object_looks,
+};
+
+void network_coop_client_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's network_coop::ClientWorldArguments: a co-op client
+applying its host's world changes: which (_coop_client_world_*), the count
+and the entries (network_coop_records.h's), the game's object of each name
+(object_name_list_port_get) and the loaded tags (cache_files_tag_instances) */
+struct halo_sim_network_coop_client_world
+{
+	short kind;
+	short count;
+	unsigned long entries;
+	unsigned long object_name_list;
+	unsigned long tag_instances;
+	long tag_count;
 };
 
 /* coop_enemies.c's update's calls (crates/halo_map's coop_enemies::call) */

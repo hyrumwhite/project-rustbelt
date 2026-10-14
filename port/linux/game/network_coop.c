@@ -89,6 +89,7 @@ index and tag, since the map placed them at the same index everywhere.
 #include "interface/hud_unit.h"
 #include "interface/hud_weapon.h"
 #include "main/main.h"
+#include "memory/memory_pool.h"
 #include "models/model_animation_definitions.h"
 #include "models/model_definitions.h"
 #include "models/models.h"
@@ -355,6 +356,10 @@ static void client_play_presentation(void);
 static void coop_presentation_call(long kind, long a, long b);
 /* devices.c */
 void device_group_network_masks(word *network_flags, short *runtime_bit);
+/* cache_files.c */
+void *cache_files_tag_instances(long *count);
+/* objects.c */
+struct memory_pool *objects_memory_pool(void);
 /* unit_scripting_commands.c */
 void unit_scripting_set_current_vitality_of(long unit_index, real body_vitality, real shield_vitality);
 
@@ -3013,15 +3018,118 @@ word network_coop_device_state_entry_size(
 }
 
 /* client: its devices where the host's are (DEVICE_POSITION_TOLERANCE) */
-void network_coop_handle_device_states(
+/* port: a client's world calls (the Rust port's, crates/halo_map's
+network_coop) */
+void network_coop_client_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_coop_client_call_device_state:
+		device_port_set_state(call->actor, call->input[0], (boolean)call->a, call->input[1]);
+		break;
+	case _network_coop_client_call_set_position:
+	{
+		real_point3d position;
+		real_vector3d forward, up;
+
+		position.x = call->input[0];
+		position.y = call->input[1];
+		position.z = call->input[2];
+		forward.i = call->input[3];
+		forward.j = call->input[4];
+		forward.k = call->input[5];
+		up.i = call->input[6];
+		up.j = call->input[7];
+		up.k = call->input[8];
+		object_set_position(call->actor, &position, &forward, &up);
+		break;
+	}
+	case _network_coop_client_call_set_permutation:
+		object_get(call->actor)->object.region_permutations[call->a] = (byte)call->b;
+		break;
+	case _network_coop_client_call_set_scale:
+		objects_scripting_set_scale(call->actor, call->input[0], 0);
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static void client_apply_device_states_game(void const *entries, short count);
+static void client_apply_object_transforms_game(void const *entries, short count);
+static void client_apply_object_looks_game(void const *entries, short count);
+
+/* port: the client's world changes from its host (device states, scenery
+transforms, looks): Rust's in Rust's mode (crates/halo_map's network_coop),
+checked against the game's otherwise. Its world: the arguments; the game's
+changes go through calls. */
+static void client_apply_world(
+	short kind,
+	void const *entries,
+	short count)
+{
+	struct halo_sim_network_coop_client_world arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[5];
+	struct memory_pool *pool = objects_memory_pool();
+	long region_count = 0;
+	int checking = FALSE;
+
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.kind = kind;
+	arguments.count = count;
+	arguments.entries = (unsigned long)entries;
+	arguments.object_name_list = (unsigned long)object_name_list_port_get();
+	arguments.tag_instances = (unsigned long)cache_files_tag_instances(&arguments.tag_count);
+	regions[region_count].address = (unsigned long)&arguments;
+	regions[region_count++].size = sizeof(arguments);
+	/* (the objects, which the calls change and the game reads after them:
+	a device's position, an object's scale) */
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_world, &context, regions, region_count,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	switch (kind)
+	{
+	case _coop_client_world_device_states: client_apply_device_states_game(entries, count); break;
+	case _coop_client_world_object_transforms: client_apply_object_transforms_game(entries, count); break;
+	case _coop_client_world_object_looks: client_apply_object_looks_game(entries, count); break;
+	}
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_world);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_device_states_game(
 	void const *entries,
 	short count)
 {
 	struct distributed_coop_device_state const *states = entries;
 	short index;
 
-	if (!coop_client())
-		return;
 	for (index = 0; index < count; index++)
 	{
 		struct distributed_coop_device_state const *state = &states[index];
@@ -3036,9 +3144,27 @@ void network_coop_handle_device_states(
 		difference = device->device.position - state->position;
 		if (difference < 0.0f)
 			difference = -difference;
-		device_port_set_state(device_index, state->power,
-			(!state->moving && difference > 0.001f) || difference > DEVICE_POSITION_TOLERANCE, state->position);
+		/* port: (through the world's calls, the Rust port's) */
+		{
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_client_call_device_state;
+			call.actor = device_index;
+			call.a = (!state->moving && difference > 0.001f) || difference > DEVICE_POSITION_TOLERANCE;
+			call.input[0] = state->power;
+			call.input[1] = state->position;
+			network_coop_client_call(&call);
+		}
 	}
+}
+
+void network_coop_handle_device_states(
+	void const *entries,
+	short count)
+{
+	if (coop_client())
+		client_apply_world(_coop_client_world_device_states, entries, count);
 }
 
 word network_coop_object_transform_entry_size(
@@ -3047,15 +3173,14 @@ word network_coop_object_transform_entry_size(
 	return sizeof(struct distributed_coop_object_transform);
 }
 
-void network_coop_handle_object_transforms(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_object_transforms_game(
 	void const *entries,
 	short count)
 {
 	struct distributed_coop_object_transform const *transforms = entries;
 	short index;
 
-	if (!coop_client())
-		return;
 	for (index = 0; index < count; index++)
 	{
 		struct distributed_coop_object_transform const *transform = &transforms[index];
@@ -3068,8 +3193,33 @@ void network_coop_handle_object_transforms(
 		distributed_vector_unpack(&transform->forward, DISTRIBUTED_UNIT_SCALE, &forward);
 		distributed_vector_unpack(&transform->up, DISTRIBUTED_UNIT_SCALE, &up);
 		if (distributed_point_valid(&transform->position, UNIT_WORLD_BOUND) && distributed_axes_make_valid(&forward, &up))
-			object_set_position(object_index, &transform->position, &forward, &up);
+		{
+			/* port: (through the world's calls, the Rust port's) */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_client_call_set_position;
+			call.actor = object_index;
+			call.input[0] = transform->position.x;
+			call.input[1] = transform->position.y;
+			call.input[2] = transform->position.z;
+			call.input[3] = forward.i;
+			call.input[4] = forward.j;
+			call.input[5] = forward.k;
+			call.input[6] = up.i;
+			call.input[7] = up.j;
+			call.input[8] = up.k;
+			network_coop_client_call(&call);
+		}
 	}
+}
+
+void network_coop_handle_object_transforms(
+	void const *entries,
+	short count)
+{
+	if (coop_client())
+		client_apply_world(_coop_client_world_object_transforms, entries, count);
 }
 
 word network_coop_object_look_entry_size(
@@ -3078,15 +3228,14 @@ word network_coop_object_look_entry_size(
 	return sizeof(struct distributed_coop_object_look);
 }
 
-void network_coop_handle_object_looks(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_object_looks_game(
 	void const *entries,
 	short count)
 {
 	struct distributed_coop_object_look const *looks = entries;
 	short index;
 
-	if (!coop_client())
-		return;
 	for (index = 0; index < count; index++)
 	{
 		struct distributed_coop_object_look const *look = &looks[index];
@@ -3107,15 +3256,38 @@ void network_coop_handle_object_looks(
 			if (permutation_index == (byte)NONE ||
 				permutation_index < TAG_BLOCK_GET_ELEMENT(&model->regions, region_index, struct model_region)->permutations.count)
 			{
-				object->object.region_permutations[region_index] = permutation_index;
+				/* port: (through the world's calls, the Rust port's) */
+				struct halo_sim_ai_call call;
+
+				memset(&call, 0, sizeof(call));
+				call.kind = _network_coop_client_call_set_permutation;
+				call.actor = object_index;
+				call.a = region_index;
+				call.b = permutation_index;
+				network_coop_client_call(&call);
 			}
 		}
 		if (distributed_real_valid(look->scale) && look->scale > 0.0f && look->scale < 100.0f &&
 			look->scale != object->object.scale)
 		{
-			objects_scripting_set_scale(object_index, look->scale, 0);
+			/* port: (through the world's calls, the Rust port's) */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_client_call_set_scale;
+			call.actor = object_index;
+			call.input[0] = look->scale;
+			network_coop_client_call(&call);
 		}
 	}
+}
+
+void network_coop_handle_object_looks(
+	void const *entries,
+	short count)
+{
+	if (coop_client())
+		client_apply_world(_coop_client_world_object_looks, entries, count);
 }
 
 word network_coop_object_names_entry_size(

@@ -158,8 +158,9 @@ Carried over, then done in the rendering pass (branch `rendering-pass`, OpenCE `
 - [x] Only the active BSP is shown, along with its placed light fixtures. Solari traces every `RaytracingMesh3d` whether visible or not, so hidden meshes now leave the ray-traced scene (`TracedMesh`).
 - [x] Active camouflage: drawn as a faint glassy shell, out of the ray-traced scene (no shadow). Under the overlay the game neither draws its shimmer, which refracts a picture it no longer has, nor the camouflaged model.
 - [x] Dynamic lights: up to 64 a frame from the game's light system (muzzle flashes, plasma, explosions, the flashlight), each lighting an emissive proxy the rays see: a sphere, or a disc for a spotlight.
-- [ ] Plasma and other opaque-world effects the overlay can't carry
-- [ ] Multiply-blended effects: they darken what's under them, and coverage alpha can't represent that, so they are lost over the viewer's world
+- [x] Opaque-world animation the overlay can't carry, for environment shaders: their self-illumination (primary and secondary colours between "off" and "on"; the plasma band sweeping through the map's alpha) and texture scrolling, by the game's periodic functions (`halo_environment.wesl`). The tables are rebuilt as the game builds them (identical, all 12,288 bytes) and the plasma band comes from the game's own combiner program.
+- [ ] Opaque model shaders animated by object functions (pulsing Covenant lights on objects): still static; they need the objects' function values through the bridge
+- [x] Multiply-blended effects (protocol 31): the game draws them to a picture of their own over the same depth buffer, cleared to 0.5, on which its own blends compute half their factor; the viewer multiplies its world by twice it under the overlay (scorch marks and other darkening or brightening decals)
 
 Checked: b30's opening cutscene (letterbox, engine glows, water, fog) lined up with the ray-traced Pelicans; b30 gameplay with the full HUD; a10's opening with the Pillar of Autumn's engine glows. 4 of 4 a10 overlay starts were clean.
 

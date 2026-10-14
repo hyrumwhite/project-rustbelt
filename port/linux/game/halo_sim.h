@@ -2397,6 +2397,7 @@ enum
 	_halo_sim_world_step_network_coop_client_world,
 	_halo_sim_world_step_network_coop_client_devices,
 	_halo_sim_world_step_network_coop_client_names,
+	_halo_sim_world_step_network_coop_client_events,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3114,6 +3115,77 @@ enum
 	_network_coop_client_call_create_named,
 	/* the object (actor) deleted (object_delete) */
 	_network_coop_client_call_delete,
+	/* an event's: the HUD's help text shown if a; its state message a; its
+	objective a; its help flashing if a; its messages cleared; a checkpoint
+	shown, with a saying whether one was saved */
+	_network_coop_client_call_hud_help_text,
+	_network_coop_client_call_hud_state_message,
+	_network_coop_client_call_hud_objective,
+	_network_coop_client_call_hud_flash,
+	_network_coop_client_call_hud_clear,
+	_network_coop_client_call_hud_checkpoint,
+	/* the players' scripted effect of the kind a (_coop_player_effect_*),
+	with its values input[0..2] */
+	_network_coop_client_call_player_effect,
+	/* a nav point of the kind a (_coop_nav_point_*): the nav index b (NONE
+	to take it away), for the team or unit actor, at the cutscene flag or
+	object whose index's bits are input[1], offset input[0] */
+	_network_coop_client_call_nav_point,
+	/* the unit's (actor) scripted animation stopped; played: the graph a's
+	animation b, interpolating if input[0]'s bits, from the frame input[1]'s */
+	_network_coop_client_call_unit_stop_animation,
+	_network_coop_client_call_unit_play_animation,
+	/* the scenery's (actor) animation: the graph a's b, from the frame
+	input[0]'s bits */
+	_network_coop_client_call_scenery_animation,
+	/* the sound a played from the object actor (NONE: none) at the scale
+	input[0]; the looping sound a started so, or stopped */
+	_network_coop_client_call_sound_impulse,
+	_network_coop_client_call_looping_sound_start,
+	_network_coop_client_call_looping_sound_stop,
+	/* the effect a at the cutscene flag b; at the object's (actor) model's
+	marker b */
+	_network_coop_client_call_effect_at_flag,
+	_network_coop_client_call_effect_on_marker,
+	/* the object a detached from the object actor; attached to it, at the
+	parent's marker b and its own whose index's bits are input[0] */
+	_network_coop_client_call_detach,
+	_network_coop_client_call_attach,
+	/* the sound a's playing stopped (a skipped cutscene's dialogue) */
+	_network_coop_client_call_stop_impulse,
+	/* the chapter title a shown after input[0] seconds */
+	_network_coop_client_call_title,
+	/* the breakable surface a broken from input[0..2] */
+	_network_coop_client_call_break_surface,
+	/* the unit (actor) opened if a, else closed */
+	_network_coop_client_call_unit_open,
+};
+
+/* crates/halo_map's network_coop::ClientEventsArguments: a co-op client
+applying its host's events: the count and the entries (struct
+distributed_coop_event), the events applied (struct coop_events), the script
+sounds played (struct coop_client_script_sounds), the objects the client has
+(network_objects.c's), the game's object of each name, the loaded tags, the
+HUD's messages, the nav point arrows, the cutscene flags and chapter titles
+(their counts) and the structure BSP */
+struct halo_sim_network_coop_client_events
+{
+	long count;
+	unsigned long entries;
+	unsigned long events;
+	unsigned long script_sounds;
+	unsigned long client_has;
+	unsigned long object_name_list;
+	unsigned long tag_instances;
+	long tag_count;
+	long hud_message_count;
+	long arrow_count;
+	long cutscene_flag_count;
+	long chapter_title_count;
+	long structure_bsp_index;
+	/* whether each entry's looping sound was playing as the step began (a
+	byte each) */
+	unsigned long looping_playing;
 };
 
 /* crates/halo_map's network_coop::ClientNamesArguments: a co-op client

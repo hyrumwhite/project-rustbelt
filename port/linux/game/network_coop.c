@@ -332,14 +332,11 @@ static struct coop_client_devices client_devices;
 which a skipped cutscene stops */
 enum
 {
-	CLIENT_SCRIPT_SOUND_COUNT = 16,
+	/* (network_coop_records.h's) */
+	CLIENT_SCRIPT_SOUND_COUNT = COOP_CLIENT_SCRIPT_SOUND_COUNT,
 };
 
-static struct
-{
-	long definition_indices[CLIENT_SCRIPT_SOUND_COUNT];
-	short next;
-} client_script_sounds;
+static struct coop_client_script_sounds client_script_sounds;
 
 /* client: the object names that differed from the host's last time */
 static byte client_names_differing[OBJECT_NAME_BYTES];
@@ -357,6 +354,8 @@ void device_group_network_masks(word *network_flags, short *runtime_bit);
 void *cache_files_tag_instances(long *count);
 /* objects.c */
 struct memory_pool *objects_memory_pool(void);
+/* network_objects.c */
+long const *network_objects_client_has_table(void);
 /* unit_scripting_commands.c */
 void unit_scripting_set_current_vitality_of(long unit_index, real body_vitality, real shield_vitality);
 
@@ -1694,28 +1693,63 @@ static void client_host_camera_set(
 	director_script_camera(host_camera);
 }
 
+/* port: the arguments of the client's events' step (network_coop_handle_events),
+and whether each entry's looping sound was playing as it began (starting
+one changes its tag) */
+static struct halo_sim_network_coop_client_events coop_client_events_arguments;
+static byte coop_client_events_looping_playing[MAXIMUM_QUEUED_EVENTS];
+
+/* port: an event's call (the Rust port's, through the world's calls), its
+longs in input as their bits */
+static void client_event_call(
+	long kind,
+	long actor,
+	long a,
+	long b,
+	real const *reals,
+	short real_count,
+	long const *longs,
+	short long_count)
+{
+	struct halo_sim_ai_call call;
+	short index;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor;
+	call.a = a;
+	call.b = b;
+	for (index = 0; index < real_count; index++)
+		call.input[index] = reals[index];
+	for (index = 0; index < long_count; index++)
+		csmemcpy(&call.input[real_count + index], &longs[index], sizeof(long));
+	network_coop_client_call(&call);
+}
+
 static void client_apply_hud(
 	struct distributed_coop_event const *event)
 {
+	short message_count = (short)coop_client_events_arguments.hud_message_count;
+
 	switch (event->type)
 	{
 	case _coop_hud_help_text:
-		hud_scripted_globals->show_hud_help_text = event->frame != 0;
-		if (event->value >= 0 && event->value < hud_messaging_port_message_count())
-			scripted_hud_set_state_message(event->value);
+		client_event_call(_network_coop_client_call_hud_help_text, NONE, event->frame != 0, 0, NULL, 0, NULL, 0);
+		if (event->value >= 0 && event->value < message_count)
+			client_event_call(_network_coop_client_call_hud_state_message, NONE, event->value, 0, NULL, 0, NULL, 0);
 		break;
 	case _coop_hud_objective:
-		if (event->value >= 0 && event->value < hud_messaging_port_message_count())
-			scripted_hud_set_objective(event->value);
+		if (event->value >= 0 && event->value < message_count)
+			client_event_call(_network_coop_client_call_hud_objective, NONE, event->value, 0, NULL, 0, NULL, 0);
 		break;
 	case _coop_hud_help_flash:
-		scripted_hud_set_flashing_state(event->value != 0);
+		client_event_call(_network_coop_client_call_hud_flash, NONE, event->value != 0, 0, NULL, 0, NULL, 0);
 		break;
 	case _coop_hud_messages_clear:
-		scripted_hud_messages_clear();
+		client_event_call(_network_coop_client_call_hud_clear, NONE, 0, 0, NULL, 0, NULL, 0);
 		break;
 	case _coop_hud_checkpoint:
-		hud_autosave(event->value != 0);
+		client_event_call(_network_coop_client_call_hud_checkpoint, NONE, event->value != 0, 0, NULL, 0, NULL, 0);
 		break;
 	default:
 		break;
@@ -1726,75 +1760,55 @@ static void client_apply_player_effect(
 	struct distributed_coop_event const *event)
 {
 	real const *reals = event->reals;
+	real values[3] = { 0.0f, 0.0f, 0.0f };
 
 	switch (event->type)
 	{
 	case _coop_player_effect_translation:
 		/* (the camera's shake, which moves it no further than an observer
 		accepts) */
-		scripted_player_effect_set_translation(PIN(reals[0], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND),
-			PIN(reals[1], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND), PIN(reals[2], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND));
+		values[0] = PIN(reals[0], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND);
+		values[1] = PIN(reals[1], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND);
+		values[2] = PIN(reals[2], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND);
 		break;
 	case _coop_player_effect_rotation:
-		scripted_player_effect_set_rotation(reals[0], reals[1], reals[2]);
+		values[0] = reals[0];
+		values[1] = reals[1];
+		values[2] = reals[2];
 		break;
 	case _coop_player_effect_start:
-		scripted_player_effect_start(PIN(reals[0], 0.0f, 1.0f), PIN(reals[1], 0.0f, 60.0f));
+		values[0] = PIN(reals[0], 0.0f, 1.0f);
+		values[1] = PIN(reals[1], 0.0f, 60.0f);
 		break;
 	case _coop_player_effect_stop:
-		scripted_player_effect_stop(PIN(reals[0], 0.0f, 60.0f));
+		values[0] = PIN(reals[0], 0.0f, 60.0f);
 		break;
 	default:
-		break;
+		return;
 	}
+	client_event_call(_network_coop_client_call_player_effect, NONE, event->type, 0, values, 3, NULL, 0);
 }
 
 static void client_apply_nav_point(
 	struct distributed_coop_event const *event)
 {
-	struct scenario *scenario = global_scenario_get();
 	boolean activate = event->value != NONE;
 	boolean flag = event->type == _coop_nav_point_team_flag || event->type == _coop_nav_point_unit_flag;
 	boolean team = event->type == _coop_nav_point_team_flag || event->type == _coop_nav_point_team_object;
 	real offset = event->reals[0];
 
-	if (activate && (event->value < 0 || event->value >= hud_globals->waypoint.arrows.count))
+	if (activate && (event->value < 0 || event->value >= coop_client_events_arguments.arrow_count))
 		return;
-	if (flag && (event->object_index < 0 || event->object_index >= scenario->cutscene_flags.count))
+	if (flag && (event->object_index < 0 || event->object_index >= coop_client_events_arguments.cutscene_flag_count))
 		return;
 	if (team && (event->target < 0 || event->target >= NUMBER_OF_SOLO_CAMPAIGN_TEAMS))
 		return;
 	if (!team && !object_try_and_get_and_verify_type(event->target, _object_mask_unit))
 		return;
-	switch (event->type)
-	{
-	case _coop_nav_point_team_flag:
-		if (activate)
-			hud_activate_team_nav_point_with_flag(event->value, (short)event->target, (short)event->object_index, offset);
-		else
-			hud_deactivate_team_nav_point_with_flag((short)event->target, (short)event->object_index);
-		break;
-	case _coop_nav_point_team_object:
-		if (activate)
-			hud_activate_team_nav_point_with_object(event->value, (short)event->target, event->object_index, offset);
-		else
-			hud_deactivate_team_nav_point_with_object((short)event->target, event->object_index);
-		break;
-	case _coop_nav_point_unit_flag:
-		if (activate)
-			hud_unit_activate_nav_point_with_flag(event->value, event->target, (short)event->object_index, offset);
-		else
-			hud_unit_deactivate_nav_point_with_flag(event->target, (short)event->object_index);
-		break;
-	case _coop_nav_point_unit_object:
-		if (activate)
-			hud_unit_activate_nav_point_with_object(event->value, event->target, event->object_index, offset);
-		else
-			hud_unit_deactivate_nav_point_with_object(event->target, event->object_index);
-		break;
-	default:
-		break;
-	}
+	if (event->type > _coop_nav_point_unit_object)
+		return;
+	client_event_call(_network_coop_client_call_nav_point, event->target, event->type, event->value, &offset, 1,
+		&event->object_index, 1);
 }
 
 static void client_apply_unit_animation(
@@ -1806,9 +1820,16 @@ static void client_apply_unit_animation(
 		return;
 	}
 	if (event->tag_index == NONE)
-		unit_stop_custom_animation(event->object_index);
+		client_event_call(_network_coop_client_call_unit_stop_animation, event->object_index, 0, 0, NULL, 0, NULL, 0);
 	else if (distributed_graph_animation(event->tag_index, event->value))
-		unit_port_play_user_animation(event->object_index, event->tag_index, event->value, event->interpolate, event->frame);
+	{
+		long longs[2];
+
+		longs[0] = event->interpolate;
+		longs[1] = event->frame;
+		client_event_call(_network_coop_client_call_unit_play_animation, event->object_index, event->tag_index,
+			event->value, NULL, 0, longs, 2);
+	}
 }
 
 static void client_apply_scenery_animation(
@@ -1820,7 +1841,12 @@ static void client_apply_scenery_animation(
 
 	/* scenery animations have no random permutations, so the name finds the same one */
 	if (scenery_index != NONE && animation)
-		scenery_animation_start_at_frame(scenery_index, event->tag_index, animation->name, event->frame);
+	{
+		long frame = event->frame;
+
+		client_event_call(_network_coop_client_call_scenery_animation, scenery_index, event->tag_index, event->value,
+			NULL, 0, &frame, 1);
+	}
 }
 
 static void client_apply_sound(
@@ -1835,7 +1861,8 @@ static void client_apply_sound(
 	case _coop_sound_impulse:
 		if (distributed_tag_of_group(event->tag_index, SOUND_DEFINITION_TAG))
 		{
-			scripted_sound_new(event->tag_index, object_index, scale);
+			client_event_call(_network_coop_client_call_sound_impulse, object_index, event->tag_index, 0, &scale, 1,
+				NULL, 0);
 			client_script_sounds.definition_indices[client_script_sounds.next] = event->tag_index;
 			client_script_sounds.next = (short)((client_script_sounds.next + 1) % CLIENT_SCRIPT_SOUND_COUNT);
 		}
@@ -1845,12 +1872,13 @@ static void client_apply_sound(
 		if (distributed_tag_of_group(event->tag_index, LOOPING_SOUND_DEFINITION_TAG) &&
 			looping_sound_definition_get(event->tag_index)->runtime_scripting_sound_index == NONE)
 		{
-			scripted_looping_sound_start(event->tag_index, object_index, scale);
+			client_event_call(_network_coop_client_call_looping_sound_start, object_index, event->tag_index, 0, &scale,
+				1, NULL, 0);
 		}
 		break;
 	case _coop_sound_looping_stop:
 		if (distributed_tag_of_group(event->tag_index, LOOPING_SOUND_DEFINITION_TAG))
-			scripted_looping_sound_stop(event->tag_index);
+			client_event_call(_network_coop_client_call_looping_sound_stop, NONE, event->tag_index, 0, NULL, 0, NULL, 0);
 		break;
 	default:
 		break;
@@ -1868,8 +1896,9 @@ static void client_apply_effect(
 		return;
 	if (event->type == _coop_effect_at_flag)
 	{
-		if (event->value >= 0 && event->value < global_scenario_get()->cutscene_flags.count)
-			hs_effect_new(event->tag_index, event->value);
+		if (event->value >= 0 && event->value < coop_client_events_arguments.cutscene_flag_count)
+			client_event_call(_network_coop_client_call_effect_at_flag, NONE, event->tag_index, event->value, NULL, 0,
+				NULL, 0);
 		return;
 	}
 	object_index = object_find(event->name_index, event->object_index, event->definition_index, _object_mask_all);
@@ -1878,8 +1907,8 @@ static void client_apply_effect(
 		model_definition_get(object_definition_get(object->definition_index)->object.model.index) : NULL;
 	if (model && event->value >= 0 && event->value < model->markers.count)
 	{
-		hs_effect_new_from_object_marker(event->tag_index, object_index,
-			TAG_BLOCK_GET_ELEMENT(&model->markers, event->value, struct model_marker)->name);
+		client_event_call(_network_coop_client_call_effect_on_marker, object_index, event->tag_index, event->value,
+			NULL, 0, NULL, 0);
 	}
 }
 
@@ -1934,11 +1963,12 @@ static void client_apply_attach(
 			return;
 	}
 	if (event->type == _coop_detach)
-		objects_scripting_detach(parent_index, child_index);
+		client_event_call(_network_coop_client_call_detach, parent_index, child_index, 0, NULL, 0, NULL, 0);
 	else
 	{
-		objects_scripting_attach(parent_index, object_marker_name(parent_index, event->value), child_index,
-			object_marker_name(child_index, event->frame));
+		long frame = event->frame;
+
+		client_event_call(_network_coop_client_call_attach, parent_index, child_index, event->value, NULL, 0, &frame, 1);
 	}
 }
 
@@ -1954,7 +1984,7 @@ static void client_stop_script_sounds(
 		long definition_index = client_script_sounds.definition_indices[index];
 
 		if (definition_index != NONE && distributed_tag_of_group(definition_index, SOUND_DEFINITION_TAG))
-			sound_stop_impulse(sound_definition_get(definition_index)->scripting_sound_index);
+			client_event_call(_network_coop_client_call_stop_impulse, NONE, definition_index, 0, NULL, 0, NULL, 0);
 		client_script_sounds.definition_indices[index] = NONE;
 	}
 }
@@ -1968,8 +1998,12 @@ static void client_apply_event(
 		client_apply_sound(event);
 		break;
 	case _coop_event_title:
-		if (event->value >= 0 && event->value < global_scenario_get()->cutscene_chapter_titles.count)
-			cinematic_set_title_delayed(event->value, PIN(event->reals[0], 0.0f, 60.0f));
+		if (event->value >= 0 && event->value < coop_client_events_arguments.chapter_title_count)
+		{
+			real delay = PIN(event->reals[0], 0.0f, 60.0f);
+
+			client_event_call(_network_coop_client_call_title, NONE, event->value, 0, &delay, 1, NULL, 0);
+		}
 		break;
 	case _coop_event_hud:
 		client_apply_hud(event);
@@ -1996,21 +2030,17 @@ static void client_apply_event(
 		client_stop_script_sounds();
 		break;
 	case _coop_event_surface_broken:
-		if (event->frame == global_structure_bsp_index)
+		if (event->frame == coop_client_events_arguments.structure_bsp_index)
 		{
-			real_point3d epicenter = { event->reals[0], event->reals[1], event->reals[2] };
-
-			breakable_surface_port_break(event->value, &epicenter);
+			client_event_call(_network_coop_client_call_break_surface, NONE, event->value, 0, event->reals, 3, NULL, 0);
 		}
 		break;
 	case _coop_event_unit_open:
 		if (distributed_object_index_valid(event->object_index) && network_objects_client_has(event->object_index) &&
 			object_try_and_get_and_verify_type(event->object_index, _object_mask_unit))
 		{
-			if (event->value)
-				unit_open(event->object_index);
-			else
-				unit_close(event->object_index);
+			client_event_call(_network_coop_client_call_unit_open, event->object_index, event->value != 0, 0, NULL, 0,
+				NULL, 0);
 		}
 		break;
 	default:
@@ -3059,6 +3089,152 @@ void network_coop_client_call(
 	case _network_coop_client_call_delete:
 		object_delete(call->actor);
 		break;
+	case _network_coop_client_call_hud_help_text:
+		hud_scripted_globals->show_hud_help_text = (boolean)call->a;
+		break;
+	case _network_coop_client_call_hud_state_message:
+		scripted_hud_set_state_message((short)call->a);
+		break;
+	case _network_coop_client_call_hud_objective:
+		scripted_hud_set_objective((short)call->a);
+		break;
+	case _network_coop_client_call_hud_flash:
+		scripted_hud_set_flashing_state((boolean)call->a);
+		break;
+	case _network_coop_client_call_hud_clear:
+		scripted_hud_messages_clear();
+		break;
+	case _network_coop_client_call_hud_checkpoint:
+		hud_autosave((boolean)call->a);
+		break;
+	case _network_coop_client_call_player_effect:
+		switch (call->a)
+		{
+		case _coop_player_effect_translation:
+			scripted_player_effect_set_translation(call->input[0], call->input[1], call->input[2]);
+			break;
+		case _coop_player_effect_rotation:
+			scripted_player_effect_set_rotation(call->input[0], call->input[1], call->input[2]);
+			break;
+		case _coop_player_effect_start:
+			scripted_player_effect_start(call->input[0], call->input[1]);
+			break;
+		case _coop_player_effect_stop:
+			scripted_player_effect_stop(call->input[0]);
+			break;
+		}
+		break;
+	case _network_coop_client_call_nav_point:
+	{
+		long object_index;
+		boolean activate = call->b != NONE;
+		real offset = call->input[0];
+
+		csmemcpy(&object_index, &call->input[1], sizeof(long));
+		switch (call->a)
+		{
+		case _coop_nav_point_team_flag:
+			if (activate)
+				hud_activate_team_nav_point_with_flag((short)call->b, (short)call->actor, (short)object_index, offset);
+			else
+				hud_deactivate_team_nav_point_with_flag((short)call->actor, (short)object_index);
+			break;
+		case _coop_nav_point_team_object:
+			if (activate)
+				hud_activate_team_nav_point_with_object((short)call->b, (short)call->actor, object_index, offset);
+			else
+				hud_deactivate_team_nav_point_with_object((short)call->actor, object_index);
+			break;
+		case _coop_nav_point_unit_flag:
+			if (activate)
+				hud_unit_activate_nav_point_with_flag((short)call->b, call->actor, (short)object_index, offset);
+			else
+				hud_unit_deactivate_nav_point_with_flag(call->actor, (short)object_index);
+			break;
+		case _coop_nav_point_unit_object:
+			if (activate)
+				hud_unit_activate_nav_point_with_object((short)call->b, call->actor, object_index, offset);
+			else
+				hud_unit_deactivate_nav_point_with_object(call->actor, object_index);
+			break;
+		}
+		break;
+	}
+	case _network_coop_client_call_unit_stop_animation:
+		unit_stop_custom_animation(call->actor);
+		break;
+	case _network_coop_client_call_unit_play_animation:
+	{
+		long longs[2];
+
+		csmemcpy(longs, &call->input[0], sizeof(longs));
+		unit_port_play_user_animation(call->actor, call->a, (short)call->b, (boolean)longs[0], (short)longs[1]);
+		break;
+	}
+	case _network_coop_client_call_scenery_animation:
+	{
+		long frame;
+
+		csmemcpy(&frame, &call->input[0], sizeof(frame));
+		scenery_animation_start_at_frame(call->actor, call->a, distributed_graph_animation(call->a, (short)call->b)->name,
+			(short)frame);
+		break;
+	}
+	case _network_coop_client_call_sound_impulse:
+		scripted_sound_new(call->a, call->actor, call->input[0]);
+		break;
+	case _network_coop_client_call_looping_sound_start:
+		scripted_looping_sound_start(call->a, call->actor, call->input[0]);
+		break;
+	case _network_coop_client_call_looping_sound_stop:
+		scripted_looping_sound_stop(call->a);
+		break;
+	case _network_coop_client_call_effect_at_flag:
+		hs_effect_new(call->a, (short)call->b);
+		break;
+	case _network_coop_client_call_effect_on_marker:
+	{
+		struct object_datum *object = object_get(call->actor);
+		struct model *model = model_definition_get(object_definition_get(object->definition_index)->object.model.index);
+
+		hs_effect_new_from_object_marker(call->a, call->actor,
+			TAG_BLOCK_GET_ELEMENT(&model->markers, call->b, struct model_marker)->name);
+		break;
+	}
+	case _network_coop_client_call_detach:
+		objects_scripting_detach(call->actor, call->a);
+		break;
+	case _network_coop_client_call_attach:
+	{
+		long frame;
+
+		csmemcpy(&frame, &call->input[0], sizeof(frame));
+		objects_scripting_attach(call->actor, object_marker_name(call->actor, (short)call->b), call->a,
+			object_marker_name(call->a, (short)frame));
+		break;
+	}
+	case _network_coop_client_call_stop_impulse:
+		sound_stop_impulse(sound_definition_get(call->a)->scripting_sound_index);
+		break;
+	case _network_coop_client_call_title:
+		cinematic_set_title_delayed((short)call->a, call->input[0]);
+		break;
+	case _network_coop_client_call_break_surface:
+	{
+		real_point3d epicenter;
+
+		epicenter.x = call->input[0];
+		epicenter.y = call->input[1];
+		epicenter.z = call->input[2];
+		breakable_surface_port_break((short)call->a, &epicenter);
+		break;
+	}
+	case _network_coop_client_call_unit_open:
+		if (call->a)
+			unit_open(call->actor);
+		else
+			unit_close(call->actor);
+		break;
 	}
 	halo_sim_world_event_end(call, opened);
 }
@@ -3526,16 +3702,14 @@ void network_coop_handle_object_names(
 		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_names);
 }
 
-/* client: applies each event once, in order */
-void network_coop_handle_events(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_events_game(
 	void const *entries,
 	short count)
 {
 	struct distributed_coop_event const *events = entries;
 	short index;
 
-	if (!coop_client())
-		return;
 	for (index = 0; index < count; index++)
 	{
 		/* already applied (the comparison handles the number wrapping) */
@@ -3551,6 +3725,89 @@ void network_coop_handle_events(
 		}
 		client_apply_event(&events[index]);
 	}
+}
+
+/* client: applies each event once, in order */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the events applied,
+the script sounds played, and the objects (which the calls change: an
+attach). */
+void network_coop_handle_events(
+	void const *entries,
+	short count)
+{
+	struct halo_sim_network_coop_client_events *arguments = &coop_client_events_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[8];
+	struct memory_pool *pool = objects_memory_pool();
+	struct scenario *scenario = global_scenario_get();
+	long region_count = 0;
+	int checking = FALSE;
+
+	if (!coop_client())
+		return;
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->count = count;
+	arguments->entries = (unsigned long)entries;
+	arguments->events = (unsigned long)&coop_events;
+	arguments->script_sounds = (unsigned long)&client_script_sounds;
+	arguments->client_has = (unsigned long)network_objects_client_has_table();
+	arguments->object_name_list = (unsigned long)object_name_list_port_get();
+	arguments->tag_instances = (unsigned long)cache_files_tag_instances(&arguments->tag_count);
+	arguments->hud_message_count = hud_messaging_port_message_count();
+	arguments->arrow_count = hud_globals->waypoint.arrows.count;
+	arguments->cutscene_flag_count = scenario->cutscene_flags.count;
+	arguments->chapter_title_count = scenario->cutscene_chapter_titles.count;
+	arguments->structure_bsp_index = global_structure_bsp_index;
+	arguments->looping_playing = (unsigned long)coop_client_events_looping_playing;
+	{
+		struct distributed_coop_event const *events = entries;
+		short index;
+
+		csmemset(coop_client_events_looping_playing, 0, sizeof(coop_client_events_looping_playing));
+		for (index = 0; index < count && index < MAXIMUM_QUEUED_EVENTS; index++)
+		{
+			coop_client_events_looping_playing[index] = (byte)(events[index].kind == _coop_event_sound &&
+				distributed_tag_of_group(events[index].tag_index, LOOPING_SOUND_DEFINITION_TAG) &&
+				looping_sound_definition_get(events[index].tag_index)->runtime_scripting_sound_index != NONE);
+		}
+	}
+	regions[region_count].address = (unsigned long)coop_client_events_looping_playing;
+	regions[region_count++].size = sizeof(coop_client_events_looping_playing);
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)&coop_events;
+	regions[region_count++].size = sizeof(coop_events);
+	regions[region_count].address = (unsigned long)&client_script_sounds;
+	regions[region_count++].size = sizeof(client_script_sounds);
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_events, &context, regions, region_count,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	client_apply_events_game(entries, count);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_events);
 }
 
 /* client: keeps the host's presentation of tick host_time, to be played

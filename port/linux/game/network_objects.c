@@ -490,6 +490,14 @@ static boolean distributed_object_networked(
 		DATUM_INDEX_TO_ABSOLUTE_INDEX(object_index) < MAXIMUM_TRACKED_OBJECTS;
 }
 
+/* port: each object a client has, by its absolute index (the object's
+index, else NONE), for network co-op's Rust port */
+long const *network_objects_client_has_table(
+	void)
+{
+	return objects_client_has;
+}
+
 boolean network_objects_client_has(
 	long object_index)
 {

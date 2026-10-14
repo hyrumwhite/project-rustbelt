@@ -467,4 +467,14 @@ struct coop_client_devices
 	boolean seen[COOP_MAXIMUM_DEVICE_GROUPS];
 };
 
+/* client: the script sounds (impulse ones: dialogue) it played lately,
+which a skipped cutscene stops */
+#define COOP_CLIENT_SCRIPT_SOUND_COUNT 16
+
+struct coop_client_script_sounds
+{
+	long definition_indices[COOP_CLIENT_SCRIPT_SOUND_COUNT];
+	short next;
+};
+
 #endif

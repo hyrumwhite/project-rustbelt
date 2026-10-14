@@ -28,7 +28,8 @@ use crate::layout::{
     coop_events as ce, coop_host_attachment as at, coop_host_looping_sound as ls, coop_host_nav_point as np,
     coop_host_queue as hq, coop_host_resend as hr, coop_players_vitality as pv, coop_presentation_inputs as pi,
     coop_player_unit as cpu, coop_resend_inputs as ri, player_datum as pd, coop_sent_device as sd, coop_sent_look as sl,
-    coop_client_devices as cd, coop_client_script_sounds as ss, coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
+    coop_client_devices as cd, coop_client_presentation as cp, coop_client_script_sounds as ss,
+    rasterizer_screen_effect_port_state as se_state, coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
     distributed_coop_device_group as dg,
     distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_names as on,
     distributed_coop_object_names_message as cn, distributed_coop_screen_effect_message as se, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
@@ -1997,4 +1998,97 @@ pub fn client_events(context: &WorldContext, host: &impl AiHost) {
         }
         events.apply(event, index);
     }
+}
+
+// ---------- a client: the host's presentation messages
+
+/// halo_sim.h's `_network_coop_client_call_set_screen_effect`: the screen
+/// effect set as the step left it.
+const SET_SCREEN_EFFECT: i32 = 30;
+/// halo_sim.h's `_coop_client_message_*`.
+const CLIENT_MESSAGE_PRESENTATION: i16 = 0;
+
+/// halo_sim.h's `struct halo_sim_network_coop_client_messages`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClientMessagesArguments {
+    pub kind: i16,
+    pub count: i16,
+    pub entries: u32,
+    pub host_time: i32,
+    pub now: i32,
+    pub window_count: i32,
+    pub presentation: u32,
+    pub screen_effect: u32,
+    pub screen_effect_size: i32,
+}
+
+/// network_coop.c's screen effect bounds: the rasterizer's convolution
+/// types and overbright modes, and the extra passes a script gets.
+const SCREEN_EFFECT_CONVOLUTION_TYPES: i16 = 3;
+const SCREEN_EFFECT_OVERBRIGHT_MODES: i16 = 3;
+const SCREEN_EFFECT_MAXIMUM_EXTRA_PASSES: i16 = 8;
+/// network_coop_records.h's `COOP_PRESENTATION_BUFFER_COUNT`.
+const PRESENTATION_BUFFER_COUNT: i32 = nv::COOP_PRESENTATION_BUFFER_COUNT as i32;
+
+/// The world step of a co-op client handling one of its host's
+/// presentation messages: network_coop.c's
+/// `network_coop_handle_presentation` (the host's presentation of a tick,
+/// kept to play in its turn) or `network_coop_handle_screen_effect` (the
+/// scripts' screen effect, as this machine can draw it).
+pub fn client_messages(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ClientMessagesArguments = arguments(context, m);
+    let p = a.presentation;
+    if a.kind == CLIENT_MESSAGE_PRESENTATION {
+        m.w32(p + cp::HEARD_TIME as u32, a.now as u32);
+        if m.r8(p + cp::PLAYING as u32) != 0 && a.host_time <= m.i32(p + cp::PLAYED_TIME as u32) {
+            return;
+        }
+        let slot = (a.host_time % PRESENTATION_BUFFER_COUNT) as u32;
+        for offset in 0..dp::SIZEOF as u32 {
+            m.w8(p + cp::BUFFERED as u32 + slot * dp::SIZEOF as u32 + offset, m.r8(a.entries + offset));
+        }
+        m.w32(p + cp::BUFFERED_TIMES as u32 + 4 * slot, a.host_time as u32);
+        if m.r8(p + cp::HEARD_ANY as u32) == 0 || a.host_time > m.i32(p + cp::NEWEST_TIME as u32) {
+            m.w32(p + cp::NEWEST_TIME as u32, a.host_time as u32);
+        }
+        m.w8(p + cp::HEARD_ANY as u32, 1);
+        return;
+    }
+    if a.count != 1 {
+        return;
+    }
+    // (every field from the tint onward is a real, and must be a number)
+    let size = a.screen_effect_size as u32;
+    let first_real = se_state::FILTER_DESATURATION_TINT as u32;
+    if (first_real..size).step_by(4).any(|offset| !wire::real_valid(m.f32(a.entries + offset))) {
+        return;
+    }
+    let state = a.screen_effect;
+    for offset in 0..size {
+        m.w8(state + offset, m.r8(a.entries + offset));
+    }
+    let short = |field: usize| state + field as u32;
+    let clamp = |field: usize, high: i16| m.set_i16(short(field), m.i16(short(field)).clamp(0, high));
+    // (what the rasterizer can draw, and video with no convolution, as
+    // rasterizer_screen_effect_set_video leaves it)
+    clamp(se_state::CONVOLUTION_TYPE, SCREEN_EFFECT_CONVOLUTION_TYPES - 1);
+    clamp(se_state::CONVOLUTION_EXTRA_PASSES, SCREEN_EFFECT_MAXIMUM_EXTRA_PASSES);
+    clamp(se_state::VIDEO_OVERBRIGHT_MODE, SCREEN_EFFECT_OVERBRIGHT_MODES - 1);
+    let radius = state + se_state::CONVOLUTION_RADIUS as u32;
+    if m.r8(state + se_state::VIDEO_ON as u32) != 0 {
+        m.set_i16(short(se_state::CONVOLUTION_TYPE), 0);
+        m.set_i16(short(se_state::CONVOLUTION_EXTRA_PASSES), 0);
+        m.set_f32(radius, 0.0);
+        m.set_f32(radius + 4, 0.0);
+    }
+    // (the game can only blur one window, so split screen goes without)
+    if a.window_count > 1 {
+        m.set_i16(short(se_state::CONVOLUTION_TYPE), 0);
+        m.set_f32(radius, 0.0);
+        m.set_f32(radius + 4, 0.0);
+    }
+    let mut call = AiCall { kind: SET_SCREEN_EFFECT, actor: NONE, ..AiCall::default() };
+    host.call(&mut call);
 }

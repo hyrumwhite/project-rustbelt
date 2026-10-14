@@ -1238,6 +1238,15 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Four of eight planted errors were caught: the numbers' comparison, a sound's scale, a nav point's offset and a broken surface's BSP. Four went unseen: an objective past the HUD's messages (a hostile host's), a resent attach (a30's reach the client once), the dialogue ring's size (fewer than eight sounds) and a looping sound started twice in one message.
        - **Rust in charge:** in co-op on a30, the positions differ by a median of 8.5 to 12.4 cm (the C's 8.3 to 12.5), and both machines end with the host's count of items. Two of about ten such sessions began late on the joining machine (71 seconds in common rather than 91) with medians of 21 to 22 cm; no C session has yet, and the cause isn't known.
 
+   - [x] A co-op client's presentation messages in Rust (`halo_map::network_coop`, world step 43): network_coop.c's `network_coop_handle_presentation` and `network_coop_handle_screen_effect`.
+     - **What Rust does:**
+       - **The host's presentation of a tick** is kept to be played in its turn: when heard, unless already played past, in its slot of eight by the host's tick, with the newest tick heard.
+       - **The scripts' screen effect** as this machine can draw it: none with a real that isn't a number; its convolution type, extra passes and overbright mode held to what the rasterizer has; video with no convolution; split screen without the blur.
+     - **The game's, through calls:** setting the screen effect, from the state the step left. The presentations kept moved to network_coop_records.h.
+     - **Results:**
+       - In 100-second co-op sessions on a30 with a screen effect started on the host (`(begin (cinematic_screen_effect_start true) (cinematic_screen_effect_set_convolution 1 2 0 4 2))`, host only), every message agrees on the joining machine, with none left out.
+       - Three of six planted errors were caught: the slot, and the convolution type's and extra passes' limits. Three went unseen: a presentation already played past and the newest tick's test (loopback delivers in order), and one with a higher pass limit (the script's passes are within it).
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

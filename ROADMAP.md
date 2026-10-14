@@ -1180,6 +1180,14 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - One went unseen: waiting for the save before offering the skip (no save happened during a skippable cutscene).
        - **Rust in charge:** in co-op on a30, with all networking systems in Rust, the positions differ by a median of 7.8 cm, within the C's 8.0 to 15.9 (a hair under), and both machines end with the host's count of items.
 
+   - [x] Co-op's host resend and players' vitality in Rust (`halo_map::network_coop`, world step 37): network_coop.c's `host_resend_update` and `players_vitality_keep` (the host's side).
+     - **What Rust does:** each tick, whether a client machine appeared since the last (a join, which resends everything a late joiner lacks), and whether to resend this tick (a join, or every two seconds). Then, once the scripts have set the players' maximum vitality, every player's unit not at it is set to it (a respawned one).
+     - **The game's:** the client machines and each player's unit with its maximum vitality are gathered before the step (struct `coop_resend_inputs`). Setting a unit's vitality changes the unit, outside the step's records, so the check's replay would otherwise see it already set. Setting the vitality (`object_initialize_vitality`) and the join's log go through calls.
+     - **Results:**
+       - In 100-second co-op sessions on a30 with a late join (40 seconds), the scripts' vitality set by a console command (`(unit_set_maximum_vitality (unit (list_get (players) 0)) 200 150)`) and players killed and respawning (`HALO_NETWORK_TEST_KILL=20`), every tick agrees, with none left out.
+       - Three of four planted errors were caught: the resend period, the join, and the vitality call. The shield's comparison went unseen (a respawned unit differs in its body vitality too).
+       - **Rust in charge:** in co-op on a30, the positions differ by a median of 11.5 cm, within the C's 8.0 to 15.9, and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

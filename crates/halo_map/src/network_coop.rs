@@ -26,7 +26,8 @@ use crate::data_array::{DATA_COUNT, DATA_DATA, DATA_SIZE};
 use crate::distributed_wire::{self as wire, UNIT_SCALE};
 use crate::layout::{
     coop_events as ce, coop_host_attachment as at, coop_host_looping_sound as ls, coop_host_nav_point as np,
-    coop_host_queue as hq, coop_presentation_inputs as pi, coop_sent_device as sd, coop_sent_look as sl,
+    coop_host_queue as hq, coop_host_resend as hr, coop_players_vitality as pv, coop_presentation_inputs as pi,
+    coop_player_unit as cpu, coop_resend_inputs as ri, coop_sent_device as sd, coop_sent_look as sl,
     coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
     distributed_coop_device_group as dg,
     distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_names as on,
@@ -1093,4 +1094,81 @@ pub fn host_presentation(context: &WorldContext, host: &impl AiHost) {
     presentation.count_skip_votes();
     presentation.presentation();
     presentation.call(presentation_call::SEND_PRESENTATION, 0, 0);
+}
+
+// ---------- the resend and the players' vitality
+
+/// network_coop.c's resend and vitality calls (halo_sim.h's
+/// `_network_coop_world_call_*`).
+mod resend_call {
+    /// Logs that a machine joined.
+    pub const LOG_JOINED: i32 = 12;
+    /// Sets the unit's (`a`) maximum vitality to the players'.
+    pub const INITIALIZE_VITALITY: i32 = 13;
+}
+
+/// halo_sim.h's `struct halo_sim_network_coop_resend`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ResendArguments {
+    pub inputs: u32,
+    pub resend: u32,
+    pub vitality: u32,
+}
+
+/// network_coop.c's `OBJECT_REFRESH_TICKS`: how often the host sends again
+/// what a client that joined since, or missed a message, would lack.
+const OBJECT_REFRESH_TICKS: i32 = 60;
+
+/// The world step of co-op's host noticing a machine joining and keeping
+/// its players' units at the scripts' vitality, each tick.
+pub fn host_resend(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ResendArguments = arguments(context, m);
+    let call = |kind: i32, a: i32| {
+        let mut call = AiCall { kind, actor: NONE, a, ..AiCall::default() };
+        host.call(&mut call);
+    };
+
+    // network_coop.c's host_resend_update: whether a client machine joined
+    // since the last tick, and so whether to resend this tick
+    let count = m.i16(a.inputs + ri::MACHINE_COUNT as u32).max(0) as u32;
+    let known_count = m.i16(a.resend + hr::MACHINE_COUNT as u32).max(0) as u32;
+    let machine = |base: u32, index: u32| m.i32(base + 4 * index);
+    let mut joined = false;
+    for index in 0..count {
+        if joined {
+            break;
+        }
+        let id = machine(a.inputs + ri::MACHINES as u32, index);
+        joined = !(0..known_count).any(|known| machine(a.resend + hr::MACHINES as u32, known) == id);
+    }
+    for index in 0..count {
+        m.w32(a.resend + hr::MACHINES as u32 + 4 * index, machine(a.inputs + ri::MACHINES as u32, index) as u32);
+    }
+    m.set_i16(a.resend + hr::MACHINE_COUNT as u32, count as i16);
+    m.w8(a.resend + hr::JOINED as u32, joined as u8);
+    m.w8(a.resend + hr::REFRESH as u32, (joined || context.game_time % OBJECT_REFRESH_TICKS == 0) as u8);
+    if joined {
+        call(resend_call::LOG_JOINED, 0);
+    }
+
+    // network_coop.c's players_vitality_keep: every player's unit at the
+    // maximum vitality the scripts set (the units as gathered before the
+    // step: its calls change them)
+    if m.r8(a.vitality + pv::SET as u32) == 0 {
+        return;
+    }
+    let body = m.f32(a.vitality + pv::MAXIMUM_BODY as u32);
+    let shield = m.f32(a.vitality + pv::MAXIMUM_SHIELD as u32);
+    for player_index in 0..m.i16(a.inputs + ri::PLAYER_COUNT as u32).max(0) as u32 {
+        let entry = a.inputs + ri::PLAYER_UNITS as u32 + player_index * cpu::SIZEOF as u32;
+        let unit_index = m.i32(entry + cpu::UNIT_INDEX as u32);
+        if unit_index == NONE
+            || (m.f32(entry + cpu::MAXIMUM_BODY as u32) == body && m.f32(entry + cpu::MAXIMUM_SHIELD as u32) == shield)
+        {
+            continue;
+        }
+        call(resend_call::INITIALIZE_VITALITY, unit_index);
+    }
 }

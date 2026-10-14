@@ -311,24 +311,17 @@ static struct halo_sim_network_coop_device_groups coop_device_groups_arguments;
 /* The players' maximum vitality, once the scripts have set a player's: on
 the host as they set it, on a client as the host's presentation has it.
 Every player's unit is kept at it, a new one included. */
-static struct
-{
-	boolean set;
-	real maximum_body;
-	real maximum_shield;
-} players_vitality;
+static struct coop_players_vitality players_vitality;
 
 /* host: the client machines it had last tick. On the tick a new one
 appears, and every OBJECT_REFRESH_TICKS, the state a client that joined
 since would lack is sent again (refresh), and on the join every device that
 has moved since the map loaded too (joined). */
-static struct
-{
-	long machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	short machine_count;
-	boolean joined;
-	boolean refresh;
-} host_resend;
+static struct coop_host_resend host_resend;
+/* port: ... the client machines it has now, and the arguments of the step
+that updates them and keeps the players' vitality (host_resend_and_vitality) */
+static struct coop_resend_inputs coop_resend_inputs;
+static struct halo_sim_network_coop_resend coop_resend_arguments;
 
 /* client: the host's snap count last seen for each of its groups */
 static struct
@@ -359,6 +352,7 @@ static struct coop_skip_vote skip_vote;
 /* ---------- prototypes */
 
 static void client_play_presentation(void);
+static void coop_presentation_call(long kind, long a, long b);
 /* devices.c */
 void device_group_network_masks(word *network_flags, short *runtime_bit);
 /* unit_scripting_commands.c */
@@ -397,11 +391,13 @@ static void send_to_clients(
 
 /* host, each tick: whether a client machine joined since the last, and so
 whether to resend this tick (host_resend) */
+/* port: the game's (halo_sim.c checks Rust's against it), of the machines
+gathered (coop_resend_inputs) */
 static void host_resend_update(
 	void)
 {
-	long machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	short count = distributed_client_machines(machines, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	long const *machines = coop_resend_inputs.machines;
+	short count = coop_resend_inputs.machine_count;
 	short index, known;
 
 	host_resend.joined = FALSE;
@@ -415,7 +411,7 @@ static void host_resend_update(
 	host_resend.machine_count = count;
 	host_resend.refresh = host_resend.joined || game_time_get() % OBJECT_REFRESH_TICKS == 0;
 	if (host_resend.joined)
-		error(_error_silent, "co-op: a machine joined; resending the game's state");
+		coop_presentation_call(_network_coop_world_call_log_joined, 0, 0);
 }
 
 /* whether the object is a player's unit or carries one (scripts never delete those) */
@@ -900,6 +896,12 @@ void network_coop_world_call(
 	case _network_coop_world_call_skip_cinematic:
 		error(_error_silent, "co-op: skipping the cutscene (%d of %d voted)", call->a, call->b);
 		main_skip_cinematic();
+		break;
+	case _network_coop_world_call_log_joined:
+		error(_error_silent, "co-op: a machine joined; resending the game's state");
+		break;
+	case _network_coop_world_call_initialize_vitality:
+		object_initialize_vitality(call->a, &players_vitality.maximum_body, &players_vitality.maximum_shield);
 		break;
 	case _network_coop_world_call_send_presentation:
 		send_to_clients(&coop_presentation_message, _distributed_message_coop_presentation, 1,
@@ -2077,8 +2079,10 @@ static void players_vitality_keep(
 		{
 			continue;
 		}
+		/* port: (only in the host's step, host_resend_and_vitality: through
+		the world's calls, the Rust port's) */
 		if (coop_host())
-			object_initialize_vitality(player->unit_index, &players_vitality.maximum_body, &players_vitality.maximum_shield);
+			coop_presentation_call(_network_coop_world_call_initialize_vitality, player->unit_index, 0);
 		else
 		{
 			unit->object.maximum_body_vitality = players_vitality.maximum_body;
@@ -2838,14 +2842,89 @@ static void host_send_queue(
 		halo_sim_world_step_check(_halo_sim_world_step_network_coop_queue);
 }
 
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_resend_and_vitality_game(
+	void)
+{
+	host_resend_update();
+	players_vitality_keep();
+}
+
+/* host, each tick: whether a machine joined and whether to resend, and the
+players' units kept at the vitality the scripts set */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the machines
+gathered, the resend's records and the players' vitality. */
+static void host_resend_and_vitality(
+	void)
+{
+	struct halo_sim_network_coop_resend *arguments = &coop_resend_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
+
+	coop_resend_inputs.machine_count = distributed_client_machines(coop_resend_inputs.machines,
+		HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	{
+		struct data_iterator iterator;
+		struct player_datum *player;
+		short index;
+
+		coop_resend_inputs.player_count = (short)MIN(player_data->count, HALO_PORT_MAXIMUM_NETWORK_PLAYERS);
+		for (index = 0; index < HALO_PORT_MAXIMUM_NETWORK_PLAYERS; index++)
+		{
+			coop_resend_inputs.player_units[index].unit_index = NONE;
+			coop_resend_inputs.player_units[index].maximum_body = 0.0f;
+			coop_resend_inputs.player_units[index].maximum_shield = 0.0f;
+		}
+		data_iterator_new(&iterator, player_data);
+		while ((player = data_iterator_next(&iterator)) != NULL)
+		{
+			struct object_datum *unit = object_try_and_get(player->unit_index);
+			short absolute_index = (short)DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.datum_index);
+
+			if (unit && absolute_index < HALO_PORT_MAXIMUM_NETWORK_PLAYERS)
+			{
+				coop_resend_inputs.player_units[absolute_index].unit_index = player->unit_index;
+				coop_resend_inputs.player_units[absolute_index].maximum_body = unit->object.maximum_body_vitality;
+				coop_resend_inputs.player_units[absolute_index].maximum_shield = unit->object.maximum_shield_vitality;
+			}
+		}
+	}
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->inputs = (unsigned long)&coop_resend_inputs;
+	arguments->resend = (unsigned long)&host_resend;
+	arguments->vitality = (unsigned long)&players_vitality;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_resend_inputs;
+	regions[1].size = sizeof(coop_resend_inputs);
+	regions[2].address = (unsigned long)&host_resend;
+	regions[2].size = sizeof(host_resend);
+	regions[3].address = (unsigned long)&players_vitality;
+	regions[3].size = sizeof(players_vitality);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_resend, &context, regions, 4,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_resend_and_vitality_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_resend);
+}
+
 /* host, after each tick */
 void network_coop_host_tick(
 	void)
 {
 	if (!coop_game())
 		return;
-	host_resend_update();
-	players_vitality_keep();
+	host_resend_and_vitality();
 	coop_enemies_update();
 	host_send_presentation();
 	host_send_device_groups();

@@ -418,4 +418,46 @@ struct coop_presentation_inputs
 	struct hud_timer_state timer;
 };
 
+/* host: the client machines it had last tick. On the tick a new one
+appears, and every OBJECT_REFRESH_TICKS, the state a client that joined
+since would lack is sent again (refresh), and on the join every device that
+has moved since the map loaded too (joined). */
+struct coop_host_resend
+{
+	long machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+	short machine_count;
+	boolean joined;
+	boolean refresh;
+};
+
+/* a player's unit (NONE for none) and its maximum vitality */
+struct coop_player_unit
+{
+	long unit_index;
+	real maximum_body;
+	real maximum_shield;
+};
+
+/* host: the client machines it has this tick (distributed_client_machines),
+and each player's unit, by the player's absolute index, as the tick left it
+(what players_vitality_keep reads: gathered before the step, since its calls
+change the units) */
+struct coop_resend_inputs
+{
+	long machines[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+	short machine_count;
+	short player_count;
+	struct coop_player_unit player_units[HALO_PORT_MAXIMUM_NETWORK_PLAYERS];
+};
+
+/* The players' maximum vitality, once the scripts have set a player's: on
+the host as they set it, on a client as the host's presentation has it.
+Every player's unit is kept at it, a new one included. */
+struct coop_players_vitality
+{
+	boolean set;
+	real maximum_body;
+	real maximum_shield;
+};
+
 #endif

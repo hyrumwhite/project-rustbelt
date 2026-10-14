@@ -2392,6 +2392,7 @@ enum
 	_halo_sim_world_step_network_coop_object_names,
 	_halo_sim_world_step_network_coop_screen_effect,
 	_halo_sim_world_step_network_coop_presentation,
+	_halo_sim_world_step_network_coop_resend,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3083,6 +3084,22 @@ enum
 	_network_coop_world_call_skip_cinematic,
 	/* the presentation's message to every client */
 	_network_coop_world_call_send_presentation,
+	/* logs that a machine joined */
+	_network_coop_world_call_log_joined,
+	/* sets the unit's (a) maximum vitality to the players' (object_initialize_vitality) */
+	_network_coop_world_call_initialize_vitality,
+};
+
+/* crates/halo_map's network_coop::ResendArguments: co-op's host noticing a
+machine joining (and so resending) and keeping its players' units at the
+scripts' vitality: the machines it has (struct coop_resend_inputs), the
+resend's records (struct coop_host_resend) and the players' vitality (struct
+coop_players_vitality) */
+struct halo_sim_network_coop_resend
+{
+	unsigned long inputs;
+	unsigned long resend;
+	unsigned long vitality;
 };
 
 /* crates/halo_map's network_coop::PresentationArguments: co-op's host

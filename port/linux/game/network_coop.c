@@ -150,7 +150,8 @@ enum
 	letterbox) one a tick, about this many ticks behind the newest it has,
 	so they keep an even pace however unevenly the network delivers them. */
 	PRESENTATION_DELAY_TICKS = 2,
-	PRESENTATION_BUFFER_COUNT = 8,
+	/* (network_coop_records.h's) */
+	PRESENTATION_BUFFER_COUNT = COOP_PRESENTATION_BUFFER_COUNT,
 	/* the field of view (radians) is sent as a word, scaled by this */
 	FIELD_OF_VIEW_SCALE = 10000,
 
@@ -275,30 +276,13 @@ struct distributed_coop_skip_vote_message
 
 /* ---------- globals */
 
-/* client: the cinematic it started to match the host's */
-static struct
-{
-	boolean cinematic_started;
-	/* looking through the host's camera: its scripted cutscene camera, or
-	its view for a player with nothing else to look at */
-	boolean host_camera;
-	/* the eased view behind the host, used while there is nothing else to
-	watch (watching_host_valid is FALSE until it is first set) */
-	boolean watching_host_valid;
-	real_point3d watching_host_position;
-	real_vector3d watching_host_forward;
-	long heard_time;
-	long fade_start_time;
-	/* the host's presentations as they arrived, by the host's tick; the
-	newest tick heard and the tick last played (nothing is played until
-	one has been heard) */
-	struct distributed_coop_presentation buffered[PRESENTATION_BUFFER_COUNT];
-	long buffered_times[PRESENTATION_BUFFER_COUNT];
-	boolean heard_any;
-	boolean playing;
-	long newest_time;
-	long played_time;
-} coop_presentation;
+/* client: the cinematic it started to match the host's, and the host's
+presentations (network_coop_records.h) */
+static struct coop_client_presentation coop_presentation;
+/* port: the screen effect a client sets (network_coop_handle_screen_effect),
+and the arguments of its presentation messages' step */
+static struct rasterizer_screen_effect_port_state coop_client_screen_effect;
+static struct halo_sim_network_coop_client_messages coop_client_messages_arguments;
 
 /* host: events still to be sent; client: the last one applied
 (network_coop_records.h) */
@@ -348,6 +332,8 @@ static struct coop_skip_vote skip_vote;
 
 static void client_play_presentation(void);
 static void coop_presentation_call(long kind, long a, long b);
+static void client_event_call(long kind, long actor, long a, long b, real const *reals, short real_count,
+	long const *longs, short long_count);
 /* devices.c */
 void device_group_network_masks(word *network_flags, short *runtime_bit);
 /* cache_files.c */
@@ -1254,18 +1240,19 @@ word network_coop_screen_effect_entry_size(
 	return sizeof(struct rasterizer_screen_effect_port_state);
 }
 
-void network_coop_handle_screen_effect(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_screen_effect_game(
 	void const *entries,
 	short count)
 {
-	struct rasterizer_screen_effect_port_state state;
+	struct rasterizer_screen_effect_port_state state = { 0 };
 	/* every field from the tint onward is a real (rasterizer_cinematics.h) */
 	real const *reals = &state.filter_desaturation_tint.red;
 	short real_count = (short)((sizeof(state) -
 		offsetof(struct rasterizer_screen_effect_port_state, filter_desaturation_tint)) / sizeof(real));
 	short index;
 
-	if (!coop_client() || count != 1)
+	if (count != 1)
 		return;
 	csmemcpy(&state, entries, sizeof(state));
 	for (index = 0; index < real_count; index++)
@@ -1286,12 +1273,90 @@ void network_coop_handle_screen_effect(
 		state.convolution_radius[0] = state.convolution_radius[1] = 0.0f;
 	}
 	/* the game can only blur one window, so split screen goes without */
-	if (main_get_window_count() > 1)
+	if (coop_client_messages_arguments.window_count > 1)
 	{
 		state.convolution_type = 0;
 		state.convolution_radius[0] = state.convolution_radius[1] = 0.0f;
 	}
-	rasterizer_screen_effect_port_set(&state);
+	/* port: (through the world's calls, the Rust port's: the state as set) */
+	coop_client_screen_effect = state;
+	client_event_call(_network_coop_client_call_set_screen_effect, NONE, 0, 0, NULL, 0, NULL, 0);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_buffer_presentation_game(
+	void const *entries,
+	long host_time)
+{
+	short slot;
+
+	coop_presentation.heard_time = coop_client_messages_arguments.now;
+	if (coop_presentation.playing && host_time <= coop_presentation.played_time)
+		return;
+	slot = (short)(host_time % PRESENTATION_BUFFER_COUNT);
+	coop_presentation.buffered[slot] = *(struct distributed_coop_presentation const *)entries;
+	coop_presentation.buffered_times[slot] = host_time;
+	if (!coop_presentation.heard_any || host_time > coop_presentation.newest_time)
+		coop_presentation.newest_time = host_time;
+	coop_presentation.heard_any = TRUE;
+}
+
+/* port: a client's presentation messages (the host's presentation of a tick,
+kept to play in its turn; the scripts' screen effect): Rust's in Rust's mode
+(crates/halo_map's network_coop), checked against the game's otherwise. Its
+world: the arguments, the presentations kept, and the screen effect as
+set. */
+static void client_presentation_message(
+	short kind,
+	void const *entries,
+	short count,
+	long host_time)
+{
+	struct halo_sim_network_coop_client_messages *arguments = &coop_client_messages_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	int checking = FALSE;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->kind = kind;
+	arguments->count = count;
+	arguments->entries = (unsigned long)entries;
+	arguments->host_time = host_time;
+	arguments->now = game_time_get();
+	arguments->window_count = main_get_window_count();
+	arguments->presentation = (unsigned long)&coop_presentation;
+	arguments->screen_effect = (unsigned long)&coop_client_screen_effect;
+	arguments->screen_effect_size = sizeof(coop_client_screen_effect);
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_presentation;
+	regions[1].size = sizeof(coop_presentation);
+	regions[2].address = (unsigned long)&coop_client_screen_effect;
+	regions[2].size = sizeof(coop_client_screen_effect);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_messages, &context, regions, 3,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	if (kind == _coop_client_message_presentation)
+		client_buffer_presentation_game(entries, host_time);
+	else
+		client_apply_screen_effect_game(entries, count);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_messages);
+}
+
+void network_coop_handle_screen_effect(
+	void const *entries,
+	short count)
+{
+	if (coop_client())
+		client_presentation_message(_coop_client_message_screen_effect, entries, count, 0);
 }
 
 /* host: what its scripts have attached, the HUD state they set and the
@@ -3235,6 +3300,9 @@ void network_coop_client_call(
 		else
 			unit_close(call->actor);
 		break;
+	case _network_coop_client_call_set_screen_effect:
+		rasterizer_screen_effect_port_set(&coop_client_screen_effect);
+		break;
 	}
 	halo_sim_world_event_end(call, opened);
 }
@@ -3816,19 +3884,8 @@ void network_coop_handle_presentation(
 	void const *entries,
 	long host_time)
 {
-	short slot;
-
-	if (!coop_client() || host_time < 0)
-		return;
-	coop_presentation.heard_time = game_time_get();
-	if (coop_presentation.playing && host_time <= coop_presentation.played_time)
-		return;
-	slot = (short)(host_time % PRESENTATION_BUFFER_COUNT);
-	coop_presentation.buffered[slot] = *(struct distributed_coop_presentation const *)entries;
-	coop_presentation.buffered_times[slot] = host_time;
-	if (!coop_presentation.heard_any || host_time > coop_presentation.newest_time)
-		coop_presentation.newest_time = host_time;
-	coop_presentation.heard_any = TRUE;
+	if (coop_client() && host_time >= 0)
+		client_presentation_message(_coop_client_message_presentation, entries, 1, host_time);
 }
 
 static void client_presentation_apply(

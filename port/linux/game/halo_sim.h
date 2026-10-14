@@ -2398,6 +2398,7 @@ enum
 	_halo_sim_world_step_network_coop_client_devices,
 	_halo_sim_world_step_network_coop_client_names,
 	_halo_sim_world_step_network_coop_client_events,
+	_halo_sim_world_step_network_coop_client_messages,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3159,6 +3160,34 @@ enum
 	_network_coop_client_call_break_surface,
 	/* the unit (actor) opened if a, else closed */
 	_network_coop_client_call_unit_open,
+	/* the screen effect set as the step left it (rasterizer_screen_effect_port_set) */
+	_network_coop_client_call_set_screen_effect,
+};
+
+/* which of a client's presentation messages */
+enum
+{
+	_coop_client_message_presentation,
+	_coop_client_message_screen_effect,
+};
+
+/* crates/halo_map's network_coop::ClientMessagesArguments: a co-op client
+handling its host's presentation messages: which (_coop_client_message_*),
+the count and the entries, the host's tick (a presentation's), the game
+time, the windows (split screen), the presentations kept (struct
+coop_client_presentation), and the screen effect to set (struct
+rasterizer_screen_effect_port_state) and its size */
+struct halo_sim_network_coop_client_messages
+{
+	short kind;
+	short count;
+	unsigned long entries;
+	long host_time;
+	long now;
+	long window_count;
+	unsigned long presentation;
+	unsigned long screen_effect;
+	long screen_effect_size;
 };
 
 /* crates/halo_map's network_coop::ClientEventsArguments: a co-op client

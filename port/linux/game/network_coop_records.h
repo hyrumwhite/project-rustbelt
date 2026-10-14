@@ -477,4 +477,32 @@ struct coop_client_script_sounds
 	short next;
 };
 
+/* the host's presentations a client keeps, by the host's tick */
+#define COOP_PRESENTATION_BUFFER_COUNT 8
+
+/* client: the cinematic it started to match the host's */
+struct coop_client_presentation
+{
+	boolean cinematic_started;
+	/* looking through the host's camera: its scripted cutscene camera, or
+	its view for a player with nothing else to look at */
+	boolean host_camera;
+	/* the eased view behind the host, used while there is nothing else to
+	watch (watching_host_valid is FALSE until it is first set) */
+	boolean watching_host_valid;
+	real_point3d watching_host_position;
+	real_vector3d watching_host_forward;
+	long heard_time;
+	long fade_start_time;
+	/* the host's presentations as they arrived, by the host's tick; the
+	newest tick heard and the tick last played (nothing is played until
+	one has been heard) */
+	struct distributed_coop_presentation buffered[COOP_PRESENTATION_BUFFER_COUNT];
+	long buffered_times[COOP_PRESENTATION_BUFFER_COUNT];
+	boolean heard_any;
+	boolean playing;
+	long newest_time;
+	long played_time;
+};
+
 #endif

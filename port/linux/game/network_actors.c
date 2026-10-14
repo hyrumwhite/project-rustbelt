@@ -28,12 +28,21 @@ replays the host's damage.
 A client creates no actors of its own (actors.c): the host's are the only
 ones. Deaths need nothing here: network_damage.c kills a client's copy of
 an AI unit the same way it kills a player's.
+
+port: each of the file's steps runs in Rust in Rust's mode (crates/halo_map's
+network_actors), checked against the game's otherwise: noting what an actor
+gave its unit, the host's tick, and a client's handling of the damage and
+the states and its driving of the units. Their records are in
+network_actors_records.h; what they end in of the game goes through
+network_actors_call.
 */
 
 /* ---------- headers */
 
 #include "cseries.h"
 #include "game/game.h"
+#include "game/players.h"
+#include "memory/memory_pool.h"
 #include "networking/network_game_globals.h"
 #include "objects/objects.h"
 #include "objects/damage.h"
@@ -43,6 +52,8 @@ an AI unit the same way it kills a player's.
 #include "units/unit_control_data.h"
 #include "network_coop.h"
 #include "network_distributed.h"
+#include "network_actors_records.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <math.h>
 
@@ -50,11 +61,6 @@ an AI unit the same way it kills a player's.
 
 enum
 {
-	/* AI units tracked at once: every actor (halo_port_capacity.h's
-	HALO_PORT_MAXIMUM_ACTORS) and the units the cutscenes' recorded
-	animations drive */
-	MAXIMUM_NETWORK_ACTORS = HALO_PORT_MAXIMUM_ACTORS + 32,
-	MAXIMUM_ENTRIES_PER_MESSAGE = 64,
 	/* A client keeps applying a control for this long after the host last
 	sent one. After that the unit is left alone: the actor let go of it, or
 	the host went quiet. */
@@ -80,6 +86,10 @@ enum
 		FLAG(_unit_control_swap_weapons_bit),
 };
 
+/* port: a client's handling of states: its regions (as many as the world
+checks take) */
+#define MAXIMUM_ACTOR_STATE_REGIONS 16
+
 /* struct distributed_actor_state flags */
 enum
 {
@@ -95,148 +105,26 @@ enum
 	_distributed_actor_running_blindly_bit,
 };
 
-/* facing, aiming and looking vectors are sent as yaw and pitch */
-enum
-{
-	_angle_yaw,
-	_angle_pitch,
-	NUMBER_OF_ANGLES
-};
-
-/* ---------- structures */
-
-/* an AI unit's control and state at the end of the host's tick (like
-struct distributed_unit_state for players) */
-struct distributed_actor_state
-{
-	long unit_index;
-	long vehicle_index;
-	short seat_index;
-	byte flags;
-	/* the impulse's sequence number; impulse is NO_IMPULSE when there is none */
-	byte impulse_number;
-	byte impulse;
-	byte animation_state;
-	byte aiming_speed;
-	byte primary_trigger;
-	word control_flags;
-	signed char throttle[3];
-	byte active_camouflage;
-	/* the speech's sequence number; 0 when there is none */
-	byte speech_number;
-	/* the unit's team (NO_TEAM for none): the AI sets it after the unit is
-	made, so a client's copy would keep the team it was made with */
-	byte team;
-	short facing[NUMBER_OF_ANGLES];
-	short aiming[NUMBER_OF_ANGLES];
-	short looking[NUMBER_OF_ANGLES];
-	short impulse_alignment;
-	short run_blindly_angle;
-	word body_vitality;
-	word shield_vitality;
-	/* the sound the unit started saying (a sound tag) */
-	long speech_sound;
-	/* the custom animation it started (unit_start_user_animation), and its
-	sequence number; the graph is NONE when there is none */
-	long user_animation_graph;
-	short user_animation;
-	byte user_animation_number;
-	byte user_animation_interpolate;
-	real_point3d position;
-	struct distributed_vector velocity;
-	struct distributed_vector forward;
-	struct distributed_vector up;
-};
-
-/* the damage an AI unit is taking: its shield's flare and its body's wounds
-are drawn by it */
-struct distributed_actor_damage
-{
-	long unit_index;
-	word current_shield_damage;
-	word recent_shield_damage;
-	word current_body_damage;
-	word recent_body_damage;
-};
-
-struct distributed_actor_damage_message
-{
-	struct distributed_message_header header;
-	struct distributed_actor_damage units[MAXIMUM_ENTRIES_PER_MESSAGE];
-};
-
-struct distributed_actor_state_message
-{
-	struct distributed_message_header header;
-	struct distributed_actor_state states[MAXIMUM_ENTRIES_PER_MESSAGE];
-};
-
-/* host: what an actor gave its unit this tick */
-struct host_actor
-{
-	long unit_index;
-	/* got a control since the last send (noted during game_tick, sent after it) */
-	boolean noted;
-	/* its damage was sent last tick (and once more when it ends) */
-	boolean damaged;
-	struct unit_control_data control;
-	/* the control flags of the last tick's entry */
-	word sent_control_flags;
-	/* the latest impulse, how many more entries carry it, and its number */
-	short impulse;
-	short impulse_sends;
-	byte impulse_number;
-	boolean impulse_aligned;
-	real_vector2d impulse_alignment;
-	/* the latest speech, how many more entries carry it, and its number */
-	long speech_sound;
-	short speech_sends;
-	byte speech_number;
-	/* the latest custom animation, the same way */
-	long user_animation_graph;
-	short user_animation;
-	boolean user_animation_interpolate;
-	short user_animation_sends;
-	byte user_animation_number;
-};
-
-/* client: the latest the host sent about an AI unit */
-struct client_actor
-{
-	long unit_index;
-	long received_time;
-	struct unit_control_data control;
-	/* the impulse to play, and the number of the last one played */
-	short impulse;
-	byte impulse_number;
-	byte played_impulse_number;
-	boolean impulse_aligned;
-	real_vector2d impulse_alignment;
-	/* the speech to play (NONE when there is none), and the number of the last played */
-	long speech_sound;
-	byte speech_number;
-	byte played_speech_number;
-	/* the custom animation to play (graph NONE when there is none), and the
-	number of the last played */
-	long user_animation_graph;
-	short user_animation;
-	boolean user_animation_interpolate;
-	byte user_animation_number;
-	byte played_user_animation_number;
-	boolean driven;
-};
-
 /* ---------- globals */
 
-static struct host_actor host_actors[MAXIMUM_NETWORK_ACTORS];
-static short host_actor_count;
-/* host: the numbers of every unit's impulses, speech and animations, from
-one counter, so a unit that drops out of the table and comes back can't
-repeat the number a client last played */
-static byte host_event_number;
+static struct network_actors_host actors_host;
+static struct network_actors_client actors_client;
+static struct network_actors_host_sends actors_host_sends;
+static struct network_actors_host_inputs actors_host_inputs;
 
-static struct client_actor client_actors[MAXIMUM_NETWORK_ACTORS];
-static short client_actor_count;
+/* port: the steps' arguments (halo_sim.h) */
+static struct halo_sim_network_actors_note actors_note_arguments;
+static struct halo_sim_network_actors_host_tick actors_host_tick_arguments;
+static struct halo_sim_network_actors_client actors_client_arguments;
+
+/* ---------- prototypes */
+
+/* cache_files.c */
+void *cache_files_tag_instances(long *count);
+/* objects.c */
+struct memory_pool *objects_memory_pool(void);
+/* network_objects.c */
+long const *network_objects_client_has_table(void);
 
 /* ---------- private code */
 
@@ -244,16 +132,16 @@ static void angles_pack(
 	real_vector3d const *vector,
 	short *angles)
 {
-	angles[_angle_yaw] = distributed_angle_pack((real)atan2(vector->j, vector->i));
-	angles[_angle_pitch] = distributed_angle_pack((real)asin(PIN(vector->k, -1.0f, 1.0f)));
+	angles[_actor_angle_yaw] = distributed_angle_pack((real)atan2(vector->j, vector->i));
+	angles[_actor_angle_pitch] = distributed_angle_pack((real)asin(PIN(vector->k, -1.0f, 1.0f)));
 }
 
 static void angles_unpack(
 	short const *angles,
 	real_vector3d *vector)
 {
-	real yaw = distributed_angle_unpack(angles[_angle_yaw], FALSE);
-	real pitch = distributed_angle_unpack(angles[_angle_pitch], TRUE);
+	real yaw = distributed_angle_unpack(angles[_actor_angle_yaw], FALSE);
+	real pitch = distributed_angle_unpack(angles[_actor_angle_pitch], TRUE);
 
 	vector->i = (real)(cos(pitch) * cos(yaw));
 	vector->j = (real)(cos(pitch) * sin(yaw));
@@ -265,9 +153,9 @@ as played) */
 static byte next_event_number(
 	void)
 {
-	if (++host_event_number == 0)
-		host_event_number = 1;
-	return host_event_number;
+	if (++actors_host.event_number == 0)
+		actors_host.event_number = 1;
+	return actors_host.event_number;
 }
 
 /* the unit's entry, adding one if needed; NULL if the table is full */
@@ -276,19 +164,19 @@ static struct host_actor *host_actor_for(
 {
 	short index;
 
-	for (index = 0; index < host_actor_count; index++)
+	for (index = 0; index < actors_host.count; index++)
 	{
-		if (host_actors[index].unit_index == unit_index)
-			return &host_actors[index];
+		if (actors_host.actors[index].unit_index == unit_index)
+			return &actors_host.actors[index];
 	}
-	if (host_actor_count >= MAXIMUM_NETWORK_ACTORS)
+	if (actors_host.count >= MAXIMUM_NETWORK_ACTORS)
 		return NULL;
-	csmemset(&host_actors[host_actor_count], 0, sizeof(host_actors[0]));
-	host_actors[host_actor_count].unit_index = unit_index;
-	host_actors[host_actor_count].impulse = NONE;
-	host_actors[host_actor_count].speech_sound = NONE;
-	host_actors[host_actor_count].user_animation_graph = NONE;
-	return &host_actors[host_actor_count++];
+	csmemset(&actors_host.actors[actors_host.count], 0, sizeof(actors_host.actors[0]));
+	actors_host.actors[actors_host.count].unit_index = unit_index;
+	actors_host.actors[actors_host.count].impulse = NONE;
+	actors_host.actors[actors_host.count].speech_sound = NONE;
+	actors_host.actors[actors_host.count].user_animation_graph = NONE;
+	return &actors_host.actors[actors_host.count++];
 }
 
 static struct client_actor *client_actor_for(
@@ -296,19 +184,19 @@ static struct client_actor *client_actor_for(
 {
 	short index;
 
-	for (index = 0; index < client_actor_count; index++)
+	for (index = 0; index < actors_client.count; index++)
 	{
-		if (client_actors[index].unit_index == unit_index)
-			return &client_actors[index];
+		if (actors_client.actors[index].unit_index == unit_index)
+			return &actors_client.actors[index];
 	}
-	if (client_actor_count >= MAXIMUM_NETWORK_ACTORS)
+	if (actors_client.count >= MAXIMUM_NETWORK_ACTORS)
 		return NULL;
-	csmemset(&client_actors[client_actor_count], 0, sizeof(client_actors[0]));
-	client_actors[client_actor_count].unit_index = unit_index;
-	client_actors[client_actor_count].impulse = NONE;
-	client_actors[client_actor_count].speech_sound = NONE;
-	client_actors[client_actor_count].user_animation_graph = NONE;
-	return &client_actors[client_actor_count++];
+	csmemset(&actors_client.actors[actors_client.count], 0, sizeof(actors_client.actors[0]));
+	actors_client.actors[actors_client.count].unit_index = unit_index;
+	actors_client.actors[actors_client.count].impulse = NONE;
+	actors_client.actors[actors_client.count].speech_sound = NONE;
+	actors_client.actors[actors_client.count].user_animation_graph = NONE;
+	return &actors_client.actors[actors_client.count++];
 }
 
 /* whether the unit exists, is alive, and isn't a player's */
@@ -321,6 +209,47 @@ static boolean actor_unit_valid(
 		return FALSE;
 	unit = unit_get(unit_index);
 	return !TEST_FLAG(unit->object.damage_flags, _object_dead_bit) && unit->unit.player_index == NONE;
+}
+
+/* port: the steps' calls, through the world's (the Rust port's) */
+static long actors_call(
+	long kind,
+	long actor,
+	long a,
+	long b,
+	real const *reals,
+	short real_count)
+{
+	struct halo_sim_ai_call call;
+	short index;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor;
+	call.a = a;
+	call.b = b;
+	for (index = 0; index < real_count; index++)
+		call.input[index] = reals[index];
+	network_actors_call(&call);
+	return call.result;
+}
+
+/* port: damage_set_network_state through the world's calls */
+static void actors_set_damage(
+	long unit_index,
+	struct damage_network_state const *damage)
+{
+	real reals[6];
+
+	reals[0] = damage->body_vitality;
+	reals[1] = damage->shield_vitality;
+	reals[2] = damage->current_body_damage;
+	reals[3] = damage->recent_body_damage;
+	reals[4] = damage->current_shield_damage;
+	reals[5] = damage->recent_shield_damage;
+	actors_call(_network_actors_call_set_damage, NONE, unit_index,
+		(damage->shield_depleted ? FLAG(0) : 0) | (damage->shield_charging ? FLAG(1) : 0) |
+		(damage->shield_over_charging ? FLAG(2) : 0), reals, 6);
 }
 
 /* host: builds the entry to send for an AI unit */
@@ -433,7 +362,7 @@ static boolean actor_state_apply(
 		TEST_FLAG(unit_get(state->unit_index)->object.flags, _object_at_rest_bit) &&
 		unit_get(state->unit_index)->unit.player_index == NONE && state->body_vitality > 0)
 	{
-		unit_port_resurrect(state->unit_index);
+		actors_call(_network_actors_call_resurrect, NONE, state->unit_index, 0, NULL, 0);
 	}
 	if (!actor_unit_valid(state->unit_index) ||
 		state->animation_state >= NUMBER_OF_UNIT_ANIMATION_STATES ||
@@ -503,12 +432,13 @@ static boolean actor_state_apply(
 		if (unit->object.parent_object_index != state->vehicle_index ||
 			unit->unit.parent_seat_index != state->seat_index)
 		{
-			network_objects_set_seat(state->unit_index, state->vehicle_index, state->seat_index);
+			actors_call(_network_actors_call_set_seat, state->seat_index, state->unit_index, state->vehicle_index,
+				NULL, 0);
 		}
 	}
 	else if (unit->object.parent_object_index != NONE)
 	{
-		network_objects_set_seat(state->unit_index, NONE, NONE);
+		actors_call(_network_actors_call_set_seat, NONE, state->unit_index, NONE, NULL, 0);
 	}
 	damage_get_network_state(state->unit_index, &damage);
 	damage.shield_depleted = TEST_FLAG(state->flags, _distributed_actor_shield_depleted_bit);
@@ -516,7 +446,7 @@ static boolean actor_state_apply(
 	damage.shield_over_charging = TEST_FLAG(state->flags, _distributed_actor_shield_over_charging_bit);
 	damage.body_vitality = distributed_vitality_unpack(state->body_vitality);
 	damage.shield_vitality = distributed_vitality_unpack(state->shield_vitality);
-	damage_set_network_state(state->unit_index, &damage);
+	actors_set_damage(state->unit_index, &damage);
 	SET_FLAG(unit->unit.flags, _unit_active_camouflaged_bit,
 		TEST_FLAG(state->flags, _distributed_actor_camouflaged_bit));
 	SET_FLAG(unit->unit.flags, _unit_super_camouflaged_bit,
@@ -536,11 +466,15 @@ static boolean actor_state_apply(
 		real dy = state->position.y - unit->object.position.y;
 		real dz = state->position.z - unit->object.position.z;
 
-		if (dx * dx + dy * dy + dz * dz > REMOTE_CORRECTION_TOLERANCE * REMOTE_CORRECTION_TOLERANCE &&
-			network_objects_reconcile(state->unit_index, &state->position, &forward, &up, &velocity, NULL,
-				REMOTE_BLEND_DISTANCE))
+		if (dx * dx + dy * dy + dz * dz > REMOTE_CORRECTION_TOLERANCE * REMOTE_CORRECTION_TOLERANCE)
 		{
-			distributed_count_correction();
+			/* port: (where it goes, for the call) */
+			actors_client.reconcile_position = state->position;
+			actors_client.reconcile_forward = forward;
+			actors_client.reconcile_up = up;
+			actors_client.reconcile_velocity = velocity;
+			if (actors_call(_network_actors_call_reconcile, NONE, state->unit_index, 0, NULL, 0))
+				actors_call(_network_actors_call_count_correction, NONE, NONE, 0, NULL, 0);
 		}
 	}
 	return TRUE;
@@ -566,29 +500,125 @@ static void speech_play(
 	object_impulse_sound_new(unit_index, sound_definition_index, node_index, &position, &forward, 1.0f);
 }
 
-/* ---------- public code */
-
-void network_actors_new_game(
-	void)
+/* host: what an actor gave its unit, or started it on (the note's kind) */
+static void note_game(
+	struct halo_sim_network_actors_note const *note)
 {
-	host_actor_count = 0;
-	client_actor_count = 0;
-}
+	struct host_actor *actor = host_actor_for(note->unit_index);
 
-/* host: unit_control calls this when an actor drives its unit */
-void network_actors_note_control(
-	long unit_index,
-	struct unit_control_data const *control_data)
-{
-	struct host_actor *actor;
-
-	if (game_connection() != _game_connection_network_server)
-		return;
-	actor = host_actor_for(unit_index);
 	if (!actor)
 		return;
-	actor->noted = TRUE;
-	actor->control = *control_data;
+	switch (note->kind)
+	{
+	case _network_actors_note_control:
+		actor->noted = TRUE;
+		csmemcpy(&actor->control, note->control, sizeof(actor->control));
+		break;
+	case _network_actors_note_action:
+		actor->impulse = (short)note->action;
+		actor->impulse_sends = IMPULSE_REPEAT_TICKS;
+		actor->impulse_number = next_event_number();
+		actor->impulse_aligned = note->aligned != 0;
+		if (note->aligned)
+		{
+			actor->impulse_alignment.i = note->alignment_i;
+			actor->impulse_alignment.j = note->alignment_j;
+		}
+		break;
+	case _network_actors_note_speech:
+		actor->speech_sound = note->sound;
+		actor->speech_sends = IMPULSE_REPEAT_TICKS;
+		actor->speech_number = next_event_number();
+		break;
+	case _network_actors_note_user_animation:
+		actor->user_animation_graph = note->graph;
+		actor->user_animation = (short)note->animation;
+		actor->user_animation_interpolate = note->interpolate != 0;
+		actor->user_animation_sends = IMPULSE_REPEAT_TICKS;
+		actor->user_animation_number = next_event_number();
+		break;
+	}
+}
+
+/* the host's table, its used entries and the extra ones (new ones) */
+static unsigned long host_table_size(
+	long extra)
+{
+	long count = MIN(actors_host.count + extra, MAXIMUM_NETWORK_ACTORS);
+
+	return (unsigned long)((byte *)&actors_host.actors[count] - (byte *)&actors_host);
+}
+
+static unsigned long client_table_size(
+	long extra)
+{
+	long count = MIN(actors_client.count + extra, MAXIMUM_NETWORK_ACTORS);
+
+	return (unsigned long)((byte *)&actors_client.actors[count] - (byte *)&actors_client);
+}
+
+/* port: the objects (their headers, and the pool their datums are in), as a
+step's regions */
+static long objects_regions(
+	struct halo_sim_world_region *regions)
+{
+	struct memory_pool *pool = objects_memory_pool();
+	long region_count = 0;
+
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	return region_count;
+}
+
+static void world_context(
+	struct halo_sim_world_context *context,
+	void const *arguments)
+{
+	memset(context, 0, sizeof(*context));
+	context->game_time = game_time_get();
+	context->object_header_data = (unsigned long)object_header_data;
+	context->player_data = (unsigned long)player_data;
+	context->arguments = (unsigned long)arguments;
+}
+
+/* host: a note of the kind for an AI unit */
+/* port: Rust's in Rust's mode (crates/halo_map's network_actors), checked
+against the game's otherwise. Its world: the arguments and the host's
+table (with room for a new entry). */
+static void note(
+	struct halo_sim_network_actors_note *arguments)
+{
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	int checking = FALSE;
+
+	arguments->host = (unsigned long)&actors_host;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&actors_host;
+	regions[1].size = host_table_size(1);
+	world_context(&context, arguments);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_actors_note, &context, regions, 2, network_actors_call,
+		&checking))
+	{
+		return;
+	}
+	note_game(arguments);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_actors_note);
 }
 
 /* host: an impulse or action for an AI unit, sent in the next few entries */
@@ -597,19 +627,343 @@ static void note_action(
 	short action,
 	real_vector2d const *alignment_vector)
 {
-	struct host_actor *actor;
+	struct halo_sim_network_actors_note *arguments = &actors_note_arguments;
 
 	if (game_connection() != _game_connection_network_server)
 		return;
-	actor = host_actor_for(unit_index);
-	if (!actor)
-		return;
-	actor->impulse = action;
-	actor->impulse_sends = IMPULSE_REPEAT_TICKS;
-	actor->impulse_number = next_event_number();
-	actor->impulse_aligned = alignment_vector != NULL;
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->kind = _network_actors_note_action;
+	arguments->unit_index = unit_index;
+	arguments->action = action;
+	arguments->aligned = alignment_vector != NULL;
 	if (alignment_vector)
-		actor->impulse_alignment = *alignment_vector;
+	{
+		arguments->alignment_i = alignment_vector->i;
+		arguments->alignment_j = alignment_vector->j;
+	}
+	note(arguments);
+}
+
+/* host: the damage of the AI units taking some, to every client (and once
+more when it ends, so a flare goes) */
+static void host_send_damage(
+	void)
+{
+	struct distributed_actor_damage_message *message = &actors_host_sends.damage_message;
+	short count = 0;
+	short index;
+
+	for (index = 0; index < actors_host.count; index++)
+	{
+		struct host_actor *actor = &actors_host.actors[index];
+		struct damage_network_state damage;
+		boolean damaged;
+
+		if (!actor_unit_valid(actor->unit_index))
+			continue;
+		damage_get_network_state(actor->unit_index, &damage);
+		damaged = damage.current_shield_damage > 0.0f || damage.recent_shield_damage > 0.0f ||
+			damage.current_body_damage > 0.0f || damage.recent_body_damage > 0.0f;
+		if (!damaged && !actor->damaged)
+			continue;
+		actor->damaged = damaged;
+		message->units[count].unit_index = actor->unit_index;
+		message->units[count].current_shield_damage = distributed_vitality_pack(damage.current_shield_damage);
+		message->units[count].recent_shield_damage = distributed_vitality_pack(damage.recent_shield_damage);
+		message->units[count].current_body_damage = distributed_vitality_pack(damage.current_body_damage);
+		message->units[count].recent_body_damage = distributed_vitality_pack(damage.recent_body_damage);
+		if (++count == MAXIMUM_ACTOR_ENTRIES_PER_MESSAGE)
+		{
+			actors_call(_network_actors_call_send_damage, NONE, count, 0, NULL, 0);
+			count = 0;
+		}
+	}
+	if (count)
+		actors_call(_network_actors_call_send_damage, NONE, count, 0, NULL, 0);
+}
+
+static void host_tick_game(
+	void)
+{
+	struct network_actors_host_sends *sends = &actors_host_sends;
+	struct network_actors_host_inputs const *inputs = &actors_host_inputs;
+	long now = inputs->now;
+	short state_count = 0;
+	short index;
+	short machine_number;
+
+	for (index = 0; index < actors_host.count; index++)
+	{
+		struct host_actor *actor = &actors_host.actors[index];
+
+		if (!actor_unit_valid(actor->unit_index) ||
+			(!actor->noted && !TEST_FLAG(unit_get(actor->unit_index)->unit.flags, _unit_running_blindly_bit)))
+		{
+			actors_host.actors[index--] = actors_host.actors[--actors_host.count];
+			continue;
+		}
+		actor_state_from_unit(actor, &sends->states[state_count]);
+		sends->urgent[state_count] = sends->states[state_count].impulse != NO_IMPULSE ||
+			sends->states[state_count].speech_sound != NONE ||
+			sends->states[state_count].user_animation_graph != NONE ||
+			(sends->states[state_count].control_flags & ~actor->sent_control_flags & ONE_SHOT_CONTROL_FLAGS) != 0;
+		actor->sent_control_flags = sends->states[state_count].control_flags;
+		state_count++;
+		actor->noted = FALSE;
+		if (actor->impulse_sends > 0)
+			actor->impulse_sends--;
+		if (actor->speech_sends > 0)
+			actor->speech_sends--;
+		if (actor->user_animation_sends > 0)
+			actor->user_animation_sends--;
+	}
+	host_send_damage();
+	for (machine_number = 0; machine_number < inputs->machine_count; machine_number++)
+	{
+		long machine_index = inputs->machine_indices[machine_number];
+		short count = 0;
+
+		for (index = 0; index < state_count; index++)
+		{
+			struct distributed_actor_state const *state = &sends->states[index];
+			short period = (short)actors_call(_network_actors_call_send_period, NONE, machine_index, 0,
+				&state->position.x, 3);
+
+			if (!sends->urgent[index] && (now + DATUM_INDEX_TO_ABSOLUTE_INDEX(state->unit_index)) % period != 0)
+				continue;
+			sends->state_message.states[count++] = *state;
+			if (count == MAXIMUM_ACTOR_ENTRIES_PER_MESSAGE || count == DATAGRAM_ENTRIES(struct distributed_actor_state))
+			{
+				actors_call(_network_actors_call_send_states, NONE, machine_index, count, NULL, 0);
+				count = 0;
+			}
+		}
+		if (count)
+			actors_call(_network_actors_call_send_states, NONE, machine_index, count, NULL, 0);
+	}
+}
+
+static void handle_damage_game(
+	struct distributed_actor_damage const *units,
+	short count)
+{
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		struct damage_network_state damage;
+
+		if (!distributed_object_index_valid(units[index].unit_index) ||
+			!network_objects_client_has(units[index].unit_index) || !actor_unit_valid(units[index].unit_index))
+		{
+			continue;
+		}
+		damage_get_network_state(units[index].unit_index, &damage);
+		damage.current_shield_damage = distributed_vitality_unpack(units[index].current_shield_damage);
+		damage.recent_shield_damage = distributed_vitality_unpack(units[index].recent_shield_damage);
+		damage.current_body_damage = distributed_vitality_unpack(units[index].current_body_damage);
+		damage.recent_body_damage = distributed_vitality_unpack(units[index].recent_body_damage);
+		actors_set_damage(units[index].unit_index, &damage);
+	}
+}
+
+static void handle_states_game(
+	struct distributed_actor_state const *states,
+	short count,
+	long now)
+{
+	short index;
+
+	for (index = 0; index < count; index++)
+		actor_state_apply(&states[index], now);
+}
+
+static void drive_game(
+	long now)
+{
+	short index;
+
+	for (index = 0; index < actors_client.count; index++)
+	{
+		struct client_actor *actor = &actors_client.actors[index];
+
+		if (!actor_unit_valid(actor->unit_index) || now - actor->received_time > CONTROL_HELD_TICKS)
+		{
+			if (actor->driven && object_try_and_get_and_verify_type(actor->unit_index, _object_mask_unit))
+				actors_call(_network_actors_call_set_actively_controlled, NONE, actor->unit_index, FALSE, NULL, 0);
+			actors_client.actors[index--] = actors_client.actors[--actors_client.count];
+			continue;
+		}
+		/* vehicles follow the host's transform instead (network_objects.c) */
+		if (object_get(actor->unit_index)->object.type == _object_type_vehicle)
+			continue;
+		if (!actor->driven)
+		{
+			actors_call(_network_actors_call_set_actively_controlled, NONE, actor->unit_index, TRUE, NULL, 0);
+			actor->driven = TRUE;
+		}
+		actors_call(_network_actors_call_unit_control, NONE, actor->unit_index, (long)&actor->control, NULL, 0);
+		if (actor->impulse != NONE && actor->impulse_number != actor->played_impulse_number)
+		{
+			real alignment[2];
+
+			alignment[0] = actor->impulse_alignment.i;
+			alignment[1] = actor->impulse_alignment.j;
+			actors_call(_network_actors_call_action, actor->impulse, actor->unit_index, actor->impulse_aligned,
+				alignment, 2);
+			actor->played_impulse_number = actor->impulse_number;
+			actor->impulse = NONE;
+		}
+		if (actor->speech_sound != NONE)
+		{
+			actors_call(_network_actors_call_speech, NONE, actor->unit_index, actor->speech_sound, NULL, 0);
+			actor->played_speech_number = actor->speech_number;
+			actor->speech_sound = NONE;
+		}
+		if (actor->user_animation_graph != NONE)
+		{
+			real interpolate = actor->user_animation_interpolate ? 1.0f : 0.0f;
+
+			actors_call(_network_actors_call_user_animation, actor->user_animation, actor->unit_index,
+				actor->user_animation_graph, &interpolate, 1);
+			actor->played_user_animation_number = actor->user_animation_number;
+			actor->user_animation_graph = NONE;
+		}
+	}
+}
+
+/* port: a client's step's arguments, and its first regions: the arguments
+and the client's table (with extra entries) */
+static long client_step_regions(
+	struct halo_sim_network_actors_client *arguments,
+	struct halo_sim_world_region *regions,
+	long extra)
+{
+	long region_count = 0;
+
+	arguments->client = (unsigned long)&actors_client;
+	arguments->client_has = (unsigned long)network_objects_client_has_table();
+	arguments->tag_instances = (unsigned long)cache_files_tag_instances(&arguments->tag_count);
+	arguments->now = game_time_get();
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)&actors_client;
+	regions[region_count++].size = client_table_size(extra);
+	return region_count;
+}
+
+/* ---------- public code */
+
+/* port: the steps' calls (halo_sim.h's _network_actors_call_*) */
+void network_actors_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_actors_call_send_period:
+	{
+		real_point3d position;
+
+		position.x = call->input[0];
+		position.y = call->input[1];
+		position.z = call->input[2];
+		call->result = network_objects_send_period(call->a, &position);
+		break;
+	}
+	case _network_actors_call_send_damage:
+		distributed_send(&actors_host_sends.damage_message, _distributed_message_actor_damage, (short)call->a,
+			(word)(sizeof(actors_host_sends.damage_message.header) +
+				call->a * sizeof(actors_host_sends.damage_message.units[0])), _distributed_to_clients);
+		break;
+	case _network_actors_call_send_states:
+		distributed_send_to_machine(call->a, &actors_host_sends.state_message, _distributed_message_actor_states,
+			(short)call->b, (word)(sizeof(actors_host_sends.state_message.header) +
+				call->b * sizeof(struct distributed_actor_state)));
+		break;
+	case _network_actors_call_resurrect:
+		unit_port_resurrect(call->a);
+		break;
+	case _network_actors_call_set_seat:
+		network_objects_set_seat(call->a, call->b, (short)call->actor);
+		break;
+	case _network_actors_call_set_damage:
+	{
+		struct damage_network_state damage;
+
+		damage.shield_depleted = TEST_FLAG(call->b, 0);
+		damage.shield_charging = TEST_FLAG(call->b, 1);
+		damage.shield_over_charging = TEST_FLAG(call->b, 2);
+		damage.body_vitality = call->input[0];
+		damage.shield_vitality = call->input[1];
+		damage.current_body_damage = call->input[2];
+		damage.recent_body_damage = call->input[3];
+		damage.current_shield_damage = call->input[4];
+		damage.recent_shield_damage = call->input[5];
+		damage_set_network_state(call->a, &damage);
+		break;
+	}
+	case _network_actors_call_reconcile:
+		call->result = network_objects_reconcile(call->a, &actors_client.reconcile_position,
+			&actors_client.reconcile_forward, &actors_client.reconcile_up, &actors_client.reconcile_velocity, NULL,
+			REMOTE_BLEND_DISTANCE);
+		break;
+	case _network_actors_call_count_correction:
+		distributed_count_correction();
+		break;
+	case _network_actors_call_set_actively_controlled:
+		unit_set_actively_controlled(call->a, (boolean)call->b);
+		break;
+	case _network_actors_call_unit_control:
+		unit_control(call->a, (struct unit_control_data const *)call->b);
+		break;
+	case _network_actors_call_action:
+	{
+		real_vector2d alignment_vector;
+		real_vector2d *alignment = call->b ? &alignment_vector : NULL;
+
+		alignment_vector.i = call->input[0];
+		alignment_vector.j = call->input[1];
+		if (call->actor == _actor_action_melee)
+			unit_melee_attack_begin(call->a, FALSE, alignment);
+		else if (call->actor == _actor_action_leap)
+			unit_leap_begin(call->a, alignment);
+		else
+			unit_start_animation_impulse(call->a, (short)call->actor, alignment);
+		break;
+	}
+	case _network_actors_call_speech:
+		speech_play(call->a, call->b);
+		break;
+	case _network_actors_call_user_animation:
+		unit_port_play_user_animation(call->a, call->b, (short)call->actor, call->input[0] != 0.0f, 0);
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+void network_actors_new_game(
+	void)
+{
+	actors_host.count = 0;
+	actors_client.count = 0;
+}
+
+/* host: unit_control calls this when an actor drives its unit */
+void network_actors_note_control(
+	long unit_index,
+	struct unit_control_data const *control_data)
+{
+	struct halo_sim_network_actors_note *arguments = &actors_note_arguments;
+
+	if (game_connection() != _game_connection_network_server)
+		return;
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->kind = _network_actors_note_control;
+	arguments->unit_index = unit_index;
+	csmemcpy(arguments->control, control_data, sizeof(arguments->control));
+	note(arguments);
 }
 
 /* host: unit_start_animation_impulse calls this for an AI unit */
@@ -643,16 +997,15 @@ void network_actors_note_speech(
 	long unit_index,
 	long sound_definition_index)
 {
-	struct host_actor *actor;
+	struct halo_sim_network_actors_note *arguments = &actors_note_arguments;
 
 	if (game_connection() != _game_connection_network_server)
 		return;
-	actor = host_actor_for(unit_index);
-	if (!actor)
-		return;
-	actor->speech_sound = sound_definition_index;
-	actor->speech_sends = IMPULSE_REPEAT_TICKS;
-	actor->speech_number = next_event_number();
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->kind = _network_actors_note_speech;
+	arguments->unit_index = unit_index;
+	arguments->sound = sound_definition_index;
+	note(arguments);
 }
 
 /* host: unit_start_user_animation calls this when an AI unit starts a
@@ -663,60 +1016,17 @@ void network_actors_note_user_animation(
 	short animation_index,
 	boolean interpolate)
 {
-	struct host_actor *actor;
+	struct halo_sim_network_actors_note *arguments = &actors_note_arguments;
 
 	if (game_connection() != _game_connection_network_server || network_coop_active())
 		return;
-	actor = host_actor_for(unit_index);
-	if (!actor)
-		return;
-	actor->user_animation_graph = animation_graph_index;
-	actor->user_animation = animation_index;
-	actor->user_animation_interpolate = interpolate;
-	actor->user_animation_sends = IMPULSE_REPEAT_TICKS;
-	actor->user_animation_number = next_event_number();
-}
-
-/* host: the damage of the AI units taking some, to every client (and once
-more when it ends, so a flare goes) */
-static void host_send_damage(
-	void)
-{
-	struct distributed_actor_damage_message message;
-	short count = 0;
-	short index;
-
-	for (index = 0; index < host_actor_count; index++)
-	{
-		struct host_actor *actor = &host_actors[index];
-		struct damage_network_state damage;
-		boolean damaged;
-
-		if (!actor_unit_valid(actor->unit_index))
-			continue;
-		damage_get_network_state(actor->unit_index, &damage);
-		damaged = damage.current_shield_damage > 0.0f || damage.recent_shield_damage > 0.0f ||
-			damage.current_body_damage > 0.0f || damage.recent_body_damage > 0.0f;
-		if (!damaged && !actor->damaged)
-			continue;
-		actor->damaged = damaged;
-		message.units[count].unit_index = actor->unit_index;
-		message.units[count].current_shield_damage = distributed_vitality_pack(damage.current_shield_damage);
-		message.units[count].recent_shield_damage = distributed_vitality_pack(damage.recent_shield_damage);
-		message.units[count].current_body_damage = distributed_vitality_pack(damage.current_body_damage);
-		message.units[count].recent_body_damage = distributed_vitality_pack(damage.recent_body_damage);
-		if (++count == MAXIMUM_ENTRIES_PER_MESSAGE)
-		{
-			distributed_send(&message, _distributed_message_actor_damage, count,
-				(word)(sizeof(message.header) + count * sizeof(message.units[0])), _distributed_to_clients);
-			count = 0;
-		}
-	}
-	if (count)
-	{
-		distributed_send(&message, _distributed_message_actor_damage, count,
-			(word)(sizeof(message.header) + count * sizeof(message.units[0])), _distributed_to_clients);
-	}
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->kind = _network_actors_note_user_animation;
+	arguments->unit_index = unit_index;
+	arguments->graph = animation_graph_index;
+	arguments->animation = animation_index;
+	arguments->interpolate = interpolate;
+	note(arguments);
 }
 
 /* Host, after each tick: sends each client the AI units driven this tick.
@@ -726,71 +1036,45 @@ of the next IMPULSE_REPEAT_TICKS ticks, and one starting a one-tick action
 goes that tick. A unit no actor drove this tick is dropped from the table,
 unless it is fleeing: a unit running blindly moves by itself, without its
 actor's control, and dropped it stood running in place on the clients. */
+/* port: Rust's in Rust's mode (crates/halo_map's network_actors), checked
+against the game's otherwise. Its world: the arguments, what it reads of
+the game (the clients' machines), the host's table and the sends. (Not the
+objects, which it only reads and its calls don't change: copied for each of
+its many calls, they slowed the game.) */
 void network_actors_host_tick(
 	void)
 {
-	static struct distributed_actor_state states[MAXIMUM_NETWORK_ACTORS];
-	/* sent to every client this tick, whatever its period */
-	static boolean urgent[MAXIMUM_NETWORK_ACTORS];
-	struct distributed_actor_state_message message;
-	long machine_indices[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-	short machine_count = distributed_client_machines(machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
-	long now = game_time_get();
-	short state_count = 0;
-	short index;
-	short machine_number;
+	struct halo_sim_network_actors_host_tick *arguments = &actors_host_tick_arguments;
+	struct network_actors_host_inputs *inputs = &actors_host_inputs;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	long region_count = 0;
+	int checking = FALSE;
 
-	for (index = 0; index < host_actor_count; index++)
+	csmemset(inputs, 0, sizeof(*inputs));
+	inputs->now = game_time_get();
+	inputs->machine_count = distributed_client_machines(inputs->machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->host = (unsigned long)&actors_host;
+	arguments->sends = (unsigned long)&actors_host_sends;
+	arguments->inputs = (unsigned long)inputs;
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)inputs;
+	regions[region_count++].size = sizeof(*inputs);
+	regions[region_count].address = (unsigned long)&actors_host;
+	regions[region_count++].size = host_table_size(0);
+	regions[region_count].address = (unsigned long)&actors_host_sends;
+	regions[region_count++].size = sizeof(actors_host_sends);
+	world_context(&context, arguments);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_actors_host_tick, &context, regions, region_count,
+		network_actors_call, &checking))
 	{
-		struct host_actor *actor = &host_actors[index];
-
-		if (!actor_unit_valid(actor->unit_index) ||
-			(!actor->noted && !TEST_FLAG(unit_get(actor->unit_index)->unit.flags, _unit_running_blindly_bit)))
-		{
-			host_actors[index--] = host_actors[--host_actor_count];
-			continue;
-		}
-		actor_state_from_unit(actor, &states[state_count]);
-		urgent[state_count] = states[state_count].impulse != NO_IMPULSE || states[state_count].speech_sound != NONE ||
-			states[state_count].user_animation_graph != NONE ||
-			(states[state_count].control_flags & ~actor->sent_control_flags & ONE_SHOT_CONTROL_FLAGS) != 0;
-		actor->sent_control_flags = states[state_count].control_flags;
-		state_count++;
-		actor->noted = FALSE;
-		if (actor->impulse_sends > 0)
-			actor->impulse_sends--;
-		if (actor->speech_sends > 0)
-			actor->speech_sends--;
-		if (actor->user_animation_sends > 0)
-			actor->user_animation_sends--;
+		return;
 	}
-	host_send_damage();
-	for (machine_number = 0; machine_number < machine_count; machine_number++)
-	{
-		long machine_index = machine_indices[machine_number];
-		short count = 0;
-
-		for (index = 0; index < state_count; index++)
-		{
-			struct distributed_actor_state const *state = &states[index];
-			short period = network_objects_send_period(machine_index, &state->position);
-
-			if (!urgent[index] && (now + DATUM_INDEX_TO_ABSOLUTE_INDEX(state->unit_index)) % period != 0)
-				continue;
-			message.states[count++] = *state;
-			if (count == MAXIMUM_ENTRIES_PER_MESSAGE || count == DATAGRAM_ENTRIES(struct distributed_actor_state))
-			{
-				distributed_send_to_machine(machine_index, &message, _distributed_message_actor_states, count,
-					(word)(sizeof(message.header) + count * sizeof(struct distributed_actor_state)));
-				count = 0;
-			}
-		}
-		if (count)
-		{
-			distributed_send_to_machine(machine_index, &message, _distributed_message_actor_states, count,
-				(word)(sizeof(message.header) + count * sizeof(struct distributed_actor_state)));
-		}
-	}
+	host_tick_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_actors_host_tick);
 }
 
 word network_actors_damage_entry_size(
@@ -800,29 +1084,33 @@ word network_actors_damage_entry_size(
 }
 
 /* client: the damage the host's AI units are taking */
+/* port: Rust's in Rust's mode (crates/halo_map's network_actors), checked
+against the game's otherwise. Its world: the arguments. (It writes nothing
+of its own; its calls set what of the units it reads to what it was, but
+for the damage, which it doesn't read.) */
 void network_actors_handle_damage(
 	void const *entries,
 	short count)
 {
-	struct distributed_actor_damage const *units = entries;
-	short index;
+	struct halo_sim_network_actors_client *arguments = &actors_client_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	long region_count;
+	int checking = FALSE;
 
-	for (index = 0; index < count; index++)
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->count = count;
+	arguments->entries = (unsigned long)entries;
+	region_count = client_step_regions(arguments, regions, 0) - 1;
+	world_context(&context, arguments);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_actors_damage, &context, regions, region_count,
+		network_actors_call, &checking))
 	{
-		struct damage_network_state damage;
-
-		if (!distributed_object_index_valid(units[index].unit_index) ||
-			!network_objects_client_has(units[index].unit_index) || !actor_unit_valid(units[index].unit_index))
-		{
-			continue;
-		}
-		damage_get_network_state(units[index].unit_index, &damage);
-		damage.current_shield_damage = distributed_vitality_unpack(units[index].current_shield_damage);
-		damage.recent_shield_damage = distributed_vitality_unpack(units[index].recent_shield_damage);
-		damage.current_body_damage = distributed_vitality_unpack(units[index].current_body_damage);
-		damage.recent_body_damage = distributed_vitality_unpack(units[index].recent_body_damage);
-		damage_set_network_state(units[index].unit_index, &damage);
+		return;
 	}
+	handle_damage_game(entries, count);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_actors_damage);
 }
 
 word network_actors_entry_size(
@@ -832,71 +1120,77 @@ word network_actors_entry_size(
 }
 
 /* client: entries from the host */
+/* port: Rust's in Rust's mode (crates/halo_map's network_actors), checked
+against the game's otherwise. Its world: the arguments, the client's table
+(with room for a new entry each) and the units the entries name (their
+datums), or for more entries than that fits, the objects. */
 void network_actors_handle_states(
 	void const *entries,
 	short count)
 {
 	struct distributed_actor_state const *states = entries;
-	long now = game_time_get();
+	struct halo_sim_network_actors_client *arguments = &actors_client_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[MAXIMUM_ACTOR_STATE_REGIONS];
+	long region_count;
+	int checking = FALSE;
 	short index;
 
-	for (index = 0; index < count; index++)
-		actor_state_apply(&states[index], now);
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->count = count;
+	arguments->entries = (unsigned long)entries;
+	region_count = client_step_regions(arguments, regions, count);
+	if (region_count + count > MAXIMUM_ACTOR_STATE_REGIONS)
+		region_count += objects_regions(regions + region_count);
+	else
+	{
+		for (index = 0; index < count; index++)
+		{
+			struct object_header_datum *header = object_try_and_get_and_verify_type(states[index].unit_index,
+				_object_mask_unit) ? object_header_get(states[index].unit_index) : NULL;
+
+			if (header)
+			{
+				regions[region_count].address = (unsigned long)header->datum;
+				regions[region_count++].size = (unsigned long)header->data_size;
+			}
+		}
+	}
+	world_context(&context, arguments);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_actors_states, &context, regions, region_count,
+		network_actors_call, &checking))
+	{
+		return;
+	}
+	handle_states_game(entries, count, arguments->now);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_actors_states);
 }
 
 /* Client: called at the point in the tick where the host runs the AI.
 Drives each AI unit with the last control the host sent. */
+/* port: Rust's in Rust's mode (crates/halo_map's network_actors), checked
+against the game's otherwise. Its world: the arguments and the client's
+table. (Not the objects: what it reads of them its calls don't change, and
+copied for each of its many calls, they slowed the game.) */
 void network_actors_drive(
 	void)
 {
-	long now = game_time_get();
-	short index;
+	struct halo_sim_network_actors_client *arguments = &actors_client_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	long region_count;
+	int checking = FALSE;
 
-	for (index = 0; index < client_actor_count; index++)
+	memset(arguments, 0, sizeof(*arguments));
+	region_count = client_step_regions(arguments, regions, 0);
+	world_context(&context, arguments);
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_actors_drive, &context, regions, region_count,
+		network_actors_call, &checking))
 	{
-		struct client_actor *actor = &client_actors[index];
-
-		if (!actor_unit_valid(actor->unit_index) || now - actor->received_time > CONTROL_HELD_TICKS)
-		{
-			if (actor->driven && object_try_and_get_and_verify_type(actor->unit_index, _object_mask_unit))
-				unit_set_actively_controlled(actor->unit_index, FALSE);
-			client_actors[index--] = client_actors[--client_actor_count];
-			continue;
-		}
-		/* vehicles follow the host's transform instead (network_objects.c) */
-		if (object_get(actor->unit_index)->object.type == _object_type_vehicle)
-			continue;
-		if (!actor->driven)
-		{
-			unit_set_actively_controlled(actor->unit_index, TRUE);
-			actor->driven = TRUE;
-		}
-		unit_control(actor->unit_index, &actor->control);
-		if (actor->impulse != NONE && actor->impulse_number != actor->played_impulse_number)
-		{
-			real_vector2d *alignment = actor->impulse_aligned ? &actor->impulse_alignment : NULL;
-
-			if (actor->impulse == _actor_action_melee)
-				unit_melee_attack_begin(actor->unit_index, FALSE, alignment);
-			else if (actor->impulse == _actor_action_leap)
-				unit_leap_begin(actor->unit_index, alignment);
-			else
-				unit_start_animation_impulse(actor->unit_index, actor->impulse, alignment);
-			actor->played_impulse_number = actor->impulse_number;
-			actor->impulse = NONE;
-		}
-		if (actor->speech_sound != NONE)
-		{
-			speech_play(actor->unit_index, actor->speech_sound);
-			actor->played_speech_number = actor->speech_number;
-			actor->speech_sound = NONE;
-		}
-		if (actor->user_animation_graph != NONE)
-		{
-			unit_port_play_user_animation(actor->unit_index, actor->user_animation_graph, actor->user_animation,
-				actor->user_animation_interpolate, 0);
-			actor->played_user_animation_number = actor->user_animation_number;
-			actor->user_animation_graph = NONE;
-		}
+		return;
 	}
+	drive_game(arguments->now);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_actors_drive);
 }

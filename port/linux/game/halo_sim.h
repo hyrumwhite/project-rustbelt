@@ -83,6 +83,8 @@ enum
 	_halo_sim_network_clock,
 	/* network co-op (network_coop.c) */
 	_halo_sim_network_coop,
+	/* AI sync (network_actors.c) */
+	_halo_sim_network_actors,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2400,6 +2402,11 @@ enum
 	_halo_sim_world_step_network_coop_client_events,
 	_halo_sim_world_step_network_coop_client_messages,
 	_halo_sim_world_step_network_coop_client_tick,
+	_halo_sim_world_step_network_actors_note,
+	_halo_sim_world_step_network_actors_host_tick,
+	_halo_sim_world_step_network_actors_damage,
+	_halo_sim_world_step_network_actors_states,
+	_halo_sim_world_step_network_actors_drive,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3324,6 +3331,106 @@ enum
 };
 
 void coop_enemies_world_call(struct halo_sim_ai_call *call);
+
+/* network_actors.c's steps' calls (crates/halo_map's network_actors::call) */
+enum
+{
+	/* how often, in ticks, a unit at input[0..2] goes to the machine a
+	(network_objects_send_period): result */
+	_network_actors_call_send_period = 1,
+	/* the damage message's a entries, to every client */
+	_network_actors_call_send_damage,
+	/* the state message's b entries, to the machine a */
+	_network_actors_call_send_states,
+	/* the unit a got back up (unit_port_resurrect) */
+	_network_actors_call_resurrect,
+	/* the unit a seated in the vehicle b's seat actor, or out of it (NONE)
+	(network_objects_set_seat) */
+	_network_actors_call_set_seat,
+	/* damage_set_network_state(a): the shields depleted, charging and over
+	charging (b's bits 0 to 2), the body and shield vitalities, the current
+	and recent body damage and the current and recent shield damage
+	(input[0..5]) */
+	_network_actors_call_set_damage,
+	/* the unit a moved toward where the client's table says
+	(network_objects_reconcile): result */
+	_network_actors_call_reconcile,
+	/* distributed_count_correction */
+	_network_actors_call_count_correction,
+	/* unit_set_actively_controlled(a, b) */
+	_network_actors_call_set_actively_controlled,
+	/* unit_control(a, the control at the address b) */
+	_network_actors_call_unit_control,
+	/* the action actor (an animation impulse, a melee attack or a leap)
+	started on the unit a, turned to input[0..1] if b */
+	_network_actors_call_action,
+	/* the sound b played at the unit a's head */
+	_network_actors_call_speech,
+	/* the unit a's custom animation actor of the graph b, interpolated if
+	input[0] isn't 0 (unit_port_play_user_animation) */
+	_network_actors_call_user_animation,
+};
+
+void network_actors_call(struct halo_sim_ai_call *call);
+
+/* struct halo_sim_network_actors_note kinds */
+enum
+{
+	/* the control an actor gave its unit */
+	_network_actors_note_control,
+	/* an action it started (an animation impulse, a melee attack, a leap) */
+	_network_actors_note_action,
+	/* a sound it started saying */
+	_network_actors_note_speech,
+	/* a custom animation it started */
+	_network_actors_note_user_animation,
+};
+
+/* crates/halo_map's network_actors::NoteArguments: the host noting what an
+actor gave its unit or started it on: the kind, the unit, the host's table
+(struct network_actors_host, network_actors_records.h), the action, whether
+it is turned and to what, the sound, the custom animation (its graph,
+animation and whether interpolated) and the control */
+struct halo_sim_network_actors_note
+{
+	long kind;
+	long unit_index;
+	unsigned long host;
+	long action;
+	long aligned;
+	float alignment_i;
+	float alignment_j;
+	long sound;
+	long graph;
+	long animation;
+	long interpolate;
+	unsigned char control[0x40];
+};
+
+/* crates/halo_map's network_actors::HostTickArguments: the host's tick:
+its table, the sends (struct network_actors_host_sends) and what it reads of
+the game (struct network_actors_host_inputs) */
+struct halo_sim_network_actors_host_tick
+{
+	unsigned long host;
+	unsigned long sends;
+	unsigned long inputs;
+};
+
+/* crates/halo_map's network_actors::ClientArguments: a client handling the
+host's damage or states (count entries) or driving its units: the client's
+table (struct network_actors_client), the objects it has
+(network_objects_client_has_table), the loaded tags and the time */
+struct halo_sim_network_actors_client
+{
+	long count;
+	unsigned long entries;
+	unsigned long client;
+	unsigned long client_has;
+	unsigned long tag_instances;
+	long tag_count;
+	long now;
+};
 
 /* crates/halo_map's coop_enemies::Arguments: co-op's host placing the
 riders kept for want of a dropship's seat: the state (struct

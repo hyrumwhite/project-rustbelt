@@ -217,6 +217,7 @@ const STEP_NETWORK_COOP_OBJECT_NAMES: i32 = 34;
 const STEP_NETWORK_COOP_SCREEN_EFFECT: i32 = 35;
 const STEP_NETWORK_COOP_PRESENTATION: i32 = 36;
 const STEP_NETWORK_COOP_RESEND: i32 = 37;
+const STEP_COOP_ENEMIES: i32 = 38;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -258,6 +259,7 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_COOP_SCREEN_EFFECT => halo_map::network_coop::host_screen_effect(context, host),
         STEP_NETWORK_COOP_PRESENTATION => halo_map::network_coop::host_presentation(context, host),
         STEP_NETWORK_COOP_RESEND => halo_map::network_coop::host_resend(context, host),
+        STEP_COOP_ENEMIES => halo_map::coop_enemies::update(context, host),
         _ => return None,
     }
     Some(())

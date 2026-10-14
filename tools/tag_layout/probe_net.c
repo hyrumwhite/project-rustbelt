@@ -31,6 +31,7 @@ distributed_state_from_object and distributed_inventory_from_unit).
 #include "halo_port_limits.h"
 #include "rasterizer/rasterizer_cinematics.h"
 #include "network_coop_records.h"
+#include "coop_enemies_records.h"
 #include "network_coop.h"
 #include "devices/devices.h"
 
@@ -524,6 +525,23 @@ LAYOUT_SIZE(coop_player_unit)
 LAYOUT_MEMBER(coop_player_unit, unit_index, unit_index)
 LAYOUT_MEMBER(coop_player_unit, maximum_body, maximum_body)
 LAYOUT_MEMBER(coop_player_unit, maximum_shield, maximum_shield)
+LAYOUT_MEMBER(coop_enemies_state, vehicles, vehicles)
+LAYOUT_MEMBER(coop_enemies_state, vehicle_count, vehicle_count)
+LAYOUT_MEMBER(coop_enemies_state, riders, riders)
+LAYOUT_MEMBER(coop_enemies_state, rider_count, rider_count)
+LAYOUT_SIZE(coop_riding_vehicle)
+LAYOUT_MEMBER(coop_riding_vehicle, vehicle_index, vehicle_index)
+LAYOUT_MEMBER(coop_riding_vehicle, seated_unit_indices, seated_unit_indices)
+LAYOUT_MEMBER(coop_riding_vehicle, seat_indices, seat_indices)
+LAYOUT_MEMBER(coop_riding_vehicle, seated_count, seated_count)
+LAYOUT_MEMBER(coop_riding_vehicle, releasing, releasing)
+LAYOUT_MEMBER(coop_riding_vehicle, released_count, released_count)
+LAYOUT_MEMBER(coop_riding_vehicle, next_release_time, next_release_time)
+LAYOUT_SIZE(coop_kept_rider)
+LAYOUT_MEMBER(coop_kept_rider, vehicle_index, vehicle_index)
+LAYOUT_MEMBER(coop_kept_rider, variant_definition_index, variant_definition_index)
+LAYOUT_MEMBER(coop_kept_rider, encounter_index, encounter_index)
+LAYOUT_MEMBER(coop_kept_rider, squad_index, squad_index)
 LAYOUT_SIZE(distributed_damage_animation)
 LAYOUT_SIZE(objects_host_damage_animation)
 LAYOUT_MEMBER(objects_host_damage_animation, animation, animation)

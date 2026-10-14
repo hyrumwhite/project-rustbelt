@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, process::ExitCode, time::Instant};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(command), Some(path)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: halo_map <info|tags|bsp|shaders|shader|sky|bitmap|bitmaps|objects|skypano> <map> [args]");
+        eprintln!("usage: halo_map <info|tags|bsp|shaders|shader|sky|bitmap|bitmaps|objects|names|skypano> <map> [args]");
         return ExitCode::FAILURE;
     };
     let start = Instant::now();
@@ -41,6 +41,7 @@ fn main() -> ExitCode {
         "bitmaps" => all_bitmaps(&cache),
         "skypano" => sky_panorama(&cache, &args[2..]),
         "objects" => objects(&cache, args.get(2).is_some_and(|a| a == "list")),
+        "names" => names(&cache),
         other => Err(format!("unknown command {other}").into()),
     };
     match result {
@@ -251,6 +252,25 @@ fn all_bitmaps(cache: &CacheFile) -> CliResult {
         println!("FAIL {failure}");
     }
     println!("{} unexpected failures", failures.len());
+    Ok(())
+}
+
+/// The scenario's object names (what scripts call objects by) and its
+/// encounters with their squads (what they place AI by).
+fn names(cache: &CacheFile) -> CliResult {
+    use halo_map::layout::{encounter_definition as e, scenario as s, squad_definition as q};
+    /// a scenario object name: its name, then its type and index
+    const OBJECT_NAME_SIZE: usize = 36;
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes.split(|&b| b == 0).next().unwrap_or(&[])).into_owned();
+    let scenario = cache.scenario()?;
+    for (index, name) in scenario.block(s::OBJECT_NAMES, OBJECT_NAME_SIZE)?.iter().enumerate() {
+        println!("object name {index}: {}", text(name.bytes(0, 32)?));
+    }
+    for (index, encounter) in scenario.block(s::AI_ENCOUNTERS, e::SIZEOF)?.iter().enumerate() {
+        let squads: Vec<String> =
+            encounter.block(e::SQUADS, q::SIZEOF)?.iter().map(|q| q.bytes(q::NAME, 32).map(text)).collect::<Result<_, _>>()?;
+        println!("encounter {index}: {} (squads {})", text(encounter.bytes(e::NAME, 32)?), squads.join(", "));
+    }
     Ok(())
 }
 

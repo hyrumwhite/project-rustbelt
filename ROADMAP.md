@@ -1188,6 +1188,18 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Three of four planted errors were caught: the resend period, the join, and the vitality call. The shield's comparison went unseen (a respawned unit differs in its body vitality too).
        - **Rust in charge:** in co-op on a30, the positions differ by a median of 11.5 cm, within the C's 8.0 to 15.9, and both machines end with the host's count of items.
 
+   - [x] Co-op's extra enemies' kept riders in Rust (`halo_map::coop_enemies`, world step 38): coop_enemies.c's `coop_enemies_update`, with `coop_enemies_rider_place`, `coop_enemies_riders_getting_out` and `coop_enemies_forget_vehicle`.
+     - **What Rust does:** Server Setup's EXTRA ENEMIES can make a squad a script loads into a dropship larger than its seats; the riders without a seat are kept. Each tick, for each dropship with riders kept:
+       - a dropship gone or destroyed forgets its riders, and one with none left is done with;
+       - once one of its seated riders is out of it and alive, its kept riders are placed one every four ticks: beside a rider who got out (a ring further about them each round), else at a seat's marker, else the dropship's place; on free ground about it if there is some, else on a ring about it.
+     - **The game's, through calls (`coop_enemies_world_call`):** finding free ground (collision tests against the level and its objects, `coop_enemies_spread_position`), a seat's marker, and placing the actor (`actor_place`, `encounter_update_status`). The state moved to coop_enemies_records.h.
+     - **The test harness:** no level loads enemies into a dropship within a few minutes, so console commands do. `halo_map names <map>` (new) lists a scenario's object names and encounters with their squads. On a30: `HALO_SIM_HS_COMMAND="(begin (object_create lz_cship) (ai_place first_wave) (vehicle_load_magic lz_cship \"\" (ai_actors first_wave)))"` at tick 300, and a new second command, `HALO_SIM_HS_COMMAND_LATER="(vehicle_unload lz_cship \"\")"` (at tick 600, or `HALO_SIM_HS_COMMAND_LATER_TIME`), with `HALO_NET_COOP_ENEMIES_MODE=multiplier HALO_NET_COOP_ENEMIES_MULTIPLIER=4`.
+     - **Results:**
+       - In 100-second co-op sessions on a30 with that setup, every tick agrees, with none left out (171 calls: the kept riders placed).
+       - Without it, 240-second sessions on a30 and b30 agree too, with no riders kept.
+       - All seven planted errors were caught: the release interval, the facing, the ring's spacing, the spread's number, the dead riders, the released count and the rider chosen to stand beside.
+       - **Rust in charge:** with that setup, the positions differ by a median of 12.8 cm (16.8 for the C in the same setup) and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

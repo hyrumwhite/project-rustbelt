@@ -29,7 +29,7 @@ use bevy::{
 };
 use bevy_solarik::{
     pathtracer::{Pathtracer, PathtracingPlugin},
-    prelude::{SolarikLighting, SolarikPlugins},
+    prelude::{SolarikLighting, SolarikPlugins, SolarikSkyLight},
 };
 use halo_map::{
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
@@ -270,7 +270,7 @@ fn main() -> AppExit {
         .insert_resource(saved.as_ref().map_or_else(LightingSettings::default, |s| s.lighting.clone()))
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
-        .add_systems(Update, start_camera)
+        .add_systems(Update, (start_camera, sync_sky_light))
         .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));
 
@@ -705,6 +705,27 @@ fn apply_lighting(
                 skybox.brightness = power * settings.sky_scale;
             }
         }
+    }
+}
+
+/// Solarik lights the rays that leave the level from `SolarikSkyLight`,
+/// where Solari took the camera's environment light: it gets the same
+/// cubemap and intensity (none without one).
+fn sync_sky_light(
+    mut commands: Commands,
+    camera: Query<Option<Ref<EnvironmentMapLight>>, With<Camera3d>>,
+    sky: Option<Res<SolarikSkyLight>>,
+) {
+    let Some(environment) = camera.iter().next() else { return };
+    match environment {
+        Some(environment) if environment.is_changed() || sky.as_ref().is_none_or(|s| s.image.is_none()) => {
+            commands.insert_resource(SolarikSkyLight {
+                image: Some(environment.specular_map.clone()),
+                intensity: environment.intensity,
+            });
+        }
+        None if sky.is_some_and(|s| s.image.is_some()) => commands.insert_resource(SolarikSkyLight { image: None, intensity: 1.0 }),
+        _ => {}
     }
 }
 

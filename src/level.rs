@@ -601,13 +601,20 @@ impl LevelBuilder {
                 if raster_use && !self.skip_transparent {
                     let mut drawn = commands.spawn((
                         Name::new(name),
-                        Mesh3d(mesh),
+                        Mesh3d(mesh.clone()),
                         bevy::light::NotShadowCaster,
                         Transform::default(),
                         ChildOf(parent),
                     ));
                     match surface {
                         Surface::Transparent(material) => drawn.insert(MeshMaterial3d(material.clone())),
+                        // glass and water are thin panes in the ray-traced
+                        // scene too: Solarik reflects, tints and shadows
+                        // through them, and composites the camera's panes in
+                        // place of the raster draw once it can
+                        Surface::Blended(material) if traced_use => {
+                            drawn.insert((MeshMaterial3d(material.clone()), RaytracingMesh3d(mesh.clone()), TracedMesh(mesh)))
+                        }
                         Surface::Blended(material) => drawn.insert(MeshMaterial3d(material.clone())),
                         Surface::Solid(_) => unreachable!(),
                     };
@@ -1131,9 +1138,12 @@ impl LevelBuilder {
         Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance }))
     }
 
-    /// Glass and water as smooth, blended surfaces: Halo draws them in
-    /// several passes (tint, reflection, ripples); this keeps their colour,
-    /// transparency and a reflection of the sky from the environment map.
+    /// Glass and water as smooth, thin panes: Halo draws them in several
+    /// passes (tint, reflection, ripples); this keeps their colour as the
+    /// tint of what is seen through them, and a reflection. Solarik's thin
+    /// glass is a blended material with full specular transmission; its
+    /// alpha is coverage (zero a hole), so a pane is fully covered and
+    /// tinted, and reflects by Fresnel.
     fn glass_or_water_material(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<Handle<StandardMaterial>> {
         let texture = |map: Option<TagRef>, this: &mut Self, assets: &mut LevelAssets| {
             map.and_then(|m| m.datum).and_then(|d| this.textures.get(&this.cache, d, 0, true, assets.images))
@@ -1141,24 +1151,27 @@ impl LevelBuilder {
         let material = if let Some(glass) = info.glass {
             let [r, g, b] = glass.tint;
             StandardMaterial {
-                base_color: Color::srgba(r, g, b, 0.35),
-                base_color_texture: texture(glass.diffuse_map.or(glass.tint_map), self, assets),
+                base_color: Color::srgba(r, g, b, 1.0),
+                base_color_texture: texture(glass.tint_map, self, assets),
                 perceptual_roughness: 0.05,
                 reflectance: 0.6,
+                specular_transmission: 1.0,
                 alpha_mode: AlphaMode::Blend,
                 cull_mode: None,
+                double_sided: true,
                 ..default()
             }
         } else {
             let water = info.water?;
-            let [r, g, b, a] = water.perpendicular_tint;
+            let [r, g, b, _] = water.perpendicular_tint;
             StandardMaterial {
-                base_color: Color::srgba(r, g, b, a.clamp(0.3, 0.9)),
-                base_color_texture: texture(water.base_map, self, assets),
+                base_color: Color::srgba(r, g, b, 1.0),
                 perceptual_roughness: 0.08,
                 reflectance: 0.5,
+                specular_transmission: 1.0,
                 alpha_mode: AlphaMode::Blend,
                 cull_mode: None,
+                double_sided: true,
                 ..default()
             }
         };

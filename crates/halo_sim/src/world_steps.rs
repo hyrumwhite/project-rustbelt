@@ -233,6 +233,9 @@ const STEP_NETWORK_VOTEKICK_REQUEST: i32 = 50;
 const STEP_NETWORK_VOTEKICK_HOST_TICK: i32 = 51;
 const STEP_NETWORK_VOTEKICK_STATUS: i32 = 52;
 const STEP_NETWORK_VOTEKICK_MACHINE: i32 = 53;
+const STEP_NETWORK_VOICE_UPDATE: i32 = 54;
+const STEP_NETWORK_VOICE_MESSAGE: i32 = 55;
+const STEP_NETWORK_VOICE_JOINED: i32 = 56;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -290,6 +293,9 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_VOTEKICK_HOST_TICK => halo_map::network_votekick::host_tick(context, host),
         STEP_NETWORK_VOTEKICK_STATUS => halo_map::network_votekick::status(context, host),
         STEP_NETWORK_VOTEKICK_MACHINE => halo_map::network_votekick::machine(context, host),
+        STEP_NETWORK_VOICE_UPDATE => halo_map::network_voice::update(context, host),
+        STEP_NETWORK_VOICE_MESSAGE => halo_map::network_voice::message(context, host),
+        STEP_NETWORK_VOICE_JOINED => halo_map::network_voice::joined(context, host),
         _ => return None,
     }
     Some(())

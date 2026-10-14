@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 30
+#define BEVY_BRIDGE_VERSION 31
 #define BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS 512
 #define BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS 256
 #define BEVY_BRIDGE_MASS_POINTS 8192
@@ -281,7 +281,11 @@ struct bevy_bridge_input
 
 /* an overlay picture: width x height pixels, RGBA, 8 bits a channel, the
 top row first; the colours premultiplied by alpha (what covers the world)
-and in the display's encoding (sRGB) */
+and in the display's encoding (sRGB). With `multiply` (protocol 31), as
+many pixels again follow it: what the multiplying blends (decals that darken
+or brighten what is under them) do to the world, as half the factor (0.5:
+nothing), in the display's encoding: the renderer multiplies its world by
+twice it, under the picture. */
 struct bevy_bridge_overlay
 {
 	unsigned long sequence;
@@ -289,7 +293,8 @@ struct bevy_bridge_overlay
 	unsigned long frame_index;
 	unsigned long width;
 	unsigned long height;
-	unsigned long reserved[4];
+	unsigned long multiply;
+	unsigned long reserved[3];
 };
 
 /* a gamepad the renderer forwards */
@@ -971,7 +976,8 @@ struct bevy_bridge_shared
 	/* vehicle updates (a ring, as the projectiles) */
 	unsigned long vehicle_update_record_count;
 	struct bevy_bridge_vehicle_update_record vehicle_update_records[BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS];
-	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
+	/* (each overlay's picture, then its multiply's) */
+	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4 * 2];
 };
 
 /* ---------- prototypes/the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c) */

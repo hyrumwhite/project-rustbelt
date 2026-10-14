@@ -43,6 +43,9 @@ unsigned char *bevy_bridge_overlay_begin(
 	unsigned long width,
 	unsigned long height);
 void bevy_bridge_overlay_commit(void);
+/* (before the commit) whether the multiply's pixels follow the picture's
+(bevy_bridge_protocol.h) */
+void bevy_bridge_overlay_multiply(boolean multiply);
 
 /* projectiles.c, with game.bevy_bridge_ray_tests: each projectile_update
 recorded for a renderer to replay (bevy_bridge_projectile_record) */

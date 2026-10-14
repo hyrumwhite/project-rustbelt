@@ -85,6 +85,8 @@ enum
 	_halo_sim_network_coop,
 	/* AI sync (network_actors.c) */
 	_halo_sim_network_actors,
+	/* the players' vote to kick a player (network_votekick.c) */
+	_halo_sim_network_votekick,
 	NUMBER_OF_HALO_SIM_SYSTEMS
 };
 
@@ -2407,6 +2409,10 @@ enum
 	_halo_sim_world_step_network_actors_damage,
 	_halo_sim_world_step_network_actors_states,
 	_halo_sim_world_step_network_actors_drive,
+	_halo_sim_world_step_network_votekick_request,
+	_halo_sim_world_step_network_votekick_host_tick,
+	_halo_sim_world_step_network_votekick_status,
+	_halo_sim_world_step_network_votekick_machine,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3372,6 +3378,63 @@ enum
 };
 
 void network_actors_call(struct halo_sim_ai_call *call);
+
+/* network_votekick.c's steps' calls (crates/halo_map's
+network_votekick::call) */
+enum
+{
+	/* the machine a's players' names (distributed_machine_player_names)
+	into the texts' names, or (b) the vote's target's */
+	_network_votekick_call_names = 1,
+	/* the texts' notice to everyone (distributed_send_notice) */
+	_network_votekick_call_notice,
+	/* ... to the machine a alone, NONE the host's own
+	(distributed_send_notice_to_machine) */
+	_network_votekick_call_refuse,
+	/* the machine a kicked (network_game_server_kick_machine) */
+	_network_votekick_call_kick,
+	/* the texts' message (the count) to the machine a */
+	_network_votekick_call_send_status,
+	/* the log's line: a vote started by the machine a against b */
+	_network_votekick_call_log_started,
+};
+
+void network_votekick_call(struct halo_sim_ai_call *call);
+
+/* struct halo_sim_network_votekick kinds: a request's (a client's message,
+the host's own machine's), and the host's server's questions */
+enum
+{
+	_network_votekick_request_message = 0,
+	_network_votekick_request_own,
+};
+enum
+{
+	_network_votekick_machine_joined = 0,
+	_network_votekick_machine_kept_out,
+	_network_votekick_new_game,
+};
+
+/* crates/halo_map's network_votekick::Arguments: a step of the vote: its
+kind, the machine (a request's sender, a machine joined), the player the
+host's own request names, whether a client's came over its stream, the
+message's entry, the vote's records (struct votekick_state,
+network_votekick_records.h), its texts (struct votekick_texts), what it
+reads of the game (struct votekick_inputs), whether this machine hosts, and
+the answer (kept out) */
+struct halo_sim_network_votekick
+{
+	long kind;
+	long machine_index;
+	long player_index;
+	long from_stream;
+	unsigned long entries;
+	unsigned long state;
+	unsigned long texts;
+	unsigned long inputs;
+	long host;
+	long result;
+};
 
 /* struct halo_sim_network_actors_note kinds */
 enum

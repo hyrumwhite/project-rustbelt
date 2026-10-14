@@ -2239,6 +2239,7 @@ static char const *const halo_sim_system_names[NUMBER_OF_HALO_SIM_SYSTEMS] =
 	"network_clock",
 	"network_coop",
 	"network_actors",
+	"network_votekick",
 };
 
 /* the biped rest checks: what the game's began with, its calls, and the
@@ -10913,6 +10914,10 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network actors damage",
 	"network actors states",
 	"network actors drive",
+	"network votekick request",
+	"network votekick host tick",
+	"network votekick status",
+	"network votekick machine",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10967,6 +10972,10 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_actors,
 	_halo_sim_network_actors,
 	_halo_sim_network_actors,
+	_halo_sim_network_votekick,
+	_halo_sim_network_votekick,
+	_halo_sim_network_votekick,
+	_halo_sim_network_votekick,
 };
 
 static struct

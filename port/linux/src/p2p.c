@@ -669,7 +669,17 @@ void p2p_hardware_id(char *hex, int size)
 
 		computed = 1;
 		cached[0] = 0;
-		if (hardware_id_source(source, sizeof(source)))
+		/* (the automated network tests' machines, several on one computer:
+		HALO_NETWORK_TEST_HARDWARE_ID, what each is known by instead, so
+		that each is its own person to a host, as the players' vote counts
+		them: port/linux/game/network_votekick.c) */
+		if (getenv("HALO_NETWORK_TEST_HARDWARE_ID") && getenv("HALO_NETWORK_TEST_HARDWARE_ID")[0])
+		{
+			snprintf(source, sizeof(source), "%s", getenv("HALO_NETWORK_TEST_HARDWARE_ID"));
+			p2p_hmac_sha256((const unsigned char *)key, (int)sizeof(key) - 1, source, (int)strlen(source), digest);
+			p2p_hex(digest, P2P_HARDWARE_ID_BYTES, cached);
+		}
+		else if (hardware_id_source(source, sizeof(source)))
 		{
 			p2p_hmac_sha256((const unsigned char *)key, (int)sizeof(key) - 1, source, (int)strlen(source), digest);
 			p2p_hex(digest, P2P_HARDWARE_ID_BYTES, cached);

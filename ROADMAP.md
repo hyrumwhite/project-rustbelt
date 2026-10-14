@@ -1226,6 +1226,18 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Two of four planted errors were caught: the second sighting and the networked types. Two went unseen: forgetting a difference that resolved itself, and keeping an object that holds a player.
        - **Rust in charge:** in co-op on a30 with those commands, the positions differ by a median of 12.0 to 12.9 cm (the C's 12.9), and both machines end with the host's count of items.
 
+   - [x] A co-op client applying its host's events in Rust (`halo_map::network_coop`, world step 42): network_coop.c's `network_coop_handle_events` and `client_apply_event`, with the sound, HUD, player effect, nav point, animation, effect, attach and script sounds' appliers.
+     - **What Rust does:** each event once and in order (its number past the last applied, wrapping), none with a real that isn't a number, then by its kind, checking it against what this machine has:
+       - **sounds:** a dialogue sound (remembered, sixteen at a time, for a skipped cutscene to stop), a looping one started (unless already playing) or stopped, from the object if the client has it;
+       - **a chapter title**, the **HUD** (help text, objective, flashing, messages cleared, checkpoint), the scripts' **camera shake** (held to what an observer accepts), a **nav point** (its arrow, flag, team or unit checked);
+       - **a unit's animation** (an animation graph's animation, the unit the client's), **a scenery's** (found as the host named it), **an effect** at a cutscene flag or on an object's model marker;
+       - **an attach or detach** (not one already made, nor onto its own child), the **revert's** stopping of the dialogue, a **broken surface** of this BSP, a **unit opened** or closed.
+     - **The game's, through calls (`network_coop_client_call`):** each engine function the event ends in, by numbers (a marker's or animation's index, the game finding its name). Since starting a looping sound changes its tag, whether each entry's was playing is gathered before the step, and Rust follows its own starts and stops within it; the objects (an attach) are the step's records. The script sounds moved to network_coop_records.h; network_objects.c gained an accessor of the objects a client has.
+     - **Results:**
+       - In 100-second co-op sessions on a30 (with a nav point on the host's player and broken surfaces, host only), a10 and b30, every message agrees on the joining machine, with none left out.
+       - Four of eight planted errors were caught: the numbers' comparison, a sound's scale, a nav point's offset and a broken surface's BSP. Four went unseen: an objective past the HUD's messages (a hostile host's), a resent attach (a30's reach the client once), the dialogue ring's size (fewer than eight sounds) and a looping sound started twice in one message.
+       - **Rust in charge:** in co-op on a30, the positions differ by a median of 8.5 to 12.4 cm (the C's 8.3 to 12.5), and both machines end with the host's count of items. Two of about ten such sessions began late on the joining machine (71 seconds in common rather than 91) with medians of 21 to 22 cm; no C session has yet, and the cause isn't known.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

@@ -28,7 +28,7 @@ use crate::layout::{
     coop_events as ce, coop_host_attachment as at, coop_host_looping_sound as ls, coop_host_nav_point as np,
     coop_host_queue as hq, coop_host_resend as hr, coop_players_vitality as pv, coop_presentation_inputs as pi,
     coop_player_unit as cpu, coop_resend_inputs as ri, player_datum as pd, coop_sent_device as sd, coop_sent_look as sl,
-    coop_client_devices as cd, coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
+    coop_client_devices as cd, coop_client_script_sounds as ss, coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
     distributed_coop_device_group as dg,
     distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_names as on,
     distributed_coop_object_names_message as cn, distributed_coop_screen_effect_message as se, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
@@ -1593,5 +1593,408 @@ pub fn client_names(context: &WorldContext, host: &impl AiHost) {
             let mut call = AiCall { kind: DELETE, actor: object_index, ..AiCall::default() };
             host.call(&mut call);
         }
+    }
+}
+
+// ---------- a client: the host's events
+
+/// network_coop.c's client event calls (halo_sim.h's
+/// `_network_coop_client_call_*`, after the device groups' and names').
+mod event_call {
+    pub const HUD_HELP_TEXT: i32 = 8;
+    pub const HUD_STATE_MESSAGE: i32 = 9;
+    pub const HUD_OBJECTIVE: i32 = 10;
+    pub const HUD_FLASH: i32 = 11;
+    pub const HUD_CLEAR: i32 = 12;
+    pub const HUD_CHECKPOINT: i32 = 13;
+    pub const PLAYER_EFFECT: i32 = 14;
+    pub const NAV_POINT: i32 = 15;
+    pub const UNIT_STOP_ANIMATION: i32 = 16;
+    pub const UNIT_PLAY_ANIMATION: i32 = 17;
+    pub const SCENERY_ANIMATION: i32 = 18;
+    pub const SOUND_IMPULSE: i32 = 19;
+    pub const LOOPING_SOUND_START: i32 = 20;
+    pub const LOOPING_SOUND_STOP: i32 = 21;
+    pub const EFFECT_AT_FLAG: i32 = 22;
+    pub const EFFECT_ON_MARKER: i32 = 23;
+    pub const DETACH: i32 = 24;
+    pub const ATTACH: i32 = 25;
+    pub const STOP_IMPULSE: i32 = 26;
+    pub const TITLE: i32 = 27;
+    pub const BREAK_SURFACE: i32 = 28;
+    pub const UNIT_OPEN: i32 = 29;
+}
+
+/// halo_sim.h's `struct halo_sim_network_coop_client_events`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClientEventsArguments {
+    pub count: i32,
+    pub entries: u32,
+    pub events: u32,
+    pub script_sounds: u32,
+    pub client_has: u32,
+    pub object_name_list: u32,
+    pub tag_instances: u32,
+    pub tag_count: i32,
+    pub hud_message_count: i32,
+    pub arrow_count: i32,
+    pub cutscene_flag_count: i32,
+    pub chapter_title_count: i32,
+    pub structure_bsp_index: i32,
+    pub looping_playing: u32,
+}
+
+/// network_coop.c's `_coop_effect_*`: an effect at a cutscene flag, or on
+/// an object's marker.
+const EFFECT_AT_FLAG: u8 = 0;
+/// network_coop.c's `CAMERA_WORLD_BOUND`: a scripted camera shake moves the
+/// camera no further than an observer accepts.
+const CAMERA_WORLD_BOUND: f32 = 5000.0;
+/// game.h's `NUMBER_OF_SOLO_CAMPAIGN_TEAMS`.
+const SOLO_CAMPAIGN_TEAMS: i32 = 10;
+/// network_distributed.h's `MAXIMUM_TRACKED_OBJECTS`.
+const TRACKED_OBJECTS: i32 = nv::MAXIMUM_TRACKED_OBJECTS as i32;
+
+/// `PIN` of a real (finite here: the events' reals are checked first).
+fn pin(value: f32, low: f32, high: f32) -> f32 {
+    if value < low {
+        low
+    } else if value > high {
+        high
+    } else {
+        value
+    }
+}
+
+/// A long passed in a call's reals, as its bits.
+fn bits(value: i32) -> f32 {
+    f32::from_bits(value as u32)
+}
+
+struct ClientEvents<'a, H: AiHost> {
+    world: ClientWorld<'a, H>,
+    a: ClientEventsArguments,
+    tags: crate::ai_actor::AiStepContext,
+    /// The looping sounds this step started (true) or stopped: their tags
+    /// say so after the calls, as the entries' playing (gathered as the step
+    /// began) no longer does.
+    looping: std::cell::RefCell<Vec<(i32, bool)>>,
+}
+
+impl<H: AiHost> ClientEvents<'_, H> {
+    fn m(&self) -> &dyn AiMemory {
+        self.world.m
+    }
+
+    fn call(&self, kind: i32, actor: i32, a: i32, b: i32, input: &[f32]) {
+        self.world.call(kind, actor, a, b, input);
+    }
+
+    fn of_group(&self, tag_index: i32, group: &[u8; 4]) -> bool {
+        crate::sensing::tag_of_group(self.m(), &self.tags, crate::fourcc(group), tag_index)
+    }
+
+    /// network_objects.c's `network_objects_client_has`.
+    fn client_has(&self, object_index: i32) -> bool {
+        let absolute_index = object_index as i16 as i32;
+        object_index != NONE
+            && (0..TRACKED_OBJECTS).contains(&absolute_index)
+            && self.m().i32(self.a.client_has + 4 * absolute_index as u32) == object_index
+            && self.world.typed(object_index, u32::MAX).is_some()
+    }
+
+    /// `distributed_object_index_valid`, the client has it and it is a unit.
+    fn client_unit(&self, object_index: i32) -> bool {
+        object_index != NONE
+            && object_index >> 16 != 0
+            && self.client_has(object_index)
+            && self.world.typed(object_index, nv::_OBJECT_MASK_UNIT as u32).is_some()
+    }
+
+    /// network_distributed.c's `distributed_graph_animation`: whether the
+    /// graph is an animation graph with that animation.
+    fn graph_animation(&self, graph_index: i32, animation_index: i16) -> bool {
+        if !self.of_group(graph_index, b"antr") {
+            return false;
+        }
+        let Some(graph) = crate::sensing::tag_get(self.m(), &self.tags, crate::fourcc(b"antr"), graph_index) else { return false };
+        let count = crate::ai_actor::tag_block_count(self.m(), graph + crate::layout::animation_graph::ANIMATIONS as u32);
+        (0..count).contains(&(animation_index as i32))
+    }
+
+    /// The model of an object's definition, if it has one.
+    fn model(&self, object: u32) -> Option<u32> {
+        let m = self.m();
+        let definition_index = m.i32(object + ud::DEFINITION_INDEX as u32);
+        let model_index = crate::sensing::tag_get(m, &self.tags, crate::fourcc(b"obje"), definition_index)
+            .map_or(0, |definition| m.i32(definition + crate::layout::object_definition::OBJECT_MODEL as u32 + 0xc));
+        if model_index == NONE {
+            return None;
+        }
+        crate::sensing::tag_get(m, &self.tags, crate::fourcc(b"mode"), model_index)
+    }
+
+    /// network_coop.c's `client_apply_hud`.
+    fn hud(&self, event: u32) {
+        let m = self.m();
+        let value = m.i16(event + ev::VALUE as u32);
+        let message = (0..self.a.hud_message_count).contains(&(value as i32));
+        match m.r8(event + ev::TYPE as u32) as usize {
+            nv::_COOP_HUD_HELP_TEXT => {
+                self.call(event_call::HUD_HELP_TEXT, NONE, (m.i16(event + ev::FRAME as u32) != 0) as i32, 0, &[]);
+                if message {
+                    self.call(event_call::HUD_STATE_MESSAGE, NONE, value as i32, 0, &[]);
+                }
+            }
+            nv::_COOP_HUD_OBJECTIVE if message => self.call(event_call::HUD_OBJECTIVE, NONE, value as i32, 0, &[]),
+            nv::_COOP_HUD_HELP_FLASH => self.call(event_call::HUD_FLASH, NONE, (value != 0) as i32, 0, &[]),
+            nv::_COOP_HUD_MESSAGES_CLEAR => self.call(event_call::HUD_CLEAR, NONE, 0, 0, &[]),
+            nv::_COOP_HUD_CHECKPOINT => self.call(event_call::HUD_CHECKPOINT, NONE, (value != 0) as i32, 0, &[]),
+            _ => {}
+        }
+    }
+
+    /// network_coop.c's `client_apply_player_effect`.
+    fn player_effect(&self, event: u32) {
+        let m = self.m();
+        let reals = [0, 1, 2].map(|index| m.f32(event + ev::REALS as u32 + 4 * index));
+        let kind = m.r8(event + ev::TYPE as u32);
+        let values = match kind as usize {
+            nv::_COOP_PLAYER_EFFECT_TRANSLATION => reals.map(|r| pin(r, -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND)),
+            nv::_COOP_PLAYER_EFFECT_ROTATION => reals,
+            nv::_COOP_PLAYER_EFFECT_START => [pin(reals[0], 0.0, 1.0), pin(reals[1], 0.0, 60.0), 0.0],
+            nv::_COOP_PLAYER_EFFECT_STOP => [pin(reals[0], 0.0, 60.0), 0.0, 0.0],
+            _ => return,
+        };
+        self.call(event_call::PLAYER_EFFECT, NONE, kind as i32, 0, &values);
+    }
+
+    /// network_coop.c's `client_apply_nav_point`.
+    fn nav_point(&self, event: u32) {
+        let m = self.m();
+        let kind = m.r8(event + ev::TYPE as u32) as usize;
+        let value = m.i16(event + ev::VALUE as u32);
+        let target = m.i32(event + ev::TARGET as u32);
+        let object_index = m.i32(event + ev::OBJECT_INDEX as u32);
+        let activate = value != NONE as i16;
+        let flag = kind == nv::_COOP_NAV_POINT_TEAM_FLAG || kind == nv::_COOP_NAV_POINT_UNIT_FLAG;
+        let team = kind == nv::_COOP_NAV_POINT_TEAM_FLAG || kind == nv::_COOP_NAV_POINT_TEAM_OBJECT;
+        if (activate && !(0..self.a.arrow_count).contains(&(value as i32)))
+            || (flag && !(0..self.a.cutscene_flag_count).contains(&object_index))
+            || (team && !(0..SOLO_CAMPAIGN_TEAMS).contains(&target))
+            || (!team && self.world.typed(target, nv::_OBJECT_MASK_UNIT as u32).is_none())
+            || kind > nv::_COOP_NAV_POINT_UNIT_OBJECT
+        {
+            return;
+        }
+        let offset = m.f32(event + ev::REALS as u32);
+        self.call(event_call::NAV_POINT, target, kind as i32, value as i32, &[offset, bits(object_index)]);
+    }
+
+    /// network_coop.c's `client_apply_sound`.
+    fn sound(&self, event: u32, index: u32) {
+        let m = self.m();
+        let tag_index = m.i32(event + ev::TAG_INDEX as u32);
+        let object_index = m.i32(event + ev::OBJECT_INDEX as u32);
+        let object_index = if object_index != NONE && self.client_has(object_index) { object_index } else { NONE };
+        let scale = pin(m.f32(event + ev::REALS as u32), 0.0, 1.0);
+        match m.r8(event + ev::TYPE as u32) as usize {
+            nv::_COOP_SOUND_IMPULSE if self.of_group(tag_index, b"snd!") => {
+                self.call(event_call::SOUND_IMPULSE, object_index, tag_index, 0, &[scale]);
+                let sounds = self.a.script_sounds;
+                let next = m.i16(sounds + ss::NEXT as u32);
+                m.w32(sounds + ss::DEFINITION_INDICES as u32 + 4 * next as u32, tag_index as u32);
+                m.set_i16(sounds + ss::NEXT as u32, ((next as i32 + 1) % nv::COOP_CLIENT_SCRIPT_SOUND_COUNT as i32) as i16);
+            }
+            nv::_COOP_SOUND_LOOPING_START if self.of_group(tag_index, b"lsnd") => {
+                // (a resent sound already playing here is left alone)
+                let started = self.looping.borrow().iter().rev().find(|(tag, _)| *tag == tag_index).map(|&(_, playing)| playing);
+                let playing = started.unwrap_or_else(|| m.r8(self.a.looping_playing + index) != 0);
+                if !playing {
+                    self.call(event_call::LOOPING_SOUND_START, object_index, tag_index, 0, &[scale]);
+                    self.looping.borrow_mut().push((tag_index, true));
+                }
+            }
+            nv::_COOP_SOUND_LOOPING_STOP if self.of_group(tag_index, b"lsnd") => {
+                self.call(event_call::LOOPING_SOUND_STOP, NONE, tag_index, 0, &[]);
+                self.looping.borrow_mut().push((tag_index, false));
+            }
+            _ => {}
+        }
+    }
+
+    /// network_coop.c's `client_apply_effect`.
+    fn effect(&self, event: u32) {
+        let m = self.m();
+        let tag_index = m.i32(event + ev::TAG_INDEX as u32);
+        let value = m.i16(event + ev::VALUE as u32);
+        if !self.of_group(tag_index, b"effe") {
+            return;
+        }
+        if m.r8(event + ev::TYPE as u32) == EFFECT_AT_FLAG {
+            if (0..self.a.cutscene_flag_count).contains(&(value as i32)) {
+                self.call(event_call::EFFECT_AT_FLAG, NONE, tag_index, value as i32, &[]);
+            }
+            return;
+        }
+        let Some((object_index, object)) = self.find(event, u32::MAX) else { return };
+        let Some(model) = self.model(object) else { return };
+        let markers = crate::ai_actor::tag_block_count(m, model + crate::layout::model::MARKERS as u32);
+        if (0..markers).contains(&(value as i32)) {
+            self.call(event_call::EFFECT_ON_MARKER, object_index, tag_index, value as i32, &[]);
+        }
+    }
+
+    /// The event's object (`object_find` of its name, object and
+    /// definition).
+    fn find(&self, event: u32, mask: u32) -> Option<(i32, u32)> {
+        let m = self.m();
+        self.world.object_find(
+            m.i16(event + ev::NAME_INDEX as u32),
+            m.i32(event + ev::OBJECT_INDEX as u32),
+            m.i32(event + ev::DEFINITION_INDEX as u32),
+            mask,
+        )
+    }
+
+    /// network_coop.c's `client_apply_attach`: the parent is the event's
+    /// object; the child its target, with its definition in its tag and its
+    /// name index in its first real; its value and frame the markers.
+    fn attach(&self, event: u32) {
+        let m = self.m();
+        let parent = self.find(event, u32::MAX).map(|(index, _)| index).unwrap_or(NONE);
+        let child_name = pin(m.f32(event + ev::REALS as u32), -1.0, 32767.0) as i16;
+        let child = self
+            .world
+            .object_find(child_name, m.i32(event + ev::TARGET as u32), m.i32(event + ev::TAG_INDEX as u32), u32::MAX)
+            .map(|(index, _)| index)
+            .unwrap_or(NONE);
+        if parent == NONE || child == NONE || parent == child {
+            return;
+        }
+        let parent_of = |index: i32| self.world.typed(index, u32::MAX).map_or(NONE, |o| m.i32(o + ud::OBJECT_PARENT_OBJECT_INDEX as u32));
+        let attaching = m.r8(event + ev::TYPE as u32) == nv::_COOP_ATTACH as u8;
+        // (a resent attach this machine already has)
+        if attaching && parent_of(child) == parent {
+            return;
+        }
+        // (not to one of its own children, which objects.c cannot do)
+        if attaching {
+            let mut ancestor = parent_of(parent);
+            while ancestor != NONE {
+                if ancestor == child {
+                    return;
+                }
+                ancestor = parent_of(ancestor);
+            }
+        }
+        if !attaching {
+            self.call(event_call::DETACH, parent, child, 0, &[]);
+        } else {
+            let frame = m.i16(event + ev::FRAME as u32) as i32;
+            self.call(event_call::ATTACH, parent, child, m.i16(event + ev::VALUE as u32) as i32, &[bits(frame)]);
+        }
+    }
+
+    /// network_coop.c's `client_stop_script_sounds`: a skipped cutscene's
+    /// dialogue stopped.
+    fn stop_script_sounds(&self) {
+        let m = self.m();
+        for index in 0..nv::COOP_CLIENT_SCRIPT_SOUND_COUNT as u32 {
+            let at = self.a.script_sounds + ss::DEFINITION_INDICES as u32 + 4 * index;
+            let definition_index = m.i32(at);
+            if definition_index != NONE && self.of_group(definition_index, b"snd!") {
+                self.call(event_call::STOP_IMPULSE, NONE, definition_index, 0, &[]);
+            }
+            m.w32(at, NONE as u32);
+        }
+    }
+
+    /// network_coop.c's `client_apply_event` (the message's `index`th).
+    fn apply(&self, event: u32, index: u32) {
+        let m = self.m();
+        let value = m.i16(event + ev::VALUE as u32);
+        let object_index = m.i32(event + ev::OBJECT_INDEX as u32);
+        match m.r8(event + ev::KIND as u32) as usize {
+            nv::_COOP_EVENT_SOUND => self.sound(event, index),
+            nv::_COOP_EVENT_TITLE => {
+                if (0..self.a.chapter_title_count).contains(&(value as i32)) {
+                    let delay = pin(m.f32(event + ev::REALS as u32), 0.0, 60.0);
+                    self.call(event_call::TITLE, NONE, value as i32, 0, &[delay]);
+                }
+            }
+            nv::_COOP_EVENT_HUD => self.hud(event),
+            nv::_COOP_EVENT_PLAYER_EFFECT => self.player_effect(event),
+            nv::_COOP_EVENT_NAV_POINT => self.nav_point(event),
+            nv::_COOP_EVENT_UNIT_ANIMATION => {
+                if self.client_unit(object_index) {
+                    let graph = m.i32(event + ev::TAG_INDEX as u32);
+                    if graph == NONE {
+                        self.call(event_call::UNIT_STOP_ANIMATION, object_index, 0, 0, &[]);
+                    } else if self.graph_animation(graph, value) {
+                        let interpolate = m.r8(event + ev::INTERPOLATE as u32) as i32;
+                        let frame = m.i16(event + ev::FRAME as u32) as i32;
+                        self.call(event_call::UNIT_PLAY_ANIMATION, object_index, graph, value as i32, &[bits(interpolate), bits(frame)]);
+                    }
+                }
+            }
+            nv::_COOP_EVENT_SCENERY_ANIMATION => {
+                let scenery = self.find(event, nv::_OBJECT_MASK_SCENERY as u32);
+                let graph = m.i32(event + ev::TAG_INDEX as u32);
+                if let Some((scenery_index, _)) = scenery
+                    && self.graph_animation(graph, value)
+                {
+                    let frame = m.i16(event + ev::FRAME as u32) as i32;
+                    self.call(event_call::SCENERY_ANIMATION, scenery_index, graph, value as i32, &[bits(frame)]);
+                }
+            }
+            nv::_COOP_EVENT_EFFECT => self.effect(event),
+            nv::_COOP_EVENT_ATTACH => self.attach(event),
+            nv::_COOP_EVENT_REVERTED => self.stop_script_sounds(),
+            nv::_COOP_EVENT_SURFACE_BROKEN => {
+                if m.i16(event + ev::FRAME as u32) as i32 == self.a.structure_bsp_index {
+                    let reals = [0, 1, 2].map(|index| m.f32(event + ev::REALS as u32 + 4 * index));
+                    self.call(event_call::BREAK_SURFACE, NONE, value as i32, 0, &reals);
+                }
+            }
+            nv::_COOP_EVENT_UNIT_OPEN => {
+                if self.client_unit(object_index) {
+                    self.call(event_call::UNIT_OPEN, object_index, (value != 0) as i32, 0, &[]);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The world step of a co-op client applying its host's events, each once
+/// and in order: network_coop.c's `network_coop_handle_events`.
+pub fn client_events(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ClientEventsArguments = arguments(context, m);
+    let world = ClientWorld {
+        context,
+        host,
+        m,
+        a: ClientWorldArguments { kind: NONE as i16, count: 0, entries: 0, object_name_list: a.object_name_list, tag_instances: 0, tag_count: 0 },
+    };
+    let tags = crate::ai_actor::AiStepContext { tag_instances: a.tag_instances, tag_count: a.tag_count, ..crate::ai_actor::AiStepContext::default() };
+    let events = ClientEvents { world, a, tags, looping: Default::default() };
+    for index in 0..a.count.max(0) as u32 {
+        let event = a.entries + index * ev::SIZEOF as u32;
+        let number = m.r16(event + ev::NUMBER as u32);
+        // (already applied: the comparison handles the number wrapping)
+        let applied_number = m.r16(a.events + ce::APPLIED_NUMBER as u32);
+        if m.r8(a.events + ce::APPLIED_ANY as u32) != 0 && (number.wrapping_sub(applied_number) as i16) <= 0 {
+            continue;
+        }
+        m.w16(a.events + ce::APPLIED_NUMBER as u32, number);
+        m.w8(a.events + ce::APPLIED_ANY as u32, 1);
+        // (not with a number that isn't one)
+        if (0..3).any(|part| !wire::real_valid(m.f32(event + ev::REALS as u32 + 4 * part))) {
+            continue;
+        }
+        events.apply(event, index);
     }
 }

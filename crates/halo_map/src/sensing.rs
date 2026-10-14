@@ -117,6 +117,22 @@ pub fn tag_get(m: &dyn AiMemory, context: &AiStepContext, group_tag: u32, tag_in
     (of_group && base_address != 0).then_some(base_address)
 }
 
+/// network_distributed.c's `distributed_tag_of_group`: whether the index is
+/// a loaded tag's of the group (its own or a parent's; `tag_iterator_next`'s
+/// test). Tag indices are unique, so only the instance at its absolute
+/// index can be it.
+pub fn tag_of_group(m: &dyn AiMemory, context: &AiStepContext, group_tag: u32, tag_index: i32) -> bool {
+    let absolute_index = tag_index as i16;
+    if context.tag_instances == 0 || absolute_index < 0 || absolute_index as i32 >= context.tag_count {
+        return false;
+    }
+    let instance = context.tag_instances + absolute_index as u32 * tag_instance::SIZEOF;
+    m.i32(instance + tag_instance::TAG_INDEX) == tag_index
+        && (m.r32(instance + tag_instance::GROUP_TAG) == group_tag
+            || m.r32(instance + tag_instance::PARENT_GROUP_TAGS) == group_tag
+            || m.r32(instance + tag_instance::PARENT_GROUP_TAGS + 4) == group_tag)
+}
+
 /// `BIT_VECTOR_SIZE_IN_LONGS`.
 fn bit_vector_longs(bit_count: i32) -> i32 {
     (bit_count + 31) >> 5

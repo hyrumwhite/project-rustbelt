@@ -229,6 +229,10 @@ const STEP_NETWORK_ACTORS_HOST_TICK: i32 = 46;
 const STEP_NETWORK_ACTORS_DAMAGE: i32 = 47;
 const STEP_NETWORK_ACTORS_STATES: i32 = 48;
 const STEP_NETWORK_ACTORS_DRIVE: i32 = 49;
+const STEP_NETWORK_VOTEKICK_REQUEST: i32 = 50;
+const STEP_NETWORK_VOTEKICK_HOST_TICK: i32 = 51;
+const STEP_NETWORK_VOTEKICK_STATUS: i32 = 52;
+const STEP_NETWORK_VOTEKICK_MACHINE: i32 = 53;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -282,6 +286,10 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_ACTORS_DAMAGE => halo_map::network_actors::client_damage(context, host),
         STEP_NETWORK_ACTORS_STATES => halo_map::network_actors::client_states(context, host),
         STEP_NETWORK_ACTORS_DRIVE => halo_map::network_actors::client_drive(context, host),
+        STEP_NETWORK_VOTEKICK_REQUEST => halo_map::network_votekick::request(context, host),
+        STEP_NETWORK_VOTEKICK_HOST_TICK => halo_map::network_votekick::host_tick(context, host),
+        STEP_NETWORK_VOTEKICK_STATUS => halo_map::network_votekick::status(context, host),
+        STEP_NETWORK_VOTEKICK_MACHINE => halo_map::network_votekick::machine(context, host),
         _ => return None,
     }
     Some(())

@@ -27,8 +27,8 @@ use crate::distributed_wire::{self as wire, UNIT_SCALE};
 use crate::layout::{
     coop_events as ce, coop_host_attachment as at, coop_host_looping_sound as ls, coop_host_nav_point as np,
     coop_host_queue as hq, coop_host_resend as hr, coop_players_vitality as pv, coop_presentation_inputs as pi,
-    coop_player_unit as cpu, coop_resend_inputs as ri, coop_sent_device as sd, coop_sent_look as sl,
-    coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
+    coop_player_unit as cpu, coop_resend_inputs as ri, player_datum as pd, coop_sent_device as sd, coop_sent_look as sl,
+    coop_client_devices as cd, coop_skip_vote as sv, distributed_coop_presentation as dp, distributed_coop_presentation_message as pm, coop_sent_transform as st, device_datum as dd,
     distributed_coop_device_group as dg,
     distributed_coop_device_state as ds, distributed_coop_event as ev, distributed_coop_object_names as on,
     distributed_coop_object_names_message as cn, distributed_coop_screen_effect_message as se, distributed_coop_object_look as ol, distributed_coop_object_transform as ot,
@@ -308,6 +308,7 @@ const GROUP_FLAGS: u32 = 2;
 const GROUP_VALUE: u32 = 4;
 /// network_coop.c's `_device_group_role_*`.
 const ROLE_POWER: u8 = 0;
+const ROLE_POSITION: u8 = 1;
 
 struct DeviceGroups<'a, H: AiHost> {
     context: &'a WorldContext,
@@ -320,16 +321,7 @@ impl<H: AiHost> DeviceGroups<'_, H> {
     /// devices.c's `device_group_network_get`: the group's value, its flags
     /// a client takes, and whether it is a device's own (made at run time).
     fn group(&self, group_index: i16) -> Option<(f32, u16, bool)> {
-        if group_index == NONE as i16 {
-            return None;
-        }
-        let group = crate::ai_actor::datum_get(self.m, self.a.device_groups, group_index as i32)?;
-        let flags = self.m.r16(group + GROUP_FLAGS);
-        Some((
-            self.m.f32(group + GROUP_VALUE),
-            flags & self.a.network_flags as u16,
-            flags as u32 & (1 << self.a.runtime_bit) != 0,
-        ))
+        device_group_get(self.m, self.a.device_groups, group_index, self.a.network_flags, self.a.runtime_bit)
     }
 
     fn entry(&self, index: i16) -> u32 {
@@ -1397,5 +1389,209 @@ pub fn client_world(context: &WorldContext, host: &impl AiHost) {
         CLIENT_OBJECT_TRANSFORMS => world.object_transforms(),
         CLIENT_OBJECT_LOOKS => world.object_looks(),
         _ => {}
+    }
+}
+
+// ---------- a client: the host's device groups
+
+/// halo_sim.h's `_network_coop_client_call_set_device_group`: the device
+/// group (`actor`) set to `input[0]` with the flags `a`, jumping there if
+/// `b`.
+const SET_DEVICE_GROUP: i32 = 5;
+
+/// halo_sim.h's `struct halo_sim_network_coop_client_devices`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClientDevicesArguments {
+    pub count: i32,
+    pub entries: u32,
+    pub client_devices: u32,
+    pub device_groups: u32,
+    pub scenario_group_count: i32,
+    pub network_flags: i32,
+    pub runtime_bit: i32,
+    pub object_name_list: u32,
+}
+
+/// devices.c's `device_group_network_get`: the group's value, its flags a
+/// client takes, and whether it is a device's own (made at run time).
+fn device_group_get(m: &dyn AiMemory, device_groups: u32, group_index: i16, network_flags: i32, runtime_bit: i32) -> Option<(f32, u16, bool)> {
+    if group_index == NONE as i16 {
+        return None;
+    }
+    let group = crate::ai_actor::datum_get(m, device_groups, group_index as i32)?;
+    let flags = m.r16(group + GROUP_FLAGS);
+    Some((m.f32(group + GROUP_VALUE), flags & network_flags as u16, flags as u32 & (1 << runtime_bit) != 0))
+}
+
+/// The world step of a co-op client applying its host's device groups:
+/// network_coop.c's `network_coop_handle_device_groups`, with
+/// `device_group_find`.
+pub fn client_devices(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ClientDevicesArguments = arguments(context, m);
+    let get = |group_index: i16| device_group_get(m, a.device_groups, group_index, a.network_flags, a.runtime_bit);
+    let world = ClientWorld {
+        context,
+        host,
+        m,
+        a: ClientWorldArguments { kind: NONE as i16, count: 0, entries: 0, object_name_list: a.object_name_list, tag_instances: 0, tag_count: 0 },
+    };
+    let in_range = |group_index: i16| (0..MAXIMUM_DEVICE_GROUPS).contains(&(group_index as i32));
+    for index in 0..a.count.max(0) as u32 {
+        let entry = a.entries + index * dg::SIZEOF as u32;
+        // (network_coop.c's device_group_find: the local group the host's
+        // entry is, a scenario's by its index, a device's own by the device
+        // and its role)
+        let entry_group = m.i16(entry + dg::GROUP_INDEX as u32);
+        let group_index = if entry_group != NONE as i16 {
+            (entry_group >= 0
+                && (entry_group as i32) < a.scenario_group_count
+                && in_range(entry_group)
+                && get(entry_group).is_some_and(|(_, _, runtime)| !runtime))
+            .then_some(entry_group)
+        } else {
+            world
+                .object_find(
+                    m.i16(entry + dg::NAME_INDEX as u32),
+                    m.i32(entry + dg::OBJECT_INDEX as u32),
+                    m.i32(entry + dg::DEFINITION_INDEX as u32),
+                    nv::_OBJECT_MASK_DEVICE as u32,
+                )
+                .and_then(|(_, device)| match m.r8(entry + dg::ROLE as u32) {
+                    ROLE_POWER => Some(m.i16(device + dd::DEVICE_POWER_GROUP_INDEX as u32)),
+                    ROLE_POSITION => Some(m.i16(device + dd::DEVICE_POSITION_GROUP_INDEX as u32)),
+                    _ => None,
+                })
+                .filter(|&group| in_range(group) && get(group).is_some_and(|(_, _, runtime)| runtime))
+        };
+        let Some(group_index) = group_index else { continue };
+        let Some((here, flags, _)) = get(group_index) else { continue };
+        let value = m.f32(entry + dg::VALUE as u32);
+        if !wire::real_valid(value) {
+            continue;
+        }
+        let value = value.clamp(0.0, 1.0);
+        let snaps_at = a.client_devices + cd::SNAPS as u32 + group_index as u32;
+        let seen_at = a.client_devices + cd::SEEN as u32 + group_index as u32;
+        let entry_snaps = m.r8(entry + dg::SNAPS as u32);
+        let entry_flags = m.r8(entry + dg::FLAGS as u32);
+        // (jumping straight to the value when the host did, or when a
+        // rotation's entry disagrees: a change missed, or a late join; a
+        // change's entry animates, as it did on the host)
+        let snap = (m.r8(seen_at) != 0 && entry_snaps != m.r8(snaps_at)) || (m.r8(entry + dg::CHANGED as u32) == 0 && value != here);
+        if snap || value != here || entry_flags != flags as u8 {
+            let mut call = AiCall { kind: SET_DEVICE_GROUP, actor: group_index as i32, a: entry_flags as i32, b: snap as i32, ..AiCall::default() };
+            call.input[0] = value;
+            host.call(&mut call);
+        }
+        m.w8(snaps_at, entry_snaps);
+        m.w8(seen_at, 1);
+    }
+}
+
+// ---------- a client: the host's object names
+
+/// halo_sim.h's `_network_coop_client_call_create_named` and `_delete`:
+/// the object of the scenario's name `actor` made, the object `actor`
+/// deleted.
+const CREATE_NAMED: i32 = 6;
+const DELETE: i32 = 7;
+
+/// halo_sim.h's `struct halo_sim_network_coop_client_names`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClientNamesArguments {
+    pub names: u32,
+    pub differing: u32,
+    pub object_name_list: u32,
+    pub scenario_names: u32,
+    pub scenario_name_count: i32,
+    pub structure_bsp_index: i32,
+}
+
+/// scenario_definitions.h's `struct scenario_object_name`: its size and
+/// its runtime object type.
+const SCENARIO_OBJECT_NAME_SIZE: u32 = 36;
+const SCENARIO_OBJECT_NAME_TYPE: u32 = 32;
+/// network_coop.c's `NETWORKED_OBJECT_TYPES`: the types network_objects.c
+/// syncs, which the names leave alone.
+const NETWORKED_OBJECT_TYPES: u32 =
+    (nv::_OBJECT_MASK_BIPED | nv::_OBJECT_MASK_VEHICLE | nv::_OBJECT_MASK_WEAPON | nv::_OBJECT_MASK_EQUIPMENT) as u32;
+
+/// The world step of a co-op client creating or deleting its named scenery
+/// and devices to match its host's: network_coop.c's
+/// `network_coop_handle_object_names`. A difference must show up twice in a
+/// row, on the same BSP, so a message crossing a BSP switch or a script's
+/// create can't cause a false one.
+pub fn client_names(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ClientNamesArguments = arguments(context, m);
+    let structure_bsp_index = m.i16(a.names + on::STRUCTURE_BSP_INDEX as u32);
+    let name_count = m.i16(a.names + on::NAME_COUNT as u32);
+    let bytes = nv::COOP_OBJECT_NAME_BYTES as u32;
+    if structure_bsp_index as i32 != a.structure_bsp_index
+        || name_count as i32 != a.scenario_name_count.min(nv::MAXIMUM_OBJECT_NAMES_PER_SCENARIO as i32)
+    {
+        for index in 0..bytes {
+            m.w8(a.differing + index, 0);
+        }
+        return;
+    }
+    // network_coop.c's object_holds_player: a player's unit, or carrying one
+    // (scripts never delete those)
+    fn holds_player(m: &dyn AiMemory, context: &WorldContext, object_index: i32) -> bool {
+        // (players.c's player_index_from_unit_index)
+        let data = context.player_data;
+        let size = m.r16(data + DATA_SIZE) as i16 as u32;
+        for player_index in 0..m.r16(data + DATA_COUNT) as i16 as u32 {
+            let player = m.r32(data + DATA_DATA) + player_index * size;
+            if m.i16(player + pd::IDENTIFIER as u32) != 0 && m.i32(player + pd::UNIT_INDEX as u32) == object_index {
+                return true;
+            }
+        }
+        let object = |index: i32| {
+            crate::ai_actor::datum_get(m, context.object_header_data, index).map(|header| m.r32(header + oh::DATUM as u32))
+        };
+        let mut child_index = object(object_index).map_or(NONE, |o| m.i32(o + ud::OBJECT_FIRST_CHILD_OBJECT_INDEX as u32));
+        while child_index != NONE {
+            if holds_player(m, context, child_index) {
+                return true;
+            }
+            child_index = object(child_index).map_or(NONE, |o| m.i32(o + ud::OBJECT_NEXT_OBJECT_INDEX as u32));
+        }
+        false
+    }
+    for name_index in 0..name_count.max(0) as u32 {
+        let differing = a.differing + name_index / 8;
+        let bit = 1u8 << (name_index % 8);
+        let host_has = m.r8(a.names + on::PRESENT as u32 + name_index / 8) & bit != 0;
+        // (objects.c's object_index_from_name_index; network_coop.c's
+        // object_name_type)
+        let object_index = m.i32(a.object_name_list + 4 * name_index);
+        let kind = if (name_index as i32) < a.scenario_name_count {
+            m.i16(a.scenario_names + name_index * SCENARIO_OBJECT_NAME_SIZE + SCENARIO_OBJECT_NAME_TYPE)
+        } else {
+            NONE as i16
+        };
+        if !(0..nv::NUMBER_OF_OBJECT_TYPES as i16).contains(&kind)
+            || NETWORKED_OBJECT_TYPES & (1 << kind) != 0
+            || host_has == (object_index != NONE)
+        {
+            m.w8(differing, m.r8(differing) & !bit);
+            continue;
+        }
+        if m.r8(differing) & bit == 0 {
+            m.w8(differing, m.r8(differing) | bit);
+            continue;
+        }
+        m.w8(differing, m.r8(differing) & !bit);
+        if host_has {
+            let mut call = AiCall { kind: CREATE_NAMED, actor: name_index as i32, ..AiCall::default() };
+            host.call(&mut call);
+        } else if !holds_player(m, context, object_index) {
+            let mut call = AiCall { kind: DELETE, actor: object_index, ..AiCall::default() };
+            host.call(&mut call);
+        }
     }
 }

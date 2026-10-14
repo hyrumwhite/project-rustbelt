@@ -1211,6 +1211,21 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - Three of six planted errors were caught: the device tolerance, the snap's moving test and the axes made valid. The three unseen check against a hostile or mismatched host (a permutation past the model's, a salt that differs, a named object found by index).
        - **Rust in charge:** in co-op on a30, the positions differ by a median of 12.4 cm, within the C's 8.0 to 15.9, and both machines end with the host's count of items.
 
+   - [x] A co-op client applying its host's device groups in Rust (`halo_map::network_coop`, world step 40): network_coop.c's `network_coop_handle_device_groups`, with `device_group_find`.
+     - **What Rust does:** for each of the host's groups, the client's own: a scenario's by its index (one not made at run time), a device's own by the device (`object_find`) and its role. The group is set to the host's value (held to 0 to 1) and flags, jumping there when the host did (its count of immediate sets differs from the last seen) or when a rotation's entry disagrees (a change missed, a late join); a change's entry animates, as on the host.
+     - **The game's, through calls:** setting a group (`device_group_network_set`). The snap counts seen moved to network_coop_records.h; the game's device groups are the step's records, since setting one changes what the next entries read.
+     - **Results:**
+       - In 100-second co-op sessions on a10 (doors moved on the host, a 40-second late join) and a30, every message agrees on the joining machine.
+       - Three of six planted errors were caught: the changed entry's test, the device's role and the groups seen. Three went unseen: the snap count (an immediate set reaches the client as a changed entry anyway), the flags' comparison (no script changes them) and a scenario group's runtime test (a hostile host's).
+
+   - [x] A co-op client matching its host's named objects in Rust (`halo_map::network_coop`, world step 41): network_coop.c's `network_coop_handle_object_names`, with `object_holds_player`.
+     - **What Rust does:** for each scenario object name of a type the object netcode doesn't sync (scenery, devices), whether the host has its object and the client doesn't, or the other way. A difference seen twice in a row on the same BSP creates the object, or deletes the client's (not one holding a player). A message of another BSP or count of names forgets the differences.
+     - **The game's, through calls:** creating by name (`object_new_by_name`) and deleting (`object_delete`). The names' objects, the objects' headers and memory pool are the step's records.
+     - **Results:**
+       - In 100-second co-op sessions on a30 with the host alone destroying and later recreating `intro_tree` (`HOST_ONLY_COMMAND=1`), every message agrees on the joining machine.
+       - Two of four planted errors were caught: the second sighting and the networked types. Two went unseen: forgetting a difference that resolved itself, and keeping an object that holds a player.
+       - **Rust in charge:** in co-op on a30 with those commands, the positions differ by a median of 12.0 to 12.9 cm (the C's 12.9), and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

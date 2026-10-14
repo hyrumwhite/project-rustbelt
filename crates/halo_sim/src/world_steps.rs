@@ -219,6 +219,8 @@ const STEP_NETWORK_COOP_PRESENTATION: i32 = 36;
 const STEP_NETWORK_COOP_RESEND: i32 = 37;
 const STEP_COOP_ENEMIES: i32 = 38;
 const STEP_NETWORK_COOP_CLIENT_WORLD: i32 = 39;
+const STEP_NETWORK_COOP_CLIENT_DEVICES: i32 = 40;
+const STEP_NETWORK_COOP_CLIENT_NAMES: i32 = 41;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -262,6 +264,8 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_COOP_RESEND => halo_map::network_coop::host_resend(context, host),
         STEP_COOP_ENEMIES => halo_map::coop_enemies::update(context, host),
         STEP_NETWORK_COOP_CLIENT_WORLD => halo_map::network_coop::client_world(context, host),
+        STEP_NETWORK_COOP_CLIENT_DEVICES => halo_map::network_coop::client_devices(context, host),
+        STEP_NETWORK_COOP_CLIENT_NAMES => halo_map::network_coop::client_names(context, host),
         _ => return None,
     }
     Some(())

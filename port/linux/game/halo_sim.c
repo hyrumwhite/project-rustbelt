@@ -7,7 +7,7 @@ game's own C, one system at a time: the object simulation handing off from
 the game to Rust (ROADMAP phase 7).
 
 Off unless game.rust_simulation names systems (HALO_RUST_SIMULATION, e.g.
-"point_physics" or "point_physics:check"). The DLL reads the level from
+"point_physics" or "point_physics:check", or "all" for every one in Rust). The DLL reads the level from
 the game's own map file at its first call in the level. In check mode both
 run: the game keeps its own result, and the Rust result is compared with it
 bit for bit; differences are counted and the first few logged.
@@ -4986,7 +4986,13 @@ static void halo_sim_initialize(void)
 			platform_log("halo_sim: %s runs in Rust%s", name,
 				halo_sim.modes[system] == _halo_sim_mode_check ? ", checked against the game's" : "");
 		}
+		/* ("all": every system, each in Rust, as bevy-rt-test's launcher
+		starts the game) */
+		else if (!strcmp(systems, "all"))
+			halo_sim.modes[system] = _halo_sim_mode_rust;
 	}
+	if (!strcmp(systems, "all"))
+		platform_log("halo_sim: all %d systems run in Rust", NUMBER_OF_HALO_SIM_SYSTEMS);
 }
 
 /* the level's map file, read by the DLL once a level */

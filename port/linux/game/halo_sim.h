@@ -2393,6 +2393,7 @@ enum
 	_halo_sim_world_step_network_coop_screen_effect,
 	_halo_sim_world_step_network_coop_presentation,
 	_halo_sim_world_step_network_coop_resend,
+	_halo_sim_world_step_coop_enemies,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3088,6 +3089,29 @@ enum
 	_network_coop_world_call_log_joined,
 	/* sets the unit's (a) maximum vitality to the players' (object_initialize_vitality) */
 	_network_coop_world_call_initialize_vitality,
+};
+
+/* coop_enemies.c's update's calls (crates/halo_map's coop_enemies::call) */
+enum
+{
+	/* free ground about input[0..2] for the a'th enemy
+	(coop_enemies_spread_position): result, and output[0..2] */
+	_coop_enemies_call_spread_position = 1,
+	/* the vehicle's (a) seat's (b) marker: result, and output[0..2] */
+	_coop_enemies_call_seat_marker,
+	/* places a kept rider of the variant a, the encounter b and the squad
+	actor at input[0..2] facing input[3] (actor_place) */
+	_coop_enemies_call_place_rider,
+};
+
+void coop_enemies_world_call(struct halo_sim_ai_call *call);
+
+/* crates/halo_map's coop_enemies::Arguments: co-op's host placing the
+riders kept for want of a dropship's seat: the state (struct
+coop_enemies_state, coop_enemies_records.h) */
+struct halo_sim_coop_enemies
+{
+	unsigned long state;
 };
 
 /* crates/halo_map's network_coop::ResendArguments: co-op's host noticing a

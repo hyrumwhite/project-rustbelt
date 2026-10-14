@@ -2772,6 +2772,7 @@ static struct
 	unsigned long skipped[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
 	unsigned long externals[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
 	boolean command_run;
+	boolean later_command_run;
 } halo_sim_hs_checks;
 
 static char const *const halo_sim_hs_operation_names[NUMBER_OF_HALO_SIM_HS_OPERATIONS] =
@@ -10899,6 +10900,7 @@ static char const *const halo_sim_world_step_names[NUMBER_OF_HALO_SIM_WORLD_STEP
 	"network coop screen effect",
 	"network coop presentation",
 	"network coop resend",
+	"coop enemies",
 };
 
 static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
@@ -10934,6 +10936,7 @@ static short const halo_sim_world_step_systems[NUMBER_OF_HALO_SIM_WORLD_STEPS] =
 	_halo_sim_network_host,
 	_halo_sim_network_input,
 	_halo_sim_network_clock,
+	_halo_sim_network_coop,
 	_halo_sim_network_coop,
 	_halo_sim_network_coop,
 	_halo_sim_network_coop,
@@ -11290,6 +11293,25 @@ int halo_sim_hs_begin(long operation, long expression, long *result, int *checki
 
 			platform_log("halo_sim: breaking %d breakable surfaces of %d", count,
 				breakable_surfaces_port_break_first(count));
+		}
+	}
+	/* (and a second, later: HALO_SIM_HS_COMMAND_LATER at the tick
+	HALO_SIM_HS_COMMAND_LATER_TIME, 600 if not given: a script's two steps,
+	as a dropship loaded and later unloaded) */
+	if (operation == _halo_sim_hs_update && !halo_sim_hs_checks.later_command_run)
+	{
+		char const *command = getenv("HALO_SIM_HS_COMMAND_LATER");
+		char const *time = getenv("HALO_SIM_HS_COMMAND_LATER_TIME");
+
+		if (!command)
+		{
+			halo_sim_hs_checks.later_command_run = TRUE;
+		}
+		else if (game_time_get() >= (time ? atol(time) : 600))
+		{
+			halo_sim_hs_checks.later_command_run = TRUE;
+			platform_log("halo_sim: evaluating the later command %s: %s", command,
+				hs_compile_and_evaluate(command) ? "compiled" : "didn't compile");
 		}
 	}
 	if (mode == _halo_sim_mode_c)

@@ -47,7 +47,9 @@ Only the host runs the AI, so all of this is the host's.
 #include "units/unit_definitions.h"
 
 #include "coop_enemies.h"
+#include "coop_enemies_records.h"
 #include "network_coop.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
 
 #include <math.h>
 #include <string.h>
@@ -77,9 +79,10 @@ enum
 	SPREAD_PLACES_PER_RING = 6,
 	/* the rings coop_enemies_fallback_position tries, a place on each */
 	FALLBACK_RINGS = 8,
-	MAXIMUM_RIDING_VEHICLES = 32,
-	MAXIMUM_SEATED_RIDERS = 16,
-	MAXIMUM_KEPT_RIDERS = 512,
+	/* (coop_enemies_records.h's) */
+	MAXIMUM_RIDING_VEHICLES = COOP_ENEMIES_MAXIMUM_RIDING_VEHICLES,
+	MAXIMUM_SEATED_RIDERS = COOP_ENEMIES_MAXIMUM_SEATED_RIDERS,
+	MAXIMUM_KEPT_RIDERS = COOP_ENEMIES_MAXIMUM_KEPT_RIDERS,
 	/* a kept rider placed every this many ticks, as the seated ones
 	jumped out */
 	RIDER_RELEASE_TICKS = 4,
@@ -117,42 +120,14 @@ enum
 
 /* ---------- structures */
 
-/* a vehicle a script loaded riders into: its seated ones, and whether they
-have begun to get out */
-struct coop_riding_vehicle
-{
-	long vehicle_index;
-	long seated_unit_indices[MAXIMUM_SEATED_RIDERS];
-	short seat_indices[MAXIMUM_SEATED_RIDERS];
-	short seated_count;
-	boolean releasing;
-	short released_count;
-	long next_release_time;
-};
-
-/* a rider left without a seat, to place once its vehicle's get out */
-struct coop_kept_rider
-{
-	long vehicle_index;
-	long variant_definition_index;
-	long encounter_index;
-	short squad_index;
-};
+/* (struct coop_riding_vehicle, struct coop_kept_rider and the state:
+coop_enemies_records.h) */
 
 /* ---------- globals */
 
-static struct
-{
-	/* EXTRA ENEMIES, as the game began with it: its choice, and the amount
-	of PER PLAYER (a percentage) and of STATIC MULTIPLIER */
-	short mode;
-	short percent;
-	short multiplier;
-	struct coop_riding_vehicle vehicles[MAXIMUM_RIDING_VEHICLES];
-	short vehicle_count;
-	struct coop_kept_rider riders[MAXIMUM_KEPT_RIDERS];
-	short rider_count;
-} coop_enemies;
+static struct coop_enemies_state coop_enemies;
+/* port: the arguments of the host's update (coop_enemies_update) */
+static struct halo_sim_coop_enemies coop_enemies_arguments;
 
 /* ---------- private code */
 
@@ -345,6 +320,81 @@ static boolean coop_enemies_riders_getting_out(
 	return FALSE;
 }
 
+/* port: the host's update's calls (the Rust port's, crates/halo_map's
+coop_enemies): the spread position, a seat's marker, and placing a rider */
+void coop_enemies_world_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _coop_enemies_call_spread_position:
+	{
+		real_point3d origin, position;
+
+		origin.x = call->input[0];
+		origin.y = call->input[1];
+		origin.z = call->input[2];
+		call->result = coop_enemies_spread_position(&origin, (short)call->a, NULL, &position);
+		if (call->result)
+		{
+			call->output[0] = position.x;
+			call->output[1] = position.y;
+			call->output[2] = position.z;
+		}
+		break;
+	}
+	case _coop_enemies_call_seat_marker:
+	{
+		struct object_datum *object = object_get(call->a);
+		struct unit_definition *definition = unit_definition_get(object->definition_index);
+		struct object_marker marker;
+
+		call->result = FALSE;
+		if (VALID_INDEX(call->b, definition->unit.seats.count))
+		{
+			struct unit_seat *seat = TAG_BLOCK_GET_ELEMENT(&definition->unit.seats, call->b, struct unit_seat);
+
+			if (seat->marker_name[0] && object_get_marker_by_name(call->a, seat->marker_name, &marker, 1) > 0)
+			{
+				call->result = TRUE;
+				call->output[0] = marker.matrix.position.x;
+				call->output[1] = marker.matrix.position.y;
+				call->output[2] = marker.matrix.position.z;
+			}
+		}
+		break;
+	}
+	case _coop_enemies_call_place_rider:
+	{
+		struct encounter_definition *encounter_definition = TAG_BLOCK_GET_ELEMENT(&global_scenario_get()->ai_encounters,
+			DATUM_INDEX_TO_ABSOLUTE_INDEX(call->b), struct encounter_definition);
+		struct squad_definition *squad_definition = TAG_BLOCK_GET_ELEMENT(&encounter_definition->squads,
+			call->actor, struct squad_definition);
+		struct actor_starting_location location;
+
+		/* (as the squad's: its states, no command list of a starting
+		location's) */
+		csmemset(&location, 0, sizeof(location));
+		location.position.x = call->input[0];
+		location.position.y = call->input[1];
+		location.position.z = call->input[2];
+		location.facing = call->input[3];
+		location.cluster_index = NONE;
+		location.noncombat_sequence_id = NONE;
+		location.default_state = squad_definition->default_state;
+		location.initial_state = squad_definition->initial_state;
+		location.actor_variant_index = NONE;
+		location.command_list_index = NONE;
+		actor_place(call->a, call->b, (short)call->actor, &location, FALSE, 0);
+		encounter_update_status(call->b);
+		break;
+	}
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
 /* where a vehicle's `number`th kept rider is placed: beside one of the
 riders who got out of it (where it is now: out of the vehicle, in the
 open), a ring further about them each round; else at a seat's marker, else
@@ -356,7 +406,6 @@ static void coop_enemies_rider_place(
 	real *facing)
 {
 	struct object_datum *object = object_get(vehicle->vehicle_index);
-	struct unit_definition *definition = unit_definition_get(object->definition_index);
 	long out_unit_indices[MAXIMUM_SEATED_RIDERS];
 	short out_count = 0;
 	short index, round;
@@ -383,27 +432,49 @@ static void coop_enemies_rider_place(
 	}
 	else
 	{
-		struct object_marker marker;
-
 		round = number;
-		if (vehicle->seated_count > 0 && VALID_INDEX(vehicle->seat_indices[0], definition->unit.seats.count))
+		/* port: (the seat's marker through the world's calls, the Rust
+		port's) */
+		if (vehicle->seated_count > 0)
 		{
-			struct unit_seat *seat = TAG_BLOCK_GET_ELEMENT(&definition->unit.seats, vehicle->seat_indices[0],
-				struct unit_seat);
+			struct halo_sim_ai_call call;
 
-			if (seat->marker_name[0] &&
-				object_get_marker_by_name(vehicle->vehicle_index, seat->marker_name, &marker, 1) > 0)
+			memset(&call, 0, sizeof(call));
+			call.kind = _coop_enemies_call_seat_marker;
+			call.actor = NONE;
+			call.a = vehicle->vehicle_index;
+			call.b = vehicle->seat_indices[0];
+			coop_enemies_world_call(&call);
+			if (call.result)
 			{
-				*position = marker.matrix.position;
+				position->x = call.output[0];
+				position->y = call.output[1];
+				position->z = call.output[2];
 			}
 		}
 	}
 	/* free ground around that spot, as the squad's own extra enemies get;
 	failing that, a ring around it, further out each round */
-	if (coop_enemies_spread_position(position, (short)(number + 1), NULL, &spread))
+	/* port: (through the world's calls, the Rust port's) */
 	{
-		*position = spread;
-		return;
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _coop_enemies_call_spread_position;
+		call.actor = NONE;
+		call.a = number + 1;
+		call.input[0] = position->x;
+		call.input[1] = position->y;
+		call.input[2] = position->z;
+		coop_enemies_world_call(&call);
+		if (call.result)
+		{
+			spread.x = call.output[0];
+			spread.y = call.output[1];
+			spread.z = call.output[2];
+			*position = spread;
+			return;
+		}
 	}
 	angle = (real)number * (_pi * 2.0f / SPREAD_PLACES_PER_RING);
 	position->x += (real)cos(angle) * RIDER_SPACING * (real)(round / SPREAD_PLACES_PER_RING + 1);
@@ -617,14 +688,13 @@ boolean coop_enemies_rider_unseated(
 	return TRUE;
 }
 
-void coop_enemies_update(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void coop_enemies_update_game(
 	void)
 {
 	long now = game_time_get();
 	short vehicle_number;
 
-	if (!coop_enemies_host())
-		return;
 	for (vehicle_number = coop_enemies.vehicle_count - 1; vehicle_number >= 0; vehicle_number--)
 	{
 		struct coop_riding_vehicle *vehicle = &coop_enemies.vehicles[vehicle_number];
@@ -656,28 +726,57 @@ void coop_enemies_update(
 			continue;
 		{
 			struct coop_kept_rider rider = coop_enemies.riders[index];
-			struct encounter_definition *encounter_definition;
-			struct squad_definition *squad_definition;
-			struct actor_starting_location location;
+			real_point3d position;
+			real facing;
+			struct halo_sim_ai_call call;
 
 			coop_enemies.riders[index] = coop_enemies.riders[--coop_enemies.rider_count];
-			encounter_definition = TAG_BLOCK_GET_ELEMENT(&global_scenario_get()->ai_encounters,
-				DATUM_INDEX_TO_ABSOLUTE_INDEX(rider.encounter_index), struct encounter_definition);
-			squad_definition = TAG_BLOCK_GET_ELEMENT(&encounter_definition->squads, rider.squad_index,
-				struct squad_definition);
-			/* (as the squad's: its states, no command list of a starting
-			location's) */
-			csmemset(&location, 0, sizeof(location));
-			coop_enemies_rider_place(vehicle, vehicle->released_count++, &location.position, &location.facing);
-			location.cluster_index = NONE;
-			location.noncombat_sequence_id = NONE;
-			location.default_state = squad_definition->default_state;
-			location.initial_state = squad_definition->initial_state;
-			location.actor_variant_index = NONE;
-			location.command_list_index = NONE;
-			actor_place(rider.variant_definition_index, rider.encounter_index, rider.squad_index, &location, FALSE, 0);
-			encounter_update_status(rider.encounter_index);
+			coop_enemies_rider_place(vehicle, vehicle->released_count++, &position, &facing);
+			/* port: (placed through the world's calls, the Rust port's) */
+			memset(&call, 0, sizeof(call));
+			call.kind = _coop_enemies_call_place_rider;
+			call.actor = rider.squad_index;
+			call.a = rider.variant_definition_index;
+			call.b = rider.encounter_index;
+			call.input[0] = position.x;
+			call.input[1] = position.y;
+			call.input[2] = position.z;
+			call.input[3] = facing;
+			coop_enemies_world_call(&call);
 		}
 		vehicle->next_release_time = now + RIDER_RELEASE_TICKS;
 	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's coop_enemies), checked
+against the game's otherwise. Its world: the arguments and the state. */
+void coop_enemies_update(
+	void)
+{
+	struct halo_sim_coop_enemies *arguments = &coop_enemies_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	int checking = FALSE;
+
+	if (!coop_enemies_host())
+		return;
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->state = (unsigned long)&coop_enemies;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_enemies;
+	regions[1].size = sizeof(coop_enemies);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_coop_enemies, &context, regions, 2, coop_enemies_world_call,
+		&checking))
+	{
+		return;
+	}
+	coop_enemies_update_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_coop_enemies);
 }

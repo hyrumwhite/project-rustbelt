@@ -505,4 +505,17 @@ struct coop_client_presentation
 	long played_time;
 };
 
+/* what a client's tick reads of the game (network_coop_client_tick): the
+game time, whether a cinematic is in progress, whether local player 0
+watches a teammate riding with an AI driver or has nobody to watch
+(coop_spectate.c), and whether the scripts' camera shake is running */
+struct coop_client_tick_inputs
+{
+	long now;
+	boolean cinematic_in_progress;
+	boolean watching_rider;
+	boolean nothing_to_watch;
+	boolean scripted_shake;
+};
+
 #endif

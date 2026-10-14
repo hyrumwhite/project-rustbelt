@@ -2399,6 +2399,7 @@ enum
 	_halo_sim_world_step_network_coop_client_names,
 	_halo_sim_world_step_network_coop_client_events,
 	_halo_sim_world_step_network_coop_client_messages,
+	_halo_sim_world_step_network_coop_client_tick,
 	NUMBER_OF_HALO_SIM_WORLD_STEPS
 };
 
@@ -3162,6 +3163,41 @@ enum
 	_network_coop_client_call_unit_open,
 	/* the screen effect set as the step left it (rasterizer_screen_effect_port_set) */
 	_network_coop_client_call_set_screen_effect,
+	/* the client's tick's: the players' input enabled if a; the
+	allegiances of the presentation kept in the slot a; the scripts'
+	camera shake ended; the cinematic started; stopped; the host's camera
+	used if a (director_script_camera); the letterbox shown if a; the
+	cluster a kept active (none: NONE) */
+	_network_coop_client_call_input_enable,
+	_network_coop_client_call_allegiance,
+	_network_coop_client_call_shake_end,
+	_network_coop_client_call_cinematic_start,
+	_network_coop_client_call_cinematic_stop,
+	_network_coop_client_call_host_camera,
+	_network_coop_client_call_letterbox,
+	_network_coop_client_call_activating_cluster,
+	/* the scripted camera at input[0..2] facing input[3..5] with up
+	input[6..8], the field of view b's bits */
+	_network_coop_client_call_camera,
+	/* the screen fade of the color input[0..2], b fading out, a ticks long,
+	begun at the game time actor */
+	_network_coop_client_call_fade,
+	/* the HUD settings of the presentation kept in the slot a */
+	_network_coop_client_call_hud_state,
+	/* the skip vote sent to the host, voted if a */
+	_network_coop_client_call_skip_vote,
+};
+
+/* crates/halo_map's network_coop::ClientTickArguments: a co-op client's
+tick: what it reads of the game (struct coop_client_tick_inputs), the
+presentation (struct coop_client_presentation), the skip vote (struct
+coop_skip_vote) and the players' vitality (struct coop_players_vitality) */
+struct halo_sim_network_coop_client_tick
+{
+	unsigned long inputs;
+	unsigned long presentation;
+	unsigned long skip_vote;
+	unsigned long vitality;
 };
 
 /* which of a client's presentation messages */

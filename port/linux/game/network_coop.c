@@ -283,6 +283,10 @@ static struct coop_client_presentation coop_presentation;
 and the arguments of its presentation messages' step */
 static struct rasterizer_screen_effect_port_state coop_client_screen_effect;
 static struct halo_sim_network_coop_client_messages coop_client_messages_arguments;
+/* port: what the client's tick reads of the game (gathered before its
+step), and its arguments */
+static struct coop_client_tick_inputs coop_client_tick_inputs;
+static struct halo_sim_network_coop_client_tick coop_client_tick_arguments;
 
 /* host: events still to be sent; client: the last one applied
 (network_coop_records.h) */
@@ -1702,7 +1706,8 @@ static void client_cinematic_end(
 	if (!coop_presentation.cinematic_started)
 		return;
 	coop_presentation.cinematic_started = FALSE;
-	cinematic_stop();
+	/* port: (through the world's calls, the Rust port's) */
+	client_event_call(_network_coop_client_call_cinematic_stop, NONE, 0, 0, NULL, 0, NULL, 0);
 }
 
 /* client with nothing else to watch: moves the camera (position, forward,
@@ -1755,7 +1760,8 @@ static void client_host_camera_set(
 	if (coop_presentation.host_camera == host_camera)
 		return;
 	coop_presentation.host_camera = host_camera;
-	director_script_camera(host_camera);
+	/* port: (through the world's calls, the Rust port's) */
+	client_event_call(_network_coop_client_call_host_camera, NONE, host_camera, 0, NULL, 0, NULL, 0);
 }
 
 /* port: the arguments of the client's events' step (network_coop_handle_events),
@@ -3033,32 +3039,96 @@ void network_coop_host_tick(
 }
 
 /* client, after each tick */
-void network_coop_client_tick(
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_tick_game(
 	void)
 {
-	/* (a multiplayer game's input and camera are its own) */
-	if (!coop_client())
-		return;
 	client_play_presentation();
 	players_vitality_keep();
-	if (game_time_get() - coop_presentation.heard_time > PRESENTATION_SILENCE_TICKS)
+	if (coop_client_tick_inputs.now - coop_presentation.heard_time > PRESENTATION_SILENCE_TICKS)
 	{
 		client_cinematic_end();
 		client_host_camera_set(FALSE);
-		player_input_enable(TRUE);
+		client_event_call(_network_coop_client_call_input_enable, NONE, TRUE, 0, NULL, 0, NULL, 0);
 	}
 	/* sent every tick while a skip is offered, voted or not, because the
 	host only counts machines it hears from */
-	if (!network_coop_skip_offered())
+	if (!(skip_vote.offered && coop_presentation.cinematic_started))
 		skip_vote.voted = FALSE;
 	else
-	{
-		struct distributed_coop_skip_vote_message message;
+		client_event_call(_network_coop_client_call_skip_vote, NONE, skip_vote.voted, 0, NULL, 0, NULL, 0);
+}
 
-		csmemset(&message.vote, 0, sizeof(message.vote));
-		message.vote.voted = skip_vote.voted;
-		distributed_send(&message, _distributed_message_coop_skip_vote, 1, (word)sizeof(message), _distributed_to_host);
+/* client, after each tick: the host's presentation played in its turn, the
+players' vitality kept, the cinematic ended when the host goes quiet, and
+the skip vote sent while a skip is offered */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, what it reads of the
+game, the presentation, the skip vote, the players' vitality and the objects
+(their vitality kept). */
+void network_coop_client_tick(
+	void)
+{
+	struct halo_sim_network_coop_client_tick *arguments = &coop_client_tick_arguments;
+	struct coop_client_tick_inputs *inputs = &coop_client_tick_inputs;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[9];
+	struct memory_pool *pool = objects_memory_pool();
+	long region_count = 0;
+	int checking = FALSE;
+
+	/* (a multiplayer game's input and camera are its own) */
+	if (!coop_client())
+		return;
+	csmemset(inputs, 0, sizeof(*inputs));
+	inputs->now = game_time_get();
+	inputs->cinematic_in_progress = cinematic_in_progress();
+	inputs->watching_rider = coop_spectate_watching_rider(0);
+	inputs->nothing_to_watch = coop_spectate_nothing_to_watch(0);
+	inputs->scripted_shake = player_effect_port_scripted_active() != FALSE;
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->inputs = (unsigned long)inputs;
+	arguments->presentation = (unsigned long)&coop_presentation;
+	arguments->skip_vote = (unsigned long)&skip_vote;
+	arguments->vitality = (unsigned long)&players_vitality;
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)inputs;
+	regions[region_count++].size = sizeof(*inputs);
+	regions[region_count].address = (unsigned long)&coop_presentation;
+	regions[region_count++].size = sizeof(coop_presentation);
+	regions[region_count].address = (unsigned long)&skip_vote;
+	regions[region_count++].size = sizeof(skip_vote);
+	regions[region_count].address = (unsigned long)&players_vitality;
+	regions[region_count++].size = sizeof(players_vitality);
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
 	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_tick, &context, regions, region_count,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	client_tick_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_tick);
 }
 
 word network_coop_presentation_entry_size(
@@ -3303,6 +3373,72 @@ void network_coop_client_call(
 	case _network_coop_client_call_set_screen_effect:
 		rasterizer_screen_effect_port_set(&coop_client_screen_effect);
 		break;
+	case _network_coop_client_call_input_enable:
+		player_input_enable((boolean)call->a);
+		break;
+	case _network_coop_client_call_allegiance:
+		game_allegiance_set_teams(coop_presentation.buffered[call->a].ally_teams,
+			coop_presentation.buffered[call->a].friendly_teams);
+		break;
+	case _network_coop_client_call_shake_end:
+		player_effect_port_scripted_end();
+		break;
+	case _network_coop_client_call_cinematic_start:
+		cinematic_start();
+		break;
+	case _network_coop_client_call_cinematic_stop:
+		cinematic_stop();
+		break;
+	case _network_coop_client_call_host_camera:
+		director_script_camera((boolean)call->a);
+		break;
+	case _network_coop_client_call_letterbox:
+		cinematic_show_letterbox((boolean)call->a);
+		break;
+	case _network_coop_client_call_activating_cluster:
+		objects_port_set_activating_cluster((short)call->a);
+		break;
+	case _network_coop_client_call_camera:
+	{
+		real_point3d position;
+		real_vector3d forward, up;
+		real field_of_view;
+
+		position.x = call->input[0];
+		position.y = call->input[1];
+		position.z = call->input[2];
+		forward.i = call->input[3];
+		forward.j = call->input[4];
+		forward.k = call->input[5];
+		up.i = call->input[6];
+		up.j = call->input[7];
+		up.k = call->input[8];
+		csmemcpy(&field_of_view, &call->b, sizeof(field_of_view));
+		scripted_camera_set_camera_point_relative(&position, &forward, &up, field_of_view, 0, NONE);
+		break;
+	}
+	case _network_coop_client_call_fade:
+	{
+		real_rgb_color color;
+
+		color.red = call->input[0];
+		color.green = call->input[1];
+		color.blue = call->input[2];
+		player_effect_port_screen_fade_set(&color, (short)call->a, (boolean)call->b, call->actor);
+		break;
+	}
+	case _network_coop_client_call_hud_state:
+		client_apply_hud_state(&coop_presentation.buffered[call->a]);
+		break;
+	case _network_coop_client_call_skip_vote:
+	{
+		struct distributed_coop_skip_vote_message message;
+
+		csmemset(&message.vote, 0, sizeof(message.vote));
+		message.vote.voted = (byte)call->a;
+		distributed_send(&message, _distributed_message_coop_skip_vote, 1, (word)sizeof(message), _distributed_to_host);
+		break;
+	}
 	}
 	halo_sim_world_event_end(call, opened);
 }
@@ -3892,8 +4028,11 @@ static void client_presentation_apply(
 	struct distributed_coop_presentation const *presentation)
 {
 	boolean cinematic = TEST_FLAG(presentation->flags, _presentation_cinematic_bit);
+	long slot = (long)(presentation - coop_presentation.buffered);
 
-	player_input_enable(!presentation->input_disabled);
+	/* port: (the game's changes through the world's calls, the Rust port's;
+	what it reads of the game gathered before the step, coop_client_tick_inputs) */
+	client_event_call(_network_coop_client_call_input_enable, NONE, !presentation->input_disabled, 0, NULL, 0, NULL, 0);
 	if (presentation->players_vitality_set && distributed_real_valid(presentation->players_maximum_body_vitality) &&
 		distributed_real_valid(presentation->players_maximum_shield_vitality) &&
 		presentation->players_maximum_body_vitality > 0.0f && presentation->players_maximum_shield_vitality >= 0.0f)
@@ -3902,15 +4041,15 @@ static void client_presentation_apply(
 		players_vitality.maximum_body = presentation->players_maximum_body_vitality;
 		players_vitality.maximum_shield = presentation->players_maximum_shield_vitality;
 	}
-	game_allegiance_set_teams(presentation->ally_teams, presentation->friendly_teams);
-	if (!presentation->scripted_shake && player_effect_port_scripted_active())
-		player_effect_port_scripted_end();
+	client_event_call(_network_coop_client_call_allegiance, NONE, slot, 0, NULL, 0, NULL, 0);
+	if (!presentation->scripted_shake && coop_client_tick_inputs.scripted_shake)
+		client_event_call(_network_coop_client_call_shake_end, NONE, 0, 0, NULL, 0, NULL, 0);
 
 	/* a machine that joined mid-cutscene may already have started it */
 	if (cinematic && !coop_presentation.cinematic_started)
 	{
-		if (!cinematic_in_progress())
-			cinematic_start();
+		if (!coop_client_tick_inputs.cinematic_in_progress)
+			client_event_call(_network_coop_client_call_cinematic_start, NONE, 0, 0, NULL, 0, NULL, 0);
 		coop_presentation.cinematic_started = TRUE;
 	}
 	else if (!cinematic)
@@ -3924,10 +4063,14 @@ static void client_presentation_apply(
 	with no unit and nobody to watch also gets the host's view, rather than
 	a dead camera at the world origin. */
 	client_host_camera_set((coop_presentation.cinematic_started && presentation->camera_scripted &&
-		!coop_spectate_watching_rider(0)) || coop_spectate_nothing_to_watch(0));
+		!coop_client_tick_inputs.watching_rider) || coop_client_tick_inputs.nothing_to_watch);
 	if (coop_presentation.cinematic_started)
-		cinematic_show_letterbox(TEST_FLAG(presentation->flags, _presentation_letterbox_bit));
-	objects_port_set_activating_cluster((short)(presentation->activating_cluster - 1));
+	{
+		client_event_call(_network_coop_client_call_letterbox, NONE,
+			TEST_FLAG(presentation->flags, _presentation_letterbox_bit) != 0, 0, NULL, 0, NULL, 0);
+	}
+	client_event_call(_network_coop_client_call_activating_cluster, NONE, (short)(presentation->activating_cluster - 1),
+		0, NULL, 0, NULL, 0);
 	if (coop_presentation.host_camera)
 	{
 		real_vector3d forward, up;
@@ -3957,9 +4100,24 @@ static void client_presentation_apply(
 			if (!(coop_presentation.cinematic_started && presentation->camera_scripted))
 				camera_ready = client_watch_host_from_behind(&position, &forward, &up);
 			if (camera_ready && valid_real_vector3d_axes2(&forward, &up))
-				scripted_camera_set_camera_point_relative(&position, &forward, &up,
-					PIN((real)presentation->camera_field_of_view / FIELD_OF_VIEW_SCALE, CAMERA_MINIMUM_FIELD_OF_VIEW,
-						CAMERA_MAXIMUM_FIELD_OF_VIEW), 0, NONE);
+			{
+				real field_of_view = PIN((real)presentation->camera_field_of_view / FIELD_OF_VIEW_SCALE,
+					CAMERA_MINIMUM_FIELD_OF_VIEW, CAMERA_MAXIMUM_FIELD_OF_VIEW);
+				real reals[9];
+				long field_of_view_bits;
+
+				reals[0] = position.x;
+				reals[1] = position.y;
+				reals[2] = position.z;
+				reals[3] = forward.i;
+				reals[4] = forward.j;
+				reals[5] = forward.k;
+				reals[6] = up.i;
+				reals[7] = up.j;
+				reals[8] = up.k;
+				csmemcpy(&field_of_view_bits, &field_of_view, sizeof(field_of_view_bits));
+				client_event_call(_network_coop_client_call_camera, NONE, 0, field_of_view_bits, reals, 9, NULL, 0);
+			}
 		}
 	}
 	else
@@ -3975,16 +4133,16 @@ static void client_presentation_apply(
 		color.red = presentation->fade_color[0] / 255.0f;
 		color.green = presentation->fade_color[1] / 255.0f;
 		color.blue = presentation->fade_color[2] / 255.0f;
-		player_effect_port_screen_fade_set(&color, presentation->fade_ticks,
-			TEST_FLAG(presentation->flags, _presentation_fading_out_bit),
-			game_time_get() - presentation->fade_elapsed);
+		client_event_call(_network_coop_client_call_fade, coop_client_tick_inputs.now - presentation->fade_elapsed,
+			presentation->fade_ticks, TEST_FLAG(presentation->flags, _presentation_fading_out_bit) != 0, &color.red, 3,
+			NULL, 0);
 		coop_presentation.fade_start_time = presentation->fade_start_time;
 	}
 
 	skip_vote.offered = TEST_FLAG(presentation->flags, _presentation_skippable_bit);
 	skip_vote.votes = presentation->skip_votes;
 	skip_vote.voters = presentation->skip_voters;
-	client_apply_hud_state(presentation);
+	client_event_call(_network_coop_client_call_hud_state, NONE, slot, 0, NULL, 0, NULL, 0);
 }
 
 /* client, each tick: plays the next of the host's presentations. It moves

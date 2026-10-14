@@ -186,14 +186,16 @@ fn modulate_base(
 }
 
 /// The base map (at its own size; white without one) times `lerp(1, color,
-/// mask.a)`, its alpha kept.
+/// mask.b)`, its alpha kept: the multipurpose map's blue channel is its
+/// colour change mask in the Xbox order (its alpha, in the PC's, is opaque
+/// in the Xbox maps' DXT1, which tinted whole surfaces).
 fn change_color(mask: &bitmap::Decoded, base: Option<&bitmap::Decoded>, color: [u8; 3]) -> (u32, u32, Vec<u8>, bool) {
     let (w, h) = base.map_or((mask.width, mask.height), |b| (b.width, b.height));
     let mut out = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
             let (mx, my) = (x * mask.width / w, y * mask.height / h);
-            let amount = mask.data[((my * mask.width + mx) * 4 + 3) as usize] as f32 / 255.0;
+            let amount = mask.data[((my * mask.width + mx) * 4 + 2) as usize] as f32 / 255.0;
             let texel = match base {
                 Some(b) => {
                     let o = ((y * w + x) * 4) as usize;

@@ -248,6 +248,23 @@ pub struct ModelSelfIlluminationAnimation {
     pub color_source: Option<usize>,
 }
 
+/// A `shader_model`'s detail map (rasterizer_xbox_models.c's
+/// `set_environment_shader_pixel_shader`): pulled toward neutral (0.5 for the
+/// biased functions, 1 for multiply) where its mask says, then combined with
+/// the base map by its function (0 double biased multiply, 1 multiply, 2
+/// double biased add). The mask (0 none) is the multipurpose map's
+/// reflection (red), self-illumination (green) or colour change (blue)
+/// channel, or its alpha, each inverted first (odd) or not (even): 1 and 2
+/// red, 3 and 4 green, 5 and 6 blue, 7 and 8 alpha. Its scale (u, v) is
+/// against the model's own texture coordinates.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelDetail {
+    pub map: TagRef,
+    pub function: i16,
+    pub mask: i16,
+    pub scale: [f32; 2],
+}
+
 /// A `shader_environment`'s texture animation
 /// (`shader_environment_texture_animation_evaluate`): each texture
 /// coordinate offset by its periodic function of time / period, times its
@@ -297,6 +314,8 @@ pub struct ShaderInfo {
     pub water: Option<Water>,
     /// `shader_environment`'s self-illumination animation (with a map).
     pub self_illumination_animation: Option<EnvironmentSelfIlluminationAnimation>,
+    /// `shader_model`'s detail map.
+    pub model_detail: Option<ModelDetail>,
     /// `shader_model`'s self-illumination animation (with a multipurpose
     /// map).
     pub model_self_illumination_animation: Option<ModelSelfIlluminationAnimation>,
@@ -344,6 +363,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         water: None,
         self_illumination_animation: None,
         model_self_illumination_animation: None,
+        model_detail: None,
         texture_animation: None,
     };
 
@@ -454,6 +474,15 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         // (0 none, 1-4 A-D)
         let source = root.i16(m::CHANGE_COLOR_SOURCE)?;
         info.change_color = (1..=4).contains(&source).then(|| source as usize - 1);
+        if let Some(map) = present(root.reference(m::DETAIL_MAP)?) {
+            let scale = nonzero(root.f32(m::DETAIL_MAP_SCALE)?);
+            info.model_detail = Some(ModelDetail {
+                map,
+                function: root.i16(m::DETAIL_FUNCTION)?.clamp(0, 2),
+                mask: root.i16(m::DETAIL_MASK)?.clamp(0, 8),
+                scale: [scale, scale * nonzero(root.f32(m::DETAIL_MAP_V_SCALE)?)],
+            });
+        }
         let (lower, upper) =
             (root.vec3(m::SELF_ILLUMINATION_COLOR_LOWER_BOUND)?, root.vec3(m::SELF_ILLUMINATION_COLOR_UPPER_BOUND)?);
         if let Some(multipurpose_map) = info.multipurpose_map

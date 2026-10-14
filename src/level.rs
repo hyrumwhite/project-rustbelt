@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// every frame, the object's phase, and the object's change colours.
 #[derive(Component, Clone)]
 pub struct AnimatedSelfIllumination {
-    pub materials: Vec<(Handle<StandardMaterial>, shader::ModelSelfIlluminationAnimation)>,
+    pub materials: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, shader::ModelSelfIlluminationAnimation)>,
     pub phase: f32,
     pub change_colors: [[f32; 3]; 4],
 }
@@ -59,6 +59,7 @@ pub fn animate_self_illumination(
     settings: Res<crate::LightingSettings>,
     objects: Query<&AnimatedSelfIllumination>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut raster_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
 ) {
     let functions = halo_map::object_functions::FunctionTables {
         periodic: std::array::from_fn(|index| Some(&tables.0[index])),
@@ -67,7 +68,7 @@ pub fn animate_self_illumination(
     };
     let seconds = time.elapsed_secs();
     for object in &objects {
-        for (material, animation) in &object.materials {
+        for (material, raster, animation) in &object.materials {
             let phase = if animation.random_phase { object.phase } else { 0.0 };
             let fraction = functions.periodic(animation.function, seconds / animation.period + phase);
             let mut color = Vec3::from(animation.lower) + (Vec3::from(animation.upper) - Vec3::from(animation.lower)) * fraction;
@@ -75,8 +76,12 @@ pub fn animate_self_illumination(
                 color *= Vec3::from(object.change_colors[source]).clamp(Vec3::ZERO, Vec3::ONE);
             }
             let radiance = color * SELF_ILLUMINATION_RADIANCE * settings.emissive_scale;
+            let emissive = LinearRgba::rgb(radiance.x, radiance.y, radiance.z);
             if let Some(mut material) = materials.get_mut(material) {
-                material.emissive = LinearRgba::rgb(radiance.x, radiance.y, radiance.z);
+                material.emissive = emissive;
+            }
+            if let Some(mut raster) = raster.as_ref().and_then(|raster| raster_materials.get_mut(raster)) {
+                raster.base.emissive = emissive;
             }
         }
     }
@@ -912,7 +917,8 @@ impl LevelBuilder {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
         // the shaders whose self-illumination animates: a copy of each one's
         // material for this object (its phase is its own)
-        let mut animated: Vec<(Handle<StandardMaterial>, shader::ModelSelfIlluminationAnimation)> = Vec::new();
+        let mut animated: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, shader::ModelSelfIlluminationAnimation)> =
+            Vec::new();
         let mut animated_by_shader: HashMap<u32, Surface> = HashMap::new();
         let mut animate = |builder: &mut Self, surface: Surface, shader: Option<u32>, assets: &mut LevelAssets| -> Surface {
             let (Surface::Solid(solid), Some(shader)) = (&surface, shader) else { return surface };
@@ -923,8 +929,9 @@ impl LevelBuilder {
             let Some(animation) = info.and_then(|i| i.model_self_illumination_animation) else { return surface };
             let Some(material) = assets.materials.get(&solid.standard).cloned() else { return surface };
             let handle = assets.materials.add(material);
-            animated.push((handle.clone(), animation));
-            let copy = Surface::Solid(SolidSurface { standard: handle, ..solid.clone() });
+            let raster = solid.raster.as_ref().and_then(|raster| assets.environment_materials.get(raster).cloned()).map(|raster| assets.environment_materials.add(raster));
+            animated.push((handle.clone(), raster.clone(), animation));
+            let copy = Surface::Solid(SolidSurface { standard: handle, raster: raster.or(solid.raster.clone()), ..solid.clone() });
             animated_by_shader.insert(shader, copy.clone());
             copy
         };
@@ -1111,8 +1118,14 @@ impl LevelBuilder {
         };
         let surface = match (self.textures.baked(&self.cache, bake, assets.images), assets.materials.get(&solid.standard)) {
             (Some(texture), Some(material)) => {
-                let material = StandardMaterial { base_color_texture: Some(texture), ..material.clone() };
-                Surface::Solid(SolidSurface { standard: assets.materials.add(material), ..solid.clone() })
+                let material = StandardMaterial { base_color_texture: Some(texture.clone()), ..material.clone() };
+                // (and the camera's, a model's detail, over the coloured base)
+                let raster = solid.raster.as_ref().and_then(|raster| assets.environment_materials.get(raster).cloned()).map(|mut raster| {
+                    raster.base.base_color_texture = Some(texture.clone());
+                    raster.extension.base_map = texture;
+                    assets.environment_materials.add(raster)
+                });
+                Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster: raster.or(solid.raster.clone()), ..solid.clone() })
             }
             _ => base.clone(),
         };
@@ -1242,9 +1255,54 @@ impl LevelBuilder {
             (Some(environment), Some(base_map)) => {
                 Some(self.environment_material(environment, base_map.clone(), &material, info, assets))
             }
+            // (a model's detail map: the camera's; the rays keep the base)
+            (None, Some(base_map)) if info.model_detail.is_some() => {
+                self.model_detail_material(base_map.clone(), &material, info, assets)
+            }
             _ => None,
         };
         Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance }))
+    }
+
+    /// A `shader_model`'s camera material with its detail map (see
+    /// `shader::ModelDetail` and `halo_environment.wesl`'s model mode), over
+    /// `standard`; None if its detail map can't be had.
+    fn model_detail_material(
+        &mut self,
+        base_map: Handle<Image>,
+        standard: &StandardMaterial,
+        info: &ShaderInfo,
+        assets: &mut LevelAssets,
+    ) -> Option<Handle<HaloEnvironmentMaterial>> {
+        let detail = info.model_detail?;
+        let detail_map = self.textures.get(&self.cache, detail.map.datum?, 0, true, assets.images)?;
+        // (the mask, read as it is stored)
+        let multipurpose = info
+            .multipurpose_map
+            .and_then(|m| m.datum)
+            .and_then(|datum| self.textures.get(&self.cache, datum, 0, false, assets.images))
+            .unwrap_or_else(|| assets.neutral_detail.clone());
+        // (the mesh's texture coordinates are the base map's, already scaled by
+        // the shader's map scale; the detail's scale is against the model's own)
+        let scale = Vec2::from(detail.scale) / Vec2::from(info.uv_scale).max(Vec2::splat(1e-4));
+        Some(assets.environment_materials.add(HaloEnvironmentMaterial {
+            base: standard.clone(),
+            extension: HaloEnvironment {
+                params: HaloEnvironmentParams {
+                    detail_scales: scale.extend(1.0).extend(1.0),
+                    micro_scale: Vec4::ONE,
+                    modes: UVec4::new(detail.mask as u32, detail.function as u32, 0, crate::material::MODEL_DETAIL),
+                    ..default()
+                },
+                base_map,
+                primary_detail_map: detail_map,
+                secondary_detail_map: multipurpose,
+                micro_detail_map: assets.neutral_detail.clone(),
+                bump_map: assets.flat_normal.clone(),
+                self_illumination_map: assets.flat_normal.clone(),
+                periodic_tables: crate::material::PERIODIC_TABLES.get().cloned().unwrap_or_default(),
+            },
+        }))
     }
 
     /// Glass and water as smooth, thin panes: Halo draws them in several

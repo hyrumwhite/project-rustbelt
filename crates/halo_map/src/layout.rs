@@ -3476,7 +3476,11 @@ pub mod shader_model_definition {
     pub const MAP_V_SCALE: usize = 0xa0;
     pub const BASE_MAP: usize = 0xa4;
     pub const MULTIPURPOSE_MAP: usize = 0xbc;
+    pub const DETAIL_FUNCTION: usize = 0xd4;
+    pub const DETAIL_MASK: usize = 0xd6;
+    pub const DETAIL_MAP_SCALE: usize = 0xd8;
     pub const DETAIL_MAP: usize = 0xdc;
+    pub const DETAIL_MAP_V_SCALE: usize = 0xec;
     pub const PERPENDICULAR_BRIGHTNESS: usize = 0x144;
     pub const PERPENDICULAR_TINT_COLOR: usize = 0x148;
     pub const PARALLEL_BRIGHTNESS: usize = 0x154;

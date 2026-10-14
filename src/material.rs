@@ -149,6 +149,10 @@ pub const ENVIRONMENT_ALPHA_TESTED: u32 = 1 << 1;
 pub const ENVIRONMENT_ANIMATED_ILLUMINATION: u32 = 1 << 2;
 /// The textures move (`HaloEnvironmentParams::texture_*`).
 pub const ENVIRONMENT_TEXTURE_ANIMATION: u32 = 1 << 3;
+/// A `shader_model`'s detail map instead of the environment's layers: the
+/// primary detail map is its detail map, the secondary its multipurpose map
+/// (the mask: `modes.x`), `modes.y` its function.
+pub const MODEL_DETAIL: u32 = 1 << 4;
 
 const SHADER: &str = "embedded://halo_rt/shaders/halo_environment.wesl";
 

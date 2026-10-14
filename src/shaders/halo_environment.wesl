@@ -175,10 +175,26 @@ fn fragment(
     let secondary = textureSample(secondary_detail_map, secondary_detail_sampler, uv * halo.detail_scales.zw);
     let micro = textureSample(micro_detail_map, micro_detail_sampler, uv * halo.micro_scale.xy);
 
-    let w = select(secondary.a, base.a, halo.modes.x != 0u);
-    let detail = mix(to_gamma(secondary.rgb), to_gamma(primary.rgb), w);
-    var colour = saturate(detail_combine(to_gamma(base.rgb), detail, halo.modes.y));
-    colour = saturate(detail_combine(colour, to_gamma(micro.rgb), halo.modes.z));
+    var colour: vec3<f32>;
+    if (halo.modes.w & 16u) != 0u {
+        // a model's detail map, pulled toward neutral where the
+        // multipurpose map (here, linear) doesn't ask for it
+        // (rasterizer_xbox_models.c's set_environment_shader_pixel_shader)
+        let channels = array<f32, 4>(secondary.r, secondary.g, secondary.b, secondary.a);
+        var mask = 1.0;
+        if halo.modes.x != 0u {
+            let channel = channels[(halo.modes.x - 1u) / 2u];
+            mask = select(channel, 1.0 - channel, (halo.modes.x & 1u) == 1u);
+        }
+        let neutral = select(0.5, 1.0, halo.modes.y == 1u);
+        let detail = mix(vec3<f32>(neutral), to_gamma(primary.rgb), mask);
+        colour = saturate(detail_combine(to_gamma(base.rgb), detail, halo.modes.y));
+    } else {
+        let w = select(secondary.a, base.a, halo.modes.x != 0u);
+        let detail = mix(to_gamma(secondary.rgb), to_gamma(primary.rgb), w);
+        colour = saturate(detail_combine(to_gamma(base.rgb), detail, halo.modes.y));
+        colour = saturate(detail_combine(colour, to_gamma(micro.rgb), halo.modes.z));
+    }
     pbr_input.material.base_color = vec4<f32>(to_linear(colour), pbr_input.material.base_color.a);
 
     let bump = textureSample(bump_map, bump_sampler, uv * halo.micro_scale.zw);

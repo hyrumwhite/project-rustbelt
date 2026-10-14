@@ -77,10 +77,17 @@ pub fn animate_self_illumination(
             }
             let radiance = color * SELF_ILLUMINATION_RADIANCE * settings.emissive_scale;
             let emissive = LinearRgba::rgb(radiance.x, radiance.y, radiance.z);
-            if let Some(mut material) = materials.get_mut(material) {
+            // (only when it changes: each change prepares the material
+            // again, and a material changed every frame flickers)
+            if materials.get(material).is_some_and(|m| m.emissive != emissive)
+                && let Some(mut material) = materials.get_mut(material)
+            {
                 material.emissive = emissive;
             }
-            if let Some(mut raster) = raster.as_ref().and_then(|raster| raster_materials.get_mut(raster)) {
+            if let Some(raster) = raster
+                && raster_materials.get(raster).is_some_and(|m| m.base.emissive != emissive)
+                && let Some(mut raster) = raster_materials.get_mut(raster)
+            {
                 raster.base.emissive = emissive;
             }
         }
@@ -927,6 +934,11 @@ impl LevelBuilder {
             }
             let info = shader::shader_info(&builder.cache, TagRef { group: 0, datum: Some(shader) }).ok().flatten();
             let Some(animation) = info.and_then(|i| i.model_self_illumination_animation) else { return surface };
+            // (one that holds its upper colour is the shader's own material:
+            // function 0 is "one")
+            if animation.color_source.is_none() && (animation.function == 0 || animation.lower == animation.upper) {
+                return surface;
+            }
             let Some(material) = assets.materials.get(&solid.standard).cloned() else { return surface };
             let handle = assets.materials.add(material);
             let raster = solid.raster.as_ref().and_then(|raster| assets.environment_materials.get(raster).cloned()).map(|raster| assets.environment_materials.add(raster));
@@ -1208,7 +1220,7 @@ impl LevelBuilder {
             perceptual_roughness: shine.roughness,
             metallic: shine.metallic,
             metallic_roughness_texture: shine.texture,
-            reflectance: 0.5,
+            reflectance: shine.reflectance,
             // A surface that lit the lightmaps (radiosity emission) keeps that
             // as its brightness, the real light output; self-illumination
             // otherwise.
@@ -1409,14 +1421,19 @@ impl LevelBuilder {
     fn shininess(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Shininess {
         use crate::textures::{Bake, MATTE_ROUGHNESS};
         use shader::SpecularMask;
-        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, texture: None };
+        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, reflectance: 0.5, texture: None };
         let Some(reflection) = info.reflection.filter(|_| !self.matte) else { return matte };
         let r = reflection.perpendicular_brightness.max(reflection.parallel_brightness).clamp(0.0, 1.0);
         if r < 0.02 || reflection.cube_map.is_none() {
             return matte;
         }
-        let roughness = 0.8 - 0.65 * r.sqrt();
+        // Models (armour, weapons, vehicles) gloss the most: Halo gives them
+        // a bright cube map whatever lies round them; here they reflect the
+        // level itself, near mirror-like and more strongly head-on.
+        let model = info.shader_type == ShaderType::Model;
+        let roughness = if model { 0.45 - 0.37 * r.sqrt() } else { 0.8 - 0.65 * r.sqrt() };
         let metallic = 0.5 * r;
+        let reflectance = if model { 0.5 + 0.5 * r } else { 0.5 };
         let mask = match reflection.mask {
             // an alpha-tested base map's alpha is its cut-out, not a mask
             SpecularMask::BaseAlpha if !info.alpha_tested => info.base_map.and_then(|b| b.datum).map(|d| (d, 3)),
@@ -1434,8 +1451,8 @@ impl LevelBuilder {
         });
         match texture {
             // the texture holds the values; the factors multiply them
-            Some(texture) => Shininess { roughness: 1.0, metallic: 1.0, texture: Some(texture) },
-            None => Shininess { roughness, metallic, texture: None },
+            Some(texture) => Shininess { roughness: 1.0, metallic: 1.0, reflectance, texture: Some(texture) },
+            None => Shininess { roughness, metallic, reflectance, texture: None },
         }
     }
 
@@ -1558,6 +1575,8 @@ impl LevelBuilder {
 struct Shininess {
     roughness: f32,
     metallic: f32,
+    /// StandardMaterial's reflectance (0.5: the usual 4% head-on).
+    reflectance: f32,
     texture: Option<Handle<Image>>,
 }
 

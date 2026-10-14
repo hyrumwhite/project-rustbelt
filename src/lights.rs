@@ -22,6 +22,9 @@ const SPOT_RADIUS: f32 = 0.15;
 /// the emissive scale: a muzzle flash (reaching 2 world units) visibly lights
 /// the weapon and the ground nearby in daylight, and a dark room.
 const RADIANCE_PER_REACH2: f32 = 30000.0;
+/// Point lights' share of that (muzzle flashes, plasma, explosions): toned
+/// down from the flashlight's.
+const POINT_LIGHT_SCALE: f32 = 0.5;
 /// Below this cutoff angle (radians, from the light's axis) a light is a
 /// spot light; Bevy's cones stop short of a hemisphere.
 const SPOT_CUTOFF: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
@@ -57,7 +60,8 @@ fn sync_lights(
         let spot = light.cutoff_angle < SPOT_CUTOFF;
         let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT));
         let forward = Vec3::from(halo_to_bevy(light.forward, 1.0)).normalize_or(Vec3::NEG_Z);
-        let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * light.radius * light.radius;
+        let scale = if spot { 1.0 } else { POINT_LIGHT_SCALE };
+        let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * light.radius * light.radius;
         let range = light.radius * METERS_PER_WORLD_UNIT;
         let radius = if spot { SPOT_RADIUS } else { LIGHT_RADIUS };
         let source = LightSource { power: radiance * sphere_lumens_per_radiance(radius) };

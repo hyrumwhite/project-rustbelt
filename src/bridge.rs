@@ -493,6 +493,7 @@ fn sync_active_bsp(
     mut visibility: Query<&mut Visibility>,
     fixtures: Query<(Entity, &crate::level::OnBsps)>,
     mut shown: Local<Option<usize>>,
+    mut reset: ResMut<crate::ResetHistory>,
 ) {
     let Some(snapshot) = &link.latest else { return };
     let builder = &level.builder;
@@ -505,6 +506,8 @@ fn sync_active_bsp(
     let active = snapshot.structure_bsp_index as usize;
     if *shown != Some(active) {
         info!("the game is in BSP {active}");
+        // (the other BSP's light and surfaces are gone from the history)
+        reset.0 |= shown.is_some();
         *shown = Some(active);
     }
     let mut show = |entity: Entity, shown: bool| {

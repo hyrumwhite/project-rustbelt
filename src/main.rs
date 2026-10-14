@@ -311,7 +311,9 @@ fn main() -> AppExit {
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
         .add_systems(Update, (start_camera, sync_sky_light))
+        .init_resource::<ResetHistory>()
         .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate))
+        .add_systems(PostUpdate, reset_history_on_cuts.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));
 
     if args.screenshot.is_some() {
@@ -350,6 +352,52 @@ fn main() -> AppExit {
     }
 
     app.run()
+}
+
+/// Asks for the lighting's (and DLSS's) saved past frames to be dropped
+/// this frame: the level or its active BSP changed, so they no longer show
+/// what is there. Camera cuts ask for it themselves (`reset_history_on_cuts`).
+#[derive(Resource, Default)]
+pub struct ResetHistory(pub bool);
+
+/// A camera that moved this far in a frame (metres) cut; or turned this far
+/// (radians): a cutscene's next shot, a respawn, a teleport, the free camera
+/// taken or given back. Moving the fastest vehicle or turning the fastest
+/// flick goes a small part of either in a frame.
+const CUT_DISTANCE: f32 = 3.0;
+const CUT_ANGLE: f32 = std::f32::consts::FRAC_PI_4;
+
+/// Drops the lighting's temporal history (Solarik's reservoirs and world
+/// cache, the pathtracer's accumulation, DLSS's past frames) at a camera
+/// cut or when `ResetHistory` asks: reprojected, they would ghost the old
+/// view into the new for a moment.
+fn reset_history_on_cuts(
+    mut reset: ResMut<ResetHistory>,
+    mut last: Local<Option<(Vec3, Vec3)>>,
+    camera: Single<(&Transform, Option<&mut SolarikLighting>, Option<&mut Pathtracer>), With<Camera3d>>,
+    #[cfg(feature = "dlss")] mut dlss: Query<&mut Dlss<DlssRayReconstructionFeature>, With<Camera3d>>,
+) {
+    let (transform, lighting, pathtracer) = camera.into_inner();
+    let now = (transform.translation, *transform.forward());
+    let cut = last.is_some_and(|(position, forward)| {
+        position.distance(now.0) > CUT_DISTANCE || forward.angle_between(now.1) > CUT_ANGLE
+    });
+    *last = Some(now);
+    if !cut && !reset.0 {
+        return;
+    }
+    debug!("the lighting's history dropped: {}", if cut { "a camera cut" } else { "the level changed" });
+    reset.0 = false;
+    if let Some(mut lighting) = lighting {
+        lighting.reset = true;
+    }
+    if let Some(mut pathtracer) = pathtracer {
+        pathtracer.reset = true;
+    }
+    #[cfg(feature = "dlss")]
+    for mut dlss in &mut dlss {
+        dlss.reset = true;
+    }
 }
 
 /// The open cache file, consumed by `setup_level`.
@@ -619,6 +667,7 @@ fn follow_level(
     mut window: Single<&mut Window, With<bevy::window::PrimaryWindow>>,
     mut params: LevelAssetParams,
     mut failed: Local<Option<String>>,
+    mut reset: ResMut<ResetHistory>,
 ) {
     let Some(snapshot) = &link.latest else { return };
     let map = snapshot.map_name();
@@ -637,6 +686,7 @@ fn follow_level(
     };
     info!("the game changed level: {} -> {}", stats.map_name, snapshot.scenario_name);
     *failed = None;
+    reset.0 = true;
     commands.entity(root.0).despawn();
     objects.clear();
     root.0 = commands.spawn((Name::new("level"), Transform::default(), Visibility::default())).id();

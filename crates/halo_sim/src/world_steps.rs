@@ -224,6 +224,11 @@ const STEP_NETWORK_COOP_CLIENT_NAMES: i32 = 41;
 const STEP_NETWORK_COOP_CLIENT_EVENTS: i32 = 42;
 const STEP_NETWORK_COOP_CLIENT_MESSAGES: i32 = 43;
 const STEP_NETWORK_COOP_CLIENT_TICK: i32 = 44;
+const STEP_NETWORK_ACTORS_NOTE: i32 = 45;
+const STEP_NETWORK_ACTORS_HOST_TICK: i32 = 46;
+const STEP_NETWORK_ACTORS_DAMAGE: i32 = 47;
+const STEP_NETWORK_ACTORS_STATES: i32 = 48;
+const STEP_NETWORK_ACTORS_DRIVE: i32 = 49;
 
 fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
     match step {
@@ -272,6 +277,11 @@ fn run(step: i32, context: &WorldContext, host: &impl AiHost) -> Option<()> {
         STEP_NETWORK_COOP_CLIENT_EVENTS => halo_map::network_coop::client_events(context, host),
         STEP_NETWORK_COOP_CLIENT_MESSAGES => halo_map::network_coop::client_messages(context, host),
         STEP_NETWORK_COOP_CLIENT_TICK => halo_map::network_coop::client_tick(context, host),
+        STEP_NETWORK_ACTORS_NOTE => halo_map::network_actors::note(context, host),
+        STEP_NETWORK_ACTORS_HOST_TICK => halo_map::network_actors::host_tick(context, host),
+        STEP_NETWORK_ACTORS_DAMAGE => halo_map::network_actors::client_damage(context, host),
+        STEP_NETWORK_ACTORS_STATES => halo_map::network_actors::client_states(context, host),
+        STEP_NETWORK_ACTORS_DRIVE => halo_map::network_actors::client_drive(context, host),
         _ => return None,
     }
     Some(())

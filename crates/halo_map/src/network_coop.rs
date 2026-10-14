@@ -1172,3 +1172,230 @@ pub fn host_resend(context: &WorldContext, host: &impl AiHost) {
         call(resend_call::INITIALIZE_VITALITY, unit_index);
     }
 }
+
+// ---------- a client: the host's world changes
+
+/// network_coop.c's client world calls (halo_sim.h's
+/// `_network_coop_client_call_*`).
+pub mod client_call {
+    /// The device (`actor`) set to the power `input[0]`, and moved to the
+    /// position `input[1]` if `a`.
+    pub const DEVICE_STATE: i32 = 1;
+    /// The object (`actor`) placed at `input[0..3]` facing `input[3..6]`
+    /// with up `input[6..9]`.
+    pub const SET_POSITION: i32 = 2;
+    /// The object's (`actor`) region `a`'s permutation set to `b`.
+    pub const SET_PERMUTATION: i32 = 3;
+    /// The object (`actor`) scaled to `input[0]`.
+    pub const SET_SCALE: i32 = 4;
+}
+
+/// halo_sim.h's `_coop_client_world_*`: which of the host's world changes.
+const CLIENT_DEVICE_STATES: i16 = 0;
+const CLIENT_OBJECT_TRANSFORMS: i16 = 1;
+const CLIENT_OBJECT_LOOKS: i16 = 2;
+
+/// halo_sim.h's `struct halo_sim_network_coop_client_world`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClientWorldArguments {
+    pub kind: i16,
+    pub count: i16,
+    pub entries: u32,
+    pub object_name_list: u32,
+    pub tag_instances: u32,
+    pub tag_count: i32,
+}
+
+/// network_coop.c's `DEVICE_POSITION_TOLERANCE`: a client's devices are
+/// moved to the host's position when this far from it (or still and off it
+/// at all).
+const DEVICE_POSITION_TOLERANCE: f32 = 0.03;
+/// network_distributed.h's `UNIT_WORLD_BOUND`.
+const UNIT_WORLD_BOUND: f32 = 32768.0;
+/// objects.h's `MAXIMUM_OBJECT_NAMES_PER_SCENARIO` (scenario.h).
+const MAXIMUM_OBJECT_NAMES: i16 = nv::MAXIMUM_OBJECT_NAMES_PER_SCENARIO as i16;
+
+struct ClientWorld<'a, H: AiHost> {
+    context: &'a WorldContext,
+    host: &'a H,
+    m: &'a dyn AiMemory,
+    a: ClientWorldArguments,
+}
+
+impl<H: AiHost> ClientWorld<'_, H> {
+    fn call(&self, kind: i32, actor: i32, a: i32, b: i32, input: &[f32]) {
+        let mut call = AiCall { kind, actor, a, b, ..AiCall::default() };
+        call.input[..input.len()].copy_from_slice(input);
+        self.host.call(&mut call);
+    }
+
+    /// `object_try_and_get_and_verify_type`: the object's datum, if it is of
+    /// a type in the mask.
+    fn typed(&self, object_index: i32, mask: u32) -> Option<u32> {
+        let header = crate::ai_actor::datum_get(self.m, self.context.object_header_data, object_index)?;
+        (mask & (1 << self.m.r8(header + oh::TYPE as u32)) != 0).then(|| self.m.r32(header + oh::DATUM as u32))
+    }
+
+    /// network_coop.c's `object_find`: the local copy of an object the host
+    /// named, of a type in the mask (NONE for none). An unnamed object sits
+    /// at the same object index on every machine; if its salt differs here,
+    /// matching the absolute index is enough, as long as the tag matches.
+    fn object_find(&self, name_index: i16, object_index: i32, definition_index: i32, mask: u32) -> Option<(i32, u32)> {
+        let m = self.m;
+        let mut object_index = object_index;
+        if name_index != NONE as i16 {
+            // (objects.c's object_index_from_name_index)
+            object_index = if (0..MAXIMUM_OBJECT_NAMES).contains(&name_index) {
+                m.i32(self.a.object_name_list + 4 * name_index as u32)
+            } else {
+                NONE
+            };
+        }
+        if object_index == NONE {
+            return None;
+        }
+        let mut object = self.typed(object_index, mask);
+        if object.is_none() && name_index == NONE as i16 {
+            // (the object of the types at that absolute index, whatever its
+            // salt: object_iterator_next's)
+            let data = self.context.object_header_data;
+            let absolute_index = object_index as i16;
+            if absolute_index >= 0 && absolute_index < m.r16(data + DATA_COUNT) as i16 {
+                let size = m.r16(data + DATA_SIZE) as i16 as u32;
+                let header = m.r32(data + DATA_DATA) + absolute_index as u32 * size;
+                let identifier = m.i16(header);
+                if identifier != 0 && mask & (1 << m.r8(header + oh::TYPE as u32)) != 0 {
+                    object = Some(m.r32(header + oh::DATUM as u32));
+                    object_index = (identifier as i32) << 16 | absolute_index as i32;
+                }
+            }
+        }
+        let object = object?;
+        if m.i32(object + ud::DEFINITION_INDEX as u32) != definition_index
+            || (name_index == NONE as i16 && m.i16(object + ud::OBJECT_NAME_INDEX as u32) != NONE as i16)
+        {
+            return None;
+        }
+        Some((object_index, object))
+    }
+
+    fn entry(&self, index: i16, size: usize) -> u32 {
+        self.a.entries + index as u32 * size as u32
+    }
+
+    /// network_coop.c's `network_coop_handle_device_states`: each device
+    /// where the host's is (moved there if off it), at its power.
+    fn device_states(&self) {
+        let m = self.m;
+        for index in 0..self.a.count {
+            let state = self.entry(index, ds::SIZEOF);
+            let found = self.object_find(
+                m.i16(state + ds::NAME_INDEX as u32),
+                m.i32(state + ds::OBJECT_INDEX as u32),
+                m.i32(state + ds::DEFINITION_INDEX as u32),
+                nv::_OBJECT_MASK_DEVICE as u32,
+            );
+            let position = m.f32(state + ds::POSITION as u32);
+            let power = m.f32(state + ds::POWER as u32);
+            let Some((device_index, device)) = found else { continue };
+            if !wire::real_valid(position) || !wire::real_valid(power) {
+                continue;
+            }
+            let difference = (m.f32(device + dd::DEVICE_POSITION as u32) - position).abs();
+            let moving = m.r8(state + ds::MOVING as u32) != 0;
+            let snap = (!moving && difference > 0.001) || difference > DEVICE_POSITION_TOLERANCE;
+            self.call(client_call::DEVICE_STATE, device_index, snap as i32, 0, &[power, position]);
+        }
+    }
+
+    /// network_coop.c's `network_coop_handle_object_transforms`: each
+    /// scenery and machine where the host's is.
+    fn object_transforms(&self) {
+        let m = self.m;
+        for index in 0..self.a.count {
+            let transform = self.entry(index, ot::SIZEOF);
+            let Some((object_index, object)) = self.object_find(
+                m.i16(transform + ot::NAME_INDEX as u32),
+                m.i32(transform + ot::OBJECT_INDEX as u32),
+                m.i32(transform + ot::DEFINITION_INDEX as u32),
+                COOP_MOVED_OBJECTS,
+            ) else {
+                continue;
+            };
+            if m.i32(object + ud::OBJECT_PARENT_OBJECT_INDEX as u32) != NONE {
+                continue;
+            }
+            let vector = |at: u32| [m.i16(at), m.i16(at + 2), m.i16(at + 4)];
+            let forward = wire::vector_unpack(vector(transform + ot::FORWARD as u32), UNIT_SCALE);
+            let up = wire::vector_unpack(vector(transform + ot::UP as u32), UNIT_SCALE);
+            let at = transform + ot::POSITION as u32;
+            let position = [m.f32(at), m.f32(at + 4), m.f32(at + 8)];
+            let mut axes = [forward[0], forward[1], forward[2], up[0], up[1], up[2]];
+            if wire::point_valid(position, UNIT_WORLD_BOUND) && wire::axes_make_valid(&mut axes) {
+                let mut input = [0.0; 9];
+                input[..3].copy_from_slice(&position);
+                input[3..].copy_from_slice(&axes);
+                self.call(client_call::SET_POSITION, object_index, 0, 0, &input);
+            }
+        }
+    }
+
+    /// network_coop.c's `network_coop_handle_object_looks`: each object's
+    /// permutations (only ones its model has, or none) and scale as the
+    /// host's.
+    fn object_looks(&self) {
+        let m = self.m;
+        let tags = crate::ai_actor::AiStepContext {
+            tag_instances: self.a.tag_instances,
+            tag_count: self.a.tag_count,
+            ..crate::ai_actor::AiStepContext::default()
+        };
+        for index in 0..self.a.count {
+            let look = self.entry(index, ol::SIZEOF);
+            let Some((object_index, object)) = self.object_find(
+                m.i16(look + ol::NAME_INDEX as u32),
+                m.i32(look + ol::OBJECT_INDEX as u32),
+                m.i32(look + ol::DEFINITION_INDEX as u32),
+                u32::MAX,
+            ) else {
+                continue;
+            };
+            let definition_index = m.i32(object + ud::DEFINITION_INDEX as u32);
+            let model_index = crate::sensing::tag_get(m, &tags, crate::fourcc(b"obje"), definition_index)
+                .map_or(0, |definition| m.i32(definition + crate::layout::object_definition::OBJECT_MODEL as u32 + 0xc));
+            let model = if model_index != NONE { crate::sensing::tag_get(m, &tags, crate::fourcc(b"mode"), model_index) } else { None };
+            if let Some(model) = model {
+                let regions = model + crate::layout::model::REGIONS as u32;
+                let count = crate::ai_actor::tag_block_count(m, regions).min(nv::MAXIMUM_REGIONS_PER_OBJECT as i32);
+                for region_index in 0..count {
+                    let region = crate::ai_actor::tag_block_element(m, regions, region_index, crate::layout::model_region::SIZEOF);
+                    let permutation_index = m.r8(look + ol::REGION_PERMUTATIONS as u32 + region_index as u32);
+                    if permutation_index == 0xff
+                        || (permutation_index as i32) < crate::ai_actor::tag_block_count(m, region + crate::layout::model_region::PERMUTATIONS as u32)
+                    {
+                        self.call(client_call::SET_PERMUTATION, object_index, region_index, permutation_index as i32, &[]);
+                    }
+                }
+            }
+            let scale = m.f32(look + ol::SCALE as u32);
+            if wire::real_valid(scale) && scale > 0.0 && scale < 100.0 && scale != m.f32(object + ud::OBJECT_SCALE as u32) {
+                self.call(client_call::SET_SCALE, object_index, 0, 0, &[scale]);
+            }
+        }
+    }
+}
+
+/// The world step of a co-op client applying its host's world changes: a
+/// message of device states, scenery transforms or looks.
+pub fn client_world(context: &WorldContext, host: &impl AiHost) {
+    let m = host.memory();
+    let a: ClientWorldArguments = arguments(context, m);
+    let world = ClientWorld { context, host, m, a };
+    match a.kind {
+        CLIENT_DEVICE_STATES => world.device_states(),
+        CLIENT_OBJECT_TRANSFORMS => world.object_transforms(),
+        CLIENT_OBJECT_LOOKS => world.object_looks(),
+        _ => {}
+    }
+}

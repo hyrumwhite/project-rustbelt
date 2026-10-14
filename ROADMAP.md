@@ -1200,6 +1200,17 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - All seven planted errors were caught: the release interval, the facing, the ring's spacing, the spread's number, the dead riders, the released count and the rider chosen to stand beside.
        - **Rust in charge:** with that setup, the positions differ by a median of 12.8 cm (16.8 for the C in the same setup) and both machines end with the host's count of items.
 
+   - [x] A co-op client applying its host's world changes in Rust (`halo_map::network_coop`, world step 39): network_coop.c's `network_coop_handle_device_states`, `network_coop_handle_object_transforms` and `network_coop_handle_object_looks`, with `object_find`. The first of the client's side.
+     - **What Rust does:** for each entry of the host's message, the client's copy of the object (by its name, else its index, matching the salt or only the absolute index, as long as the tag matches and an unnamed object has no name here), then:
+       - **a device** set to the host's power, and moved to its position when off it (still and off it at all, or farther than 3 hundredths);
+       - **a scenery or machine** without a parent placed where the host's is, its axes made a rotation;
+       - **an object's look:** each region's permutation the model has (or none), and its scale when it differs (between 0 and 100).
+     - **The game's, through calls (`network_coop_client_call`):** setting a device's state, placing an object, setting a permutation, scaling. The model's regions are read through the loaded tags. Since the calls change the objects the step reads (a device's position, a scale), the objects' headers and memory pool are the step's records, as for the network objects' changes.
+     - **Results:**
+       - In 100-second co-op sessions on a10 (doors moved on the host only, `HOST_ONLY_COMMAND=1`), a30 and d40, every message agrees on the joining machine, with none left out.
+       - Three of six planted errors were caught: the device tolerance, the snap's moving test and the axes made valid. The three unseen check against a hostile or mismatched host (a permutation past the model's, a salt that differs, a named object found by index).
+       - **Rust in charge:** in co-op on a30, the positions differ by a median of 12.4 cm, within the C's 8.0 to 15.9, and both machines end with the host's count of items.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

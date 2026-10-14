@@ -468,12 +468,12 @@ pub fn relayed_action_read(buffer: &[u8], relayed: &mut RelayedAction) -> u16 {
 // ---------- the receiver's checks
 
 /// `distributed_real_valid`: finite.
-fn real_valid(value: f32) -> bool {
+pub fn real_valid(value: f32) -> bool {
     value - value == 0.0
 }
 
 /// `distributed_point_valid`: each part within the bound.
-fn point_valid(point: [f32; 3], bound: f32) -> bool {
+pub fn point_valid(point: [f32; 3], bound: f32) -> bool {
     point.iter().all(|part| part.abs() <= bound)
 }
 

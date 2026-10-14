@@ -66,6 +66,18 @@ The top-right panel shows GPU timings for each Solari pass and for DLSS-RR.
 
 ## Play
 
+### One executable
+
+```powershell
+python tools/package.py
+dist\halo_rt.exe          # the game's menus
+dist\halo_rt.exe b30      # or straight into a level
+```
+
+`tools/package.py` builds OpenCE (`../OpenCE-bevy`), the Rust simulation (`halo_sim`, 32-bit) and the viewer with the `dlss` and `bundle` features. `dist\halo_rt.exe` then carries the game, the simulation and the DLSS runtime. Run, it unpacks them into `%LOCALAPPDATA%\halo_rt\runtime-<hash>` (once per build), starts the game hidden with every simulation system in Rust (`--simulation` names others, or `none` for the game's own C), and draws it path traced. The game's data isn't in it: the maps come from `HALO_MAPS`, `--maps-dir`, or a `maps` folder beside the executable. `--viewer` only views the map, as a build without the game does. Under the hood the game still runs in its own hidden 32-bit process: the C engine (its main loop, memory, menus, HUD and sound) runs the Rust simulation, and the viewer draws what it shares.
+
+### From the source
+
 Playing needs OpenCE built from its `bevy-bridge` branch, which shares the game's world with the viewer and takes input from it. The branch is checked out at `../OpenCE-bevy`. Build it as OpenCE's Windows README says (`python configure.py`, then `ninja windows`). Then:
 
 ```powershell

@@ -14,6 +14,10 @@ default = []
 # NVIDIA DLSS (Ray Reconstruction denoising + upscaling). Requires the DLSS SDK,
 # Vulkan SDK and clang at build time — see README.md.
 dlss = ["bevy/dlss", "bevy_solarik/dlss"]
+# The game and the Rust simulation inside the executable, which then plays:
+# OpenCE's halo.exe and SDL3.dll, the 32-bit halo_sim.dll and (with dlss)
+# the DLSS runtime, built first (build.rs; tools/package.py builds it all).
+bundle = []
 
 [dependencies]
 halo_map = { path = "crates/halo_map" }

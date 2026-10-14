@@ -5,10 +5,16 @@
 //! objects and sky, with Halo's materials, lit by the level's sun and sky and
 //! by its light-emitting surfaces. Phase 4: with `--bridge`, the objects and
 //! camera of a running OpenCE game instead (see [`bridge`]).
+//!
+//! Built with `--features bundle` (`tools/package.py`), the executable
+//! carries the game and the Rust simulation and, run, plays: it starts the
+//! game hidden with every simulation system in Rust and draws it here (see
+//! [`bundle`]).
 
 #![allow(clippy::too_many_arguments, reason = "Bevy systems take their resources and queries as arguments")]
 
 mod bridge;
+mod bundle;
 mod level;
 mod lights;
 mod material;
@@ -50,9 +56,10 @@ use bevy::{
 /// Halo: CE levels with Bevy Solari ray tracing.
 #[derive(FromArgs, Resource, Clone)]
 struct Args {
-    /// map name (b30, bloodgulch, ...) or path to a .map file
-    #[argh(positional, default = "String::from(\"b30\")")]
-    map: String,
+    /// map name (b30, bloodgulch, ...) or path to a .map file (default b30;
+    /// a build carrying the game starts at its menus without one)
+    #[argh(positional)]
+    map: Option<String>,
     /// folder holding the Xbox maps (default: $HALO_MAPS, else ./maps)
     #[argh(option)]
     maps_dir: Option<PathBuf>,
@@ -115,6 +122,14 @@ struct Args {
     /// transparent surfaces) and draw the transparent surfaces here
     #[argh(switch)]
     no_overlay: bool,
+    /// with --opence, the simulation's systems that run in Rust (its
+    /// game.rust_simulation: "all", "none", or names; default "all" in a
+    /// build carrying the game, else the game's own setting)
+    #[argh(option)]
+    simulation: Option<String>,
+    /// in a build carrying the game, only view the map (no game)
+    #[argh(switch)]
+    viewer: bool,
 }
 
 fn parse_camera(value: &str) -> Result<[f32; 5], String> {
@@ -139,14 +154,19 @@ fn halo_camera(position: [f32; 3], yaw: f32, pitch: f32) -> Transform {
 }
 
 impl Args {
+    /// The map's name or path (b30 when none was given).
+    fn map(&self) -> &str {
+        self.map.as_deref().unwrap_or("b30")
+    }
+
     /// The map file: the argument itself if it is a path, else `<name>.map`
     /// in the first maps folder that has it (see [`Args::map_dirs`]).
     fn map_path(&self) -> Result<PathBuf, String> {
-        let direct = PathBuf::from(&self.map);
+        let direct = PathBuf::from(self.map());
         if direct.extension().is_some() || direct.is_file() {
             return Ok(direct);
         }
-        let file = format!("{}.map", self.map);
+        let file = format!("{}.map", self.map());
         let dirs = self.map_dirs();
         dirs.iter().map(|dir| dir.join(&file)).find(|path| path.is_file()).ok_or_else(|| {
             let tried: Vec<String> = dirs.iter().map(|d| format!("  {}", d.display())).collect();
@@ -198,6 +218,25 @@ fn main() -> AppExit {
     let mut game_process = None;
     let mut overlay = false;
     let mut bridge_name = args.bridge_name.clone().unwrap_or_else(|| halo_bridge::DEFAULT_NAME.to_string());
+    // (a build carrying the game plays it: started hidden, every system in
+    // Rust, at its menus unless a map was named)
+    let mut simulation_dll = None;
+    if bundle::EMBEDDED && args.opence.is_none() && !args.bridge && !args.viewer {
+        match bundle::unpack() {
+            Ok(Some(runtime)) => {
+                eprintln!("the game and the Rust simulation: {}", runtime.dir.display());
+                args.opence = Some(runtime.game);
+                simulation_dll = Some(runtime.simulation);
+                args.menu |= args.map.is_none();
+                args.simulation.get_or_insert_with(|| "all".to_string());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("could not unpack the game: {e}");
+                return AppExit::error();
+            }
+        }
+    }
     if let Some(exe) = args.opence.clone() {
         args.bridge = true;
         let map_path = match args.map_path() {
@@ -219,7 +258,8 @@ fn main() -> AppExit {
         };
         match {
             bridge_name = bridge::own_bridge_name();
-            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay)
+            let simulation = args.simulation.as_deref().map(|systems| bridge::Simulation { systems, dll: simulation_dll.as_deref() });
+            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, simulation)
         } {
             // (stops the game when the viewer exits, or gives up on it)
             Ok(child) => game_process = Some(bridge::GameProcess(child)),
@@ -235,7 +275,7 @@ fn main() -> AppExit {
             return AppExit::error();
         };
         eprintln!("bridged to OpenCE: {} ({} objects)", snapshot.scenario_name, snapshot.objects.len());
-        args.map = snapshot.map_name().to_string();
+        args.map = Some(snapshot.map_name().to_string());
         overlay = bridge.overlay_enabled();
         link = Some(bridge::BridgeLink::new(bridge, snapshot));
     }
@@ -321,7 +361,7 @@ fn default_plugins(args: &Args, overlay: bool) -> impl PluginGroup {
         settings::{Backends, WgpuSettings},
         RenderPlugin,
     };
-    let title = format!("Halo RT - {}", args.map);
+    let title = format!("Halo RT - {}", args.map());
     let mut window = Window { title, ..default() };
     if overlay {
         // the game's overlay is drawn at this shape (overlay::WINDOW_SIZE)
@@ -585,7 +625,7 @@ fn follow_level(
     if map.is_empty() || map.eq_ignore_ascii_case(&stats.map_name) || failed.as_deref() == Some(map) {
         return;
     }
-    let level_args = Args { map: map.to_string(), ..args.clone() };
+    let level_args = Args { map: Some(map.to_string()), ..args.clone() };
     let cache = match level_args.map_path().map_err(|e| e.to_string()).and_then(|p| CacheFile::open(&p).map_err(|e| e.to_string())) {
         Ok(cache) => cache,
         Err(e) => {

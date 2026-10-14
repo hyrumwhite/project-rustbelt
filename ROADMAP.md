@@ -1296,6 +1296,8 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
        - All twelve planted errors were caught: the hello's interval, the settings' repeat, the farthest gain, the pan, the right vector's normalizing, the allowance, the settings' range, the route of enemies near, the speaker's player, the sequence, the new key and open mic's hold. Four needed a session where the players were heard from further than three units (proximity raised to 100, or co-op a30): where the bots stayed apart or together, nothing was heard by proximity.
        - **Rust in charge**, with all of networking in Rust: both machines hear each other (66 and 88 frames logged, gains 0.2 to 1.0); on bloodgulch the positions differ by a median of 6.4 cm and on a30 8.7 cm (the C's 8.3 to 12.9), and the machines end with the host's count of items.
 
+- [x] **One executable** (`tools/package.py` → `dist\halo_rt.exe`, the `bundle` feature): the viewer carries OpenCE's halo.exe and SDL3.dll, the 32-bit halo_sim.dll and the DLSS runtime, unpacks them into `%LOCALAPPDATA%\halo_rtuntime-<hash>`, and starts the game hidden with `game.rust_simulation = "all"` (new: every one of the 63 systems in Rust), at its menus or on a level named. Checked from an empty folder: a30 played path traced with DLSS Ray Reconstruction, all 63 systems in Rust, the game's HUD over it; the menus with no level named. Five levels (b30, a30, c20, d20, a50) ran a minute each with every system in Rust and the probe firing, with no panic and every probe check agreeing. The game still runs as a hidden 32-bit process under the viewer.
+
 When nothing is left in the 32-bit process, the bridge goes away.
 
 ## Known risks

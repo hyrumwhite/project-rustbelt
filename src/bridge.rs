@@ -23,11 +23,20 @@ use bevy::{
 use halo_bridge::{Bridge, Snapshot, OBJECT_FIRST_PERSON, OBJECT_HIDDEN, OBJECT_MODEL};
 use std::{sync::Arc, time::Duration};
 
+/// The simulation the game runs: the systems in Rust (its
+/// game.rust_simulation: "all", "none", or names) and the Rust simulation's
+/// DLL (halo_sim.dll beside the game when None).
+pub struct Simulation<'a> {
+    pub systems: &'a str,
+    pub dll: Option<&'a std::path::Path>,
+}
+
 /// Starts OpenCE on the map at `map_path`: its data root is the folder that
 /// holds the maps folder, the level is the map's scenario, the bridge is on
 /// and (unless `show`) its window is hidden. With `overlay`, it shares its
-/// overlay (`crate::overlay`), drawing at the viewer's window size. Its output
-/// goes to `halo_rt_opence-<viewer process id>.log` in the temporary folder.
+/// overlay (`crate::overlay`), drawing at the viewer's window size. With
+/// `simulation`, those systems run in Rust. Its output goes to
+/// `halo_rt_opence-<viewer process id>.log` in the temporary folder.
 pub fn launch_game(
     exe: &std::path::Path,
     map_path: &std::path::Path,
@@ -35,6 +44,7 @@ pub fn launch_game(
     bridge_name: &str,
     show: bool,
     overlay: bool,
+    simulation: Option<Simulation>,
 ) -> std::io::Result<std::process::Child> {
     use std::io::{Error, ErrorKind};
     let cache = halo_map::CacheFile::open(map_path).map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
@@ -55,6 +65,14 @@ pub fn launch_game(
         .stderr(log);
     if start_on_map {
         command.env("HALO_BEVY_BRIDGE_MAP", &scenario);
+    }
+    if let Some(simulation) = &simulation {
+        let systems = if simulation.systems == "none" { "" } else { simulation.systems };
+        command.env("HALO_RUST_SIMULATION", systems);
+        if let Some(dll) = simulation.dll {
+            command.env("HALO_SIM_DLL", dll);
+        }
+        eprintln!("the simulation in Rust: {}", if systems.is_empty() { "none" } else { systems });
     }
     if !show {
         // hidden, and small and windowed so it never takes the display; it

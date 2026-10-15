@@ -21,7 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 33;
+pub const VERSION: u32 = 34;
+pub const DECALS: usize = 2048;
+pub const DECAL_VERTICES: usize = 10240;
 pub const VEHICLE_UPDATE_RECORDS: usize = 512;
 pub const VEHICLE_PHYSICS_RECORDS: usize = 256;
 pub const MASS_POINTS: usize = 8192;
@@ -136,6 +138,50 @@ pub struct FogScreen {
     /// The near density over the far.
     pub near_density: f32,
     pub layers: [FogScreenLayer; 4],
+}
+
+/// (Protocol 34) a decal the first player's window would have drawn (with
+/// `game.bevy_bridge_viewer_decals`): its quads (four vertices each, from
+/// `first_vertex` of the frame's decal vertices), its bitmap, and how it
+/// blends: its shader's framebuffer blend function ([`DECAL_BLEND_ALPHA`]
+/// and on) with its colour and intensity, as the game's combiners take
+/// them (the bitmap's colour times the decal's, by the intensity toward
+/// nothing: multiply's white, double multiply's grey, add's black).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Decal {
+    /// Its datum index: the same decal from frame to frame.
+    pub decal_index: u32,
+    /// The bitmap tag's datum index, and the bitmap of it.
+    pub map: u32,
+    pub bitmap_index: u8,
+    /// 0 primary, 1 secondary, 2 light, 3 alpha tested, 4 water.
+    pub layer: u8,
+    pub blend_function: u8,
+    /// 0..255.
+    pub intensity: u8,
+    /// Red, green, blue (0..255), and padding.
+    pub color: [u8; 4],
+    pub first_vertex: u32,
+    pub quad_count: u32,
+}
+
+pub const DECAL_BLEND_ALPHA: u8 = 0;
+pub const DECAL_BLEND_MULTIPLY: u8 = 1;
+pub const DECAL_BLEND_DOUBLE_MULTIPLY: u8 = 2;
+pub const DECAL_BLEND_ADD: u8 = 3;
+pub const DECAL_BLEND_REVERSE_SUBTRACT: u8 = 4;
+pub const DECAL_BLEND_MIN: u8 = 5;
+pub const DECAL_BLEND_MAX: u8 = 6;
+pub const DECAL_BLEND_ALPHA_MULTIPLY_ADD: u8 = 7;
+
+/// A decal's vertex as the game keeps it: the game's coordinates, and the
+/// bitmap's texture coordinates in 32768ths.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DecalVertex {
+    pub position: [f32; 3],
+    pub texcoord: [i16; 2],
 }
 
 #[repr(C)]
@@ -264,6 +310,10 @@ struct Frame {
     camera: Camera,
     fog: Fog,
     fog_screen: FogScreen,
+    decal_count: u32,
+    decal_vertex_count: u32,
+    decals: [Decal; DECALS],
+    decal_vertices: [DecalVertex; DECAL_VERTICES],
     light_count: u32,
     lights: [Light; MAXIMUM_LIGHTS],
     ray_test_count: u32,
@@ -1032,6 +1082,10 @@ pub struct Snapshot {
     pub fog: Option<Fog>,
     /// The fog screen over it, when there is one.
     pub fog_screen: Option<FogScreen>,
+    /// The decals it would have drawn (with the viewer drawing them), and
+    /// their vertices.
+    pub decals: Vec<Decal>,
+    pub decal_vertices: Vec<DecalVertex>,
     pub lights: Vec<Light>,
     pub ray_tests: Vec<RayTest>,
     /// The point physics definition the ray tests' points use (`u32::MAX`
@@ -1617,6 +1671,12 @@ impl Bridge {
                         .then(|| std::ptr::read_volatile(&(*frame).camera)),
                     fog: Some(std::ptr::read_volatile(&(*frame).fog)).filter(|fog| fog.valid != 0),
                     fog_screen: Some(std::ptr::read_volatile(&(*frame).fog_screen)).filter(|screen| screen.mode != 0),
+                    decals: (0..(std::ptr::read_volatile(&(*frame).decal_count) as usize).min(DECALS))
+                        .map(|i| std::ptr::read_volatile(&(*frame).decals[i]))
+                        .collect(),
+                    decal_vertices: (0..(std::ptr::read_volatile(&(*frame).decal_vertex_count) as usize).min(DECAL_VERTICES))
+                        .map(|i| std::ptr::read_volatile(&(*frame).decal_vertices[i]))
+                        .collect(),
                     lights: (0..light_count).map(|i| std::ptr::read_volatile(&(*frame).lights[i])).collect(),
                     ray_tests: (0..ray_test_count).map(|i| std::ptr::read_volatile(&(*frame).ray_tests[i])).collect(),
                     point_physics_definition: std::ptr::read_volatile(&(*frame).point_physics_definition),

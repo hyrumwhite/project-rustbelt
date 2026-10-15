@@ -46,6 +46,15 @@ void bevy_bridge_note_fog(void const *fog);
 /* rasterizer_environment_fog_screen_share: the fog screen this frame's
 window would have drawn (struct bevy_bridge_fog_screen), for its export */
 void bevy_bridge_note_fog_screen(void const *screen);
+/* with game.bevy_bridge_viewer_decals on too: TRUE (the renderer draws the
+decals itself, from those each frame shares, so the game draws none) */
+boolean bevy_bridge_viewer_draws_decals(void);
+/* rasterizer_xbox_decals.c: a decal the first player's window would have
+drawn, its quads' vertices as the game keeps them (struct
+bevy_bridge_decal_vertex), for the frame's export */
+void bevy_bridge_note_decal(long decal_index, long map, short bitmap_index, short layer,
+	short blend_function, unsigned long color, unsigned long intensity,
+	void const *vertices, long quad_count);
 
 /* the overlay buffer to fill with a width x height picture
 (bevy_bridge_protocol.h), or NULL; bevy_bridge_overlay_commit shares it */

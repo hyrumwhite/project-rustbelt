@@ -40,7 +40,9 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 33
+#define BEVY_BRIDGE_VERSION 34
+#define BEVY_BRIDGE_DECALS 2048
+#define BEVY_BRIDGE_DECAL_VERTICES 10240
 #define BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS 512
 #define BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS 256
 #define BEVY_BRIDGE_MASS_POINTS 8192
@@ -153,6 +155,41 @@ struct bevy_bridge_fog_screen
 	float far_distance;
 	float near_density;
 	struct bevy_bridge_fog_screen_layer layers[4];
+};
+
+/* (protocol 34) a decal the first player's window would have drawn, with
+game.bevy_bridge_viewer_decals (rasterizer_xbox_decals.c): its quads (four
+vertices each, from first_vertex of the frame's decal_vertices), its
+bitmap, and how it blends, by its shader's framebuffer blend function
+(0 alpha blend, 1 multiply, 2 double multiply, 3 add, 4 reverse subtract,
+5 min, 6 max, 7 alpha multiply add) with its colour and intensity, as the
+game's combiners take them: the bitmap's colour times the decal's colour,
+by the intensity toward nothing (multiply's white, double multiply's
+grey, add's black) */
+struct bevy_bridge_decal
+{
+	/* its datum index: the same decal from frame to frame */
+	unsigned long decal_index;
+	/* the bitmap tag's datum index, and the bitmap of it */
+	unsigned long map;
+	unsigned char bitmap_index;
+	/* 0 primary, 1 secondary, 2 light, 3 alpha tested, 4 water */
+	unsigned char layer;
+	unsigned char blend_function;
+	/* 0..255 */
+	unsigned char intensity;
+	/* red, green, blue (0..255) */
+	unsigned char color[4];
+	unsigned long first_vertex;
+	unsigned long quad_count;
+};
+
+/* a decal's vertex, as the game keeps it: the game's coordinates, and the
+bitmap's texture coordinates in 32768ths */
+struct bevy_bridge_decal_vertex
+{
+	float position[3];
+	short texcoord[2];
 };
 
 struct bevy_bridge_object
@@ -302,6 +339,10 @@ struct bevy_bridge_frame
 	struct bevy_bridge_camera camera;
 	struct bevy_bridge_fog fog;
 	struct bevy_bridge_fog_screen fog_screen;
+	unsigned long decal_count;
+	unsigned long decal_vertex_count;
+	struct bevy_bridge_decal decals[BEVY_BRIDGE_DECALS];
+	struct bevy_bridge_decal_vertex decal_vertices[BEVY_BRIDGE_DECAL_VERTICES];
 	unsigned long light_count;
 	struct bevy_bridge_light lights[BEVY_BRIDGE_MAXIMUM_LIGHTS];
 	/* rays fanned out from the camera (only with game.bevy_bridge_ray_tests) */

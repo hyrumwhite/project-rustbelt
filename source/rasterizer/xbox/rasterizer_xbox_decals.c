@@ -139,6 +139,7 @@ symbols in this file:
 #include "rasterizer/xbox/rasterizer_xbox.h"
 #include "rasterizer/xbox/rasterizer_xbox_pixel_shader.h"
 #include "saved games/game_state.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 /* ---------- constants */
 
@@ -645,6 +646,43 @@ void _rasterizer_decals_draw(
 		return;
 	if (!rasterizer_debug_options.draw_environment_decals)
 		return;
+
+	/* port: a Bevy renderer drawing the decals itself is told of them
+	instead (the first player's; a mirror's are not drawn) */
+	if (bevy_bridge_viewer_draws_decals())
+	{
+		if (global_window_parameters.rasterizer_target != 0 /* render primary */ ||
+			global_window_parameters.window_index == NONE)
+		{
+			return;
+		}
+		for (decal_index = decal_get_first_decal_index(cluster_index, local_layer);
+			decal_index != NONE;
+			decal_index = DECAL_GET(decal_index)->next_decal_index)
+		{
+			struct decal_datum *decal = DECAL_GET(decal_index);
+			struct decal_definition *definition = decal_definition_get(decal->definition_index);
+			unsigned long offset = (unsigned long)lruv_block_get_address(local_vertex_cache, decal_index);
+			unsigned long size = (unsigned long)decal->quad_count * 4 * sizeof(struct decal_vertex);
+			byte *vertices = NULL;
+
+			IDirect3DVertexBuffer8_Lock(local_d3d_vertex_buffer, offset, size, &vertices, D3DLOCK_READONLY);
+			if (!vertices)
+				continue;
+			bevy_bridge_note_decal(
+				decal_index,
+				definition->shader.map.index,
+				(char)decal->bitmap_index,
+				local_layer,
+				definition->shader.framebuffer_blend_function,
+				decal->color,
+				(decal->intensity * (decal->color >> 24) + 127) >> 8,
+				vertices,
+				decal->quad_count);
+			IDirect3DVertexBuffer8_Unlock(local_d3d_vertex_buffer);
+		}
+		return;
+	}
 
 	decal_index = decal_get_first_decal_index(cluster_index, local_layer);
 	while (decal_index != NONE)

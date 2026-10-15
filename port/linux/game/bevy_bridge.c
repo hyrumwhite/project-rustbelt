@@ -296,6 +296,11 @@ static void bevy_bridge_point(float *out, real_point3d const *in);
 static struct bevy_bridge_fog bevy_bridge_fog;
 /* ... and the fog screen, noted afresh each frame */
 static struct bevy_bridge_fog_screen bevy_bridge_fog_screen;
+/* ... and the decals drawn */
+static unsigned long bevy_bridge_decal_count;
+static unsigned long bevy_bridge_decal_vertex_count;
+static struct bevy_bridge_decal bevy_bridge_decals[BEVY_BRIDGE_DECALS];
+static struct bevy_bridge_decal_vertex bevy_bridge_decal_vertices[BEVY_BRIDGE_DECAL_VERTICES];
 
 /* game.bevy_bridge_ray_tests: the vehicles' physics placement, and rays from
 the camera at them tested with their physics shapes
@@ -554,6 +559,8 @@ void bevy_bridge_export_frame(
 	frame->camera_valid = FALSE;
 	memset(&frame->fog, 0, sizeof(frame->fog));
 	memset(&frame->fog_screen, 0, sizeof(frame->fog_screen));
+	frame->decal_count = 0;
+	frame->decal_vertex_count = 0;
 	frame->ray_test_count = 0;
 	frame->physics_vehicle_count = 0;
 	frame->vehicle_ray_test_count = 0;
@@ -580,6 +587,11 @@ void bevy_bridge_export_frame(
 		frame->camera_valid = TRUE;
 		frame->fog = bevy_bridge_fog;
 		frame->fog_screen = bevy_bridge_fog_screen;
+		frame->decal_count = bevy_bridge_decal_count;
+		frame->decal_vertex_count = bevy_bridge_decal_vertex_count;
+		memcpy(frame->decals, bevy_bridge_decals, bevy_bridge_decal_count * sizeof(struct bevy_bridge_decal));
+		memcpy(frame->decal_vertices, bevy_bridge_decal_vertices,
+			bevy_bridge_decal_vertex_count * sizeof(struct bevy_bridge_decal_vertex));
 		memset(&bevy_bridge_fog_screen, 0, sizeof(bevy_bridge_fog_screen));
 		first_person_unit = bevy_bridge_first_person_unit(window->local_player_index);
 		frame->ray_test_count = bevy_bridge_ray_tests(frame->ray_tests, &window->render_camera.position,
@@ -587,6 +599,10 @@ void bevy_bridge_export_frame(
 		bevy_bridge_vehicle_ray_tests(frame, &window->render_camera.position);
 		break;
 	}
+
+	/* (the decals staged for this frame, shared or not) */
+	bevy_bridge_decal_count = 0;
+	bevy_bridge_decal_vertex_count = 0;
 
 	/* the dynamic lights */
 	{
@@ -754,6 +770,45 @@ void bevy_bridge_note_fog(void const *data)
 	bevy_bridge_fog.planar_maximum_density = fog->planar_maximum_density;
 	bevy_bridge_fog.planar_maximum_distance = fog->planar_maximum_distance;
 	bevy_bridge_fog.planar_maximum_depth = fog->planar_maximum_depth;
+}
+
+boolean bevy_bridge_viewer_draws_decals(void)
+{
+	static int viewer_decals = -1;
+
+	if (viewer_decals < 0)
+		viewer_decals = config_boolean("game.bevy_bridge_viewer_decals") != 0;
+	return viewer_decals && bevy_bridge_overlay_enabled();
+}
+
+void bevy_bridge_note_decal(long decal_index, long map, short bitmap_index, short layer,
+	short blend_function, unsigned long color, unsigned long intensity,
+	void const *vertices, long quad_count)
+{
+	struct bevy_bridge_decal *decal;
+	unsigned long vertex_count = (unsigned long)quad_count * 4;
+
+	if (bevy_bridge_decal_count >= BEVY_BRIDGE_DECALS || quad_count <= 0 ||
+		bevy_bridge_decal_vertex_count + vertex_count > BEVY_BRIDGE_DECAL_VERTICES)
+	{
+		return;
+	}
+	decal = &bevy_bridge_decals[bevy_bridge_decal_count++];
+	decal->decal_index = (unsigned long)decal_index;
+	decal->map = (unsigned long)map;
+	decal->bitmap_index = (unsigned char)bitmap_index;
+	decal->layer = (unsigned char)layer;
+	decal->blend_function = (unsigned char)blend_function;
+	decal->intensity = (unsigned char)(intensity < 255 ? intensity : 255);
+	decal->color[0] = (unsigned char)(color >> 16);
+	decal->color[1] = (unsigned char)(color >> 8);
+	decal->color[2] = (unsigned char)color;
+	decal->color[3] = 0;
+	decal->first_vertex = bevy_bridge_decal_vertex_count;
+	decal->quad_count = (unsigned long)quad_count;
+	memcpy(&bevy_bridge_decal_vertices[bevy_bridge_decal_vertex_count], vertices,
+		vertex_count * sizeof(struct bevy_bridge_decal_vertex));
+	bevy_bridge_decal_vertex_count += vertex_count;
 }
 
 void bevy_bridge_note_fog_screen(void const *screen)

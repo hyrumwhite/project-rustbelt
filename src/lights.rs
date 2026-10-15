@@ -22,9 +22,15 @@ const SPOT_RADIUS: f32 = 0.15;
 /// the emissive scale: a muzzle flash (reaching 2 world units) visibly lights
 /// the weapon and the ground nearby in daylight, and a dark room.
 const RADIANCE_PER_REACH2: f32 = 30000.0;
-/// Point lights' share of that (muzzle flashes, plasma, explosions): toned
-/// down from the flashlight's.
-const POINT_LIGHT_SCALE: f32 = 0.5;
+/// Point lights' share of that (muzzle flashes, plasma, explosions).
+const POINT_LIGHT_SCALE: f32 = 0.35;
+/// Spot lights' (the flashlight's): its cone holds its light, and at full
+/// strength it washed the view white.
+const SPOT_LIGHT_SCALE: f32 = 0.15;
+/// How far ahead of the game's position a spot light shines from (metres):
+/// the flashlight sits at the eye, inside the first-person weapon, which
+/// it lit glaring white.
+const SPOT_FORWARD: f32 = 0.6;
 /// Below this cutoff angle (radians, from the light's axis) a light is a
 /// spot light; Bevy's cones stop short of a hemisphere.
 const SPOT_CUTOFF: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
@@ -58,9 +64,9 @@ fn sync_lights(
     let (mut used_points, mut used_spots) = (0, 0);
     for light in &snapshot.lights {
         let spot = light.cutoff_angle < SPOT_CUTOFF;
-        let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT));
         let forward = Vec3::from(halo_to_bevy(light.forward, 1.0)).normalize_or(Vec3::NEG_Z);
-        let scale = if spot { 1.0 } else { POINT_LIGHT_SCALE };
+        let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT)) + if spot { forward * SPOT_FORWARD } else { Vec3::ZERO };
+        let scale = if spot { SPOT_LIGHT_SCALE } else { POINT_LIGHT_SCALE };
         let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * light.radius * light.radius;
         let range = light.radius * METERS_PER_WORLD_UNIT;
         let radius = if spot { SPOT_RADIUS } else { LIGHT_RADIUS };

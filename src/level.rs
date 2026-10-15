@@ -1429,11 +1429,13 @@ impl LevelBuilder {
         }
         // Models (armour, weapons, vehicles) gloss the most: Halo gives them
         // a bright cube map whatever lies round them; here they reflect the
-        // level itself, near mirror-like and more strongly head-on.
+        // level itself, near mirror-like, tinted by their colour where their
+        // mask says (metallic, which the mask scales; reflectance is the
+        // whole material's, and raised it hazed the matte parts like dust).
         let model = info.shader_type == ShaderType::Model;
         let roughness = if model { 0.45 - 0.37 * r.sqrt() } else { 0.8 - 0.65 * r.sqrt() };
-        let metallic = 0.5 * r;
-        let reflectance = if model { 0.5 + 0.5 * r } else { 0.5 };
+        let metallic = if model { 0.8 * r } else { 0.5 * r };
+        let reflectance = 0.5;
         let mask = match reflection.mask {
             // an alpha-tested base map's alpha is its cut-out, not a mask
             SpecularMask::BaseAlpha if !info.alpha_tested => info.base_map.and_then(|b| b.datum).map(|d| (d, 3)),

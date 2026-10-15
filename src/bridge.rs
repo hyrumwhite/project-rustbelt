@@ -221,6 +221,20 @@ pub struct BridgeObjects {
     tracked: HashMap<u32, Tracked>,
     /// Definitions without a model (nothing to draw).
     modelless: HashMap<(u32, [u8; 8]), ()>,
+    /// Models made again, still drawn until their replacements are ready
+    /// (each with the frames it has left).
+    retiring: Vec<(Entity, u8)>,
+}
+
+/// How many frames a model made again stays drawn: its replacement takes
+/// its transforms the next frame and its new materials a frame or two later.
+const RETIRING_FRAMES: u8 = 4;
+
+/// An object's change colours in steps of 1/16: some follow the object's
+/// functions (the plasma rifle's heat, the cyborg's shield), and each change
+/// makes the model again with newly baked textures.
+fn change_color_steps(colors: &[[f32; 3]; 4]) -> [[f32; 3]; 4] {
+    colors.map(|color| color.map(|c| (c.clamp(0.0, 1.0) * 16.0).round() / 16.0))
 }
 
 impl BridgeObjects {
@@ -232,6 +246,7 @@ impl BridgeObjects {
     pub fn clear(&mut self) {
         self.tracked.clear();
         self.modelless.clear();
+        self.retiring.clear();
     }
 }
 
@@ -311,19 +326,29 @@ fn sync_objects(
         return;
     }
 
+    // (models made again, gone once their replacements are drawn)
+    objects.retiring.retain_mut(|(entity, frames)| {
+        *frames -= 1;
+        if *frames == 0 {
+            commands.entity(*entity).despawn();
+        }
+        *frames > 0
+    });
+
     let mut seen = HashMap::<u32, ()>::default();
     for object in &snapshot.objects {
         seen.insert(object.object_index, ());
+        let change_colors = change_color_steps(&object.change_colors);
         // an object whose definition or permutations changed is made again
         let current = objects.tracked.get(&object.object_index);
         if current.is_some_and(|t| {
             t.definition != object.definition_index
                 || t.permutations != object.region_permutations
-                || t.change_colors != object.change_colors
+                || t.change_colors != change_colors
                 || t.camouflaged != camouflaged(object)
         }) {
             let old = objects.tracked.remove(&object.object_index).unwrap();
-            commands.entity(old.root).despawn();
+            objects.retiring.push((old.root, RETIRING_FRAMES));
         }
         if !objects.tracked.contains_key(&object.object_index) {
             let key = (object.definition_index, object.region_permutations);
@@ -343,14 +368,14 @@ fn sync_objects(
                 continue;
             };
             let (root, nodes, skins) =
-                builder.spawn_animated_model(&mut commands, &model, raster, &object.change_colors, camouflaged(object), object.object_index, assets);
+                builder.spawn_animated_model(&mut commands, &model, raster, &change_colors, camouflaged(object), object.object_index, assets);
             objects.tracked.insert(
                 object.object_index,
                 Tracked {
                     root,
                     definition: object.definition_index,
                     permutations: object.region_permutations,
-                    change_colors: object.change_colors,
+                    change_colors,
                     camouflaged: camouflaged(object),
                     model,
                     nodes,

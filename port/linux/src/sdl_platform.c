@@ -147,6 +147,8 @@ BOOL platform_sdl_initialize(void)
 
 /* bevy_bridge_input.c */
 void bevy_bridge_input_pump(SDL_Window *window);
+void bevy_bridge_input_menus_pointer(int active);
+int bevy_bridge_input_attached(void);
 /* ---------- first start without game data (xbox_files.c) */
 
 struct data_extraction
@@ -1659,8 +1661,12 @@ void platform_ui_pointer_set_active(BOOL active)
 	memset(input_state.mouse_buttons, 0, sizeof(input_state.mouse_buttons));
 	memset(mouse_buttons_pressed, 0, sizeof(mouse_buttons_pressed));
 	pthread_mutex_unlock(&input_lock);
+	/* (a renderer's window, forwarding its cursor, frees it too) */
+	bevy_bridge_input_menus_pointer(active);
 	platform_mouse_capture(!active && !input_state.mouse_released);
-	if (active)
+	/* (the pointer starts at the centre; but not the cursor's, which is the
+	renderer's) */
+	if (active && !bevy_bridge_input_attached())
 	{
 		int width, height;
 

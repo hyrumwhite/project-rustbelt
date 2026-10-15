@@ -276,7 +276,11 @@ struct bevy_bridge_input
 	float listener_position[3];
 	float listener_forward[3];
 	float listener_up[3];
-	unsigned long reserved[1];
+	/* the renderer's cursor while the game's menus take a pointer
+	(bevy_bridge_shared.menus_pointer) and it is over the window: bit 30
+	set, and the fractions of the window across (bits 0-14) and down (bits
+	15-29) from the top left, each of 32767; 0 when there is none */
+	unsigned long pointer;
 };
 
 /* an overlay picture: width x height pixels, RGBA, 8 bits a channel, the
@@ -915,7 +919,10 @@ struct bevy_bridge_shared
 	/* the frame buffer last completed */
 	unsigned long latest_frame;
 	unsigned long writer_process_id;
-	unsigned long reserved[3];
+	/* nonzero while the game's menus are up and take a mouse pointer: the
+	renderer then frees its cursor and forwards its place (input.pointer) */
+	unsigned long menus_pointer;
+	unsigned long reserved[2];
 	struct bevy_bridge_input input;
 	struct bevy_bridge_gamepads gamepads;
 	struct bevy_bridge_frame frames[BEVY_BRIDGE_FRAMES];

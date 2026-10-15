@@ -7,6 +7,11 @@ and this turns their changes into SDL events, pushed just before the
 platform layer polls SDL (sdl_platform.c), so the game handles them as its
 own window's: bindings, menus, typing and the aim all work unchanged. When
 the renderer stops forwarding, everything it held is released.
+
+While the menus take a pointer (bevy_bridge_input_menus_pointer), the
+renderer's cursor is free and its place comes as a fraction of the
+renderer's window (the game draws at that window's shape, its overlay
+filling it), here put at the same place in the game's own window.
 */
 
 #include "../game/bevy_bridge_protocol.h"
@@ -17,6 +22,25 @@ the renderer stops forwarding, everything it held is released.
 static struct bevy_bridge_input bevy_bridge_last;
 /* the game's window, which the events are for */
 static SDL_WindowID bevy_bridge_window;
+/* the pointer's place in the game's window, as last sent */
+static float bevy_bridge_pointer_x, bevy_bridge_pointer_y;
+
+/* sdl_platform.c: whether the menus take a pointer, for the renderer */
+void bevy_bridge_input_menus_pointer(int active)
+{
+	struct bevy_bridge_shared *shared = (struct bevy_bridge_shared *)bevy_bridge_platform_shared();
+
+	if (shared)
+		__atomic_store_n(&shared->menus_pointer, active ? 1ul : 0ul, __ATOMIC_RELEASE);
+	/* (and where the cursor is goes to the menus again, moved or not) */
+	bevy_bridge_last.pointer = 0;
+}
+
+/* whether the bridge drives this window's input */
+int bevy_bridge_input_attached(void)
+{
+	return bevy_bridge_platform_shared() != NULL;
+}
 
 static SDL_Keymod bevy_bridge_modifiers(const struct bevy_bridge_input *input)
 {
@@ -65,6 +89,8 @@ static void bevy_bridge_push_button(int button, bool down)
 	event.button.button = (Uint8)button;
 	event.button.down = down;
 	event.button.clicks = 1;
+	event.button.x = bevy_bridge_pointer_x;
+	event.button.y = bevy_bridge_pointer_y;
 	SDL_PushEvent(&event);
 }
 
@@ -98,6 +124,31 @@ void bevy_bridge_input_pump(SDL_Window *window)
 		}
 	}
 	modifiers = bevy_bridge_modifiers(&input);
+
+	/* the pointer first, so that a click in the same frame is where it is */
+	if (input.pointer & (1ul << 30))
+	{
+		int width = 0, height = 0;
+		float x, y;
+
+		SDL_GetWindowSize(window, &width, &height);
+		x = (float)(input.pointer & 0x7FFF) / 32767.0f * (float)width;
+		y = (float)((input.pointer >> 15) & 0x7FFF) / 32767.0f * (float)height;
+		if (input.pointer != bevy_bridge_last.pointer)
+		{
+			SDL_Event event;
+
+			memset(&event, 0, sizeof(event));
+			event.type = SDL_EVENT_MOUSE_MOTION;
+			event.motion.timestamp = SDL_GetTicksNS();
+			event.motion.windowID = bevy_bridge_window;
+			event.motion.x = x;
+			event.motion.y = y;
+			SDL_PushEvent(&event);
+		}
+		bevy_bridge_pointer_x = x;
+		bevy_bridge_pointer_y = y;
+	}
 
 	for (index = 0; index < 16 * 32 && index < SDL_SCANCODE_COUNT; index++)
 	{

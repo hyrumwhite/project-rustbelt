@@ -261,7 +261,9 @@ pub struct Input {
     pub listener_position: [f32; 3],
     pub listener_forward: [f32; 3],
     pub listener_up: [f32; 3],
-    pub reserved: [u32; 1],
+    /// The cursor over the window while the game's menus have a pointer
+    /// ([`Bridge::menus_want_pointer`]): 0 for none, or [`Input::pointer_at`].
+    pub pointer: u32,
 }
 
 impl Input {
@@ -274,6 +276,14 @@ impl Input {
                 self.keys[word] &= !(1 << bit);
             }
         }
+    }
+
+    /// A cursor at this fraction of the window across and down (0..1, from
+    /// the top left), for [`Input::pointer`]: bit 30 set, x in bits 0..15 and
+    /// y in bits 15..30, each a fraction of 32767.
+    pub fn pointer_at(x: f32, y: f32) -> u32 {
+        let fraction = |v: f32| (v.clamp(0.0, 1.0) * 32767.0).round() as u32;
+        1 << 30 | fraction(y) << 15 | fraction(x)
     }
 }
 
@@ -881,7 +891,9 @@ struct Shared {
     size: u32,
     latest_frame: u32,
     writer_process_id: u32,
-    reserved: [u32; 3],
+    /// nonzero while the game's menus are up and take a pointer
+    menus_pointer: u32,
+    reserved: [u32; 2],
     input: Input,
     gamepads: Gamepads,
     frames: [Frame; FRAMES],
@@ -1439,6 +1451,13 @@ impl Bridge {
             fence(Ordering::Acquire);
             (0..count).map(|i| std::ptr::read_volatile(&(*self.shared).random_directions[i])).collect()
         }
+    }
+
+    /// Whether the game's menus are up and take a mouse pointer (then the
+    /// cursor is to be free, its place forwarded in [`Input::pointer`]).
+    pub fn menus_want_pointer(&self) -> bool {
+        // SAFETY: as in check()
+        unsafe { std::ptr::read_volatile(&(*self.shared).menus_pointer) != 0 }
     }
 
     /// Whether the game shares overlays.

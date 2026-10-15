@@ -594,10 +594,15 @@ fn sync_camera(
 }
 
 /// Whether this window's keyboard and mouse go to the game: while following
-/// the game's camera with the cursor grabbed (click to grab, F12 releases).
+/// the game's camera, focused, with the cursor grabbed, or free over the
+/// game's menus, which take a pointer (F12 or losing the focus lets go, a
+/// click takes it back).
 #[derive(Resource, Default)]
 pub struct ForwardInput {
     pub active: bool,
+    released: bool,
+    /// the cursor over the menus, a fraction of the window
+    pointer: Option<Vec2>,
     state: halo_bridge::Input,
 }
 
@@ -610,7 +615,8 @@ pub fn not_forwarding(forward: Option<Res<ForwardInput>>) -> bool {
 /// Keys the viewer keeps for itself even while forwarding.
 const VIEWER_KEYS: [KeyCode; 3] = [KeyCode::F8, KeyCode::F10, KeyCode::F12];
 
-/// Click to play (grab the cursor), F12 to let go.
+/// Click to play (grab the cursor; over the game's menus, free, its place
+/// forwarded), F12 to let go.
 fn grab_cursor(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -618,21 +624,30 @@ fn grab_cursor(
     window: Single<(&Window, &mut bevy::window::CursorOptions), With<bevy::window::PrimaryWindow>>,
     mut forward: ResMut<ForwardInput>,
     panel: Option<Res<crate::options::OptionsPanel>>,
+    link: Res<BridgeLink>,
 ) {
     use bevy::window::CursorGrabMode;
     let (window, mut cursor) = window.into_inner();
-    let grabbed = cursor.grab_mode != CursorGrabMode::None;
     // (the options panel has the mouse while it's open)
     let panel_open = panel.is_some_and(|p| p.open);
-    let release = keys.just_pressed(KeyCode::F12) || !window.focused || !follow.0 || panel_open;
-    if grabbed && release {
-        cursor.grab_mode = CursorGrabMode::None;
-        cursor.visible = true;
-    } else if !grabbed && !panel_open && follow.0 && window.focused && buttons.just_pressed(MouseButton::Left) {
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
+    let attending = follow.0 && window.focused && !panel_open;
+    if keys.just_pressed(KeyCode::F12) || !window.focused {
+        forward.released = true;
+    } else if attending && buttons.just_pressed(MouseButton::Left) {
+        forward.released = false;
     }
-    forward.active = follow.0 && window.focused && cursor.grab_mode != CursorGrabMode::None;
+    let playing = attending && !forward.released;
+    let menus = link.bridge.menus_want_pointer();
+    let grab = playing && !menus;
+    if grab != (cursor.grab_mode != CursorGrabMode::None) {
+        cursor.grab_mode = if grab { CursorGrabMode::Locked } else { CursorGrabMode::None };
+        cursor.visible = !grab;
+    }
+    forward.active = playing;
+    forward.pointer = (playing && menus)
+        .then(|| window.cursor_position())
+        .flatten()
+        .map(|at| at / Vec2::new(window.width(), window.height()).max(Vec2::ONE));
 }
 
 fn forward_input(
@@ -645,10 +660,11 @@ fn forward_input(
     mut forward: ResMut<ForwardInput>,
     mut link: ResMut<BridgeLink>,
 ) {
-    let ForwardInput { active, state } = &mut *forward;
+    let ForwardInput { active, pointer, state, .. } = &mut *forward;
     state.active = u32::from(*active);
     state.keys = [0; 16];
     state.mouse_buttons = 0;
+    state.pointer = pointer.map_or(0, |at| halo_bridge::Input::pointer_at(at.x, at.y));
     if *active {
         for key in keys.get_pressed().filter(|k| !VIEWER_KEYS.contains(k)) {
             if let Some(scancode) = scancode(*key) {

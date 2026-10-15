@@ -3102,9 +3102,14 @@ enum
 
 static long halo_sim_host_object(unsigned long index, struct halo_sim_host_object *out, unsigned long purpose)
 {
-	struct object_datum *object = object_get((long)index);
+	/* (an index no longer an object's, as a weapon's tracked target after
+	it was deleted: none, as the game's own object_try_and_get finds,
+	rather than object_get's assertion) */
+	struct object_datum *object = object_try_and_get((long)index);
 	short region;
 
+	if (!object)
+		return FALSE;
 	/* (recorded for the bridge as the game's own ray tests and feature
 	gatherings record what they visit) */
 	if (purpose == _halo_sim_object_ray_test && (halo_sim_projectile_updating || halo_sim_vehicle_physics_updating))

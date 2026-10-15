@@ -8,16 +8,17 @@
 //   add, max, ...    e = i t c                                  dst + e, ...
 //   alpha blend      t c over, by i times the bitmap's alpha
 // Factors become linear ones (what multiplying the encoded colour does to
-// the linear); added colours become radiance, at what shows as that colour
-// at the camera's exposure. An alpha blend, which would need the light on
-// it, multiplies toward its colour instead.
+// the linear); added colours are written as they are, so they show as that
+// colour (Bevy's materials apply the camera's exposure in their own shaders;
+// these write past them). An alpha blend, which would need the light on it,
+// multiplies toward its colour instead.
 
 import bevy_pbr::render::forward_io::VertexOutput;
 
 struct HaloDecal {
     // the decal's colour (display-encoded), its intensity
     color: vec4<f32>,
-    // x: framebuffer blend function, y: radiance a displayed 1 is, z: 1 to
+    // x: framebuffer blend function, y: what a displayed 1 is written as, z: 1 to
     // cut away below half the bitmap's alpha (the alpha-tested layer), w: 1
     // to show it in magenta (debugging)
     mode: vec4<f32>,

@@ -1326,8 +1326,15 @@ Phase 5 had the game draw everything but the opaque world into an overlay: a fla
      - Not in the ray-traced scene, so reflections don't show them. Drawing them into the traced surfaces' colour is the next step for that.
    - [ ] Retire the multiply layer (protocol 31) once nothing else uses it.
 3. **Particles and effects**
-   - [ ] Share the particles (position, size, rotation, colour, bitmap frame, blend) and particle systems each frame, then contrails, weather, lightning and lens flares.
-   - [ ] Draw them after the traced picture, depth-tested against it, before DLSS where they need motion vectors. The bright ones (plasma, explosions, muzzle flashes) also light the scene, as the dynamic lights already do.
+   - [x] Sprites (protocol 35, `game.bevy_bridge_viewer_effects`): everything `build_sprites_end` draws, which is particles, particle systems, weather, glows and antennas. The game records each batch instead of drawing it. That's its quads (taken out of the camera's space), the effect shader's blend, flags and maps, the bitmap frame, and the centroid the game sorts it by: up to 512 batches and 32,768 vertices a frame. `--game-effects` turns it off.
+   - [x] Draw them (`src/effects.rs`, `shaders/halo_sprite.wesl`). A pool of meshes holds each frame's batches, placed at the game's sort centroids so the transparent pass keeps the game's order. They're unlit, over the lit, traced picture, before DLSS and the fog.
+     - The colour is the effect shader's combiners (decoded from `rasterizer_xbox_transparent_geometry.c`): the bitmap times the vertex colour, or the nonlinear tint (1 - v)t^4 + vt, faded by the vertex alpha toward the blend's neutral. The game's dumped effect vertex shader (`HALO_GPU_DUMP_SHADERS`) confirms the vertex colour is `oD1` and `oD0.a` is the fog's transmittance.
+     - Checked on b30's landing against the game's own sprites in the same frame, with the game drawing them as well (`HALO_BEVY_BRIDGE_EFFECTS_ALSO_DRAWN`), its overlay's coverage in red (`HALO_RT_OVERLAY_DEBUG=1`) and these in cyan by their coverage (`HALO_RT_SPRITE_DEBUG=1`). The beach's blowing dust (`scenery\emitters\dust`, about 200 large sprites around the camera), the impacts, and the burning crash on the right cover the same places.
+     - Found on the way: Bevy's materials apply the camera's exposure in their own shaders, so a colour written past them is already what shows. The decals' and sprites' added colours had been scaled by 1/exposure, about 1,000 times too bright.
+   - [ ] Still the game's, in the overlay: contrails (`render_contrails`), lens flares, lightning, and the weather's own sheets if any. These are the next to share.
+   - [ ] Effects' own fog: the game fogs each effect by its own depth (the combiners' last stage). Here the fog pass fogs a pixel by the surface behind the effect, so an effect in front of a distant fogged wall is fogged as much as the wall.
+   - [ ] Secondary maps and z-sprites: the effect shader's secondary map, which multiplies the colour and alpha, and the z-sprite anchor, which gives a sprite a per-pixel depth from a z-map, are left out. About one batch type in eight on b30 has one (impacts, muzzle flashes).
+   - [ ] The bright ones (plasma, explosions, muzzle flashes) also light the scene, as the dynamic lights already do.
    - [ ] What's left in the overlay is the HUD, the menus and text.
 
 ## Known risks

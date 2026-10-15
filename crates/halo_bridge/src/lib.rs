@@ -21,7 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 34;
+pub const VERSION: u32 = 35;
+pub const SPRITE_BATCHES: usize = 512;
+pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
 pub const DECAL_VERTICES: usize = 10240;
 pub const VEHICLE_UPDATE_RECORDS: usize = 512;
@@ -175,6 +177,50 @@ pub const DECAL_BLEND_MIN: u8 = 5;
 pub const DECAL_BLEND_MAX: u8 = 6;
 pub const DECAL_BLEND_ALPHA_MULTIPLY_ADD: u8 = 7;
 
+/// (Protocol 35) a batch of sprites the first player's window would have
+/// drawn (with `game.bevy_bridge_viewer_effects`: particles, particle
+/// systems, weather, glows, antennas): quads (four vertices each, from
+/// `first_vertex` of the frame's sprite vertices) of one bitmap of `map`,
+/// with an effect shader. Its combiners take the bitmap's colour times the
+/// vertex's (with nonlinear tint, (1 - v) t^4 + v t) and blend it by the
+/// framebuffer blend function (as a decal's, [`DECAL_BLEND_ALPHA`] and on),
+/// faded by the vertex's alpha toward nothing.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SpriteBatch {
+    pub map: u32,
+    pub bitmap_index: u16,
+    /// Bit 0 sort bias, 1 nonlinear tint, 2 don't overdraw the first-person
+    /// weapon.
+    pub shader_flags: u16,
+    pub blend_function: u16,
+    /// Bit 0 point sampled, 1 u clamped, 2 v clamped.
+    pub map_flags: u16,
+    /// 1 drawn with the first-person weapon.
+    pub first_person: u32,
+    /// The secondary map's bitmap tag (`u32::MAX` for none), its anchor (0
+    /// with the primary, 1 screen space, 2 zsprite) and flags.
+    pub secondary_map: u32,
+    pub secondary_anchor: u16,
+    pub secondary_flags: u16,
+    /// Where the game sorts the batch from (the game's coordinates).
+    pub centroid: [f32; 3],
+    pub first_vertex: u32,
+    pub quad_count: u32,
+}
+
+pub const SPRITE_NONLINEAR_TINT: u16 = 1 << 1;
+
+/// A sprite's vertex: the game's coordinates, the bitmap's texture
+/// coordinates and the colour (a8r8g8b8, alpha the fade).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SpriteVertex {
+    pub position: [f32; 3],
+    pub texcoord: [f32; 2],
+    pub color: u32,
+}
+
 /// A decal's vertex as the game keeps it: the game's coordinates, and the
 /// bitmap's texture coordinates in 32768ths.
 #[repr(C)]
@@ -314,6 +360,10 @@ struct Frame {
     decal_vertex_count: u32,
     decals: [Decal; DECALS],
     decal_vertices: [DecalVertex; DECAL_VERTICES],
+    sprite_batch_count: u32,
+    sprite_vertex_count: u32,
+    sprite_batches: [SpriteBatch; SPRITE_BATCHES],
+    sprite_vertices: [SpriteVertex; SPRITE_VERTICES],
     light_count: u32,
     lights: [Light; MAXIMUM_LIGHTS],
     ray_test_count: u32,
@@ -1086,6 +1136,10 @@ pub struct Snapshot {
     /// their vertices.
     pub decals: Vec<Decal>,
     pub decal_vertices: Vec<DecalVertex>,
+    /// The sprites it would have drawn (with the viewer drawing them), and
+    /// their vertices.
+    pub sprite_batches: Vec<SpriteBatch>,
+    pub sprite_vertices: Vec<SpriteVertex>,
     pub lights: Vec<Light>,
     pub ray_tests: Vec<RayTest>,
     /// The point physics definition the ray tests' points use (`u32::MAX`
@@ -1676,6 +1730,12 @@ impl Bridge {
                         .collect(),
                     decal_vertices: (0..(std::ptr::read_volatile(&(*frame).decal_vertex_count) as usize).min(DECAL_VERTICES))
                         .map(|i| std::ptr::read_volatile(&(*frame).decal_vertices[i]))
+                        .collect(),
+                    sprite_batches: (0..(std::ptr::read_volatile(&(*frame).sprite_batch_count) as usize).min(SPRITE_BATCHES))
+                        .map(|i| std::ptr::read_volatile(&(*frame).sprite_batches[i]))
+                        .collect(),
+                    sprite_vertices: (0..(std::ptr::read_volatile(&(*frame).sprite_vertex_count) as usize).min(SPRITE_VERTICES))
+                        .map(|i| std::ptr::read_volatile(&(*frame).sprite_vertices[i]))
                         .collect(),
                     lights: (0..light_count).map(|i| std::ptr::read_volatile(&(*frame).lights[i])).collect(),
                     ray_tests: (0..ray_test_count).map(|i| std::ptr::read_volatile(&(*frame).ray_tests[i])).collect(),

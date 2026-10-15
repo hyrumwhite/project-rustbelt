@@ -43,7 +43,7 @@ impl Plugin for DecalsPlugin {
 struct DecalParams {
     /// the decal's colour (display-encoded), its intensity
     color: Vec4,
-    /// framebuffer blend function, radiance a displayed 1 is, 1 to cut away
+    /// framebuffer blend function, what a displayed 1 is written as, 1 to cut away
     /// below half the bitmap's alpha
     mode: Vec4,
 }
@@ -205,7 +205,6 @@ fn follow_decals(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<DecalMaterial>>,
-    exposure: Single<&bevy::camera::Exposure, With<Camera3d>>,
 ) {
     let Some(snapshot) = link.latest.as_ref() else { return };
     if snapshot.frame_index == decals.last_frame_index {
@@ -232,8 +231,9 @@ fn follow_decals(
             snapshot.camera.map(|c| halo_to_bevy(c.position, METERS_PER_WORLD_UNIT))
         );
     }
-    // (what shows as a displayed 1 at the camera's exposure)
-    let radiance_scale = 1.0 / exposure.exposure().max(1e-9);
+    // (a colour written as it is shows as it is: Bevy's own materials apply
+    // the camera's exposure in their shaders, and these write past them)
+    let radiance_scale = 1.0;
     let rescale = (radiance_scale - decals.radiance_scale).abs() > radiance_scale * 1e-3;
     decals.radiance_scale = radiance_scale;
 

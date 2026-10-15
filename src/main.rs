@@ -15,6 +15,7 @@
 
 mod bridge;
 mod bundle;
+mod fog;
 mod level;
 mod lights;
 mod material;
@@ -135,6 +136,10 @@ struct Args {
     /// drawing them here, ray traced
     #[argh(switch)]
     game_glass: bool,
+    /// with --opence, leave the fog in the game's overlay instead of drawing
+    /// it here
+    #[argh(switch)]
+    game_fog: bool,
 }
 
 impl Args {
@@ -143,6 +148,13 @@ impl Args {
     /// (game.bevy_bridge_viewer_glass).
     fn viewer_glass(&self) -> bool {
         self.opence.is_some() && !self.no_overlay && !self.game_glass
+    }
+
+    /// Whether this viewer fogs its world itself while the game shares its
+    /// overlay: the game it starts leaves its fog out of the overlay and
+    /// shares the fog instead (game.bevy_bridge_viewer_fog).
+    fn viewer_fog(&self) -> bool {
+        self.opence.is_some() && !self.no_overlay && !self.game_fog
     }
 }
 
@@ -273,7 +285,7 @@ fn main() -> AppExit {
         match {
             bridge_name = bridge::own_bridge_name();
             let simulation = args.simulation.as_deref().map(|systems| bridge::Simulation { systems, dll: simulation_dll.as_deref() });
-            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, args.viewer_glass(), simulation)
+            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, args.viewer_glass(), args.viewer_fog(), simulation)
         } {
             // (stops the game when the viewer exits, or gives up on it)
             Ok(child) => game_process = Some(bridge::GameProcess(child)),
@@ -345,6 +357,9 @@ fn main() -> AppExit {
         }
         if overlay {
             app.add_plugins(overlay::OverlayPlugin);
+            if args.viewer_fog() {
+                app.add_plugins(fog::FogPlugin);
+            }
         }
     }
     if let Some(game_process) = game_process {

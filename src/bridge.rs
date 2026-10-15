@@ -36,7 +36,7 @@ pub struct Simulation<'a> {
 /// and (unless `show`) its window is hidden. With `overlay`, it shares its
 /// overlay (`crate::overlay`), drawing at the viewer's window size, and
 /// with `viewer_glass` leaves glass and water out of it (the viewer draws
-/// them). With `simulation`, those systems run in Rust. Its output goes to
+/// them), and with `viewer_fog` its fog, which it shares instead. With `simulation`, those systems run in Rust. Its output goes to
 /// `halo_rt_opence-<viewer process id>.log` in the temporary folder.
 pub fn launch_game(
     exe: &std::path::Path,
@@ -46,6 +46,7 @@ pub fn launch_game(
     show: bool,
     overlay: bool,
     viewer_glass: bool,
+    viewer_fog: bool,
     simulation: Option<Simulation>,
 ) -> std::io::Result<std::process::Child> {
     use std::io::{Error, ErrorKind};
@@ -91,6 +92,10 @@ pub fn launch_game(
         // (glass and water: the viewer's, ray traced)
         if viewer_glass {
             command.env("HALO_BEVY_BRIDGE_VIEWER_GLASS", "1");
+        }
+        // (and the fog: the viewer's, from what each frame shares)
+        if viewer_fog {
+            command.env("HALO_BEVY_BRIDGE_VIEWER_FOG", "1");
         }
     }
     let start = if start_on_map { format!("on {scenario}") } else { "at its menus".to_string() };

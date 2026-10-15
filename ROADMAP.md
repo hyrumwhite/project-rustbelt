@@ -1303,6 +1303,26 @@ Move subsystems out of the 32-bit process one at a time behind the bridge interf
 
 When nothing is left in the 32-bit process, the bridge goes away.
 
+## Effects in the viewer (sub-roadmap)  ← *in progress*
+
+Phase 5 had the game draw everything but the opaque world into an overlay: a flat picture over the traced one. That was cheap and faithful, but what's in it is never lit by the traced lights, never seen in reflections or through glass and water, comes after DLSS and the denoiser, and its multiplying blends meet a world the game no longer has (the smoky corridors and the flickering on a30's crashed Pelican). This moves what has a place in the world into the viewer, one kind at a time. Each step has a switch that leaves it to the game (`--game-…`), for comparison against the game's own on the same frame. The overlay ends up as only the HUD and menus.
+
+1. **Fog**
+   - [x] Atmospheric and planar fog (OpenCE `bevy-bridge-collision`, protocol 32). Each frame shares the fog the first player's window was drawn with, as `rasterizer_window_set_fog` leaves it (`struct bevy_bridge_fog`). With `game.bevy_bridge_viewer_fog`, the game leaves out its environment fog pass. The viewer fogs its tonemapped picture against the traced depth (`src/fog.rs`, `shaders/halo_fog.wesl`) with the game's equations. These were decoded from `_rasterizer_environment_fog_begin`'s register combiners and its two density textures: a ramp, and a smoothstep in distance times one in depth. They blend in the display's encoding, as the game's do. `--game-fog` turns it off.
+     - Checked on b30 (atmospheric plus the sea's water fog) and c10 (atmosphere-dominant swamp fog), against `--game-fog` at the spawn: level surfaces within 1 to 3 levels of 255. Objects (trees, boulders, Marines) are now fogged as well, as the game's own model shaders fog them. The overlay never could, so in play they had stood out unfogged.
+   - [ ] Fog screens (`structure_render_fog_screen`: the textured, wind-blown fog layers, such as c10's `fog_noise`). Under the overlay the game skips them altogether, so they are missing in play today. They need their layers, wind and animation shared, or read from the fog tag.
+   - [ ] The multiply's order: the game multiplies (decals) before its fog, but the viewer's multiply node runs after the fog pass, so distant darkening decals also darken the fog over them. Move the multiply into the fog pass, before the fog.
+   - [ ] Fog seen by the rays: reflections, and through glass and water, show the surfaces they hit unfogged. Fog the traced secondary hits by their distance, or at least the water's refraction.
+   - [ ] Lit fog, optional: volumetric scattering in the path tracer (muzzle flashes and plasma lighting the swamp). Costly and noisy, so it's an option over the game's look, not a replacement.
+2. **Decals**
+   - [ ] Share the decals (`decals.c`: each one's vertices fitted to the level, its bitmap, colour, blend and fade) when they're made or change. They change rarely, so this is cheap.
+   - [ ] Draw them into the traced surfaces' colour, so they're seen in reflections, with the multiplying and double-multiplying blends done in the viewer. Thin meshes above the surface are the fallback.
+   - [ ] Retire the multiply layer (protocol 31) once nothing else uses it.
+3. **Particles and effects**
+   - [ ] Share the particles (position, size, rotation, colour, bitmap frame, blend) and particle systems each frame, then contrails, weather, lightning and lens flares.
+   - [ ] Draw them after the traced picture, depth-tested against it, before DLSS where they need motion vectors. The bright ones (plasma, explosions, muzzle flashes) also light the scene, as the dynamic lights already do.
+   - [ ] What's left in the overlay is the HUD, the menus and text.
+
 ## Known risks
 
 - **Solari is experimental.** It needs hardware ray tracing and supports opaque `StandardMaterial` only. Transparent and alpha-tested content needs a fallback.

@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 31;
+pub const VERSION: u32 = 32;
 pub const VEHICLE_UPDATE_RECORDS: usize = 512;
 pub const VEHICLE_PHYSICS_RECORDS: usize = 256;
 pub const MASS_POINTS: usize = 8192;
@@ -66,6 +66,34 @@ pub struct Camera {
     pub up: [f32; 3],
     /// Radians.
     pub vertical_field_of_view: f32,
+}
+
+/// (Protocol 32) the fog the first player's window was drawn with
+/// (`rasterizer_window_set_fog`'s, as it left it: off, each has no
+/// density), in the game's coordinates. Atmospheric fog thickens with the
+/// view depth from the minimum to the maximum distance; planar fog with the
+/// view depth over its maximum distance and the depth under its plane
+/// (whose normal points out of the fog) over its maximum depth
+/// (`rasterizer_xbox_environment_fog.c`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Fog {
+    pub valid: u32,
+    /// `fog_definition` flags: bit 0 water, 1 atmosphere dominant, 2 screen
+    /// effect only.
+    pub flags: u16,
+    /// 0 off, 1 normal, 2 fully fogged.
+    pub planar_mode: i16,
+    pub atmospheric_color: [f32; 3],
+    pub atmospheric_maximum_density: f32,
+    pub atmospheric_minimum_distance: f32,
+    pub atmospheric_maximum_distance: f32,
+    /// Normal and d: n.p = d on the plane.
+    pub plane: [f32; 4],
+    pub planar_color: [f32; 3],
+    pub planar_maximum_density: f32,
+    pub planar_maximum_distance: f32,
+    pub planar_maximum_depth: f32,
 }
 
 #[repr(C)]
@@ -192,6 +220,7 @@ struct Frame {
     scenario_name: [u8; 64],
     camera_valid: u32,
     camera: Camera,
+    fog: Fog,
     light_count: u32,
     lights: [Light; MAXIMUM_LIGHTS],
     ray_test_count: u32,
@@ -956,6 +985,8 @@ pub struct Snapshot {
     /// The scenario tag's name, e.g. `levels\b30\b30`.
     pub scenario_name: String,
     pub camera: Option<Camera>,
+    /// The fog the camera's view was drawn with, once the game shares it.
+    pub fog: Option<Fog>,
     pub lights: Vec<Light>,
     pub ray_tests: Vec<RayTest>,
     /// The point physics definition the ray tests' points use (`u32::MAX`
@@ -1539,6 +1570,7 @@ impl Bridge {
                     scenario_name: String::from_utf8_lossy(&name[..end]).into_owned(),
                     camera: (std::ptr::read_volatile(&(*frame).camera_valid) != 0)
                         .then(|| std::ptr::read_volatile(&(*frame).camera)),
+                    fog: Some(std::ptr::read_volatile(&(*frame).fog)).filter(|fog| fog.valid != 0),
                     lights: (0..light_count).map(|i| std::ptr::read_volatile(&(*frame).lights[i])).collect(),
                     ray_tests: (0..ray_test_count).map(|i| std::ptr::read_volatile(&(*frame).ray_tests[i])).collect(),
                     point_physics_definition: std::ptr::read_volatile(&(*frame).point_physics_definition),

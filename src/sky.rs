@@ -73,6 +73,10 @@ pub fn gradient_cubemap(sky: Color, images: &mut Assets<Image>) -> Handle<Image>
     })
 }
 
+/// How far above the horizon (the sine of the elevation) the sky model's
+/// colour is taken for every direction below it.
+const HORIZON: f32 = 0.03;
+
 /// The sky model's layers, composited in every direction (see
 /// [`halo_map::sky::SkyRenderer`]).
 pub fn sky_model_cubemap(cache: &CacheFile, model_datum: u32, images: &mut Assets<Image>) -> halo_map::Result<Option<Handle<Image>>> {
@@ -81,8 +85,13 @@ pub fn sky_model_cubemap(cache: &CacheFile, model_datum: u32, images: &mut Asset
         return Ok(None);
     }
     // Bevy (x, y, z) is Halo (x, -z, y); the composite is 8-bit gamma, which
-    // the sRGB texture stores as is
-    Ok(Some(cubemap(64, images, |dir| renderer.sample([dir.x, -dir.z, dir.y]))))
+    // the sRGB texture stores as is. Below the horizon, where the sky model
+    // has nothing (the game fogs or never shows it), its colour at the
+    // horizon: rays out through the sea saw black there.
+    Ok(Some(cubemap(64, images, |dir| {
+        let dir = if dir.y < HORIZON { Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::X).with_y(HORIZON).normalize() } else { dir };
+        renderer.sample([dir.x, -dir.z, dir.y])
+    })))
 }
 
 /// A cubemap whose texel colours (sRGB, 0..1) `colour` gives per direction

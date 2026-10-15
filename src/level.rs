@@ -40,6 +40,18 @@ pub struct AnimatedSelfIllumination {
     pub change_colors: [[f32; 3]; 4],
 }
 
+/// A moving object's mesh whose material its change colours can make anew
+/// in place ([`LevelBuilder::recolour`]): the object's root, the piece's
+/// uncoloured surface and shader, and whether this entity is the rays' (or
+/// shares the rays' material) or the camera's alone.
+#[derive(Component, Clone)]
+pub struct Recolourable {
+    pub root: Entity,
+    base: Surface,
+    shader: Option<u32>,
+    traced: bool,
+}
+
 /// The game's periodic functions, for the animations evaluated here.
 #[derive(Resource)]
 pub struct PeriodicTables(pub [[u8; 1024]; 12]);
@@ -328,6 +340,9 @@ pub fn halo_to_bevy_affine() -> Affine3A {
 
 pub struct LevelBuilder {
     pub cache: Arc<CacheFile>,
+    /// While a moving object's piece is spawned: its root, uncoloured
+    /// surface and shader, put on its entities as [`Recolourable`].
+    recolour: Option<(Entity, Surface, Option<u32>)>,
     pub textures: TextureCache,
     surfaces: HashMap<Option<u32>, ShaderSurface>,
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
@@ -369,6 +384,7 @@ struct SourceVertex {
 impl LevelBuilder {
     pub fn new(cache: Arc<CacheFile>, bc_supported: bool) -> Self {
         LevelBuilder {
+            recolour: None,
             textures: TextureCache::new(bc_supported),
             surfaces: HashMap::default(),
             models: HashMap::default(),
@@ -717,6 +733,9 @@ impl LevelBuilder {
                 entity.insert(EmissiveSurface { radiance });
                 self.stats.emissive_meshes += 1;
             }
+            if let Some((root, base, shader)) = &self.recolour {
+                entity.insert(Recolourable { root: *root, base: base.clone(), shader: *shader, traced: true });
+            }
             traced = Some(entity.id());
         }
         if raster_use {
@@ -735,6 +754,9 @@ impl LevelBuilder {
                     };
                     if let Some(radiance) = surface.radiance {
                         drawn.insert(EmissiveSurface { radiance });
+                    }
+                    if let Some((root, base, shader)) = &self.recolour {
+                        drawn.insert(Recolourable { root: *root, base: base.clone(), shader: *shader, traced: false });
                     }
                     skinned(&mut drawn, skin);
                 }
@@ -984,7 +1006,9 @@ impl LevelBuilder {
             let surface = animate(self, surface, piece.shader, assets);
             let pane = matches!(surface, Surface::Blended(_));
             let mode = if raster && (model.skinned.is_empty() || pane) { MeshUse::Both } else { MeshUse::Traced };
+            self.recolour = Some((root, piece.surface.clone(), piece.shader));
             let _ = self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
+            self.recolour = None;
         }
         // the bending parts, the object's own entities (in the world: the
         // root stays put), given a mesh skinned anew as its nodes move
@@ -996,7 +1020,9 @@ impl LevelBuilder {
             let surface = animate(self, surface, skin.shader, assets);
             let mesh = assets.meshes.add(skin.mesh(&rest));
             let mode = if raster && matches!(surface, Surface::Blended(_)) { MeshUse::Both } else { MeshUse::Traced };
+            self.recolour = Some((root, skin.surface.clone(), skin.shader));
             skins.extend(self.spawn_mesh_as(commands, root, model.name.clone(), mesh, &surface, mode));
+            self.recolour = None;
         }
         if raster {
             for part in &model.skinned {
@@ -1007,8 +1033,10 @@ impl LevelBuilder {
                 let surface = self.coloured_surface(&part.surface, part.shader, change_colors, assets);
                 let surface = animate(self, surface, part.shader, assets);
                 let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
+                self.recolour = Some((root, part.surface.clone(), part.shader));
                 let _ =
                     self.spawn_mesh_as(commands, root, model.name.clone(), part.mesh.clone(), &surface, MeshUse::Raster(Some(skin)));
+                self.recolour = None;
             }
         }
         if !animated.is_empty() {
@@ -1101,6 +1129,27 @@ impl LevelBuilder {
 
     /// A piece's surface with the object's change colour, where its shader
     /// takes one (made once per shader and colour).
+    /// An object's meshes in new change colours, their materials swapped in
+    /// place: remaking the model left it missing a frame and lost its
+    /// motion's history, and the plasma rifle's colours follow its heat.
+    pub fn recolour<'a>(
+        &mut self,
+        commands: &mut Commands,
+        entities: impl Iterator<Item = (Entity, &'a Recolourable)>,
+        change_colors: &[[f32; 3]; 4],
+        assets: &mut LevelAssets,
+    ) {
+        for (entity, recolourable) in entities {
+            let Surface::Solid(solid) = self.coloured_surface(&recolourable.base, recolourable.shader, change_colors, assets) else {
+                continue;
+            };
+            match (&solid.raster, recolourable.traced) {
+                (Some(raster), false) => commands.entity(entity).insert(MeshMaterial3d(raster.clone())),
+                _ => commands.entity(entity).insert(MeshMaterial3d(solid.standard.clone())),
+            };
+        }
+    }
+
     fn coloured_surface(
         &mut self,
         base: &Surface,
@@ -1433,8 +1482,8 @@ impl LevelBuilder {
         // mask says (metallic, which the mask scales; reflectance is the
         // whole material's, and raised it hazed the matte parts like dust).
         let model = info.shader_type == ShaderType::Model;
-        let roughness = if model { 0.45 - 0.37 * r.sqrt() } else { 0.8 - 0.65 * r.sqrt() };
-        let metallic = if model { 0.8 * r } else { 0.5 * r };
+        let roughness = if model { 0.4 - 0.34 * r.sqrt() } else { 0.8 - 0.65 * r.sqrt() };
+        let metallic = if model { 0.9 * r } else { 0.5 * r };
         let reflectance = 0.5;
         let mask = match reflection.mask {
             // an alpha-tested base map's alpha is its cut-out, not a mask

@@ -228,7 +228,7 @@ pub struct BridgeObjects {
 
 /// How many frames a model made again stays drawn: its replacement takes
 /// its transforms the next frame and its new materials a frame or two later.
-const RETIRING_FRAMES: u8 = 4;
+const RETIRING_FRAMES: u8 = 2;
 
 /// An object's change colours in steps of 1/16: some follow the object's
 /// functions (the plasma rifle's heat, the cyborg's shield), and each change
@@ -299,6 +299,7 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
+    (recolourable, animated): (Query<(Entity, &crate::level::Recolourable)>, Query<(), With<crate::level::AnimatedSelfIllumination>>),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
 ) {
@@ -339,6 +340,20 @@ fn sync_objects(
     for object in &snapshot.objects {
         seen.insert(object.object_index, ());
         let change_colors = change_color_steps(&object.change_colors);
+        // an object whose change colours alone changed takes new materials
+        // (but one with animated self-illumination, whose own copies of its
+        // materials the animation keeps)
+        if let Some(tracked) = objects.tracked.get_mut(&object.object_index)
+            && tracked.definition == object.definition_index
+            && tracked.permutations == object.region_permutations
+            && tracked.camouflaged == camouflaged(object)
+            && tracked.change_colors != change_colors
+            && !animated.contains(tracked.root)
+        {
+            let root = tracked.root;
+            tracked.change_colors = change_colors;
+            builder.recolour(&mut commands, recolourable.iter().filter(|(_, r)| r.root == root), &change_colors, assets);
+        }
         // an object whose definition or permutations changed is made again
         let current = objects.tracked.get(&object.object_index);
         if current.is_some_and(|t| {

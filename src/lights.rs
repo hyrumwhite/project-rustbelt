@@ -12,9 +12,9 @@ use crate::{
 use bevy::prelude::*;
 use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 
-/// The lights' size (metres): as bright as the emissive sphere that stood
-/// in for one under Solari.
-const LIGHT_RADIUS: f32 = 0.1;
+/// The lights' size (metres): larger, softer round the light (a muzzle
+/// flash's bright spot on the weapon and the wall beside it).
+const LIGHT_RADIUS: f32 = 0.25;
 /// A spot light's size: the disc that stood in for one, emitting from its
 /// front.
 const SPOT_RADIUS: f32 = 0.15;
@@ -23,14 +23,18 @@ const SPOT_RADIUS: f32 = 0.15;
 /// the weapon and the ground nearby in daylight, and a dark room.
 const RADIANCE_PER_REACH2: f32 = 30000.0;
 /// Point lights' share of that (muzzle flashes, plasma, explosions).
-const POINT_LIGHT_SCALE: f32 = 0.35;
+const POINT_LIGHT_SCALE: f32 = 0.25;
 /// Spot lights' (the flashlight's): its cone holds its light, and at full
 /// strength it washed the view white.
-const SPOT_LIGHT_SCALE: f32 = 0.15;
+const SPOT_LIGHT_SCALE: f32 = 0.1;
 /// How far ahead of the game's position a spot light shines from (metres):
 /// the flashlight sits at the eye, inside the first-person weapon, which
 /// it lit glaring white.
 const SPOT_FORWARD: f32 = 0.6;
+/// A spot light this near the game's camera (world units) is the player's
+/// flashlight, aimed where the camera looks: the game's light keeps the
+/// unit's level facing.
+const FLASHLIGHT_REACH: f32 = 1.0;
 /// Below this cutoff angle (radians, from the light's axis) a light is a
 /// spot light; Bevy's cones stop short of a hemisphere.
 const SPOT_CUTOFF: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
@@ -64,7 +68,10 @@ fn sync_lights(
     let (mut used_points, mut used_spots) = (0, 0);
     for light in &snapshot.lights {
         let spot = light.cutoff_angle < SPOT_CUTOFF;
-        let forward = Vec3::from(halo_to_bevy(light.forward, 1.0)).normalize_or(Vec3::NEG_Z);
+        let near_camera = snapshot.camera.as_ref().filter(|camera| {
+            spot && Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH
+        });
+        let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
         let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT)) + if spot { forward * SPOT_FORWARD } else { Vec3::ZERO };
         let scale = if spot { SPOT_LIGHT_SCALE } else { POINT_LIGHT_SCALE };
         let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * light.radius * light.radius;

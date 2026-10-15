@@ -296,6 +296,11 @@ static void bevy_bridge_point(float *out, real_point3d const *in);
 static struct bevy_bridge_fog bevy_bridge_fog;
 /* ... and the fog screen, noted afresh each frame */
 static struct bevy_bridge_fog_screen bevy_bridge_fog_screen;
+/* ... and the sprites */
+static unsigned long bevy_bridge_sprite_batch_count;
+static unsigned long bevy_bridge_sprite_vertex_count;
+static struct bevy_bridge_sprite_batch bevy_bridge_sprite_batches[BEVY_BRIDGE_SPRITE_BATCHES];
+static struct bevy_bridge_sprite_vertex bevy_bridge_sprite_vertices[BEVY_BRIDGE_SPRITE_VERTICES];
 /* ... and the decals drawn */
 static unsigned long bevy_bridge_decal_count;
 static unsigned long bevy_bridge_decal_vertex_count;
@@ -561,6 +566,8 @@ void bevy_bridge_export_frame(
 	memset(&frame->fog_screen, 0, sizeof(frame->fog_screen));
 	frame->decal_count = 0;
 	frame->decal_vertex_count = 0;
+	frame->sprite_batch_count = 0;
+	frame->sprite_vertex_count = 0;
 	frame->ray_test_count = 0;
 	frame->physics_vehicle_count = 0;
 	frame->vehicle_ray_test_count = 0;
@@ -587,6 +594,12 @@ void bevy_bridge_export_frame(
 		frame->camera_valid = TRUE;
 		frame->fog = bevy_bridge_fog;
 		frame->fog_screen = bevy_bridge_fog_screen;
+		frame->sprite_batch_count = bevy_bridge_sprite_batch_count;
+		frame->sprite_vertex_count = bevy_bridge_sprite_vertex_count;
+		memcpy(frame->sprite_batches, bevy_bridge_sprite_batches,
+			bevy_bridge_sprite_batch_count * sizeof(struct bevy_bridge_sprite_batch));
+		memcpy(frame->sprite_vertices, bevy_bridge_sprite_vertices,
+			bevy_bridge_sprite_vertex_count * sizeof(struct bevy_bridge_sprite_vertex));
 		frame->decal_count = bevy_bridge_decal_count;
 		frame->decal_vertex_count = bevy_bridge_decal_vertex_count;
 		memcpy(frame->decals, bevy_bridge_decals, bevy_bridge_decal_count * sizeof(struct bevy_bridge_decal));
@@ -603,6 +616,8 @@ void bevy_bridge_export_frame(
 	/* (the decals staged for this frame, shared or not) */
 	bevy_bridge_decal_count = 0;
 	bevy_bridge_decal_vertex_count = 0;
+	bevy_bridge_sprite_batch_count = 0;
+	bevy_bridge_sprite_vertex_count = 0;
 
 	/* the dynamic lights */
 	{
@@ -770,6 +785,35 @@ void bevy_bridge_note_fog(void const *data)
 	bevy_bridge_fog.planar_maximum_density = fog->planar_maximum_density;
 	bevy_bridge_fog.planar_maximum_distance = fog->planar_maximum_distance;
 	bevy_bridge_fog.planar_maximum_depth = fog->planar_maximum_depth;
+}
+
+boolean bevy_bridge_viewer_draws_effects(void)
+{
+	static int viewer_effects = -1;
+
+	if (viewer_effects < 0)
+		viewer_effects = config_boolean("game.bevy_bridge_viewer_effects") != 0;
+	return viewer_effects && bevy_bridge_overlay_enabled();
+}
+
+boolean bevy_bridge_note_sprite_batch(struct bevy_bridge_sprite_batch const *batch,
+	struct bevy_bridge_sprite_vertex const *vertices)
+{
+	struct bevy_bridge_sprite_batch *out;
+	unsigned long vertex_count = batch->quad_count * 4;
+
+	if (bevy_bridge_sprite_batch_count >= BEVY_BRIDGE_SPRITE_BATCHES ||
+		bevy_bridge_sprite_vertex_count + vertex_count > BEVY_BRIDGE_SPRITE_VERTICES)
+	{
+		return FALSE;
+	}
+	out = &bevy_bridge_sprite_batches[bevy_bridge_sprite_batch_count++];
+	*out = *batch;
+	out->first_vertex = bevy_bridge_sprite_vertex_count;
+	memcpy(&bevy_bridge_sprite_vertices[bevy_bridge_sprite_vertex_count], vertices,
+		vertex_count * sizeof(struct bevy_bridge_sprite_vertex));
+	bevy_bridge_sprite_vertex_count += vertex_count;
+	return TRUE;
 }
 
 boolean bevy_bridge_viewer_draws_decals(void)

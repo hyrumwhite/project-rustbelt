@@ -9,6 +9,8 @@ The world, each frame, for a Bevy renderer (bevy_bridge.c).
 #pragma once
 
 struct render_window;
+struct bevy_bridge_sprite_batch;
+struct bevy_bridge_sprite_vertex;
 struct real_matrix4x3;
 
 /* render_frame, once a frame: the windows it draws */
@@ -49,6 +51,15 @@ void bevy_bridge_note_fog_screen(void const *screen);
 /* with game.bevy_bridge_viewer_decals on too: TRUE (the renderer draws the
 decals itself, from those each frame shares, so the game draws none) */
 boolean bevy_bridge_viewer_draws_decals(void);
+/* with game.bevy_bridge_viewer_effects on too: TRUE (the renderer draws the
+sprites itself, from the batches each frame shares, so the game draws
+none) */
+boolean bevy_bridge_viewer_draws_effects(void);
+/* render_sprite.c: a batch of sprites the first player's window would have
+drawn (struct bevy_bridge_sprite_batch, its vertices already in the game's
+coordinates), for the frame's export; FALSE if there is no room */
+boolean bevy_bridge_note_sprite_batch(struct bevy_bridge_sprite_batch const *batch,
+	struct bevy_bridge_sprite_vertex const *vertices);
 /* rasterizer_xbox_decals.c: a decal the first player's window would have
 drawn, its quads' vertices as the game keeps them (struct
 bevy_bridge_decal_vertex), for the frame's export */

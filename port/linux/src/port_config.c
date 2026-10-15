@@ -302,6 +302,11 @@ static const struct config_setting config_settings[] =
 		_platform_desktop,
 		"With game.bevy_bridge_overlay: glass and water are the Bevy renderer's\n"
 		"(ray traced), so the game leaves them out of what it shares." },
+	{ "game.bevy_bridge_viewer_effects", _config_boolean, "false", "HALO_BEVY_BRIDGE_VIEWER_EFFECTS", _environment_value,
+		_platform_desktop,
+		"With game.bevy_bridge_overlay: the Bevy renderer draws the sprites\n"
+		"(particles, particle systems, weather, glows) itself, from those the\n"
+		"game shares each frame, so the game draws none." },
 	{ "game.bevy_bridge_viewer_decals", _config_boolean, "false", "HALO_BEVY_BRIDGE_VIEWER_DECALS", _environment_value,
 		_platform_desktop,
 		"With game.bevy_bridge_overlay: the Bevy renderer draws the decals\n"

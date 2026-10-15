@@ -40,7 +40,9 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 34
+#define BEVY_BRIDGE_VERSION 35
+#define BEVY_BRIDGE_SPRITE_BATCHES 512
+#define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
 #define BEVY_BRIDGE_DECAL_VERTICES 10240
 #define BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS 512
@@ -182,6 +184,49 @@ struct bevy_bridge_decal
 	unsigned char color[4];
 	unsigned long first_vertex;
 	unsigned long quad_count;
+};
+
+/* (protocol 35) a batch of sprites the first player's window would have
+drawn, with game.bevy_bridge_viewer_effects (render_sprite.c's
+build_sprites_end: particles, particle systems, weather, glows, antennas):
+quads (four vertices each, from first_vertex of the frame's
+sprite_vertices) of one bitmap of `map`, with an effect shader
+(shader_effect_definition). Its combiners take the bitmap's colour times
+the vertex's (with nonlinear tint, (1 - v) t^4 + v t), and blend it by the
+framebuffer blend function (as a decal's), faded by the vertex's alpha
+toward nothing: an alpha blend's alpha is the bitmap's times it, a
+multiply's colour goes toward white, a double multiply's toward grey, an
+add's toward black */
+struct bevy_bridge_sprite_batch
+{
+	unsigned long map;
+	unsigned short bitmap_index;
+	/* shader_effect flags (bit 0 sort bias, 1 nonlinear tint, 2 don't
+	overdraw the first-person weapon) and its framebuffer blend function */
+	unsigned short shader_flags;
+	unsigned short blend_function;
+	/* primary map flags (bit 0 point sampled, 1 u clamped, 2 v clamped) */
+	unsigned short map_flags;
+	/* 1 drawn with the first-person weapon */
+	unsigned long first_person;
+	/* the secondary map's bitmap tag (all ones for none), its anchor (0
+	with the primary, 1 screen space, 2 zsprite) and flags */
+	unsigned long secondary_map;
+	unsigned short secondary_anchor;
+	unsigned short secondary_flags;
+	/* where the game sorts the batch from (the game's coordinates) */
+	float centroid[3];
+	unsigned long first_vertex;
+	unsigned long quad_count;
+};
+
+/* a sprite's vertex: the game's coordinates, the bitmap's texture
+coordinates and the colour (a8r8g8b8: alpha the fade) */
+struct bevy_bridge_sprite_vertex
+{
+	float position[3];
+	float texcoord[2];
+	unsigned long color;
 };
 
 /* a decal's vertex, as the game keeps it: the game's coordinates, and the
@@ -343,6 +388,10 @@ struct bevy_bridge_frame
 	unsigned long decal_vertex_count;
 	struct bevy_bridge_decal decals[BEVY_BRIDGE_DECALS];
 	struct bevy_bridge_decal_vertex decal_vertices[BEVY_BRIDGE_DECAL_VERTICES];
+	unsigned long sprite_batch_count;
+	unsigned long sprite_vertex_count;
+	struct bevy_bridge_sprite_batch sprite_batches[BEVY_BRIDGE_SPRITE_BATCHES];
+	struct bevy_bridge_sprite_vertex sprite_vertices[BEVY_BRIDGE_SPRITE_VERTICES];
 	unsigned long light_count;
 	struct bevy_bridge_light lights[BEVY_BRIDGE_MAXIMUM_LIGHTS];
 	/* rays fanned out from the camera (only with game.bevy_bridge_ray_tests) */

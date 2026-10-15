@@ -89,6 +89,10 @@ symbols in this file:
 #include "cache/texture_cache.h"
 #include "tag_files/tag_files.h"
 #include "tag_files/tag_groups.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "bevy_bridge_protocol.h"
+
+#include <stdlib.h>
 
 /* ---------- constants */
 
@@ -223,11 +227,69 @@ void build_sprites_begin(
 	return;
 }
 
+/* port: with a Bevy renderer that draws the sprites itself
+(game.bevy_bridge_viewer_effects), a group shared with it instead of drawn:
+its vertices out of the camera's space; the first player's window's only
+(a mirror's are not drawn) */
+static void build_sprites_share(
+	struct build_sprite_data const *data,
+	struct build_sprite_group const *group)
+{
+	static struct bevy_bridge_sprite_vertex vertices[BEVY_BRIDGE_SPRITE_VERTICES];
+	struct bevy_bridge_sprite_batch batch;
+	struct bitmap_group *bitmap_group = bitmap_group_get(data->bitmap_group_index);
+	struct build_sprite_vertex const *in = (struct build_sprite_vertex const *)group->vertices;
+	long vertex_count = (long)group->sprite_count * NUMBER_OF_VERTICES_PER_QUADRILATERAL;
+	long vertex_index;
+
+	if (render.local_player_index == NONE || !bitmap_group || !group->bitmap ||
+		vertex_count > BEVY_BRIDGE_SPRITE_VERTICES)
+	{
+		return;
+	}
+	csmemset(&batch, 0, sizeof(batch));
+	batch.map = (unsigned long)data->bitmap_group_index;
+	batch.bitmap_index = (unsigned short)(group->bitmap - (struct bitmap_data *)bitmap_group->bitmaps.address);
+	if (data->shader)
+	{
+		batch.shader_flags = data->shader->flags;
+		batch.blend_function = data->shader->framebuffer_blend_function;
+		batch.map_flags = data->shader->primary_map_flags;
+		batch.secondary_map = (unsigned long)data->shader->secondary_map.index;
+		batch.secondary_anchor = data->shader->secondary_map_anchor;
+		batch.secondary_flags = data->shader->secondary_map_flags;
+	}
+	else
+	{
+		batch.secondary_map = (unsigned long)NONE;
+	}
+	batch.first_person = TEST_FLAG(data->flags, _build_sprites_first_person_bit) ? 1 : 0;
+	batch.centroid[0] = data->centroid.x;
+	batch.centroid[1] = data->centroid.y;
+	batch.centroid[2] = data->centroid.z;
+	batch.quad_count = (unsigned long)group->sprite_count;
+	for (vertex_index = 0; vertex_index < vertex_count; vertex_index++)
+	{
+		real_point3d point;
+
+		matrix4x3_transform_point(&render.frustum.view_to_world, &in[vertex_index].point, &point);
+		vertices[vertex_index].position[0] = point.x;
+		vertices[vertex_index].position[1] = point.y;
+		vertices[vertex_index].position[2] = point.z;
+		vertices[vertex_index].texcoord[0] = in[vertex_index].texture_coordinates.x;
+		vertices[vertex_index].texcoord[1] = in[vertex_index].texture_coordinates.y;
+		vertices[vertex_index].color = in[vertex_index].color;
+	}
+	bevy_bridge_note_sprite_batch(&batch, vertices);
+}
+
 void build_sprites_end(
 	struct build_sprite_data *data)
 {
 	real one_over_sprite_count = 1.f / data->sprite_count;
 	short group_index;
+	boolean shared = bevy_bridge_viewer_draws_effects() &&
+		!TEST_FLAG(data->flags, _build_sprites_screen_space_bit);
 
 	match_assert(
 		"c:\\halo\\SOURCE\\render\\render_sprite.c",
@@ -245,8 +307,16 @@ void build_sprites_end(
 
 		if (group->sprite_count)
 		{
+			/* port: shared (before the vertices are let go of), not drawn */
+			if (shared)
+				build_sprites_share(data, group);
 			rasterizer_dynamic_vertices_unlock(group->vertex_buffer_index);
-			if (TEST_FLAG(data->flags, _build_sprites_screen_space_bit))
+			/* (HALO_BEVY_BRIDGE_EFFECTS_ALSO_DRAWN, debugging: drawn as well,
+			to compare the two on one frame) */
+			if (shared && !getenv("HALO_BEVY_BRIDGE_EFFECTS_ALSO_DRAWN"))
+			{
+			}
+			else if (TEST_FLAG(data->flags, _build_sprites_screen_space_bit))
 			{
 				match_vassert(
 					"c:\\halo\\SOURCE\\render\\render_sprite.c",

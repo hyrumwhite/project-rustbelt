@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 31
+#define BEVY_BRIDGE_VERSION 32
 #define BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS 512
 #define BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS 256
 #define BEVY_BRIDGE_MASS_POINTS 8192
@@ -88,6 +88,33 @@ struct bevy_bridge_camera
 	/* radians: the vertical extent the picture covers (the frustum's,
 	wider than the camera's own in cinematics), centred */
 	float vertical_field_of_view;
+};
+
+/* (protocol 32) the fog the first player's window was drawn with
+(rasterizer_window_set_fog's, as it left it: off, each has no density), in
+the game's coordinates. Atmospheric fog thickens with the view depth from
+the minimum to the maximum distance; planar fog with the view depth over its
+maximum distance and the depth under its plane (whose normal points out of
+the fog) over its maximum depth (rasterizer_xbox_environment_fog.c) */
+struct bevy_bridge_fog
+{
+	/* nonzero once written */
+	unsigned long valid;
+	/* fog_definition flags (bit 0 water, 1 atmosphere dominant, 2 screen
+	effect only) and render_fog.planar_mode (0 off, 1 normal, 2 fully
+	fogged) */
+	unsigned short flags;
+	short planar_mode;
+	float atmospheric_color[3];
+	float atmospheric_maximum_density;
+	float atmospheric_minimum_distance;
+	float atmospheric_maximum_distance;
+	/* normal (i, j, k) and d: n.p = d on the plane */
+	float plane[4];
+	float planar_color[3];
+	float planar_maximum_density;
+	float planar_maximum_distance;
+	float planar_maximum_depth;
 };
 
 struct bevy_bridge_object
@@ -235,6 +262,7 @@ struct bevy_bridge_frame
 	char scenario_name[64];
 	unsigned long camera_valid;
 	struct bevy_bridge_camera camera;
+	struct bevy_bridge_fog fog;
 	unsigned long light_count;
 	struct bevy_bridge_light lights[BEVY_BRIDGE_MAXIMUM_LIGHTS];
 	/* rays fanned out from the camera (only with game.bevy_bridge_ray_tests) */

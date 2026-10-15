@@ -292,6 +292,8 @@ static unsigned long bevy_bridge_ray_tests(
 
 static void bevy_bridge_vector(float *out, real_vector3d const *in);
 static void bevy_bridge_point(float *out, real_point3d const *in);
+/* the fog last noted (bevy_bridge_note_fog), for the next frame's export */
+static struct bevy_bridge_fog bevy_bridge_fog;
 
 /* game.bevy_bridge_ray_tests: the vehicles' physics placement, and rays from
 the camera at them tested with their physics shapes
@@ -548,6 +550,7 @@ void bevy_bridge_export_frame(
 
 	/* the first player's view */
 	frame->camera_valid = FALSE;
+	memset(&frame->fog, 0, sizeof(frame->fog));
 	frame->ray_test_count = 0;
 	frame->physics_vehicle_count = 0;
 	frame->vehicle_ray_test_count = 0;
@@ -572,6 +575,7 @@ void bevy_bridge_export_frame(
 				tangent(window->render_camera.vertical_field_of_view * 0.5f) * (bounds.y1 - bounds.y0) * 0.5f, 1.0f);
 		}
 		frame->camera_valid = TRUE;
+		frame->fog = bevy_bridge_fog;
 		first_person_unit = bevy_bridge_first_person_unit(window->local_player_index);
 		frame->ray_test_count = bevy_bridge_ray_tests(frame->ray_tests, &window->render_camera.position,
 			&window->render_camera.forward, &window->render_camera.up);
@@ -713,6 +717,38 @@ boolean bevy_bridge_viewer_draws_glass(void)
 	if (viewer_glass < 0)
 		viewer_glass = config_boolean("game.bevy_bridge_viewer_glass") != 0;
 	return viewer_glass && bevy_bridge_overlay_enabled();
+}
+
+boolean bevy_bridge_viewer_draws_fog(void)
+{
+	static int viewer_fog = -1;
+
+	if (viewer_fog < 0)
+		viewer_fog = config_boolean("game.bevy_bridge_viewer_fog") != 0;
+	return viewer_fog && bevy_bridge_overlay_enabled();
+}
+
+void bevy_bridge_note_fog(void const *data)
+{
+	struct render_fog const *fog = (struct render_fog const *)data;
+
+	bevy_bridge_fog.valid = TRUE;
+	bevy_bridge_fog.flags = fog->fog_definition_flags;
+	bevy_bridge_fog.planar_mode = fog->planar_mode;
+	bevy_bridge_fog.atmospheric_color[0] = fog->atmospheric_color.red;
+	bevy_bridge_fog.atmospheric_color[1] = fog->atmospheric_color.green;
+	bevy_bridge_fog.atmospheric_color[2] = fog->atmospheric_color.blue;
+	bevy_bridge_fog.atmospheric_maximum_density = fog->atmospheric_maximum_density;
+	bevy_bridge_fog.atmospheric_minimum_distance = fog->atmospheric_minimum_distance;
+	bevy_bridge_fog.atmospheric_maximum_distance = fog->atmospheric_maximum_distance;
+	bevy_bridge_vector(bevy_bridge_fog.plane, &fog->plane.n);
+	bevy_bridge_fog.plane[3] = fog->plane.d;
+	bevy_bridge_fog.planar_color[0] = fog->planar_color.red;
+	bevy_bridge_fog.planar_color[1] = fog->planar_color.green;
+	bevy_bridge_fog.planar_color[2] = fog->planar_color.blue;
+	bevy_bridge_fog.planar_maximum_density = fog->planar_maximum_density;
+	bevy_bridge_fog.planar_maximum_distance = fog->planar_maximum_distance;
+	bevy_bridge_fog.planar_maximum_depth = fog->planar_maximum_depth;
 }
 
 unsigned char *bevy_bridge_overlay_begin(

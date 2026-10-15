@@ -36,6 +36,13 @@ boolean bevy_bridge_overlay_enabled(void);
 /* with game.bevy_bridge_viewer_glass on too: TRUE (the renderer draws glass
 and water itself, ray traced, so the game leaves them out of its overlay) */
 boolean bevy_bridge_viewer_draws_glass(void);
+/* with game.bevy_bridge_viewer_fog on too: TRUE (the renderer fogs the world
+itself, from the fog each frame shares, so the game draws no environment
+fog into its overlay) */
+boolean bevy_bridge_viewer_draws_fog(void);
+/* rasterizer_window_set_fog: the fog the first player's window is drawn
+with (struct render_fog), for the frame's export */
+void bevy_bridge_note_fog(void const *fog);
 
 /* the overlay buffer to fill with a width x height picture
 (bevy_bridge_protocol.h), or NULL; bevy_bridge_overlay_commit shares it */

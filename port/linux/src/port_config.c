@@ -302,6 +302,11 @@ static const struct config_setting config_settings[] =
 		_platform_desktop,
 		"With game.bevy_bridge_overlay: glass and water are the Bevy renderer's\n"
 		"(ray traced), so the game leaves them out of what it shares." },
+	{ "game.bevy_bridge_viewer_fog", _config_boolean, "false", "HALO_BEVY_BRIDGE_VIEWER_FOG", _environment_value,
+		_platform_desktop,
+		"With game.bevy_bridge_overlay: the Bevy renderer fogs the world\n"
+		"itself, from the fog the game shares each frame, so the game draws no\n"
+		"environment fog into what it shares." },
 
 	{ "paths.data", _config_string, "\"\"", "HALO_DATA_ROOT", _environment_value, _platform_desktop,
 		"The folder holding the game data's maps folder; empty looks in the\n"

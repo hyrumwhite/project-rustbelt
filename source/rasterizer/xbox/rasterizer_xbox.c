@@ -407,6 +407,7 @@ symbols in this file:
 #include "render/render.h"
 #include "render/render_cameras.h"
 #include "models/model_definitions.h" /* port: MAXIMUM_NODES_PER_MODEL */
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 /* The January object retains out-of-line copies of the D3D inline wrappers.
  * The stock XDK definition of D3DINLINE (static __forceinline) reproduces
@@ -993,6 +994,13 @@ void _rasterizer_window_set_fog(
 		global_d3d_device,
 		D3DRS_FOGCOLOR,
 		real_rgb_color_to_pixel32(&global_window_parameters.fog.atmospheric_color));
+	/* port: the first player's fog, for a Bevy renderer to draw itself
+	(port/linux/game/bevy_bridge.c) */
+	if (global_window_parameters.rasterizer_target == _rasterizer_target_render_primary &&
+		global_window_parameters.window_index != NONE)
+	{
+		bevy_bridge_note_fog(&global_window_parameters.fog);
+	}
 	return;
 }
 

@@ -404,7 +404,9 @@ static void render_window(
 		structure_render_reflections();
 		halo_screen_overlay_world(FALSE);
 		structure_render_transparent_geometry();
-		structure_render_fog();
+		/* port: unless a Bevy renderer fogs its world itself */
+		if (!bevy_bridge_viewer_draws_fog())
+			structure_render_fog();
 		game_engine_post_rasterize_objects();
 		weather_particle_systems_render();
 		render_particles();

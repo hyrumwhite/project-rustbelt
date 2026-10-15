@@ -428,6 +428,9 @@ static void render_window(
 		rasterizer_transparent_geometry_stop();
 		if (!halo_screen_overlay())
 			structure_render_fog_screen();
+		/* port: a Bevy renderer drawing the fog draws the screen too */
+		else if (bevy_bridge_viewer_draws_fog())
+			rasterizer_environment_fog_screen_share();
 		rasterizer_lens_flares_draw();
 		/* port: the 3D view antialiased (display.anti_aliasing), before the
 		HUD and menus are drawn over it */

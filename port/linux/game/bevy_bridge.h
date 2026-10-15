@@ -43,6 +43,9 @@ boolean bevy_bridge_viewer_draws_fog(void);
 /* rasterizer_window_set_fog: the fog the first player's window is drawn
 with (struct render_fog), for the frame's export */
 void bevy_bridge_note_fog(void const *fog);
+/* rasterizer_environment_fog_screen_share: the fog screen this frame's
+window would have drawn (struct bevy_bridge_fog_screen), for its export */
+void bevy_bridge_note_fog_screen(void const *screen);
 
 /* the overlay buffer to fill with a width x height picture
 (bevy_bridge_protocol.h), or NULL; bevy_bridge_overlay_commit shares it */

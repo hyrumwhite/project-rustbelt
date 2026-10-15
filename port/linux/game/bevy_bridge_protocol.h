@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 32
+#define BEVY_BRIDGE_VERSION 33
 #define BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS 512
 #define BEVY_BRIDGE_VEHICLE_PHYSICS_RECORDS 256
 #define BEVY_BRIDGE_MASS_POINTS 8192
@@ -115,6 +115,44 @@ struct bevy_bridge_fog
 	float planar_maximum_density;
 	float planar_maximum_distance;
 	float planar_maximum_depth;
+};
+
+/* (protocol 33) the fog screen the first player's window would have drawn
+over its fog (rasterizer_xbox_environment_fog.c): up to four layers of a
+bitmap's frames over the screen, moved on by the game (wind, strafing,
+rotation, zoom), each a density: the dot product of the frame's colour and
+the layer's weights (its animation and depth). They cover 1 - the product of
+(1 - each), in the fog screen's colour; with `mode` 1 that is added to the
+picture, times the surface's density: near_density at near_distance up to 1
+at far_distance along the planar fog density's smoothstep (1 where nothing
+is drawn); with 2, blended over the whole picture. */
+struct bevy_bridge_fog_screen_layer
+{
+	/* the layer's texture coordinates from the screen's, x right and y up,
+	-1 to 1 across the picture: u = t0 x + t1 y + t2, v = t3 x + t4 y + t5 */
+	float transform[6];
+	/* the frame's red, green and blue's weights */
+	float weights[3];
+	/* the frame: the bitmap of `map` */
+	unsigned long bitmap_index;
+};
+
+struct bevy_bridge_fog_screen
+{
+	/* 0 none, 1 added by depth, 2 blended over */
+	unsigned short mode;
+	/* fog_screen flags (bit 2: no texture: its depth's density is flat) */
+	unsigned short flags;
+	/* the bitmap tag's datum index */
+	unsigned long map;
+	short layer_count;
+	short pad;
+	float color[3];
+	/* world units, and the near density over the far */
+	float near_distance;
+	float far_distance;
+	float near_density;
+	struct bevy_bridge_fog_screen_layer layers[4];
 };
 
 struct bevy_bridge_object
@@ -263,6 +301,7 @@ struct bevy_bridge_frame
 	unsigned long camera_valid;
 	struct bevy_bridge_camera camera;
 	struct bevy_bridge_fog fog;
+	struct bevy_bridge_fog_screen fog_screen;
 	unsigned long light_count;
 	struct bevy_bridge_light lights[BEVY_BRIDGE_MAXIMUM_LIGHTS];
 	/* rays fanned out from the camera (only with game.bevy_bridge_ray_tests) */

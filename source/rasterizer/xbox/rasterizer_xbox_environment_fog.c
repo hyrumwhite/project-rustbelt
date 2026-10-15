@@ -149,6 +149,8 @@ symbols in this file:
 #include "rasterizer/xbox/rasterizer_xbox_pixel_shader.h"
 #include "rasterizer_xbox_draw_primitives.h"
 #include "rasterizer_xbox_water.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "bevy_bridge_protocol.h"
 
 /* ---------- constants */
 
@@ -954,6 +956,374 @@ static void rasterizer_environment_fog_screen_wind_update(
 	return;
 }
 
+/* port: the fog screen moved on a frame: pass 0's work before its drawing
+(rasterizer_environment_fog_screen_begin), also done without drawing for a
+Bevy renderer that draws the screen itself
+(rasterizer_environment_fog_screen_share). The layers' texture transforms
+come back, their colours and bitmaps in local_fog_screen_layer_colors and
+local_fog_screen_layer_bitmap_indices; FALSE if it is not drawn this frame */
+static boolean rasterizer_environment_fog_screen_update(
+	struct fog_screen const *screen,
+	struct rasterizer_environment_fog_screen_window *window,
+	real texture_transforms[MAXIMUM_ENVIRONMENT_FOG_SCREEN_LAYERS][8])
+{
+	real_matrix4x3 *previous_camera_matrix =
+		previous_camera_matrix_for_window(global_window_parameters.window_index);
+	real_matrix4x3 wind_matrix = *global_identity4x3;
+	real_matrix4x3 matrix;
+	real_vector3d vector;
+	real layer_spacing;
+	real inverse_depth;
+	real aspect_ratio;
+	real projection_scale;
+	real cosine;
+	real sine;
+	short layer;
+
+	{
+	if (local_fog_screen_first_time)
+	{
+		short window_index;
+
+		(void)bitmap_group_get(screen->map.index);
+		for (window_index = 0; window_index < MAXIMUM_WINDOWS; window_index++)
+		{
+			csmemset(
+				&windows[window_index],
+				0,
+				sizeof(struct rasterizer_environment_fog_screen_window));
+			for (layer = 0; layer < screen->layer_count; layer++)
+			{
+				struct rasterizer_environment_fog_screen_layer *layer_state =
+					&windows[window_index].
+						layers[layer];
+
+				layer_state->v = real_local_random();
+				layer_state->u = real_local_random();
+			}
+			/* January copies the first matrix-sized camera bytes here verbatim. */
+			csmemcpy(
+				&previous_camera_matrix[
+					window_index],
+				&global_window_parameters.camera,
+				sizeof(previous_camera_matrix[
+					window_index]));
+		}
+		local_fog_screen_first_time = FALSE;
+	}
+
+	rasterizer_environment_fog_screen_wind_update(screen, &window->wind);
+	rasterizer_environment_fog_screen_wind_get_vector(
+		global_window_parameters.window_index,
+		global_frame_parameters.dt,
+		&vector);
+	wind_matrix.position.x = vector.i;
+	wind_matrix.position.y = vector.j;
+	matrix4x3_inverse(previous_camera_matrix, &matrix);
+	matrix4x3_multiply(&wind_matrix, &matrix, &matrix);
+	matrix4x3_multiply(&global_window_parameters.frustum.world_to_view, &matrix, &matrix);
+	csmemcpy(
+		&previous_camera_matrix[
+			global_window_parameters.window_index],
+		&global_window_parameters.frustum.world_to_view,
+		sizeof(real_matrix4x3));
+	}
+
+	layer_spacing = (screen->far_distance - screen->near_distance) / screen->layer_count;
+	inverse_depth = 1.0f / (screen->far_distance - screen->near_distance);
+	aspect_ratio = (real)(global_window_parameters.camera.viewport_bounds.y1 -
+		global_window_parameters.camera.viewport_bounds.y0) /
+		(real)(global_window_parameters.camera.viewport_bounds.x1 -
+			global_window_parameters.camera.viewport_bounds.x0);
+	projection_scale = screen->map_scale * 0.5f /
+		(tan(global_window_parameters.camera.vertical_field_of_view * 0.5f) *
+			screen->far_distance * aspect_ratio);
+
+	vector.i = 1.0f;
+	vector.j = 0.0f;
+	vector.k = 0.0f;
+	matrix4x3_transform_normal(&matrix, &vector, &vector);
+	window->rotation += (real)atan2(vector.j, vector.i) *
+		screen->rotation_multiplier;
+	cosine = (real)cos(window->rotation);
+	sine = (real)sin(window->rotation);
+
+	if (screen->far_distance - screen->near_distance > 0.01f)
+	{
+		long offset;
+
+		window->base_z -= screen->zoom_multiplier / layer_spacing * matrix.position.z;
+		offset = fast_ftol((real)floor(window->base_z));
+		if (offset > 0)
+		{
+			real u = real_local_random();
+			real v = real_local_random();
+			short index = (word)(window->animation_index - 1) % screen->layer_count;
+
+			window->layers[index].u = v;
+			window->layers[index].v = u;
+		}
+		else if (offset < 0)
+		{
+			real u = real_local_random();
+			real v = real_local_random();
+			short index = window->animation_index;
+
+			window->layers[index].u = v;
+			window->layers[index].v = u;
+		}
+		window->animation_index = (word)(window->animation_index - offset) %
+			screen->layer_count;
+		window->base_z -= (real)offset;
+		if (!(window->base_z >= 0.0f && window->base_z < 1.0f))
+		{
+			error(
+				_error_silent,
+				"### ERROR fog_screen: base z failure (near=%f, far=%f, z=%f, offset=%d) -- tell Bernie!",
+				screen->near_distance,
+				screen->far_distance,
+				window->base_z,
+				offset);
+
+			return FALSE;
+		}
+	}
+
+	{
+	real animation_times[MAXIMUM_ENVIRONMENT_FOG_SCREEN_LAYERS];
+	real phase[MAXIMUM_ENVIRONMENT_FOG_SCREEN_LAYERS];
+
+	phase[0] = 0.0f;
+	phase[1] = 0.7135f;
+	phase[2] = 0.3422f;
+	phase[3] = 0.5798f;
+	for (layer = 0; layer < screen->layer_count; layer++)
+	{
+		struct bitmap_group const *bitmap_group = bitmap_group_get(screen->map.index);
+
+		match_assert(
+			"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_environment_fog.c",
+			653,
+			bitmap_group && bitmap_group->bitmaps.count>0);
+		/* port: a map with no bitmaps has no frame to pick (it divided by
+		zero); the screen isn't drawn, as on a base z failure */
+		if (bitmap_group->bitmaps.count<=0)
+		{
+			if (!reported_fog_screen_without_bitmaps)
+			{
+				error(_error_silent, "### ERROR fog screen map has no bitmaps; it is not drawn");
+				reported_fog_screen_without_bitmaps = TRUE;
+			}
+
+			return FALSE;
+		}
+
+		if (screen->animation_period != 0.0f)
+		{
+			short animation_index;
+			real t = bitmap_group->bitmaps.count * phase[layer] +
+				global_frame_parameters.game_time_sec / screen->animation_period;
+			real animation_time = (real)PIN(t - floor(t), 0.0, 1.0);
+
+			animation_times[layer] = animation_time;
+			animation_index = (short)(fast_ftol((real)floor(t)) % bitmap_group->bitmaps.count);
+			if (animation_index < 0)
+			{
+				if (!reported_bad_animation_index)
+				{
+					long game_time_bits;
+					long animation_period_bits;
+					long phase_bits;
+					long time_bits;
+					long animation_time_bits;
+
+					csmemcpy(
+						&game_time_bits,
+						&global_frame_parameters.game_time_sec,
+						sizeof(game_time_bits));
+					csmemcpy(
+						&animation_period_bits,
+						&screen->animation_period,
+						sizeof(animation_period_bits));
+					csmemcpy(
+						&phase_bits,
+						&phase[layer],
+						sizeof(phase_bits));
+					csmemcpy(
+						&time_bits,
+						&t,
+						sizeof(time_bits));
+					csmemcpy(
+						&animation_time_bits,
+						&animation_times[layer],
+						sizeof(animation_time_bits));
+					error(
+						_error_silent,
+						"### ERROR fog screen animation index is invalid -- tell Bernie!!");
+					error(
+						_error_silent,
+						"\tindex=%d",
+						animation_index);
+					error(
+						_error_silent,
+						"\ttime=%f[%x]",
+						global_frame_parameters.game_time_sec,
+						game_time_bits);
+					error(
+						_error_silent,
+						"\tperiod=%f[%x]",
+						screen->animation_period,
+						animation_period_bits);
+					error(
+						_error_silent,
+						"\tphase=%f[%x]",
+						phase[layer],
+						phase_bits);
+					error(
+						_error_silent,
+						"\tt=%f[%x]",
+						t,
+						time_bits);
+					error(
+						_error_silent,
+						"\tanimation_time=%f[%x]",
+						animation_time,
+						animation_time_bits);
+					reported_bad_animation_index = TRUE;
+				}
+				animation_index = 0;
+			}
+			match_assert(
+				"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_environment_fog.c",
+				682,
+				animation_index>=0 && animation_index<bitmap_group->bitmaps.count);
+			local_fog_screen_layer_bitmap_indices[layer] = animation_index;
+		}
+		else
+		{
+			animation_times[layer] = 0.0f;
+			local_fog_screen_layer_bitmap_indices[layer] =
+				(short)(layer % bitmap_group->bitmaps.count);
+		}
+	}
+
+	for (layer = 0; layer < screen->layer_count; layer++)
+	{
+		short index = (word)(window->animation_index + layer) % screen->layer_count;
+		real z = ((real)layer + window->base_z) * layer_spacing + screen->near_distance;
+		real density = (real)pow(
+			1.0 - pow(fabs((z - screen->near_distance) * inverse_depth * 2.0f - 1.0f), 3.0),
+			2.0) * (local_fog_eye_density * screen->far_density);
+		real scale = screen->map_scale / screen->far_distance * z;
+		real_rgb_color *color = &local_fog_screen_layer_colors[layer];
+		real_point3d point;
+
+		point.x = 0.0f;
+		point.y = 0.0f;
+		point.z = -z;
+		matrix4x3_transform_point(&matrix, &point, &point);
+		window->layers[index].u -= (point.x * cosine + point.y * sine) *
+			screen->strafing_multiplier * projection_scale;
+		window->layers[index].v -= (point.y * cosine - point.x * sine) *
+			screen->strafing_multiplier * projection_scale;
+		if (screen->far_density != 0.0f)
+		{
+			real inverse_time = 1.0f - animation_times[index];
+
+			color->red = inverse_time * inverse_time * density;
+			color->green = 2.0f * animation_times[index] * inverse_time * density;
+			color->blue = animation_times[index] * animation_times[index] * density;
+		}
+		else
+		{
+			color->red = 0.0f;
+			color->green = density;
+			color->blue = 0.0f;
+		}
+		texture_transforms[layer][0] = scale * cosine * 0.5f;
+		texture_transforms[layer][1] = scale * sine * aspect_ratio * 0.5f;
+		texture_transforms[layer][2] = 0.0f;
+		texture_transforms[layer][3] = window->layers[index].u;
+		texture_transforms[layer][4] = scale * sine * -0.5f;
+		texture_transforms[layer][5] = scale * cosine * aspect_ratio * 0.5f;
+		texture_transforms[layer][6] = 0.0f;
+		texture_transforms[layer][7] = window->layers[index].v;
+	}
+
+	}
+
+	return TRUE;
+}
+
+/* port: with a Bevy renderer that draws the fog screen itself
+(game.bevy_bridge_viewer_fog), what structure_render_fog_screen would have
+drawn this frame: the screen moved on as its first pass moves it, and
+shared (bevy_bridge_protocol.h's struct bevy_bridge_fog_screen) */
+void rasterizer_environment_fog_screen_share(
+	void)
+{
+	struct bevy_bridge_fog_screen shared;
+
+	csmemset(&shared, 0, sizeof(shared));
+	if (rasterizer_environment_fog_screen_is_active())
+	{
+		struct fog_screen const *screen = global_window_parameters.fog.screen;
+		struct rasterizer_environment_fog_screen_window *window =
+			&windows[global_window_parameters.window_index];
+		real texture_transforms[MAXIMUM_ENVIRONMENT_FOG_SCREEN_LAYERS][8];
+
+		if (rasterizer_environment_fog_screen_update(screen, window, texture_transforms))
+		{
+			short layer;
+
+			/* (as _rasterizer_environment_fog_screen_end blends it: added,
+			by the surfaces' depth, after its multipass; else over all) */
+			shared.mode = screen->near_density != screen->far_density &&
+				(!TEST_FLAG(screen->flags, _fog_screen_no_environment_multipass_bit) ||
+					!TEST_FLAG(screen->flags, _fog_screen_no_model_multipass_bit))
+				? 1
+				: 2;
+			shared.flags = screen->flags;
+			shared.map = (unsigned long)screen->map.index;
+			shared.layer_count = screen->layer_count;
+			if (screen->color)
+			{
+				shared.color[0] = (real)((screen->color >> 16) & 0xFF) / 255.0f;
+				shared.color[1] = (real)((screen->color >> 8) & 0xFF) / 255.0f;
+				shared.color[2] = (real)(screen->color & 0xFF) / 255.0f;
+			}
+			else
+			{
+				shared.color[0] = global_window_parameters.fog.planar_color.red;
+				shared.color[1] = global_window_parameters.fog.planar_color.green;
+				shared.color[2] = global_window_parameters.fog.planar_color.blue;
+			}
+			shared.near_distance = screen->near_distance;
+			shared.far_distance = screen->far_distance;
+			shared.near_density = screen->far_density != 0.0f
+				? screen->near_density / screen->far_density
+				: 1.0f;
+			for (layer = 0; layer < screen->layer_count; layer++)
+			{
+				struct bevy_bridge_fog_screen_layer *out = &shared.layers[layer];
+				short layer_index = (word)(window->animation_index + layer) % screen->layer_count;
+
+				out->transform[0] = texture_transforms[layer][0];
+				out->transform[1] = texture_transforms[layer][1];
+				out->transform[2] = texture_transforms[layer][3];
+				out->transform[3] = texture_transforms[layer][4];
+				out->transform[4] = texture_transforms[layer][5];
+				out->transform[5] = texture_transforms[layer][7];
+				out->weights[0] = PIN(local_fog_screen_layer_colors[layer].red, 0.0f, 1.0f);
+				out->weights[1] = PIN(local_fog_screen_layer_colors[layer].green, 0.0f, 1.0f);
+				out->weights[2] = PIN(local_fog_screen_layer_colors[layer].blue, 0.0f, 1.0f);
+				out->bitmap_index = local_fog_screen_layer_bitmap_indices[layer_index];
+			}
+		}
+	}
+	bevy_bridge_note_fog_screen(&shared);
+}
+
 void _rasterizer_environment_fog_screen_begin(
 	short pass)
 {
@@ -983,79 +1353,11 @@ void _rasterizer_environment_fog_screen_begin(
 
 		if (pass == 0)
 		{
-			real_matrix4x3 *previous_camera_matrix =
-				previous_camera_matrix_for_window(global_window_parameters.window_index);
-			real_matrix4x3 wind_matrix = *global_identity4x3;
 			real screen_constants[5][4];
-			real_matrix4x3 matrix;
 			real texture_transforms[MAXIMUM_ENVIRONMENT_FOG_SCREEN_LAYERS][8];
-			real_vector3d vector;
-			real layer_spacing;
-			real inverse_depth;
-			real aspect_ratio;
-			real projection_scale;
-			real cosine;
-			real sine;
-			short layer;
 
-			{
-			if (local_fog_screen_first_time)
-			{
-				short window_index;
-
-				(void)bitmap_group_get(screen->map.index);
-				for (window_index = 0; window_index < MAXIMUM_WINDOWS; window_index++)
-				{
-					csmemset(
-						&windows[window_index],
-						0,
-						sizeof(struct rasterizer_environment_fog_screen_window));
-					for (layer = 0; layer < screen->layer_count; layer++)
-					{
-						struct rasterizer_environment_fog_screen_layer *layer_state =
-							&windows[window_index].
-								layers[layer];
-
-						layer_state->v = real_local_random();
-						layer_state->u = real_local_random();
-					}
-					/* January copies the first matrix-sized camera bytes here verbatim. */
-					csmemcpy(
-						&previous_camera_matrix[
-							window_index],
-						&global_window_parameters.camera,
-						sizeof(previous_camera_matrix[
-							window_index]));
-				}
-				local_fog_screen_first_time = FALSE;
-			}
-
-			rasterizer_environment_fog_screen_wind_update(screen, &window->wind);
-			rasterizer_environment_fog_screen_wind_get_vector(
-				global_window_parameters.window_index,
-				global_frame_parameters.dt,
-				&vector);
-			wind_matrix.position.x = vector.i;
-			wind_matrix.position.y = vector.j;
-			matrix4x3_inverse(previous_camera_matrix, &matrix);
-			matrix4x3_multiply(&wind_matrix, &matrix, &matrix);
-			matrix4x3_multiply(&global_window_parameters.frustum.world_to_view, &matrix, &matrix);
-			csmemcpy(
-				&previous_camera_matrix[
-					global_window_parameters.window_index],
-				&global_window_parameters.frustum.world_to_view,
-				sizeof(real_matrix4x3));
-			}
-
-			layer_spacing = (screen->far_distance - screen->near_distance) / screen->layer_count;
-			inverse_depth = 1.0f / (screen->far_distance - screen->near_distance);
-			aspect_ratio = (real)(global_window_parameters.camera.viewport_bounds.y1 -
-				global_window_parameters.camera.viewport_bounds.y0) /
-				(real)(global_window_parameters.camera.viewport_bounds.x1 -
-					global_window_parameters.camera.viewport_bounds.x0);
-			projection_scale = screen->map_scale * 0.5f /
-				(tan(global_window_parameters.camera.vertical_field_of_view * 0.5f) *
-					screen->far_distance * aspect_ratio);
+			if (!rasterizer_environment_fog_screen_update(screen, window, texture_transforms))
+				return;
 
 			screen_constants[0][0] = 2.0f / (global_window_parameters.camera.viewport_bounds.x1 -
 				global_window_parameters.camera.viewport_bounds.x0);
@@ -1081,219 +1383,6 @@ void _rasterizer_environment_fog_screen_begin(
 			screen_constants[4][1] = 0.0f;
 			screen_constants[4][2] = 0.0f;
 			screen_constants[4][3] = 1.0f;
-
-			vector.i = 1.0f;
-			vector.j = 0.0f;
-			vector.k = 0.0f;
-			matrix4x3_transform_normal(&matrix, &vector, &vector);
-			window->rotation += (real)atan2(vector.j, vector.i) *
-				screen->rotation_multiplier;
-			cosine = (real)cos(window->rotation);
-			sine = (real)sin(window->rotation);
-
-			if (screen->far_distance - screen->near_distance > 0.01f)
-			{
-				long offset;
-
-				window->base_z -= screen->zoom_multiplier / layer_spacing * matrix.position.z;
-				offset = fast_ftol((real)floor(window->base_z));
-				if (offset > 0)
-				{
-					real u = real_local_random();
-					real v = real_local_random();
-					short index = (word)(window->animation_index - 1) % screen->layer_count;
-
-					window->layers[index].u = v;
-					window->layers[index].v = u;
-				}
-				else if (offset < 0)
-				{
-					real u = real_local_random();
-					real v = real_local_random();
-					short index = window->animation_index;
-
-					window->layers[index].u = v;
-					window->layers[index].v = u;
-				}
-				window->animation_index = (word)(window->animation_index - offset) %
-					screen->layer_count;
-				window->base_z -= (real)offset;
-				if (!(window->base_z >= 0.0f && window->base_z < 1.0f))
-				{
-					error(
-						_error_silent,
-						"### ERROR fog_screen: base z failure (near=%f, far=%f, z=%f, offset=%d) -- tell Bernie!",
-						screen->near_distance,
-						screen->far_distance,
-						window->base_z,
-						offset);
-
-					return;
-				}
-			}
-
-			{
-			real animation_times[MAXIMUM_ENVIRONMENT_FOG_SCREEN_LAYERS];
-			real phase[MAXIMUM_ENVIRONMENT_FOG_SCREEN_LAYERS];
-
-			phase[0] = 0.0f;
-			phase[1] = 0.7135f;
-			phase[2] = 0.3422f;
-			phase[3] = 0.5798f;
-			for (layer = 0; layer < screen->layer_count; layer++)
-			{
-				struct bitmap_group const *bitmap_group = bitmap_group_get(screen->map.index);
-
-				match_assert(
-					"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_environment_fog.c",
-					653,
-					bitmap_group && bitmap_group->bitmaps.count>0);
-				/* port: a map with no bitmaps has no frame to pick (it divided by
-				zero); the screen isn't drawn, as on a base z failure */
-				if (bitmap_group->bitmaps.count<=0)
-				{
-					if (!reported_fog_screen_without_bitmaps)
-					{
-						error(_error_silent, "### ERROR fog screen map has no bitmaps; it is not drawn");
-						reported_fog_screen_without_bitmaps = TRUE;
-					}
-
-					return;
-				}
-
-				if (screen->animation_period != 0.0f)
-				{
-					short animation_index;
-					real t = bitmap_group->bitmaps.count * phase[layer] +
-						global_frame_parameters.game_time_sec / screen->animation_period;
-					real animation_time = (real)PIN(t - floor(t), 0.0, 1.0);
-
-					animation_times[layer] = animation_time;
-					animation_index = (short)(fast_ftol((real)floor(t)) % bitmap_group->bitmaps.count);
-					if (animation_index < 0)
-					{
-						if (!reported_bad_animation_index)
-						{
-							long game_time_bits;
-							long animation_period_bits;
-							long phase_bits;
-							long time_bits;
-							long animation_time_bits;
-
-							csmemcpy(
-								&game_time_bits,
-								&global_frame_parameters.game_time_sec,
-								sizeof(game_time_bits));
-							csmemcpy(
-								&animation_period_bits,
-								&screen->animation_period,
-								sizeof(animation_period_bits));
-							csmemcpy(
-								&phase_bits,
-								&phase[layer],
-								sizeof(phase_bits));
-							csmemcpy(
-								&time_bits,
-								&t,
-								sizeof(time_bits));
-							csmemcpy(
-								&animation_time_bits,
-								&animation_times[layer],
-								sizeof(animation_time_bits));
-							error(
-								_error_silent,
-								"### ERROR fog screen animation index is invalid -- tell Bernie!!");
-							error(
-								_error_silent,
-								"\tindex=%d",
-								animation_index);
-							error(
-								_error_silent,
-								"\ttime=%f[%x]",
-								global_frame_parameters.game_time_sec,
-								game_time_bits);
-							error(
-								_error_silent,
-								"\tperiod=%f[%x]",
-								screen->animation_period,
-								animation_period_bits);
-							error(
-								_error_silent,
-								"\tphase=%f[%x]",
-								phase[layer],
-								phase_bits);
-							error(
-								_error_silent,
-								"\tt=%f[%x]",
-								t,
-								time_bits);
-							error(
-								_error_silent,
-								"\tanimation_time=%f[%x]",
-								animation_time,
-								animation_time_bits);
-							reported_bad_animation_index = TRUE;
-						}
-						animation_index = 0;
-					}
-					match_assert(
-						"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_environment_fog.c",
-						682,
-						animation_index>=0 && animation_index<bitmap_group->bitmaps.count);
-					local_fog_screen_layer_bitmap_indices[layer] = animation_index;
-				}
-				else
-				{
-					animation_times[layer] = 0.0f;
-					local_fog_screen_layer_bitmap_indices[layer] =
-						(short)(layer % bitmap_group->bitmaps.count);
-				}
-			}
-
-			for (layer = 0; layer < screen->layer_count; layer++)
-			{
-				short index = (word)(window->animation_index + layer) % screen->layer_count;
-				real z = ((real)layer + window->base_z) * layer_spacing + screen->near_distance;
-				real density = (real)pow(
-					1.0 - pow(fabs((z - screen->near_distance) * inverse_depth * 2.0f - 1.0f), 3.0),
-					2.0) * (local_fog_eye_density * screen->far_density);
-				real scale = screen->map_scale / screen->far_distance * z;
-				real_rgb_color *color = &local_fog_screen_layer_colors[layer];
-				real_point3d point;
-
-				point.x = 0.0f;
-				point.y = 0.0f;
-				point.z = -z;
-				matrix4x3_transform_point(&matrix, &point, &point);
-				window->layers[index].u -= (point.x * cosine + point.y * sine) *
-					screen->strafing_multiplier * projection_scale;
-				window->layers[index].v -= (point.y * cosine - point.x * sine) *
-					screen->strafing_multiplier * projection_scale;
-				if (screen->far_density != 0.0f)
-				{
-					real inverse_time = 1.0f - animation_times[index];
-
-					color->red = inverse_time * inverse_time * density;
-					color->green = 2.0f * animation_times[index] * inverse_time * density;
-					color->blue = animation_times[index] * animation_times[index] * density;
-				}
-				else
-				{
-					color->red = 0.0f;
-					color->green = density;
-					color->blue = 0.0f;
-				}
-				texture_transforms[layer][0] = scale * cosine * 0.5f;
-				texture_transforms[layer][1] = scale * sine * aspect_ratio * 0.5f;
-				texture_transforms[layer][2] = 0.0f;
-				texture_transforms[layer][3] = window->layers[index].u;
-				texture_transforms[layer][4] = scale * sine * -0.5f;
-				texture_transforms[layer][5] = scale * cosine * aspect_ratio * 0.5f;
-				texture_transforms[layer][6] = 0.0f;
-				texture_transforms[layer][7] = window->layers[index].v;
-			}
-
-			}
 
 			IDirect3DDevice8_SetVertexShaderConstant(
 				global_d3d_device,

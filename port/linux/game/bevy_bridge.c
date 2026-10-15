@@ -294,6 +294,8 @@ static void bevy_bridge_vector(float *out, real_vector3d const *in);
 static void bevy_bridge_point(float *out, real_point3d const *in);
 /* the fog last noted (bevy_bridge_note_fog), for the next frame's export */
 static struct bevy_bridge_fog bevy_bridge_fog;
+/* ... and the fog screen, noted afresh each frame */
+static struct bevy_bridge_fog_screen bevy_bridge_fog_screen;
 
 /* game.bevy_bridge_ray_tests: the vehicles' physics placement, and rays from
 the camera at them tested with their physics shapes
@@ -551,6 +553,7 @@ void bevy_bridge_export_frame(
 	/* the first player's view */
 	frame->camera_valid = FALSE;
 	memset(&frame->fog, 0, sizeof(frame->fog));
+	memset(&frame->fog_screen, 0, sizeof(frame->fog_screen));
 	frame->ray_test_count = 0;
 	frame->physics_vehicle_count = 0;
 	frame->vehicle_ray_test_count = 0;
@@ -576,6 +579,8 @@ void bevy_bridge_export_frame(
 		}
 		frame->camera_valid = TRUE;
 		frame->fog = bevy_bridge_fog;
+		frame->fog_screen = bevy_bridge_fog_screen;
+		memset(&bevy_bridge_fog_screen, 0, sizeof(bevy_bridge_fog_screen));
 		first_person_unit = bevy_bridge_first_person_unit(window->local_player_index);
 		frame->ray_test_count = bevy_bridge_ray_tests(frame->ray_tests, &window->render_camera.position,
 			&window->render_camera.forward, &window->render_camera.up);
@@ -749,6 +754,11 @@ void bevy_bridge_note_fog(void const *data)
 	bevy_bridge_fog.planar_maximum_density = fog->planar_maximum_density;
 	bevy_bridge_fog.planar_maximum_distance = fog->planar_maximum_distance;
 	bevy_bridge_fog.planar_maximum_depth = fog->planar_maximum_depth;
+}
+
+void bevy_bridge_note_fog_screen(void const *screen)
+{
+	memcpy(&bevy_bridge_fog_screen, screen, sizeof(bevy_bridge_fog_screen));
 }
 
 unsigned char *bevy_bridge_overlay_begin(

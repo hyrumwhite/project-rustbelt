@@ -710,6 +710,10 @@ void rasterizer_screen_flash(
 	void);
 void rasterizer_environment_fog_screen_begin(
 	boolean render_fog);
+/* port: the fog screen moved on and shared with a Bevy renderer instead of
+drawn (rasterizer_xbox_environment_fog.c) */
+void rasterizer_environment_fog_screen_share(
+	void);
 void rasterizer_environment_fog_screen_wind_get_vector(
 	short wind_index,
 	real animation_time,

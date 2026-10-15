@@ -55,6 +55,12 @@ impl Plugin for OverlayPlugin {
     }
 }
 
+/// With the viewer's fog (`crate::fog`): the game's multiplying blends are
+/// done there, before the fog, as the game orders them, not by a node over
+/// the fogged picture.
+#[derive(Resource)]
+pub struct MultiplyBeforeFog;
+
 /// Whether the game shares its overlay (and so draws the transparent
 /// surfaces itself).
 #[derive(Resource, Clone, Copy)]
@@ -128,8 +134,8 @@ impl UiMaterial for OverlayMaterial {
 /// changes only when the picture's size does.
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
-struct OverlayPicture {
-    image: Handle<Image>,
+pub(crate) struct OverlayPicture {
+    pub(crate) image: Handle<Image>,
     material: Handle<OverlayMaterial>,
     multiply: Handle<MultiplyMaterial>,
     size: (u32, u32),
@@ -158,17 +164,20 @@ fn spawn_overlay(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<OverlayMaterial>>,
     mut multiplies: ResMut<Assets<MultiplyMaterial>>,
+    before_fog: Option<Res<MultiplyBeforeFog>>,
 ) {
     let (width, height) = (1, 1);
     let image = images.add(overlay_image(width, height));
     let multiply = multiplies.add(MultiplyMaterial { picture: image.clone() });
-    commands.spawn((
-        Name::new("Game multiply"),
-        MaterialNode(multiply.clone()),
-        Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
-        // under the overlay
-        GlobalZIndex(-2),
-    ));
+    if before_fog.is_none() {
+        commands.spawn((
+            Name::new("Game multiply"),
+            MaterialNode(multiply.clone()),
+            Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
+            // under the overlay
+            GlobalZIndex(-2),
+        ));
+    }
     let material = materials.add(OverlayMaterial { picture: image.clone(), mode: std::env::var("HALO_RT_OVERLAY_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0) });
     commands.spawn((
         Name::new("Game overlay"),

@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 32;
+pub const VERSION: u32 = 33;
 pub const VEHICLE_UPDATE_RECORDS: usize = 512;
 pub const VEHICLE_PHYSICS_RECORDS: usize = 256;
 pub const MASS_POINTS: usize = 8192;
@@ -94,6 +94,48 @@ pub struct Fog {
     pub planar_maximum_density: f32,
     pub planar_maximum_distance: f32,
     pub planar_maximum_depth: f32,
+}
+
+/// (Protocol 33) a fog screen layer: a frame of the screen's bitmap over
+/// the picture, moved on by the game.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FogScreenLayer {
+    /// Texture coordinates from the picture's (x right, y up, -1 to 1):
+    /// u = t0 x + t1 y + t2, v = t3 x + t4 y + t5.
+    pub transform: [f32; 6],
+    /// The frame's red, green and blue's weights: the layer's density is
+    /// their dot product with its colour.
+    pub weights: [f32; 3],
+    /// The frame: a bitmap of [`FogScreen::map`].
+    pub bitmap_index: u32,
+}
+
+/// (Protocol 33) the fog screen the first player's window would have drawn
+/// over its fog (`rasterizer_xbox_environment_fog.c`). Its layers cover
+/// 1 - the product of (1 - each density), in its colour: with `mode` 1
+/// added to the picture, times the surface's density (`near_density` at
+/// `near_distance` up to 1 at `far_distance`, along the planar fog
+/// density's smoothstep; 1 where nothing is drawn); with 2, blended over
+/// the whole picture.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FogScreen {
+    /// 0 none, 1 added by depth, 2 blended over.
+    pub mode: u16,
+    /// `fog_screen` flags (bit 2: no texture, its depth's density flat).
+    pub flags: u16,
+    /// The bitmap tag's datum index.
+    pub map: u32,
+    pub layer_count: i16,
+    pub pad: i16,
+    pub color: [f32; 3],
+    /// World units.
+    pub near_distance: f32,
+    pub far_distance: f32,
+    /// The near density over the far.
+    pub near_density: f32,
+    pub layers: [FogScreenLayer; 4],
 }
 
 #[repr(C)]
@@ -221,6 +263,7 @@ struct Frame {
     camera_valid: u32,
     camera: Camera,
     fog: Fog,
+    fog_screen: FogScreen,
     light_count: u32,
     lights: [Light; MAXIMUM_LIGHTS],
     ray_test_count: u32,
@@ -987,6 +1030,8 @@ pub struct Snapshot {
     pub camera: Option<Camera>,
     /// The fog the camera's view was drawn with, once the game shares it.
     pub fog: Option<Fog>,
+    /// The fog screen over it, when there is one.
+    pub fog_screen: Option<FogScreen>,
     pub lights: Vec<Light>,
     pub ray_tests: Vec<RayTest>,
     /// The point physics definition the ray tests' points use (`u32::MAX`
@@ -1571,6 +1616,7 @@ impl Bridge {
                     camera: (std::ptr::read_volatile(&(*frame).camera_valid) != 0)
                         .then(|| std::ptr::read_volatile(&(*frame).camera)),
                     fog: Some(std::ptr::read_volatile(&(*frame).fog)).filter(|fog| fog.valid != 0),
+                    fog_screen: Some(std::ptr::read_volatile(&(*frame).fog_screen)).filter(|screen| screen.mode != 0),
                     lights: (0..light_count).map(|i| std::ptr::read_volatile(&(*frame).lights[i])).collect(),
                     ray_tests: (0..ray_test_count).map(|i| std::ptr::read_volatile(&(*frame).ray_tests[i])).collect(),
                     point_physics_definition: std::ptr::read_volatile(&(*frame).point_physics_definition),

@@ -263,9 +263,15 @@ impl Material for HaloTransparentMaterial {
 /// composites the camera's panes over what is behind them before the
 /// transparent pass, where the sky's layers are drawn; without it, they drew
 /// over every pane with only the sky behind it (the needler's needles above
-/// the horizon).
+/// the horizon). It is drawn first in the transparent pass, before the sky's
+/// layers: in the opaque pass it kept the skybox from behind the panes too,
+/// and they were composited over black.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
 pub struct GlassSkyMask {}
+
+/// The mask's sort bias: behind the sky's layers (see `level::SKY_BIAS`), so
+/// drawn before them.
+const GLASS_SKY_MASK_BIAS: f32 = -1.0e9;
 
 impl Material for GlassSkyMask {
     fn vertex_shader() -> ShaderRef {
@@ -276,8 +282,12 @@ impl Material for GlassSkyMask {
         "embedded://halo_rt/shaders/glass_sky_mask.wesl".into()
     }
 
-    fn opaque_render_method(&self) -> bevy::material::OpaqueRendererMethod {
-        bevy::material::OpaqueRendererMethod::Forward
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn depth_bias(&self) -> f32 {
+        GLASS_SKY_MASK_BIAS
     }
 
     fn enable_prepass() -> bool {
@@ -295,6 +305,10 @@ impl Material for GlassSkyMask {
         _key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
+        // (blended materials write no depth; this writes only depth)
+        if let Some(depth_stencil) = descriptor.depth_stencil.as_mut() {
+            depth_stencil.depth_write_enabled = Some(true);
+        }
         if let Some(fragment) = descriptor.fragment.as_mut() {
             for target in fragment.targets.iter_mut().flatten() {
                 target.write_mask = bevy::render::render_resource::ColorWrites::empty();

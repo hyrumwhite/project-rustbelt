@@ -92,6 +92,10 @@ pub struct Model<'a> {
     pub regions: Vec<Region>,
     /// The model's shaders; parts index these.
     pub shaders: Vec<TagRef>,
+    /// Each shader's permutation: which of its bitmaps' images it draws with
+    /// (the game's `permutation % image count`; the blunt Grunt's head and
+    /// back are image 1 of the pointy one's bitmaps).
+    pub shader_permutations: Vec<u16>,
     pub geometry_count: usize,
 }
 
@@ -153,6 +157,11 @@ impl<'a> Model<'a> {
             .iter()
             .map(|s| s.reference(layout::model_shader_reference::SHADER))
             .collect::<Result<_>>()?;
+        let shader_permutations = root
+            .block(m::SHADERS, layout::model_shader_reference::SIZEOF)?
+            .iter()
+            .map(|s| s.i16(layout::model_shader_reference::PERMUTATION_INDEX).map(|p| p.max(0) as u16))
+            .collect::<Result<_>>()?;
         let scale = root.vec2(m::BASE_MAP_SCALE)?;
         Ok(Model {
             name: cache.tag(datum)?.name.clone(),
@@ -161,6 +170,7 @@ impl<'a> Model<'a> {
             nodes,
             regions,
             shaders,
+            shader_permutations,
             geometry_count: root.block(m::GEOMETRIES, layout::model_geometry::SIZEOF)?.count,
         })
     }

@@ -48,8 +48,16 @@ pub struct AnimatedSelfIllumination {
 pub struct Recolourable {
     pub root: Entity,
     base: Surface,
-    shader: Option<u32>,
+    shader: Option<ShaderUse>,
     traced: bool,
+}
+
+/// A model's shader and its permutation (which of its bitmaps' images it
+/// draws with, see [`TextureCache::permuted`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShaderUse {
+    datum: u32,
+    permutation: u16,
 }
 
 /// The game's periodic functions, for the animations evaluated here.
@@ -256,7 +264,7 @@ struct ModelPiece {
     mesh: Handle<Mesh>,
     surface: Surface,
     /// Its shader, for change colours.
-    shader: Option<u32>,
+    shader: Option<ShaderUse>,
 }
 
 /// A whole model part as one mesh skinned to the model's nodes (each vertex
@@ -264,7 +272,7 @@ struct ModelPiece {
 struct SkinnedPart {
     mesh: Handle<Mesh>,
     surface: Surface,
-    shader: Option<u32>,
+    shader: Option<ShaderUse>,
 }
 
 /// How far inside a skinned model its rigid ray-traced copy sits (world
@@ -288,7 +296,7 @@ pub struct TracedSkin {
     /// Counter-clockwise (Bevy's front faces).
     indices: Vec<u32>,
     surface: Surface,
-    shader: Option<u32>,
+    shader: Option<ShaderUse>,
 }
 
 impl TracedSkin {
@@ -354,15 +362,18 @@ pub struct LevelBuilder {
     pub cache: Arc<CacheFile>,
     /// While a moving object's piece is spawned: its root, uncoloured
     /// surface and shader, put on its entities as [`Recolourable`].
-    recolour: Option<(Entity, Surface, Option<u32>)>,
+    recolour: Option<(Entity, Surface, Option<ShaderUse>)>,
     pub textures: TextureCache,
-    surfaces: HashMap<Option<u32>, ShaderSurface>,
+    /// By shader and permutation.
+    surfaces: HashMap<(Option<u32>, u16), ShaderSurface>,
+    /// While a surface is made: its shader's permutation.
+    permutation: u16,
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
     animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
     /// The glassy look of an actively camouflaged object.
     camouflage: Option<Handle<StandardMaterial>>,
     /// Surfaces tinted by a change colour, by shader and colour.
-    coloured_surfaces: HashMap<(u32, [u8; 3]), Surface>,
+    coloured_surfaces: HashMap<(ShaderUse, [u8; 3]), Surface>,
     loaded_bsps: Vec<usize>,
     /// Each loaded BSP's root entity, by BSP index.
     pub bsp_roots: Vec<(usize, Entity)>,
@@ -399,6 +410,7 @@ impl LevelBuilder {
             recolour: None,
             textures: TextureCache::new(bc_supported),
             surfaces: HashMap::default(),
+            permutation: 0,
             models: HashMap::default(),
             animated_models: HashMap::default(),
             coloured_surfaces: HashMap::default(),
@@ -445,7 +457,7 @@ impl LevelBuilder {
                 if material.indices.is_empty() {
                     continue;
                 }
-                let shader = self.surface(material.shader, assets);
+                let shader = self.surface(material.shader, 0, assets);
                 let Some(surface) = shader.surface else {
                     self.stats.skipped_transparent += 1;
                     continue;
@@ -826,7 +838,9 @@ impl LevelBuilder {
                     .get(part.shader_index.max(0) as usize)
                     .copied()
                     .unwrap_or(TagRef { group: 0, datum: None });
-                let shader = self.surface(shader_ref, assets);
+                let permutation = model.shader_permutations.get(part.shader_index.max(0) as usize).copied().unwrap_or(0);
+                let shader_use = shader_ref.datum.map(|datum| ShaderUse { datum, permutation });
+                let shader = self.surface(shader_ref, permutation, assets);
                 let Some(surface) = shader.surface else {
                     self.stats.skipped_transparent += 1;
                     continue;
@@ -899,7 +913,7 @@ impl LevelBuilder {
                         weights: weights.iter().map(|w| [w[0], w[1]]).collect(),
                         indices,
                         surface: surface.clone(),
-                        shader: shader_ref.datum,
+                        shader: shader_use,
                     });
                 }
                 let mut by_node: HashMap<usize, Vec<u32>> = HashMap::default();
@@ -927,14 +941,14 @@ impl LevelBuilder {
                 };
                 for (node, indices) in by_node {
                     let mesh = assets.meshes.add(build_model_mesh(source().map(inset), &indices, shader.uv_scale));
-                    pieces.push(ModelPiece { node, mesh, surface: surface.clone(), shader: shader_ref.datum });
+                    pieces.push(ModelPiece { node, mesh, surface: surface.clone(), shader: shader_use });
                 }
                 // the whole part, skinned: each vertex follows its nodes by
                 // their weights, so joints bend without seams
                 let mesh = build_model_mesh(source(), &part.indices, shader.uv_scale)
                     .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(joints))
                     .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, weights);
-                skinned.push(SkinnedPart { mesh: assets.meshes.add(mesh), surface: surface.clone(), shader: shader_ref.datum });
+                skinned.push(SkinnedPart { mesh: assets.meshes.add(mesh), surface: surface.clone(), shader: shader_use });
             }
         }
         let default_inverses: Vec<Affine3A> = model.nodes.iter().map(|n| halo_affine(&n.default_inverse)).collect();
@@ -960,13 +974,13 @@ impl LevelBuilder {
         // material for this object (its phase is its own)
         let mut animated: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, shader::ModelSelfIlluminationAnimation)> =
             Vec::new();
-        let mut animated_by_shader: HashMap<u32, Surface> = HashMap::new();
-        let mut animate = |builder: &mut Self, surface: Surface, shader: Option<u32>, assets: &mut LevelAssets| -> Surface {
+        let mut animated_by_shader: HashMap<ShaderUse, Surface> = HashMap::new();
+        let mut animate = |builder: &mut Self, surface: Surface, shader: Option<ShaderUse>, assets: &mut LevelAssets| -> Surface {
             let (Surface::Solid(solid), Some(shader)) = (&surface, shader) else { return surface };
             if let Some(copy) = animated_by_shader.get(&shader) {
                 return copy.clone();
             }
-            let info = shader::shader_info(&builder.cache, TagRef { group: 0, datum: Some(shader) }).ok().flatten();
+            let info = shader::shader_info(&builder.cache, TagRef { group: 0, datum: Some(shader.datum) }).ok().flatten();
             let Some(animation) = info.and_then(|i| i.model_self_illumination_animation) else { return surface };
             // (one that holds its upper colour is the shader's own material:
             // function 0 is "one")
@@ -1104,7 +1118,8 @@ impl LevelBuilder {
                     .get(part.shader_index.max(0) as usize)
                     .copied()
                     .unwrap_or(TagRef { group: 0, datum: None });
-                let shader = self.surface(shader_ref, assets);
+                let permutation = model.shader_permutations.get(part.shader_index.max(0) as usize).copied().unwrap_or(0);
+                let shader = self.surface(shader_ref, permutation, assets);
                 let Some(surface) = shader.surface else {
                     self.stats.skipped_transparent += 1;
                     continue;
@@ -1165,13 +1180,13 @@ impl LevelBuilder {
     fn coloured_surface(
         &mut self,
         base: &Surface,
-        shader: Option<u32>,
+        shader: Option<ShaderUse>,
         change_colors: &[[f32; 3]; 4],
         assets: &mut LevelAssets,
     ) -> Surface {
         let Surface::Solid(solid) = base else { return base.clone() };
         let Some(shader) = shader else { return base.clone() };
-        let info = shader::shader_info(&self.cache, TagRef { group: 0, datum: Some(shader) }).ok().flatten();
+        let info = shader::shader_info(&self.cache, TagRef { group: 0, datum: Some(shader.datum) }).ok().flatten();
         let Some((source, multipurpose)) =
             info.as_ref().and_then(|i| Some((i.change_color?, i.multipurpose_map.and_then(|m| m.datum)?)))
         else {
@@ -1189,7 +1204,7 @@ impl LevelBuilder {
             multipurpose,
             color,
         };
-        let surface = match (self.textures.baked(&self.cache, bake, assets.images), assets.materials.get(&solid.standard)) {
+        let surface = match (self.textures.baked(&self.cache, bake, shader.permutation, assets.images), assets.materials.get(&solid.standard)) {
             (Some(texture), Some(material)) => {
                 let material = StandardMaterial { base_color_texture: Some(texture.clone()), ..material.clone() };
                 // (and the camera's, a model's detail, over the coloured base)
@@ -1207,15 +1222,17 @@ impl LevelBuilder {
         surface
     }
 
-    /// The material for a shader, made once per shader.
+    /// The material for a shader, made once per shader and permutation.
     fn surface(
         &mut self,
         shader: TagRef,
+        permutation: u16,
         assets: &mut LevelAssets,
     ) -> ShaderSurface {
-        if let Some(surface) = self.surfaces.get(&shader.datum) {
+        if let Some(surface) = self.surfaces.get(&(shader.datum, permutation)) {
             return surface.clone();
         }
+        self.permutation = permutation;
         let info = match shader::shader_info(&self.cache, shader) {
             Ok(info) => info,
             Err(e) => {
@@ -1227,7 +1244,11 @@ impl LevelBuilder {
             surface: self.make_surface(info.as_ref(), assets),
             uv_scale: info.as_ref().map_or([1.0, 1.0], |i| i.uv_scale),
         };
-        self.surfaces.insert(shader.datum, surface.clone());
+        if permutation != 0 {
+            debug!("shader {} at permutation {permutation}", info.as_ref().map_or("-", |i| i.name.as_str()));
+        }
+        self.permutation = 0;
+        self.surfaces.insert((shader.datum, permutation), surface.clone());
         surface
     }
 
@@ -1250,7 +1271,7 @@ impl LevelBuilder {
         let base_color_texture = info
             .base_map
             .and_then(|r| r.datum)
-            .and_then(|datum| self.textures.get(&self.cache, datum, 0, true, assets.images));
+            .and_then(|datum| self.textures.permuted(&self.cache, datum, self.permutation, true, assets.images));
         let radiance = Vec3::from(info.emitted_light) * info.emitted_power;
         let emits = info.emitted_power > 0.0 && radiance != Vec3::ZERO;
 
@@ -1266,7 +1287,7 @@ impl LevelBuilder {
                     base: info.base_map.and_then(|b| b.datum),
                     multipurpose: multipurpose_map.datum?,
                 };
-                Some((self.textures.baked(&self.cache, bake, assets.images)?, Vec3::from(color_upper)))
+                Some((self.textures.baked(&self.cache, bake, self.permutation, assets.images)?, Vec3::from(color_upper)))
             }
             shader::SelfIllumination::Environment { map, primary, secondary, plasma } => {
                 let bake = crate::textures::Bake::EnvironmentSelfIllumination {
@@ -1274,7 +1295,7 @@ impl LevelBuilder {
                     map: map.datum?,
                     colors: [primary, secondary, plasma].map(|c| c.map(f32::to_bits)),
                 };
-                Some((self.textures.baked(&self.cache, bake, assets.images)?, Vec3::ONE))
+                Some((self.textures.baked(&self.cache, bake, self.permutation, assets.images)?, Vec3::ONE))
             }
         });
         let shine = self.shininess(info, assets);
@@ -1356,12 +1377,12 @@ impl LevelBuilder {
         assets: &mut LevelAssets,
     ) -> Option<Handle<HaloEnvironmentMaterial>> {
         let detail = info.model_detail?;
-        let detail_map = self.textures.get(&self.cache, detail.map.datum?, 0, true, assets.images)?;
+        let detail_map = self.textures.permuted(&self.cache, detail.map.datum?, self.permutation, true, assets.images)?;
         // (the mask, read as it is stored)
         let multipurpose = info
             .multipurpose_map
             .and_then(|m| m.datum)
-            .and_then(|datum| self.textures.get(&self.cache, datum, 0, false, assets.images))
+            .and_then(|datum| self.textures.permuted(&self.cache, datum, self.permutation, false, assets.images))
             .unwrap_or_else(|| assets.neutral_detail.clone());
         // (the mesh's texture coordinates are the base map's, already scaled by
         // the shader's map scale; the detail's scale is against the model's own)
@@ -1394,7 +1415,7 @@ impl LevelBuilder {
     /// tinted, and reflects by Fresnel.
     fn glass_or_water_material(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<Handle<StandardMaterial>> {
         let texture = |map: Option<TagRef>, this: &mut Self, assets: &mut LevelAssets| {
-            map.and_then(|m| m.datum).and_then(|d| this.textures.get(&this.cache, d, 0, true, assets.images))
+            map.and_then(|m| m.datum).and_then(|d| this.textures.permuted(&this.cache, d, this.permutation, true, assets.images))
         };
         let material = if let Some(glass) = info.glass {
             let [r, g, b] = glass.tint;
@@ -1454,7 +1475,7 @@ impl LevelBuilder {
                 continue;
             }
             let Some(map) = slot else { continue };
-            let Some(image) = map.bitmap.datum.and_then(|d| self.textures.get(&self.cache, d, 0, true, assets.images))
+            let Some(image) = map.bitmap.datum.and_then(|d| self.textures.permuted(&self.cache, d, self.permutation, true, assets.images))
             else {
                 continue;
             };
@@ -1518,7 +1539,7 @@ impl LevelBuilder {
                 roughness: roughness.to_bits(),
                 metallic: metallic.to_bits(),
             };
-            self.textures.baked(&self.cache, bake, assets.images)
+            self.textures.baked(&self.cache, bake, self.permutation, assets.images)
         });
         match texture {
             // the texture holds the values; the factors multiply them
@@ -1542,7 +1563,7 @@ impl LevelBuilder {
         let mut layer = |map: Option<shader::DetailMap>| -> (Handle<Image>, Vec2) {
             let Some(map) = map else { return (assets.neutral_detail.clone(), Vec2::ONE) };
             let Some(datum) = map.bitmap.datum else { return (assets.neutral_detail.clone(), Vec2::ONE) };
-            let image = self.textures.get(&self.cache, datum, 0, true, assets.images);
+            let image = self.textures.permuted(&self.cache, datum, self.permutation, true, assets.images);
             // rescaled detail maps repeat relative to the base map's size
             let rescale = match (environment.rescale_detail_maps, base_size, bitmap_size(&self.cache, datum)) {
                 (true, Some(base), Some(detail)) => base / detail,
@@ -1572,7 +1593,7 @@ impl LevelBuilder {
         let mut self_illumination_map = assets.flat_normal.clone();
         if let (Some(animation), Some(shader::SelfIllumination::Environment { map, .. })) =
             (info.self_illumination_animation, info.self_illumination)
-            && let Some(image) = map.datum.and_then(|datum| self.textures.get(&self.cache, datum, 0, false, assets.images))
+            && let Some(image) = map.datum.and_then(|datum| self.textures.permuted(&self.cache, datum, self.permutation, false, assets.images))
         {
             self_illumination_map = image;
             flags |= crate::material::ENVIRONMENT_ANIMATED_ILLUMINATION;
@@ -1633,7 +1654,7 @@ impl LevelBuilder {
     ) -> Option<(Handle<Image>, Vec2)> {
         let map = environment.bump_map?;
         let datum = map.bitmap.datum?;
-        let image = self.textures.get(&self.cache, datum, 0, false, images)?;
+        let image = self.textures.permuted(&self.cache, datum, self.permutation, false, images)?;
         let rescale = match (environment.rescale_bump_map, base_size, bitmap_size(&self.cache, datum)) {
             (true, Some(base), Some(bump)) => base / bump,
             _ => Vec2::ONE,

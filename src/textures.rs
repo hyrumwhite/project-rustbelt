@@ -14,7 +14,9 @@ use halo_map::{bitmap, CacheFile};
 #[derive(Default)]
 pub struct TextureCache {
     images: HashMap<(u32, usize, bool), Option<Handle<Image>>>,
-    baked: HashMap<Bake, Option<Handle<Image>>>,
+    baked: HashMap<(Bake, u16), Option<Handle<Image>>>,
+    /// Each bitmap tag's image count, for [`TextureCache::permuted`].
+    counts: HashMap<u32, usize>,
     /// Whether the GPU takes BC (DXT) textures as they are.
     pub bc_supported: bool,
     pub failures: usize,
@@ -44,11 +46,13 @@ pub enum Bake {
 pub const MATTE_ROUGHNESS: f32 = 0.9;
 
 impl TextureCache {
-    pub fn baked(&mut self, cache: &CacheFile, bake: Bake, images: &mut Assets<Image>) -> Option<Handle<Image>> {
-        if let Some(cached) = self.baked.get(&bake) {
+    /// A bake from its bitmaps' images for a shader permutation (see
+    /// [`TextureCache::permuted`]).
+    pub fn baked(&mut self, cache: &CacheFile, bake: Bake, permutation: u16, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        if let Some(cached) = self.baked.get(&(bake, permutation)) {
             return cached.clone();
         }
-        let result = match bake_rgba(cache, bake) {
+        let result = match bake_rgba(cache, bake, permutation) {
             Ok((width, height, data, srgb)) => {
                 let format = if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
                 let mut image = Image::new(
@@ -67,8 +71,22 @@ impl TextureCache {
                 None
             }
         };
-        self.baked.insert(bake, result.clone());
+        self.baked.insert((bake, permutation), result.clone());
         result
+    }
+
+    /// A bitmap's image for a shader permutation: image `permutation % count`,
+    /// as the game's `rasterizer_set_texture` picks it.
+    pub fn permuted(
+        &mut self,
+        cache: &CacheFile,
+        datum: u32,
+        permutation: u16,
+        srgb: bool,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let count = *self.counts.entry(datum).or_insert_with(|| bitmap::bitmaps(cache, datum).map_or(1, |b| b.len().max(1)));
+        self.get(cache, datum, permutation as usize % count, srgb, images)
     }
 
     pub fn new(bc_supported: bool) -> Self {
@@ -139,9 +157,12 @@ fn repeat_sampler() -> ImageSampler {
 }
 
 /// The first bitmap of a group as RGBA8.
-fn rgba8(cache: &CacheFile, datum: u32) -> halo_map::Result<bitmap::Decoded> {
+fn rgba8(cache: &CacheFile, datum: u32, permutation: u16) -> halo_map::Result<bitmap::Decoded> {
     let bitmaps = bitmap::bitmaps(cache, datum)?;
-    let first = bitmaps.first().ok_or_else(|| halo_map::Error::BadTag("bitmap group has no bitmaps".into()))?;
+    if bitmaps.is_empty() {
+        return Err(halo_map::Error::BadTag("bitmap group has no bitmaps".into()));
+    }
+    let first = &bitmaps[permutation as usize % bitmaps.len()];
     first.decode_rgba8(cache)
 }
 
@@ -214,25 +235,25 @@ fn change_color(mask: &bitmap::Decoded, base: Option<&bitmap::Decoded>, color: [
 }
 
 /// (width, height, RGBA8 texels, sRGB-encoded)
-fn bake_rgba(cache: &CacheFile, bake: Bake) -> halo_map::Result<(u32, u32, Vec<u8>, bool)> {
+fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Result<(u32, u32, Vec<u8>, bool)> {
     match bake {
         Bake::ModelSelfIllumination { base, multipurpose } => {
-            let mask = rgba8(cache, multipurpose)?;
-            let base = base.map(|b| rgba8(cache, b)).transpose()?;
+            let mask = rgba8(cache, multipurpose, permutation)?;
+            let base = base.map(|b| rgba8(cache, b, permutation)).transpose()?;
             Ok(modulate_base(&mask, base.as_ref(), |texel| [texel[1] as f32 / 255.0; 3]))
         }
         Bake::ChangeColor { base, multipurpose, color } => {
-            let mask = rgba8(cache, multipurpose)?;
-            let base = base.map(|b| rgba8(cache, b)).transpose()?;
+            let mask = rgba8(cache, multipurpose, permutation)?;
+            let base = base.map(|b| rgba8(cache, b, permutation)).transpose()?;
             Ok(change_color(&mask, base.as_ref(), color))
         }
         Bake::MetallicRoughness { mask, channel, roughness, metallic } => {
-            let mask = rgba8(cache, mask)?;
+            let mask = rgba8(cache, mask, permutation)?;
             Ok(metallic_roughness(&mask, channel as usize, f32::from_bits(roughness), f32::from_bits(metallic)))
         }
         Bake::EnvironmentSelfIllumination { base, map, colors } => {
-            let map = rgba8(cache, map)?;
-            let base = base.map(|b| rgba8(cache, b)).transpose()?;
+            let map = rgba8(cache, map, permutation)?;
+            let base = base.map(|b| rgba8(cache, b, permutation)).transpose()?;
             let colors = colors.map(|c| c.map(f32::from_bits));
             Ok(modulate_base(&map, base.as_ref(), |texel| {
                 let weights = [texel[0], texel[1], texel[2]].map(|c| c as f32 / 255.0);

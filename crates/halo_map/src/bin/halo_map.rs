@@ -313,6 +313,14 @@ fn names(cache: &CacheFile) -> CliResult {
             encounter.block(e::SQUADS, q::SIZEOF)?.iter().map(|q| q.bytes(q::NAME, 32).map(text)).collect::<Result<_, _>>()?;
         println!("encounter {index}: {} (squads {})", text(encounter.bytes(e::NAME, 32)?), squads.join(", "));
     }
+    // (cutscene flags: scenario_cutscene_flag, a name then a position and facing)
+    const CUTSCENE_FLAGS: usize = 0x4e4;
+    const CUTSCENE_FLAG_SIZE: usize = 0x5c;
+    for (index, flag) in scenario.block(CUTSCENE_FLAGS, CUTSCENE_FLAG_SIZE)?.iter().enumerate() {
+        let position = flag.bytes(36, 12)?;
+        let at = |i: usize| f32::from_le_bytes(position[i * 4..i * 4 + 4].try_into().unwrap());
+        println!("cutscene flag {index}: {} at {:.2},{:.2},{:.2}", text(flag.bytes(4, 32)?), at(0), at(1), at(2));
+    }
     Ok(())
 }
 

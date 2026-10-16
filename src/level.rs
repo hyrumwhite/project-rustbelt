@@ -130,8 +130,15 @@ pub struct HaloObject;
 pub struct SkyDome;
 
 /// Metres per sky model unit. A sky is drawn around the camera at no
-/// particular size; this puts it far beyond any level (skies are ~10⁵ units).
-const SKY_SCALE: f32 = 1.0;
+/// particular size, behind the level (the game draws it first); this puts it
+/// far beyond any level. Its domes are ~10⁵ units across, but some of its
+/// parts are much smaller (a50's fog band: a ring ~3200 units across), and
+/// at a metre per unit, the level beyond them was hidden behind them.
+const SKY_SCALE: f32 = 100.0;
+
+fn sky_scale() -> f32 {
+    std::env::var("HALO_RT_SKY_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(SKY_SCALE)
+}
 /// Transparent meshes sort back to front by their bounds' centres plus a
 /// bias. Sky layers are drawn first (behind every transparent surface of the
 /// level), in Halo's part order: each step is larger than the sky is.
@@ -207,6 +214,11 @@ struct SolidSurface {
     raster: Option<Handle<HaloEnvironmentMaterial>>,
     /// Emitted light (see [`EmissiveSurface`]).
     radiance: Option<Vec3>,
+    /// For the rays only: a transparent shader's radiosity emitter (c10's
+    /// light cards, an invisible bitmap added), which lit the lightmaps but
+    /// which the camera doesn't see (the game's overlay draws whatever it
+    /// shows).
+    unseen: bool,
 }
 
 /// A shader's material and the texture coordinate scale it applies.
@@ -547,7 +559,7 @@ impl LevelBuilder {
                 let depth_bias = SKY_BIAS + layer as f32 * SKY_LAYER_BIAS;
                 if let Some(material) = self.transparent_material(&info, depth_bias, assets) {
                     let vertices = part.vertices.iter().map(|v| SourceVertex {
-                        position: v.position.map(|c| c * SKY_SCALE / METERS_PER_WORLD_UNIT),
+                        position: v.position.map(|c| c * sky_scale() / METERS_PER_WORLD_UNIT),
                         normal: v.normal,
                         binormal: v.binormal,
                         tangent: v.tangent,
@@ -587,7 +599,7 @@ impl LevelBuilder {
                     ..default()
                 });
                 let vertices = part.vertices.iter().map(|v| SourceVertex {
-                    position: v.position.map(|c| c * SKY_SCALE / METERS_PER_WORLD_UNIT),
+                    position: v.position.map(|c| c * sky_scale() / METERS_PER_WORLD_UNIT),
                     normal: v.normal,
                     binormal: v.binormal,
                     tangent: v.tangent,
@@ -738,7 +750,7 @@ impl LevelBuilder {
             }
             traced = Some(entity.id());
         }
-        if raster_use {
+        if raster_use && !surface.unseen {
             match (&surface.raster, traced) {
                 // the same entity, when the camera sees what the rays do and
                 // nothing moves it differently
@@ -1220,13 +1232,20 @@ impl LevelBuilder {
     }
 
     fn make_surface(&mut self, info: Option<&ShaderInfo>, assets: &mut LevelAssets) -> Option<Surface> {
+        // (HALO_RT_SKIP_SHADERS, debugging: shaders whose names hold any of
+        // these comma-separated words, not drawn)
+        if let (Some(info), Ok(skip)) = (info, std::env::var("HALO_RT_SKIP_SHADERS"))
+            && skip.split(',').any(|word| !word.is_empty() && info.name.contains(word))
+        {
+            return None;
+        }
         let Some(info) = info else {
             let standard = assets.materials.add(StandardMaterial {
                 base_color: Color::srgb(0.5, 0.5, 0.5),
                 perceptual_roughness: 0.9,
                 ..default()
             });
-            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None }));
+            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, unseen: false }));
         };
         let base_color_texture = info
             .base_map
@@ -1322,7 +1341,8 @@ impl LevelBuilder {
             }
             _ => None,
         };
-        Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance }))
+        let unseen = info.shader_type.is_transparent();
+        Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance, unseen }))
     }
 
     /// A `shader_model`'s camera material with its detail map (see

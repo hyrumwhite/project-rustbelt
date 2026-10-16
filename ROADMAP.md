@@ -1340,14 +1340,18 @@ Phase 5 had the game draw everything but the opaque world into an overlay: a fla
    - [ ] Secondary maps and z-sprites: the effect shader's secondary map, which multiplies the colour and alpha, and the z-sprite anchor, which gives a sprite a per-pixel depth from a z-map, are left out. About one batch type in eight on b30 has one (impacts, muzzle flashes).
    - [ ] The bright ones (plasma, explosions, muzzle flashes) also light the scene, as the dynamic lights already do.
    - [ ] What's left in the overlay is the HUD, the menus and text.
-4. **Found in play (hands-on, 2026-10-15; a10, a30, b30, c10)**
+4. **Found in play (hands-on, 2026-10-15 and 16; a10, a30, a50, b30, c10)**
    - Good: impact decals; smoke, dust and fog, including under b30's sea and in c10's swamp fog.
    - [ ] Muzzle flashes too bright, with a strong falloff. That's both the flash sprites (`effects\particles\flash\...`, added, first person; probably the missing secondary map) and the weapon's dynamic light.
    - [ ] The muzzle flash's light is a sphere centred on the player, not at the weapon. In first person, the light should come from the gun's muzzle (the first-person model's marker), not the body's.
    - [ ] The plasma pistol's light is too bright and lingers. Its light tag's own animation (duration, intensity and colour over its life) should fade it, as if the plasma were cooling on the weapon.
    - [ ] a30's crashed Pelican (the drop pod at the start) still flickers, with decals and effects in the viewer. So it isn't the overlay's multiply. Next suspects: its smoke sprites' sort order, or the wreck's own surfaces (z-fighting, or emissive or transparent parts).
-   - [ ] Sprites that look wrongly loaded on c10 (no capture: in play, P goes to the game). F9 now saves the picture (`captures` beside the program) and logs the level, tick and camera, in play too.
-   - [ ] Black artifacts still on some Grunt models.
+   - [x] c10's flat panels (captured with F9) weren't sprites. They were its radiosity light cards (`c10light ...`, `c10_light_fungal_green`): transparent shaders with an invisible bitmap added, which only lit the lightmaps. The viewer had drawn every emitting shader as a solid surface. Now a transparent emitter lights the rays only, unseen by the camera.
+   - [ ] The ray-traced swamp water still reflects those cards, as pale shapes on the ground. The fix needs a Solarik emitter that rays don't see (light sampling only).
+   - [ ] c10's hanging vines float against the sky. Either we see more than the game shows (its fog, its sky), or they're misplaced. Compare with the game's own drawing.
+   - [ ] Black artifacts still on some Grunt models: the variant with the flatter tank (`grunt head and back`; captured on a10). Every Grunt, Elite and Chief shader reflects at brightness 1.0, which the viewer makes near-mirror metal (metallic 0.9, under the multipurpose red mask). Metal shows no diffuse, so the backpack's dark rust spots, and its top where it mirrors a dark room, go black. Halo adds its cube map over the diffuse, tinted by the shader, not the base map. Wanted: keep the diffuse under the mask, e.g. metallic scaled down where the base map is dark, or a lower metallic for models.
+   - [x] a50's "plane" across the top of the view, moving with the player: its sky's fog band, a ring only ~3200 units across. At a metre per sky unit, it hid the level beyond it. The sky is now drawn at 100 m per unit (`HALO_RT_SKY_SCALE` overrides that).
+   - [ ] b30's sea: a flat teal plane (an old problem, still to look into).
    - [ ] Once, sound and input stopped while the picture kept going (perhaps a misclicked shortcut). Watch whether the game process exits.
 
 ## Known risks

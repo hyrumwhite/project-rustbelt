@@ -190,6 +190,31 @@ fn shaders(cache: &CacheFile) -> CliResult {
 fn skies(cache: &CacheFile) -> CliResult {
     for sky in sky::skies(cache)? {
         println!("{}", sky.name);
+        if let Some(datum) = sky.model.and_then(|m| m.datum) {
+            let model = halo_map::model::Model::load(cache, datum)?;
+            let mut parts = 0;
+            let (mut low, mut high) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for geometry in model.geometries_for(&[], halo_map::model::HIGHEST_DETAIL) {
+                for part in model.geometry(geometry)? {
+                    parts += 1;
+                    let (mut part_low, mut part_high) = ([f32::MAX; 3], [f32::MIN; 3]);
+                    for v in &part.vertices {
+                        for axis in 0..3 {
+                            part_low[axis] = part_low[axis].min(v.position[axis]);
+                            part_high[axis] = part_high[axis].max(v.position[axis]);
+                        }
+                    }
+                    let shader = model.shaders.get(part.shader_index.max(0) as usize).and_then(|s| s.datum);
+                    let shader = shader.and_then(|d| cache.tag(d).ok()).map_or("-".to_string(), |t| t.name.clone());
+                    println!("    part {shader}: {} vertices, {part_low:?} to {part_high:?}", part.vertices.len());
+                    for axis in 0..3 {
+                        low[axis] = low[axis].min(part_low[axis]);
+                        high[axis] = high[axis].max(part_high[axis]);
+                    }
+                }
+            }
+            println!("  model {} ({parts} parts): {low:?} to {high:?}", model.name);
+        }
         for light in &sky.lights {
             println!(
                 "  light color {:?} power {:.3} direction {:?} diameter {:.4}",

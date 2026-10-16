@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 36
+#define BEVY_BRIDGE_VERSION 37
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -303,6 +303,9 @@ struct bevy_bridge_light
 	float radius;
 	/* a spotlight's cutoff angle (radians); pi or more shines every way */
 	float cutoff_angle;
+	/* (protocol 37) the angle its light falls off from, to none at the
+	cutoff (radians) */
+	float falloff_angle;
 };
 
 /* a ray the game tested against its structure's collision geometry

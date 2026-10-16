@@ -26,6 +26,8 @@ struct lights_port_light
 	/* a spotlight's (the flashlight's) cutoff angle, radians; pi or more
 	for a light shining every way */
 	real cutoff_angle;
+	/* and the angle its light falls off from, to none at the cutoff */
+	real falloff_angle;
 };
 
 /* ---------- prototypes/OBJECT_LIGHTS.C */

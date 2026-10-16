@@ -920,6 +920,7 @@ short lights_port_list(
 		lights[count].color = light->color;
 		lights[count].radius = light->radius;
 		lights[count].cutoff_angle = definition ? definition->cutoff_angle : _pi;
+		lights[count].falloff_angle = definition ? definition->falloff_angle : _pi;
 		count++;
 	}
 	return count;

@@ -636,6 +636,7 @@ void bevy_bridge_export_frame(
 			out->color[2] = lights[index].color.blue;
 			out->radius = lights[index].radius;
 			out->cutoff_angle = lights[index].cutoff_angle;
+			out->falloff_angle = lights[index].falloff_angle;
 		}
 		frame->light_count = (unsigned long)count;
 	}

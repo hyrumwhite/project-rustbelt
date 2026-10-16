@@ -390,7 +390,9 @@ fn main() -> AppExit {
         link.sync_to_overlay = overlay;
         app.insert_resource(link)
             .add_plugins((bridge::BridgePlugin, lights::DynamicLightsPlugin))
-            .add_systems(PreUpdate, follow_level);
+            .add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin)
+            .add_systems(PreUpdate, follow_level)
+            .add_systems(Last, log_heartbeat);
         if args.camera.is_some() {
             app.insert_resource(bridge::FollowGame(false));
         }
@@ -678,6 +680,31 @@ fn bsp_overview(cache: &CacheFile, index: usize) -> Option<Transform> {
     let [x, y, z] = halo_map::bsp::Bsp::load(cache, &reference).ok()?.world_bounds().ok()?;
     let centre = [(x[0] + x[1]) / 2.0, (y[0] + y[1]) / 2.0, (z[0] + z[1]) / 2.0];
     Some(Transform::from_translation(Vec3::from(halo_to_bevy(centre, METERS_PER_WORLD_UNIT))))
+}
+
+/// Every 10 seconds, a line in the log: the frames drawn, the game's tick,
+/// and how many entities and assets there are, with the process's memory. A
+/// freeze shows where they stop; a leak, what grows.
+fn log_heartbeat(world: &World, mut last: Local<Option<std::time::Instant>>) {
+    if last.is_some_and(|last| last.elapsed().as_secs_f32() < 10.0) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    let frames = world.get_resource::<bevy::diagnostic::FrameCount>().map_or(0, |f| f.0);
+    let tick = world.get_resource::<bridge::BridgeLink>().and_then(|l| l.latest.as_ref()).map_or(0, |s| s.game_tick);
+    let count = |n: Option<usize>| n.unwrap_or(0);
+    let meshes = count(world.get_resource::<Assets<Mesh>>().map(|a| a.len()));
+    let images = count(world.get_resource::<Assets<Image>>().map(|a| a.len()));
+    let standard = count(world.get_resource::<Assets<StandardMaterial>>().map(|a| a.len()));
+    let memory = world
+        .get_resource::<bevy::diagnostic::DiagnosticsStore>()
+        .and_then(|d| d.get(&bevy::diagnostic::SystemInformationDiagnosticsPlugin::PROCESS_MEM_USAGE))
+        .and_then(|d| d.value());
+    info!(
+        "heartbeat: frame {frames}, tick {tick}, {} entities, {meshes} meshes, {images} images, {standard} materials, memory {:.2} GiB",
+        world.entities().count_spawned(),
+        memory.unwrap_or(0.0)
+    );
 }
 
 fn setup_camera(

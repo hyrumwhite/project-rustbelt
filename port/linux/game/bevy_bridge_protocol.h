@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 35
+#define BEVY_BRIDGE_VERSION 36
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -218,6 +218,19 @@ struct bevy_bridge_sprite_batch
 	float centroid[3];
 	unsigned long first_vertex;
 	unsigned long quad_count;
+	/* (protocol 36) what it is: BEVY_BRIDGE_SPRITE_EFFECT, or
+	BEVY_BRIDGE_SPRITE_LENS_FLARE, a lens flare's reflection: drawn over
+	everything (the game tests its occlusion itself), added by the vertex's
+	alpha, its colour (1 - v) tint t^6 + v t (rasterizer_xbox_widgets.c's
+	internal sprite), shader_flags and blend_function unused */
+	unsigned long kind;
+	float tint;
+};
+
+enum
+{
+	BEVY_BRIDGE_SPRITE_EFFECT = 0,
+	BEVY_BRIDGE_SPRITE_LENS_FLARE = 1
 };
 
 /* a sprite's vertex: the game's coordinates, the bitmap's texture

@@ -83,6 +83,7 @@ symbols in this file:
 #include "cseries.h"
 #include "errors.h"
 #include "bitmaps/bitmaps.h"
+#include "bitmaps/bitmap_group.h" /* port: the lens flares shared */
 #include "interface/hud_draw.h"
 #include "bitmaps/bitmap_color_conversion.h"
 #include "math/periodic_functions.h"
@@ -99,6 +100,8 @@ symbols in this file:
 #include "objects/widgets/widget_types.h"
 #include "main/main.h"
 #include <xtl.h>
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "bevy_bridge_protocol.h"
 #include "rasterizer/xbox/rasterizer_xbox.h"
 #include "main/main.h"
 
@@ -359,6 +362,72 @@ static long local_lens_flare_count = 0;
 extern short global_screenshot_count;
 
 /* ---------- private code */
+
+/* port: with a Bevy renderer that draws the effects itself
+(game.bevy_bridge_viewer_effects), a lens flare's reflection shared with it
+instead of drawn: the quad rasterizer_widget_draw_sprite3d would draw, in the
+world, facing the camera at the point's depth */
+static void lens_flare_reflection_share(
+	long bitmap_group_index,
+	short sequence_index,
+	real tint_factor,
+	real_point3d const *point,
+	real radius,
+	real_vector2d const *scale,
+	real rotation,
+	pixel32 color,
+	boolean first_person)
+{
+	struct bevy_bridge_sprite_batch batch;
+	struct bevy_bridge_sprite_vertex vertices[4];
+	struct bitmap_group *bitmap_group;
+	/* (the view's x and y, in the world: the screen's right and up; the
+	matrix's forward, left and up are the view's x, y and z) */
+	real_vector3d const *right = &global_window_parameters.frustum.view_to_world.forward;
+	real_vector3d const *up = &global_window_parameters.frustum.view_to_world.left;
+	real theta;
+	real a;
+	real b;
+	real offsets[4][2];
+	short corner;
+
+	bitmap_group = bitmap_group_index != NONE ? bitmap_group_get(bitmap_group_index) : NULL;
+	if (!bitmap_group || bitmap_group->bitmaps.count <= 0 || radius <= 0.0f)
+	{
+		return;
+	}
+	/* (the widget takes the rotation in degrees after it was made radians:
+	as the game draws it) */
+	theta = DEGREES_TO_RADIANS(rotation);
+	a = radius * ((real)cos(theta) - (real)sin(theta));
+	b = radius * ((real)sin(theta) + (real)cos(theta));
+	/* (right, down: the widget's corners on the screen) */
+	offsets[0][0] = -scale->i * a; offsets[0][1] = -scale->j * b;
+	offsets[1][0] = scale->i * b; offsets[1][1] = -scale->j * a;
+	offsets[2][0] = scale->i * a; offsets[2][1] = scale->j * b;
+	offsets[3][0] = -scale->i * b; offsets[3][1] = scale->j * a;
+	for (corner = 0; corner < 4; corner++)
+	{
+		vertices[corner].position[0] = point->x + right->i * offsets[corner][0] - up->i * offsets[corner][1];
+		vertices[corner].position[1] = point->y + right->j * offsets[corner][0] - up->j * offsets[corner][1];
+		vertices[corner].position[2] = point->z + right->k * offsets[corner][0] - up->k * offsets[corner][1];
+		vertices[corner].texcoord[0] = (corner == 1 || corner == 2) ? 1.0f : 0.0f;
+		vertices[corner].texcoord[1] = (corner >= 2) ? 1.0f : 0.0f;
+		vertices[corner].color = color;
+	}
+	csmemset(&batch, 0, sizeof(batch));
+	batch.map = (unsigned long)bitmap_group_index;
+	batch.bitmap_index = (unsigned short)(sequence_index % bitmap_group->bitmaps.count);
+	batch.secondary_map = (unsigned long)NONE;
+	batch.first_person = first_person ? 1 : 0;
+	batch.centroid[0] = point->x;
+	batch.centroid[1] = point->y;
+	batch.centroid[2] = point->z;
+	batch.quad_count = 1;
+	batch.kind = BEVY_BRIDGE_SPRITE_LENS_FLARE;
+	batch.tint = tint_factor;
+	bevy_bridge_note_sprite_batch(&batch, vertices);
+}
 
 /* port: a map's BSP lens flare marker past what the BSP has; said once */
 static void lens_flare_data_error(
@@ -1132,6 +1201,27 @@ void rasterizer_lens_flares_draw(
 									point.y = offset*corona_axis.j + corona_position.y;
 									point.z = offset*corona_axis.k + corona_position.z;
 
+									/* port: shared with a Bevy renderer that
+									draws the effects (and its fog, after which
+									it adds them), not drawn */
+									if (bevy_bridge_viewer_draws_effects() && bevy_bridge_viewer_draws_fog())
+									{
+										lens_flare_reflection_share(
+											definition->primary_map.index,
+											reflection->bitmap_index,
+											tint_factor,
+											&point,
+											radius,
+											&scale,
+											rotation*(_pi/180.0f),
+											pixel,
+											TEST_FLAG(reflection->flags, _lens_flare_reflection_zbuffer_bit) &&
+												(lens_flare_parameters->compressed_window_index & _lens_flare_first_person_weapon_flag));
+										if (!getenv("HALO_BEVY_BRIDGE_EFFECTS_ALSO_DRAWN"))
+										{
+											continue;
+										}
+									}
 									if (rasterizer_widget_set_texture(
 										0,
 										definition->primary_map.index,

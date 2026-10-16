@@ -37,6 +37,7 @@ symbols in this file:
 #include "objects/objects.h"
 #include "rasterizer/rasterizer.h"
 #include "render.h"
+#include "render_sprite.h"
 #include "tag_files/tag_files.h"
 
 /* ---------- constants */
@@ -433,6 +434,21 @@ static void render_contrail(
 				average_position.y *= one_over_point_count;
 				average_position.z *= one_over_point_count;
 			}
+			/* port: shared with a Bevy renderer that draws the effects,
+			not drawn */
+			if (build_sprites_share_strip(
+				(struct shader_effect_definition const *)shader,
+				definition->bitmap.index,
+				bitmap,
+				first_vertex,
+				vertex_count / 2,
+				&average_position))
+			{
+				rasterizer_dynamic_triangles_unlock(triangle_buffer_index);
+				rasterizer_dynamic_vertices_unlock(vertex_buffer_index);
+			}
+			else
+			{
 			rasterizer_dynamic_triangles_unlock(triangle_buffer_index);
 			rasterizer_dynamic_vertices_unlock(vertex_buffer_index);
 			rasterizer_dynamic_unlit_geometry_draw(
@@ -444,6 +460,7 @@ static void render_contrail(
 				triangle_count,
 				&average_position,
 				0);
+			}
 			rasterizer_dynamic_triangles_delete(triangle_buffer_index);
 			rasterizer_dynamic_vertices_delete(vertex_buffer_index);
 		}

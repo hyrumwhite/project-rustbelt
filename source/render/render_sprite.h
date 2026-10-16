@@ -101,6 +101,13 @@ void build_sprite(
 	unsigned long flags);
 void build_sprites_end(
 	struct build_sprite_data *data);
+boolean build_sprites_share_strip(
+	struct shader_effect_definition const *shader,
+	long bitmap_group_index,
+	struct bitmap_data const *bitmap,
+	void const *strip_vertices,
+	long pair_count,
+	real_point3d const *centroid);
 void build_sprite_prepare_for_window(
 	void);
 real build_sprite_compute_vertex_fade(

@@ -55,6 +55,7 @@ symbols in this file:
 #include "rasterizer/rasterizer.h"
 #include "rasterizer/rasterizer_geometry.h"
 #include "render/render.h"
+#include "render/render_sprite.h"
 #include "saved games/game_state.h"
 #include "shaders/shader_definitions.h"
 #include "shaders/shaders.h"
@@ -449,6 +450,20 @@ void lightning_submit(
 									else
 										shader = &global_shader_effect_additive.shader;
 
+									/* port: shared with a Bevy renderer that draws the effects, not
+									drawn */
+									if (build_sprites_share_strip(
+										(struct shader_effect_definition const *)shader,
+										definition->map.index,
+										bitmap,
+										vertices - 2*point_count,
+										point_count,
+										&centroid))
+									{
+										rasterizer_dynamic_vertices_unlock(vertex_buffer_index);
+									}
+									else
+									{
 									rasterizer_dynamic_vertices_unlock(vertex_buffer_index);
 									rasterizer_dynamic_unlit_geometry_draw(
 										shader,
@@ -459,6 +474,7 @@ void lightning_submit(
 										2*point_count - 2,
 										&centroid,
 										0);
+									}
 									rasterizer_dynamic_vertices_delete(vertex_buffer_index);
 								}
 								first_marker = TRUE;

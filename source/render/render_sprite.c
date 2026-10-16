@@ -283,6 +283,71 @@ static void build_sprites_share(
 	bevy_bridge_note_sprite_batch(&batch, vertices);
 }
 
+/* port: with a Bevy renderer that draws the effects itself
+(game.bevy_bridge_viewer_effects), a strip of world-space vertex pairs
+(contrails, lightning: each two pairs a quad, vertices as a sprite's) shared
+with it as a batch of quads. TRUE when the caller is not to draw it. */
+boolean build_sprites_share_strip(
+	struct shader_effect_definition const *shader,
+	long bitmap_group_index,
+	struct bitmap_data const *bitmap,
+	void const *strip_vertices,
+	long pair_count,
+	real_point3d const *centroid)
+{
+	static struct bevy_bridge_sprite_vertex vertices[BEVY_BRIDGE_SPRITE_VERTICES];
+	struct bevy_bridge_sprite_batch batch;
+	struct bitmap_group *bitmap_group;
+	struct build_sprite_vertex const *in = (struct build_sprite_vertex const *)strip_vertices;
+	long quad_count = pair_count - 1;
+	long quad_index;
+
+	if (!bevy_bridge_viewer_draws_effects())
+	{
+		return FALSE;
+	}
+	bitmap_group = bitmap_group_get(bitmap_group_index);
+	if (render.local_player_index != NONE && bitmap_group && bitmap && quad_count > 0 &&
+		quad_count * NUMBER_OF_VERTICES_PER_QUADRILATERAL <= BEVY_BRIDGE_SPRITE_VERTICES)
+	{
+		csmemset(&batch, 0, sizeof(batch));
+		batch.map = (unsigned long)bitmap_group_index;
+		batch.bitmap_index = (unsigned short)(bitmap - (struct bitmap_data *)bitmap_group->bitmaps.address);
+		batch.shader_flags = shader->flags;
+		batch.blend_function = shader->framebuffer_blend_function;
+		batch.map_flags = shader->primary_map_flags;
+		batch.secondary_map = (unsigned long)shader->secondary_map.index;
+		batch.secondary_anchor = shader->secondary_map_anchor;
+		batch.secondary_flags = shader->secondary_map_flags;
+		batch.centroid[0] = centroid->x;
+		batch.centroid[1] = centroid->y;
+		batch.centroid[2] = centroid->z;
+		batch.quad_count = (unsigned long)quad_count;
+		/* (pairs i and i + 1: a quad around, as a sprite's four) */
+		for (quad_index = 0; quad_index < quad_count; quad_index++)
+		{
+			static short const corners[NUMBER_OF_VERTICES_PER_QUADRILATERAL] = { 0, 1, 3, 2 };
+			short corner;
+
+			for (corner = 0; corner < NUMBER_OF_VERTICES_PER_QUADRILATERAL; corner++)
+			{
+				struct build_sprite_vertex const *v = &in[2 * quad_index + corners[corner]];
+				struct bevy_bridge_sprite_vertex *out = &vertices[NUMBER_OF_VERTICES_PER_QUADRILATERAL * quad_index + corner];
+
+				out->position[0] = v->point.x;
+				out->position[1] = v->point.y;
+				out->position[2] = v->point.z;
+				out->texcoord[0] = v->texture_coordinates.x;
+				out->texcoord[1] = v->texture_coordinates.y;
+				out->color = v->color;
+			}
+		}
+		bevy_bridge_note_sprite_batch(&batch, vertices);
+	}
+	/* (HALO_BEVY_BRIDGE_EFFECTS_ALSO_DRAWN, debugging: drawn as well) */
+	return !getenv("HALO_BEVY_BRIDGE_EFFECTS_ALSO_DRAWN");
+}
+
 void build_sprites_end(
 	struct build_sprite_data *data)
 {

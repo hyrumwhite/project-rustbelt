@@ -580,7 +580,7 @@ fn load_level(
     let start = std::time::Instant::now();
     let mut builder = LevelBuilder::new(cache.clone(), bc_supported);
     builder.root = Some(root);
-    builder.glass_sky_mask = Some(params.glass_sky_mask.0.clone());
+    builder.glass_sky_mask = Some(params.glass_sky_mask.clone());
     builder.fixture_lights = !args.no_fixture_lights;
     builder.show_light_proxies = args.show_light_proxies;
     builder.matte = args.matte;
@@ -691,7 +691,8 @@ fn setup_camera(
     #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
 ) {
     let mut camera = commands.spawn((
-        Camera3d::default(),
+        // (the fog reads the main pass's depth)
+        Camera3d { depth_texture_usages: (TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING).into(), ..default() },
         // (inactive for its first frames: start_camera)
         Camera { clear_color: ClearColorConfig::Custom(Color::BLACK), is_active: args.pathtracer, ..default() },
         start.0,

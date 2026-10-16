@@ -84,6 +84,13 @@ struct HaloFog {
 @group(0) @binding(9) var layer_sampler: sampler;
 @group(0) @binding(10) var overlay: texture_2d<f32>;
 @group(0) @binding(11) var flares: texture_2d<f32>;
+// the main pass's depth: nearer than the prepass's where the first-person
+// weapon's panes (the needler's needles) are, which the prepass leaves out
+@group(0) @binding(12) var scene_depth: texture_depth_2d;
+
+// metres: the level's panes' masks' depth (src/material.rs,
+// GLASS_SKY_MASK_DISTANCE), which is none
+const GLASS_SKY_MASK_DISTANCE: f32 = 50000.0;
 
 // a 16-texel texture's coordinate as the texel it falls on (0 to 1 over the
 // texels' centres, clamped)
@@ -115,7 +122,13 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // (the depth is at the render resolution, the picture perhaps upscaled)
     let size = vec2<f32>(textureDimensions(depth));
     let pixel = vec2<i32>(min(in.uv * size, size - 1.0));
-    let z = textureLoad(depth, pixel, 0);
+    var z = textureLoad(depth, pixel, 0);
+    // (a first-person pane in front: fogged at its own depth)
+    let pane_z = textureLoad(scene_depth, pixel, 0);
+    let mask_z = view.clip_from_view[3][2] / GLASS_SKY_MASK_DISTANCE;
+    if pane_z > z * 1.0001 && abs(pane_z - mask_z) > mask_z * 0.01 {
+        z = pane_z;
+    }
     let ndc = vec2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
 
     // the fog screen's layers (sampled before anything returns, for their

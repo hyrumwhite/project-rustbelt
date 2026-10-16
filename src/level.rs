@@ -394,7 +394,10 @@ pub struct LevelBuilder {
     pub root: Option<Entity>,
     /// Each glass or water pane's sky mask (see
     /// [`crate::material::GlassSkyMask`]).
-    pub glass_sky_mask: Option<Handle<crate::material::GlassSkyMask>>,
+    pub glass_sky_mask: Option<crate::material::GlassSkyMaskMaterial>,
+    /// Whether the models spawned are the first-person weapon and hands
+    /// (their panes' masks at their own depth).
+    pub first_person: bool,
     pub stats: LevelStats,
 }
 
@@ -412,6 +415,7 @@ impl LevelBuilder {
         LevelBuilder {
             recolour: None,
             glass_sky_mask: None,
+            first_person: false,
             textures: TextureCache::new(bc_supported),
             surfaces: HashMap::default(),
             permutation: 0,
@@ -741,7 +745,8 @@ impl LevelBuilder {
                     };
                     skinned(&mut drawn, skin.clone());
                     // (a pane's sky mask: the sky's layers not over it)
-                    if let (Surface::Blended(_), Some(mask)) = (surface, &self.glass_sky_mask) {
+                    if let (Surface::Blended(_), Some(masks)) = (surface, &self.glass_sky_mask) {
+                        let mask = if self.first_person { &masks.near } else { &masks.far };
                         let mut masked = commands.spawn((
                             Name::new("sky mask"),
                             Mesh3d(mesh.clone()),

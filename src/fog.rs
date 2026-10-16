@@ -47,7 +47,7 @@ use bevy::{
             TextureSampleType,
         },
         renderer::{RenderContext, RenderDevice, ViewQuery},
-        view::{ExtractedView, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+        view::{ExtractedView, ViewDepthStencilTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
         RenderApp, RenderStartup,
     },
 };
@@ -252,6 +252,7 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_depth_2d(),
             ),
         ),
     );
@@ -271,7 +272,15 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
 }
 
 fn draw_fog(
-    view: ViewQuery<(&ViewTarget, &ViewPrepassTextures, &ViewUniformOffset, &ExtractedView, &HaloFog, Option<&FogScreenMaps>)>,
+    view: ViewQuery<(
+        &ViewTarget,
+        &ViewPrepassTextures,
+        &ViewDepthStencilTexture,
+        &ViewUniformOffset,
+        &ExtractedView,
+        &HaloFog,
+        Option<&FogScreenMaps>,
+    )>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     fallback: Res<FallbackImage>,
     fallback_zero: Res<FallbackImageZero>,
@@ -286,13 +295,17 @@ fn draw_fog(
     mut pipelines: Local<HashMap<TextureFormat, CachedRenderPipelineId>>,
     mut ctx: RenderContext,
 ) {
-    let (target, prepass, view_offset, extracted, fog, maps) = view.into_inner();
+    let (target, prepass, main_depth, view_offset, extracted, fog, maps) = view.into_inner();
     let layer = |index: usize| {
         maps.and_then(|maps| maps.0[index].as_ref())
             .and_then(|handle| gpu_images.get(handle))
             .map_or(&fallback.d2.texture_view, |image| &image.texture_view)
     };
-    let (Some(depth), Some(view_binding)) = (prepass.depth_only_view(), view_uniforms.uniforms.binding()) else { return };
+    let (Some(depth), Some(main_depth), Some(view_binding)) =
+        (prepass.depth_only_view(), main_depth.attachment.depth_stencil_views().depth_only_view(), view_uniforms.uniforms.binding())
+    else {
+        return;
+    };
     let id = *pipelines.entry(extracted.target_format).or_insert_with(|| {
         cache.queue_render_pipeline(RenderPipelineDescriptor {
             label: Some("halo_fog".into()),
@@ -357,6 +370,7 @@ fn draw_fog(
             &fog_pipeline.layer_sampler,
             multiply.map_or(&fallback.d2.texture_view, |image| &image.texture_view),
             flare_view.as_ref().unwrap_or(&fallback_zero.texture_view),
+            main_depth,
         )),
     );
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {

@@ -397,8 +397,10 @@ fn sync_objects(
                 objects.modelless.insert(key, ());
                 continue;
             };
+            builder.first_person = object.flags & OBJECT_MODEL != 0;
             let (root, nodes, skins) =
                 builder.spawn_animated_model(&mut commands, &model, raster, &change_colors, camouflaged(object), object.object_index, assets);
+            builder.first_person = false;
             objects.tracked.insert(
                 object.object_index,
                 Tracked {

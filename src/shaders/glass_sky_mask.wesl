@@ -13,8 +13,9 @@ import bevy_pbr::render::{
     mesh_view_bindings::view,
 };
 
-// metres: beyond any level, nearer than any sky part (100 m per sky unit)
-const MASK_DISTANCE: f32 = 50000.0;
+// metres: beyond any level, nearer than any sky part (100 m per sky unit),
+// or 0 for the pane's own depth (the first-person weapon's)
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> mask_distance: f32;
 
 @vertex
 fn vertex(vertex_in: Vertex) -> @builtin(position) vec4<f32> {
@@ -26,7 +27,9 @@ fn vertex(vertex_in: Vertex) -> @builtin(position) vec4<f32> {
     let world = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(vertex.position, 1.0));
     var clip = position_world_to_clip(world.xyz);
     // (reverse Z, infinite: depth = near / distance)
-    clip.z = view.clip_from_view[3][2] / MASK_DISTANCE * clip.w;
+    if mask_distance > 0.0 {
+        clip.z = view.clip_from_view[3][2] / mask_distance * clip.w;
+    }
     return clip;
 }
 

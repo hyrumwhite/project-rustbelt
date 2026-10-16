@@ -29,8 +29,10 @@ impl Plugin for HaloMaterialsPlugin {
             MaterialPlugin::<HaloTransparentMaterial>::default(),
             MaterialPlugin::<GlassSkyMask>::default(),
         ));
-        let mask = app.world_mut().resource_mut::<Assets<GlassSkyMask>>().add(GlassSkyMask::default());
-        app.insert_resource(GlassSkyMaskMaterial(mask));
+        let mut masks = app.world_mut().resource_mut::<Assets<GlassSkyMask>>();
+        let far = masks.add(GlassSkyMask { distance: GLASS_SKY_MASK_DISTANCE });
+        let near = masks.add(GlassSkyMask { distance: 0.0 });
+        app.insert_resource(GlassSkyMaskMaterial { far, near });
         let grey = app.world_mut().resource_mut::<Assets<Image>>().add(neutral_detail_image());
         app.insert_resource(NeutralDetail(grey));
         let tables = app.world_mut().resource_mut::<Assets<Image>>().add(periodic_tables_image());
@@ -38,9 +40,13 @@ impl Plugin for HaloMaterialsPlugin {
     }
 }
 
-/// The one sky mask material every pane shares.
+/// The sky mask materials every pane shares: the level's, far beyond it,
+/// and the first-person weapon's, at its own depth.
 #[derive(Resource, Clone)]
-pub struct GlassSkyMaskMaterial(pub Handle<GlassSkyMask>);
+pub struct GlassSkyMaskMaterial {
+    pub far: Handle<GlassSkyMask>,
+    pub near: Handle<GlassSkyMask>,
+}
 
 /// A flat normal map, for environment materials without a bump map.
 pub fn flat_normal_image() -> Image {
@@ -265,9 +271,20 @@ impl Material for HaloTransparentMaterial {
 /// over every pane with only the sky behind it (the needler's needles above
 /// the horizon). It is drawn first in the transparent pass, before the sky's
 /// layers: in the opaque pass it kept the skybox from behind the panes too,
-/// and they were composited over black.
+/// and they were composited over black. The first-person weapon's panes
+/// (the needler's needles) write their own depth instead, as the game draws
+/// the weapon over everything: so the fog, which reads it, leaves them clear,
+/// and the level's transparent surfaces (the sea) don't draw over them.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
-pub struct GlassSkyMask {}
+pub struct GlassSkyMask {
+    /// The depth written (metres), or 0 for the pane's own.
+    #[uniform(0)]
+    pub distance: f32,
+}
+
+/// The level's panes' mask distance (metres): beyond any level, nearer than
+/// any sky part (100 m per sky unit). The fog takes a depth at it for none.
+pub const GLASS_SKY_MASK_DISTANCE: f32 = 50000.0;
 
 /// The mask's sort bias: behind the sky's layers (see `level::SKY_BIAS`), so
 /// drawn before them.

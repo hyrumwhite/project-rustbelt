@@ -41,6 +41,15 @@ const SPOT_REFERENCE_REACH: f32 = 6.0;
 /// the flashlight sits at the eye, inside the first-person weapon, which
 /// it lit glaring white.
 const SPOT_FORWARD: f32 = 0.6;
+/// Others' spot lights (the Warthog's headlights, on a marker atop its
+/// windscreen, one light 90 degrees wide that lit its hood): this far
+/// further ahead and this far down (metres, the world's down: about its
+/// bumper), their cone this share of the tag's, and this share of the
+/// brightness.
+const VEHICLE_SPOT_FORWARD: f32 = 1.6;
+const VEHICLE_SPOT_DROP: f32 = 0.6;
+const VEHICLE_SPOT_CONE: f32 = 0.6;
+const VEHICLE_SPOT_SCALE: f32 = 0.5;
 /// The player's spot light (their flashlight; the game marks it first
 /// person, or failing that it is this near the camera, in world units) is
 /// aimed where the camera looks: the game's light keeps the unit's level
@@ -118,14 +127,25 @@ fn sync_lights(
             );
         }
         let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
+        let vehicle = spot && !muzzle && near_camera.is_none();
         let ahead = match (muzzle, spot) {
             (true, _) if near_camera.is_some() => MUZZLE_FORWARD,
             (true, _) => OTHERS_MUZZLE_FORWARD,
+            (false, true) if vehicle => SPOT_FORWARD + VEHICLE_SPOT_FORWARD,
             (false, true) => SPOT_FORWARD,
             (false, false) => 0.0,
         };
-        let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT)) + forward * ahead;
-        let scale = if muzzle { MUZZLE_LIGHT_SCALE } else if spot { SPOT_LIGHT_SCALE } else { POINT_LIGHT_SCALE };
+        let drop = if vehicle { Vec3::NEG_Y * VEHICLE_SPOT_DROP } else { Vec3::ZERO };
+        let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT)) + forward * ahead + drop;
+        let scale = if muzzle {
+            MUZZLE_LIGHT_SCALE
+        } else if vehicle {
+            SPOT_LIGHT_SCALE * VEHICLE_SPOT_SCALE
+        } else if spot {
+            SPOT_LIGHT_SCALE
+        } else {
+            POINT_LIGHT_SCALE
+        };
         let reach2 = if spot && !muzzle { light.radius * SPOT_REFERENCE_REACH } else { light.radius * light.radius };
         let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * reach2;
         let range = light.radius * METERS_PER_WORLD_UNIT * RANGE_PER_RADIUS;
@@ -142,7 +162,13 @@ fn sync_lights(
             let entity = pools.spots[used_spots];
             used_spots += 1;
             let Ok((mut light_component, mut transform, mut visibility)) = spots.get_mut(entity) else { continue };
-            let (cutoff, falloff) = if muzzle { (MUZZLE_CUTOFF, MUZZLE_FALLOFF) } else { (light.cutoff_angle, light.falloff_angle) };
+            let (cutoff, falloff) = if muzzle {
+                (MUZZLE_CUTOFF, MUZZLE_FALLOFF)
+            } else if vehicle {
+                (light.cutoff_angle * VEHICLE_SPOT_CONE, light.falloff_angle * VEHICLE_SPOT_CONE)
+            } else {
+                (light.cutoff_angle, light.falloff_angle)
+            };
             let outer = cutoff.clamp(0.01, SPOT_WIDEST);
             *light_component = SpotLight {
                 color,

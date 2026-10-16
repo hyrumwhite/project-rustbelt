@@ -644,9 +644,13 @@ void bevy_bridge_export_frame(
 			if (first_person_unit != NONE)
 			{
 				long ancestor;
+				struct object_datum *object;
 
-				for (ancestor = lights[index].object_index; ancestor != NONE;
-					ancestor = object_get(ancestor)->object.parent_object_index)
+				/* (a light can outlive its object, a grenade's: object_get
+				halts on one deleted) */
+				for (ancestor = lights[index].object_index;
+					ancestor != NONE && (object = object_try_and_get(ancestor)) != NULL;
+					ancestor = object->object.parent_object_index)
 				{
 					if (ancestor == first_person_unit)
 					{

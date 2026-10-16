@@ -190,11 +190,12 @@ impl BridgeLink {
     }
 
     /// Shows the frame `frame_index` (the overlay's) if it was read; the
-    /// frames before it are dropped.
-    pub fn show_frame(&mut self, frame_index: u32) {
-        let Some(position) = self.pending.iter().position(|s| s.frame_index == frame_index) else { return };
+    /// frames before it are dropped. False if it wasn't among them.
+    pub fn show_frame(&mut self, frame_index: u32) -> bool {
+        let Some(position) = self.pending.iter().position(|s| s.frame_index == frame_index) else { return false };
         self.pending.drain(..position);
         self.latest = self.pending.pop_front();
+        true
     }
 }
 

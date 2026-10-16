@@ -17,6 +17,13 @@
 //!
 //! And last, the game's lens flares (`src/lens_flares.rs`), added up first
 //! in a texture of their own, then added in the display's encoding.
+//!
+//! Where this viewer draws the water ([`ViewerWater`]), the planar fog seen
+//! through it covers only the light that came through the surface: the game
+//! fogs the seabed under its fog plane (the sea's surface, in b30) and draws
+//! its water's reflection over that, but here the water is already in the
+//! picture, its reflection and the seabed through it together, and under
+//! the full fog the sea was a flat teal.
 
 use crate::bridge::BridgeLink;
 use bevy::{
@@ -48,6 +55,11 @@ use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 
 pub struct FogPlugin;
 
+/// This viewer draws the water (and glass) itself, ray traced, not the
+/// game's overlay.
+#[derive(Resource)]
+pub struct ViewerWater;
+
 impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/halo_fog.wesl");
@@ -68,7 +80,8 @@ impl Plugin for FogPlugin {
 pub struct HaloFog {
     /// rgb, maximum density
     atmospheric_color: Vec4,
-    /// minimum and maximum distance, the camera's density
+    /// minimum and maximum distance, the camera's density, 1 when the
+    /// picture holds the water ([`ViewerWater`])
     atmospheric: Vec4,
     /// normal (out of the fog) and d
     plane: Vec4,
@@ -160,6 +173,7 @@ fn follow_fog(
     mut logged_screen: Local<Option<u32>>,
     mut level: Option<ResMut<crate::bridge::BridgeLevel>>,
     mut images: ResMut<Assets<Image>>,
+    viewer_water: Option<Res<ViewerWater>>,
 ) {
     let (entity, current) = *camera;
     let Some(snapshot) = link.latest.as_ref() else { return };
@@ -184,7 +198,11 @@ fn follow_fog(
         .fog
         .as_ref()
         .zip(snapshot.camera.as_ref())
-        .and_then(|(fog, camera)| HaloFog::new(fog, screen, camera.position));
+        .and_then(|(fog, camera)| HaloFog::new(fog, screen, camera.position))
+        .map(|mut fog| {
+            fog.atmospheric.w = if viewer_water.is_some() { 1.0 } else { 0.0 };
+            fog
+        });
     match (fog, current) {
         (Some(fog), _) => {
             // the layers' frames, from the level's map

@@ -20,6 +20,14 @@
 // The sky (nothing in the depth buffer) is left as it is: the game's fog pass
 // covers the level's surfaces only.
 //
+// Where the picture holds the water (atmospheric.w), a surface under the fog
+// plane seen from above it was seen through the water's surface (the plane,
+// in b30): the game fogs it and draws the water's reflection over it, but
+// here the reflection is already in the picture with it. So there the
+// planar fog covers only the light that came through, 1 - the water's
+// Fresnel reflectance (Schlick's, F0 0.04, as its ray-traced pane's) at the
+// view's angle to the plane, and the atmospheric fog is to the surface.
+//
 // The fog screen is its _rasterizer_environment_fog_screen_end: up to four
 // layers over the picture, each a density, the dot product of its frame's
 // colour and its weights (the game moves them on and shares them), covering
@@ -42,7 +50,8 @@ import bevy_render::view::View;
 struct HaloFog {
     // rgb, maximum density
     atmospheric_color: vec4<f32>,
-    // minimum and maximum distance (metres), the camera's density
+    // minimum and maximum distance (metres), the camera's density, 1 when the
+    // picture holds the water
     atmospheric: vec4<f32>,
     // normal (out of the fog) and d: n.p = d on the plane (metres)
     plane: vec4<f32>,
@@ -136,11 +145,23 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         let forward = -normalize(view.world_from_view[2].xyz);
         view_depth = dot(position - view.world_position, forward);
 
+        // (through the water: the camera above the plane, the surface under it)
+        let camera_height = dot(fog.plane.xyz, view.world_position) - fog.plane.w;
+        let surface_height = dot(fog.plane.xyz, position) - fog.plane.w;
+        var transmitted = 1.0;
+        var atmospheric_depth = view_depth;
+        if fog.atmospheric.w > 0.5 && camera_height > 0.0 && surface_height < 0.0 {
+            let ray = normalize(position - view.world_position);
+            let cosine = abs(dot(ray, fog.plane.xyz));
+            transmitted = 1.0 - (0.04 + 0.96 * pow(1.0 - cosine, 5.0));
+            atmospheric_depth = view_depth * camera_height / (camera_height - surface_height);
+        }
+
         let range = max(fog.atmospheric.y - fog.atmospheric.x, 1e-4);
-        let atmospheric = fog.atmospheric_color.a * texel((view_depth - fog.atmospheric.x) / range);
+        let atmospheric = fog.atmospheric_color.a * texel((atmospheric_depth - fog.atmospheric.x) / range);
         let distance = smoothstep(0.0, 1.0, texel(view_depth / max(fog.planar.x, 1e-4)));
-        let under = smoothstep(0.0, 1.0, texel((fog.plane.w - dot(fog.plane.xyz, position)) / max(fog.planar.y, 1e-4)));
-        let planar = fog.planar_color.a * mix(distance * under, distance, fog.planar.z);
+        let under = smoothstep(0.0, 1.0, texel(-surface_height / max(fog.planar.y, 1e-4)));
+        let planar = fog.planar_color.a * mix(distance * under, distance, fog.planar.z) * transmitted;
 
         let eye = fog.atmospheric.z;
         let fogged = fog.atmospheric_color.rgb * atmospheric * (1.0 - (1.0 - eye) * planar)

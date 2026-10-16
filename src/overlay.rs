@@ -223,7 +223,10 @@ fn read_overlay(
     }
     picture.generation += 1;
     // the world as the picture saw it
-    link.show_frame(overlay.frame_index);
+    if !link.show_frame(overlay.frame_index) && std::env::var_os("HALO_RT_SYNC_LOG").is_some() {
+        let pending: Vec<u32> = link.pending.iter().map(|s| s.frame_index).collect();
+        info!("overlay frame {} not among the frames read: {pending:?}, showing {:?}", overlay.frame_index, link.latest.as_ref().map(|s| s.frame_index));
+    }
     stats.shown += 1;
     stats.size = size;
 }

@@ -385,6 +385,9 @@ fn main() -> AppExit {
             app.add_plugins(overlay::OverlayPlugin);
             if args.viewer_fog() {
                 app.add_plugins(fog::FogPlugin);
+                if args.viewer_glass() {
+                    app.insert_resource(fog::ViewerWater);
+                }
             }
             if args.viewer_decals() {
                 app.add_plugins(decals::DecalsPlugin);

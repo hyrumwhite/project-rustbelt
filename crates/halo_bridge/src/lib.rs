@@ -1700,14 +1700,32 @@ impl Bridge {
         None
     }
 
-    /// The latest frame, if it is newer than the last one returned.
+    /// The next frame newer than the last one returned: the one before the
+    /// latest, while it is still there, then the latest. (The overlay's
+    /// picture is taken after its frame is shared, and the game has often
+    /// shared the next frame by the time the viewer reads; the viewer shows
+    /// the frame the picture was drawn for, so it must have read it.)
     pub fn read(&mut self) -> Option<Snapshot> {
         for _ in 0..8 {
             // SAFETY: as in check(); every field read is plain old data, read
             // volatile and validated by the sequence afterwards
             unsafe {
-                let latest = std::ptr::read_volatile(&(*self.shared).latest_frame) as usize % FRAMES;
+                let mut latest = std::ptr::read_volatile(&(*self.shared).latest_frame) as usize % FRAMES;
                 fence(Ordering::Acquire);
+                // (the one before, if it is newer than the last returned and
+                // not being written)
+                let older = (latest + FRAMES - 1) % FRAMES;
+                let older_frame = &(*self.shared).frames[older] as *const Frame;
+                let older_sequence = std::ptr::read_volatile(&(*older_frame).sequence);
+                fence(Ordering::Acquire);
+                let older_index = std::ptr::read_volatile(&(*older_frame).frame_index);
+                let latest_index = std::ptr::read_volatile(&(*self.shared).frames[latest].frame_index);
+                if older_sequence & 1 == 0
+                    && (older_index.wrapping_sub(self.last_frame_index) as i32) > 0
+                    && (latest_index.wrapping_sub(older_index) as i32) > 0
+                {
+                    latest = older;
+                }
                 let frame = &(*self.shared).frames[latest] as *const Frame;
                 let sequence = std::ptr::read_volatile(&(*frame).sequence);
                 if sequence & 1 != 0 {

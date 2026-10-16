@@ -1379,6 +1379,14 @@ impl LevelBuilder {
             _ => None,
         };
         let unseen = info.shader_type.is_transparent();
+        // (and the rays don't see it either: masked out everywhere, every
+        // ray passes through it, so nothing reflects it and it shadows
+        // nothing, while Solarik's light sampling still takes its emission,
+        // which a mask doesn't scale)
+        if unseen {
+            material.base_color = material.base_color.with_alpha(0.0);
+            material.alpha_mode = AlphaMode::Mask(0.5);
+        }
         Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance, unseen }))
     }
 

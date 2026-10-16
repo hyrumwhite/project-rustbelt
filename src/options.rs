@@ -410,29 +410,33 @@ fn save_settings(
     panel: Res<OptionsPanel>,
     lighting: Res<LightingSettings>,
     #[cfg(feature = "dlss")] dlss: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
+    #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssRayReconstructionSupported>>,
 ) {
     *since += time.delta_secs();
     if *since < 1.0 || pending.is_some() {
         return;
     }
     *since = 0.0;
+    // (against what the file holds, or the defaults: nothing is written
+    // until something changes)
+    let last = last.get_or_insert_with(|| SavedSettings::load().unwrap_or_else(SavedSettings::defaults));
+    // (where DLSS can't run, as in a build run without its libraries, the
+    // saved choice is kept: off there, it was saved off for every run)
     #[cfg(feature = "dlss")]
-    let (dlss_rr, dlss_quality) = match dlss.iter().next().flatten() {
-        Some(dlss) => (true, format!("{:?}", dlss.perf_quality_mode)),
-        None => (false, last.as_ref().map_or("Auto".to_string(), |l| l.dlss_quality.clone())),
+    let (dlss_rr, dlss_quality) = match (dlss.iter().next().flatten(), dlss_supported.is_some()) {
+        (Some(dlss), _) => (true, format!("{:?}", dlss.perf_quality_mode)),
+        (None, true) => (false, last.dlss_quality.clone()),
+        (None, false) => (last.dlss_rr, last.dlss_quality.clone()),
     };
     #[cfg(not(feature = "dlss"))]
-    let (dlss_rr, dlss_quality) = (true, "Auto".to_string());
+    let (dlss_rr, dlss_quality) = (last.dlss_rr, last.dlss_quality.clone());
     let current = SavedSettings {
         lighting: lighting.clone(),
-        restir: last.as_ref().is_none_or(|l| l.restir),
+        restir: last.restir,
         dlss_rr,
         dlss_quality,
         show_stats: panel.show_stats,
     };
-    // (against what the file holds, or the defaults: nothing is written
-    // until something changes)
-    let last = last.get_or_insert_with(|| SavedSettings::load().unwrap_or_else(SavedSettings::defaults));
     if *last == current {
         return;
     }

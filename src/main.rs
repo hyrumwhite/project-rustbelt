@@ -287,6 +287,19 @@ fn main() -> AppExit {
                 return AppExit::error();
             }
         }
+    } else if bundle::EMBEDDED && cfg!(feature = "dlss") {
+        // (DLSS's libraries all the same, for the viewer and another game)
+        if let Err(e) = bundle::unpack() {
+            eprintln!("could not unpack DLSS: {e}");
+        }
+    }
+    // (a build run in place: DLSS's libraries in the SDK it was built with)
+    #[cfg(feature = "dlss")]
+    if std::env::var_os("DLSS_SDK").is_none() {
+        if let Some(sdk) = option_env!("DLSS_SDK") {
+            // SAFETY: at start-up, before any other thread runs
+            unsafe { std::env::set_var("DLSS_SDK", sdk) };
+        }
     }
     if let Some(exe) = args.opence.clone() {
         args.bridge = true;

@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 37;
+pub const VERSION: u32 = 38;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -295,7 +295,19 @@ pub struct Light {
     /// (Protocol 37) the angle its light falls off from, to none at the
     /// cutoff (radians).
     pub falloff_angle: f32,
+    /// (Protocol 38) its light tag (datum index), that tag's flags
+    /// ([`LIGHT_MUZZLE_FLASH`] in the muzzle flashes'), the object it is
+    /// attached to (datum index; `u32::MAX` for none), and 1 when that object
+    /// is the player's first-person unit or something attached to it.
+    pub definition_index: u32,
+    pub definition_flags: u32,
+    pub object_index: u32,
+    pub first_person: u32,
 }
+
+/// A light tag flag that, in the retail maps, only the weapons' muzzle
+/// flashes have (bit 5).
+pub const LIGHT_MUZZLE_FLASH: u32 = 1 << 5;
 
 /// A ray the game tested against its structure's collision geometry
 /// (front-facing surfaces), with `game.bevy_bridge_ray_tests` on.

@@ -2,18 +2,20 @@
 //! flashlight, headlights) in the ray-traced scene: each light the bridge
 //! shares is a point light, or a spot light for one with a cone of up to a
 //! hemisphere, which Solarik samples as a small sphere, full inside the
-//! light's falloff angle and fading to none at its cutoff. The player's own
-//! weapon lights (muzzle flashes, shining every way from the weapon, at the
-//! camera in first person) are spot lights too, out ahead along the aim:
-//! round the camera they lit a circle round the player. They are kept in
-//! pools and reused frame to frame; unused ones are hidden.
+//! light's falloff angle and fading to none at its cutoff. Muzzle flashes
+//! (their tag's, protocol 38), which shine every way from the weapon, are
+//! spot lights too: the player's out ahead along the camera's aim (round the
+//! camera, in first person, they lit a circle round the player), others'
+//! along their weapon's. Explosions, grenades and bolts stay round. They are
+//! kept in pools and reused frame to frame; unused ones are hidden.
 
 use crate::{
-    bridge::BridgeLink,
+    bridge::{BridgeLevel, BridgeLink},
     level::{sphere_lumens_per_radiance, LightSource},
     LightingSettings,
 };
-use bevy::prelude::*;
+use bevy::{platform::collections::HashMap, prelude::*};
+use halo_bridge::LIGHT_MUZZLE_FLASH;
 use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 
 /// The lights' size (metres): larger, softer round the light (a muzzle
@@ -39,15 +41,17 @@ const SPOT_REFERENCE_REACH: f32 = 6.0;
 /// the flashlight sits at the eye, inside the first-person weapon, which
 /// it lit glaring white.
 const SPOT_FORWARD: f32 = 0.6;
-/// A spot light this near the game's camera (world units) is the player's
-/// flashlight, aimed where the camera looks: the game's light keeps the
-/// unit's level facing.
+/// The player's spot light (their flashlight; the game marks it first
+/// person, or failing that it is this near the camera, in world units) is
+/// aimed where the camera looks: the game's light keeps the unit's level
+/// facing.
 const FLASHLIGHT_REACH: f32 = 1.0;
-/// A light shining every way this near the camera is the player's weapon's
-/// (a muzzle flash, plasma): a spot light this far out along the aim
-/// (metres, about the muzzle), with this cone (radians: full to the first,
-/// none at the second), and this share of a point light's brightness.
+/// A muzzle flash is a spot light: the player's this far out along the aim
+/// (metres, about the muzzle), others' this far out along their weapon's,
+/// with this cone (radians: full to the first, none at the second), and this
+/// share of a point light's brightness.
 const MUZZLE_FORWARD: f32 = 1.0;
+const OTHERS_MUZZLE_FORWARD: f32 = 0.3;
 const MUZZLE_FALLOFF: f32 = 0.45;
 const MUZZLE_CUTOFF: f32 = 1.2;
 const MUZZLE_LIGHT_SCALE: f32 = 0.15;
@@ -81,25 +85,45 @@ fn sync_lights(
     mut pools: ResMut<DynamicLights>,
     mut points: Query<(&mut PointLight, &mut Transform, &mut Visibility), Without<SpotLight>>,
     mut spots: Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
+    level: Option<Res<BridgeLevel>>,
+    mut muzzle_tags: Local<HashMap<u32, bool>>,
+    mut scenario: Local<String>,
 ) {
     let Some(snapshot) = &link.latest else { return };
+    // (a new level: its own tags)
+    if snapshot.scenario_name != *scenario {
+        muzzle_tags.clear();
+        *scenario = snapshot.scenario_name.clone();
+    }
     let (mut used_points, mut used_spots) = (0, 0);
     for light in &snapshot.lights {
         let near = snapshot.camera.as_ref().filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
-        let muzzle = light.cutoff_angle > SPOT_CUTOFF && near.is_some();
+        let own = light.first_person != 0;
+        // (a muzzle flash: its tag's flag, or its name)
+        let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0
+            || *muzzle_tags.entry(light.definition_index).or_insert_with(|| {
+                level.as_ref().and_then(|level| level.builder.cache.tag(light.definition_index).ok()).is_some_and(|tag| tag.name.ends_with("muzzle flash"))
+            });
+        let muzzle = light.cutoff_angle > SPOT_CUTOFF && muzzle_tag;
         let spot = light.cutoff_angle <= SPOT_CUTOFF || muzzle;
-        let near_camera = near.filter(|_| spot);
+        // (the player's spot lights follow the camera's aim)
+        let near_camera = snapshot.camera.as_ref().filter(|_| spot && (own || (!muzzle && near.is_some())));
         // (HALO_RT_LIGHT_LOG: each light, in the log)
         if std::env::var_os("HALO_RT_LIGHT_LOG").is_some() {
             let distance = snapshot.camera.as_ref().map(|c| Vec3::from(c.position).distance(Vec3::from(light.position)));
             info!(
-                "light at tick {}: position {:?} forward {:?} colour {:?} radius {} cutoff {:.1} falloff {:.1} deg, {distance:?} from the camera (forward {:?}), flashlight {} muzzle {muzzle}",
+                "light at tick {}: position {:?} forward {:?} colour {:?} radius {} cutoff {:.1} falloff {:.1} deg, {distance:?} from the camera (forward {:?}), own {own} muzzle {muzzle} aimed by the camera {} tag {:#x} flags {:#x} object {:#x}",
                 snapshot.game_tick, light.position, light.forward, light.color, light.radius, light.cutoff_angle.to_degrees(), light.falloff_angle.to_degrees(),
-                snapshot.camera.as_ref().map(|c| c.forward), near_camera.is_some()
+                snapshot.camera.as_ref().map(|c| c.forward), near_camera.is_some(), light.definition_index, light.definition_flags, light.object_index
             );
         }
         let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
-        let ahead = if muzzle { MUZZLE_FORWARD } else if spot { SPOT_FORWARD } else { 0.0 };
+        let ahead = match (muzzle, spot) {
+            (true, _) if near_camera.is_some() => MUZZLE_FORWARD,
+            (true, _) => OTHERS_MUZZLE_FORWARD,
+            (false, true) => SPOT_FORWARD,
+            (false, false) => 0.0,
+        };
         let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT)) + forward * ahead;
         let scale = if muzzle { MUZZLE_LIGHT_SCALE } else if spot { SPOT_LIGHT_SCALE } else { POINT_LIGHT_SCALE };
         let reach2 = if spot && !muzzle { light.radius * SPOT_REFERENCE_REACH } else { light.radius * light.radius };

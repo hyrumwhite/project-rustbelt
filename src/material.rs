@@ -23,16 +23,24 @@ impl Plugin for HaloMaterialsPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/halo_environment.wesl");
         embedded_asset!(app, "shaders/halo_transparent.wesl");
+        embedded_asset!(app, "shaders/glass_sky_mask.wesl");
         app.add_plugins((
             MaterialPlugin::<HaloEnvironmentMaterial>::default(),
             MaterialPlugin::<HaloTransparentMaterial>::default(),
+            MaterialPlugin::<GlassSkyMask>::default(),
         ));
+        let mask = app.world_mut().resource_mut::<Assets<GlassSkyMask>>().add(GlassSkyMask::default());
+        app.insert_resource(GlassSkyMaskMaterial(mask));
         let grey = app.world_mut().resource_mut::<Assets<Image>>().add(neutral_detail_image());
         app.insert_resource(NeutralDetail(grey));
         let tables = app.world_mut().resource_mut::<Assets<Image>>().add(periodic_tables_image());
         let _ = PERIODIC_TABLES.set(tables);
     }
 }
+
+/// The one sky mask material every pane shares.
+#[derive(Resource, Clone)]
+pub struct GlassSkyMaskMaterial(pub Handle<GlassSkyMask>);
 
 /// A flat normal map, for environment materials without a bump map.
 pub fn flat_normal_image() -> Image {
@@ -246,6 +254,53 @@ impl Material for HaloTransparentMaterial {
         _key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
+        Ok(())
+    }
+}
+
+/// A glass or water pane's sky mask (see `glass_sky_mask.wesl`): its depth,
+/// far beyond the level but in front of the sky, and no colour. Solarik
+/// composites the camera's panes over what is behind them before the
+/// transparent pass, where the sky's layers are drawn; without it, they drew
+/// over every pane with only the sky behind it (the needler's needles above
+/// the horizon).
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone, Default)]
+pub struct GlassSkyMask {}
+
+impl Material for GlassSkyMask {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://halo_rt/shaders/glass_sky_mask.wesl".into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        "embedded://halo_rt/shaders/glass_sky_mask.wesl".into()
+    }
+
+    fn opaque_render_method(&self) -> bevy::material::OpaqueRendererMethod {
+        bevy::material::OpaqueRendererMethod::Forward
+    }
+
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            for target in fragment.targets.iter_mut().flatten() {
+                target.write_mask = bevy::render::render_resource::ColorWrites::empty();
+                target.blend = None;
+            }
+        }
         Ok(())
     }
 }

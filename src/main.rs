@@ -515,6 +515,7 @@ struct LevelAssetParams<'w> {
     images: ResMut<'w, Assets<Image>>,
     inverse_bindposes: ResMut<'w, Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<'w, NeutralDetail>,
+    glass_sky_mask: Res<'w, material::GlassSkyMaskMaterial>,
 }
 
 /// The parent of the loaded level's entities.
@@ -566,6 +567,7 @@ fn load_level(
     let start = std::time::Instant::now();
     let mut builder = LevelBuilder::new(cache.clone(), bc_supported);
     builder.root = Some(root);
+    builder.glass_sky_mask = Some(params.glass_sky_mask.0.clone());
     builder.fixture_lights = !args.no_fixture_lights;
     builder.show_light_proxies = args.show_light_proxies;
     builder.matte = args.matte;

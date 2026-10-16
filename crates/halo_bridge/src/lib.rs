@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 36;
+pub const VERSION: u32 = 37;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -292,6 +292,9 @@ pub struct Light {
     pub radius: f32,
     /// A spotlight's cutoff angle (radians); pi or more shines every way.
     pub cutoff_angle: f32,
+    /// (Protocol 37) the angle its light falls off from, to none at the
+    /// cutoff (radians).
+    pub falloff_angle: f32,
 }
 
 /// A ray the game tested against its structure's collision geometry

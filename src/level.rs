@@ -392,6 +392,9 @@ pub struct LevelBuilder {
     /// The parent of everything this level spawns, so that despawning it
     /// unloads the level (when the bridged game changes level).
     pub root: Option<Entity>,
+    /// Each glass or water pane's sky mask (see
+    /// [`crate::material::GlassSkyMask`]).
+    pub glass_sky_mask: Option<Handle<crate::material::GlassSkyMask>>,
     pub stats: LevelStats,
 }
 
@@ -408,6 +411,7 @@ impl LevelBuilder {
     pub fn new(cache: Arc<CacheFile>, bc_supported: bool) -> Self {
         LevelBuilder {
             recolour: None,
+            glass_sky_mask: None,
             textures: TextureCache::new(bc_supported),
             surfaces: HashMap::default(),
             permutation: 0,
@@ -730,12 +734,24 @@ impl LevelBuilder {
                         // through them, and composites the camera's panes in
                         // place of the raster draw once it can
                         Surface::Blended(material) if traced_use => {
-                            drawn.insert((MeshMaterial3d(material.clone()), RaytracingMesh3d(mesh.clone()), TracedMesh(mesh)))
+                            drawn.insert((MeshMaterial3d(material.clone()), RaytracingMesh3d(mesh.clone()), TracedMesh(mesh.clone())))
                         }
                         Surface::Blended(material) => drawn.insert(MeshMaterial3d(material.clone())),
                         Surface::Solid(_) => unreachable!(),
                     };
-                    skinned(&mut drawn, skin);
+                    skinned(&mut drawn, skin.clone());
+                    // (a pane's sky mask: the sky's layers not over it)
+                    if let (Surface::Blended(_), Some(mask)) = (surface, &self.glass_sky_mask) {
+                        let mut masked = commands.spawn((
+                            Name::new("sky mask"),
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(mask.clone()),
+                            bevy::light::NotShadowCaster,
+                            Transform::default(),
+                            ChildOf(parent),
+                        ));
+                        skinned(&mut masked, skin);
+                    }
                     self.stats.meshes += 1;
                     self.stats.transparent_meshes += 1;
                 }

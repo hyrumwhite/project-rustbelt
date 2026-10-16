@@ -42,6 +42,7 @@ fn main() -> ExitCode {
         "skypano" => sky_panorama(&cache, &args[2..]),
         "objects" => objects(&cache, args.get(2).is_some_and(|a| a == "list")),
         "names" => names(&cache),
+        "light" => light(&cache, &args[2..]),
         other => Err(format!("unknown command {other}").into()),
     };
     match result {
@@ -282,6 +283,22 @@ fn all_bitmaps(cache: &CacheFile) -> CliResult {
 
 /// The scenario's object names (what scripts call objects by) and its
 /// encounters with their squads (what they place AI by).
+/// A light tag's (`ligh`, `point_light_definition` in object_lights.c)
+/// shape, reach and colours.
+fn light(cache: &CacheFile, args: &[String]) -> CliResult {
+    let name = args.first().ok_or("usage: halo_map light <map> <tag name>")?;
+    let group = u32::from_be_bytes(*b"ligh");
+    let tag = cache.find_tag(group, name).ok_or_else(|| format!("no light {name}"))?;
+    let root = cache.tag_root(tag.datum, group)?;
+    let f = |o: usize| root.f32(o).unwrap_or(f32::NAN);
+    println!("{}", tag.name);
+    println!("  flags {:#x} radius {} (x {}..{})", root.u32(0)?, f(4), f(8), f(0xC));
+    println!("  falloff angle {:.1} deg, cutoff angle {:.1} deg, lens flare radius {}", f(0x10).to_degrees(), f(0x14).to_degrees(), f(0x18));
+    println!("  colour lower {:?} upper {:?} (interpolation flags {:#x})", [f(0x38), f(0x3C), f(0x40), f(0x44)], [f(0x48), f(0x4C), f(0x50), f(0x54)], root.u32(0x34)?);
+    println!("  transition duration {} falloff function {}", f(0xF4), root.u32(0xF8)? >> 16);
+    Ok(())
+}
+
 fn names(cache: &CacheFile) -> CliResult {
     use halo_map::layout::{encounter_definition as e, scenario as s, squad_definition as q};
     /// a scenario object name: its name, then its type and index

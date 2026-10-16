@@ -1331,11 +1331,24 @@ Phase 5 had the game draw everything but the opaque world into an overlay: a fla
      - The colour is the effect shader's combiners (decoded from `rasterizer_xbox_transparent_geometry.c`): the bitmap times the vertex colour, or the nonlinear tint (1 - v)t^4 + vt, faded by the vertex alpha toward the blend's neutral. The game's dumped effect vertex shader (`HALO_GPU_DUMP_SHADERS`) confirms the vertex colour is `oD1` and `oD0.a` is the fog's transmittance.
      - Checked on b30's landing against the game's own sprites in the same frame, with the game drawing them as well (`HALO_BEVY_BRIDGE_EFFECTS_ALSO_DRAWN`), its overlay's coverage in red (`HALO_RT_OVERLAY_DEBUG=1`) and these in cyan by their coverage (`HALO_RT_SPRITE_DEBUG=1`). The beach's blowing dust (`scenery\emitters\dust`, about 200 large sprites around the camera), the impacts, and the burning crash on the right cover the same places.
      - Found on the way: Bevy's materials apply the camera's exposure in their own shaders, so a colour written past them is already what shows. The decals' and sprites' added colours had been scaled by 1/exposure, about 1,000 times too bright.
-   - [ ] Still the game's, in the overlay: contrails (`render_contrails`), lens flares, lightning, and the weather's own sheets if any. These are the next to share.
+   - [x] Contrails and lightning: their strips of world-space vertex pairs (`render_contrail`, `lightning_render`) are shared as sprite batches, each segment a quad, through `build_sprites_share_strip`, with the same effect shader fields. Seen in the log on b30's beach: the assault rifle's tracers and the needler's and plasma rifle's trails. Still to check by eye in play.
+   - [x] Lens flares (protocol 36: a batch's `kind` and `tint`). The game still tests each flare's occlusion against its own depth. It then shares each reflection it would have drawn (`rasterizer_lens_flares_draw`) as the quad `rasterizer_widget_draw_sprite3d` would draw, facing the camera at the flare's depth in the world. (The view-to-world matrix's `forward` and `left` are the view's x and y: the screen's right and up.) Only when the viewer draws the fog too: the game adds its flares after everything, in the display's encoding, so they're added up in a texture of their own (`src/lens_flares.rs`, `shaders/halo_lens_flare.wesl`) and added in the fog pass, after the fog screen. The colour is the internal sprite's combiners: (1 - v) k t^6 + v t, added by the vertex's alpha.
+     - Checked on b30's opening flyby against `--game-effects`: the Pelicans' engine glows match. Drawn as sprites into the HDR picture before tonemapping, they had come out far fainter over the sky.
+     - Left out: the sun glow (`rasterizer_sun_glow_draw`), which blurs the framebuffer around the sun (under the overlay there's nothing there to blur), and hiding a flare behind the first-person weapon (the stencil).
+   - [ ] Still the game's: the weather's own sheets, if any.
    - [ ] Effects' own fog: the game fogs each effect by its own depth (the combiners' last stage). Here the fog pass fogs a pixel by the surface behind the effect, so an effect in front of a distant fogged wall is fogged as much as the wall.
    - [ ] Secondary maps and z-sprites: the effect shader's secondary map, which multiplies the colour and alpha, and the z-sprite anchor, which gives a sprite a per-pixel depth from a z-map, are left out. About one batch type in eight on b30 has one (impacts, muzzle flashes).
    - [ ] The bright ones (plasma, explosions, muzzle flashes) also light the scene, as the dynamic lights already do.
    - [ ] What's left in the overlay is the HUD, the menus and text.
+4. **Found in play (hands-on, 2026-10-15; a10, a30, b30, c10)**
+   - Good: impact decals; smoke, dust and fog, including under b30's sea and in c10's swamp fog.
+   - [ ] Muzzle flashes too bright, with a strong falloff. That's both the flash sprites (`effects\particles\flash\...`, added, first person; probably the missing secondary map) and the weapon's dynamic light.
+   - [ ] The muzzle flash's light is a sphere centred on the player, not at the weapon. In first person, the light should come from the gun's muzzle (the first-person model's marker), not the body's.
+   - [ ] The plasma pistol's light is too bright and lingers. Its light tag's own animation (duration, intensity and colour over its life) should fade it, as if the plasma were cooling on the weapon.
+   - [ ] a30's crashed Pelican (the drop pod at the start) still flickers, with decals and effects in the viewer. So it isn't the overlay's multiply. Next suspects: its smoke sprites' sort order, or the wreck's own surfaces (z-fighting, or emissive or transparent parts).
+   - [ ] Sprites that look wrongly loaded on c10 (no capture: in play, P goes to the game). F9 now saves the picture (`captures` beside the program) and logs the level, tick and camera, in play too.
+   - [ ] Black artifacts still on some Grunt models.
+   - [ ] Once, sound and input stopped while the picture kept going (perhaps a misclicked shortcut). Watch whether the game process exits.
 
 ## Known risks
 

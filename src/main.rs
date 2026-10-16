@@ -17,6 +17,7 @@ mod bridge;
 mod bundle;
 mod decals;
 mod effects;
+mod lens_flares;
 mod fog;
 mod level;
 mod lights;
@@ -368,6 +369,7 @@ fn main() -> AppExit {
         .add_systems(PostUpdate, reset_history_on_cuts.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));
 
+    app.add_systems(Update, capture);
     if args.screenshot.is_some() {
         app.add_systems(Update, screenshot_and_exit);
     }
@@ -389,6 +391,11 @@ fn main() -> AppExit {
             }
             if args.viewer_effects() {
                 app.add_plugins(effects::EffectsPlugin);
+                // (the lens flares are added in the fog pass; without it the
+                // game draws them)
+                if args.viewer_fog() {
+                    app.add_plugins(lens_flares::LensFlaresPlugin);
+                }
             }
         }
     }
@@ -890,18 +897,56 @@ fn sync_sky_light(
     }
 }
 
-/// P: log the camera as a `--camera` argument.
-fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With<Camera3d>>) {
-    if !keys.just_pressed(KeyCode::KeyP) {
-        return;
-    }
+/// The camera as a `--camera` argument.
+fn camera_argument(camera: &Transform) -> String {
     let p = camera.translation / METERS_PER_WORLD_UNIT;
     let f = camera.forward();
     // Bevy (x, y, z) is Halo (x, -z, y)
     let (hx, hy, hz) = (f.x, -f.z, f.y);
     let yaw = hy.atan2(hx).to_degrees();
     let pitch = hz.clamp(-1.0, 1.0).asin().to_degrees();
-    info!("--camera {:.2},{:.2},{:.2},{yaw:.1},{pitch:.1}", p.x, -p.z, p.y);
+    format!("--camera {:.2},{:.2},{:.2},{yaw:.1},{pitch:.1}", p.x, -p.z, p.y)
+}
+
+/// P: log the camera as a `--camera` argument.
+fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With<Camera3d>>) {
+    if keys.just_pressed(KeyCode::KeyP) {
+        info!("{}", camera_argument(&camera));
+    }
+}
+
+/// F9, in play too: save the window's picture (in `captures` beside the
+/// program) and log where it was taken: the level, the game's tick and the
+/// camera, as a `--camera` argument.
+fn capture(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    camera: Single<&Transform, With<Camera3d>>,
+    link: Option<Res<bridge::BridgeLink>>,
+) {
+    use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+    if !keys.just_pressed(KeyCode::F9) {
+        return;
+    }
+    let directory = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("captures")))
+        .unwrap_or_else(|| PathBuf::from("captures"));
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        warn!("capture: can't make {}: {error}", directory.display());
+        return;
+    }
+    let game = link.as_ref().and_then(|link| link.latest.as_ref());
+    let level = game.and_then(|g| g.scenario_name.rsplit('\\').next()).filter(|l| !l.is_empty()).unwrap_or("viewer").to_string();
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let path = directory.join(format!("{level}_{stamp}.png"));
+    info!(
+        "capture: {} - {level} at tick {}, {}",
+        path.display(),
+        game.map_or(0, |g| g.game_tick),
+        camera_argument(&camera)
+    );
+    commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
 }
 
 /// Frames the camera waits before it starts rendering. DLSS creates its
@@ -1093,7 +1138,7 @@ fn update_control_text(
     {
         s += "\nNo denoiser: build with --features dlss";
     }
-    s += "\nWASD/QE fly, Shift run, right mouse or M to look, P print camera, F10 options";
+    s += "\nWASD/QE fly, Shift run, right mouse or M to look, P print camera, F9 capture, F10 options";
     text.0 = s;
 }
 

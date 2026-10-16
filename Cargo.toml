@@ -28,6 +28,8 @@ bevy = { version = "=0.20.0", features = ["https", "free_camera"] }
 # sibling checkout of https://github.com/AlrikOlson/bevy_solarik
 bevy_solarik = { path = "../bevy_solarik" }
 argh = "0.1.12"
+# (src/lens_flares.rs: its vertices into a buffer)
+bytemuck = { version = "1.25.2", features = ["derive"] }
 
 [dev-dependencies]
 # examples/solari_demo.rs

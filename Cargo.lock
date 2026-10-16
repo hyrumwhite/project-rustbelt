@@ -3219,6 +3219,7 @@ dependencies = [
  "argh",
  "bevy",
  "bevy_solarik",
+ "bytemuck",
  "chacha20",
  "halo_bridge",
  "halo_map",

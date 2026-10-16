@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 35;
+pub const VERSION: u32 = 36;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -207,9 +207,17 @@ pub struct SpriteBatch {
     pub centroid: [f32; 3],
     pub first_vertex: u32,
     pub quad_count: u32,
+    /// (Protocol 36) [`SPRITE_EFFECT`], or [`SPRITE_LENS_FLARE`]: a lens
+    /// flare's reflection, drawn over everything (the game tests its
+    /// occlusion itself), added by the vertex's alpha, its colour
+    /// (1 - v) tint t^6 + v t; `shader_flags` and `blend_function` unused.
+    pub kind: u32,
+    pub tint: f32,
 }
 
 pub const SPRITE_NONLINEAR_TINT: u16 = 1 << 1;
+pub const SPRITE_EFFECT: u32 = 0;
+pub const SPRITE_LENS_FLARE: u32 = 1;
 
 /// A sprite's vertex: the game's coordinates, the bitmap's texture
 /// coordinates and the colour (a8r8g8b8, alpha the fade).

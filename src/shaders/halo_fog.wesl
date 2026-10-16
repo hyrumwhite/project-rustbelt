@@ -32,6 +32,9 @@
 // brightening what's under them), which it draws before its fog: the bottom
 // half of the overlay's picture holds half their factor, display-encoded
 // (0.5: nothing), as for the overlay's multiply node (game_multiply.wesl).
+//
+// After both, the game's lens flares, added up (src/lens_flares.rs,
+// display-encoded light): added, as the game adds them over its picture.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_render::view::View;
@@ -71,6 +74,7 @@ struct HaloFog {
 @group(0) @binding(8) var layer_3: texture_2d<f32>;
 @group(0) @binding(9) var layer_sampler: sampler;
 @group(0) @binding(10) var overlay: texture_2d<f32>;
+@group(0) @binding(11) var flares: texture_2d<f32>;
 
 // a 16-texel texture's coordinate as the texel it falls on (0 to 1 over the
 // texels' centres, clamped)
@@ -117,6 +121,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     // (sampled before anything returns, as the layers)
     let half_factor = srgb_encode(textureSample(overlay, source_sampler, vec2(in.uv.x, 0.5 + in.uv.y * 0.5)).rgb);
+    let flare = textureSample(flares, source_sampler, in.uv).rgb;
 
     var encoded = srgb_encode(saturate(colour.rgb));
     var changed = false;
@@ -160,6 +165,11 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         } else {
             encoded = mix(encoded, fog.screen_color.rgb, screen_coverage);
         }
+        changed = true;
+    }
+    // (added as the game's framebuffer adds them: up to 1)
+    if any(flare > vec3(0.0)) {
+        encoded = max(encoded, min(encoded + flare, vec3(1.0)));
         changed = true;
     }
     if !changed {

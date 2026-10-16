@@ -14,6 +14,9 @@
 //! And, first, the game's multiplying blends (the overlay's multiply,
 //! darkening decals): the game draws them before its fog, so the fog over
 //! them is not darkened with them.
+//!
+//! And last, the game's lens flares (`src/lens_flares.rs`), added up first
+//! in a texture of their own, then added in the display's encoding.
 
 use crate::bridge::BridgeLink;
 use bevy::{
@@ -26,7 +29,7 @@ use bevy::{
     render::{
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         render_asset::RenderAssets,
-        texture::{FallbackImage, GpuImage},
+        texture::{FallbackImage, FallbackImageZero, GpuImage, TextureCache},
         render_resource::{
             binding_types::{sampler, texture_2d, texture_depth_2d, uniform_buffer},
             encase::UniformBuffer,
@@ -230,6 +233,7 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
             ),
         ),
     );
@@ -252,7 +256,10 @@ fn draw_fog(
     view: ViewQuery<(&ViewTarget, &ViewPrepassTextures, &ViewUniformOffset, &ExtractedView, &HaloFog, Option<&FogScreenMaps>)>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     fallback: Res<FallbackImage>,
+    fallback_zero: Res<FallbackImageZero>,
     overlay: Option<Res<crate::overlay::OverlayPicture>>,
+    (flares, flare_pipeline): (Option<Res<crate::lens_flares::LensFlares>>, Option<Res<crate::lens_flares::LensFlarePipeline>>),
+    mut texture_cache: ResMut<TextureCache>,
     fog_pipeline: Res<FogPipeline>,
     fullscreen: Res<FullscreenShader>,
     cache: Res<PipelineCache>,
@@ -300,6 +307,21 @@ fn draw_fog(
         contents: uniform.as_ref(),
         usage: BufferUsages::UNIFORM,
     });
+    // the lens flares, added up (the picture's size: upscaled by now)
+    let flare_view = flares.as_deref().zip(flare_pipeline.as_deref()).and_then(|(flares, flare_pipeline)| {
+        crate::lens_flares::draw_lens_flares(
+            &mut ctx,
+            flares,
+            flare_pipeline,
+            &cache,
+            &device,
+            &gpu_images,
+            &mut texture_cache,
+            &view_uniforms,
+            view_offset.offset,
+            target.main_texture().size(),
+        )
+    });
     let post_process = target.post_process_write();
     let bind_group = device.create_bind_group(
         "halo_fog",
@@ -316,6 +338,7 @@ fn draw_fog(
             layer(3),
             &fog_pipeline.layer_sampler,
             multiply.map_or(&fallback.d2.texture_view, |image| &image.texture_view),
+            flare_view.as_ref().unwrap_or(&fallback_zero.texture_view),
         )),
     );
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {

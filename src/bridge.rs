@@ -59,7 +59,10 @@ pub fn launch_game(
         .parent()
         .and_then(|maps| maps.parent())
         .ok_or_else(|| Error::new(ErrorKind::NotFound, "the map is not in a maps folder"))?;
-    let log_path = std::env::temp_dir().join(format!("halo_rt_opence-{}.log", std::process::id()));
+    let log_path = game_log_path();
+    // (where the game writes its errors, and how much it held before)
+    let debug_txt = data_root.join("debug.txt");
+    let _ = GAME_DEBUG_TXT.set((debug_txt.clone(), std::fs::metadata(&debug_txt).map_or(0, |m| m.len())));
     let log = std::fs::File::create(&log_path)?;
     let mut command = std::process::Command::new(exe);
     command
@@ -111,6 +114,15 @@ pub fn launch_game(
     eprintln!("starting OpenCE {start} (data root {}; its log: {})", data_root.display(), log_path.display());
     command.spawn()
 }
+
+/// The game's output (`launch_game`'s).
+fn game_log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("halo_rt_opence-{}.log", std::process::id()))
+}
+
+/// The game's own error log (debug.txt, in its data folder, where its halt
+/// messages go) and its length when the game was started.
+static GAME_DEBUG_TXT: std::sync::OnceLock<(std::path::PathBuf, u64)> = std::sync::OnceLock::new();
 
 /// The game the viewer started; stopped with the viewer.
 #[derive(Resource)]
@@ -167,7 +179,107 @@ impl Plugin for BridgePlugin {
             .init_resource::<ForwardInput>()
             .add_systems(First, read_frame.in_set(ReadFrame))
             .add_systems(PreUpdate, (grab_cursor, forward_input, forward_gamepads).chain().after(bevy::input::InputSystems))
-            .add_systems(Update, (toggle_follow, sync_objects, sync_camera, sync_active_bsp).chain());
+            .add_systems(Update, (toggle_follow, sync_objects, sync_camera, sync_active_bsp).chain())
+            .add_systems(Startup, spawn_game_banner)
+            .add_systems(Update, watch_game);
+    }
+}
+
+/// A game that shares no frame for this long has stopped (halted on an
+/// error, its window left open, or hung): a level loads in less.
+const GAME_STALLED_AFTER: Duration = Duration::from_secs(15);
+
+/// The banner over the picture when the game has stopped.
+#[derive(Component)]
+struct GameBanner;
+
+fn spawn_game_banner(mut commands: Commands) {
+    commands.spawn((
+        GameBanner,
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(8.0),
+            left: px(8.0),
+            // (clear of the timings, top right)
+            right: px(180.0),
+            padding: px(8.0).all(),
+            border_radius: BorderRadius::all(px(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.55, 0.05, 0.05, 0.9)),
+        Visibility::Hidden,
+        GlobalZIndex(100),
+        children![(Text::default(), TextFont { font_size: FontSize::Px(16.0), ..default() }, TextColor(Color::WHITE))],
+    ));
+}
+
+/// The last error the game wrote since it was started, if any: its halt
+/// message (in its debug.txt), or the crash handler's (in its output).
+fn last_game_error() -> Option<String> {
+    let is_error = |line: &&str| ["EXCEPTION", "crash:"].iter().any(|word| line.contains(word));
+    let from_debug_txt = GAME_DEBUG_TXT.get().and_then(|(path, start)| {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path).ok()?;
+        file.seek(SeekFrom::Start(*start)).ok()?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).ok()?;
+        let text = String::from_utf8_lossy(&bytes);
+        text.lines().rev().find(is_error).map(|line| line.trim().to_string())
+    });
+    from_debug_txt.or_else(|| {
+        let text = std::fs::read_to_string(game_log_path()).ok()?;
+        text.lines().rev().find(is_error).map(|line| line.trim().trim_start_matches("halo-linux: ").to_string())
+    })
+}
+
+/// Tells when the game has stopped: its process gone, or no frame from it
+/// for a while (a halted game keeps its window open, on its error). The
+/// viewer otherwise sits on the last frame, looking frozen.
+fn watch_game(
+    link: Res<BridgeLink>,
+    process: Option<ResMut<GameProcess>>,
+    mut banner: Query<(&mut Visibility, &Children), With<GameBanner>>,
+    mut texts: Query<&mut Text>,
+    mut checked: Local<Option<std::time::Instant>>,
+    mut problem: Local<Option<String>>,
+) {
+    if checked.is_some_and(|checked| checked.elapsed() < Duration::from_secs(1)) {
+        return;
+    }
+    *checked = Some(std::time::Instant::now());
+    let exited = process.and_then(|mut process| process.0.try_wait().ok().flatten());
+    let stalled = link.last_read.is_some_and(|read| read.elapsed() > GAME_STALLED_AFTER);
+    let now = match (exited, stalled) {
+        (Some(status), _) => Some(format!("The game has exited ({status}).")),
+        (None, true) => Some(format!(
+            "The game has shared no frame for {} seconds: it has stopped (halted on an error, or hung).",
+            link.last_read.map_or(0, |read| read.elapsed().as_secs())
+        )),
+        (None, false) => None,
+    };
+    // (the reason, once, when it changes; the seconds don't count)
+    let reason = |p: &Option<String>| p.as_ref().map(|p| p.split(" for ").next().unwrap_or(p).to_string());
+    if reason(&now) != reason(&problem) {
+        if let Some(now) = &now {
+            warn!("{now} {}", last_game_error().unwrap_or_default());
+        } else if problem.is_some() {
+            info!("the game is sharing frames again");
+        }
+    }
+    *problem = now;
+    let Ok((mut visibility, children)) = banner.single_mut() else { return };
+    let wanted = if problem.is_some() { Visibility::Inherited } else { Visibility::Hidden };
+    visibility.set_if_neq(wanted);
+    if let Some(problem) = problem.as_ref()
+        && let Some(mut text) = children.first().and_then(|&child| texts.get_mut(child).ok())
+    {
+        let error = last_game_error().map_or(String::new(), |error| format!("
+Its last error: {error}"));
+        let debug_txt = GAME_DEBUG_TXT.get().map_or(String::new(), |(path, _)| format!("
+  {}", path.display()));
+        text.0 = format!("{problem}{error}
+Its logs:{debug_txt}
+  {}", game_log_path().display());
     }
 }
 
@@ -182,11 +294,13 @@ pub struct BridgeLink {
     /// first; the overlay shows the one its picture was drawn for.
     pub pending: std::collections::VecDeque<Snapshot>,
     pub sync_to_overlay: bool,
+    /// When the last frame was read (for telling when the game stopped).
+    pub last_read: Option<std::time::Instant>,
 }
 
 impl BridgeLink {
     pub fn new(bridge: Bridge, snapshot: Snapshot) -> Self {
-        BridgeLink { bridge, latest: Some(snapshot), frames: 0, pending: default(), sync_to_overlay: false }
+        BridgeLink { bridge, latest: Some(snapshot), frames: 0, pending: default(), sync_to_overlay: false, last_read: Some(std::time::Instant::now()) }
     }
 
     /// Shows the frame `frame_index` (the overlay's) if it was read; the
@@ -268,6 +382,7 @@ impl BridgeObjects {
 fn read_frame(mut link: ResMut<BridgeLink>) {
     while let Some(snapshot) = link.bridge.read() {
         link.frames += 1;
+        link.last_read = Some(std::time::Instant::now());
         if link.sync_to_overlay {
             // (a few frames: the overlay comes at most a frame or two behind)
             if link.pending.len() >= 8 {

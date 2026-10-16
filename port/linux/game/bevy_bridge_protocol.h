@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 37
+#define BEVY_BRIDGE_VERSION 38
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -306,6 +306,14 @@ struct bevy_bridge_light
 	/* (protocol 37) the angle its light falls off from, to none at the
 	cutoff (radians) */
 	float falloff_angle;
+	/* (protocol 38) its light tag (datum index), that tag's flags (bit 5
+	in the muzzle flashes' tags), the object it is attached to (datum
+	index; all ones for none), and 1 when that object is the player's
+	first-person unit or something attached to it (its weapon) */
+	unsigned long definition_index;
+	unsigned long definition_flags;
+	unsigned long object_index;
+	unsigned long first_person;
 };
 
 /* a ray the game tested against its structure's collision geometry

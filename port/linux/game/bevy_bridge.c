@@ -637,6 +637,24 @@ void bevy_bridge_export_frame(
 			out->radius = lights[index].radius;
 			out->cutoff_angle = lights[index].cutoff_angle;
 			out->falloff_angle = lights[index].falloff_angle;
+			out->definition_index = (unsigned long)lights[index].definition_index;
+			out->definition_flags = (unsigned long)lights[index].definition_flags;
+			out->object_index = (unsigned long)lights[index].object_index;
+			out->first_person = 0;
+			if (first_person_unit != NONE)
+			{
+				long ancestor;
+
+				for (ancestor = lights[index].object_index; ancestor != NONE;
+					ancestor = object_get(ancestor)->object.parent_object_index)
+				{
+					if (ancestor == first_person_unit)
+					{
+						out->first_person = 1;
+						break;
+					}
+				}
+			}
 		}
 		frame->light_count = (unsigned long)count;
 	}

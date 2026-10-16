@@ -28,6 +28,11 @@ struct lights_port_light
 	real cutoff_angle;
 	/* and the angle its light falls off from, to none at the cutoff */
 	real falloff_angle;
+	/* its light tag, that tag's flags, and the object it is attached to
+	(NONE for none) */
+	long definition_index;
+	long definition_flags;
+	long object_index;
 };
 
 /* ---------- prototypes/OBJECT_LIGHTS.C */

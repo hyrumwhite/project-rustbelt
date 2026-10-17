@@ -283,6 +283,14 @@ const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
 /// (meters): the two are skinned alike, but on different processors.
 const TRACED_SKIN_INSET: f32 = 0.005;
 
+/// And further inside where it is bending, by how far each vertex moved since
+/// the pose before (up to [`TRACED_SKIN_MOTION_INSET`]): the rays see a new
+/// skin a frame late, so the camera's surface has moved on about that far,
+/// and rays leaving it would hit the rays' copy (a character moving shadowed
+/// itself black where it bends).
+const TRACED_SKIN_MOTION_SCALE: f32 = 1.25;
+const TRACED_SKIN_MOTION_INSET: f32 = 0.05;
+
 /// A model part that bends between nodes, as the rays see it: its vertices
 /// at rest (Bevy space) with their two nodes and weights, skinned by
 /// [`TracedSkin::mesh`] to the nodes' current transforms.
@@ -306,18 +314,25 @@ impl TracedSkin {
 
     /// The part skinned to the nodes' transforms (Bevy space, each node's
     /// default inverse included), as the camera's skinned mesh is: each
-    /// vertex blended between its two nodes by their weights.
-    pub fn mesh(&self, nodes: &[Mat4]) -> Mesh {
-        let node = |index: u16| nodes.get(index as usize).copied().unwrap_or(Mat4::IDENTITY);
+    /// vertex blended between its two nodes by their weights. Given the
+    /// transforms of the pose before, it sits further inside where it moved.
+    pub fn mesh(&self, nodes: &[Mat4], previous: Option<&[Mat4]>) -> Mesh {
+        let node = |nodes: &[Mat4], index: u16| nodes.get(index as usize).copied().unwrap_or(Mat4::IDENTITY);
         let count = self.positions.len();
         let (mut positions, mut normals, mut tangents) =
             (Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count));
         for i in 0..count {
             let ([a, b], [wa, wb]) = (self.joints[i], self.weights[i]);
-            let (ma, mb) = (node(a), node(b));
+            let (ma, mb) = (node(nodes, a), node(nodes, b));
             let (p, n, t) = (self.positions[i], self.normals[i], self.tangents[i]);
             let normal = (wa * ma.transform_vector3(n) + wb * mb.transform_vector3(n)).normalize_or_zero();
-            let position = wa * ma.transform_point3(p) + wb * mb.transform_point3(p) - normal * TRACED_SKIN_INSET;
+            let skinned = wa * ma.transform_point3(p) + wb * mb.transform_point3(p);
+            let moved = previous.map_or(0.0, |previous| {
+                let (pa, pb) = (node(previous, a), node(previous, b));
+                skinned.distance(wa * pa.transform_point3(p) + wb * pb.transform_point3(p))
+            });
+            let inset = TRACED_SKIN_INSET + (moved * TRACED_SKIN_MOTION_SCALE).min(TRACED_SKIN_MOTION_INSET);
+            let position = skinned - normal * inset;
             let tangent =
                 (wa * ma.transform_vector3(t.truncate()) + wb * mb.transform_vector3(t.truncate())).normalize_or_zero();
             positions.push(position.to_array());
@@ -1057,20 +1072,23 @@ impl LevelBuilder {
             let _ = self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
             self.recolour = None;
         }
-        // the bending parts, the object's own entities (in the world: the
-        // root stays put), given a mesh skinned anew as its nodes move
+        // the bending parts, under the model's root node, given a mesh
+        // skinned anew (relative to that node) as its nodes move
         // (crate::bridge): two for each, taking turns, the second out of the
-        // rays' scene until its first skin
+        // rays' scene until its first skin. (The root node carries the whole
+        // model at once, as the rigid pieces are; only the bending lags.)
         let rest = vec![Mat4::IDENTITY; model.default_inverses.len()];
+        let skin_parent = nodes.first().copied().unwrap_or(root);
         let mut skins = Vec::new();
         for skin in &model.traced_skins {
             let surface = self.coloured_surface(&skin.surface, skin.shader, change_colors, assets);
             let surface = animate(self, surface, skin.shader, assets);
-            let mesh = assets.meshes.add(skin.mesh(&rest));
+            let mesh = assets.meshes.add(skin.mesh(&rest, None));
             let mode = if raster && matches!(surface, Surface::Blended(_)) { MeshUse::Both } else { MeshUse::Traced };
             self.recolour = Some((root, skin.surface.clone(), skin.shader));
-            let first = self.spawn_mesh_as(commands, root, model.name.clone(), mesh.clone(), &surface, mode);
-            let second = first.and_then(|_| self.spawn_mesh_as(commands, root, model.name.clone(), mesh, &surface, MeshUse::Traced));
+            let first = self.spawn_mesh_as(commands, skin_parent, model.name.clone(), mesh.clone(), &surface, mode);
+            let second =
+                first.and_then(|_| self.spawn_mesh_as(commands, skin_parent, model.name.clone(), mesh, &surface, MeshUse::Traced));
             self.recolour = None;
             if let (Some(first), Some(second)) = (first, second) {
                 commands.entity(second).remove::<(RaytracingMesh3d, TracedMesh)>();

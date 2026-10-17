@@ -339,9 +339,19 @@ struct Tracked {
     model: Arc<AnimatedModel>,
     nodes: Vec<Option<Entity>>,
     /// The rays' entities for its bending parts (`AnimatedModel::traced_skins`),
-    /// and the node transforms they were last skinned to.
-    skins: Vec<Entity>,
+    /// two for each, and the node transforms they were last skinned to.
+    /// Solarik takes a mesh into its scene a frame after an entity is given
+    /// it, so one entity given a new mesh every frame (a character always
+    /// moving) was never in it, and cast no shadow. So the two take turns:
+    /// the new skin goes to the one not shown, while the other, given its
+    /// skin a frame before, is; once the nodes stop, the older one leaves.
+    skins: Vec<[Entity; 2]>,
     skinned_to: Vec<Mat4>,
+    /// Which of the two has the newest skin, the frame it got it, and
+    /// whether the other still has its older one in the rays' scene.
+    skin_turn: usize,
+    skinned_at: u32,
+    older_skin_shown: bool,
 }
 
 /// The game's objects drawn so far, by object datum index.
@@ -433,6 +443,8 @@ fn sync_objects(
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
 ) {
+    timing.frame_number = timing.frame_number.wrapping_add(1);
+    let frame_number = timing.frame_number;
     let Some(snapshot) = &link.latest else { return };
     let started = std::time::Instant::now();
     timing.frame(snapshot.frame_index);
@@ -528,6 +540,9 @@ fn sync_objects(
                     nodes,
                     skins,
                     skinned_to: Vec::new(),
+                    skin_turn: 0,
+                    skinned_at: 0,
+                    older_skin_shown: false,
                 },
             );
             // newly spawned entities take their transforms next frame
@@ -571,13 +586,24 @@ fn sync_objects(
             // (a new mesh each time: Solari queues each mesh's acceleration
             // structure for compaction once, and one changed in place every
             // frame is queued again before that is done)
-            for (skin, &entity) in tracked.model.traced_skins.iter().zip(&tracked.skins) {
+            let turn = 1 - tracked.skin_turn;
+            for (skin, entities) in tracked.model.traced_skins.iter().zip(&tracked.skins) {
                 timing.skins += 1;
                 timing.skinned_vertices += skin.vertex_count() as u64;
                 let mesh = assets.meshes.add(skin.mesh(&node_matrices));
-                commands.entity(entity).insert((RaytracingMesh3d(mesh.clone()), TracedMesh(mesh)));
+                commands.entity(entities[turn]).insert((RaytracingMesh3d(mesh.clone()), TracedMesh(mesh)));
             }
+            tracked.skin_turn = turn;
+            tracked.skinned_at = frame_number;
+            tracked.older_skin_shown = true;
             tracked.skinned_to = node_matrices;
+        } else if tracked.older_skin_shown && frame_number.wrapping_sub(tracked.skinned_at) >= 1 {
+            // (the nodes still: the newest skin is in the scene by now, and
+            // the older one leaves it)
+            for entities in &tracked.skins {
+                commands.entity(entities[1 - tracked.skin_turn]).remove::<(RaytracingMesh3d, TracedMesh)>();
+            }
+            tracked.older_skin_shown = false;
         }
     }
 
@@ -597,6 +623,8 @@ fn sync_objects(
 /// how many of the game's frames it showed, and what sync_objects cost.
 #[derive(Default)]
 struct SyncTiming {
+    /// Counts the frames synced (for characters' skins' turns).
+    frame_number: u32,
     since: Option<std::time::Instant>,
     frames: u32,
     /// frames that showed the same game frame as the one before, and game

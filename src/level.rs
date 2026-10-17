@@ -989,7 +989,7 @@ impl LevelBuilder {
         camouflaged: bool,
         object_index: u32,
         assets: &mut LevelAssets,
-    ) -> (Entity, Vec<Option<Entity>>, Vec<Entity>) {
+    ) -> (Entity, Vec<Option<Entity>>, Vec<[Entity; 2]>) {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
         // the shaders whose self-illumination animates: a copy of each one's
         // material for this object (its phase is its own)
@@ -1059,7 +1059,8 @@ impl LevelBuilder {
         }
         // the bending parts, the object's own entities (in the world: the
         // root stays put), given a mesh skinned anew as its nodes move
-        // (crate::bridge)
+        // (crate::bridge): two for each, taking turns, the second out of the
+        // rays' scene until its first skin
         let rest = vec![Mat4::IDENTITY; model.default_inverses.len()];
         let mut skins = Vec::new();
         for skin in &model.traced_skins {
@@ -1068,8 +1069,13 @@ impl LevelBuilder {
             let mesh = assets.meshes.add(skin.mesh(&rest));
             let mode = if raster && matches!(surface, Surface::Blended(_)) { MeshUse::Both } else { MeshUse::Traced };
             self.recolour = Some((root, skin.surface.clone(), skin.shader));
-            skins.extend(self.spawn_mesh_as(commands, root, model.name.clone(), mesh, &surface, mode));
+            let first = self.spawn_mesh_as(commands, root, model.name.clone(), mesh.clone(), &surface, mode);
+            let second = first.and_then(|_| self.spawn_mesh_as(commands, root, model.name.clone(), mesh, &surface, MeshUse::Traced));
             self.recolour = None;
+            if let (Some(first), Some(second)) = (first, second) {
+                commands.entity(second).remove::<(RaytracingMesh3d, TracedMesh)>();
+                skins.push([first, second]);
+            }
         }
         if raster {
             for part in &model.skinned {

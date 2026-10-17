@@ -2159,7 +2159,9 @@ void actor_dispatch_call(
 {
 	int opened;
 
-	if (call->kind >= _actions_port_handler_call_set_default_state)
+	/* (the handlers' calls have their own high byte; the vehicle choice's,
+	17 << 8, are above them and go to its file with the actions') */
+	if ((call->kind >> 8) == (_actions_port_handler_call_set_default_state >> 8))
 	{
 		actions_port_handler_call(call);
 		return;

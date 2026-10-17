@@ -1110,6 +1110,50 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         panic!("Too many light sources in the scene, maximum is 65535.");
     }
 
+    // Directional lights take a fixed share of light selection. Their nominal
+    // 1 m² flux is no measure of what they light: beside a level's emissive
+    // surfaces the sun was chosen under 1% of the time, so sunlit ground got
+    // a sun sample in few pixels and the denoiser rebuilt its shadow edges
+    // from sparse samples (blocky, unstable). Each sample is still divided
+    // by its actual probability, so only variance changes.
+    let directional_share = std::env::var("SOLARIK_DIRECTIONAL_SHARE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(DIRECTIONAL_LIGHT_SHARE)
+        .clamp(0.0, 0.99);
+    let is_directional: Vec<bool> = light_sources
+        .get()
+        .iter()
+        .map(|s| s.kind == LIGHT_SOURCE_KIND_DIRECTIONAL)
+        .collect();
+    let (directional_flux, other_flux) = light_fluxes.iter().zip(&is_directional).fold(
+        (0.0, 0.0),
+        |(d, o), (&f, &directional)| if directional { (d + f, o) } else { (d, o + f) },
+    );
+    if directional_flux > 0.0 && other_flux > 0.0 && directional_share > 0.0 {
+        let scale = other_flux * directional_share / (1.0 - directional_share) / directional_flux;
+        for (flux, &directional) in light_fluxes.iter_mut().zip(&is_directional) {
+            if directional {
+                *flux *= scale;
+            }
+        }
+    }
+    if std::env::var_os("SOLARIK_LIGHT_FLUX_LOG").is_some() {
+        let total: f64 = light_fluxes.iter().sum();
+        let mut ranked: Vec<(usize, f64, u32)> = light_fluxes
+            .iter()
+            .zip(light_sources.get().iter())
+            .enumerate()
+            .map(|(i, (&f, s))| (i, f, s.kind))
+            .collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let top: Vec<String> = ranked
+            .iter()
+            .take(12)
+            .map(|(i, f, k)| format!("#{i} kind {k:#x}: {:.4}", f / total))
+            .collect();
+        tracing::info!("light fluxes: {} sources, total {total:.3e}; top shares {}", light_fluxes.len(), top.join(", "));
+    }
     for (source, bin) in light_sources
         .get_mut()
         .iter_mut()
@@ -1593,6 +1637,9 @@ impl GpuLightSource {
 /// The low bit clear is an emissive mesh (upstream: the triangle count sits
 /// above it); the low bit set is any other light, with the kind above it.
 const LIGHT_SOURCE_KIND_DIRECTIONAL: u32 = 1;
+/// The share of light selection the directional lights take together, by
+/// illuminance among themselves (`SOLARIK_DIRECTIONAL_SHARE` overrides it).
+const DIRECTIONAL_LIGHT_SHARE: f64 = 0.5;
 const LIGHT_SOURCE_KIND_POINT: u32 = 3;
 const LIGHT_SOURCE_KIND_SPOT: u32 = 5;
 

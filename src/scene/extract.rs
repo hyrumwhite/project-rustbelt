@@ -1,5 +1,6 @@
 use super::{RaytracingMesh3d, collimated::RaytracingMaterial3d};
 use bevy_asset::{AssetId, Assets};
+use bevy_camera::visibility::InheritedVisibility;
 use bevy_derive::Deref;
 use bevy_ecs::{
     lifecycle::RemovedComponents,
@@ -20,6 +21,7 @@ pub fn extract_raytracing_scene(
             Option<&RaytracingMaterial3d>,
             &GlobalTransform,
             Option<&PreviousGlobalTransform>,
+            Option<&InheritedVisibility>,
         )>,
     >,
     mut removed_raytracing_meshes: Extract<RemovedComponents<RaytracingMesh3d>>,
@@ -39,9 +41,17 @@ pub fn extract_raytracing_scene(
         }
     }
 
-    for (render_entity, mesh, material, override_material, transform, previous_frame_transform) in
+    for (render_entity, mesh, material, override_material, transform, previous_frame_transform, visibility) in
         &instances
     {
+        // A hidden entity (or one under a hidden parent) is out of the rays'
+        // scene too: hiding a model hid it from the camera only, and it still
+        // shadowed and reflected. (Not view visibility: rays see what the
+        // camera doesn't.)
+        if visibility.is_some_and(|v| !v.get()) {
+            commands.entity(render_entity).remove::<RaytracingMesh3d>();
+            continue;
+        }
         let Some(material) = override_material
             .map(|m| MeshMaterial3d(m.0.clone()))
             .or_else(|| material.cloned())

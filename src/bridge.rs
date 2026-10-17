@@ -529,17 +529,9 @@ fn sync_objects(
                 continue;
             };
             builder.first_person = object.flags & OBJECT_MODEL != 0;
-            let (root, nodes, mut skins) =
+            let (root, nodes, skins) =
                 builder.spawn_animated_model(&mut commands, &model, raster, &change_colors, camouflaged(object), object.object_index, assets);
             builder.first_person = false;
-            // (the first-person arms and weapon bend out of the rays' scene:
-            // posed for the camera's view alone, they would be reflected and
-            // shadow where nothing is)
-            if object.flags & OBJECT_MODEL != 0 {
-                for [shown, _] in skins.drain(..) {
-                    commands.entity(shown).remove::<(RaytracingMesh3d, TracedMesh)>();
-                }
-            }
             objects.tracked.insert(
                 object.object_index,
                 Tracked {

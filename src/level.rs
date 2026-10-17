@@ -1068,6 +1068,15 @@ impl LevelBuilder {
             let surface = animate(self, surface, piece.shader, assets);
             let pane = matches!(surface, Surface::Blended(_));
             let mode = if raster && (model.skinned.is_empty() || pane) { MeshUse::Both } else { MeshUse::Traced };
+            // (the first-person arms and weapon are the camera's alone, but
+            // their panes: posed for its view, in the rays' scene they'd be
+            // reflected and shadow where nothing is, and the panes traced
+            // from the camera, the sea's, showed their outline around them)
+            let mode = match mode {
+                _ if !self.first_person || pane => mode,
+                MeshUse::Both => MeshUse::Raster(None),
+                _ => continue,
+            };
             self.recolour = Some((root, piece.surface.clone(), piece.shader));
             let _ = self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
             self.recolour = None;
@@ -1085,8 +1094,14 @@ impl LevelBuilder {
             let surface = animate(self, surface, skin.shader, assets);
             let mesh = assets.meshes.add(skin.mesh(&rest, None));
             let mode = if raster && matches!(surface, Surface::Blended(_)) { MeshUse::Both } else { MeshUse::Traced };
+            // (none for the first-person arms and weapon, as above)
+            if self.first_person && !matches!(mode, MeshUse::Both) {
+                continue;
+            }
             self.recolour = Some((root, skin.surface.clone(), skin.shader));
-            let first = self.spawn_mesh_as(commands, skin_parent, model.name.clone(), mesh.clone(), &surface, mode);
+            // (a pane is the camera's too, unbent, under the root as before)
+            let parent = if matches!(mode, MeshUse::Both) { root } else { skin_parent };
+            let first = self.spawn_mesh_as(commands, parent, model.name.clone(), mesh.clone(), &surface, mode);
             let second =
                 first.and_then(|_| self.spawn_mesh_as(commands, skin_parent, model.name.clone(), mesh, &surface, MeshUse::Traced));
             self.recolour = None;

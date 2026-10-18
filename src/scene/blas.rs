@@ -3,10 +3,11 @@ use alloc::collections::VecDeque;
 use bevy_asset::AssetId;
 use bevy_ecs::{
     resource::Resource,
-    system::{Res, ResMut},
+    system::{Query, Res, ResMut},
 };
 use bevy_math::{Mat4, Vec3};
 use bevy_mesh::{Indices, Mesh};
+use bevy_pbr::{MeshMaterial3d, StandardMaterial};
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_render::{
     mesh::{
@@ -108,6 +109,11 @@ impl OpacityBook {
 pub fn prepare_raytracing_blas(
     mut blas_manager: ResMut<BlasManager>,
     extracted_meshes: Res<ExtractedAssets<RenderMesh>>,
+    (instances, materials, alpha_testing): (
+        Query<(&super::RaytracingMesh3d, &MeshMaterial3d<StandardMaterial>)>,
+        Res<super::extract::StandardMaterialAssets>,
+        Res<super::binder::SolarikAlphaTesting>,
+    ),
     readiness: Res<bevy_render::scene_readiness::SceneGeometryReadiness>,
     mesh_allocator: Res<MeshAllocator>,
     render_device: Res<RenderDevice>,
@@ -117,6 +123,30 @@ pub fn prepare_raytracing_blas(
     let _cpu_profile = bevy_render::diagnostic::profile_scope("scene.blas_prepare");
     let mut required = blas_manager.opacity.required_non_opaque.clone();
     required.extend(readiness.alpha_requested::<Mesh>());
+    // A new mesh already on an instance with an alpha-tested material is built
+    // non-opaque at once. (Otherwise it was built opaque, the binder found it
+    // wanted alpha testing, and it was rebuilt a frame later: a mesh replaced
+    // every frame, such as a skinned character's copy, was never in the TLAS.)
+    if alpha_testing.0 && !extracted_meshes.extracted.is_empty() {
+        let new: HashSet<AssetId<Mesh>> = extracted_meshes
+            .extracted
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        required.extend(
+            instances
+                .iter()
+                .filter(|(mesh, material)| {
+                    new.contains(&mesh.id())
+                        && materials.get(&material.id()).is_some_and(|material| {
+                            super::binder::material_alpha(material).flags
+                                & super::binder::MATERIAL_FLAG_OPAQUE
+                                == 0
+                        })
+                })
+                .map(|(mesh, _)| mesh.id()),
+        );
+    }
     blas_manager.set_non_opaque_meshes(required);
     // Delete BLAS for deleted or modified meshes
     for asset_id in extracted_meshes
@@ -248,7 +278,7 @@ pub fn publish_readiness(
         for id in readiness.requested::<Mesh>() {
             readiness.publish(id.untyped(), manager.get(&id).is_some());
         }
-        for id in readiness.requested::<bevy_pbr::StandardMaterial>() {
+        for id in readiness.requested::<StandardMaterial>() {
             let ready = registrations.gpu_ready(id, &bindings, &images)
                 && bindings.contains_key(&id.untyped())
                 && materials.get(&id).is_some_and(|material| {

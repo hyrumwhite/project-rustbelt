@@ -1532,7 +1532,7 @@ struct GpuMaterial {
 }
 
 /// `Material.flags` bits, mirrored in `raytracing_scene_bindings.wesl`.
-const MATERIAL_FLAG_OPAQUE: u32 = 1;
+pub(super) const MATERIAL_FLAG_OPAQUE: u32 = 1;
 const MATERIAL_FLAG_ALPHA_MASK: u32 = 2;
 const MATERIAL_FLAG_ALPHA_BLEND: u32 = 4;
 const MATERIAL_FLAG_DIFFUSE_BLEND: u32 = 16;
@@ -1544,12 +1544,12 @@ const MATERIAL_FLAG_DOUBLE_SIDED: u32 = 8;
 /// `DIFFUSE_BLEND` shades an ordinary surface with fractional coverage.
 /// No mode bit means raster fallback: never bind it in the TLAS.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct MaterialAlpha {
-    flags: u32,
+pub(super) struct MaterialAlpha {
+    pub(super) flags: u32,
     cutoff: f32,
 }
 
-fn material_alpha(material: &StandardMaterial) -> MaterialAlpha {
+pub(super) fn material_alpha(material: &StandardMaterial) -> MaterialAlpha {
     let (mode, cutoff) = match material.alpha_mode {
         AlphaMode::Opaque => (MATERIAL_FLAG_OPAQUE, 0.0),
         AlphaMode::Mask(cutoff) => (MATERIAL_FLAG_ALPHA_MASK, cutoff),

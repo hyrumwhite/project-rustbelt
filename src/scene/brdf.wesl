@@ -160,7 +160,16 @@ fn evaluate_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f32
 }
 
 fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
-    return f0 + (1.0 - f0) * pow(1.0 - LdotH, 5.0);
+    return f0 + (fresnel_f90(f0) - f0) * pow(1.0 - LdotH, 5.0);
+}
+
+// Reflectance at grazing angles: 1 for any real interface (f0 of 2% and up),
+// less below, as in Bevy's rasterizer and the guide buffers' albedo
+// (Filament's specular occlusion): a surface given less reflectance than any
+// real material, standing for one too rough and cavitied to reflect, otherwise
+// still turned into a mirror edge-on (grass looking toward a low sun).
+fn fresnel_f90(f0: vec3<f32>) -> f32 {
+    return saturate(f0.g * 50.0);
 }
 
 // Share of the light arriving at `cosine` to the normal that the specular
@@ -172,7 +181,7 @@ fn fresnel(f0: vec3<f32>, LdotH: f32) -> vec3<f32> {
 // surface seen edge-on.
 fn specular_albedo(F0: vec3<f32>, cosine: f32, perceptual_roughness: f32) -> vec3<f32> {
     let F_ab = F_AB(perceptual_roughness, cosine);
-    return saturate(F0 * F_ab.x + F_ab.y);
+    return saturate(F0 * F_ab.x + fresnel_f90(F0) * F_ab.y);
 }
 
 // Scale/bias approximation

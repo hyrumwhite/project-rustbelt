@@ -279,11 +279,12 @@ struct SkinnedPart {
 /// units: 2 cm).
 const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
 
-/// StandardMaterial's reflectance for a surface Halo gives no reflection
-/// (about 1.4% head-on, not the usual 4%): Halo shades these diffuse only, and
+/// StandardMaterial's reflectance for a surface Halo gives no reflection (1%
+/// head-on, not the usual 4%, and half at grazing angles, not all: Solarik
+/// lowers grazing reflectance below 2%): Halo shades these diffuse only, and
 /// the usual sheen of the sky on them washed grass out grey looking toward the
 /// sun (a30's fields).
-const MATTE_REFLECTANCE: f32 = 0.3;
+const MATTE_REFLECTANCE: f32 = 0.25;
 
 /// How far inside the camera's skinned surface the rays' skinned copy sits
 /// (meters): the two are skinned alike, but on different processors.

@@ -279,17 +279,15 @@ struct SkinnedPart {
 /// units: 2 cm).
 const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
 
+/// StandardMaterial's reflectance for a surface Halo gives no reflection
+/// (about 1.4% head-on, not the usual 4%): Halo shades these diffuse only, and
+/// the usual sheen of the sky on them washed grass out grey looking toward the
+/// sun (a30's fields).
+const MATTE_REFLECTANCE: f32 = 0.3;
+
 /// How far inside the camera's skinned surface the rays' skinned copy sits
 /// (meters): the two are skinned alike, but on different processors.
 const TRACED_SKIN_INSET: f32 = 0.005;
-
-/// And further inside where it is bending, by how far each vertex moved since
-/// the pose before (up to [`TRACED_SKIN_MOTION_INSET`]): the rays see a new
-/// skin a frame late, so the camera's surface has moved on about that far,
-/// and rays leaving it would hit the rays' copy (a character moving shadowed
-/// itself black where it bends).
-const TRACED_SKIN_MOTION_SCALE: f32 = 1.25;
-const TRACED_SKIN_MOTION_INSET: f32 = 0.05;
 
 /// A model part that bends between nodes, as the rays see it: its vertices
 /// at rest (Bevy space) with their two nodes and weights, skinned by
@@ -314,9 +312,8 @@ impl TracedSkin {
 
     /// The part skinned to the nodes' transforms (Bevy space, each node's
     /// default inverse included), as the camera's skinned mesh is: each
-    /// vertex blended between its two nodes by their weights. Given the
-    /// transforms of the pose before, it sits further inside where it moved.
-    pub fn mesh(&self, nodes: &[Mat4], previous: Option<&[Mat4]>) -> Mesh {
+    /// vertex blended between its two nodes by their weights.
+    pub fn mesh(&self, nodes: &[Mat4]) -> Mesh {
         let node = |nodes: &[Mat4], index: u16| nodes.get(index as usize).copied().unwrap_or(Mat4::IDENTITY);
         let count = self.positions.len();
         let (mut positions, mut normals, mut tangents) =
@@ -327,12 +324,7 @@ impl TracedSkin {
             let (p, n, t) = (self.positions[i], self.normals[i], self.tangents[i]);
             let normal = (wa * ma.transform_vector3(n) + wb * mb.transform_vector3(n)).normalize_or_zero();
             let skinned = wa * ma.transform_point3(p) + wb * mb.transform_point3(p);
-            let moved = previous.map_or(0.0, |previous| {
-                let (pa, pb) = (node(previous, a), node(previous, b));
-                skinned.distance(wa * pa.transform_point3(p) + wb * pb.transform_point3(p))
-            });
-            let inset = TRACED_SKIN_INSET + (moved * TRACED_SKIN_MOTION_SCALE).min(TRACED_SKIN_MOTION_INSET);
-            let position = skinned - normal * inset;
+            let position = skinned - normal * TRACED_SKIN_INSET;
             let tangent =
                 (wa * ma.transform_vector3(t.truncate()) + wb * mb.transform_vector3(t.truncate())).normalize_or_zero();
             positions.push(position.to_array());
@@ -1004,7 +996,7 @@ impl LevelBuilder {
         camouflaged: bool,
         object_index: u32,
         assets: &mut LevelAssets,
-    ) -> (Entity, Vec<Option<Entity>>, Vec<[Entity; 2]>) {
+    ) -> (Entity, Vec<Option<Entity>>, Vec<Entity>) {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
         // the shaders whose self-illumination animates: a copy of each one's
         // material for this object (its phase is its own)
@@ -1083,32 +1075,33 @@ impl LevelBuilder {
         }
         // the bending parts, under the model's root node, given a mesh
         // skinned anew (relative to that node) as its nodes move
-        // (crate::bridge): two for each, taking turns, the second out of the
-        // rays' scene until its first skin. (The root node carries the whole
-        // model at once, as the rigid pieces are; only the bending lags.)
+        // (crate::bridge)
         let rest = vec![Mat4::IDENTITY; model.default_inverses.len()];
         let skin_parent = nodes.first().copied().unwrap_or(root);
         let mut skins = Vec::new();
         for skin in &model.traced_skins {
             let surface = self.coloured_surface(&skin.surface, skin.shader, change_colors, assets);
             let surface = animate(self, surface, skin.shader, assets);
-            let mesh = assets.meshes.add(skin.mesh(&rest, None));
+            let mesh = assets.meshes.add(skin.mesh(&rest));
             let mode = if raster && matches!(surface, Surface::Blended(_)) { MeshUse::Both } else { MeshUse::Traced };
             // (none for the first-person arms and weapon, as above)
             if self.first_person && !matches!(mode, MeshUse::Both) {
                 continue;
             }
             self.recolour = Some((root, skin.surface.clone(), skin.shader));
-            // (a pane is the camera's too, unbent, under the root as before)
-            let parent = if matches!(mode, MeshUse::Both) { root } else { skin_parent };
-            let first = self.spawn_mesh_as(commands, parent, model.name.clone(), mesh.clone(), &surface, mode);
-            let second =
-                first.and_then(|_| self.spawn_mesh_as(commands, skin_parent, model.name.clone(), mesh, &surface, MeshUse::Traced));
-            self.recolour = None;
-            if let (Some(first), Some(second)) = (first, second) {
-                commands.entity(second).remove::<(RaytracingMesh3d, TracedMesh)>();
-                skins.push([first, second]);
+            // (a pane is the camera's too, unbent, under the root as before;
+            // the first-person one stays unbent for the rays too)
+            if matches!(mode, MeshUse::Both) {
+                let pane = if self.first_person { MeshUse::Both } else { MeshUse::Raster(None) };
+                let _ = self.spawn_mesh_as(commands, root, model.name.clone(), mesh.clone(), &surface, pane);
             }
+            if !self.first_person
+                && let Some(traced) =
+                    self.spawn_mesh_as(commands, skin_parent, model.name.clone(), mesh, &surface, MeshUse::Traced)
+            {
+                skins.push(traced);
+            }
+            self.recolour = None;
         }
         if raster {
             for part in &model.skinned {
@@ -1579,7 +1572,7 @@ impl LevelBuilder {
     fn shininess(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Shininess {
         use crate::textures::{Bake, MATTE_ROUGHNESS};
         use shader::SpecularMask;
-        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, reflectance: 0.5, texture: None };
+        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, reflectance: MATTE_REFLECTANCE, texture: None };
         let Some(reflection) = info.reflection.filter(|_| !self.matte) else { return matte };
         let r = reflection.perpendicular_brightness.max(reflection.parallel_brightness).clamp(0.0, 1.0);
         if r < 0.02 || reflection.cube_map.is_none() {

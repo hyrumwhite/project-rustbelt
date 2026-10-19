@@ -420,10 +420,13 @@ fn save_settings(
     // (against what the file holds, or the defaults: nothing is written
     // until something changes)
     let last = last.get_or_insert_with(|| SavedSettings::load().unwrap_or_else(SavedSettings::defaults));
-    // (where DLSS can't run, as in a build run without its libraries, the
-    // saved choice is kept: off there, it was saved off for every run)
+    // (where DLSS can't run, as in a build run without its libraries, or is
+    // kept off for the run by HALO_RT_NO_DLSS, the saved choice is kept:
+    // off there, it was saved off for every run)
     #[cfg(feature = "dlss")]
-    let (dlss_rr, dlss_quality) = match (dlss.iter().next().flatten(), dlss_supported.is_some()) {
+    let dlss_can_run = dlss_supported.is_some() && std::env::var_os("HALO_RT_NO_DLSS").is_none();
+    #[cfg(feature = "dlss")]
+    let (dlss_rr, dlss_quality) = match (dlss.iter().next().flatten(), dlss_can_run) {
         (Some(dlss), _) => (true, format!("{:?}", dlss.perf_quality_mode)),
         (None, true) => (false, last.dlss_quality.clone()),
         (None, false) => (last.dlss_rr, last.dlss_quality.clone()),

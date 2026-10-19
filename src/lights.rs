@@ -12,8 +12,9 @@
 //! are kept in pools and reused frame to frame; unused ones are hidden.
 //! Projectiles glow too: the plasma bolts by the lights their tags attach,
 //! which in the game are only lens flares and light nothing (the game
-//! shares them anyway, at their tags' colour and reach); rockets, needles
-//! and the Wraith's mortar, whose tags carry no light, by their own here.
+//! shares them anyway, at their tags' colour and reach); rockets, needles,
+//! the Wraith's mortar and the Sentinels' beams, whose tags carry no light,
+//! by their own here.
 
 use crate::{
     bridge::{BridgeLevel, BridgeLink},
@@ -93,13 +94,15 @@ const GEL_LIGHT_SCALE: f32 = 0.5;
 /// fuel rods, charged bolts and grenades have their own, the other bolts
 /// their lens flares'): their tag's name, their light's colour and reach
 /// (world units, as a light tag's radius).
-const PROJECTILE_GLOWS: [(&str, [f32; 3], f32); 3] = [
+const PROJECTILE_GLOWS: [(&str, [f32; 3], f32); 4] = [
     // (its exhaust's flame)
     ("weapons\\rocket launcher\\rocket", [1.0, 0.55, 0.2], 2.0),
     // (pink crystal, in flight and stuck in what it hit)
     ("weapons\\needler\\needle", [1.0, 0.3, 0.8], 0.75),
     // (a ball of blue plasma)
     ("vehicles\\wraith\\wraith mortar", [0.5, 0.45, 1.0], 2.0),
+    // (an orange laser, a stream of them)
+    ("characters\\sentinel\\beam", [1.0, 0.45, 0.15], 1.0),
 ];
 
 pub struct DynamicLightsPlugin;
@@ -138,12 +141,11 @@ fn sync_lights(
         *scenario = snapshot.scenario_name.clone();
     }
     // the glowing projectiles' lights, round from their middles (by no tag:
-    // neither muzzle flashes nor gelled)
-    const INVISIBLE: u32 = 1;
+    // neither muzzle flashes nor gelled; hidden ones too: a projectile
+    // without a model, a Sentinel's beam, the game hides)
     let projectile_lights: Vec<Light> = snapshot
         .objects
         .iter()
-        .filter(|object| object.object_flags & INVISIBLE == 0)
         .filter_map(|object| {
             let (color, radius) = (*glows.entry(object.definition_index).or_insert_with(|| {
                 let tag = level.as_ref()?.builder.cache.tag(object.definition_index).ok()?;

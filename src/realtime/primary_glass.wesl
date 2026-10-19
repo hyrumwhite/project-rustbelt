@@ -15,6 +15,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::materials;
 import bevy_solarik::scene::raytracing_scene_bindings::material_ids;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_ALPHA_BLEND;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_DIFFUSE_BLEND;
+import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_REFRACT;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_material_alpha;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
@@ -25,6 +26,7 @@ import bevy_solarik::realtime::realtime_bindings::view_output;
 import bevy_solarik::realtime::realtime_bindings::depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::constants;
+import bevy_solarik::realtime::realtime_bindings::primary_background;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::resolve_dlss_rr_textures::resolve_background_guides;
 
 enable wgpu_ray_query;
@@ -57,8 +59,10 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
 // Front-to-back camera panes split both lobes deterministically. Reflected
 // paths retain the existing bounded glossy estimator; transmission reuses
 // the already shaded opaque/sky pixel. Inputs and output are scene radiance.
-fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: vec3f, max_distance: f32, background: vec3f, rng: ptr<function, u32>) -> vec4f {
+fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: vec3f, max_distance: f32, unbent_background: vec3f, rng: ptr<function, u32>) -> vec4f {
     var origin = initial_origin;
+    var background = unbent_background;
+    var refracted = false;
 @if(RAY_MATERIAL_FOOTPRINTS) {
     var cone = primary_ray_cone(view.clip_from_view, view.main_pass_viewport.zw, distance(initial_origin, view.world_position));
 }
@@ -100,6 +104,29 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
         let hit = resolve_ray_hit_full(ray);
 }
         let alpha = clamp(scene_hit_alpha(ray, hit.uv), 0.0, 1.0);
+        if (material.flags & MATERIAL_FLAG_REFRACT) != 0u {
+            // A thick pane: its front reflects; what lies behind it is the
+            // picture there, bent. (Once: its far side, or another body
+            // behind it, would bend a picture that is already bent.)
+            if !refracted {
+                refracted = true;
+                let normal = liquid_normal(hit.world_normal, hit.world_position, direction);
+                let weights = thin_glass_weights(-direction, normal, hit.material.base_color, alpha, hit.material.reflectance);
+                radiance += transmission * alpha * emitted_radiance(hit.material, -direction);
+                if weights.a > 0.0 {
+                    var surface = ResolvedGPixel(hit.world_position, normal, hit.material);
+                    surface.material.roughness = 0.0;
+                    surface.material.metallic = 0.0;
+                    let reflected = trace_glossy_path(pixel_id, surface, length(hit.world_position - initial_origin), reflect(direction, normal), 1.0, rng);
+                    radiance += transmission * weights.a * reflected;
+                }
+                background = refracted_background(hit.world_position, direction, normal, material.alpha_cutoff, hit.material.reflectance, background);
+                transmission *= weights.rgb;
+                if all(transmission <= vec3(0.0)) { return vec4(radiance, has_glass); }
+            }
+            origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, direction, RAY_T_MIN);
+            continue;
+        }
         if (material.flags & MATERIAL_FLAG_DIFFUSE_BLEND) != 0u {
             var surface_radiance = vec3(0.0);
             if alpha > 0.0 {
@@ -131,4 +158,56 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
     }
     // A bounded chain cannot assume unvisited panes are transparent.
     return vec4(radiance, has_glass);
+}
+
+// How far a refracting pane's normal sways (a liquid's surface), and how
+// finely and fast it ripples (per metre, per second at 60 frames a second).
+const LIQUID_SWAY = 0.12;
+const LIQUID_RIPPLES = 7.0;
+const LIQUID_FLOW = 2.0;
+
+// A refracting pane's normal, toward the camera, rippling as it flows.
+fn liquid_normal(normal: vec3f, position: vec3f, direction: vec3f) -> vec3f {
+    // (render_frame counts frames: there is no clock here)
+    let t = f32(constants.render_frame % 1000000u) / 60.0 * LIQUID_FLOW;
+    let p = position * LIQUID_RIPPLES;
+    let ripple = vec3(
+        sin(p.y + t + sin(p.z * 1.3 + t * 0.7)),
+        sin(p.z + t * 0.8 + sin(p.x * 1.1 - t * 0.6)),
+        sin(p.x - t * 0.9 + sin(p.y * 0.9 + t * 0.5)),
+    );
+    let swayed = normalize(normal + LIQUID_SWAY * ripple);
+    return faceForward(swayed, direction, swayed);
+}
+
+// The picture behind a pane `depth` thick at `position`, seen along
+// `direction` through its `normal`: where the ray bent into it would come
+// out, projected (Bevy's screen-space transmission). Parts of the picture
+// nearer than the pane don't show through it; with none, the unbent one.
+fn refracted_background(position: vec3f, direction: vec3f, normal: vec3f, depth: f32, reflectance: f32, unbent: vec3f) -> vec3f {
+    // (its index from its reflectance: f0 = 0.16 reflectance^2)
+    let root_f0 = clamp(0.4 * reflectance, 0.0, 0.9);
+    let bent = refract(direction, normal, (1.0 - root_f0) / (1.0 + root_f0));
+    let pane_clip = view.clip_from_world * vec4(position, 1.0);
+    let clip = view.clip_from_world * vec4(position + bent * depth, 1.0);
+    if clip.w <= 0.0 || pane_clip.w <= 0.0 { return unbent; }
+    let pane_depth = pane_clip.z / pane_clip.w;
+    let size = view.main_pass_viewport.zw;
+    let pixel = ((clip.xy / clip.w) * vec2(0.5, -0.5) + 0.5) * size - 0.5;
+    if any(pixel < vec2(0.0)) || any(pixel > size - 1.0) { return unbent; }
+    let corner = vec2u(floor(pixel));
+    let f = fract(pixel);
+    var sum = vec3(0.0);
+    var weight = 0.0;
+    for (var tap = 0u; tap < 4u; tap += 1u) {
+        let offset = vec2u(tap & 1u, tap >> 1u);
+        let at = min(corner + offset, vec2u(size) - 1u);
+        // (reversed depth: nearer is greater)
+        if textureLoad(depth_buffer, at, 0) > pane_depth { continue; }
+        let w = select(1.0 - f.x, f.x, offset.x == 1u) * select(1.0 - f.y, f.y, offset.y == 1u);
+        sum += w * textureLoad(primary_background, at, 0).rgb;
+        weight += w;
+    }
+    if weight <= 0.0001 { return unbent; }
+    return sum / weight / view.exposure;
 }

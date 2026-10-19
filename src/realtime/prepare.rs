@@ -19,8 +19,8 @@ use bevy_render::texture::CachedTexture;
 use bevy_render::{
     camera::ExtractedCamera,
     render_resource::{
-        Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureFormat,
-        TextureUsages, TextureView, TextureViewDescriptor,
+        Buffer, BufferDescriptor, BufferUsages, Texture, TextureDescriptor, TextureDimension,
+        TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
     },
     renderer::RenderDevice,
 };
@@ -68,6 +68,10 @@ pub struct SolarikLightingResources {
     pub world_cache_active_cell_indices: Buffer,
     pub world_cache_active_cells_count: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
+    /// The view target as the camera's panes found it, which refracting
+    /// panes sample bent (written just before they are composited).
+    pub primary_background: Texture,
+    pub primary_background_view: TextureView,
     pub view_size: UVec2,
     pub(crate) history: crate::scene::history::ViewHistory,
 }
@@ -150,6 +154,17 @@ pub fn prepare_solari_lighting_resources(
                 })
                 .create_view(&TextureViewDescriptor::default())
         };
+        let primary_background = render_device.create_texture(&TextureDescriptor {
+            label: Some("solarik_lighting_primary_background"),
+            size: view_size.to_extents(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba16Float,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let primary_background_view = primary_background.create_view(&TextureViewDescriptor::default());
         let di_reservoirs_a = di_reservoirs("solarik_lighting_di_reservoirs_a");
         let di_reservoirs_b = di_reservoirs("solarik_lighting_di_reservoirs_b");
 
@@ -266,6 +281,8 @@ pub fn prepare_solari_lighting_resources(
             world_cache_active_cell_indices,
             world_cache_active_cells_count,
             world_cache_active_cells_dispatch,
+            primary_background,
+            primary_background_view,
             view_size,
             history: Default::default(),
         });

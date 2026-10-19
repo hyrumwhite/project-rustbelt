@@ -72,8 +72,9 @@ struct Material {
     perceptual_roughness: f32,
     emissive: vec3<f32>,
     metallic: f32,
-    // Alpha handling for the rays (upstream's padding): the mask cutoff, the
-    // MATERIAL_FLAG_* bits and the base colour's alpha factor.
+    // Alpha handling for the rays (upstream's padding): the mask cutoff (a
+    // refracting pane's depth), the MATERIAL_FLAG_* bits and the base
+    // colour's alpha factor.
     alpha_cutoff: f32,
     flags: u32,
     base_color_alpha: f32,
@@ -88,6 +89,9 @@ const MATERIAL_FLAG_ALPHA_MASK = 2u;
 const MATERIAL_FLAG_ALPHA_BLEND = 4u;
 const MATERIAL_FLAG_DIFFUSE_BLEND = 16u;
 const MATERIAL_FLAG_DOUBLE_SIDED = 8u;
+// An ALPHA_BLEND pane as thick as alpha_cutoff: the camera sees through it
+// bent (primary_glass.wesl).
+const MATERIAL_FLAG_REFRACT = 64u;
 
 const TEXTURE_MAP_NONE = 0xFFFFFFFFu;
 

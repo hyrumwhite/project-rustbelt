@@ -123,6 +123,8 @@ pub struct RaytracingSceneBindings {
     /// Whether this frame's TLAS contains explicitly transmissive foliage.
     pub(crate) has_foliage: bool,
     pub(crate) has_canopy: bool,
+    /// Whether this frame's TLAS contains refracting panes.
+    pub(crate) has_refraction: bool,
     /// Region about the render origin untouched by this frame's geometry.
     /// Infinity means unchanged; zero means unknown or global lighting change.
     pub(crate) history_stable_radius: f32,
@@ -680,6 +682,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         raytracing_scene_bindings.debug = super::graphics_debug::SceneSnapshot::default();
     }
     raytracing_scene_bindings.has_foliage = false;
+    raytracing_scene_bindings.has_refraction = false;
 
     let mut this_frame_entity_to_light_id = HashMap::<SceneInstance, u32>::default();
     let previous_frame_light_entities: Vec<_> = raytracing_scene_bindings
@@ -952,6 +955,8 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         material_transport_flags |= material.flags;
         prepared.transport.add(material.flags);
         raytracing_scene_bindings.has_foliage |= alpha_testing.0 && (material.flags >> 16) != 0;
+        raytracing_scene_bindings.has_refraction |=
+            alpha_testing.0 && material.flags & MATERIAL_FLAG_REFRACT != 0;
         if alpha_testing.0
             && material.flags & (MATERIAL_FLAG_ALPHA_BLEND | MATERIAL_FLAG_DIFFUSE_BLEND) != 0
         {
@@ -1468,6 +1473,7 @@ impl RaytracingSceneBindings {
             glass_entities: HashSet::default(),
             has_foliage: false,
             has_canopy: false,
+            has_refraction: false,
             history_stable_radius: 0.0,
             history_generation: 0,
             history_regional: false,
@@ -1553,11 +1559,16 @@ const MATERIAL_FLAG_ALPHA_MASK: u32 = 2;
 const MATERIAL_FLAG_ALPHA_BLEND: u32 = 4;
 const MATERIAL_FLAG_DIFFUSE_BLEND: u32 = 16;
 const MATERIAL_FLAG_DOUBLE_SIDED: u32 = 8;
+/// A thick pane: `ALPHA_BLEND` with a positive `thickness`, through which
+/// the camera sees what lies behind bent by the pane's normals, as through a
+/// body of glass that deep (`cutoff` holds the depth, metres).
+const MATERIAL_FLAG_REFRACT: u32 = 64;
 
 /// How the rays treat a material's alpha: exactly one of `OPAQUE`,
 /// `ALPHA_MASK` (test the base colour alpha against `cutoff`) or
 /// `ALPHA_BLEND` (explicit thin glass), plus `DOUBLE_SIDED`.
 /// `DIFFUSE_BLEND` shades an ordinary surface with fractional coverage.
+/// `REFRACT` marks a thick `ALPHA_BLEND` pane.
 /// No mode bit means raster fallback: never bind it in the TLAS.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MaterialAlpha {
@@ -1596,8 +1607,16 @@ pub(super) fn material_alpha(material: &StandardMaterial) -> MaterialAlpha {
     } else {
         0
     };
+    let (refract, cutoff) = if mode == MATERIAL_FLAG_ALPHA_BLEND
+        && material.thickness > 0.0
+        && material.thickness.is_finite()
+    {
+        (MATERIAL_FLAG_REFRACT, material.thickness)
+    } else {
+        (0, cutoff)
+    };
     MaterialAlpha {
-        flags: mode | double_sided | (transmission << 16),
+        flags: mode | double_sided | refract | (transmission << 16),
         cutoff,
     }
 }
@@ -2029,6 +2048,24 @@ mod tests {
 
         material.alpha_mode = AlphaMode::AlphaToCoverage;
         assert_eq!(material_alpha(&material).cutoff, 0.5);
+
+        let mut pane = StandardMaterial {
+            alpha_mode: AlphaMode::Blend,
+            specular_transmission: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(material_alpha(&pane).flags, MATERIAL_FLAG_ALPHA_BLEND);
+        pane.thickness = 0.25;
+        assert_eq!(
+            material_alpha(&pane),
+            MaterialAlpha {
+                flags: MATERIAL_FLAG_ALPHA_BLEND | MATERIAL_FLAG_REFRACT,
+                cutoff: 0.25
+            }
+        );
+        material.thickness = 0.25;
+        assert_eq!(material_alpha(&material).flags & MATERIAL_FLAG_REFRACT, 0);
+        material.thickness = 0.0;
 
         for blended in [
             AlphaMode::Blend,

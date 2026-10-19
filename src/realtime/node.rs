@@ -399,6 +399,7 @@ pub fn solarik_lighting<const PRIMARY: bool>(
             s.world_cache_active_cell_indices.as_entire_binding(),
             s.world_cache_active_cells_count.as_entire_binding(),
             s.sky_distribution.as_entire_binding(),
+            &s.primary_background_view,
         )),
     );
     let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
@@ -518,6 +519,33 @@ pub fn solarik_lighting<const PRIMARY: bool>(
             span.end(&mut pass);
         }
         if let Some(pipeline) = primary_pipeline.filter(|_| owns_glass) {
+            // (refracting panes read the picture behind them from a copy:
+            // their neighbours write theirs over it meanwhile)
+            if scene_bindings.has_refraction {
+                drop(pass);
+                command_encoder.copy_texture_to_texture(
+                    view_target.main_texture().as_image_copy(),
+                    s.primary_background.as_image_copy(),
+                    bevy_image::ToExtents::to_extents(s.view_size),
+                );
+                pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("solarik_lighting_primary_glass"),
+                    timestamp_writes: None,
+                });
+                pass.set_bind_group(0, scene_bind_group, &[]);
+                pass.set_bind_group(
+                    1,
+                    &bind_group,
+                    &[
+                        view_uniform_offset.offset,
+                        previous_view_uniform_offset.offset,
+                    ],
+                );
+                #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+                if let Some(group) = &bind_group_resolve_dlss_rr_textures {
+                    pass.set_bind_group(2, group, &[]);
+                }
+            }
             pass.set_pipeline(pipeline);
             pass.set_immediates(
                 0,
@@ -782,6 +810,7 @@ pub fn init_solari_lighting_pipelines(
                 storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
+                texture_2d(TextureSampleType::Float { filterable: false }),
             ),
         ),
     );

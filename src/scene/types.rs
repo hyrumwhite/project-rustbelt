@@ -22,3 +22,23 @@ use derive_more::derive::From;
 #[reflect(Component, Default, Clone, PartialEq)]
 #[require(MeshMaterial3d<StandardMaterial>, Transform, SyncToRenderWorld)]
 pub struct RaytracingMesh3d(pub Handle<Mesh>);
+
+/// The ray scene instance mask of a [`RaytracingMesh3d`] (`0xFF` without
+/// one). An entity with a mask stays in the ray scene while hidden: a body
+/// the camera doesn't show that still shades the world (a first-person
+/// player's).
+///
+/// Rays leaving a point near [`super::SolarikNearRays`]'s centre see only
+/// instances with [`RaytracingMask::NEAR`] set: [`RaytracingMask::AWAY`]
+/// (the player's body) is seen from everywhere else.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Reflect)]
+#[reflect(Component, Clone, PartialEq)]
+#[require(SyncToRenderWorld)]
+pub struct RaytracingMask(pub u8);
+
+impl RaytracingMask {
+    /// Seen by rays leaving points near [`super::SolarikNearRays`]'s centre.
+    pub const NEAR: u8 = 1 << 0;
+    /// Seen by rays from everywhere else only.
+    pub const AWAY: RaytracingMask = RaytracingMask(1 << 1);
+}

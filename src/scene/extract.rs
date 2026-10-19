@@ -1,4 +1,4 @@
-use super::{RaytracingMesh3d, collimated::RaytracingMaterial3d};
+use super::{RaytracingMask, RaytracingMesh3d, collimated::RaytracingMaterial3d};
 use bevy_asset::{AssetId, Assets};
 use bevy_camera::visibility::InheritedVisibility;
 use bevy_derive::Deref;
@@ -22,6 +22,7 @@ pub fn extract_raytracing_scene(
             &GlobalTransform,
             Option<&PreviousGlobalTransform>,
             Option<&InheritedVisibility>,
+            Option<&RaytracingMask>,
         )>,
     >,
     mut removed_raytracing_meshes: Extract<RemovedComponents<RaytracingMesh3d>>,
@@ -32,6 +33,7 @@ pub fn extract_raytracing_scene(
         &MeshMaterial3d<StandardMaterial>,
         &GlobalTransform,
         Option<&PreviousGlobalTransform>,
+        Option<&RaytracingMask>,
     )>,
 ) {
     let _cpu_profile = bevy_render::diagnostic::profile_scope("scene.extract");
@@ -41,14 +43,14 @@ pub fn extract_raytracing_scene(
         }
     }
 
-    for (render_entity, mesh, material, override_material, transform, previous_frame_transform, visibility) in
+    for (render_entity, mesh, material, override_material, transform, previous_frame_transform, visibility, mask) in
         &instances
     {
         // A hidden entity (or one under a hidden parent) is out of the rays'
         // scene too: hiding a model hid it from the camera only, and it still
         // shadowed and reflected. (Not view visibility: rays see what the
-        // camera doesn't.)
-        if visibility.is_some_and(|v| !v.get()) {
+        // camera doesn't.) One with a mask stays: hidden for the camera alone.
+        if mask.is_none() && visibility.is_some_and(|v| !v.get()) {
             commands.entity(render_entity).remove::<RaytracingMesh3d>();
             continue;
         }
@@ -59,12 +61,13 @@ pub fn extract_raytracing_scene(
             commands.entity(render_entity).remove::<RaytracingMesh3d>();
             continue;
         };
-        if let Ok((old_mesh, old_material, old_transform, old_previous)) =
+        if let Ok((old_mesh, old_material, old_transform, old_previous, old_mask)) =
             existing.get(render_entity)
             && old_mesh.id() == mesh.id()
             && old_material.id() == material.id()
             && old_transform.affine() == transform.affine()
             && old_previous.map(|t| t.0) == previous_frame_transform.map(|t| t.0)
+            && old_mask == mask
         {
             continue;
         }
@@ -72,6 +75,10 @@ pub fn extract_raytracing_scene(
         if previous_frame_transform.is_none() {
             commands.remove::<PreviousGlobalTransform>();
         }
+        match mask {
+            Some(mask) => commands.insert(*mask),
+            None => commands.remove::<RaytracingMask>(),
+        };
 
         match previous_frame_transform.cloned() {
             Some(previous_frame_transform) => commands.insert((

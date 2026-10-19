@@ -140,6 +140,9 @@ struct SkyLight {
     ray_max_distance: f32,
     relative_ray_min: f32,
     material_transport_flags: u32,
+    // Rays leaving within w (metres) of xyz see only the instances with
+    // RAY_MASK_NEAR (SolarikNearRays): not a first-person player's body.
+    near_rays: vec4<f32>,
     // The air of the planet the scene stands on, which directional light
     // crosses on its way to a surface. No medium when its radius is zero.
     medium: LightMedium,
@@ -257,6 +260,7 @@ fn offset_surface_ray(position: vec3<f32>, normal: vec3<f32>, camera_position: v
 fn ray_max_distance() -> f32 { return sky_light.ray_max_distance; }
 
 const RAY_NO_CULL = 0xFFu;
+const RAY_MASK_NEAR = 0x01u;
 
 fn trace_ray(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32) -> SceneHit {
     return trace_ray_impl(ray_origin, ray_direction, ray_t_min, ray_t_max, ray_flag, false);
@@ -304,7 +308,9 @@ fn trace_triangle_ray_impl(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_
         var miss: RayIntersection;
         return miss;
     }
-    let ray = RayDesc(ray_flag, RAY_NO_CULL, minimum, maximum, ray_origin, ray_direction);
+    let near = sky_light.near_rays;
+    let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
+    let ray = RayDesc(ray_flag, cull_mask, minimum, maximum, ray_origin, ray_direction);
     var rq: ray_query;
     rayQueryInitialize(&rq, tlas, ray);
     // Opaque geometry commits in hardware and never shows up here. Meshes

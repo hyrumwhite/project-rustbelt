@@ -1,5 +1,5 @@
 //! Detect renderer input mutations before walking persistent ray scene slots.
-use super::{RaytracingAssembly3d, RaytracingMesh3d};
+use super::{RaytracingAssembly3d, RaytracingMask, RaytracingMesh3d};
 use bevy_ecs::{
     entity::Entity,
     lifecycle::RemovedComponents,
@@ -16,6 +16,7 @@ type ChangedInputs = Or<(
     Changed<Material>,
     Changed<GlobalTransform>,
     Changed<PreviousGlobalTransform>,
+    Changed<RaytracingMask>,
 )>;
 
 #[derive(SystemParam)]
@@ -49,6 +50,7 @@ pub(super) struct RayInstanceChanges<'w, 's> {
     material: RemovedComponents<'w, 's, Material>,
     transform: RemovedComponents<'w, 's, GlobalTransform>,
     previous: RemovedComponents<'w, 's, PreviousGlobalTransform>,
+    ray_mask: RemovedComponents<'w, 's, RaytracingMask>,
 }
 impl RayInstanceChanges<'_, '_> {
     pub(super) fn collect(&mut self) -> HashSet<Entity> {
@@ -62,6 +64,7 @@ impl RayInstanceChanges<'_, '_> {
         roots.extend(self.material.read());
         roots.extend(self.transform.read());
         roots.extend(self.previous.read());
+        roots.extend(self.ray_mask.read());
         roots
     }
     #[cfg(test)]

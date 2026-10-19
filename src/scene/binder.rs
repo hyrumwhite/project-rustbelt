@@ -73,6 +73,17 @@ pub struct SolarikSkyLight {
     pub intensity: f32,
 }
 
+/// Where rays see only instances with [`super::RaytracingMask::NEAR`]: those
+/// leaving a point within `radius` of `centre` (world space, metres; none
+/// with a radius of zero). A first-person view's centre is the camera: its
+/// arms and weapon, and the camera's own rays, never meet the player's body.
+#[derive(Resource, ExtractResource, Clone, Copy, Default, Debug)]
+#[extract_app(bevy_render::RenderApp)]
+pub struct SolarikNearRays {
+    pub centre: Vec3,
+    pub radius: f32,
+}
+
 impl Default for SolarikSkyLight {
     fn default() -> Self {
         Self {
@@ -165,10 +176,13 @@ pub(super) struct RayInstanceInput {
     pub(super) material: AssetId<StandardMaterial>,
     pub(super) transform: Affine3A,
     pub(super) previous: Affine3A,
+    /// Its instance mask ([`super::RaytracingMask`]).
+    pub(super) mask: u8,
 }
 impl PartialEq for RayInstanceInput {
     fn eq(&self, other: &Self) -> bool {
         self.entity == other.entity
+            && self.mask == other.mask
             && self.mesh == other.mesh
             && self.material == other.material
             && self.transform.to_cols_array().map(f32::to_bits)
@@ -294,6 +308,7 @@ fn update_input_history(
 }
 fn same_occluder(old: &RayInstanceInput, new: &RayInstanceInput) -> bool {
     old.entity == new.entity
+        && old.mask == new.mask
         && old.mesh == new.mesh
         && old.material == new.material
         && old.transform.to_cols_array().map(f32::to_bits)
@@ -393,7 +408,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
     dfg_lut: Res<DfgLut>,
-    sky_light: Res<SolarikSkyLight>,
+    (sky_light, near_rays): (Res<SolarikSkyLight>, Res<SolarikNearRays>),
     (alpha_testing, ray_settings, planet, atmosphere, rings, readiness, canopy): (
         Res<SolarikAlphaTesting>,
         Res<SolarikRaySettings>,
@@ -1013,7 +1028,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                 blas,
                 tlas_transform(&transforms.get()[index as usize]),
                 index,
-                0xFF,
+                input.mask,
             )),
         );
     }
@@ -1339,6 +1354,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         ray_max_distance: ray_settings.max_distance(),
         relative_ray_min: ray_settings.relative_min_distance(),
         material_transport_flags,
+        near_rays: near_rays.centre.extend(near_rays.radius),
         medium: GpuLightMedium::new(
             planet.as_deref(),
             atmosphere.as_deref(),
@@ -1726,6 +1742,7 @@ struct GpuSkyLight {
     ray_max_distance: f32,
     relative_ray_min: f32,
     material_transport_flags: u32,
+    near_rays: Vec4,
     medium: GpuLightMedium,
 }
 
@@ -1856,6 +1873,7 @@ mod tests {
             material: material.id(),
             transform: Affine3A::from_translation(Vec3::X * 1000.0),
             previous: Affine3A::IDENTITY,
+            mask: 0xFF,
         };
         let mut blas = BlasManager::default();
         let materials = StandardMaterialAssets::extract_resource(&source);

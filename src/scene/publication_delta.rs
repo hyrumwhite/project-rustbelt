@@ -183,7 +183,7 @@ pub(super) fn try_publish(
                     blas.get(&input.mesh)?,
                     tlas_transform(&Mat4::from(input.transform)),
                     index,
-                    0xFF,
+                    input.mask,
                 ),
             ))
         })
@@ -333,6 +333,7 @@ mod tests {
                     material: Handle::<StandardMaterial>::default().id(),
                     transform: Affine3A::from_translation(Vec3::X * id as f32),
                     previous: Affine3A::IDENTITY,
+                    mask: 0xFF,
                 },
                 false,
                 &mut dirty,

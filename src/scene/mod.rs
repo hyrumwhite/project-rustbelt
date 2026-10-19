@@ -25,9 +25,9 @@ mod tlas;
 mod types;
 
 use bevy_shader::load_shader_library;
-pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikSkyLight};
+pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikSkyLight};
 pub use ray_settings::SolarikRaySettings;
-pub use types::RaytracingMesh3d;
+pub use types::{RaytracingMask, RaytracingMesh3d};
 
 use crate::SolarikPlugins;
 use bevy_app::{App, Plugin};
@@ -79,6 +79,7 @@ impl Plugin for RaytracingScenePlugin {
         app.add_systems(bevy_app::First, assembly::previous_transforms);
         app.init_resource::<bevy_render::scene_readiness::SceneGeometryReadiness>();
         app.init_resource::<SolarikSkyLight>();
+        app.init_resource::<SolarikNearRays>();
         app.init_resource::<SolarikAlphaTesting>();
         app.init_resource::<SolarikRaySettings>();
     }
@@ -103,6 +104,7 @@ impl Plugin for RaytracingScenePlugin {
         app.add_plugins((
             ExtractResourcePlugin::<StandardMaterialAssets>::default(),
             ExtractResourcePlugin::<SolarikSkyLight>::default(),
+            ExtractResourcePlugin::<SolarikNearRays>::default(),
             ExtractResourcePlugin::<SolarikAlphaTesting>::default(),
             ExtractResourcePlugin::<SolarikRaySettings>::default(),
         ));
@@ -114,6 +116,7 @@ impl Plugin for RaytracingScenePlugin {
             .resource_mut::<MeshAllocatorSettings>()
             .extra_buffer_usages |= BufferUsages::BLAS_INPUT | BufferUsages::STORAGE;
         render_app.init_resource::<SolarikSkyLight>();
+        render_app.init_resource::<SolarikNearRays>();
         render_app.init_resource::<SolarikAlphaTesting>();
         render_app.init_resource::<SolarikRaySettings>();
 

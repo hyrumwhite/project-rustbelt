@@ -109,6 +109,7 @@ fn fixture(count: usize) -> (bevy_render::scene_slots::SceneSlots, Vec<RayInstan
                     Vec3::new(index as f32, 17.0, -31.0),
                 ),
                 previous: Affine3A::IDENTITY,
+                mask: 0xFF,
             }
         })
         .collect();

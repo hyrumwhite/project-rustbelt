@@ -1,6 +1,6 @@
 //! Compact root queries expand immutable parts only when the ray scene changes.
 use super::binder::RayInstanceInput;
-use super::{RaytracingAssembly3d, RaytracingMesh3d};
+use super::{RaytracingAssembly3d, RaytracingMask, RaytracingMesh3d};
 use alloc::sync::Arc;
 use bevy_asset::AssetId;
 use bevy_ecs::{
@@ -24,6 +24,7 @@ pub(super) struct SceneRows<'w, 's> {
             &'static MeshMaterial3d<StandardMaterial>,
             &'static GlobalTransform,
             Option<&'static PreviousGlobalTransform>,
+            Option<&'static RaytracingMask>,
         ),
     >,
     assemblies: Query<
@@ -49,7 +50,7 @@ impl SceneRows<'_, '_> {
         let mut roots: HashSet<_> = self
             .single
             .iter()
-            .filter_map(|(entity, mesh, material, _, _)| {
+            .filter_map(|(entity, mesh, material, _, _, _)| {
                 affected(mesh.id(), material.id()).then_some(entity)
             })
             .collect();
@@ -74,7 +75,7 @@ impl SceneRows<'_, '_> {
     pub(super) fn sources(&self) -> HashSet<(AssetId<Mesh>, AssetId<StandardMaterial>)> {
         let mut sources = HashSet::default();
         let mut assemblies: HashSet<_> = HashSet::default();
-        for (_, mesh, material, _, _) in &self.single {
+        for (_, mesh, material, _, _, _) in &self.single {
             sources.insert((mesh.id(), material.id()));
         }
         for (_, assembly, _, _) in &self.assemblies {
@@ -92,13 +93,14 @@ impl SceneRows<'_, '_> {
     /// Expand only one changed root; removal naturally returns no rows.
     pub(super) fn for_root(&self, entity: Entity) -> Vec<RayInstanceInput> {
         let mut rows = Vec::new();
-        if let Ok((entity, mesh, material, transform, previous)) = self.single.get(entity) {
+        if let Ok((entity, mesh, material, transform, previous, mask)) = self.single.get(entity) {
             rows.push(RayInstanceInput {
                 entity: entity.into(),
                 mesh: mesh.id(),
                 material: material.id(),
                 transform: transform.affine(),
                 previous: previous.map_or(transform.affine(), |p| p.0),
+                mask: mask.map_or(0xFF, |m| m.0),
             });
         }
         if let Ok((entity, assembly, transform, previous)) = self.assemblies.get(entity) {
@@ -118,6 +120,7 @@ impl SceneRows<'_, '_> {
                         material: source.material.id(),
                         transform: transform * source.transform,
                         previous: previous * source.transform,
+                        mask: 0xFF,
                     }),
             );
         }
@@ -128,12 +131,13 @@ impl SceneRows<'_, '_> {
             .single
             .iter()
             .map(
-                |(entity, mesh, material, transform, previous)| RayInstanceInput {
+                |(entity, mesh, material, transform, previous, mask)| RayInstanceInput {
                     entity: entity.into(),
                     mesh: mesh.id(),
                     material: material.id(),
                     transform: transform.affine(),
                     previous: previous.map_or(transform.affine(), |p| p.0),
+                    mask: mask.map_or(0xFF, |m| m.0),
                 },
             );
         single.chain(
@@ -155,6 +159,7 @@ impl SceneRows<'_, '_> {
                             material: source.material.id(),
                             transform: transform * source.transform,
                             previous: previous * source.transform,
+                            mask: 0xFF,
                         })
                 }),
         )

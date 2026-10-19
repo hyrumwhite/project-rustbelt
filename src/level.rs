@@ -286,6 +286,10 @@ const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
 /// sun (a30's fields).
 const MATTE_REFLECTANCE: f32 = 0.25;
 
+/// How deep an actively camouflaged body's glass is (metres): how far it
+/// bends the picture behind it.
+const CAMOUFLAGE_THICKNESS: f32 = 0.6;
+
 /// Roughness where a reflective model shader's specular mask is zero: a
 /// plastic's sheen, not the matte of surfaces Halo gives no reflection.
 const MODEL_UNMASKED_ROUGHNESS: f32 = 0.45;
@@ -384,6 +388,8 @@ pub struct LevelBuilder {
     animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
     /// The glassy look of an actively camouflaged object.
     camouflage: Option<Handle<StandardMaterial>>,
+    /// Its liquid glass, in the rays' scene.
+    camouflage_glass: Option<Handle<StandardMaterial>>,
     /// Surfaces tinted by a change colour, by shader and colour.
     coloured_surfaces: HashMap<(ShaderUse, [u8; 3]), Surface>,
     loaded_bsps: Vec<usize>,
@@ -435,6 +441,7 @@ impl LevelBuilder {
             animated_models: HashMap::default(),
             coloured_surfaces: HashMap::default(),
             camouflage: None,
+            camouflage_glass: None,
             loaded_bsps: Vec::new(),
             bsp_roots: Vec::new(),
             light_proxy: None,
@@ -1033,9 +1040,36 @@ impl LevelBuilder {
         let nodes: Vec<Entity> = (0..model.default_inverses.len().max(1))
             .map(|_| commands.spawn((Transform::default(), Visibility::default(), ChildOf(root))).id())
             .collect();
-        // camouflaged: a faint glassy shell for the camera, nothing for the
-        // rays (no shadow): the game's own shimmer refracts the picture
-        // behind, which the overlay doesn't have
+        // camouflaged: a body of liquid glass in the rays' scene, which
+        // Solarik composites for the camera, bending the picture behind it
+        // and reflecting what is round it (and, as glass, it casts no
+        // shadow); the game's own shimmer refracts the picture behind, which
+        // its overlay doesn't have. The first-person arms and weapon, posed
+        // for the camera and unbent for the rays, keep a faint shell.
+        if camouflaged && !self.first_person {
+            let material = self.camouflage_glass(assets);
+            let glass = |commands: &mut Commands, parent: Entity, mesh: Handle<Mesh>| {
+                commands
+                    .spawn((
+                        Name::new(format!("{} (camouflaged)", model.name)),
+                        RaytracingMesh3d(mesh.clone()),
+                        TracedMesh(mesh),
+                        Visibility::Inherited,
+                        MeshMaterial3d(material.clone()),
+                        Transform::default(),
+                        ChildOf(parent),
+                    ))
+                    .id()
+            };
+            for piece in &model.pieces {
+                glass(commands, nodes[piece.node], piece.mesh.clone());
+            }
+            // (its bending parts skinned anew as its nodes move, as below)
+            let rest = vec![Mat4::IDENTITY; model.default_inverses.len()];
+            let skin_parent = nodes.first().copied().unwrap_or(root);
+            let skins = model.traced_skins.iter().map(|skin| glass(commands, skin_parent, assets.meshes.add(skin.mesh(&rest)))).collect();
+            return (root, nodes.into_iter().map(Some).collect(), skins);
+        }
         if camouflaged {
             if raster {
                 // (drawn even where the game's overlay has the other
@@ -1194,6 +1228,27 @@ impl LevelBuilder {
             }
         }
         Ok(out)
+    }
+
+    /// An actively camouflaged object's liquid glass: clear but for a cool
+    /// tinge, smooth, as thick as a limb (Solarik bends the picture behind
+    /// it through that depth).
+    fn camouflage_glass(&mut self, assets: &mut LevelAssets) -> Handle<StandardMaterial> {
+        self.camouflage_glass
+            .get_or_insert_with(|| {
+                assets.materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.93, 0.97, 1.0),
+                    perceptual_roughness: 0.05,
+                    reflectance: 0.5,
+                    specular_transmission: 1.0,
+                    thickness: CAMOUFLAGE_THICKNESS,
+                    alpha_mode: AlphaMode::Blend,
+                    cull_mode: None,
+                    double_sided: true,
+                    ..default()
+                })
+            })
+            .clone()
     }
 
     /// The glassy look of an actively camouflaged object: nearly clear,

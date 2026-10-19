@@ -16,7 +16,7 @@ use crate::{
     level::{sphere_lumens_per_radiance, LightSource},
     LightingSettings,
 };
-use bevy::{platform::collections::HashMap, prelude::*};
+use bevy::{camera::visibility::NoFrustumCulling, platform::collections::HashMap, prelude::*};
 use halo_bridge::LIGHT_MUZZLE_FLASH;
 use halo_map::{
     light_gel::{gel_beams, GelBeam},
@@ -191,9 +191,12 @@ fn sync_lights(
                 let along = light_forward * f + light_left * l + light_up * u;
                 let forward = Vec3::from(halo_to_bevy(along.to_array(), 1.0)).normalize_or(Vec3::NEG_Z);
                 let (color, intensity) = LightSource { power: source.power * beam.strength }.color_and_intensity(settings.emissive_scale);
+                // (never frustum culled, here and below: Bevy would leave a
+                // light out of the scene with its range off screen, and its
+                // bounces with it)
                 if used_spots == pools.spots.len() {
                     let entity = commands
-                        .spawn((Name::new("spotlight"), SpotLight { radius: SPOT_RADIUS, shadow_maps_enabled: false, ..default() }, Visibility::Hidden))
+                        .spawn((Name::new("spotlight"), SpotLight { radius: SPOT_RADIUS, shadow_maps_enabled: false, ..default() }, Visibility::Hidden, NoFrustumCulling))
                         .id();
                     pools.spots.push(entity);
                 }
@@ -219,7 +222,7 @@ fn sync_lights(
         if spot {
             if used_spots == pools.spots.len() {
                 let entity = commands
-                    .spawn((Name::new("spotlight"), SpotLight { radius, shadow_maps_enabled: false, ..default() }, Visibility::Hidden))
+                    .spawn((Name::new("spotlight"), SpotLight { radius, shadow_maps_enabled: false, ..default() }, Visibility::Hidden, NoFrustumCulling))
                     .id();
                 pools.spots.push(entity);
             }
@@ -250,7 +253,7 @@ fn sync_lights(
         } else {
             if used_points == pools.points.len() {
                 let entity = commands
-                    .spawn((Name::new("light"), PointLight { radius, shadow_maps_enabled: false, ..default() }, Visibility::Hidden))
+                    .spawn((Name::new("light"), PointLight { radius, shadow_maps_enabled: false, ..default() }, Visibility::Hidden, NoFrustumCulling))
                     .id();
                 pools.points.push(entity);
             }

@@ -675,6 +675,9 @@ impl LevelBuilder {
             Name::new("light fixture light"),
             PointLight { radius: LIGHT_PROXY_RADIUS, range: FIXTURE_LIGHT_RANGE, shadow_maps_enabled: false, ..default() },
             LightSource { power },
+            // (lighting the rays' scene from off screen too: Bevy's frustum
+            // culling would leave it out with its range off screen)
+            bevy::camera::visibility::NoFrustumCulling,
             // object space is Bevy-converted Halo space: Halo forward (+x) is +x
             Transform::from_xyz(LIGHT_PROXY_OFFSET, 0.0, 0.0),
             ChildOf(object),

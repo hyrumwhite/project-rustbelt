@@ -908,18 +908,31 @@ short lights_port_list(
 	{
 		struct light_datum *light = light_get(light_index);
 		struct point_light_definition *definition;
+		struct object_datum *object;
+		boolean flare = FALSE;
 
-		if (!TEST_FLAG(light->flags, _point_light_dynamic_bit) || light->radius <= 0.0f ||
+		/* (a projectile's light that lights nothing, the plasma bolts' that
+		are only their lens flares, at its tag's colour and reach: the
+		viewer lights them, knowing them by their tag's flags) */
+		if (!TEST_FLAG(light->flags, _point_light_dynamic_bit) && light->parent_light_index == NONE &&
+			light->object_index != NONE && (object = object_try_and_get(light->object_index)) != NULL &&
+			object->object.type == _object_type_projectile)
+		{
+			flare = TRUE;
+		}
+		else if (!TEST_FLAG(light->flags, _point_light_dynamic_bit) || light->radius <= 0.0f ||
 			(light->color.red == 0.0f && light->color.green == 0.0f && light->color.blue == 0.0f))
 		{
 			continue;
 		}
 		definition = light_definition_get(light->definition_index);
+		if (flare && (!definition || definition->radius <= 0.0f))
+			continue;
 		lights[count].position = light->position;
 		lights[count].forward = light->forward;
 		lights[count].up = light->up;
-		lights[count].color = light->color;
-		lights[count].radius = light->radius;
+		lights[count].color = flare ? definition->color_upper_bound.rgb : light->color;
+		lights[count].radius = flare ? definition->radius : light->radius;
 		lights[count].cutoff_angle = definition ? definition->cutoff_angle : _pi;
 		lights[count].falloff_angle = definition ? definition->falloff_angle : _pi;
 		lights[count].definition_index = light->definition_index;

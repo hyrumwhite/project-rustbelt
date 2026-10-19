@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 38
+#define BEVY_BRIDGE_VERSION 39
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -314,6 +314,9 @@ struct bevy_bridge_light
 	unsigned long definition_flags;
 	unsigned long object_index;
 	unsigned long first_person;
+	/* (protocol 39) its up: a light's gel (a cube map round it, the a10
+	alarm lights' two beams) is turned to its forward and up */
+	float up[3];
 };
 
 /* a ray the game tested against its structure's collision geometry

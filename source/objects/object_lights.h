@@ -21,6 +21,8 @@ struct lights_port_light
 {
 	real_point3d position;
 	real_vector3d forward;
+	/* and its up, which turns a gel round the forward */
+	real_vector3d up;
 	real_rgb_color color;
 	real radius;
 	/* a spotlight's (the flashlight's) cutoff angle, radians; pi or more

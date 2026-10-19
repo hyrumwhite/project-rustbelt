@@ -631,6 +631,7 @@ void bevy_bridge_export_frame(
 
 			bevy_bridge_point(out->position, &lights[index].position);
 			bevy_bridge_vector(out->forward, &lights[index].forward);
+			bevy_bridge_vector(out->up, &lights[index].up);
 			out->color[0] = lights[index].color.red;
 			out->color[1] = lights[index].color.green;
 			out->color[2] = lights[index].color.blue;

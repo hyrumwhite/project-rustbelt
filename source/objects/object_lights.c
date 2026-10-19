@@ -917,6 +917,7 @@ short lights_port_list(
 		definition = light_definition_get(light->definition_index);
 		lights[count].position = light->position;
 		lights[count].forward = light->forward;
+		lights[count].up = light->up;
 		lights[count].color = light->color;
 		lights[count].radius = light->radius;
 		lights[count].cutoff_angle = definition ? definition->cutoff_angle : _pi;

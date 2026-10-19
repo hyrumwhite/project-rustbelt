@@ -475,6 +475,7 @@ static unsigned long bevy_bridge_object_flags(long object_index, long first_pers
 	{
 		if (ancestor == first_person_unit)
 		{
+			SET_FLAG(flags, _bevy_bridge_object_first_person_body_bit, !TEST_FLAG(flags, _bevy_bridge_object_hidden_bit));
 			SET_FLAG(flags, _bevy_bridge_object_hidden_bit, TRUE);
 			break;
 		}

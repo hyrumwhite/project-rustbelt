@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 39
+#define BEVY_BRIDGE_VERSION 40
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -82,6 +82,10 @@ enum
 	/* not an object: a model the game draws by itself (the first-person
 	weapon and hands); definition_index is the model tag's datum index */
 	_bevy_bridge_object_model_bit,
+	/* (protocol 40) the first-person unit or something it holds, not itself
+	invisible: hidden from the camera, but its body can still shade the
+	world */
+	_bevy_bridge_object_first_person_body_bit,
 };
 
 struct bevy_bridge_camera

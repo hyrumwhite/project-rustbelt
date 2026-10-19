@@ -103,6 +103,10 @@ struct Args {
     /// with --screenshot-every, the frame to start at
     #[argh(option, default = "0")]
     screenshot_from: u32,
+    /// move the camera forward and back this far (metres) along its view,
+    /// once every two seconds of frames: the lighting's history in motion
+    #[argh(option)]
+    dolly: Option<f32>,
     /// draw a running OpenCE game (its objects and camera) instead of the
     /// map's placements; the map is the game's (start OpenCE with
     /// HALO_BEVY_BRIDGE=1)
@@ -383,6 +387,9 @@ fn main() -> AppExit {
         .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));
 
     app.add_systems(Update, capture);
+    if args.dolly.is_some() {
+        app.add_systems(Update, dolly_camera);
+    }
     if args.screenshot.is_some() {
         app.add_systems(Update, screenshot_and_exit);
     }
@@ -731,7 +738,13 @@ fn setup_camera(
     if args.pathtracer {
         camera.insert(Pathtracer::default());
     } else {
-        camera.insert(SolarikLighting::default());
+        // a game's scene never stops changing (lights culled with the view,
+        // flashing and moving, its objects in motion): the lighting's history
+        // follows it instead of starting over at each change, which left
+        // the indirect light in dim rooms smoky (HALO_RT_SCENE_RESETS=1 for
+        // Solarik's own, for comparison)
+        let dynamic_scene = std::env::var_os("HALO_RT_SCENE_RESETS").is_none();
+        camera.insert(SolarikLighting { dynamic_scene, ..default() });
     }
     // a bridged camera follows the game's until F8 detaches it (or, with
     // --camera, starts detached there)
@@ -744,7 +757,7 @@ fn setup_camera(
     }
 
     #[cfg(feature = "dlss")]
-    if dlss_rr_supported.is_some() {
+    if dlss_rr_supported.is_some() && std::env::var_os("HALO_RT_NO_DLSS").is_none() {
         camera.insert(Dlss::<DlssRayReconstructionFeature>::default());
     }
 
@@ -1008,6 +1021,23 @@ fn start_camera(mut frames: Local<u32>, mut camera: Single<&mut Camera, With<Sol
     if *frames == CAMERA_START_FRAME {
         camera.is_active = true;
     }
+}
+
+/// Frames in one forward-and-back sweep of `--dolly`.
+const DOLLY_PERIOD: u32 = 120;
+
+/// `--dolly`: sways the camera forward and back from where it started.
+fn dolly_camera(
+    args: Res<Args>,
+    mut start: Local<Option<Transform>>,
+    mut frames: Local<u32>,
+    mut camera: Single<&mut Transform, With<Camera3d>>,
+) {
+    let Some(reach) = args.dolly else { return };
+    let start = *start.get_or_insert(**camera);
+    *frames += 1;
+    let phase = (*frames % DOLLY_PERIOD) as f32 / DOLLY_PERIOD as f32 * std::f32::consts::TAU;
+    camera.translation = start.translation + *start.forward() * reach * phase.sin();
 }
 
 #[cfg(feature = "dlss")]

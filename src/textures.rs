@@ -33,9 +33,9 @@ pub enum Bake {
     EnvironmentSelfIllumination { base: Option<u32>, map: u32, colors: [[u32; 3]; 3] },
     /// A StandardMaterial metallic/roughness texture (G roughness, B metallic)
     /// from a specular mask: `channel` (0..=3) of `mask`'s first bitmap mixes
-    /// from rough dielectric (mask 0) to `roughness`/`metallic` (mask 1), as
-    /// f32 bits.
-    MetallicRoughness { mask: u32, channel: u8, roughness: u32, metallic: u32 },
+    /// from a dielectric of roughness `unmasked` (mask 0) to
+    /// `roughness`/`metallic` (mask 1), as f32 bits.
+    MetallicRoughness { mask: u32, channel: u8, unmasked: u32, roughness: u32, metallic: u32 },
     /// A model base map tinted by an object's change colour where the
     /// multipurpose map's alpha says, as the Xbox model shader does:
     /// `base * lerp(1, color, multipurpose.a)` (8-bit, display-encoded).
@@ -166,11 +166,11 @@ fn rgba8(cache: &CacheFile, datum: u32, permutation: u16) -> halo_map::Result<bi
     first.decode_rgba8(cache)
 }
 
-fn metallic_roughness(mask: &bitmap::Decoded, channel: usize, roughness: f32, metallic: f32) -> (u32, u32, Vec<u8>, bool) {
+fn metallic_roughness(mask: &bitmap::Decoded, channel: usize, unmasked: f32, roughness: f32, metallic: f32) -> (u32, u32, Vec<u8>, bool) {
     let mut out = Vec::with_capacity(mask.data.len());
     for texel in mask.data.chunks_exact(4) {
         let m = texel[channel] as f32 / 255.0;
-        let r = MATTE_ROUGHNESS + (roughness - MATTE_ROUGHNESS) * m;
+        let r = unmasked + (roughness - unmasked) * m;
         out.extend([255, (r * 255.0).round() as u8, (metallic * m * 255.0).round() as u8, 255]);
     }
     (mask.width, mask.height, out, false)
@@ -247,9 +247,9 @@ fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Resul
             let base = base.map(|b| rgba8(cache, b, permutation)).transpose()?;
             Ok(change_color(&mask, base.as_ref(), color))
         }
-        Bake::MetallicRoughness { mask, channel, roughness, metallic } => {
+        Bake::MetallicRoughness { mask, channel, unmasked, roughness, metallic } => {
             let mask = rgba8(cache, mask, permutation)?;
-            Ok(metallic_roughness(&mask, channel as usize, f32::from_bits(roughness), f32::from_bits(metallic)))
+            Ok(metallic_roughness(&mask, channel as usize, f32::from_bits(unmasked), f32::from_bits(roughness), f32::from_bits(metallic)))
         }
         Bake::EnvironmentSelfIllumination { base, map, colors } => {
             let map = rgba8(cache, map, permutation)?;

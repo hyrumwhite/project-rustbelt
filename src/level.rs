@@ -286,6 +286,10 @@ const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
 /// sun (a30's fields).
 const MATTE_REFLECTANCE: f32 = 0.25;
 
+/// Roughness where a reflective model shader's specular mask is zero: a
+/// plastic's sheen, not the matte of surfaces Halo gives no reflection.
+const MODEL_UNMASKED_ROUGHNESS: f32 = 0.45;
+
 /// How far inside the camera's skinned surface the rays' skinned copy sits
 /// (meters): the two are skinned alike, but on different processors.
 const TRACED_SKIN_INSET: f32 = 0.005;
@@ -857,7 +861,7 @@ impl LevelBuilder {
         let mut pieces = Vec::new();
         let mut traced_skins = Vec::new();
         let mut skinned = Vec::new();
-        for geometry in model.geometries_for(permutations, model::HIGHEST_DETAIL) {
+        for geometry in model.geometries_for(permutations, model.finest_played_detail()) {
             for part in model.geometry(geometry)? {
                 if part.indices.is_empty() {
                     continue;
@@ -1162,7 +1166,7 @@ impl LevelBuilder {
         let cache = self.cache.clone();
         let model = Model::load(&cache, datum)?;
         let mut out = Vec::new();
-        for geometry in model.geometries_for(permutations, model::HIGHEST_DETAIL) {
+        for geometry in model.geometries_for(permutations, model.finest_played_detail()) {
             for part in model.geometry(geometry)? {
                 if part.indices.is_empty() {
                     continue;
@@ -1594,10 +1598,15 @@ impl LevelBuilder {
             SpecularMask::MultipurposeRed => info.multipurpose_map.and_then(|m| m.datum).map(|d| (d, 0)),
             _ => None,
         };
+        // Halo's mask dims a reflection, never blurs it: a model's unmasked
+        // parts stay semi-glossy (fading them to matte while partly metallic
+        // left Covenant crates looking dusty).
+        let unmasked = if model { MODEL_UNMASKED_ROUGHNESS } else { MATTE_ROUGHNESS };
         let texture = mask.and_then(|(mask, channel)| {
             let bake = Bake::MetallicRoughness {
                 mask,
                 channel,
+                unmasked: unmasked.to_bits(),
                 roughness: roughness.to_bits(),
                 metallic: metallic.to_bits(),
             };
@@ -1870,18 +1879,30 @@ fn build_mesh_oriented(vertices: impl Iterator<Item = SourceVertex>, indices: &[
     // Bevy's front faces are counter-clockwise. A few are wound against
     // their vertices' normals (a model's handful): the game culls them where
     // they face the camera and lights them by their normals where they face
-    // away, where the rays' lighting finds them black; turned to face their
-    // normals (models only), they fill their holes and stay unseen from
-    // behind.
-    let indices: Vec<u32> = indices
-        .chunks_exact(3)
-        .flat_map(|t| {
-            let corner = |i: u32| sources.get(i as usize).copied().unwrap_or_default();
-            let ((a, na), (b, nb), (c, nc)) = (corner(t[0]), corner(t[1]), corner(t[2]));
-            // (clockwise from the front: the cross product points back)
-            if orient && (b - a).cross(c - a).dot(na + nb + nc) > 0.0 { [t[0], t[1], t[2]] } else { [t[0], t[2], t[1]] }
-        })
-        .collect();
+    // away, where the rays' lighting finds them black. Turned to face their
+    // normals (models only) where all three disagree, they fill their holes
+    // and stay unseen from behind. Where only some do, they're seams whose
+    // normals bend round an edge (the root of Johnson's cap bill, which the
+    // game draws facing down): drawn from both sides, as turned they left a
+    // notch seen from below.
+    let mut wound = Vec::with_capacity(indices.len());
+    for t in indices.chunks_exact(3) {
+        let corner = |i: u32| sources.get(i as usize).copied().unwrap_or_default();
+        let ((a, na), (b, nb), (c, nc)) = (corner(t[0]), corner(t[1]), corner(t[2]));
+        // (clockwise from the front: the cross product points back)
+        let back = (b - a).cross(c - a);
+        let game = [t[0], t[2], t[1]];
+        let turned = [t[0], t[1], t[2]];
+        if !orient || back.dot(na + nb + nc) <= 0.0 {
+            wound.extend(game);
+        } else if [na, nb, nc].iter().all(|n| back.dot(*n) > 0.0) {
+            wound.extend(turned);
+        } else {
+            wound.extend(game);
+            wound.extend(turned);
+        }
+    }
+    let indices = wound;
 
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)

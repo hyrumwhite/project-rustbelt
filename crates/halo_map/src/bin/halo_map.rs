@@ -240,7 +240,21 @@ fn export_bitmap(cache: &CacheFile, args: &[String]) -> CliResult {
         );
     }
     let b = bitmaps.get(index).ok_or("bitmap index out of range")?;
-    let decoded = b.decode_rgba8(cache)?;
+    // (a cube map: its faces side by side, +X -X +Y -Y +Z -Z)
+    let decoded = if b.kind == bitmap::Kind::CubeMap {
+        let faces = b.decode_cube_faces_rgba8(cache)?;
+        let (w, h) = (b.width as usize, b.height as usize);
+        let mut data = vec![0u8; w * 6 * h * 4];
+        for (f, face) in faces.iter().enumerate() {
+            for y in 0..h {
+                let row = &face.data[y * w * 4..(y + 1) * w * 4];
+                data[(y * w * 6 + f * w) * 4..(y * w * 6 + (f + 1) * w) * 4].copy_from_slice(row);
+            }
+        }
+        bitmap::Decoded { width: b.width * 6, data, ..faces.into_iter().next().unwrap() }
+    } else {
+        b.decode_rgba8(cache)?
+    };
     image::save_buffer(out, &decoded.data, decoded.width, decoded.height, image::ColorType::Rgba8)?;
     println!("wrote {out}");
     Ok(())
@@ -296,6 +310,22 @@ fn light(cache: &CacheFile, args: &[String]) -> CliResult {
     println!("  falloff angle {:.1} deg, cutoff angle {:.1} deg, lens flare radius {}", f(0x10).to_degrees(), f(0x14).to_degrees(), f(0x18));
     println!("  colour lower {:?} upper {:?} (interpolation flags {:#x})", [f(0x38), f(0x3C), f(0x40), f(0x44)], [f(0x48), f(0x4C), f(0x50), f(0x54)], root.u32(0x34)?);
     println!("  transition duration {} falloff function {}", f(0xF4), root.u32(0xF8)? >> 16);
+    // the gel (light_definition: a cube map projected round the light) and
+    // its periodic turning
+    let name = |o: usize| -> Result<String, Box<dyn std::error::Error>> {
+        Ok(root.reference(o)?.datum.map(|d| cache.tag(d).map(|t| t.name.clone())).transpose()?.unwrap_or_else(|| "none".into()))
+    };
+    println!("  gel {} (secondary {}), lens flare {}", name(0x64)?, name(0x7C)?, name(0xAC)?);
+    println!(
+        "  yaw function {} period {}, roll {} period {}, pitch {} period {}",
+        root.i16(0x8E)?, f(0x90), root.i16(0x96)?, f(0x98), root.i16(0x9E)?, f(0xA0)
+    );
+    for beam in halo_map::light_gel::gel_beams(cache, tag.datum)? {
+        println!(
+            "  gel beam along {:.2?} (forward, left, up), falloff {:.1} cutoff {:.1} deg, strength {:.2}",
+            beam.direction, beam.falloff_angle.to_degrees(), beam.cutoff_angle.to_degrees(), beam.strength
+        );
+    }
     Ok(())
 }
 
@@ -330,7 +360,7 @@ fn objects(cache: &CacheFile, list: bool) -> CliResult {
         for p in &placements {
             let name = p.definition.datum.map(|d| cache.tag(d).map(|t| t.name.clone())).transpose()?.unwrap_or_default();
             println!(
-                "{:?} {name} at {:.2},{:.2},{:.2} yaw {:.1} bsps {:#x}{}{}",
+                "{:?} {name} at {:.2},{:.2},{:.2} yaw {:.1} bsps {:#x}{}{}{}",
                 p.kind,
                 p.position[0],
                 p.position[1],
@@ -338,7 +368,8 @@ fn objects(cache: &CacheFile, list: bool) -> CliResult {
                 p.rotation[0].to_degrees(),
                 p.on_bsp_flags,
                 if p.not_automatic { " (scripted)" } else { "" },
-                p.light.map(|l| format!(" light {:?} x{} falloff {:.2} cutoff {:.2}", l.color, l.intensity, l.falloff_angle, l.cutoff_angle)).unwrap_or_default()
+                p.light.map(|l| format!(" light {:?} x{} falloff {:.2} cutoff {:.2}", l.color, l.intensity, l.falloff_angle, l.cutoff_angle)).unwrap_or_default(),
+                if p.region_permutations != [0; 8] { format!(" permutations {:?}", p.region_permutations) } else { String::new() }
             );
         }
     }

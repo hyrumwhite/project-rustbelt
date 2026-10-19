@@ -9,7 +9,7 @@ fn main() {
             continue;
         }
         let Ok(model) = halo_map::model::Model::load(&cache, datum) else { continue };
-        println!("{} ({} geometries, {} nodes)", model.name, model.geometry_count, model.nodes.len());
+        println!("{} ({} geometries, {} nodes, cutoffs {:?} px)", model.name, model.geometry_count, model.nodes.len(), model.detail_cutoff_pixels);
         for region in &model.regions {
             for permutation in &region.permutations {
                 let counts: Vec<String> = permutation
@@ -40,6 +40,12 @@ fn main() {
                             // (clockwise from the front: the cross product points back)
                             if face[0] * normal[0] + face[1] * normal[1] + face[2] * normal[2] > 0.0 {
                                 against += 1;
+                                if std::env::var_os("MODEL_LODS_TRIANGLES").is_some() {
+                                    let p = |v: &halo_map::model::Vertex| {
+                                        format!("({:.3} {:.3} {:.3} n {:.2} {:.2} {:.2})", v.position[0], v.position[1], v.position[2], v.normal[0], v.normal[1], v.normal[2])
+                                    };
+                                    println!("      {} {} {}", p(&a), p(&b), p(&c));
+                                }
                             }
                         }
                         if against > 0 {

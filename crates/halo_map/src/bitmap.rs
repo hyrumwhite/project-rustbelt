@@ -213,6 +213,30 @@ impl BitmapInfo {
         Ok(Decoded { width: self.width, height: self.height, levels, format: PixelFormat::Rgba8, data })
     }
 
+    /// A cube map's six faces' base levels as RGBA8, in Direct3D's order
+    /// (+X, -X, +Y, -Y, +Z, -Z). The Xbox keeps each face's whole mip chain
+    /// together, faces 128-byte aligned.
+    pub fn decode_cube_faces_rgba8(&self, cache: &CacheFile) -> Result<Vec<Decoded>> {
+        if self.kind != Kind::CubeMap {
+            return Err(Error::Unsupported(format!("{:?} bitmaps as cube faces", self.kind)));
+        }
+        let chain: usize = (0..self.levels.max(1)).map(|l| self.level_bytes(l)).sum();
+        let stride = chain.next_multiple_of(128);
+        let pixels = cache.file_bytes(self.pixels_offset, stride * 5 + chain)?;
+        let (w, h) = (self.width, self.height);
+        Ok((0..6)
+            .map(|face| {
+                let bytes = &pixels[face * stride..face * stride + self.level_bytes(0)];
+                let data = if self.format.is_compressed() {
+                    decode_dxt(self.format, bytes, w, h)
+                } else {
+                    decode_uncompressed(self.format, bytes, w, h, self.flags & FLAG_SWIZZLED != 0)
+                };
+                Decoded { width: w, height: h, levels: 1, format: PixelFormat::Rgba8, data }
+            })
+            .collect())
+    }
+
     /// The base level as RGBA8 regardless of format (for previews).
     pub fn decode_rgba8(&self, cache: &CacheFile) -> Result<Decoded> {
         let decoded = self.decode(cache, 1)?;

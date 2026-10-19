@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 38;
+pub const VERSION: u32 = 39;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -303,6 +303,9 @@ pub struct Light {
     pub definition_flags: u32,
     pub object_index: u32,
     pub first_person: u32,
+    /// (Protocol 39) its up: a light's gel (a cube map round it, the a10
+    /// alarm lights' two beams) is turned to its forward and up.
+    pub up: [f32; 3],
 }
 
 /// A light tag flag that, in the retail maps, only the weapons' muzzle

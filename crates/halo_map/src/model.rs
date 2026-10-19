@@ -26,6 +26,16 @@ const TRIANGLE_BUFFER_STRIP: i16 = 1;
 pub const LEVELS_OF_DETAIL: usize = 5;
 pub const HIGHEST_DETAIL: usize = LEVELS_OF_DETAIL - 1;
 
+/// `model.detail_cutoff_pixels` (model_definitions.h: after the flags and
+/// the node list checksum; the generated layout leaves it out).
+const DETAIL_CUTOFF_PIXELS: usize = 0x8;
+
+/// A level of detail whose cutoff is beyond this many pixels (twice the
+/// Xbox's 480 lines) is never reached in play: the game draws it only for a
+/// cinematic's movie stars, which it gives the finest (render_objects.c).
+/// a10's cryo tubes hold a Master Chief at 3000 pixels, and are empty below.
+pub const CINEMATIC_CUTOFF_PIXELS: f32 = 960.0;
+
 /// `real_matrix4x3`: `position + scale * (x * forward + y * left + z * up)`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Matrix4x3 {
@@ -97,6 +107,10 @@ pub struct Model<'a> {
     /// back are image 1 of the pointy one's bitmaps).
     pub shader_permutations: Vec<u16>,
     pub geometry_count: usize,
+    /// The screen size (the bounding sphere's diameter, in pixels) from
+    /// which each level of detail is drawn: the game draws the finest whose
+    /// cutoff the object reaches (models.c), and nothing below the first.
+    pub detail_cutoff_pixels: [f32; LEVELS_OF_DETAIL],
 }
 
 impl<'a> Model<'a> {
@@ -172,7 +186,20 @@ impl<'a> Model<'a> {
             shaders,
             shader_permutations,
             geometry_count: root.block(m::GEOMETRIES, layout::model_geometry::SIZEOF)?.count,
+            detail_cutoff_pixels: {
+                let mut cutoffs = [0.0; LEVELS_OF_DETAIL];
+                for (i, cutoff) in cutoffs.iter_mut().enumerate() {
+                    *cutoff = root.f32(DETAIL_CUTOFF_PIXELS + 4 * i)?;
+                }
+                cutoffs
+            },
         })
+    }
+
+    /// The finest level of detail the game draws in play: the highest whose
+    /// cutoff isn't a cinematic's (see [`CINEMATIC_CUTOFF_PIXELS`]).
+    pub fn finest_played_detail(&self) -> usize {
+        (0..LEVELS_OF_DETAIL).rev().find(|&l| self.detail_cutoff_pixels[l] <= CINEMATIC_CUTOFF_PIXELS).unwrap_or(0)
     }
 
     /// The geometry indices to draw: for each region, the given permutation

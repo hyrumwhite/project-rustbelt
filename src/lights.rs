@@ -6,8 +6,10 @@
 //! (their tag's, protocol 38), which shine every way from the weapon, are
 //! spot lights too: the player's out ahead along the camera's aim (round the
 //! camera, in first person, they lit a circle round the player), others'
-//! along their weapon's. Explosions, grenades and bolts stay round. They are
-//! kept in pools and reused frame to frame; unused ones are hidden.
+//! along their weapon's. Explosions, grenades and bolts stay round. A light
+//! shining every way through a gel of a few narrow discs (a10's spinning
+//! alarm lights: two) is a spot light for each, turned with the light. They
+//! are kept in pools and reused frame to frame; unused ones are hidden.
 
 use crate::{
     bridge::{BridgeLevel, BridgeLink},
@@ -16,7 +18,10 @@ use crate::{
 };
 use bevy::{platform::collections::HashMap, prelude::*};
 use halo_bridge::LIGHT_MUZZLE_FLASH;
-use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
+use halo_map::{
+    light_gel::{gel_beams, GelBeam},
+    math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
+};
 
 /// The lights' size (metres): larger, softer round the light (a muzzle
 /// flash's bright spot on the weapon and the wall beside it).
@@ -72,6 +77,13 @@ const SPOT_WIDEST: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
 /// How far a light reaches, over its radius: Bevy's range window fades it
 /// to none at the range, and at the radius the flashlight stopped short.
 const RANGE_PER_RADIUS: f32 = 1.75;
+/// A gel is drawn as spot lights when each of its discs is dark beyond this
+/// angle (radians; a10's alarm beams, 40 degrees): the holograms' and the
+/// Monitor's spill everywhere, and stay a point light.
+const GEL_WIDEST: f32 = 1.05;
+/// A gel's beams' share of the light's brightness (by the gel's own, its
+/// discs lit the rooms as brightly as the light unmasked).
+const GEL_LIGHT_SCALE: f32 = 0.5;
 
 pub struct DynamicLightsPlugin;
 
@@ -96,12 +108,14 @@ fn sync_lights(
     mut spots: Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
     level: Option<Res<BridgeLevel>>,
     mut muzzle_tags: Local<HashMap<u32, bool>>,
+    mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
     mut scenario: Local<String>,
 ) {
     let Some(snapshot) = &link.latest else { return };
     // (a new level: its own tags)
     if snapshot.scenario_name != *scenario {
         muzzle_tags.clear();
+        gels.clear();
         *scenario = snapshot.scenario_name.clone();
     }
     let (mut used_points, mut used_spots) = (0, 0);
@@ -152,6 +166,56 @@ fn sync_lights(
         let radius = if spot { SPOT_RADIUS } else { LIGHT_RADIUS };
         let source = LightSource { power: radiance * sphere_lumens_per_radiance(radius) };
         let (color, intensity) = source.color_and_intensity(settings.emissive_scale);
+        // a light shining every way through a gel of narrow discs: a spot
+        // light along each, by the light's forward, left and up (the game
+        // turns the gel with them), each as bright in its cone as the light
+        // was there, by the gel
+        let beams = if spot {
+            &[][..]
+        } else {
+            gels.entry(light.definition_index)
+                .or_insert_with(|| {
+                    let beams = level.as_ref().and_then(|level| gel_beams(&level.builder.cache, light.definition_index).ok()).unwrap_or_default();
+                    if beams.iter().all(|beam| beam.cutoff_angle <= GEL_WIDEST) { beams } else { Vec::new() }
+                })
+                .as_slice()
+        };
+        let (light_forward, light_up) = (Vec3::from(light.forward), Vec3::from(light.up));
+        let light_left = light_forward.cross(light_up);
+        if !beams.is_empty() && light_left.length_squared() > 1e-6 {
+            let light_left = light_left.normalize();
+            let light_up = light_left.cross(light_forward).normalize();
+            let source = LightSource { power: radiance * GEL_LIGHT_SCALE * sphere_lumens_per_radiance(SPOT_RADIUS) };
+            for beam in beams {
+                let [f, l, u] = beam.direction;
+                let along = light_forward * f + light_left * l + light_up * u;
+                let forward = Vec3::from(halo_to_bevy(along.to_array(), 1.0)).normalize_or(Vec3::NEG_Z);
+                let (color, intensity) = LightSource { power: source.power * beam.strength }.color_and_intensity(settings.emissive_scale);
+                if used_spots == pools.spots.len() {
+                    let entity = commands
+                        .spawn((Name::new("spotlight"), SpotLight { radius: SPOT_RADIUS, shadow_maps_enabled: false, ..default() }, Visibility::Hidden))
+                        .id();
+                    pools.spots.push(entity);
+                }
+                let entity = pools.spots[used_spots];
+                used_spots += 1;
+                let Ok((mut light_component, mut transform, mut visibility)) = spots.get_mut(entity) else { continue };
+                let outer = beam.cutoff_angle.clamp(0.01, SPOT_WIDEST);
+                *light_component = SpotLight {
+                    color,
+                    intensity,
+                    range,
+                    radius: SPOT_RADIUS,
+                    outer_angle: outer,
+                    inner_angle: beam.falloff_angle.clamp(0.0, outer * 0.99),
+                    shadow_maps_enabled: false,
+                    ..default()
+                };
+                *transform = Transform::from_translation(position).looking_to(forward, if forward.y.abs() > 0.99 { Vec3::X } else { Vec3::Y });
+                visibility.set_if_neq(Visibility::Inherited);
+            }
+            continue;
+        }
         if spot {
             if used_spots == pools.spots.len() {
                 let entity = commands

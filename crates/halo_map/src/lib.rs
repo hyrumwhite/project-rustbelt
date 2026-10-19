@@ -82,6 +82,7 @@ pub mod device_pose;
 pub mod features;
 mod cache;
 pub mod layout;
+pub mod light_gel;
 pub mod math;
 pub mod model;
 pub mod objects;
@@ -138,6 +139,7 @@ pub mod groups {
     pub const SHADER_MODEL: u32 = fourcc(b"soso");
     pub const SKY: u32 = fourcc(b"sky ");
     pub const MODEL: u32 = fourcc(b"mode");
+    pub const LIGHT: u32 = fourcc(b"ligh");
     /// The parent of every object group (`scen`, `vehi`, `weap`, ...).
     pub const OBJECT: u32 = fourcc(b"obje");
     pub const DAMAGE_EFFECT: u32 = fourcc(b"jpt!");

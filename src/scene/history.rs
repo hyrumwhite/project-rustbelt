@@ -30,6 +30,11 @@ impl ViewHistory {
             0.0
         }
     }
+    /// Whether nothing was rendered yet or a reset was asked for since.
+    pub(crate) fn full_reset_pending(&self) -> bool {
+        self.scene_generation.load(Ordering::Relaxed) == 0
+            || self.pending_full_reset.load(Ordering::Relaxed)
+    }
     pub(crate) fn has_one_pending_event(&self, generation: u64) -> bool {
         let previous = self.scene_generation.load(Ordering::Relaxed);
         previous != 0

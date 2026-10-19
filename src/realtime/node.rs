@@ -436,7 +436,12 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         && scene_bindings.history_regional
         && s.history
             .has_one_pending_event(scene_bindings.history_generation);
-    let reset_flags = if solarik_lighting.reset || (stable_radius == 0.0 && !regional) {
+    let reset_flags = if solarik_lighting.reset || s.history.full_reset_pending() {
+        1u32
+    } else if solarik_lighting.dynamic_scene {
+        // (scene changes keep the history: SolarikLighting::dynamic_scene)
+        0u32
+    } else if stable_radius == 0.0 && !regional {
         1u32
     } else if regional {
         6u32
@@ -866,6 +871,10 @@ pub fn init_solari_lighting_pipelines(
             raster_subpixel_bits,
         ));
         shader_defs.push("BINDLESS_SURFACE_DETAIL".into());
+        // (diagnostics: extra definitions, comma separated)
+        if let Ok(defs) = std::env::var("SOLARIK_SHADER_DEFS") {
+            shader_defs.extend(defs.split(',').filter(|d| !d.is_empty()).map(|d| d.trim().to_string().into()));
+        }
         if std::env::var("SOLARIK_ADAPTIVE_CACHE_BUDGET").is_ok_and(|v| v == "1") {
             shader_defs.push("ADAPTIVE_CACHE_BUDGET".into());
         }

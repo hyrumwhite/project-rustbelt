@@ -137,12 +137,22 @@ pub struct SolarikLighting {
     /// After setting this to true, it will automatically be toggled
     /// back to false at the end of the frame.
     pub reset: bool,
+    /// Set to true for a scene that changes all the time (a game: lights
+    /// culled, moving and flashing, emissive and occluding objects in
+    /// motion): its changes keep the temporal history instead of discarding
+    /// it, which the history then follows over its frames (DI's reservoirs
+    /// translate light ids, GI's samples age out, cache cells are traced
+    /// again), as upstream Solari does. Discarding it at every change leaves
+    /// a scene that never stops changing with almost no history, its
+    /// indirect light noisy. Only `reset` (and the first frame) discards it.
+    pub dynamic_scene: bool,
 }
 
 impl Default for SolarikLighting {
     fn default() -> Self {
         Self {
             reset: true, // No temporal history on the first frame
+            dynamic_scene: false,
         }
     }
 }

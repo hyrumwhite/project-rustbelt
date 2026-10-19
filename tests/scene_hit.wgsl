@@ -4,6 +4,7 @@ struct Output { a:vec4u,b:vec4u }
 @group(0) @binding(1) var<storage,read> requests:array<Request>;
 @group(0) @binding(2) var<storage,read_write> output:array<Output>;
 const RAY_NO_CULL=255u;
+const RAY_MASK_NEAR=1u;
 const MATERIAL_FLAG_DOUBLE_SIDED=1u;
 const MATERIAL_FLAG_OPAQUE=2u;
 struct ForestEvent {position_distance:vec4f,normal_hit:vec4f,color_coverage:vec4f,surface:vec4f,source:vec4u}
@@ -23,8 +24,8 @@ fn forest_trace_scene_impl(origin:vec3f,direction:vec3f,minimum:f32,maximum:f32,
     }
     return result;
 }
-struct Sky { relative_ray_min:f32 }
-const sky_light=Sky(0.000001);
+struct Sky { relative_ray_min:f32, near_rays:vec4f }
+const sky_light=Sky(0.000001, vec4f(0.0));
 fn ray_max_distance()->f32 {return 6.0;}
 // Synthetic material acceptance isolates the unchanged hardware query from its adapter.
 fn candidate_is_solid(hit:RayIntersection,glass:bool,origin:vec3f,direction:vec3f)->bool {

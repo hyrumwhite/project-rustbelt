@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 39;
+pub const VERSION: u32 = 40;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -61,6 +61,10 @@ pub const OBJECT_FIRST_PERSON: u32 = 1 << 1;
 /// Not an object but a model the game draws by itself (the first-person
 /// weapon and hands): [`Object::definition_index`] is the model tag.
 pub const OBJECT_MODEL: u32 = 1 << 2;
+/// (Protocol 40) The first-person unit or something it holds, not itself
+/// invisible ([`OBJECT_HIDDEN`] is set too): hidden from the camera, but its
+/// body can still shade the world.
+pub const OBJECT_FIRST_PERSON_BODY: u32 = 1 << 3;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]

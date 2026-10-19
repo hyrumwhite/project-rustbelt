@@ -20,7 +20,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
 };
-use halo_bridge::{Bridge, Snapshot, OBJECT_FIRST_PERSON, OBJECT_HIDDEN, OBJECT_MODEL};
+use halo_bridge::{Bridge, Snapshot, OBJECT_FIRST_PERSON, OBJECT_FIRST_PERSON_BODY, OBJECT_HIDDEN, OBJECT_MODEL};
 use std::{sync::Arc, time::Duration};
 
 /// The simulation the game runs: the systems in Rust (its
@@ -345,7 +345,16 @@ struct Tracked {
     /// pose the camera draws.
     skins: Vec<Entity>,
     skinned_to: Vec<Mat4>,
+    /// Whether it is the first-person player's body (or what it holds),
+    /// which the rays see from away from the camera only.
+    body: bool,
 }
+
+/// How far round the first-person camera rays don't meet the player's own
+/// body (metres): the first-person arms and weapon, which sit inside it,
+/// lie within, and the camera's own rays start there. Further away, the
+/// body shades the world.
+const NEAR_RAYS_RADIUS: f32 = 1.0;
 
 /// The game's objects drawn so far, by object datum index.
 #[derive(Resource, Default)]
@@ -432,7 +441,11 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, animated): (Query<(Entity, &crate::level::Recolourable)>, Query<(), With<crate::level::AnimatedSelfIllumination>>),
+    (recolourable, animated, children): (
+        Query<(Entity, &crate::level::Recolourable)>,
+        Query<(), With<crate::level::AnimatedSelfIllumination>>,
+        Query<&Children>,
+    ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
 ) {
@@ -531,6 +544,7 @@ fn sync_objects(
                     nodes,
                     skins,
                     skinned_to: Vec::new(),
+                    body: false,
                 },
             );
             // newly spawned entities take their transforms next frame
@@ -550,6 +564,20 @@ fn sync_objects(
                 *v = wanted;
             }
         }
+        // the first-person player's body and what it holds: the camera's
+        // view leaves it out, but it shadows the world (and shows in
+        // reflections), seen by rays from away from the camera alone
+        let body = object.flags & OBJECT_FIRST_PERSON_BODY != 0;
+        if body != tracked.body {
+            for entity in children.iter_descendants(tracked.root) {
+                if body {
+                    commands.entity(entity).try_insert(bevy_solarik::scene::RaytracingMask::AWAY);
+                } else {
+                    commands.entity(entity).try_remove::<bevy_solarik::scene::RaytracingMask>();
+                }
+            }
+            tracked.body = body;
+        }
         let nodes = snapshot.object_nodes(object);
         let mut node_matrices = Vec::with_capacity(tracked.nodes.len());
         for (index, entity) in tracked.nodes.iter().enumerate() {
@@ -567,11 +595,11 @@ fn sync_objects(
         }
         // the rays' copies of the bending parts, skinned again when the
         // nodes moved relative to the root node (and not for a hidden
-        // object, which the rays don't see)
+        // object, which the rays don't see, but the first-person body)
         let to_root = node_matrices.first().map_or(Mat4::IDENTITY, |root| root.inverse());
         let relative: Vec<Mat4> = node_matrices.iter().map(|m| to_root * *m).collect();
         if !tracked.skins.is_empty()
-            && object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) == 0
+            && (object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) == 0 || body)
             && tracked.skinned_to != relative
         {
             // (a new mesh each time: Solari queues each mesh's acceleration
@@ -714,7 +742,37 @@ fn sync_camera(
     link: Res<BridgeLink>,
     follow: Res<FollowGame>,
     camera: Single<(&mut Transform, &mut Projection), With<Camera3d>>,
+    mut near_rays: ResMut<bevy_solarik::scene::SolarikNearRays>,
 ) {
+    // round a first-person camera, rays don't meet the player's body
+    let first_person = link.latest.as_ref().filter(|s| s.objects.iter().any(|o| o.flags & OBJECT_FIRST_PERSON != 0));
+    let near = match first_person.and_then(|s| s.camera) {
+        Some(game) => bevy_solarik::scene::SolarikNearRays {
+            centre: Vec3::from(halo_map::math::halo_to_bevy(game.position, halo_map::math::METERS_PER_WORLD_UNIT)),
+            radius: NEAR_RAYS_RADIUS,
+        },
+        None => bevy_solarik::scene::SolarikNearRays::default(),
+    };
+    if near_rays.centre != near.centre || near_rays.radius != near.radius {
+        *near_rays = near;
+    }
+    // (HALO_RT_CAMERA_LOG: the game's camera each second, in --camera's form)
+    if let Some(snapshot) = link.latest.as_ref()
+        && let Some(game) = snapshot.camera
+        && snapshot.game_tick % 30 == 0
+        && std::env::var_os("HALO_RT_CAMERA_LOG").is_some()
+    {
+        let [x, y, z] = game.forward;
+        info!(
+            "camera at tick {}: {:.2},{:.2},{:.2},{:.1},{:.1}",
+            snapshot.game_tick,
+            game.position[0],
+            game.position[1],
+            game.position[2],
+            y.atan2(x).to_degrees(),
+            z.clamp(-1.0, 1.0).asin().to_degrees()
+        );
+    }
     if !follow.0 {
         return;
     }

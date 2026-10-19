@@ -10,6 +10,10 @@
 //! shining every way through a gel of a few narrow discs (a10's spinning
 //! alarm lights: two) is a spot light for each, turned with the light. They
 //! are kept in pools and reused frame to frame; unused ones are hidden.
+//! Projectiles glow too: the plasma bolts by the lights their tags attach,
+//! which in the game are only lens flares and light nothing (the game
+//! shares them anyway, at their tags' colour and reach); rockets, needles
+//! and the Wraith's mortar, whose tags carry no light, by their own here.
 
 use crate::{
     bridge::{BridgeLevel, BridgeLink},
@@ -17,7 +21,7 @@ use crate::{
     LightingSettings,
 };
 use bevy::{camera::visibility::NoFrustumCulling, platform::collections::HashMap, prelude::*};
-use halo_bridge::LIGHT_MUZZLE_FLASH;
+use halo_bridge::{Light, LIGHT_MUZZLE_FLASH};
 use halo_map::{
     light_gel::{gel_beams, GelBeam},
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
@@ -85,6 +89,19 @@ const GEL_WIDEST: f32 = 1.05;
 /// discs lit the rooms as brightly as the light unmasked).
 const GEL_LIGHT_SCALE: f32 = 0.5;
 
+/// The projectiles that glow in flight with no light in their tags (the
+/// fuel rods, charged bolts and grenades have their own, the other bolts
+/// their lens flares'): their tag's name, their light's colour and reach
+/// (world units, as a light tag's radius).
+const PROJECTILE_GLOWS: [(&str, [f32; 3], f32); 3] = [
+    // (its exhaust's flame)
+    ("weapons\\rocket launcher\\rocket", [1.0, 0.55, 0.2], 2.0),
+    // (pink crystal, in flight and stuck in what it hit)
+    ("weapons\\needler\\needle", [1.0, 0.3, 0.8], 0.75),
+    // (a ball of blue plasma)
+    ("vehicles\\wraith\\wraith mortar", [0.5, 0.45, 1.0], 2.0),
+];
+
 pub struct DynamicLightsPlugin;
 
 impl Plugin for DynamicLightsPlugin {
@@ -109,6 +126,7 @@ fn sync_lights(
     level: Option<Res<BridgeLevel>>,
     mut muzzle_tags: Local<HashMap<u32, bool>>,
     mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
+    mut glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
     mut scenario: Local<String>,
 ) {
     let Some(snapshot) = &link.latest else { return };
@@ -116,10 +134,37 @@ fn sync_lights(
     if snapshot.scenario_name != *scenario {
         muzzle_tags.clear();
         gels.clear();
+        glows.clear();
         *scenario = snapshot.scenario_name.clone();
     }
+    // the glowing projectiles' lights, round from their middles (by no tag:
+    // neither muzzle flashes nor gelled)
+    const INVISIBLE: u32 = 1;
+    let projectile_lights: Vec<Light> = snapshot
+        .objects
+        .iter()
+        .filter(|object| object.object_flags & INVISIBLE == 0)
+        .filter_map(|object| {
+            let (color, radius) = (*glows.entry(object.definition_index).or_insert_with(|| {
+                let tag = level.as_ref()?.builder.cache.tag(object.definition_index).ok()?;
+                PROJECTILE_GLOWS.iter().find(|(name, ..)| tag.name.eq_ignore_ascii_case(name)).map(|&(_, color, radius)| (color, radius))
+            }))?;
+            Some(Light {
+                position: object.bounding_center,
+                forward: [1.0, 0.0, 0.0],
+                up: [0.0, 0.0, 1.0],
+                color,
+                radius,
+                cutoff_angle: std::f32::consts::PI,
+                falloff_angle: std::f32::consts::PI,
+                definition_index: u32::MAX,
+                object_index: object.object_index,
+                ..default()
+            })
+        })
+        .collect();
     let (mut used_points, mut used_spots) = (0, 0);
-    for light in &snapshot.lights {
+    for light in snapshot.lights.iter().chain(&projectile_lights) {
         let near = snapshot.camera.as_ref().filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
         let own = light.first_person != 0;
         // (a muzzle flash: its tag's flag, or its name)

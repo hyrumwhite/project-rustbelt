@@ -388,6 +388,9 @@ fn main() -> AppExit {
 
     app.add_systems(Update, capture);
     app.init_resource::<CaptureFrames>().add_systems(First, count_capture_frames);
+    if std::env::var_os("HALO_RT_CACHE_LOG").is_some() {
+        app.add_systems(PostUpdate, log_world_cache);
+    }
     if args.dolly.is_some() {
         app.add_systems(Update, dolly_camera);
     }
@@ -1037,6 +1040,21 @@ struct CaptureFrames(u32);
 
 fn count_capture_frames(mut frames: ResMut<CaptureFrames>) {
     frames.0 += 1;
+}
+
+/// `HALO_RT_CACHE_LOG`: Solarik's world cache counters every 40 frames
+/// (diagnostics for the interiors' slow drift).
+fn log_world_cache(frames: Res<CaptureFrames>, diagnostics: Res<DiagnosticsStore>) {
+    if frames.0 % 40 != 0 {
+        return;
+    }
+    let mut line = format!("cache {}:", frames.0);
+    for name in ["world_cache_active_cells_count", "world_cache_selected_cells", "world_cache_unlit_cells", "world_cache_selected_unlit", "world_cache_oldest_age", "world_cache_updated_cells"] {
+        let path = DiagnosticPath::new(format!("render/solarik_lighting/{name}"));
+        let value = diagnostics.get(&path).and_then(Diagnostic::value).unwrap_or(-1.0);
+        line += &format!(" {}={value}", name.trim_start_matches("world_cache_"));
+    }
+    info!("{line}");
 }
 
 /// `--dolly`: sways the camera forward and back from where it started, and

@@ -86,7 +86,8 @@ pub fn animate_self_illumination(
         // (the transition functions aren't used here; any table will do)
         transition: std::array::from_fn(|_| Some(&tables.0[0])),
     };
-    let seconds = time.elapsed_secs();
+    // (HALO_RT_FREEZE_ANIMATION, diagnostics: the glow as at the start)
+    let seconds = if std::env::var_os("HALO_RT_FREEZE_ANIMATION").is_some() { 0.0 } else { time.elapsed_secs() };
     for object in &objects {
         for (material, raster, animation) in &object.materials {
             let phase = if animation.random_phase { object.phase } else { 0.0 };
@@ -695,6 +696,10 @@ impl LevelBuilder {
         light: Vec3,
         assets: &mut LevelAssets,
     ) {
+        // (HALO_RT_NO_FIXTURE_LIGHTS, diagnostics: none)
+        if std::env::var_os("HALO_RT_NO_FIXTURE_LIGHTS").is_some() {
+            return;
+        }
         let power = light * LIGHT_PROXY_RADIANCE * sphere_lumens_per_radiance(LIGHT_PROXY_RADIUS);
         let mut source = commands.spawn((
             Name::new("light fixture light"),

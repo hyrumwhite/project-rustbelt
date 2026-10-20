@@ -387,6 +387,7 @@ fn main() -> AppExit {
         .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));
 
     app.add_systems(Update, capture);
+    app.init_resource::<CaptureFrames>().add_systems(First, count_capture_frames);
     if args.dolly.is_some() {
         app.add_systems(Update, dolly_camera);
     }
@@ -506,7 +507,9 @@ fn default_plugins(args: &Args, overlay: bool) -> impl PluginGroup {
         RenderPlugin,
     };
     let title = format!("Halo RT - {}", args.map());
-    let mut window = Window { title, ..default() };
+    // (a scripted capture opens behind the window in use, without taking
+    // the keyboard)
+    let mut window = Window { title, focused: args.screenshot.is_none(), ..default() };
     if overlay {
         // the game's overlay is drawn at this shape (overlay::WINDOW_SIZE)
         window.resolution = overlay::WINDOW_SIZE.into();
@@ -748,7 +751,8 @@ fn setup_camera(
     }
     // a bridged camera follows the game's until F8 detaches it (or, with
     // --camera, starts detached there)
-    if !args.bridge || args.camera.is_some() {
+    // (not for a scripted capture, which nothing should move)
+    if (!args.bridge || args.camera.is_some()) && args.screenshot.is_none() {
         camera.insert(FreeCamera { walk_speed: 6.0, run_speed: 25.0, ..default() });
     }
 
@@ -1026,18 +1030,33 @@ fn start_camera(mut frames: Local<u32>, mut camera: Single<&mut Camera, With<Sol
 /// Frames in one forward-and-back sweep of `--dolly`.
 const DOLLY_PERIOD: u32 = 120;
 
-/// `--dolly`: sways the camera forward and back from where it started.
+/// Frames since the app started, as `--screenshot` and `--dolly` count them
+/// (one count, so a capture's frame is the dolly's).
+#[derive(Resource, Default)]
+struct CaptureFrames(u32);
+
+fn count_capture_frames(mut frames: ResMut<CaptureFrames>) {
+    frames.0 += 1;
+}
+
+/// `--dolly`: sways the camera forward and back from where it started, and
+/// with `--screenshot-every` stops there at `--screenshot-from` (a multiple
+/// of the period: at rest), so the captures show the lighting settling
+/// after the motion, from one view.
 fn dolly_camera(
     args: Res<Args>,
+    frames: Res<CaptureFrames>,
     mut start: Local<Option<Transform>>,
-    mut frames: Local<u32>,
     mut camera: Single<&mut Transform, With<Camera3d>>,
 ) {
     let Some(reach) = args.dolly else { return };
     let start = *start.get_or_insert(**camera);
-    *frames += 1;
-    let phase = (*frames % DOLLY_PERIOD) as f32 / DOLLY_PERIOD as f32 * std::f32::consts::TAU;
-    camera.translation = start.translation + *start.forward() * reach * phase.sin();
+    if args.screenshot_every.is_some() && frames.0 >= args.screenshot_from {
+        camera.translation = start.translation;
+        return;
+    }
+    let phase = (frames.0 % DOLLY_PERIOD) as f32 / DOLLY_PERIOD as f32 * std::f32::consts::TAU;
+    camera.translation = start.translation + *start.forward() * reach * 0.5 * (1.0 - phase.cos());
 }
 
 #[cfg(feature = "dlss")]
@@ -1078,11 +1097,11 @@ fn cycle_dlss_quality(key_input: Res<ButtonInput<KeyCode>>, mut dlss: Query<&mut
 fn screenshot_and_exit(
     mut commands: Commands,
     args: Res<Args>,
-    mut frames: Local<u32>,
+    frames: Res<CaptureFrames>,
     mut exit: MessageWriter<AppExit>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-    *frames += 1;
+    let frames = &frames.0;
     if let (Some(every), Some(path)) = (args.screenshot_every, &args.screenshot)
         && every > 0
         && *frames % every == 0

@@ -263,6 +263,10 @@ pub struct HaloTransparentMaterial {
     /// A numeric counter's digit (an ammo counter's): its first map's frames.
     #[reflect(ignore)]
     pub numeric: Option<std::sync::Arc<NumericCounter>>,
+    /// A meter (`shader_transparent_meter`): its combiner constants follow
+    /// its object's functions.
+    #[reflect(ignore)]
+    pub meter: Option<std::sync::Arc<halo_map::shader::MeterInfo>>,
 }
 
 /// A numeric shader's digit (`_shader_transparent_flag_numeric_bit`): the
@@ -303,6 +307,15 @@ impl HaloTransparentMaterial {
         time: f32,
         periodic: &impl Fn(i16, f32) -> f32,
     ) -> Option<HaloCombinerParams> {
+        if let Some(meter) = &self.meter {
+            let mut params = self.params.clone();
+            let (c0, c1) = meter.constants(values);
+            for stage in 0..4 {
+                params.constant0[stage] = Vec4::from(c0[stage]);
+                params.constant1[stage] = Vec4::from(c1[stage]);
+            }
+            return Some(params);
+        }
         let info = self.animation.as_ref()?;
         let mut params = self.params.clone();
         for (stage, map) in info.maps.iter().enumerate().take(4) {
@@ -369,6 +382,10 @@ impl Material for HaloTransparentMaterial {
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         use bevy::render::render_resource::{BlendComponent, BlendFactor, BlendOperation, BlendState, Face};
         descriptor.primitive.cull_mode = if key.bind_group_data.one_sided { Some(Face::Back) } else { None };
+        // (a meter's blend takes a constant colour, its tint, which the
+        // shader applies: tint mode 1, src times the tint's alpha plus what's
+        // there times its colour, taken as its mean in the alpha; tint mode 2,
+        // src times the tint's colour plus what's there times src's alpha)
         let component = |src_factor, dst_factor, operation| BlendComponent { src_factor, dst_factor, operation };
         let keep_alpha = component(BlendFactor::Zero, BlendFactor::One, BlendOperation::Add);
         let color = match key.bind_group_data.blend {
@@ -382,7 +399,9 @@ impl Material for HaloTransparentMaterial {
             4 => component(BlendFactor::One, BlendFactor::One, BlendOperation::ReverseSubtract),
             5 => component(BlendFactor::One, BlendFactor::One, BlendOperation::Min),
             6 => component(BlendFactor::One, BlendFactor::One, BlendOperation::Max),
-            // alpha multiply add: premultiplied
+            // meter, tint mode 2
+            9 => component(BlendFactor::One, BlendFactor::SrcAlpha, BlendOperation::Add),
+            // alpha multiply add: premultiplied; meter, tint mode 1
             _ => component(BlendFactor::One, BlendFactor::OneMinusSrcAlpha, BlendOperation::Add),
         };
         if let Some(fragment) = descriptor.fragment.as_mut() {

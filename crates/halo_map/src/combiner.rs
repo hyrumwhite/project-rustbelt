@@ -97,6 +97,29 @@ pub fn program(cache: &CacheFile, shader: TagRef) -> Result<Option<CombinerProgr
     })
 }
 
+/// `_shader_type_transparent_meter`'s pixel shader (its constants are the
+/// draw's: `MeterInfo::constants`). The final combiner takes r0 times the
+/// map's alpha, and r0's alpha; the map's zero alpha is killed.
+pub fn meter(flash_color_is_negative: bool) -> CombinerProgram {
+    let mut program = CombinerProgram {
+        stage_count: 4,
+        flags: 0x11100,
+        final_abcd: 0x0C180000,
+        final_efg: 0x00001C00,
+        ..Default::default()
+    };
+    program.alpha_inputs[..4].copy_from_slice(&[0x12081208, 0x6C200000, 0x0820B120, 0x12201120]);
+    program.alpha_outputs[..4].copy_from_slice(&[0x20C00, 0xC0, 0xC00, 0x4C00]);
+    program.rgb_inputs[..4].copy_from_slice(&[
+        0x1120E820,
+        0x3C011C02,
+        ((if flash_color_is_negative { 0xE0 } else { 0 }) + 2) | 0x0C201C00,
+        0x0C200120,
+    ]);
+    program.rgb_outputs[..4].copy_from_slice(&[0x20C00, 0xC00, 0xC00, 0x4C00]);
+    program
+}
+
 /// `shader_transparent_chicago_create`.
 fn chicago(root: Ptr<'_>) -> Result<CombinerProgram> {
     use layout::{shader_transparent as t, shader_transparent_chicago_map as m};

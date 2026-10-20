@@ -275,8 +275,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let rgb = saturate(fa.rgb * fb.rgb + (1.0 - fa.rgb) * fc.rgb + fd.rgb);
     let alpha = final_input(&registers, (efg >> 8u) & 0xffu, true).a;
 
-    // the game's alpha test (reference 0x7f)
+    // the game's alpha test (reference 0x7f); a meter's alpha kill (its
+    // map's zero alpha)
     if (combiner.modes.z & 1u) != 0u && alpha < 127.5 / 255.0 {
+        discard;
+    }
+    if (combiner.modes.z & 256u) != 0u && registers[8].a <= 0.0 {
         discard;
     }
     if combiner.fade.y > 0.5 {
@@ -295,6 +299,16 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         case 2u: { return vec4(pow(2.0 * mix(vec3(0.5), rgb, fade), vec3(2.2)), 1.0); }
         // alpha multiply add: premultiplied
         case 7u: { return vec4(pow(rgb, vec3(2.2)) * fade * fog.y, alpha * fade); }
+        // a meter: its blend's constant colour, the tint (stage 3's c1)
+        case 8u: {
+            let tint = combiner.constant1[3];
+            let keep = dot(pow(tint.rgb, vec3(2.2)), vec3(1.0 / 3.0));
+            return vec4(pow(rgb, vec3(2.2)) * tint.a * fade * fog.y, 1.0 - keep);
+        }
+        case 9u: {
+            let tint = combiner.constant1[3];
+            return vec4(pow(rgb, vec3(2.2)) * pow(tint.rgb, vec3(2.2)) * fade * fog.y, alpha);
+        }
         // add, subtract, max
         default: { return vec4(pow(rgb, vec3(2.2)) * fade * fog.y, 1.0); }
     }

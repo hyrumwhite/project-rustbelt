@@ -216,6 +216,74 @@ impl StageColorAnimation {
     }
 }
 
+/// `shader_transparent_meter`: a gauge (the plasma weapons' heat, the
+/// Warthog's), a bitmap whose alpha is where along it a texel lies, lit up to
+/// the object's function value.
+#[derive(Debug, Clone, Copy)]
+pub struct MeterInfo {
+    /// bit 1 two-sided, 2 flash colour is negative, 3 tint mode 2
+    pub flags: u16,
+    pub map: TagRef,
+    pub gradient_min: [f32; 3],
+    pub gradient_max: [f32; 3],
+    pub background: [f32; 3],
+    pub flash: [f32; 3],
+    pub tint: [f32; 3],
+    pub meter_transparency: f32,
+    pub background_transparency: f32,
+    /// object functions (A-D: 1-4; 0 none) for the meter's brightness, the
+    /// flash's brightness, the value, the gradient and the flash's extension
+    pub sources: [i16; 5],
+}
+
+impl MeterInfo {
+    pub const TWO_SIDED: u16 = 1 << 1;
+    pub const FLASH_COLOR_IS_NEGATIVE: u16 = 1 << 2;
+    pub const TINT_MODE_2: u16 = 1 << 3;
+
+    fn read(root: crate::Ptr<'_>) -> Result<Self> {
+        let rgb = |o: usize| -> Result<[f32; 3]> { Ok([root.f32(o)?, root.f32(o + 4)?, root.f32(o + 8)?]) };
+        Ok(Self {
+            flags: root.u16(0x28)?,
+            map: root.reference(0x4c)?,
+            gradient_min: rgb(0x7c)?,
+            gradient_max: rgb(0x88)?,
+            background: rgb(0x94)?,
+            flash: rgb(0xa0)?,
+            tint: rgb(0xac)?,
+            meter_transparency: root.f32(0xb8)?,
+            background_transparency: root.f32(0xbc)?,
+            sources: [root.i16(0xd8)?, root.i16(0xda)?, root.i16(0xdc)?, root.i16(0xde)?, root.i16(0xe0)?],
+        })
+    }
+
+    /// The meter's combiner constants (each stage's c0 and c1, rgba) with
+    /// the object's function values, as `_shader_type_transparent_meter`'s
+    /// draw makes them; c1 of stage 3 is the blend's constant colour.
+    pub fn constants(&self, values: Option<&[f32; 4]>) -> ([[f32; 4]; 4], [[f32; 4]; 4]) {
+        let value = |source: i16| match values {
+            Some(values) if (1..=4).contains(&source) => values[source as usize - 1],
+            _ => 1.0,
+        };
+        let [meter_brightness, flash_brightness, meter_value, gradient_value, flash_extension] = self.sources.map(value);
+        let flash_color = self.flash.map(|c| c * flash_brightness);
+        let flash_alpha = 1.0 / (gradient_value * 8.0).max(1.0);
+        let pixel = |alpha: f32, rgb: [f32; 3]| [rgb[0], rgb[1], rgb[2], alpha].map(|c| c.clamp(0.0, 1.0));
+        let (background, tint) = if self.flags & Self::TINT_MODE_2 != 0 {
+            (
+                pixel(self.background_transparency, self.background),
+                pixel(self.meter_transparency, self.tint.map(|c| c * meter_brightness)),
+            )
+        } else {
+            (pixel(0.0, self.background), pixel(meter_brightness, self.tint))
+        };
+        let gradient_min = pixel(meter_value, self.gradient_min);
+        let gradient_max = pixel(flash_alpha, self.gradient_max);
+        let flash = pixel(flash_extension, flash_color);
+        ([flash, gradient_min, gradient_min, background], [gradient_max, gradient_max, flash, tint])
+    }
+}
+
 /// The parts of a transparent generic or chicago shader the renderer uses.
 #[derive(Debug, Clone)]
 pub struct TransparentInfo {
@@ -474,6 +542,8 @@ pub struct ShaderInfo {
     pub uv_scale: [f32; 2],
     /// For transparent generic and chicago shaders.
     pub transparent: Option<TransparentInfo>,
+    /// For transparent meter shaders.
+    pub meter: Option<MeterInfo>,
     pub self_illumination: Option<SelfIllumination>,
     /// `shader_model`'s multipurpose map (see [`SelfIllumination::Model`]).
     pub multipurpose_map: Option<TagRef>,
@@ -527,6 +597,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         two_sided: false,
         uv_scale: [1.0, 1.0],
         transparent: None,
+        meter: None,
         self_illumination: None,
         multipurpose_map: None,
         change_color: None,
@@ -702,6 +773,9 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
             perpendicular_tint: argb(root, w::VIEW_PERPENDICULAR_TINT_COLOR)?,
             parallel_tint: argb(root, w::VIEW_PARALLEL_TINT_COLOR)?,
         });
+    }
+    if shader_type == ShaderType::Meter {
+        info.meter = Some(MeterInfo::read(root)?);
     }
     if matches!(shader_type, ShaderType::TransparentGeneric | ShaderType::TransparentChicago) {
         use layout::shader_transparent as t;

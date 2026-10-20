@@ -102,7 +102,8 @@ pub fn animate_transparent(
     mut materials: ResMut<Assets<HaloTransparentMaterial>>,
 ) {
     let seconds = if std::env::var_os("HALO_RT_FREEZE_ANIMATION").is_some() { 0.0 } else { time.elapsed_secs() };
-    let animated: Vec<_> = materials.iter().filter(|(_, m)| m.animation.is_some()).map(|(id, _)| id).collect();
+    let animated: Vec<_> =
+        materials.iter().filter(|(_, m)| m.animation.is_some() || m.meter.is_some()).map(|(id, _)| id).collect();
     for id in animated {
         let Some(material) = materials.get(id) else { continue };
         let functions = material.object.and_then(|object| objects.get(object).ok());
@@ -130,6 +131,7 @@ pub fn animate_transparent(
         let Some(material) = materials.get(id) else { continue };
         if params.map_rows != material.params.map_rows
             || params.constant0 != material.params.constant0
+            || params.constant1 != material.params.constant1
             || params.fade != material.params.fade
         {
             if let Some(mut material) = materials.get_mut(id) {
@@ -615,16 +617,19 @@ impl LevelBuilder {
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
         let mut placements = objects::placements(&self.cache)?;
-        // `HALO_RT_PLACE=<biped tag>@x,y,z,yaw`: one more biped there (Halo
-        // world units, yaw in degrees), to look at a character's materials
-        // where the light suits
+        // `HALO_RT_PLACE=<biped or weapon tag>@x,y,z,yaw`: one more there
+        // (Halo world units, yaw in degrees), to look at its materials where
+        // the light suits
         if let Ok(spec) = std::env::var("HALO_RT_PLACE") {
             let parsed = spec.split_once('@').and_then(|(name, at)| {
                 let v: Vec<f32> = at.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-                let tag = self.cache.find_tag(halo_map::groups::BIPED, name)?;
-                let like = placements.iter().find(|p| p.kind == objects::ObjectKind::Biped)?;
+                let weapon = halo_map::fourcc(b"weap");
+                let (group, tag) = [halo_map::groups::BIPED, weapon]
+                    .into_iter()
+                    .find_map(|group| self.cache.find_tag(group, name).map(|tag| (group, tag)))?;
+                let like = placements.iter().find(|p| p.kind == objects::ObjectKind::Biped).or(placements.first())?;
                 (v.len() >= 3).then(|| objects::Placement {
-                    definition: halo_map::TagRef { group: halo_map::groups::BIPED, datum: Some(tag.datum) },
+                    definition: halo_map::TagRef { group, datum: Some(tag.datum) },
                     position: [v[0], v[1], v[2]],
                     rotation: [v.get(3).copied().unwrap_or(0.0).to_radians(), 0.0, 0.0],
                     on_bsp_flags: 0,
@@ -635,7 +640,7 @@ impl LevelBuilder {
             });
             match parsed {
                 Some(placement) => placements.push(placement),
-                None => warn!("HALO_RT_PLACE {spec}: no such biped (or no biped to copy) in this map"),
+                None => warn!("HALO_RT_PLACE {spec}: no such biped or weapon (or nothing to copy) in this map"),
             }
         }
         let objects_root = commands.spawn((Name::new("objects"), Transform::default(), Visibility::default())).id();
@@ -1161,7 +1166,7 @@ impl LevelBuilder {
                 let Some(mut copy) = assets.transparent_materials.get(material).cloned() else { return surface };
                 // (shared by every object where nothing of its object's
                 // changes it)
-                if !copy.animation.as_ref().is_some_and(|a| a.uses_object()) {
+                if !copy.animation.as_ref().is_some_and(|a| a.uses_object()) && copy.meter.is_none() {
                     return surface;
                 }
                 copy.object = Some(root);
@@ -1768,6 +1773,9 @@ impl LevelBuilder {
         assets: &mut LevelAssets,
     ) -> Option<Handle<HaloTransparentMaterial>> {
         use shader::BlendFunction;
+        if let Some(meter) = info.meter {
+            return self.meter_material(info, meter, assets);
+        }
         let transparent = info.transparent.as_ref()?;
         let shader_ref = TagRef { group: info.group, datum: Some(info.datum) };
         let program = match halo_map::combiner::program(&self.cache, shader_ref) {
@@ -1822,6 +1830,7 @@ impl LevelBuilder {
             animation: Some(std::sync::Arc::new(transparent.clone())),
             object: None,
             numeric: None,
+            meter: None,
         };
         // a numeric counter's digit: its first map's every frame
         if transparent.flags & shader::TransparentInfo::NUMERIC != 0
@@ -1848,6 +1857,47 @@ impl LevelBuilder {
         if !transparent.animated() && !transparent.uses_object() {
             material.animation = None;
         }
+        Some(assets.transparent_materials.add(material))
+    }
+
+    /// A meter's material: its combiner program, its constants (as for a
+    /// full meter until its object's functions say), its blend by its tint
+    /// mode.
+    fn meter_material(
+        &mut self,
+        info: &ShaderInfo,
+        meter: shader::MeterInfo,
+        assets: &mut LevelAssets,
+    ) -> Option<Handle<HaloTransparentMaterial>> {
+        let program = halo_map::combiner::meter(meter.flags & shader::MeterInfo::FLASH_COLOR_IS_NEGATIVE != 0);
+        let mut params = HaloCombinerParams::from_program(&program);
+        let map = meter.map.datum.and_then(|d| self.textures.permuted(&self.cache, d, self.permutation, true, assets.images))?;
+        let blend: u16 = if meter.flags & shader::MeterInfo::TINT_MODE_2 != 0 { 9 } else { 8 };
+        // (alpha kill: a map texel of zero alpha isn't drawn)
+        params.modes = UVec4::new(blend as u32, 1, 1 << 8, 0);
+        if std::env::var("HALO_RT_TRANSPARENT_DEBUG").is_ok_and(|v| v == "1") {
+            params.fade.y = 1.0;
+        }
+        let mut material = HaloTransparentMaterial {
+            params,
+            map0: map,
+            map1: assets.neutral_detail.clone(),
+            map2: assets.neutral_detail.clone(),
+            map3: assets.neutral_detail.clone(),
+            alpha_mode: AlphaMode::Blend,
+            depth_bias: 0.0,
+            blend,
+            one_sided: meter.flags & shader::MeterInfo::TWO_SIDED == 0,
+            animation: None,
+            object: None,
+            numeric: None,
+            meter: Some(std::sync::Arc::new(meter)),
+        };
+        let periodic = periodic_function;
+        if let Some(params) = material.animate(None, None, 0.0, &periodic) {
+            material.params = params;
+        }
+        let _ = info;
         Some(assets.transparent_materials.add(material))
     }
 

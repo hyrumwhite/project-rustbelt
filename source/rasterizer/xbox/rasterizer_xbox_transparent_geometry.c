@@ -1513,10 +1513,11 @@ void rasterizer_transparent_geometry_group_draw(
 					{
 						continue;
 					}
-					/* port: and the chicago and generic shaders when it draws
-					those too (game.bevy_bridge_viewer_transparent) */
+					/* port: and the chicago, generic and meter shaders when it
+					draws those too (game.bevy_bridge_viewer_transparent) */
 					if ((group->shader->base.type == _shader_type_transparent_chicago ||
-							group->shader->base.type == _shader_type_transparent_generic) &&
+							group->shader->base.type == _shader_type_transparent_generic ||
+							group->shader->base.type == _shader_type_transparent_meter) &&
 						bevy_bridge_viewer_draws_transparent())
 					{
 						continue;

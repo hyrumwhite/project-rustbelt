@@ -122,6 +122,13 @@ pub fn animate_transparent(
         if let Some(functions) = functions {
             material.camouflage_fade(&mut params, functions.camouflage);
         }
+        // (a shield's plasma unseen, as it is but when hit, and already so:
+        // its moving noise left be, rather than rewriting the material every
+        // frame for each shielded unit)
+        let unseen = |p: &crate::material::HaloCombinerParams| p.constant0[0].w <= 0.0 && p.constant0[0].w + p.constant1[0].w <= 0.0;
+        if material.plasma.is_some() && unseen(&params) && unseen(&material.params) {
+            continue;
+        }
         // a numeric counter's digit, when it changes
         let digit = material
             .numeric

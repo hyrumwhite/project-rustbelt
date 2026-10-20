@@ -189,7 +189,7 @@ pub struct StageColorAnimation {
 
 impl StageColorAnimation {
     /// `_shader_transparent_generic_stage_flag_a_out_controls_color0_animation_bit`
-    pub const A_OUT_CONTROLS_COLOR0: u16 = 1 << 3;
+    pub const A_OUT_CONTROLS_COLOR0: u16 = 1 << 2;
 
     pub fn animated(&self) -> bool {
         self.color0 != self.color1 || self.source != 0

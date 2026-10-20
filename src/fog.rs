@@ -110,9 +110,18 @@ pub struct FogScreenMaps([Option<Handle<Image>>; 4]);
 impl HaloFog {
     /// The environment fog's five values (atmospheric colour and density,
     /// its distances, the plane, planar colour and density, its distances),
-    /// as `halo_fog.wesl` and the sprites' shader take them.
+    /// as the sprites' and transparent surfaces' shaders take them: without
+    /// the camera's own place in the fog (the eye terms, which those shaders
+    /// find from the view), so that they change only with the game's fog, not
+    /// every frame the camera rises or falls (each change rewrites every
+    /// material).
     pub fn layers(&self) -> [Vec4; 5] {
-        [self.atmospheric_color, self.atmospheric, self.plane, self.planar_color, self.planar]
+        let mut atmospheric = self.atmospheric;
+        let mut planar = self.planar;
+        // (atmosphere dominant: the eye's atmospheric term, 1, kept as a flag)
+        atmospheric.z = if atmospheric.z >= 1.0 { 1.0 } else { 0.0 };
+        planar.z = 0.0;
+        [self.atmospheric_color, atmospheric, self.plane, self.planar_color, planar]
     }
 
     /// The game's fog as seen from its camera (in the game's coordinates):

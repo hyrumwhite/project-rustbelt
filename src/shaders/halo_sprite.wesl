@@ -106,7 +106,10 @@ fn fog_coverage(view_depth: f32, position: vec3<f32>) -> f32 {
     let atmospheric = sprite.atmospheric_color.a * fog_texel((view_depth - sprite.atmospheric.x) / range);
     let distance = smoothstep(0.0, 1.0, fog_texel(view_depth / max(sprite.planar.x, 1e-4)));
     let under = smoothstep(0.0, 1.0, fog_texel(-height / max(sprite.planar.y, 1e-4)));
-    let planar = sprite.planar_color.a * mix(distance * under, distance, sprite.planar.z);
+    // (how far the camera is under the plane, from the view: the material's
+    // fog leaves it out)
+    let eye = saturate(-(dot(sprite.plane.xyz, view.world_position) - sprite.plane.w) / max(sprite.planar.y, 1e-4));
+    let planar = sprite.planar_color.a * mix(distance * under, distance, eye);
     return 1.0 - (1.0 - atmospheric) * (1.0 - planar);
 }
 

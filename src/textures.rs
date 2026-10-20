@@ -171,7 +171,8 @@ fn metallic_roughness(mask: &bitmap::Decoded, channel: usize, unmasked: f32, rou
     for texel in mask.data.chunks_exact(4) {
         let m = texel[channel] as f32 / 255.0;
         let r = unmasked + (roughness - unmasked) * m;
-        out.extend([255, (r * 255.0).round() as u8, (metallic * m * 255.0).round() as u8, 255]);
+        // red: the mask itself (a clear coat's, where a shader has one)
+        out.extend([texel[channel], (r * 255.0).round() as u8, (metallic * m * 255.0).round() as u8, 255]);
     }
     (mask.width, mask.height, out, false)
 }

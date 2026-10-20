@@ -668,6 +668,7 @@ fn load_level(
         (Some([x, y, z, yaw, pitch]), _) => halo_camera([x, y, z], yaw.to_radians(), pitch.to_radians()),
         (None, Some(start)) => {
             let [x, y, z] = start.position;
+            info!("player start {x},{y},{z} facing {}", start.facing.to_degrees());
             halo_camera([x, y, z + 0.62], start.facing, 0.0)
         }
         // no start in this BSP: look across it from above its centre

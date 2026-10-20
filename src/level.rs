@@ -545,9 +545,42 @@ impl LevelBuilder {
         commands: &mut Commands,
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
-        let placements = objects::placements(&self.cache)?;
+        let mut placements = objects::placements(&self.cache)?;
+        // `HALO_RT_PLACE=<biped tag>@x,y,z,yaw`: one more biped there (Halo
+        // world units, yaw in degrees), to look at a character's materials
+        // where the light suits
+        if let Ok(spec) = std::env::var("HALO_RT_PLACE") {
+            let parsed = spec.split_once('@').and_then(|(name, at)| {
+                let v: Vec<f32> = at.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                let tag = self.cache.find_tag(halo_map::groups::BIPED, name)?;
+                let like = placements.iter().find(|p| p.kind == objects::ObjectKind::Biped)?;
+                (v.len() >= 3).then(|| objects::Placement {
+                    definition: halo_map::TagRef { group: halo_map::groups::BIPED, datum: Some(tag.datum) },
+                    position: [v[0], v[1], v[2]],
+                    rotation: [v.get(3).copied().unwrap_or(0.0).to_radians(), 0.0, 0.0],
+                    on_bsp_flags: 0,
+                    not_automatic: false,
+                    region_permutations: [0; 8],
+                    ..like.clone()
+                })
+            });
+            match parsed {
+                Some(placement) => placements.push(placement),
+                None => warn!("HALO_RT_PLACE {spec}: no such biped (or no biped to copy) in this map"),
+            }
+        }
         let objects_root = commands.spawn((Name::new("objects"), Transform::default(), Visibility::default())).id();
         self.adopt(commands, objects_root);
+        // `HALO_RT_LIST_OBJECTS=<text>`: log the placements whose tag names
+        // hold it (finding objects to look at)
+        if let Ok(text) = std::env::var("HALO_RT_LIST_OBJECTS") {
+            for placement in &placements {
+                let name = self.cache.tag(placement.definition.datum.unwrap())?.name.clone();
+                if name.contains(text.as_str()) {
+                    info!("object {name} at {:?} bsps {:#x} scripted {}", placement.position, placement.on_bsp_flags, placement.not_automatic);
+                }
+            }
+        }
         for placement in &placements {
             // (multiplayer vehicles have no BSP flags: the game type spawns them)
             let in_loaded_bsp =
@@ -1478,6 +1511,27 @@ impl LevelBuilder {
         // Chief's visor: a gold mirror of what is round it (its base map is
         // black, which as a metal reflects nothing, with a reflection
         // painted on in grey)
+        // the Elites' armour: a clear coat over it, where its reflection mask
+        // says (the baked mask's red channel; skin and joints have none)
+        // (tuning: `HALO_RT_ELITE_COLOR=r,g,b` paints the Elites' armour
+        // its change colour, as the game does a live Elite, here where the
+        // level's placements have none)
+        if let Some(color) = std::env::var("HALO_RT_ELITE_COLOR").ok().filter(|_| elite_armour(&info.name)).and_then(|text| {
+            let c: Vec<f32> = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            (c.len() == 3).then(|| [c[0], c[1], c[2]].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+        }) && let Some(multipurpose) = info.multipurpose_map.and_then(|m| m.datum)
+            && info.change_color.is_some()
+        {
+            let bake = crate::textures::Bake::ChangeColor { base: info.base_map.and_then(|b| b.datum), multipurpose, color };
+            if let Some(texture) = self.textures.baked(&self.cache, bake, self.permutation, assets.images) {
+                material.base_color_texture = Some(texture);
+            }
+        }
+        if let Some((strength, roughness)) = elite_coat(&info.name) {
+            material.clearcoat = strength;
+            material.clearcoat_perceptual_roughness = roughness;
+            material.clearcoat_texture = material.metallic_roughness_texture.clone();
+        }
         let base_color_texture = if info.name.eq_ignore_ascii_case(VISOR_SHADER) {
             material.base_color = VISOR_COLOR;
             material.base_color_texture = None;
@@ -1694,7 +1748,13 @@ impl LevelBuilder {
         let roughness = if model { 0.4 - 0.34 * r.sqrt() } else { 0.8 - 0.65 * r.sqrt() };
         let metallic = if model { 0.9 * r } else { 0.5 * r };
         // (some duller still)
-        let shine = MODEL_SHINE.iter().find(|(path, _)| model && info.name.starts_with(path)).map_or(1.0, |&(_, shine)| shine);
+        let mut shine = MODEL_SHINE.iter().find(|(path, _)| model && info.name.starts_with(path)).map_or(1.0, |&(_, shine)| shine);
+        // (tuning: `HALO_RT_ELITE_SHINE` for the coated Elite armour beneath its coat)
+        if elite_armour(&info.name) {
+            if let Some(value) = std::env::var("HALO_RT_ELITE_SHINE").ok().and_then(|v| v.parse().ok()) {
+                shine = value;
+            }
+        }
         let dull = |roughness: f32| roughness + (DULL_ROUGHNESS.max(roughness) - roughness) * (1.0 - shine);
         let (roughness, metallic) = (dull(roughness), metallic * shine);
         let reflectance = 0.5;
@@ -1841,6 +1901,39 @@ impl LevelBuilder {
 }
 
 /// StandardMaterial roughness and metalness for a Halo shader.
+/// The Elites' armour shaders, which get a clear coat.
+const ELITE_ARMOUR: [&str; 6] = [
+    "characters\\elite\\shaders\\elite arms",
+    "characters\\elite\\shaders\\elite head",
+    "characters\\elite\\shaders\\elite heada",
+    "characters\\elite\\shaders\\elite legs",
+    "characters\\elite\\shaders\\elite legsa",
+    "characters\\elite\\shaders\\elite torso",
+];
+const ELITE_SPECIAL_ARMOUR: &str = "characters\\elite\\elite_special\\shaders\\elite special body";
+/// The coat's strength and perceptual roughness (the G-buffer keeps the
+/// roughness in thirtieths up to 0.5): none for now, the Elites' near-mirror
+/// metal as it is looked best; a coat reads only over a duller base
+/// (`HALO_RT_ELITE_SHINE=0.4` with `HALO_RT_ELITE_COAT=1,0.1`).
+const ELITE_COAT: (f32, f32) = (0.0, 0.1);
+
+fn elite_armour(shader: &str) -> bool {
+    ELITE_ARMOUR.iter().chain([&ELITE_SPECIAL_ARMOUR]).any(|name| shader.eq_ignore_ascii_case(name))
+}
+
+/// A shader's clear coat, if it has one. `HALO_RT_ELITE_COAT=strength,roughness`
+/// overrides the Elites' (0 none).
+fn elite_coat(shader: &str) -> Option<(f32, f32)> {
+    if !elite_armour(shader) {
+        return None;
+    }
+    let coat = std::env::var("HALO_RT_ELITE_COAT").ok().and_then(|text| {
+        let mut values = text.split(',').map(|v| v.trim().parse::<f32>().ok());
+        Some((values.next()??, values.next().flatten().unwrap_or(ELITE_COAT.1)))
+    });
+    Some(coat.unwrap_or(ELITE_COAT)).filter(|&(strength, _)| strength > 0.0)
+}
+
 struct Shininess {
     roughness: f32,
     metallic: f32,

@@ -26,7 +26,7 @@ bevy = { version = "=0.20.0", features = ["https", "free_camera"] }
 # Solarik, a fork of bevy_solari (glass, alpha-masked foliage, point and spot
 # lights, sky lighting, a reference pathtracer that keeps accumulating), as a
 # sibling checkout of https://github.com/AlrikOlson/bevy_solarik
-bevy_solarik = { path = "../bevy_solarik" }
+bevy_solarik = { path = "../bevy_solarik", features = ["pbr_multi_layer_material_textures"] }
 argh = "0.1.12"
 # (src/lens_flares.rs: its vertices into a buffer)
 bytemuck = { version = "1.25.2", features = ["derive"] }

@@ -37,6 +37,15 @@ impl Plugin for HaloMaterialsPlugin {
         app.insert_resource(NeutralDetail(grey));
         let tables = app.world_mut().resource_mut::<Assets<Image>>().add(periodic_tables_image());
         let _ = PERIODIC_TABLES.set(tables);
+        let volume = Image::new(
+            bevy::render::render_resource::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            bevy::render::render_resource::TextureDimension::D3,
+            vec![255; 4],
+            bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+            bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        );
+        let volume = app.world_mut().resource_mut::<Assets<Image>>().add(volume);
+        let _ = NEUTRAL_VOLUME.set(volume);
     }
 }
 
@@ -245,6 +254,13 @@ pub struct HaloTransparentMaterial {
     #[texture(7)]
     #[sampler(8)]
     pub map3: Handle<Image>,
+    /// plasma's two noise maps (3D; [`neutral_volume`] otherwise)
+    #[texture(9, dimension = "3d")]
+    #[sampler(10)]
+    pub noise0: Handle<Image>,
+    #[texture(11, dimension = "3d")]
+    #[sampler(12)]
+    pub noise1: Handle<Image>,
     pub alpha_mode: AlphaMode,
     /// Draws later (over) other transparent surfaces at the same distance.
     pub depth_bias: f32,
@@ -267,6 +283,18 @@ pub struct HaloTransparentMaterial {
     /// its object's functions.
     #[reflect(ignore)]
     pub meter: Option<std::sync::Arc<halo_map::shader::MeterInfo>>,
+    /// Plasma (`shader_transparent_plasma`, a shield's): its noise moves and
+    /// its colours follow its object's functions.
+    #[reflect(ignore)]
+    pub plasma: Option<std::sync::Arc<halo_map::shader::PlasmaInfo>>,
+}
+
+static NEUTRAL_VOLUME: std::sync::OnceLock<Handle<Image>> = std::sync::OnceLock::new();
+
+/// A 1x1x1 white 3D texture, for the plasma noise bindings of the
+/// transparent surfaces that aren't plasma.
+pub fn neutral_volume() -> Handle<Image> {
+    NEUTRAL_VOLUME.get().cloned().unwrap_or_default()
 }
 
 /// A numeric shader's digit (`_shader_transparent_flag_numeric_bit`): the
@@ -307,6 +335,19 @@ impl HaloTransparentMaterial {
         time: f32,
         periodic: &impl Fn(i16, f32) -> f32,
     ) -> Option<HaloCombinerParams> {
+        if let Some(plasma) = &self.plasma {
+            let mut params = self.params.clone();
+            for (index, noise) in plasma.noise.iter().enumerate() {
+                let period = if noise.period == 0.0 { 1.0 } else { noise.period };
+                let t = time / period;
+                params.map_rows[index] =
+                    Vec4::new(noise.scale, t * noise.direction[0], t * noise.direction[1], t * noise.direction[2]);
+            }
+            let (parallel, delta) = plasma.colors(values, colors);
+            params.constant0[0] = Vec4::from(parallel);
+            params.constant1[0] = Vec4::from(delta);
+            return Some(params);
+        }
         if let Some(meter) = &self.meter {
             let mut params = self.params.clone();
             let (c0, c1) = meter.constants(values);
@@ -401,6 +442,8 @@ impl Material for HaloTransparentMaterial {
             6 => component(BlendFactor::One, BlendFactor::One, BlendOperation::Max),
             // meter, tint mode 2
             9 => component(BlendFactor::One, BlendFactor::SrcAlpha, BlendOperation::Add),
+            // plasma: added by its alpha
+            10 => component(BlendFactor::SrcAlpha, BlendFactor::One, BlendOperation::Add),
             // alpha multiply add: premultiplied; meter, tint mode 1
             _ => component(BlendFactor::One, BlendFactor::OneMinusSrcAlpha, BlendOperation::Add),
         };

@@ -2754,6 +2754,7 @@ pub mod object_definition {
     pub const OBJECT_TYPE: usize = 0x0;
     pub const OBJECT_MODEL: usize = 0x28;
     pub const OBJECT_COLLISION_MODEL: usize = 0x70;
+    pub const OBJECT_MODIFIER_SHADER: usize = 0x90;
 }
 
 pub mod object_function_definition {

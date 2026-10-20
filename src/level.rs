@@ -102,11 +102,18 @@ pub fn animate_transparent(
     mut materials: ResMut<Assets<HaloTransparentMaterial>>,
 ) {
     let seconds = if std::env::var_os("HALO_RT_FREEZE_ANIMATION").is_some() { 0.0 } else { time.elapsed_secs() };
-    let animated: Vec<_> =
-        materials.iter().filter(|(_, m)| m.animation.is_some() || m.meter.is_some()).map(|(id, _)| id).collect();
+    let animated: Vec<_> = materials
+        .iter()
+        .filter(|(_, m)| m.animation.is_some() || m.meter.is_some() || m.plasma.is_some())
+        .map(|(id, _)| id)
+        .collect();
     for id in animated {
         let Some(material) = materials.get(id) else { continue };
-        let functions = material.object.and_then(|object| objects.get(object).ok());
+        let mut functions = material.object.and_then(|object| objects.get(object).ok());
+        // (HALO_RT_PLASMA_DEBUG: shields' plasma at full strength, to see it)
+        if material.plasma.is_some() && std::env::var_os("HALO_RT_PLASMA_DEBUG").is_some() {
+            functions = None;
+        }
         let Some(mut params) =
             material.animate(functions.map(|f| &f.values), functions.map(|f| &f.colors), seconds, &periodic_function)
         else {
@@ -513,6 +520,9 @@ pub struct LevelBuilder {
     /// Whether the models spawned are the first-person weapon and hands
     /// (their panes' masks at their own depth).
     pub first_person: bool,
+    /// The next model spawned's object's modifier shader (a shield's
+    /// plasma), drawn over it.
+    pub modifier_shader: Option<TagRef>,
     pub stats: LevelStats,
 }
 
@@ -531,6 +541,7 @@ impl LevelBuilder {
             recolour: None,
             glass_sky_mask: None,
             first_person: false,
+            modifier_shader: None,
             textures: TextureCache::new(bc_supported),
             surfaces: HashMap::default(),
             permutation: 0,
@@ -1166,7 +1177,7 @@ impl LevelBuilder {
                 let Some(mut copy) = assets.transparent_materials.get(material).cloned() else { return surface };
                 // (shared by every object where nothing of its object's
                 // changes it)
-                if !copy.animation.as_ref().is_some_and(|a| a.uses_object()) && copy.meter.is_none() {
+                if !copy.animation.as_ref().is_some_and(|a| a.uses_object()) && copy.meter.is_none() && copy.plasma.is_none() {
                     return surface;
                 }
                 copy.object = Some(root);
@@ -1315,6 +1326,38 @@ impl LevelBuilder {
                 self.recolour = None;
             }
         }
+        // its modifier shader (a shield's plasma) over its skinned parts: a
+        // copy of each part's mesh carrying its rest position (the game's
+        // units and axes) as its colour, where the noise is sampled
+        if raster
+            && let Some(shader) = self.modifier_shader.take()
+            && let Some(plasma) = self.plasma_material(shader, assets)
+            && let Some(mut material) = assets.transparent_materials.get(&plasma).cloned()
+        {
+            material.object = Some(root);
+            let material = assets.transparent_materials.add(material);
+            for part in &model.skinned {
+                let Some(mut mesh) = assets.meshes.get(&part.mesh).cloned() else { continue };
+                let Some(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|p| p.as_float3()) else { continue };
+                let rest: Vec<[f32; 4]> = positions
+                    .iter()
+                    .map(|p| [p[0] / METERS_PER_WORLD_UNIT, -p[2] / METERS_PER_WORLD_UNIT, p[1] / METERS_PER_WORLD_UNIT, 1.0])
+                    .collect();
+                mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, rest);
+                let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
+                commands.spawn((
+                    Name::new(format!("{} (modifier)", model.name)),
+                    Mesh3d(assets.meshes.add(mesh)),
+                    MeshMaterial3d(material.clone()),
+                    bevy::light::NotShadowCaster,
+                    skin,
+                    bevy::camera::visibility::NoFrustumCulling,
+                    Transform::default(),
+                    ChildOf(root),
+                ));
+            }
+        }
+        self.modifier_shader = None;
         if !animated.is_empty() {
             commands.entity(root).insert(AnimatedSelfIllumination {
                 materials: animated,
@@ -1831,6 +1874,9 @@ impl LevelBuilder {
             object: None,
             numeric: None,
             meter: None,
+            plasma: None,
+            noise0: crate::material::neutral_volume(),
+            noise1: crate::material::neutral_volume(),
         };
         // a numeric counter's digit: its first map's every frame
         if transparent.flags & shader::TransparentInfo::NUMERIC != 0
@@ -1856,6 +1902,44 @@ impl LevelBuilder {
         }
         if !transparent.animated() && !transparent.uses_object() {
             material.animation = None;
+        }
+        Some(assets.transparent_materials.add(material))
+    }
+
+    /// A plasma shader's material (a shield's energy, its object's modifier
+    /// shader): its combiner program over its two noise maps; drawn from both
+    /// sides, added by its alpha.
+    pub fn plasma_material(&mut self, shader: TagRef, assets: &mut LevelAssets) -> Option<Handle<HaloTransparentMaterial>> {
+        let info = shader::shader_info(&self.cache, shader).ok().flatten()?;
+        let plasma = info.plasma?;
+        let program = halo_map::combiner::plasma();
+        let mut params = HaloCombinerParams::from_program(&program);
+        let noise0 = plasma.noise[0].map.datum.and_then(|d| self.textures.volume(&self.cache, d, assets.images))?;
+        let noise1 = plasma.noise[1].map.datum.and_then(|d| self.textures.volume(&self.cache, d, assets.images))?;
+        params.modes = UVec4::new(10, 0, 1 << 9, 0);
+        if std::env::var("HALO_RT_TRANSPARENT_DEBUG").is_ok_and(|v| v == "1") {
+            params.fade.y = 1.0;
+        }
+        let mut material = HaloTransparentMaterial {
+            params,
+            map0: assets.neutral_detail.clone(),
+            map1: assets.neutral_detail.clone(),
+            map2: assets.neutral_detail.clone(),
+            map3: assets.neutral_detail.clone(),
+            noise0,
+            noise1,
+            alpha_mode: AlphaMode::Blend,
+            depth_bias: 0.0,
+            blend: 10,
+            one_sided: false,
+            animation: None,
+            object: None,
+            numeric: None,
+            meter: None,
+            plasma: Some(std::sync::Arc::new(plasma)),
+        };
+        if let Some(params) = material.animate(None, None, 0.0, &periodic_function) {
+            material.params = params;
         }
         Some(assets.transparent_materials.add(material))
     }
@@ -1892,6 +1976,9 @@ impl LevelBuilder {
             object: None,
             numeric: None,
             meter: Some(std::sync::Arc::new(meter)),
+            plasma: None,
+            noise0: crate::material::neutral_volume(),
+            noise1: crate::material::neutral_volume(),
         };
         let periodic = periodic_function;
         if let Some(params) = material.animate(None, None, 0.0, &periodic) {

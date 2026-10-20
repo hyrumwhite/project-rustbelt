@@ -17,6 +17,8 @@ pub struct TextureCache {
     baked: HashMap<(Bake, u16), Option<Handle<Image>>>,
     /// Each bitmap tag's image count, for [`TextureCache::permuted`].
     counts: HashMap<u32, usize>,
+    /// 3D bitmaps (plasma's noise), by tag.
+    volumes: HashMap<u32, Option<Handle<Image>>>,
     /// Whether the GPU takes BC (DXT) textures as they are.
     pub bc_supported: bool,
     pub failures: usize,
@@ -87,6 +89,41 @@ impl TextureCache {
     ) -> Option<Handle<Image>> {
         let count = *self.counts.entry(datum).or_insert_with(|| bitmap::bitmaps(cache, datum).map_or(1, |b| b.len().max(1)));
         self.get(cache, datum, permutation as usize % count, srgb, images)
+    }
+
+    /// A 3D bitmap's first level (plasma's noise), as data, repeating.
+    pub fn volume(&mut self, cache: &CacheFile, datum: u32, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+        if let Some(volume) = self.volumes.get(&datum) {
+            return volume.clone();
+        }
+        let volume = bitmap::bitmaps(cache, datum)
+            .ok()
+            .and_then(|b| b.into_iter().next())
+            .and_then(|info| info.decode_3d_rgba8(cache).ok())
+            .map(|decoded| {
+                let mut image = Image::new(
+                    Extent3d { width: decoded.width, height: decoded.height, depth_or_array_layers: decoded.depth },
+                    TextureDimension::D3,
+                    decoded.data,
+                    TextureFormat::Rgba8Unorm,
+                    RenderAssetUsages::RENDER_WORLD,
+                );
+                image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+                    address_mode_u: ImageAddressMode::Repeat,
+                    address_mode_v: ImageAddressMode::Repeat,
+                    address_mode_w: ImageAddressMode::Repeat,
+                    mag_filter: ImageFilterMode::Linear,
+                    min_filter: ImageFilterMode::Linear,
+                    ..default()
+                });
+                images.add(image)
+            });
+        if volume.is_none() {
+            let name = cache.tag(datum).map(|t| t.name.clone()).unwrap_or_default();
+            warn!("bitmap {name}: no 3D texture");
+        }
+        self.volumes.insert(datum, volume.clone());
+        volume
     }
 
     pub fn new(bc_supported: bool) -> Self {

@@ -173,6 +173,15 @@ pub struct FixtureLight {
 }
 
 /// The model of an object definition tag (any object group).
+/// An object definition's modifier shader (a shield's plasma), drawn over its
+/// model with its functions and colours.
+pub fn modifier_shader(cache: &CacheFile, definition: TagRef) -> Result<Option<TagRef>> {
+    let Some(datum) = definition.datum else { return Ok(None) };
+    let root = cache.tag_root(datum, crate::groups::OBJECT)?;
+    let shader = root.reference(layout::object_definition::OBJECT_MODIFIER_SHADER)?;
+    Ok(shader.datum.map(|_| shader))
+}
+
 pub fn object_model(cache: &CacheFile, definition: TagRef) -> Result<Option<TagRef>> {
     let Some(datum) = definition.datum else { return Ok(None) };
     let root = cache.tag_root(datum, crate::groups::OBJECT)?;

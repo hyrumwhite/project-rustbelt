@@ -576,6 +576,11 @@ fn sync_objects(
                 continue;
             };
             builder.first_person = object.flags & OBJECT_MODEL != 0;
+            // (its modifier shader, a shield's plasma, over it)
+            if object.flags & OBJECT_MODEL == 0 {
+                let definition = halo_map::TagRef { group: 0, datum: Some(object.definition_index) };
+                builder.modifier_shader = halo_map::objects::modifier_shader(&builder.cache, definition).ok().flatten();
+            }
             let (root, nodes, skins) =
                 builder.spawn_animated_model(&mut commands, &model, raster, &change_colors, camouflaged(object), object.object_index, assets);
             builder.first_person = false;

@@ -284,6 +284,89 @@ impl MeterInfo {
     }
 }
 
+/// `shader_transparent_plasma`: the energy over a shield (an object's
+/// modifier shader): two 3D noise maps, moving, whose difference makes bands,
+/// in colours from perpendicular to parallel by the view's angle, as bright
+/// as the object's function says (rasterizer_xbox_plasma_energy.c).
+#[derive(Debug, Clone, Copy)]
+pub struct PlasmaInfo {
+    /// object functions (A-D: 1-4; 0 none): the intensity's, raised to its
+    /// exponent, and the offset's
+    pub intensity_source: i16,
+    pub intensity_exponent: f32,
+    pub offset_source: i16,
+    pub offset_amount: f32,
+    pub offset_exponent: f32,
+    pub perpendicular_alpha: f32,
+    pub perpendicular_color: [f32; 3],
+    pub parallel_alpha: f32,
+    pub parallel_color: [f32; 3],
+    /// an object's change colour (A-D: 1-4) to tint by; 0 none
+    pub color_source: i16,
+    /// each noise map: its animation period (seconds), direction and scale
+    pub noise: [PlasmaNoise; 2],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PlasmaNoise {
+    pub period: f32,
+    pub direction: [f32; 3],
+    pub scale: f32,
+    pub map: TagRef,
+}
+
+impl PlasmaInfo {
+    fn read(root: crate::Ptr<'_>) -> Result<Self> {
+        let p = 0x28;
+        let rgb = |o: usize| -> Result<[f32; 3]> { Ok([root.f32(o)?, root.f32(o + 4)?, root.f32(o + 8)?]) };
+        let noise = |o: usize| -> Result<PlasmaNoise> {
+            Ok(PlasmaNoise { period: root.f32(o)?, direction: rgb(o + 4)?, scale: root.f32(o + 0x10)?, map: root.reference(o + 0x14)? })
+        };
+        Ok(Self {
+            intensity_source: root.i16(p + 0x4)?,
+            intensity_exponent: root.f32(p + 0x8)?,
+            offset_source: root.i16(p + 0xc)?,
+            offset_amount: root.f32(p + 0x10)?,
+            offset_exponent: root.f32(p + 0x14)?,
+            perpendicular_alpha: root.f32(p + 0x38)?,
+            perpendicular_color: rgb(p + 0x3c)?,
+            parallel_alpha: root.f32(p + 0x48)?,
+            parallel_color: rgb(p + 0x4c)?,
+            color_source: root.i16(p + 0x58)?,
+            noise: [noise(p + 0x98)?, noise(p + 0xe0)?],
+        })
+    }
+
+    /// Its colours (rgb, alpha) seen edge on (`parallel`) and their change
+    /// to head on (`delta`), with the object's function values and change
+    /// colours, as the draw's colour constants.
+    pub fn colors(&self, values: Option<&[f32; 4]>, colors: Option<&[[f32; 3]; 4]>) -> ([f32; 4], [f32; 4]) {
+        let tint = match colors {
+            Some(colors) if (1..=4).contains(&self.color_source) => colors[self.color_source as usize - 1],
+            _ => [1.0; 3],
+        };
+        let intensity = match values {
+            Some(values) if (1..=4).contains(&self.intensity_source) => {
+                values[self.intensity_source as usize - 1].max(0.0).powf(self.intensity_exponent)
+            }
+            _ => 1.0,
+        };
+        let parallel = [
+            self.parallel_color[0] * tint[0],
+            self.parallel_color[1] * tint[1],
+            self.parallel_color[2] * tint[2],
+            intensity * self.parallel_alpha,
+        ];
+        let delta = [
+            (self.perpendicular_color[0] - self.parallel_color[0]) * tint[0],
+            (self.perpendicular_color[1] - self.parallel_color[1]) * tint[1],
+            (self.perpendicular_color[2] - self.parallel_color[2]) * tint[2],
+            (self.perpendicular_alpha - self.parallel_alpha) * intensity,
+        ];
+        (parallel, delta)
+    }
+}
+
 /// The parts of a transparent generic or chicago shader the renderer uses.
 #[derive(Debug, Clone)]
 pub struct TransparentInfo {
@@ -544,6 +627,8 @@ pub struct ShaderInfo {
     pub transparent: Option<TransparentInfo>,
     /// For transparent meter shaders.
     pub meter: Option<MeterInfo>,
+    /// For transparent plasma shaders.
+    pub plasma: Option<PlasmaInfo>,
     pub self_illumination: Option<SelfIllumination>,
     /// `shader_model`'s multipurpose map (see [`SelfIllumination::Model`]).
     pub multipurpose_map: Option<TagRef>,
@@ -598,6 +683,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         uv_scale: [1.0, 1.0],
         transparent: None,
         meter: None,
+        plasma: None,
         self_illumination: None,
         multipurpose_map: None,
         change_color: None,
@@ -776,6 +862,9 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
     }
     if shader_type == ShaderType::Meter {
         info.meter = Some(MeterInfo::read(root)?);
+    }
+    if shader_type == ShaderType::Plasma {
+        info.plasma = Some(PlasmaInfo::read(root)?);
     }
     if matches!(shader_type, ShaderType::TransparentGeneric | ShaderType::TransparentChicago) {
         use layout::shader_transparent as t;

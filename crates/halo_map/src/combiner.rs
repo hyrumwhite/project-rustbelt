@@ -120,6 +120,23 @@ pub fn meter(flash_color_is_negative: bool) -> CombinerProgram {
     program
 }
 
+/// rasterizer_xbox_plasma_energy.c's pixel shader: t0 and t1 the two noise
+/// maps, v0 the colour (and alpha) by the view's angle.
+pub fn plasma() -> CombinerProgram {
+    let mut program = CombinerProgram {
+        stage_count: 4,
+        flags: 0x100,
+        final_abcd: 0x0C0F0000,
+        final_efg: 0x1C1C1400,
+        ..Default::default()
+    };
+    program.alpha_inputs[..4].copy_from_slice(&[0x0820A920, 0x1C1C0C0C, 0x00005C5C, 0x14150000]);
+    program.alpha_outputs[..4].copy_from_slice(&[0xC00, 0x24C00, 0x4D00, 0x40]);
+    program.rgb_inputs[..4].copy_from_slice(&[0x1920B820, 0, 0, 0x1C051DA0]);
+    program.rgb_outputs[..4].copy_from_slice(&[0xC00, 0, 0, 0xC00]);
+    program
+}
+
 /// `shader_transparent_chicago_create`.
 fn chicago(root: Ptr<'_>) -> Result<CombinerProgram> {
     use layout::{shader_transparent as t, shader_transparent_chicago_map as m};

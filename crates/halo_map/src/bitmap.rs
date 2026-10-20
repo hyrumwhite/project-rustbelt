@@ -288,6 +288,64 @@ fn spread(mask: u32, mut value: u32) -> u32 {
     result
 }
 
+/// Bits of x, y and z alternate from the lowest until each dimension runs
+/// out (`swizzle_masks` in xbox_textures.c, for volumes).
+fn swizzle_masks_3d(width: u32, height: u32, depth: u32) -> [u32; 3] {
+    let mut masks = [0u32; 3];
+    let (mut bit, mut mask_bit) = (1u32, 1u32);
+    loop {
+        let mut done = true;
+        for (axis, size) in [width, height, depth].into_iter().enumerate() {
+            if bit < size {
+                masks[axis] |= mask_bit;
+                mask_bit <<= 1;
+                done = false;
+            }
+        }
+        if done {
+            return masks;
+        }
+        bit <<= 1;
+    }
+}
+
+impl BitmapInfo {
+    /// A 3D texture's first level as RGBA8, slice after slice (plasma's
+    /// noise). Only uncompressed formats.
+    pub fn decode_3d_rgba8(&self, cache: &CacheFile) -> Result<Decoded3d> {
+        if self.kind != Kind::Texture3d || matches!(self.format, Format::Dxt1 | Format::Dxt3 | Format::Dxt5) {
+            return Err(Error::Unsupported(format!("{:?} {:?} bitmaps as a volume", self.kind, self.format)));
+        }
+        let (width, height, depth) = (self.width.max(1), self.height.max(1), self.depth.max(1));
+        let unit = self.format.unit_bytes();
+        let bytes = cache.file_bytes(self.pixels_offset, (width * height * depth) as usize * unit)?;
+        let swizzled = self.flags & FLAG_SWIZZLED != 0;
+        let [mask_x, mask_y, mask_z] = swizzle_masks_3d(width, height, depth);
+        let mut data = Vec::with_capacity((width * height * depth * 4) as usize);
+        for z in 0..depth {
+            for y in 0..height {
+                for x in 0..width {
+                    let index = if swizzled {
+                        (spread(mask_x, x) | spread(mask_y, y) | spread(mask_z, z)) as usize
+                    } else {
+                        ((z * height + y) * width + x) as usize
+                    };
+                    data.extend_from_slice(&texel_rgba8(self.format, &bytes[index * unit..index * unit + unit]));
+                }
+            }
+        }
+        Ok(Decoded3d { width, height, depth, data })
+    }
+}
+
+/// A volume's texels, RGBA8, x fastest then y then z.
+pub struct Decoded3d {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub data: Vec<u8>,
+}
+
 fn decode_uncompressed(format: Format, bytes: &[u8], width: u32, height: u32, swizzled: bool) -> Vec<u8> {
     let unit = format.unit_bytes();
     let (mask_x, mask_y) = swizzle_masks(width, height);
@@ -295,7 +353,16 @@ fn decode_uncompressed(format: Format, bytes: &[u8], width: u32, height: u32, sw
     for y in 0..height {
         for x in 0..width {
             let index = if swizzled { (spread(mask_x, x) | spread(mask_y, y)) as usize } else { (y * width + x) as usize };
-            let t = &bytes[index * unit..index * unit + unit];
+            out.extend_from_slice(&texel_rgba8(format, &bytes[index * unit..index * unit + unit]));
+        }
+    }
+    out
+}
+
+/// One uncompressed texel as RGBA8.
+fn texel_rgba8(format: Format, t: &[u8]) -> [u8; 4] {
+    {
+        {
             let u16v = || u16::from_le_bytes([t[0], t[1]]);
             let e4 = |v: u16| (v as u8 & 0xF) * 17;
             let e5 = |v: u16| ((v as u32 & 0x1F) * 255 / 31) as u8;
@@ -326,10 +393,9 @@ fn decode_uncompressed(format: Format, bytes: &[u8], width: u32, height: u32, sw
                 }
                 Format::Dxt1 | Format::Dxt3 | Format::Dxt5 => unreachable!(),
             };
-            out.extend_from_slice(&rgba);
+            rgba
         }
     }
-    out
 }
 
 fn rgb565(v: u16) -> [u8; 3] {

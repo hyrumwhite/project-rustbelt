@@ -48,6 +48,10 @@ struct HaloCombiner {
 @group(constants::MATERIAL_BIND_GROUP) @binding(6) var map2_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(7) var map3: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(8) var map3_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(9) var noise0: texture_3d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(10) var noise0_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(11) var noise1: texture_3d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(12) var noise1_sampler: sampler;
 
 fn word(words: array<vec4<u32>, 2>, index: u32) -> u32 {
     return words[index / 4u][index % 4u];
@@ -211,6 +215,24 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // vertex colours: no fade and no lighting tint
     registers[4] = vec4<f32>(1.0);
     registers[5] = vec4<f32>(1.0);
+    // plasma (modes.z bit 9): its noise maps at the surface's own place (the
+    // model's rest position, in the game's units and axes, carried in the
+    // vertex colour) times their scale, moved by their direction with time;
+    // v1 its colour (and alpha) from parallel to perpendicular by the view's
+    // angle; v0 white (the draw's colour constant 0)
+    if (combiner.modes.z & 512u) != 0u {
+        var position = vec3(0.0);
+@if(VERTEX_COLORS) {
+        position = in.color.xyz;
+}
+        let n0 = combiner.map_rows[0];
+        let n1 = combiner.map_rows[1];
+        registers[8] = textureSample(noise0, noise0_sampler, position * n0.x + n0.yzw);
+        registers[9] = textureSample(noise1, noise1_sampler, position * n1.x + n1.yzw);
+        let facing = abs(dot(normalize(in.world_normal), normalize(view.world_position - in.world_position.xyz)));
+        registers[5] = saturate(combiner.constant0[0] + combiner.constant1[0] * facing);
+        registers[12] = vec4<f32>(0.0, 0.0, 0.0, registers[8].a);
+    }
     // r0's alpha starts as t0's
     registers[12] = vec4<f32>(0.0, 0.0, 0.0, registers[8].a);
 
@@ -309,6 +331,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             let tint = combiner.constant1[3];
             return vec4(pow(rgb, vec3(2.2)) * pow(tint.rgb, vec3(2.2)) * fade * fog.y, alpha);
         }
+        // plasma: added by its alpha
+        case 10u: { return vec4(pow(rgb, vec3(2.2)) * fog.y, alpha * fade); }
         // add, subtract, max
         default: { return vec4(pow(rgb, vec3(2.2)) * fade * fog.y, 1.0); }
     }

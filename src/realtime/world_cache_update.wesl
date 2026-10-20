@@ -11,6 +11,7 @@ import bevy_render::maths::PI;
 import bevy_render::view::View;
 import bevy_solarik::realtime::presample_light_tiles::ResolvedLightSamplePacked;
 import bevy_solarik::realtime::presample_light_tiles::unpack_resolved_light_sample;
+import bevy_solarik::realtime::presample_light_tiles::light_tile_seed;
 import bevy_solarik::scene::sampling::calculate_resolved_light_contribution;
 import bevy_solarik::scene::sampling::trace_light_transmission_with_support;
 import bevy_solarik::scene::sampling::trace_shadow_transmission_impl;
@@ -144,7 +145,7 @@ fn cache_blend_amount(sample_count: f32, old_luminance: f32, luminance_delta: f3
 }
 
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec4<f32> {
-    var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
+    var workgroup_rng = light_tile_seed((workgroup_id.x * 5782582u) + workgroup_id.y, constants.frame_index);
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
     var weight_sum = 0.0;

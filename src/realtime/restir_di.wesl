@@ -13,6 +13,7 @@ import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
 import bevy_solarik::realtime::gbuffer_utils::raster_reconstruction_error;
 import bevy_solarik::realtime::presample_light_tiles::unpack_resolved_light_sample;
+import bevy_solarik::realtime::presample_light_tiles::light_tile_seed;
 import bevy_solarik::scene::sampling::LightSample;
 import bevy_solarik::scene::sampling::ResolvedLightSample;
 import bevy_solarik::scene::sampling::NULL_LIGHT_ID;
@@ -136,7 +137,7 @@ fn shade_di_reservoir(result: ReservoirMergeResult, world_position: vec3<f32>, w
 }
 
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
-    var workgroup_rng = (workgroup_id.x * 5782582u) + workgroup_id.y;
+    var workgroup_rng = light_tile_seed((workgroup_id.x * 5782582u) + workgroup_id.y, lighting_constants.frame_index);
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
     var reservoir = empty_reservoir();

@@ -24,13 +24,28 @@ enable wgpu_ray_query;
 @compute @workgroup_size(1024, 1, 1)
 fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(local_invocation_index) sample_index: u32) {
     let tile_id = workgroup_id.x;
-    var rng = (tile_id * 5782582u) + sample_index + constants.frame_index;
+    var rng = light_tile_seed((tile_id * 1024u) + sample_index, constants.frame_index);
 
     let sample = generate_random_light_sample(&rng);
 
     let i = (tile_id * 1024u) + sample_index;
     light_tile_samples[i] = sample.light_sample;
     light_tile_resolved_samples[i] = pack_resolved_light_sample(sample.resolved_light_sample);
+}
+
+// A seed for `index` that is new every frame. Bevy's generators use their
+// seed as their state, so `index + frame` seeds slide: frame f + 1's slot i
+// drew frame f's slot i + 1's light, and the tiles' 131072 samples turned
+// over in a thousand frames; a rare light's share of a tile then drifted for
+// hundreds of frames (interiors brightening and darkening fivefold).
+fn light_tile_seed(index: u32, frame_index: u32) -> u32 {
+    return seed_hash(seed_hash(index) ^ (frame_index * 0x9E3779B9u));
+}
+
+fn seed_hash(input: u32) -> u32 {
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
 }
 
 // The kind rides in two signs: a negative inverse_pdf is a directional light

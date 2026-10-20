@@ -11,6 +11,8 @@ fn scene_consumers_compose_across_production_feature_variants() {
         "realtime::primary_foliage",
         "realtime::primary_glass",
         "realtime::restir_gi",
+        "realtime::restir_di",
+        "realtime::presample_light_tiles",
         "realtime::world_cache_update",
         "realtime::specular_gi",
         "realtime::surface_path",

@@ -350,6 +350,10 @@ struct ModelPiece {
 /// to its two, weighted), for the camera.
 struct SkinnedPart {
     mesh: Handle<Mesh>,
+    /// The same, carrying its rest position (the game's units and axes) as
+    /// its colour, for a modifier shader's noise (a shield's plasma): built
+    /// with the part, since a mesh's data leaves for the GPU once drawn.
+    modifier_mesh: Handle<Mesh>,
     surface: Surface,
     shader: Option<ShaderUse>,
 }
@@ -1139,7 +1143,16 @@ impl LevelBuilder {
                 let mesh = build_model_mesh(source(), &part.indices, shader.uv_scale)
                     .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_INDEX, VertexAttributeValues::Uint16x4(joints))
                     .with_inserted_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, weights);
-                skinned.push(SkinnedPart { mesh: assets.meshes.add(mesh), surface: surface.clone(), shader: shader_use });
+                let rest: Vec<[f32; 4]> = source()
+                    .map(|v| [v.position[0], v.position[1], v.position[2], 1.0])
+                    .collect();
+                let modifier_mesh = assets.meshes.add(mesh.clone().with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, rest));
+                skinned.push(SkinnedPart {
+                    mesh: assets.meshes.add(mesh),
+                    modifier_mesh,
+                    surface: surface.clone(),
+                    shader: shader_use,
+                });
             }
         }
         let default_inverses: Vec<Affine3A> = model.nodes.iter().map(|n| halo_affine(&n.default_inverse)).collect();
@@ -1337,17 +1350,10 @@ impl LevelBuilder {
             material.object = Some(root);
             let material = assets.transparent_materials.add(material);
             for part in &model.skinned {
-                let Some(mut mesh) = assets.meshes.get(&part.mesh).cloned() else { continue };
-                let Some(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|p| p.as_float3()) else { continue };
-                let rest: Vec<[f32; 4]> = positions
-                    .iter()
-                    .map(|p| [p[0] / METERS_PER_WORLD_UNIT, -p[2] / METERS_PER_WORLD_UNIT, p[1] / METERS_PER_WORLD_UNIT, 1.0])
-                    .collect();
-                mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, rest);
                 let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
                 commands.spawn((
                     Name::new(format!("{} (modifier)", model.name)),
-                    Mesh3d(assets.meshes.add(mesh)),
+                    Mesh3d(part.modifier_mesh.clone()),
                     MeshMaterial3d(material.clone()),
                     bevy::light::NotShadowCaster,
                     skin,

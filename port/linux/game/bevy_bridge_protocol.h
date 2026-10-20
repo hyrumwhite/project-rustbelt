@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 40
+#define BEVY_BRIDGE_VERSION 41
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -322,6 +322,12 @@ struct bevy_bridge_light
 	alarm lights' two beams) is turned to its forward and up */
 	float up[3];
 };
+
+/* (protocol 41) a light's definition_flags bit (no light tag has it) for a
+contrail's line, after the lights: its contrail tag as the definition, its
+middle, its direction from its oldest point to its newest, half its length
+as the radius, no colour */
+#define BEVY_BRIDGE_LIGHT_CONTRAIL 0x80000000UL
 
 /* a ray the game tested against its structure's collision geometry
 (collision_bsp_test_vector, front-facing surfaces), for a renderer to check

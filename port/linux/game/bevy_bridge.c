@@ -32,6 +32,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "devices/devices.h"
 #include "models/model_definitions.h"
 #include "objects/object_lights.h"
+#include "effects/contrails.h"
 #include "physics/collision_bsp.h"
 #include "physics/collisions.h"
 #include "physics/point_physics.h"
@@ -459,6 +460,68 @@ static long bevy_bridge_first_person_unit(short local_player_index)
 	return player_get(player_index)->unit_index;
 }
 
+/* the contrails, after the lights, as lights of no colour flagged
+BEVY_BRIDGE_LIGHT_CONTRAIL: each instance's line from its oldest point to
+its newest (the light's forward), its middle the position and half its
+length the radius, by its contrail tag (the viewer lights the ones it knows,
+the Sentinels' beams: their projectiles cross 40 world units a tick and
+never outlive the tick that fired them, so only the contrail is seen) */
+static short bevy_bridge_contrails(struct bevy_bridge_light *lights, short maximum)
+{
+	long contrail_index;
+	short count = 0;
+
+	if (!contrail_data || !contrail_data->valid || !contrail_point_data || !contrail_point_data->valid)
+		return 0;
+	for (contrail_index = data_next_index(contrail_data, NONE);
+		contrail_index != NONE && count < maximum;
+		contrail_index = data_next_index(contrail_data, contrail_index))
+	{
+		struct contrail_datum *contrail = (struct contrail_datum *)datum_get(contrail_data, contrail_index);
+		short instance_index;
+
+		for (instance_index = 0; instance_index < 4 && count < maximum; instance_index++)
+		{
+			long point_index = contrail->first_contrail_point_indices[instance_index];
+			real_point3d newest, oldest, middle;
+			real_vector3d along;
+			real length;
+			struct bevy_bridge_light *out;
+
+			if (point_index == NONE || contrail->contrail_point_counts[instance_index] < 2)
+				continue;
+			newest = ((struct contrail_point_datum *)datum_get(contrail_point_data, point_index))->position;
+			oldest = newest;
+			while (point_index != NONE)
+			{
+				struct contrail_point_datum *point = (struct contrail_point_datum *)datum_get(contrail_point_data, point_index);
+
+				oldest = point->position;
+				point_index = point->next_contrail_point_index;
+			}
+			vector_from_points3d(&oldest, &newest, &along);
+			length = normalize3d(&along);
+			if (length <= 0.0f)
+				continue;
+			middle.x = 0.5f * (oldest.x + newest.x);
+			middle.y = 0.5f * (oldest.y + newest.y);
+			middle.z = 0.5f * (oldest.z + newest.z);
+			out = &lights[count++];
+			memset(out, 0, sizeof(*out));
+			bevy_bridge_point(out->position, &middle);
+			bevy_bridge_vector(out->forward, &along);
+			out->up[2] = 1.0f;
+			out->radius = 0.5f * length;
+			out->cutoff_angle = _pi;
+			out->falloff_angle = _pi;
+			out->definition_index = (unsigned long)contrail->definition_index;
+			out->definition_flags = BEVY_BRIDGE_LIGHT_CONTRAIL;
+			out->object_index = (unsigned long)contrail->object_index;
+		}
+	}
+	return count;
+}
+
 /* an object the game does not draw: invisible, or the first-person unit or
 something attached to it */
 static unsigned long bevy_bridge_object_flags(long object_index, long first_person_unit)
@@ -662,6 +725,8 @@ void bevy_bridge_export_frame(
 				}
 			}
 		}
+		if (global_scenario_index != NONE)
+			count += bevy_bridge_contrails(&frame->lights[count], (short)(BEVY_BRIDGE_MAXIMUM_LIGHTS - count));
 		frame->light_count = (unsigned long)count;
 	}
 

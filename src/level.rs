@@ -299,10 +299,10 @@ const MODEL_UNMASKED_ROUGHNESS: f32 = 0.45;
 /// toward [`DULL_ROUGHNESS`] (lit by the level's own lights, Chief's
 /// armour and the vehicles shone like chrome).
 const MODEL_SHINE: [(&str, f32); 8] = [
-    ("characters\\cyborg\\", 0.5),
+    ("characters\\cyborg\\", 0.3),
     ("characters\\marine", 0.5),
     ("characters\\grunt\\", 0.8),
-    ("vehicles\\scorpion\\", 0.45),
+    ("vehicles\\scorpion\\", 0.15),
     ("vehicles\\warthog\\", 0.5),
     // (Covenant crates)
     ("scenery\\c_storage\\", 0.7),

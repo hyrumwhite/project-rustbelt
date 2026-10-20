@@ -441,11 +441,12 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, animated, children, follow): (
+    (recolourable, animated, children, follow, mut visibility_data): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<(), With<crate::level::AnimatedSelfIllumination>>,
         Query<&Children>,
         Res<FollowGame>,
+        Local<Option<((String, i32), Option<ClusterVisibility>)>>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -496,6 +497,30 @@ fn sync_objects(
             }
         }
         flags & OBJECT_OUTSIDE_OF_MAP != 0
+    };
+    // (and those in clusters the game's camera can't see from its own, by
+    // the BSP's potentially visible sets, which the game doesn't draw: in
+    // b30's interior cutscene the trees beyond a window, in the same BSP;
+    // a camera flying free sees them all)
+    let key = (builder.stats.map_name.clone(), snapshot.structure_bsp_index);
+    if visibility_data.as_ref().is_none_or(|(loaded, _)| *loaded != key) {
+        *visibility_data = Some((key, ClusterVisibility::load(&builder.cache, snapshot.structure_bsp_index)));
+    }
+    let camera_cluster = match (&visibility_data.as_ref().and_then(|(_, v)| v.as_ref()), snapshot.camera) {
+        (Some(visibility), Some(camera)) if follow.0 => visibility.cluster(camera.position),
+        _ => -1,
+    };
+    let clusters_of: HashMap<u32, (i16, u32)> = snapshot.objects.iter().map(|o| (o.object_index, (o.location_cluster, o.parent_index))).collect();
+    let unseen_cluster = |object: &halo_bridge::Object| {
+        let Some(visibility) = visibility_data.as_ref().and_then(|(_, v)| v.as_ref()).filter(|_| camera_cluster >= 0) else { return false };
+        let (mut cluster, mut parent) = (object.location_cluster, object.parent_index);
+        for _ in 0..8 {
+            match clusters_of.get(&parent) {
+                Some(&(parent_cluster, grandparent)) => (cluster, parent) = (parent_cluster, grandparent),
+                None => break,
+            }
+        }
+        cluster >= 0 && !visibility.sees(camera_cluster, cluster)
     };
     let mut seen = HashMap::<u32, ()>::default();
     for object in &snapshot.objects {
@@ -572,7 +597,7 @@ fn sync_objects(
             // weapon and hands, which sit inside it; but for a camera flying
             // free of the game's, which sees the player)
             let seen_body = !follow.0 && object.flags & OBJECT_FIRST_PERSON_BODY != 0;
-            let wanted = if (object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) != 0 && !seen_body) || outside_of_map(object) {
+            let wanted = if (object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) != 0 && !seen_body) || outside_of_map(object) || unseen_cluster(object) {
                 Visibility::Hidden
             } else {
                 Visibility::Inherited
@@ -712,6 +737,48 @@ fn node_matrix(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy: &A
         position: node.position,
     });
     Mat4::from(*to_bevy * world * *default_inverse * *from_bevy)
+}
+
+/// A structure BSP's clusters and potentially visible sets: which clusters
+/// the game draws from the one its camera is in.
+pub struct ClusterVisibility {
+    collision: halo_map::collision::CollisionBsp,
+    clusters: halo_map::collision::StructureClusters,
+    /// A bit vector of the clusters each cluster sees (32-bit words).
+    pvs: Vec<u32>,
+    words_per_cluster: usize,
+}
+
+impl ClusterVisibility {
+    /// BSP `index`'s, None if it can't be read.
+    fn load(cache: &halo_map::CacheFile, index: i32) -> Option<Self> {
+        use halo_map::layout::{structure_bsp, structure_cluster};
+        let reference = halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index as i32 == index)?;
+        let bsp = halo_map::bsp::Bsp::load(cache, &reference).ok()?;
+        let count = bsp.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF).ok()?.count;
+        let pvs: Vec<u32> = bsp.root.data_bytes(structure_bsp::CLUSTER_DATA).ok()?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+        let words_per_cluster = count.div_ceil(32);
+        if count == 0 || pvs.len() < count * words_per_cluster {
+            return None;
+        }
+        Some(ClusterVisibility {
+            collision: halo_map::collision::CollisionBsp::load(&bsp).ok()?,
+            clusters: halo_map::collision::StructureClusters::load(cache, &bsp).ok()?,
+            pvs,
+            words_per_cluster,
+        })
+    }
+
+    /// The cluster a point (world units) is in, -1 outside the BSP.
+    fn cluster(&self, point: [f32; 3]) -> i16 {
+        self.clusters.cluster_from_leaf(self.collision.leaf_from_point(point))
+    }
+
+    /// Whether cluster `from` sees cluster `to` (`structure_bsp_get_cluster_pvs`).
+    fn sees(&self, from: i16, to: i16) -> bool {
+        let word = from as usize * self.words_per_cluster + to as usize / 32;
+        self.pvs.get(word).is_none_or(|bits| bits & (1 << (to as u32 % 32)) != 0)
+    }
 }
 
 /// Shows only the BSP the game is in (and the placed light fixtures of it),

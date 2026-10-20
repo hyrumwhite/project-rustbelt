@@ -145,37 +145,7 @@ pub struct DynamicLightsPlugin;
 
 impl Plugin for DynamicLightsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DynamicLights>().add_systems(Update, (sync_lights, cull_far_fixtures));
-    }
-}
-
-/// How much further than its range (metres) a light can be from the camera
-/// and still be in the scene: off screen it lights what is in view, and
-/// bounces into it, but every light in the scene shares the lights' samples,
-/// and a10's alarm lights spinning all through the ship (and every fixture
-/// on the deck) left those near the camera few, the rooms flickering.
-const LIGHT_CULL_MARGIN: f32 = 10.0;
-
-/// Whether a light at `position` reaching `range` (metres) is too far from
-/// the camera to keep ([`LIGHT_CULL_MARGIN`]; `HALO_RT_NO_LIGHT_CULL` keeps
-/// every light).
-fn far_from(camera: Option<&GlobalTransform>, position: Vec3, range: f32) -> bool {
-    static KEEP_ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *KEEP_ALL.get_or_init(|| std::env::var_os("HALO_RT_NO_LIGHT_CULL").is_some()) {
-        return false;
-    }
-    camera.is_some_and(|camera| camera.translation().distance(position) > range + LIGHT_CULL_MARGIN)
-}
-
-/// Leaves the light fixtures far from the camera out of the scene
-/// ([`far_from`]).
-fn cull_far_fixtures(
-    camera: Option<Single<&GlobalTransform, With<Camera3d>>>,
-    mut fixtures: Query<(&GlobalTransform, &PointLight, &mut Visibility), With<LightSource>>,
-) {
-    for (transform, light, mut visibility) in &mut fixtures {
-        let wanted = if far_from(camera.as_deref().copied(), transform.translation(), light.range) { Visibility::Hidden } else { Visibility::Inherited };
-        visibility.set_if_neq(wanted);
+        app.init_resource::<DynamicLights>().add_systems(Update, sync_lights);
     }
 }
 
@@ -193,7 +163,6 @@ fn sync_lights(
     mut points: Query<(&mut PointLight, &mut Transform, &mut Visibility), Without<SpotLight>>,
     mut spots: Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
     level: Option<Res<BridgeLevel>>,
-    camera: Option<Single<&GlobalTransform, With<Camera3d>>>,
     mut light_tags: Local<HashMap<u32, LightTag>>,
     mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
     mut glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
@@ -315,10 +284,6 @@ fn sync_lights(
         let reach2 = if spot && !muzzle { light.radius * SPOT_REFERENCE_REACH } else { light.radius * light.radius };
         let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * reach2;
         let range = light.radius * METERS_PER_WORLD_UNIT * RANGE_PER_RADIUS;
-        // (too far from the camera to light what it sees: left out)
-        if far_from(camera.as_deref().copied(), position, range) {
-            continue;
-        }
         let radius = if spot { SPOT_RADIUS } else { LIGHT_RADIUS };
         let source = LightSource { power: radiance * sphere_lumens_per_radiance(radius) };
         let (color, intensity) = source.color_and_intensity(settings.emissive_scale);

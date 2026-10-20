@@ -73,6 +73,7 @@ static struct
 	short node_count;
 	real_matrix4x3 nodes[MAXIMUM_RECORDED_MODEL_NODES];
 	real_rgb_color change_colors[4];
+	real function_values[4];
 	real active_camouflage;
 } bevy_bridge_recorded[MAXIMUM_RECORDED_MODELS];
 static short bevy_bridge_recorded_count;
@@ -576,10 +577,18 @@ void bevy_bridge_record_model(
 	real_matrix4x3 const *node_matrices,
 	short node_count,
 	real_rgb_color const *change_colors,
+	real const *function_values,
 	real active_camouflage)
 {
+	short value_index;
+
 	if (!bevy_bridge_shared || model_index == NONE || bevy_bridge_recorded_count >= MAXIMUM_RECORDED_MODELS)
 		return;
+	for (value_index = 0; value_index < 4; value_index++)
+	{
+		bevy_bridge_recorded[bevy_bridge_recorded_count].function_values[value_index] =
+			function_values ? function_values[value_index] : 0.0f;
+	}
 	node_count = (short)MIN(node_count, MAXIMUM_RECORDED_MODEL_NODES);
 	bevy_bridge_recorded[bevy_bridge_recorded_count].model_index = model_index;
 	bevy_bridge_recorded[bevy_bridge_recorded_count].node_count = node_count;
@@ -766,6 +775,7 @@ void bevy_bridge_export_frame(
 			out->parent_index = (unsigned long)object->object.parent_object_index;
 			out->location_cluster = object->object.location.cluster_index;
 			out->pad = 0;
+			memcpy(out->function_values, object->object.outgoing_function_values, sizeof(out->function_values));
 			memcpy(out->region_permutations, object->object.region_permutations, sizeof(out->region_permutations));
 			{
 				short color_index;
@@ -808,6 +818,7 @@ void bevy_bridge_export_frame(
 			out->type = NONE;
 			SET_FLAG(out->flags, _bevy_bridge_object_model_bit, TRUE);
 			out->active_camouflage = bevy_bridge_recorded[recorded].active_camouflage;
+			memcpy(out->function_values, bevy_bridge_recorded[recorded].function_values, sizeof(out->function_values));
 			{
 				short color_index;
 
@@ -834,6 +845,15 @@ boolean bevy_bridge_overlay_enabled(void)
 	struct bevy_bridge_shared *shared = bevy_bridge_get();
 
 	return shared && shared->overlay_enabled;
+}
+
+boolean bevy_bridge_viewer_draws_transparent(void)
+{
+	static int viewer_transparent = -1;
+
+	if (viewer_transparent < 0)
+		viewer_transparent = config_boolean("game.bevy_bridge_viewer_transparent") != 0;
+	return viewer_transparent && bevy_bridge_overlay_enabled();
 }
 
 boolean bevy_bridge_viewer_draws_glass(void)

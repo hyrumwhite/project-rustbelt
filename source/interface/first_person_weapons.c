@@ -537,6 +537,7 @@ void first_person_weapon_draw(
 								weapon_definition->weapon.interface_definition.first_person_model.index)->nodes.count,
 								MAXIMUM_NODES_PER_ANIMATION),
 							weapon->object.outgoing_change_colors,
+							weapon->object.outgoing_function_values,
 							unit->unit.active_camouflage);
 						/* port: camouflaged, not drawn over the Bevy bridge's
 						overlay (render_objects.c, overlay_camouflaged) */
@@ -572,6 +573,7 @@ void first_person_weapon_draw(
 							(short)MIN(model_definition_get(first_person_interface->hands.index)->nodes.count,
 								MAXIMUM_NODES_PER_ANIMATION),
 							unit->object.outgoing_change_colors,
+							unit->object.outgoing_function_values,
 							unit->unit.active_camouflage);
 						/* port: camouflaged, not drawn over the Bevy bridge's
 						overlay (render_objects.c, overlay_camouflaged) */

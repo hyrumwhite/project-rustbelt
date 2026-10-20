@@ -25,6 +25,7 @@ void bevy_bridge_record_model(
 	struct real_matrix4x3 const *node_matrices,
 	short node_count,
 	real_rgb_color const *change_colors,
+	real const *function_values,
 	real active_camouflage);
 
 /* sound_manager.c: the first player's listener, which the renderer may
@@ -38,6 +39,10 @@ boolean bevy_bridge_overlay_enabled(void);
 /* with game.bevy_bridge_viewer_glass on too: TRUE (the renderer draws glass
 and water itself, ray traced, so the game leaves them out of its overlay) */
 boolean bevy_bridge_viewer_draws_glass(void);
+/* with game.bevy_bridge_viewer_transparent on too: TRUE (the renderer draws
+the transparent chicago and generic shaders itself, so the game leaves them
+out of its overlay) */
+boolean bevy_bridge_viewer_draws_transparent(void);
 /* with game.bevy_bridge_viewer_fog on too: TRUE (the renderer fogs the world
 itself, from the fog each frame shares, so the game draws no environment
 fog into its overlay) */

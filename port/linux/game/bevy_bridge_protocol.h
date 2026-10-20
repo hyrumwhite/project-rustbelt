@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 42
+#define BEVY_BRIDGE_VERSION 43
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -288,6 +288,9 @@ struct bevy_bridge_object
 	unsigned long parent_index;
 	short location_cluster;
 	short pad;
+	/* (protocol 43) its outgoing function values (A-D), which its shaders'
+	animations, fades and numeric counters take as sources */
+	float function_values[4];
 };
 
 /* real_matrix4x3: a node's world transform */

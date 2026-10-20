@@ -108,6 +108,13 @@ pub struct HaloFog {
 pub struct FogScreenMaps([Option<Handle<Image>>; 4]);
 
 impl HaloFog {
+    /// The environment fog's five values (atmospheric colour and density,
+    /// its distances, the plane, planar colour and density, its distances),
+    /// as `halo_fog.wesl` and the sprites' shader take them.
+    pub fn layers(&self) -> [Vec4; 5] {
+        [self.atmospheric_color, self.atmospheric, self.plane, self.planar_color, self.planar]
+    }
+
     /// The game's fog as seen from its camera (in the game's coordinates):
     /// the camera's densities as `_rasterizer_environment_fog_begin` finds
     /// them, and its screen. None if neither has any density.

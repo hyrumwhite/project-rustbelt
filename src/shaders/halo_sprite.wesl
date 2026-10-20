@@ -18,9 +18,19 @@
 // R (no nearer than 1 cm past the near plane) times the z-map's height
 // (green over blue), so a flash or burst bulges toward the camera instead of
 // being cut flat by the surface it meets. The z-map spans each quad.
+//
+// Fog: the game draws its effects after its fog, each faded toward its
+// blend's neutral by the fog's transmittance at its own depth (the effect
+// combiners' last stage). Here the fog pass comes after, over the picture by
+// the depth of what lies behind (src/fog.rs). So a sprite fades by its own
+// fog, and its colour is raised by what that pass will take from the surface
+// behind (1 over 1 - its coverage, up to 4 times; none over the sky, which
+// the pass leaves): an effect in front of a far fogged wall is no longer
+// fogged as much as the wall, nor one against the sky not at all.
 
 import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_view_bindings::view;
+@if(DEPTH_PREPASS) import bevy_pbr::prepass::utils::prepass_depth;
 
 struct HaloSprite {
     // x: framebuffer blend function, y: what a displayed 1 is written as, z: 1 for
@@ -28,6 +38,12 @@ struct HaloSprite {
     mode: vec4<f32>,
     // x: a zsprite's radius (metres)
     zsprite: vec4<f32>,
+    // the environment fog (halo_fog.wesl's first five)
+    atmospheric_color: vec4<f32>,
+    atmospheric: vec4<f32>,
+    plane: vec4<f32>,
+    planar_color: vec4<f32>,
+    planar: vec4<f32>,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> sprite: HaloSprite;
@@ -77,7 +93,77 @@ fn srgb_decode(encoded: vec3<f32>) -> vec3<f32> {
     return select(high, low, encoded <= vec3(0.04045));
 }
 
+// a 16-texel density texture's coordinate as the texel it falls on
+fn fog_texel(u: f32) -> f32 {
+    return saturate((u * 16.0 - 0.5) / 15.0);
+}
+
+// the environment fog's coverage at a view depth and a point (halo_fog.wesl,
+// without the water's case)
+fn fog_coverage(view_depth: f32, position: vec3<f32>) -> f32 {
+    let height = dot(sprite.plane.xyz, position) - sprite.plane.w;
+    let range = max(sprite.atmospheric.y - sprite.atmospheric.x, 1e-4);
+    let atmospheric = sprite.atmospheric_color.a * fog_texel((view_depth - sprite.atmospheric.x) / range);
+    let distance = smoothstep(0.0, 1.0, fog_texel(view_depth / max(sprite.planar.x, 1e-4)));
+    let under = smoothstep(0.0, 1.0, fog_texel(-height / max(sprite.planar.y, 1e-4)));
+    let planar = sprite.planar_color.a * mix(distance * under, distance, sprite.planar.z);
+    return 1.0 - (1.0 - atmospheric) * (1.0 - planar);
+}
+
+// the sprite's own fog's transmittance, and how much to raise its colour by
+// for the fog pass over what lies behind it
+fn sprite_fog(in: VertexOutput) -> vec2<f32> {
+    if sprite.atmospheric_color.a <= 0.0 && sprite.planar_color.a <= 0.0 {
+        return vec2(1.0);
+    }
+    let forward = -normalize(view.world_from_view[2].xyz);
+    let own = 1.0 - fog_coverage(dot(in.world_position.xyz - view.world_position, forward), in.world_position.xyz);
+    var behind = 0.0;
+@if(DEPTH_PREPASS) {
+    let depth = prepass_depth(in.position, 0u);
+    if depth > 0.0 {
+        let uv = in.position.xy / view.viewport.zw;
+        let ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+        let p = view.world_from_clip * vec4(ndc, depth, 1.0);
+        let position = p.xyz / p.w;
+        behind = fog_coverage(dot(position - view.world_position, forward), position);
+    }
+}
+    return vec2(own, min(1.0 / max(1.0 - behind, 1e-4), 4.0));
+}
+
 fn shade(in: VertexOutput) -> vec4<f32> {
+    let fogged = sprite_fog(in);
+    let shaded = shade_unfogged(in);
+    let mode = u32(sprite.mode.x);
+    if sprite.mode.w > 2.5 {
+        return vec4(1.0 - fogged.x, (fogged.y - 1.0) / 3.0, 0.0, 1.0);
+    }
+    if sprite.mode.w > 0.5 { return shaded; }
+    switch mode {
+        // multiply, min, double multiply: the factor toward its neutral
+        case 1u, 5u: {
+            return vec4(mix(vec3(1.0), shaded.rgb, fogged.x), shaded.a);
+        }
+        case 2u: {
+            return vec4(mix(vec3(1.0), shaded.rgb, fogged.x), shaded.a);
+        }
+        // alpha blend: its coverage
+        case 0u: {
+            return vec4(shaded.rgb * fogged.y, shaded.a * fogged.x);
+        }
+        // alpha multiply add: premultiplied
+        case 7u: {
+            return vec4(shaded.rgb * fogged.x * fogged.y, shaded.a * fogged.x);
+        }
+        // add, subtract, max
+        default: {
+            return vec4(shaded.rgb * fogged.x * fogged.y, shaded.a);
+        }
+    }
+}
+
+fn shade_unfogged(in: VertexOutput) -> vec4<f32> {
     let sample = textureSample(map, map_sampler, in.uv);
     var v = vec4(1.0);
 @if(VERTEX_COLORS) {

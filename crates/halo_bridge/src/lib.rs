@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 40;
+pub const VERSION: u32 = 41;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -57,6 +57,10 @@ const OVERLAYS: usize = 2;
 pub const DEFAULT_NAME: &str = "HaloBevyBridge";
 
 pub const OBJECT_HIDDEN: u32 = 1 << 0;
+/// An object's `object_flags` bit for one outside the map the game is in
+/// (`_object_outside_of_map_bit`): in no cluster of the BSP, which the game
+/// doesn't draw.
+pub const OBJECT_OUTSIDE_OF_MAP: u32 = 1 << 21;
 pub const OBJECT_FIRST_PERSON: u32 = 1 << 1;
 /// Not an object but a model the game draws by itself (the first-person
 /// weapon and hands): [`Object::definition_index`] is the model tag.
@@ -315,6 +319,12 @@ pub struct Light {
 /// A light tag flag that, in the retail maps, only the weapons' muzzle
 /// flashes have (bit 5).
 pub const LIGHT_MUZZLE_FLASH: u32 = 1 << 5;
+
+/// (Protocol 41) a light's `definition_flags` bit no light tag has, for a
+/// contrail's line, after the lights: its contrail tag as the definition,
+/// its middle as the position, its direction from its oldest point to its
+/// newest as the forward, half its length as the radius, no colour.
+pub const LIGHT_CONTRAIL: u32 = 1 << 31;
 
 /// A ray the game tested against its structure's collision geometry
 /// (front-facing surfaces), with `game.bevy_bridge_ray_tests` on.

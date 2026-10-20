@@ -20,7 +20,7 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
 };
-use halo_bridge::{Bridge, Snapshot, OBJECT_FIRST_PERSON, OBJECT_FIRST_PERSON_BODY, OBJECT_HIDDEN, OBJECT_MODEL};
+use halo_bridge::{Bridge, Snapshot, OBJECT_FIRST_PERSON, OBJECT_FIRST_PERSON_BODY, OBJECT_HIDDEN, OBJECT_MODEL, OBJECT_OUTSIDE_OF_MAP};
 use std::{sync::Arc, time::Duration};
 
 /// The simulation the game runs: the systems in Rust (its
@@ -441,10 +441,11 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, animated, children): (
+    (recolourable, animated, children, follow): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<(), With<crate::level::AnimatedSelfIllumination>>,
         Query<&Children>,
+        Res<FollowGame>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -482,6 +483,20 @@ fn sync_objects(
         *frames > 0
     });
 
+    // (objects outside the map the game is in, as their outermost parent
+    // is, which the game doesn't draw: in b30's interior, the trees beyond
+    // a window, which stood in the other BSP)
+    let flags_of: HashMap<u32, (u32, u32)> = snapshot.objects.iter().map(|o| (o.object_index, (o.object_flags, o.parent_index))).collect();
+    let outside_of_map = |object: &halo_bridge::Object| {
+        let (mut flags, mut parent) = (object.object_flags, object.parent_index);
+        for _ in 0..8 {
+            match flags_of.get(&parent) {
+                Some(&(parent_flags, grandparent)) => (flags, parent) = (parent_flags, grandparent),
+                None => break,
+            }
+        }
+        flags & OBJECT_OUTSIDE_OF_MAP != 0
+    };
     let mut seen = HashMap::<u32, ()>::default();
     for object in &snapshot.objects {
         seen.insert(object.object_index, ());
@@ -554,8 +569,10 @@ fn sync_objects(
         if let Ok(mut v) = visibility.get_mut(tracked.root) {
             // (the first-person unit as the game leaves it out: drawn, its
             // body would close round the camera and shade the first-person
-            // weapon and hands, which sit inside it)
-            let wanted = if object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) != 0 {
+            // weapon and hands, which sit inside it; but for a camera flying
+            // free of the game's, which sees the player)
+            let seen_body = !follow.0 && object.flags & OBJECT_FIRST_PERSON_BODY != 0;
+            let wanted = if (object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) != 0 && !seen_body) || outside_of_map(object) {
                 Visibility::Hidden
             } else {
                 Visibility::Inherited

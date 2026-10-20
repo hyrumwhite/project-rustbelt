@@ -294,6 +294,31 @@ const CAMOUFLAGE_THICKNESS: f32 = 0.6;
 /// plastic's sheen, not the matte of surfaces Halo gives no reflection.
 const MODEL_UNMASKED_ROUGHNESS: f32 = 0.45;
 
+/// Models duller than their shaders' reflections make them (by the shader
+/// tag's path): the share of their gloss and metal they keep, the rest
+/// toward [`DULL_ROUGHNESS`] (lit by the level's own lights, Chief's
+/// armour and the vehicles shone like chrome).
+const MODEL_SHINE: [(&str, f32); 8] = [
+    ("characters\\cyborg\\", 0.5),
+    ("characters\\marine", 0.5),
+    ("characters\\grunt\\", 0.8),
+    ("vehicles\\scorpion\\", 0.45),
+    ("vehicles\\warthog\\", 0.5),
+    // (Covenant crates)
+    ("scenery\\c_storage\\", 0.7),
+    ("scenery\\rocks\\", 0.6),
+    ("scenery\\cutscene_small_rock\\", 0.6),
+];
+
+/// The roughness a model's gloss fades toward as [`MODEL_SHINE`] dulls it.
+const DULL_ROUGHNESS: f32 = 0.6;
+
+/// Chief's visor's shader, drawn as a smooth metal of this colour (Halo's
+/// visor reflects gold) instead of by its maps.
+const VISOR_SHADER: &str = "characters\\cyborg\\shaders\\visor";
+const VISOR_COLOR: Color = Color::srgb(0.8, 0.55, 0.2);
+const VISOR_ROUGHNESS: f32 = 0.12;
+
 /// How far inside the camera's skinned surface the rays' skinned copy sits
 /// (meters): the two are skinned alike, but on different processors.
 const TRACED_SKIN_INSET: f32 = 0.005;
@@ -1309,7 +1334,8 @@ impl LevelBuilder {
             return base.clone();
         };
         let color = change_colors[source].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-        if color == [255; 3] {
+        // (Chief's visor is its own colour, not its base map's)
+        if color == [255; 3] || info.as_ref().is_some_and(|i| i.name.eq_ignore_ascii_case(VISOR_SHADER)) {
             return base.clone();
         }
         if let Some(surface) = self.coloured_surfaces.get(&(shader, color)) {
@@ -1444,6 +1470,19 @@ impl LevelBuilder {
         // the ray-traced surface gets the bump map too, where it tiles as the
         // base map does (StandardMaterial has one set of texture coordinates)
         let mut material = material;
+        // Chief's visor: a gold mirror of what is round it (its base map is
+        // black, which as a metal reflects nothing, with a reflection
+        // painted on in grey)
+        let base_color_texture = if info.name.eq_ignore_ascii_case(VISOR_SHADER) {
+            material.base_color = VISOR_COLOR;
+            material.base_color_texture = None;
+            material.metallic = 1.0;
+            material.perceptual_roughness = VISOR_ROUGHNESS;
+            material.metallic_roughness_texture = None;
+            None
+        } else {
+            base_color_texture
+        };
         // a model shader's cut-out (the game's alpha test, reference 0x7f, on
         // the base map's alpha: leaves, grilles) and its two sides
         if info.environment.is_none() && info.alpha_tested && base_color_texture.is_some() {
@@ -1649,6 +1688,10 @@ impl LevelBuilder {
         let model = info.shader_type == ShaderType::Model;
         let roughness = if model { 0.4 - 0.34 * r.sqrt() } else { 0.8 - 0.65 * r.sqrt() };
         let metallic = if model { 0.9 * r } else { 0.5 * r };
+        // (some duller still)
+        let shine = MODEL_SHINE.iter().find(|(path, _)| model && info.name.starts_with(path)).map_or(1.0, |&(_, shine)| shine);
+        let dull = |roughness: f32| roughness + (DULL_ROUGHNESS.max(roughness) - roughness) * (1.0 - shine);
+        let (roughness, metallic) = (dull(roughness), metallic * shine);
         let reflectance = 0.5;
         let mask = match reflection.mask {
             // an alpha-tested base map's alpha is its cut-out, not a mask
@@ -1659,7 +1702,7 @@ impl LevelBuilder {
         // Halo's mask dims a reflection, never blurs it: a model's unmasked
         // parts stay semi-glossy (fading them to matte while partly metallic
         // left Covenant crates looking dusty).
-        let unmasked = if model { MODEL_UNMASKED_ROUGHNESS } else { MATTE_ROUGHNESS };
+        let unmasked = if model { dull(MODEL_UNMASKED_ROUGHNESS) } else { MATTE_ROUGHNESS };
         let texture = mask.and_then(|(mask, channel)| {
             let bake = Bake::MetallicRoughness {
                 mask,

@@ -13,8 +13,10 @@
 //! Projectiles glow too: the plasma bolts by the lights their tags attach,
 //! which in the game are only lens flares and light nothing (the game
 //! shares them anyway, at their tags' colour and reach); rockets, needles,
-//! the Wraith's mortar and the Sentinels' beams, whose tags carry no light,
-//! by their own here.
+//! and the Wraith's mortar, whose tags carry no light, by their own here.
+//! The Sentinels' beams glow along their contrails (the beam's projectile
+//! never outlives the tick that fired it), which the game shares with the
+//! lights.
 
 use crate::{
     bridge::{BridgeLevel, BridgeLink},
@@ -22,7 +24,7 @@ use crate::{
     LightingSettings,
 };
 use bevy::{camera::visibility::NoFrustumCulling, platform::collections::HashMap, prelude::*};
-use halo_bridge::{Light, LIGHT_MUZZLE_FLASH};
+use halo_bridge::{Light, LIGHT_CONTRAIL, LIGHT_MUZZLE_FLASH};
 use halo_map::{
     light_gel::{gel_beams, GelBeam},
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
@@ -65,6 +67,10 @@ const VEHICLE_SPOT_SCALE: f32 = 0.5;
 /// aimed where the camera looks: the game's light keeps the unit's level
 /// facing.
 const FLASHLIGHT_REACH: f32 = 1.0;
+/// The player's flashlight's cone, as a share of its tag's (by the tag's it
+/// lit most of the view), and its share of a spot light's brightness.
+const FLASHLIGHT_CONE: f32 = 0.7;
+const FLASHLIGHT_SCALE: f32 = 0.8;
 /// A muzzle flash is a spot light: the player's this far out along the aim
 /// (metres, about the muzzle), others' this far out along their weapon's,
 /// with this cone (radians: full to the first, none at the second), and this
@@ -94,22 +100,82 @@ const GEL_LIGHT_SCALE: f32 = 0.5;
 /// fuel rods, charged bolts and grenades have their own, the other bolts
 /// their lens flares'): their tag's name, their light's colour and reach
 /// (world units, as a light tag's radius).
-const PROJECTILE_GLOWS: [(&str, [f32; 3], f32); 4] = [
+const PROJECTILE_GLOWS: [(&str, [f32; 3], f32); 3] = [
     // (its exhaust's flame)
     ("weapons\\rocket launcher\\rocket", [1.0, 0.55, 0.2], 2.0),
     // (pink crystal, in flight and stuck in what it hit)
     ("weapons\\needler\\needle", [1.0, 0.3, 0.8], 0.75),
     // (a ball of blue plasma)
     ("vehicles\\wraith\\wraith mortar", [0.5, 0.45, 1.0], 2.0),
-    // (an orange laser, a stream of them)
+];
+
+/// The contrails that glow (by their contrail tag's name), with the colour
+/// and reach (world units) of the lights along them: one each this far
+/// apart (world units), up to this many.
+const CONTRAIL_GLOWS: [(&str, [f32; 3], f32); 1] = [
+    // (the Sentinels' beam: an orange laser)
     ("characters\\sentinel\\beam", [1.0, 0.45, 0.15], 1.0),
 ];
+const CONTRAIL_GLOW_SPACING: f32 = 3.0;
+const CONTRAIL_GLOW_MOST: usize = 4;
+
+/// Lights dimmed from their tags' brightness (by the light tag's name): a
+/// wide reach is a bright light here (brightness grows with its square).
+const LIGHT_DIMMING: [(&str, f32); 5] = [
+    // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
+    // floodlights)
+    ("characters\\monitor\\monitor dynamic", 0.15),
+    // (the grenades' glow in flight, and their explosions', reaching 10)
+    ("weapons\\frag grenade\\frag grenade", 0.7),
+    ("weapons\\plasma grenade\\plasma grenade", 0.7),
+    ("weapons\\frag grenade\\explosion", 0.6),
+    ("weapons\\plasma grenade\\explosion", 0.6),
+];
+
+/// What a light's tag says of it here.
+#[derive(Clone, Copy)]
+struct LightTag {
+    /// A muzzle flash, by its name.
+    muzzle: bool,
+    /// Its share of its brightness ([`LIGHT_DIMMING`]).
+    dimming: f32,
+}
 
 pub struct DynamicLightsPlugin;
 
 impl Plugin for DynamicLightsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DynamicLights>().add_systems(Update, sync_lights);
+        app.init_resource::<DynamicLights>().add_systems(Update, (sync_lights, cull_far_fixtures));
+    }
+}
+
+/// How much further than its range (metres) a light can be from the camera
+/// and still be in the scene: off screen it lights what is in view, and
+/// bounces into it, but every light in the scene shares the lights' samples,
+/// and a10's alarm lights spinning all through the ship (and every fixture
+/// on the deck) left those near the camera few, the rooms flickering.
+const LIGHT_CULL_MARGIN: f32 = 10.0;
+
+/// Whether a light at `position` reaching `range` (metres) is too far from
+/// the camera to keep ([`LIGHT_CULL_MARGIN`]; `HALO_RT_NO_LIGHT_CULL` keeps
+/// every light).
+fn far_from(camera: Option<&GlobalTransform>, position: Vec3, range: f32) -> bool {
+    static KEEP_ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *KEEP_ALL.get_or_init(|| std::env::var_os("HALO_RT_NO_LIGHT_CULL").is_some()) {
+        return false;
+    }
+    camera.is_some_and(|camera| camera.translation().distance(position) > range + LIGHT_CULL_MARGIN)
+}
+
+/// Leaves the light fixtures far from the camera out of the scene
+/// ([`far_from`]).
+fn cull_far_fixtures(
+    camera: Option<Single<&GlobalTransform, With<Camera3d>>>,
+    mut fixtures: Query<(&GlobalTransform, &PointLight, &mut Visibility), With<LightSource>>,
+) {
+    for (transform, light, mut visibility) in &mut fixtures {
+        let wanted = if far_from(camera.as_deref().copied(), transform.translation(), light.range) { Visibility::Hidden } else { Visibility::Inherited };
+        visibility.set_if_neq(wanted);
     }
 }
 
@@ -127,17 +193,20 @@ fn sync_lights(
     mut points: Query<(&mut PointLight, &mut Transform, &mut Visibility), Without<SpotLight>>,
     mut spots: Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
     level: Option<Res<BridgeLevel>>,
-    mut muzzle_tags: Local<HashMap<u32, bool>>,
+    camera: Option<Single<&GlobalTransform, With<Camera3d>>>,
+    mut light_tags: Local<HashMap<u32, LightTag>>,
     mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
     mut glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
+    mut contrail_glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
     mut scenario: Local<String>,
 ) {
     let Some(snapshot) = &link.latest else { return };
     // (a new level: its own tags)
     if snapshot.scenario_name != *scenario {
-        muzzle_tags.clear();
+        light_tags.clear();
         gels.clear();
         glows.clear();
+        contrail_glows.clear();
         *scenario = snapshot.scenario_name.clone();
     }
     // the glowing projectiles' lights, round from their middles (by no tag:
@@ -165,15 +234,48 @@ fn sync_lights(
             })
         })
         .collect();
+    // the glowing contrails' lights, evenly along each (the rest of the
+    // contrails light nothing)
+    let mut contrail_lights: Vec<Light> = Vec::new();
+    for contrail in snapshot.lights.iter().filter(|light| light.definition_flags & LIGHT_CONTRAIL != 0) {
+        let Some((color, radius)) = *contrail_glows.entry(contrail.definition_index).or_insert_with(|| {
+            let tag = level.as_ref()?.builder.cache.tag(contrail.definition_index).ok()?;
+            CONTRAIL_GLOWS.iter().find(|(name, ..)| tag.name.eq_ignore_ascii_case(name)).map(|&(_, color, radius)| (color, radius))
+        }) else {
+            continue;
+        };
+        let (middle, along, length) = (Vec3::from(contrail.position), Vec3::from(contrail.forward), 2.0 * contrail.radius);
+        let count = ((length / CONTRAIL_GLOW_SPACING).ceil() as usize).clamp(1, CONTRAIL_GLOW_MOST);
+        for index in 0..count {
+            let offset = ((index as f32 + 0.5) / count as f32 - 0.5) * length;
+            contrail_lights.push(Light {
+                position: (middle + along * offset).to_array(),
+                forward: [1.0, 0.0, 0.0],
+                up: [0.0, 0.0, 1.0],
+                color,
+                radius,
+                cutoff_angle: std::f32::consts::PI,
+                falloff_angle: std::f32::consts::PI,
+                definition_index: u32::MAX,
+                object_index: contrail.object_index,
+                ..default()
+            });
+        }
+    }
+    let lights = snapshot.lights.iter().filter(|light| light.definition_flags & LIGHT_CONTRAIL == 0);
     let (mut used_points, mut used_spots) = (0, 0);
-    for light in snapshot.lights.iter().chain(&projectile_lights) {
+    for light in lights.chain(&projectile_lights).chain(&contrail_lights) {
         let near = snapshot.camera.as_ref().filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
         let own = light.first_person != 0;
         // (a muzzle flash: its tag's flag, or its name)
-        let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0
-            || *muzzle_tags.entry(light.definition_index).or_insert_with(|| {
-                level.as_ref().and_then(|level| level.builder.cache.tag(light.definition_index).ok()).is_some_and(|tag| tag.name.ends_with("muzzle flash"))
-            });
+        let tag = *light_tags.entry(light.definition_index).or_insert_with(|| {
+            let name = level.as_ref().and_then(|level| level.builder.cache.tag(light.definition_index).ok()).map(|tag| tag.name.as_str());
+            LightTag {
+                muzzle: name.is_some_and(|name| name.ends_with("muzzle flash")),
+                dimming: name.and_then(|name| LIGHT_DIMMING.iter().find(|(dimmed, _)| name.eq_ignore_ascii_case(dimmed))).map_or(1.0, |&(_, dimming)| dimming),
+            }
+        });
+        let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0 || tag.muzzle;
         let muzzle = light.cutoff_angle > SPOT_CUTOFF && muzzle_tag;
         let spot = light.cutoff_angle <= SPOT_CUTOFF || muzzle;
         // (the player's spot lights follow the camera's aim)
@@ -189,6 +291,7 @@ fn sync_lights(
         }
         let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
         let vehicle = spot && !muzzle && near_camera.is_none();
+        let flashlight = spot && !muzzle && near_camera.is_some();
         let ahead = match (muzzle, spot) {
             (true, _) if near_camera.is_some() => MUZZLE_FORWARD,
             (true, _) => OTHERS_MUZZLE_FORWARD,
@@ -202,14 +305,20 @@ fn sync_lights(
             MUZZLE_LIGHT_SCALE
         } else if vehicle {
             SPOT_LIGHT_SCALE * VEHICLE_SPOT_SCALE
+        } else if flashlight {
+            SPOT_LIGHT_SCALE * FLASHLIGHT_SCALE
         } else if spot {
             SPOT_LIGHT_SCALE
         } else {
             POINT_LIGHT_SCALE
-        };
+        } * tag.dimming;
         let reach2 = if spot && !muzzle { light.radius * SPOT_REFERENCE_REACH } else { light.radius * light.radius };
         let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * reach2;
         let range = light.radius * METERS_PER_WORLD_UNIT * RANGE_PER_RADIUS;
+        // (too far from the camera to light what it sees: left out)
+        if far_from(camera.as_deref().copied(), position, range) {
+            continue;
+        }
         let radius = if spot { SPOT_RADIUS } else { LIGHT_RADIUS };
         let source = LightSource { power: radiance * sphere_lumens_per_radiance(radius) };
         let (color, intensity) = source.color_and_intensity(settings.emissive_scale);
@@ -280,6 +389,8 @@ fn sync_lights(
                 (MUZZLE_CUTOFF, MUZZLE_FALLOFF)
             } else if vehicle {
                 (light.cutoff_angle * VEHICLE_SPOT_CONE, light.falloff_angle * VEHICLE_SPOT_CONE)
+            } else if flashlight {
+                (light.cutoff_angle * FLASHLIGHT_CONE, light.falloff_angle * FLASHLIGHT_CONE)
             } else {
                 (light.cutoff_angle, light.falloff_angle)
             };

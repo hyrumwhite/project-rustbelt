@@ -520,6 +520,11 @@ fn sync_objects(
     let clusters_of: HashMap<u32, (i16, u32)> = snapshot.objects.iter().map(|o| (o.object_index, (o.location_cluster, o.parent_index))).collect();
     let unseen_cluster = |object: &halo_bridge::Object| {
         let Some(visibility) = visibility_data.as_ref().and_then(|(_, v)| v.as_ref()).filter(|_| camera_cluster >= 0) else { return false };
+        // (a model the game draws by itself, the first-person weapon and
+        // hands, comes with no cluster: its zeroed 0 isn't where it is)
+        if object.flags & OBJECT_MODEL != 0 {
+            return false;
+        }
         let (mut cluster, mut parent) = (object.location_cluster, object.parent_index);
         for _ in 0..8 {
             match clusters_of.get(&parent) {

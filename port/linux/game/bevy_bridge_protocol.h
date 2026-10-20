@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 41
+#define BEVY_BRIDGE_VERSION 42
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -229,6 +229,11 @@ struct bevy_bridge_sprite_batch
 	internal sprite), shader_flags and blend_function unused */
 	unsigned long kind;
 	float tint;
+	/* (protocol 42) a zsprite's radius (world units): how far toward the
+	camera its secondary map (a z-map: green over blue its height) brings a
+	pixel; the shader's secondary map radius times its zsprite radius scale
+	(1 if none). 0 for other anchors */
+	float secondary_radius;
 };
 
 enum

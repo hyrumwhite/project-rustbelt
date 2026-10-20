@@ -227,6 +227,17 @@ void build_sprites_begin(
 	return;
 }
 
+/* port: a zsprite's radius, as the effect rasterizer's zsprite constants
+take it (0 for other anchors) */
+static float build_sprites_zsprite_radius(
+	struct shader_effect_definition const *shader)
+{
+	if (shader->secondary_map.index == NONE || shader->secondary_map_anchor != 2)
+		return 0.0f;
+	return shader->secondary_map_radius *
+		(shader->secondary_map_zsprite_radius_scale != 0.0f ? shader->secondary_map_zsprite_radius_scale : 1.0f);
+}
+
 /* port: with a Bevy renderer that draws the sprites itself
 (game.bevy_bridge_viewer_effects), a group shared with it instead of drawn:
 its vertices out of the camera's space; the first player's window's only
@@ -258,6 +269,7 @@ static void build_sprites_share(
 		batch.secondary_map = (unsigned long)data->shader->secondary_map.index;
 		batch.secondary_anchor = data->shader->secondary_map_anchor;
 		batch.secondary_flags = data->shader->secondary_map_flags;
+		batch.secondary_radius = build_sprites_zsprite_radius(data->shader);
 	}
 	else
 	{
@@ -319,6 +331,7 @@ boolean build_sprites_share_strip(
 		batch.secondary_map = (unsigned long)shader->secondary_map.index;
 		batch.secondary_anchor = shader->secondary_map_anchor;
 		batch.secondary_flags = shader->secondary_map_flags;
+		batch.secondary_radius = build_sprites_zsprite_radius(shader);
 		batch.centroid[0] = centroid->x;
 		batch.centroid[1] = centroid->y;
 		batch.centroid[2] = centroid->z;

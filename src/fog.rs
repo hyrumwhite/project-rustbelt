@@ -174,6 +174,7 @@ fn follow_fog(
     mut level: Option<ResMut<crate::bridge::BridgeLevel>>,
     mut images: ResMut<Assets<Image>>,
     viewer_water: Option<Res<ViewerWater>>,
+    mut ray_fog: ResMut<bevy_solarik::scene::SolarikRayFog>,
 ) {
     let (entity, current) = *camera;
     let Some(snapshot) = link.latest.as_ref() else { return };
@@ -203,6 +204,20 @@ fn follow_fog(
             fog.atmospheric.w = if viewer_water.is_some() { 1.0 } else { 0.0 };
             fog
         });
+    // the same fog over what reflections see beyond their surfaces
+    // (`HALO_RT_NO_RAY_FOG`: none, for comparison)
+    let traced = fog.filter(|_| std::env::var_os("HALO_RT_NO_RAY_FOG").is_none()).map_or_else(Default::default, |fog| {
+        bevy_solarik::scene::SolarikRayFog {
+            atmospheric_color: fog.atmospheric_color,
+            atmospheric: fog.atmospheric,
+            plane: fog.plane,
+            planar_color: fog.planar_color,
+            planar: fog.planar,
+        }
+    });
+    if *ray_fog != traced {
+        *ray_fog = traced;
+    }
     match (fog, current) {
         (Some(fog), _) => {
             // the layers' frames, from the level's map

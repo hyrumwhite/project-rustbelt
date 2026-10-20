@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 42;
+pub const VERSION: u32 = 43;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -278,6 +278,9 @@ pub struct Object {
     pub parent_index: u32,
     pub location_cluster: i16,
     pub pad: i16,
+    /// (Protocol 43) Its outgoing function values (A-D), which its shaders'
+    /// animations, fades and numeric counters take as sources.
+    pub function_values: [f32; 4],
 }
 
 /// `real_matrix4x3`: a node's world transform.
@@ -1157,7 +1160,7 @@ struct Shared {
 
 /// The layout is the game's, measured there; keep these in step with
 /// `bevy_bridge_protocol.h`.
-const _: () = assert!(std::mem::size_of::<Object>() == 108);
+const _: () = assert!(std::mem::size_of::<Object>() == 124);
 const _: () = assert!(std::mem::size_of::<Node>() == 52);
 const _: () = assert!(std::mem::size_of::<Camera>() == 40);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);

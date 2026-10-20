@@ -155,6 +155,10 @@ struct Args {
     /// game's overlay instead of drawing them here
     #[argh(switch)]
     game_effects: bool,
+    /// with --opence, leave the transparent chicago and generic surfaces in
+    /// the game's overlay instead of drawing them here
+    #[argh(switch)]
+    game_transparent: bool,
 }
 
 impl Args {
@@ -184,6 +188,13 @@ impl Args {
     /// (game.bevy_bridge_viewer_effects).
     fn viewer_effects(&self) -> bool {
         self.opence.is_some() && !self.no_overlay && !self.game_effects
+    }
+
+    /// Whether this viewer draws the transparent chicago and generic
+    /// surfaces itself while the game shares its overlay: the game it starts
+    /// leaves them out (game.bevy_bridge_viewer_transparent).
+    fn viewer_transparent(&self) -> bool {
+        self.opence.is_some() && !self.no_overlay && !self.game_transparent
     }
 }
 
@@ -327,7 +338,7 @@ fn main() -> AppExit {
         match {
             bridge_name = bridge::own_bridge_name();
             let simulation = args.simulation.as_deref().map(|systems| bridge::Simulation { systems, dll: simulation_dll.as_deref() });
-            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, args.viewer_glass(), args.viewer_fog(), args.viewer_decals(), args.viewer_effects(), simulation)
+            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, args.viewer_glass(), args.viewer_fog(), args.viewer_decals(), args.viewer_effects(), args.viewer_transparent(), simulation)
         } {
             // (stops the game when the viewer exits, or gives up on it)
             Ok(child) => game_process = Some(bridge::GameProcess(child)),
@@ -381,7 +392,7 @@ fn main() -> AppExit {
         .add_systems(Update, (start_camera, sync_sky_light))
         .init_resource::<ResetHistory>()
         .init_resource::<level::PeriodicTables>()
-        .add_systems(Update, level::animate_self_illumination.after(apply_lighting))
+        .add_systems(Update, (level::animate_self_illumination.after(apply_lighting), level::animate_transparent))
         .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, reset_history_on_cuts.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));
@@ -601,7 +612,7 @@ fn load_level(
     builder.matte = args.matte;
     // (the game's overlay has them; but glass and water, when this viewer
     // draws them)
-    builder.skip_transparent = overlay;
+    builder.skip_transparent = overlay && !args.viewer_transparent();
     builder.draw_blended = !overlay || args.viewer_glass();
     if let Err(e) = builder.spawn_bsps(args.bsp, !args.pathtracer, &mut commands, &mut assets) {
         error!("loading {}: {e}", cache.header.name);

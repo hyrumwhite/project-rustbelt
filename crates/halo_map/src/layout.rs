@@ -3495,11 +3495,16 @@ pub mod shader_radiosity_properties {
 }
 
 pub mod shader_transparent {
+    pub const NUMERIC_COUNTER_LIMIT: usize = 0x0;
     pub const FLAGS: usize = 0x1;
     pub const FIRST_MAP_TYPE: usize = 0x2;
     pub const FRAMEBUFFER_BLEND_FUNCTION: usize = 0x4;
+    pub const FRAMEBUFFER_FADE_MODE: usize = 0x6;
+    pub const FRAMEBUFFER_FADE_SOURCE: usize = 0x8;
     pub const EXTRA_LAYERS: usize = 0x20;
     pub const MAPS: usize = 0x2c;
+    /// (chicago only)
+    pub const CHICAGO_EXTRA_FLAGS: usize = 0x38;
 }
 
 pub mod shader_transparent_chicago_definition {
@@ -3517,6 +3522,7 @@ pub mod shader_transparent_chicago_map {
     pub const MAP_V_OFFSET: usize = 0x60;
     pub const MAP_ROTATION: usize = 0x64;
     pub const MAP: usize = 0x6c;
+    pub const MAP_ANIMATION: usize = 0xa4;
 }
 
 pub mod shader_transparent_generic_definition {
@@ -3533,11 +3539,15 @@ pub mod shader_transparent_generic_map {
     pub const MAP_V_OFFSET: usize = 0x10;
     pub const MAP_ROTATION: usize = 0x14;
     pub const MAP: usize = 0x1c;
+    pub const MAP_ANIMATION: usize = 0x2c;
 }
 
 pub mod shader_transparent_generic_stage {
     pub const SIZEOF: usize = 0x70;
     pub const FLAGS: usize = 0x0;
+    pub const CONSTANT_COLOR0_ANIMATION_SOURCE: usize = 0x4;
+    pub const CONSTANT_COLOR0_ANIMATION_FUNCTION: usize = 0x6;
+    pub const CONSTANT_COLOR0_ANIMATION_PERIOD: usize = 0x8;
     pub const CONSTANT_COLOR0_LOWER_BOUND: usize = 0xc;
     pub const CONSTANT_COLOR0_UPPER_BOUND: usize = 0x1c;
     pub const COLOR1: usize = 0x2c;

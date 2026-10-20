@@ -70,6 +70,75 @@ impl Default for PeriodicTables {
     }
 }
 
+/// `periodic_function_evaluate`, with the game's tables (made once).
+pub fn periodic_function(function: i16, time: f32) -> f32 {
+    static TABLES: std::sync::OnceLock<[[u8; 1024]; 12]> = std::sync::OnceLock::new();
+    let tables = TABLES.get_or_init(halo_map::object_functions::periodic_function_tables);
+    let functions = halo_map::object_functions::FunctionTables {
+        periodic: std::array::from_fn(|index| Some(&tables[index])),
+        // (the transition functions aren't used here; any table will do)
+        transition: std::array::from_fn(|_| Some(&tables[0])),
+    };
+    functions.periodic(function, time)
+}
+
+/// An object's function values (A-D: what its shaders' animations take as
+/// sources) and change colours, as the game last shared them.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+pub struct ObjectFunctions {
+    pub values: [f32; 4],
+    pub colors: [[f32; 3]; 4],
+    /// how camouflaged it is (0..1), which fades its transparent surfaces
+    pub camouflage: f32,
+}
+
+/// Each animated transparent surface's maps and colours at this time
+/// (`shader_texture_animation_evaluate`, the generic stages' colour
+/// animation), with its object's functions where it has one. Raster only, so
+/// a change every frame costs a uniform's upload.
+pub fn animate_transparent(
+    time: Res<Time>,
+    objects: Query<&ObjectFunctions>,
+    mut materials: ResMut<Assets<HaloTransparentMaterial>>,
+) {
+    let seconds = if std::env::var_os("HALO_RT_FREEZE_ANIMATION").is_some() { 0.0 } else { time.elapsed_secs() };
+    let animated: Vec<_> = materials.iter().filter(|(_, m)| m.animation.is_some()).map(|(id, _)| id).collect();
+    for id in animated {
+        let Some(material) = materials.get(id) else { continue };
+        let functions = material.object.and_then(|object| objects.get(object).ok());
+        let Some(mut params) =
+            material.animate(functions.map(|f| &f.values), functions.map(|f| &f.colors), seconds, &periodic_function)
+        else {
+            continue;
+        };
+        if let Some(functions) = functions {
+            material.camouflage_fade(&mut params, functions.camouflage);
+        }
+        // a numeric counter's digit, when it changes
+        let digit = material
+            .numeric
+            .as_ref()
+            .zip(functions)
+            .and_then(|(numeric, functions)| numeric.frame(&functions.values))
+            .filter(|frame| **frame != material.map0)
+            .cloned();
+        if let Some(frame) = digit
+            && let Some(mut material) = materials.get_mut(id)
+        {
+            material.map0 = frame;
+        }
+        let Some(material) = materials.get(id) else { continue };
+        if params.map_rows != material.params.map_rows
+            || params.constant0 != material.params.constant0
+            || params.fade != material.params.fade
+        {
+            if let Some(mut material) = materials.get_mut(id) {
+                material.params = params;
+            }
+        }
+    }
+}
+
 /// Each animated model shader's emissive: its colour between the bounds by
 /// its periodic function (rasterizer_xbox_models.c), times the object's
 /// change colour when it says, at the lighting's emissive scale.
@@ -655,7 +724,7 @@ impl LevelBuilder {
                 let Some(shader_ref) = model.shaders.get(part.shader_index.max(0) as usize).copied() else { continue };
                 let Some(info) = shader::shader_info(&self.cache, shader_ref)? else { continue };
                 let depth_bias = SKY_BIAS + layer as f32 * SKY_LAYER_BIAS;
-                if let Some(material) = self.transparent_material(&info, depth_bias, assets) {
+                if let Some(material) = self.transparent_material(&info, depth_bias, true, assets) {
                     let vertices = part.vertices.iter().map(|v| SourceVertex {
                         position: v.position.map(|c| c * sky_scale() / METERS_PER_WORLD_UNIT),
                         normal: v.normal,
@@ -1082,6 +1151,24 @@ impl LevelBuilder {
             Vec::new();
         let mut animated_by_shader: HashMap<ShaderUse, Surface> = HashMap::new();
         let mut animate = |builder: &mut Self, surface: Surface, shader: Option<ShaderUse>, assets: &mut LevelAssets| -> Surface {
+            // a transparent surface its object's functions or colours drive:
+            // a copy of its material for this object (`ObjectFunctions` on
+            // the root, `animate_transparent`)
+            if let (Surface::Transparent(material), Some(shader)) = (&surface, shader) {
+                if let Some(copy) = animated_by_shader.get(&shader) {
+                    return copy.clone();
+                }
+                let Some(mut copy) = assets.transparent_materials.get(material).cloned() else { return surface };
+                // (shared by every object where nothing of its object's
+                // changes it)
+                if !copy.animation.as_ref().is_some_and(|a| a.uses_object()) {
+                    return surface;
+                }
+                copy.object = Some(root);
+                let copy = Surface::Transparent(assets.transparent_materials.add(copy));
+                animated_by_shader.insert(shader, copy.clone());
+                return copy;
+            }
             let (Surface::Solid(solid), Some(shader)) = (&surface, shader) else { return surface };
             if let Some(copy) = animated_by_shader.get(&shader) {
                 return copy.clone();
@@ -1459,7 +1546,7 @@ impl LevelBuilder {
             if let Some(material) = self.glass_or_water_material(info, assets) {
                 return Some(Surface::Blended(material));
             }
-            return self.transparent_material(info, 0.0, assets).map(Surface::Transparent);
+            return self.transparent_material(info, 0.0, false, assets).map(Surface::Transparent);
         }
         let self_illumination = info.self_illumination.and_then(|si| match si {
             shader::SelfIllumination::Model { multipurpose_map, color_upper, .. } => {
@@ -1672,10 +1759,12 @@ impl LevelBuilder {
     /// A transparent chicago or generic shader's combiner material: its maps
     /// in stage order, their texture transforms, and Bevy's nearest blend
     /// mode to the shader's framebuffer blend function.
+    /// (`sky`: a sky's layer, seen from inside, from both sides)
     fn transparent_material(
         &mut self,
         info: &ShaderInfo,
         depth_bias: f32,
+        sky: bool,
         assets: &mut LevelAssets,
     ) -> Option<Handle<HaloTransparentMaterial>> {
         use shader::BlendFunction;
@@ -1703,27 +1792,63 @@ impl LevelBuilder {
             };
             maps[stage] = image;
             present |= 1 << stage;
-            params.map_transforms[stage] = Vec4::new(map.uv_scale[0], map.uv_scale[1], map.uv_offset[0], map.uv_offset[1]);
         }
-        let (alpha_mode, output) = match transparent.blend {
-            BlendFunction::AlphaBlend => (AlphaMode::Blend, 0),
-            BlendFunction::Add | BlendFunction::Subtract | BlendFunction::ComponentMax => (AlphaMode::Add, 1),
-            BlendFunction::Multiply | BlendFunction::DoubleMultiply | BlendFunction::ComponentMin => {
-                (AlphaMode::Multiply, 2)
-            }
-            BlendFunction::AlphaMultiplyAdd => (AlphaMode::Premultiplied, 3),
+        let blend = match transparent.blend {
+            BlendFunction::AlphaBlend => 0,
+            BlendFunction::Multiply => 1,
+            BlendFunction::DoubleMultiply => 2,
+            BlendFunction::Add => 3,
+            BlendFunction::Subtract => 4,
+            BlendFunction::ComponentMin => 5,
+            BlendFunction::ComponentMax => 6,
+            BlendFunction::AlphaMultiplyAdd => 7,
         };
-        params.modes = UVec4::new(output, present, 0, 0);
+        params.modes = UVec4::new(blend, present, transparent.flags as u32, transparent.fade_mode.clamp(0, 2) as u32);
+        // (HALO_RT_TRANSPARENT_DEBUG=1: each in magenta, to see where they are)
+        if std::env::var("HALO_RT_TRANSPARENT_DEBUG").is_ok_and(|v| v == "1") {
+            params.fade.y = 1.0;
+        }
         let [map0, map1, map2, map3] = maps;
-        Some(assets.transparent_materials.add(HaloTransparentMaterial {
+        let mut material = HaloTransparentMaterial {
             params,
             map0,
             map1,
             map2,
             map3,
-            alpha_mode,
+            alpha_mode: AlphaMode::Blend,
             depth_bias,
-        }))
+            blend: blend as u16,
+            one_sided: !sky && transparent.flags & shader::TransparentInfo::TWO_SIDED == 0,
+            animation: Some(std::sync::Arc::new(transparent.clone())),
+            object: None,
+            numeric: None,
+        };
+        // a numeric counter's digit: its first map's every frame
+        if transparent.flags & shader::TransparentInfo::NUMERIC != 0
+            && let Some(Some(map)) = transparent.maps.first()
+            && let Some(datum) = map.bitmap.datum
+        {
+            let count = halo_map::bitmap::bitmaps(&self.cache, datum).map_or(0, |b| b.len());
+            let frames: Vec<_> =
+                (0..count).filter_map(|index| self.textures.get(&self.cache, datum, index, true, assets.images)).collect();
+            if frames.len() == count && count > 0 {
+                material.numeric = Some(std::sync::Arc::new(crate::material::NumericCounter {
+                    frames,
+                    digit: self.permutation,
+                    limit: transparent.numeric_counter_limit,
+                }));
+            }
+        }
+        // its maps' transforms (and stages' colours) as at the start; kept
+        // for the animation only where they change
+        let periodic = periodic_function;
+        if let Some(params) = material.animate(None, None, 0.0, &periodic) {
+            material.params = params;
+        }
+        if !transparent.animated() && !transparent.uses_object() {
+            material.animation = None;
+        }
+        Some(assets.transparent_materials.add(material))
     }
 
     /// Roughness and metalness from Halo's reflection settings. Halo has no

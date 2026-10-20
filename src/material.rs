@@ -189,13 +189,21 @@ pub struct HaloCombinerParams {
     pub alpha_outputs: [UVec4; 2],
     pub constant0: [Vec4; 8],
     pub constant1: [Vec4; 8],
-    /// Per map: texture coordinate scale (xy) and offset (zw).
-    pub map_transforms: [Vec4; 4],
+    /// Per map, its texture coordinate transform's two rows (u, then v):
+    /// u' = row . (u, v, 0, 1), as `shader_texture_animation_evaluate`
+    /// gives them.
+    pub map_rows: [Vec4; 8],
     /// Stage count, combiner flags, final ABCD, final EFG.
     pub program: UVec4,
-    /// Output mode (0 alpha blend, 1 add, 2 multiply, 3 premultiplied),
-    /// maps present (a bit per stage).
+    /// The framebuffer blend function (`BlendFunction` as the tag's), maps
+    /// present (a bit per stage), `TransparentInfo::flags`, the fade mode.
     pub modes: UVec4,
+    /// x: the fade's scale (its source and the camouflage), y: 1 to show
+    /// the surface in magenta (debugging)
+    pub fade: Vec4,
+    /// The game's environment fog (`crate::fog::HaloFog::layers`): the
+    /// surface is fogged by its own depth, as the game's are.
+    pub fog: [Vec4; 5],
 }
 
 impl HaloCombinerParams {
@@ -208,9 +216,11 @@ impl HaloCombinerParams {
             alpha_outputs: words(&program.alpha_outputs),
             constant0: program.constant0.map(Vec4::from),
             constant1: program.constant1.map(Vec4::from),
-            map_transforms: [Vec4::new(1.0, 1.0, 0.0, 0.0); 4],
+            map_rows: std::array::from_fn(|i| if i % 2 == 0 { Vec4::new(1.0, 0.0, 0.0, 0.0) } else { Vec4::new(0.0, 1.0, 0.0, 0.0) }),
             program: UVec4::new(program.stage_count as u32, program.flags, program.final_abcd, program.final_efg),
             modes: UVec4::ZERO,
+            fade: Vec4::new(1.0, 0.0, 0.0, 0.0),
+            fog: [Vec4::ZERO; 5],
         }
     }
 }
@@ -219,6 +229,7 @@ impl HaloCombinerParams {
 /// program (see `halo_transparent.wesl`). Raster only: Solari does not trace
 /// transparent surfaces.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[bind_group_data(HaloTransparentKey)]
 pub struct HaloTransparentMaterial {
     #[uniform(0)]
     pub params: HaloCombinerParams,
@@ -237,6 +248,101 @@ pub struct HaloTransparentMaterial {
     pub alpha_mode: AlphaMode,
     /// Draws later (over) other transparent surfaces at the same distance.
     pub depth_bias: f32,
+    /// The framebuffer blend function (the tag's), as its pipeline's blend.
+    pub blend: u16,
+    /// Culled from behind (not two-sided).
+    pub one_sided: bool,
+    /// What changes it over time (its maps' animation, its stages' colours),
+    /// for [`crate::level::animate_transparent`]; none when nothing does.
+    #[reflect(ignore)]
+    pub animation: Option<std::sync::Arc<halo_map::shader::TransparentInfo>>,
+    /// The object whose functions and colours drive it (a copy of the
+    /// material for that object); none for the level's and for shaders
+    /// that take nothing from their object.
+    pub object: Option<Entity>,
+    /// A numeric counter's digit (an ammo counter's): its first map's frames.
+    #[reflect(ignore)]
+    pub numeric: Option<std::sync::Arc<NumericCounter>>,
+}
+
+/// A numeric shader's digit (`_shader_transparent_flag_numeric_bit`): the
+/// first map's frame is one digit, in base its frame count, of its object's
+/// function (D for eight frames, else A) times its counter limit.
+#[derive(Debug)]
+pub struct NumericCounter {
+    pub frames: Vec<Handle<Image>>,
+    /// which digit (the shader's permutation: 0 the units)
+    pub digit: u16,
+    pub limit: u8,
+}
+
+impl NumericCounter {
+    /// The frame showing this digit for the object's function values.
+    pub fn frame(&self, values: &[f32; 4]) -> Option<&Handle<Image>> {
+        let count = self.frames.len() as i64;
+        if count == 0 {
+            return None;
+        }
+        let function = if count == 8 { 3 } else { 0 };
+        let limit = self.limit as i64;
+        let mut value = ((limit as f32 * values[function] + 0.5).floor() as i64).clamp(0, limit);
+        for _ in 0..self.digit {
+            value /= count;
+        }
+        self.frames.get((value % count) as usize)
+    }
+}
+
+impl HaloTransparentMaterial {
+    /// Its maps' transforms and stages' colours at `time` (seconds), with
+    /// the object's function values and change colours.
+    pub fn animate(
+        &self,
+        values: Option<&[f32; 4]>,
+        colors: Option<&[[f32; 3]; 4]>,
+        time: f32,
+        periodic: &impl Fn(i16, f32) -> f32,
+    ) -> Option<HaloCombinerParams> {
+        let info = self.animation.as_ref()?;
+        let mut params = self.params.clone();
+        for (stage, map) in info.maps.iter().enumerate().take(4) {
+            let Some(map) = map else { continue };
+            let (u, v) = map.animation.evaluate(values, map.uv_scale, map.uv_offset, map.rotation, time, periodic);
+            params.map_rows[stage * 2] = Vec4::from(u);
+            params.map_rows[stage * 2 + 1] = Vec4::from(v);
+        }
+        for (stage, color) in info.stage_colors.iter().enumerate().take(8) {
+            params.constant0[stage] = Vec4::from(color.evaluate(values, colors, time, periodic));
+        }
+        if info.fade_source > 0
+            && let Some(values) = values
+        {
+            params.fade.x = values.get(info.fade_source as usize - 1).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+        }
+        Some(params)
+    }
+
+    /// Faded by its object's camouflage, as the game fades it (but chicago's
+    /// flagged not to).
+    pub fn camouflage_fade(&self, params: &mut HaloCombinerParams, camouflage: f32) {
+        let keep = self.animation.as_ref().is_some_and(|a| a.extra_flags & 1 != 0);
+        if !keep {
+            params.fade.x *= (1.0 - camouflage).clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// A transparent surface's pipeline: its blend and culling.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HaloTransparentKey {
+    blend: u16,
+    one_sided: bool,
+}
+
+impl From<&HaloTransparentMaterial> for HaloTransparentKey {
+    fn from(material: &HaloTransparentMaterial) -> Self {
+        HaloTransparentKey { blend: material.blend, one_sided: material.one_sided }
+    }
 }
 
 impl Material for HaloTransparentMaterial {
@@ -252,14 +358,38 @@ impl Material for HaloTransparentMaterial {
         self.depth_bias
     }
 
-    /// Transparent layers are seen from both sides (skies from inside).
+    /// Two-sided ones (and skies, seen from inside) are drawn from both
+    /// sides; each blend function is its own blend state, as the game's
+    /// framebuffer blends (the shader writes what each one takes).
     fn specialize(
         _pipeline: &bevy::pbr::MaterialPipeline,
         descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
         _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
-        _key: bevy::pbr::MaterialPipelineKey<Self>,
+        key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
-        descriptor.primitive.cull_mode = None;
+        use bevy::render::render_resource::{BlendComponent, BlendFactor, BlendOperation, BlendState, Face};
+        descriptor.primitive.cull_mode = if key.bind_group_data.one_sided { Some(Face::Back) } else { None };
+        let component = |src_factor, dst_factor, operation| BlendComponent { src_factor, dst_factor, operation };
+        let keep_alpha = component(BlendFactor::Zero, BlendFactor::One, BlendOperation::Add);
+        let color = match key.bind_group_data.blend {
+            // alpha blend
+            0 => component(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha, BlendOperation::Add),
+            // multiply, double multiply (the shader doubles)
+            1 | 2 => component(BlendFactor::Dst, BlendFactor::Zero, BlendOperation::Add),
+            // add
+            3 => component(BlendFactor::One, BlendFactor::One, BlendOperation::Add),
+            // subtract: what's there less the colour
+            4 => component(BlendFactor::One, BlendFactor::One, BlendOperation::ReverseSubtract),
+            5 => component(BlendFactor::One, BlendFactor::One, BlendOperation::Min),
+            6 => component(BlendFactor::One, BlendFactor::One, BlendOperation::Max),
+            // alpha multiply add: premultiplied
+            _ => component(BlendFactor::One, BlendFactor::OneMinusSrcAlpha, BlendOperation::Add),
+        };
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            for target in fragment.targets.iter_mut().flatten() {
+                target.blend = Some(BlendState { color, alpha: keep_alpha });
+            }
+        }
         Ok(())
     }
 }

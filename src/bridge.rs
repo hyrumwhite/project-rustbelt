@@ -50,6 +50,7 @@ pub fn launch_game(
     viewer_fog: bool,
     viewer_decals: bool,
     viewer_effects: bool,
+    viewer_transparent: bool,
     simulation: Option<Simulation>,
 ) -> std::io::Result<std::process::Child> {
     use std::io::{Error, ErrorKind};
@@ -108,6 +109,10 @@ pub fn launch_game(
         }
         if viewer_effects {
             command.env("HALO_BEVY_BRIDGE_VIEWER_EFFECTS", "1");
+        }
+        // (the transparent chicago and generic shaders: the viewer's)
+        if viewer_transparent {
+            command.env("HALO_BEVY_BRIDGE_VIEWER_TRANSPARENT", "1");
         }
     }
     let start = if start_on_map { format!("on {scenario}") } else { "at its menus".to_string() };
@@ -335,6 +340,8 @@ struct Tracked {
     definition: u32,
     permutations: [u8; 8],
     change_colors: [[f32; 3]; 4],
+    /// Its functions and colours as last given to its root.
+    functions: crate::level::ObjectFunctions,
     camouflaged: bool,
     model: Arc<AnimatedModel>,
     nodes: Vec<Option<Entity>>,
@@ -572,6 +579,7 @@ fn sync_objects(
             let (root, nodes, skins) =
                 builder.spawn_animated_model(&mut commands, &model, raster, &change_colors, camouflaged(object), object.object_index, assets);
             builder.first_person = false;
+            commands.entity(root).insert(object_functions(object));
             objects.tracked.insert(
                 object.object_index,
                 Tracked {
@@ -585,12 +593,19 @@ fn sync_objects(
                     skins,
                     skinned_to: Vec::new(),
                     body: false,
+                    functions: object_functions(object),
                 },
             );
             // newly spawned entities take their transforms next frame
             continue;
         }
         let Some(tracked) = objects.tracked.get_mut(&object.object_index) else { continue };
+        // its functions and colours, for its shaders' animations
+        let functions = object_functions(object);
+        if tracked.functions != functions {
+            tracked.functions = functions;
+            commands.entity(tracked.root).insert(functions);
+        }
         if let Ok(mut v) = visibility.get_mut(tracked.root) {
             // (the first-person unit as the game leaves it out: drawn, its
             // body would close round the camera and shade the first-person
@@ -723,6 +738,15 @@ impl SyncTiming {
 /// switches halfway).
 fn camouflaged(object: &halo_bridge::Object) -> bool {
     object.active_camouflage >= 0.5
+}
+
+/// An object's functions and colours, as its shaders' animations take them.
+fn object_functions(object: &halo_bridge::Object) -> crate::level::ObjectFunctions {
+    crate::level::ObjectFunctions {
+        values: object.function_values,
+        colors: object.change_colors,
+        camouflage: object.active_camouflage,
+    }
 }
 
 /// A node's draw transform in Bevy space: the game's node matrix times the

@@ -64,7 +64,7 @@ impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/halo_fog.wesl");
         app.insert_resource(crate::overlay::MultiplyBeforeFog).add_plugins((ExtractComponentPlugin::<HaloFog>::default(), ExtractComponentPlugin::<FogScreenMaps>::default()))
-            .add_systems(Update, follow_fog);
+            .add_systems(Update, (follow_fog, fog_transparent_surfaces));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
         render_app
             .add_systems(RenderStartup, init_pipeline)
@@ -168,6 +168,26 @@ impl HaloFog {
             screen_transforms,
             screen_weights,
         })
+    }
+}
+
+/// The camera's fog onto the transparent surfaces, which fade by their own
+/// (`halo_transparent.wesl`); `HALO_RT_NO_SPRITE_FOG` leaves them, as the
+/// sprites, to the fog pass.
+fn fog_transparent_surfaces(
+    camera: Query<&HaloFog, With<Camera3d>>,
+    mut materials: ResMut<Assets<crate::material::HaloTransparentMaterial>>,
+) {
+    let fog = camera
+        .iter()
+        .next()
+        .filter(|_| std::env::var_os("HALO_RT_NO_SPRITE_FOG").is_none())
+        .map_or([Vec4::ZERO; 5], HaloFog::layers);
+    let stale: Vec<_> = materials.iter().filter(|(_, m)| m.params.fog != fog).map(|(id, _)| id).collect();
+    for id in stale {
+        if let Some(mut material) = materials.get_mut(id) {
+            material.params.fog = fog;
+        }
     }
 }
 

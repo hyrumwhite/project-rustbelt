@@ -80,6 +80,140 @@ pub struct TransparentMap {
     pub bitmap: TagRef,
     pub uv_scale: [f32; 2],
     pub uv_offset: [f32; 2],
+    /// degrees
+    pub rotation: f32,
+    /// `_shader_transparent_map_flag_*` (chicago: bit 0 unfiltered, 1 alpha
+    /// replicate, 2 u clamped, 3 v clamped; generic: 0 unfiltered, 1 u
+    /// clamped, 2 v clamped)
+    pub flags: u16,
+    pub animation: MapAnimation,
+}
+
+/// One of a `shader_texture_animation`'s channels (u, v or rotation).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AnimationChannel {
+    /// 0 none (1), else an object function (A-D: 1-4)
+    pub source: i16,
+    /// a periodic function
+    pub function: i16,
+    pub period: f32,
+    pub phase: f32,
+    pub scale: f32,
+}
+
+/// `shader_texture_animation`: a map's offset (and rotation, about a
+/// centre) moving with time and the object's functions.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MapAnimation {
+    pub u: AnimationChannel,
+    pub v: AnimationChannel,
+    pub r: AnimationChannel,
+    pub r_center: [f32; 2],
+}
+
+impl MapAnimation {
+    fn read(p: crate::Ptr<'_>, at: usize) -> Result<Self> {
+        let channel = |o: usize| -> Result<AnimationChannel> {
+            Ok(AnimationChannel {
+                source: p.i16(at + o)?,
+                function: p.i16(at + o + 2)?,
+                period: p.f32(at + o + 4)?,
+                phase: p.f32(at + o + 8)?,
+                scale: p.f32(at + o + 0xc)?,
+            })
+        };
+        Ok(Self { u: channel(0)?, v: channel(0x10)?, r: channel(0x20)?, r_center: [p.f32(at + 0x30)?, p.f32(at + 0x34)?] })
+    }
+
+    /// Whether the transform changes over time or with the object (the
+    /// periodic function `one` with no source is a constant).
+    pub fn animated(&self) -> bool {
+        [self.u, self.v, self.r].iter().any(|c| c.source != 0 || c.function != PERIODIC_ONE)
+    }
+
+    /// Whether an object function drives it.
+    pub fn uses_object(&self) -> bool {
+        [self.u, self.v, self.r].iter().any(|c| c.source != 0)
+    }
+
+    /// `shader_texture_animation_evaluate`: the map's texture coordinate
+    /// transform, u' = u_row . (u, v, 0, 1) and v' likewise, for a map of this
+    /// scale, offset and rotation (degrees) at `time` (seconds), with the
+    /// object's function values (`None`: each source 1, as for the level).
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate(
+        &self,
+        values: Option<&[f32; 4]>,
+        scale: [f32; 2],
+        offset: [f32; 2],
+        rotation: f32,
+        time: f32,
+        periodic: impl Fn(i16, f32) -> f32,
+    ) -> ([f32; 4], [f32; 4]) {
+        let input = |c: &AnimationChannel| {
+            let source = match values {
+                Some(values) if c.source > 0 => values.get(c.source as usize - 1).copied().unwrap_or(1.0),
+                _ => 1.0,
+            };
+            let period = if c.period == 0.0 { 1.0 } else { c.period };
+            periodic(c.function, (c.phase + time) / period) * c.scale * source
+        };
+        let u = offset[0] - self.r_center[0] + input(&self.u);
+        let v = offset[1] - self.r_center[1] + input(&self.v);
+        let angle = input(&self.r) + rotation;
+        let (sine, cosine) = if angle != 0.0 { angle.to_radians().sin_cos() } else { (0.0, 1.0) };
+        (
+            [cosine * scale[0], -(sine * scale[1]), 0.0, cosine * u - sine * v + self.r_center[0]],
+            [sine * scale[0], cosine * scale[1], 0.0, cosine * v + sine * u + self.r_center[1]],
+        )
+    }
+}
+
+/// `_periodic_function_one`.
+pub const PERIODIC_ONE: i16 = 0;
+
+/// A generic shader stage's constant colour 0, moving between its two
+/// colours (`shader_transparent_generic_stage`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StageColorAnimation {
+    /// bit 3: the object's function A drives it instead of time
+    pub flags: u16,
+    /// 0 none, else an object's change colour (A-D: 1-4) to multiply by
+    pub source: i16,
+    pub function: i16,
+    pub period: f32,
+    /// rgba
+    pub color0: [f32; 4],
+    pub color1: [f32; 4],
+}
+
+impl StageColorAnimation {
+    /// `_shader_transparent_generic_stage_flag_a_out_controls_color0_animation_bit`
+    pub const A_OUT_CONTROLS_COLOR0: u16 = 1 << 3;
+
+    pub fn animated(&self) -> bool {
+        self.color0 != self.color1 || self.source != 0
+    }
+
+    pub fn uses_object(&self) -> bool {
+        self.source != 0 || (self.flags & Self::A_OUT_CONTROLS_COLOR0 != 0 && self.color0 != self.color1)
+    }
+
+    /// The stage's constant colour 0 (rgba) at `time`, with the object's
+    /// function values and change colours (`None` for the level's).
+    pub fn evaluate(&self, values: Option<&[f32; 4]>, colors: Option<&[[f32; 3]; 4]>, time: f32, periodic: impl Fn(i16, f32) -> f32) -> [f32; 4] {
+        let fraction = match values {
+            Some(values) if self.flags & Self::A_OUT_CONTROLS_COLOR0 != 0 => values[0],
+            _ => periodic(self.function, time / if self.period == 0.0 { 1.0 } else { self.period }),
+        };
+        let mut color: [f32; 4] = std::array::from_fn(|c| self.color0[c] + (self.color1[c] - self.color0[c]) * fraction);
+        if let (Some(colors), 1..=4) = (colors, self.source) {
+            for c in 0..3 {
+                color[c] *= colors[self.source as usize - 1][c].clamp(0.0, 1.0);
+            }
+        }
+        color
+    }
 }
 
 /// The parts of a transparent generic or chicago shader the renderer uses.
@@ -91,6 +225,45 @@ pub struct TransparentInfo {
     /// One per stage, in stage order (the combiner names them t0..t3);
     /// `None` where a stage has no bitmap.
     pub maps: Vec<Option<TransparentMap>>,
+    /// `_shader_transparent_flag_*`: bit 0 alpha tested, 1 decal, 2 two
+    /// sided, 3 first map in screen space, 4 draw before water, 5 ignore
+    /// effect, 6 scale first map with distance, 7 numeric
+    pub flags: u8,
+    pub numeric_counter_limit: u8,
+    /// 0 none, 1 fade when perpendicular, 2 fade when parallel
+    pub fade_mode: i16,
+    /// 0 none, else an object function (A-D: 1-4) scaling the fade
+    pub fade_source: i16,
+    /// Shaders drawn first, over the same surface.
+    pub extra_layers: Vec<TagRef>,
+    /// chicago's: bit 0 don't fade active camouflage, 1 numeric countdown
+    /// timer
+    pub extra_flags: u16,
+    /// generic's stages' constant colour 0, in stage order
+    pub stage_colors: Vec<StageColorAnimation>,
+}
+
+impl TransparentInfo {
+    pub const ALPHA_TESTED: u8 = 1 << 0;
+    pub const DECAL: u8 = 1 << 1;
+    pub const TWO_SIDED: u8 = 1 << 2;
+    pub const FIRST_MAP_IN_SCREEN_SPACE: u8 = 1 << 3;
+    pub const SCALE_FIRST_MAP_WITH_DISTANCE: u8 = 1 << 6;
+    pub const NUMERIC: u8 = 1 << 7;
+
+    /// Whether anything changes over time (map transforms, colours).
+    pub fn animated(&self) -> bool {
+        self.maps.iter().flatten().any(|m| m.animation.animated()) || self.stage_colors.iter().any(|s| s.animated())
+    }
+
+    /// Whether the object's functions or colours change it (a copy of its
+    /// material for each object).
+    pub fn uses_object(&self) -> bool {
+        self.maps.iter().flatten().any(|m| m.animation.uses_object())
+            || self.stage_colors.iter().any(|s| s.uses_object())
+            || self.fade_source != 0
+            || self.flags & Self::NUMERIC != 0
+    }
 }
 
 /// `_detail_map_function_*` (rasterizer_xbox_environment.c).
@@ -532,7 +705,8 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
     }
     if matches!(shader_type, ShaderType::TransparentGeneric | ShaderType::TransparentChicago) {
         use layout::shader_transparent as t;
-        let (base, map_size, map, scale_u, scale_v, offset_u, offset_v) = if shader_type == ShaderType::TransparentGeneric {
+        let generic = shader_type == ShaderType::TransparentGeneric;
+        let (base, map_size, map, scale_u, scale_v, offset_u, offset_v, rotation, animation) = if generic {
             use layout::shader_transparent_generic_map as m;
             (
                 layout::shader_transparent_generic_definition::TRANSPARENT,
@@ -542,6 +716,8 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
                 m::MAP_V_SCALE,
                 m::MAP_U_OFFSET,
                 m::MAP_V_OFFSET,
+                m::MAP_ROTATION,
+                m::MAP_ANIMATION,
             )
         } else {
             use layout::shader_transparent_chicago_map as m;
@@ -553,6 +729,8 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
                 m::MAP_V_SCALE,
                 m::MAP_U_OFFSET,
                 m::MAP_V_OFFSET,
+                m::MAP_ROTATION,
+                m::MAP_ANIMATION,
             )
         };
         let maps = root
@@ -566,15 +744,40 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
                         bitmap,
                         uv_scale: [if u == 0.0 { 1.0 } else { u }, if v == 0.0 { 1.0 } else { v }],
                         uv_offset: [m.f32(offset_u)?, m.f32(offset_v)?],
+                        rotation: m.f32(rotation)?,
+                        flags: m.u16(0)?,
+                        animation: MapAnimation::read(m, animation)?,
                     }))
                 };
                 read()
             })
             .collect::<Result<Vec<_>>>()?;
+        let extra_layers = root.block(base + t::EXTRA_LAYERS, 16)?.iter().filter_map(|l| l.reference(0).ok().and_then(present)).collect();
+        let mut stage_colors = Vec::new();
+        if generic {
+            use layout::shader_transparent_generic_stage as s;
+            for stage in root.block(layout::shader_transparent_generic_definition::STAGES, s::SIZEOF)?.iter() {
+                stage_colors.push(StageColorAnimation {
+                    flags: stage.u16(s::FLAGS)?,
+                    source: stage.i16(s::CONSTANT_COLOR0_ANIMATION_SOURCE)?,
+                    function: stage.i16(s::CONSTANT_COLOR0_ANIMATION_FUNCTION)?,
+                    period: stage.f32(s::CONSTANT_COLOR0_ANIMATION_PERIOD)?,
+                    color0: argb(stage, s::CONSTANT_COLOR0_LOWER_BOUND)?.map(|c| c.clamp(0.0, 1.0)),
+                    color1: argb(stage, s::CONSTANT_COLOR0_UPPER_BOUND)?.map(|c| c.clamp(0.0, 1.0)),
+                });
+            }
+        }
         info.transparent = Some(TransparentInfo {
             blend: BlendFunction::from_raw(root.i16(base + t::FRAMEBUFFER_BLEND_FUNCTION)?),
             first_map_type: root.i16(base + t::FIRST_MAP_TYPE)?,
             maps,
+            flags: root.u8(base + t::FLAGS)?,
+            numeric_counter_limit: root.u8(base + t::NUMERIC_COUNTER_LIMIT)?,
+            fade_mode: root.i16(base + t::FRAMEBUFFER_FADE_MODE)?,
+            fade_source: root.i16(base + t::FRAMEBUFFER_FADE_SOURCE)?,
+            extra_layers,
+            extra_flags: if generic { 0 } else { root.u16(base + t::CHICAGO_EXTRA_FLAGS)? },
+            stage_colors,
         });
     }
     Ok(Some(info))

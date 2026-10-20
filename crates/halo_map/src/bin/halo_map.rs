@@ -35,6 +35,7 @@ fn main() -> ExitCode {
         "tags" => tags(&cache, args.get(2)),
         "bsp" => bsps(&cache),
         "shaders" => shaders(&cache),
+        "transparent" => transparent_survey(&cache),
         "shader" => shader(&cache, &args[2..]),
         "sky" => skies(&cache),
         "bitmap" => export_bitmap(&cache, &args[2..]),
@@ -184,6 +185,80 @@ fn shaders(cache: &CacheFile) -> CliResult {
                 None => println!("(none)"),
             }
         }
+    }
+    Ok(())
+}
+
+/// Every transparent shader in the map (chicago, generic, meter, plasma):
+/// what the viewer needs to draw them as the game does. `bsp` marks the
+/// level's own; the rest are objects' and effects'.
+fn transparent_survey(cache: &CacheFile) -> CliResult {
+    let mut in_bsp = std::collections::BTreeSet::new();
+    for reference in bsp::references(cache)? {
+        for material in bsp::Bsp::load(cache, &reference)?.materials()? {
+            if let Some(datum) = material.shader.datum {
+                in_bsp.insert(datum);
+            }
+        }
+    }
+    // a map's texture animation: each of u, v and rotation as source/function
+    // (nonzero when animated)
+    let animation = |p: halo_map::Ptr<'_>, at: usize| -> Result<String, Box<dyn std::error::Error>> {
+        let mut parts = Vec::new();
+        for (name, o) in [("u", 0usize), ("v", 0x10), ("r", 0x20)] {
+            let (source, function, period, scale) = (p.i16(at + o)?, p.i16(at + o + 2)?, p.f32(at + o + 4)?, p.f32(at + o + 0xc)?);
+            if source != 0 || period != 0.0 || scale != 0.0 {
+                parts.push(format!("{name}:src{source}/fn{function}/T{period}/x{scale}"));
+            }
+        }
+        Ok(parts.join(" "))
+    };
+    for tag in cache.tags.iter().filter(|t| t.is_a(halo_map::groups::SHADER)) {
+        let Ok(root) = cache.tag_root(tag.datum, halo_map::groups::SHADER) else { continue };
+        let shader_type = shader::shader_type(root.i16(0x24).unwrap_or(-1));
+        let kind = match shader_type {
+            shader::ShaderType::TransparentChicago => "chicago",
+            shader::ShaderType::TransparentGeneric => "generic",
+            shader::ShaderType::Meter => "meter",
+            shader::ShaderType::Plasma => "plasma",
+            _ => continue,
+        };
+        let place = if in_bsp.contains(&tag.datum) { "bsp" } else { "obj" };
+        if matches!(kind, "meter" | "plasma") {
+            println!("{place} {kind} {}", tag.name);
+            continue;
+        }
+        let t = 0x28;
+        let flags = root.u8(t + 1)?;
+        let (map_type, blend, fade, fade_source) = (root.i16(t + 2)?, root.i16(t + 4)?, root.i16(t + 6)?, root.i16(t + 8)?);
+        let layers = root.block(t + 0x20, 16)?.count;
+        let (map_size, animation_at) = if kind == "chicago" { (0xdc, 0xa4) } else { (0x64, 0x2c) };
+        let maps = root.block(t + 0x2c, map_size)?;
+        let mut animated = Vec::new();
+        for index in 0..maps.count {
+            let map = maps.get(index).unwrap();
+            let text = animation(map, animation_at)?;
+            if !text.is_empty() {
+                animated.push(format!("m{index}[{text}]"));
+            }
+        }
+        if kind == "generic" {
+            let stages = root.block(0x60, 0x70)?;
+            for index in 0..stages.count {
+                let stage = stages.get(index).unwrap();
+                let (source, function, period) = (stage.i16(4)?, stage.i16(6)?, stage.f32(8)?);
+                if source != 0 || period != 0.0 {
+                    animated.push(format!("c0s{index}[src{source}/fn{function}/T{period}]"));
+                }
+            }
+        }
+        let extra = if kind == "chicago" { root.u16(t + 0x38)? } else { 0 };
+        println!(
+            "{place} {kind} type{map_type} blend{blend} fade{fade}/src{fade_source} flags{flags:#04x} extra{extra:#x} layers{layers} maps{} {} {}",
+            maps.count,
+            animated.join(" "),
+            tag.name
+        );
     }
     Ok(())
 }

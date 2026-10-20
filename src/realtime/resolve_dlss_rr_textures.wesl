@@ -40,9 +40,23 @@ fn resolve_background_guides(pixel_id: vec2u) {
     let F0 = calculate_F0(surface.material.base_color, surface.material.metallic, vec3(surface.material.reflectance));
     let wo = normalize(view.world_position - surface.world_position);
 
-    textureStore(diffuse_albedo, pixel_id, vec4(calculate_diffuse_color(surface.material.base_color, surface.material.metallic, 0.0, 0.0), 0.0));
-    textureStore(specular_albedo, pixel_id, vec4(env_brdf_approx2(F0, surface.material.roughness, surface.world_normal, wo), 0.0));
-    textureStore(normal_roughness, pixel_id, vec4(surface.world_normal, surface.material.perceptual_roughness));
+    var diffuse = calculate_diffuse_color(surface.material.base_color, surface.material.metallic, 0.0, 0.0);
+    var specular = env_brdf_approx2(F0, surface.material.roughness, surface.world_normal, wo);
+    var perceptual_roughness = surface.material.perceptual_roughness;
+    // A clear coat (brdf.wesl) reflects its share over what lies beneath; the
+    // roughness guide leans to whichever of the two reflects more.
+    if surface.material.clearcoat > 0.0 && surface.material.roughness > 0.001 && !surface.material.lommel {
+        let coat_perceptual = max(surface.material.clearcoat_perceptual_roughness, 0.045);
+        let coat = surface.material.clearcoat * env_brdf_approx2(vec3(0.04), coat_perceptual * coat_perceptual, surface.world_normal, wo).g;
+        let beneath = (1.0 - coat) * (1.0 - coat);
+        diffuse *= beneath;
+        let base = specular * beneath;
+        specular = base + coat;
+        perceptual_roughness = mix(perceptual_roughness, coat_perceptual, coat / max(coat + dot(base, vec3(0.2126, 0.7152, 0.0722)), 1e-6));
+    }
+    textureStore(diffuse_albedo, pixel_id, vec4(diffuse, 0.0));
+    textureStore(specular_albedo, pixel_id, vec4(specular, 0.0));
+    textureStore(normal_roughness, pixel_id, vec4(surface.world_normal, perceptual_roughness));
 }
 
 fn env_brdf_approx2(specular_color: vec3<f32>, alpha: f32, N: vec3<f32>, V: vec3<f32>) -> vec3<f32> {

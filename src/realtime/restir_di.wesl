@@ -7,7 +7,9 @@ import bevy_pbr::render::utils::sample_disk;
 import bevy_render::maths::PI;
 import bevy_render::view::View;
 import bevy_solarik::scene::brdf::evaluate_diffuse_brdf;
-import bevy_solarik::scene::brdf::evaluate_specular_brdf;
+import bevy_solarik::scene::brdf::evaluate_base_specular_brdf;
+import bevy_solarik::scene::brdf::evaluate_clearcoat_brdf;
+import bevy_solarik::scene::brdf::clearcoat_roughness;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
@@ -110,9 +112,12 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let wo = normalize(view.world_position - surface.world_position);
     var brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
-    // Only consider the specular lobe if the surface is not smooth, else leave it for the specular GI pass to handle
+    // Only consider a specular lobe if it is not smooth, else leave it for the specular GI pass to handle
     if surface.material.roughness > SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD {
-        brdf += evaluate_specular_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
+        brdf += evaluate_base_specular_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
+    }
+    if clearcoat_roughness(surface.material) > SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD {
+        brdf += evaluate_clearcoat_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
     }
 
     var raster_error = 0.0;

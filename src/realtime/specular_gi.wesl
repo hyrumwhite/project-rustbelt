@@ -14,7 +14,12 @@ import bevy_render::maths::orthonormalize;
 import bevy_render::maths::PI;
 import bevy_render::view::View;
 import bevy_solarik::scene::brdf::evaluate_brdf;
-import bevy_solarik::scene::brdf::evaluate_specular_brdf;
+import bevy_solarik::scene::brdf::evaluate_base_specular_brdf;
+import bevy_solarik::scene::brdf::evaluate_clearcoat_brdf;
+import bevy_solarik::scene::brdf::clearcoat_albedo;
+import bevy_solarik::scene::brdf::clearcoat_roughness;
+import bevy_solarik::scene::brdf::CLEARCOAT_MIN_PERCEPTUAL_ROUGHNESS;
+import bevy_solarik::scene::brdf::sample_glossy_lobes;
 import bevy_solarik::realtime::surface_path::shade_surface_scattering;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::ResolvedGPixel;
@@ -85,6 +90,37 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let wo_length = length(wo_unnormalized);
     let wo = wo_unnormalized / wo_length;
 
+    let lobe = glossy_lobe(global_id.xy, pixel_index, surface, wo, wo_length, &rng);
+    var radiance = lobe.radiance * evaluate_base_specular_brdf(wo, lobe.wi, surface.world_normal, surface.material);
+    // A clear coat's reflection: its own path, as a surface of the coat's roughness.
+    if clearcoat_albedo(surface.material, 1.0) > 0.0 {
+        var coat_surface = surface;
+        coat_surface.material.perceptual_roughness = max(surface.material.clearcoat_perceptual_roughness, CLEARCOAT_MIN_PERCEPTUAL_ROUGHNESS);
+        coat_surface.material.roughness = clearcoat_roughness(surface.material);
+        coat_surface.material.metallic = 0.0;
+        coat_surface.material.clearcoat = 0.0;
+        let coat = glossy_lobe(global_id.xy, pixel_index, coat_surface, wo, wo_length, &rng);
+        radiance += coat.radiance * evaluate_clearcoat_brdf(wo, coat.wi, surface.world_normal, surface.material);
+    }
+    radiance *= view.exposure;
+
+    var pixel_color = textureLoad(view_output, global_id.xy);
+    pixel_color += vec4(radiance, 0.0);
+    textureStore(view_output, global_id.xy, pixel_color);
+
+@if(VISUALIZE_WORLD_CACHE) {
+    textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, ray_max_distance(), WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
+}
+}
+
+struct GlossyLobe {
+    // Incoming radiance over the sample's density (a mirror's: as it is).
+    radiance: vec3<f32>,
+    wi: vec3<f32>,
+}
+
+// One sample of a glossy lobe of `surface.material.roughness`.
+fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, wo: vec3<f32>, wo_length: f32, rng: ptr<function, u32>) -> GlossyLobe {
     var radiance: vec3<f32>;
     var wi: vec3<f32>;
     if surface.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
@@ -100,7 +136,7 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let B = TBN[1];
         let N = TBN[2];
         let wo_tangent = vec3(dot(wo, T), dot(wo, B), dot(wo, N));
-        let wi_tangent = sample_ggx_vndf(wo_tangent, surface.material.roughness, &rng);
+        let wi_tangent = sample_ggx_vndf(wo_tangent, surface.material.roughness, rng);
         if ggx_vndf_sample_invalid(wi_tangent) {
             wi = vec3(0.0);
             radiance = vec3(0.0);
@@ -108,23 +144,13 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
             wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
             let pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, surface.material.roughness);
 
-            radiance = trace_glossy_path(global_id.xy, surface, wo_length, wi, pdf, &rng);
+            radiance = trace_glossy_path(pixel_id, surface, wo_length, wi, pdf, rng);
             if surface.material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
                 radiance /= pdf;
             }
         }
     }
-
-    let brdf = evaluate_specular_brdf(wo, wi, surface.world_normal, surface.material);
-    radiance *= brdf * view.exposure;
-
-    var pixel_color = textureLoad(view_output, global_id.xy);
-    pixel_color += vec4(radiance, 0.0);
-    textureStore(view_output, global_id.xy, pixel_color);
-
-@if(VISUALIZE_WORLD_CACHE) {
-    textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, ray_max_distance(), WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
-}
+    return GlossyLobe(radiance, wi);
 }
 
 fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, rng: ptr<function, u32>) -> vec3<f32> {
@@ -279,13 +305,14 @@ fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initi
         cone = scatter_ray_cone(cone, ray_hit.normal_spread, ray_hit.material.roughness);
 }
         // Sample new ray direction from the GGX BRDF for next bounce
-        let wi_tangent = sample_ggx_vndf(wo_tangent, ray_hit.material.roughness, rng);
+        let glossy = sample_glossy_lobes(wo_tangent, ray_hit.material, rng);
+        let wi_tangent = glossy.xyz;
         if ggx_vndf_sample_invalid(wi_tangent) { break; }
         wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
         ray_origin = ray_hit.world_position + (ray_hit.geometric_world_normal * RAY_T_MIN);
 
         // Update throughput for next bounce
-        p_bounce = ggx_vndf_pdf(wo_tangent, wi_tangent, ray_hit.material.roughness);
+        p_bounce = glossy.w;
         throughput *= evaluate_brdf(wo, wi, N, ray_hit.material);
         if ray_hit.material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
             throughput /= p_bounce;

@@ -27,7 +27,14 @@ fn gpixel_resolve(gpixel: vec4<u32>, depth: f32, pixel_id: vec2<u32>, view_size:
     let emissive = rgb9e5_to_vec3_(gpixel.g);
     let gaussian_weight = select(0.0, props.a, (gpixel.a & 0x08000000u) != 0u);
     let transmission=select(0.0,props.a,(gpixel.a&0x20000000u)!=0u);
-    let material = ResolvedMaterial(base_color, emissive, reflectance, perceptual_roughness, roughness, metallic, transmission, vec4(0.0), gaussian_weight, (gpixel.a & 0x10000000u) != 0u);
+    // Bevy's deferred packing keeps the clear coat in props.a (strength in
+    // the low four bits, perceptual roughness up to 0.5 in the high four)
+    // unless a Gaussian or transmission flag claims it.
+    let coat_props = select(u32(round(props.a * 255.0)), 0u, (gpixel.a & 0x28000000u) != 0u);
+    let clearcoat = f32(coat_props & 0x0fu) / 15.0;
+    let clearcoat_perceptual_roughness = f32(coat_props >> 4u) / 30.0;
+    let material = ResolvedMaterial(base_color, emissive, reflectance, perceptual_roughness, roughness, metallic, transmission, vec4(0.0), gaussian_weight, (gpixel.a & 0x10000000u) != 0u,
+        clearcoat, clearcoat_perceptual_roughness);
 
     return ResolvedGPixel(world_position, world_normal, material);
 }

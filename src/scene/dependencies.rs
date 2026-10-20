@@ -69,12 +69,15 @@ fn material_state(material: &StandardMaterial, images: &RenderAssets<GpuImage>) 
     // when scene inputs/resources change; this is not a per-instance operation.
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     format!("{material:?}").hash(&mut hash);
-    let textures = [
+    #[allow(unused_mut)]
+    let mut textures = vec![
         &material.base_color_texture,
         &material.normal_map_texture,
         &material.emissive_texture,
         &material.metallic_roughness_texture,
     ];
+    #[cfg(feature = "pbr_multi_layer_material_textures")]
+    textures.push(&material.clearcoat_texture);
     let ready = textures.iter().all(|texture| {
         texture
             .as_ref()

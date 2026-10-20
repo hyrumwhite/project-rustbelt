@@ -66,8 +66,20 @@ fn evaluate_and_sample_brdf(
 
     var wi: vec3<f32>;
     var wi_tangent: vec3<f32>;
-    let diffuse_selected = rand_f(rng) < diffuse_weight;
-    if diffuse_selected {
+    // The coat is picked by its share of the reflected light; without one the
+    // random number (and so the sequence) is the same as before.
+    let coat_weight = clearcoat_albedo(material, NdotV);
+    var lobe = rand_f(rng);
+    let coat_selected = lobe < coat_weight;
+    lobe = (lobe - coat_weight) / (1.0 - coat_weight);
+    let diffuse_selected = !coat_selected && lobe < diffuse_weight;
+    if coat_selected {
+        wi_tangent = sample_ggx_vndf(wo_tangent, clearcoat_roughness(material), rng);
+        if ggx_vndf_sample_invalid(wi_tangent) {
+            return EvaluateAndSampleBrdfResult(vec3(0.0), vec3(0.0), 0.0, 0.0);
+        }
+        wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
+    } else if diffuse_selected {
         // Preserve the old random sequence when transmission is disabled.
         var normal = world_normal;
         if material.diffuse_transmission > 0.0 {
@@ -87,13 +99,16 @@ fn evaluate_and_sample_brdf(
     if pdf <= 0.0 { return EvaluateAndSampleBrdfResult(wi, vec3(0.0), 0.0, 0.0); }
 
     var throughput = evaluate_brdf(wo, wi, world_normal, material);
-    if diffuse_selected || material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
+    // (A mirror surface has no coat: clearcoat_albedo.)
+    if coat_selected || diffuse_selected || material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
         throughput /= pdf;
     } else {
         throughput /= specular_weight;
     }
 
-    return EvaluateAndSampleBrdfResult(wi, throughput, pdf, select(material.roughness, 1.0, diffuse_selected));
+    var sampled_roughness = select(material.roughness, 1.0, diffuse_selected);
+    if coat_selected { sampled_roughness = clearcoat_roughness(material); }
+    return EvaluateAndSampleBrdfResult(wi, throughput, pdf, sampled_roughness);
 }
 
 fn evaluate_brdf(
@@ -103,6 +118,72 @@ fn evaluate_brdf(
     material: ResolvedMaterial,
 ) -> vec3<f32> {
     return evaluate_diffuse_brdf(wo, wi, world_normal, material) + evaluate_specular_brdf(wo, wi, world_normal, material);
+}
+
+// A clear coat (Filament's model): a smooth dielectric layer (f0 4%) of its
+// own roughness over the surface, which sees the light the coat lets through
+// on the way in and out. Mirror surfaces take none (their delta lobe has no
+// share to give up).
+const CLEARCOAT_F0: f32 = 0.04;
+// Kept off the mirror threshold, where the lobe would turn into a delta.
+const CLEARCOAT_MIN_PERCEPTUAL_ROUGHNESS: f32 = 0.045;
+
+fn clearcoat_roughness(material: ResolvedMaterial) -> f32 {
+    let perceptual = max(material.clearcoat_perceptual_roughness, CLEARCOAT_MIN_PERCEPTUAL_ROUGHNESS);
+    return perceptual * perceptual;
+}
+
+// Share of the light arriving at `cosine` to the normal that the coat reflects.
+fn clearcoat_albedo(material: ResolvedMaterial, cosine: f32) -> f32 {
+    if material.clearcoat <= 0.0 || material.lommel || material.roughness <= MIRROR_ROUGHNESS_THRESHOLD { return 0.0; }
+    let perceptual = max(material.clearcoat_perceptual_roughness, CLEARCOAT_MIN_PERCEPTUAL_ROUGHNESS);
+    return material.clearcoat * specular_albedo(vec3(CLEARCOAT_F0), saturate(cosine), perceptual).g;
+}
+
+// What the coat leaves of the surface beneath it, for light in and out.
+fn clearcoat_attenuation(material: ResolvedMaterial, NdotV: f32, NdotL: f32) -> f32 {
+    return (1.0 - clearcoat_albedo(material, NdotV)) * (1.0 - clearcoat_albedo(material, abs(NdotL)));
+}
+
+fn evaluate_clearcoat_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f32>, material: ResolvedMaterial) -> vec3<f32> {
+    if clearcoat_albedo(material, 1.0) <= 0.0 { return vec3(0.0); }
+    let world_normal = view_facing_normal(shading_normal, wo);
+    let H = normalize(wi + wo);
+    let NdotL = dot(world_normal, wi);
+    let NdotH = dot(world_normal, H);
+    let LdotH = dot(wi, H);
+    let NdotV = dot(world_normal, wo);
+    if NdotL < 0.0001 || NdotH < 0.0001 || LdotH < 0.0001 || NdotV < 0.0001 { return vec3(0.0); }
+    let roughness = clearcoat_roughness(material);
+    let F = fresnel(vec3(CLEARCOAT_F0), LdotH).g;
+    return vec3(material.clearcoat * D_GGX(roughness, NdotH) * V_SmithGGXCorrelated(roughness, NdotV, NdotL) * F * NdotL);
+}
+
+// Picks a glossy lobe (the coat or the surface's own specular) by their
+// shares of the reflected light; the tangent-space direction and the pair's
+// combined density, for paths that follow only glossy reflection.
+fn sample_glossy_lobes(wo_tangent: vec3<f32>, material: ResolvedMaterial, rng: ptr<function, u32>) -> vec4<f32> {
+    let coat = glossy_coat_probability(wo_tangent.z, material);
+    var roughness = material.roughness;
+    if coat > 0.0 && rand_f(rng) < coat { roughness = clearcoat_roughness(material); }
+    let wi_tangent = sample_ggx_vndf(wo_tangent, roughness, rng);
+    if ggx_vndf_sample_invalid(wi_tangent) { return vec4(wi_tangent, 0.0); }
+    return vec4(wi_tangent, glossy_lobes_pdf(wo_tangent, wi_tangent, material));
+}
+
+fn glossy_lobes_pdf(wo_tangent: vec3<f32>, wi_tangent: vec3<f32>, material: ResolvedMaterial) -> f32 {
+    let base = ggx_vndf_pdf(wo_tangent, wi_tangent, material.roughness);
+    let coat = glossy_coat_probability(wo_tangent.z, material);
+    if coat <= 0.0 { return base; }
+    return mix(base, ggx_vndf_pdf(wo_tangent, wi_tangent, clearcoat_roughness(material)), coat);
+}
+
+fn glossy_coat_probability(NdotV: f32, material: ResolvedMaterial) -> f32 {
+    let coat = clearcoat_albedo(material, NdotV);
+    if coat <= 0.0 { return 0.0; }
+    let F0 = calculate_F0(material.base_color, material.metallic, vec3(material.reflectance));
+    let base = (1.0 - coat) * luminance(specular_albedo(F0, saturate(NdotV), material.perceptual_roughness));
+    return coat / max(coat + base, 1e-6);
 }
 
 fn evaluate_diffuse_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f32>, material: ResolvedMaterial) -> vec3<f32> {
@@ -125,10 +206,22 @@ fn evaluate_diffuse_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f32>
         layering = mix(layering, vec3(transmission), material.gaussian_weight);
     }
     let side_weight = select(1.0 - material.diffuse_transmission, material.diffuse_transmission, NdotL < 0.0);
-    return diffuse_color * layering * abs(NdotL) * side_weight;
+    return diffuse_color * layering * abs(NdotL) * side_weight * clearcoat_attenuation(material, NdotV, NdotL);
 }
 
+// Both glossy lobes: the surface's own beneath the coat, and the coat.
 fn evaluate_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f32>, material: ResolvedMaterial) -> vec3<f32> {
+    return evaluate_base_specular_brdf(wo, wi, shading_normal, material) + evaluate_clearcoat_brdf(wo, wi, shading_normal, material);
+}
+
+// The surface's own specular lobe, beneath any coat.
+fn evaluate_base_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f32>, material: ResolvedMaterial) -> vec3<f32> {
+    let world_normal = view_facing_normal(shading_normal, wo);
+    let coat = clearcoat_attenuation(material, dot(world_normal, wo), dot(world_normal, wi));
+    return evaluate_uncoated_specular_brdf(wo, wi, shading_normal, material) * coat;
+}
+
+fn evaluate_uncoated_specular_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f32>, material: ResolvedMaterial) -> vec3<f32> {
     if material.lommel { return vec3(0.0); }
     let world_normal = view_facing_normal(shading_normal, wo);
     if dot(world_normal, wi) < 0.0001 { return vec3(0.0); }
@@ -198,11 +291,14 @@ fn evaluate_brdf_pdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f32>, ma
     let F0 = calculate_F0(material.base_color, material.metallic, vec3(material.reflectance));
     let diffuse_weight = select(mix(1.0 - luminance(specular_albedo(F0, NdotV, material.perceptual_roughness)), 0.0, material.metallic), 1.0, material.lommel);
     let side_weight = select(1.0 - material.diffuse_transmission, material.diffuse_transmission, NdotL < 0.0);
+    let coat_weight = clearcoat_albedo(material, NdotV);
     let diffuse_pdf = diffuse_weight * side_weight * abs(NdotL) / PI;
     // GGX has support only on the reflection hemisphere.
-    if NdotL <= 0.0 { return diffuse_pdf; }
+    if NdotL <= 0.0 { return (1.0 - coat_weight) * diffuse_pdf; }
     let TBN = orthonormalize(world_normal);
     let wo_tangent = transpose(TBN) * wo;
     let wi_tangent = transpose(TBN) * wi;
-    return diffuse_pdf + (1.0 - diffuse_weight) * ggx_vndf_pdf(wo_tangent, wi_tangent, material.roughness);
+    let base_pdf = diffuse_pdf + (1.0 - diffuse_weight) * ggx_vndf_pdf(wo_tangent, wi_tangent, material.roughness);
+    if coat_weight <= 0.0 { return base_pdf; }
+    return mix(base_pdf, ggx_vndf_pdf(wo_tangent, wi_tangent, clearcoat_roughness(material)), coat_weight);
 }

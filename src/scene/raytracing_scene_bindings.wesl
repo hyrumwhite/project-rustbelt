@@ -81,6 +81,10 @@ struct Material {
     reflectance: f32,
     emission_cone: vec4<f32>,
     gaussian: vec4<f32>,
+    // StandardMaterial's clear coat: x the coat's strength, y its perceptual
+    // roughness, z 1 when a texture's red channel scales the strength, w that
+    // texture.
+    clearcoat: vec4<f32>,
 }
 
 // Mirrored in binder.rs. Exactly one of OPAQUE / ALPHA_MASK / ALPHA_BLEND.
@@ -429,6 +433,10 @@ struct ResolvedMaterial {
     emission_cone: vec4<f32>,
     gaussian_weight: f32,
     lommel: bool,
+    // A clear coat over the surface (brdf.wesl): its strength (0 none) and
+    // perceptual roughness.
+    clearcoat: f32,
+    clearcoat_perceptual_roughness: f32,
 }
 
 fn emitted_radiance(material: ResolvedMaterial, outgoing: vec3<f32>) -> vec3<f32> {
@@ -494,6 +502,11 @@ fn resolve_material_filtered(material: Material, uv: vec2f, uv_width: vec2f) -> 
         m.perceptual_roughness = mix(m.perceptual_roughness, material.gaussian.y, m.gaussian_weight);
     }
     m.roughness = m.perceptual_roughness * m.perceptual_roughness;
+    m.clearcoat = material.clearcoat.x;
+    if material.clearcoat.z > 0.0 && m.clearcoat > 0.0 {
+        m.clearcoat *= sample_texture_filtered(u32(material.clearcoat.w), uv, uv_width).r;
+    }
+    m.clearcoat_perceptual_roughness = material.clearcoat.y;
 
     return m;
 }

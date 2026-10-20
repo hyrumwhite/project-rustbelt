@@ -799,6 +799,17 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             continue;
         };
 
+        // z marks a coat texture (its red channel scales the coat), w its id.
+        #[allow(unused_mut)]
+        let mut clearcoat = Vec4::new(material.clearcoat, material.clearcoat_perceptual_roughness, 0.0, 0.0);
+        #[cfg(feature = "pbr_multi_layer_material_textures")]
+        if material.clearcoat_texture.is_some() {
+            let Some(texture) = process_texture(&material.clearcoat_texture) else {
+                continue;
+            };
+            clearcoat.z = 1.0;
+            clearcoat.w = texture as f32;
+        }
         let mut gaussian_parameters = Vec4::ZERO;
         if let Some(extension) = gaussian.0.get(asset_id) {
             let Some(mask) = process_texture(&Some(extension.mask.clone())) else {
@@ -867,6 +878,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             base_color_alpha: LinearRgba::from(material.base_color).alpha,
             reflectance: material.reflectance,
             gaussian: gaussian_parameters,
+            clearcoat,
             emission_cone: collimated
                 .0
                 .get(asset_id)
@@ -1551,6 +1563,8 @@ struct GpuMaterial {
     reflectance: f32,
     emission_cone: Vec4,
     gaussian: Vec4,
+    // Strength and perceptual roughness (zw unused).
+    clearcoat: Vec4,
 }
 
 /// `Material.flags` bits, mirrored in `raytracing_scene_bindings.wesl`.
@@ -1980,7 +1994,7 @@ mod tests {
             material.alpha_mode = mode;
             assert_eq!(material_alpha(&material).flags >> 16, 0);
         }
-        assert_eq!(GpuMaterial::min_size().get(), 96);
+        assert_eq!(GpuMaterial::min_size().get(), 112);
     }
 
     #[test]

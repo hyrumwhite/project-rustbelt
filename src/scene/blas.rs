@@ -287,6 +287,8 @@ pub fn publish_readiness(
                         &material.normal_map_texture,
                         &material.emissive_texture,
                         &material.metallic_roughness_texture,
+                        #[cfg(feature = "pbr_multi_layer_material_textures")]
+                        &material.clearcoat_texture,
                     ]
                     .into_iter()
                     .flatten()

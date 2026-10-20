@@ -354,6 +354,7 @@ mod tests {
             reflectance: 0.5,
             emission_cone: Vec4::ZERO,
             gaussian: Vec4::ZERO,
+            clearcoat: Vec4::ZERO,
         });
         cache
             .storage

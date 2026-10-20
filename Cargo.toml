@@ -26,6 +26,9 @@ zstd_c = ["bevy_image/zstd_c"]
 # needs DLSS_SDK, VULKAN_SDK and libclang at build time).
 dlss = ["bevy_anti_alias/dlss"]
 force_disable_dlss = ["bevy_anti_alias/force_disable_dlss"]
+# StandardMaterial's clear coat texture (bevy_pbr's multi-layer textures),
+# which the rays then read too; without it a coat is uniform.
+pbr_multi_layer_material_textures = ["bevy_pbr/pbr_multi_layer_material_textures"]
 # Native capture probes; no systems or readbacks in default builds.
 graphics_debug = ["bevy_pbr/graphics_debug"]
 

@@ -16,6 +16,7 @@ fn scene_consumers_compose_across_production_feature_variants() {
         "realtime::world_cache_update",
         "realtime::specular_gi",
         "realtime::surface_path",
+        "realtime::resolve_dlss_rr_textures",
         "pathtracer::pathtracer",
         "filtered_canopy_prepass",
     ];
@@ -39,6 +40,10 @@ fn scene_consumers_compose_across_production_feature_variants() {
             }
         }
         for consumer in consumers {
+            // The guide pass exists only with the guide buffers.
+            if consumer == "realtime::resolve_dlss_rr_textures" && bits & 4 == 0 {
+                continue;
+            }
             let module = format!("bevy_solarik::{consumer}");
             let mut stage_definitions = definitions.clone();
             if consumer == "filtered_canopy_prepass" && bits & 1 != 0 {

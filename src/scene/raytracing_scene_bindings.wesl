@@ -154,6 +154,16 @@ struct SkyLight {
     // The air of the planet the scene stands on, which directional light
     // crosses on its way to a surface. No medium when its radius is zero.
     medium: LightMedium,
+    // Fog over the specular paths' hits (SolarikRayFog, ray_fog.wesl).
+    fog: RayFog,
+}
+
+struct RayFog {
+    atmospheric_color: vec4<f32>,
+    atmospheric: vec4<f32>,
+    plane: vec4<f32>,
+    planar_color: vec4<f32>,
+    planar: vec4<f32>,
 }
 
 struct DirectionalLight {

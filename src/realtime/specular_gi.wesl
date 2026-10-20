@@ -24,6 +24,9 @@ import bevy_solarik::realtime::surface_path::shade_surface_scattering;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::ResolvedGPixel;
 import bevy_solarik::scene::sampling::analytic_light_radiance;
+import bevy_solarik::scene::ray_fog::ray_fog_active;
+import bevy_solarik::scene::ray_fog::fog_ray_segment;
+import bevy_solarik::scene::raytracing_scene_bindings::sky_light;
 import bevy_solarik::scene::sampling::shade_gi_connection;
 import bevy_solarik::scene::sampling::sample_random_light_transmitted;
 import bevy_solarik::scene::sampling::random_emissive_light_solid_angle_pdf;
@@ -153,7 +156,24 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, w
     return GlossyLobe(radiance, wi);
 }
 
+// A glossy path's radiance, its first hit fogged (SolarikRayFog) for the way
+// beyond the surface it leaves; a path to the sky is left as it is (the
+// application's fog covers its level's surfaces only).
 fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, rng: ptr<function, u32>) -> vec3<f32> {
+    var first_hit = vec4(0.0);
+    let radiance = trace_unfogged_glossy_path(pixel_id, primary_surface, initial_ray_t, initial_wi, initial_p_bounce, rng, &first_hit);
+    if first_hit.w <= 0.0 || !ray_fog_active() { return radiance; }
+    let forward = -normalize(view.world_from_view[2].xyz);
+    let surface_depth = dot(primary_surface.world_position - view.world_position, forward);
+    let plane = sky_light.fog.plane;
+    return fog_ray_segment(radiance, surface_depth, dot(plane.xyz, primary_surface.world_position) - plane.w,
+        first_hit.w, dot(plane.xyz, first_hit.xyz) - plane.w, view.exposure);
+}
+
+// (`first_hit`: where the first ray met a surface, and how far it went; w 0
+// for none)
+fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, rng: ptr<function, u32>, first_hit: ptr<function, vec4<f32>>) -> vec3<f32> {
+    var first_ray = true;
     var radiance = vec3(0.0);
     var throughput = vec3(1.0);
 
@@ -180,6 +200,12 @@ fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initi
     for (var i = 0u; i < 3u;) {
         // Trace ray
         let ray = trace_glass_ray(ray_origin, wi, RAY_T_MIN, ray_max_distance());
+        if first_ray {
+            first_ray = false;
+            if !scene_hit_is_miss(ray) {
+                *first_hit = vec4(ray_origin + wi * ray.t, ray.t);
+            }
+        }
         radiance += throughput * analytic_light_radiance(ray_origin, wi,
             select(ray.t, ray_max_distance(), scene_hit_is_miss(ray)), analytic_owned, previous_scatter_position);
         if scene_hit_is_miss(ray) {

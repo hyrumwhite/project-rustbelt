@@ -84,6 +84,25 @@ pub struct SolarikNearRays {
     pub radius: f32,
 }
 
+/// Fog over what the specular paths see beyond the surfaces they leave, for
+/// an application that fogs its picture by depth (none by default). Halo's
+/// environment fog (`ray_fog.wesl`), in metres with Y up: colours in the
+/// display's encoding.
+#[derive(Resource, ExtractResource, Clone, Copy, Default, Debug, PartialEq, ShaderType)]
+#[extract_app(bevy_render::RenderApp)]
+pub struct SolarikRayFog {
+    /// rgb, maximum density
+    pub atmospheric_color: Vec4,
+    /// minimum and maximum distance, the camera's density (unused)
+    pub atmospheric: Vec4,
+    /// normal (out of the fog) and d: n.p = d on the plane
+    pub plane: Vec4,
+    /// rgb, maximum density
+    pub planar_color: Vec4,
+    /// maximum distance and depth, the camera's planar density (unused)
+    pub planar: Vec4,
+}
+
 impl Default for SolarikSkyLight {
     fn default() -> Self {
         Self {
@@ -410,7 +429,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
     dfg_lut: Res<DfgLut>,
-    (sky_light, near_rays): (Res<SolarikSkyLight>, Res<SolarikNearRays>),
+    (sky_light, near_rays, ray_fog): (Res<SolarikSkyLight>, Res<SolarikNearRays>, Res<SolarikRayFog>),
     (alpha_testing, ray_settings, planet, atmosphere, rings, readiness, canopy): (
         Res<SolarikAlphaTesting>,
         Res<SolarikRaySettings>,
@@ -1377,6 +1396,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             atmosphere.as_deref(),
             weather_image.is_some(),
         ),
+        fog: *ray_fog,
     });
     sky_buffer.write_buffer_changed(&render_device, &render_queue);
     ring_buffer.set(rings.0.clone());
@@ -1777,6 +1797,7 @@ struct GpuSkyLight {
     material_transport_flags: u32,
     near_rays: Vec4,
     medium: GpuLightMedium,
+    fog: SolarikRayFog,
 }
 
 /// Mirrors `LightMedium` in `light_medium.wesl`. Metres.

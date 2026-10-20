@@ -25,7 +25,7 @@ mod tlas;
 mod types;
 
 use bevy_shader::load_shader_library;
-pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikSkyLight};
+pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSkyLight};
 pub use ray_settings::SolarikRaySettings;
 pub use types::{RaytracingMask, RaytracingMesh3d};
 
@@ -69,6 +69,7 @@ impl Plugin for RaytracingScenePlugin {
         crate::load_cloud_field(app);
         load_shader_library!(app, "brdf.wesl");
         load_shader_library!(app, "light_medium.wesl");
+        load_shader_library!(app, "ray_fog.wesl");
         load_shader_library!(app, "thin_glass.wesl");
         load_shader_library!(app, "scene_hit.wesl");
         load_shader_library!(app, "raytracing_scene_bindings.wesl");
@@ -80,6 +81,7 @@ impl Plugin for RaytracingScenePlugin {
         app.init_resource::<bevy_render::scene_readiness::SceneGeometryReadiness>();
         app.init_resource::<SolarikSkyLight>();
         app.init_resource::<SolarikNearRays>();
+        app.init_resource::<SolarikRayFog>();
         app.init_resource::<SolarikAlphaTesting>();
         app.init_resource::<SolarikRaySettings>();
     }
@@ -105,6 +107,7 @@ impl Plugin for RaytracingScenePlugin {
             ExtractResourcePlugin::<StandardMaterialAssets>::default(),
             ExtractResourcePlugin::<SolarikSkyLight>::default(),
             ExtractResourcePlugin::<SolarikNearRays>::default(),
+            ExtractResourcePlugin::<SolarikRayFog>::default(),
             ExtractResourcePlugin::<SolarikAlphaTesting>::default(),
             ExtractResourcePlugin::<SolarikRaySettings>::default(),
         ));
@@ -117,6 +120,7 @@ impl Plugin for RaytracingScenePlugin {
             .extra_buffer_usages |= BufferUsages::BLAS_INPUT | BufferUsages::STORAGE;
         render_app.init_resource::<SolarikSkyLight>();
         render_app.init_resource::<SolarikNearRays>();
+        render_app.init_resource::<SolarikRayFog>();
         render_app.init_resource::<SolarikAlphaTesting>();
         render_app.init_resource::<SolarikRaySettings>();
 

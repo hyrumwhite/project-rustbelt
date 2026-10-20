@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 41;
+pub const VERSION: u32 = 42;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -221,6 +221,10 @@ pub struct SpriteBatch {
     /// (1 - v) tint t^6 + v t; `shader_flags` and `blend_function` unused.
     pub kind: u32,
     pub tint: f32,
+    /// (Protocol 42) A zsprite's radius (world units): how far toward the
+    /// camera its secondary map (a z-map: green over blue its height) brings
+    /// a pixel. 0 for other anchors.
+    pub secondary_radius: f32,
 }
 
 pub const SPRITE_NONLINEAR_TINT: u16 = 1 << 1;

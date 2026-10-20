@@ -49,6 +49,8 @@ struct SpriteParams {
     /// framebuffer blend function, what a displayed 1 is written as, 1 for
     /// nonlinear tint, 1 to show it in cyan
     mode: Vec4,
+    /// a zsprite's radius (metres)
+    zsprite: Vec4,
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
@@ -59,18 +61,24 @@ pub struct SpriteMaterial {
     #[texture(1)]
     #[sampler(2)]
     map: Handle<Image>,
+    /// a zsprite's z-map (its secondary map): each pixel's depth brought
+    /// toward the camera by its height
+    #[texture(3)]
+    #[sampler(4)]
+    zmap: Option<Handle<Image>>,
     blend: u16,
 }
 
-/// The pipeline a batch needs: its blend.
+/// The pipeline a batch needs: its blend, and whether it's a zsprite.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpriteKey {
     blend: u16,
+    zsprite: bool,
 }
 
 impl From<&SpriteMaterial> for SpriteKey {
     fn from(material: &SpriteMaterial) -> Self {
-        SpriteKey { blend: material.blend }
+        SpriteKey { blend: material.blend, zsprite: material.zmap.is_some() }
     }
 }
 
@@ -99,6 +107,11 @@ impl Material for SpriteMaterial {
     ) -> Result<(), SpecializedMeshPipelineError> {
         // (the effect shader draws both sides)
         descriptor.primitive.cull_mode = None;
+        if key.bind_group_data.zsprite
+            && let Some(fragment) = descriptor.fragment.as_mut()
+        {
+            fragment.shader_defs.push("ZSPRITE".into());
+        }
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.depth_write_enabled = Some(false);
             // (HALO_RT_SPRITE_DEBUG=2: seen through everything)
@@ -136,6 +149,9 @@ struct MaterialKey {
     bitmap_index: u16,
     blend: u16,
     nonlinear_tint: bool,
+    /// a zsprite's z-map and radius (its bits; none: `u32::MAX`, 0)
+    zmap: u32,
+    zsprite_radius: u32,
 }
 
 /// The sprite meshes (one a batch, reused frame to frame) and materials.
@@ -157,6 +173,10 @@ fn batch_mesh(vertices: &[halo_bridge::SpriteVertex], centroid: Vec3) -> Mesh {
         .map(|v| (Vec3::from(halo_to_bevy(v.position, METERS_PER_WORLD_UNIT)) - centroid).to_array())
         .collect();
     let uvs: Vec<[f32; 2]> = vertices.iter().map(|v| v.texcoord).collect();
+    // each quad's corners, as the game's zsprite texture coordinate stream
+    // gives them (a z-map spans its quad)
+    const CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+    let corners: Vec<[f32; 2]> = (0..vertices.len()).map(|i| CORNERS[i % 4]).collect();
     // (a8r8g8b8, display-encoded: the shader takes them as they are)
     let colors: Vec<[f32; 4]> = vertices
         .iter()
@@ -174,6 +194,7 @@ fn batch_mesh(vertices: &[halo_bridge::SpriteVertex], centroid: Vec3) -> Mesh {
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, corners)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
         .with_inserted_indices(Indices::U32(indices))
 }
@@ -230,7 +251,22 @@ fn follow_sprites(
             *batch;
         let first = first_vertex as usize;
         let Some(vertices) = snapshot.sprite_vertices.get(first..first + quad_count as usize * 4) else { continue };
-        let key = MaterialKey { map, bitmap_index, blend: blend_function, nonlinear_tint: shader_flags & SPRITE_NONLINEAR_TINT != 0 };
+        // (a zsprite: its z-map lifts its pixels toward the camera; the game
+        // leaves it out for the first-person weapon's, and HALO_RT_NO_ZSPRITES
+        // here)
+        let zsprite = batch.secondary_anchor == 2
+            && batch.secondary_map != u32::MAX
+            && batch.secondary_radius > 0.0
+            && batch.first_person == 0
+            && std::env::var_os("HALO_RT_NO_ZSPRITES").is_none();
+        let key = MaterialKey {
+            map,
+            bitmap_index,
+            blend: blend_function,
+            nonlinear_tint: shader_flags & SPRITE_NONLINEAR_TINT != 0,
+            zmap: if zsprite { batch.secondary_map } else { u32::MAX },
+            zsprite_radius: if zsprite { batch.secondary_radius.to_bits() } else { 0 },
+        };
         let material = match sprites.materials.get(&key) {
             Some(material) => material.clone(),
             None => {
@@ -250,13 +286,21 @@ fn follow_sprites(
                 // its bitmap, from the level's map (display-encoded)
                 let material = level.as_deref_mut().and_then(|level| {
                     let builder = &mut level.builder;
-                    builder.textures.get(&builder.cache, map, bitmap_index as usize, true, &mut images)
-                }).map(|map| {
+                    let map = builder.textures.get(&builder.cache, map, bitmap_index as usize, true, &mut images)?;
+                    // (the z-map's heights are data, not colours)
+                    let zmap = (key.zmap != u32::MAX)
+                        .then(|| builder.textures.get(&builder.cache, key.zmap, 0, false, &mut images))
+                        .flatten();
+                    Some((map, zmap))
+                }).map(|(map, zmap)| {
+                    let radius = f32::from_bits(key.zsprite_radius) * METERS_PER_WORLD_UNIT;
                     materials.add(SpriteMaterial {
                         params: SpriteParams {
                             mode: Vec4::new(blend_function as f32, radiance_scale, if key.nonlinear_tint { 1.0 } else { 0.0 }, debug),
+                            zsprite: Vec4::new(radius, 0.0, 0.0, 0.0),
                         },
                         map,
+                        zmap,
                         blend: blend_function,
                     })
                 });

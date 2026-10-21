@@ -24,6 +24,8 @@ import bevy_solarik::realtime::world_cache_priority::selected_world_cache_cell_c
 import bevy_solarik::realtime::world_cache_priority::PRIORITY_UPDATED_COUNT;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_MAX_TEMPORAL_SAMPLES;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT;
+import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_DIRECT_LIGHT_SAMPLES_PER_UPDATE;
+import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_HISTORY_FRAMES;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_MAX_GI_RAY_DISTANCE;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_UPDATES_SOFT_CAP;
 import bevy_solarik::realtime::world_cache_query::query_two_sided_world_cache_with_support;
@@ -53,7 +55,15 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     var rng = cell_index + constants.frame_index;
     forest_set_seed(vec2u(cell_index,constants.frame_index^0x4173bda1u));
 
-    let new_radiance = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy, &rng);
+    // Several shadow-tested lights an update, each from a tile of its own: a
+    // cell's single light sample (one of the level's hundreds of emitters)
+    // was noisy enough to set the whole cache, which feeds itself, drifting.
+    var new_radiance = vec4(0.0);
+    for (var i = 0u; i < WORLD_CACHE_DIRECT_LIGHT_SAMPLES_PER_UPDATE; i++) {
+        let sample = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy + vec2(0u, i * 7919u), &rng);
+        new_radiance = vec4(new_radiance.rgb + sample.rgb, max(new_radiance.w, sample.w));
+    }
+    new_radiance = vec4(new_radiance.rgb / f32(WORLD_CACHE_DIRECT_LIGHT_SAMPLES_PER_UPDATE), new_radiance.w);
 
     world_cache_active_cells_new_radiance[active_cell_id.x] = new_radiance;
 }
@@ -138,9 +148,14 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 // Convert the history horizon from rendered frames to successful cell updates.
 // Otherwise the update budget silently stretches history as the cache grows.
 fn cache_blend_amount(sample_count: f32, old_luminance: f32, luminance_delta: f32, update_probability: f32) -> f32 {
+    // The history shortens as the cell's light changes: in proportion to the
+    // change (an eighth root made every single-sample update's noise read as
+    // a change, keeping a few samples where 32 were meant).
     let alpha = abs(luminance_delta) / max(old_luminance, 0.001);
-    let max_sample_count = mix(WORLD_CACHE_MAX_TEMPORAL_SAMPLES, 1.0, pow(saturate(alpha), 1.0 / 8.0));
-    let frame_limited_samples = max(1.0, 16.0 * clamp(update_probability, 0.0, 1.0));
+    let max_sample_count = mix(WORLD_CACHE_MAX_TEMPORAL_SAMPLES, 1.0, saturate(alpha));
+    // (and at most WORLD_CACHE_HISTORY_FRAMES frames' updates: at 16, a big
+    // cache, a cell updated one frame in four, kept four samples)
+    let frame_limited_samples = max(1.0, WORLD_CACHE_HISTORY_FRAMES * clamp(update_probability, 0.0, 1.0));
     return 1.0 / min(sample_count, min(max_sample_count, frame_limited_samples));
 }
 

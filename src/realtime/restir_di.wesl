@@ -51,9 +51,12 @@ import bevy_solarik::realtime::realtime_bindings::ResolvedLightSamplePacked;
 enable wgpu_ray_query;
 
 
-const INITIAL_SAMPLES = 8u;
+// (32 and a confidence cap of 8, from 8 and 20: a sample reused for 20
+// frames over 30 pixels made patches of light that came and went, which
+// DLSS-RR keeps as detail; interiors boiled)
+const INITIAL_SAMPLES = 32u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
-const CONFIDENCE_WEIGHT_CAP = 20.0;
+const CONFIDENCE_WEIGHT_CAP = 8.0;
 @if((RASTER_SUBPIXEL_BITS))
 const RASTER_SUBPIXEL_STEP = 1.0 / f32(1u << constants::RASTER_SUBPIXEL_BITS);
 // Vulkan's guaranteed minimum, used by tools without adapter specialization.

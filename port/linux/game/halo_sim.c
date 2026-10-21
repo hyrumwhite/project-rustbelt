@@ -70,6 +70,7 @@ unsigned char const *transition_function_table_get(short function_type); /* peri
 #include "bevy_bridge.h"
 #include "halo_sim.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -11316,6 +11317,9 @@ static void halo_sim_hs_snapshot_restore(struct halo_sim_hs_context const *conte
 	memcpy((void *)context->runtime_globals, snapshot->runtime_globals, sizeof(snapshot->runtime_globals));
 }
 
+/* (HALO_SIM_TELEPORT's, once) */
+static boolean halo_sim_teleport_done = FALSE;
+
 int halo_sim_hs_begin(long operation, long expression, long *result, int *checking)
 {
 	short mode = halo_sim_mode(_halo_sim_hs);
@@ -11369,6 +11373,33 @@ int halo_sim_hs_begin(long operation, long expression, long *result, int *checki
 			platform_log("halo_sim: evaluating the later command %s: %s", command,
 				hs_compile_and_evaluate(command) ? "compiled" : "didn't compile");
 		}
+	}
+	/* (and for testing a place no flag marks: HALO_SIM_TELEPORT "x,y,z,yaw"
+	(world units, degrees), the first local player's unit moved and turned
+	there at the tick HALO_SIM_TELEPORT_TIME, 900 if not given, and then
+	HALO_SIM_TELEPORT_COMMAND evaluated) */
+	if (operation == _halo_sim_hs_update && getenv("HALO_SIM_TELEPORT") && !halo_sim_teleport_done
+		&& game_time_get() >= (getenv("HALO_SIM_TELEPORT_TIME") ? atol(getenv("HALO_SIM_TELEPORT_TIME")) : 900))
+	{
+		real_point3d position;
+		float yaw = 0.0f;
+		long player_index = local_player_get_player_index(0);
+
+		halo_sim_teleport_done = TRUE;
+		if (player_index != NONE
+			&& sscanf(getenv("HALO_SIM_TELEPORT"), "%f,%f,%f,%f", &position.x, &position.y, &position.z, &yaw) >= 3
+			&& player_get(player_index)->unit_index != NONE)
+		{
+			real_vector3d forward = { cosf(yaw * 0.0174533f), sinf(yaw * 0.0174533f), 0.0f };
+
+			object_set_position(player_get(player_index)->unit_index, &position, &forward, NULL);
+			player_control_set_facing(0, &forward);
+			platform_log("halo_sim: the player moved to %f,%f,%f", position.x, position.y, position.z);
+		}
+		/* (then HALO_SIM_TELEPORT_COMMAND, if given) */
+		if (getenv("HALO_SIM_TELEPORT_COMMAND"))
+			platform_log("halo_sim: evaluating the command %s: %s", getenv("HALO_SIM_TELEPORT_COMMAND"),
+				hs_compile_and_evaluate(getenv("HALO_SIM_TELEPORT_COMMAND")) ? "compiled" : "didn't compile");
 	}
 	if (mode == _halo_sim_mode_c)
 		return FALSE;

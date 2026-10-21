@@ -180,6 +180,7 @@ pub struct ReadFrame;
 impl Plugin for BridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BridgeObjects>()
+            .init_resource::<CameraSky>()
             .init_resource::<FollowGame>()
             .init_resource::<ForwardInput>()
             .add_systems(First, read_frame.in_set(ReadFrame))
@@ -448,12 +449,13 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, animated, children, follow, mut visibility_data): (
+    (recolourable, animated, children, follow, mut visibility_data, mut camera_sky): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<(), With<crate::level::AnimatedSelfIllumination>>,
         Query<&Children>,
         Res<FollowGame>,
         Local<Option<((String, i32), Option<ClusterVisibility>)>>,
+        ResMut<CameraSky>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -517,6 +519,17 @@ fn sync_objects(
         (Some(visibility), Some(camera)) if follow.0 => visibility.cluster(camera.position),
         _ => -1,
     };
+    // (the game draws no sky from a cluster that has none: an interior's
+    // windows onto nothing stay dark, as b30's Shaft B cutscene's)
+    let skyless = camera_cluster >= 0
+        && visibility_data
+            .as_ref()
+            .and_then(|(_, v)| v.as_ref())
+            .and_then(|v| v.skies.get(camera_cluster as usize))
+            .is_some_and(|&sky| sky < 0);
+    if camera_sky.none != skyless {
+        camera_sky.none = skyless;
+    }
     let clusters_of: HashMap<u32, (i16, u32)> = snapshot.objects.iter().map(|o| (o.object_index, (o.location_cluster, o.parent_index))).collect();
     let unseen_cluster = |object: &halo_bridge::Object| {
         let Some(visibility) = visibility_data.as_ref().and_then(|(_, v)| v.as_ref()).filter(|_| camera_cluster >= 0) else { return false };
@@ -800,6 +813,13 @@ fn node_matrix(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy: &A
     Mat4::from(*to_bevy * world * *default_inverse * *from_bevy)
 }
 
+/// Whether the game's camera is in a cluster with no sky, where the game
+/// draws none (the camera's skybox goes dark, `crate::follow_camera_sky`).
+#[derive(Resource, Default)]
+pub struct CameraSky {
+    pub none: bool,
+}
+
 /// A structure BSP's clusters and potentially visible sets: which clusters
 /// the game draws from the one its camera is in.
 pub struct ClusterVisibility {
@@ -808,6 +828,9 @@ pub struct ClusterVisibility {
     /// A bit vector of the clusters each cluster sees (32-bit words).
     pvs: Vec<u32>,
     words_per_cluster: usize,
+    /// Each cluster's sky (the scenario's), -1 for none: the game draws no
+    /// sky from a camera in such a cluster (`structure_visibility_find_camera`).
+    skies: Vec<i16>,
 }
 
 impl ClusterVisibility {
@@ -816,7 +839,9 @@ impl ClusterVisibility {
         use halo_map::layout::{structure_bsp, structure_cluster};
         let reference = halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index as i32 == index)?;
         let bsp = halo_map::bsp::Bsp::load(cache, &reference).ok()?;
-        let count = bsp.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF).ok()?.count;
+        let clusters = bsp.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF).ok()?;
+        let count = clusters.count;
+        let skies = clusters.iter().map(|c| c.i16(structure_cluster::SKY_INDEX).unwrap_or(0)).collect();
         let pvs: Vec<u32> = bsp.root.data_bytes(structure_bsp::CLUSTER_DATA).ok()?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
         let words_per_cluster = count.div_ceil(32);
         if count == 0 || pvs.len() < count * words_per_cluster {
@@ -827,6 +852,7 @@ impl ClusterVisibility {
             clusters: halo_map::collision::StructureClusters::load(cache, &bsp).ok()?,
             pvs,
             words_per_cluster,
+            skies,
         })
     }
 

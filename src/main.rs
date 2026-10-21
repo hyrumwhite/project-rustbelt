@@ -453,7 +453,7 @@ fn main() -> AppExit {
         app.add_systems(
             Update,
             (
-                (adjust_lighting.run_if(bridge::not_forwarding), apply_lighting).chain(),
+                (adjust_lighting.run_if(bridge::not_forwarding), apply_lighting, follow_camera_sky).chain(),
                 print_camera.run_if(bridge::not_forwarding),
             ),
         )
@@ -950,6 +950,28 @@ fn apply_lighting(
             if let Some(mut skybox) = skybox {
                 skybox.brightness = power * settings.sky_scale;
             }
+        }
+    }
+}
+
+/// The camera's skybox dark where the game's camera is in a cluster with no
+/// sky ([`bridge::CameraSky`]), as the game draws none there; the sky's light
+/// is left as it is.
+fn follow_camera_sky(
+    settings: Res<LightingSettings>,
+    level_sky: Res<LevelSky>,
+    camera_sky: Option<Res<bridge::CameraSky>>,
+    mut skyboxes: Query<&mut Skybox>,
+) {
+    let Some(camera_sky) = camera_sky else { return };
+    if !camera_sky.is_changed() && !settings.is_changed() {
+        return;
+    }
+    let Some((_, power)) = level_sky.0.sky else { return };
+    let brightness = if camera_sky.none { 0.0 } else { power * settings.sky_scale };
+    for mut skybox in &mut skyboxes {
+        if skybox.brightness != brightness {
+            skybox.brightness = brightness;
         }
     }
 }

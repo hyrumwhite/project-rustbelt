@@ -3646,6 +3646,7 @@ pub mod structure_bsp {
 
 pub mod structure_cluster {
     pub const SIZEOF: usize = 0x68;
+    pub const SKY_INDEX: usize = 0x0;
     pub const FOG_REFERENCE: usize = 0x2;
     pub const BACKGROUND_SOUND_PALETTE_INDEX: usize = 0x4;
 }

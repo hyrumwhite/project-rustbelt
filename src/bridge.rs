@@ -181,6 +181,7 @@ impl Plugin for BridgePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BridgeObjects>()
             .init_resource::<CameraSky>()
+            .init_resource::<DrawnBsp>()
             .init_resource::<FollowGame>()
             .init_resource::<ForwardInput>()
             .add_systems(First, read_frame.in_set(ReadFrame))
@@ -449,13 +450,14 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, animated, children, follow, mut visibility_data, mut camera_sky): (
+    (recolourable, animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<(), With<crate::level::AnimatedSelfIllumination>>,
         Query<&Children>,
         Res<FollowGame>,
-        Local<Option<((String, i32), Option<ClusterVisibility>)>>,
+        Local<Option<(String, Vec<Option<ClusterVisibility>>)>>,
         ResMut<CameraSky>,
+        ResMut<DrawnBsp>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -511,28 +513,44 @@ fn sync_objects(
     // the BSP's potentially visible sets, which the game doesn't draw: in
     // b30's interior cutscene the trees beyond a window, in the same BSP;
     // a camera flying free sees them all)
-    let key = (builder.stats.map_name.clone(), snapshot.structure_bsp_index);
-    if visibility_data.as_ref().is_none_or(|(loaded, _)| *loaded != key) {
-        *visibility_data = Some((key, ClusterVisibility::load(&builder.cache, snapshot.structure_bsp_index)));
+    if visibility_data.as_ref().is_none_or(|(loaded, _)| *loaded != builder.stats.map_name) {
+        *visibility_data = Some((builder.stats.map_name.clone(), ClusterVisibility::load_all(&builder.cache)));
     }
-    let camera_cluster = match (&visibility_data.as_ref().and_then(|(_, v)| v.as_ref()), snapshot.camera) {
+    let all_visibility = visibility_data.as_ref().map(|(_, v)| v.as_slice()).unwrap_or(&[]);
+    let active_visibility = usize::try_from(snapshot.structure_bsp_index).ok().and_then(|i| all_visibility.get(i)).and_then(|v| v.as_ref());
+    let camera_cluster = match (active_visibility, snapshot.camera) {
         (Some(visibility), Some(camera)) if follow.0 => visibility.cluster(camera.position),
         _ => -1,
     };
     // (the game draws no sky from a cluster that has none: an interior's
     // windows onto nothing stay dark, as b30's Shaft B cutscene's)
-    let skyless = camera_cluster >= 0
-        && visibility_data
-            .as_ref()
-            .and_then(|(_, v)| v.as_ref())
-            .and_then(|v| v.skies.get(camera_cluster as usize))
-            .is_some_and(|&sky| sky < 0);
+    let skyless = camera_cluster >= 0 && active_visibility.is_some_and(|v| v.skies.get(camera_cluster as usize).is_some_and(|&sky| sky < 0));
     if camera_sky.none != skyless {
         camera_sky.none = skyless;
     }
+    // A skyless cluster that sees clusters with sky looks through its
+    // openings onto the outdoors with no sky behind it: the game draws the
+    // land beyond against black. A room both BSPs hold, from the BSP the
+    // game hasn't switched to yet, is one (b30's Shaft B control room, in
+    // its cutscene: the exterior's underside through a window onto the
+    // interior's shaft). There the viewer draws the other BSP, whose copy of
+    // the room sees no sky: what the window was built to look onto. (Only
+    // where the other BSP holds all of the interior the game's camera sees,
+    // so all that goes is the outdoors the game shows against black.)
+    let drawn = match (snapshot.camera, active_visibility.filter(|v| skyless && v.sees_sky(camera_cluster))) {
+        (Some(camera), Some(active)) => all_visibility.iter().enumerate().find_map(|(index, other)| {
+            let other = other.as_ref().filter(|_| index as i32 != snapshot.structure_bsp_index)?;
+            let cluster = other.cluster(camera.position);
+            (cluster >= 0 && !other.sees_sky(cluster) && other.holds_interior_seen(active, camera_cluster)).then_some(index)
+        }),
+        _ => None,
+    };
+    if drawn_bsp.0 != drawn {
+        drawn_bsp.0 = drawn;
+    }
     let clusters_of: HashMap<u32, (i16, u32)> = snapshot.objects.iter().map(|o| (o.object_index, (o.location_cluster, o.parent_index))).collect();
     let unseen_cluster = |object: &halo_bridge::Object| {
-        let Some(visibility) = visibility_data.as_ref().and_then(|(_, v)| v.as_ref()).filter(|_| camera_cluster >= 0) else { return false };
+        let Some(visibility) = active_visibility.filter(|_| camera_cluster >= 0) else { return false };
         // (a model the game draws by itself, the first-person weapon and
         // hands, comes with no cluster: its zeroed 0 isn't where it is)
         if object.flags & OBJECT_MODEL != 0 {
@@ -813,6 +831,12 @@ fn node_matrix(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy: &A
     Mat4::from(*to_bevy * world * *default_inverse * *from_bevy)
 }
 
+/// The BSP the viewer draws in place of the one the game is in, when the
+/// game's camera stands in a room both hold and sees from the game's only
+/// outdoors without sky (`sync_objects`).
+#[derive(Resource, Default)]
+pub struct DrawnBsp(pub Option<usize>);
+
 /// Whether the game's camera is in a cluster with no sky, where the game
 /// draws none (the camera's skybox goes dark, `crate::follow_camera_sky`).
 #[derive(Resource, Default)]
@@ -834,6 +858,12 @@ pub struct ClusterVisibility {
 }
 
 impl ClusterVisibility {
+    /// Each of the level's BSPs', by BSP index.
+    fn load_all(cache: &halo_map::CacheFile) -> Vec<Option<Self>> {
+        let count = halo_map::bsp::references(cache).map(|r| r.iter().map(|r| r.index as usize + 1).max().unwrap_or(0)).unwrap_or(0);
+        (0..count).map(|index| Self::load(cache, index as i32)).collect()
+    }
+
     /// BSP `index`'s, None if it can't be read.
     fn load(cache: &halo_map::CacheFile, index: i32) -> Option<Self> {
         use halo_map::layout::{structure_bsp, structure_cluster};
@@ -861,6 +891,21 @@ impl ClusterVisibility {
         self.clusters.cluster_from_leaf(self.collision.leaf_from_point(point))
     }
 
+    /// Whether cluster `from` sees any cluster with a sky.
+    fn sees_sky(&self, from: i16) -> bool {
+        from >= 0 && self.skies.iter().enumerate().any(|(to, &sky)| sky >= 0 && self.sees(from, to as i16))
+    }
+
+    /// Whether this BSP holds the interior that `active`'s cluster `from`
+    /// sees: the portals of each cluster without sky it sees, by their
+    /// centres.
+    fn holds_interior_seen(&self, active: &ClusterVisibility, from: i16) -> bool {
+        (0..active.skies.len()).filter(|&to| active.skies[to] < 0 && active.sees(from, to as i16)).all(|to| {
+            let portals = active.clusters.cluster_portals.get(to).map(|p| p.as_slice()).unwrap_or(&[]);
+            portals.iter().all(|&p| active.clusters.portals.get(p as usize).is_none_or(|portal| self.cluster(portal.centroid) >= 0))
+        })
+    }
+
     /// Whether cluster `from` sees cluster `to` (`structure_bsp_get_cluster_pvs`).
     fn sees(&self, from: i16, to: i16) -> bool {
         let word = from as usize * self.words_per_cluster + to as usize / 32;
@@ -873,9 +918,10 @@ impl ClusterVisibility {
 fn sync_active_bsp(
     link: Res<BridgeLink>,
     level: Res<BridgeLevel>,
+    drawn_bsp: Res<DrawnBsp>,
     mut visibility: Query<&mut Visibility>,
     fixtures: Query<(Entity, &crate::level::OnBsps)>,
-    mut shown: Local<Option<usize>>,
+    (mut shown, mut game_bsp): (Local<Option<usize>>, Local<Option<i32>>),
     mut reset: ResMut<crate::ResetHistory>,
 ) {
     let Some(snapshot) = &link.latest else { return };
@@ -886,12 +932,20 @@ fn sync_active_bsp(
     if !snapshot.map_name().eq_ignore_ascii_case(&builder.stats.map_name) {
         return;
     }
-    let active = snapshot.structure_bsp_index as usize;
+    let active = drawn_bsp.0.unwrap_or(snapshot.structure_bsp_index as usize);
     if *shown != Some(active) {
-        info!("the game is in BSP {active}");
-        // (the other BSP's light and surfaces are gone from the history)
-        reset.0 |= shown.is_some();
+        match drawn_bsp.0 {
+            Some(drawn) => info!("the game is in BSP {}, its camera in a room BSP {drawn} holds too: drawing BSP {drawn}", snapshot.structure_bsp_index),
+            None => info!("the game is in BSP {active}"),
+        }
         *shown = Some(active);
+    }
+    // (the other BSP's light and surfaces are gone from the history, when
+    // the game switches; not for a room both BSPs hold, which the camera
+    // walks in and out of)
+    if *game_bsp != Some(snapshot.structure_bsp_index) {
+        reset.0 |= game_bsp.is_some();
+        *game_bsp = Some(snapshot.structure_bsp_index);
     }
     let mut show = |entity: Entity, shown: bool| {
         if let Ok(mut v) = visibility.get_mut(entity) {

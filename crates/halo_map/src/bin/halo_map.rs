@@ -38,6 +38,8 @@ fn main() -> ExitCode {
         "transparent" => transparent_survey(&cache),
         "shader" => shader(&cache, &args[2..]),
         "model" => model_dump(&cache, &args[2..]),
+        "where" => where_point(&cache, &args[2..]),
+        "skyless" => skyless_survey(&cache),
         "sky" => skies(&cache),
         "bitmap" => export_bitmap(&cache, &args[2..]),
         "bitmaps" => all_bitmaps(&cache),
@@ -62,6 +64,132 @@ type CliResult = Result<(), Box<dyn std::error::Error>>;
 /// it, and a transparent shader's combiner program.
 /// One model tag (by name): its nodes, regions' permutations, and each
 /// geometry's parts (shader, vertex and triangle counts, bounds).
+/// The skyless clusters that see clusters with sky, in each BSP, and which
+/// of their portals' centres another BSP holds in a cluster that sees none
+/// (where the viewer draws that other BSP, bridge.rs `DrawnBsp`).
+fn skyless_survey(cache: &CacheFile) -> CliResult {
+    use halo_map::collision::{CollisionBsp, StructureClusters};
+    use halo_map::layout::{structure_bsp, structure_cluster};
+    struct Loaded {
+        index: usize,
+        collision: CollisionBsp,
+        clusters: StructureClusters,
+        skies: Vec<i16>,
+        pvs: Vec<u32>,
+    }
+    impl Loaded {
+        fn sees_sky(&self, from: usize) -> bool {
+            let words = self.skies.len().div_ceil(32);
+            (0..self.skies.len()).any(|to| self.skies[to] >= 0 && self.pvs.get(from * words + to / 32).is_some_and(|b| b & (1 << (to % 32)) != 0))
+        }
+    }
+    let mut all = Vec::new();
+    for reference in bsp::references(cache)? {
+        let loaded = bsp::Bsp::load(cache, &reference)?;
+        let blocks = loaded.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF)?;
+        all.push(Loaded {
+            index: reference.index,
+            collision: CollisionBsp::load(&loaded)?,
+            clusters: StructureClusters::load(cache, &loaded)?,
+            skies: blocks.iter().map(|c| c.i16(structure_cluster::SKY_INDEX).unwrap_or(0)).collect(),
+            pvs: loaded.root.data_bytes(structure_bsp::CLUSTER_DATA)?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect(),
+        });
+    }
+    for a in &all {
+        for c in 0..a.skies.len() {
+            if a.skies[c] >= 0 || !a.sees_sky(c) {
+                continue;
+            }
+            // (the viewer's rule needs the other BSP to hold every portal of
+            // each skyless cluster this one sees)
+            let words = a.skies.len().div_ceil(32);
+            let seen: Vec<usize> = (0..a.skies.len()).filter(|&o| a.skies[o] < 0 && a.pvs.get(c * words + o / 32).is_some_and(|b| b & (1 << (o % 32)) != 0)).collect();
+            for o in all.iter().filter(|o| o.index != a.index) {
+                let held = |p: [f32; 3]| o.clusters.cluster_from_leaf(o.collision.leaf_from_point(p)) >= 0;
+                let all_held = seen.iter().all(|&s| a.clusters.cluster_portals.get(s).map(|v| v.as_slice()).unwrap_or(&[]).iter().all(|&p| held(a.clusters.portals[p as usize].centroid)));
+                // (cameras sampled at the cluster's portals' centres)
+                let cameras: Vec<i16> = a.clusters.cluster_portals.get(c).map(|v| v.as_slice()).unwrap_or(&[]).iter().map(|&p| o.clusters.cluster_from_leaf(o.collision.leaf_from_point(a.clusters.portals[p as usize].centroid))).collect();
+                let firing: Vec<i16> = cameras.iter().copied().filter(|&oc| oc >= 0 && !o.sees_sky(oc as usize)).collect();
+                // (the sky clusters seen: whether a portal joins each to the
+                // skyless clusters seen, or the camera's own)
+                let seen_sky: Vec<(usize, bool)> = (0..a.skies.len())
+                    .filter(|&s| a.skies[s] >= 0 && a.pvs.get(c * words + s / 32).is_some_and(|b| b & (1 << (s % 32)) != 0))
+                    .map(|s| {
+                        let joined = a.clusters.cluster_portals.get(s).map(|v| v.as_slice()).unwrap_or(&[]).iter().any(|&p| {
+                            let pair = a.clusters.portals[p as usize].clusters;
+                            pair.iter().any(|&k| k >= 0 && (k as usize == c || seen.contains(&(k as usize))))
+                        });
+                        (s, joined)
+                    })
+                    .collect();
+                if all_held && !firing.is_empty() {
+                    println!("    seen sky clusters (cluster, joined by a portal): {seen_sky:?}");
+                    println!("  RULE: bsp {} cluster {c} draws bsp {} (its clusters {:?}, {} clusters, sky {:?})", a.index, o.index, firing, o.skies.len(), firing.iter().map(|&f| o.skies[f as usize]).collect::<Vec<_>>());
+                }
+            }
+            let mut hits = Vec::new();
+            for &p in a.clusters.cluster_portals.get(c).map(|v| v.as_slice()).unwrap_or(&[]) {
+                let portal = &a.clusters.portals[p as usize];
+                for o in all.iter().filter(|o| o.index != a.index) {
+                    let oc = o.clusters.cluster_from_leaf(o.collision.leaf_from_point(portal.centroid));
+                    if oc >= 0 && !o.sees_sky(oc as usize) {
+                        hits.push(format!("bsp {} cluster {oc} at {:?}", o.index, portal.centroid.map(|v| (v * 10.0).round() / 10.0)));
+                    }
+                }
+            }
+            println!("bsp {} cluster {c}: skyless, sees sky; {}", a.index, if hits.is_empty() { "no other BSP holds it".to_string() } else { hits.join("; ") });
+        }
+    }
+    Ok(())
+}
+
+/// Each BSP's view from a point: its cluster there, the cluster's sky, what
+/// its potentially visible set holds, its portals, and how far rays round
+/// the point go before they meet a surface.
+fn where_point(cache: &CacheFile, args: &[String]) -> CliResult {
+    use halo_map::collision::{CollisionBsp, StructureClusters};
+    use halo_map::layout::{structure_bsp, structure_cluster};
+    let point: Vec<f32> = args.first().ok_or("usage: halo_map where <map> x,y,z")?.split(',').map(|v| v.parse()).collect::<Result<_, _>>()?;
+    let point = [point[0], point[1], point[2]];
+    for reference in bsp::references(cache)? {
+        let loaded = bsp::Bsp::load(cache, &reference)?;
+        let collision = CollisionBsp::load(&loaded)?;
+        let clusters = StructureClusters::load(cache, &loaded)?;
+        let blocks = loaded.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF)?;
+        let skies: Vec<i16> = blocks.iter().map(|c| c.i16(structure_cluster::SKY_INDEX).unwrap_or(0)).collect();
+        let pvs: Vec<u32> = loaded.root.data_bytes(structure_bsp::CLUSTER_DATA)?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+        let words = skies.len().div_ceil(32);
+        let cluster = clusters.cluster_from_leaf(collision.leaf_from_point(point));
+        print!("bsp {} {}: {} clusters; at the point cluster {cluster}", reference.index, reference.name, skies.len());
+        if cluster < 0 {
+            println!();
+            continue;
+        }
+        let c = cluster as usize;
+        let seen: Vec<usize> = (0..skies.len()).filter(|&o| pvs.get(c * words + o / 32).is_some_and(|b| b & (1 << (o % 32)) != 0)).collect();
+        let with_sky = seen.iter().filter(|&&o| skies[o] >= 0).count();
+        println!(", sky {}, sees {} clusters ({} with sky): {:?}", skies[c], seen.len(), with_sky, seen);
+        for &p in clusters.cluster_portals.get(c).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let portal = &clusters.portals[p as usize];
+            println!("  portal {p} {:?} at {:?} radius {:.2}", portal.clusters, portal.centroid, portal.bounding_radius);
+        }
+        let mut line = String::new();
+        for step in 0..24 {
+            let yaw = (step as f32 * 15.0).to_radians();
+            let vector = [yaw.cos() * 40.0, yaw.sin() * 40.0, 0.0];
+            let (hit, leaves) = collision.test_vector_leaves(3, point, vector, 1.0);
+            let end = hit.map(|h| h.t * 40.0);
+            let last = leaves.iter().rev().map(|&l| clusters.cluster_from_leaf(l)).find(|&c| c >= 0).unwrap_or(-1);
+            line += &match end {
+                Some(d) => format!(" {:>3}:{d:.1}(f{:x},c{last})", step * 15, hit.unwrap().flags),
+                None => format!(" {:>3}:--(c{last})", step * 15),
+            };
+        }
+        println!("  rays (yaw:distance):{line}");
+    }
+    Ok(())
+}
+
 fn model_dump(cache: &CacheFile, args: &[String]) -> CliResult {
     let name = args.first().ok_or("usage: halo_map model <map> <tag name>")?;
     let tag = cache

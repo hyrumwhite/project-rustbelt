@@ -14,6 +14,8 @@ import bevy_solarik::realtime::realtime_bindings::light_tile_resolved_samples;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::constants;
 import bevy_solarik::realtime::realtime_bindings::ResolvedLightSamplePacked;
+import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
+import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
 
 // https://cwyman.org/papers/hpg21_rearchitectingReSTIR.pdf
 
@@ -26,7 +28,19 @@ fn presample_light_tiles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builti
     let tile_id = workgroup_id.x;
     var rng = light_tile_seed((tile_id * 1024u) + sample_index, constants.frame_index);
 
-    let sample = generate_random_light_sample(&rng);
+    var sample = generate_random_light_sample(&rng);
+    // The tiles hold the lights other than the sun, which ReSTIR DI and the
+    // world cache sample by themselves: a sun sample is drawn again, and the
+    // others' density is the table's over what isn't the sun's.
+    if arrayLength(&directional_lights) > 0u {
+        let sun_probability = light_sources[directional_lights[0].light_source_index].selection_probability;
+        if sun_probability < 0.999 {
+            for (var tries = 0u; tries < 16u && sample.resolved_light_sample.world_position.w == LIGHT_SAMPLE_DIRECTIONAL; tries++) {
+                sample = generate_random_light_sample(&rng);
+            }
+            sample.resolved_light_sample.inverse_pdf *= 1.0 - sun_probability;
+        }
+    }
 
     let i = (tile_id * 1024u) + sample_index;
     light_tile_samples[i] = sample.light_sample;

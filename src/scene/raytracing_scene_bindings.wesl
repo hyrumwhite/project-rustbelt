@@ -171,6 +171,8 @@ struct DirectionalLight {
     cos_theta_max: f32,
     luminance: vec3<f32>,
     inverse_pdf: f32,
+    // Its index among the light sources.
+    light_source_index: u32,
 }
 
 const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;

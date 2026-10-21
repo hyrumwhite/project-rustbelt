@@ -25,6 +25,9 @@ import bevy_solarik::scene::sampling::resolve_light_sample;
 import bevy_solarik::scene::sampling::trace_light_transmission;
 import bevy_solarik::scene::sampling::balance_heuristic;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
+import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+import bevy_solarik::scene::sampling::LIGHT_SAMPLE_DIRECTIONAL;
+import bevy_pbr::render::utils::rand_u;
 import bevy_solarik::scene::raytracing_scene_bindings::previous_frame_light_id_translations;
 import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_NOT_PRESENT_THIS_FRAME;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
@@ -154,9 +157,12 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
     var reservoir_target_function = 0.0;
     var selected_tile_sample = 0u;
+    var selected_light_position = vec4(0.0);
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+        // (the sun has a sample of its own, below)
+        if resolved_light_sample.world_position.w == LIGHT_SAMPLE_DIRECTIONAL { continue; }
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
         let target_function = luminance(light_contribution.radiance * diffuse_brdf * saturate(dot(light_contribution.wi, world_normal)));
@@ -167,16 +173,58 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         if rand_f(rng) < resampling_weight / weight_sum {
             reservoir_target_function = target_function;
             selected_tile_sample = tile_sample;
+            selected_light_position = resolved_light_sample.world_position;
+        }
+    }
+
+    var sun_selected = false;
+    var sun_sample = LightSample(0u, 0u);
+    // The sun, one sample of its own in every pixel, shadow-tested before
+    // it competes: indoors, out of sight behind the hull, it was the
+    // brightest candidate yet lit nothing, and won most pixels (a fixed
+    // share of the tiles' samples was the sun's); outdoors, it reaches
+    // every pixel instead of half.
+    if arrayLength(&directional_lights) > 0u {
+        let light_id = directional_lights[0].light_source_index;
+        let candidate = LightSample(light_id << 16u, rand_u(rng));
+        let resolved = resolve_light_sample(candidate, light_sources[light_id]);
+        let contribution = calculate_resolved_light_contribution(resolved, world_position, world_normal);
+        let target_function = luminance(contribution.radiance * diffuse_brdf * saturate(dot(contribution.wi, world_normal)));
+        if target_function > 0.0 {
+            let transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), resolved.world_position);
+            if max(transmission.r, max(transmission.g, transmission.b)) > 0.0 {
+                let resampling_weight = target_function * contribution.inverse_pdf;
+                weight_sum += resampling_weight;
+                if rand_f(rng) < resampling_weight / weight_sum {
+                    reservoir_target_function = target_function;
+                    sun_selected = true;
+                    sun_sample = candidate;
+                    selected_light_position = resolved.world_position;
+                }
+            }
         }
     }
 
     if reservoir_target_function != 0.0 {
         reservoir.sample = light_tile_samples[selected_tile_sample];
+        if sun_selected {
+            reservoir.sample = sun_sample;
+        }
     }
 
     if reservoir_valid(reservoir) {
         let inverse_target_function = select(0.0, 1.0 / reservoir_target_function, reservoir_target_function > 0.0);
         reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
+        // A light out of sight lights nothing: it is dropped before reuse
+        // spreads it (over 30 pixels and 8 frames, the patches of a corridor
+        // lit or dark as one hidden light came and went). The sun was tested
+        // above.
+        if !sun_selected {
+            let transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), selected_light_position);
+            if max(transmission.r, max(transmission.g, transmission.b)) <= 0.0 {
+                reservoir.unbiased_contribution_weight = 0.0;
+            }
+        }
     }
 
     reservoir.confidence_weight = 1.0;

@@ -1096,7 +1096,9 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         let directional_lights = directional_lights.get_mut();
         let directional_light_id = directional_lights.len() as u32;
 
-        directional_lights.push(GpuDirectionalLight::new(directional_light));
+        let mut gpu_directional_light = GpuDirectionalLight::new(directional_light);
+        gpu_directional_light.light_source_index = light_sources.get().len() as u32;
+        directional_lights.push(gpu_directional_light);
         // A nominal 1 m² collection area puts lux in the same power scale
         // as local lumens. This changes variance, never emitted radiance.
         light_fluxes.push(
@@ -1770,6 +1772,8 @@ struct GpuDirectionalLight {
     cos_theta_max: f32,
     luminance: Vec3,
     inverse_pdf: f32,
+    /// Its index among the light sources (ReSTIR DI samples it by itself).
+    light_source_index: u32,
 }
 
 impl GpuDirectionalLight {
@@ -1784,6 +1788,7 @@ impl GpuDirectionalLight {
             cos_theta_max,
             luminance,
             inverse_pdf: solid_angle,
+            light_source_index: 0,
         }
     }
 }

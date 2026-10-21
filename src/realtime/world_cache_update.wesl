@@ -13,6 +13,12 @@ import bevy_solarik::realtime::presample_light_tiles::ResolvedLightSamplePacked;
 import bevy_solarik::realtime::presample_light_tiles::unpack_resolved_light_sample;
 import bevy_solarik::realtime::presample_light_tiles::light_tile_seed;
 import bevy_solarik::scene::sampling::calculate_resolved_light_contribution;
+import bevy_solarik::scene::sampling::resolve_light_sample;
+import bevy_solarik::scene::sampling::LightSample;
+import bevy_solarik::scene::sampling::LIGHT_SAMPLE_DIRECTIONAL;
+import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
+import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+import bevy_pbr::render::utils::rand_u;
 import bevy_solarik::scene::sampling::trace_light_transmission_with_support;
 import bevy_solarik::scene::sampling::trace_shadow_transmission_impl;
 import bevy_solarik::scene::raytracing_scene_bindings::trace_ray;
@@ -64,6 +70,19 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         new_radiance = vec4(new_radiance.rgb + sample.rgb, max(new_radiance.w, sample.w));
     }
     new_radiance = vec4(new_radiance.rgb / f32(WORLD_CACHE_DIRECT_LIGHT_SAMPLES_PER_UPDATE), new_radiance.w);
+    // The sun by itself, one shadow-tested sample an update (the tiles hold
+    // none, presample_light_tiles: indoors, behind the hull, the sun's
+    // fixed share of them took half the candidates and lit nothing)
+    if arrayLength(&directional_lights) > 0u {
+        let light_id = directional_lights[0].light_source_index;
+        let resolved = resolve_light_sample(LightSample(light_id << 16u, rand_u(&rng)), light_sources[light_id]);
+        let sun = calculate_resolved_light_contribution(resolved, geometry_data.world_position, geometry_data.world_normal);
+        let contribution = sun.radiance * saturate(dot(sun.wi, geometry_data.world_normal)) * sun.inverse_pdf;
+        if any(contribution > vec3(0.0)) {
+            let shadow = trace_light_transmission_with_support(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), resolved.world_position);
+            new_radiance = vec4(new_radiance.rgb + contribution * shadow.energy.rgb, new_radiance.w);
+        }
+    }
 
     world_cache_active_cells_new_radiance[active_cell_id.x] = new_radiance;
 }
@@ -171,6 +190,8 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
     for (var i = 0u; i < WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT; i++) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+        // (the sun has a sample of its own, sample_di)
+        if resolved_light_sample.world_position.w == LIGHT_SAMPLE_DIRECTIONAL { continue; }
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
 
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));

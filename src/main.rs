@@ -1103,7 +1103,9 @@ fn dolly_camera(
 ) {
     let Some(reach) = args.dolly else { return };
     let start = *start.get_or_insert(**camera);
-    if args.screenshot_every.is_some() && frames.0 >= args.screenshot_from {
+    // (HALO_RT_DOLLY_DURING: it sways on through the captures, taken at one
+    // phase of each sweep: the lighting in motion, compared at one place)
+    if args.screenshot_every.is_some() && frames.0 >= args.screenshot_from && std::env::var_os("HALO_RT_DOLLY_DURING").is_none() {
         camera.translation = start.translation;
         return;
     }

@@ -31,7 +31,12 @@ struct HaloCombiner {
     modes: vec4<u32>,
     // x: the fade's scale, y: 1 to show it in magenta (debugging)
     fade: vec4<f32>,
-    // the environment fog (halo_fog.wesl's first five)
+}
+
+// the environment fog (halo_fog.wesl's first five; crate::fog::fog_layers),
+// one buffer every material shares, so that the fog's changes (its distance
+// follows the camera on some levels) rewrite no material
+struct HaloFogLayers {
     atmospheric_color: vec4<f32>,
     atmospheric: vec4<f32>,
     plane: vec4<f32>,
@@ -52,6 +57,7 @@ struct HaloCombiner {
 @group(constants::MATERIAL_BIND_GROUP) @binding(10) var noise0_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(11) var noise1: texture_3d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(12) var noise1_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(13) var<storage, read> fog_layers: HaloFogLayers;
 
 fn word(words: array<vec4<u32>, 2>, index: u32) -> u32 {
     return words[index / 4u][index % 4u];
@@ -87,15 +93,15 @@ fn fog_texel(u: f32) -> f32 {
 // the environment fog's coverage at a view depth and a point (halo_fog.wesl,
 // without the water's case)
 fn fog_coverage(view_depth: f32, position: vec3<f32>) -> f32 {
-    let height = dot(combiner.plane.xyz, position) - combiner.plane.w;
-    let range = max(combiner.atmospheric.y - combiner.atmospheric.x, 1e-4);
-    let atmospheric = combiner.atmospheric_color.a * fog_texel((view_depth - combiner.atmospheric.x) / range);
-    let distance = smoothstep(0.0, 1.0, fog_texel(view_depth / max(combiner.planar.x, 1e-4)));
-    let under = smoothstep(0.0, 1.0, fog_texel(-height / max(combiner.planar.y, 1e-4)));
+    let height = dot(fog_layers.plane.xyz, position) - fog_layers.plane.w;
+    let range = max(fog_layers.atmospheric.y - fog_layers.atmospheric.x, 1e-4);
+    let atmospheric = fog_layers.atmospheric_color.a * fog_texel((view_depth - fog_layers.atmospheric.x) / range);
+    let distance = smoothstep(0.0, 1.0, fog_texel(view_depth / max(fog_layers.planar.x, 1e-4)));
+    let under = smoothstep(0.0, 1.0, fog_texel(-height / max(fog_layers.planar.y, 1e-4)));
     // (how far the camera is under the plane, from the view: the material's
     // fog leaves it out)
-    let eye = saturate(-(dot(combiner.plane.xyz, view.world_position) - combiner.plane.w) / max(combiner.planar.y, 1e-4));
-    let planar = combiner.planar_color.a * mix(distance * under, distance, eye);
+    let eye = saturate(-(dot(fog_layers.plane.xyz, view.world_position) - fog_layers.plane.w) / max(fog_layers.planar.y, 1e-4));
+    let planar = fog_layers.planar_color.a * mix(distance * under, distance, eye);
     return 1.0 - (1.0 - atmospheric) * (1.0 - planar);
 }
 
@@ -104,7 +110,7 @@ fn fog_coverage(view_depth: f32, position: vec3<f32>) -> f32 {
 // halo_sprite.wesl): the game draws its transparent surfaces after its fog,
 // each faded by the fog at its own depth (the combiners' last stage).
 fn surface_fog(in: VertexOutput) -> vec2<f32> {
-    if combiner.atmospheric_color.a <= 0.0 && combiner.planar_color.a <= 0.0 {
+    if fog_layers.atmospheric_color.a <= 0.0 && fog_layers.planar_color.a <= 0.0 {
         return vec2(1.0);
     }
     let forward = -normalize(view.world_from_view[2].xyz);

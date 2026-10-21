@@ -313,6 +313,10 @@ struct SolidSurface {
     /// which the camera doesn't see (the game's overlay draws whatever it
     /// shows).
     unseen: bool,
+    /// What the camera sees of such an emitter, now that the viewer draws
+    /// the transparent surfaces (b30's control room hologram): its
+    /// transparent material, drawn over the unseen emitter.
+    seen_as: Option<Handle<HaloTransparentMaterial>>,
 }
 
 /// A shader's material and the texture coordinate scale it applies.
@@ -964,6 +968,22 @@ impl LevelBuilder {
             }
             traced = Some(entity.id());
         }
+        // (an unseen emitter's transparent surface, which the camera sees)
+        if raster_use
+            && !self.skip_transparent
+            && let Some(material) = surface.seen_as.as_ref().filter(|_| surface.unseen)
+        {
+            let mut drawn = commands.spawn((
+                Name::new(name.clone()),
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(material.clone()),
+                bevy::light::NotShadowCaster,
+                Transform::default(),
+                ChildOf(parent),
+            ));
+            skinned(&mut drawn, skin.clone());
+            self.stats.transparent_meshes += 1;
+        }
         if raster_use && !surface.unseen {
             match (&surface.raster, traced) {
                 // the same entity, when the camera sees what the rays do and
@@ -1043,6 +1063,17 @@ impl LevelBuilder {
                 let permutation = model.shader_permutations.get(part.shader_index.max(0) as usize).copied().unwrap_or(0);
                 let shader_use = shader_ref.datum.map(|datum| ShaderUse { datum, permutation });
                 let shader = self.surface(shader_ref, permutation, assets);
+                if let Some(text) = std::env::var_os("HALO_RT_OBJECT_LOG")
+                    && model.name.contains(text.to_string_lossy().as_ref())
+                {
+                    let kind = match &shader.surface {
+                        None => "none",
+                        Some(Surface::Solid(_)) => "solid",
+                        Some(Surface::Transparent(_)) => "transparent",
+                        Some(Surface::Blended(_)) => "blended",
+                    };
+                    info!("model {} part: shader {:?} {kind}, {} vertices", model.name, shader_ref.datum, part.vertices.len());
+                }
                 let Some(surface) = shader.surface else {
                     self.stats.skipped_transparent += 1;
                     continue;
@@ -1594,7 +1625,7 @@ impl LevelBuilder {
                 perceptual_roughness: 0.9,
                 ..default()
             });
-            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, unseen: false }));
+            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, unseen: false, seen_as: None }));
         };
         let base_color_texture = info
             .base_map
@@ -1733,7 +1764,8 @@ impl LevelBuilder {
             material.base_color = material.base_color.with_alpha(0.0);
             material.alpha_mode = AlphaMode::Mask(0.5);
         }
-        Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance, unseen }))
+        let seen_as = if unseen { self.transparent_material(info, 0.0, false, assets) } else { None };
+        Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance, unseen, seen_as }))
     }
 
     /// A `shader_model`'s camera material with its detail map (see
@@ -1890,6 +1922,7 @@ impl LevelBuilder {
             plasma: None,
             noise0: crate::material::neutral_volume(),
             noise1: crate::material::neutral_volume(),
+            fog: crate::fog::fog_layers(),
         };
         // a numeric counter's digit: its first map's every frame
         if transparent.flags & shader::TransparentInfo::NUMERIC != 0
@@ -1941,6 +1974,7 @@ impl LevelBuilder {
             map3: assets.neutral_detail.clone(),
             noise0,
             noise1,
+            fog: crate::fog::fog_layers(),
             alpha_mode: AlphaMode::Blend,
             depth_bias: 0.0,
             blend: 10,
@@ -1992,6 +2026,7 @@ impl LevelBuilder {
             plasma: None,
             noise0: crate::material::neutral_volume(),
             noise1: crate::material::neutral_volume(),
+            fog: crate::fog::fog_layers(),
         };
         let periodic = periodic_function;
         if let Some(params) = material.animate(None, None, 0.0, &periodic) {

@@ -630,6 +630,33 @@ fn sync_objects(
             if *v != wanted {
                 *v = wanted;
             }
+            // (`HALO_RT_OBJECT_LOG=<text>`: why the objects whose model's
+            // name holds it are shown or not, every few hundred game frames)
+            if let Some(text) = std::env::var_os("HALO_RT_OBJECT_LOG")
+                && tracked.model.name.contains(text.to_string_lossy().as_ref())
+                && snapshot.frame_index % 300 == 0
+            {
+                let node: Vec<_> = snapshot
+                    .nodes
+                    .iter()
+                    .skip(object.first_node as usize)
+                    .take(3)
+                    .map(|n| (n.position, n.scale, n.forward, n.left, n.up))
+                    .collect();
+                info!(
+                    "object {} {:#x}: flags {:#x}, cluster {}, outside {}, unseen cluster {}, {:?}, first node {node:?} of {}, functions {:?}, colours {:?}",
+                    tracked.model.name,
+                    object.object_index,
+                    object.flags,
+                    object.location_cluster,
+                    outside_of_map(object),
+                    unseen_cluster(object),
+                    wanted,
+                    object.node_count,
+                    object.function_values,
+                    object.change_colors
+                );
+            }
         }
         // the first-person player's body and what it holds: the camera's
         // view leaves it out, but it shadows the world (and shows in

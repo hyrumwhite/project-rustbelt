@@ -46,6 +46,9 @@ impl Plugin for HaloMaterialsPlugin {
         );
         let volume = app.world_mut().resource_mut::<Assets<Image>>().add(volume);
         let _ = NEUTRAL_VOLUME.set(volume);
+        let fog = bevy::render::storage::ShaderBuffer::new(vec![Vec4::ZERO; 5], RenderAssetUsages::default());
+        let fog = app.world_mut().resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>().add(fog);
+        let _ = crate::fog::FOG_LAYERS.set(fog);
     }
 }
 
@@ -210,9 +213,6 @@ pub struct HaloCombinerParams {
     /// x: the fade's scale (its source and the camouflage), y: 1 to show
     /// the surface in magenta (debugging)
     pub fade: Vec4,
-    /// The game's environment fog (`crate::fog::HaloFog::layers`): the
-    /// surface is fogged by its own depth, as the game's are.
-    pub fog: [Vec4; 5],
 }
 
 impl HaloCombinerParams {
@@ -229,7 +229,6 @@ impl HaloCombinerParams {
             program: UVec4::new(program.stage_count as u32, program.flags, program.final_abcd, program.final_efg),
             modes: UVec4::ZERO,
             fade: Vec4::new(1.0, 0.0, 0.0, 0.0),
-            fog: [Vec4::ZERO; 5],
         }
     }
 }
@@ -261,6 +260,10 @@ pub struct HaloTransparentMaterial {
     #[texture(11, dimension = "3d")]
     #[sampler(12)]
     pub noise1: Handle<Image>,
+    /// The game's environment fog ([`crate::fog::fog_layers`], shared): the
+    /// surface is fogged by its own depth, as the game's are.
+    #[storage(13, read_only)]
+    pub fog: Handle<bevy::render::storage::ShaderBuffer>,
     pub alpha_mode: AlphaMode,
     /// Draws later (over) other transparent surfaces at the same distance.
     pub depth_bias: f32,

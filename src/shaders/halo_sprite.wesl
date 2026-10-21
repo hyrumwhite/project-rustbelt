@@ -38,7 +38,12 @@ struct HaloSprite {
     mode: vec4<f32>,
     // x: a zsprite's radius (metres)
     zsprite: vec4<f32>,
-    // the environment fog (halo_fog.wesl's first five)
+}
+
+// the environment fog (halo_fog.wesl's first five; crate::fog::fog_layers),
+// one buffer every material shares, so that the fog's changes (its distance
+// follows the camera on some levels) rewrite no material
+struct HaloFogLayers {
     atmospheric_color: vec4<f32>,
     atmospheric: vec4<f32>,
     plane: vec4<f32>,
@@ -51,6 +56,7 @@ struct HaloSprite {
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var map_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(3) var zmap: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(4) var zmap_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(5) var<storage, read> fog_layers: HaloFogLayers;
 
 struct ZspriteOutput {
     @location(0) colour: vec4<f32>,
@@ -101,22 +107,22 @@ fn fog_texel(u: f32) -> f32 {
 // the environment fog's coverage at a view depth and a point (halo_fog.wesl,
 // without the water's case)
 fn fog_coverage(view_depth: f32, position: vec3<f32>) -> f32 {
-    let height = dot(sprite.plane.xyz, position) - sprite.plane.w;
-    let range = max(sprite.atmospheric.y - sprite.atmospheric.x, 1e-4);
-    let atmospheric = sprite.atmospheric_color.a * fog_texel((view_depth - sprite.atmospheric.x) / range);
-    let distance = smoothstep(0.0, 1.0, fog_texel(view_depth / max(sprite.planar.x, 1e-4)));
-    let under = smoothstep(0.0, 1.0, fog_texel(-height / max(sprite.planar.y, 1e-4)));
+    let height = dot(fog_layers.plane.xyz, position) - fog_layers.plane.w;
+    let range = max(fog_layers.atmospheric.y - fog_layers.atmospheric.x, 1e-4);
+    let atmospheric = fog_layers.atmospheric_color.a * fog_texel((view_depth - fog_layers.atmospheric.x) / range);
+    let distance = smoothstep(0.0, 1.0, fog_texel(view_depth / max(fog_layers.planar.x, 1e-4)));
+    let under = smoothstep(0.0, 1.0, fog_texel(-height / max(fog_layers.planar.y, 1e-4)));
     // (how far the camera is under the plane, from the view: the material's
     // fog leaves it out)
-    let eye = saturate(-(dot(sprite.plane.xyz, view.world_position) - sprite.plane.w) / max(sprite.planar.y, 1e-4));
-    let planar = sprite.planar_color.a * mix(distance * under, distance, eye);
+    let eye = saturate(-(dot(fog_layers.plane.xyz, view.world_position) - fog_layers.plane.w) / max(fog_layers.planar.y, 1e-4));
+    let planar = fog_layers.planar_color.a * mix(distance * under, distance, eye);
     return 1.0 - (1.0 - atmospheric) * (1.0 - planar);
 }
 
 // the sprite's own fog's transmittance, and how much to raise its colour by
 // for the fog pass over what lies behind it
 fn sprite_fog(in: VertexOutput) -> vec2<f32> {
-    if sprite.atmospheric_color.a <= 0.0 && sprite.planar_color.a <= 0.0 {
+    if fog_layers.atmospheric_color.a <= 0.0 && fog_layers.planar_color.a <= 0.0 {
         return vec2(1.0);
     }
     let forward = -normalize(view.world_from_view[2].xyz);

@@ -36,6 +36,7 @@ use bevy::{
     render::{
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         render_asset::RenderAssets,
+        storage::ShaderBuffer,
         texture::{FallbackImage, FallbackImageZero, GpuImage, TextureCache},
         render_resource::{
             binding_types::{sampler, texture_2d, texture_depth_2d, uniform_buffer},
@@ -185,19 +186,32 @@ impl HaloFog {
 /// sprites, to the fog pass.
 fn fog_transparent_surfaces(
     camera: Query<&HaloFog, With<Camera3d>>,
-    mut materials: ResMut<Assets<crate::material::HaloTransparentMaterial>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
+    mut current: Local<[Vec4; 5]>,
 ) {
     let fog = camera
         .iter()
         .next()
         .filter(|_| std::env::var_os("HALO_RT_NO_SPRITE_FOG").is_none())
         .map_or([Vec4::ZERO; 5], HaloFog::layers);
-    let stale: Vec<_> = materials.iter().filter(|(_, m)| m.params.fog != fog).map(|(id, _)| id).collect();
-    for id in stale {
-        if let Some(mut material) = materials.get_mut(id) {
-            material.params.fog = fog;
-        }
+    if fog != *current
+        && let Some(mut buffer) = buffers.get_mut(&fog_layers())
+    {
+        *current = fog;
+        // (the same size: the GPU's buffer is rewritten in place)
+        *buffer = ShaderBuffer::new(fog.to_vec(), bevy::asset::RenderAssetUsages::default());
     }
+}
+
+pub(crate) static FOG_LAYERS: std::sync::OnceLock<Handle<ShaderBuffer>> = std::sync::OnceLock::new();
+
+/// The buffer holding the game's fog ([`HaloFog::layers`]) that every
+/// transparent surface's and sprite's material reads: one write when the fog
+/// changes (its distance follows the camera on some levels), rather than a
+/// rewrite of every material. (Made by the material plugin: the level
+/// viewer has no fog, and reads it as none.)
+pub fn fog_layers() -> Handle<ShaderBuffer> {
+    FOG_LAYERS.get().cloned().unwrap_or_default()
 }
 
 /// The latest frame's fog onto the camera.

@@ -37,6 +37,7 @@ fn main() -> ExitCode {
         "shaders" => shaders(&cache),
         "transparent" => transparent_survey(&cache),
         "shader" => shader(&cache, &args[2..]),
+        "model" => model_dump(&cache, &args[2..]),
         "sky" => skies(&cache),
         "bitmap" => export_bitmap(&cache, &args[2..]),
         "bitmaps" => all_bitmaps(&cache),
@@ -59,6 +60,58 @@ type CliResult = Result<(), Box<dyn std::error::Error>>;
 
 /// One shader tag (by name, any shader group): what the renderer reads from
 /// it, and a transparent shader's combiner program.
+/// One model tag (by name): its nodes, regions' permutations, and each
+/// geometry's parts (shader, vertex and triangle counts, bounds).
+fn model_dump(cache: &CacheFile, args: &[String]) -> CliResult {
+    let name = args.first().ok_or("usage: halo_map model <map> <tag name>")?;
+    let tag = cache
+        .tags
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(name) && t.group == groups::MODEL)
+        .ok_or_else(|| format!("no model {name}"))?;
+    let model = model::Model::load(cache, tag.datum)?;
+    println!("detail cutoffs {:?}, finest played {}", model.detail_cutoff_pixels, model.finest_played_detail());
+    for (index, node) in model.nodes.iter().enumerate() {
+        println!(
+            "node {index} {} parent {:?} at {:?} rotation {:?} inverse scale {}",
+            node.name, node.parent, node.default_translation, node.default_rotation, node.default_inverse.scale
+        );
+    }
+    for region in &model.regions {
+        for permutation in &region.permutations {
+            println!("region {} permutation {} geometries {:?}", region.name, permutation.name, permutation.geometry_indices);
+        }
+    }
+    for geometry in 0..model.geometry_count {
+        for part in model.geometry(geometry)? {
+            let shader = model
+                .shaders
+                .get(part.shader_index as usize)
+                .and_then(|s| s.datum)
+                .and_then(|d| cache.tag(d).ok())
+                .map_or(String::new(), |t| t.name.clone());
+            let (mut low, mut high) = ([f32::MAX; 3], [f32::MIN; 3]);
+            let mut nodes = std::collections::BTreeSet::new();
+            let weights: std::collections::BTreeSet<String> =
+                part.vertices.iter().take(400).map(|v| format!("{:?}/{:.2?}", v.nodes, v.node_weights)).collect();
+            println!("  weights {:?}", weights.iter().take(6).collect::<Vec<_>>());
+            for v in &part.vertices {
+                for c in 0..3 {
+                    low[c] = low[c].min(v.position[c]);
+                    high[c] = high[c].max(v.position[c]);
+                }
+                nodes.insert(v.nodes[0]);
+            }
+            println!(
+                "geometry {geometry}: {shader}: {} vertices, {} triangles, nodes {nodes:?}, from {low:.2?} to {high:.2?}",
+                part.vertices.len(),
+                part.indices.len() / 3
+            );
+        }
+    }
+    Ok(())
+}
+
 fn shader(cache: &CacheFile, args: &[String]) -> CliResult {
     let name = args.first().ok_or("usage: halo_map shader <map> <tag name>")?;
     let tag = cache

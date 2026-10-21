@@ -51,9 +51,6 @@ struct SpriteParams {
     mode: Vec4,
     /// a zsprite's radius (metres)
     zsprite: Vec4,
-    /// the game's environment fog ([`crate::fog::HaloFog::layers`]): the
-    /// sprite fades by its own, as the game's effects do
-    fog: [Vec4; 5],
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
@@ -69,6 +66,10 @@ pub struct SpriteMaterial {
     #[texture(3)]
     #[sampler(4)]
     zmap: Option<Handle<Image>>,
+    /// the game's environment fog ([`crate::fog::fog_layers`], shared): the
+    /// sprite fades by its own, as the game's effects do
+    #[storage(5, read_only)]
+    fog: Handle<bevy::render::storage::ShaderBuffer>,
     blend: u16,
 }
 
@@ -165,8 +166,6 @@ struct Sprites {
     materials: HashMap<MaterialKey, Option<Handle<SpriteMaterial>>>,
     last_frame_index: u32,
     radiance_scale: f32,
-    /// The fog the materials have.
-    fog: [Vec4; 5],
     /// How many batches the game shared last (for the log).
     shared: usize,
 }
@@ -214,23 +213,7 @@ fn follow_sprites(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SpriteMaterial>>,
-    camera_fog: Query<&crate::fog::HaloFog, With<Camera3d>>,
 ) {
-    // the camera's fog onto every material (`HALO_RT_NO_SPRITE_FOG`: none, the
-    // fog pass alone fogging them by what lies behind)
-    let fog = camera_fog
-        .iter()
-        .next()
-        .filter(|_| std::env::var_os("HALO_RT_NO_SPRITE_FOG").is_none())
-        .map_or([Vec4::ZERO; 5], |fog| fog.layers());
-    if fog != sprites.fog {
-        sprites.fog = fog;
-        for material in sprites.materials.values().flatten() {
-            if let Some(mut material) = materials.get_mut(material) {
-                material.params.fog = fog;
-            }
-        }
-    }
     let Some(snapshot) = link.latest.as_ref() else { return };
     if snapshot.frame_index == sprites.last_frame_index {
         return;
@@ -325,10 +308,10 @@ fn follow_sprites(
                         params: SpriteParams {
                             mode: Vec4::new(blend_function as f32, radiance_scale, if key.nonlinear_tint { 1.0 } else { 0.0 }, debug),
                             zsprite: Vec4::new(radius, 0.0, 0.0, 0.0),
-                            fog: sprites.fog,
                         },
                         map,
                         zmap,
+                        fog: crate::fog::fog_layers(),
                         blend: blend_function,
                     })
                 });

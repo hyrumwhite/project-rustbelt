@@ -1443,10 +1443,7 @@ static GLint target_pixel(float coordinate, int axis)
 nothing to draw into */
 static BOOL overlay_target(void);
 static GLenum blend_equation(DWORD operation);
-static GLuint overlay_multiply_target(unsigned long width, unsigned long height);
 static BOOL overlay_multiply_draw(void);
-/* this draw goes to the overlay's multiply (overlay_multiply_draw), bound */
-static BOOL overlay_multiply_bound;
 
 static BOOL bind_targets(BOOL *has_depth)
 {
@@ -1492,16 +1489,9 @@ static BOOL bind_targets(BOOL *has_depth)
 	{
 		GLuint color_texture = color ? color->target.texture : 0;
 
-		/* (the overlay's multiplying blends: to its multiply, over the same
-		depth buffer) */
-		overlay_multiply_bound = color && overlay_multiply_draw();
-		if (overlay_multiply_bound)
-			color_texture = overlay_multiply_target(color->target.gl_width, color->target.gl_height);
 		state_framebuffer(framebuffer_get(color_texture, depth ? depth->target.texture : 0));
 		target_samples = 1;
 	}
-	if (samples)
-		overlay_multiply_bound = FALSE;
 	*has_depth = depth != NULL;
 	return TRUE;
 }
@@ -3184,7 +3174,6 @@ premultiplied. Present shares it. */
 unsigned char bevy_bridge_overlay_enabled(void);
 unsigned char *bevy_bridge_overlay_begin(unsigned long width, unsigned long height);
 void bevy_bridge_overlay_commit(void);
-void bevy_bridge_overlay_multiply(unsigned char multiply);
 #endif
 
 /* -1 until first asked */
@@ -3212,39 +3201,11 @@ static BOOL overlay_target(void)
 	return overlay_enabled() && device.render_target && device.render_target->Data == device.back_buffer.Data;
 }
 
-/* The overlay's multiply: the blends that multiply what is under them
-(decals darkening, or at twice brightening, the world) have nothing under
-them in the overlay, which starts clear. They go to a picture of their own
-instead, cleared to 0.5 (half the factor: nothing), on which the game's own
-blends compute half their factor (s·src, and the doubled 2·s·src); the
-renderer multiplies its world by twice it (bevy_bridge_protocol.h). */
-static GLuint overlay_multiply_texture;
-static unsigned long overlay_multiply_size[2];
-/* drawn into since the overlay was last cleared */
-static BOOL overlay_multiply_used;
-static void overlay_multiply_clear(void);
-
-static GLuint overlay_multiply_target(
-	unsigned long width,
-	unsigned long height)
-{
-	if (!overlay_multiply_texture || overlay_multiply_size[0] != width || overlay_multiply_size[1] != height)
-	{
-		if (!overlay_multiply_texture)
-			glGenTextures(1, &overlay_multiply_texture);
-		glBindTexture(GL_TEXTURE_2D, overlay_multiply_texture);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)width, (GLsizei)height, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
-		overlay_multiply_size[0] = width;
-		overlay_multiply_size[1] = height;
-		xgpu_gl_state_invalidate();
-		/* (made: nothing multiplied yet) */
-		overlay_multiply_used = TRUE;
-		overlay_multiply_clear();
-	}
-	overlay_multiply_used = TRUE;
-	return overlay_multiply_texture;
-}
+/* The blends that multiply what is under them (decals darkening, or at twice
+brightening, the world) have nothing under them in the overlay, which starts
+clear: the renderer draws all of those itself, its decals and transparent
+surfaces (protocol 44 dropped the multiply picture the game once shared), so
+any that would reach the overlay are left out. */
 
 /* whether this draw's blend multiplies what is under it (the world's
 picture), drawing over the overlay */
@@ -3262,21 +3223,6 @@ static BOOL overlay_multiply_draw(void)
 	return (source == GL_DST_COLOR && destination == GL_ZERO) ||
 		(source == GL_ZERO && destination == GL_SRC_COLOR) ||
 		(source == GL_DST_COLOR && destination == GL_SRC_COLOR);
-}
-
-/* the overlay cleared: its multiply too, to nothing */
-static void overlay_multiply_clear(
-	void)
-{
-	if (!overlay_multiply_texture || !overlay_multiply_used)
-		return;
-	state_framebuffer(framebuffer_get(overlay_multiply_texture, 0));
-	glDisable(GL_SCISSOR_TEST);
-	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-	glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT);
-	xgpu_gl_state_invalidate();
-	overlay_multiply_used = FALSE;
 }
 
 /* render.c: around the opaque world's passes */
@@ -3413,22 +3359,16 @@ static void apply_raster_state(BOOL has_depth)
 		picture) are left out */
 		BOOL world = overlay_world && !(overlay_first_person && rs[D3DRS_ALPHABLENDENABLE]);
 
-		if (world || !(write & (D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE)))
+		if (world || !(write & (D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE)) ||
+			overlay_multiply_draw())
+		{
 			write = 0;
-		else if (overlay_multiply_bound)
-			write &= ~D3DCOLORWRITEENABLE_ALPHA;
+		}
 		else
 			write |= D3DCOLORWRITEENABLE_ALPHA;
 	}
 	state_enable(&gl_state.blend, GL_BLEND, rs[D3DRS_ALPHABLENDENABLE] != 0);
-	if (rs[D3DRS_ALPHABLENDENABLE] && overlay && overlay_multiply_bound)
-	{
-		/* (the multiply: the game's blend, on half the factor) */
-		glBlendFuncSeparate((GLenum)rs[D3DRS_SRCBLEND], (GLenum)rs[D3DRS_DESTBLEND], GL_ZERO, GL_ONE);
-		glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
-		gl_state.blend_source = gl_state.blend_destination = gl_state.blend_equation = (GLenum)~0U;
-	}
-	else if (rs[D3DRS_ALPHABLENDENABLE] && overlay)
+	if (rs[D3DRS_ALPHABLENDENABLE] && overlay)
 	{
 		GLenum equation = blend_equation(rs[D3DRS_BLENDOP]);
 		GLenum source = (GLenum)rs[D3DRS_SRCBLEND];
@@ -4836,12 +4776,6 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 		clears (the fog screen's) left out */
 		if (flags & (D3DCLEAR_TARGET_R | D3DCLEAR_TARGET_G | D3DCLEAR_TARGET_B))
 		{
-			/* (its multiply too, then the overlay's targets again) */
-			if (overlay_multiply_used)
-			{
-				overlay_multiply_clear();
-				bind_targets(&has_depth);
-			}
 			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 			glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
 			mask |= GL_COLOR_BUFFER_BIT;
@@ -5134,20 +5068,6 @@ static void overlay_share(struct render_target_entry *target)
 	/* (row 0 of the render target is the top of the picture, as the
 	overlay's is) */
 	glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-	/* (the multiply, when something multiplied this frame) */
-	if (overlay_multiply_used && overlay_multiply_size[0] == width && overlay_multiply_size[1] == height)
-	{
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(overlay_multiply_texture, 0));
-		glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, pixels + width * height * 4);
-		bevy_bridge_overlay_multiply(TRUE);
-		{
-			static BOOL logged;
-
-			if (!logged)
-				platform_log("bevy bridge: the overlay's multiplying blends shared");
-			logged = TRUE;
-		}
-	}
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
 	glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
 	glPixelStorei(GL_PACK_ALIGNMENT, alignment);

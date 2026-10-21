@@ -132,8 +132,8 @@ const LIGHT_DIMMING: [(&str, f32); 6] = [
     ("weapons\\plasma grenade\\explosion", 0.6),
     // (b30's control room light, reaching 3.5 around its hologram until the
     // terminal turns it off: it washed out the hologram, which the game
-    // draws brighter than the walls; play feedback: half)
-    ("levels\\b30\\devices\\interior tech objects\\holo control room display\\light", 0.5),
+    // draws brighter than the walls; play feedback: to 15%)
+    ("levels\\b30\\devices\\interior tech objects\\holo control room display\\light", 0.15),
 ];
 
 /// What a light's tag says of it here.

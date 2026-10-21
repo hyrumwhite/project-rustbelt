@@ -1017,7 +1017,12 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         let transform = transforms.get()[index];
         slots.activate(slot);
 
-        if material.emissive != Vec3::ZERO {
+        // (a masked body's emission, a first-person player's glowing weapon,
+        // is no light: at the camera, among the hands holding it, its shadow
+        // rays came and went, and in a10's Jefferies tubes, the walls an arm's
+        // length away, they boiled, 0.03 to 0.23; rays that meet it still
+        // see it glow)
+        if material.emissive != Vec3::ZERO && input.mask == 0xFF {
             // Texture-average emission is not available on the CPU. The
             // material factor is a power estimate; PDFs remain exact.
             light_fluxes.push(

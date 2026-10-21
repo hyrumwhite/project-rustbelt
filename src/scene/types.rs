@@ -26,7 +26,8 @@ pub struct RaytracingMesh3d(pub Handle<Mesh>);
 /// The ray scene instance mask of a [`RaytracingMesh3d`] (`0xFF` without
 /// one). An entity with a mask stays in the ray scene while hidden: a body
 /// the camera doesn't show that still shades the world (a first-person
-/// player's).
+/// player's). Its emission is no light source (rays that meet it still see
+/// it glow).
 ///
 /// Rays leaving a point near [`super::SolarikNearRays`]'s centre see only
 /// instances with [`RaytracingMask::NEAR`] set: [`RaytracingMask::AWAY`]

@@ -877,7 +877,8 @@ pub fn init_solari_lighting_pipelines(
         if let Ok(defs) = std::env::var("SOLARIK_SHADER_DEFS") {
             shader_defs.extend(defs.split(',').filter(|d| !d.is_empty()).map(|d| d.trim().to_string().into()));
         }
-        if std::env::var("SOLARIK_CELL_LIGHTS").is_ok_and(|v| v == "1") {
+        // (on by default; SOLARIK_CELL_LIGHTS=0 leaves them out)
+        if !std::env::var("SOLARIK_CELL_LIGHTS").is_ok_and(|v| v == "0") {
             shader_defs.push("DI_CELL_LIGHTS".into());
         }
         if std::env::var("SOLARIK_ADAPTIVE_CACHE_BUDGET").is_ok_and(|v| v == "1") {

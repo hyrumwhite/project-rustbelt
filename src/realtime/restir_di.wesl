@@ -64,7 +64,7 @@ enable wgpu_ray_query;
 const INITIAL_SAMPLES = 32u;
 // Candidates from the lights in sight of the pixel's world cache cell, beside
 // the tiles' (which draw from the whole level by power), with
-// SOLARIK_CELL_LIGHTS=1: a narrow corridor's recessed fixtures, among hundreds
+// on by default (SOLARIK_CELL_LIGHTS=0 leaves them out): a narrow corridor's recessed fixtures, among hundreds
 // of the level's lights, got a sample now and then. In a10's corridors, in
 // motion, 8% less boiling for 0.6 ms (the tiles alone, since the sun has its
 // own sample, mostly find them).

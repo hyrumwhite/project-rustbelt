@@ -36,11 +36,6 @@
 // the far density at the near distance, up to 1 at the far, along L; 1 for
 // the sky), when its densities differ; else blended over all of it.
 //
-// Before both, the game's multiplying blends (decals darkening or
-// brightening what's under them), which it draws before its fog: the bottom
-// half of the overlay's picture holds half their factor, display-encoded
-// (0.5: nothing), as for the overlay's multiply node (game_multiply.wesl).
-//
 // After both, the game's lens flares, added up (src/lens_flares.rs,
 // display-encoded light): added, as the game adds them over its picture.
 
@@ -57,8 +52,7 @@ struct HaloFog {
     plane: vec4<f32>,
     // rgb, maximum density
     planar_color: vec4<f32>,
-    // maximum distance and depth (metres), the camera's density, 1 with the
-    // overlay's multiply
+    // maximum distance and depth (metres), the camera's density
     planar: vec4<f32>,
     // the fog screen: rgb, and its mode (0 none, 1 added by depth, 2 blended)
     screen_color: vec4<f32>,
@@ -82,11 +76,10 @@ struct HaloFog {
 @group(0) @binding(7) var layer_2: texture_2d<f32>;
 @group(0) @binding(8) var layer_3: texture_2d<f32>;
 @group(0) @binding(9) var layer_sampler: sampler;
-@group(0) @binding(10) var overlay: texture_2d<f32>;
-@group(0) @binding(11) var flares: texture_2d<f32>;
+@group(0) @binding(10) var flares: texture_2d<f32>;
 // the main pass's depth: nearer than the prepass's where the first-person
 // weapon's panes (the needler's needles) are, which the prepass leaves out
-@group(0) @binding(12) var scene_depth: texture_depth_2d;
+@group(0) @binding(11) var scene_depth: texture_depth_2d;
 
 // metres: the level's panes' masks' depth (src/material.rs,
 // GLASS_SKY_MASK_DISTANCE), which is none
@@ -142,15 +135,10 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let screen_coverage = 1.0 - (1.0 - d0) * (1.0 - d1) * (1.0 - d2) * (1.0 - d3);
 
     // (sampled before anything returns, as the layers)
-    let half_factor = srgb_encode(textureSample(overlay, source_sampler, vec2(in.uv.x, 0.5 + in.uv.y * 0.5)).rgb);
     let flare = textureSample(flares, source_sampler, in.uv).rgb;
 
     var encoded = srgb_encode(saturate(colour.rgb));
     var changed = false;
-    if fog.planar.w > 0.5 && any(abs(half_factor - 0.5) > vec3(0.5 / 255.0)) {
-        encoded = saturate(encoded * 2.0 * half_factor);
-        changed = true;
-    }
     var view_depth = 0.0;
     if z > 0.0 {
         let p = view.world_from_clip * vec4(ndc, z, 1.0);

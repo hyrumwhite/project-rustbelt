@@ -11,10 +11,6 @@
 //! layers on each frame without drawing them (under the overlay it never
 //! drew them at all), and this draws them, with their bitmap's frames.
 //!
-//! And, first, the game's multiplying blends (the overlay's multiply,
-//! darkening decals): the game draws them before its fog, so the fog over
-//! them is not darkened with them.
-//!
 //! And last, the game's lens flares (`src/lens_flares.rs`), added up first
 //! in a texture of their own, then added in the display's encoding.
 //!
@@ -64,7 +60,7 @@ pub struct ViewerWater;
 impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/halo_fog.wesl");
-        app.insert_resource(crate::overlay::MultiplyBeforeFog).add_plugins((ExtractComponentPlugin::<HaloFog>::default(), ExtractComponentPlugin::<FogScreenMaps>::default()))
+        app.add_plugins((ExtractComponentPlugin::<HaloFog>::default(), ExtractComponentPlugin::<FogScreenMaps>::default()))
             .add_systems(Update, (follow_fog, fog_transparent_surfaces));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
         render_app
@@ -88,8 +84,7 @@ pub struct HaloFog {
     plane: Vec4,
     /// rgb, maximum density
     planar_color: Vec4,
-    /// maximum distance and depth, the camera's density, 1 with the
-    /// overlay's multiply (set in the render world)
+    /// maximum distance and depth, the camera's density
     planar: Vec4,
     /// the fog screen: rgb, mode (0 none, 1 added by depth, 2 blended)
     screen_color: Vec4,
@@ -316,7 +311,6 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
-                texture_2d(TextureSampleType::Float { filterable: true }),
                 texture_depth_2d(),
             ),
         ),
@@ -349,7 +343,6 @@ fn draw_fog(
     gpu_images: Res<RenderAssets<GpuImage>>,
     fallback: Res<FallbackImage>,
     fallback_zero: Res<FallbackImageZero>,
-    overlay: Option<Res<crate::overlay::OverlayPicture>>,
     (flares, flare_pipeline): (Option<Res<crate::lens_flares::LensFlares>>, Option<Res<crate::lens_flares::LensFlarePipeline>>),
     mut texture_cache: ResMut<TextureCache>,
     fog_pipeline: Res<FogPipeline>,
@@ -389,10 +382,7 @@ fn draw_fog(
         })
     });
     let Some(pipeline) = cache.get_render_pipeline(id) else { return };
-    // the overlay's picture over its multiply, once there is one
-    let multiply = overlay.as_ref().and_then(|overlay| gpu_images.get(&overlay.image));
-    let mut fog = *fog;
-    fog.planar.w = if multiply.is_some() { 1.0 } else { 0.0 };
+    let fog = *fog;
 
     let mut uniform = UniformBuffer::new(Vec::new());
     if uniform.write(&fog).is_err() {
@@ -433,7 +423,6 @@ fn draw_fog(
             layer(2),
             layer(3),
             &fog_pipeline.layer_sampler,
-            multiply.map_or(&fallback.d2.texture_view, |image| &image.texture_view),
             flare_view.as_ref().unwrap_or(&fallback_zero.texture_view),
             main_depth,
         )),

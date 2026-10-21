@@ -9,8 +9,7 @@ import bevy_ui_render::ui_vertex_output::UiVertexOutput;
 
 @fragment
 fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
-    // (the picture is the texture's top half; its multiply, the bottom)
-    let colour = textureSample(picture, picture_sampler, vec2(in.uv.x, in.uv.y * 0.5));
+    let colour = textureSample(picture, picture_sampler, in.uv);
     if mode == 1u {
         return vec4(0.5 * colour.a, 0.0, 0.0, 0.5 * colour.a);
     }

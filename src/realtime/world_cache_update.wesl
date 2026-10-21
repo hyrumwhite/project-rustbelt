@@ -36,6 +36,9 @@ import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_MAX_GI_RAY_DISTANC
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_UPDATES_SOFT_CAP;
 import bevy_solarik::realtime::world_cache_query::query_two_sided_world_cache_with_support;
 import bevy_solarik::realtime::realtime_bindings::light_tile_resolved_samples;
+import bevy_solarik::realtime::realtime_bindings::light_tile_samples;
+import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
+import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_NO_LIGHT;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::constants;
 import bevy_solarik::realtime::realtime_bindings::world_cache_active_cells_count;
@@ -64,11 +67,19 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     // Several shadow-tested lights an update, each from a tile of its own: a
     // cell's single light sample (one of the level's hundreds of emitters)
     // was noisy enough to set the whole cache, which feeds itself, drifting.
+    // (each light found in sight takes the cell's slot of its sample, which
+    // ReSTIR DI draws candidates from: the lights that reach this place)
     var new_radiance = vec4(0.0);
+    var light_slots = world_cache_light_slots[cell_index];
     for (var i = 0u; i < WORLD_CACHE_DIRECT_LIGHT_SAMPLES_PER_UPDATE; i++) {
-        let sample = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy + vec2(0u, i * 7919u), &rng);
+        var seen_light = WORLD_CACHE_NO_LIGHT;
+        let sample = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy + vec2(0u, i * 7919u), &rng, &seen_light);
         new_radiance = vec4(new_radiance.rgb + sample.rgb, max(new_radiance.w, sample.w));
+        if seen_light != WORLD_CACHE_NO_LIGHT && i < 4u {
+            light_slots[i] = seen_light;
+        }
     }
+    world_cache_light_slots[cell_index] = light_slots;
     new_radiance = vec4(new_radiance.rgb / f32(WORLD_CACHE_DIRECT_LIGHT_SAMPLES_PER_UPDATE), new_radiance.w);
     // The sun by itself, one shadow-tested sample an update (the tiles hold
     // none, presample_light_tiles: indoors, behind the hull, the sun's
@@ -178,7 +189,7 @@ fn cache_blend_amount(sample_count: f32, old_luminance: f32, luminance_delta: f3
     return 1.0 / min(sample_count, min(max_sample_count, frame_limited_samples));
 }
 
-fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> vec4<f32> {
+fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>, seen_light: ptr<function, u32>) -> vec4<f32> {
     var workgroup_rng = light_tile_seed((workgroup_id.x * 5782582u) + workgroup_id.y, constants.frame_index);
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -186,6 +197,7 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
     var selected_sample_radiance = vec3(0.0);
     var selected_sample_target_function = 0.0;
     var selected_sample_world_position = vec4(0.0);
+    var selected_tile_sample = 0u;
     let mis_weight = 1.0 / f32(WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT);
     for (var i = 0u; i < WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT; i++) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
@@ -204,6 +216,7 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
             selected_sample_radiance = contribution;
             selected_sample_target_function = target_function;
             selected_sample_world_position = resolved_light_sample.world_position;
+            selected_tile_sample = tile_sample;
         }
     }
 
@@ -216,6 +229,9 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
         let shadow = trace_light_transmission_with_support(world_position + (world_normal * RAY_T_MIN), selected_sample_world_position);
         selected_sample_radiance *= shadow.energy.rgb;
         support_radius = shadow.distance + RAY_T_MIN;
+        if any(selected_sample_radiance > vec3(0.0)) {
+            *seen_light = light_tile_samples[selected_tile_sample].light_id >> 16u;
+        }
     }
 
     return vec4(selected_sample_radiance * unbiased_contribution_weight, support_radius);

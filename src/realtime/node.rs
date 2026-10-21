@@ -400,6 +400,7 @@ pub fn solarik_lighting<const PRIMARY: bool>(
             s.world_cache_active_cells_count.as_entire_binding(),
             s.sky_distribution.as_entire_binding(),
             &s.primary_background_view,
+            s.world_cache_light_slots.as_entire_binding(),
         )),
     );
     let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
@@ -816,6 +817,7 @@ pub fn init_solari_lighting_pipelines(
                 storage_buffer_sized(false, None),
                 storage_buffer_sized(false, None),
                 texture_2d(TextureSampleType::Float { filterable: false }),
+                storage_buffer_sized(false, None),
             ),
         ),
     );
@@ -874,6 +876,9 @@ pub fn init_solari_lighting_pipelines(
         // (diagnostics: extra definitions, comma separated)
         if let Ok(defs) = std::env::var("SOLARIK_SHADER_DEFS") {
             shader_defs.extend(defs.split(',').filter(|d| !d.is_empty()).map(|d| d.trim().to_string().into()));
+        }
+        if std::env::var("SOLARIK_CELL_LIGHTS").is_ok_and(|v| v == "1") {
+            shader_defs.push("DI_CELL_LIGHTS".into());
         }
         if std::env::var("SOLARIK_ADAPTIVE_CACHE_BUDGET").is_ok_and(|v| v == "1") {
             shader_defs.push("ADAPTIVE_CACHE_BUDGET".into());

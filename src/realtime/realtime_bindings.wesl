@@ -40,6 +40,9 @@ enable wgpu_ray_query;
 // (binding 24 is sky_sampling.wesl's)
 // The lit picture before the camera's panes: what refracting panes bend.
 @group(1) @binding(25) var primary_background: texture_2d<f32>;
+// Per world cache cell, four lights (light source indices) its direct light
+// updates found in sight, from which ReSTIR DI draws candidates by place.
+@group(1) @binding(26) var<storage, read_write> world_cache_light_slots: array<vec4<u32>, constants::WORLD_CACHE_SIZE>;
 
 @if((DLSS_RR_GUIDE_BUFFERS))
 @group(2) @binding(0) var diffuse_albedo: texture_storage_2d<rgba8unorm, write>;

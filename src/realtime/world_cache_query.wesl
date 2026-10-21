@@ -5,6 +5,7 @@ import bevy_solarik::realtime::realtime_bindings::world_cache_life;
 import bevy_solarik::realtime::realtime_bindings::world_cache_checksums;
 import bevy_solarik::realtime::realtime_bindings::world_cache_radiance;
 import bevy_solarik::realtime::realtime_bindings::world_cache_geometry_data;
+import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
 import bevy_solarik::realtime::realtime_bindings::world_cache_luminance_deltas;
 import bevy_solarik::realtime::realtime_bindings::world_cache_a;
 import bevy_solarik::realtime::realtime_bindings::world_cache_b;
@@ -130,6 +131,7 @@ fn query_world_cache_with_support(world_position_in: vec3<f32>, world_normal: ve
             world_cache_geometry_data[key].world_normal = world_normal;
             world_cache_geometry_data[key].last_traced_frame = 0u;
             world_cache_geometry_data[key].support_radius = 0.0;
+            world_cache_light_slots[key] = vec4(WORLD_CACHE_NO_LIGHT);
             return vec4(0.0);
         } else {
             // Collision - linear probe to next entry
@@ -138,6 +140,33 @@ fn query_world_cache_with_support(world_position_in: vec3<f32>, world_normal: ve
     }
 
     return vec4(0.0);
+}
+
+// An empty light slot.
+const WORLD_CACHE_NO_LIGHT: u32 = 0xFFFFFFFFu;
+
+// The cell a point's query lands in (with the query's jitter and level of
+// detail), -1 for none: read only, the cell neither made nor kept alive.
+fn find_world_cache_cell(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, rng: ptr<function, u32>) -> i32 {
+    var world_position = world_position_in;
+    var cell_size = get_cell_size(world_position, view_position, rng);
+@if(!NO_JITTER_WORLD_CACHE) {
+    let TBN = orthonormalize(world_normal);
+    let offset = (rand_vec2f(rng) * 2.0 - 1.0) * cell_size * 0.5;
+    world_position += offset.x * TBN[0] + offset.y * TBN[1];
+    cell_size = get_cell_size(world_position, view_position, rng);
+}
+    let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
+    let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));
+    var key = compute_key(world_position_quantized, world_normal_quantized);
+    let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
+    for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
+        let existing_checksum = atomicLoad(&world_cache_checksums[key]);
+        if existing_checksum == checksum { return i32(key); }
+        if existing_checksum == WORLD_CACHE_EMPTY_CELL { return -1; }
+        key = wrap_key(key + 1u);
+    }
+    return -1;
 }
 
 fn get_cell_size(world_position: vec3<f32>, view_position: vec3<f32>, rng: ptr<function, u32>) -> f32 {

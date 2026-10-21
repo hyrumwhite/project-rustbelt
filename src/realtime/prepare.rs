@@ -68,6 +68,8 @@ pub struct SolarikLightingResources {
     pub world_cache_active_cell_indices: Buffer,
     pub world_cache_active_cells_count: Buffer,
     pub world_cache_active_cells_dispatch: Buffer,
+    /// Per world cache cell, four lights in sight of it (`vec4<u32>`).
+    pub world_cache_light_slots: Buffer,
     /// The view target as the camera's panes found it, which refracting
     /// panes sample bent (written just before they are composited).
     pub primary_background: Texture,
@@ -222,6 +224,13 @@ pub fn prepare_solari_lighting_resources(
                 mapped_at_creation: false,
             });
 
+        let world_cache_light_slots = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solarik_lighting_world_cache_light_slots"),
+            size: WORLD_CACHE_SIZE * size_of::<[u32; 4]>() as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         let world_cache_a = render_device.create_buffer(&BufferDescriptor {
             label: Some("solarik_lighting_world_cache_a"),
             size: WORLD_CACHE_SIZE * size_of::<u32>() as u64,
@@ -281,6 +290,7 @@ pub fn prepare_solari_lighting_resources(
             world_cache_active_cell_indices,
             world_cache_active_cells_count,
             world_cache_active_cells_dispatch,
+            world_cache_light_slots,
             primary_background,
             primary_background_view,
             view_size,

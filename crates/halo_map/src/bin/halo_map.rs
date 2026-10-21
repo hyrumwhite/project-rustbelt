@@ -299,6 +299,16 @@ fn bsps(cache: &CacheFile) -> CliResult {
         let bounds = loaded.world_bounds()?;
         let vertices: usize = materials.iter().map(|m| m.vertices.len()).sum();
         let triangles: usize = materials.iter().map(|m| m.indices.len() / 3).sum();
+        // (HALO_MAP_MATERIALS: each material's shader and triangles, and
+        // the centre of its vertices)
+        if std::env::var_os("HALO_MAP_MATERIALS").is_some() {
+            for material in &materials {
+                let name = material.shader.datum.and_then(|d| cache.tags.iter().find(|t| t.datum == d)).map_or("?", |t| t.name.as_str());
+                let n = material.vertices.len().max(1) as f32;
+                let centre = material.vertices.iter().fold([0.0f32; 3], |c, v| [c[0] + v.position[0] / n, c[1] + v.position[1] / n, c[2] + v.position[2] / n]);
+                println!("  material {name}: {} triangles, centre {:.1?}", material.indices.len() / 3, centre);
+            }
+        }
 
         // Winding: compare each triangle's geometric normal with its vertices'
         // normals, to know which way the game's triangles face.

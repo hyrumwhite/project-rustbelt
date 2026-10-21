@@ -121,7 +121,7 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 
 /// Lights dimmed from their tags' brightness (by the light tag's name): a
 /// wide reach is a bright light here (brightness grows with its square).
-const LIGHT_DIMMING: [(&str, f32); 5] = [
+const LIGHT_DIMMING: [(&str, f32); 6] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights)
     ("characters\\monitor\\monitor dynamic", 0.15),
@@ -130,6 +130,10 @@ const LIGHT_DIMMING: [(&str, f32); 5] = [
     ("weapons\\plasma grenade\\plasma grenade", 0.7),
     ("weapons\\frag grenade\\explosion", 0.6),
     ("weapons\\plasma grenade\\explosion", 0.6),
+    // (b30's control room light, reaching 3.5 around its hologram until the
+    // terminal turns it off: it washed out the hologram, which the game
+    // draws brighter than the walls; play feedback: half)
+    ("levels\\b30\\devices\\interior tech objects\\holo control room display\\light", 0.5),
 ];
 
 /// What a light's tag says of it here.

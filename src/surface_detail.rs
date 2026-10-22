@@ -156,6 +156,10 @@ pub(crate) struct GpuSurfaceDetail {
     pub textures: UVec4,
     /// Mesoscale colour (x) and detail (y) in the scan array.
     pub meso: UVec4,
+    /// A water pane's ripples ([`crate::water_ripples`]), carried here, by
+    /// material, rather than in a binding of their own: one more storage
+    /// buffer was past the primary glass pass's limit.
+    pub ripples: crate::water_ripples::GpuWaterRipples,
 }
 
 /// Registers filtered scanned detail for Bevy's forward and deferred paths.

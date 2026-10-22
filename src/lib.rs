@@ -37,6 +37,7 @@ pub mod scene;
 pub mod stellar_disks;
 pub mod surface_detail;
 pub mod thin_volume;
+pub mod water_ripples;
 
 /// The solarik prelude.
 ///

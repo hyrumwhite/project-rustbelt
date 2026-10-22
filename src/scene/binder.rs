@@ -420,15 +420,16 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     mesh_allocator: Res<MeshAllocator>,
     mut blas_manager: ResMut<BlasManager>,
     material_assets: Res<StandardMaterialAssets>,
-    (collimated, detailed, gaussian, lommel): (
+    (collimated, detailed, gaussian, lommel, ripples): (
         Res<CollimatedMaterials>,
         Res<DetailedRayMaterials>,
         Res<GaussianRayMaterials>,
         Res<crate::lommel::LommelRayMaterials>,
+        Res<crate::water_ripples::WaterRippleMaterials>,
     ),
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
-    dfg_lut: Res<DfgLut>,
+    (dfg_lut, time): (Res<DfgLut>, Res<bevy_time::Time>),
     (sky_light, near_rays, ray_fog): (Res<SolarikSkyLight>, Res<SolarikNearRays>, Res<SolarikRayFog>),
     (alpha_testing, ray_settings, planet, atmosphere, rings, readiness, canopy): (
         Res<SolarikAlphaTesting>,
@@ -534,6 +535,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         || detailed.is_changed()
         || gaussian.is_changed()
         || lommel.is_changed()
+        || ripples.is_changed()
         || texture_assets.is_changed()
         || fallback_texture.is_changed();
     // Pending geometry retains ownership but needs another full readiness pass.
@@ -879,6 +881,12 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             detail.coordinates = extension.coordinates.clone();
             detail.textures = UVec4::new(cover0, cover1, scan_ids[0], scan_ids[1]);
             detail.meso = UVec4::new(scan_ids[2], scan_ids[3], 0, 0);
+        }
+        if let Some(extension) = ripples.0.get(asset_id) {
+            let ids = extension.maps.clone().map(|map| process_texture(&Some(map)));
+            if let [Some(a), Some(b), Some(c), Some(d)] = ids {
+                detail.ripples = crate::water_ripples::GpuWaterRipples::new(extension, [a, b, c, d]);
+            }
         }
         detail_parameters.get_mut().push(detail);
         let alpha = material_alpha(material);
@@ -1404,6 +1412,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             weather_image.is_some(),
         ),
         fog: *ray_fog,
+        time: time.elapsed_secs_wrapped(),
     });
     sky_buffer.write_buffer_changed(&render_device, &render_queue);
     ring_buffer.set(rings.0.clone());
@@ -1808,6 +1817,8 @@ struct GpuSkyLight {
     near_rays: Vec4,
     medium: GpuLightMedium,
     fog: SolarikRayFog,
+    /// Seconds (wrapped, as the globals' time): the water ripples' drift.
+    time: f32,
 }
 
 /// Mirrors `LightMedium` in `light_medium.wesl`. Metres.

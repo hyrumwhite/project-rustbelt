@@ -156,6 +156,8 @@ struct SkyLight {
     medium: LightMedium,
     // Fog over the specular paths' hits (SolarikRayFog, ray_fog.wesl).
     fog: RayFog,
+    // Seconds: the water ripples' drift.
+    time: f32,
 }
 
 struct RayFog {
@@ -206,8 +208,71 @@ struct SurfaceDetailParameters {
     textures: vec4u,
     // Mesoscale colour (x) and detail (y) atlas indices.
     meso: vec4u,
+    // A water pane's ripples (below; here rather than in a binding of their
+    // own, which was past the primary glass pass's storage buffer limit).
+    ripples: WaterRipples,
 }
 @group(0) @binding(23) var<storage> surface_details: array<SurfaceDetailParameters>;
+
+// A water pane's ripples (water_ripples.rs), by material: up to four bump
+// maps, each tiled its repeats times over their sum, drifting and offset,
+// summed by weight; the sum tiled at its scale over the material's texture
+// coordinates, itself drifting, and each of its mip levels faded toward flat
+// by its level over the last times the fade (Halo's water shader).
+struct WaterRipples {
+    maps: vec4u,
+    // scale, drift (u, v), 1 if enabled
+    sum: vec4f,
+    // repeats, offset (u, v), weight
+    ripples: array<vec4f, 4>,
+    drifts: array<vec4f, 4>,
+    // levels, fade, level-of-detail bias, size (texels)
+    mipmaps: vec4f,
+}
+
+// A ripple's bump at the sum's coordinate `uv`, sampled at the level of
+// detail of `width` (the sum's texture units across the ray's footprint;
+// none for the finest).
+fn water_ripple_bump(ripples: WaterRipples, index: u32, uv: vec2f, width: f32) -> vec3f {
+    let r = ripples.ripples[index];
+    let id = ripples.maps[index];
+    let coordinate = uv * r.x + sky_light.time * ripples.drifts[index].xy + r.yz;
+    let size = vec2f(textureDimensions(textures[id], 0));
+    let lod = clamp(log2(max(width * r.x * max(size.x, size.y), 1.0)), 0.0, f32(textureNumLevels(textures[id]) - 1u));
+    return textureSampleLevel(textures[id], samplers[id], coordinate, lod).rgb * 2.0 - 1.0;
+}
+
+// `normal` bent by a water material's ripples at `uv`. `gradient_u` and
+// `gradient_v` are the texture coordinates' gradients (per metre, in the
+// world), `footprint` the ray's width there (metres); none takes the sum's
+// last, most faded level, and its maps' coarsest.
+fn water_ripple_normal(ripples: WaterRipples, uv: vec2f, gradient_u: vec3f, gradient_v: vec3f, footprint: f32, normal: vec3f) -> vec3f {
+    let sum_uv = uv * ripples.sum.x + sky_light.time * ripples.sum.yz;
+    // (the sum's texture units across the footprint)
+    let width = select(1.0, footprint * max(length(gradient_u), length(gradient_v)) * ripples.sum.x, footprint > 0.0);
+    var bump = vec3f(0.0);
+    for (var i = 0u; i < 4u; i++) {
+        if ripples.ripples[i].w > 0.0 {
+            bump += water_ripple_bump(ripples, i, sum_uv, width) * ripples.ripples[i].w;
+        }
+    }
+    let levels = ripples.mipmaps.x;
+    let level = clamp(log2(max(width * ripples.mipmaps.w, 1e-6)) - ripples.mipmaps.z, 0.0, levels - 1.0);
+    let fade = select(0.0, level / max(levels - 1.0, 1.0) * ripples.mipmaps.y, levels > 1.0);
+    let faded = mix(bump, vec3f(0.0, 0.0, 1.0), fade);
+    if length(faded) < 1e-4 || length(gradient_u) < 1e-12 || length(gradient_v) < 1e-12 { return normal; }
+    let n = normalize(faded);
+    // (the bump's x along u, y along v, in the surface)
+    let t = normalize(gradient_u - normal * dot(gradient_u, normal));
+    let b = normalize(gradient_v - normal * dot(gradient_v, normal));
+    return normalize(t * n.x + b * n.y + normal * n.z);
+}
+
+// Whether a hit's material ripples (a water pane's, water_ripples.rs).
+fn scene_hit_ripples(ray_hit: SceneHit) -> bool {
+    if !scene_hit_is_triangle(ray_hit) { return false; }
+    return surface_details[material_ids[ray_hit.triangle.slot]].ripples.sum.w > 0.5;
+}
 // Eight old/new unions, two vec4s each. A zero w denotes an empty octant.
 @group(0) @binding(25) var<storage> scene_history_regions: array<vec4f>;
 fn scene_support_is_valid(position: vec3f, radius: f32) -> bool {
@@ -697,6 +762,20 @@ fn resolve_triangle_data_filtered(instance_id: u32, triangle_id: u32, barycentri
         resolved_material.perceptual_roughness = clamp(resolved_material.perceptual_roughness * mix(sampled.roughness, 1.0, resolved_material.gaussian_weight), 0.02, 1.0);
         resolved_material.roughness = resolved_material.perceptual_roughness * resolved_material.perceptual_roughness;
         world_normal = normalize(normal_matrix * detail_normal(n, sampled.gradient));
+    }
+    let ripples = surface_details[material_id].ripples;
+    if ripples.sum.w > 0.5 {
+        let e0 = world_vertices[1] - world_vertices[0];
+        let e1 = world_vertices[2] - world_vertices[0];
+        let face = cross(e0, e1);
+        let inverse_area_squared = 1.0 / max(dot(face, face), 1e-30);
+        let a = cross(e1, face) * inverse_area_squared;
+        let b = cross(face, e0) * inverse_area_squared;
+        let du = vertices[1].uv - vertices[0].uv;
+        let dv = vertices[2].uv - vertices[0].uv;
+        let face_normal = normalize(face);
+        let ripple_footprint = cone.x / max(abs(dot(face_normal, direction)), 0.0001);
+        world_normal = water_ripple_normal(ripples, uv, a * du.x + b * dv.x, a * du.y + b * dv.y, ripple_footprint, geometric_world_normal);
     }
 @if(RAY_MATERIAL_FOOTPRINTS) {
     // Add unresolved normal variance in GGX alpha-squared space.

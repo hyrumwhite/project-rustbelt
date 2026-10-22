@@ -2,9 +2,10 @@ import bevy_solarik::filtered_canopy_scene::forest_set_seed;
 import bevy_solarik::scene::scene_hit::scene_hit_is_miss;
 import bevy_solarik::scene::raytracing_scene_bindings::scene_hit_material;
 import bevy_solarik::scene::raytracing_scene_bindings::scene_hit_alpha;
-@if((RAY_MATERIAL_FOOTPRINTS)) import bevy_solarik::scene::raytracing_scene_bindings::primary_ray_cone;
-@if((RAY_MATERIAL_FOOTPRINTS)) import bevy_solarik::scene::raytracing_scene_bindings::advance_ray_cone;
-@if((RAY_MATERIAL_FOOTPRINTS)) import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_filtered;
+import bevy_solarik::scene::raytracing_scene_bindings::primary_ray_cone;
+import bevy_solarik::scene::raytracing_scene_bindings::advance_ray_cone;
+import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_filtered;
+import bevy_solarik::scene::raytracing_scene_bindings::scene_hit_ripples;
 import bevy_solarik::scene::thin_glass::thin_glass_weights;
 import bevy_solarik::scene::thin_glass::offset_thin_glass_ray;
 import bevy_solarik::realtime::gbuffer_utils::reconstruct_world_position;
@@ -63,9 +64,9 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
     var origin = initial_origin;
     var background = unbent_background;
     var refracted = false;
-@if(RAY_MATERIAL_FOOTPRINTS) {
+    // (the ray's width: the panes' texture filtering with footprints, and
+    // always a water pane's ripples' level of detail)
     var cone = primary_ray_cone(view.clip_from_view, view.main_pass_viewport.zw, distance(initial_origin, view.world_position));
-}
     var transmission = vec3(1.0);
     var radiance = vec3(0.0);
     var has_glass = 0.0;
@@ -75,9 +76,7 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
         let ray = trace_glass_ray(origin, direction, RAY_T_MIN, remaining);
         if scene_hit_is_miss(ray) { return vec4(radiance + transmission * background, has_glass); }
         let material = scene_hit_material(ray);
-@if(RAY_MATERIAL_FOOTPRINTS) {
         cone = advance_ray_cone(cone, ray.t);
-}
         if (material.flags & (MATERIAL_FLAG_ALPHA_BLEND | MATERIAL_FLAG_DIFFUSE_BLEND)) == 0u {
             // Raster depth bounds this query. An earlier opaque hit was omitted
             // by raster (e.g. a building's back-facing wall), so sky/background
@@ -97,12 +96,7 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
         }
         if i == 32u { break; }
         has_glass = 1.0;
-@if(RAY_MATERIAL_FOOTPRINTS) {
         let hit = resolve_ray_hit_filtered(ray, direction, cone);
-}
-@if(!(RAY_MATERIAL_FOOTPRINTS)) {
-        let hit = resolve_ray_hit_full(ray);
-}
         let alpha = clamp(scene_hit_alpha(ray, hit.uv), 0.0, 1.0);
         if (material.flags & MATERIAL_FLAG_REFRACT) != 0u {
             // A thick pane: its front reflects; what lies behind it is the
@@ -140,11 +134,22 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
             origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, direction, RAY_T_MIN);
             continue;
         }
-        let weights = thin_glass_weights(-direction, hit.geometric_world_normal, hit.material.base_color, alpha, hit.material.reflectance);
+        // (a water pane reflects about its rippled normal, toward the
+        // camera; a ray it would send into the water reflects about the
+        // flat surface instead)
+        let facing = faceForward(hit.geometric_world_normal, direction, hit.geometric_world_normal);
+        var pane_normal = hit.geometric_world_normal;
+        if scene_hit_ripples(ray) {
+            let rippled = faceForward(hit.world_normal, direction, hit.world_normal);
+            if dot(reflect(direction, rippled), facing) > 0.0 {
+                pane_normal = rippled;
+            }
+        }
+        let weights = thin_glass_weights(-direction, pane_normal, hit.material.base_color, alpha, hit.material.reflectance);
         radiance += transmission * alpha * emitted_radiance(hit.material, -direction);
         if weights.a > 0.0 {
-            let wi = reflect(direction, hit.geometric_world_normal);
-            let normal = faceForward(hit.geometric_world_normal, direction, hit.geometric_world_normal);
+            let wi = reflect(direction, pane_normal);
+            let normal = faceForward(pane_normal, direction, pane_normal);
             var surface = ResolvedGPixel(hit.world_position, normal, hit.material);
             // Smooth dielectric delta: owns reflected emission and never PSR.
             surface.material.roughness = 0.0;

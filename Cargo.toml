@@ -67,6 +67,7 @@ bevy_post_process = "0.20.0"
 bevy_reflect = "0.20.0"
 bevy_render = { version = "0.20.0", path = "vendor/bevy_render" }
 bevy_shader = "0.20.0"
+bevy_time = "0.20.0"
 bevy_transform = "0.20.0"
 bevy_utils = "0.20.0"
 bytemuck = "1"

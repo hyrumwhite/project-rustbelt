@@ -39,6 +39,16 @@ import bevy_solarik::realtime::realtime_bindings::light_tile_resolved_samples;
 import bevy_solarik::realtime::realtime_bindings::light_tile_samples;
 import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_NO_LIGHT;
+import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_SLOT_FADE;
+import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_SLOT_LIGHT_SAMPLE_COUNT;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_light;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_weight;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_probabilities;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_light_probability;
+import bevy_solarik::realtime::world_cache_query::world_cache_draw_slot;
+import bevy_solarik::realtime::world_cache_query::world_cache_slots_found;
+import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_SOURCE_KIND_DIRECTIONAL;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::constants;
 import bevy_solarik::realtime::realtime_bindings::world_cache_active_cells_count;
@@ -67,16 +77,25 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     // Several shadow-tested lights an update, each from a tile of its own: a
     // cell's single light sample (one of the level's hundreds of emitters)
     // was noisy enough to set the whole cache, which feeds itself, drifting.
-    // (each light found in sight takes the cell's slot of its sample, which
-    // ReSTIR DI draws candidates from: the lights that reach this place)
+    // (each light found in sight goes in the cell's slots by how much it
+    // lights the cell, world_cache_slots_found; the search draws candidates
+    // from them too, as ReSTIR DI does: the lights that reach this place)
     var new_radiance = vec4(0.0);
-    var light_slots = world_cache_light_slots[cell_index];
+    let found_slots = world_cache_light_slots[cell_index];
+    let slot_probabilities = world_cache_slot_probabilities(found_slots);
+    var light_slots = found_slots;
+    for (var j = 0u; j < 4u; j++) {
+        if world_cache_slot_light(light_slots[j]) != WORLD_CACHE_NO_LIGHT {
+            light_slots[j] = world_cache_slot(light_slots[j], world_cache_slot_weight(light_slots[j]) * WORLD_CACHE_SLOT_FADE);
+        }
+    }
     for (var i = 0u; i < WORLD_CACHE_DIRECT_LIGHT_SAMPLES_PER_UPDATE; i++) {
         var seen_light = WORLD_CACHE_NO_LIGHT;
-        let sample = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy + vec2(0u, i * 7919u), &rng, &seen_light);
+        var seen_weight = 0.0;
+        let sample = sample_random_light_ris(geometry_data.world_position, geometry_data.world_normal, workgroup_id.xy + vec2(0u, i * 7919u), found_slots, slot_probabilities, &rng, &seen_light, &seen_weight);
         new_radiance = vec4(new_radiance.rgb + sample.rgb, max(new_radiance.w, sample.w));
-        if seen_light != WORLD_CACHE_NO_LIGHT && i < 4u {
-            light_slots[i] = seen_light;
+        if seen_light != WORLD_CACHE_NO_LIGHT {
+            light_slots = world_cache_slots_found(light_slots, seen_light, seen_weight);
         }
     }
     world_cache_light_slots[cell_index] = light_slots;
@@ -189,16 +208,29 @@ fn cache_blend_amount(sample_count: f32, old_luminance: f32, luminance_delta: f3
     return 1.0 / min(sample_count, min(max_sample_count, frame_limited_samples));
 }
 
-fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>, seen_light: ptr<function, u32>) -> vec4<f32> {
+// Candidates from the tiles and from the cell's slots (`slots`, drawn by
+// `slot_probabilities`), each weighted by the balance heuristic of the two
+// (as restir_di's generate_initial_reservoir does); the light picked, if in
+// sight, is `seen_light`, and `seen_weight` its shadow-tested irradiance
+// estimate (exposed), for the slots.
+fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, slots: vec4<u32>, slot_probabilities: vec4<f32>, rng: ptr<function, u32>, seen_light: ptr<function, u32>, seen_weight: ptr<function, f32>) -> vec4<f32> {
     var workgroup_rng = light_tile_seed((workgroup_id.x * 5782582u) + workgroup_id.y, constants.frame_index);
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
+
+    var sun_share = 1.0;
+    if arrayLength(&directional_lights) > 0u {
+        let sun_probability = light_sources[directional_lights[0].light_source_index].selection_probability;
+        if sun_probability < 0.999 { sun_share = 1.0 - sun_probability; }
+    }
+    let slot_count = select(0u, WORLD_CACHE_SLOT_LIGHT_SAMPLE_COUNT, any(slot_probabilities > vec4(0.0)));
+    let tile_count = f32(WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT);
 
     var weight_sum = 0.0;
     var selected_sample_radiance = vec3(0.0);
     var selected_sample_target_function = 0.0;
     var selected_sample_world_position = vec4(0.0);
-    var selected_tile_sample = 0u;
-    let mis_weight = 1.0 / f32(WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT);
+    var selected_light = WORLD_CACHE_NO_LIGHT;
+    var selected_light_inverse_pdf = 0.0;
     for (var i = 0u; i < WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT; i++) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
@@ -208,7 +240,14 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
 
         let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
         let target_function = luminance(contribution);
-        let resampling_weight = mis_weight * (target_function * light_contribution.inverse_pdf);
+        if target_function <= 0.0 { continue; }
+        let light_id = light_tile_samples[tile_sample].light_id >> 16u;
+        let tile_probability = light_sources[light_id].selection_probability / sun_share;
+        // (the point's density on its light: the tile's, without the light's
+        // selection)
+        let light_inverse_pdf = light_contribution.inverse_pdf * tile_probability;
+        let slot_probability = world_cache_slot_light_probability(slots, slot_probabilities, light_id);
+        let resampling_weight = target_function * light_inverse_pdf / (tile_count * tile_probability + f32(slot_count) * slot_probability);
 
         weight_sum += resampling_weight;
 
@@ -216,7 +255,37 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
             selected_sample_radiance = contribution;
             selected_sample_target_function = target_function;
             selected_sample_world_position = resolved_light_sample.world_position;
-            selected_tile_sample = tile_sample;
+            selected_light = light_id;
+            selected_light_inverse_pdf = light_inverse_pdf;
+        }
+    }
+    for (var i = 0u; i < slot_count; i++) {
+        let light_id = world_cache_slot_light(slots[world_cache_draw_slot(slot_probabilities, rand_f(rng))]);
+        if light_id >= arrayLength(&light_sources) { continue; }
+        let light_source = light_sources[light_id];
+        if light_source.kind == LIGHT_SOURCE_KIND_DIRECTIONAL { continue; }
+        var triangle_id = 0u;
+        if (light_source.kind & 1u) == 0u {
+            triangle_id = rand_range_u(light_source.kind >> 1u, rng);
+        }
+        let resolved_light_sample = resolve_light_sample(LightSample((light_id << 16u) | triangle_id, rand_u(rng)), light_source);
+        let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
+
+        let contribution = light_contribution.radiance * saturate(dot(light_contribution.wi, world_normal));
+        let target_function = luminance(contribution);
+        if target_function <= 0.0 { continue; }
+        let tile_probability = light_source.selection_probability / sun_share;
+        let slot_probability = world_cache_slot_light_probability(slots, slot_probabilities, light_id);
+        let resampling_weight = target_function * light_contribution.inverse_pdf / (tile_count * tile_probability + f32(slot_count) * slot_probability);
+
+        weight_sum += resampling_weight;
+
+        if rand_f(rng) < resampling_weight / weight_sum {
+            selected_sample_radiance = contribution;
+            selected_sample_target_function = target_function;
+            selected_sample_world_position = resolved_light_sample.world_position;
+            selected_light = light_id;
+            selected_light_inverse_pdf = light_contribution.inverse_pdf;
         }
     }
 
@@ -230,7 +299,9 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
         selected_sample_radiance *= shadow.energy.rgb;
         support_radius = shadow.distance + RAY_T_MIN;
         if any(selected_sample_radiance > vec3(0.0)) {
-            *seen_light = light_tile_samples[selected_tile_sample].light_id >> 16u;
+            *seen_light = selected_light;
+            // (the light's irradiance here, estimated from this point on it)
+            *seen_weight = luminance(selected_sample_radiance) * selected_light_inverse_pdf * view.exposure;
         }
     }
 

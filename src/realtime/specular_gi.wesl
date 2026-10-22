@@ -51,6 +51,11 @@ import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
 import bevy_solarik::realtime::world_cache_query::query_world_cache;
+import bevy_solarik::realtime::world_cache_query::find_world_cache_cell;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_light;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_probabilities;
+import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_NO_LIGHT;
+import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
 import bevy_solarik::realtime::world_cache_query::get_cell_size;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_LIFETIME;
 import bevy_solarik::realtime::realtime_bindings::view_output;
@@ -113,6 +118,28 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 @if(VISUALIZE_WORLD_CACHE) {
     textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, ray_max_distance(), WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
+}
+// (SOLARIK_SHADER_DEFS=VISUALIZE_CELL_LIGHTS: the lights each pixel's cell
+// offers ReSTIR DI, a colour each by its share; magenta where it finds no
+// cell, black where the cell has none)
+@if(VISUALIZE_CELL_LIGHTS) {
+    let debug_cell = find_world_cache_cell(surface.world_position, surface.world_normal, view.world_position, &rng);
+    var debug_colour = vec3(1.0, 0.0, 1.0);
+    if debug_cell >= 0 {
+        let slots = world_cache_light_slots[debug_cell];
+        let p = world_cache_slot_probabilities(slots);
+        debug_colour = vec3(0.0);
+        for (var j = 0u; j < 4u; j++) {
+            let light = world_cache_slot_light(slots[j]);
+            if light != WORLD_CACHE_NO_LIGHT {
+                var h = light * 747796405u + 2891336453u;
+                h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+                h = (h >> 22u) ^ h;
+                debug_colour += p[j] * vec3(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u)) / 255.0;
+            }
+        }
+    }
+    textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
 }
 }
 

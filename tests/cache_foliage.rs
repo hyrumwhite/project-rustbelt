@@ -236,6 +236,8 @@ var<workgroup> world_cache_checksums: array<atomic<u32>, 64>;
 struct Geometry { world_position: vec3<f32>, last_traced_frame: u32, world_normal: vec3<f32>, support_radius: f32 }
 var<private> world_cache_geometry_data: array<Geometry, 64>;
 var<private> world_cache_radiance: array<vec4<f32>, 64>;
+var<private> world_cache_light_slots: array<vec4<u32>, 64>;
+const WORLD_CACHE_NO_LIGHT = 0xFFFFFFFFu;
 const WORLD_CACHE_POSITION_BASE_CELL_SIZE = 0.15;
 const WORLD_CACHE_POSITION_LOD_SCALE = 15.0;
 const WORLD_CACHE_MAX_SEARCH_STEPS = 3u;

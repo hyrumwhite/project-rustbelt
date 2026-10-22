@@ -30,6 +30,10 @@ import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_SOURCE_KIND_DIRECTI
 import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
 import bevy_solarik::realtime::world_cache_query::find_world_cache_cell;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_NO_LIGHT;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_light;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_probabilities;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_light_probability;
+import bevy_solarik::realtime::world_cache_query::world_cache_draw_slot;
 import bevy_solarik::scene::sampling::LIGHT_SAMPLE_DIRECTIONAL;
 import bevy_pbr::render::utils::rand_u;
 import bevy_solarik::scene::raytracing_scene_bindings::previous_frame_light_id_translations;
@@ -67,7 +71,10 @@ const INITIAL_SAMPLES = 32u;
 // on by default (SOLARIK_CELL_LIGHTS=0 leaves them out): a narrow corridor's recessed fixtures, among hundreds
 // of the level's lights, got a sample now and then. In a10's corridors, in
 // motion, 8% less boiling for 0.6 ms (the tiles alone, since the sun has its
-// own sample, mostly find them).
+// own sample, mostly find them). (With the slots weighted by what each light
+// gives the cell, and half the screen finding its cell again, in a10's
+// Jefferies tubes a wall beside a dim red strip went from lit and dark by
+// turns to steady, its three-shot spread 0.35 to 0.01; 24 did no better.)
 const CELL_SAMPLES = 8u;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 8.0;
@@ -167,7 +174,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
     // Two strategies pick a light: the tiles, by the table's selection
     // probability (over what isn't the sun's, presample_light_tiles), and the
-    // cell's slots, by the light's share of them; a point on the light is
+    // cell's slots, by the light's weight in them; a point on the light is
     // picked alike after. Each candidate is weighted by the balance heuristic
     // of the two, so a light the cell missed still comes by the tiles.
     var sun_share = 1.0;
@@ -182,8 +189,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         light_slots = world_cache_light_slots[cell];
     }
 }
+    // (the slots drawn by how much each light lights the cell)
+    let slot_probabilities = world_cache_slot_probabilities(light_slots);
     var cell_samples = 0u;
-    if any(light_slots != vec4(WORLD_CACHE_NO_LIGHT)) {
+    if any(slot_probabilities > vec4(0.0)) {
         cell_samples = CELL_SAMPLES;
     }
 
@@ -204,7 +213,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         if cell_samples > 0u {
             let light_id = light_tile_samples[tile_sample].light_id >> 16u;
             let tile_probability = light_sources[light_id].selection_probability / sun_share;
-            let cell_probability = f32(dot(vec4<u32>(light_slots == vec4(light_id)), vec4(1u))) / 4.0;
+            let cell_probability = world_cache_slot_light_probability(light_slots, slot_probabilities, light_id);
             resampling_weight = target_function * resolved_light_sample.inverse_pdf * tile_probability
                 / (f32(INITIAL_SAMPLES) * tile_probability + f32(cell_samples) * cell_probability);
         }
@@ -217,7 +226,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         }
     }
     for (var i = 0u; i < cell_samples; i++) {
-        let light_id = light_slots[rand_range_u(4u, rng)];
+        let light_id = world_cache_slot_light(light_slots[world_cache_draw_slot(slot_probabilities, rand_f(rng))]);
         if light_id >= arrayLength(&light_sources) { continue; }
         let light_source = light_sources[light_id];
         if light_source.kind == LIGHT_SOURCE_KIND_DIRECTIONAL { continue; }
@@ -232,7 +241,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         if target_function <= 0.0 { continue; }
 
         let tile_probability = light_source.selection_probability / sun_share;
-        let cell_probability = f32(dot(vec4<u32>(light_slots == vec4(light_id)), vec4(1u))) / 4.0;
+        let cell_probability = world_cache_slot_light_probability(light_slots, slot_probabilities, light_id);
         let resampling_weight = target_function * resolved_light_sample.inverse_pdf
             / (f32(INITIAL_SAMPLES) * tile_probability + f32(cell_samples) * cell_probability);
 

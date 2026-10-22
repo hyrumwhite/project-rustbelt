@@ -145,9 +145,105 @@ fn query_world_cache_with_support(world_position_in: vec3<f32>, world_normal: ve
 // An empty light slot.
 const WORLD_CACHE_NO_LIGHT: u32 = 0xFFFFFFFFu;
 
+// A cell's light slot: the light's id in the low 16 bits (0xFFFF for none)
+// and above, as an f16, how much it lights the cell (its shadow-tested
+// irradiance there, exposed, smoothed over the updates that found it). The
+// slots are drawn by it: drawn uniformly, a narrow corridor's dim recessed
+// strip, beside the brighter fixtures down the hall, got its quarter of the
+// cell's candidates whatever it lit, and got into the slots by luck.
+fn world_cache_slot_light(slot: u32) -> u32 {
+    return select(slot & 0xFFFFu, WORLD_CACHE_NO_LIGHT, (slot & 0xFFFFu) == 0xFFFFu);
+}
+
+fn world_cache_slot_weight(slot: u32) -> f32 {
+    let weight = unpack2x16float(slot).y;
+    return select(0.0, weight, (slot & 0xFFFFu) != 0xFFFFu && weight > 0.0 && weight < 65504.0);
+}
+
+fn world_cache_slot(light_id: u32, weight: f32) -> u32 {
+    return (light_id & 0xFFFFu) | (pack2x16float(vec2(0.0, clamp(weight, 0.0, 60000.0))) & 0xFFFF0000u);
+}
+
+// Each slot's probability of being drawn: by its weight, with a quarter of
+// the mean beside (each light in the cell drawn now and then: a weight is a
+// noisy estimate), none for an empty slot.
+fn world_cache_slot_probabilities(slots: vec4<u32>) -> vec4<f32> {
+    let present = vec4<f32>((slots & vec4(0xFFFFu)) != vec4(0xFFFFu));
+    let count = dot(present, vec4(1.0));
+    if count == 0.0 { return vec4(0.0); }
+    let weights = vec4(world_cache_slot_weight(slots.x), world_cache_slot_weight(slots.y), world_cache_slot_weight(slots.z), world_cache_slot_weight(slots.w));
+    let total = dot(weights, present);
+    let floor = select(1.0, 0.25 * total / count, total > 0.0);
+    let p = (weights + floor) * present;
+    return p / dot(p, vec4(1.0));
+}
+
+// The probability that a draw from the slots picks `light_id`.
+fn world_cache_slot_light_probability(slots: vec4<u32>, probabilities: vec4<f32>, light_id: u32) -> f32 {
+    return dot(probabilities, vec4<f32>((slots & vec4(0xFFFFu)) == vec4(light_id & 0xFFFFu)));
+}
+
+// A slot drawn by `probabilities`, `u` in [0, 1).
+fn world_cache_draw_slot(probabilities: vec4<f32>, u: f32) -> u32 {
+    let c = vec3(probabilities.x, probabilities.x + probabilities.y, probabilities.x + probabilities.y + probabilities.z);
+    return u32(u >= c.x) + u32(u >= c.y) + u32(u >= c.z);
+}
+
+// Smoothing of a slot's weight by each estimate found, and its fading each
+// update (a light no longer found, or no longer in sight, gives way).
+const WORLD_CACHE_SLOT_SMOOTHING: f32 = 0.25;
+const WORLD_CACHE_SLOT_FADE: f32 = 0.95;
+// Candidates a cell's light search draws from its slots, beside the tiles'.
+const WORLD_CACHE_SLOT_LIGHT_SAMPLE_COUNT: u32 = 16u;
+
+// `slots` with a light found in sight, `weight` its estimate: its slot's
+// weight smoothed toward it, or else the weakest slot taken if the light
+// would outweigh it.
+fn world_cache_slots_found(slots: vec4<u32>, light_id: u32, weight: f32) -> vec4<u32> {
+    var s = slots;
+    var weakest = 0u;
+    var weakest_weight = 3.4e38;
+    for (var j = 0u; j < 4u; j++) {
+        if world_cache_slot_light(s[j]) == light_id {
+            s[j] = world_cache_slot(light_id, mix(world_cache_slot_weight(s[j]), weight, WORLD_CACHE_SLOT_SMOOTHING));
+            return s;
+        }
+        let w = select(world_cache_slot_weight(s[j]), -1.0, world_cache_slot_light(s[j]) == WORLD_CACHE_NO_LIGHT);
+        if w < weakest_weight {
+            weakest = j;
+            weakest_weight = w;
+        }
+    }
+    let entering = weight * WORLD_CACHE_SLOT_SMOOTHING;
+    if entering > weakest_weight {
+        s[weakest] = world_cache_slot(light_id, entering);
+    }
+    return s;
+}
+
 // The cell a point's query lands in (with the query's jitter and level of
 // detail), -1 for none: read only, the cell neither made nor kept alive.
-fn find_world_cache_cell(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, rng: ptr<function, u32>) -> i32 {
+// A camera pixel's shading normal (normal mapped) keys another cell than the
+// geometric normal the cells were made with (the GI rays' hits) where a
+// component lies near a step of floor(2n), a wall's zero above all: such a
+// pixel tries those components on either side of the step, each with a
+// jitter of its own, before it gives up (in a10's Jefferies tubes half the
+// screen found no cell, and so no light candidates by place).
+fn find_world_cache_cell(world_position: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, rng: ptr<function, u32>) -> i32 {
+    let scaled = world_normal * 2.0;
+    // (no -0: the key hashes the bits)
+    let step = select(round(scaled), vec3(0.0), round(scaled) == vec3(0.0));
+    let near_step = abs(scaled - step) < vec3(0.2);
+    let quantized = quantize_normal(world_normal);
+    var tries = array<vec3<f32>, 4>(select(quantized, step, near_step), quantized, select(quantized, step - 1.0, near_step), select(quantized, step, near_step));
+    for (var attempt = 0u; attempt < 4u; attempt++) {
+        let cell = find_world_cache_cell_once(world_position, world_normal, tries[attempt], view_position, rng);
+        if cell >= 0 { return cell; }
+    }
+    return -1;
+}
+
+fn find_world_cache_cell_once(world_position_in: vec3<f32>, world_normal: vec3<f32>, normal_quantized: vec3<f32>, view_position: vec3<f32>, rng: ptr<function, u32>) -> i32 {
     var world_position = world_position_in;
     var cell_size = get_cell_size(world_position, view_position, rng);
 @if(!NO_JITTER_WORLD_CACHE) {
@@ -157,7 +253,7 @@ fn find_world_cache_cell(world_position_in: vec3<f32>, world_normal: vec3<f32>, 
     cell_size = get_cell_size(world_position, view_position, rng);
 }
     let world_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size));
-    let world_normal_quantized = bitcast<vec3<u32>>(quantize_normal(world_normal));
+    let world_normal_quantized = bitcast<vec3<u32>>(normal_quantized);
     var key = compute_key(world_position_quantized, world_normal_quantized);
     let checksum = compute_checksum(world_position_quantized, world_normal_quantized);
     for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {

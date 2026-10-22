@@ -29,10 +29,13 @@ fn resolve_background_guides(pixel_id: vec2u) {
 
     let depth = textureLoad(depth_buffer, pixel_id, 0);
     textureStore(dlss_rr_depth, pixel_id, vec4(depth));
+    // The sky: the DLSS-RR integration guide's defaults (3.4.1-3.4.4), a
+    // diffuse albedo of 0.5, no specular albedo, normal or roughness. (As a
+    // mirror, specular albedo 0.5, RR smoothed a starfield away.)
     if depth == 0.0 {
-        textureStore(diffuse_albedo, pixel_id, vec4(0.0));
-        textureStore(specular_albedo, pixel_id, vec4(0.5));
-        textureStore(normal_roughness, pixel_id, vec4(0.0, 0.0, 1.0, 0.0));
+        textureStore(diffuse_albedo, pixel_id, vec4(0.5, 0.5, 0.5, 0.0));
+        textureStore(specular_albedo, pixel_id, vec4(0.0));
+        textureStore(normal_roughness, pixel_id, vec4(0.0));
         return;
     }
 

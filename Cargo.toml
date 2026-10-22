@@ -37,6 +37,7 @@ wgpu-core = { path = "vendor/wgpu-core" }
 wgpu-hal = { path = "vendor/wgpu-hal" }
 bevy_render = { path = "vendor/bevy_render" }
 bevy_pbr = { path = "vendor/bevy_pbr" }
+bevy_anti_alias = { path = "vendor/bevy_anti_alias" }
 
 [dev-dependencies]
 bevy_shape = "=0.20.0"

@@ -25,6 +25,8 @@ mod material;
 mod options;
 mod overlay;
 mod sky;
+#[cfg(feature = "dlss")]
+mod sky_overlay;
 mod textures;
 
 use argh::FromArgs;
@@ -460,6 +462,8 @@ fn main() -> AppExit {
             .add_systems(PostUpdate, (update_control_text, update_performance_text));
         #[cfg(feature = "dlss")]
         app.add_systems(Update, (toggle_dlss_rr, cycle_dlss_quality).run_if(bridge::not_forwarding));
+        #[cfg(feature = "dlss")]
+        app.add_plugins(sky_overlay::SkyOverlayPlugin);
     }
 
     app.run()

@@ -41,6 +41,7 @@ rand = "0.10.0"
 [patch.crates-io]
 bevy_render = { path = "../bevy_solarik/vendor/bevy_render" }
 bevy_pbr = { path = "../bevy_solarik/vendor/bevy_pbr" }
+bevy_anti_alias = { path = "../bevy_solarik/vendor/bevy_anti_alias" }
 wgpu-core = { path = "../bevy_solarik/vendor/wgpu-core" }
 wgpu-hal = { path = "../bevy_solarik/vendor/wgpu-hal" }
 

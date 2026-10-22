@@ -2338,13 +2338,20 @@ pub fn sync_traced_visibility(
     }
 }
 
+/// The game draws the sky model at 1/1024 scale round the camera's position
+/// times 0.999 (render_sky.c): seen from the point in the model at the
+/// camera's world position, in world units. Its parts are laid out about the
+/// level (a30's sea and far land, finite sheets below the horizon), and seen
+/// from the model's origin instead, their edges came into view.
 pub fn follow_camera(
     camera: Query<&Transform, (With<Camera3d>, Without<SkyDome>)>,
     mut domes: Query<&mut Transform, With<SkyDome>>,
 ) {
     let Ok(camera) = camera.single() else { return };
+    // (the camera in world units, at sky_scale() metres a sky unit)
+    let offset = camera.translation / METERS_PER_WORLD_UNIT * sky_scale();
     for mut dome in &mut domes {
-        dome.translation = camera.translation;
+        dome.translation = camera.translation - offset;
     }
 }
 

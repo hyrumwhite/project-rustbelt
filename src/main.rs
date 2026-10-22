@@ -630,7 +630,7 @@ fn load_level(
             error!("sky: {e}");
         }
         match sky::sky_model_cubemap(&cache, model, assets.images) {
-            Ok(Some(cubemap)) => commands.insert_resource(SkyCubemap(cubemap)),
+            Ok(Some(cubemaps)) => commands.insert_resource(SkyCubemap(cubemaps.lighting, cubemaps.background)),
             Ok(None) => commands.remove_resource::<SkyCubemap>(),
             Err(e) => {
                 error!("sky environment map: {e}");
@@ -696,9 +696,10 @@ fn load_level(
 #[derive(Resource)]
 struct CameraStart(Transform);
 
-/// The sky model rendered into a cubemap, for the environment light.
+/// The sky model rendered into cubemaps: the environment light's and the
+/// skybox's (see [`sky::SkyModelCubemaps`]).
 #[derive(Resource)]
-struct SkyCubemap(Handle<Image>);
+struct SkyCubemap(Handle<Image>, Handle<Image>);
 
 fn bsp_overview(cache: &CacheFile, index: usize) -> Option<Transform> {
     let reference = halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index == index)?;
@@ -789,9 +790,12 @@ fn sky_environment(
     images: &mut Assets<Image>,
 ) -> Option<(EnvironmentMapLight, Skybox)> {
     let (color, power) = level_sky.0.sky?;
-    let cubemap = match sky_cubemap {
-        Some(sky) => sky.0.clone(),
-        None => sky::gradient_cubemap(color, images),
+    let (cubemap, background) = match sky_cubemap {
+        Some(sky) => (sky.0.clone(), sky.1.clone()),
+        None => {
+            let gradient = sky::gradient_cubemap(color, images);
+            (gradient.clone(), gradient)
+        }
     };
     Some((
         EnvironmentMapLight {
@@ -800,7 +804,7 @@ fn sky_environment(
             intensity: power * settings.sky_scale,
             ..default()
         },
-        Skybox { image: Some(cubemap), brightness: power * settings.sky_scale, ..default() },
+        Skybox { image: Some(background), brightness: power * settings.sky_scale, ..default() },
     ))
 }
 
@@ -849,7 +853,7 @@ fn follow_level(
     commands.queue(move |world: &mut World| {
         let sky = world.resource::<LevelSky>().clone();
         let settings = world.resource::<LightingSettings>().clone();
-        let cubemap = world.get_resource::<SkyCubemap>().map(|c| SkyCubemap(c.0.clone()));
+        let cubemap = world.get_resource::<SkyCubemap>().map(|c| SkyCubemap(c.0.clone(), c.1.clone()));
         let environment =
             world.resource_scope(|_, mut images: Mut<Assets<Image>>| sky_environment(&sky, cubemap.as_ref(), &settings, &mut images));
         let mut camera = world.entity_mut(camera);

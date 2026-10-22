@@ -82,8 +82,19 @@ const HORIZON: f32 = 0.03;
 const SKY_CUBEMAP_SIZE: u32 = 512;
 
 /// The sky model's layers, composited in every direction (see
-/// [`halo_map::sky::SkyRenderer`]).
-pub fn sky_model_cubemap(cache: &CacheFile, model_datum: u32, images: &mut Assets<Image>) -> halo_map::Result<Option<Handle<Image>>> {
+/// [`halo_map::sky::SkyRenderer`]): the environment light's cubemap, and the
+/// camera's skybox's.
+pub struct SkyModelCubemaps {
+    /// Below the horizon, the colour at the horizon (see [`HORIZON`]).
+    pub lighting: Handle<Image>,
+    /// The layers as they are in every direction, behind the drawn sky
+    /// model: the lighting's showed through its translucent layers below the
+    /// horizon, the horizon's colours streaked downwards (the stars of the
+    /// menus' space).
+    pub background: Handle<Image>,
+}
+
+pub fn sky_model_cubemap(cache: &CacheFile, model_datum: u32, images: &mut Assets<Image>) -> halo_map::Result<Option<SkyModelCubemaps>> {
     let renderer = halo_map::sky::SkyRenderer::new(cache, model_datum)?;
     if renderer.is_empty() {
         return Ok(None);
@@ -93,12 +104,13 @@ pub fn sky_model_cubemap(cache: &CacheFile, model_datum: u32, images: &mut Asset
     // has nothing (the game fogs or never shows it), its colour at the
     // horizon: rays out through the sea saw black there.
     let started = std::time::Instant::now();
-    let cubemap = cubemap(SKY_CUBEMAP_SIZE, images, |dir| {
+    let lighting = cubemap(SKY_CUBEMAP_SIZE, images, |dir| {
         let dir = if dir.y < HORIZON { Vec3::new(dir.x, 0.0, dir.z).normalize_or(Vec3::X).with_y(HORIZON).normalize() } else { dir };
         renderer.sample([dir.x, -dir.z, dir.y])
     });
-    info!("sky environment map: {SKY_CUBEMAP_SIZE} texels a face in {:.2} s", started.elapsed().as_secs_f32());
-    Ok(Some(cubemap))
+    let background = cubemap(SKY_CUBEMAP_SIZE, images, |dir| renderer.sample([dir.x, -dir.z, dir.y]));
+    info!("sky environment map: {SKY_CUBEMAP_SIZE} texels a face, twice, in {:.2} s", started.elapsed().as_secs_f32());
+    Ok(Some(SkyModelCubemaps { lighting, background }))
 }
 
 /// A cubemap whose texel colours (sRGB, 0..1) `colour` gives per direction

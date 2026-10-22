@@ -182,6 +182,7 @@ impl Plugin for BridgePlugin {
         app.init_resource::<BridgeObjects>()
             .init_resource::<CameraSky>()
             .init_resource::<DrawnBsp>()
+            .init_resource::<LightsInSolid>()
             .init_resource::<FollowGame>()
             .init_resource::<ForwardInput>()
             .add_systems(First, read_frame.in_set(ReadFrame))
@@ -450,7 +451,7 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp): (
+    (recolourable, animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<(), With<crate::level::AnimatedSelfIllumination>>,
         Query<&Children>,
@@ -458,6 +459,7 @@ fn sync_objects(
         Local<Option<(String, Vec<Option<ClusterVisibility>>)>>,
         ResMut<CameraSky>,
         ResMut<DrawnBsp>,
+        ResMut<LightsInSolid>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -547,6 +549,22 @@ fn sync_objects(
     };
     if drawn_bsp.0 != drawn {
         drawn_bsp.0 = drawn;
+    }
+    // the game's lights in the drawn BSP's solid, each side of them too:
+    // another BSP's, whose room overlaps this one's (a10's alarm light under
+    // a Jefferies tube's floor, in a10d's room, a10e drawn: its light came
+    // through the tube's thin shell, a red that boiled on its walls)
+    let drawn_visibility = usize::try_from(snapshot.structure_bsp_index).ok().map(|i| drawn.unwrap_or(i)).and_then(|i| all_visibility.get(i)).and_then(|v| v.as_ref());
+    let in_solid = |p: [f32; 3]| {
+        const AROUND: [[f32; 3]; 7] = [[0.0; 3], [0.1, 0.0, 0.0], [-0.1, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, -0.1, 0.0], [0.0, 0.0, 0.1], [0.0, 0.0, -0.1]];
+        drawn_visibility.is_some_and(|v| AROUND.iter().all(|o| v.cluster([p[0] + o[0], p[1] + o[1], p[2] + o[2]]) < 0))
+    };
+    let solid: Vec<(u32, u32)> = snapshot.lights.iter().filter(|l| in_solid(l.position)).map(|l| (l.definition_index, l.object_index)).collect();
+    if lights_in_solid.0 != solid {
+        if !solid.is_empty() {
+            info!("{} of the game's lights in the drawn BSP's solid, left out: {solid:x?}", solid.len());
+        }
+        lights_in_solid.0 = solid;
     }
     let clusters_of: HashMap<u32, (i16, u32)> = snapshot.objects.iter().map(|o| (o.object_index, (o.location_cluster, o.parent_index))).collect();
     let unseen_cluster = |object: &halo_bridge::Object| {
@@ -843,6 +861,12 @@ pub struct DrawnBsp(pub Option<usize>);
 pub struct CameraSky {
     pub none: bool,
 }
+
+/// The game's lights (by definition and object) in the solid of the BSP
+/// drawn, 0.1 world units round them too: another BSP's, in a room of its
+/// that overlaps this one's; left out (`crate::lights`).
+#[derive(Resource, Default)]
+pub struct LightsInSolid(pub Vec<(u32, u32)>);
 
 /// A structure BSP's clusters and potentially visible sets: which clusters
 /// the game draws from the one its camera is in.

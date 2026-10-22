@@ -167,6 +167,7 @@ fn sync_lights(
     mut points: Query<(&mut PointLight, &mut Transform, &mut Visibility), Without<SpotLight>>,
     mut spots: Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
     level: Option<Res<BridgeLevel>>,
+    in_solid: Res<crate::bridge::LightsInSolid>,
     mut light_tags: Local<HashMap<u32, LightTag>>,
     mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
     mut glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
@@ -235,7 +236,10 @@ fn sync_lights(
             });
         }
     }
-    let lights = snapshot.lights.iter().filter(|light| light.definition_flags & LIGHT_CONTRAIL == 0);
+    // (but those in the drawn BSP's solid, another BSP's: crate::bridge)
+    let lights = snapshot.lights.iter().filter(|light| {
+        light.definition_flags & LIGHT_CONTRAIL == 0 && !in_solid.0.contains(&(light.definition_index, light.object_index))
+    });
     let (mut used_points, mut used_spots) = (0, 0);
     for light in lights.chain(&projectile_lights).chain(&contrail_lights) {
         let near = snapshot.camera.as_ref().filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);

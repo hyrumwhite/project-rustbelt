@@ -556,6 +556,7 @@ struct LevelAssetParams<'w> {
     environment_materials: ResMut<'w, Assets<HaloEnvironmentMaterial>>,
     transparent_materials: ResMut<'w, Assets<HaloTransparentMaterial>>,
     sky_water: ResMut<'w, Assets<material::SkyWaterMaterial>>,
+    water_ripples: ResMut<'w, bevy_solarik::water_ripples::WaterRippleMaterials>,
     images: ResMut<'w, Assets<Image>>,
     inverse_bindposes: ResMut<'w, Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<'w, NeutralDetail>,
@@ -595,12 +596,15 @@ fn load_level(
 ) {
     let level_sky = sky::SkyLighting::from_map(&cache);
     let cache = std::sync::Arc::new(cache);
+    // (the last level's water panes' ripples)
+    params.water_ripples.0.clear();
     let mut assets = LevelAssets {
         meshes: &mut params.meshes,
         materials: &mut params.materials,
         environment_materials: &mut params.environment_materials,
         transparent_materials: &mut params.transparent_materials,
         sky_water: Some(&mut params.sky_water),
+        water_ripples: Some(&mut params.water_ripples),
         images: &mut params.images,
         inverse_bindposes: &mut params.inverse_bindposes,
         neutral_detail: params.neutral_detail.0.clone(),

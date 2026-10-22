@@ -281,6 +281,8 @@ pub struct LevelAssets<'a> {
     pub transparent_materials: &'a mut Assets<HaloTransparentMaterial>,
     /// A sky's water (where a level's sky is spawned).
     pub sky_water: Option<&'a mut Assets<crate::material::SkyWaterMaterial>>,
+    /// The ray-traced water panes' ripples (where a level's BSPs are).
+    pub water_ripples: Option<&'a mut bevy_solarik::water_ripples::WaterRippleMaterials>,
     pub images: &'a mut Assets<Image>,
     pub inverse_bindposes: &'a mut Assets<SkinnedMeshInverseBindposes>,
     /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
@@ -1887,7 +1889,7 @@ impl LevelBuilder {
         } else {
             let water = info.water?;
             let [r, g, b, _] = water.perpendicular_tint;
-            StandardMaterial {
+            let material = assets.materials.add(StandardMaterial {
                 base_color: Color::srgba(r, g, b, 1.0),
                 perceptual_roughness: 0.08,
                 reflectance: 0.5,
@@ -1896,7 +1898,37 @@ impl LevelBuilder {
                 cull_mode: None,
                 double_sided: true,
                 ..default()
+            });
+            // (its ripples, which Solarik bends the pane's normal by;
+            // HALO_RT_NO_WATER_RIPPLES=1 leaves it flat)
+            let (ripples, drifts, present) = crate::material::water_ripple_terms(&water);
+            let present = present && !std::env::var("HALO_RT_NO_WATER_RIPPLES").is_ok_and(|v| v == "1");
+            if present && let Some(registry) = assets.water_ripples.as_deref_mut() {
+                let mut map = |index: usize| {
+                    water
+                        .ripple_maps
+                        .and_then(|r| r.datum)
+                        .filter(|_| index < water.ripple_count)
+                        .and_then(|datum| self.textures.get(&self.cache, datum, water.ripples[index].map_index.max(0) as usize, false, assets.images))
+                        .unwrap_or_else(|| assets.flat_normal.clone())
+                };
+                let maps = [map(0), map(1), map(2), map(3)];
+                registry.0.insert(
+                    material.id(),
+                    bevy_solarik::water_ripples::WaterRipples {
+                        maps,
+                        scale: water.ripple_scale,
+                        drift: crate::material::water_ripple_drift(&water),
+                        ripples,
+                        drifts,
+                        levels: water.ripple_mipmap_levels.clamp(1, 4) as f32,
+                        fade: water.ripple_mipmap_fade_factor,
+                        lod_bias: water.ripple_mipmap_lod_bias,
+                        size: crate::material::WATER_BUMPMAP_SIZE,
+                    },
+                );
             }
+            return Some(material);
         };
         Some(assets.materials.add(material))
     }

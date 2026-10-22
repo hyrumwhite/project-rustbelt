@@ -523,32 +523,47 @@ pub struct SkyWaterParams {
     pub mipmaps: Vec4,
 }
 
+/// A water shader's ripples as rasterizer_water_build_bumpmap sums them:
+/// each one's repeats, offset (u, v) and weight in the sum, and its drift
+/// (texture units a second); and whether there are any.
+pub fn water_ripple_terms(water: &halo_map::shader::Water) -> ([Vec4; 4], [Vec2; 4], bool) {
+    let mut ripples = water.ripples;
+    for ripple in ripples.iter_mut().skip(water.ripple_count) {
+        *ripple = halo_map::shader::WaterRipple { repeats: 1, ..default() };
+    }
+    // (the game's: a pair with no contribution takes its second whole)
+    if ripples[0].contribution == 0.0 && ripples[1].contribution == 0.0 {
+        ripples[1].contribution = 1.0;
+    }
+    if ripples[2].contribution == 0.0 && ripples[3].contribution == 0.0 {
+        ripples[3].contribution = 1.0;
+    }
+    let total: f32 = ripples.iter().map(|r| r.contribution).sum();
+    let present = water.ripple_count > 0 && water.ripple_maps.is_some() && total > 0.0;
+    (
+        ripples.map(|r| Vec4::new(r.repeats.max(1) as f32, r.offset[0], r.offset[1], if total > 0.0 { r.contribution / total } else { 0.0 })),
+        ripples.map(|r| Vec2::new(r.angle.cos() * r.velocity, r.angle.sin() * r.velocity)),
+        present,
+    )
+}
+
+/// The sum's own drift (texture units a second).
+pub fn water_ripple_drift(water: &halo_map::shader::Water) -> Vec2 {
+    Vec2::new(water.ripple_angle.cos() * water.ripple_velocity, water.ripple_angle.sin() * water.ripple_velocity)
+}
+
+/// The game's ripple bump map's size (WATER_BUMPMAP_RESOLUTION): its levels
+/// of detail are measured as this texture's.
+pub const WATER_BUMPMAP_SIZE: f32 = 128.0;
+
 impl SkyWaterParams {
     pub fn new(water: &halo_map::shader::Water) -> Self {
-        let mut ripples = water.ripples;
-        for ripple in ripples.iter_mut().skip(water.ripple_count) {
-            *ripple = halo_map::shader::WaterRipple { repeats: 1, ..default() };
-        }
-        // (the game's: a pair with no contribution takes its second whole)
-        if ripples[0].contribution == 0.0 && ripples[1].contribution == 0.0 {
-            ripples[1].contribution = 1.0;
-        }
-        if ripples[2].contribution == 0.0 && ripples[3].contribution == 0.0 {
-            ripples[3].contribution = 1.0;
-        }
-        let total: f32 = ripples.iter().map(|r| r.contribution).sum();
-        let present = water.ripple_count > 0 && water.ripple_maps.is_some() && total > 0.0;
+        let (ripples, drifts, present) = water_ripple_terms(water);
+        let drift = water_ripple_drift(water);
         SkyWaterParams {
-            ripple: Vec4::new(
-                water.ripple_scale,
-                water.ripple_angle.cos() * water.ripple_velocity,
-                water.ripple_angle.sin() * water.ripple_velocity,
-                if present { 1.0 } else { 0.0 },
-            ),
-            ripples: ripples.map(|r| {
-                Vec4::new(r.repeats.max(1) as f32, r.offset[0], r.offset[1], if total > 0.0 { r.contribution / total } else { 0.0 })
-            }),
-            drifts: ripples.map(|r| Vec4::new(r.angle.cos() * r.velocity, r.angle.sin() * r.velocity, 0.0, 0.0)),
+            ripple: Vec4::new(water.ripple_scale, drift.x, drift.y, if present { 1.0 } else { 0.0 }),
+            ripples,
+            drifts: drifts.map(|d| d.extend(0.0).extend(0.0)),
             mipmaps: Vec4::new(
                 water.ripple_mipmap_levels.clamp(1, 4) as f32,
                 water.ripple_mipmap_fade_factor,

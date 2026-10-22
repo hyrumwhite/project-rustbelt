@@ -1922,7 +1922,7 @@ impl LevelBuilder {
             plasma: None,
             noise0: crate::material::neutral_volume(),
             noise1: crate::material::neutral_volume(),
-            fog: crate::fog::fog_layers(),
+            fog: if sky { crate::fog::no_fog_layers() } else { crate::fog::fog_layers() },
         };
         // a numeric counter's digit: its first map's every frame
         if transparent.flags & shader::TransparentInfo::NUMERIC != 0

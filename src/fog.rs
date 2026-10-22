@@ -209,6 +209,15 @@ pub fn fog_layers() -> Handle<ShaderBuffer> {
     FOG_LAYERS.get().cloned().unwrap_or_default()
 }
 
+pub(crate) static NO_FOG_LAYERS: std::sync::OnceLock<Handle<ShaderBuffer>> = std::sync::OnceLock::new();
+
+/// A fog buffer that stays empty: the sky's layers', which the game draws
+/// unfogged (bridged, the sky took the full fog at its distance, ~100 km,
+/// and a30's clouds, ring and sea went grey).
+pub fn no_fog_layers() -> Handle<ShaderBuffer> {
+    NO_FOG_LAYERS.get().cloned().unwrap_or_default()
+}
+
 /// The latest frame's fog onto the camera.
 fn follow_fog(
     mut commands: Commands,

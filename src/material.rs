@@ -49,6 +49,9 @@ impl Plugin for HaloMaterialsPlugin {
         let fog = bevy::render::storage::ShaderBuffer::new(vec![Vec4::ZERO; 5], RenderAssetUsages::default());
         let fog = app.world_mut().resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>().add(fog);
         let _ = crate::fog::FOG_LAYERS.set(fog);
+        let none = bevy::render::storage::ShaderBuffer::new(vec![Vec4::ZERO; 5], RenderAssetUsages::default());
+        let none = app.world_mut().resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>().add(none);
+        let _ = crate::fog::NO_FOG_LAYERS.set(none);
     }
 }
 

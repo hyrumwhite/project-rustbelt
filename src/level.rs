@@ -279,6 +279,8 @@ pub struct LevelAssets<'a> {
     pub materials: &'a mut Assets<StandardMaterial>,
     pub environment_materials: &'a mut Assets<HaloEnvironmentMaterial>,
     pub transparent_materials: &'a mut Assets<HaloTransparentMaterial>,
+    /// A sky's water (where a level's sky is spawned).
+    pub sky_water: Option<&'a mut Assets<crate::material::SkyWaterMaterial>>,
     pub images: &'a mut Assets<Image>,
     pub inverse_bindposes: &'a mut Assets<SkinnedMeshInverseBindposes>,
     /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
@@ -755,6 +757,56 @@ impl LevelBuilder {
                 let Some(shader_ref) = model.shaders.get(part.shader_index.max(0) as usize).copied() else { continue };
                 let Some(info) = shader::shader_info(&self.cache, shader_ref)? else { continue };
                 let depth_bias = SKY_BIAS + layer as f32 * SKY_LAYER_BIAS;
+                // (a water shader: its reflection cube map, see SkyWaterMaterial)
+                if let Some(sky_water) = assets.sky_water.as_deref_mut()
+                    && let Some(reflection) = info
+                        .water
+                        .as_ref()
+                        .and_then(|w| w.reflection_map)
+                        .and_then(|r| r.datum)
+                        .and_then(|datum| crate::material::cube_map_image(&self.cache, datum))
+                {
+                    let water = info.water.as_ref().expect("a water shader");
+                    // (each ripple's bump map, from the ripple maps by its index)
+                    let mut ripple = |index: usize| {
+                        let map = water.ripples[index].map_index.max(0) as usize;
+                        water
+                            .ripple_maps
+                            .and_then(|r| r.datum)
+                            .filter(|_| index < water.ripple_count)
+                            .and_then(|datum| self.textures.get(&self.cache, datum, map, false, assets.images))
+                            .unwrap_or_else(|| assets.flat_normal.clone())
+                    };
+                    let ripples = [ripple(0), ripple(1), ripple(2), ripple(3)];
+                    let [ripple0, ripple1, ripple2, ripple3] = ripples;
+                    let material = sky_water.add(crate::material::SkyWaterMaterial {
+                        reflection: assets.images.add(reflection),
+                        params: crate::material::SkyWaterParams::new(water),
+                        ripple0,
+                        ripple1,
+                        ripple2,
+                        ripple3,
+                        depth_bias,
+                    });
+                    let vertices = part.vertices.iter().map(|v| SourceVertex {
+                        position: v.position.map(|c| c * sky_scale() / METERS_PER_WORLD_UNIT),
+                        normal: v.normal,
+                        binormal: v.binormal,
+                        tangent: v.tangent,
+                        texcoord: v.texcoord,
+                    });
+                    let mesh = assets.meshes.add(build_mesh(vertices, &part.indices, [1.0, 1.0]));
+                    commands.spawn((
+                        Name::new(format!("{} layer {layer}", info.name)),
+                        Mesh3d(mesh),
+                        MeshMaterial3d(material),
+                        NotShadowCaster,
+                        Transform::default(),
+                        ChildOf(dome),
+                    ));
+                    layer += 1;
+                    continue;
+                }
                 if let Some(material) = self.transparent_material(&info, depth_bias, true, assets) {
                     let vertices = part.vertices.iter().map(|v| SourceVertex {
                         position: v.position.map(|c| c * sky_scale() / METERS_PER_WORLD_UNIT),

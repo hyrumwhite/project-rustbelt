@@ -3575,6 +3575,14 @@ pub mod shader_transparent_water_definition {
     pub const VIEW_PARALLEL_TINT_COLOR: usize = 0x7c;
     pub const RIPPLE_SCALE: usize = 0xc4;
     pub const RIPPLE_MAPS: usize = 0xc8;
+    pub const FLAGS: usize = 0x28;
+    pub const REFLECTION_MAP: usize = 0x9c;
+    pub const RIPPLE_ANIMATION_ANGLE: usize = 0xbc;
+    pub const RIPPLE_ANIMATION_VELOCITY: usize = 0xc0;
+    pub const RIPPLES: usize = 0x124;
+    pub const RIPPLE_MIPMAP_LEVELS: usize = 0xd8;
+    pub const RIPPLE_MIPMAP_FADE_FACTOR: usize = 0xdc;
+    pub const RIPPLE_MIPMAP_LOD_BIAS: usize = 0xe0;
 }
 
 pub mod sky_definition {

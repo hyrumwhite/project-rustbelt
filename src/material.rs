@@ -24,10 +24,12 @@ impl Plugin for HaloMaterialsPlugin {
         embedded_asset!(app, "shaders/halo_environment.wesl");
         embedded_asset!(app, "shaders/halo_transparent.wesl");
         embedded_asset!(app, "shaders/glass_sky_mask.wesl");
+        embedded_asset!(app, "shaders/sky_water.wesl");
         app.add_plugins((
             MaterialPlugin::<HaloEnvironmentMaterial>::default(),
             MaterialPlugin::<HaloTransparentMaterial>::default(),
             MaterialPlugin::<GlassSkyMask>::default(),
+            MaterialPlugin::<SkyWaterMaterial>::default(),
         ));
         let mut masks = app.world_mut().resource_mut::<Assets<GlassSkyMask>>();
         let far = masks.add(GlassSkyMask { distance: GLASS_SKY_MASK_DISTANCE });
@@ -478,6 +480,135 @@ pub struct GlassSkyMask {
     /// The depth written (metres), or 0 for the pane's own.
     #[uniform(0)]
     pub distance: f32,
+}
+
+/// A sky's water (`shaders/sky_water.wesl`): its reflection cube map along
+/// the view's reflection, bent by its ripples, opaque, as the game draws a
+/// water shader on a sky model. Drawn among the sky's layers, in their order.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+pub struct SkyWaterMaterial {
+    #[texture(0, dimension = "cube")]
+    #[sampler(1)]
+    pub reflection: Handle<Image>,
+    #[uniform(2)]
+    pub params: SkyWaterParams,
+    /// Each ripple's bump map (a flat normal for none).
+    #[texture(3)]
+    #[sampler(4)]
+    pub ripple0: Handle<Image>,
+    #[texture(5)]
+    #[sampler(6)]
+    pub ripple1: Handle<Image>,
+    #[texture(7)]
+    #[sampler(8)]
+    pub ripple2: Handle<Image>,
+    #[texture(9)]
+    #[sampler(10)]
+    pub ripple3: Handle<Image>,
+    pub depth_bias: f32,
+}
+
+/// A sky water's ripples, as rasterizer_xbox_water.c moves them.
+#[derive(ShaderType, Reflect, Debug, Clone, Copy, Default)]
+pub struct SkyWaterParams {
+    /// The ripples' sum: its tiling, its drift (texture units a second, u
+    /// and v), and 1 if it has any.
+    pub ripple: Vec4,
+    /// Each ripple: its repeats, its offset (u, v) and its weight.
+    pub ripples: [Vec4; 4],
+    /// Each ripple's drift (texture units a second, u and v).
+    pub drifts: [Vec4; 4],
+    /// The sum's mip fade: its levels (at most four), its fade factor and
+    /// its level-of-detail bias.
+    pub mipmaps: Vec4,
+}
+
+impl SkyWaterParams {
+    pub fn new(water: &halo_map::shader::Water) -> Self {
+        let mut ripples = water.ripples;
+        for ripple in ripples.iter_mut().skip(water.ripple_count) {
+            *ripple = halo_map::shader::WaterRipple { repeats: 1, ..default() };
+        }
+        // (the game's: a pair with no contribution takes its second whole)
+        if ripples[0].contribution == 0.0 && ripples[1].contribution == 0.0 {
+            ripples[1].contribution = 1.0;
+        }
+        if ripples[2].contribution == 0.0 && ripples[3].contribution == 0.0 {
+            ripples[3].contribution = 1.0;
+        }
+        let total: f32 = ripples.iter().map(|r| r.contribution).sum();
+        let present = water.ripple_count > 0 && water.ripple_maps.is_some() && total > 0.0;
+        SkyWaterParams {
+            ripple: Vec4::new(
+                water.ripple_scale,
+                water.ripple_angle.cos() * water.ripple_velocity,
+                water.ripple_angle.sin() * water.ripple_velocity,
+                if present { 1.0 } else { 0.0 },
+            ),
+            ripples: ripples.map(|r| {
+                Vec4::new(r.repeats.max(1) as f32, r.offset[0], r.offset[1], if total > 0.0 { r.contribution / total } else { 0.0 })
+            }),
+            drifts: ripples.map(|r| Vec4::new(r.angle.cos() * r.velocity, r.angle.sin() * r.velocity, 0.0, 0.0)),
+            mipmaps: Vec4::new(
+                water.ripple_mipmap_levels.clamp(1, 4) as f32,
+                water.ripple_mipmap_fade_factor,
+                water.ripple_mipmap_lod_bias,
+                0.0,
+            ),
+        }
+    }
+}
+
+impl Material for SkyWaterMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://halo_rt/shaders/sky_water.wesl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn depth_bias(&self) -> f32 {
+        self.depth_bias
+    }
+
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = None;
+        Ok(())
+    }
+}
+
+/// A cube map bitmap's first bitmap as a cube texture (sRGB), its faces in
+/// Direct3D's order, which is wgpu's.
+pub fn cube_map_image(cache: &halo_map::CacheFile, datum: u32) -> Option<Image> {
+    let bitmap = halo_map::bitmap::bitmaps(cache, datum).ok()?.into_iter().next()?;
+    let faces = bitmap.decode_cube_faces_rgba8(cache).ok()?;
+    let data: Vec<u8> = faces.into_iter().flat_map(|face| face.data).collect();
+    let mut image = Image::new(
+        Extent3d { width: bitmap.width as u32, height: bitmap.height as u32, depth_or_array_layers: 6 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_view_descriptor = Some(bevy::render::render_resource::TextureViewDescriptor {
+        dimension: Some(bevy::render::render_resource::TextureViewDimension::Cube),
+        ..default()
+    });
+    Some(image)
 }
 
 /// The level's panes' mask distance (metres): beyond any level, nearer than

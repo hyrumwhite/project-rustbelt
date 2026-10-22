@@ -522,6 +522,38 @@ pub struct Water {
     /// Tint seen head-on and at grazing angles (RGBA).
     pub perpendicular_tint: [f32; 4],
     pub parallel_tint: [f32; 4],
+    /// The cube map the surface reflects (in the world's axes).
+    pub reflection_map: Option<TagRef>,
+    pub flags: u16,
+    /// The ripples' bump maps (a bitmap each, by [`WaterRipple::map_index`]).
+    pub ripple_maps: Option<TagRef>,
+    /// Their sum's tiling over the surface, and its drift (radians, world
+    /// units a second).
+    pub ripple_scale: f32,
+    pub ripple_angle: f32,
+    pub ripple_velocity: f32,
+    /// Their sum's mip levels (the game makes up to four), each faded toward
+    /// flat by its level over the last, times the fade factor; and the bias
+    /// the game takes from its level of detail.
+    pub ripple_mipmap_levels: i16,
+    pub ripple_mipmap_fade_factor: f32,
+    pub ripple_mipmap_lod_bias: f32,
+    /// The first [`Self::ripple_count`] are the tag's.
+    pub ripples: [WaterRipple; 4],
+    pub ripple_count: usize,
+}
+
+/// One of a water shader's (up to four) ripples (`water_ripple`,
+/// rasterizer_xbox_water.c): a bump map tiled and drifting, weighted by its
+/// contribution in their sum.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WaterRipple {
+    pub contribution: f32,
+    pub angle: f32,
+    pub velocity: f32,
+    pub offset: [f32; 2],
+    pub repeats: i16,
+    pub map_index: i16,
 }
 
 fn argb(p: crate::Ptr<'_>, offset: usize) -> Result<[f32; 4]> {
@@ -856,9 +888,34 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         use layout::shader_transparent_water_definition as w;
         info.water = Some(Water {
             base_map: present(root.reference(w::BASE_MAP)?),
+            reflection_map: present(root.reference(w::REFLECTION_MAP)?),
+            flags: root.u16(w::FLAGS)?,
+            ripple_maps: present(root.reference(w::RIPPLE_MAPS)?),
+            ripple_scale: root.f32(w::RIPPLE_SCALE)?,
+            ripple_angle: root.f32(w::RIPPLE_ANIMATION_ANGLE)?,
+            ripple_velocity: root.f32(w::RIPPLE_ANIMATION_VELOCITY)?,
+            ripple_mipmap_levels: root.i16(w::RIPPLE_MIPMAP_LEVELS)?,
+            ripple_mipmap_fade_factor: root.f32(w::RIPPLE_MIPMAP_FADE_FACTOR)?,
+            ripple_mipmap_lod_bias: root.f32(w::RIPPLE_MIPMAP_LOD_BIAS)?,
+            ripples: Default::default(),
+            ripple_count: 0,
             perpendicular_tint: argb(root, w::VIEW_PERPENDICULAR_TINT_COLOR)?,
             parallel_tint: argb(root, w::VIEW_PARALLEL_TINT_COLOR)?,
         });
+        // (water_ripple: 0x4C bytes; offsets from rasterizer_xbox_water.c)
+        if let Some(water) = info.water.as_mut() {
+            for (slot, r) in water.ripples.iter_mut().zip(root.block(w::RIPPLES, 0x4c)?.iter()) {
+                *slot = WaterRipple {
+                    contribution: r.f32(0x4)?,
+                    angle: r.f32(0x28)?,
+                    velocity: r.f32(0x2c)?,
+                    offset: [r.f32(0x30)?, r.f32(0x34)?],
+                    repeats: r.i16(0x38)?,
+                    map_index: r.i16(0x3a)?,
+                };
+                water.ripple_count += 1;
+            }
+        }
     }
     if shader_type == ShaderType::Meter {
         info.meter = Some(MeterInfo::read(root)?);

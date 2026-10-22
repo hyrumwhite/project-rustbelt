@@ -475,6 +475,7 @@ fn sync_objects(
         materials: &mut materials,
         environment_materials: &mut environment_materials,
         transparent_materials: &mut transparent_materials,
+        sky_water: None,
         images: &mut images,
         inverse_bindposes: &mut inverse_bindposes,
         neutral_detail: neutral_detail.0.clone(),

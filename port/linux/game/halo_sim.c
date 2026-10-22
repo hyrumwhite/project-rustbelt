@@ -66,6 +66,7 @@ bit for bit; differences are counted and the first few logged.
 #include "memory/data.h"
 unsigned char const *transition_function_table_get(short function_type); /* periodic_functions.c */
 #include "render/render.h"
+#include "tag_files/tag_files.h"
 #include "tag_files/tag_groups.h"
 #include "bevy_bridge.h"
 #include "halo_sim.h"
@@ -11395,6 +11396,25 @@ int halo_sim_hs_begin(long operation, long expression, long *result, int *checki
 			object_set_position(player_get(player_index)->unit_index, &position, &forward, NULL);
 			player_control_set_facing(0, &forward);
 			platform_log("halo_sim: the player moved to %f,%f,%f", position.x, position.y, position.z);
+		}
+		/* (and HALO_SIM_POWER_DEVICES: each machine whose tag's name holds
+		it powered on, as a10's alarm lights later in the level) */
+		if (getenv("HALO_SIM_POWER_DEVICES"))
+		{
+			struct object_iterator iterator;
+			struct object_datum *object;
+			long count = 0;
+
+			object_iterator_new(&iterator, _object_mask_machine, 0);
+			while ((object = (struct object_datum *)object_iterator_next(&iterator)) != NULL)
+			{
+				if (strstr(tag_get_name(object->definition_index), getenv("HALO_SIM_POWER_DEVICES")))
+				{
+					device_set_power(iterator.index, 1.0f);
+					count++;
+				}
+			}
+			platform_log("halo_sim: %d machines powered on", count);
 		}
 		/* (then HALO_SIM_TELEPORT_COMMAND, if given) */
 		if (getenv("HALO_SIM_TELEPORT_COMMAND"))

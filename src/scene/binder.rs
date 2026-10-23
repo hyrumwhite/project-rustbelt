@@ -73,23 +73,6 @@ pub struct SolarikSkyLight {
     pub intensity: f32,
 }
 
-/// Each emissive material's emissive texture's mean (linear luminance, 0 to
-/// 1), where the application knows it: light selection weighs an emitter by
-/// its emissive factor and area, as if its texture were white all over; a
-/// surface lit in small spots (a ship's hull, its windows lit) took most of
-/// the samples from the lights that light a room. Pick weights only: the
-/// sampled emission and its PDF stay exact.
-#[derive(Resource, ExtractResource, Clone, Default, Debug)]
-#[extract_app(bevy_render::RenderApp)]
-pub struct SolarikEmissionAverages(pub HashMap<AssetId<StandardMaterial>, f32>);
-
-/// (`SOLARIK_EMISSION_AVERAGES=0`: emitters weighed as before, by their
-/// factor and area alone)
-fn use_emission_averages() -> bool {
-    static USE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *USE.get_or_init(|| !std::env::var("SOLARIK_EMISSION_AVERAGES").is_ok_and(|v| v == "0"))
-}
-
 /// Where rays see only instances with [`super::RaytracingMask::NEAR`]: those
 /// leaving a point within `radius` of `centre` (world space, metres; none
 /// with a radius of zero). A first-person view's centre is the camera: its
@@ -446,7 +429,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     ),
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
-    (dfg_lut, time, emission_averages): (Res<DfgLut>, Res<bevy_time::Time>, Res<SolarikEmissionAverages>),
+    (dfg_lut, time): (Res<DfgLut>, Res<bevy_time::Time>),
     (sky_light, near_rays, ray_fog): (Res<SolarikSkyLight>, Res<SolarikNearRays>, Res<SolarikRayFog>),
     (alpha_testing, ray_settings, planet, atmosphere, rings, readiness, canopy): (
         Res<SolarikAlphaTesting>,
@@ -546,7 +529,6 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     let blas_changed = scene_cache.blas_generation != blas_manager.generation;
     scene_cache.blas_generation = blas_manager.generation;
     let resources_changed = blas_changed
-        || emission_averages.is_changed()
         || mesh_allocator.is_changed()
         || material_assets.is_changed()
         || collimated.is_changed()
@@ -1053,7 +1035,6 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             // material factor is a power estimate; PDFs remain exact.
             light_fluxes.push(
                 luminance(material.emissive)
-                    * f64::from(emission_averages.0.get(&input.material).copied().filter(|_| use_emission_averages()).unwrap_or(1.0))
                     * blas_manager.mesh_world_area(&mesh, transform)
                     * f64::from(PI)
                     * if material.emission_cone.w > 0.0 {

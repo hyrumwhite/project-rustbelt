@@ -25,7 +25,7 @@ mod tlas;
 mod types;
 
 use bevy_shader::load_shader_library;
-pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikEmissionAverages, SolarikNearRays, SolarikRayFog, SolarikSkyLight};
+pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSkyLight};
 pub use ray_settings::SolarikRaySettings;
 pub use types::{RaytracingMask, RaytracingMesh3d};
 
@@ -87,7 +87,6 @@ impl Plugin for RaytracingScenePlugin {
         app.init_resource::<SolarikAlphaTesting>();
         app.init_resource::<SolarikRaySettings>();
         app.init_resource::<SolarikDeformableMeshes>();
-        app.init_resource::<SolarikEmissionAverages>();
     }
 
     fn finish(&self, app: &mut App) {
@@ -115,7 +114,6 @@ impl Plugin for RaytracingScenePlugin {
             ExtractResourcePlugin::<SolarikAlphaTesting>::default(),
             ExtractResourcePlugin::<SolarikRaySettings>::default(),
             ExtractResourcePlugin::<SolarikDeformableMeshes>::default(),
-            ExtractResourcePlugin::<SolarikEmissionAverages>::default(),
         ));
 
         let render_app = app.sub_app_mut(RenderApp);
@@ -130,7 +128,6 @@ impl Plugin for RaytracingScenePlugin {
         render_app.init_resource::<SolarikAlphaTesting>();
         render_app.init_resource::<SolarikRaySettings>();
         render_app.init_resource::<SolarikDeformableMeshes>();
-        render_app.init_resource::<SolarikEmissionAverages>();
 
         render_app
             .init_gpu_resource::<BlasManager>()

@@ -15,6 +15,7 @@
 
 mod bridge;
 mod bundle;
+mod cpu_times;
 mod decals;
 mod effects;
 mod lens_flares;
@@ -405,7 +406,7 @@ fn main() -> AppExit {
         app.add_systems(PostUpdate, log_world_cache);
     }
     if std::env::var_os("HALO_RT_GPU_LOG").is_some() {
-        app.add_systems(Last, log_gpu_times);
+        app.add_systems(Last, log_gpu_times).add_plugins(cpu_times::CpuTimesPlugin);
     }
     if args.dolly.is_some() {
         app.add_systems(Update, dolly_camera);

@@ -300,3 +300,47 @@ fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Resul
         }
     }
 }
+
+/// A texture's mean linear luminance (0 to 1) over its first level, from its
+/// pixels while the main world still holds them (just after it is made):
+/// an emissive texture's, for Solarik's light selection
+/// (`SolarikEmissionAverages`). Block-compressed ones by each block's two
+/// endpoint colours, enough for a weight.
+pub fn mean_linear_luminance(image: &Image) -> Option<f32> {
+    let data = image.data.as_ref()?;
+    let format = image.texture_descriptor.format;
+    let size = image.texture_descriptor.size;
+    let (width, height) = (size.width as usize, size.height as usize);
+    let srgb = format.is_srgb();
+    let decode = |c: f32| if srgb { if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) } } else { c };
+    let luminance = |r: f32, g: f32, b: f32| 0.2126 * decode(r) + 0.7152 * decode(g) + 0.0722 * decode(b);
+    let (mut sum, mut count) = (0.0f64, 0usize);
+    match format {
+        TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb => {
+            for pixel in data.chunks_exact(4).take(width * height) {
+                sum += f64::from(luminance(pixel[0] as f32 / 255.0, pixel[1] as f32 / 255.0, pixel[2] as f32 / 255.0));
+                count += 1;
+            }
+        }
+        TextureFormat::Bc1RgbaUnorm | TextureFormat::Bc1RgbaUnormSrgb
+        | TextureFormat::Bc2RgbaUnorm | TextureFormat::Bc2RgbaUnormSrgb
+        | TextureFormat::Bc3RgbaUnorm | TextureFormat::Bc3RgbaUnormSrgb => {
+            let (block, colour_at) = match format {
+                TextureFormat::Bc1RgbaUnorm | TextureFormat::Bc1RgbaUnormSrgb => (8, 0),
+                _ => (16, 8),
+            };
+            let blocks = width.div_ceil(4) * height.div_ceil(4);
+            let rgb565 = |v: u16| ((v >> 11) as f32 / 31.0, ((v >> 5) & 63) as f32 / 63.0, (v & 31) as f32 / 31.0);
+            for chunk in data.chunks_exact(block).take(blocks) {
+                for end in 0..2 {
+                    let at = colour_at + end * 2;
+                    let (r, g, b) = rgb565(u16::from_le_bytes([chunk[at], chunk[at + 1]]));
+                    sum += f64::from(luminance(r, g, b));
+                    count += 1;
+                }
+            }
+        }
+        _ => return None,
+    }
+    (count > 0).then(|| (sum / count as f64) as f32)
+}

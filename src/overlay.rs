@@ -140,7 +140,22 @@ fn read_overlay(
     mut materials: ResMut<Assets<OverlayMaterial>>,
     mut stats: ResMut<OverlayStats>,
     mut buffer: Local<Vec<u8>>,
+    mut looks: Local<Option<(std::time::Instant, f32)>>,
 ) {
+    // how often this looks (microseconds, smoothed), for the game's pacing
+    let now = std::time::Instant::now();
+    let interval = match *looks {
+        Some((last, interval)) => {
+            let since = (now - last).as_secs_f32() * 1e6;
+            // (a hitch, such as a load, isn't taken as the pace)
+            if since < 100_000.0 { interval + (since - interval) / 8.0 } else { interval }
+        }
+        None => 0.0,
+    };
+    *looks = Some((now, interval));
+    if interval > 0.0 && paced() {
+        link.bridge.note_overlay_look(interval.round() as u32);
+    }
     let Some(overlay) = link.bridge.read_overlay(&mut buffer) else { return };
     let size = (overlay.width, overlay.height);
     if picture.size != size {
@@ -165,6 +180,12 @@ fn read_overlay(
     }
     stats.shown += 1;
     stats.size = size;
+}
+
+/// Whether the game's frames are paced by this one's looks for an overlay
+/// (`HALO_RT_NO_PACE=1`: drawn as the display allows, as before 2026-10-23).
+pub fn paced() -> bool {
+    std::env::var_os("HALO_RT_NO_PACE").is_none()
 }
 
 #[derive(Resource, Default)]

@@ -1093,6 +1093,28 @@ pub struct BipedUpdate {
 const _: () = assert!(std::mem::size_of::<ProjectileState>() == 92);
 const _: () = assert!(std::mem::size_of::<ProjectileRecord>() == 228 + 16 + 16 + 4 + 44 * 4);
 
+/// The performance counter in microseconds (wrapping), as the game's
+/// `overlay_microseconds` reads it.
+#[cfg(windows)]
+fn performance_microseconds() -> Option<u32> {
+    unsafe extern "system" {
+        fn QueryPerformanceCounter(count: *mut i64) -> i32;
+        fn QueryPerformanceFrequency(frequency: *mut i64) -> i32;
+    }
+    let (mut counter, mut frequency) = (0i64, 0i64);
+    // SAFETY: both write one i64
+    if unsafe { QueryPerformanceCounter(&mut counter) == 0 || QueryPerformanceFrequency(&mut frequency) == 0 } || frequency <= 0 {
+        return None;
+    }
+    let (counter, frequency) = (counter as u64, frequency as u64);
+    Some(((counter / frequency) * 1_000_000 + (counter % frequency) * 1_000_000 / frequency) as u32)
+}
+
+#[cfg(not(windows))]
+fn performance_microseconds() -> Option<u32> {
+    None
+}
+
 #[repr(C)]
 struct OverlayHeader {
     sequence: u32,
@@ -1117,7 +1139,10 @@ struct Shared {
     frames: [Frame; FRAMES],
     overlay_enabled: u32,
     latest_overlay: u32,
-    overlay_reserved: [u32; 2],
+    /// When the viewer last looked for an overlay and how often it looks
+    /// (`Bridge::note_overlay_look`).
+    overlay_viewer_looked: u32,
+    overlay_viewer_interval: u32,
     overlays: [OverlayHeader; OVERLAYS],
     projectile_record_count: u32,
     random_direction_count: u32,
@@ -1304,6 +1329,21 @@ impl Bridge {
             )));
         }
         Ok(())
+    }
+
+    /// Tells the game the viewer is looking for an overlay now, and how often
+    /// it looks (microseconds): the game starts each frame just soon enough
+    /// to share its overlay before the next look, rather than drawing frames
+    /// the viewer never shows. (Windows only: both sides read the system's
+    /// performance counter.)
+    pub fn note_overlay_look(&mut self, interval_microseconds: u32) {
+        let Some(now) = performance_microseconds() else { return };
+        // SAFETY: as in write_input; the game only reads these words
+        unsafe {
+            std::ptr::write_volatile(&raw const (*self.shared).overlay_viewer_looked as *mut u32, now);
+            std::ptr::write_volatile(&raw const (*self.shared).overlay_viewer_interval as *mut u32, interval_microseconds);
+        }
+        fence(Ordering::Release);
     }
 
     /// Forwards input to the game (see [`Input`]).

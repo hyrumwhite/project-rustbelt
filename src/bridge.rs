@@ -96,6 +96,12 @@ pub fn launch_game(
     if overlay {
         let (width, height) = crate::overlay::WINDOW_SIZE;
         command.env("HALO_BEVY_BRIDGE_OVERLAY", "1").env("HALO_WINDOW_SIZE", format!("{width}x{height}"));
+        // its frames paced by the viewer's looks for an overlay
+        // (`Bridge::note_overlay_look`), not by the display: a vsynced swap
+        // waits as long as a frame of its own
+        if crate::overlay::paced() {
+            command.env("HALO_NO_VSYNC", "1");
+        }
         // (glass and water: the viewer's, ray traced)
         if viewer_glass {
             command.env("HALO_BEVY_BRIDGE_VIEWER_GLASS", "1");

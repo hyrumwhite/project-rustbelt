@@ -2033,9 +2033,16 @@ impl LevelBuilder {
         let mut params = HaloCombinerParams::from_program(&program);
         let mut maps: [Handle<Image>; 4] = std::array::from_fn(|_| assets.neutral_detail.clone());
         let mut present = 0;
+        // a cube map first stage (reflection, object or viewer centred): its
+        // cube map, sampled by the direction its type takes (a10's command
+        // displays: the screens, which its cube map holds)
+        let mut cube = None;
         for (stage, slot) in transparent.maps.iter().enumerate().take(4) {
-            // a cube map first stage (reflections) is not drawn yet
             if stage == 0 && transparent.first_map_type != 0 {
+                if let Some(image) = slot.as_ref().and_then(|map| map.bitmap.datum).and_then(|datum| crate::material::cube_map_image(&self.cache, datum)) {
+                    cube = Some(assets.images.add(image));
+                    present |= 1;
+                }
                 continue;
             }
             let Some(map) = slot else { continue };
@@ -2079,8 +2086,13 @@ impl LevelBuilder {
             plasma: None,
             noise0: crate::material::neutral_volume(),
             noise1: crate::material::neutral_volume(),
+            cube0: crate::material::neutral_cube(),
             fog: if sky { crate::fog::no_fog_layers() } else { crate::fog::fog_layers() },
         };
+        if let Some(cube) = cube {
+            material.cube0 = cube;
+            material.params.fade.z = f32::from(transparent.first_map_type);
+        }
         // a numeric counter's digit: its first map's every frame
         if transparent.flags & shader::TransparentInfo::NUMERIC != 0
             && let Some(Some(map)) = transparent.maps.first()
@@ -2135,6 +2147,7 @@ impl LevelBuilder {
             map3: assets.neutral_detail.clone(),
             noise0,
             noise1,
+            cube0: crate::material::neutral_cube(),
             fog: crate::fog::fog_layers(),
             alpha_mode: AlphaMode::Blend,
             depth_bias: 0.0,
@@ -2187,6 +2200,7 @@ impl LevelBuilder {
             plasma: None,
             noise0: crate::material::neutral_volume(),
             noise1: crate::material::neutral_volume(),
+            cube0: crate::material::neutral_cube(),
             fog: crate::fog::fog_layers(),
         };
         let periodic = periodic_function;

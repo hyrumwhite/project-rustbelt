@@ -58,6 +58,8 @@ struct HaloFogLayers {
 @group(constants::MATERIAL_BIND_GROUP) @binding(11) var noise1: texture_3d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(12) var noise1_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(13) var<storage, read> fog_layers: HaloFogLayers;
+@group(constants::MATERIAL_BIND_GROUP) @binding(14) var cube0: texture_cube<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(15) var cube0_sampler: sampler;
 
 fn word(words: array<vec4<u32>, 2>, index: u32) -> u32 {
     return words[index / 4u][index % 4u];
@@ -83,6 +85,22 @@ fn first_map_uv(in: VertexOutput) -> vec2<f32> {
         uv *= max(dot(in.world_position.xyz - view.world_position, forward), 0.0) / METERS_PER_WORLD_UNIT;
     }
     return uv;
+}
+
+// a cube map first stage's direction, in the game's axes (Bevy's (x, y, z)
+// is its (x, -z, y)): the view reflected about the surface (type 1), from
+// the object's centre (2, taken as the surface's normal), or the view's own
+// (3)
+fn first_map_direction(in: VertexOutput) -> vec3<f32> {
+    let incident = normalize(in.world_position.xyz - view.world_position);
+    let normal = normalize(in.world_normal);
+    var d = reflect(incident, normal);
+    if combiner.fade.z > 2.5 {
+        d = incident;
+    } else if combiner.fade.z > 1.5 {
+        d = normal;
+    }
+    return vec3(d.x, -d.z, d.y);
 }
 
 // a 16-texel density texture's coordinate as the texel it falls on
@@ -217,7 +235,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         registers[i] = vec4<f32>(0.0);
     }
     let present = combiner.modes.y;
-    if (present & 1u) != 0u { registers[8] = to_gamma(textureSample(map0, map0_sampler, uv_for(0u, first_map_uv(in)))); }
+    if (present & 1u) != 0u {
+        if combiner.fade.z > 0.5 {
+            registers[8] = to_gamma(textureSample(cube0, cube0_sampler, first_map_direction(in)));
+        } else {
+            registers[8] = to_gamma(textureSample(map0, map0_sampler, uv_for(0u, first_map_uv(in))));
+        }
+    }
     if (present & 2u) != 0u { registers[9] = to_gamma(textureSample(map1, map1_sampler, uv_for(1u, in.uv))); }
     if (present & 4u) != 0u { registers[10] = to_gamma(textureSample(map2, map2_sampler, uv_for(2u, in.uv))); }
     if (present & 8u) != 0u { registers[11] = to_gamma(textureSample(map3, map3_sampler, uv_for(3u, in.uv))); }

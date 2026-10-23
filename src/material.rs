@@ -49,6 +49,19 @@ impl Plugin for HaloMaterialsPlugin {
         );
         let volume = app.world_mut().resource_mut::<Assets<Image>>().add(volume);
         let _ = NEUTRAL_VOLUME.set(volume);
+        let mut cube = Image::new(
+            bevy::render::render_resource::Extent3d { width: 1, height: 1, depth_or_array_layers: 6 },
+            bevy::render::render_resource::TextureDimension::D2,
+            vec![0; 4 * 6],
+            bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+            bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        );
+        cube.texture_view_descriptor = Some(bevy::render::render_resource::TextureViewDescriptor {
+            dimension: Some(bevy::render::render_resource::TextureViewDimension::Cube),
+            ..default()
+        });
+        let cube = app.world_mut().resource_mut::<Assets<Image>>().add(cube);
+        let _ = NEUTRAL_CUBE.set(cube);
         let fog = bevy::render::storage::ShaderBuffer::new(vec![Vec4::ZERO; 5], RenderAssetUsages::default());
         let fog = app.world_mut().resource_mut::<Assets<bevy::render::storage::ShaderBuffer>>().add(fog);
         let _ = crate::fog::FOG_LAYERS.set(fog);
@@ -280,6 +293,11 @@ pub struct HaloTransparentMaterial {
     /// surface is fogged by its own depth, as the game's are.
     #[storage(13, read_only)]
     pub fog: Handle<bevy::render::storage::ShaderBuffer>,
+    /// A cube map first stage (its type in `params.fade.z`: 1 reflection,
+    /// 2 object centred, 3 viewer centred; [`neutral_cube`] otherwise)
+    #[texture(14, dimension = "cube")]
+    #[sampler(15)]
+    pub cube0: Handle<Image>,
     pub alpha_mode: AlphaMode,
     /// Draws later (over) other transparent surfaces at the same distance.
     pub depth_bias: f32,
@@ -309,6 +327,13 @@ pub struct HaloTransparentMaterial {
 }
 
 static NEUTRAL_VOLUME: std::sync::OnceLock<Handle<Image>> = std::sync::OnceLock::new();
+static NEUTRAL_CUBE: std::sync::OnceLock<Handle<Image>> = std::sync::OnceLock::new();
+
+/// A 1-texel black cube map, for transparent materials without a cube map
+/// first stage.
+pub fn neutral_cube() -> Handle<Image> {
+    NEUTRAL_CUBE.get().cloned().unwrap_or_default()
+}
 
 /// A 1x1x1 white 3D texture, for the plasma noise bindings of the
 /// transparent surfaces that aren't plasma.

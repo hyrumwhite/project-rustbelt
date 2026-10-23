@@ -399,6 +399,8 @@ impl TransparentInfo {
     pub const DECAL: u8 = 1 << 1;
     pub const TWO_SIDED: u8 = 1 << 2;
     pub const FIRST_MAP_IN_SCREEN_SPACE: u8 = 1 << 3;
+    /// Left out of an object's effect (a self-occluding object's depth).
+    pub const IGNORE_EFFECT: u8 = 1 << 5;
     pub const SCALE_FIRST_MAP_WITH_DISTANCE: u8 = 1 << 6;
     pub const NUMERIC: u8 = 1 << 7;
 

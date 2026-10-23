@@ -17,6 +17,7 @@ defined in the port's tag schema for models.
 /* objects: every object group's definition starts with this */
 LAYOUT_SIZE(_object_definition)
 LAYOUT_OFFSET(_object_definition, type)
+LAYOUT_OFFSET(_object_definition, flags)
 LAYOUT_OFFSET(_object_definition, model)
 LAYOUT_OFFSET(_object_definition, collision_model)
 LAYOUT_OFFSET(_object_definition, animation_graph)

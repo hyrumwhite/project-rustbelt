@@ -182,6 +182,16 @@ pub fn modifier_shader(cache: &CacheFile, definition: TagRef) -> Result<Option<T
     Ok(shader.datum.map(|_| shader))
 }
 
+/// Whether an object definition's transparent parts occlude one another
+/// ("transparency self occludes", Cortana's): the game draws them all into
+/// the depth buffer first, then each where it is nearest (render_objects.c's
+/// modifier effect, rasterizer_xbox_transparent_geometry.c).
+pub fn transparency_self_occludes(cache: &CacheFile, definition: TagRef) -> Result<bool> {
+    let Some(datum) = definition.datum else { return Ok(false) };
+    let root = cache.tag_root(datum, crate::groups::OBJECT)?;
+    Ok(root.u16(layout::_object_definition::FLAGS)? & (1 << 1) != 0)
+}
+
 pub fn object_model(cache: &CacheFile, definition: TagRef) -> Result<Option<TagRef>> {
     let Some(datum) = definition.datum else { return Ok(None) };
     let root = cache.tag_root(datum, crate::groups::OBJECT)?;

@@ -16,7 +16,7 @@ use bevy::{
         Indices, PrimitiveTopology, VertexAttributeValues,
     },
     math::Affine3A,
-    platform::collections::HashMap,
+    platform::collections::{HashMap, HashSet},
     prelude::*,
 };
 use halo_map::{
@@ -552,6 +552,13 @@ pub struct LevelBuilder {
     /// The next model spawned's object's modifier shader (a shield's
     /// plasma), drawn over it.
     pub modifier_shader: Option<TagRef>,
+    /// Whether the next model spawned's object's transparent parts occlude
+    /// one another (`halo_map::objects::transparency_self_occludes`): each
+    /// gets a depth-only copy drawn just before it.
+    pub self_occluding: bool,
+    /// Transparent materials left out of an object's effect (their shaders'
+    /// IGNORE_EFFECT): no depth for a self-occluding object.
+    ignores_effect: HashSet<AssetId<HaloTransparentMaterial>>,
     pub stats: LevelStats,
 }
 
@@ -571,6 +578,8 @@ impl LevelBuilder {
             glass_sky_mask: None,
             first_person: false,
             modifier_shader: None,
+            self_occluding: false,
+            ignores_effect: HashSet::default(),
             textures: TextureCache::new(bc_supported),
             surfaces: HashMap::default(),
             permutation: 0,
@@ -993,6 +1002,20 @@ impl LevelBuilder {
                         Surface::Solid(_) => unreachable!(),
                     };
                     skinned(&mut drawn, skin.clone());
+                    // (a self-occluding object's part's depth, before it)
+                    if let (Surface::Transparent(material), true, Some(masks)) = (surface, self.self_occluding, &self.glass_sky_mask)
+                        && !self.ignores_effect.contains(&material.id())
+                    {
+                        let mut depth = commands.spawn((
+                            Name::new("self-occluding depth"),
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(masks.self_occlusion.clone()),
+                            bevy::light::NotShadowCaster,
+                            Transform::default(),
+                            ChildOf(parent),
+                        ));
+                        skinned(&mut depth, skin.clone());
+                    }
                     // (a pane's sky mask: the sky's layers not over it)
                     if let (Surface::Blended(_), Some(masks)) = (surface, &self.glass_sky_mask) {
                         let mask = if self.first_person { &masks.near } else { &masks.far };
@@ -2070,7 +2093,11 @@ impl LevelBuilder {
         if !transparent.animated() && !transparent.uses_object() {
             material.animation = None;
         }
-        Some(assets.transparent_materials.add(material))
+        let handle = assets.transparent_materials.add(material);
+        if transparent.flags & shader::TransparentInfo::IGNORE_EFFECT != 0 {
+            self.ignores_effect.insert(handle.id());
+        }
+        Some(handle)
     }
 
     /// A plasma shader's material (a shield's energy, its object's modifier

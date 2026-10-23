@@ -692,10 +692,14 @@ fn sync_objects(
             if object.flags & OBJECT_MODEL == 0 {
                 let definition = halo_map::TagRef { group: 0, datum: Some(object.definition_index) };
                 builder.modifier_shader = halo_map::objects::modifier_shader(&builder.cache, definition).ok().flatten();
+                // (Cortana's parts each shown where nearest: her eyelids
+                // over her eyes)
+                builder.self_occluding = halo_map::objects::transparency_self_occludes(&builder.cache, definition).unwrap_or(false);
             }
             let (root, nodes, skins) =
                 builder.spawn_animated_model(&mut commands, &model, raster, &change_colors, camouflaged(object), object.object_index, assets);
             builder.first_person = false;
+            builder.self_occluding = false;
             commands.entity(root).insert(object_functions(object));
             objects.tracked.insert(
                 object.object_index,

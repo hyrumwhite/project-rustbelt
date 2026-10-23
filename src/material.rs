@@ -32,9 +32,10 @@ impl Plugin for HaloMaterialsPlugin {
             MaterialPlugin::<SkyWaterMaterial>::default(),
         ));
         let mut masks = app.world_mut().resource_mut::<Assets<GlassSkyMask>>();
-        let far = masks.add(GlassSkyMask { distance: GLASS_SKY_MASK_DISTANCE });
-        let near = masks.add(GlassSkyMask { distance: 0.0 });
-        app.insert_resource(GlassSkyMaskMaterial { far, near });
+        let far = masks.add(GlassSkyMask { distance: GLASS_SKY_MASK_DISTANCE, ..default() });
+        let near = masks.add(GlassSkyMask { distance: 0.0, ..default() });
+        let self_occlusion = masks.add(GlassSkyMask { distance: 0.0, sort_bias: Some(-SELF_OCCLUSION_LEAD) });
+        app.insert_resource(GlassSkyMaskMaterial { far, near, self_occlusion });
         let grey = app.world_mut().resource_mut::<Assets<Image>>().add(neutral_detail_image());
         app.insert_resource(NeutralDetail(grey));
         let tables = app.world_mut().resource_mut::<Assets<Image>>().add(periodic_tables_image());
@@ -63,7 +64,17 @@ impl Plugin for HaloMaterialsPlugin {
 pub struct GlassSkyMaskMaterial {
     pub far: Handle<GlassSkyMask>,
     pub near: Handle<GlassSkyMask>,
+    /// A self-occluding object's transparent parts' depth, drawn just before
+    /// them (`LevelBuilder::self_occluding`).
+    pub self_occlusion: Handle<GlassSkyMask>,
 }
+
+/// How much sooner (metres of the transparent pass's sort) a self-occluding
+/// object's depth is drawn than its parts, which share its position: then
+/// each part shows only where it is nearest, as the game draws Cortana (her
+/// eyelids over her eyes), while what is behind her, drawn before, shows
+/// through.
+const SELF_OCCLUSION_LEAD: f32 = 0.01;
 
 /// A flat normal map, for environment materials without a bump map.
 pub fn flat_normal_image() -> Image {
@@ -480,6 +491,8 @@ pub struct GlassSkyMask {
     /// The depth written (metres), or 0 for the pane's own.
     #[uniform(0)]
     pub distance: f32,
+    /// Its sort bias, if not the sky masks' (before the sky's layers).
+    pub sort_bias: Option<f32>,
 }
 
 /// A sky's water (`shaders/sky_water.wesl`): its reflection cube map along
@@ -650,7 +663,7 @@ impl Material for GlassSkyMask {
     }
 
     fn depth_bias(&self) -> f32 {
-        GLASS_SKY_MASK_BIAS
+        self.sort_bias.unwrap_or(GLASS_SKY_MASK_BIAS)
     }
 
     fn enable_prepass() -> bool {

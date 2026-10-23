@@ -75,6 +75,7 @@ pub mod _machine_definition {
 pub mod _object_definition {
     pub const SIZEOF: usize = 0x17c;
     pub const TYPE: usize = 0x0;
+    pub const FLAGS: usize = 0x2;
     pub const ORIGIN_OFFSET: usize = 0x14;
     pub const RUNTIME_FLAGS: usize = 0x24;
     pub const MODEL: usize = 0x28;

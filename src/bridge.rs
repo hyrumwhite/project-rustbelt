@@ -451,9 +451,9 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid): (
+    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid): (
         Query<(Entity, &crate::level::Recolourable)>,
-        Query<(), With<crate::level::AnimatedSelfIllumination>>,
+        Query<&mut crate::level::AnimatedSelfIllumination>,
         Query<&Children>,
         Res<FollowGame>,
         Local<Option<(String, Vec<Option<ClusterVisibility>>)>>,
@@ -611,19 +611,29 @@ fn sync_objects(
     for object in &snapshot.objects {
         seen.insert(object.object_index, ());
         let change_colors = change_color_steps(&object.change_colors);
+        // its self-illumination's animation takes its change colours as they
+        // are, every frame
+        if let Some(tracked) = objects.tracked.get(&object.object_index)
+            && let Ok(mut animation) = animated.get_mut(tracked.root)
+            && animation.change_colors != object.change_colors
+        {
+            animation.change_colors = object.change_colors;
+        }
         // an object whose change colours alone changed takes new materials
-        // (but one with animated self-illumination, whose own copies of its
-        // materials the animation keeps)
+        // in place (with animated self-illumination, the animation's own
+        // copies of its materials kept: made again, a30's crashed lifepod,
+        // whose lights flicker by its colour, was made anew every few
+        // frames, flickering and now and then gone)
         if let Some(tracked) = objects.tracked.get_mut(&object.object_index)
             && tracked.definition == object.definition_index
             && tracked.permutations == object.region_permutations
             && tracked.camouflaged == camouflaged(object)
             && tracked.change_colors != change_colors
-            && !animated.contains(tracked.root)
         {
             let root = tracked.root;
             tracked.change_colors = change_colors;
-            builder.recolour(&mut commands, recolourable.iter().filter(|(_, r)| r.root == root), &change_colors, assets);
+            let animation = animated.get(root).ok();
+            builder.recolour(&mut commands, recolourable.iter().filter(|(_, r)| r.root == root), &change_colors, animation, assets);
         }
         // an object whose definition or permutations changed is made again
         let current = objects.tracked.get(&object.object_index);
@@ -634,6 +644,19 @@ fn sync_objects(
                 || t.camouflaged != camouflaged(object)
         }) {
             let old = objects.tracked.remove(&object.object_index).unwrap();
+            if std::env::var_os("HALO_RT_HIDE_LOG").is_some() {
+                info!(
+                    "frame {}: {} {:#x} made again (definition {}, permutations {}, colours {:?} to {:?}, camouflage {})",
+                    snapshot.frame_index,
+                    old.model.name,
+                    object.object_index,
+                    old.definition != object.definition_index,
+                    old.permutations != object.region_permutations,
+                    old.change_colors,
+                    change_colors,
+                    old.camouflaged != camouflaged(object)
+                );
+            }
             objects.retiring.push((old.root, RETIRING_FRAMES));
         }
         if !objects.tracked.contains_key(&object.object_index) {

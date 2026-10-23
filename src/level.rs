@@ -32,10 +32,15 @@ use std::sync::Arc;
 /// An object's model shaders whose self-illumination animates
 /// (`shader::ModelSelfIlluminationAnimation`): each its own copy of the
 /// shader's material, whose emissive [`animate_self_illumination`] sets
-/// every frame, the object's phase, and the object's change colours.
+/// every frame, the object's phase, and the object's change colours (as the
+/// game gives them, unstepped: a30's crashed lifepod's lights flicker by
+/// them).
 #[derive(Component, Clone)]
 pub struct AnimatedSelfIllumination {
     pub materials: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, shader::ModelSelfIlluminationAnimation)>,
+    /// Each material's shader, which [`LevelBuilder::recolour`] colours in
+    /// place.
+    shaders: Vec<ShaderUse>,
     pub phase: f32,
     pub change_colors: [[f32; 3]; 4],
 }
@@ -1275,6 +1280,7 @@ impl LevelBuilder {
         // material for this object (its phase is its own)
         let mut animated: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, shader::ModelSelfIlluminationAnimation)> =
             Vec::new();
+        let mut animated_shaders: Vec<ShaderUse> = Vec::new();
         let mut animated_by_shader: HashMap<ShaderUse, Surface> = HashMap::new();
         let mut animate = |builder: &mut Self, surface: Surface, shader: Option<ShaderUse>, assets: &mut LevelAssets| -> Surface {
             // a transparent surface its object's functions or colours drive:
@@ -1310,6 +1316,7 @@ impl LevelBuilder {
             let handle = assets.materials.add(material);
             let raster = solid.raster.as_ref().and_then(|raster| assets.environment_materials.get(raster).cloned()).map(|raster| assets.environment_materials.add(raster));
             animated.push((handle.clone(), raster.clone(), animation));
+            animated_shaders.push(shader);
             let copy = Surface::Solid(SolidSurface { standard: handle, raster: raster.or(solid.raster.clone()), ..solid.clone() });
             animated_by_shader.insert(shader, copy.clone());
             copy
@@ -1464,6 +1471,7 @@ impl LevelBuilder {
         if !animated.is_empty() {
             commands.entity(root).insert(AnimatedSelfIllumination {
                 materials: animated,
+                shaders: animated_shaders,
                 phase: self_illumination_phase(object_index),
                 change_colors: *change_colors,
             });
@@ -1581,12 +1589,36 @@ impl LevelBuilder {
         commands: &mut Commands,
         entities: impl Iterator<Item = (Entity, &'a Recolourable)>,
         change_colors: &[[f32; 3]; 4],
+        animation: Option<&AnimatedSelfIllumination>,
         assets: &mut LevelAssets,
     ) {
         for (entity, recolourable) in entities {
             let Surface::Solid(solid) = self.coloured_surface(&recolourable.base, recolourable.shader, change_colors, assets) else {
                 continue;
             };
+            // (a piece whose self-illumination animates keeps the object's
+            // own copy of its material, given the coloured base map)
+            if let Some(animation) = animation
+                && let Some(index) = recolourable.shader.and_then(|shader| animation.shaders.iter().position(|s| *s == shader))
+            {
+                let (standard, raster, _) = &animation.materials[index];
+                let texture = assets.materials.get(&solid.standard).and_then(|m| m.base_color_texture.clone());
+                if let Some(texture) = texture {
+                    if assets.materials.get(standard).is_some_and(|m| m.base_color_texture.as_ref() != Some(&texture))
+                        && let Some(mut material) = assets.materials.get_mut(standard)
+                    {
+                        material.base_color_texture = Some(texture.clone());
+                    }
+                    if let Some(raster) = raster
+                        && assets.environment_materials.get(raster).is_some_and(|m| m.extension.base_map != texture)
+                        && let Some(mut material) = assets.environment_materials.get_mut(raster)
+                    {
+                        material.base.base_color_texture = Some(texture.clone());
+                        material.extension.base_map = texture;
+                    }
+                }
+                continue;
+            }
             match (&solid.raster, recolourable.traced) {
                 (Some(raster), false) => commands.entity(entity).insert(MeshMaterial3d(raster.clone())),
                 _ => commands.entity(entity).insert(MeshMaterial3d(solid.standard.clone())),

@@ -1192,6 +1192,26 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         .iter()
         .map(|s| s.kind == LIGHT_SOURCE_KIND_DIRECTIONAL)
         .collect();
+    // The other lights' weights are compressed (raised to FLUX_EXPONENT):
+    // selection is global, blind to where a light shines, and by power alone
+    // a level's few great emitters took nearly every sample from the small
+    // lights of the rooms they don't reach. a10's space BSP: the Pillar of
+    // Autumn's hull, twelve emissive materials hundreds of units long, left
+    // the bridge cabin seen through its window under 1% (its world cache
+    // cells found its lights by chance, and it boiled; the receding hull
+    // flickered). Weighing emitters by their textures' means instead fixed
+    // that but starved the Covenant boarding craft's thin glowing strips.
+    // The square root does both (hull 0.45 to 0.24, the craft's noise kept
+    // at 0.04). Each sample is still divided by its actual probability.
+    // (SOLARIK_FLUX_EXPONENT overrides it; 1 weighs by power alone.)
+    let flux_exponent = std::env::var("SOLARIK_FLUX_EXPONENT").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(FLUX_EXPONENT);
+    if flux_exponent != 1.0 {
+        for (flux, &directional) in light_fluxes.iter_mut().zip(&is_directional) {
+            if !directional && *flux > 0.0 {
+                *flux = flux.powf(flux_exponent);
+            }
+        }
+    }
     let (directional_flux, other_flux) = light_fluxes.iter().zip(&is_directional).fold(
         (0.0, 0.0),
         |(d, o), (&f, &directional)| if directional { (d + f, o) } else { (d, o + f) },
@@ -1722,6 +1742,9 @@ impl GpuLightSource {
 /// The low bit clear is an emissive mesh (upstream: the triangle count sits
 /// above it); the low bit set is any other light, with the kind above it.
 const LIGHT_SOURCE_KIND_DIRECTIONAL: u32 = 1;
+/// The power the lights other than the sun are weighed by in selection,
+/// raised to this (`prepare_raytracing_scene_bindings`).
+const FLUX_EXPONENT: f64 = 0.5;
 /// The share of light selection the directional lights take together, by
 /// illuminance among themselves (`SOLARIK_DIRECTIONAL_SHARE` overrides it).
 const DIRECTIONAL_LIGHT_SHARE: f64 = 0.5;

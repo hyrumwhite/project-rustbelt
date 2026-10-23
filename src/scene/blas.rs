@@ -15,6 +15,7 @@ use bevy_render::{
         allocator::{MeshAllocator, MeshBufferSlice},
     },
     render_asset::ExtractedAssets,
+    extract_resource::ExtractResource,
     render_resource::*,
     renderer::{RenderDevice, RenderQueue},
 };
@@ -22,6 +23,19 @@ use bevy_render::{
 /// After compacting this many vertices worth of meshes per frame, no further BLAS will be compacted.
 /// Lower this number to distribute the work across more frames.
 const MAX_COMPACTION_VERTICES_PER_FRAME: u32 = 400_000;
+
+/// A deformable mesh's BLAS is refit this many times, then built again: a
+/// refit keeps the tree built for the first pose, which traces slower as the
+/// mesh moves away from it.
+const MAX_REFITS: u32 = 240;
+
+/// Meshes whose vertices move from frame to frame while their topology stays
+/// (a skinned character's ray-traced copy, changed in place): their BLAS is
+/// built to allow updates and never compacted, and a change that keeps the
+/// vertex and index counts refits it in place instead of building it again.
+#[derive(Resource, ExtractResource, Clone, Default, Debug)]
+#[extract_app(bevy_render::RenderApp)]
+pub struct SolarikDeformableMeshes(pub HashSet<AssetId<Mesh>>);
 
 #[derive(Resource, Default)]
 pub struct BlasManager {
@@ -36,6 +50,9 @@ pub struct BlasManager {
     /// Meshes whose BLAS was dropped because its opacity no longer matched
     /// the materials on it; rebuilt by `prepare_raytracing_blas` next frame.
     rebuild_queue: Vec<AssetId<Mesh>>,
+    /// Deformable meshes' BLAS: the vertex and index counts and opacity each
+    /// was built with, and how many times it has been refit since.
+    updatable: HashMap<AssetId<Mesh>, (u32, u32, bool, u32)>,
 }
 
 impl BlasManager {
@@ -115,6 +132,7 @@ pub fn prepare_raytracing_blas(
         Res<super::binder::SolarikAlphaTesting>,
     ),
     readiness: Res<bevy_render::scene_readiness::SceneGeometryReadiness>,
+    deformable: Res<SolarikDeformableMeshes>,
     mesh_allocator: Res<MeshAllocator>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -148,12 +166,38 @@ pub fn prepare_raytracing_blas(
         );
     }
     blas_manager.set_non_opaque_meshes(required);
+    // Deformable meshes changed in place (the same vertex and index counts,
+    // the same opacity) keep their BLAS, refit below
+    let refits: HashSet<AssetId<Mesh>> = extracted_meshes
+        .modified
+        .iter()
+        .filter(|asset_id| {
+            deformable.0.contains(*asset_id)
+                && !extracted_meshes.removed.contains(*asset_id)
+                && blas_manager.blas.contains_key(*asset_id)
+                && blas_manager.updatable.get(*asset_id).is_some_and(
+                    |&(vertices, indices, non_opaque, refits)| {
+                        refits < MAX_REFITS
+                            && blas_manager.opacity.is_non_opaque(asset_id) == non_opaque
+                            && mesh_allocator
+                                .mesh_vertex_slice(asset_id)
+                                .is_some_and(|slice| slice.range.len() as u32 == vertices)
+                            && mesh_allocator
+                                .mesh_index_slice(asset_id)
+                                .is_some_and(|slice| slice.range.len() as u32 == indices)
+                    },
+                )
+        })
+        .copied()
+        .collect();
     // Delete BLAS for deleted or modified meshes
     for asset_id in extracted_meshes
         .removed
         .iter()
         .chain(extracted_meshes.modified.iter())
+        .filter(|asset_id| !refits.contains(*asset_id))
     {
+        blas_manager.updatable.remove(asset_id);
         if blas_manager.blas.remove(asset_id).is_some() {
             blas_manager.generation = blas_manager.generation.wrapping_add(1);
         }
@@ -205,25 +249,38 @@ pub fn prepare_raytracing_blas(
             let index_slice = mesh_allocator.mesh_index_slice(&asset_id).unwrap();
 
             let non_opaque = blas_manager.opacity.is_non_opaque(&asset_id);
-            let (blas, blas_size) = allocate_blas(
-                &vertex_slice,
-                &index_slice,
-                &asset_id,
-                non_opaque,
-                &render_device,
-            );
-
-            blas_manager.blas.insert(asset_id, blas);
+            let blas_size = blas_size(&vertex_slice, &index_slice, non_opaque);
+            // (a new revision either way: the mesh's slices may have moved)
             blas_manager.generation = blas_manager.generation.wrapping_add(1);
             let revision = blas_manager.generation;
             blas_manager.revisions.insert(asset_id, revision);
+            if refits.contains(&asset_id) {
+                // built again into the same BLAS, which wgpu refits
+                if let Some(entry) = blas_manager.updatable.get_mut(&asset_id) {
+                    entry.3 += 1;
+                }
+                return (asset_id, vertex_slice, index_slice, blas_size);
+            }
+
+            let updatable = deformable.0.contains(&asset_id);
+            let blas = allocate_blas(&blas_size, &asset_id, updatable, &render_device);
+            blas_manager.blas.insert(asset_id, blas);
             blas_manager.opacity.record_built(asset_id, non_opaque);
-            blas_manager.compaction_queue.push_back((
-                asset_id,
-                revision,
-                blas_size.vertex_count,
-                false,
-            ));
+            if updatable {
+                // (a compacted BLAS can't be updated)
+                blas_manager.updatable.insert(
+                    asset_id,
+                    (blas_size.vertex_count, blas_size.index_count.unwrap_or(0), non_opaque, 0),
+                );
+            } else {
+                blas_manager.updatable.remove(&asset_id);
+                blas_manager.compaction_queue.push_back((
+                    asset_id,
+                    revision,
+                    blas_size.vertex_count,
+                    false,
+                ));
+            }
 
             (asset_id, vertex_slice, index_slice, blas_size)
         })
@@ -351,14 +408,12 @@ fn compact_ready_blas(blas_manager: &mut BlasManager, render_queue: &RenderQueue
     }
 }
 
-fn allocate_blas(
+fn blas_size(
     vertex_slice: &MeshBufferSlice,
     index_slice: &MeshBufferSlice,
-    asset_id: &AssetId<Mesh>,
     non_opaque: bool,
-    render_device: &RenderDevice,
-) -> (Blas, BlasTriangleGeometrySizeDescriptor) {
-    let blas_size = BlasTriangleGeometrySizeDescriptor {
+) -> BlasTriangleGeometrySizeDescriptor {
+    BlasTriangleGeometrySizeDescriptor {
         vertex_format: Mesh::ATTRIBUTE_POSITION.format,
         vertex_count: vertex_slice.range.len() as u32,
         index_format: Some(IndexFormat::Uint32),
@@ -370,21 +425,39 @@ fn allocate_blas(
         } else {
             AccelerationStructureGeometryFlags::OPAQUE
         },
-    };
+    }
+}
 
-    let blas = render_device.wgpu_device().create_blas(
+/// A BLAS for geometry of this size: compactable, or (a deformable mesh's)
+/// updatable in place.
+fn allocate_blas(
+    blas_size: &BlasTriangleGeometrySizeDescriptor,
+    asset_id: &AssetId<Mesh>,
+    updatable: bool,
+    render_device: &RenderDevice,
+) -> Blas {
+    let (flags, update_mode) = if updatable {
+        (
+            AccelerationStructureFlags::PREFER_FAST_TRACE | AccelerationStructureFlags::ALLOW_UPDATE,
+            AccelerationStructureUpdateMode::PreferUpdate,
+        )
+    } else {
+        (
+            AccelerationStructureFlags::PREFER_FAST_TRACE
+                | AccelerationStructureFlags::ALLOW_COMPACTION,
+            AccelerationStructureUpdateMode::Build,
+        )
+    };
+    render_device.wgpu_device().create_blas(
         &CreateBlasDescriptor {
             label: Some(&asset_id.to_string()),
-            flags: AccelerationStructureFlags::PREFER_FAST_TRACE
-                | AccelerationStructureFlags::ALLOW_COMPACTION,
-            update_mode: AccelerationStructureUpdateMode::Build,
+            flags,
+            update_mode,
         },
         BlasGeometrySizeDescriptors::Triangles {
             descriptors: vec![blas_size.clone()],
         },
-    );
-
-    (blas, blas_size)
+    )
 }
 
 fn is_mesh_raytracing_compatible(mesh: &Mesh) -> bool {

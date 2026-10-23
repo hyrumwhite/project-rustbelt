@@ -45,6 +45,7 @@ use bevy_render::{
 };
 use binder::prepare_raytracing_scene_bindings;
 use blas::{BlasManager, compact_raytracing_blas, prepare_raytracing_blas};
+pub use blas::SolarikDeformableMeshes;
 use extract::{StandardMaterialAssets, extract_raytracing_scene};
 use tracing::warn;
 
@@ -85,6 +86,7 @@ impl Plugin for RaytracingScenePlugin {
         app.init_resource::<SolarikRayFog>();
         app.init_resource::<SolarikAlphaTesting>();
         app.init_resource::<SolarikRaySettings>();
+        app.init_resource::<SolarikDeformableMeshes>();
     }
 
     fn finish(&self, app: &mut App) {
@@ -111,6 +113,7 @@ impl Plugin for RaytracingScenePlugin {
             ExtractResourcePlugin::<SolarikRayFog>::default(),
             ExtractResourcePlugin::<SolarikAlphaTesting>::default(),
             ExtractResourcePlugin::<SolarikRaySettings>::default(),
+            ExtractResourcePlugin::<SolarikDeformableMeshes>::default(),
         ));
 
         let render_app = app.sub_app_mut(RenderApp);
@@ -124,6 +127,7 @@ impl Plugin for RaytracingScenePlugin {
         render_app.init_resource::<SolarikRayFog>();
         render_app.init_resource::<SolarikAlphaTesting>();
         render_app.init_resource::<SolarikRaySettings>();
+        render_app.init_resource::<SolarikDeformableMeshes>();
 
         render_app
             .init_gpu_resource::<BlasManager>()

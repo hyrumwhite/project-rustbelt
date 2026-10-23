@@ -1162,8 +1162,23 @@ fn sync_camera(
         && game.vertical_field_of_view > 0.0
     {
         perspective.fov = game.vertical_field_of_view;
+        // the game's near clip plane where it comes nearer than the usual
+        // (a10's close-ups: 3 cm, where 10 cm cut into Keyes' face); not
+        // further, where the game draws the first-person weapon in a pass
+        // of its own with a nearer one
+        let near = if game.near_clip_distance > 0.0 {
+            (game.near_clip_distance * halo_map::math::METERS_PER_WORLD_UNIT).min(CAMERA_NEAR)
+        } else {
+            CAMERA_NEAR
+        };
+        if perspective.near != near {
+            perspective.near = near;
+        }
     }
 }
+
+/// The camera's usual near clip distance (metres; Bevy's default).
+const CAMERA_NEAR: f32 = 0.1;
 
 /// Whether this window's keyboard and mouse go to the game: while following
 /// the game's camera, focused, with the cursor grabbed, or free over the

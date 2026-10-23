@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 44;
+pub const VERSION: u32 = 45;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -78,6 +78,9 @@ pub struct Camera {
     pub up: [f32; 3],
     /// Radians.
     pub vertical_field_of_view: f32,
+    /// (Protocol 45) world units: the near clip plane's distance, which
+    /// cinematics move (a10's close-ups 0.01, against the usual 0.0625).
+    pub near_clip_distance: f32,
 }
 
 /// (Protocol 32) the fog the first player's window was drawn with
@@ -1185,7 +1188,7 @@ struct Shared {
 /// `bevy_bridge_protocol.h`.
 const _: () = assert!(std::mem::size_of::<Object>() == 124);
 const _: () = assert!(std::mem::size_of::<Node>() == 52);
-const _: () = assert!(std::mem::size_of::<Camera>() == 40);
+const _: () = assert!(std::mem::size_of::<Camera>() == 44);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);
 const _: () = assert!(std::mem::size_of::<Gamepad>() == 20);
 

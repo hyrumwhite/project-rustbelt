@@ -568,7 +568,7 @@ fn sync_objects(
         }
         lights_in_solid.0 = solid;
     }
-    let clusters_of: HashMap<u32, (i16, u32)> = snapshot.objects.iter().map(|o| (o.object_index, (o.location_cluster, o.parent_index))).collect();
+    let objects_by_index: HashMap<u32, &halo_bridge::Object> = snapshot.objects.iter().map(|o| (o.object_index, o)).collect();
     let unseen_cluster = |object: &halo_bridge::Object| {
         let Some(visibility) = active_visibility.filter(|_| camera_cluster >= 0) else { return false };
         // (a model the game draws by itself, the first-person weapon and
@@ -576,14 +576,36 @@ fn sync_objects(
         if object.flags & OBJECT_MODEL != 0 {
             return false;
         }
-        let (mut cluster, mut parent) = (object.location_cluster, object.parent_index);
+        // (as its outermost parent is)
+        let mut outermost = object;
         for _ in 0..8 {
-            match clusters_of.get(&parent) {
-                Some(&(parent_cluster, grandparent)) => (cluster, parent) = (parent_cluster, grandparent),
+            match objects_by_index.get(&outermost.parent_index) {
+                Some(parent) => outermost = parent,
                 None => break,
             }
         }
-        cluster >= 0 && !visibility.sees(camera_cluster, cluster)
+        // The game draws an object in every cluster its bounds touch, not
+        // only the one its centre is in: the clusters under its bounding
+        // sphere (its centre, the axes' and its enclosing cube's corners),
+        // and always one round the camera. (By its centre's cluster alone,
+        // a30's crashed lifepod, round the player at the start, went now
+        // and then as the camera crossed into a cluster that sees the
+        // pod's centre's not.)
+        let (centre, radius) = (Vec3::from(outermost.bounding_center), outermost.bounding_radius.max(0.0));
+        if snapshot.camera.is_some_and(|camera| Vec3::from(camera.position).distance(centre) <= radius) {
+            return false;
+        }
+        let mut any_cluster = false;
+        for offset in BOUNDS_SAMPLES {
+            let cluster = visibility.cluster((centre + Vec3::from(offset) * radius).to_array());
+            if cluster >= 0 {
+                if visibility.sees(camera_cluster, cluster) {
+                    return false;
+                }
+                any_cluster = true;
+            }
+        }
+        any_cluster
     };
     let mut seen = HashMap::<u32, ()>::default();
     for object in &snapshot.objects {
@@ -679,6 +701,20 @@ fn sync_objects(
                 Visibility::Inherited
             };
             if *v != wanted {
+                // (`HALO_RT_HIDE_LOG=1`: each object shown or hidden, and why)
+                if std::env::var_os("HALO_RT_HIDE_LOG").is_some() {
+                    info!(
+                        "frame {}: {} {:#x} {:?} (flags {:#x}, outside {}, unseen cluster {}, its cluster {}, the camera's {camera_cluster})",
+                        snapshot.frame_index,
+                        tracked.model.name,
+                        object.object_index,
+                        wanted,
+                        object.flags,
+                        outside_of_map(object),
+                        unseen_cluster(object),
+                        object.location_cluster
+                    );
+                }
                 *v = wanted;
             }
             // (`HALO_RT_OBJECT_LOG=<text>`: why the objects whose model's
@@ -872,6 +908,27 @@ pub struct LightsInSolid(pub Vec<(u32, u32)>);
 
 /// A structure BSP's clusters and potentially visible sets: which clusters
 /// the game draws from the one its camera is in.
+/// Where an object's bounds are sampled for the clusters they touch, in
+/// bounding radii from its centre: the centre, the axes and the corners of
+/// the cube round the sphere.
+const BOUNDS_SAMPLES: [[f32; 3]; 15] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, -1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [0.0, 0.0, -1.0],
+    [1.0, 1.0, 1.0],
+    [1.0, 1.0, -1.0],
+    [1.0, -1.0, 1.0],
+    [1.0, -1.0, -1.0],
+    [-1.0, 1.0, 1.0],
+    [-1.0, 1.0, -1.0],
+    [-1.0, -1.0, 1.0],
+    [-1.0, -1.0, -1.0],
+];
+
 pub struct ClusterVisibility {
     collision: halo_map::collision::CollisionBsp,
     clusters: halo_map::collision::StructureClusters,

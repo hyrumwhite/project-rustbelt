@@ -552,12 +552,14 @@ pub fn solarik_lighting<const PRIMARY: bool>(
                     pass.set_bind_group(2, group, &[]);
                 }
             }
+            let span = diagnostics.time_span(&mut pass, "solarik_lighting/primary_glass");
             pass.set_pipeline(pipeline);
             pass.set_immediates(
                 0,
                 bytemuck::cast_slice(&[frame_index, 0u32, render_frame, stable_radius.to_bits()]),
             );
             pass.dispatch_workgroups(dx, dy, 1);
+            span.end(&mut pass);
         }
         return;
     }

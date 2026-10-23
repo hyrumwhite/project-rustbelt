@@ -293,8 +293,6 @@ pub struct LevelAssets<'a> {
     pub sky_water: Option<&'a mut Assets<crate::material::SkyWaterMaterial>>,
     /// The ray-traced water panes' ripples (where a level's BSPs are).
     pub water_ripples: Option<&'a mut bevy_solarik::water_ripples::WaterRippleMaterials>,
-    /// Emissive materials' textures' means, for Solarik's light selection.
-    pub emission_averages: Option<&'a mut bevy_solarik::scene::SolarikEmissionAverages>,
     pub images: &'a mut Assets<Image>,
     pub inverse_bindposes: &'a mut Assets<SkinnedMeshInverseBindposes>,
     /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
@@ -1881,18 +1879,7 @@ impl LevelBuilder {
             material.alpha_mode = AlphaMode::Mask(0.5);
         }
         let seen_as = if unseen { self.transparent_material(info, 0.0, false, assets) } else { None };
-        let emissive_texture = material.emissive_texture.clone();
-        let standard = assets.materials.add(material);
-        // (how much of its texture glows: a ship's hull, its windows lit,
-        // was taken for a hull lit all over, and drew the samples from the
-        // lights of the rooms beyond its windows)
-        if radiance.is_some()
-            && let Some(average) = emissive_texture.and_then(|texture| assets.images.get(&texture)).and_then(crate::textures::mean_linear_luminance)
-            && let Some(averages) = assets.emission_averages.as_deref_mut()
-        {
-            averages.0.insert(standard.id(), average);
-        }
-        Some(Surface::Solid(SolidSurface { standard, raster, radiance, unseen, seen_as }))
+        Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance, unseen, seen_as }))
     }
 
     /// A `shader_model`'s camera material with its detail map (see

@@ -386,6 +386,13 @@ fn main() -> AppExit {
     #[cfg(feature = "dlss")]
     app.insert_resource(DlssProjectId(bevy::asset::uuid::uuid!("3f1d6a2e-8a4b-4f5e-9c3d-1b2a7e6f0d91")));
 
+    // (unfocused too, at full speed: Bevy's default updates an unfocused
+    // window 60 times a second, which held scripted captures, and perhaps a
+    // window Windows doesn't count as focused, there)
+    app.insert_resource(bevy::winit::WinitSettings {
+        focused_mode: bevy::winit::UpdateMode::Continuous,
+        unfocused_mode: bevy::winit::UpdateMode::Continuous,
+    });
     app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))
@@ -1265,25 +1272,34 @@ fn update_control_text(
     forward: Option<Res<bridge::ForwardInput>>,
     overlay: Option<Res<overlay::OverlayStats>>,
     time: Res<Time>,
-    mut rate: Local<(f32, u32)>,
+    window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
+    // (seconds counted, the game's frames per second, frames drawn since the
+    // count began, frames drawn per second)
+    mut rate: Local<(f32, u32, u32, u32)>,
     #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
     #[cfg(feature = "dlss")] dlss_camera: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
 ) {
     let mut s = String::new();
     if let (Some(mut link), Some(bridged), Some(follow)) = (link, bridged, follow) {
-        // the game's frame rate, over the last second
+        // the game's frame rate and this one's, over the last second
         rate.0 += time.delta_secs();
+        rate.2 += 1;
         if rate.0 >= 1.0 {
             rate.1 = (link.frames as f32 / rate.0).round() as u32;
+            rate.3 = (rate.2 as f32 / rate.0).round() as u32;
             link.frames = 0;
+            rate.2 = 0;
             rate.0 = 0.0;
         }
         let game = link.latest.as_ref();
+        let unfocused = window.is_some_and(|window| !window.focused);
         s += &format!(
-            "OpenCE bridge: {} at tick {}, {} game frames/s, drawing {} of {} objects - F8: {}{}\n",
+            "OpenCE bridge: {} at tick {}, {} game frames/s, {} drawn/s{}, drawing {} of {} objects - F8: {}{}\n",
             game.map_or("", |g| g.scenario_name.as_str()),
             game.map_or(0, |g| g.game_tick),
             rate.1,
+            rate.3,
+            if unfocused { " (window unfocused)" } else { "" },
             bridged.count(),
             game.map_or(0, |g| g.objects.len()),
             if follow.0 { "free camera" } else { "follow the game's camera" },

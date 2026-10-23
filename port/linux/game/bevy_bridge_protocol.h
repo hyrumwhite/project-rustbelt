@@ -1129,7 +1129,11 @@ struct bevy_bridge_shared
 	unsigned long overlay_enabled;
 	/* the overlay buffer last completed */
 	unsigned long latest_overlay;
-	unsigned long overlay_reserved[2];
+	/* (written by the viewer) when it last looked for an overlay and how
+	often it looks, in microseconds of the system's performance counter
+	(wrapping), or zero; the game paces its frames by them */
+	unsigned long overlay_viewer_looked;
+	unsigned long overlay_viewer_interval;
 	struct bevy_bridge_overlay overlays[BEVY_BRIDGE_OVERLAYS];
 	/* projectile updates (a ring: the record `count` goes in place
 	count % BEVY_BRIDGE_PROJECTILE_RECORDS), and the random direction table

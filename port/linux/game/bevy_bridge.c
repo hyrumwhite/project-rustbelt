@@ -1006,6 +1006,19 @@ void bevy_bridge_overlay_commit(void)
 	bevy_bridge_overlay_buffer = NONE;
 }
 
+boolean bevy_bridge_overlay_viewer(
+	unsigned long *looked,
+	unsigned long *interval)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+
+	if (!shared || !shared->overlay_enabled)
+		return FALSE;
+	*interval = __atomic_load_n(&shared->overlay_viewer_interval, __ATOMIC_RELAXED);
+	*looked = __atomic_load_n(&shared->overlay_viewer_looked, __ATOMIC_RELAXED);
+	return *interval != 0;
+}
+
 boolean bevy_bridge_listener(
 	real_matrix4x3 *matrix)
 {

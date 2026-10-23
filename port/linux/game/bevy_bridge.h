@@ -78,6 +78,9 @@ unsigned char *bevy_bridge_overlay_begin(
 	unsigned long width,
 	unsigned long height);
 void bevy_bridge_overlay_commit(void);
+/* when the viewer last looked for an overlay and how often it looks
+(microseconds of the performance counter, wrapping); FALSE if it doesn't say */
+boolean bevy_bridge_overlay_viewer(unsigned long *looked, unsigned long *interval);
 
 /* projectiles.c, with game.bevy_bridge_ray_tests: each projectile_update
 recorded for a renderer to replay (bevy_bridge_projectile_record) */

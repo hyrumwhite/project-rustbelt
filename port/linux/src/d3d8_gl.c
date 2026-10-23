@@ -3174,6 +3174,7 @@ premultiplied. Present shares it. */
 unsigned char bevy_bridge_overlay_enabled(void);
 unsigned char *bevy_bridge_overlay_begin(unsigned long width, unsigned long height);
 void bevy_bridge_overlay_commit(void);
+unsigned char bevy_bridge_overlay_viewer(unsigned long *looked, unsigned long *interval);
 #endif
 
 /* -1 until first asked */
@@ -5046,6 +5047,85 @@ static void visibility_copy_batch(void)
 
 #endif
 
+#ifndef HALO_ANDROID
+/* The overlay's pacing: the viewer says when it last looked for an overlay
+and how often it looks (bevy_bridge_overlay_viewer), and each frame starts
+just soon enough to be shared before its next look. Drawn as often as the
+display allowed, most frames were never shown and took GPU time from the
+viewer's ray tracing (a fifth of its GPU time on a10, 2026-10-23). */
+static Uint64 overlay_frame_started;
+/* how long a frame takes from its start until its overlay is shared
+(nanoseconds): any longer frame at once, a shorter one slowly */
+static Uint64 overlay_frame_time;
+
+/* the performance counter in microseconds, as the viewer reads it */
+static unsigned long overlay_microseconds(void)
+{
+	Uint64 counter = SDL_GetPerformanceCounter();
+	Uint64 frequency = SDL_GetPerformanceFrequency();
+
+	return (unsigned long)((counter / frequency) * 1000000 + (counter % frequency) * 1000000 / frequency);
+}
+
+static void overlay_shared(void)
+{
+	Uint64 took;
+
+	if (!overlay_frame_started)
+		return;
+	took = SDL_GetTicksNS() - overlay_frame_started;
+	/* (a hitch, such as a load, is forgotten within a few frames) */
+	if (took > 50000000)
+		took = 50000000;
+	overlay_frame_time = took > overlay_frame_time ? took : overlay_frame_time - (overlay_frame_time - took) / 16;
+}
+
+/* after a present: waits for the next frame's start */
+static void overlay_pace(void)
+{
+	/* (and a little more, for the viewer's own timing) */
+	const unsigned long margin = 2500;
+	static int log = -1;
+	static unsigned long frames;
+	static Uint64 waited;
+	unsigned long looked, interval, now, lead, next;
+	long wait;
+	int step;
+
+	if (bevy_bridge_overlay_viewer(&looked, &interval) && interval <= 100000)
+	{
+		now = overlay_microseconds();
+		lead = (unsigned long)(overlay_frame_time / 1000) + margin;
+		/* (not when the viewer has stopped looking: loading, or gone; nor
+		when a frame takes longer than the viewer's: then frames come as fast
+		as they can, and waiting would leave out every other look) */
+		if ((long)(now - looked) >= 0 && now - looked < 100000 && lead < interval)
+		{
+			next = looked + interval;
+			for (step = 0; step < 8 && (long)(next - lead - now) < 0; step++)
+				next += interval;
+			wait = (long)(next - lead - now);
+			if (wait > 0 && wait <= (long)interval)
+			{
+				SDL_DelayPrecise((Uint64)wait * 1000);
+				waited += (Uint64)wait;
+			}
+		}
+		/* (HALO_BEVY_PACE_LOG: the pacing every 300 frames) */
+		if (log < 0)
+			log = getenv("HALO_BEVY_PACE_LOG") != NULL;
+		if (log && ++frames == 300)
+		{
+			platform_log("overlay pacing: the viewer looks every %lu us; frames take %lu us; waited %lu us a frame",
+				interval, (unsigned long)(overlay_frame_time / 1000), (unsigned long)(waited / frames));
+			frames = 0;
+			waited = 0;
+		}
+	}
+	overlay_frame_started = SDL_GetTicksNS();
+}
+
+#endif
 /* the back buffer, which the overlay is, shared with the Bevy renderer */
 static void overlay_share(struct render_target_entry *target)
 {
@@ -5073,6 +5153,7 @@ static void overlay_share(struct render_target_entry *target)
 	glPixelStorei(GL_PACK_ALIGNMENT, alignment);
 	glPixelStorei(GL_PACK_ROW_LENGTH, row_length);
 	bevy_bridge_overlay_commit();
+	overlay_shared();
 #else
 	(void)target;
 #endif
@@ -5132,6 +5213,10 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		glBlitFramebuffer(0, 0, (GLint)back_buffer->target.gl_width, (GLint)back_buffer->target.gl_height,
 			x, y + height, x + width, y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
 		platform_video_swap();
+#ifndef HALO_ANDROID
+		if (overlay_enabled())
+			overlay_pace();
+#endif
 		xgpu_gl_state_invalidate();
 		memory_watch_begin_frame();
 		xgpu_texture_cache_begin_frame();

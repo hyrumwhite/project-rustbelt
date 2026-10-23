@@ -109,12 +109,15 @@ fn layer_density(index: u32, colour: vec4<f32>) -> f32 {
     return saturate(dot(colour.rgb, weights.rgb)) * weights.w;
 }
 
-@fragment
-fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let colour = textureSample(source, source_sampler, in.uv);
-    // (the depth is at the render resolution, the picture perhaps upscaled)
-    let size = vec2<f32>(textureDimensions(depth));
-    let pixel = vec2<i32>(min(in.uv * size, size - 1.0));
+// The environment fog at one of the render resolution's pixels: the light
+// it adds (rgb) and its coverage (a), and the fog screen's density there
+// (1 for the sky).
+struct Fogged {
+    fogged: vec4<f32>,
+    screen_density: f32,
+}
+
+fn fog_at(pixel: vec2<i32>) -> Fogged {
     var z = textureLoad(depth, pixel, 0);
     // (a first-person pane in front: fogged at its own depth)
     let pane_z = textureLoad(scene_depth, pixel, 0);
@@ -122,6 +125,53 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     if pane_z > z * 1.0001 && abs(pane_z - mask_z) > mask_z * 0.01 {
         z = pane_z;
     }
+    var result = Fogged(vec4(0.0), 1.0);
+    if z <= 0.0 {
+        return result;
+    }
+    // (the pixel's centre, where the jittered view sampled it)
+    let viewport = view.main_pass_viewport;
+    let uv = (vec2<f32>(pixel) + 0.5 - viewport.xy) / viewport.zw;
+    let ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let p = view.world_from_clip * vec4(ndc, z, 1.0);
+    let position = p.xyz / p.w;
+    let forward = -normalize(view.world_from_view[2].xyz);
+    let view_depth = dot(position - view.world_position, forward);
+
+    // (through the water: the camera above the plane, the surface under it)
+    let camera_height = dot(fog.plane.xyz, view.world_position) - fog.plane.w;
+    let surface_height = dot(fog.plane.xyz, position) - fog.plane.w;
+    var transmitted = 1.0;
+    var atmospheric_depth = view_depth;
+    if fog.atmospheric.w > 0.5 && camera_height > 0.0 && surface_height < 0.0 {
+        let ray = normalize(position - view.world_position);
+        let cosine = abs(dot(ray, fog.plane.xyz));
+        transmitted = 1.0 - (0.04 + 0.96 * pow(1.0 - cosine, 5.0));
+        atmospheric_depth = view_depth * camera_height / (camera_height - surface_height);
+    }
+
+    let range = max(fog.atmospheric.y - fog.atmospheric.x, 1e-4);
+    let atmospheric = fog.atmospheric_color.a * texel((atmospheric_depth - fog.atmospheric.x) / range);
+    let distance = smoothstep(0.0, 1.0, texel(view_depth / max(fog.planar.x, 1e-4)));
+    let under = smoothstep(0.0, 1.0, texel(-surface_height / max(fog.planar.y, 1e-4)));
+    let planar = fog.planar_color.a * mix(distance * under, distance, fog.planar.z) * transmitted;
+
+    let eye = fog.atmospheric.z;
+    let fogged = fog.atmospheric_color.rgb * atmospheric * (1.0 - (1.0 - eye) * planar)
+        + fog.planar_color.rgb * planar * (1.0 - atmospheric * eye);
+    let coverage = 1.0 - (1.0 - atmospheric) * (1.0 - planar);
+    result.fogged = vec4(fogged, coverage);
+
+    if fog.screen.w < 0.5 {
+        let range = max(fog.screen.y - fog.screen.x, 1e-4);
+        result.screen_density = mix(fog.screen.z, 1.0, smoothstep(0.0, 1.0, texel((view_depth - fog.screen.x) / range)));
+    }
+    return result;
+}
+
+@fragment
+fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let colour = textureSample(source, source_sampler, in.uv);
     let ndc = vec2(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
 
     // the fog screen's layers (sampled before anything returns, for their
@@ -137,53 +187,49 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // (sampled before anything returns, as the layers)
     let flare = textureSample(flares, source_sampler, in.uv).rgb;
 
+    // The depth is at the render resolution, jittered each frame, while the
+    // picture is upscaled and steady: the fog of the four render pixels round
+    // where the jittered view saw this point, filtered. Below DLAA the depth
+    // texture is the picture's size, the view drawn in its corner (the main
+    // pass's viewport): read over the whole texture, the fog was from depths
+    // elsewhere in the picture (b30's far sea a white band, streaked, and
+    // outlines round models against it); from the nearest pixel alone, a
+    // silhouette's edge was fogged as the surface beside it now and then.
+    let anchor = view.world_position - normalize(view.world_from_view[2].xyz);
+    let jittered = view.clip_from_world * vec4(anchor, 1.0);
+    let steady = view.unjittered_clip_from_world * vec4(anchor, 1.0);
+    let jitter = jittered.xy / jittered.w - steady.xy / steady.w;
+    let viewport = view.main_pass_viewport;
+    let at = viewport.xy + (in.uv + vec2(jitter.x, -jitter.y) * 0.5) * viewport.zw - 0.5;
+    let base = floor(at);
+    let weight = at - base;
+    let low = vec2<i32>(viewport.xy);
+    let high = vec2<i32>(viewport.xy + viewport.zw) - 1;
+    let p00 = clamp(vec2<i32>(base), low, high);
+    let p11 = clamp(vec2<i32>(base) + 1, low, high);
+    let f00 = fog_at(p00);
+    let f10 = fog_at(vec2(p11.x, p00.y));
+    let f01 = fog_at(vec2(p00.x, p11.y));
+    let f11 = fog_at(p11);
+    let w00 = (1.0 - weight.x) * (1.0 - weight.y);
+    let w10 = weight.x * (1.0 - weight.y);
+    let w01 = (1.0 - weight.x) * weight.y;
+    let w11 = weight.x * weight.y;
+    let fogged = f00.fogged * w00 + f10.fogged * w10 + f01.fogged * w01 + f11.fogged * w11;
+    let screen_density = f00.screen_density * w00 + f10.screen_density * w10 + f01.screen_density * w01 + f11.screen_density * w11;
+
     var encoded = srgb_encode(saturate(colour.rgb));
     var changed = false;
-    var view_depth = 0.0;
-    if z > 0.0 {
-        let p = view.world_from_clip * vec4(ndc, z, 1.0);
-        let position = p.xyz / p.w;
-        let forward = -normalize(view.world_from_view[2].xyz);
-        view_depth = dot(position - view.world_position, forward);
-
-        // (through the water: the camera above the plane, the surface under it)
-        let camera_height = dot(fog.plane.xyz, view.world_position) - fog.plane.w;
-        let surface_height = dot(fog.plane.xyz, position) - fog.plane.w;
-        var transmitted = 1.0;
-        var atmospheric_depth = view_depth;
-        if fog.atmospheric.w > 0.5 && camera_height > 0.0 && surface_height < 0.0 {
-            let ray = normalize(position - view.world_position);
-            let cosine = abs(dot(ray, fog.plane.xyz));
-            transmitted = 1.0 - (0.04 + 0.96 * pow(1.0 - cosine, 5.0));
-            atmospheric_depth = view_depth * camera_height / (camera_height - surface_height);
-        }
-
-        let range = max(fog.atmospheric.y - fog.atmospheric.x, 1e-4);
-        let atmospheric = fog.atmospheric_color.a * texel((atmospheric_depth - fog.atmospheric.x) / range);
-        let distance = smoothstep(0.0, 1.0, texel(view_depth / max(fog.planar.x, 1e-4)));
-        let under = smoothstep(0.0, 1.0, texel(-surface_height / max(fog.planar.y, 1e-4)));
-        let planar = fog.planar_color.a * mix(distance * under, distance, fog.planar.z) * transmitted;
-
-        let eye = fog.atmospheric.z;
-        let fogged = fog.atmospheric_color.rgb * atmospheric * (1.0 - (1.0 - eye) * planar)
-            + fog.planar_color.rgb * planar * (1.0 - atmospheric * eye);
-        let coverage = 1.0 - (1.0 - atmospheric) * (1.0 - planar);
-        if coverage > 0.0 {
-            encoded = fogged + encoded * (1.0 - coverage);
-            changed = true;
-        }
+    if fogged.a > 0.0 {
+        encoded = fogged.rgb + encoded * (1.0 - fogged.a);
+        changed = true;
     }
 
     let mode = fog.screen_color.a;
     if mode > 0.5 && screen_coverage > 0.0 {
         if mode < 1.5 {
             // added, by the surface's density (the sky's: 1)
-            var density = 1.0;
-            if z > 0.0 && fog.screen.w < 0.5 {
-                let range = max(fog.screen.y - fog.screen.x, 1e-4);
-                density = mix(fog.screen.z, 1.0, smoothstep(0.0, 1.0, texel((view_depth - fog.screen.x) / range)));
-            }
-            encoded += fog.screen_color.rgb * screen_coverage * density;
+            encoded += fog.screen_color.rgb * screen_coverage * screen_density;
         } else {
             encoded = mix(encoded, fog.screen_color.rgb, screen_coverage);
         }

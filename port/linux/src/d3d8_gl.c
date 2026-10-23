@@ -5052,7 +5052,7 @@ static void visibility_copy_batch(void)
 and how often it looks (bevy_bridge_overlay_viewer), and each frame starts
 just soon enough to be shared before its next look. Drawn as often as the
 display allowed, most frames were never shown and took GPU time from the
-viewer's ray tracing (a fifth of its GPU time on a10, 2026-10-23). */
+viewer's ray tracing (about a tenth of its GPU time, 2026-10-23). */
 static Uint64 overlay_frame_started;
 /* how long a frame takes from its start until its overlay is shared
 (nanoseconds): any longer frame at once, a shorter one slowly */

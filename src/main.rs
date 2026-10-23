@@ -404,6 +404,9 @@ fn main() -> AppExit {
     if std::env::var_os("HALO_RT_CACHE_LOG").is_some() {
         app.add_systems(PostUpdate, log_world_cache);
     }
+    if std::env::var_os("HALO_RT_GPU_LOG").is_some() {
+        app.add_systems(Last, log_gpu_times);
+    }
     if args.dolly.is_some() {
         app.add_systems(Update, dolly_camera);
     }
@@ -528,6 +531,10 @@ fn default_plugins(args: &Args, overlay: bool) -> impl PluginGroup {
     // (a scripted capture opens behind the window in use, without taking
     // the keyboard)
     let mut window = Window { title, focused: args.screenshot.is_none(), ..default() };
+    // (`HALO_RT_NO_VSYNC=1`: frames as fast as they come, for timing)
+    if std::env::var_os("HALO_RT_NO_VSYNC").is_some() {
+        window.present_mode = bevy::window::PresentMode::AutoNoVsync;
+    }
     if overlay {
         // the game's overlay is drawn at this shape (overlay::WINDOW_SIZE)
         window.resolution = overlay::WINDOW_SIZE.into();
@@ -721,6 +728,27 @@ fn bsp_overview(cache: &CacheFile, index: usize) -> Option<Transform> {
 /// Every 10 seconds, a line in the log: the frames drawn, the game's tick,
 /// and how many entities and assets there are, with the process's memory. A
 /// freeze shows where they stop; a leak, what grows.
+/// (`HALO_RT_GPU_LOG=1`) Every 5 seconds, the GPU time of each render pass
+/// Bevy's render diagnostics time (milliseconds, averaged), and their sum.
+fn log_gpu_times(store: Res<bevy::diagnostic::DiagnosticsStore>, mut last: Local<Option<std::time::Instant>>) {
+    if last.is_some_and(|last| last.elapsed().as_secs_f32() < 5.0) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    let mut times: Vec<(String, f64)> = store
+        .iter()
+        .filter(|d| d.path().as_str().ends_with("/elapsed_gpu"))
+        // (not those left from frames long gone: a span timed only on the
+        // frames it runs keeps its last average, BLAS builds at load)
+        .filter(|d| d.measurement().is_some_and(|m| m.time.elapsed().as_secs_f32() < 1.0))
+        .filter_map(|d| Some((d.path().as_str().trim_end_matches("/elapsed_gpu").to_string(), d.average()?)))
+        .collect();
+    times.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let total: f64 = times.iter().map(|t| t.1).sum();
+    let list: Vec<String> = times.iter().filter(|t| t.1 >= 0.02).map(|(name, ms)| format!("{name} {ms:.2}")).collect();
+    info!("gpu {total:.2} ms: {}", list.join(", "));
+}
+
 fn log_heartbeat(world: &World, mut last: Local<Option<std::time::Instant>>) {
     if last.is_some_and(|last| last.elapsed().as_secs_f32() < 10.0) {
         return;

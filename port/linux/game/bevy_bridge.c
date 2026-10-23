@@ -664,6 +664,7 @@ void bevy_bridge_export_frame(
 			frame->camera.vertical_field_of_view = 2.0f * arctangent(
 				tangent(window->render_camera.vertical_field_of_view * 0.5f) * (bounds.y1 - bounds.y0) * 0.5f, 1.0f);
 		}
+		frame->camera.near_clip_distance = window->render_camera.z_near;
 		frame->camera_valid = TRUE;
 		frame->fog = bevy_bridge_fog;
 		frame->fog_screen = bevy_bridge_fog_screen;

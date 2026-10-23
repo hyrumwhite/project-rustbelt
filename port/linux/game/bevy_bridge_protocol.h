@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 44
+#define BEVY_BRIDGE_VERSION 45
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -96,6 +96,10 @@ struct bevy_bridge_camera
 	/* radians: the vertical extent the picture covers (the frustum's,
 	wider than the camera's own in cinematics), centred */
 	float vertical_field_of_view;
+	/* (protocol 45) world units: the near clip plane's distance, which
+	cinematics move (cinematic_set_near_clip_distance: a10's close-ups
+	0.01, against the usual 0.0625) */
+	float near_clip_distance;
 };
 
 /* (protocol 32) the fog the first player's window was drawn with

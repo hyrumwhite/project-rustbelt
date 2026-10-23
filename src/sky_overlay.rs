@@ -9,6 +9,7 @@
 use bevy::{
     anti_alias::dlss::{node::dlss_super_resolution, Dlss, DlssRayReconstructionFeature, ViewDlssRayReconstructionOverlay},
     asset::{embedded_asset, load_embedded_asset},
+    camera::MainPassResolutionOverride,
     core_pipeline::{prepass::ViewPrepassTextures, schedule::Core3d, Core3dSystems, FullscreenShader},
     prelude::*,
     render::{
@@ -17,7 +18,7 @@ use bevy::{
             BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedRenderPipelineId, ColorTargetState,
             ColorWrites, FragmentState, LoadOp, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
             RenderPipelineDescriptor, ShaderStages, StoreOp, TextureDescriptor, TextureDimension, TextureFormat,
-            TextureSampleType, TextureUsages,
+            Extent3d, TextureSampleType, TextureUsages,
         },
         renderer::{RenderContext, RenderDevice, ViewQuery},
         texture::TextureCache,
@@ -72,20 +73,27 @@ fn init_pipeline(mut commands: Commands, assets: Res<AssetServer>, fullscreen: R
     commands.insert_resource(SkyOverlayPipeline { layout, pipeline });
 }
 
-/// Each RR view's overlay, the size of its picture (RR reads the same
-/// corner of it as of the picture).
+/// Each RR view's overlay, the size of the picture RR is given: its render
+/// resolution, the corner of the view's textures the view is drawn in below
+/// DLAA. (RR takes the overlay's size from its texture: one the size of the
+/// view's textures it composited 1:1 over its output, the render corner as a
+/// shrunken copy of the scene, and its edges black outlines.)
 fn prepare_overlay(
     mut commands: Commands,
-    views: Query<(Entity, &ViewTarget), With<Dlss<DlssRayReconstructionFeature>>>,
+    views: Query<(Entity, &ViewTarget, Option<&MainPassResolutionOverride>), With<Dlss<DlssRayReconstructionFeature>>>,
     mut texture_cache: ResMut<TextureCache>,
     device: Res<RenderDevice>,
 ) {
-    for (entity, target) in &views {
+    for (entity, target, resolution) in &views {
+        let size = match resolution {
+            Some(resolution) => Extent3d { width: resolution.0.x, height: resolution.0.y, depth_or_array_layers: 1 },
+            None => target.main_texture().size(),
+        };
         let texture = texture_cache.get(
             &device,
             TextureDescriptor {
                 label: Some("sky_overlay"),
-                size: target.main_texture().size(),
+                size,
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,

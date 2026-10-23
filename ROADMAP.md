@@ -1414,6 +1414,15 @@ Phase 5 had the game draw everything but the opaque world into an overlay: a fla
    - [ ] An older halt in debug.txt (13 October, 18:39): `hud_nav_points.c #615: waypoint_type!=NONE`. Perhaps the input and sound loss seen then; not reproduced.
    - [x] (It follows looking up and down, 20 October.) The flashlight "bound to horizontal movement" (a10, b30): it is aimed along the game's camera, pitch included (`HALO_RT_LIGHT_LOG` shows it). Check in play whether it still doesn't follow looking up and down.
    - [ ] Once, sound and input stopped while the picture kept going (perhaps a misclicked shortcut). Watch whether the game process exits.
+   - The user's play session of 22 October (a10, b30; the Silent Cartographer's and Halo's water "great"):
+     - [ ] The Jefferies tubes boil more again since the latest lighting changes.
+     - [ ] Inside a10's drop pod, now and then a flash of the outside (too brief to capture).
+     - [ ] b30's sky: cloud layers come and go as the view pitches up and down (the user's beach series, holding the rifle).
+     - [ ] The pistol's zoom shows vertical streaks at the horizon (the stretching reported before; perhaps stars reflected in the sea).
+     - [x] Below DLAA, a faint copy of the scene at render resolution in the screen's corner, and black outlines round everything against the sky and the sea (worse at lower qualities). Both were the sky's RR overlay: below DLAA the view is drawn in the render-resolution corner of full-size textures, and the overlay was full size; RR takes the overlay's resolution from its texture, so it composited the corner 1:1 over its output and its sky mask fell beside the edges. The overlay is now the render resolution's size (`MainPassResolutionOverride`). Checked on b30's shore at Performance, Ultra Performance and DLAA: no corner copy, no outlines, the stars kept.
+     - [ ] The needler's needles seem to mask the water's fog seen through them.
+     - [ ] Materials (later): many models look rubbery (the Warthog, crewmen).
+     - [ ] Performance seems a little lower with this batch of changes.
 
 ## Known risks
 

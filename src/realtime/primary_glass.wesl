@@ -21,6 +21,9 @@ import bevy_solarik::scene::raytracing_scene_bindings::resolve_material_alpha;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
+import bevy_solarik::scene::raytracing_scene_bindings::sky_light;
+import bevy_solarik::scene::ray_fog::fog_ray_segment;
+import bevy_solarik::scene::ray_fog::ray_fog_active;
 import bevy_solarik::realtime::specular_gi::trace_glossy_path;
 import bevy_solarik::realtime::surface_path::shade_surface_path;
 import bevy_solarik::realtime::realtime_bindings::view_output;
@@ -43,14 +46,17 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
     let direction = normalize(along_ray - origin);
     let depth = textureLoad(depth_buffer, id.xy, 0);
     var distance = ray_max_distance();
+    // (where the background is a surface, w 1; the sky, 0)
+    var background_point = vec4(0.0);
     if depth > 0.0 {
         let background_position = reconstruct_world_position(id.xy, depth, view.main_pass_viewport.zw, view.world_from_clip);
         distance = max(0.0, dot(background_position - origin, direction) - RAY_T_MIN);
+        background_point = vec4(background_position, 1.0);
     }
     var rng = id.x + id.y * u32(view.main_pass_viewport.z) + constants.frame_index;
     forest_set_seed(vec2u(id.x+id.y*u32(view.main_pass_viewport.z),constants.frame_index^0x71478d15u));
     let background = textureLoad(view_output, id.xy);
-    let radiance = composite_primary_glass(id.xy, origin, direction, distance, background.rgb / view.exposure, &rng);
+    let radiance = composite_primary_glass(id.xy, origin, direction, distance, background.rgb / view.exposure, background_point, &rng);
     textureStore(view_output, id.xy, vec4(radiance.rgb * view.exposure, background.a));
 @if(DLSS_RR_GUIDE_BUFFERS) {
     if radiance.a > 0.0 { resolve_background_guides(id.xy); }
@@ -60,8 +66,11 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
 // Front-to-back camera panes split both lobes deterministically. Reflected
 // paths retain the existing bounded glossy estimator; transmission reuses
 // the already shaded opaque/sky pixel. Inputs and output are scene radiance.
-fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: vec3f, max_distance: f32, unbent_background: vec3f, rng: ptr<function, u32>) -> vec4f {
+fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: vec3f, max_distance: f32, unbent_background: vec3f, background_point: vec4f, rng: ptr<function, u32>) -> vec4f {
     var origin = initial_origin;
+    // (the first pane, where it is within the near rays' reach of the camera
+    // (SolarikNearRays: a first-person weapon's), w 1)
+    var near_pane = vec4(0.0);
     var background = unbent_background;
     var refracted = false;
     // (the ray's width: the panes' texture filtering with footprints, and
@@ -72,9 +81,9 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
     var has_glass = 0.0;
     for (var i = 0u; i <= 32u; i += 1u) {
         let remaining = max_distance - dot(origin - initial_origin, direction);
-        if remaining <= RAY_T_MIN { return vec4(radiance + transmission * background, has_glass); }
+        if remaining <= RAY_T_MIN { return vec4(radiance + transmission * behind_near_pane(background, near_pane, background_point), has_glass); }
         let ray = trace_glass_ray(origin, direction, RAY_T_MIN, remaining);
-        if scene_hit_is_miss(ray) { return vec4(radiance + transmission * background, has_glass); }
+        if scene_hit_is_miss(ray) { return vec4(radiance + transmission * behind_near_pane(background, near_pane, background_point), has_glass); }
         let material = scene_hit_material(ray);
         cone = advance_ray_cone(cone, ray.t);
         if (material.flags & (MATERIAL_FLAG_ALPHA_BLEND | MATERIAL_FLAG_DIFFUSE_BLEND)) == 0u {
@@ -95,8 +104,12 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
             return vec4(radiance + transmission * (opaque_radiance / 4.0), has_glass);
         }
         if i == 32u { break; }
-        has_glass = 1.0;
         let hit = resolve_ray_hit_filtered(ray, direction, cone);
+        let near = sky_light.near_rays;
+        if has_glass == 0.0 && near.w > 0.0 && distance(hit.world_position, near.xyz) < near.w {
+            near_pane = vec4(hit.world_position, 1.0);
+        }
+        has_glass = 1.0;
         let alpha = clamp(scene_hit_alpha(ray, hit.uv), 0.0, 1.0);
         if (material.flags & MATERIAL_FLAG_REFRACT) != 0u {
             // A thick pane: its front reflects; what lies behind it is the
@@ -163,6 +176,22 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
     }
     // A bounded chain cannot assume unvisited panes are transparent.
     return vec4(radiance, has_glass);
+}
+
+// What a first-person pane lets through, fogged (SolarikRayFog) from the
+// pane to the surface behind it. The application fogs such a pane's pixel at
+// the pane's own depth (the needler's needles: the game draws the weapon
+// after its fog, so the needles stay clear); the surface behind them would
+// otherwise be left unfogged, the needles a clear window through the fog.
+// Elsewhere, and in front of the sky, the background is left as it is.
+fn behind_near_pane(background: vec3f, near_pane: vec4f, background_point: vec4f) -> vec3f {
+    if near_pane.w <= 0.0 || background_point.w <= 0.0 || !ray_fog_active() { return background; }
+    let forward = -normalize(view.world_from_view[2].xyz);
+    let pane_depth = dot(near_pane.xyz - view.world_position, forward);
+    let background_depth = dot(background_point.xyz - view.world_position, forward);
+    let plane = sky_light.fog.plane;
+    return fog_ray_segment(background, pane_depth, dot(plane.xyz, near_pane.xyz) - plane.w,
+        max(background_depth - pane_depth, 0.0), dot(plane.xyz, background_point.xyz) - plane.w, view.exposure);
 }
 
 // How far a refracting pane's normal sways (a liquid's surface), and how

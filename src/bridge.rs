@@ -360,6 +360,10 @@ struct Tracked {
     /// mesh into its scene the frame it is given, so the rays' copy is in the
     /// pose the camera draws.
     skins: Vec<Entity>,
+    /// The rays' meshes for its bending parts, made at their first skinning
+    /// and changed in place after (Solarik refits their acceleration
+    /// structures; `SolarikDeformableMeshes`).
+    skin_meshes: Vec<Option<Handle<Mesh>>>,
     skinned_to: Vec<Mat4>,
     /// Whether it is the first-person player's body (or what it holds),
     /// which the rays see from away from the camera only.
@@ -457,7 +461,7 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid): (
+    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid, mut deformable): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<&mut crate::level::AnimatedSelfIllumination>,
         Query<&Children>,
@@ -466,6 +470,7 @@ fn sync_objects(
         ResMut<CameraSky>,
         ResMut<DrawnBsp>,
         ResMut<LightsInSolid>,
+        ResMut<bevy_solarik::scene::SolarikDeformableMeshes>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -703,6 +708,7 @@ fn sync_objects(
                     model,
                     nodes,
                     skins,
+                    skin_meshes: Vec::new(),
                     skinned_to: Vec::new(),
                     body: false,
                     functions: object_functions(object),
@@ -812,14 +818,33 @@ fn sync_objects(
             && (object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) == 0 || body)
             && tracked.skinned_to != relative
         {
-            // (a new mesh each time: Solari queues each mesh's acceleration
-            // structure for compaction once, and one changed in place every
-            // frame is queued again before that is done)
-            for (skin, entity) in tracked.model.traced_skins.iter().zip(&tracked.skins) {
+            // (each its own mesh, made the first time: the one it was spawned
+            // with may be a pane's too; then changed in place, as a deformable
+            // mesh whose acceleration structure is refit rather than built
+            // again)
+            tracked.skin_meshes.resize(tracked.skins.len(), None);
+            for ((skin, entity), mesh) in tracked.model.traced_skins.iter().zip(&tracked.skins).zip(&mut tracked.skin_meshes) {
                 timing.skins += 1;
                 timing.skinned_vertices += skin.vertex_count() as u64;
-                let mesh = assets.meshes.add(skin.mesh(&relative));
-                commands.entity(*entity).insert((RaytracingMesh3d(mesh.clone()), TracedMesh(mesh)));
+                let posed = skin.mesh(&relative);
+                // (`HALO_RT_NO_REFIT=1`: a new mesh each time, its acceleration
+                // structure built afresh, as before 2026-10-23)
+                if no_refit() {
+                    let made = assets.meshes.add(posed);
+                    commands.entity(*entity).insert((RaytracingMesh3d(made.clone()), TracedMesh(made)));
+                    continue;
+                }
+                match mesh {
+                    Some(mesh) => {
+                        let _ = assets.meshes.insert(mesh.id(), posed);
+                    }
+                    None => {
+                        let made = assets.meshes.add(posed);
+                        deformable.0.insert(made.id());
+                        commands.entity(*entity).insert((RaytracingMesh3d(made.clone()), TracedMesh(made.clone())));
+                        *mesh = Some(made);
+                    }
+                }
             }
             tracked.skinned_to = relative;
         }
@@ -833,8 +858,18 @@ fn sync_objects(
         }
         keep
     });
+    // (and their deformable meshes, once gone)
+    if deformable.0.iter().any(|id| !assets.meshes.contains(*id)) {
+        let meshes = &assets.meshes;
+        deformable.0.retain(|id| meshes.contains(*id));
+    }
     timing.busy += started.elapsed();
     timing.report();
+}
+
+fn no_refit() -> bool {
+    static NO_REFIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NO_REFIT.get_or_init(|| std::env::var_os("HALO_RT_NO_REFIT").is_some())
 }
 
 /// `HALO_RT_FRAME_LOG`: logs every few seconds how often the viewer drew,

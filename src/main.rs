@@ -389,10 +389,15 @@ fn main() -> AppExit {
     // (unfocused too, at full speed: Bevy's default updates an unfocused
     // window 60 times a second, which held scripted captures, and perhaps a
     // window Windows doesn't count as focused, there)
-    app.insert_resource(bevy::winit::WinitSettings {
-        focused_mode: bevy::winit::UpdateMode::Continuous,
-        unfocused_mode: bevy::winit::UpdateMode::Continuous,
-    });
+    // (`HALO_RT_UNFOCUSED_60=1`: unfocused, 60 frames a second, as before:
+    // scripted runs then show the same game tick at the same frame, for
+    // comparing two builds frame by frame)
+    let unfocused_mode = if std::env::var_os("HALO_RT_UNFOCUSED_60").is_some() {
+        bevy::winit::UpdateMode::reactive_low_power(std::time::Duration::from_secs_f64(1.0 / 60.0))
+    } else {
+        bevy::winit::UpdateMode::Continuous
+    };
+    app.insert_resource(bevy::winit::WinitSettings { focused_mode: bevy::winit::UpdateMode::Continuous, unfocused_mode });
     app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))

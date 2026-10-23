@@ -235,9 +235,13 @@ fn sky_scale() -> f32 {
 }
 /// Transparent meshes sort back to front by their bounds' centres plus a
 /// bias. Sky layers are drawn first (behind every transparent surface of the
-/// level), in Halo's part order: each step is larger than the sky is.
-const SKY_BIAS: f32 = -1.0e8;
-const SKY_LAYER_BIAS: f32 = 1.0e6;
+/// level), in Halo's part order: each step is larger than the sky is (at
+/// `SKY_SCALE`, its layers' centres up to ~2·10⁶ m from its origin: b30's
+/// ring's is 1.6·10⁶ m up, and with steps of 10⁶ it sorted after the clouds
+/// once the view pitched down, drawn over them). The bias is also the GPU's
+/// constant depth bias, an i32: room for 20 layers.
+const SKY_BIAS: f32 = -2.0e9;
+const SKY_LAYER_BIAS: f32 = 1.0e8;
 
 /// Light fixtures become point lights, a sphere this size (metres).
 const LIGHT_PROXY_RADIUS: f32 = 0.12;

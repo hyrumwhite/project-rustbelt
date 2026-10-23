@@ -963,8 +963,9 @@ fn iter_blas<'snatch_guard: 'buffers, 'buffers>(
 
                 {
                     let scratch_buffer_offset = *scratch_buffer_blas_size;
+                    // (an update, `map_blas`, may need more scratch than a build)
                     *scratch_buffer_blas_size = scratch_buffer_blas_size.saturating_add(align_to(
-                        blas.size_info.build_scratch_size,
+                        blas.size_info.build_scratch_size.max(blas.size_info.update_scratch_size),
                         u64::from(state.device.alignments.ray_tracing_scratch_buffer_alignment),
                     ));
 
@@ -1092,8 +1093,9 @@ fn iter_blas<'snatch_guard: 'buffers, 'buffers>(
 
                 {
                     let scratch_buffer_offset = *scratch_buffer_blas_size;
+                    // (an update, `map_blas`, may need more scratch than a build)
                     *scratch_buffer_blas_size = scratch_buffer_blas_size.saturating_add(align_to(
-                        blas.size_info.build_scratch_size,
+                        blas.size_info.build_scratch_size.max(blas.size_info.update_scratch_size),
                         u64::from(state.device.alignments.ray_tracing_scratch_buffer_alignment),
                     ));
 
@@ -1141,6 +1143,20 @@ fn map_blas<'a>(
             blas.error_ident(),
         ));
     }
+    // A BLAS made to prefer updates, built with ALLOW_UPDATE and already
+    // built by a submitted command buffer, is updated in place: refit to the
+    // new vertex positions (the counts and flags can't change), much cheaper
+    // than building it again. (Patched in: wgpu only rebuilt.)
+    let mode = if blas.update_mode == wgt::AccelerationStructureUpdateMode::PreferUpdate
+        && blas
+            .flags
+            .contains(wgpu_types::AccelerationStructureFlags::ALLOW_UPDATE)
+        && blas.built_index.read().is_some()
+    {
+        hal::AccelerationStructureBuildMode::Update
+    } else {
+        hal::AccelerationStructureBuildMode::Build
+    };
 
     if blas
         .flags
@@ -1150,7 +1166,7 @@ fn map_blas<'a>(
     }
     Ok(hal::BuildAccelerationStructureDescriptor {
         entries,
-        mode: hal::AccelerationStructureBuildMode::Build,
+        mode,
         flags: blas.flags,
         source_acceleration_structure: None,
         destination_acceleration_structure: raw,

@@ -631,8 +631,10 @@ pub fn cube_map_image(cache: &halo_map::CacheFile, datum: u32) -> Option<Image> 
 pub const GLASS_SKY_MASK_DISTANCE: f32 = 50000.0;
 
 /// The mask's sort bias: behind the sky's layers (see `level::SKY_BIAS`), so
-/// drawn before them.
-const GLASS_SKY_MASK_BIAS: f32 = -1.0e9;
+/// drawn before them (at -10^9, once the sky's bias was -2*10^9, the needler's
+/// needles were masked after the sky's first layers had drawn over them). (A
+/// material's bias is the GPU's depth bias for StandardMaterial alone.)
+const GLASS_SKY_MASK_BIAS: f32 = -2.1e9;
 
 impl Material for GlassSkyMask {
     fn vertex_shader() -> ShaderRef {

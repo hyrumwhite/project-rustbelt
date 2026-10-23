@@ -239,7 +239,8 @@ fn sky_scale() -> f32 {
 /// `SKY_SCALE`, its layers' centres up to ~2·10⁶ m from its origin: b30's
 /// ring's is 1.6·10⁶ m up, and with steps of 10⁶ it sorted after the clouds
 /// once the view pitched down, drawn over them). The bias is also the GPU's
-/// constant depth bias, an i32: room for 20 layers.
+/// constant depth bias, an i32: room for 20 layers. The panes' sky masks
+/// (`material::GLASS_SKY_MASK_BIAS`) must sort below it.
 const SKY_BIAS: f32 = -2.0e9;
 const SKY_LAYER_BIAS: f32 = 1.0e8;
 

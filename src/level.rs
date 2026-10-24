@@ -1836,7 +1836,7 @@ impl LevelBuilder {
                 material.base_color_texture = Some(texture);
             }
         }
-        if let Some((strength, roughness)) = elite_coat(&info.name) {
+        if let Some((strength, roughness)) = clear_coat(&info.name) {
             material.clearcoat = strength;
             material.clearcoat_perceptual_roughness = roughness;
             material.clearcoat_texture = material.metallic_roughness_texture.clone();
@@ -2406,26 +2406,38 @@ const ELITE_ARMOUR: [&str; 6] = [
 ];
 const ELITE_SPECIAL_ARMOUR: &str = "characters\\elite\\elite_special\\shaders\\elite special body";
 /// The coat's strength and perceptual roughness (the G-buffer keeps the
-/// roughness in thirtieths up to 0.5): none for now, the Elites' near-mirror
-/// metal as it is looked best; a coat reads only over a duller base
-/// (`HALO_RT_ELITE_SHINE=0.4` with `HALO_RT_ELITE_COAT=1,0.1`).
-const ELITE_COAT: (f32, f32) = (0.0, 0.1);
+/// roughness in thirtieths up to 0.5). A plain coat added little over the
+/// Elites' near-mirror metal; as Solarik's thin film (main.rs's `THIN_FILM`)
+/// it plays teal and violet over it, as their painted cube maps' swirls do in
+/// Halo. (A duller base shows it more: `HALO_RT_ELITE_SHINE=0.4`.)
+const ELITE_COAT: (f32, f32) = (1.0, 0.1);
 
 fn elite_armour(shader: &str) -> bool {
     ELITE_ARMOUR.iter().chain([&ELITE_SPECIAL_ARMOUR]).any(|name| shader.eq_ignore_ascii_case(name))
 }
 
-/// A shader's clear coat, if it has one. `HALO_RT_ELITE_COAT=strength,roughness`
-/// overrides the Elites' (0 none).
-fn elite_coat(shader: &str) -> Option<(f32, f32)> {
-    if !elite_armour(shader) {
+/// Chief's armour shaders (his own and his first-person arms').
+const CHIEF_ARMOUR: [&str; 2] = ["characters\\cyborg\\shaders\\armor", "characters\\cyborg\\fp\\shaders\\armor hands"];
+/// Chief's armour's coat (strength, perceptual roughness): half the Elites',
+/// a hint of the thin film's colours on his darker plates.
+const CHIEF_COAT: (f32, f32) = (0.5, 0.1);
+
+/// A shader's clear coat, if it has one: the Elites' and Chief's armour.
+/// `HALO_RT_ELITE_COAT` and `HALO_RT_CHIEF_COAT=strength,roughness` override
+/// them (0 none).
+fn clear_coat(shader: &str) -> Option<(f32, f32)> {
+    let (default, variable) = if elite_armour(shader) {
+        (ELITE_COAT, "HALO_RT_ELITE_COAT")
+    } else if CHIEF_ARMOUR.iter().any(|name| shader.eq_ignore_ascii_case(name)) {
+        (CHIEF_COAT, "HALO_RT_CHIEF_COAT")
+    } else {
         return None;
-    }
-    let coat = std::env::var("HALO_RT_ELITE_COAT").ok().and_then(|text| {
+    };
+    let coat = std::env::var(variable).ok().and_then(|text| {
         let mut values = text.split(',').map(|v| v.trim().parse::<f32>().ok());
-        Some((values.next()??, values.next().flatten().unwrap_or(ELITE_COAT.1)))
+        Some((values.next()??, values.next().flatten().unwrap_or(default.1)))
     });
-    Some(coat.unwrap_or(ELITE_COAT)).filter(|&(strength, _)| strength > 0.0)
+    Some(coat.unwrap_or(default)).filter(|&(strength, _)| strength > 0.0)
 }
 
 struct Shininess {

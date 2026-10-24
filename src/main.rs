@@ -281,6 +281,9 @@ impl Default for LightingSettings {
 #[derive(Resource, Clone)]
 struct LevelSky(sky::SkyLighting);
 
+/// Solarik's thin-film clear coat: thickness (nm), film IOR, surface IOR.
+const THIN_FILM: &str = "320,1.5,2.2";
+
 fn main() -> AppExit {
     let mut args: Args = argh::from_env();
     let mut link = None;
@@ -318,6 +321,14 @@ fn main() -> AppExit {
             // SAFETY: at start-up, before any other thread runs
             unsafe { std::env::set_var("DLSS_SDK", sdk) };
         }
+    }
+    // Solarik's clear coats as thin films (the Elites' and Chief's armour;
+    // level.rs's `clear_coat`): a 320 nm film, teal head-on, violet toward
+    // the edges, for the iridescence of Halo's painted cube maps.
+    // `SOLARIK_THIN_FILM=thickness,ior,base_ior` overrides it, 0 none.
+    if std::env::var_os("SOLARIK_THIN_FILM").is_none() {
+        // SAFETY: at start-up, before any other thread runs
+        unsafe { std::env::set_var("SOLARIK_THIN_FILM", THIN_FILM) };
     }
     if let Some(exe) = args.opence.clone() {
         args.bridge = true;

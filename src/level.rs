@@ -399,7 +399,10 @@ const MATTE_REFLECTANCE: f32 = 0.25;
 const CAMOUFLAGE_THICKNESS: f32 = 0.6;
 
 /// Roughness where a reflective model shader's specular mask is zero: a
-/// plastic's sheen, not the matte of surfaces Halo gives no reflection.
+/// plastic's sheen, not the matte of surfaces Halo gives no reflection. That
+/// is for the brightest reflections (armour, Covenant hulls); dimmer ones fade
+/// toward matte by the square of their brightness (the crewmen's cloth,
+/// 0.5: 0.79; the lifepod's vinyl, 0.025: matte), as does their reflectance.
 const MODEL_UNMASKED_ROUGHNESS: f32 = 0.45;
 
 /// Models duller than their shaders' reflections make them (by the shader
@@ -2245,7 +2248,10 @@ impl LevelBuilder {
         }
         let dull = |roughness: f32| roughness + (DULL_ROUGHNESS.max(roughness) - roughness) * (1.0 - shine);
         let (roughness, metallic) = (dull(roughness), metallic * shine);
-        let reflectance = 0.5;
+        // a dim reflection's sheen, between matte and a plastic's (see
+        // MODEL_UNMASKED_ROUGHNESS)
+        let gloss = if model { r * r } else { 1.0 };
+        let reflectance = MATTE_REFLECTANCE + (0.5 - MATTE_REFLECTANCE) * gloss;
         let mask = match reflection.mask {
             // an alpha-tested base map's alpha is its cut-out, not a mask
             SpecularMask::BaseAlpha if !info.alpha_tested => info.base_map.and_then(|b| b.datum).map(|d| (d, 3)),
@@ -2255,7 +2261,7 @@ impl LevelBuilder {
         // Halo's mask dims a reflection, never blurs it: a model's unmasked
         // parts stay semi-glossy (fading them to matte while partly metallic
         // left Covenant crates looking dusty).
-        let unmasked = if model { dull(MODEL_UNMASKED_ROUGHNESS) } else { MATTE_ROUGHNESS };
+        let unmasked = if model { dull(MATTE_ROUGHNESS + (MODEL_UNMASKED_ROUGHNESS - MATTE_ROUGHNESS) * gloss) } else { MATTE_ROUGHNESS };
         let texture = mask.and_then(|(mask, channel)| {
             let bake = Bake::MetallicRoughness {
                 mask,

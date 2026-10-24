@@ -305,6 +305,9 @@ pub struct HaloTransparentMaterial {
     pub blend: u16,
     /// Culled from behind (not two-sided).
     pub one_sided: bool,
+    /// A sky layer: drawn in the transmissive phase (see
+    /// `crate::level::LevelBuilder::spawn_sky`).
+    pub sky: bool,
     /// What changes it over time (its maps' animation, its stages' colours),
     /// for [`crate::level::animate_transparent`]; none when nothing does.
     #[reflect(ignore)]
@@ -456,6 +459,10 @@ impl Material for HaloTransparentMaterial {
         self.depth_bias
     }
 
+    fn reads_view_transmission_texture(&self) -> bool {
+        self.sky
+    }
+
     /// Two-sided ones (and skies, seen from inside) are drawn from both
     /// sides; each blend function is its own blend state, as the game's
     /// framebuffer blends (the shader writes what each one takes).
@@ -503,11 +510,13 @@ impl Material for HaloTransparentMaterial {
 /// A glass or water pane's sky mask (see `glass_sky_mask.wesl`): its depth,
 /// far beyond the level but in front of the sky, and no colour. Solarik
 /// composites the camera's panes over what is behind them before the
-/// transparent pass, where the sky's layers are drawn; without it, they drew
-/// over every pane with only the sky behind it (the needler's needles above
-/// the horizon). It is drawn first in the transparent pass, before the sky's
-/// layers: in the opaque pass it kept the skybox from behind the panes too,
-/// and they were composited over black. The first-person weapon's panes
+/// transparent pass; the sky's layers were drawn in it then, and without
+/// the mask drew over every pane with only the sky behind it (the needler's
+/// needles above the horizon). They are drawn before the composite now
+/// (`crate::level::LevelBuilder::spawn_sky`), behind the panes; the mask,
+/// drawn first in the transparent pass, gives a pane over the sky a depth
+/// (in the opaque pass it kept the skybox from behind the panes too, and
+/// they were composited over black). The first-person weapon's panes
 /// (the needler's needles) write their own depth instead, as the game draws
 /// the weapon over everything: so the fog, which reads it, leaves them clear,
 /// and the level's transparent surfaces (the sea) don't draw over them.
@@ -623,6 +632,12 @@ impl Material for SkyWaterMaterial {
 
     fn depth_bias(&self) -> f32 {
         self.depth_bias
+    }
+
+    /// (a sky layer: drawn in the transmissive phase, see
+    /// `crate::level::LevelBuilder::spawn_sky`)
+    fn reads_view_transmission_texture(&self) -> bool {
+        true
     }
 
     fn enable_prepass() -> bool {

@@ -804,6 +804,9 @@ fn setup_camera(
         CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
         Msaa::Off,
         Exposure { ev100: settings.exposure_ev100 },
+        // (the sky's layers' phase, before Solarik's lighting: no steps, no
+        // copies; LevelBuilder::spawn_sky)
+        bevy::pbr::ScreenSpaceTransmission { steps: 0, ..default() },
     ));
     if args.pathtracer {
         camera.insert(Pathtracer::default());

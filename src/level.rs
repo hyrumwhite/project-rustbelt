@@ -759,6 +759,16 @@ impl LevelBuilder {
     /// Spawns a sky model as raster-only, unlit, alpha-blended layers in the
     /// model's part order. Solari never sees it: the sky's light comes from
     /// the environment map and the sun.
+    ///
+    /// The layers are drawn in Bevy's transmissive phase (their materials
+    /// say they read the transmission texture; the camera's
+    /// `ScreenSpaceTransmission` has no steps, so nothing is copied),
+    /// between the opaque and transparent passes, before Solarik's lighting:
+    /// Solarik composites the camera's glass and water panes over what is
+    /// behind them then. Drawn in the transparent pass, the layers came too
+    /// late, and the panes had only the skybox behind them (a30's opening,
+    /// from the dropship: the sky's horizon land black through the windows,
+    /// where the skybox, seen from the sky's origin, has nothing).
     pub fn spawn_sky(
         &mut self,
         model_datum: u32,
@@ -867,6 +877,9 @@ impl LevelBuilder {
                     cull_mode: None,
                     fog_enabled: false,
                     depth_bias: SKY_BIAS + layer as f32 * SKY_LAYER_BIAS,
+                    // (in the transmissive phase, as above; unlit, it
+                    // refracts nothing)
+                    specular_transmission: f32::MIN_POSITIVE,
                     ..default()
                 });
                 let vertices = part.vertices.iter().map(|v| SourceVertex {
@@ -2066,6 +2079,7 @@ impl LevelBuilder {
             depth_bias,
             blend: blend as u16,
             one_sided: !sky && transparent.flags & shader::TransparentInfo::TWO_SIDED == 0,
+            sky,
             animation: Some(std::sync::Arc::new(transparent.clone())),
             object: None,
             numeric: None,
@@ -2140,6 +2154,7 @@ impl LevelBuilder {
             depth_bias: 0.0,
             blend: 10,
             one_sided: false,
+            sky: false,
             animation: None,
             object: None,
             numeric: None,
@@ -2180,6 +2195,7 @@ impl LevelBuilder {
             depth_bias: 0.0,
             blend,
             one_sided: meter.flags & shader::MeterInfo::TWO_SIDED == 0,
+            sky: false,
             animation: None,
             object: None,
             numeric: None,

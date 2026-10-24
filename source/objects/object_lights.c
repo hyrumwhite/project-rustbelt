@@ -931,6 +931,25 @@ short lights_port_list(
 		lights[count].position = light->position;
 		lights[count].forward = light->forward;
 		lights[count].up = light->up;
+		/* an attached light where its object's marker is drawn now: the
+		game moves an object's lights only with its dynamic lighting
+		recompute flag, which units, items and projectiles set but scenery
+		never does (a10's baton, held in a marine's hand, had its light left
+		where it was placed) */
+		if (light->parent_light_index == NONE && light->object_index != NONE &&
+			object_try_and_get(light->object_index) != NULL)
+		{
+			struct object_marker markers[1];
+
+			object_get_marker_by_name(
+				light->object_index,
+				object_get_attachment_marker_name(light->object_index, light->attachment_marker_index),
+				markers,
+				1);
+			lights[count].position = markers[0].matrix.position;
+			lights[count].forward = markers[0].matrix.forward;
+			lights[count].up = markers[0].matrix.up;
+		}
 		lights[count].color = flare ? definition->color_upper_bound.rgb : light->color;
 		lights[count].radius = flare ? definition->radius : light->radius;
 		lights[count].cutoff_angle = definition ? definition->cutoff_angle : _pi;

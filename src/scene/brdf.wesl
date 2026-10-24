@@ -155,8 +155,53 @@ fn evaluate_clearcoat_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f3
     let NdotV = dot(world_normal, wo);
     if NdotL < 0.0001 || NdotH < 0.0001 || LdotH < 0.0001 || NdotV < 0.0001 { return vec3(0.0); }
     let roughness = clearcoat_roughness(material);
-    let F = fresnel(vec3(CLEARCOAT_F0), LdotH).g;
-    return vec3(material.clearcoat * D_GGX(roughness, NdotH) * V_SmithGGXCorrelated(roughness, NdotV, NdotL) * F * NdotL);
+    let F = clearcoat_fresnel(LdotH);
+    return material.clearcoat * D_GGX(roughness, NdotH) * V_SmithGGXCorrelated(roughness, NdotV, NdotL) * F * NdotL;
+}
+
+// The coat's reflectance at `LdotH`: a 4% dielectric's, or with
+// THIN_FILM_COAT a thin film's, whose interference colours it by the angle.
+fn clearcoat_fresnel(LdotH: f32) -> vec3<f32> {
+    var F = vec3(fresnel(vec3(CLEARCOAT_F0), LdotH).g);
+@if(THIN_FILM_COAT) {
+    F = thin_film_reflectance(LdotH);
+}
+    return F;
+}
+
+// A thin dielectric film over the surface (THIN_FILM_COAT: its thickness in
+// nanometres, its and the surface's indices of refraction in thousandths):
+// the two-beam interference of the light reflected by the film's top and its
+// bottom (Airy's sum), for s and p polarisations, averaged over three
+// wavelengths in each of red, green and blue. An oil film's or a beetle's
+// colours, shifting with the angle.
+@if(THIN_FILM_COAT)
+fn thin_film_reflectance(cos1: f32) -> vec3<f32> {
+    let n2 = f32(constants::THIN_FILM_IOR) / 1000.0;
+    let n3 = f32(constants::THIN_FILM_BASE_IOR) / 1000.0;
+    let thickness = f32(constants::THIN_FILM_NM);
+    let sin1_squared = 1.0 - cos1 * cos1;
+    let cos2 = sqrt(max(1.0 - sin1_squared / (n2 * n2), 0.0));
+    let cos3 = sqrt(max(1.0 - sin1_squared / (n3 * n3), 0.0));
+    let r12s = (cos1 - n2 * cos2) / (cos1 + n2 * cos2);
+    let r12p = (n2 * cos1 - cos2) / (n2 * cos1 + cos2);
+    let r23s = (n2 * cos2 - n3 * cos3) / (n2 * cos2 + n3 * cos3);
+    let r23p = (n3 * cos2 - n2 * cos3) / (n3 * cos2 + n2 * cos3);
+    // the phase difference of the two reflections per nanometre of wavelength
+    let path = 4.0 * PI * n2 * thickness * cos2;
+    let red = path / vec3(610.0, 650.0, 690.0);
+    let green = path / vec3(500.0, 532.0, 565.0);
+    let blue = path / vec3(420.0, 450.0, 480.0);
+    let s = vec3(dot(airy(r12s, r23s, red), vec3(1.0)), dot(airy(r12s, r23s, green), vec3(1.0)), dot(airy(r12s, r23s, blue), vec3(1.0)));
+    let p = vec3(dot(airy(r12p, r23p, red), vec3(1.0)), dot(airy(r12p, r23p, green), vec3(1.0)), dot(airy(r12p, r23p, blue), vec3(1.0)));
+    return (s + p) / 6.0;
+}
+
+// |r12 + r23 e^(i phase)|^2 / |1 + r12 r23 e^(i phase)|^2
+@if(THIN_FILM_COAT)
+fn airy(r12: f32, r23: f32, phase: vec3<f32>) -> vec3<f32> {
+    let c = cos(phase);
+    return (r12 * r12 + r23 * r23 + 2.0 * r12 * r23 * c) / (1.0 + r12 * r12 * r23 * r23 + 2.0 * r12 * r23 * c);
 }
 
 // Picks a glossy lobe (the coat or the surface's own specular) by their

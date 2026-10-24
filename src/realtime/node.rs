@@ -916,6 +916,14 @@ pub fn init_solari_lighting_pipelines(
         if std::env::var("SOLARIK_RAY_MATERIAL_FILTERING").is_ok_and(|v| v == "1") {
             shader_defs.push("RAY_MATERIAL_FOOTPRINTS".into());
         }
+        // Clear coats as thin films (brdf.wesl's `thin_film_reflectance`):
+        // SOLARIK_THIN_FILM=thickness in nm,film IOR,surface IOR.
+        if let Some([thickness, ior, base_ior]) = thin_film_coat() {
+            shader_defs.push("THIN_FILM_COAT".into());
+            shader_defs.push(ShaderDefVal::UInt("THIN_FILM_NM".into(), thickness.round() as u32));
+            shader_defs.push(ShaderDefVal::UInt("THIN_FILM_IOR".into(), (ior * 1000.0).round() as u32));
+            shader_defs.push(ShaderDefVal::UInt("THIN_FILM_BASE_IOR".into(), (base_ior * 1000.0).round() as u32));
+        }
         #[cfg(feature = "graphics_debug")]
         if entry_point == "primary_foliage"
             && std::env::var("SOLARIK_PRIMARY_QUERY_ONLY").as_deref() == Ok("1")
@@ -1168,4 +1176,15 @@ pub fn init_solari_lighting_pipelines(
     if let Some(capture) = query_capture {
         commands.insert_resource(capture);
     }
+}
+
+/// `SOLARIK_THIN_FILM=thickness,ior,base_ior` (nanometres; the film's and the
+/// surface's indices of refraction, 1.5 and 2.2 when left out).
+fn thin_film_coat() -> Option<[f32; 3]> {
+    let text = std::env::var("SOLARIK_THIN_FILM").ok()?;
+    let mut values = text.split(',').map(|v| v.trim().parse::<f32>().ok());
+    let thickness = values.next()??;
+    let ior = values.next().flatten().unwrap_or(1.5);
+    let base_ior = values.next().flatten().unwrap_or(2.2);
+    (thickness > 0.0 && ior > 1.0 && base_ior > 1.0).then_some([thickness, ior, base_ior])
 }

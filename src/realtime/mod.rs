@@ -104,6 +104,10 @@ impl Plugin for SolarikLightingPlugin {
                     // overwrite masked pixels. Depth-zero pixels retain sky.
                     .chain()
                     .after(main_opaque_pass_3d)
+                    // (what the application draws in the transmissive
+                    // phase, its sky's layers, is behind the camera's panes,
+                    // which this composites over what is behind them)
+                    .after(bevy_pbr::main_transmissive_pass_3d)
                     .after(crate::atmosphere::AtmosphereBackground)
                     .before(main_transparent_pass_3d)
                     .in_set(Core3dSystems::MainPass),

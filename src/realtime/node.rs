@@ -96,10 +96,14 @@ type SolarikLightingViewQuery = (
 );
 
 /// Views whose raster panes are owned by the primary compositor this frame.
+/// (A pane is queued in the transmissive phase instead of the transparent
+/// one when its view has `ScreenSpaceTransmission`: an application that
+/// draws in that phase, before this compositor, what lies behind the panes.)
 #[derive(Resource, Default)]
 pub struct PrimaryGlassViews(
     HashSet<RetainedViewEntity>,
     Vec<(RetainedViewEntity, Transparent3d)>,
+    Vec<(RetainedViewEntity, bevy_pbr::Transmissive3d)>,
 );
 
 /// Restore retained entries before Bevy updates visibility and materials.
@@ -107,9 +111,15 @@ pub struct PrimaryGlassViews(
 pub fn restore_primary_glass(
     mut state: ResMut<PrimaryGlassViews>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
+    mut transmissive_phases: ResMut<ViewSortedRenderPhases<bevy_pbr::Transmissive3d>>,
 ) {
     for (view, item) in state.1.drain(..) {
         if let Some(phase) = phases.get_mut(&view) {
+            phase.add_retained(item);
+        }
+    }
+    for (view, item) in state.2.drain(..) {
+        if let Some(phase) = transmissive_phases.get_mut(&view) {
             phase.add_retained(item);
         }
     }
@@ -126,6 +136,7 @@ pub fn prepare_primary_glass(
     view_uniforms: Res<ViewUniforms>,
     previous_uniforms: Res<PreviousViewUniforms>,
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
+    mut transmissive_phases: ResMut<ViewSortedRenderPhases<bevy_pbr::Transmissive3d>>,
     mut ready_views: ResMut<PrimaryGlassViews>,
 ) {
     ready_views.0.clear();
@@ -208,6 +219,19 @@ pub fn prepare_primary_glass(
         for key in keys {
             if let Some(item) = phase.items.shift_remove(&key) {
                 ready_views.1.push((extracted.retained_view_entity, item));
+            }
+        }
+        if let Some(phase) = transmissive_phases.get_mut(&extracted.retained_view_entity) {
+            let keys: Vec<_> = phase
+                .items
+                .keys()
+                .filter(|(_, main_entity)| glass_main_entities.contains(main_entity))
+                .copied()
+                .collect();
+            for key in keys {
+                if let Some(item) = phase.items.shift_remove(&key) {
+                    ready_views.2.push((extracted.retained_view_entity, item));
+                }
             }
         }
         ready_views.0.insert(extracted.retained_view_entity);

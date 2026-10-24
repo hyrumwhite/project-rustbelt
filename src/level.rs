@@ -2486,15 +2486,25 @@ pub struct TracedMesh(pub Handle<Mesh>);
 pub struct OnBsps(pub u32);
 
 /// Puts hidden ray-traced meshes out of the ray-traced scene, and shown ones
-/// back.
+/// back; not a masked one (`RaytracingMask`), hidden for the camera alone:
+/// the first-person player's body, which shadows the world. (It went out
+/// once the body's skinned meshes were changed in place: a new mesh every
+/// frame had put it back each time, and the player lost their shadow.)
 pub fn sync_traced_visibility(
     mut commands: Commands,
-    traced: Query<(Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>), Changed<InheritedVisibility>>,
+    traced: Query<
+        (Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>, Has<bevy_solarik::scene::RaytracingMask>),
+        Or<(Changed<InheritedVisibility>, Changed<bevy_solarik::scene::RaytracingMask>)>,
+    >,
+    all: Query<(Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>, Has<bevy_solarik::scene::RaytracingMask>)>,
+    mut unmasked: RemovedComponents<bevy_solarik::scene::RaytracingMask>,
 ) {
-    for (entity, mesh, visibility, in_scene) in &traced {
-        if visibility.get() && !in_scene {
+    let unmasked: Vec<Entity> = unmasked.read().collect();
+    for (entity, mesh, visibility, in_scene, masked) in traced.iter().chain(unmasked.iter().filter_map(|&e| all.get(e).ok())) {
+        let wanted = visibility.get() || masked;
+        if wanted && !in_scene {
             commands.entity(entity).insert(RaytracingMesh3d(mesh.0.clone()));
-        } else if !visibility.get() && in_scene {
+        } else if !wanted && in_scene {
             commands.entity(entity).remove::<RaytracingMesh3d>();
         }
     }

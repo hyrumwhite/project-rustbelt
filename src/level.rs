@@ -1681,8 +1681,9 @@ impl LevelBuilder {
             return base.clone();
         };
         let color = change_colors[source].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
-        // (Chief's visor is its own colour, not its base map's)
-        if color == [255; 3] || info.as_ref().is_some_and(|i| i.name.eq_ignore_ascii_case(VISOR_SHADER)) {
+        // (Chief's visor is its own colour, not its base map's; a tuning
+        // colour, `painted`, is already the base's)
+        if color == [255; 3] || info.as_ref().is_some_and(|i| painted(&i.name).is_some()) || info.as_ref().is_some_and(|i| i.name.eq_ignore_ascii_case(VISOR_SHADER)) {
             return base.clone();
         }
         if let Some(surface) = self.coloured_surfaces.get(&(shader, color)) {
@@ -1824,11 +1825,8 @@ impl LevelBuilder {
         // says (the baked mask's red channel; skin and joints have none)
         // (tuning: `HALO_RT_ELITE_COLOR=r,g,b` paints the Elites' armour
         // its change colour, as the game does a live Elite, here where the
-        // level's placements have none)
-        if let Some(color) = std::env::var("HALO_RT_ELITE_COLOR").ok().filter(|_| elite_armour(&info.name)).and_then(|text| {
-            let c: Vec<f32> = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-            (c.len() == 3).then(|| [c[0], c[1], c[2]].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
-        }) && let Some(multipurpose) = info.multipurpose_map.and_then(|m| m.datum)
+        // level's placements have none; `HALO_RT_CHIEF_COLOR` Chief's)
+        if let Some(color) = painted(&info.name) && let Some(multipurpose) = info.multipurpose_map.and_then(|m| m.datum)
             && info.change_color.is_some()
         {
             let bake = crate::textures::Bake::ChangeColor { base: info.base_map.and_then(|b| b.datum), multipurpose, color };
@@ -1840,6 +1838,15 @@ impl LevelBuilder {
             material.clearcoat = strength;
             material.clearcoat_perceptual_roughness = roughness;
             material.clearcoat_texture = material.metallic_roughness_texture.clone();
+            // Chief's only on his armour plates: the multipurpose map's blue,
+            // the change colour's mask (its red, the reflection mask, takes
+            // in his black suit too), baked into the red the coat reads
+            if CHIEF_ARMOUR.iter().any(|name| info.name.eq_ignore_ascii_case(name))
+                && let Some(multipurpose) = info.multipurpose_map.and_then(|m| m.datum)
+            {
+                let bake = crate::textures::Bake::MetallicRoughness { mask: multipurpose, channel: 2, unmasked: 0, roughness: 0, metallic: 0 };
+                material.clearcoat_texture = self.textures.baked(&self.cache, bake, self.permutation, assets.images);
+            }
         }
         let base_color_texture = if info.name.eq_ignore_ascii_case(VISOR_SHADER) {
             material.base_color = VISOR_COLOR;
@@ -1849,7 +1856,8 @@ impl LevelBuilder {
             material.metallic_roughness_texture = None;
             None
         } else {
-            base_color_texture
+            // (painted, when a tuning colour is)
+            material.base_color_texture.clone()
         };
         // a model shader's cut-out (the game's alpha test, reference 0x7f, on
         // the base map's alpha: leaves, grilles) and its two sides
@@ -2418,9 +2426,23 @@ fn elite_armour(shader: &str) -> bool {
 
 /// Chief's armour shaders (his own and his first-person arms').
 const CHIEF_ARMOUR: [&str; 2] = ["characters\\cyborg\\shaders\\armor", "characters\\cyborg\\fp\\shaders\\armor hands"];
-/// Chief's armour's coat (strength, perceptual roughness): half the Elites',
-/// a hint of the thin film's colours on his darker plates.
+/// Chief's armour's coat (strength, perceptual roughness), on his armour
+/// plates alone: half the Elites', a hint of the thin film's colours.
 const CHIEF_COAT: (f32, f32) = (0.5, 0.1);
+
+/// A tuning colour for the Elites' or Chief's armour, in place of an
+/// object's change colour (`HALO_RT_ELITE_COLOR`, `HALO_RT_CHIEF_COLOR=r,g,b`).
+fn painted(shader: &str) -> Option<[u8; 3]> {
+    let variable = if elite_armour(shader) {
+        "HALO_RT_ELITE_COLOR"
+    } else if CHIEF_ARMOUR.iter().any(|name| shader.eq_ignore_ascii_case(name)) {
+        "HALO_RT_CHIEF_COLOR"
+    } else {
+        return None;
+    };
+    let c: Vec<f32> = std::env::var(variable).ok()?.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+    (c.len() == 3).then(|| [c[0], c[1], c[2]].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+}
 
 /// A shader's clear coat, if it has one: the Elites' and Chief's armour.
 /// `HALO_RT_ELITE_COAT` and `HALO_RT_CHIEF_COAT=strength,roughness` override

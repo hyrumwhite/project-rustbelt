@@ -229,6 +229,21 @@ const DEVICE_GROUP_FLAGS: u32 = 2;
 const DEVICE_GROUP_ACTUAL_VALUE: u32 = 4;
 const DEVICE_GROUP_CAN_CHANGE_ONLY_ONCE: u16 = 1 << 0;
 const DEVICE_GROUP_CHANGED_ONCE: u16 = 1 << 1;
+/// `_unit_suspended_bit` of a unit's flags, `_biped_airborne_bit` of a
+/// biped's.
+const UNIT_SUSPENDED: u32 = 1 << 24;
+const BIPED_AIRBORNE: u32 = 1 << 0;
+/// `struct screen_fade_definition`'s start time, ticks and direction (its
+/// colour first).
+const SCREEN_FADE_START_TIME: u32 = 12;
+const SCREEN_FADE_TICKS: u32 = 16;
+const SCREEN_FADE_FADING_OUT: u32 = 18;
+/// `struct recent_conversation`: its size, whether it couldn't begin or
+/// finished well, and when it finished (its conversation's index first).
+const RECENT_CONVERSATION_SIZE: u32 = 0x10;
+const RECENT_CONVERSATION_UNABLE_TO_BEGIN: u32 = 2;
+const RECENT_CONVERSATION_FINISHED_SUCCESSFULLY: u32 = 3;
+const RECENT_CONVERSATION_FINISH_TIME: u32 = 4;
 /// `MAXIMUM_WEAPONS_PER_UNIT`.
 const UNIT_WEAPONS: i16 = 4;
 /// `struct object_list_header_datum`'s count and first reference, and
@@ -373,6 +388,14 @@ pub struct HsContext {
     /// devices (`network_coop_devices_remote`).
     pub device_groups_data: u32,
     pub devices_remote: bool,
+    /// `player_data`; the screen fade (`player_effect_globals`'s);
+    /// `conversation_data`, and `ai_globals`' recent conversations and the
+    /// address of their count.
+    pub player_data: u32,
+    pub screen_fade: u32,
+    pub conversation_data: u32,
+    pub recent_conversations: u32,
+    pub recent_conversation_count: u32,
 }
 
 /// `(long)value` as x86 truncates it.
@@ -1651,6 +1674,116 @@ impl<H: HsHost> Runtime<'_, H> {
                         }
                     }
                 }
+            }
+            // hs_players: a new list of each player's unit (object_list_new,
+            // object_list_add)
+            "players" => {
+                let list = self.datum_new(self.context.object_list_header_data);
+                if list != NONE {
+                    let Some(header) = self.datum_get(self.context.object_list_header_data, list) else { return false };
+                    m.w16(header + OBJECT_LIST_HEADER_COUNT, 0);
+                    m.w32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE, NONE as u32);
+                    let mut player_index = self.data_next_index(self.context.player_data, NONE);
+                    while player_index != NONE {
+                        let Some(player) = self.datum_get(self.context.player_data, player_index) else { return false };
+                        let unit_index = m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32;
+                        if unit_index != NONE {
+                            // (reference_list_add: a full pool lists nothing,
+                            // though the count goes up)
+                            let reference = self.datum_new(self.context.object_list_data);
+                            if reference != NONE {
+                                let Some(datum) = self.datum_get(self.context.object_list_data, reference) else { return false };
+                                m.w32(datum + DATA_REFERENCE_DATUM, unit_index as u32);
+                                m.w32(datum + DATA_REFERENCE_NEXT, m.r32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE));
+                                m.w32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE, reference as u32);
+                            }
+                            let count = m.r16(header + OBJECT_LIST_HEADER_COUNT);
+                            m.w16(header + OBJECT_LIST_HEADER_COUNT, count.wrapping_add(1));
+                        }
+                        player_index = self.data_next_index(self.context.player_data, player_index);
+                    }
+                }
+                list
+            }
+            // unit_scripting_suspended (not as network co-op's host, where
+            // the players the scripts can't name go with player0)
+            "unit_suspended" => {
+                if self.context.coop_host {
+                    return false;
+                }
+                let unit_index = argument(0);
+                if unit_index != NONE {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let suspended = m.r8(arguments + 4) != 0;
+                    let flags = m.r32(unit + u::UNIT_FLAGS as u32);
+                    m.w32(unit + u::UNIT_FLAGS as u32, if suspended { flags | UNIT_SUSPENDED } else { flags & !UNIT_SUSPENDED });
+                    for i in 0..3 {
+                        m.w32(unit + u::OBJECT_TRANSLATIONAL_VELOCITY as u32 + 4 * i, 0);
+                    }
+                    if m.r16(unit + u::OBJECT_TYPE as u32) == 0 {
+                        let address = unit + crate::layout::biped_datum::BIPED_FLAGS as u32;
+                        m.w32(address, m.r32(address) & !BIPED_AIRBORNE);
+                    }
+                }
+                0
+            }
+            // player_effect_screen_fade_in and _out
+            name @ ("fade_in" | "fade_out") => {
+                let fade = self.context.screen_fade;
+                for i in 0..3 {
+                    m.w32(fade + 4 * i, m.r32(arguments + 4 * i));
+                }
+                m.w16(fade + SCREEN_FADE_TICKS, m.r16(arguments + 12));
+                m.w8(fade + SCREEN_FADE_FADING_OUT, (name == "fade_out") as u8);
+                m.w32(fade + SCREEN_FADE_START_TIME, self.context.game_time as u32);
+                0
+            }
+            // ai_conversation_status: the most advanced of the
+            // conversation's running copies, else how its latest ended
+            "ai_conversation_status" => {
+                use crate::layout::conversation_datum as c;
+                let conversation_index = short(0);
+                let mut status = 0;
+                let mut index = self.data_next_index(self.context.conversation_data, NONE);
+                while index != NONE {
+                    let Some(conversation) = self.datum_get(self.context.conversation_data, index) else { return false };
+                    if m.r16(conversation + c::SCENARIO_CONVERSATION_INDEX as u32) as i16 == conversation_index {
+                        let this = if m.r8(conversation + c::BEGUN as u32) == 0 {
+                            1
+                        } else if m.r8(conversation + c::ANY_LINE_SPOKEN as u32) == 0 {
+                            2
+                        } else if m.r8(conversation + c::WAITING_TO_ADVANCE as u32) != 0 {
+                            4
+                        } else {
+                            3
+                        };
+                        status = status.max(this);
+                    }
+                    index = self.data_next_index(self.context.conversation_data, index);
+                }
+                if status == 0 && self.context.recent_conversations != 0 {
+                    let recent_count = m.r16(self.context.recent_conversation_count) as i16;
+                    let mut latest: Option<u32> = None;
+                    let mut latest_finish_time = NONE;
+                    for i in 0..recent_count.max(0) as u32 {
+                        let recent = self.context.recent_conversations + i * RECENT_CONVERSATION_SIZE;
+                        let finish_time = m.r32(recent + RECENT_CONVERSATION_FINISH_TIME) as i32;
+                        if m.r16(recent) as i16 == conversation_index && finish_time > latest_finish_time {
+                            latest = Some(recent);
+                            latest_finish_time = finish_time;
+                        }
+                    }
+                    if let Some(recent) = latest {
+                        status = if m.r8(recent + RECENT_CONVERSATION_UNABLE_TO_BEGIN) != 0 {
+                            5
+                        } else if m.r8(recent + RECENT_CONVERSATION_FINISHED_SUCCESSFULLY) != 0 {
+                            6
+                        } else {
+                            7
+                        };
+                    }
+                }
+                short_value(status)
             }
             // device_get_position
             "device_get_position" => {

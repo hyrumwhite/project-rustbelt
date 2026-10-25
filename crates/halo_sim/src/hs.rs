@@ -123,6 +123,11 @@ pub struct HsContextC {
     pub coop_host: i32,
     pub device_groups_data: u32,
     pub devices_remote: i32,
+    pub player_data: u32,
+    pub screen_fade: u32,
+    pub conversation_data: u32,
+    pub recent_conversations: u32,
+    pub recent_conversation_count: u32,
 }
 
 impl HsContextC {
@@ -162,6 +167,11 @@ impl HsContextC {
             coop_host: self.coop_host != 0,
             device_groups_data: self.device_groups_data,
             devices_remote: self.devices_remote != 0,
+            player_data: self.player_data,
+            screen_fade: self.screen_fade,
+            conversation_data: self.conversation_data,
+            recent_conversations: self.recent_conversations,
+            recent_conversation_count: self.recent_conversation_count,
         }
     }
 }

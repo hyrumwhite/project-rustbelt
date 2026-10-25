@@ -848,6 +848,14 @@ struct halo_sim_hs_context
 	unsigned long conversation_data;
 	unsigned long recent_conversations;
 	unsigned long recent_conversation_count;
+	/* actor_data, and the scenario's command lists (their first element)
+	and count */
+	unsigned long actor_data;
+	unsigned long command_lists;
+	long command_list_count;
+	/* the loaded tags' table and its count (cache_files_tag_instances) */
+	unsigned long tag_instances;
+	long tag_count;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's

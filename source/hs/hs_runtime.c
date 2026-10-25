@@ -297,6 +297,7 @@ extern struct hs_external_global_definition *hs_external_globals[];
 #include "ai/ai_globals.h"
 #include "game/players.h"
 #include "effects/player_effects.h"
+#include "ai/actors.h"
 static long hs_runtime_call_simple(long kind, long a);
 static long hs_object_list_from_ai_reference(long ai_reference);
 
@@ -2077,6 +2078,8 @@ static char const *const hs_runtime_rust_bodies[] =
 	"fade_in",
 	"fade_out",
 	"ai_conversation_status",
+	"ai_command_list_status",
+	"vehicle_test_seat_list",
 };
 /* (each library function's runs, for HALO_HS_LIBRARY_COUNTS's) */
 unsigned long hs_runtime_library_counts[1024];
@@ -3938,6 +3941,14 @@ void hs_runtime_port_context(
 	context->conversation_data = (unsigned long)conversation_data;
 	context->recent_conversations = ai_globals ? (unsigned long)ai_globals->recent_conversations : 0;
 	context->recent_conversation_count = ai_globals ? (unsigned long)&ai_globals->recent_conversation_count : 0;
+	context->actor_data = (unsigned long)actor_data;
+	context->command_lists = scenario ? (unsigned long)scenario->ai_command_lists.address : 0;
+	context->command_list_count = scenario ? scenario->ai_command_lists.count : 0;
+	{
+		extern void *cache_files_tag_instances(long *count);
+
+		context->tag_instances = (unsigned long)cache_files_tag_instances(&context->tag_count);
+	}
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

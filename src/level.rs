@@ -409,17 +409,23 @@ const MODEL_UNMASKED_ROUGHNESS: f32 = 0.45;
 /// tag's path): the share of their gloss and metal they keep, the rest
 /// toward [`DULL_ROUGHNESS`] (lit by the level's own lights, Chief's
 /// armour and the vehicles shone like chrome).
-const MODEL_SHINE: [(&str, f32); 8] = [
+const MODEL_SHINE: [(&str, f32); 9] = [
     ("characters\\cyborg\\", 0.3),
     ("characters\\marine", 0.5),
     ("characters\\grunt\\", 0.8),
     ("vehicles\\scorpion\\", 0.15),
-    ("vehicles\\warthog\\", 0.5),
+    ("vehicles\\warthog\\", 0.35),
+    ("vehicles\\pelican\\", 0.35),
     // (Covenant crates)
     ("scenery\\c_storage\\", 0.7),
     ("scenery\\rocks\\", 0.6),
     ("scenery\\cutscene_small_rock\\", 0.6),
 ];
+
+/// Models whose reflection is paint's sheen, not bare metal (by the shader
+/// tag's path): the share of their metalness they keep. Halo adds a model's
+/// reflection over its full colour; as metal it greyed the Warthog's olive.
+const MODEL_METAL: [(&str, f32); 2] = [("vehicles\\warthog\\", 0.2), ("vehicles\\pelican\\", 0.2)];
 
 /// The roughness a model's gloss fades toward as [`MODEL_SHINE`] dulls it.
 const DULL_ROUGHNESS: f32 = 0.6;
@@ -669,18 +675,25 @@ impl LevelBuilder {
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
         let mut placements = objects::placements(&self.cache)?;
-        // `HALO_RT_PLACE=<biped or weapon tag>@x,y,z,yaw`: one more there
+        // `HALO_RT_PLACE=<biped, vehicle or weapon tag>@x,y,z,yaw`: one more there
         // (Halo world units, yaw in degrees), to look at its materials where
         // the light suits
         if let Ok(spec) = std::env::var("HALO_RT_PLACE") {
             let parsed = spec.split_once('@').and_then(|(name, at)| {
                 let v: Vec<f32> = at.split(',').filter_map(|v| v.trim().parse().ok()).collect();
                 let weapon = halo_map::fourcc(b"weap");
-                let (group, tag) = [halo_map::groups::BIPED, weapon]
+                let vehicle = halo_map::fourcc(b"vehi");
+                let (group, tag) = [halo_map::groups::BIPED, vehicle, weapon]
                     .into_iter()
                     .find_map(|group| self.cache.find_tag(group, name).map(|tag| (group, tag)))?;
+                let kind = match group {
+                    g if g == vehicle => objects::ObjectKind::Vehicle,
+                    g if g == weapon => objects::ObjectKind::Weapon,
+                    _ => objects::ObjectKind::Biped,
+                };
                 let like = placements.iter().find(|p| p.kind == objects::ObjectKind::Biped).or(placements.first())?;
                 (v.len() >= 3).then(|| objects::Placement {
+                    kind,
                     definition: halo_map::TagRef { group, datum: Some(tag.datum) },
                     position: [v[0], v[1], v[2]],
                     rotation: [v.get(3).copied().unwrap_or(0.0).to_radians(), 0.0, 0.0],
@@ -1844,7 +1857,7 @@ impl LevelBuilder {
             if CHIEF_ARMOUR.iter().any(|name| info.name.eq_ignore_ascii_case(name))
                 && let Some(multipurpose) = info.multipurpose_map.and_then(|m| m.datum)
             {
-                let bake = crate::textures::Bake::MetallicRoughness { mask: multipurpose, channel: 2, unmasked: 0, roughness: 0, metallic: 0 };
+                let bake = crate::textures::Bake::MetallicRoughness { mask: multipurpose, channel: 2, unmasked: 0, roughness: 0, metallic: 0, cloth: None };
                 material.clearcoat_texture = self.textures.baked(&self.cache, bake, self.permutation, assets.images);
             }
         }
@@ -2248,6 +2261,24 @@ impl LevelBuilder {
         let metallic = if model { 0.9 * r } else { 0.5 * r };
         // (some duller still)
         let mut shine = MODEL_SHINE.iter().find(|(path, _)| model && info.name.starts_with(path)).map_or(1.0, |&(_, shine)| shine);
+        // (some painted, not bare metal: their gloss is a dielectric's sheen)
+        let mut metal = MODEL_METAL.iter().find(|(path, _)| model && info.name.starts_with(path)).map_or(1.0, |&(_, metal)| metal);
+        // (tuning: `HALO_RT_MODEL_TUNE=<shader path prefix>=shine,metal;...`)
+        if let Ok(text) = std::env::var("HALO_RT_MODEL_TUNE") {
+            for entry in text.split(';') {
+                let Some((prefix, values)) = entry.split_once('=') else { continue };
+                if !model || prefix.is_empty() || !info.name.starts_with(prefix) {
+                    continue;
+                }
+                let mut values = values.split(',').map(|v| v.trim().parse::<f32>().ok());
+                if let Some(Some(value)) = values.next() {
+                    shine = value;
+                }
+                if let Some(Some(value)) = values.next() {
+                    metal = value;
+                }
+            }
+        }
         // (tuning: `HALO_RT_ELITE_SHINE` for the coated Elite armour beneath its coat)
         if elite_armour(&info.name) {
             if let Some(value) = std::env::var("HALO_RT_ELITE_SHINE").ok().and_then(|v| v.parse().ok()) {
@@ -2255,7 +2286,7 @@ impl LevelBuilder {
             }
         }
         let dull = |roughness: f32| roughness + (DULL_ROUGHNESS.max(roughness) - roughness) * (1.0 - shine);
-        let (roughness, metallic) = (dull(roughness), metallic * shine);
+        let (roughness, metallic) = (dull(roughness), metallic * shine * metal);
         // a dim reflection's sheen, between matte and a plastic's (see
         // MODEL_UNMASKED_ROUGHNESS)
         let gloss = if model { r * r } else { 1.0 };
@@ -2277,6 +2308,10 @@ impl LevelBuilder {
                 unmasked: unmasked.to_bits(),
                 roughness: roughness.to_bits(),
                 metallic: metallic.to_bits(),
+                // Chief's suit, outside his plates (the multipurpose map's
+                // blue, the change colour's mask): cloth, not his armour's
+                // gloss (his belt, joints and gloves)
+                cloth: (channel == 0 && CHIEF_ARMOUR.iter().any(|name| info.name.eq_ignore_ascii_case(name))).then_some((2, CHIEF_SUIT_ROUGHNESS.to_bits())),
             };
             self.textures.baked(&self.cache, bake, self.permutation, assets.images)
         });
@@ -2426,6 +2461,9 @@ fn elite_armour(shader: &str) -> bool {
 
 /// Chief's armour shaders (his own and his first-person arms').
 const CHIEF_ARMOUR: [&str; 2] = ["characters\\cyborg\\shaders\\armor", "characters\\cyborg\\fp\\shaders\\armor hands"];
+/// Chief's black suit's roughness (his belt, joints and gloves: the parts of
+/// his armour shader outside the change colour's mask), a fabric's.
+const CHIEF_SUIT_ROUGHNESS: f32 = 0.85;
 /// Chief's armour's coat (strength, perceptual roughness), on his armour
 /// plates alone, as strong as the Elites'.
 const CHIEF_COAT: (f32, f32) = (1.0, 0.1);

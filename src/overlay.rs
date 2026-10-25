@@ -72,6 +72,14 @@ pub struct OverlayMaterial {
     mode: u32,
 }
 
+impl OverlayMaterial {
+    /// A premultiplied picture drawn over the window (the HUD's too,
+    /// `crate::hud`), with the overlay's debug mode.
+    pub fn new(picture: Handle<Image>) -> Self {
+        Self { picture, mode: std::env::var("HALO_RT_OVERLAY_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0) }
+    }
+}
+
 impl UiMaterial for OverlayMaterial {
     fn fragment_shader() -> ShaderRef {
         "embedded://halo_rt/shaders/game_overlay.wesl".into()
@@ -127,8 +135,8 @@ fn spawn_overlay(
         Name::new("Game overlay"),
         MaterialNode(material.clone()),
         Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
-        // under the viewer's own text
-        GlobalZIndex(-1),
+        // under the HUD (crate::hud) and the viewer's own text
+        GlobalZIndex(-2),
     ));
     commands.insert_resource(OverlayPicture { image, material, size: (width, height), pixels: default(), generation: 0 });
 }

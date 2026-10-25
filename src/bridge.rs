@@ -51,6 +51,7 @@ pub fn launch_game(
     viewer_decals: bool,
     viewer_effects: bool,
     viewer_transparent: bool,
+    viewer_hud: bool,
     simulation: Option<Simulation>,
 ) -> std::io::Result<std::process::Child> {
     use std::io::{Error, ErrorKind};
@@ -119,6 +120,10 @@ pub fn launch_game(
         // (the transparent chicago and generic shaders: the viewer's)
         if viewer_transparent {
             command.env("HALO_BEVY_BRIDGE_VIEWER_TRANSPARENT", "1");
+        }
+        // (the HUD's and menus' bitmaps: the viewer's, crate::hud)
+        if viewer_hud {
+            command.env("HALO_BEVY_BRIDGE_VIEWER_HUD", "1");
         }
     }
     let start = if start_on_map { format!("on {scenario}") } else { "at its menus".to_string() };

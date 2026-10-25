@@ -21,7 +21,9 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 45;
+pub const VERSION: u32 = 46;
+pub const SCREEN_DRAWS: usize = 1024;
+pub const SCREEN_VERTICES: usize = 4096;
 pub const SPRITE_BATCHES: usize = 512;
 pub const SPRITE_VERTICES: usize = 32768;
 pub const DECALS: usize = 2048;
@@ -230,6 +232,74 @@ pub struct SpriteBatch {
     pub secondary_radius: f32,
 }
 
+/// (Protocol 46) a screen quad's vertex (with `game.bevy_bridge_viewer_hud`):
+/// the viewport's pixels (its offset applied), each map's texture
+/// coordinates as the game's screen geometry vertex shader works them out,
+/// and the colour (a8r8g8b8, the combiners' v0).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ScreenVertex {
+    pub position: [f32; 2],
+    pub texcoords: [[f32; 2]; 3],
+    pub color: u32,
+}
+
+/// A screen quad's map: the bitmap tag (`u32::MAX` for none), its bitmap,
+/// and flags ([`SCREEN_MAP_WRAPPED`], [`SCREEN_MAP_POINT_SAMPLED`]).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ScreenMap {
+    pub bitmap: u32,
+    pub bitmap_index: u16,
+    pub flags: u16,
+}
+
+pub const SCREEN_MAP_WRAPPED: u16 = 1 << 0;
+pub const SCREEN_MAP_POINT_SAMPLED: u16 = 1 << 1;
+
+/// (Protocol 46) a screen quad the game would have drawn (the HUD's and
+/// menus' bitmaps, in the order drawn): its vertices, its maps, the NV2A
+/// pixel shader the game built for it (general combiner stages over t0-t2
+/// and v0, then the final combiner; constants a8r8g8b8) and its framebuffer
+/// blend (GL's factor and operation enums, as the Xbox's D3D uses them).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenDraw {
+    pub first_vertex: u32,
+    pub vertex_count: u32,
+    /// The viewport its vertices' pixels are of.
+    pub viewport: [f32; 2],
+    pub maps: [ScreenMap; 3],
+    pub combiner_count: u32,
+    pub rgb_inputs: [u32; 8],
+    pub rgb_outputs: [u32; 8],
+    pub alpha_inputs: [u32; 8],
+    pub alpha_outputs: [u32; 8],
+    pub constant_0: [u32; 8],
+    pub constant_1: [u32; 8],
+    pub final_combiner_inputs_abcd: u32,
+    pub final_combiner_inputs_efg: u32,
+    pub final_combiner_constant_0: u32,
+    pub final_combiner_constant_1: u32,
+    pub blend_source: u32,
+    pub blend_destination: u32,
+    pub blend_operation: u32,
+    pub blend_color: u32,
+    /// [`SCREEN_DRAW_BLENDED`], [`SCREEN_DRAW_ALPHA_KILL`].
+    pub flags: u32,
+}
+
+impl Default for ScreenDraw {
+    fn default() -> Self {
+        // SAFETY: plain numbers
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+pub const SCREEN_DRAW_BLENDED: u32 = 1 << 0;
+/// t0's alpha kill (a meter's): a pixel whose t0 alpha is zero is dropped.
+pub const SCREEN_DRAW_ALPHA_KILL: u32 = 1 << 1;
+
 pub const SPRITE_NONLINEAR_TINT: u16 = 1 << 1;
 pub const SPRITE_EFFECT: u32 = 0;
 pub const SPRITE_LENS_FLARE: u32 = 1;
@@ -427,6 +497,10 @@ struct Frame {
     physics_vehicles: [PhysicsVehicle; PHYSICS_VEHICLES],
     vehicle_ray_test_count: u32,
     vehicle_ray_tests: [VehicleRayTest; VEHICLE_RAY_TESTS],
+    screen_draw_count: u32,
+    screen_vertex_count: u32,
+    screen_draws: [ScreenDraw; SCREEN_DRAWS],
+    screen_vertices: [ScreenVertex; SCREEN_VERTICES],
 }
 
 /// (Protocol 26) a vehicle as its physics shape is placed
@@ -1224,6 +1298,10 @@ pub struct Snapshot {
     /// physics shapes (with `game.bevy_bridge_ray_tests` on).
     pub physics_vehicles: Vec<PhysicsVehicle>,
     pub vehicle_ray_tests: Vec<VehicleRayTest>,
+    /// The screen quads the game would have drawn, in order (with
+    /// `game.bevy_bridge_viewer_hud` on).
+    pub screen_draws: Vec<ScreenDraw>,
+    pub screen_vertices: Vec<ScreenVertex>,
 }
 
 impl Snapshot {
@@ -1848,6 +1926,12 @@ impl Bridge {
                         .collect(),
                     vehicle_ray_tests: (0..(std::ptr::read_volatile(&(*frame).vehicle_ray_test_count) as usize).min(VEHICLE_RAY_TESTS))
                         .map(|i| std::ptr::read_volatile(&(*frame).vehicle_ray_tests[i]))
+                        .collect(),
+                    screen_draws: (0..(std::ptr::read_volatile(&(*frame).screen_draw_count) as usize).min(SCREEN_DRAWS))
+                        .map(|i| std::ptr::read_volatile(&(*frame).screen_draws[i]))
+                        .collect(),
+                    screen_vertices: (0..(std::ptr::read_volatile(&(*frame).screen_vertex_count) as usize).min(SCREEN_VERTICES))
+                        .map(|i| std::ptr::read_volatile(&(*frame).screen_vertices[i]))
                         .collect(),
                 };
                 fence(Ordering::Acquire);

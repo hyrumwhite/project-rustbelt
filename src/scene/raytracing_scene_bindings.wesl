@@ -514,6 +514,8 @@ struct ResolvedMaterial {
     // perceptual roughness.
     clearcoat: f32,
     clearcoat_perceptual_roughness: f32,
+    // The coat is the second thin film (brdf.wesl's THIN_FILM_PEARL).
+    pearl_coat: bool,
 }
 
 fn emitted_radiance(material: ResolvedMaterial, outgoing: vec3<f32>) -> vec3<f32> {
@@ -556,6 +558,7 @@ fn resolve_material_filtered(material: Material, uv: vec2f, uv_width: vec2f) -> 
 
     m.reflectance = material.reflectance;
     m.lommel = (material.flags & 32u) != 0u;
+    m.pearl_coat = (material.flags & 128u) != 0u;
     // Realtime estimators opt in only once both hemispheres are supported.
 @if(FOLIAGE_TRANSMISSION) {
     m.diffuse_transmission = f32(material.flags >> 16u) / 65535.0;

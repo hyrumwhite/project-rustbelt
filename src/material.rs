@@ -275,6 +275,7 @@ fn initialize(world: &mut World) {
     world.init_resource::<Registrations>();
     world.init_resource::<GaussianRayMaterials>();
     world.init_resource::<LommelRayMaterials>();
+    world.init_resource::<crate::lommel::PearlCoatMaterials>();
     world.init_resource::<DetailedRayMaterials>();
     world.init_resource::<Assets<GaussianMaterial>>();
     world.init_resource::<Assets<LommelMaterial>>();

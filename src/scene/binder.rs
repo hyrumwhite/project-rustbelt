@@ -420,12 +420,13 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     mesh_allocator: Res<MeshAllocator>,
     mut blas_manager: ResMut<BlasManager>,
     material_assets: Res<StandardMaterialAssets>,
-    (collimated, detailed, gaussian, lommel, ripples): (
+    (collimated, detailed, gaussian, lommel, ripples, pearl): (
         Res<CollimatedMaterials>,
         Res<DetailedRayMaterials>,
         Res<GaussianRayMaterials>,
         Res<crate::lommel::LommelRayMaterials>,
         Res<crate::water_ripples::WaterRippleMaterials>,
+        Res<crate::lommel::PearlCoatMaterials>,
     ),
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
@@ -535,6 +536,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         || detailed.is_changed()
         || gaussian.is_changed()
         || lommel.is_changed()
+        || pearl.is_changed()
         || ripples.is_changed()
         || texture_assets.is_changed()
         || fallback_texture.is_changed();
@@ -901,7 +903,9 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             emissive: material.emissive.to_vec3(),
             metallic: material.metallic,
             alpha_cutoff: alpha.cutoff,
-            flags: alpha.flags | if lommel.0.contains(asset_id) { 32 } else { 0 },
+            flags: alpha.flags
+                | if lommel.0.contains(asset_id) { 32 } else { 0 }
+                | if pearl.0.contains(asset_id) { 128 } else { 0 },
             base_color_alpha: LinearRgba::from(material.base_color).alpha,
             reflectance: material.reflectance,
             gaussian: gaussian_parameters,

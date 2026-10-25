@@ -923,6 +923,12 @@ pub fn init_solari_lighting_pipelines(
             shader_defs.push(ShaderDefVal::UInt("THIN_FILM_NM".into(), thickness.round() as u32));
             shader_defs.push(ShaderDefVal::UInt("THIN_FILM_IOR".into(), (ior * 1000.0).round() as u32));
             shader_defs.push(ShaderDefVal::UInt("THIN_FILM_BASE_IOR".into(), (base_ior * 1000.0).round() as u32));
+            // the pearl coats' thicker film (SOLARIK_PEARL_FILM=thickness in
+            // nm; brdf.wesl's PearlCoatMaterials and G-buffer bit 30)
+            if let Some(pearl) = std::env::var("SOLARIK_PEARL_FILM").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|&v| v > 0.0) {
+                shader_defs.push("THIN_FILM_PEARL".into());
+                shader_defs.push(ShaderDefVal::UInt("THIN_FILM_PEARL_NM".into(), pearl.round() as u32));
+            }
         }
         #[cfg(feature = "graphics_debug")]
         if entry_point == "primary_foliage"

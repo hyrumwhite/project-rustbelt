@@ -155,31 +155,34 @@ fn evaluate_clearcoat_brdf(wo: vec3<f32>, wi: vec3<f32>, shading_normal: vec3<f3
     let NdotV = dot(world_normal, wo);
     if NdotL < 0.0001 || NdotH < 0.0001 || LdotH < 0.0001 || NdotV < 0.0001 { return vec3(0.0); }
     let roughness = clearcoat_roughness(material);
-    let F = clearcoat_fresnel(LdotH);
+    let F = clearcoat_fresnel(LdotH, material.pearl_coat);
     return material.clearcoat * D_GGX(roughness, NdotH) * V_SmithGGXCorrelated(roughness, NdotV, NdotL) * F * NdotL;
 }
 
 // The coat's reflectance at `LdotH`: a 4% dielectric's, or with
-// THIN_FILM_COAT a thin film's, whose interference colours it by the angle.
-fn clearcoat_fresnel(LdotH: f32) -> vec3<f32> {
+// THIN_FILM_COAT a thin film's, whose interference colours it by the angle;
+// a pearl coat's (`pearl`, THIN_FILM_PEARL) is a thicker film's, in pastels.
+fn clearcoat_fresnel(LdotH: f32, pearl: bool) -> vec3<f32> {
     var F = vec3(fresnel(vec3(CLEARCOAT_F0), LdotH).g);
 @if(THIN_FILM_COAT) {
-    F = thin_film_reflectance(LdotH);
+    F = thin_film_reflectance(LdotH, f32(constants::THIN_FILM_NM));
+}
+@if(THIN_FILM_PEARL) {
+    if pearl { F = thin_film_reflectance(LdotH, f32(constants::THIN_FILM_PEARL_NM)); }
 }
     return F;
 }
 
-// A thin dielectric film over the surface (THIN_FILM_COAT: its thickness in
-// nanometres, its and the surface's indices of refraction in thousandths):
+// A thin dielectric film over the surface (`thickness` in nanometres;
+// THIN_FILM_COAT: its and the surface's indices of refraction in thousandths):
 // the two-beam interference of the light reflected by the film's top and its
 // bottom (Airy's sum), for s and p polarisations, averaged over three
 // wavelengths in each of red, green and blue. An oil film's or a beetle's
 // colours, shifting with the angle.
 @if(THIN_FILM_COAT)
-fn thin_film_reflectance(cos1: f32) -> vec3<f32> {
+fn thin_film_reflectance(cos1: f32, thickness: f32) -> vec3<f32> {
     let n2 = f32(constants::THIN_FILM_IOR) / 1000.0;
     let n3 = f32(constants::THIN_FILM_BASE_IOR) / 1000.0;
-    let thickness = f32(constants::THIN_FILM_NM);
     let sin1_squared = 1.0 - cos1 * cos1;
     let cos2 = sqrt(max(1.0 - sin1_squared / (n2 * n2), 0.0));
     let cos3 = sqrt(max(1.0 - sin1_squared / (n3 * n3), 0.0));

@@ -11515,7 +11515,32 @@ void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened)
 	}
 }
 
+static void halo_sim_hs_check_recorded(long result);
+
+/* (the object lists' collection the recorded update asked for, run after
+its check) */
+static boolean halo_sim_hs_list_gc_deferred = FALSE;
+void object_list_gc(void); /* hs/object_lists.c */
+
+int halo_sim_hs_defer_list_gc(void)
+{
+	if (!halo_sim_hs_checks.recording)
+		return FALSE;
+	halo_sim_hs_list_gc_deferred = TRUE;
+	return TRUE;
+}
+
 void halo_sim_hs_check(long result)
+{
+	halo_sim_hs_check_recorded(result);
+	if (halo_sim_hs_list_gc_deferred)
+	{
+		halo_sim_hs_list_gc_deferred = FALSE;
+		object_list_gc();
+	}
+}
+
+static void halo_sim_hs_check_recorded(long result)
 {
 	long operation = halo_sim_hs_checks.operation;
 	struct halo_sim_hs_update_call call;
@@ -11607,6 +11632,37 @@ void halo_sim_hs_check(long result)
 			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu library calls, %lu bodies Rust's; %lu left out)",
 				halo_sim_hs_operation_names[operation], compared - halo_sim_hs_checks.differed[operation], compared,
 				halo_sim_hs_checks.externals[operation], hs_runtime_rust_bodies_run, halo_sim_hs_checks.skipped[operation]);
+			/* (HALO_HS_LIBRARY_COUNTS: the library functions run most, with
+			their runs, for choosing the bodies to port) */
+			if (getenv("HALO_HS_LIBRARY_COUNTS") && compared >= 256)
+			{
+				extern unsigned long hs_runtime_library_counts[1024];
+				extern char const *hs_runtime_function_name(short function_index);
+				static boolean listed[1024];
+				char line[1024];
+				long rank;
+
+				memset(listed, 0, sizeof(listed));
+				line[0] = 0;
+				for (rank = 0; rank < 24; rank++)
+				{
+					long best = NONE;
+					long index;
+
+					for (index = 0; index < 1024; index++)
+					{
+						if (!listed[index] && hs_runtime_library_counts[index] &&
+							(best == NONE || hs_runtime_library_counts[index] > hs_runtime_library_counts[best]))
+							best = index;
+					}
+					if (best == NONE)
+						break;
+					listed[best] = TRUE;
+					snprintf(line + strlen(line), sizeof(line) - strlen(line), " %s %lu",
+						hs_runtime_function_name((short)best), hs_runtime_library_counts[best]);
+				}
+				platform_log("halo_sim: library runs:%s", line);
+			}
 		}
 	}
 }

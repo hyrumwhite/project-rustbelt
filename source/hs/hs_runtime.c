@@ -2044,11 +2044,27 @@ static char const *const hs_runtime_rust_bodies[] =
 	"unit_get_shield",
 	"unit_get_total_grenade_count",
 	"game_difficulty_get",
-	/* (not list_count: in check mode the lists it counts were the game's
-	update's, made and let go by calls the replay doesn't make again) */
+	"not",
+	"list_get",
+	"list_count",
+	"volume_test_object",
+	"volume_test_objects",
+	"unit_has_weapon_readied",
+	"device_get_position",
 };
 /* (the bodies run so, for check mode's report) */
 unsigned long hs_runtime_rust_bodies_run;
+/* (and each library function's runs, for HALO_HS_LIBRARY_COUNTS's) */
+unsigned long hs_runtime_library_counts[1024];
+
+char const *hs_runtime_function_name(
+	short function_index)
+{
+	struct hs_function_definition const *function = function_index >= 0 && function_index < hs_function_table_count ?
+		hs_function_get(function_index) : NULL;
+
+	return function && function->name ? function->name : "";
+}
 static unsigned char hs_runtime_rust_body_bits[(1024 + 7) / 8];
 static boolean hs_runtime_rust_body_bits_made;
 
@@ -2974,6 +2990,8 @@ static void hs_thread_main(
 						initialize) :
 					(long *)thread->stack->data;
 
+				if (arguments && expression->index >= 0 && expression->index < 1024)
+					hs_runtime_library_counts[expression->index]++;
 				/* (a body the Rust port runs itself: here too, without a call) */
 				if (arguments && hs_runtime_rust_body(expression->index))
 				{
@@ -3818,7 +3836,10 @@ void hs_runtime_call(
 		}
 
 		case _hs_runtime_call_object_list_gc:
-			object_list_gc();
+			/* (in check mode, after the check: the lists the update made are
+			there for the replay's bodies to read) */
+			if (!halo_sim_hs_defer_list_gc())
+				object_list_gc();
 			break;
 
 		case _hs_runtime_call_node_gc:
@@ -3869,6 +3890,19 @@ void hs_runtime_port_context(
 		context->object_list_header_data = (unsigned long)object_list_header_data;
 	}
 	context->difficulty = game_difficulty_level_get();
+	{
+		extern struct data_array *object_list_data;
+
+		context->object_list_data = (unsigned long)object_list_data;
+	}
+	context->trigger_volumes = 0;
+	context->trigger_volume_count = 0;
+	if (scenario)
+	{
+		context->trigger_volume_count = scenario->trigger_volumes.count;
+		context->trigger_volumes = (unsigned long)scenario->trigger_volumes.address;
+	}
+	context->debug_data = (unsigned long)hs_debug_data;
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

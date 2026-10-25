@@ -819,6 +819,13 @@ struct halo_sim_hs_context
 	unsigned long object_header_data;
 	unsigned long object_list_header_data;
 	long difficulty;
+	/* object_list_data (the lists' references), the scenario's trigger
+	volumes (their first element) and count, and hs_debug_data (a bit per
+	volume, its last test's) */
+	unsigned long object_list_data;
+	unsigned long trigger_volumes;
+	long trigger_volume_count;
+	unsigned long debug_data;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's
@@ -2245,6 +2252,9 @@ value) puts the script memory back as the operation began, runs Rust's
 replay on it, compares, and leaves the game's */
 int halo_sim_hs_begin(long operation, long expression, long *result, int *checking);
 void halo_sim_hs_check(long result);
+/* whether the object lists' collection waits for the check (TRUE while an
+update is recorded: the replay reads the lists the game's update made) */
+int halo_sim_hs_defer_list_gc(void);
 int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call);
 void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened);
 void hs_runtime_call(struct halo_sim_hs_call *call);

@@ -57,6 +57,8 @@ void player_effect_screen_fade_out(
 	real blue,
 	short ticks);
 /* port: screen fade sync for network co-op */
+void *player_effect_port_screen_fade(
+	void);
 void player_effect_port_screen_fade_get(
 	real_rgb_color *color,
 	short *ticks,

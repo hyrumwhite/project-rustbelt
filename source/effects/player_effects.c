@@ -503,6 +503,13 @@ void player_effect_screen_fade_out(
 	return;
 }
 
+/* port: the screen fade, for the Rust port's script bodies (hs_runtime.c) */
+void *player_effect_port_screen_fade(
+	void)
+{
+	return &player_effect_globals->screen_fade;
+}
+
 /* port: read and set the screen fade, so a co-op host can send it to its
 clients (port/linux/game/network_coop.c): color, length, direction, and
 the game time it started */

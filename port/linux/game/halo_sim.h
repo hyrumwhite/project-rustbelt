@@ -841,6 +841,13 @@ struct halo_sim_hs_context
 	devices (network_coop_devices_remote) */
 	unsigned long device_groups_data;
 	long devices_remote;
+	/* player_data; the screen fade (player_effects.c's); conversation_data,
+	and ai_globals' recent conversations and their count */
+	unsigned long player_data;
+	unsigned long screen_fade;
+	unsigned long conversation_data;
+	unsigned long recent_conversations;
+	unsigned long recent_conversation_count;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's

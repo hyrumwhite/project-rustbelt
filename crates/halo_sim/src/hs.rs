@@ -200,6 +200,9 @@ impl HsHost for CheckHost<'_> {
     fn memory(&self) -> &dyn HsMemory {
         &GameMemory
     }
+    fn stopped(&self) -> bool {
+        self.difference.get().is_some()
+    }
     fn call(&self, call: &mut HsCall) {
         let index = self.next.get();
         let Some(event) = self.events.get(index) else {
@@ -212,6 +215,10 @@ impl HsHost for CheckHost<'_> {
             self.differ(index, 1);
         } else if e.a != call.a || e.b != call.b || e.c != call.c {
             self.differ(index, 2);
+        }
+        // (none of a call that isn't the game's put in its place)
+        if self.difference.get().is_some() {
+            return;
         }
         // (a library function's evaluation, or its body: the thread as the
         // game left it)

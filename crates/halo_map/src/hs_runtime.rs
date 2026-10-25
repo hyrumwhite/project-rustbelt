@@ -261,6 +261,11 @@ impl crate::ai_actor::AiMemory for AsAiMemory<'_> {
 pub trait HsHost {
     fn memory(&self) -> &dyn HsMemory;
     fn call(&self, call: &mut HsCall);
+    /// Whether the runtime gives up where it is (a check's replay that has
+    /// gone apart from the game's calls, whose results no longer fit it).
+    fn stopped(&self) -> bool {
+        false
+    }
 }
 
 /// Where the runtime's state and tables are in the game's memory.
@@ -1339,7 +1344,7 @@ impl<H: HsHost> Runtime<'_, H> {
         }
 
         loop {
-            if self.stack(thread) == base {
+            if self.stack(thread) == base || self.host.stopped() {
                 break;
             }
             let sleep_until = m.r32(thread + THREAD_SLEEP_UNTIL) as i32;
@@ -1486,6 +1491,9 @@ impl<H: HsHost> Runtime<'_, H> {
         let mut console_command_running = false;
         let mut thread_index = self.data_next_index(self.context.thread_data, NONE);
         while self.initialized() && thread_index != NONE {
+            if self.host.stopped() {
+                return;
+            }
             let thread = self.thread(thread_index);
             if m.r8(thread + THREAD_TYPE) == THREAD_TYPE_CONSOLE_COMMAND {
                 console_command_running = true;

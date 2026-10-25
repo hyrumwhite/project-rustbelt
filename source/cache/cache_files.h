@@ -185,6 +185,9 @@ short cache_file_read(
 	boolean blocking);
 
 unsigned long tag_get_group_tag(long tag_index);
+/* port: whether the index is a loaded tag of the group (tag_get would only
+assert on one that isn't) */
+boolean tag_index_is_group(long tag_index, long group_tag);
 /* port: whether size bytes at address lie in the tag cache the loaded map's
 tags are in: this build's, or a Custom Edition map's own */
 boolean cache_file_tag_cache_contains(void const *address, long size);

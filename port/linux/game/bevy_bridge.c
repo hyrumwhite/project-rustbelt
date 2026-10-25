@@ -1038,11 +1038,15 @@ boolean bevy_bridge_note_screen_draw(struct bevy_bridge_screen_draw const *draw,
 which */
 static boolean bevy_bridge_bitmap_in_tag(void const *bitmap, long tag_index, unsigned short *bitmap_index)
 {
-	struct bitmap_group *group = (struct bitmap_group *)tag_get(BITMAP_GROUP_TAG, tag_index);
+	struct bitmap_group *group;
 	char const *first;
 	unsigned long offset;
 
-	if (!group || !group->bitmaps.address || group->bitmaps.count <= 0)
+	/* (a recent tag may be one of the last map's, another group's here) */
+	if (!tag_index_is_group(tag_index, BITMAP_GROUP_TAG))
+		return FALSE;
+	group = (struct bitmap_group *)tag_get(BITMAP_GROUP_TAG, tag_index);
+	if (!group ||!group->bitmaps.address || group->bitmaps.count <= 0)
 		return FALSE;
 	first = (char const *)group->bitmaps.address;
 	if ((char const *)bitmap < first)

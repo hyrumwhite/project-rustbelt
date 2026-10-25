@@ -11546,8 +11546,17 @@ void halo_sim_hs_check(long result)
 	call.expression = halo_sim_hs_checks.expression;
 	if (halo_sim.hs_update_check(&call) != 0)
 	{
+		unsigned long skipped;
+
 		halo_sim_hs_snapshot_restore(context, &halo_sim_hs_checks.after);
-		halo_sim_hs_checks.skipped[operation]++;
+		skipped = ++halo_sim_hs_checks.skipped[operation];
+		/* (a replay that couldn't run, as one that went astray from the
+		game's calls: said, or a run of them passes for no comparisons) */
+		if ((skipped & (skipped - 1)) == 0)
+		{
+			platform_log("halo_sim: %s: the replay couldn't run %lu times (%lu compared)",
+				halo_sim_hs_operation_names[operation], skipped, halo_sim_hs_checks.compared[operation]);
+		}
 		return;
 	}
 	/* (Rust's left in the memory: taken into the before snapshot's room,
@@ -11593,9 +11602,11 @@ void halo_sim_hs_check(long result)
 
 		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
 		{
-			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu library calls; %lu left out)",
+			extern unsigned long hs_runtime_rust_bodies_run;
+
+			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu library calls, %lu bodies Rust's; %lu left out)",
 				halo_sim_hs_operation_names[operation], compared - halo_sim_hs_checks.differed[operation], compared,
-				halo_sim_hs_checks.externals[operation], halo_sim_hs_checks.skipped[operation]);
+				halo_sim_hs_checks.externals[operation], hs_runtime_rust_bodies_run, halo_sim_hs_checks.skipped[operation]);
 		}
 	}
 }

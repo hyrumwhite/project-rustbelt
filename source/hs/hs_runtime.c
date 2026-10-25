@@ -2035,6 +2035,61 @@ body runs (hs_runtime_call's library), which its evaluation takes as they
 are */
 static long *hs_runtime_ready_arguments;
 
+/* port: the library functions whose bodies the Rust port's runtime runs
+itself (crates/halo_map's hs_library): run here too without a call, so that
+check mode compares them (their values are the threads') */
+static char const *const hs_runtime_rust_bodies[] =
+{
+	"unit_get_health",
+	"unit_get_shield",
+	"unit_get_total_grenade_count",
+	"game_difficulty_get",
+	/* (not list_count: in check mode the lists it counts were the game's
+	update's, made and let go by calls the replay doesn't make again) */
+};
+/* (the bodies run so, for check mode's report) */
+unsigned long hs_runtime_rust_bodies_run;
+static unsigned char hs_runtime_rust_body_bits[(1024 + 7) / 8];
+static boolean hs_runtime_rust_body_bits_made;
+
+/* (the bits, made once from the function table's names) */
+static unsigned char const *hs_runtime_rust_body_bits_get(
+	void)
+{
+	if (!hs_runtime_rust_body_bits_made)
+	{
+		long function_index;
+
+		hs_runtime_rust_body_bits_made = TRUE;
+		for (function_index = 0; function_index < hs_function_table_count && function_index < 1024; function_index++)
+		{
+			struct hs_function_definition const *function = hs_function_get((short)function_index);
+			short name_index;
+
+			/* (HALO_HS_RUST_BODIES: the bodies named in it, comma separated,
+			in place of the list, to test them one at a time) */
+			char const *only = getenv("HALO_HS_RUST_BODIES");
+
+			for (name_index = 0; name_index < NUMBEROF(hs_runtime_rust_bodies); name_index++)
+			{
+				if (function && function->name && !strcmp(function->name, hs_runtime_rust_bodies[name_index]) &&
+					(!only || strstr(only, function->name)))
+				{
+					hs_runtime_rust_body_bits[function_index >> 3] |= (unsigned char)(1 << (function_index & 7));
+				}
+			}
+		}
+	}
+	return hs_runtime_rust_body_bits;
+}
+
+static boolean hs_runtime_rust_body(
+	short function_index)
+{
+	return function_index >= 0 && function_index < 1024 &&
+		(hs_runtime_rust_body_bits_get()[function_index >> 3] & (1 << (function_index & 7))) != 0;
+}
+
 long *hs_macro_function_evaluate(
 	short function_index,
 	long thread_index,
@@ -2919,7 +2974,15 @@ static void hs_thread_main(
 						initialize) :
 					(long *)thread->stack->data;
 
-				if (arguments)
+				/* (a body the Rust port runs itself: here too, without a call) */
+				if (arguments && hs_runtime_rust_body(expression->index))
+				{
+					hs_runtime_rust_bodies_run++;
+					hs_runtime_ready_arguments = function->parameter_count>0 ? arguments : NULL;
+					function->evaluate(expression->index, thread_index, FALSE);
+					hs_runtime_ready_arguments = NULL;
+				}
+				else if (arguments)
 				{
 					struct halo_sim_hs_call call;
 
@@ -3797,6 +3860,15 @@ void hs_runtime_port_context(
 	context->runtime_globals = (unsigned long)&hs_runtime_globals;
 	context->scenario_loaded = scenario!=NULL;
 	context->macro_parse = (unsigned long)hs_macro_function_parse;
+	context->rust_bodies = (unsigned long)hs_runtime_rust_body_bits_get();
+	{
+		extern struct data_array *object_header_data;
+		extern struct data_array *object_list_header_data;
+
+		context->object_header_data = (unsigned long)object_header_data;
+		context->object_list_header_data = (unsigned long)object_list_header_data;
+	}
+	context->difficulty = game_difficulty_level_get();
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

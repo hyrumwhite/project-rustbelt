@@ -811,6 +811,14 @@ struct halo_sim_hs_context
 	arguments as hs_macro_function_evaluate does, the runtime's to evaluate,
 	then its body (_hs_runtime_call_library) */
 	unsigned long macro_parse;
+	/* the library functions whose bodies the Rust port runs itself (a bit
+	per function, hs_runtime.c's hs_runtime_rust_bodies), and what they read:
+	object_header_data, object_list_header_data (their data arrays) and the
+	game's difficulty */
+	unsigned long rust_bodies;
+	unsigned long object_header_data;
+	unsigned long object_list_header_data;
+	long difficulty;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's

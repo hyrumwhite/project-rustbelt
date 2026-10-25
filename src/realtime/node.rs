@@ -60,6 +60,8 @@ pub struct SolarikLightingPipelines {
     gi_initial_and_temporal_pipeline: CachedComputePipelineId,
     gi_spatial_and_shade_pipeline: CachedComputePipelineId,
     specular_gi_pipeline: CachedComputePipelineId,
+    lit_fog_pipeline: CachedComputePipelineId,
+    lit_fog_accumulate_pipeline: CachedComputePipelineId,
     primary_glass_pipeline: CachedComputePipelineId,
     primary_foliage_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
@@ -243,6 +245,7 @@ pub fn solarik_lighting<const PRIMARY: bool>(
     primary_views: Res<PrimaryGlassViews>,
     pipeline_cache: Res<PipelineCache>,
     scene_bindings: Res<RaytracingSceneBindings>,
+    ray_fog: Res<crate::scene::SolarikRayFog>,
     view_uniforms: Res<ViewUniforms>,
     previous_view_uniforms: Res<PreviousViewUniforms>,
     frame_count: Res<FrameCount>,
@@ -425,6 +428,9 @@ pub fn solarik_lighting<const PRIMARY: bool>(
             s.sky_distribution.as_entire_binding(),
             &s.primary_background_view,
             s.world_cache_light_slots.as_entire_binding(),
+            &s.lit_fog_raw,
+            &s.lit_fog_history[0],
+            &s.lit_fog_history[1],
         )),
     );
     let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
@@ -764,6 +770,30 @@ pub fn solarik_lighting<const PRIMARY: bool>(
     pass.dispatch_workgroups(dx, dy, 1);
     d.end(&mut pass);
 
+    // lit fog, when asked for (and compiled: it doesn't hold the rest back)
+    if ray_fog.lit.x > 0.0 {
+        if let (Some(lit_fog_pipeline), Some(accumulate_pipeline)) = (
+            pipeline_cache.get_compute_pipeline(pipelines.lit_fog_pipeline),
+            pipeline_cache.get_compute_pipeline(pipelines.lit_fog_accumulate_pipeline),
+        ) {
+            let d = diagnostics.time_span(&mut pass, "solarik_lighting/lit_fog");
+            for pipeline in [lit_fog_pipeline, accumulate_pipeline] {
+                pass.set_pipeline(pipeline);
+                pass.set_immediates(
+                    0,
+                    bytemuck::cast_slice(&[
+                        frame_index,
+                        reset_flags,
+                        render_frame,
+                        stable_radius.to_bits(),
+                    ]),
+                );
+                pass.dispatch_workgroups(dx, dy, 1);
+            }
+            d.end(&mut pass);
+        }
+    }
+
     drop(pass);
     // Earlier returns (missing scene/pipelines and the primary compositor)
     // leave both scene events and explicit full resets pending for this view.
@@ -844,6 +874,9 @@ pub fn init_solari_lighting_pipelines(
                 storage_buffer_sized(false, None),
                 texture_2d(TextureSampleType::Float { filterable: false }),
                 storage_buffer_sized(false, None),
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
             ),
         ),
     );
@@ -1132,6 +1165,20 @@ pub fn init_solari_lighting_pipelines(
                 "FOLIAGE_TRANSMISSION".into(),
                 "DLSS_RR_GUIDE_BUFFERS".into(),
             ],
+        ),
+        lit_fog_pipeline: create_pipeline(
+            "solarik_lighting_lit_fog_pipeline",
+            "lit_fog",
+            load_embedded_asset!(asset_server.as_ref(), "lit_fog.wesl"),
+            None,
+            vec![],
+        ),
+        lit_fog_accumulate_pipeline: create_pipeline(
+            "solarik_lighting_lit_fog_accumulate_pipeline",
+            "lit_fog_accumulate",
+            load_embedded_asset!(asset_server.as_ref(), "lit_fog.wesl"),
+            None,
+            vec![],
         ),
         primary_glass_pipeline: create_pipeline(
             "solarik_primary_glass",

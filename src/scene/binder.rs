@@ -101,6 +101,11 @@ pub struct SolarikRayFog {
     pub planar_color: Vec4,
     /// maximum distance and depth, the camera's planar density (unused)
     pub planar: Vec4,
+    /// Lit fog (`realtime/lit_fog.wesl`): the light the fog scatters toward
+    /// the camera from the scene's lights. x its strength (0 none), y above
+    /// 0.5 to let the directional lights light it too, z above 0.5 to show
+    /// the scattered light alone (for looking at it).
+    pub lit: Vec4,
 }
 
 impl Default for SolarikSkyLight {

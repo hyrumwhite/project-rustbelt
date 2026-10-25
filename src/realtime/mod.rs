@@ -1,6 +1,7 @@
 mod extract;
 #[cfg(feature = "graphics_debug")]
 pub mod graphics_debug;
+mod lit_fog_composite;
 mod node;
 mod prepare;
 #[cfg(feature = "graphics_debug")]
@@ -50,6 +51,8 @@ impl Plugin for SolarikLightingPlugin {
         load_shader_library!(app, "sky_sampling.wesl");
         load_shader_library!(app, "specular_gi.wesl");
         embedded_asset!(app, "primary_glass.wesl");
+        embedded_asset!(app, "lit_fog.wesl");
+        embedded_asset!(app, "lit_fog_composite.wesl");
         embedded_asset!(app, "primary_foliage.wesl");
         load_shader_library!(app, "foliage_math.wesl");
         load_shader_library!(app, "surface_path.wesl");
@@ -90,7 +93,7 @@ impl Plugin for SolarikLightingPlugin {
                     .after(RenderSystems::PrepareResources)
                     .before(RenderSystems::PrepareResourcesBatchPhases),
             )
-            .add_systems(RenderStartup, init_solari_lighting_pipelines)
+            .add_systems(RenderStartup, (init_solari_lighting_pipelines, lit_fog_composite::init_lit_fog_composite))
             .add_systems(ExtractSchedule, extract_solari_lighting)
             .add_systems(
                 Render,
@@ -111,6 +114,13 @@ impl Plugin for SolarikLightingPlugin {
                     .after(crate::atmosphere::AtmosphereBackground)
                     .before(main_transparent_pass_3d)
                     .in_set(Core3dSystems::MainPass),
+            )
+            // (lit fog, after the denoiser, which runs in EarlyPostProcess)
+            .add_systems(
+                Core3d,
+                lit_fog_composite::lit_fog_composite
+                    .in_set(Core3dSystems::PostProcess)
+                    .before(bevy_core_pipeline::tonemapping::tonemapping),
             );
     }
 }

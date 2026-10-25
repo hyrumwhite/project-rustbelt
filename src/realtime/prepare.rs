@@ -74,6 +74,12 @@ pub struct SolarikLightingResources {
     /// panes sample bent (written just before they are composited).
     pub primary_background: Texture,
     pub primary_background_view: TextureView,
+    /// Lit fog (`lit_fog.wesl`): this frame's scattered light, and its
+    /// accumulation over frames in two textures taken in turn (the frame's
+    /// parity the one written), which `lit_fog_composite` adds after the
+    /// denoiser.
+    pub lit_fog_raw: TextureView,
+    pub lit_fog_history: [TextureView; 2],
     pub view_size: UVec2,
     pub(crate) history: crate::scene::history::ViewHistory,
 }
@@ -167,6 +173,25 @@ pub fn prepare_solari_lighting_resources(
             view_formats: &[],
         });
         let primary_background_view = primary_background.create_view(&TextureViewDescriptor::default());
+        let lit_fog_texture = |name| {
+            render_device
+                .create_texture(&TextureDescriptor {
+                    label: Some(name),
+                    size: view_size.to_extents(),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba16Float,
+                    usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&TextureViewDescriptor::default())
+        };
+        let lit_fog_raw = lit_fog_texture("solarik_lighting_lit_fog_raw");
+        let lit_fog_history = [
+            lit_fog_texture("solarik_lighting_lit_fog_history_a"),
+            lit_fog_texture("solarik_lighting_lit_fog_history_b"),
+        ];
         let di_reservoirs_a = di_reservoirs("solarik_lighting_di_reservoirs_a");
         let di_reservoirs_b = di_reservoirs("solarik_lighting_di_reservoirs_b");
 
@@ -293,6 +318,8 @@ pub fn prepare_solari_lighting_resources(
             world_cache_light_slots,
             primary_background,
             primary_background_view,
+            lit_fog_raw,
+            lit_fog_history,
             view_size,
             history: Default::default(),
         });

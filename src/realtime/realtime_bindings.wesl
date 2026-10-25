@@ -43,6 +43,11 @@ enable wgpu_ray_query;
 // Per world cache cell, four lights (light source indices) its direct light
 // updates found in sight, from which ReSTIR DI draws candidates by place.
 @group(1) @binding(26) var<storage, read_write> world_cache_light_slots: array<vec4<u32>, constants::WORLD_CACHE_SIZE>;
+// Lit fog (lit_fog.wesl): this frame's scattered light, and its accumulation
+// in two textures taken in turn by the frame's parity.
+@group(1) @binding(27) var lit_fog_raw: texture_storage_2d<rgba16float, read_write>;
+@group(1) @binding(28) var lit_fog_history_a: texture_storage_2d<rgba16float, read_write>;
+@group(1) @binding(29) var lit_fog_history_b: texture_storage_2d<rgba16float, read_write>;
 
 @if((DLSS_RR_GUIDE_BUFFERS))
 @group(2) @binding(0) var diffuse_albedo: texture_storage_2d<rgba8unorm, write>;

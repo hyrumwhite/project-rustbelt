@@ -166,6 +166,7 @@ struct RayFog {
     plane: vec4<f32>,
     planar_color: vec4<f32>,
     planar: vec4<f32>,
+    lit: vec4<f32>,
 }
 
 struct DirectionalLight {

@@ -48,7 +48,7 @@ fires for whoever walks into it, and what it starts is sent to the clients
 
 /* ---------- private code */
 
-static boolean coop_scripts_host(
+boolean coop_scripts_host(
 	void)
 {
 	return game_connection() == _game_connection_network_server && network_coop_active();

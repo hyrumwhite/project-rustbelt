@@ -826,6 +826,17 @@ struct halo_sim_hs_context
 	unsigned long trigger_volumes;
 	long trigger_volume_count;
 	unsigned long debug_data;
+	/* encounter_data, squad_array and platoon_array, and the scenario's
+	encounter count; &global_structure_bsp_index (a script can switch it);
+	whether the game is cooperative (game_is_cooperative) and whether this
+	game hosts network co-op (coop_scripts_host, whose volume tests differ) */
+	unsigned long encounter_data;
+	unsigned long squad_array;
+	unsigned long platoon_array;
+	long encounter_count;
+	unsigned long structure_bsp_index;
+	long cooperative;
+	long coop_host;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's

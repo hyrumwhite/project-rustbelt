@@ -288,6 +288,9 @@ extern struct hs_external_global_definition *hs_external_globals[];
 #include "main/console.h"
 #include "game/game.h"
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
+#include "ai/encounters.h"
+#include "main/main.h"
+#include "coop_scripts.h" /* port: port/linux/game/coop_scripts.c */
 static long hs_runtime_call_simple(long kind, long a);
 static long hs_object_list_from_ai_reference(long ai_reference);
 
@@ -2051,6 +2054,14 @@ static char const *const hs_runtime_rust_bodies[] =
 	"volume_test_objects",
 	"unit_has_weapon_readied",
 	"device_get_position",
+	"volume_test_objects_all",
+	"structure_bsp_index",
+	"game_is_cooperative",
+	"ai_living_count",
+	"ai_living_fraction",
+	"ai_strength",
+	"ai_swarm_count",
+	"ai_nonswarm_count",
 };
 /* (the bodies run so, for check mode's report) */
 unsigned long hs_runtime_rust_bodies_run;
@@ -3903,6 +3914,13 @@ void hs_runtime_port_context(
 		context->trigger_volumes = (unsigned long)scenario->trigger_volumes.address;
 	}
 	context->debug_data = (unsigned long)hs_debug_data;
+	context->encounter_data = (unsigned long)encounter_data;
+	context->squad_array = (unsigned long)squad_array;
+	context->platoon_array = (unsigned long)platoon_array;
+	context->encounter_count = scenario ? scenario->ai_encounters.count : 0;
+	context->structure_bsp_index = (unsigned long)&global_structure_bsp_index;
+	context->cooperative = game_is_cooperative();
+	context->coop_host = coop_scripts_host();
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

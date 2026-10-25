@@ -1794,6 +1794,30 @@ struct halo_sim_hs_callbacks
 	void (*call)(struct halo_sim_hs_call *call);
 };
 
+/* a library function's body the Rust port runs, checked as the game's runs
+it (check mode): Rust's runs first on the memory as it is, its writes held
+aside (each byte's address and value), then the game's, and what the game's
+left is compared with them */
+#define MAXIMUM_HALO_SIM_HS_BODY_WRITES 1024
+
+struct halo_sim_hs_body_write
+{
+	unsigned long address;
+	unsigned long value;
+};
+
+struct halo_sim_hs_body_call
+{
+	struct halo_sim_hs_context context;
+	long function_index;
+	long thread_index;
+	unsigned long arguments;
+	long handled;
+	unsigned long write_count;
+	long overflow;
+	struct halo_sim_hs_body_write writes[MAXIMUM_HALO_SIM_HS_BODY_WRITES];
+};
+
 /* crates/halo_sim's AiUpdateC and AiUpdateCallbacks */
 struct halo_sim_ai_update_c
 {
@@ -1991,6 +2015,7 @@ typedef long (*halo_sim_particle_system_new_function)(struct halo_sim_particle_s
 typedef long (*halo_sim_player_effect_function)(struct halo_sim_player_effect_call_c *call);
 typedef long (*halo_sim_game_tick_function)(struct halo_sim_game_tick_call *call);
 typedef long (*halo_sim_hs_function)(struct halo_sim_hs_update_call *call);
+typedef long (*halo_sim_hs_body_function)(struct halo_sim_hs_body_call *call);
 typedef long (*halo_sim_ai_update_function)(struct halo_sim_ai_update_c *call);
 typedef long (*halo_sim_ai_step_function)(long step, struct halo_sim_ai_step_c *call);
 
@@ -2157,6 +2182,7 @@ static struct
 	halo_sim_game_tick_function game_tick_check;
 	halo_sim_hs_function hs_update;
 	halo_sim_hs_function hs_update_check;
+	halo_sim_hs_body_function hs_body_check;
 	halo_sim_ai_update_function ai_update;
 	halo_sim_ai_update_function ai_update_check;
 	halo_sim_ai_step_function ai_step;
@@ -2779,6 +2805,12 @@ static struct
 	unsigned long differed[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
 	unsigned long skipped[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
 	unsigned long externals[NUMBER_OF_HALO_SIM_HS_OPERATIONS];
+	/* the Rust bodies checked, those that differed, and those Rust's
+	runtime would have left to the game's (or wrote too much to check) */
+	unsigned long bodies_checked;
+	unsigned long bodies_differed;
+	unsigned long bodies_unchecked;
+	struct halo_sim_hs_body_call body;
 	boolean command_run;
 	boolean later_command_run;
 } halo_sim_hs_checks;
@@ -4928,6 +4960,7 @@ static void halo_sim_initialize(void)
 	halo_sim.game_tick_check = (halo_sim_game_tick_function)halo_sim_symbol(library, "halo_sim_game_tick_check");
 	halo_sim.hs_update = (halo_sim_hs_function)halo_sim_symbol(library, "halo_sim_hs_update");
 	halo_sim.hs_update_check = (halo_sim_hs_function)halo_sim_symbol(library, "halo_sim_hs_update_check");
+	halo_sim.hs_body_check = (halo_sim_hs_body_function)halo_sim_symbol(library, "halo_sim_hs_body_check");
 	halo_sim.ai_update = (halo_sim_ai_update_function)halo_sim_symbol(library, "halo_sim_ai_update");
 	halo_sim.ai_update_check = (halo_sim_ai_update_function)halo_sim_symbol(library, "halo_sim_ai_update_check");
 	halo_sim.ai_step = (halo_sim_ai_step_function)halo_sim_symbol(library, "halo_sim_ai_step");
@@ -11489,6 +11522,55 @@ int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call)
 	return TRUE;
 }
 
+int halo_sim_hs_body_check_begin(struct halo_sim_hs_call const *call)
+{
+	struct halo_sim_hs_body_call *body = &halo_sim_hs_checks.body;
+
+	if (!halo_sim_hs_checks.recording || !halo_sim.hs_body_check)
+		return FALSE;
+	body->context = halo_sim_hs_checks.context;
+	body->function_index = call->a;
+	body->thread_index = call->b;
+	body->arguments = (unsigned long)call->c;
+	body->handled = FALSE;
+	body->write_count = 0;
+	body->overflow = FALSE;
+	if (halo_sim.hs_body_check(body) != 0 || !body->handled || body->overflow)
+	{
+		halo_sim_hs_checks.bodies_unchecked++;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+void halo_sim_hs_body_check_end(struct halo_sim_hs_call const *call, int checking)
+{
+	extern char const *hs_runtime_function_name(short function_index);
+	struct halo_sim_hs_body_call const *body = &halo_sim_hs_checks.body;
+	unsigned long write_index;
+
+	if (!checking)
+		return;
+	halo_sim_hs_checks.bodies_checked++;
+	for (write_index = 0; write_index < body->write_count; write_index++)
+	{
+		struct halo_sim_hs_body_write const *write = &body->writes[write_index];
+		unsigned char game = *(unsigned char const *)write->address;
+
+		if (game != (unsigned char)write->value)
+		{
+			halo_sim_hs_checks.bodies_differed++;
+			if (halo_sim_hs_checks.bodies_differed <= 8)
+			{
+				platform_log("halo_sim: library body %s differs: byte %lx (%lu of %lu written) game %02x rust %02x",
+					hs_runtime_function_name((short)call->a), write->address, write_index, body->write_count,
+					game, (unsigned char)write->value);
+			}
+			break;
+		}
+	}
+}
+
 void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened)
 {
 	struct halo_sim_hs_event *event = halo_sim_hs_checks.open_event;
@@ -11627,11 +11709,11 @@ static void halo_sim_hs_check_recorded(long result)
 
 		if ((compared & 0x3ffff) == 0 || (compared & (compared - 1)) == 0)
 		{
-			extern unsigned long hs_runtime_rust_bodies_run;
-
-			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu library calls, %lu bodies Rust's; %lu left out)",
+			platform_log("halo_sim: %s: %lu of %lu agree with the game (%lu library calls; %lu left out); Rust's library bodies: %lu of %lu agree (%lu unchecked)",
 				halo_sim_hs_operation_names[operation], compared - halo_sim_hs_checks.differed[operation], compared,
-				halo_sim_hs_checks.externals[operation], hs_runtime_rust_bodies_run, halo_sim_hs_checks.skipped[operation]);
+				halo_sim_hs_checks.externals[operation], halo_sim_hs_checks.skipped[operation],
+				halo_sim_hs_checks.bodies_checked - halo_sim_hs_checks.bodies_differed, halo_sim_hs_checks.bodies_checked,
+				halo_sim_hs_checks.bodies_unchecked);
 			/* (HALO_HS_LIBRARY_COUNTS: the library functions run most, with
 			their runs, for choosing the bodies to port) */
 			if (getenv("HALO_HS_LIBRARY_COUNTS") && compared >= 256)

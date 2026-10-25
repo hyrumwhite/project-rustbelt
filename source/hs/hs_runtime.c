@@ -2039,8 +2039,8 @@ are */
 static long *hs_runtime_ready_arguments;
 
 /* port: the library functions whose bodies the Rust port's runtime runs
-itself (crates/halo_map's hs_library): run here too without a call, so that
-check mode compares them (their values are the threads') */
+itself (crates/halo_map's hs_runtime); in check mode Rust's is checked as
+the game's runs (halo_sim_hs_body_check_begin) */
 static char const *const hs_runtime_rust_bodies[] =
 {
 	"unit_get_health",
@@ -2063,9 +2063,7 @@ static char const *const hs_runtime_rust_bodies[] =
 	"ai_swarm_count",
 	"ai_nonswarm_count",
 };
-/* (the bodies run so, for check mode's report) */
-unsigned long hs_runtime_rust_bodies_run;
-/* (and each library function's runs, for HALO_HS_LIBRARY_COUNTS's) */
+/* (each library function's runs, for HALO_HS_LIBRARY_COUNTS's) */
 unsigned long hs_runtime_library_counts[1024];
 
 char const *hs_runtime_function_name(
@@ -3003,15 +3001,7 @@ static void hs_thread_main(
 
 				if (arguments && expression->index >= 0 && expression->index < 1024)
 					hs_runtime_library_counts[expression->index]++;
-				/* (a body the Rust port runs itself: here too, without a call) */
-				if (arguments && hs_runtime_rust_body(expression->index))
-				{
-					hs_runtime_rust_bodies_run++;
-					hs_runtime_ready_arguments = function->parameter_count>0 ? arguments : NULL;
-					function->evaluate(expression->index, thread_index, FALSE);
-					hs_runtime_ready_arguments = NULL;
-				}
-				else if (arguments)
+				if (arguments)
 				{
 					struct halo_sim_hs_call call;
 
@@ -3750,9 +3740,14 @@ void hs_runtime_call(
 		{
 			struct hs_function_definition *function = hs_function_get((short)call->a);
 
+			/* (a body the Rust port runs itself: in check mode, Rust's is
+			checked around the game's) */
+			int body_checking = hs_runtime_rust_body((short)call->a) && halo_sim_hs_body_check_begin(call);
+
 			hs_runtime_ready_arguments = (long *)call->c;
 			function->evaluate((short)call->a, call->b, FALSE);
 			hs_runtime_ready_arguments = NULL;
+			halo_sim_hs_body_check_end(call, body_checking);
 			break;
 		}
 

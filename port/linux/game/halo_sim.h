@@ -2266,6 +2266,11 @@ void halo_sim_hs_check(long result);
 /* whether the object lists' collection waits for the check (TRUE while an
 update is recorded: the replay reads the lists the game's update made) */
 int halo_sim_hs_defer_list_gc(void);
+/* a library body the Rust port runs, checked around the game's (check
+mode): Rust's runs first, its writes held aside; TRUE if it's checked, for
+the end's comparison */
+int halo_sim_hs_body_check_begin(struct halo_sim_hs_call const *call);
+void halo_sim_hs_body_check_end(struct halo_sim_hs_call const *call, int checking);
 int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call);
 void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened);
 void hs_runtime_call(struct halo_sim_hs_call *call);

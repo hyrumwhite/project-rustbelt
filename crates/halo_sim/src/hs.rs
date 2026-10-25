@@ -128,6 +128,11 @@ pub struct HsContextC {
     pub conversation_data: u32,
     pub recent_conversations: u32,
     pub recent_conversation_count: u32,
+    pub actor_data: u32,
+    pub command_lists: u32,
+    pub command_list_count: i32,
+    pub tag_instances: u32,
+    pub tag_count: i32,
 }
 
 impl HsContextC {
@@ -172,6 +177,11 @@ impl HsContextC {
             conversation_data: self.conversation_data,
             recent_conversations: self.recent_conversations,
             recent_conversation_count: self.recent_conversation_count,
+            actor_data: self.actor_data,
+            command_lists: self.command_lists,
+            command_list_count: self.command_list_count,
+            tag_instances: self.tag_instances,
+            tag_count: self.tag_count,
         }
     }
 }

@@ -244,6 +244,18 @@ const RECENT_CONVERSATION_SIZE: u32 = 0x10;
 const RECENT_CONVERSATION_UNABLE_TO_BEGIN: u32 = 2;
 const RECENT_CONVERSATION_FINISHED_SUCCESSFULLY: u32 = 3;
 const RECENT_CONVERSATION_FINISH_TIME: u32 = 4;
+/// `_actor_action_obey`, and `_obey_metadata_waiting_for_advance_notification_bit`
+/// of a simple control's metadata.
+const ACTOR_ACTION_OBEY: usize = crate::layout::ai_values::_ACTOR_ACTION_OBEY;
+const OBEY_WAITING_FOR_ADVANCE: u8 = 1 << 4;
+/// The unit tag group, where `struct unit_definition`'s unit part and its
+/// seats block are, and `struct unit_seat`'s size and label (tag_layout's
+/// probe, OpenCE-bevy d964b0b3).
+const UNIT_TAG: u32 = u32::from_be_bytes(*b"unit");
+const UNIT_DEFINITION_UNIT: u32 = 0x17c;
+const UNIT_DEFINITION_SEATS: u32 = 0x168;
+const UNIT_SEAT_SIZE: u32 = 0x11c;
+const UNIT_SEAT_LABEL: u32 = 4;
 /// `MAXIMUM_WEAPONS_PER_UNIT`.
 const UNIT_WEAPONS: i16 = 4;
 /// `struct object_list_header_datum`'s count and first reference, and
@@ -396,6 +408,14 @@ pub struct HsContext {
     pub conversation_data: u32,
     pub recent_conversations: u32,
     pub recent_conversation_count: u32,
+    /// `actor_data`, and the scenario's command lists (their first
+    /// element) and count.
+    pub actor_data: u32,
+    pub command_lists: u32,
+    pub command_list_count: i32,
+    /// The loaded tags' table and its count (`cache_files_tag_instances`).
+    pub tag_instances: u32,
+    pub tag_count: i32,
 }
 
 /// `(long)value` as x86 truncates it.
@@ -1319,6 +1339,23 @@ impl<H: HsHost> Runtime<'_, H> {
             && self.m().r8(self.context.rust_bodies + (function_index as u32 >> 3)) & (1 << (function_index & 7)) != 0
     }
 
+    /// The C string at the address (its bytes as they are, up to 256).
+    fn c_string(&self, address: u32) -> Vec<u8> {
+        let m = self.m();
+        let mut bytes = Vec::new();
+        if address == 0 {
+            return bytes;
+        }
+        for i in 0..256 {
+            let c = m.r8(address + i);
+            if c == 0 {
+                break;
+            }
+            bytes.push(c);
+        }
+        bytes
+    }
+
     /// The function's name (its definition's).
     fn function_name(&self, definition: u32) -> String {
         let m = self.m();
@@ -1784,6 +1821,105 @@ impl<H: HsHost> Runtime<'_, H> {
                     }
                 }
                 short_value(status)
+            }
+            // ai_scripting_command_list_status: the furthest along of the
+            // listed units' command lists (a swarm's left to the game's)
+            "ai_command_list_status" => {
+                use crate::layout::{actor_datum as a, obey_individual_simple_control as sc};
+                let Some(objects) = self.object_list(argument(0)) else { return false };
+                let mut result = 0;
+                for unit_index in objects {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { continue };
+                    let actor_index = m.r32(unit + u::UNIT_ACTOR_INDEX as u32) as i32;
+                    let swarm_actor_index = m.r32(unit + u::UNIT_SWARM_ACTOR_INDEX as u32) as i32;
+                    let mut status = 0;
+                    let actor = if actor_index != NONE {
+                        let Some(actor) = self.datum_get(self.context.actor_data, actor_index) else { return false };
+                        if m.r16(actor + a::STATE_ACTION as u32) as usize == ACTOR_ACTION_OBEY {
+                            // ai_scripting_command_list_status_internal
+                            let list_index = m.r16(actor + a::STATE_OBEY_COMMAND_LIST_INDEX as u32) as i16;
+                            if list_index < 0 || list_index as i32 >= self.context.command_list_count {
+                                return false;
+                            }
+                            let list = self.context.command_lists
+                                + list_index as u32 * crate::layout::ai_command_list_definition::SIZEOF as u32;
+                            let command_count = m.r32(list + crate::layout::ai_command_list_definition::COMMANDS as u32) as i32;
+                            let control = actor + a::STATE_OBEY_SIMPLE_CONTROL as u32;
+                            status = if (m.r8(control + sc::CURRENT_COMMAND_INDEX as u32) as i32) >= command_count {
+                                1
+                            } else if m.r8(control + sc::METADATA_FLAGS as u32) & OBEY_WAITING_FOR_ADVANCE != 0 {
+                                2
+                            } else {
+                                3
+                            };
+                        }
+                        Some(actor)
+                    } else if swarm_actor_index != NONE {
+                        let Some(actor) = self.datum_get(self.context.actor_data, swarm_actor_index) else { return false };
+                        if m.r16(actor + a::STATE_ACTION as u32) as usize == ACTOR_ACTION_OBEY
+                            && m.r16(actor + a::META_SWARM_CACHE_INDEX as u32) as i16 != NONE as i16
+                        {
+                            return false;
+                        }
+                        Some(actor)
+                    } else {
+                        None
+                    };
+                    if status == 0 {
+                        if let Some(actor) = actor {
+                            let last = m.r32(actor + a::STATE_LAST_COMMAND_LIST_TIME as u32) as i32;
+                            if last != NONE && last.wrapping_add(150) >= self.context.game_time {
+                                status = 1;
+                            }
+                        }
+                    }
+                    result = result.max(status);
+                }
+                short_value(result)
+            }
+            // unit_scripting_vehicle_test_seat_list: whether the unit in a
+            // seat of that label (the first found by the object iterator)
+            // is listed
+            "vehicle_test_seat_list" => {
+                let (vehicle_index, seat_name, list) = (argument(0), argument(1) as u32, argument(2));
+                if vehicle_index == NONE {
+                    0
+                } else {
+                    let Some(vehicle) = self.object_typed(vehicle_index, OBJECT_MASK_UNIT) else { return false };
+                    let tags = crate::ai_actor::AiStepContext {
+                        tag_instances: self.context.tag_instances,
+                        tag_count: self.context.tag_count,
+                        ..Default::default()
+                    };
+                    let definition_index = m.r32(vehicle + u::DEFINITION_INDEX as u32) as i32;
+                    let Some(definition) = crate::sensing::tag_get(&AsAiMemory(m), &tags, UNIT_TAG, definition_index) else {
+                        return false;
+                    };
+                    let seats = definition + UNIT_DEFINITION_UNIT + UNIT_DEFINITION_SEATS;
+                    let (seat_count, seat_array) = (m.r32(seats) as i32, m.r32(seats + 4));
+                    let name = self.c_string(seat_name);
+                    let listed = match self.object_list(list) {
+                        Some(objects) => objects,
+                        None => return false,
+                    };
+                    let mut result = false;
+                    for seat_index in 0..seat_count.max(0) {
+                        let label = self.c_string(seat_array + seat_index as u32 * UNIT_SEAT_SIZE + UNIT_SEAT_LABEL);
+                        if !name.eq_ignore_ascii_case(&label) {
+                            continue;
+                        }
+                        let rider = self.objects_of_types(OBJECT_MASK_UNIT).into_iter().find(|&(_, unit)| {
+                            m.r32(unit + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 == vehicle_index
+                                && m.r16(unit + u::UNIT_PARENT_SEAT_INDEX as u32) as i16 as i32 == seat_index
+                        });
+                        if let Some((rider_index, _)) = rider {
+                            if listed.contains(&rider_index) {
+                                result = true;
+                            }
+                        }
+                    }
+                    boolean(result)
+                }
             }
             // device_get_position
             "device_get_position" => {

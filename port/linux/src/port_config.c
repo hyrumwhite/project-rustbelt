@@ -312,6 +312,11 @@ static const struct config_setting config_settings[] =
 		"With game.bevy_bridge_overlay: the Bevy renderer draws the sprites\n"
 		"(particles, particle systems, weather, glows) itself, from those the\n"
 		"game shares each frame, so the game draws none." },
+	{ "game.bevy_bridge_viewer_hud", _config_boolean, "false", "HALO_BEVY_BRIDGE_VIEWER_HUD", _environment_value,
+		_platform_desktop,
+		"With game.bevy_bridge_overlay: the Bevy renderer draws the HUD's and\n"
+		"menus' bitmaps itself, from the screen quads the game shares each\n"
+		"frame, so the game draws none of them." },
 	{ "game.bevy_bridge_viewer_decals", _config_boolean, "false", "HALO_BEVY_BRIDGE_VIEWER_DECALS", _environment_value,
 		_platform_desktop,
 		"With game.bevy_bridge_overlay: the Bevy renderer draws the decals\n"

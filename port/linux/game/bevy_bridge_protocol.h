@@ -40,7 +40,9 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 45
+#define BEVY_BRIDGE_VERSION 46
+#define BEVY_BRIDGE_SCREEN_DRAWS 1024
+#define BEVY_BRIDGE_SCREEN_VERTICES 4096
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
 #define BEVY_BRIDGE_SPRITE_VERTICES 32768
 #define BEVY_BRIDGE_DECALS 2048
@@ -421,6 +423,60 @@ struct bevy_bridge_vehicle_ray_test
 	long surface_index;
 };
 
+/* (protocol 46) a screen quad the first player's window (or the menus')
+would have drawn (with game.bevy_bridge_viewer_hud: the HUD's and menus'
+bitmaps, rasterizer_xbox_dynavobgeom.c), in the order drawn */
+struct bevy_bridge_screen_vertex
+{
+	/* the window's pixels, its offset applied */
+	float position[2];
+	/* each map's texture coordinates, as the screen geometry vertex shader
+	works them out (its anchor, scale, offset and texture scale applied) */
+	float texcoords[3][2];
+	/* a8r8g8b8 (v0) */
+	unsigned long color;
+};
+
+struct bevy_bridge_screen_map
+{
+	/* the bitmap tag (all ones for none) and its bitmap */
+	unsigned long bitmap;
+	unsigned short bitmap_index;
+	/* bit 0 wrapped (clamped otherwise), 1 point sampled */
+	unsigned short flags;
+};
+
+struct bevy_bridge_screen_draw
+{
+	unsigned long first_vertex;
+	unsigned long vertex_count;
+	/* the viewport its vertices' pixels are of (the window's) */
+	float viewport[2];
+	struct bevy_bridge_screen_map maps[3];
+	/* its NV2A pixel shader (struct pixel_shader_definition's): general
+	combiner stages over t0-t2 and v0, then the final combiner; constants
+	a8r8g8b8 */
+	unsigned long combiner_count;
+	unsigned long rgb_inputs[8];
+	unsigned long rgb_outputs[8];
+	unsigned long alpha_inputs[8];
+	unsigned long alpha_outputs[8];
+	unsigned long constant_0[8];
+	unsigned long constant_1[8];
+	unsigned long final_combiner_inputs_abcd;
+	unsigned long final_combiner_inputs_efg;
+	unsigned long final_combiner_constant_0;
+	unsigned long final_combiner_constant_1;
+	/* the framebuffer blend: D3DBLEND source and destination factors, the
+	D3DBLENDOP operation and the constant colour (a8r8g8b8) */
+	unsigned long blend_source;
+	unsigned long blend_destination;
+	unsigned long blend_operation;
+	unsigned long blend_color;
+	/* bit 0 blended, 1 t0's alpha kill (a meter's) */
+	unsigned long flags;
+};
+
 struct bevy_bridge_frame
 {
 	unsigned long sequence;
@@ -459,6 +515,12 @@ struct bevy_bridge_frame
 	struct bevy_bridge_physics_vehicle physics_vehicles[BEVY_BRIDGE_PHYSICS_VEHICLES];
 	unsigned long vehicle_ray_test_count;
 	struct bevy_bridge_vehicle_ray_test vehicle_ray_tests[BEVY_BRIDGE_VEHICLE_RAY_TESTS];
+	/* (protocol 46; only with game.bevy_bridge_viewer_hud) the screen quads
+	the windows would have drawn, in order */
+	unsigned long screen_draw_count;
+	unsigned long screen_vertex_count;
+	struct bevy_bridge_screen_draw screen_draws[BEVY_BRIDGE_SCREEN_DRAWS];
+	struct bevy_bridge_screen_vertex screen_vertices[BEVY_BRIDGE_SCREEN_VERTICES];
 };
 
 /* what the renderer's window receives, for the game to read as its own */

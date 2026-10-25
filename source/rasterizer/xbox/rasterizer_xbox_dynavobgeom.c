@@ -87,6 +87,8 @@ symbols in this file:
 
 #include "rasterizer_xbox.h"
 #include "rasterizer_xbox_dynavobgeom.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "bevy_bridge_protocol.h"
 #include "rasterizer_xbox_pixel_shader.h"
 
 /* ---------- constants */
@@ -228,6 +230,96 @@ typedef char rasterizer_dynamic_geometry_viewport_bounds_offset_assert[
 typedef char rasterizer_dynamic_geometry_camera_offset_assert[
 	offsetof(struct rasterizer_window_begin_parameters, camera) == 0x8 ? 1 : -1];
 /* ---------- prototypes */
+
+/* port: how far right the menus are shifted while they draw (d3d8_gl.c) */
+long halo_screen_ui_offset_get(void);
+
+/* port: with the renderer drawing the HUD and menus (bevy_bridge.c), a
+screen quad shared with it instead of drawn: its vertices in the viewport's
+pixels with the offset applied, each map's texture coordinates as the screen
+geometry vertex shader (index 4) works them out, the pixel shader built for
+it and the blend set. FALSE (drawn here) if a map's bitmap is no tag's. */
+static boolean share_screen_quad(
+	struct rasterizer_dynamic_screen_geometry_parameters const *parameters,
+	struct dynamic_screen_vertex const *vertices,
+	short width,
+	short height)
+{
+	struct bevy_bridge_screen_draw draw;
+	struct bevy_bridge_screen_vertex shared[NUMBER_OF_VERTICES_PER_QUADRILATERAL];
+	short map_index;
+	short vertex_index;
+	DWORD value;
+
+	memset(&draw, 0, sizeof(draw));
+	for (map_index = 0; map_index < NUMBER_OF_SCREEN_GEOMETRY_MAPS; map_index++)
+	{
+		draw.maps[map_index].bitmap = 0xFFFFFFFFUL;
+		if (!parameters->map[map_index])
+			continue;
+		if (!bevy_bridge_bitmap_tag(parameters->map[map_index], &draw.maps[map_index].bitmap,
+			&draw.maps[map_index].bitmap_index))
+		{
+			return FALSE;
+		}
+		draw.maps[map_index].flags = (unsigned short)((parameters->map_wrapped[map_index] ? 1 : 0) |
+			(parameters->point_sampled ? 2 : 0));
+	}
+	for (vertex_index = 0; vertex_index < NUMBER_OF_VERTICES_PER_QUADRILATERAL; vertex_index++)
+	{
+		struct dynamic_screen_vertex const *vertex = &vertices[vertex_index];
+		struct bevy_bridge_screen_vertex *out = &shared[vertex_index];
+
+		/* (the menus centered as the port draws them: halo_screen_ui_offset) */
+		out->position[0] = vertex->position.x + (parameters->offset ? parameters->offset->i : 0.0f) +
+			(float)halo_screen_ui_offset_get();
+		out->position[1] = vertex->position.y + (parameters->offset ? parameters->offset->j : 0.0f);
+		for (map_index = 0; map_index < NUMBER_OF_SCREEN_GEOMETRY_MAPS; map_index++)
+		{
+			/* the screen's position or the vertex's texture coordinates (the
+			anchor), times the map's scale, plus its offset, times its
+			texture scale */
+			real u = parameters->map_anchor_screen[map_index] ? vertex->position.x : vertex->texture_coordinates.x;
+			real v = parameters->map_anchor_screen[map_index] ? vertex->position.y : vertex->texture_coordinates.y;
+
+			u = u * parameters->map_scale[map_index].i +
+				(parameters->map_offset[map_index] ? parameters->map_offset[map_index]->x : 0.0f);
+			v = v * parameters->map_scale[map_index].j +
+				(parameters->map_offset[map_index] ? parameters->map_offset[map_index]->y : 0.0f);
+			out->texcoords[map_index][0] = u * parameters->map_texture_scale[map_index].i;
+			out->texcoords[map_index][1] = v * parameters->map_texture_scale[map_index].j;
+		}
+		out->color = vertex->color;
+	}
+	draw.vertex_count = NUMBER_OF_VERTICES_PER_QUADRILATERAL;
+	draw.viewport[0] = (float)width;
+	draw.viewport[1] = (float)height;
+	draw.combiner_count = pixel_shader.combiner_count;
+	memcpy(draw.rgb_inputs, pixel_shader.rgb_inputs, sizeof(draw.rgb_inputs));
+	memcpy(draw.rgb_outputs, pixel_shader.rgb_outputs, sizeof(draw.rgb_outputs));
+	memcpy(draw.alpha_inputs, pixel_shader.alpha_inputs, sizeof(draw.alpha_inputs));
+	memcpy(draw.alpha_outputs, pixel_shader.alpha_outputs, sizeof(draw.alpha_outputs));
+	memcpy(draw.constant_0, pixel_shader.constant_0, sizeof(draw.constant_0));
+	memcpy(draw.constant_1, pixel_shader.constant_1, sizeof(draw.constant_1));
+	draw.final_combiner_inputs_abcd = pixel_shader.final_combiner_inputs_abcd;
+	draw.final_combiner_inputs_efg = pixel_shader.final_combiner_inputs_efg;
+	draw.final_combiner_constant_0 = pixel_shader.final_combiner_constant_0;
+	draw.final_combiner_constant_1 = pixel_shader.final_combiner_constant_1;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_ALPHABLENDENABLE, &value);
+	draw.flags = value ? 1 : 0;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_SRCBLEND, &value);
+	draw.blend_source = value;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_DESTBLEND, &value);
+	draw.blend_destination = value;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_BLENDOP, &value);
+	draw.blend_operation = value;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_BLENDCOLOR, &value);
+	draw.blend_color = value;
+	if (parameters->meter_parameters)
+		draw.flags |= 2;
+	bevy_bridge_note_screen_draw(&draw, shared);
+	return TRUE;
+}
 
 static void submit_screen_vertex(
 	struct dynamic_screen_vertex const *vertex);
@@ -647,12 +739,19 @@ void _rasterizer_psuedo_dynamic_screen_quad_draw(
 		SCREEN_GEOMETRY_VERTEX_TYPE,
 		SCREEN_GEOMETRY_VERTEX_SHADER_PERMUTATION);
 
-	IDirect3DDevice8_Begin(global_d3d_device, D3DPT_TRIANGLEFAN);
-	for (vertex_index = 0; vertex_index < NUMBER_OF_VERTICES_PER_QUADRILATERAL; vertex_index++)
+	/* port: the renderer's, when it draws the HUD and menus */
+	if (!bevy_bridge_viewer_draws_hud() ||
+		!share_screen_quad(parameters, vertices,
+			(short)(global_window_parameters.camera.viewport_bounds.x1 - global_window_parameters.camera.viewport_bounds.x0),
+			(short)(global_window_parameters.camera.viewport_bounds.y1 - global_window_parameters.camera.viewport_bounds.y0)))
 	{
-		submit_screen_vertex(&vertices[vertex_index]);
+		IDirect3DDevice8_Begin(global_d3d_device, D3DPT_TRIANGLEFAN);
+		for (vertex_index = 0; vertex_index < NUMBER_OF_VERTICES_PER_QUADRILATERAL; vertex_index++)
+		{
+			submit_screen_vertex(&vertices[vertex_index]);
+		}
+		IDirect3DDevice8_End(global_d3d_device);
 	}
-	IDirect3DDevice8_End(global_d3d_device);
 
 	IDirect3DDevice8_SetTextureStageState(
 		global_d3d_device,

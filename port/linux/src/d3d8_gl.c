@@ -288,6 +288,13 @@ void halo_screen_ui_offset(unsigned char centered)
 	ui_offset = centered ? (halo_screen_width() - 640) / 2 : 0;
 }
 
+/* how far right the menus are shifted while they draw (in the 480 lines'
+units), for what the game shares instead of drawing (bevy_bridge.c) */
+long halo_screen_ui_offset_get(void)
+{
+	return ui_offset;
+}
+
 /* ---------- state the XDK header's inline functions read and write */
 
 DWORD D3D__RenderState[D3DRS_MAX];

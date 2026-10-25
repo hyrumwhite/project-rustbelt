@@ -41,6 +41,8 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "render/render_cameras_internal.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_groups.h"
+#include "bitmaps/bitmaps.h"
+#include "bitmaps/bitmap_group.h"
 #include "bevy_bridge.h"
 #include "bevy_bridge_protocol.h"
 
@@ -302,6 +304,11 @@ static struct bevy_bridge_fog_screen bevy_bridge_fog_screen;
 static unsigned long bevy_bridge_sprite_batch_count;
 static unsigned long bevy_bridge_sprite_vertex_count;
 static struct bevy_bridge_sprite_batch bevy_bridge_sprite_batches[BEVY_BRIDGE_SPRITE_BATCHES];
+/* the screen quads staged for the frame's export */
+static unsigned long bevy_bridge_screen_draw_count;
+static unsigned long bevy_bridge_screen_vertex_count;
+static struct bevy_bridge_screen_draw bevy_bridge_screen_draws[BEVY_BRIDGE_SCREEN_DRAWS];
+static struct bevy_bridge_screen_vertex bevy_bridge_screen_vertices[BEVY_BRIDGE_SCREEN_VERTICES];
 static struct bevy_bridge_sprite_vertex bevy_bridge_sprite_vertices[BEVY_BRIDGE_SPRITE_VERTICES];
 /* ... and the decals drawn */
 static unsigned long bevy_bridge_decal_count;
@@ -645,6 +652,16 @@ void bevy_bridge_export_frame(
 	frame->physics_vehicle_count = 0;
 	frame->vehicle_ray_test_count = 0;
 	frame->point_physics_definition = (unsigned long)bevy_bridge_point_physics();
+	/* the windows' screen quads (the menus' too: drawn whether or not a
+	player's window is) */
+	frame->screen_draw_count = bevy_bridge_screen_draw_count;
+	frame->screen_vertex_count = bevy_bridge_screen_vertex_count;
+	memcpy(frame->screen_draws, bevy_bridge_screen_draws,
+		bevy_bridge_screen_draw_count * sizeof(struct bevy_bridge_screen_draw));
+	memcpy(frame->screen_vertices, bevy_bridge_screen_vertices,
+		bevy_bridge_screen_vertex_count * sizeof(struct bevy_bridge_screen_vertex));
+	bevy_bridge_screen_draw_count = 0;
+	bevy_bridge_screen_vertex_count = 0;
 	for (window_index = 0; window_index < window_count; window_index++)
 	{
 		struct render_window const *window = &windows[window_index];
@@ -905,6 +922,88 @@ boolean bevy_bridge_viewer_draws_effects(void)
 	if (viewer_effects < 0)
 		viewer_effects = config_boolean("game.bevy_bridge_viewer_effects") != 0;
 	return viewer_effects && bevy_bridge_overlay_enabled();
+}
+
+boolean bevy_bridge_viewer_draws_hud(void)
+{
+	static int viewer_hud = -1;
+
+	if (viewer_hud < 0)
+		viewer_hud = config_boolean("game.bevy_bridge_viewer_hud") != 0;
+	return viewer_hud && bevy_bridge_overlay_enabled();
+}
+
+boolean bevy_bridge_note_screen_draw(struct bevy_bridge_screen_draw const *draw,
+	struct bevy_bridge_screen_vertex const *vertices)
+{
+	struct bevy_bridge_screen_draw *out;
+
+	if (bevy_bridge_screen_draw_count >= BEVY_BRIDGE_SCREEN_DRAWS ||
+		bevy_bridge_screen_vertex_count + draw->vertex_count > BEVY_BRIDGE_SCREEN_VERTICES)
+	{
+		return FALSE;
+	}
+	out = &bevy_bridge_screen_draws[bevy_bridge_screen_draw_count++];
+	*out = *draw;
+	out->first_vertex = bevy_bridge_screen_vertex_count;
+	memcpy(&bevy_bridge_screen_vertices[bevy_bridge_screen_vertex_count], vertices,
+		draw->vertex_count * sizeof(struct bevy_bridge_screen_vertex));
+	bevy_bridge_screen_vertex_count += draw->vertex_count;
+	return TRUE;
+}
+
+/* whether `bitmap` is one of the bitmaps of bitmap tag `tag_index`, and
+which */
+static boolean bevy_bridge_bitmap_in_tag(void const *bitmap, long tag_index, unsigned short *bitmap_index)
+{
+	struct bitmap_group *group = (struct bitmap_group *)tag_get(BITMAP_GROUP_TAG, tag_index);
+	char const *first;
+	unsigned long offset;
+
+	if (!group || !group->bitmaps.address || group->bitmaps.count <= 0)
+		return FALSE;
+	first = (char const *)group->bitmaps.address;
+	if ((char const *)bitmap < first)
+		return FALSE;
+	offset = (unsigned long)((char const *)bitmap - first);
+	if (offset % sizeof(struct bitmap_data) || offset / sizeof(struct bitmap_data) >= (unsigned long)group->bitmaps.count)
+		return FALSE;
+	*bitmap_index = (unsigned short)(offset / sizeof(struct bitmap_data));
+	return TRUE;
+}
+
+boolean bevy_bridge_bitmap_tag(void const *bitmap, unsigned long *tag_index, unsigned short *bitmap_index)
+{
+	/* the tags last found (checked again on use: the tag data's address is
+	every map's) */
+	static long recent[16] = { NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
+		NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE };
+	static unsigned long next;
+	struct tag_iterator iterator;
+	long index;
+	short slot;
+
+	if (!bitmap || global_scenario_index == NONE)
+		return FALSE;
+	for (slot = 0; slot < 16; slot++)
+	{
+		if (recent[slot] != NONE && bevy_bridge_bitmap_in_tag(bitmap, recent[slot], bitmap_index))
+		{
+			*tag_index = (unsigned long)recent[slot];
+			return TRUE;
+		}
+	}
+	tag_iterator_new(&iterator, BITMAP_GROUP_TAG);
+	for (index = tag_iterator_next(&iterator); index != NONE; index = tag_iterator_next(&iterator))
+	{
+		if (bevy_bridge_bitmap_in_tag(bitmap, index, bitmap_index))
+		{
+			recent[next++ % 16] = index;
+			*tag_index = (unsigned long)index;
+			return TRUE;
+		}
+	}
+	return FALSE;
 }
 
 boolean bevy_bridge_note_sprite_batch(struct bevy_bridge_sprite_batch const *batch,

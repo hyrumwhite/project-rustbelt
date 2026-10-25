@@ -11,6 +11,8 @@ The world, each frame, for a Bevy renderer (bevy_bridge.c).
 struct render_window;
 struct bevy_bridge_sprite_batch;
 struct bevy_bridge_sprite_vertex;
+struct bevy_bridge_screen_draw;
+struct bevy_bridge_screen_vertex;
 struct real_matrix4x3;
 
 /* render_frame, once a frame: the windows it draws */
@@ -65,6 +67,18 @@ drawn (struct bevy_bridge_sprite_batch, its vertices already in the game's
 coordinates), for the frame's export; FALSE if there is no room */
 boolean bevy_bridge_note_sprite_batch(struct bevy_bridge_sprite_batch const *batch,
 	struct bevy_bridge_sprite_vertex const *vertices);
+/* with game.bevy_bridge_viewer_hud on too: TRUE (the renderer draws the
+HUD's and menus' screen quads itself, from those each frame shares, so the
+game draws none whose bitmaps are tags) */
+boolean bevy_bridge_viewer_draws_hud(void);
+/* rasterizer_xbox_dynavobgeom.c: a screen quad a window would have drawn
+(struct bevy_bridge_screen_draw and its vertices), for the frame's export;
+FALSE if there is no room */
+boolean bevy_bridge_note_screen_draw(struct bevy_bridge_screen_draw const *draw,
+	struct bevy_bridge_screen_vertex const *vertices);
+/* the bitmap tag and index a bitmap (struct bitmap_data) belongs to; FALSE
+if it is no tag's (a movie's frame, the text cache) */
+boolean bevy_bridge_bitmap_tag(void const *bitmap, unsigned long *tag_index, unsigned short *bitmap_index);
 /* rasterizer_xbox_decals.c: a decal the first player's window would have
 drawn, its quads' vertices as the game keeps them (struct
 bevy_bridge_decal_vertex), for the frame's export */

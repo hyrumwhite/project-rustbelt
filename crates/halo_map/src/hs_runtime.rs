@@ -207,8 +207,27 @@ const OBJECT_MASK_UNIT: u32 = 0b11;
 const OBJECT_DEAD: u16 = 1 << 2;
 /// `NUMBER_OF_UNIT_GRENADE_TYPES`.
 const UNIT_GRENADE_TYPES: u32 = 2;
-/// `struct object_list_header_datum`'s count.
+/// `_object_mask_weapon` and `_object_mask_device` (machines, controls
+/// and light fixtures).
+const OBJECT_MASK_WEAPON: u32 = 1 << 2;
+const OBJECT_MASK_DEVICE: u32 = 0b111 << 7;
+/// `MAXIMUM_WEAPONS_PER_UNIT`.
+const UNIT_WEAPONS: i16 = 4;
+/// `struct object_list_header_datum`'s count and first reference, and
+/// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
+const OBJECT_LIST_HEADER_FIRST_REFERENCE: u32 = 8;
+const DATA_REFERENCE_DATUM: u32 = 4;
+const DATA_REFERENCE_NEXT: u32 = 8;
+/// `struct scenario_trigger_volume`: its type, forward and up, and its
+/// bounds (or position and extents); `MAXIMUM_TRIGGER_VOLUMES_PER_SCENARIO`.
+const TRIGGER_VOLUME_SIZE: u32 = 0x60;
+const TRIGGER_VOLUME_FORWARD: u32 = 0x30;
+const TRIGGER_VOLUME_UP: u32 = 0x3c;
+const TRIGGER_VOLUME_BOUNDS: u32 = 0x48;
+const TRIGGER_VOLUME_AXIS_ALIGNED: i16 = 0;
+const TRIGGER_VOLUME_ORIENTED: i16 = 1;
+const MAXIMUM_TRIGGER_VOLUMES: u32 = 256;
 /// `_game_difficulty_level_normal`.
 const DIFFICULTY_NORMAL: i32 = 1;
 
@@ -308,6 +327,13 @@ pub struct HsContext {
     pub object_header_data: u32,
     pub object_list_header_data: u32,
     pub difficulty: i32,
+    /// `object_list_data` (the lists' references), the scenario's trigger
+    /// volumes (their first element) and count, and `hs_debug_data` (a bit
+    /// per volume, its last test's).
+    pub object_list_data: u32,
+    pub trigger_volumes: u32,
+    pub trigger_volume_count: i32,
+    pub debug_data: u32,
 }
 
 /// `(long)value` as x86 truncates it.
@@ -1255,13 +1281,156 @@ impl<H: HsHost> Runtime<'_, H> {
         (types & (1 << ty) != 0).then(|| m.0.r32(header + crate::layout::object_header_datum::DATUM as u32))
     }
 
+    /// `object_list_get_first` and `_get_next`: the list's objects, in order
+    /// (None for a list that isn't there).
+    fn object_list(&self, list: i32) -> Option<Vec<i32>> {
+        let m = self.m();
+        let mut objects = Vec::new();
+        if list == NONE {
+            return Some(objects);
+        }
+        let header = self.datum_get(self.context.object_list_header_data, list)?;
+        let mut reference = m.r32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE) as i32;
+        while reference != NONE {
+            let datum = self.datum_get(self.context.object_list_data, reference)?;
+            objects.push(m.r32(datum + DATA_REFERENCE_DATUM) as i32);
+            reference = m.r32(datum + DATA_REFERENCE_NEXT) as i32;
+            if objects.len() > 0x10000 {
+                return None;
+            }
+        }
+        Some(objects)
+    }
+
+    /// `scenario_trigger_volume_test_point` (None for a volume that isn't
+    /// the scenario's, which holds nothing).
+    fn trigger_volume_test_point(&self, volume_index: i16, point: [f32; 3]) -> Option<bool> {
+        if volume_index < 0 || volume_index as i32 >= self.context.trigger_volume_count {
+            return None;
+        }
+        let m = self.m();
+        let volume = self.context.trigger_volumes + volume_index as u32 * TRIGGER_VOLUME_SIZE;
+        let f = |offset: u32| f32::from_bits(m.r32(volume + offset));
+        let v = |offset: u32| [f(offset), f(offset + 4), f(offset + 8)];
+        let [x, y, z] = point;
+        match m.r16(volume) as i16 {
+            TRIGGER_VOLUME_AXIS_ALIGNED => {
+                // (bounds x0 x1 y0 y1 z0 z1)
+                let b = |i: u32| f(TRIGGER_VOLUME_BOUNDS + 4 * i);
+                Some(x > b(0) && y > b(2) && z > b(4) && x < b(1) && y < b(3) && z < b(5))
+            }
+            TRIGGER_VOLUME_ORIENTED => {
+                // matrix4x3_from_point_and_vectors (left = up x forward),
+                // then matrix4x3_inverse_transform_point at scale 1
+                let forward = v(TRIGGER_VOLUME_FORWARD);
+                let up = v(TRIGGER_VOLUME_UP);
+                let position = v(TRIGGER_VOLUME_BOUNDS);
+                let extents = v(TRIGGER_VOLUME_BOUNDS + 12);
+                let left = [
+                    up[1] * forward[2] - up[2] * forward[1],
+                    up[2] * forward[0] - up[0] * forward[2],
+                    up[0] * forward[1] - up[1] * forward[0],
+                ];
+                let (dx, dy, dz) = (x - position[0], y - position[1], z - position[2]);
+                let along = |axis: [f32; 3]| dx * axis[0] + dy * axis[1] + dz * axis[2];
+                let (tx, ty, tz) = (along(forward), along(left), along(up));
+                Some(tx > 0.0 && ty > 0.0 && tz > 0.0 && tx < extents[0] && ty < extents[1] && tz < extents[2])
+            }
+            _ => None,
+        }
+    }
+
+    /// `scenario_trigger_volume_test_object`: the object's bounding
+    /// sphere's centre in the volume (false for no object).
+    fn trigger_volume_test_object(&self, volume_index: i16, object_index: i32) -> Option<bool> {
+        use crate::layout::unit_datum as u;
+        if object_index == NONE {
+            return Some(false);
+        }
+        let object = self.object_typed(object_index, OBJECT_MASK_ALL)?;
+        let m = self.m();
+        let center = u::OBJECT_BOUNDING_SPHERE_CENTER as u32;
+        let point = [0, 4, 8].map(|i| f32::from_bits(m.r32(object + center + i)));
+        Some(self.trigger_volume_test_point(volume_index, point).unwrap_or(false))
+    }
+
     /// A library function's body that runs here (the arguments evaluated
-    /// at `arguments`), with its value returned; false if it has none here.
+    /// at `arguments`), with its value returned; false if it has none here
+    /// (or meets what the game's would stop at, which it then runs).
     fn library_body(&self, definition: u32, thread_index: i32, arguments: u32) -> bool {
         use crate::layout::unit_datum as u;
         let m = self.m();
         let argument = |index: u32| m.r32(arguments + 4 * index) as i32;
+        let short = |index: u32| m.r16(arguments + 4 * index) as i16;
+        let boolean = |value: bool| value as i32;
         let value = match self.function_name(definition).as_str() {
+            // hs_not
+            "not" => boolean(m.r8(arguments) == 0),
+            // hs_object_list_get_element
+            "list_get" => {
+                let Some(objects) = self.object_list(argument(0)) else { return false };
+                objects.get(short(1).max(0) as usize).copied().unwrap_or(NONE)
+            }
+            // hs_trigger_volume_test_objects (any), which leaves its value
+            // in hs_debug_data's bit for the volume
+            "volume_test_objects" => {
+                let volume_index = short(0);
+                let Some(objects) = self.object_list(argument(1)) else { return false };
+                let mut inside = false;
+                for object in objects {
+                    let Some(test) = self.trigger_volume_test_object(volume_index, object) else { return false };
+                    if test {
+                        inside = true;
+                        break;
+                    }
+                }
+                if (0..MAXIMUM_TRIGGER_VOLUMES as i16).contains(&volume_index) {
+                    let word = self.context.debug_data + 4 * (volume_index as u32 >> 5);
+                    let bit = 1u32 << (volume_index & 31);
+                    let bits = m.r32(word);
+                    m.w32(word, if inside { bits | bit } else { bits & !bit });
+                }
+                boolean(inside)
+            }
+            // scenario_trigger_volume_test_object
+            "volume_test_object" => match self.trigger_volume_test_object(short(0), argument(1)) {
+                Some(inside) => boolean(inside),
+                None => return false,
+            },
+            // unit_scripting_has_weapon_readied
+            "unit_has_weapon_readied" => {
+                let (unit_index, weapon_definition) = (argument(0), argument(1));
+                if unit_index == NONE || weapon_definition == NONE {
+                    0
+                } else {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let current = m.r16(unit + u::UNIT_CURRENT_WEAPON_INDEX as u32) as i16;
+                    if current == NONE as i16 {
+                        0
+                    } else if !(0..UNIT_WEAPONS).contains(&current) {
+                        return false;
+                    } else {
+                        let weapon_index = m.r32(unit + u::UNIT_WEAPON_OBJECT_INDICES as u32 + 4 * current as u32) as i32;
+                        if weapon_index == NONE {
+                            0
+                        } else {
+                            let Some(weapon) = self.object_typed(weapon_index, OBJECT_MASK_WEAPON) else { return false };
+                            boolean(m.r32(weapon + u::DEFINITION_INDEX as u32) as i32 == weapon_definition)
+                        }
+                    }
+                }
+            }
+            // device_get_position
+            "device_get_position" => {
+                let device_index = argument(0);
+                let position = if device_index == NONE {
+                    0.0f32
+                } else {
+                    let Some(device) = self.object_typed(device_index, OBJECT_MASK_DEVICE) else { return false };
+                    f32::from_bits(m.r32(device + crate::layout::device_datum::DEVICE_POSITION as u32))
+                };
+                position.to_bits() as i32
+            }
             // unit_scripting_get_health and _shield: -1 for no object, 0
             // for a dead one
             name @ ("unit_get_health" | "unit_get_shield") => {

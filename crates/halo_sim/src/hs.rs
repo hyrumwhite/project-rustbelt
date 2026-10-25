@@ -107,6 +107,10 @@ pub struct HsContextC {
     pub object_header_data: u32,
     pub object_list_header_data: u32,
     pub difficulty: i32,
+    pub object_list_data: u32,
+    pub trigger_volumes: u32,
+    pub trigger_volume_count: i32,
+    pub debug_data: u32,
 }
 
 impl HsContextC {
@@ -133,6 +137,10 @@ impl HsContextC {
             object_header_data: self.object_header_data,
             object_list_header_data: self.object_list_header_data,
             difficulty: self.difficulty,
+            object_list_data: self.object_list_data,
+            trigger_volumes: self.trigger_volumes,
+            trigger_volume_count: self.trigger_volume_count,
+            debug_data: self.debug_data,
         }
     }
 }

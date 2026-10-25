@@ -58,6 +58,8 @@ static unsigned char *atlas;
 static float atlas_scale;   /* the pixels per unit its glyphs have */
 static int pack_x, pack_y, pack_row_height;
 static int dirty_top = ATLAS_SIZE, dirty_bottom;
+/* changes with the atlas's glyphs (for the Bevy bridge, which shares it) */
+static unsigned long atlas_generation;
 static unsigned long placeholder_data, placeholder_width, placeholder_height;
 static GLuint atlas_texture;
 
@@ -101,6 +103,7 @@ static void atlas_reset(float scale)
 	pack_x = pack_y = pack_row_height = 0;
 	dirty_top = 0;
 	dirty_bottom = ATLAS_SIZE;
+	atlas_generation++;
 }
 
 long text_hires_font(char const *tag_name, float cap_height, float oversample)
@@ -210,6 +213,7 @@ int text_hires_glyph(long font, unsigned long code, struct text_hires_glyph *gly
 			stbtt_MakeGlyphBitmap(&fonts[font].info,
 				atlas + (pack_y + ATLAS_PADDING) * ATLAS_SIZE + pack_x + ATLAS_PADDING,
 				width, height, ATLAS_SIZE, pixels, pixels, index);
+			atlas_generation++;
 			if (pack_y < dirty_top)
 				dirty_top = pack_y;
 			if (pack_y + height + 2 * ATLAS_PADDING > dirty_bottom)
@@ -294,4 +298,22 @@ unsigned int text_hires_atlas_texture(unsigned long data)
 		}
 	}
 	return atlas_texture;
+}
+
+/* the atlas's coverage (ATLAS_SIZE squared, 8-bit), its generation (which
+changes with its glyphs), and whether a texture's data is its placeholder's:
+for the Bevy bridge, which shares the atlas (bevy_bridge.c) */
+unsigned long text_hires_atlas_generation(void)
+{
+	return atlas_generation;
+}
+
+unsigned char const *text_hires_atlas_coverage(void)
+{
+	return atlas;
+}
+
+int text_hires_is_atlas(unsigned long data)
+{
+	return data && data == placeholder_data && atlas;
 }

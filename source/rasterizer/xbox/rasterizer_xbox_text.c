@@ -135,6 +135,24 @@ void rasterizer_set_pixel_shader(
 extern void *global_d3d_device;
 extern struct pixel_shader_definition pixel_shader;
 
+/* port: with the renderer drawing the HUD and menus (bevy_bridge.c), the
+high-res text's characters shared with it instead of drawn, in the screen
+quads' order: what rasterizer_text_begin set up for them */
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "bevy_bridge_protocol.h"
+long halo_screen_ui_offset_get(void);
+int text_hires_is_atlas(unsigned long data);
+void *_texture_cache_bitmap_get_hardware_format(struct bitmap_data const *bitmap, boolean block, boolean load);
+static struct
+{
+	boolean atlas;
+	boolean wrapped;
+	boolean point_sampled;
+	real offset[2];
+	real texture_scale[2];
+	real viewport[2];
+} shared_text;
+
 /* ---------- public code */
 
 void rasterizer_text_end(
@@ -325,6 +343,21 @@ map_loop:
 
 maps_done:
 		rasterizer_set_vertex_shader_permutation(4, 8, TRUE);
+		/* port: what a shared character is drawn with */
+		{
+			unsigned long const *resource = parameters->map[0] ?
+				(unsigned long const *)_texture_cache_bitmap_get_hardware_format(parameters->map[0], TRUE, TRUE) : NULL;
+
+			shared_text.atlas = resource && text_hires_is_atlas(resource[1]);
+			shared_text.wrapped = parameters->clamp[0];
+			shared_text.point_sampled = parameters->point_filtering;
+			shared_text.offset[0] = parameters->scale ? parameters->scale->i : 0.0f;
+			shared_text.offset[1] = parameters->scale ? parameters->scale->j : 0.0f;
+			shared_text.texture_scale[0] = parameters->second_constants[0];
+			shared_text.texture_scale[1] = parameters->second_constants[1];
+			shared_text.viewport[0] = (real)window_width;
+			shared_text.viewport[1] = (real)window_height;
+		}
 		if (parameters->map[0])
 		{
 			real_argb_color *constant_colors;
@@ -393,11 +426,72 @@ maps_done:
 	return;
 }
 
+/* port: a character shared with the renderer (its quad, the atlas as its
+map, the pixel shader and blend rasterizer_text_begin set); FALSE if it is
+drawn here (the text cache's, not the high-res atlas's) */
+static boolean share_text_character(struct rasterizer_text_vertex const *vertices)
+{
+	struct bevy_bridge_screen_draw draw;
+	struct bevy_bridge_screen_vertex shared[4];
+	short vertex_index;
+	short map_index;
+	DWORD value;
+
+	if (!shared_text.atlas || !bevy_bridge_viewer_draws_hud())
+		return FALSE;
+	memset(&draw, 0, sizeof(draw));
+	for (map_index = 0; map_index < 3; map_index++)
+	{
+		draw.maps[map_index].bitmap = 0xFFFFFFFFUL;
+		draw.maps[map_index].texture = 0xFFFFFFFFUL;
+	}
+	draw.maps[0].texture = BEVY_BRIDGE_SCREEN_TEXTURE_TEXT_ATLAS;
+	draw.maps[0].flags = (unsigned short)((shared_text.wrapped ? 1 : 0) | (shared_text.point_sampled ? 2 : 0));
+	for (vertex_index = 0; vertex_index < 4; vertex_index++)
+	{
+		shared[vertex_index].position[0] = vertices[vertex_index].x + shared_text.offset[0] + (float)halo_screen_ui_offset_get();
+		shared[vertex_index].position[1] = vertices[vertex_index].y + shared_text.offset[1];
+		shared[vertex_index].texcoords[0][0] = vertices[vertex_index].u * shared_text.texture_scale[0];
+		shared[vertex_index].texcoords[0][1] = vertices[vertex_index].v * shared_text.texture_scale[1];
+		shared[vertex_index].color = vertices[vertex_index].color;
+	}
+	draw.vertex_count = 4;
+	draw.viewport[0] = shared_text.viewport[0];
+	draw.viewport[1] = shared_text.viewport[1];
+	draw.combiner_count = pixel_shader.combiner_count;
+	memcpy(draw.rgb_inputs, pixel_shader.rgb_inputs, sizeof(draw.rgb_inputs));
+	memcpy(draw.rgb_outputs, pixel_shader.rgb_outputs, sizeof(draw.rgb_outputs));
+	memcpy(draw.alpha_inputs, pixel_shader.alpha_inputs, sizeof(draw.alpha_inputs));
+	memcpy(draw.alpha_outputs, pixel_shader.alpha_outputs, sizeof(draw.alpha_outputs));
+	memcpy(draw.constant_0, pixel_shader.constant_0, sizeof(draw.constant_0));
+	memcpy(draw.constant_1, pixel_shader.constant_1, sizeof(draw.constant_1));
+	draw.final_combiner_inputs_abcd = pixel_shader.final_combiner_inputs_abcd;
+	draw.final_combiner_inputs_efg = pixel_shader.final_combiner_inputs_efg;
+	draw.final_combiner_constant_0 = pixel_shader.final_combiner_constant_0;
+	draw.final_combiner_constant_1 = pixel_shader.final_combiner_constant_1;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_ALPHABLENDENABLE, &value);
+	draw.flags = value ? 1 : 0;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_SRCBLEND, &value);
+	draw.blend_source = value;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_DESTBLEND, &value);
+	draw.blend_destination = value;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_BLENDOP, &value);
+	draw.blend_operation = value;
+	IDirect3DDevice8_GetRenderState(global_d3d_device, D3DRS_BLENDCOLOR, &value);
+	draw.blend_color = value;
+	bevy_bridge_note_screen_draw(&draw, shared);
+	return TRUE;
+}
+
 void rasterizer_text_draw_character(
 	struct rasterizer_text_vertex const *vertices)
 {
 	boolean success;
 	short vertex_index;
+
+	/* port: the renderer's, when it draws the HUD and menus */
+	if (share_text_character(vertices))
+		return;
 
 	match_assert(
 		"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_text.c",

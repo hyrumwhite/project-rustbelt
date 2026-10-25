@@ -76,6 +76,10 @@ boolean bevy_bridge_viewer_draws_hud(void);
 FALSE if there is no room */
 boolean bevy_bridge_note_screen_draw(struct bevy_bridge_screen_draw const *draw,
 	struct bevy_bridge_screen_vertex const *vertices);
+/* a texture the screen quads are drawn with in place of a bitmap (its id
+as struct bevy_bridge_screen_texture's, its PNG, its flags), shared once:
+its index, or all ones if there is no room */
+unsigned long bevy_bridge_screen_texture(unsigned long id, void const *png, unsigned long size, unsigned long flags);
 /* the bitmap tag and index a bitmap (struct bitmap_data) belongs to; FALSE
 if it is no tag's (a movie's frame, the text cache) */
 boolean bevy_bridge_bitmap_tag(void const *bitmap, unsigned long *tag_index, unsigned short *bitmap_index);

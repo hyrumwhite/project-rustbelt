@@ -40,7 +40,13 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 46
+#define BEVY_BRIDGE_VERSION 47
+#define BEVY_BRIDGE_SCREEN_TEXTURES 512
+#define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
+#define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
+/* a screen map's texture: the high-res text's atlas (struct
+bevy_bridge_shared's text_atlas) */
+#define BEVY_BRIDGE_SCREEN_TEXTURE_TEXT_ATLAS 0xFFFFFFFEUL
 #define BEVY_BRIDGE_SCREEN_DRAWS 1024
 #define BEVY_BRIDGE_SCREEN_VERTICES 4096
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
@@ -444,6 +450,25 @@ struct bevy_bridge_screen_map
 	unsigned short bitmap_index;
 	/* bit 0 wrapped (clamped otherwise), 1 point sampled */
 	unsigned short flags;
+	/* (protocol 47) drawn with this texture instead (all ones for none): a
+	screen texture's index (the port's high-res HUD or menu art, its PNG in
+	the shared screen textures), or BEVY_BRIDGE_SCREEN_TEXTURE_TEXT_ATLAS */
+	unsigned long texture;
+};
+
+/* (protocol 47) a texture the screen quads are drawn with in place of a
+bitmap: its PNG's bytes in the shared screen textures' png */
+struct bevy_bridge_screen_texture
+{
+	/* what it stands for (the game's: 0x10000 + a high-res HUD asset,
+	0x20000 + a menu bitmap) */
+	unsigned long id;
+	unsigned long offset;
+	unsigned long size;
+	/* bit 0: its alpha is mix(1, alpha, its green) (a meter's coverage);
+	bit 1: its red holds a meter's exact segment thresholds (point sampled,
+	zero elsewhere) */
+	unsigned long flags;
 };
 
 struct bevy_bridge_screen_draw
@@ -1253,6 +1278,18 @@ struct bevy_bridge_shared
 	unsigned long vehicle_update_record_count;
 	struct bevy_bridge_vehicle_update_record vehicle_update_records[BEVY_BRIDGE_VEHICLE_UPDATE_RECORDS];
 	unsigned char overlay_pixels[BEVY_BRIDGE_OVERLAYS][BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS * 4];
+	/* (protocol 47) the screen quads' textures, appended as first drawn and
+	never changed: each complete before it is counted */
+	unsigned long screen_texture_count;
+	unsigned long screen_texture_bytes;
+	struct bevy_bridge_screen_texture screen_textures[BEVY_BRIDGE_SCREEN_TEXTURES];
+	unsigned char screen_texture_png[BEVY_BRIDGE_SCREEN_TEXTURE_BYTES];
+	/* the high-res text's atlas (text_hires.c): its glyphs' coverage, drawn
+	white; its generation changes with it, written under a sequence lock
+	(odd while written) */
+	unsigned long text_atlas_sequence;
+	unsigned long text_atlas_generation;
+	unsigned char text_atlas[BEVY_BRIDGE_TEXT_ATLAS_SIZE * BEVY_BRIDGE_TEXT_ATLAS_SIZE];
 };
 
 /* ---------- prototypes/the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c) */

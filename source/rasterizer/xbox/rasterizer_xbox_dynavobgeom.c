@@ -233,6 +233,55 @@ typedef char rasterizer_dynamic_geometry_camera_offset_assert[
 
 /* port: how far right the menus are shifted while they draw (d3d8_gl.c) */
 long halo_screen_ui_offset_get(void);
+/* port: the high-res HUD art standing for a texture (xbox_textures.c,
+hud_hires.c), and a menu bitmap's art (menu_files.c) */
+long xgpu_texture_hires_asset(const void *resource_words);
+int hud_hires_override_coverage(long asset);
+int hud_hires_override_point_threshold(long asset);
+long menu_art_find(unsigned long data);
+const unsigned char *menu_art_png(long index, unsigned long *size);
+void *_texture_cache_bitmap_get_hardware_format(struct bitmap_data const *bitmap, boolean block, boolean load);
+
+/* port: a screen map's texture (bevy_bridge_protocol.h): the port's art
+standing for the bitmap, shared once as its PNG; or all ones (its tag's
+bitmap) */
+static unsigned long screen_map_texture(struct bitmap_data const *bitmap)
+{
+	struct hud_hires_embedded_view
+	{
+		const char *tag;
+		int bitmap;
+		unsigned int width, height;
+		unsigned int crc;
+		int coverage;
+		int point_threshold;
+		int title;
+		const unsigned int *png;
+		unsigned int png_size;
+	};
+	extern const struct hud_hires_embedded_view hud_hires_embedded[];
+	unsigned long const *resource = (unsigned long const *)_texture_cache_bitmap_get_hardware_format(bitmap, TRUE, TRUE);
+	long index;
+
+	if (!resource)
+		return 0xFFFFFFFFUL;
+	index = menu_art_find(resource[1]);
+	if (index >= 0)
+	{
+		unsigned long size = 0;
+		const unsigned char *png = menu_art_png(index, &size);
+
+		return png ? bevy_bridge_screen_texture(0x20000UL + (unsigned long)index, png, size, 0) : 0xFFFFFFFFUL;
+	}
+	index = xgpu_texture_hires_asset(resource);
+	if (index >= 0)
+	{
+		return bevy_bridge_screen_texture(0x10000UL + (unsigned long)index, hud_hires_embedded[index].png,
+			hud_hires_embedded[index].png_size,
+			(hud_hires_override_coverage(index) ? 1UL : 0UL) | (hud_hires_override_point_threshold(index) ? 2UL : 0UL));
+	}
+	return 0xFFFFFFFFUL;
+}
 
 /* port: with the renderer drawing the HUD and menus (bevy_bridge.c), a
 screen quad shared with it instead of drawn: its vertices in the viewport's
@@ -255,9 +304,14 @@ static boolean share_screen_quad(
 	for (map_index = 0; map_index < NUMBER_OF_SCREEN_GEOMETRY_MAPS; map_index++)
 	{
 		draw.maps[map_index].bitmap = 0xFFFFFFFFUL;
+		draw.maps[map_index].texture = 0xFFFFFFFFUL;
 		if (!parameters->map[map_index])
 			continue;
-		if (!bevy_bridge_bitmap_tag(parameters->map[map_index], &draw.maps[map_index].bitmap,
+		/* the port's art in its place, or its tag's bitmap (a bitmap that
+		is neither, such as a movie's frame, is drawn here) */
+		draw.maps[map_index].texture = screen_map_texture(parameters->map[map_index]);
+		if (draw.maps[map_index].texture == 0xFFFFFFFFUL &&
+			!bevy_bridge_bitmap_tag(parameters->map[map_index], &draw.maps[map_index].bitmap,
 			&draw.maps[map_index].bitmap_index))
 		{
 			return FALSE;

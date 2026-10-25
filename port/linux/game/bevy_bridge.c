@@ -304,6 +304,8 @@ static struct bevy_bridge_fog_screen bevy_bridge_fog_screen;
 static unsigned long bevy_bridge_sprite_batch_count;
 static unsigned long bevy_bridge_sprite_vertex_count;
 static struct bevy_bridge_sprite_batch bevy_bridge_sprite_batches[BEVY_BRIDGE_SPRITE_BATCHES];
+struct bevy_bridge_shared;
+static void bevy_bridge_share_text_atlas(struct bevy_bridge_shared *shared);
 /* the screen quads staged for the frame's export */
 static unsigned long bevy_bridge_screen_draw_count;
 static unsigned long bevy_bridge_screen_vertex_count;
@@ -662,6 +664,8 @@ void bevy_bridge_export_frame(
 		bevy_bridge_screen_vertex_count * sizeof(struct bevy_bridge_screen_vertex));
 	bevy_bridge_screen_draw_count = 0;
 	bevy_bridge_screen_vertex_count = 0;
+	if (bevy_bridge_viewer_draws_hud())
+		bevy_bridge_share_text_atlas(shared);
 	for (window_index = 0; window_index < window_count; window_index++)
 	{
 		struct render_window const *window = &windows[window_index];
@@ -922,6 +926,53 @@ boolean bevy_bridge_viewer_draws_effects(void)
 	if (viewer_effects < 0)
 		viewer_effects = config_boolean("game.bevy_bridge_viewer_effects") != 0;
 	return viewer_effects && bevy_bridge_overlay_enabled();
+}
+
+unsigned long bevy_bridge_screen_texture(unsigned long id, void const *png, unsigned long size, unsigned long flags)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_get();
+	unsigned long index;
+	unsigned long count;
+
+	if (!shared || !png || !size)
+		return 0xFFFFFFFFUL;
+	count = shared->screen_texture_count;
+	for (index = 0; index < count; index++)
+	{
+		if (shared->screen_textures[index].id == id)
+			return index;
+	}
+	if (count >= BEVY_BRIDGE_SCREEN_TEXTURES || shared->screen_texture_bytes + size > BEVY_BRIDGE_SCREEN_TEXTURE_BYTES)
+		return 0xFFFFFFFFUL;
+	memcpy(&shared->screen_texture_png[shared->screen_texture_bytes], png, size);
+	shared->screen_textures[count].id = id;
+	shared->screen_textures[count].offset = shared->screen_texture_bytes;
+	shared->screen_textures[count].size = size;
+	shared->screen_textures[count].flags = flags;
+	shared->screen_texture_bytes += size;
+	/* (complete before it is counted) */
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	__atomic_store_n(&shared->screen_texture_count, count + 1, __ATOMIC_RELAXED);
+	return count;
+}
+
+/* the high-res text's atlas, when it has changed (text_hires.c) */
+unsigned long text_hires_atlas_generation(void);
+unsigned char const *text_hires_atlas_coverage(void);
+
+static void bevy_bridge_share_text_atlas(struct bevy_bridge_shared *shared)
+{
+	unsigned long generation = text_hires_atlas_generation();
+	unsigned char const *coverage = text_hires_atlas_coverage();
+
+	if (!coverage || generation == shared->text_atlas_generation)
+		return;
+	__atomic_store_n(&shared->text_atlas_sequence, shared->text_atlas_sequence | 1, __ATOMIC_RELAXED);
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	memcpy(shared->text_atlas, coverage, sizeof(shared->text_atlas));
+	shared->text_atlas_generation = generation;
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	__atomic_store_n(&shared->text_atlas_sequence, (shared->text_atlas_sequence | 1) + 1, __ATOMIC_RELAXED);
 }
 
 boolean bevy_bridge_viewer_draws_hud(void)

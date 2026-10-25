@@ -1087,3 +1087,55 @@ void xgpu_texture_cache_begin_frame(void)
 		}
 	}
 }
+
+/* For the Bevy bridge, which shares the PNG of the high-res HUD art standing
+for a texture instead of drawing it (bevy_bridge.c): the asset the upload
+would draw in place of a D3D texture (its words: Common, Data, Lock, Format,
+Size), or -1; remembered per texture until its pixels change. */
+long xgpu_texture_hires_asset(const void *resource_words)
+{
+	static struct
+	{
+		DWORD data, format_word, size_word;
+		unsigned long generation;
+		long asset;
+	} recent[32];
+	static unsigned long next;
+	const DWORD *resource = (const DWORD *)resource_words;
+	DWORD data, format_word, size_word;
+	struct xgpu_texture_description description;
+	unsigned long address, size, generation;
+	long index;
+	long asset;
+
+	if (!resource)
+		return -1;
+	data = resource[1];
+	format_word = resource[3];
+	size_word = resource[4];
+	if (((format_word & D3DFORMAT_FORMAT_MASK) >> D3DFORMAT_FORMAT_SHIFT) == 0x0b)
+		return -1;
+	xgpu_texture_describe(format_word, size_word, &description);
+	if (description.cube_map || description.depth != 1 || !texture_size_supported(&description))
+		return -1;
+	address = (unsigned long)PLATFORM_PHYSICAL_TO_VIRTUAL(data);
+	size = xgpu_texture_face_size(&description);
+	generation = memory_watch_generation(address, size);
+	for (index = 0; index < 32; index++)
+	{
+		if (recent[index].data == data && recent[index].format_word == format_word &&
+			recent[index].size_word == size_word && recent[index].generation == generation && generation)
+		{
+			return recent[index].asset;
+		}
+	}
+	asset = hud_hires_override_find(address, description.width, description.height,
+		description.levels > 1 ? xgpu_texture_level_offset(&description, 1) : size);
+	index = (long)(next++ % 32);
+	recent[index].data = data;
+	recent[index].format_word = format_word;
+	recent[index].size_word = size_word;
+	recent[index].generation = generation;
+	recent[index].asset = asset;
+	return asset;
+}

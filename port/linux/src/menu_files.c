@@ -1085,3 +1085,25 @@ unsigned int menu_art_texture(unsigned long data, unsigned long *levels)
 	*levels = art[index].levels;
 	return art[index].texture;
 }
+
+/* a menu bitmap's art (its D3D texture's Data), for the Bevy bridge, which
+shares its PNG (bevy_bridge.c): its index, or -1 */
+long menu_art_find(unsigned long data)
+{
+	long index;
+
+	for (index = 0; index < art_count; index++)
+	{
+		if (art[index].data == data)
+			return art[index].failed || !art[index].png ? -1 : index;
+	}
+	return -1;
+}
+
+/* that art's PNG, or NULL */
+const unsigned char *menu_art_png(long index, unsigned long *size)
+{
+	if (index < 0 || index >= art_count || !art[index].png)
+		return NULL;
+	return file_data(art[index].png, size);
+}

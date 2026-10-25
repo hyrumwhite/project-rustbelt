@@ -207,6 +207,14 @@ const OBJECT_MASK_UNIT: u32 = 0b11;
 const OBJECT_DEAD: u16 = 1 << 2;
 /// `NUMBER_OF_UNIT_GRENADE_TYPES`.
 const UNIT_GRENADE_TYPES: u32 = 2;
+/// `ai_scripting_count_internal`'s counts.
+#[derive(Clone, Copy)]
+enum AiCount {
+    Living,
+    Swarm,
+    Nonswarm,
+}
+
 /// `_object_mask_weapon` and `_object_mask_device` (machines, controls
 /// and light fixtures).
 const OBJECT_MASK_WEAPON: u32 = 1 << 2;
@@ -334,6 +342,18 @@ pub struct HsContext {
     pub trigger_volumes: u32,
     pub trigger_volume_count: i32,
     pub debug_data: u32,
+    /// `encounter_data`, `squad_array` and `platoon_array`, and the
+    /// scenario's encounter count.
+    pub encounter_data: u32,
+    pub squad_array: u32,
+    pub platoon_array: u32,
+    pub encounter_count: i32,
+    /// `&global_structure_bsp_index` (a script can switch it).
+    pub structure_bsp_index: u32,
+    /// `game_is_cooperative`, and `coop_scripts_host` (this game the server
+    /// of network co-op, whose tests of all of a list's objects differ).
+    pub cooperative: bool,
+    pub coop_host: bool,
 }
 
 /// `(long)value` as x86 truncates it.
@@ -1354,6 +1374,56 @@ impl<H: HsHost> Runtime<'_, H> {
         Some(self.trigger_volume_test_point(volume_index, point).unwrap_or(false))
     }
 
+    /// `ai_scripting_count_internal`: the living, swarm or nonswarm count of
+    /// the encounter, platoon or squad the reference names (none for no
+    /// reference, or one the scenario doesn't have), with its original
+    /// count and strength; None for a reference of no kind.
+    fn ai_count(&self, ai_reference: i32, count_type: AiCount) -> Option<(i32, i32, f32)> {
+        use crate::layout::{encounter_datum as e, platoon_datum as pl, squad_datum as sq};
+        let m = self.m();
+        if ai_reference == NONE {
+            return Some((0, 0, 0.0));
+        }
+        let kind = ai_reference as u32 >> 30;
+        if kind > 2 {
+            return None;
+        }
+        let encounter_index = ai_reference & 0xffff;
+        if encounter_index >= self.context.encounter_count {
+            return Some((0, 0, 0.0));
+        }
+        let encounter = self.datum_get(self.context.encounter_data, encounter_index)?;
+        let index = ((ai_reference >> 16) & 0xff) as i16;
+        // (the encounter, or its platoon or squad: where their current,
+        // current swarm and original counts and strength are)
+        let (datum, current, swarm, original, strength) = match kind {
+            0 => (encounter, e::CURRENT_COUNT, e::CURRENT_SWARM_COUNT, e::ORIGINAL_COUNT, e::CURRENT_STRENGTH_FRACTION),
+            1 => {
+                if index >= m.r16(encounter + e::PLATOON_COUNT as u32) as i16 {
+                    return Some((0, 0, 0.0));
+                }
+                let absolute = index.wrapping_add(m.r16(encounter + e::PLATOON_BASE as u32) as i16);
+                let platoon = self.context.platoon_array + absolute as i32 as u32 * pl::SIZEOF as u32;
+                (platoon, pl::CURRENT_COUNT, pl::CURRENT_SWARM_COUNT, pl::ORIGINAL_COUNT, pl::CURRENT_STRENGTH_FRACTION)
+            }
+            _ => {
+                if index >= m.r16(encounter + e::SQUAD_COUNT as u32) as i16 {
+                    return Some((0, 0, 0.0));
+                }
+                let absolute = index.wrapping_add(m.r16(encounter + e::SQUAD_BASE as u32) as i16);
+                let squad = self.context.squad_array + absolute as i32 as u32 * sq::SIZEOF as u32;
+                (squad, sq::CURRENT_COUNT, sq::CURRENT_SWARM_COUNT, sq::ORIGINAL_COUNT, sq::CURRENT_STRENGTH_FRACTION)
+            }
+        };
+        let field = |offset: usize| m.r16(datum + offset as u32) as i16 as i32;
+        let count = match count_type {
+            AiCount::Living => field(current),
+            AiCount::Swarm => field(swarm),
+            AiCount::Nonswarm => (field(current) - field(swarm)).max(0),
+        };
+        Some((count, field(original), f32::from_bits(m.r32(datum + strength as u32))))
+    }
+
     /// A library function's body that runs here (the arguments evaluated
     /// at `arguments`), with its value returned; false if it has none here
     /// (or meets what the game's would stop at, which it then runs).
@@ -1363,7 +1433,32 @@ impl<H: HsHost> Runtime<'_, H> {
         let argument = |index: u32| m.r32(arguments + 4 * index) as i32;
         let short = |index: u32| m.r16(arguments + 4 * index) as i16;
         let boolean = |value: bool| value as i32;
+        // (a short's value: its 16 bits, the rest clear)
+        let short_value = |value: i32| value as u16 as i32;
         let value = match self.function_name(definition).as_str() {
+            // global_structure_bsp_index_get, game_is_cooperative
+            "structure_bsp_index" => short_value(m.r16(self.context.structure_bsp_index) as i16 as i32),
+            "game_is_cooperative" => boolean(self.context.cooperative),
+            // ai_scripting_living_count and the rest of
+            // ai_scripting_count_internal's
+            name @ ("ai_living_count" | "ai_swarm_count" | "ai_nonswarm_count") => {
+                let count_type = match name {
+                    "ai_living_count" => AiCount::Living,
+                    "ai_swarm_count" => AiCount::Swarm,
+                    _ => AiCount::Nonswarm,
+                };
+                let Some((count, _, _)) = self.ai_count(argument(0), count_type) else { return false };
+                short_value(count)
+            }
+            "ai_living_fraction" => {
+                let Some((count, original, _)) = self.ai_count(argument(0), AiCount::Living) else { return false };
+                let fraction = if original > 0 { count as f32 / original as f32 } else { 0.0 };
+                fraction.to_bits() as i32
+            }
+            "ai_strength" => {
+                let Some((_, _, strength)) = self.ai_count(argument(0), AiCount::Living) else { return false };
+                strength.to_bits() as i32
+            }
             // hs_not
             "not" => boolean(m.r8(arguments) == 0),
             // hs_object_list_get_element
@@ -1371,16 +1466,22 @@ impl<H: HsHost> Runtime<'_, H> {
                 let Some(objects) = self.object_list(argument(0)) else { return false };
                 objects.get(short(1).max(0) as usize).copied().unwrap_or(NONE)
             }
-            // hs_trigger_volume_test_objects (any), which leaves its value
-            // in hs_debug_data's bit for the volume
-            "volume_test_objects" => {
+            // hs_trigger_volume_test_objects (any or all), which leaves its
+            // value in hs_debug_data's bit for the volume (all of them not
+            // as network co-op's host, where it waits for any player and
+            // brings the rest)
+            name @ ("volume_test_objects" | "volume_test_objects_all") => {
+                let all = name == "volume_test_objects_all";
+                if all && self.context.coop_host {
+                    return false;
+                }
                 let volume_index = short(0);
                 let Some(objects) = self.object_list(argument(1)) else { return false };
-                let mut inside = false;
+                let mut inside = all;
                 for object in objects {
                     let Some(test) = self.trigger_volume_test_object(volume_index, object) else { return false };
-                    if test {
-                        inside = true;
+                    if test != inside {
+                        inside = test;
                         break;
                     }
                 }
@@ -1455,7 +1556,7 @@ impl<H: HsHost> Runtime<'_, H> {
                     0
                 } else {
                     let header = crate::ai_actor::datum_get(&AsAiMemory(m), self.context.object_list_header_data, list);
-                    header.map_or(0, |header| m.r16(header + OBJECT_LIST_HEADER_COUNT) as i16 as i32)
+                    header.map_or(0, |header| short_value(m.r16(header + OBJECT_LIST_HEADER_COUNT) as i32))
                 }
             }
             // game_difficulty_level_get_ignore_easy: normal at the least

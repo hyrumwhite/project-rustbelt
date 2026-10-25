@@ -111,6 +111,13 @@ pub struct HsContextC {
     pub trigger_volumes: u32,
     pub trigger_volume_count: i32,
     pub debug_data: u32,
+    pub encounter_data: u32,
+    pub squad_array: u32,
+    pub platoon_array: u32,
+    pub encounter_count: i32,
+    pub structure_bsp_index: u32,
+    pub cooperative: i32,
+    pub coop_host: i32,
 }
 
 impl HsContextC {
@@ -141,6 +148,13 @@ impl HsContextC {
             trigger_volumes: self.trigger_volumes,
             trigger_volume_count: self.trigger_volume_count,
             debug_data: self.debug_data,
+            encounter_data: self.encounter_data,
+            squad_array: self.squad_array,
+            platoon_array: self.platoon_array,
+            encounter_count: self.encounter_count,
+            structure_bsp_index: self.structure_bsp_index,
+            cooperative: self.cooperative != 0,
+            coop_host: self.coop_host != 0,
         }
     }
 }

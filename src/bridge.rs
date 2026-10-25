@@ -461,7 +461,7 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid, mut deformable): (
+    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid, mut deformable, mut pearl_coats): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<&mut crate::level::AnimatedSelfIllumination>,
         Query<&Children>,
@@ -471,6 +471,7 @@ fn sync_objects(
         ResMut<DrawnBsp>,
         ResMut<LightsInSolid>,
         ResMut<bevy_solarik::scene::SolarikDeformableMeshes>,
+        ResMut<bevy_solarik::lommel::PearlCoatMaterials>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -488,6 +489,7 @@ fn sync_objects(
         transparent_materials: &mut transparent_materials,
         sky_water: None,
         water_ripples: None,
+        pearl_coats: Some(&mut pearl_coats),
         images: &mut images,
         inverse_bindposes: &mut inverse_bindposes,
         neutral_detail: neutral_detail.0.clone(),

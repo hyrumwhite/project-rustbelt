@@ -293,6 +293,8 @@ pub struct LevelAssets<'a> {
     pub sky_water: Option<&'a mut Assets<crate::material::SkyWaterMaterial>>,
     /// The ray-traced water panes' ripples (where a level's BSPs are).
     pub water_ripples: Option<&'a mut bevy_solarik::water_ripples::WaterRippleMaterials>,
+    /// The materials whose coat is Solarik's pearl film, for its rays.
+    pub pearl_coats: Option<&'a mut bevy_solarik::lommel::PearlCoatMaterials>,
     pub images: &'a mut Assets<Image>,
     pub inverse_bindposes: &'a mut Assets<SkinnedMeshInverseBindposes>,
     /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
@@ -1716,7 +1718,11 @@ impl LevelBuilder {
                     raster.extension.base_map = texture;
                     assets.environment_materials.add(raster)
                 });
-                Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster: raster.or(solid.raster.clone()), ..solid.clone() })
+                let standard = assets.materials.add(material);
+                if info.as_ref().is_some_and(|i| pearl_coat(&i.name)) && let Some(pearl) = assets.pearl_coats.as_deref_mut() {
+                    pearl.0.insert(standard.id());
+                }
+                Surface::Solid(SolidSurface { standard, raster: raster.or(solid.raster.clone()), ..solid.clone() })
             }
             _ => base.clone(),
         };
@@ -1916,7 +1922,11 @@ impl LevelBuilder {
             material.alpha_mode = AlphaMode::Mask(0.5);
         }
         let seen_as = if unseen { self.transparent_material(info, 0.0, false, assets) } else { None };
-        Some(Surface::Solid(SolidSurface { standard: assets.materials.add(material), raster, radiance, unseen, seen_as }))
+        let standard = assets.materials.add(material);
+        if pearl_coat(&info.name) && let Some(pearl) = assets.pearl_coats.as_deref_mut() {
+            pearl.0.insert(standard.id());
+        }
+        Some(Surface::Solid(SolidSurface { standard, raster, radiance, unseen, seen_as }))
     }
 
     /// A `shader_model`'s camera material with its detail map (see
@@ -1946,7 +1956,12 @@ impl LevelBuilder {
                 params: HaloEnvironmentParams {
                     detail_scales: scale.extend(1.0).extend(1.0),
                     micro_scale: Vec4::ONE,
-                    modes: UVec4::new(detail.mask as u32, detail.function as u32, 0, crate::material::MODEL_DETAIL),
+                    modes: UVec4::new(
+                        detail.mask as u32,
+                        detail.function as u32,
+                        0,
+                        crate::material::MODEL_DETAIL | if pearl_coat(&info.name) { crate::material::PEARL_COAT } else { 0 },
+                    ),
                     ..default()
                 },
                 base_map,
@@ -2467,6 +2482,12 @@ const CHIEF_SUIT_ROUGHNESS: f32 = 0.85;
 /// Chief's armour's coat (strength, perceptual roughness), on his armour
 /// plates alone, as strong as the Elites'.
 const CHIEF_COAT: (f32, f32) = (1.0, 0.1);
+
+/// Whether a shader's coat is Solarik's pearl film (its second thin film,
+/// main.rs's `PEARL_FILM`): Chief's armour.
+fn pearl_coat(shader: &str) -> bool {
+    CHIEF_ARMOUR.iter().any(|name| shader.eq_ignore_ascii_case(name))
+}
 
 /// A tuning colour for the Elites' or Chief's armour, in place of an
 /// object's change colour (`HALO_RT_ELITE_COLOR`, `HALO_RT_CHIEF_COLOR=r,g,b`).

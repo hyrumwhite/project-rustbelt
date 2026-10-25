@@ -224,6 +224,11 @@ fn fragment(
     var out: FragmentOutput;
 @if(PREPASS_PIPELINE) {
     out = deferred_output(in, pbr_input);
+    // a pearl coat (PEARL_COAT): Solarik's G-buffer flag for its second
+    // thin film (lommel_math.wesl's pearl_coat_gbuffer)
+    if (halo.modes.w & 32u) != 0u {
+        out.deferred.a |= 0x40000000u;
+    }
 } @else {
     out.color = apply_pbr_lighting(pbr_input);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);

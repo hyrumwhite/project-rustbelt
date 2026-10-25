@@ -283,6 +283,8 @@ struct LevelSky(sky::SkyLighting);
 
 /// Solarik's thin-film clear coat: thickness (nm), film IOR, surface IOR.
 const THIN_FILM: &str = "320,1.5,2.2";
+/// Solarik's pearl coat film's thickness (nm): soft pinks, greens and lilacs.
+const PEARL_FILM: &str = "760";
 
 fn main() -> AppExit {
     let mut args: Args = argh::from_env();
@@ -329,6 +331,12 @@ fn main() -> AppExit {
     if std::env::var_os("SOLARIK_THIN_FILM").is_none() {
         // SAFETY: at start-up, before any other thread runs
         unsafe { std::env::set_var("SOLARIK_THIN_FILM", THIN_FILM) };
+    }
+    // Chief's coat a thicker film's pastels, a pearl's (level.rs's
+    // `pearl_coat`); `SOLARIK_PEARL_FILM=thickness in nm`, 0 the Elites' film.
+    if std::env::var_os("SOLARIK_PEARL_FILM").is_none() {
+        // SAFETY: at start-up, before any other thread runs
+        unsafe { std::env::set_var("SOLARIK_PEARL_FILM", PEARL_FILM) };
     }
     if let Some(exe) = args.opence.clone() {
         args.bridge = true;
@@ -588,6 +596,7 @@ struct LevelAssetParams<'w> {
     transparent_materials: ResMut<'w, Assets<HaloTransparentMaterial>>,
     sky_water: ResMut<'w, Assets<material::SkyWaterMaterial>>,
     water_ripples: ResMut<'w, bevy_solarik::water_ripples::WaterRippleMaterials>,
+    pearl_coats: ResMut<'w, bevy_solarik::lommel::PearlCoatMaterials>,
     images: ResMut<'w, Assets<Image>>,
     inverse_bindposes: ResMut<'w, Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<'w, NeutralDetail>,
@@ -636,6 +645,7 @@ fn load_level(
         transparent_materials: &mut params.transparent_materials,
         sky_water: Some(&mut params.sky_water),
         water_ripples: Some(&mut params.water_ripples),
+        pearl_coats: Some(&mut params.pearl_coats),
         images: &mut params.images,
         inverse_bindposes: &mut params.inverse_bindposes,
         neutral_detail: params.neutral_detail.0.clone(),

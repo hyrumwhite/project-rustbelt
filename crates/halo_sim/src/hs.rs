@@ -103,6 +103,10 @@ pub struct HsContextC {
     pub string_default: u32,
     pub scenario_loaded: i32,
     pub macro_parse: u32,
+    pub rust_bodies: u32,
+    pub object_header_data: u32,
+    pub object_list_header_data: u32,
+    pub difficulty: i32,
 }
 
 impl HsContextC {
@@ -125,6 +129,10 @@ impl HsContextC {
             game_time: self.game_time,
             string_default: self.string_default,
             macro_parse: self.macro_parse,
+            rust_bodies: self.rust_bodies,
+            object_header_data: self.object_header_data,
+            object_list_header_data: self.object_list_header_data,
+            difficulty: self.difficulty,
         }
     }
 }

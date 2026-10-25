@@ -195,9 +195,22 @@ const ERROR_GLOBAL_INITIALIZATION_SLEPT: i32 = 7;
 
 /// `struct hs_function_definition`'s parse procedure, parameter count and
 /// parameter types.
+const FUNCTION_NAME: u32 = 4;
 const FUNCTION_PARSE: u32 = 8;
 const FUNCTION_PARAMETER_COUNT: u32 = 24;
 const FUNCTION_PARAMETER_TYPES: u32 = 26;
+
+/// `_object_mask_all` and `_object_mask_unit` (bipeds and vehicles).
+const OBJECT_MASK_ALL: u32 = 0xFFFF;
+const OBJECT_MASK_UNIT: u32 = 0b11;
+/// `_object_dead_bit` of an object's damage flags.
+const OBJECT_DEAD: u16 = 1 << 2;
+/// `NUMBER_OF_UNIT_GRENADE_TYPES`.
+const UNIT_GRENADE_TYPES: u32 = 2;
+/// `struct object_list_header_datum`'s count.
+const OBJECT_LIST_HEADER_COUNT: u32 = 6;
+/// `_game_difficulty_level_normal`.
+const DIFFICULTY_NORMAL: i32 = 1;
 
 /// halo_sim.h's `struct halo_sim_hs_call`.
 #[repr(C)]
@@ -282,6 +295,14 @@ pub struct HsContext {
     /// `hs_macro_function_parse`: a library function it parses has its
     /// arguments evaluated by the runtime, then its body ([`call::LIBRARY`]).
     pub macro_parse: u32,
+    /// The library functions whose bodies run here (a bit per function,
+    /// hs_runtime.c's `hs_runtime_rust_bodies`), and what they read:
+    /// `object_header_data`, `object_list_header_data` (their data arrays)
+    /// and the game's difficulty.
+    pub rust_bodies: u32,
+    pub object_header_data: u32,
+    pub object_list_header_data: u32,
+    pub difficulty: i32,
 }
 
 /// `(long)value` as x86 truncates it.
@@ -1180,16 +1201,95 @@ impl<H: HsHost> Runtime<'_, H> {
                     let types: Vec<i16> = (0..count).map(|i| m.r16(definition + FUNCTION_PARAMETER_TYPES + 2 * i) as i16).collect();
                     // (none to evaluate for a function without parameters,
                     // whose evaluation doesn't ask for them)
-                    if types.is_empty() {
-                        self.call(call::LIBRARY, function_index as i32, thread_index, 0);
-                    } else if let Some(arguments) = self.arguments_evaluate(thread_index, &types, initialize) {
-                        self.call(call::LIBRARY, function_index as i32, thread_index, arguments as i32);
+                    let arguments = if types.is_empty() { Some(0) } else { self.arguments_evaluate(thread_index, &types, initialize) };
+                    if let Some(arguments) = arguments {
+                        // (a body that runs here, or the game's)
+                        if !(self.rust_body(function_index) && self.library_body(definition, thread_index, arguments)) {
+                            self.call(call::LIBRARY, function_index as i32, thread_index, arguments as i32);
+                        }
                     }
                 } else {
                     self.call(call::EXTERNAL, function_index as i32, thread_index, initialize as i32);
                 }
             }
         }
+    }
+
+    /// Whether the function's body runs here (hs_runtime.c's
+    /// `hs_runtime_rust_bodies`).
+    fn rust_body(&self, function_index: i16) -> bool {
+        self.context.rust_bodies != 0
+            && (0..1024).contains(&function_index)
+            && self.m().r8(self.context.rust_bodies + (function_index as u32 >> 3)) & (1 << (function_index & 7)) != 0
+    }
+
+    /// The function's name (its definition's).
+    fn function_name(&self, definition: u32) -> String {
+        let m = self.m();
+        let name = m.r32(definition + FUNCTION_NAME);
+        let mut text = String::new();
+        if name == 0 {
+            return text;
+        }
+        for i in 0..64 {
+            let c = m.r8(name + i);
+            if c == 0 {
+                break;
+            }
+            text.push(c as char);
+        }
+        text
+    }
+
+    /// `object_try_and_get_and_verify_type`: the object's datum, if it is of
+    /// one of the types (a bit per type).
+    fn object_typed(&self, object_index: i32, types: u32) -> Option<u32> {
+        let m = AsAiMemory(self.m());
+        let header = crate::ai_actor::datum_get(&m, self.context.object_header_data, object_index)?;
+        let ty = m.0.r8(header + crate::layout::object_header_datum::TYPE as u32) as u32;
+        (types & (1 << ty) != 0).then(|| m.0.r32(header + crate::layout::object_header_datum::DATUM as u32))
+    }
+
+    /// A library function's body that runs here (the arguments evaluated
+    /// at `arguments`), with its value returned; false if it has none here.
+    fn library_body(&self, definition: u32, thread_index: i32, arguments: u32) -> bool {
+        use crate::layout::unit_datum as u;
+        let m = self.m();
+        let argument = |index: u32| m.r32(arguments + 4 * index) as i32;
+        let value = match self.function_name(definition).as_str() {
+            // unit_scripting_get_health and _shield: -1 for no object, 0
+            // for a dead one
+            name @ ("unit_get_health" | "unit_get_shield") => {
+                let vitality = match self.object_typed(argument(0), OBJECT_MASK_ALL) {
+                    None => -1.0f32,
+                    Some(object) if m.r16(object + u::OBJECT_DAMAGE_FLAGS as u32) & OBJECT_DEAD != 0 => 0.0,
+                    Some(object) => f32::from_bits(m.r32(
+                        object + if name == "unit_get_health" { u::OBJECT_BODY_VITALITY } else { u::OBJECT_SHIELD_VITALITY } as u32,
+                    )),
+                };
+                vitality.to_bits() as i32
+            }
+            // unit_scripting_get_grenade_count: a unit's grenades of each type
+            "unit_get_total_grenade_count" => match self.object_typed(argument(0), OBJECT_MASK_UNIT) {
+                Some(unit) => (0..UNIT_GRENADE_TYPES).map(|i| m.r8(unit + u::UNIT_GRENADE_COUNTS as u32 + i) as i8 as i16).sum::<i16>() as i32,
+                None => 0,
+            },
+            // object_list_count
+            "list_count" => {
+                let list = argument(0);
+                if list == -1 {
+                    0
+                } else {
+                    let header = crate::ai_actor::datum_get(&AsAiMemory(m), self.context.object_list_header_data, list);
+                    header.map_or(0, |header| m.r16(header + OBJECT_LIST_HEADER_COUNT) as i16 as i32)
+                }
+            }
+            // game_difficulty_level_get_ignore_easy: normal at the least
+            "game_difficulty_get" => self.context.difficulty.max(DIFFICULTY_NORMAL),
+            _ => return false,
+        };
+        self.hs_return(thread_index, value);
+        true
     }
 
     /// `hs_script_evaluate`.

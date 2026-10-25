@@ -130,11 +130,11 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
 @if(!(RAY_MATERIAL_FOOTPRINTS)) {
             let hidden = resolve_ray_hit_full(ray);
 }
-            var opaque_radiance = vec3(0.0);
-            for (var sample = 0u; sample < 4u; sample += 1u) {
-                opaque_radiance += shade_surface_path(hidden, -direction, rng);
-            }
-            return vec4(radiance + transmission * (opaque_radiance / 4.0), has_glass);
+            // (one path: the denoiser takes this pixel's light as any other's.
+            // A water pane's floor is such a surface, under all of it: c10's
+            // swamp took 13.5 ms with four, 5.0 with one)
+            let opaque_radiance = shade_surface_path(hidden, -direction, rng);
+            return vec4(radiance + transmission * opaque_radiance, has_glass);
         }
         if i == 32u { break; }
         let hit = resolve_ray_hit_filtered(ray, direction, cone);

@@ -245,6 +245,15 @@ void *_texture_cache_bitmap_get_hardware_format(struct bitmap_data const *bitmap
 /* port: a screen map's texture (bevy_bridge_protocol.h): the port's art
 standing for the bitmap, shared once as its PNG; or all ones (its tag's
 bitmap) */
+static unsigned long screen_map_texture(struct bitmap_data const *bitmap);
+
+/* (for the other rasterizer code sharing its draws: bevy_bridge.c's
+bevy_bridge_screen_map_from_bitmap) */
+unsigned long rasterizer_screen_map_texture(void const *bitmap)
+{
+	return screen_map_texture((struct bitmap_data const *)bitmap);
+}
+
 static unsigned long screen_map_texture(struct bitmap_data const *bitmap)
 {
 	struct hud_hires_embedded_view

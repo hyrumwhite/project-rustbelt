@@ -80,6 +80,14 @@ boolean bevy_bridge_note_screen_draw(struct bevy_bridge_screen_draw const *draw,
 as struct bevy_bridge_screen_texture's, its PNG, its flags), shared once:
 its index, or all ones if there is no room */
 unsigned long bevy_bridge_screen_texture(unsigned long id, void const *png, unsigned long size, unsigned long flags);
+/* rasterizer_xbox_screen_effect.c: the first player's screen flash
+(render_screen_flash's type, intensity and colour: alpha, red, green,
+blue), for the frame's export */
+void bevy_bridge_note_screen_flash(short type, float intensity, float const color[4]);
+/* a screen map for a bitmap (struct bitmap_data): the port's art in its
+place (a screen texture) or its tag's bitmap; FALSE if it is neither */
+struct bevy_bridge_screen_map;
+boolean bevy_bridge_screen_map_from_bitmap(void const *bitmap, struct bevy_bridge_screen_map *map);
 /* the bitmap tag and index a bitmap (struct bitmap_data) belongs to; FALSE
 if it is no tag's (a movie's frame, the text cache) */
 boolean bevy_bridge_bitmap_tag(void const *bitmap, unsigned long *tag_index, unsigned short *bitmap_index);

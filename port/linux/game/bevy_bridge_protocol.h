@@ -40,13 +40,22 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 47
+#define BEVY_BRIDGE_VERSION 48
 #define BEVY_BRIDGE_SCREEN_TEXTURES 512
 #define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
 #define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
 /* a screen map's texture: the high-res text's atlas (struct
 bevy_bridge_shared's text_atlas) */
 #define BEVY_BRIDGE_SCREEN_TEXTURE_TEXT_ATLAS 0xFFFFFFFEUL
+/* (protocol 48) a screen map's texture: the motion sensor's target (the
+screen draws whose target is BEVY_BRIDGE_SCREEN_TARGET_MOTION_SENSOR, drawn
+into it first) */
+#define BEVY_BRIDGE_SCREEN_TEXTURE_MOTION_SENSOR 0xFFFFFFFDUL
+/* a screen draw's target: the screen, or the motion sensor's (the 64-texel
+sun glow target it borrows, cleared to nothing each frame; its draws'
+pixels are its own) */
+#define BEVY_BRIDGE_SCREEN_TARGET_SCREEN 0
+#define BEVY_BRIDGE_SCREEN_TARGET_MOTION_SENSOR 1
 #define BEVY_BRIDGE_SCREEN_DRAWS 1024
 #define BEVY_BRIDGE_SCREEN_VERTICES 4096
 #define BEVY_BRIDGE_SPRITE_BATCHES 512
@@ -448,7 +457,8 @@ struct bevy_bridge_screen_map
 	/* the bitmap tag (all ones for none) and its bitmap */
 	unsigned long bitmap;
 	unsigned short bitmap_index;
-	/* bit 0 wrapped (clamped otherwise), 1 point sampled */
+	/* bit 0 wrapped (clamped otherwise), 1 point sampled, 2 (protocol 48)
+	outside it the draw's border colour (D3DTADDRESS_BORDER) */
 	unsigned short flags;
 	/* (protocol 47) drawn with this texture instead (all ones for none): a
 	screen texture's index (the port's high-res HUD or menu art, its PNG in
@@ -498,8 +508,13 @@ struct bevy_bridge_screen_draw
 	unsigned long blend_destination;
 	unsigned long blend_operation;
 	unsigned long blend_color;
-	/* bit 0 blended, 1 t0's alpha kill (a meter's) */
+	/* bit 0 blended, 1 t0's alpha kill (a meter's), 2 (protocol 48) colour
+	only: alpha not written */
 	unsigned long flags;
+	/* (protocol 48) BEVY_BRIDGE_SCREEN_TARGET_*, and the border colour of
+	its maps that have one (a8r8g8b8) */
+	unsigned long target;
+	unsigned long border_color;
 };
 
 struct bevy_bridge_frame
@@ -540,6 +555,13 @@ struct bevy_bridge_frame
 	struct bevy_bridge_physics_vehicle physics_vehicles[BEVY_BRIDGE_PHYSICS_VEHICLES];
 	unsigned long vehicle_ray_test_count;
 	struct bevy_bridge_vehicle_ray_test vehicle_ray_tests[BEVY_BRIDGE_VEHICLE_RAY_TESTS];
+	/* (protocol 48; only with game.bevy_bridge_viewer_hud) the first
+	player's screen flash (render_screen_flash: its type, 0 none, 1 lighten,
+	2 darken, 3 max, 4 min, 5 invert, 6 tint; its intensity; its colour,
+	alpha red green blue), drawn over the HUD */
+	unsigned long screen_flash_type;
+	float screen_flash_intensity;
+	float screen_flash_color[4];
 	/* (protocol 46; only with game.bevy_bridge_viewer_hud) the screen quads
 	the windows would have drawn, in order */
 	unsigned long screen_draw_count;

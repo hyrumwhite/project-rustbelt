@@ -108,6 +108,7 @@ symbols in this file:
 #include <xtl.h>
 #include "rasterizer_xbox.h"
 #include "rasterizer_xbox_pixel_shader.h"
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 /* ---------- constants */
 
@@ -1192,6 +1193,22 @@ void _rasterizer_screen_flash(
 
 	rasterizer_profile_begin(_rasterizer_profile_screen_flash);
 
+	/* port: the renderer's, over the HUD, when it draws the HUD (bevy_bridge.c) */
+	if (rasterizer_debug_options.screen_flash_enabled &&
+		global_window_parameters.screen_flash.type != _render_screen_flash_type_none &&
+		bevy_bridge_viewer_draws_hud())
+	{
+		float color[4];
+
+		color[0] = global_window_parameters.screen_flash.color.alpha;
+		color[1] = global_window_parameters.screen_flash.color.red;
+		color[2] = global_window_parameters.screen_flash.color.green;
+		color[3] = global_window_parameters.screen_flash.color.blue;
+		bevy_bridge_note_screen_flash(global_window_parameters.screen_flash.type,
+			global_window_parameters.screen_flash.intensity, color);
+		rasterizer_profile_end(_rasterizer_profile_screen_flash);
+		return;
+	}
 	if (rasterizer_debug_options.screen_flash_enabled &&
 		global_window_parameters.screen_flash.type != _render_screen_flash_type_none)
 	{

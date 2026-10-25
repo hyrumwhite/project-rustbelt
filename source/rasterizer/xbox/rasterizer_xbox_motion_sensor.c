@@ -97,6 +97,88 @@ extern struct pixel_shader_definition pixel_shader;
 
 static boolean bss_00465e27 = {0};
 
+/* port: with the renderer drawing the HUD (bevy_bridge.c), the motion
+sensor's draws shared with it instead: its blips, sweep and mask into its
+own target, then that target onto the screen */
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "bevy_bridge_protocol.h"
+
+/* the motion sensor's target's pixels: RASTERIZER_TARGET_SUN_GLOW_SIZE */
+#define SHARED_MOTION_SENSOR_SIZE 64.0f
+
+/* a quad shared: corners (x, y) in the target's pixels (or the window's),
+texture coordinates (u, v), one colour; the pixel shader as set */
+static void share_motion_sensor_quad(
+	unsigned long target,
+	struct bitmap_data const *bitmap,
+	boolean motion_sensor_texture,
+	real const corners[4][4],
+	real red, real green, real blue, real alpha,
+	unsigned long blend_source, unsigned long blend_destination,
+	unsigned long border_color,
+	real viewport_width, real viewport_height)
+{
+	struct bevy_bridge_screen_draw draw;
+	struct bevy_bridge_screen_vertex vertices[4];
+	short index;
+	unsigned long color;
+
+	memset(&draw, 0, sizeof(draw));
+	for (index = 0; index < 3; index++)
+	{
+		draw.maps[index].bitmap = 0xFFFFFFFFUL;
+		draw.maps[index].texture = 0xFFFFFFFFUL;
+	}
+	if (motion_sensor_texture)
+		draw.maps[0].texture = BEVY_BRIDGE_SCREEN_TEXTURE_MOTION_SENSOR;
+	else if (!bitmap || !bevy_bridge_screen_map_from_bitmap(bitmap, &draw.maps[0]))
+		return;
+	/* (linear, and outside it the border colour; the target's own clamped) */
+	draw.maps[0].flags = motion_sensor_texture ? 0 : 4;
+	color = ((unsigned long)(alpha * 255.0f + 0.5f) << 24) |
+		((unsigned long)(PIN(red, 0.0f, 1.0f) * 255.0f + 0.5f) << 16) |
+		((unsigned long)(PIN(green, 0.0f, 1.0f) * 255.0f + 0.5f) << 8) |
+		(unsigned long)(PIN(blue, 0.0f, 1.0f) * 255.0f + 0.5f);
+	for (index = 0; index < 4; index++)
+	{
+		vertices[index].position[0] = corners[index][0];
+		vertices[index].position[1] = corners[index][1];
+		vertices[index].texcoords[0][0] = corners[index][2];
+		vertices[index].texcoords[0][1] = corners[index][3];
+		vertices[index].color = color;
+	}
+	draw.vertex_count = 4;
+	draw.viewport[0] = viewport_width;
+	draw.viewport[1] = viewport_height;
+	draw.combiner_count = pixel_shader.combiner_count;
+	memcpy(draw.rgb_inputs, pixel_shader.rgb_inputs, sizeof(draw.rgb_inputs));
+	memcpy(draw.rgb_outputs, pixel_shader.rgb_outputs, sizeof(draw.rgb_outputs));
+	memcpy(draw.alpha_inputs, pixel_shader.alpha_inputs, sizeof(draw.alpha_inputs));
+	memcpy(draw.alpha_outputs, pixel_shader.alpha_outputs, sizeof(draw.alpha_outputs));
+	memcpy(draw.constant_0, pixel_shader.constant_0, sizeof(draw.constant_0));
+	memcpy(draw.constant_1, pixel_shader.constant_1, sizeof(draw.constant_1));
+	draw.final_combiner_inputs_abcd = pixel_shader.final_combiner_inputs_abcd;
+	draw.final_combiner_inputs_efg = pixel_shader.final_combiner_inputs_efg;
+	draw.blend_source = blend_source;
+	draw.blend_destination = blend_destination;
+	draw.blend_operation = D3DBLENDOP_ADD;
+	/* blended; into its own target, colour only, as the game writes it */
+	draw.flags = 1 | (target == BEVY_BRIDGE_SCREEN_TARGET_MOTION_SENSOR ? 4 : 0);
+	draw.target = target;
+	draw.border_color = border_color;
+	bevy_bridge_note_screen_draw(&draw, vertices);
+}
+
+/* a corner in the target's clip space (as the motion sensor's identity
+transform takes it) to its pixels */
+static void motion_sensor_corner(real corner[4], real x, real y, real u, real v)
+{
+	corner[0] = (x + 1.0f) * 0.5f * SHARED_MOTION_SENSOR_SIZE;
+	corner[1] = (1.0f - y) * 0.5f * SHARED_MOTION_SENSOR_SIZE;
+	corner[2] = u;
+	corner[3] = v;
+}
+
 /* ---------- public code */
 
 void _rasterizer_hud_motion_sensor_blip_begin(
@@ -262,6 +344,21 @@ void _rasterizer_hud_motion_sensor_blip_draw(
 		radius = size * 0.0625f;
 		scaled_position.x = position->x * -0.03125f;
 		scaled_position.y = position->y * -0.03125f;
+
+		/* port: the renderer's, when it draws the HUD */
+		if (bevy_bridge_viewer_draws_hud())
+		{
+			real corners[4][4];
+
+			motion_sensor_corner(corners[0], scaled_position.x - radius, scaled_position.y + radius, 0.0f, 0.0f);
+			motion_sensor_corner(corners[1], scaled_position.x + radius, scaled_position.y + radius, 1.0f, 0.0f);
+			motion_sensor_corner(corners[2], scaled_position.x + radius, scaled_position.y - radius, 1.0f, 1.0f);
+			motion_sensor_corner(corners[3], scaled_position.x - radius, scaled_position.y - radius, 0.0f, 1.0f);
+			share_motion_sensor_quad(BEVY_BRIDGE_SCREEN_TARGET_MOTION_SENSOR, large_blip ? large_blip_bitmap : blip_bitmap,
+				FALSE, corners, color->red * intensity, color->green * intensity, color->blue * intensity, 1.0f,
+				D3DBLEND_ONE, D3DBLEND_ONE, 0, SHARED_MOTION_SENSOR_SIZE, SHARED_MOTION_SENSOR_SIZE);
+			return;
+		}
 
 		IDirect3DDevice8_Begin(global_d3d_device, D3DPT_TRIANGLEFAN);
 		IDirect3DDevice8_SetVertexData4f(
@@ -442,6 +539,48 @@ void _rasterizer_hud_motion_sensor_blip_end(
 			pixel_shader.final_combiner_inputs_efg = 0x1C00;
 			rasterizer_set_pixel_shader(&pixel_shader);
 
+			half_scale = scale * 0.5f;
+			low = 0.5f - half_scale;
+			high = 0.5f + half_scale;
+			/* port: the renderer's, when it draws the HUD: the sweep, its mask
+			and the target onto the screen */
+			if (bevy_bridge_viewer_draws_hud())
+			{
+				real corners[4][4];
+
+				motion_sensor_corner(corners[0], -1.015625f, 1.046875f, high, low);
+				motion_sensor_corner(corners[1], 1.046875f, 1.046875f, low, low);
+				motion_sensor_corner(corners[2], 1.046875f, -1.015625f, low, high);
+				motion_sensor_corner(corners[3], -1.015625f, -1.015625f, high, high);
+				share_motion_sensor_quad(BEVY_BRIDGE_SCREEN_TARGET_MOTION_SENSOR, sweep_bitmap, FALSE, corners,
+					0.4588f, 0.7294f, 1.0f, 1.0f, D3DBLEND_ONE, D3DBLEND_SRCALPHA, 0x46000000UL,
+					SHARED_MOTION_SENSOR_SIZE, SHARED_MOTION_SENSOR_SIZE);
+				csmemset(&pixel_shader, 0, sizeof(pixel_shader));
+				pixel_shader.texture_modes = 1;
+				pixel_shader.combiner_count = 1;
+				pixel_shader.final_combiner_inputs_abcd = 8;
+				pixel_shader.final_combiner_inputs_efg = 0x1800;
+				motion_sensor_corner(corners[0], -1.015625f, 1.046875f, 1.0f, 0.0f);
+				motion_sensor_corner(corners[1], 1.046875f, 1.046875f, 0.0f, 0.0f);
+				motion_sensor_corner(corners[2], 1.046875f, -1.015625f, 0.0f, 1.0f);
+				motion_sensor_corner(corners[3], -1.015625f, -1.015625f, 1.0f, 1.0f);
+				share_motion_sensor_quad(BEVY_BRIDGE_SCREEN_TARGET_MOTION_SENSOR, sweep_mask_bitmap, FALSE, corners,
+					0.4f, 0.8f, 0.4f, 1.0f, D3DBLEND_ZERO, D3DBLEND_SRCALPHA, 0,
+					SHARED_MOTION_SENSOR_SIZE, SHARED_MOTION_SENSOR_SIZE);
+				/* (the window's: its pixels) */
+				width = global_window_parameters.camera.viewport_bounds.x1 - global_window_parameters.camera.viewport_bounds.x0;
+				height = global_window_parameters.camera.viewport_bounds.y1 - global_window_parameters.camera.viewport_bounds.y0;
+				radius = local_player_count() > 1 ? 32.0f : 42.0f;
+				corners[0][0] = center->x - radius; corners[0][1] = center->y - radius; corners[0][2] = 0.0f; corners[0][3] = 0.0f;
+				corners[1][0] = center->x + radius; corners[1][1] = center->y - radius; corners[1][2] = 1.0f; corners[1][3] = 0.0f;
+				corners[2][0] = center->x + radius; corners[2][1] = center->y + radius; corners[2][2] = 1.0f; corners[2][3] = 1.0f;
+				corners[3][0] = center->x - radius; corners[3][1] = center->y + radius; corners[3][2] = 0.0f; corners[3][3] = 1.0f;
+				share_motion_sensor_quad(BEVY_BRIDGE_SCREEN_TARGET_SCREEN, NULL, TRUE, corners,
+					1.0f, 1.0f, 1.0f, 1.0f, D3DBLEND_ONE, D3DBLEND_INVSRCALPHA, 0, (real)width, (real)height);
+				rasterizer_set_target(global_window_parameters.rasterizer_target, FALSE, FALSE, FALSE, TRUE);
+				return;
+			}
+
 			IDirect3DDevice8_Begin(global_d3d_device, D3DPT_TRIANGLEFAN);
 			IDirect3DDevice8_SetVertexData4f(
 				global_d3d_device,
@@ -450,9 +589,6 @@ void _rasterizer_hud_motion_sensor_blip_end(
 				0.7294f,
 				1.0f,
 				1.0f);
-			half_scale = scale * 0.5f;
-			low = 0.5f - half_scale;
-			high = 0.5f + half_scale;
 			IDirect3DDevice8_SetVertexData2f(global_d3d_device, 4, high, low);
 			IDirect3DDevice8_SetVertexData2f(global_d3d_device, 0, -1.015625f, 1.046875f);
 			IDirect3DDevice8_SetVertexData2f(global_d3d_device, 4, low, low);

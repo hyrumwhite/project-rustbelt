@@ -306,6 +306,10 @@ static unsigned long bevy_bridge_sprite_vertex_count;
 static struct bevy_bridge_sprite_batch bevy_bridge_sprite_batches[BEVY_BRIDGE_SPRITE_BATCHES];
 struct bevy_bridge_shared;
 static void bevy_bridge_share_text_atlas(struct bevy_bridge_shared *shared);
+/* the screen flash staged for the frame's export */
+static unsigned long bevy_bridge_screen_flash_type;
+static float bevy_bridge_screen_flash_intensity;
+static float bevy_bridge_screen_flash_color[4];
 /* the screen quads staged for the frame's export */
 static unsigned long bevy_bridge_screen_draw_count;
 static unsigned long bevy_bridge_screen_vertex_count;
@@ -664,6 +668,10 @@ void bevy_bridge_export_frame(
 		bevy_bridge_screen_vertex_count * sizeof(struct bevy_bridge_screen_vertex));
 	bevy_bridge_screen_draw_count = 0;
 	bevy_bridge_screen_vertex_count = 0;
+	frame->screen_flash_type = bevy_bridge_screen_flash_type;
+	frame->screen_flash_intensity = bevy_bridge_screen_flash_intensity;
+	memcpy(frame->screen_flash_color, bevy_bridge_screen_flash_color, sizeof(frame->screen_flash_color));
+	bevy_bridge_screen_flash_type = 0;
 	if (bevy_bridge_viewer_draws_hud())
 		bevy_bridge_share_text_atlas(shared);
 	for (window_index = 0; window_index < window_count; window_index++)
@@ -956,6 +964,19 @@ unsigned long bevy_bridge_screen_texture(unsigned long id, void const *png, unsi
 	return count;
 }
 
+/* a screen map for a bitmap: the port's art in its place (a screen
+texture), or its tag's bitmap; FALSE if it is neither (rasterizer code that
+shares its draws, rasterizer_xbox_dynavobgeom.c's screen_map_texture) */
+unsigned long rasterizer_screen_map_texture(void const *bitmap);
+
+boolean bevy_bridge_screen_map_from_bitmap(void const *bitmap, struct bevy_bridge_screen_map *map)
+{
+	map->bitmap = 0xFFFFFFFFUL;
+	map->bitmap_index = 0;
+	map->texture = rasterizer_screen_map_texture(bitmap);
+	return map->texture != 0xFFFFFFFFUL || bevy_bridge_bitmap_tag(bitmap, &map->bitmap, &map->bitmap_index);
+}
+
 /* the high-res text's atlas, when it has changed (text_hires.c) */
 unsigned long text_hires_atlas_generation(void);
 unsigned char const *text_hires_atlas_coverage(void);
@@ -973,6 +994,16 @@ static void bevy_bridge_share_text_atlas(struct bevy_bridge_shared *shared)
 	shared->text_atlas_generation = generation;
 	__atomic_thread_fence(__ATOMIC_RELEASE);
 	__atomic_store_n(&shared->text_atlas_sequence, (shared->text_atlas_sequence | 1) + 1, __ATOMIC_RELAXED);
+}
+
+void bevy_bridge_note_screen_flash(short type, float intensity, float const color[4])
+{
+	/* (the first window's: the first player's) */
+	if (bevy_bridge_screen_flash_type)
+		return;
+	bevy_bridge_screen_flash_type = (unsigned long)type;
+	bevy_bridge_screen_flash_intensity = intensity;
+	memcpy(bevy_bridge_screen_flash_color, color, sizeof(bevy_bridge_screen_flash_color));
 }
 
 boolean bevy_bridge_viewer_draws_hud(void)

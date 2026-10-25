@@ -219,6 +219,16 @@ enum AiCount {
 /// and light fixtures).
 const OBJECT_MASK_WEAPON: u32 = 1 << 2;
 const OBJECT_MASK_DEVICE: u32 = 0b111 << 7;
+/// `_object_cannot_take_damage_bit` of an object's damage flags, and
+/// `_unit_ignored_by_actors_bit` of a unit's flags.
+const OBJECT_CANNOT_TAKE_DAMAGE: u16 = 1 << 11;
+const UNIT_IGNORED_BY_ACTORS: u32 = 1 << 10;
+/// `struct device_group_datum`'s flags and actual value, and its
+/// `_device_group_can_change_only_once_bit` and `_changed_once_bit`.
+const DEVICE_GROUP_FLAGS: u32 = 2;
+const DEVICE_GROUP_ACTUAL_VALUE: u32 = 4;
+const DEVICE_GROUP_CAN_CHANGE_ONLY_ONCE: u16 = 1 << 0;
+const DEVICE_GROUP_CHANGED_ONCE: u16 = 1 << 1;
 /// `MAXIMUM_WEAPONS_PER_UNIT`.
 const UNIT_WEAPONS: i16 = 4;
 /// `struct object_list_header_datum`'s count and first reference, and
@@ -359,6 +369,10 @@ pub struct HsContext {
     /// of network co-op, whose tests of all of a list's objects differ).
     pub cooperative: bool,
     pub coop_host: bool,
+    /// `device_groups_data`, and whether only network co-op's host moves
+    /// devices (`network_coop_devices_remote`).
+    pub device_groups_data: u32,
+    pub devices_remote: bool,
 }
 
 /// `(long)value` as x86 truncates it.
@@ -1432,6 +1446,63 @@ impl<H: HsHost> Runtime<'_, H> {
         Some((count, field(original), f32::from_bits(m.r32(datum + strength as u32))))
     }
 
+    /// The objects of the types (a bit per type), as `object_iterator_next`
+    /// gives them: each one's index and datum.
+    fn objects_of_types(&self, types: u32) -> Vec<(i32, u32)> {
+        use crate::layout::object_header_datum as oh;
+        let m = self.m();
+        let mut objects = Vec::new();
+        let mut index = self.data_next_index(self.context.object_header_data, NONE);
+        while index != NONE {
+            if let Some(header) = self.datum_get(self.context.object_header_data, index) {
+                if types & (1 << m.r8(header + oh::TYPE as u32)) != 0 {
+                    objects.push((index, m.r32(header + oh::DATUM as u32)));
+                }
+            }
+            index = self.data_next_index(self.context.object_header_data, index);
+        }
+        objects
+    }
+
+    /// `device_group_set_desired_value` (`device_group_change`): whether the
+    /// group's value changed; None where the game's would make effects (the
+    /// group powers a device), left to it.
+    fn device_group_set_desired_value(&self, group_index: i16, desired_value: f32) -> Option<bool> {
+        use crate::layout::device_datum as d;
+        let m = self.m();
+        if self.context.devices_remote {
+            return Some(false);
+        }
+        let desired_value = if desired_value < 0.0 {
+            0.0
+        } else if desired_value > 1.0 {
+            1.0
+        } else {
+            desired_value
+        };
+        if group_index == NONE as i16 {
+            return Some(false);
+        }
+        let group = self.datum_get(self.context.device_groups_data, group_index as i32)?;
+        let flags = m.r16(group + DEVICE_GROUP_FLAGS);
+        let actual_value = f32::from_bits(m.r32(group + DEVICE_GROUP_ACTUAL_VALUE));
+        if actual_value == desired_value
+            || (flags & DEVICE_GROUP_CAN_CHANGE_ONLY_ONCE != 0 && flags & DEVICE_GROUP_CHANGED_ONCE != 0)
+        {
+            return Some(false);
+        }
+        let powers = self
+            .objects_of_types(OBJECT_MASK_DEVICE)
+            .into_iter()
+            .any(|(_, device)| m.r16(device + d::DEVICE_POWER_GROUP_INDEX as u32) as i16 == group_index);
+        if powers {
+            return None;
+        }
+        m.w32(group + DEVICE_GROUP_ACTUAL_VALUE, desired_value.to_bits());
+        m.w16(group + DEVICE_GROUP_FLAGS, flags | DEVICE_GROUP_CHANGED_ONCE);
+        Some(true)
+    }
+
     /// A library function's body that runs here (the arguments evaluated
     /// at `arguments`), with its value returned; false if it has none here
     /// (or meets what the game's would stop at, which it then runs).
@@ -1525,6 +1596,58 @@ impl<H: HsHost> Runtime<'_, H> {
                         } else {
                             let Some(weapon) = self.object_typed(weapon_index, OBJECT_MASK_WEAPON) else { return false };
                             boolean(m.r32(weapon + u::DEFINITION_INDEX as u32) as i32 == weapon_definition)
+                        }
+                    }
+                }
+            }
+            // object_cannot_take_damage and object_can_take_damage: each
+            // listed object's flag
+            name @ ("object_cannot_take_damage" | "object_can_take_damage") => {
+                let Some(objects) = self.object_list(argument(0)) else { return false };
+                let Some(data) = objects.iter().map(|&o| self.object_typed(o, OBJECT_MASK_ALL)).collect::<Option<Vec<_>>>()
+                else {
+                    return false;
+                };
+                for object in data {
+                    let address = object + u::OBJECT_DAMAGE_FLAGS as u32;
+                    let flags = m.r16(address);
+                    let flags = if name == "object_cannot_take_damage" {
+                        flags | OBJECT_CANNOT_TAKE_DAMAGE
+                    } else {
+                        flags & !OBJECT_CANNOT_TAKE_DAMAGE
+                    };
+                    m.w16(address, flags);
+                }
+                0
+            }
+            // ai_scripting_ignore: each listed unit ignored by actors, or not
+            "ai_disregard" => {
+                let Some(objects) = self.object_list(argument(0)) else { return false };
+                let ignore = m.r8(arguments + 4) != 0;
+                for object in objects {
+                    if let Some(unit) = self.object_typed(object, OBJECT_MASK_UNIT) {
+                        let address = unit + u::UNIT_FLAGS as u32;
+                        let flags = m.r32(address);
+                        m.w32(address, if ignore { flags | UNIT_IGNORED_BY_ACTORS } else { flags & !UNIT_IGNORED_BY_ACTORS });
+                    }
+                }
+                0
+            }
+            // device_set_desired_position: its position group's desired value
+            "device_set_position" => {
+                let device_index = argument(0);
+                let position = f32::from_bits(argument(1) as u32);
+                if device_index == NONE {
+                    0
+                } else {
+                    let Some(device) = self.object_typed(device_index, OBJECT_MASK_DEVICE) else { return false };
+                    let group_index = m.r16(device + crate::layout::device_datum::DEVICE_POSITION_GROUP_INDEX as u32) as i16;
+                    if group_index == NONE as i16 {
+                        0
+                    } else {
+                        match self.device_group_set_desired_value(group_index, position) {
+                            Some(changed) => boolean(changed),
+                            None => return false,
                         }
                     }
                 }

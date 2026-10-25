@@ -121,6 +121,8 @@ pub struct HsContextC {
     pub structure_bsp_index: u32,
     pub cooperative: i32,
     pub coop_host: i32,
+    pub device_groups_data: u32,
+    pub devices_remote: i32,
 }
 
 impl HsContextC {
@@ -158,6 +160,8 @@ impl HsContextC {
             structure_bsp_index: self.structure_bsp_index,
             cooperative: self.cooperative != 0,
             coop_host: self.coop_host != 0,
+            device_groups_data: self.device_groups_data,
+            devices_remote: self.devices_remote != 0,
         }
     }
 }

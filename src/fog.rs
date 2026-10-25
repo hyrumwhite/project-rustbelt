@@ -323,7 +323,7 @@ fn follow_fog(
 }
 
 #[derive(Resource)]
-struct FogPipeline {
+pub(crate) struct FogPipeline {
     layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     /// the fog screen's: its layers tile
@@ -367,7 +367,7 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
     });
 }
 
-fn draw_fog(
+pub(crate) fn draw_fog(
     view: ViewQuery<(
         &ViewTarget,
         &ViewPrepassTextures,

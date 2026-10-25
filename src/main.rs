@@ -26,6 +26,7 @@ mod lights;
 mod material;
 mod options;
 mod overlay;
+mod screen_effect;
 mod sky;
 #[cfg(feature = "dlss")]
 mod sky_overlay;
@@ -491,7 +492,8 @@ fn main() -> AppExit {
                 app.add_plugins(decals::DecalsPlugin);
             }
             if args.draws_hud() {
-                app.add_plugins(hud::HudPlugin);
+                // (the game hands its screen effect over with its HUD)
+                app.add_plugins((hud::HudPlugin, screen_effect::ScreenEffectPlugin));
             }
             if args.viewer_effects() {
                 app.add_plugins(effects::EffectsPlugin);
@@ -1122,8 +1124,8 @@ fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With
 }
 
 /// F9, in play too: save the window's picture (in `captures` beside the
-/// program) and log where it was taken: the level, the game's tick and the
-/// camera, as a `--camera` argument.
+/// program) and log where it was taken, in the log and a `.txt` beside it:
+/// the level, the game's tick and the camera, as a `--camera` argument.
 fn capture(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1146,12 +1148,12 @@ fn capture(
     let level = game.and_then(|g| g.scenario_name.rsplit('\\').next()).filter(|l| !l.is_empty()).unwrap_or("viewer").to_string();
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
     let path = directory.join(format!("{level}_{stamp}.png"));
-    info!(
-        "capture: {} - {level} at tick {}, {}",
-        path.display(),
-        game.map_or(0, |g| g.game_tick),
-        camera_argument(&camera)
-    );
+    let place = format!("{level} at tick {}, {}", game.map_or(0, |g| g.game_tick), camera_argument(&camera));
+    info!("capture: {} - {place}", path.display());
+    // (and beside it: a packaged run's log goes nowhere)
+    if let Err(error) = std::fs::write(path.with_extension("txt"), format!("{place}\n")) {
+        warn!("capture: can't write where it was taken: {error}");
+    }
     commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
 }
 
@@ -1413,8 +1415,13 @@ fn update_performance_text(
 ) {
     text.0.clear();
     let mut total = 0.0;
+    // (a pass not run in the last second is left out: its average stays)
+    let now = std::time::Instant::now();
     let mut add = |name: &str, path: &'static str| {
-        if let Some(value) = diagnostics.get(&DiagnosticPath::new(path)).and_then(Diagnostic::smoothed) {
+        let diagnostic = diagnostics
+            .get(&DiagnosticPath::new(path))
+            .filter(|d| d.measurement().is_some_and(|m| now.duration_since(m.time).as_secs_f32() < 1.0));
+        if let Some(value) = diagnostic.and_then(Diagnostic::smoothed) {
             text.push_str(&format!("{name:17}  {value:.2} ms\n"));
             total += value;
         }
@@ -1425,6 +1432,11 @@ fn update_performance_text(
     add("Direct", "render/solarik_lighting/direct_lighting/elapsed_gpu");
     add("Diffuse indirect", "render/solarik_lighting/diffuse_indirect_lighting/elapsed_gpu");
     add("Specular indirect", "render/solarik_lighting/specular_indirect_lighting/elapsed_gpu");
+    // (the camera's glass and water, and its foliage: c10's swamp water was
+    // 13.5 ms the panel didn't show)
+    add("Glass and water", "render/solarik_lighting/primary_glass/elapsed_gpu");
+    add("Foliage", "render/solarik_lighting/primary_foliage/elapsed_gpu");
+    add("Lit fog", "render/solarik_lighting/lit_fog/elapsed_gpu");
     #[cfg(feature = "dlss")]
     if matches!(dlss_camera.single(), Ok(true)) {
         add("DLSS-RR", "render/dlss_ray_reconstruction/elapsed_gpu");

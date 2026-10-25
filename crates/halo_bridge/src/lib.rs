@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 49;
+pub const VERSION: u32 = 50;
 pub const SCREEN_TEXTURES: usize = 512;
 pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
 pub const TEXT_ATLAS_SIZE: usize = 2048;
@@ -559,7 +559,30 @@ struct Frame {
     screen_vertex_count: u32,
     screen_draws: [ScreenDraw; SCREEN_DRAWS],
     screen_vertices: [ScreenVertex; SCREEN_VERTICES],
+    screen_effect: ScreenEffect,
 }
+
+/// (Protocol 50) The screen effect over the first player's view of the
+/// world (the scripts' cinematic one, or else the HUD's), which the viewer
+/// draws over its scene: flags ([`SCREEN_EFFECT_ON`] and the rest), its
+/// filter's light enhancement and desaturation (0 to 1), the desaturation's
+/// tint, and the video effect's overbright mode (0 to 2) and noise.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ScreenEffect {
+    pub flags: u32,
+    pub light_enhancement: f32,
+    pub desaturation: f32,
+    pub desaturation_tint: [f32; 3],
+    pub video_overbright_mode: u32,
+    pub video_noise_intensity: f32,
+}
+
+pub const SCREEN_EFFECT_ON: u32 = 1;
+/// The desaturation's tinted grey is added to the picture, not mixed in.
+pub const SCREEN_EFFECT_DESATURATION_ADDITIVE: u32 = 2;
+/// The video effect (scanlines, noise, overbright): a helmet recording.
+pub const SCREEN_EFFECT_VIDEO: u32 = 4;
 
 /// (Protocol 26) a vehicle as its physics shape is placed
 /// (`physics_instance_new`: `object_get_origin`, `object_get_orientation`).
@@ -1373,6 +1396,8 @@ pub struct Snapshot {
     /// `game.bevy_bridge_viewer_hud` on).
     pub screen_draws: Vec<ScreenDraw>,
     pub screen_vertices: Vec<ScreenVertex>,
+    /// (Protocol 50) The screen effect over the first player's view.
+    pub screen_effect: ScreenEffect,
 }
 
 impl Snapshot {
@@ -2070,6 +2095,7 @@ impl Bridge {
                     screen_vertices: (0..(std::ptr::read_volatile(&(*frame).screen_vertex_count) as usize).min(SCREEN_VERTICES))
                         .map(|i| std::ptr::read_volatile(&(*frame).screen_vertices[i]))
                         .collect(),
+                    screen_effect: std::ptr::read_volatile(&(*frame).screen_effect),
                 };
                 fence(Ordering::Acquire);
                 if std::ptr::read_volatile(&(*frame).sequence) != sequence {

@@ -11473,7 +11473,7 @@ int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call)
 	event = &halo_sim_hs_checks.events[halo_sim_hs_checks.event_count++];
 	memset(event, 0, sizeof(*event));
 	event->call = *call;
-	if (call->kind == _hs_runtime_call_external)
+	if (call->kind == _hs_runtime_call_external || call->kind == _hs_runtime_call_library)
 	{
 		void *thread;
 		long *destination;
@@ -11498,7 +11498,7 @@ void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened)
 		return;
 	halo_sim_hs_checks.open_event = NULL;
 	event->call.result = call->result;
-	if (call->kind == _hs_runtime_call_external)
+	if (call->kind == _hs_runtime_call_external || call->kind == _hs_runtime_call_library)
 	{
 		memcpy(event->after, (void const *)event->thread, sizeof(event->after));
 		if (event->destination)
@@ -11558,7 +11558,8 @@ void halo_sim_hs_check(long result)
 	halo_sim_hs_checks.compared[operation]++;
 	for (event_number = 0; event_number < halo_sim_hs_checks.event_count; event_number++)
 	{
-		if (halo_sim_hs_checks.events[event_number].call.kind == _hs_runtime_call_external)
+		if (halo_sim_hs_checks.events[event_number].call.kind == _hs_runtime_call_external ||
+			halo_sim_hs_checks.events[event_number].call.kind == _hs_runtime_call_library)
 			halo_sim_hs_checks.externals[operation]++;
 	}
 	differs = call.result != result ||

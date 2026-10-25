@@ -2030,12 +2030,25 @@ void hs_return(
 	return;
 }
 
+/* port: the arguments the runtime evaluated for the library function whose
+body runs (hs_runtime_call's library), which its evaluation takes as they
+are */
+static long *hs_runtime_ready_arguments;
+
 long *hs_macro_function_evaluate(
 	short function_index,
 	long thread_index,
 	boolean initialize)
 {
 	struct hs_function_definition *function = hs_function_get(function_index);
+
+	if (hs_runtime_ready_arguments)
+	{
+		long *arguments = hs_runtime_ready_arguments;
+
+		hs_runtime_ready_arguments = NULL;
+		return arguments;
+	}
 
 	return hs_arguments_evaluate(
 		thread_index,
@@ -2891,6 +2904,33 @@ static void hs_thread_main(
 					thread_index,
 					initialize);
 			}
+			/* port: a library function its macro parses: its arguments
+			evaluated here, as hs_macro_function_evaluate would, then its body
+			through hs_runtime_call (the Rust port's runtime the same) */
+			else if (function->parse==hs_macro_function_parse)
+			{
+				/* (none to evaluate for a function without parameters, whose
+				evaluation doesn't ask for them) */
+				long *arguments = function->parameter_count>0 ?
+					hs_arguments_evaluate(
+						thread_index,
+						function->parameter_count,
+						function->parameter_types,
+						initialize) :
+					(long *)thread->stack->data;
+
+				if (arguments)
+				{
+					struct halo_sim_hs_call call;
+
+					memset(&call, 0, sizeof(call));
+					call.kind = _hs_runtime_call_library;
+					call.a = expression->index;
+					call.b = thread_index;
+					call.c = function->parameter_count>0 ? (long)arguments : 0;
+					hs_runtime_call(&call);
+				}
+			}
 			else
 			{
 				struct halo_sim_hs_call call;
@@ -3614,6 +3654,16 @@ void hs_runtime_call(
 			break;
 		}
 
+		case _hs_runtime_call_library:
+		{
+			struct hs_function_definition *function = hs_function_get((short)call->a);
+
+			hs_runtime_ready_arguments = (long *)call->c;
+			function->evaluate((short)call->a, call->b, FALSE);
+			hs_runtime_ready_arguments = NULL;
+			break;
+		}
+
 		case _hs_runtime_call_script_disabled:
 			call->result = hs_scenario_script_disabled((short)call->a) ? 1 : 0;
 			break;
@@ -3746,6 +3796,7 @@ void hs_runtime_port_context(
 	}
 	context->runtime_globals = (unsigned long)&hs_runtime_globals;
 	context->scenario_loaded = scenario!=NULL;
+	context->macro_parse = (unsigned long)hs_macro_function_parse;
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

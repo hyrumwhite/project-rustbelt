@@ -751,6 +751,9 @@ enum
 	_hs_runtime_call_node_gc,
 	_hs_runtime_call_unused15, /* (a console command's thread deleted: the runtime's own now) */
 	_hs_runtime_call_global_initializer_disabled,
+	/* a library function's body, its arguments evaluated by the runtime: a
+	the function, b the thread, c the arguments' address (its frame's) */
+	_hs_runtime_call_library,
 };
 
 /* the runtime's operations the Rust port can run */
@@ -804,6 +807,10 @@ struct halo_sim_hs_context
 	long game_time;
 	unsigned long string_default;
 	long scenario_loaded;
+	/* hs_macro_function_parse: a library function parsed by it evaluates its
+	arguments as hs_macro_function_evaluate does, the runtime's to evaluate,
+	then its body (_hs_runtime_call_library) */
+	unsigned long macro_parse;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's

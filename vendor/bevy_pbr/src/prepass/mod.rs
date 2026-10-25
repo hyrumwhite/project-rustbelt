@@ -423,6 +423,13 @@ impl PrepassPipeline {
         // (PBR code will use this to detect that it's running in deferred mode,
         // since that's the only time it gets called from a prepass pipeline.)
         shader_defs.push("PREPASS_PIPELINE".into());
+        // (the deferred G-buffer's material reads the same textures the
+        // forward pass does: a clear coat's own texture, as mesh.rs's
+        // specialization defines it; without it a coat was whole wherever
+        // its texture said none)
+        if cfg!(feature = "pbr_multi_layer_material_textures") {
+            shader_defs.push("PBR_MULTI_LAYER_MATERIAL_TEXTURES_SUPPORTED".into());
+        }
 
         shader_defs.push(ShaderDefVal::UInt(
             "MATERIAL_BIND_GROUP".into(),

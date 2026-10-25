@@ -837,6 +837,10 @@ struct halo_sim_hs_context
 	unsigned long structure_bsp_index;
 	long cooperative;
 	long coop_host;
+	/* device_groups_data, and whether only network co-op's host moves
+	devices (network_coop_devices_remote) */
+	unsigned long device_groups_data;
+	long devices_remote;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's

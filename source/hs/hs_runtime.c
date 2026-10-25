@@ -291,6 +291,8 @@ extern struct hs_external_global_definition *hs_external_globals[];
 #include "ai/encounters.h"
 #include "main/main.h"
 #include "coop_scripts.h" /* port: port/linux/game/coop_scripts.c */
+#include "devices/devices.h"
+#include "network_coop.h" /* port: port/linux/game/network_coop.c */
 static long hs_runtime_call_simple(long kind, long a);
 static long hs_object_list_from_ai_reference(long ai_reference);
 
@@ -2062,6 +2064,10 @@ static char const *const hs_runtime_rust_bodies[] =
 	"ai_strength",
 	"ai_swarm_count",
 	"ai_nonswarm_count",
+	"object_cannot_take_damage",
+	"object_can_take_damage",
+	"ai_disregard",
+	"device_set_position",
 };
 /* (each library function's runs, for HALO_HS_LIBRARY_COUNTS's) */
 unsigned long hs_runtime_library_counts[1024];
@@ -3916,6 +3922,8 @@ void hs_runtime_port_context(
 	context->structure_bsp_index = (unsigned long)&global_structure_bsp_index;
 	context->cooperative = game_is_cooperative();
 	context->coop_host = coop_scripts_host();
+	context->device_groups_data = (unsigned long)device_groups_data;
+	context->devices_remote = network_coop_devices_remote();
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

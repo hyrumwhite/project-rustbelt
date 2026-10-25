@@ -293,6 +293,11 @@ pub trait HsHost {
     fn stopped(&self) -> bool {
         false
     }
+    /// Whether the library bodies that run here do (a check's replay makes
+    /// them calls, as the game recorded them: each was checked as it ran).
+    fn run_bodies(&self) -> bool {
+        true
+    }
 }
 
 /// Where the runtime's state and tables are in the game's memory.
@@ -1255,7 +1260,10 @@ impl<H: HsHost> Runtime<'_, H> {
                     let arguments = if types.is_empty() { Some(0) } else { self.arguments_evaluate(thread_index, &types, initialize) };
                     if let Some(arguments) = arguments {
                         // (a body that runs here, or the game's)
-                        if !(self.rust_body(function_index) && self.library_body(definition, thread_index, arguments)) {
+                        if !(self.host.run_bodies()
+                            && self.rust_body(function_index)
+                            && self.library_body(definition, thread_index, arguments))
+                        {
                             self.call(call::LIBRARY, function_index as i32, thread_index, arguments as i32);
                         }
                     }
@@ -1810,6 +1818,21 @@ pub fn hs_runtime_initialize_for_new_map(context: &HsContext, host: &impl HsHost
 /// `hs_runtime_evaluate`, on the game's memory: the command's value, or NONE.
 pub fn hs_runtime_evaluate(context: &HsContext, host: &impl HsHost, expression_index: i32) -> i32 {
     Runtime { context, host }.evaluate_command(expression_index)
+}
+
+/// The library function's body, if it runs here (`arguments` evaluated, as
+/// the runtime leaves them): false if it doesn't, or leaves this one to the
+/// game's.
+pub fn hs_runtime_library_body(
+    context: &HsContext,
+    host: &impl HsHost,
+    function_index: i16,
+    thread_index: i32,
+    arguments: u32,
+) -> bool {
+    let runtime = Runtime { context, host };
+    runtime.rust_body(function_index)
+        && runtime.library_body(runtime.function_definition(function_index), thread_index, arguments)
 }
 
 /// `hs_runtime_update`: every thread due runs, on the game's memory.

@@ -8,13 +8,16 @@
 //! library function's with its thread's memory before and after, and where
 //! its value went); the game then puts its script memory back as the update
 //! began, Rust replays the update on it, and the game compares what Rust left
-//! with what its own did.
+//! with what its own did. The library bodies that run here are checked as the
+//! game's run instead ([`halo_sim_hs_body_check`]), and are calls in the
+//! replay.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 
 use halo_map::hs_runtime::{
     HsCall, HsContext, HsHost, HsMemory, call, hs_runtime_evaluate, hs_runtime_initialize_for_new_map,
-    hs_runtime_update,
+    hs_runtime_library_body, hs_runtime_update,
 };
 
 /// `sizeof(struct hs_thread_datum)`.
@@ -225,6 +228,9 @@ impl HsHost for CheckHost<'_> {
     fn stopped(&self) -> bool {
         self.difference.get().is_some()
     }
+    fn run_bodies(&self) -> bool {
+        false
+    }
     fn call(&self, call: &mut HsCall) {
         let index = self.next.get();
         let Some(event) = self.events.get(index) else {
@@ -305,5 +311,114 @@ pub unsafe extern "C" fn halo_sim_hs_update_check(update: *mut HsUpdateC) -> i32
         checker.differ(checker.next.get(), 5);
     }
     (update.difference_event, update.difference_reason) = checker.difference.get().map_or((-1, 0), |(e, r)| (e as i32, r));
+    0
+}
+
+/// halo_sim.c's `MAXIMUM_HALO_SIM_HS_BODY_WRITES`.
+pub const MAXIMUM_BODY_WRITES: usize = 1024;
+
+/// A byte a body wrote, held aside.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct HsBodyWriteC {
+    pub address: u32,
+    pub value: u32,
+}
+
+/// A library body to check: the function, its thread and evaluated
+/// arguments; whether it ran here (not left to the game's) and the bytes it
+/// wrote (`overflow` if more than there's room for).
+#[repr(C)]
+pub struct HsBodyCallC {
+    pub context: HsContextC,
+    pub function_index: i32,
+    pub thread_index: i32,
+    pub arguments: u32,
+    pub handled: i32,
+    pub write_count: u32,
+    pub overflow: i32,
+    pub writes: [HsBodyWriteC; MAXIMUM_BODY_WRITES],
+}
+
+/// The game's memory read as it is, with what's written held aside (each
+/// byte's last value), and read back.
+#[derive(Default)]
+struct OverlayMemory {
+    bytes: RefCell<BTreeMap<u32, u8>>,
+}
+
+impl HsMemory for OverlayMemory {
+    fn r8(&self, address: u32) -> u8 {
+        self.bytes.borrow().get(&address).copied().unwrap_or_else(|| GameMemory.r8(address))
+    }
+    fn r16(&self, address: u32) -> u16 {
+        u16::from_le_bytes([self.r8(address), self.r8(address.wrapping_add(1))])
+    }
+    fn r32(&self, address: u32) -> u32 {
+        u32::from_le_bytes([0, 1, 2, 3].map(|i| self.r8(address.wrapping_add(i))))
+    }
+    fn w8(&self, address: u32, value: u8) {
+        self.bytes.borrow_mut().insert(address, value);
+    }
+    fn w16(&self, address: u32, value: u16) {
+        for (i, byte) in value.to_le_bytes().into_iter().enumerate() {
+            self.w8(address.wrapping_add(i as u32), byte);
+        }
+    }
+    fn w32(&self, address: u32, value: u32) {
+        for (i, byte) in value.to_le_bytes().into_iter().enumerate() {
+            self.w8(address.wrapping_add(i as u32), byte);
+        }
+    }
+}
+
+/// A body's runtime: the held-aside memory, and no calls of the game's (a
+/// body that asks one isn't checked).
+#[derive(Default)]
+struct BodyHost {
+    memory: OverlayMemory,
+    called: Cell<bool>,
+}
+
+impl HsHost for BodyHost {
+    fn memory(&self) -> &dyn HsMemory {
+        &self.memory
+    }
+    fn call(&self, call: &mut HsCall) {
+        self.called.set(true);
+        call.result = 0;
+    }
+}
+
+/// Check mode: the library body as Rust runs it, on the game's memory as the
+/// game's body is about to run, its writes held aside for the game to compare
+/// with its own. Returns 0, or -1.
+///
+/// # Safety
+/// `body` must be valid, describing the game's script memory, the thread
+/// and its evaluated arguments.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn halo_sim_hs_body_check(body: *mut HsBodyCallC) -> i32 {
+    if body.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's
+    let body = unsafe { &mut *body };
+    let host = BodyHost::default();
+    let ran = hs_runtime_library_body(
+        &body.context.context(),
+        &host,
+        body.function_index as i16,
+        body.thread_index,
+        body.arguments,
+    );
+    body.handled = (ran && !host.called.get()) as i32;
+    let bytes = host.memory.bytes.borrow();
+    body.overflow = (bytes.len() > MAXIMUM_BODY_WRITES) as i32;
+    body.write_count = 0;
+    for (&address, &value) in bytes.iter().take(MAXIMUM_BODY_WRITES) {
+        body.writes[body.write_count as usize] = HsBodyWriteC { address, value: value as u32 };
+        body.write_count += 1;
+    }
     0
 }

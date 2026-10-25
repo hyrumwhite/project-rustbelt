@@ -2427,8 +2427,8 @@ fn elite_armour(shader: &str) -> bool {
 /// Chief's armour shaders (his own and his first-person arms').
 const CHIEF_ARMOUR: [&str; 2] = ["characters\\cyborg\\shaders\\armor", "characters\\cyborg\\fp\\shaders\\armor hands"];
 /// Chief's armour's coat (strength, perceptual roughness), on his armour
-/// plates alone: half the Elites', a hint of the thin film's colours.
-const CHIEF_COAT: (f32, f32) = (0.5, 0.1);
+/// plates alone, as strong as the Elites'.
+const CHIEF_COAT: (f32, f32) = (1.0, 0.1);
 
 /// A tuning colour for the Elites' or Chief's armour, in place of an
 /// object's change colour (`HALO_RT_ELITE_COLOR`, `HALO_RT_CHIEF_COLOR=r,g,b`).

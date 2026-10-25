@@ -149,6 +149,9 @@ pub mod call {
     pub const EXTERNAL: i32 = 1;
     /// `hs_scenario_script_disabled(a)`.
     pub const SCRIPT_DISABLED: i32 = 2;
+    /// A library function's body, its arguments evaluated by the runtime:
+    /// `a` the function, `b` the thread, `c` the arguments' address.
+    pub const LIBRARY: i32 = 17;
     /// `game_in_progress()`.
     pub const GAME_IN_PROGRESS: i32 = 3;
     /// `object_index_from_name_index(a)`.
@@ -189,6 +192,12 @@ const ERROR_OUT_OF_SCRIPT_THREADS: i32 = 5;
 const ERROR_OUT_OF_COMMAND_THREADS: i32 = 6;
 /// A global's initialization slept (the game's assertion; `b` its thread).
 const ERROR_GLOBAL_INITIALIZATION_SLEPT: i32 = 7;
+
+/// `struct hs_function_definition`'s parse procedure, parameter count and
+/// parameter types.
+const FUNCTION_PARSE: u32 = 8;
+const FUNCTION_PARAMETER_COUNT: u32 = 24;
+const FUNCTION_PARAMETER_TYPES: u32 = 26;
 
 /// halo_sim.h's `struct halo_sim_hs_call`.
 #[repr(C)]
@@ -270,6 +279,9 @@ pub struct HsContext {
     pub game_time: i32,
     /// `_hs_type_string_default` (the empty string's address).
     pub string_default: u32,
+    /// `hs_macro_function_parse`: a library function it parses has its
+    /// arguments evaluated by the runtime, then its body ([`call::LIBRARY`]).
+    pub macro_parse: u32,
 }
 
 /// `(long)value` as x86 truncates it.
@@ -1157,9 +1169,25 @@ impl<H: HsHost> Runtime<'_, H> {
             WAKE => self.evaluate_wake(thread_index),
             INSPECT => self.evaluate_inspect(thread_index, initialize),
             OBJECT_TO_UNIT => self.evaluate_object_cast_up(function_index, thread_index, initialize),
-            // (cond, the debug strings and the library: the game's)
+            // the library: a function its macro parses has its arguments
+            // evaluated here, as hs_macro_function_evaluate would, then its
+            // body (the game's); cond and the debug strings are the game's
             _ => {
-                self.call(call::EXTERNAL, function_index as i32, thread_index, initialize as i32);
+                let definition = self.function_definition(function_index);
+                let m = self.m();
+                if self.context.macro_parse != 0 && m.r32(definition + FUNCTION_PARSE) == self.context.macro_parse {
+                    let count = (m.r16(definition + FUNCTION_PARAMETER_COUNT) as i16).max(0) as u32;
+                    let types: Vec<i16> = (0..count).map(|i| m.r16(definition + FUNCTION_PARAMETER_TYPES + 2 * i) as i16).collect();
+                    // (none to evaluate for a function without parameters,
+                    // whose evaluation doesn't ask for them)
+                    if types.is_empty() {
+                        self.call(call::LIBRARY, function_index as i32, thread_index, 0);
+                    } else if let Some(arguments) = self.arguments_evaluate(thread_index, &types, initialize) {
+                        self.call(call::LIBRARY, function_index as i32, thread_index, arguments as i32);
+                    }
+                } else {
+                    self.call(call::EXTERNAL, function_index as i32, thread_index, initialize as i32);
+                }
             }
         }
     }

@@ -102,6 +102,7 @@ pub struct HsContextC {
     pub game_time: i32,
     pub string_default: u32,
     pub scenario_loaded: i32,
+    pub macro_parse: u32,
 }
 
 impl HsContextC {
@@ -123,6 +124,7 @@ impl HsContextC {
             random_seed: self.random_seed,
             game_time: self.game_time,
             string_default: self.string_default,
+            macro_parse: self.macro_parse,
         }
     }
 }
@@ -203,7 +205,9 @@ impl HsHost for CheckHost<'_> {
         } else if e.a != call.a || e.b != call.b || e.c != call.c {
             self.differ(index, 2);
         }
-        if call.kind == call::EXTERNAL && e.kind == call::EXTERNAL {
+        // (a library function's evaluation, or its body: the thread as the
+        // game left it)
+        if matches!(call.kind, call::EXTERNAL | call::LIBRARY) && e.kind == call.kind {
             // SAFETY: the thread's datum in the game's memory
             let thread = unsafe { std::slice::from_raw_parts_mut(event.thread as usize as *mut u8, THREAD_DATUM_SIZE) };
             if thread != &event.before[..] {

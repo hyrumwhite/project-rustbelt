@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 48
+#define BEVY_BRIDGE_VERSION 49
 #define BEVY_BRIDGE_SCREEN_TEXTURES 512
 #define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
 #define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
@@ -610,7 +610,10 @@ struct bevy_bridge_overlay
 	unsigned long frame_index;
 	unsigned long width;
 	unsigned long height;
-	unsigned long reserved[4];
+	/* (protocol 49) nonzero when nothing was drawn into it (the renderer
+	drawing all of it): no pixels shared, the picture clear */
+	unsigned long empty;
+	unsigned long reserved[3];
 };
 
 /* a gamepad the renderer forwards */

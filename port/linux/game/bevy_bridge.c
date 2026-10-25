@@ -1171,7 +1171,16 @@ unsigned char *bevy_bridge_overlay_begin(
 	overlay->frame_index = bevy_bridge_frame_index;
 	overlay->width = width;
 	overlay->height = height;
+	overlay->empty = 0;
 	return shared->overlay_pixels[bevy_bridge_overlay_buffer];
+}
+
+void bevy_bridge_overlay_mark_empty(void)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+
+	if (shared && bevy_bridge_overlay_buffer != NONE)
+		shared->overlays[bevy_bridge_overlay_buffer].empty = 1;
 }
 
 void bevy_bridge_overlay_commit(void)

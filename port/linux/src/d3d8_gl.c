@@ -3181,6 +3181,8 @@ premultiplied. Present shares it. */
 unsigned char bevy_bridge_overlay_enabled(void);
 unsigned char *bevy_bridge_overlay_begin(unsigned long width, unsigned long height);
 void bevy_bridge_overlay_commit(void);
+/* (the overlay shared with nothing drawn into it this frame: no pixels) */
+void bevy_bridge_overlay_mark_empty(void);
 unsigned char bevy_bridge_overlay_viewer(unsigned long *looked, unsigned long *interval);
 #endif
 
@@ -3191,6 +3193,10 @@ static BOOL overlay_world;
 /* drawing the first-person weapon, whose transparent parts (the rifle's
 ammo counter) it draws with it: those still go to the overlay */
 static BOOL overlay_first_person;
+/* whether anything has drawn colour into the overlay since it was last
+shared (with the renderer drawing all of it, most frames nothing is: then
+it is shared empty, without reading it back) */
+static BOOL overlay_drawn;
 
 static BOOL overlay_enabled(void)
 {
@@ -3373,7 +3379,10 @@ static void apply_raster_state(BOOL has_depth)
 			write = 0;
 		}
 		else
+		{
 			write |= D3DCOLORWRITEENABLE_ALPHA;
+			overlay_drawn = TRUE;
+		}
 	}
 	state_enable(&gl_state.blend, GL_BLEND, rs[D3DRS_ALPHABLENDENABLE] != 0);
 	if (rs[D3DRS_ALPHABLENDENABLE] && overlay)
@@ -5144,6 +5153,22 @@ static void overlay_share(struct render_target_entry *target)
 
 	if (!pixels)
 		return;
+	/* nothing drawn into it: shared empty, not read back
+	(HALO_BEVY_OVERLAY_ALWAYS: read back all the same) */
+	{
+		static int always = -1;
+
+		if (always < 0)
+			always = getenv("HALO_BEVY_OVERLAY_ALWAYS") != NULL;
+		if (!overlay_drawn && !always)
+		{
+			bevy_bridge_overlay_mark_empty();
+			bevy_bridge_overlay_commit();
+			overlay_shared();
+			return;
+		}
+		overlay_drawn = FALSE;
+	}
 	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
 	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
 	glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);

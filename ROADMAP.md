@@ -1448,9 +1448,11 @@ The game still draws its HUD, menus and text into the overlay it shares (at most
 2. **Text**: the high-res text's characters (port/linux/src/text_hires.c: TrueType fonts for the fonts' tags, laid out by the game, rasterized at the window's resolution) as quads of its atlas in the same list, the atlas shared when it changes (protocol 47).
    - [x] Shared and drawn: b30's chapter title as the game's. The old 128-texel text cache (fonts the high-res text doesn't cover) is still the game's.
 3. **The motion sensor's blips** (`rasterizer_hud_motion_sensor_blip_draw`) and the **screen effects** (`rasterizer_screen_effect`, the screen flash).
-   - [ ] Shared and drawn
-4. **The overlay retired** for play: with the viewer drawing effects, transparent surfaces, decals, fog and the HUD, the game's picture holds only what's left (Bink, the old text cache), and none of it most frames.
-   - [ ] Done
+   - [x] (Protocol 48) The motion sensor: its blips, sweep and mask as draws into its own target (the 64-texel sun glow target it borrows, cleared each frame; 256 texels here), colour only and with the sweep's border colour, then the target onto the screen in order. Matches the game's on b30.
+   - [x] (Protocol 48) The screen flash: its type, intensity and colour shared, drawn over the HUD as a multiply and an add or subtract (lighten, darken, tint and invert exactly; max and min as lighten and darken). b30's `fade_out` to red matches the game's.
+   - [ ] The HUD's screen effects (`rasterizer_screen_effect`: desaturation, light enhancement, convolution) work on the world's picture, which with the viewer drawing the world the game doesn't have: they belong in the viewer's post-processing.
+4. **The overlay retired** for play: with the viewer drawing effects, transparent surfaces, decals, fog and the HUD, the game's picture holds only what's left (Bink, the old text cache, the loading bar), and none of it most frames.
+   - [x] (Protocol 49) A frame that drew nothing into the overlay shares it empty: no read back (`glReadPixels` of the whole window, a GPU stall) and no upload; the viewer clears its picture once. In play on b30 and a10's opening every frame's overlay is empty (`HALO_RT_OVERLAY_DEBUG=1` shows none). `HALO_BEVY_OVERLAY_ALWAYS=1` reads it back all the same.
 
 ## Known risks
 

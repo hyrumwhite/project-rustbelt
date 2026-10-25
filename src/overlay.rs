@@ -73,10 +73,10 @@ pub struct OverlayMaterial {
 }
 
 impl OverlayMaterial {
-    /// A premultiplied picture drawn over the window (the HUD's too,
-    /// `crate::hud`), with the overlay's debug mode.
+    /// A premultiplied picture drawn over the window (the HUD's,
+    /// `crate::hud`; the overlay's debug mode is the game's picture's alone).
     pub fn new(picture: Handle<Image>) -> Self {
-        Self { picture, mode: std::env::var("HALO_RT_OVERLAY_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0) }
+        Self { picture, mode: 0 }
     }
 }
 
@@ -107,6 +107,8 @@ pub(crate) struct OverlayPicture {
     pixels: Arc<Vec<u8>>,
     /// Counts pictures, so each is copied once.
     generation: u64,
+    /// The picture last copied was clear (the game drew nothing into it).
+    empty: bool,
 }
 
 /// The overlay's texture for a picture of this size.
@@ -136,9 +138,9 @@ fn spawn_overlay(
         MaterialNode(material.clone()),
         Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
         // under the HUD (crate::hud) and the viewer's own text
-        GlobalZIndex(-2),
+        GlobalZIndex(-3),
     ));
-    commands.insert_resource(OverlayPicture { image, material, size: (width, height), pixels: default(), generation: 0 });
+    commands.insert_resource(OverlayPicture { image, material, size: (width, height), pixels: default(), generation: 0, empty: false });
 }
 
 fn read_overlay(
@@ -166,6 +168,27 @@ fn read_overlay(
     }
     let Some(overlay) = link.bridge.read_overlay(&mut buffer) else { return };
     let size = (overlay.width, overlay.height);
+    // nothing drawn into it (the viewer drawing all of it): the picture
+    // cleared once, then left
+    if overlay.empty {
+        if !picture.empty || picture.size != size {
+            if picture.size != size {
+                images.insert(picture.image.id(), overlay_image(size.0, size.1)).ok();
+                let _ = materials.get_mut(picture.material.id());
+                picture.size = size;
+            }
+            picture.pixels = Arc::new(vec![0; (size.0 * size.1 * 4) as usize]);
+            picture.generation += 1;
+            picture.empty = true;
+        }
+        if !link.show_frame(overlay.frame_index) && std::env::var_os("HALO_RT_SYNC_LOG").is_some() {
+            info!("overlay frame {} not among the frames read", overlay.frame_index);
+        }
+        stats.shown += 1;
+        stats.size = size;
+        return;
+    }
+    picture.empty = false;
     if picture.size != size {
         // a new texture at the new size (and the materials' bind groups made
         // again with it)

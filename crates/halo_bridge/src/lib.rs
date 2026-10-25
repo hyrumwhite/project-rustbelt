@@ -21,12 +21,21 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 47;
+pub const VERSION: u32 = 49;
 pub const SCREEN_TEXTURES: usize = 512;
 pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
 pub const TEXT_ATLAS_SIZE: usize = 2048;
 /// A screen map's texture: the high-res text's atlas ([`Bridge::read_text_atlas`]).
 pub const SCREEN_TEXTURE_TEXT_ATLAS: u32 = 0xFFFF_FFFE;
+/// (Protocol 48) A screen map's texture: the motion sensor's target (the
+/// draws whose target is [`SCREEN_TARGET_MOTION_SENSOR`], drawn into it
+/// first).
+pub const SCREEN_TEXTURE_MOTION_SENSOR: u32 = 0xFFFF_FFFD;
+/// A screen draw's target: the screen.
+pub const SCREEN_TARGET_SCREEN: u32 = 0;
+/// A screen draw's target: the motion sensor's (64 texels, which its draws'
+/// pixels are of, cleared to nothing each frame).
+pub const SCREEN_TARGET_MOTION_SENSOR: u32 = 1;
 /// A screen texture's alpha is mix(1, alpha, its green) (a meter's coverage).
 pub const SCREEN_TEXTURE_COVERAGE: u32 = 1 << 0;
 /// A screen texture's red holds a meter's exact segment thresholds (point
@@ -292,6 +301,8 @@ pub struct ScreenTexture {
 
 pub const SCREEN_MAP_WRAPPED: u16 = 1 << 0;
 pub const SCREEN_MAP_POINT_SAMPLED: u16 = 1 << 1;
+/// (Protocol 48) Outside the map, its draw's border colour.
+pub const SCREEN_MAP_BORDER: u16 = 1 << 2;
 
 /// (Protocol 46) a screen quad the game would have drawn (the HUD's and
 /// menus' bitmaps, in the order drawn): its vertices, its maps, the NV2A
@@ -321,8 +332,14 @@ pub struct ScreenDraw {
     pub blend_destination: u32,
     pub blend_operation: u32,
     pub blend_color: u32,
-    /// [`SCREEN_DRAW_BLENDED`], [`SCREEN_DRAW_ALPHA_KILL`].
+    /// [`SCREEN_DRAW_BLENDED`], [`SCREEN_DRAW_ALPHA_KILL`],
+    /// [`SCREEN_DRAW_COLOR_ONLY`].
     pub flags: u32,
+    /// (Protocol 48) [`SCREEN_TARGET_SCREEN`] or
+    /// [`SCREEN_TARGET_MOTION_SENSOR`], and its bordered maps' border colour
+    /// (a8r8g8b8).
+    pub target: u32,
+    pub border_color: u32,
 }
 
 impl Default for ScreenDraw {
@@ -335,6 +352,8 @@ impl Default for ScreenDraw {
 pub const SCREEN_DRAW_BLENDED: u32 = 1 << 0;
 /// t0's alpha kill (a meter's): a pixel whose t0 alpha is zero is dropped.
 pub const SCREEN_DRAW_ALPHA_KILL: u32 = 1 << 1;
+/// (Protocol 48) Colour only: alpha isn't written.
+pub const SCREEN_DRAW_COLOR_ONLY: u32 = 1 << 2;
 
 pub const SPRITE_NONLINEAR_TINT: u16 = 1 << 1;
 pub const SPRITE_EFFECT: u32 = 0;
@@ -533,6 +552,9 @@ struct Frame {
     physics_vehicles: [PhysicsVehicle; PHYSICS_VEHICLES],
     vehicle_ray_test_count: u32,
     vehicle_ray_tests: [VehicleRayTest; VEHICLE_RAY_TESTS],
+    screen_flash_type: u32,
+    screen_flash_intensity: f32,
+    screen_flash_color: [f32; 4],
     screen_draw_count: u32,
     screen_vertex_count: u32,
     screen_draws: [ScreenDraw; SCREEN_DRAWS],
@@ -1234,7 +1256,8 @@ struct OverlayHeader {
     frame_index: u32,
     width: u32,
     height: u32,
-    reserved: [u32; 4],
+    empty: u32,
+    reserved: [u32; 3],
 }
 
 #[repr(C)]
@@ -1341,6 +1364,11 @@ pub struct Snapshot {
     /// physics shapes (with `game.bevy_bridge_ray_tests` on).
     pub physics_vehicles: Vec<PhysicsVehicle>,
     pub vehicle_ray_tests: Vec<VehicleRayTest>,
+    /// (Protocol 48) The first player's screen flash (with
+    /// `game.bevy_bridge_viewer_hud` on): its type (0 none, 1 lighten, 2
+    /// darken, 3 max, 4 min, 5 invert, 6 tint), intensity and colour (alpha,
+    /// red, green, blue), drawn over the HUD.
+    pub screen_flash: (u32, f32, [f32; 4]),
     /// The screen quads the game would have drawn, in order (with
     /// `game.bevy_bridge_viewer_hud` on).
     pub screen_draws: Vec<ScreenDraw>,
@@ -1367,6 +1395,9 @@ pub struct Overlay {
     pub frame_index: u32,
     pub width: u32,
     pub height: u32,
+    /// (Protocol 49) Nothing was drawn into it: no pixels shared, the
+    /// picture clear.
+    pub empty: bool,
 }
 
 #[derive(Debug)]
@@ -1927,10 +1958,19 @@ impl Bridge {
                     frame_index: std::ptr::read_volatile(&(*header).frame_index),
                     width: std::ptr::read_volatile(&(*header).width),
                     height: std::ptr::read_volatile(&(*header).height),
+                    empty: std::ptr::read_volatile(&(*header).empty) != 0,
                 };
                 let picture = overlay.width as usize * overlay.height as usize * 4;
                 if picture == 0 || picture > OVERLAY_MAXIMUM_PIXELS * 4 {
                     return None;
+                }
+                if overlay.empty {
+                    fence(Ordering::Acquire);
+                    if std::ptr::read_volatile(&(*header).sequence) != sequence {
+                        continue;
+                    }
+                    self.last_overlay = Some((latest as u32, sequence));
+                    return Some(overlay);
                 }
                 pixels.resize(picture, 0);
                 std::ptr::copy_nonoverlapping((*self.shared).overlay_pixels[latest].as_ptr(), pixels.as_mut_ptr(), picture);
@@ -2019,6 +2059,11 @@ impl Bridge {
                     vehicle_ray_tests: (0..(std::ptr::read_volatile(&(*frame).vehicle_ray_test_count) as usize).min(VEHICLE_RAY_TESTS))
                         .map(|i| std::ptr::read_volatile(&(*frame).vehicle_ray_tests[i]))
                         .collect(),
+                    screen_flash: (
+                        std::ptr::read_volatile(&(*frame).screen_flash_type),
+                        std::ptr::read_volatile(&(*frame).screen_flash_intensity),
+                        std::ptr::read_volatile(&(*frame).screen_flash_color),
+                    ),
                     screen_draws: (0..(std::ptr::read_volatile(&(*frame).screen_draw_count) as usize).min(SCREEN_DRAWS))
                         .map(|i| std::ptr::read_volatile(&(*frame).screen_draws[i]))
                         .collect(),

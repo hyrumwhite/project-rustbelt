@@ -45,8 +45,10 @@ use bevy::{
     },
     window::PrimaryWindow,
 };
+use bevy::{render::render_resource::AsBindGroup, shader::ShaderRef, ui_render::prelude::{UiMaterial, UiMaterialPlugin}};
 use halo_bridge::{
-    ScreenDraw, SCREEN_DRAW_ALPHA_KILL, SCREEN_DRAW_BLENDED, SCREEN_MAP_POINT_SAMPLED, SCREEN_MAP_WRAPPED, SCREEN_TEXTURE_COVERAGE,
+    ScreenDraw, SCREEN_DRAW_ALPHA_KILL, SCREEN_DRAW_BLENDED, SCREEN_DRAW_COLOR_ONLY, SCREEN_MAP_BORDER, SCREEN_MAP_POINT_SAMPLED,
+    SCREEN_MAP_WRAPPED, SCREEN_TARGET_MOTION_SENSOR, SCREEN_TEXTURE_COVERAGE, SCREEN_TEXTURE_MOTION_SENSOR,
     SCREEN_TEXTURE_POINT_THRESHOLD, SCREEN_TEXTURE_TEXT_ATLAS, TEXT_ATLAS_SIZE,
 };
 
@@ -55,10 +57,12 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/halo_hud.wesl");
+        embedded_asset!(app, "shaders/halo_flash.wesl");
         app.init_resource::<HudStats>()
             .add_plugins(ExtractResourcePlugin::<HudList>::default())
-            .add_systems(Startup, spawn_hud)
-            .add_systems(Update, (size_hud, follow_hud).chain());
+            .add_plugins(UiMaterialPlugin::<FlashMaterial>::default())
+            .add_systems(Startup, (spawn_hud, spawn_flash))
+            .add_systems(Update, ((size_hud, follow_hud).chain(), follow_flash));
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
         render_app
             .add_systems(RenderStartup, init_pipeline)
@@ -97,6 +101,8 @@ struct HudDrawGpu {
     constant0: [[f32; 4]; 8],
     constant1: [[f32; 4]; 8],
     modes: [u32; 4],
+    /// the bordered maps' border colour
+    border: [f32; 4],
 }
 
 /// How a quad is blended: the game's factors and operation (GL's enums),
@@ -107,10 +113,17 @@ struct BlendKey {
     destination: u32,
     operation: u32,
     blended: bool,
+    /// alpha not written (the motion sensor's target, as the game draws it)
+    color_only: bool,
 }
 
 #[derive(Clone)]
 struct HudItem {
+    /// whether it is drawn into the motion sensor's target (first), not the
+    /// screen
+    motion_sensor: bool,
+    /// whether map 0 is the motion sensor's target
+    samples_motion_sensor: bool,
     maps: [Option<Handle<Image>>; 3],
     /// per map: bit 0 wrapped, bit 1 point sampled
     samplers: [u8; 3],
@@ -148,6 +161,109 @@ fn hud_image(width: u32, height: u32) -> Image {
     image
 }
 
+/// One of the screen flash's layers: a colour its blend multiplies the
+/// picture by, adds to it or takes from it.
+#[derive(AsBindGroup, Asset, TypePath, Debug, Clone)]
+#[bind_group_data(FlashBlend)]
+pub(crate) struct FlashMaterial {
+    #[uniform(0)]
+    colour: Vec4,
+    blend: FlashBlend,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum FlashBlend {
+    Multiply,
+    Add,
+    Subtract,
+}
+
+impl From<&FlashMaterial> for FlashBlend {
+    fn from(material: &FlashMaterial) -> Self {
+        material.blend
+    }
+}
+
+impl UiMaterial for FlashMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://halo_rt/shaders/halo_flash.wesl".into()
+    }
+
+    fn specialize(descriptor: &mut RenderPipelineDescriptor, key: bevy::ui_render::ui_material::UiMaterialKey<Self>) {
+        let (src_factor, dst_factor, operation) = match key.bind_group_data {
+            FlashBlend::Multiply => (BlendFactor::Zero, BlendFactor::Src, BlendOperation::Add),
+            FlashBlend::Add => (BlendFactor::One, BlendFactor::One, BlendOperation::Add),
+            FlashBlend::Subtract => (BlendFactor::One, BlendFactor::One, BlendOperation::ReverseSubtract),
+        };
+        let keep = BlendComponent { src_factor: BlendFactor::Zero, dst_factor: BlendFactor::One, operation: BlendOperation::Add };
+        if let Some(fragment) = &mut descriptor.fragment {
+            for target in fragment.targets.iter_mut().flatten() {
+                target.blend = Some(BlendState { color: BlendComponent { src_factor, dst_factor, operation }, alpha: keep });
+            }
+        }
+    }
+}
+
+/// The screen flash's layers: a multiply, then an add or a subtract.
+#[derive(Resource)]
+struct FlashLayers([Handle<FlashMaterial>; 3]);
+
+fn spawn_flash(mut commands: Commands, mut materials: ResMut<Assets<FlashMaterial>>) {
+    let layers = [
+        (FlashBlend::Multiply, Vec4::ONE),
+        (FlashBlend::Add, Vec4::ZERO),
+        (FlashBlend::Subtract, Vec4::ZERO),
+    ]
+    .map(|(blend, colour)| materials.add(FlashMaterial { colour, blend }));
+    for layer in &layers {
+        commands.spawn((
+            Name::new("Game screen flash"),
+            MaterialNode(layer.clone()),
+            Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
+            // over the HUD, under the viewer's own text
+            GlobalZIndex(-1),
+        ));
+    }
+    commands.insert_resource(FlashLayers(layers));
+}
+
+/// The game's flash as the layers' colours. Its blends work on the
+/// display's encoding and some take the picture or a constant colour as a
+/// factor; each is a multiply by one colour and an add (or subtract) of
+/// another: lighten f + d(1 - a), darken d - f, tint a + d(1 - inverse),
+/// invert s + d(1 - f - s). Max and min take the nearest of lighten and
+/// darken. A multiply in the display's encoding is the same multiply in light
+/// by its colour to the 2.2; the added colours are converted alike.
+fn follow_flash(link: Res<BridgeLink>, layers: Res<FlashLayers>, mut materials: ResMut<Assets<FlashMaterial>>, mut last: Local<Option<[Vec4; 3]>>) {
+    let Some(snapshot) = link.latest.as_ref() else { return };
+    let (kind, intensity, [a, r, g, b]) = snapshot.screen_flash;
+    let colour = Vec3::new(r, g, b);
+    let flash = colour * intensity;
+    let alpha = a * intensity;
+    let (multiply, add, subtract) = match kind {
+        1 | 3 => (Vec3::splat(1.0 - alpha), flash, Vec3::ZERO),
+        2 | 4 => (Vec3::ONE, Vec3::ZERO, flash),
+        5 => {
+            // the combiners' c0 * (2 c0 - 1) + c0.a
+            let s = (flash * (2.0 * flash - 1.0) + alpha).clamp(Vec3::ZERO, Vec3::ONE);
+            ((Vec3::ONE - flash - s).clamp(Vec3::ZERO, Vec3::ONE), s, Vec3::ZERO)
+        }
+        6 => (Vec3::ONE - (Vec3::ONE - colour) * intensity, Vec3::splat(alpha), Vec3::ZERO),
+        _ => (Vec3::ONE, Vec3::ZERO, Vec3::ZERO),
+    };
+    let to_light = |c: Vec3| c.clamp(Vec3::ZERO, Vec3::ONE).powf(2.2);
+    let colours = [to_light(multiply).extend(1.0), to_light(add).extend(1.0), to_light(subtract).extend(1.0)];
+    if *last == Some(colours) {
+        return;
+    }
+    *last = Some(colours);
+    for (layer, colour) in layers.0.iter().zip(colours) {
+        if let Some(mut material) = materials.get_mut(layer) {
+            material.colour = colour;
+        }
+    }
+}
+
 fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<OverlayMaterial>>) {
     let image = images.add(hud_image(1, 1));
     let material = materials.add(OverlayMaterial::new(image.clone()));
@@ -155,8 +271,9 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut mate
         Name::new("Game HUD"),
         MaterialNode(material.clone()),
         Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
-        // over the game's overlay, under the viewer's own text
-        GlobalZIndex(-1),
+        // over the game's overlay, under its screen flash and the viewer's
+        // own text
+        GlobalZIndex(-2),
     ));
     commands.insert_resource(HudList { image, material, size: (1, 1), vertices: default(), draws: default(), items: default() });
 }
@@ -332,7 +449,18 @@ fn follow_hud(
         let mut present = 0u32;
         let mut texture_flags = 0u32;
         let mut missing = false;
+        let mut bordered = 0u32;
+        let mut samples_motion_sensor = false;
         for (index, map) in draw.maps.iter().enumerate() {
+            if map.flags & SCREEN_MAP_BORDER != 0 {
+                bordered |= 1 << index;
+            }
+            // the motion sensor's target (drawn first, here)
+            if map.texture == SCREEN_TEXTURE_MOTION_SENSOR {
+                samples_motion_sensor = index == 0;
+                present |= 1 << index;
+                continue;
+            }
             // the port's art, or the text's atlas, in the bitmap's place
             if map.texture != u32::MAX {
                 let image = if map.texture == SCREEN_TEXTURE_TEXT_ATLAS {
@@ -394,11 +522,14 @@ fn follow_hud(
                 present,
                 u32::from(draw.flags & SCREEN_DRAW_ALPHA_KILL != 0),
                 u32::from(texture_flags & SCREEN_TEXTURE_COVERAGE != 0) | (u32::from(texture_flags & SCREEN_TEXTURE_POINT_THRESHOLD != 0) << 1),
-                0,
+                bordered,
             ],
+            border: unpack_color(draw.border_color),
         });
         let blend_color = unpack_color(draw.blend_color).map(f64::from);
         list.items.push(HudItem {
+            motion_sensor: draw.target == SCREEN_TARGET_MOTION_SENSOR,
+            samples_motion_sensor,
             maps,
             samplers,
             blend: BlendKey {
@@ -406,6 +537,7 @@ fn follow_hud(
                 destination: draw.blend_destination,
                 operation: draw.blend_operation,
                 blended: draw.flags & SCREEN_DRAW_BLENDED != 0,
+                color_only: draw.flags & SCREEN_DRAW_COLOR_ONLY != 0,
             },
             blend_color,
         });
@@ -481,6 +613,14 @@ fn blend_state(key: BlendKey) -> Option<BlendState> {
     if !key.blended {
         return None;
     }
+    if key.color_only {
+        let color = BlendComponent {
+            src_factor: blend_factor(key.source),
+            dst_factor: blend_factor(key.destination),
+            operation: blend_operation(key.operation),
+        };
+        return Some(BlendState { color, alpha: BlendComponent { src_factor: BlendFactor::Zero, dst_factor: BlendFactor::One, operation: BlendOperation::Add } });
+    }
     let (source, destination) = (key.source, key.destination);
     let replaces = key.operation == GL_FUNC_ADD
         && (destination == GL_ONE_MINUS_SRC_ALPHA || (destination == GL_ZERO && source != GL_ZERO && source != GL_DST_COLOR));
@@ -513,6 +653,9 @@ pub(crate) struct HudPipeline {
 
 /// What the HUD is drawn as: the display's encoding, stored as is.
 const HUD_DRAW_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
+
+/// The motion sensor's target here (the game's has 64 texels).
+const MOTION_SENSOR_SIZE: u32 = 256;
 
 fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<AssetServer>) {
     let draws_layout = BindGroupLayoutDescriptor::new(
@@ -557,7 +700,11 @@ fn queue_pipeline(cache: &PipelineCache, hud: &HudPipeline, key: BlendKey) -> Ca
         fragment: Some(FragmentState {
             shader: hud.shader.clone(),
             entry_point: Some("fragment".into()),
-            targets: vec![Some(ColorTargetState { format: HUD_DRAW_FORMAT, blend: blend_state(key), write_mask: ColorWrites::ALL })],
+            targets: vec![Some(ColorTargetState {
+                format: HUD_DRAW_FORMAT,
+                blend: blend_state(key),
+                write_mask: if key.color_only { ColorWrites::COLOR } else { ColorWrites::ALL },
+            })],
             ..default()
         }),
         ..default()
@@ -578,6 +725,7 @@ fn draw_hud(
     mut pipelines: Local<HashMap<BlendKey, CachedRenderPipelineId>>,
     frames: Option<Res<bevy::diagnostic::FrameCount>>,
     mut drawn: Local<Option<u32>>,
+    mut texture_cache: ResMut<bevy::render::texture::TextureCache>,
     mut ctx: RenderContext,
 ) {
     let (Some(list), Some(hud)) = (list, hud) else { return };
@@ -607,10 +755,33 @@ fn draw_hud(
             &BindGroupEntries::single(draws.as_entire_binding()),
         );
         let maps_layout = cache.get_bind_group_layout(&hud.maps_layout);
+        // the motion sensor's target: its own draws, then sampled by the
+        // screen's (larger than the game's 64 texels, as the window is)
+        let motion_sensor = list.items.iter().any(|item| item.motion_sensor || item.samples_motion_sensor).then(|| {
+            texture_cache.get(
+                &device,
+                bevy::render::render_resource::TextureDescriptor {
+                    label: Some("halo_hud_motion_sensor"),
+                    size: Extent3d { width: MOTION_SENSOR_SIZE, height: MOTION_SENSOR_SIZE, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: HUD_DRAW_FORMAT,
+                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+            )
+        });
+        let mut motion_runs = Vec::new();
         for (index, item) in list.items.iter().enumerate() {
             let pipeline_id = *pipelines.entry(item.blend).or_insert_with(|| queue_pipeline(&cache, &hud, item.blend));
             let Some(pipeline) = cache.get_render_pipeline(pipeline_id) else { continue };
             let texture = |map: usize| {
+                if map == 0 && item.samples_motion_sensor {
+                    if let Some(target) = &motion_sensor {
+                        return &target.default_view;
+                    }
+                }
                 item.maps[map].as_ref().and_then(|image| gpu_images.get(image)).map_or(&fallback.d2.texture_view, |image| &image.texture_view)
             };
             let sampler = |map: usize| &hud.samplers[item.samplers[map] as usize];
@@ -619,7 +790,34 @@ fn draw_hud(
                 &maps_layout,
                 &BindGroupEntries::sequential((texture(0), sampler(0), texture(1), sampler(1), texture(2), sampler(2))),
             );
-            runs.push((pipeline, maps, index as u32, item.blend_color));
+            if item.motion_sensor {
+                motion_runs.push((pipeline, maps, index as u32, item.blend_color));
+            } else {
+                runs.push((pipeline, maps, index as u32, item.blend_color));
+            }
+        }
+        if let Some(target) = &motion_sensor {
+            let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+                label: Some("halo_hud_motion_sensor"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &target.default_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations { load: LoadOp::Clear(default()), store: StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_bind_group(0, &draws_group, &[]);
+            for (pipeline, maps, index, color) in &motion_runs {
+                pass.set_render_pipeline(pipeline);
+                pass.set_bind_group(1, maps, &[]);
+                pass.set_blend_constant(LinearRgba::new(color[0] as f32, color[1] as f32, color[2] as f32, color[3] as f32));
+                pass.draw(index * 6..index * 6 + 6, *index..*index + 1);
+            }
         }
         let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("halo_hud"),

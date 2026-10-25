@@ -159,11 +159,10 @@ struct Args {
     /// game's overlay instead of drawing them here
     #[argh(switch)]
     game_effects: bool,
-    /// with --opence, draw the HUD's and menus' bitmaps here instead of in
-    /// the game's overlay (in progress: the text and the high-res HUD art
-    /// still to come, so opt in for now)
+    /// with --opence, leave the HUD, the menus and their text in the game's
+    /// overlay instead of drawing them here
     #[argh(switch)]
-    viewer_hud: bool,
+    game_hud: bool,
     /// with --opence, leave the transparent chicago and generic surfaces in
     /// the game's overlay instead of drawing them here
     #[argh(switch)]
@@ -196,7 +195,7 @@ impl Args {
     /// the game shares its overlay: the game it starts shares its screen
     /// quads instead of drawing them (game.bevy_bridge_viewer_hud).
     fn draws_hud(&self) -> bool {
-        self.opence.is_some() && !self.no_overlay && self.viewer_hud
+        self.opence.is_some() && !self.no_overlay && !self.game_hud
     }
 
     /// Whether this viewer draws the sprites itself while the game shares

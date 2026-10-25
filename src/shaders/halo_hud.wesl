@@ -14,7 +14,9 @@ struct HudDraw {
     alpha_outputs: array<vec4<u32>, 2>,
     constant0: array<vec4<f32>, 8>,
     constant1: array<vec4<f32>, 8>,
-    // x: the maps present (bit per map), y: 1 t0's alpha kill
+    // x: the maps present (bit per map), y: 1 t0's alpha kill, z: the port's
+    // art as map 0: bit 0 a meter's coverage in its green, bit 1 its exact
+    // segment thresholds in its red
     modes: vec4<u32>,
 }
 
@@ -133,6 +135,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
     // the bitmaps' stored values (the combiners' t0-t2)
     if (d.modes.x & 1u) != 0u { registers[8] = textureSample(map0, map0_sampler, in.uv0); }
+    // (the port's meter art: its segments' thresholds, never averaged with
+    // another's, as nv2a_psh.c reads them)
+    if (d.modes.z & 2u) != 0u {
+        let size = vec2<i32>(textureDimensions(map0, 0));
+        let pixel = clamp(vec2<i32>(floor(in.uv0 * vec2<f32>(size))), vec2<i32>(0), size - 1);
+        let threshold = textureLoad(map0, pixel, 0).r;
+        if threshold > 0.0 {
+            registers[8].r = threshold;
+            registers[8].b = threshold;
+        }
+    }
     if (d.modes.x & 2u) != 0u { registers[9] = textureSample(map1, map1_sampler, in.uv1); }
     if (d.modes.x & 4u) != 0u { registers[10] = textureSample(map2, map2_sampler, in.uv2); }
     // v0 the vertex's colour; v1 the screen geometry shader leaves black
@@ -206,5 +219,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     if d.modes.y != 0u && registers[8].a <= 0.0 {
         discard;
     }
-    return vec4(rgb, alpha);
+    // (the port's meter art: its coverage in its green)
+    var out_alpha = alpha;
+    if (d.modes.z & 1u) != 0u {
+        out_alpha = mix(1.0, alpha, registers[8].g);
+    }
+    return vec4(rgb, out_alpha);
 }

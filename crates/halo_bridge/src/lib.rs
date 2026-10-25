@@ -21,7 +21,17 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 46;
+pub const VERSION: u32 = 47;
+pub const SCREEN_TEXTURES: usize = 512;
+pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
+pub const TEXT_ATLAS_SIZE: usize = 2048;
+/// A screen map's texture: the high-res text's atlas ([`Bridge::read_text_atlas`]).
+pub const SCREEN_TEXTURE_TEXT_ATLAS: u32 = 0xFFFF_FFFE;
+/// A screen texture's alpha is mix(1, alpha, its green) (a meter's coverage).
+pub const SCREEN_TEXTURE_COVERAGE: u32 = 1 << 0;
+/// A screen texture's red holds a meter's exact segment thresholds (point
+/// sampled; zero elsewhere).
+pub const SCREEN_TEXTURE_POINT_THRESHOLD: u32 = 1 << 1;
 pub const SCREEN_DRAWS: usize = 1024;
 pub const SCREEN_VERTICES: usize = 4096;
 pub const SPRITE_BATCHES: usize = 512;
@@ -252,6 +262,32 @@ pub struct ScreenMap {
     pub bitmap: u32,
     pub bitmap_index: u16,
     pub flags: u16,
+    /// (Protocol 47) Drawn with this texture instead (`u32::MAX` for none):
+    /// a screen texture's index ([`Bridge::read_screen_textures`]: the port's
+    /// high-res HUD or menu art), or [`SCREEN_TEXTURE_TEXT_ATLAS`].
+    pub texture: u32,
+}
+
+/// (Protocol 47) a texture the screen quads are drawn with in place of a
+/// bitmap, as shared: what it stands for, where its PNG is, and flags.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ScreenTextureEntry {
+    id: u32,
+    offset: u32,
+    size: u32,
+    flags: u32,
+}
+
+/// A screen texture: its index (as a [`ScreenMap::texture`] names it), what
+/// it stands for, its flags ([`SCREEN_TEXTURE_COVERAGE`],
+/// [`SCREEN_TEXTURE_POINT_THRESHOLD`]) and its PNG.
+#[derive(Debug, Clone)]
+pub struct ScreenTexture {
+    pub index: u32,
+    pub id: u32,
+    pub flags: u32,
+    pub png: Vec<u8>,
 }
 
 pub const SCREEN_MAP_WRAPPED: u16 = 1 << 0;
@@ -1256,6 +1292,13 @@ struct Shared {
     vehicle_update_record_count: u32,
     vehicle_update_records: [VehicleUpdateRecord; VEHICLE_UPDATE_RECORDS],
     overlay_pixels: [[u8; OVERLAY_MAXIMUM_PIXELS * 4]; OVERLAYS],
+    screen_texture_count: u32,
+    screen_texture_bytes: u32,
+    screen_textures: [ScreenTextureEntry; SCREEN_TEXTURES],
+    screen_texture_png: [u8; SCREEN_TEXTURE_BYTES],
+    text_atlas_sequence: u32,
+    text_atlas_generation: u32,
+    text_atlas: [u8; TEXT_ATLAS_SIZE * TEXT_ATLAS_SIZE],
 }
 
 /// The layout is the game's, measured there; keep these in step with
@@ -1815,6 +1858,55 @@ impl Bridge {
 
     /// The latest overlay, copied into `pixels`, if it is newer than the last
     /// one returned.
+    /// The screen textures shared after the first `from` (the game appends
+    /// them as first drawn and never changes one).
+    pub fn read_screen_textures(&self, from: usize) -> Vec<ScreenTexture> {
+        // SAFETY: as in read(); each entry is complete before it is counted
+        unsafe {
+            let count = (std::ptr::read_volatile(&(*self.shared).screen_texture_count) as usize).min(SCREEN_TEXTURES);
+            fence(Ordering::Acquire);
+            (from..count)
+                .filter_map(|index| {
+                    let entry = std::ptr::read_volatile(&(*self.shared).screen_textures[index]);
+                    let (offset, size) = (entry.offset as usize, entry.size as usize);
+                    if offset + size > SCREEN_TEXTURE_BYTES {
+                        return None;
+                    }
+                    let mut png = vec![0u8; size];
+                    std::ptr::copy_nonoverlapping((*self.shared).screen_texture_png.as_ptr().add(offset), png.as_mut_ptr(), size);
+                    Some(ScreenTexture { index: index as u32, id: entry.id, flags: entry.flags, png })
+                })
+                .collect()
+        }
+    }
+
+    /// The high-res text's atlas ([`TEXT_ATLAS_SIZE`] squared, its glyphs'
+    /// coverage) and its generation, when that isn't `generation`.
+    pub fn read_text_atlas(&self, generation: u32, coverage: &mut Vec<u8>) -> Option<u32> {
+        for _ in 0..4 {
+            // SAFETY: as in read_overlay
+            unsafe {
+                let sequence = std::ptr::read_volatile(&(*self.shared).text_atlas_sequence);
+                if sequence & 1 != 0 {
+                    continue;
+                }
+                fence(Ordering::Acquire);
+                let current = std::ptr::read_volatile(&(*self.shared).text_atlas_generation);
+                if current == generation || current == 0 {
+                    return None;
+                }
+                coverage.resize(TEXT_ATLAS_SIZE * TEXT_ATLAS_SIZE, 0);
+                std::ptr::copy_nonoverlapping((*self.shared).text_atlas.as_ptr(), coverage.as_mut_ptr(), coverage.len());
+                fence(Ordering::Acquire);
+                if std::ptr::read_volatile(&(*self.shared).text_atlas_sequence) != sequence {
+                    continue;
+                }
+                return Some(current);
+            }
+        }
+        None
+    }
+
     pub fn read_overlay(&mut self, pixels: &mut Vec<u8>) -> Option<Overlay> {
         for _ in 0..4 {
             // SAFETY: as in read(); the pixels are copied as bytes and

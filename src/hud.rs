@@ -11,6 +11,12 @@
 //! what is under them add their coverage, additive blends keep it, and
 //! multiplying blends, with nothing under them, are left out). The texture
 //! is composited over the picture, premultiplied, as the game's overlay is.
+//!
+//! Where the port draws its own art in a bitmap's place (its high-res HUD
+//! and menu art), the game shares that art's PNG once
+//! ([`halo_bridge::Bridge::read_screen_textures`]), and the high-res text's
+//! characters come as quads of its atlas
+//! ([`halo_bridge::Bridge::read_text_atlas`]), in the same order.
 
 use crate::bridge::{BridgeLevel, BridgeLink};
 use crate::overlay::OverlayMaterial;
@@ -39,7 +45,10 @@ use bevy::{
     },
     window::PrimaryWindow,
 };
-use halo_bridge::{ScreenDraw, SCREEN_DRAW_ALPHA_KILL, SCREEN_DRAW_BLENDED, SCREEN_MAP_POINT_SAMPLED, SCREEN_MAP_WRAPPED};
+use halo_bridge::{
+    ScreenDraw, SCREEN_DRAW_ALPHA_KILL, SCREEN_DRAW_BLENDED, SCREEN_MAP_POINT_SAMPLED, SCREEN_MAP_WRAPPED, SCREEN_TEXTURE_COVERAGE,
+    SCREEN_TEXTURE_POINT_THRESHOLD, SCREEN_TEXTURE_TEXT_ATLAS, TEXT_ATLAS_SIZE,
+};
 
 pub struct HudPlugin;
 
@@ -173,6 +182,73 @@ fn unpack_color(c: u32) -> [f32; 4] {
     [((c >> 16) & 255) as f32 / 255.0, ((c >> 8) & 255) as f32 / 255.0, (c & 255) as f32 / 255.0, (c >> 24) as f32 / 255.0]
 }
 
+/// The port's art and the text's atlas, as the game has shared them.
+#[derive(Default)]
+struct ScreenTextures {
+    /// by index: the image and its flags
+    shared: Vec<Option<(Handle<Image>, u32)>>,
+    atlas: Option<Handle<Image>>,
+    atlas_generation: u32,
+    coverage: Vec<u8>,
+}
+
+/// An RGBA8 picture with its mip levels (each a box filter of the last), as
+/// the port draws its art: it is larger than it appears.
+fn with_mips(width: u32, height: u32, mut pixels: Vec<u8>) -> Image {
+    let (mut w, mut h) = (width as usize, height as usize);
+    let mut level = pixels.clone();
+    let mut levels = 1;
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![0u8; nw * nh * 4];
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let mut sum = 0u32;
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let (sx, sy) = ((x * 2 + dx).min(w - 1), (y * 2 + dy).min(h - 1));
+                        sum += u32::from(level[(sy * w + sx) * 4 + c]);
+                    }
+                    next[(y * nw + x) * 4 + c] = ((sum + 2) / 4) as u8;
+                }
+            }
+        }
+        pixels.extend_from_slice(&next);
+        level = next;
+        (w, h) = (nw, nh);
+        levels += 1;
+    }
+    let mut image = Image::new(
+        Extent3d { width, height, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        pixels,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.mip_level_count = levels;
+    image
+}
+
+/// A shared PNG as an image (its stored values, with mip levels).
+fn decode_png(png: &[u8]) -> Option<Image> {
+    // (decoded as sRGB only for the conversion to take it: the bytes are the
+    // same, and stored as they are)
+    let decoded = bevy::image::Image::from_buffer(
+        png,
+        bevy::image::ImageType::Extension("png"),
+        bevy::image::CompressedImageFormats::NONE,
+        true,
+        bevy::image::ImageSampler::Default,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .ok()?
+    .try_into_dynamic()
+    .ok()?
+    .to_rgba8();
+    let (width, height) = decoded.dimensions();
+    Some(with_mips(width, height, decoded.into_raw()))
+}
+
 fn follow_hud(
     link: Res<BridgeLink>,
     mut list: ResMut<HudList>,
@@ -180,9 +256,53 @@ fn follow_hud(
     mut level: Option<ResMut<BridgeLevel>>,
     mut images: ResMut<Assets<Image>>,
     mut bitmaps: Local<HashMap<(u32, u16), Option<Handle<Image>>>>,
+    mut textures: Local<ScreenTextures>,
     mut scenario: Local<String>,
     mut last_frame_index: Local<u32>,
 ) {
+    // the port's art the game has shared since, and the text's atlas when it
+    // has changed
+    let textures = &mut *textures;
+    for texture in link.bridge.read_screen_textures(textures.shared.len()) {
+        let image = decode_png(&texture.png).map(|image| images.add(image));
+        if image.is_none() {
+            let error = bevy::image::Image::from_buffer(
+                &texture.png,
+                bevy::image::ImageType::Extension("png"),
+                bevy::image::CompressedImageFormats::NONE,
+                false,
+                bevy::image::ImageSampler::Default,
+                RenderAssetUsages::RENDER_WORLD,
+            )
+            .err();
+            warn!(
+                "hud: screen texture {} ({:#x}, {} bytes, starting {:02x?}) didn't decode: {error:?}",
+                texture.index,
+                texture.id,
+                texture.png.len(),
+                &texture.png[..texture.png.len().min(8)]
+            );
+        }
+        textures.shared.resize(texture.index as usize + 1, None);
+        textures.shared[texture.index as usize] = image.map(|image| (image, texture.flags));
+    }
+    if let Some(generation) = link.bridge.read_text_atlas(textures.atlas_generation, &mut textures.coverage) {
+        textures.atlas_generation = generation;
+        let pixels: Vec<u8> = textures.coverage.iter().flat_map(|&a| [255, 255, 255, a]).collect();
+        let image = Image::new(
+            Extent3d { width: TEXT_ATLAS_SIZE as u32, height: TEXT_ATLAS_SIZE as u32, depth_or_array_layers: 1 },
+            TextureDimension::D2,
+            pixels,
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        match &textures.atlas {
+            Some(handle) => {
+                images.insert(handle.id(), image).ok();
+            }
+            None => textures.atlas = Some(images.add(image)),
+        }
+    }
     let Some(snapshot) = link.latest.as_ref() else { return };
     if snapshot.frame_index == *last_frame_index {
         return;
@@ -210,8 +330,29 @@ fn follow_hud(
         let mut maps: [Option<Handle<Image>>; 3] = default();
         let mut samplers = [0u8; 3];
         let mut present = 0u32;
+        let mut texture_flags = 0u32;
         let mut missing = false;
         for (index, map) in draw.maps.iter().enumerate() {
+            // the port's art, or the text's atlas, in the bitmap's place
+            if map.texture != u32::MAX {
+                let image = if map.texture == SCREEN_TEXTURE_TEXT_ATLAS {
+                    textures.atlas.clone()
+                } else {
+                    textures.shared.get(map.texture as usize).cloned().flatten().map(|(image, flags)| {
+                        if index == 0 {
+                            texture_flags = flags;
+                        }
+                        image
+                    })
+                };
+                if image.is_none() {
+                    missing = true;
+                }
+                maps[index] = image;
+                present |= 1 << index;
+                samplers[index] = u8::from(map.flags & SCREEN_MAP_WRAPPED != 0) | (u8::from(map.flags & SCREEN_MAP_POINT_SAMPLED != 0) << 1);
+                continue;
+            }
             if map.bitmap == u32::MAX {
                 continue;
             }
@@ -249,7 +390,12 @@ fn follow_hud(
             alpha_outputs: draw.alpha_outputs,
             constant0: draw.constant_0.map(unpack_color),
             constant1: draw.constant_1.map(unpack_color),
-            modes: [present, u32::from(draw.flags & SCREEN_DRAW_ALPHA_KILL != 0), 0, 0],
+            modes: [
+                present,
+                u32::from(draw.flags & SCREEN_DRAW_ALPHA_KILL != 0),
+                u32::from(texture_flags & SCREEN_TEXTURE_COVERAGE != 0) | (u32::from(texture_flags & SCREEN_TEXTURE_POINT_THRESHOLD != 0) << 1),
+                0,
+            ],
         });
         let blend_color = unpack_color(draw.blend_color).map(f64::from);
         list.items.push(HudItem {

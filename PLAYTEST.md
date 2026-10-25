@@ -36,6 +36,19 @@ To find anything still left to the game's picture, run with `HALO_RT_OVERLAY_DEB
 2. Replay that spot with everything in C: `dist/halo_rt.exe --simulation none`. If it plays fine that way, the problem is likely on the Rust side. (Not yet tried on the packaged build; the flag is passed through.)
 3. Pass on where it happened. With that, check mode (`--simulation hs:check`, the scripts only, the other systems in C) logs the exact library function that first disagrees with the game.
 
+## Optional: lit fog
+
+`dist/halo_rt.exe --lit-fog 1` (or `HALO_RT_LIT_FOG=1`) lights the game's fog with the scene's lights: muzzle flashes, plasma and glowing surfaces should light the haze around them, path traced. It's off by default. Things to try:
+
+- **Where:** foggy levels, such as c10's swamp, b30's sea fog and d20.
+- **Strength:** 1 is physical. Try 3 to 10 for a stronger look (10 is strong on c10).
+- **The sun:** add `,sun` to let it light the fog too (`--lit-fog 3,sun`). The game's fog colour already stands for daylight, so this is off by default.
+- **See the term alone:** add `,only`.
+- **What to look for:**
+  - smearing behind a moving light (the light is averaged over up to 24 frames)
+  - glows that look too strong right in front of glowing surfaces
+  - the cost: about 0.75 ms a frame at 1280x720
+
 ## Known gaps (not bugs to report)
 
 Drawn by neither the game nor the viewer yet:

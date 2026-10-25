@@ -151,6 +151,13 @@ struct Args {
     /// it here
     #[argh(switch)]
     game_fog: bool,
+    /// with the viewer's fog, light it by the scene's lights (muzzle flashes,
+    /// plasma, lamps), path traced: a strength (1 is physical), and ",sun" to
+    /// let the sun light it too (",only" shows it alone); costly and noisy,
+    /// so off by default
+    /// (HALO_RT_LIT_FOG takes the same)
+    #[argh(option)]
+    lit_fog: Option<String>,
     /// with --opence, leave the decals in the game's overlay instead of
     /// drawing them here
     #[argh(switch)]
@@ -471,6 +478,11 @@ fn main() -> AppExit {
             app.add_plugins(overlay::OverlayPlugin);
             if args.viewer_fog() {
                 app.add_plugins(fog::FogPlugin);
+                let lit_fog = args.lit_fog.clone().or_else(|| std::env::var("HALO_RT_LIT_FOG").ok());
+                if let Some(lit_fog) = lit_fog.as_deref().and_then(fog::LitFog::parse) {
+                    info!("lit fog: {lit_fog:?}");
+                    app.insert_resource(lit_fog);
+                }
                 if args.viewer_glass() {
                     app.insert_resource(fog::ViewerWater);
                 }

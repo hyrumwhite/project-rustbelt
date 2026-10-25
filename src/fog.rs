@@ -57,6 +57,32 @@ pub struct FogPlugin;
 #[derive(Resource)]
 pub struct ViewerWater;
 
+/// The fog lit by the scene's lights (Solarik's lit fog: single scattering
+/// of the lights along each view ray, through the game's fog): its strength,
+/// and whether the sun lights it too (the game's fog colour already stands
+/// for the daylight, so not by default).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct LitFog {
+    pub strength: f32,
+    pub sun: bool,
+    /// The scattered light alone, for looking at it.
+    pub only: bool,
+}
+
+impl LitFog {
+    /// "strength[,sun][,only]"; none for a strength of 0 or one that isn't a number.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split(',').map(str::trim);
+        let strength = parts.next()?.parse::<f32>().ok().filter(|s| *s > 0.0 && s.is_finite())?;
+        let (mut sun, mut only) = (false, false);
+        for part in parts {
+            sun |= part.eq_ignore_ascii_case("sun");
+            only |= part.eq_ignore_ascii_case("only");
+        }
+        Some(Self { strength, sun, only })
+    }
+}
+
 impl Plugin for FogPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "shaders/halo_fog.wesl");
@@ -228,6 +254,7 @@ fn follow_fog(
     mut level: Option<ResMut<crate::bridge::BridgeLevel>>,
     mut images: ResMut<Assets<Image>>,
     viewer_water: Option<Res<ViewerWater>>,
+    lit_fog: Option<Res<LitFog>>,
     mut ray_fog: ResMut<bevy_solarik::scene::SolarikRayFog>,
 ) {
     let (entity, current) = *camera;
@@ -267,6 +294,7 @@ fn follow_fog(
             plane: fog.plane,
             planar_color: fog.planar_color,
             planar: fog.planar,
+            lit: lit_fog.as_deref().map_or(Vec4::ZERO, |lit| Vec4::new(lit.strength, f32::from(u8::from(lit.sun)), f32::from(u8::from(lit.only)), 0.0)),
         }
     });
     if *ray_fog != traced {

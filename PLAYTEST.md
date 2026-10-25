@@ -49,11 +49,19 @@ To find anything still left to the game's picture, run with `HALO_RT_OVERLAY_DEB
   - glows that look too strong right in front of glowing surfaces
   - the cost: about 0.75 ms a frame at 1280x720
 
+## Fixes from the c10 pass to check
+
+- **Starting a level from the menus:** c10 crashed as it loaded (a bitmap kept from the menus' map was a particle there); any level could have.
+- **c10's door lights:** the coloured lights beside the doors are at a tenth of their old brightness.
+- **c10's swamps:** the water's pass is about 8.5 ms cheaper (the frame went from 28 to 20 ms on the opening's view). The stats panel now lists "Glass and water", "Foliage" and "Lit fog", which it used to leave out of its total.
+- **The Flood reveal's helmet recording:** the game's screen effects are drawn now: the video look (green scanlines, noise) and light enhancement (night vision), and desaturation. It was black.
+- **Still open:** grunt blood that disappears with the viewing angle, and the black creeping over glass. Neither reproduced yet. F9 now writes a `.txt` beside each capture with the level, tick and camera; a capture of each, at the moment it happens, gives the exact spot.
+
 ## Known gaps (not bugs to report)
 
 Drawn by neither the game nor the viewer yet:
 
-- the HUD's screen filters: desaturation and light enhancement (night vision)
+
 - the sun glow around the sun
 - active camouflage's shimmer (the viewer draws a faint glassy shell instead)
 - texture animation on character and vehicle shaders (level surfaces do animate)

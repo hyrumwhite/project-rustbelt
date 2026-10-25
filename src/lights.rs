@@ -119,9 +119,10 @@ const CONTRAIL_GLOWS: [(&str, [f32; 3], f32); 1] = [
 const CONTRAIL_GLOW_SPACING: f32 = 3.0;
 const CONTRAIL_GLOW_MOST: usize = 4;
 
-/// Lights dimmed from their tags' brightness (by the light tag's name): a
-/// wide reach is a bright light here (brightness grows with its square).
-const LIGHT_DIMMING: [(&str, f32); 6] = [
+/// Lights dimmed from their tags' brightness (by the light tag's name, or
+/// a folder's, ending in a backslash): a wide reach is a bright light here
+/// (brightness grows with its square).
+const LIGHT_DIMMING: [(&str, f32); 7] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights)
     ("characters\\monitor\\monitor dynamic", 0.15),
@@ -134,7 +135,19 @@ const LIGHT_DIMMING: [(&str, f32); 6] = [
     // terminal turns it off: it washed out the hologram, which the game
     // draws brighter than the walls; play feedback: to 15%)
     ("levels\\b30\\devices\\interior tech objects\\holo control room display\\light", 0.15),
+    // (c10's coloured point lights, flanking its doors, some blinking: they
+    // flooded the rooms green and red; play feedback: dramatically down)
+    ("levels\\c10\\scenery\\", 0.1),
 ];
+
+/// Whether a light tag's name is the dimmed one, or in the dimmed folder.
+fn dimmed_by(name: &str, dimmed: &str) -> bool {
+    if dimmed.ends_with('\\') {
+        name.len() > dimmed.len() && name.is_char_boundary(dimmed.len()) && name[..dimmed.len()].eq_ignore_ascii_case(dimmed)
+    } else {
+        name.eq_ignore_ascii_case(dimmed)
+    }
+}
 
 /// What a light's tag says of it here.
 #[derive(Clone, Copy)]
@@ -249,7 +262,7 @@ fn sync_lights(
             let name = level.as_ref().and_then(|level| level.builder.cache.tag(light.definition_index).ok()).map(|tag| tag.name.as_str());
             LightTag {
                 muzzle: name.is_some_and(|name| name.ends_with("muzzle flash")),
-                dimming: name.and_then(|name| LIGHT_DIMMING.iter().find(|(dimmed, _)| name.eq_ignore_ascii_case(dimmed))).map_or(1.0, |&(_, dimming)| dimming),
+                dimming: name.and_then(|name| LIGHT_DIMMING.iter().find(|(dimmed, _)| dimmed_by(name, dimmed))).map_or(1.0, |&(_, dimming)| dimming),
             }
         });
         let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0 || tag.muzzle;

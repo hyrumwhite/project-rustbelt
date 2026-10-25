@@ -310,6 +310,7 @@ static void bevy_bridge_share_text_atlas(struct bevy_bridge_shared *shared);
 static unsigned long bevy_bridge_screen_flash_type;
 static float bevy_bridge_screen_flash_intensity;
 static float bevy_bridge_screen_flash_color[4];
+static struct bevy_bridge_screen_effect bevy_bridge_screen_effect;
 /* the screen quads staged for the frame's export */
 static unsigned long bevy_bridge_screen_draw_count;
 static unsigned long bevy_bridge_screen_vertex_count;
@@ -672,6 +673,8 @@ void bevy_bridge_export_frame(
 	frame->screen_flash_intensity = bevy_bridge_screen_flash_intensity;
 	memcpy(frame->screen_flash_color, bevy_bridge_screen_flash_color, sizeof(frame->screen_flash_color));
 	bevy_bridge_screen_flash_type = 0;
+	frame->screen_effect = bevy_bridge_screen_effect;
+	memset(&bevy_bridge_screen_effect, 0, sizeof(bevy_bridge_screen_effect));
 	if (bevy_bridge_viewer_draws_hud())
 		bevy_bridge_share_text_atlas(shared);
 	for (window_index = 0; window_index < window_count; window_index++)
@@ -1004,6 +1007,14 @@ void bevy_bridge_note_screen_flash(short type, float intensity, float const colo
 	bevy_bridge_screen_flash_type = (unsigned long)type;
 	bevy_bridge_screen_flash_intensity = intensity;
 	memcpy(bevy_bridge_screen_flash_color, color, sizeof(bevy_bridge_screen_flash_color));
+}
+
+void bevy_bridge_note_screen_effect(struct bevy_bridge_screen_effect const *effect)
+{
+	/* (the first window's: the first player's) */
+	if (bevy_bridge_screen_effect.flags)
+		return;
+	bevy_bridge_screen_effect = *effect;
 }
 
 boolean bevy_bridge_viewer_draws_hud(void)

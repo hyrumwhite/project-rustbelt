@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 49
+#define BEVY_BRIDGE_VERSION 50
 #define BEVY_BRIDGE_SCREEN_TEXTURES 512
 #define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
 #define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
@@ -452,6 +452,25 @@ struct bevy_bridge_screen_vertex
 	unsigned long color;
 };
 
+/* (protocol 50) the screen effect over the first player's view of the
+world (the scripts' cinematic one, or else the HUD's,
+rasterizer_screen_effect_get_cinematic_parameters), which the viewer draws
+over the scene it draws: its flags, its filter's light enhancement and
+desaturation (0 to 1), the desaturation's tint, and the video effect's
+overbright mode (0 to 2) and noise intensity */
+#define BEVY_BRIDGE_SCREEN_EFFECT_ON 1UL
+#define BEVY_BRIDGE_SCREEN_EFFECT_DESATURATION_ADDITIVE 2UL
+#define BEVY_BRIDGE_SCREEN_EFFECT_VIDEO 4UL
+struct bevy_bridge_screen_effect
+{
+	unsigned long flags;
+	float light_enhancement;
+	float desaturation;
+	float desaturation_tint[3];
+	unsigned long video_overbright_mode;
+	float video_noise_intensity;
+};
+
 struct bevy_bridge_screen_map
 {
 	/* the bitmap tag (all ones for none) and its bitmap */
@@ -568,6 +587,8 @@ struct bevy_bridge_frame
 	unsigned long screen_vertex_count;
 	struct bevy_bridge_screen_draw screen_draws[BEVY_BRIDGE_SCREEN_DRAWS];
 	struct bevy_bridge_screen_vertex screen_vertices[BEVY_BRIDGE_SCREEN_VERTICES];
+	/* (protocol 50) the screen effect over the first player's view */
+	struct bevy_bridge_screen_effect screen_effect;
 };
 
 /* what the renderer's window receives, for the game to read as its own */

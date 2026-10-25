@@ -109,6 +109,7 @@ symbols in this file:
 #include "rasterizer_xbox.h"
 #include "rasterizer_xbox_pixel_shader.h"
 #include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
+#include "bevy_bridge_protocol.h"
 
 /* ---------- constants */
 
@@ -473,6 +474,38 @@ void _rasterizer_screen_effect(
 	rasterizer_profile_begin(_rasterizer_profile_screen_effect);
 
 	parameters = rasterizer_screen_effect_get_cinematic_parameters(parameters);
+
+	/* port: the renderer's, over the scene it draws, when it draws the HUD
+	(bevy_bridge.c): drawn here, it fell on the game's own picture, which
+	holds only what is drawn over the world, and left the scene under it
+	as it was (c10's dark helmet recording unlit, black) */
+	if (bevy_bridge_viewer_draws_hud())
+	{
+		if (parameters &&
+			(parameters->filter_light_enhancement_intensity > 0.0f ||
+			parameters->filter_desaturation_intensity > 0.0f ||
+			parameters->video_on) &&
+			rasterizer_debug_options.screen_effects_enabled &&
+			global_window_parameters.rasterizer_target == _rasterizer_target_render_primary)
+		{
+			struct bevy_bridge_screen_effect effect;
+
+			memset(&effect, 0, sizeof(effect));
+			effect.flags = BEVY_BRIDGE_SCREEN_EFFECT_ON |
+				(parameters->filter_desaturation_is_additive ? BEVY_BRIDGE_SCREEN_EFFECT_DESATURATION_ADDITIVE : 0) |
+				(parameters->video_on ? BEVY_BRIDGE_SCREEN_EFFECT_VIDEO : 0);
+			effect.light_enhancement = parameters->filter_light_enhancement_intensity;
+			effect.desaturation = parameters->filter_desaturation_intensity;
+			effect.desaturation_tint[0] = parameters->filter_desaturation_tint.red;
+			effect.desaturation_tint[1] = parameters->filter_desaturation_tint.green;
+			effect.desaturation_tint[2] = parameters->filter_desaturation_tint.blue;
+			effect.video_overbright_mode = (unsigned long)PIN(parameters->video_overbright_mode, 0, 2);
+			effect.video_noise_intensity = PIN(parameters->video_noise_intensity, 0.0f, 1.0f);
+			bevy_bridge_note_screen_effect(&effect);
+		}
+		rasterizer_profile_end(_rasterizer_profile_screen_effect);
+		return;
+	}
 
 	if (parameters &&
 		(parameters->convolution_type != _rasterizer_screen_effect_convolution_type_none ||

@@ -84,6 +84,10 @@ unsigned long bevy_bridge_screen_texture(unsigned long id, void const *png, unsi
 (render_screen_flash's type, intensity and colour: alpha, red, green,
 blue), for the frame's export */
 void bevy_bridge_note_screen_flash(short type, float intensity, float const color[4]);
+/* rasterizer_xbox_screen_effect.c: the screen effect over the first
+player's view (struct bevy_bridge_screen_effect), for the frame's export */
+struct bevy_bridge_screen_effect;
+void bevy_bridge_note_screen_effect(struct bevy_bridge_screen_effect const *effect);
 /* a screen map for a bitmap (struct bitmap_data): the port's art in its
 place (a screen texture) or its tag's bitmap; FALSE if it is neither */
 struct bevy_bridge_screen_map;

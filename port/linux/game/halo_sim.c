@@ -1798,7 +1798,7 @@ struct halo_sim_hs_callbacks
 it (check mode): Rust's runs first on the memory as it is, its writes held
 aside (each byte's address and value), then the game's, and what the game's
 left is compared with them */
-#define MAXIMUM_HALO_SIM_HS_BODY_WRITES 1024
+#define MAXIMUM_HALO_SIM_HS_BODY_WRITES 8192
 
 struct halo_sim_hs_body_write
 {

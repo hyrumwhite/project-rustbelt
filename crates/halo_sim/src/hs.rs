@@ -136,6 +136,8 @@ pub struct HsContextC {
     pub ai_globals: u32,
     pub encounters: u32,
     pub allegiance_globals: u32,
+    pub actor_palette: u32,
+    pub actor_palette_count: i32,
 }
 
 impl HsContextC {
@@ -188,6 +190,8 @@ impl HsContextC {
             ai_globals: self.ai_globals,
             encounters: self.encounters,
             allegiance_globals: self.allegiance_globals,
+            actor_palette: self.actor_palette,
+            actor_palette_count: self.actor_palette_count,
         }
     }
 }

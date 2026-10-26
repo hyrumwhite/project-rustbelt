@@ -238,10 +238,35 @@ pub mod call {
     pub const EFFECT_ACTOR_SET_TEAM: i32 = 0x57;
     /// `ai_update_team_status()`.
     pub const EFFECT_UPDATE_TEAM_STATUS: i32 = 0x58;
+    /// The actor `a` out of its encounter (its positions flushed) and
+    /// encounterless.
+    pub const EFFECT_FREE_ACTOR: i32 = 0x59;
+    /// `encounters_update_dirty_status()`.
+    pub const EFFECT_ENCOUNTERS_UPDATE_DIRTY_STATUS: i32 = 0x5a;
+    /// An actor for the unit `a` of the encounter `b`'s squad `c`'s palette
+    /// variant (`ai_scripting_attach_squad`).
+    pub const EFFECT_ATTACH: i32 = 0x5b;
+    /// An encounterless actor of the variant `b` for the unit `a`
+    /// (`ai_scripting_attach_free_actor`).
+    pub const EFFECT_ATTACH_FREE: i32 = 0x5c;
+    /// `actor_change_encounter(a, b, c)`.
+    pub const EFFECT_CHANGE_ENCOUNTER: i32 = 0x5d;
+    /// The actor `a`'s teleport to its starting location, `b` only if
+    /// unsupported (`ai_scripting_teleport_actor`).
+    pub const EFFECT_TELEPORT_STARTING_LOCATION: i32 = 0x5e;
+    /// The actor `a`'s grenades renewed (`ai_scripting_renew_grenades`).
+    pub const EFFECT_RENEW_GRENADES: i32 = 0x5f;
+    /// `actor_stimulus_maneuvering(a, b, FALSE)`.
+    pub const EFFECT_STIMULUS_MANEUVERING: i32 = 0x60;
+    /// The encounterless actor `a` attached to the encounter `b`'s squad `c`.
+    pub const EFFECT_ENCOUNTER_REATTACH: i32 = 0x61;
+    /// `ai_update_team_status()` if the encounters `a` and `b`'s teams
+    /// differ as it's made (after the effects before it).
+    pub const EFFECT_TEAM_STATUS_IF_TEAMS_DIFFER: i32 = 0x62;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_UPDATE_TEAM_STATUS).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_TEAM_STATUS_IF_TEAMS_DIFFER).contains(&kind)
     }
 }
 
@@ -299,6 +324,27 @@ const AI_GLOBALS_ENTERABLE_VEHICLES: u32 = 0x3b8;
 const ACTOR_META_ENCOUNTERLESS: u32 = 0x9;
 const ACTOR_VEHICLE_INDEX: u32 = 0x9c;
 const ENCOUNTER_FOLLOW_TARGET_AI_INDEX: u32 = 0x64;
+/// `struct unit_datum`'s encounter and squad its riders join (tag_layout's
+/// probe).
+const UNIT_FAKE_ENCOUNTER_INDEX: u32 = 0x2e4;
+const UNIT_FAKE_SQUAD_INDEX: u32 = 0x2e6;
+/// `struct actor_datum`'s disconnected encounter and squad, its variant and
+/// its prevehicle encounter and squad; `struct encounter_datum`'s
+/// prevehicle flag; `struct actor_definition`'s type, `struct
+/// actor_variant_definition`'s actor (its index), `struct
+/// squad_definition`'s palette entry, and a tag reference's size and index
+/// (tag_layout's probe).
+const ACTOR_DISCONNECTED_ENCOUNTER_INDEX: u32 = 0x30;
+const ACTOR_DISCONNECTED_SQUAD_INDEX: u32 = 0x38;
+const ACTOR_VARIANT_DEFINITION_INDEX: u32 = 0x5c;
+const ACTOR_PREVEHICLE_ENCOUNTER_INDEX: u32 = 0x44;
+const ACTOR_PREVEHICLE_SQUAD_INDEX: u32 = 0x48;
+const ENCOUNTER_IS_PREVEHICLE: u32 = 0x1e;
+const ACTOR_DEFINITION_TYPE: u32 = 0x14;
+const ACTOR_VARIANT_ACTOR_INDEX: u32 = 0x10;
+const SQUAD_DEFINITION_ACTOR_PALETTE_INDEX: u32 = 0x20;
+const TAG_REFERENCE_SIZE: u32 = 0x10;
+const TAG_REFERENCE_INDEX: u32 = 0xc;
 const CONVERSATION_LINE_INDEX: u32 = 0x48;
 /// `MAXIMUM_AI_ENTERABLE_VEHICLES` and `MAXIMUM_AI_INDICES_PER_ENTERABLE_VEHICLE`.
 const MAXIMUM_AI_ENTERABLE_VEHICLES: i16 = 32;
@@ -577,6 +623,9 @@ pub struct HsContext {
     pub ai_globals: u32,
     pub encounters: u32,
     pub allegiance_globals: u32,
+    /// The scenario's actor palette (its first element) and count.
+    pub actor_palette: u32,
+    pub actor_palette_count: i32,
 }
 
 /// `(long)value` as x86 truncates it.
@@ -2269,6 +2318,244 @@ impl<H: HsHost> Runtime<'_, H> {
         Some(seats)
     }
 
+    /// The loaded tag's data (`tag_get` of the group); None for one not
+    /// loaded or of another group.
+    fn tag_data(&self, group: &[u8; 4], tag_index: i32) -> Option<u32> {
+        let tags = crate::ai_actor::AiStepContext {
+            tag_instances: self.context.tag_instances,
+            tag_count: self.context.tag_count,
+            ..Default::default()
+        };
+        crate::sensing::tag_get(&AsAiMemory(self.m()), &tags, crate::fourcc(group), tag_index)
+    }
+
+    /// The actor variant and its actor definition (their data) of the actor
+    /// palette's entry, either none for an entry not there or empty; None
+    /// where the game's would stop.
+    fn palette_definitions(&self, palette_index: i16) -> Option<(Option<u32>, Option<u32>)> {
+        let m = self.m();
+        if !(0..self.context.actor_palette_count).contains(&(palette_index as i32)) {
+            return Some((None, None));
+        }
+        let entry = self.context.actor_palette + palette_index as u32 * TAG_REFERENCE_SIZE;
+        let tag_index = m.r32(entry + TAG_REFERENCE_INDEX) as i32;
+        if tag_index == NONE {
+            return Some((None, None));
+        }
+        // (tag_get_group_tag: an entry of another group is passed over)
+        let Some(variant) = self.tag_data(b"actv", tag_index) else { return Some((None, None)) };
+        let actor_index = m.r32(variant + ACTOR_VARIANT_ACTOR_INDEX) as i32;
+        let actor = if actor_index != NONE { Some(self.tag_data(b"actr", actor_index)?) } else { None };
+        Some((Some(variant), actor))
+    }
+
+    /// `ai_scripting_migrate_find_target_squad`: the squad of the target an
+    /// actor of the source squad goes to: its own (staying in its
+    /// encounter), else the first of its variant, its actor definition, its
+    /// type, the first of the target, or squad 0 (NONE for none); None where
+    /// the game's would stop.
+    fn migrate_target_squad(
+        &self,
+        source_squad_index: i32,
+        source_actor: Option<u32>,
+        source_variant: Option<u32>,
+        same_encounter: bool,
+        target_ai_reference: i32,
+    ) -> Option<i32> {
+        use crate::layout::{encounter_definition as ed, squad_definition as sd};
+        let m = self.m();
+        let target_encounter_index = target_ai_reference & 0xffff;
+        if target_encounter_index >= self.context.encounter_count {
+            return None;
+        }
+        let definition = self.context.encounters + target_encounter_index as u32 * ed::SIZEOF as u32;
+        let (squad_count, squad_definitions) = self.tag_block(definition + ed::SQUADS as u32);
+        let (mut first, mut same_type, mut same_actor, mut same_variant, mut same_squad) = (NONE, NONE, NONE, NONE, NONE);
+        for (squad_index, _) in self.ai_squads(target_ai_reference)? {
+            let squad_definition = squad_definitions + squad_index as u32 * sd::SIZEOF as u32;
+            let palette_index = m.r16(squad_definition + SQUAD_DEFINITION_ACTOR_PALETTE_INDEX) as i16;
+            let (variant, actor) = self.palette_definitions(palette_index)?;
+            if same_squad == NONE && same_encounter && source_squad_index == squad_index {
+                same_squad = squad_index;
+            }
+            if same_variant == NONE && source_variant.is_some() && variant.is_some() && source_variant == variant {
+                same_variant = squad_index;
+            }
+            if same_actor == NONE && source_actor.is_some() && actor.is_some() && source_actor == actor {
+                same_actor = squad_index;
+            }
+            if let (Some(source_actor), Some(actor)) = (source_actor, actor) {
+                if same_type == NONE && m.r16(source_actor + ACTOR_DEFINITION_TYPE) == m.r16(actor + ACTOR_DEFINITION_TYPE) {
+                    same_type = squad_index;
+                }
+            }
+            if first == NONE {
+                first = squad_index;
+            }
+        }
+        let found = [same_squad, same_variant, same_actor, same_type, first]
+            .into_iter()
+            .find(|&index| index != NONE)
+            .unwrap_or(if squad_count > 0 { 0 } else { NONE });
+        if found != NONE && !(0..squad_count).contains(&found) {
+            return None;
+        }
+        Some(found)
+    }
+
+    /// `ai_scripting_migrate_internal`: the source's squads matched with the
+    /// target's, then its actors changed over (with their stimulus), the
+    /// prevehicle and disconnected actors it had, the teams' status and the
+    /// encounters'.
+    fn migrate(&self, source: i32, target: i32, stimulus: Option<bool>) -> Option<()> {
+        use crate::layout::{actor_datum as a, encounter_datum as e, encounter_definition as ed, squad_datum as sq};
+        let m = self.m();
+        if source == NONE || target == NONE {
+            return Some(());
+        }
+        let (source_encounter_index, target_encounter_index) = (source & 0xffff, target & 0xffff);
+        if source_encounter_index >= self.context.encounter_count || target_encounter_index >= self.context.encounter_count {
+            return None;
+        }
+        let source_encounter = self.datum_get(self.context.encounter_data, source_encounter_index)?;
+        let target_encounter = self.datum_get(self.context.encounter_data, target_encounter_index)?;
+        let definition = |index: i32| self.context.encounters + index as u32 * ed::SIZEOF as u32;
+        let (_, source_squads) = self.tag_block(definition(source_encounter_index) + ed::SQUADS as u32);
+        let (target_squad_count, _) = self.tag_block(definition(target_encounter_index) + ed::SQUADS as u32);
+        let same_encounter = source_encounter_index == target_encounter_index;
+        let mut targets = [NONE; MAXIMUM_SQUADS_PER_ENCOUNTER as usize];
+        for (squad_index, squad) in self.ai_squads(source)? {
+            if !(0..MAXIMUM_SQUADS_PER_ENCOUNTER as i32).contains(&squad_index) {
+                return None;
+            }
+            if m.r16(squad + sq::CURRENT_COUNT as u32) as i16 > 0 || m.r8(source_encounter + ENCOUNTER_IS_PREVEHICLE) != 0 {
+                let squad_definition = source_squads + squad_index as u32 * crate::layout::squad_definition::SIZEOF as u32;
+                let palette_index = m.r16(squad_definition + SQUAD_DEFINITION_ACTOR_PALETTE_INDEX) as i16;
+                let (variant, actor) = self.palette_definitions(palette_index)?;
+                targets[squad_index as usize] = self.migrate_target_squad(squad_index, actor, variant, same_encounter, target)?;
+            }
+        }
+        // (the target squad of an actor in the source squad, if it moves)
+        let moved = |squad_index: i16| -> Option<Option<i32>> {
+            let target_squad = *targets.get(usize::try_from(squad_index).ok()?)?;
+            if target_squad != NONE && (!same_encounter || target_squad != squad_index as i32) {
+                (0..target_squad_count).contains(&target_squad).then_some(Some(target_squad))
+            } else {
+                Some(None)
+            }
+        };
+        if self.ai_initialized() {
+            let mut actor_index = m.r32(source_encounter + e::FIRST_ACTOR_INDEX as u32) as i32;
+            while actor_index != NONE {
+                let actor = self.datum_get(self.context.actor_data, actor_index)?;
+                let next_index = m.r32(actor + a::META_NEXT_ACTOR_INDEX as u32) as i32;
+                if let Some(target_squad) = moved(m.r16(actor + a::META_SQUAD_INDEX as u32) as i16)? {
+                    self.effect(call::EFFECT_CHANGE_ENCOUNTER, actor_index, target_encounter_index, target_squad);
+                    if let Some(advancing) = stimulus {
+                        self.effect(call::EFFECT_STIMULUS_MANEUVERING, actor_index, advancing as i32, 0);
+                    }
+                }
+                actor_index = next_index;
+            }
+        }
+        if m.r8(source_encounter + ENCOUNTER_IS_PREVEHICLE) != 0 {
+            for actor in self.all_actors(false)? {
+                if m.r32(actor + ACTOR_PREVEHICLE_ENCOUNTER_INDEX) & 0xffff == source_encounter_index as u32 {
+                    if let Some(target_squad) = moved(m.r16(actor + ACTOR_PREVEHICLE_SQUAD_INDEX) as i16)? {
+                        m.w32(actor + ACTOR_PREVEHICLE_ENCOUNTER_INDEX, target_encounter_index as u32);
+                        m.w16(actor + ACTOR_PREVEHICLE_SQUAD_INDEX, target_squad as u16);
+                    }
+                }
+            }
+            if !same_encounter {
+                // (the January build tests the masked index's reference
+                // type, so the source's flag clears for any reference)
+                m.w8(source_encounter + ENCOUNTER_IS_PREVEHICLE, 0);
+                m.w8(target_encounter + ENCOUNTER_IS_PREVEHICLE, 1);
+            }
+        }
+        if self.ai_initialized() {
+            let target_bsp = m.r16(definition(target_encounter_index) + ed::RUNTIME_STRUCTURE_BSP_REFERENCE_INDEX as u32) as i16;
+            let mut actor_index =
+                m.r32(self.context.ai_globals + crate::layout::ai_globals::FIRST_ENCOUNTERLESS_ACTOR_INDEX as u32) as i32;
+            while actor_index != NONE {
+                let actor = self.datum_get(self.context.actor_data, actor_index)?;
+                let next_index = m.r32(actor + a::META_NEXT_ACTOR_INDEX as u32) as i32;
+                if m.r32(actor + ACTOR_DISCONNECTED_ENCOUNTER_INDEX) & 0xffff == source_encounter_index as u32 {
+                    if let Some(target_squad) = moved(m.r16(actor + ACTOR_DISCONNECTED_SQUAD_INDEX) as i16)? {
+                        m.w32(actor + ACTOR_DISCONNECTED_ENCOUNTER_INDEX, target_encounter_index as u32);
+                        m.w16(actor + ACTOR_DISCONNECTED_SQUAD_INDEX, target_squad as u16);
+                        if !same_encounter && target_bsp == m.r16(self.context.structure_bsp_index) as i16 {
+                            self.effect(call::EFFECT_ENCOUNTER_REATTACH, actor_index, target_encounter_index, target_squad);
+                        }
+                    }
+                }
+                actor_index = next_index;
+            }
+        }
+        // (their teams compared as the effect is made: the actors' changes
+        // can change them)
+        self.effect(call::EFFECT_TEAM_STATUS_IF_TEAMS_DIFFER, source_encounter_index, target_encounter_index, 0);
+        self.effect(call::EFFECT_ENCOUNTERS_UPDATE_DIRTY_STATUS, 0, 0, 0);
+        Some(())
+    }
+
+    /// `ai_scripting_migrate_by_unit_internal`: the unit's actor (or its
+    /// swarm's) to its squad of the target.
+    fn migrate_unit(&self, unit: u32, target: i32) -> Option<()> {
+        use crate::layout::actor_datum as a;
+        let m = self.m();
+        let actor_index = self.unit_actor_or_swarm(unit);
+        if actor_index == NONE || target == NONE {
+            return Some(());
+        }
+        let actor = self.datum_get(self.context.actor_data, actor_index)?;
+        let actor_definition = self.tag_data(b"actr", m.r32(actor + a::META_DEFINITION_INDEX as u32) as i32)?;
+        let variant = self.tag_data(b"actv", m.r32(actor + ACTOR_VARIANT_DEFINITION_INDEX) as i32)?;
+        let target_encounter_index = target & 0xffff;
+        let squad_index = m.r16(actor + a::META_SQUAD_INDEX as u32) as i16 as i32;
+        let same_encounter = m.r32(actor + a::META_ENCOUNTER_INDEX as u32) as i32 & 0xffff == target_encounter_index;
+        let target_squad = self.migrate_target_squad(squad_index, Some(actor_definition), Some(variant), same_encounter, target)?;
+        if target_squad != NONE && (!same_encounter || target_squad != squad_index) {
+            self.effect(call::EFFECT_CHANGE_ENCOUNTER, actor_index, target_encounter_index, target_squad);
+        }
+        Some(())
+    }
+
+    /// `actor_iterator_new` and `actor_iterator_next`, active only or not
+    /// ([`Self::active_actors`]'s walk).
+    fn all_actors(&self, active_only: bool) -> Option<Vec<u32>> {
+        use crate::layout::{actor_datum as a, encounter_datum as e};
+        if active_only {
+            return self.active_actors();
+        }
+        let m = self.m();
+        let mut actors = Vec::new();
+        if !self.ai_initialized() {
+            return Some(actors);
+        }
+        let mut walk = |first: i32| -> Option<()> {
+            let mut actor_index = first;
+            while actor_index != NONE {
+                let actor = self.datum_get(self.context.actor_data, actor_index)?;
+                actors.push(actor);
+                actor_index = m.r32(actor + a::META_NEXT_ACTOR_INDEX as u32) as i32;
+                if actors.len() > 0x10000 {
+                    return None;
+                }
+            }
+            Some(())
+        };
+        let mut encounter_index = self.data_next_index(self.context.encounter_data, NONE);
+        while encounter_index != NONE {
+            let encounter = self.datum_get(self.context.encounter_data, encounter_index)?;
+            walk(m.r32(encounter + e::FIRST_ACTOR_INDEX as u32) as i32)?;
+            encounter_index = self.data_next_index(self.context.encounter_data, encounter_index);
+        }
+        walk(m.r32(self.context.ai_globals + crate::layout::ai_globals::FIRST_ENCOUNTERLESS_ACTOR_INDEX as u32) as i32)?;
+        Some(actors)
+    }
+
     /// The body itself ([`Self::library_body`]).
     fn library_body_run(&self, definition: u32, thread_index: i32, arguments: u32) -> bool {
         use crate::layout::unit_datum as u;
@@ -3749,6 +4036,241 @@ impl<H: HsHost> Runtime<'_, H> {
                     }
                 }
                 self.effect(call::EFFECT_UPDATE_TEAM_STATUS, 0, 0, 0);
+                0
+            }
+            // ai_scripting_attach_unit: an actor for the unit, of the
+            // reference's squad (a platoon's first; its report of no squad
+            // left out)
+            "ai_attach" => {
+                use crate::layout::{encounter_definition as ed, squad_definition as sd};
+                let (unit_index, ai_reference) = (argument(0), argument(1));
+                let encounter_index = ai_reference & 0xffff;
+                if self.ai_initialized()
+                    && unit_index != NONE
+                    && ai_reference != NONE
+                    && encounter_index < self.context.encounter_count
+                {
+                    let definition = self.context.encounters + encounter_index as u32 * ed::SIZEOF as u32;
+                    let (squad_count, squads) = self.tag_block(definition + ed::SQUADS as u32);
+                    let index = (ai_reference >> 16) & 0xff;
+                    let mut squad_index = 0;
+                    match ai_reference as u32 >> 30 {
+                        2 => squad_index = index,
+                        1 => {
+                            for search_index in 0..squad_count.max(0) {
+                                let squad = squads + search_index as u32 * sd::SIZEOF as u32;
+                                if m.r16(squad + sd::PLATOON_INDEX as u32) as i16 as i32 == index {
+                                    squad_index = search_index;
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if (0..squad_count).contains(&squad_index) {
+                        self.effect(call::EFFECT_ATTACH, unit_index, encounter_index, squad_index);
+                    }
+                }
+                0
+            }
+            // ai_scripting_attach_free: an encounterless actor of the variant
+            "ai_attach_free" => {
+                let (unit_index, variant) = (argument(0), argument(1));
+                if self.ai_initialized() && unit_index != NONE && variant != NONE {
+                    self.effect(call::EFFECT_ATTACH_FREE, unit_index, variant, 0);
+                }
+                0
+            }
+            // ai_scripting_free: each actor out of its encounter, encounterless
+            "ai_free" => {
+                use crate::layout::actor_datum as a;
+                let ai_reference = argument(0);
+                if ai_reference != NONE {
+                    if self
+                        .for_each_ai_actor(ai_reference, |actor_index, actor| {
+                            if m.r32(actor + a::META_ENCOUNTER_INDEX as u32) as i32 == NONE {
+                                return None;
+                            }
+                            self.effect(call::EFFECT_FREE_ACTOR, actor_index, 0, 0);
+                            Some(())
+                        })
+                        .is_none()
+                    {
+                        return false;
+                    }
+                    self.effect(call::EFFECT_ENCOUNTERS_UPDATE_DIRTY_STATUS, 0, 0, 0);
+                }
+                0
+            }
+            // ai_scripting_free_units: each listed unit's actor of an encounter
+            "ai_free_units" => {
+                use crate::layout::actor_datum as a;
+                let Some(objects) = self.object_list(argument(0)) else { return false };
+                let mut freed = false;
+                for object in objects {
+                    let Some(unit) = self.object_typed(object, OBJECT_MASK_UNIT) else { continue };
+                    let actor_index = m.r32(unit + u::UNIT_ACTOR_INDEX as u32) as i32;
+                    if actor_index == NONE {
+                        continue;
+                    }
+                    let Some(actor) = self.datum_get(self.context.actor_data, actor_index) else { return false };
+                    if m.r32(actor + a::META_ENCOUNTER_INDEX as u32) as i32 != NONE {
+                        self.effect(call::EFFECT_FREE_ACTOR, actor_index, 0, 0);
+                        freed = true;
+                    }
+                }
+                if freed {
+                    self.effect(call::EFFECT_ENCOUNTERS_UPDATE_DIRTY_STATUS, 0, 0, 0);
+                }
+                0
+            }
+            // ai_scripting_vehicle_encounter: the encounter and squad (a
+            // platoon's first, else the first) the vehicle's riders join,
+            // those riding it from its last one changed over
+            "ai_vehicle_encounter" => {
+                use crate::layout::{actor_datum as a, encounter_definition as ed, squad_definition as sd};
+                let (unit_index, ai_reference) = (argument(0), argument(1));
+                if unit_index != NONE {
+                    let Some(vehicle) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let (mut target_encounter, mut target_squad) = (NONE as i16, NONE as i16);
+                    // (the reference as a short, as the game's takes it)
+                    let encounter_index = ai_reference as i16;
+                    if ai_reference != NONE && (0..self.context.encounter_count).contains(&(encounter_index as i32)) {
+                        let definition = self.context.encounters + encounter_index as u32 * ed::SIZEOF as u32;
+                        let (squad_count, squads) = self.tag_block(definition + ed::SQUADS as u32);
+                        let squad_index = match ai_reference as u32 >> 30 {
+                            0 => 0,
+                            1 => {
+                                let platoon_index = (ai_reference >> 16) & 0xff;
+                                let found = (0..squad_count.max(0) as i16).find(|&search_index| {
+                                    let squad = squads + search_index as u32 * sd::SIZEOF as u32;
+                                    m.r16(squad + sd::PLATOON_INDEX as u32) as i16 as i32 == platoon_index
+                                });
+                                found.unwrap_or(0)
+                            }
+                            2 => ((ai_reference >> 16) & 0xff) as i16,
+                            _ => return false,
+                        };
+                        if (0..squad_count).contains(&(squad_index as i32)) {
+                            target_encounter = ai_reference as i16;
+                            target_squad = squad_index;
+                        }
+                    }
+                    if target_encounter != NONE as i16 && target_squad != NONE as i16 {
+                        let previous = m.r16(vehicle + UNIT_FAKE_ENCOUNTER_INDEX) as i16;
+                        if previous != NONE as i16 && self.ai_initialized() {
+                            let Some(encounter) = self.datum_get(self.context.encounter_data, previous as i32) else { return false };
+                            let mut actor_index = m.r32(encounter + crate::layout::encounter_datum::FIRST_ACTOR_INDEX as u32) as i32;
+                            let mut count = 0;
+                            while actor_index != NONE {
+                                let Some(actor) = self.datum_get(self.context.actor_data, actor_index) else { return false };
+                                let next_index = m.r32(actor + a::META_NEXT_ACTOR_INDEX as u32) as i32;
+                                if m.r32(actor + a::INPUT_VEHICLE_INDEX as u32) as i32 == unit_index {
+                                    self.effect(
+                                        call::EFFECT_CHANGE_ENCOUNTER,
+                                        actor_index,
+                                        target_encounter as i32,
+                                        target_squad as i32,
+                                    );
+                                }
+                                actor_index = next_index;
+                                count += 1;
+                                if count > 0x10000 {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    m.w16(vehicle + UNIT_FAKE_ENCOUNTER_INDEX, target_encounter as u16);
+                    m.w16(vehicle + UNIT_FAKE_SQUAD_INDEX, target_squad as u16);
+                }
+                0
+            }
+            // ai_scripting_teleport_starting_location and
+            // _if_unsupported: each actor's
+            name @ ("ai_teleport_to_starting_location" | "ai_teleport_to_starting_location_if_unsupported") => {
+                let only_if_unsupported = (name == "ai_teleport_to_starting_location_if_unsupported") as i32;
+                if self
+                    .for_each_ai_actor(argument(0), |actor_index, _| {
+                        self.effect(call::EFFECT_TELEPORT_STARTING_LOCATION, actor_index, only_if_unsupported, 0);
+                        Some(())
+                    })
+                    .is_none()
+                {
+                    return false;
+                }
+                0
+            }
+            // ai_scripting_renew: each actor's unit's vitality full (none
+            // where it has no maximum), and its grenades renewed
+            "ai_renew" => {
+                use crate::layout::actor_datum as a;
+                if self
+                    .for_each_ai_actor(argument(0), |actor_index, actor| {
+                        let unit_index = m.r32(actor + a::META_UNIT_INDEX as u32) as i32;
+                        if unit_index != NONE {
+                            let unit = self.object_typed(unit_index, OBJECT_MASK_UNIT)?;
+                            let f = |offset: usize| f32::from_bits(m.r32(unit + offset as u32));
+                            let full = |maximum: f32| if maximum > 0.0 { 1.0f32 } else { 0.0 };
+                            m.w32(unit + u::OBJECT_BODY_VITALITY as u32, full(f(u::OBJECT_MAXIMUM_BODY_VITALITY)).to_bits());
+                            m.w32(unit + u::OBJECT_SHIELD_VITALITY as u32, full(f(u::OBJECT_MAXIMUM_SHIELD_VITALITY)).to_bits());
+                            self.effect(call::EFFECT_RENEW_GRENADES, actor_index, 0, 0);
+                        }
+                        Some(())
+                    })
+                    .is_none()
+                {
+                    return false;
+                }
+                0
+            }
+            // ai_scripting_migrate and _migrate_and_speak (with the
+            // maneuvering stimulus, advancing or not; its report of another
+            // speech type left out)
+            "ai_migrate" => {
+                if self.migrate(argument(0), argument(1), None).is_none() {
+                    return false;
+                }
+                0
+            }
+            "ai_migrate_and_speak" => {
+                let advancing = self.c_string(argument(2) as u32).eq_ignore_ascii_case(b"advance");
+                if self.migrate(argument(0), argument(1), Some(advancing)).is_none() {
+                    return false;
+                }
+                0
+            }
+            // ai_scripting_migrate_by_unit: each listed unit's actor and those
+            // of the units it carries, then the teams' and encounters' status
+            "ai_migrate_by_unit" => {
+                let (list, target) = (argument(0), argument(1));
+                if list != NONE && target != NONE {
+                    let Some(objects) = self.object_list(list) else { return false };
+                    for object in objects {
+                        let Some(unit) = self.object_typed(object, OBJECT_MASK_UNIT) else { continue };
+                        if self.migrate_unit(unit, target).is_none() {
+                            return false;
+                        }
+                        let mut child_index = m.r32(unit + u::OBJECT_FIRST_CHILD_OBJECT_INDEX as u32) as i32;
+                        let mut count = 0;
+                        while child_index != NONE {
+                            let Some(header) = self.datum_get(self.context.object_header_data, child_index) else { return false };
+                            let child = m.r32(header + crate::layout::object_header_datum::DATUM as u32);
+                            if OBJECT_MASK_UNIT & (1 << m.r16(child + u::OBJECT_TYPE as u32)) != 0
+                                && self.migrate_unit(child, target).is_none()
+                            {
+                                return false;
+                            }
+                            child_index = m.r32(child + u::OBJECT_NEXT_OBJECT_INDEX as u32) as i32;
+                            count += 1;
+                            if count > 0x10000 {
+                                return false;
+                            }
+                        }
+                    }
+                    self.effect(call::EFFECT_UPDATE_TEAM_STATUS, 0, 0, 0);
+                    self.effect(call::EFFECT_ENCOUNTERS_UPDATE_DIRTY_STATUS, 0, 0, 0);
+                }
                 0
             }
             // game_difficulty_level_get_ignore_easy: normal at the least

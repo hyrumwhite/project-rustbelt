@@ -42,6 +42,7 @@ enum
 	_hs_game_field_animation_threads, /* the recorded animations' threads (struct data_array) */
 	_hs_game_field_scenario, /* the scenario's tag data (0 for none) */
 	_hs_game_field_hud_globals, /* struct hud_globals_definition (the HUD's globals tag) */
+	_hs_game_field_breakable_surface_globals, /* enabled (boolean) first */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

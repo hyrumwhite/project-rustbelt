@@ -55,6 +55,7 @@ OBJECTS.C
 #include "units/units.h"
 #include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
+long hs_runtime_effect(long kind, long a, long b, long c);
 /* port: object_bounds_cache.c's */
 void object_bounds_cache_update(long object_index, real_point3d const *center, real radius);
 
@@ -3103,11 +3104,20 @@ void objects_scripting_detach(
 		child_object_index!=NONE &&
 		object_get(child_object_index)->object.parent_object_index == parent_object_index)
 	{
-		network_coop_note_detach(parent_object_index, child_object_index);
-		object_detach(child_object_index);
+		hs_runtime_effect(_hs_runtime_call_effect_objects_detach, parent_object_index, child_object_index, 0);
 	}
 
 	return;
+}
+
+/* port: objects_scripting_detach's co-op note and detaching (its effect,
+_hs_runtime_call_effect_objects_detach) */
+void objects_port_scripting_detach(
+	long parent_object_index,
+	long child_object_index)
+{
+	network_coop_note_detach(parent_object_index, child_object_index);
+	object_detach(child_object_index);
 }
 
 void object_render_debug(

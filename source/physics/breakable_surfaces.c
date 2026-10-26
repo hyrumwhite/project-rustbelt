@@ -27,6 +27,9 @@ BREAKABLE_SURFACES.C
 #include "structures/structure_bsp_definitions.h"
 #include "tag_files/tag_groups.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c (the library bodies' effects) */
+
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 /* ---------- structures */
 
@@ -74,6 +77,15 @@ static boolean breakable_surface_indices_valid(
 /* ---------- globals */
 
 static struct breakable_surface_globals *globals;
+
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the globals the Rust port's library bodies set (hs_runtime_port_game_fields) */
+void breakable_surfaces_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_breakable_surface_globals] = (unsigned long)globals;
+}
 
 boolean breakable_surface_effect_enabled = TRUE;
 
@@ -162,7 +174,7 @@ void breakable_surfaces_enable(
 void breakable_surfaces_reset(
 	void)
 {
-	breakable_surfaces_initialize_for_new_map();
+	hs_runtime_effect(_hs_runtime_call_effect_breakable_surfaces_reset, 0, 0, 0);
 	return;
 }
 

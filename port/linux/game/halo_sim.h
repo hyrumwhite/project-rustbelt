@@ -810,7 +810,11 @@ enum
 	_hs_runtime_call_effect_unit_open, /* a the unit, b opening: its co-op note and animation state */
 	_hs_runtime_call_effect_object_orient, /* a the object, b the cutscene flag, c teleporting (and its co-op followers) or only facing */
 	_hs_runtime_call_effect_unit_exit_vehicle, /* a the unit, b its vehicle: its seat left, its co-op followers' too */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_unit_exit_vehicle,
+	_hs_runtime_call_effect_unit_stop_custom_animation, /* a the unit: idle, and its co-op note */
+	_hs_runtime_call_effect_object_start_interpolation, /* a the object, b the ticks */
+	_hs_runtime_call_effect_objects_detach, /* a the parent, b the child: its co-op note and the detaching */
+	_hs_runtime_call_effect_breakable_surfaces_reset,
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_breakable_surfaces_reset,
 };
 
 /* the runtime's operations the Rust port can run */

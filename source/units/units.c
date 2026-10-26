@@ -4059,7 +4059,7 @@ void unit_set_emotion(
 	if (unit_index!=NONE)
 	{
 		unit_get(unit_index)->unit.animation.emotion_index = emotion_index;
-		object_start_interpolation(unit_index, 6);
+		hs_runtime_effect(_hs_runtime_call_effect_object_start_interpolation, unit_index, 6, 0);
 	}
 
 	return;
@@ -4240,11 +4240,19 @@ void unit_stop_custom_animation(
 {
 	if (unit_index!=NONE && unit_get(unit_index)->unit.animation.state==_unit_state_user_animation)
 	{
-		unit_animation_set_state(unit_index, _unit_state_idle);
-		network_coop_note_unit_animation(unit_index, NONE, NONE, FALSE);
+		hs_runtime_effect(_hs_runtime_call_effect_unit_stop_custom_animation, unit_index, 0, 0);
 	}
 
 	return;
+}
+
+/* port: unit_stop_custom_animation's idling and co-op note (its effect,
+_hs_runtime_call_effect_unit_stop_custom_animation) */
+void unit_port_stop_custom_animation(
+	long unit_index)
+{
+	unit_animation_set_state(unit_index, _unit_state_idle);
+	network_coop_note_unit_animation(unit_index, NONE, NONE, FALSE);
 }
 
 /* port: a unit that feigned death gets back up (a Flood combat form). The

@@ -2291,6 +2291,13 @@ static char const *const hs_runtime_rust_bodies[] =
 	"object_teleport",
 	"object_set_facing",
 	"unit_exit_vehicle",
+	"unit_stop_custom_animation",
+	"unit_set_emotion",
+	"unit_set_seat",
+	"unit_set_emotion_animation",
+	"objects_detach",
+	"breakable_surfaces_enable",
+	"breakable_surfaces_reset",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2364,6 +2371,11 @@ static unsigned long *hs_runtime_port_game_fields(
 		recorded_animations_port_game_fields(fields);
 		fields[_hs_game_field_scenario] = global_scenario_index != NONE ? (unsigned long)global_scenario_get() : 0;
 		fields[_hs_game_field_hud_globals] = (unsigned long)hud_globals;
+		{
+			extern void breakable_surfaces_port_game_fields(unsigned long *fields);
+
+			breakable_surfaces_port_game_fields(fields);
+		}
 	}
 
 	return fields;
@@ -2452,6 +2464,30 @@ static void hs_runtime_effect_run(
 		extern void unit_port_exit_vehicle(long unit_index, long vehicle_index);
 
 		unit_port_exit_vehicle(call->a, call->b);
+		break;
+	}
+	case _hs_runtime_call_effect_unit_stop_custom_animation:
+	{
+		extern void unit_port_stop_custom_animation(long unit_index);
+
+		unit_port_stop_custom_animation(call->a);
+		break;
+	}
+	case _hs_runtime_call_effect_object_start_interpolation:
+		object_start_interpolation(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_objects_detach:
+	{
+		extern void objects_port_scripting_detach(long parent_object_index, long child_object_index);
+
+		objects_port_scripting_detach(call->a, call->b);
+		break;
+	}
+	case _hs_runtime_call_effect_breakable_surfaces_reset:
+	{
+		extern void breakable_surfaces_initialize_for_new_map(void);
+
+		breakable_surfaces_initialize_for_new_map();
 		break;
 	}
 	default:
@@ -4204,6 +4240,10 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_unit_open:
 		case _hs_runtime_call_effect_object_orient:
 		case _hs_runtime_call_effect_unit_exit_vehicle:
+		case _hs_runtime_call_effect_unit_stop_custom_animation:
+		case _hs_runtime_call_effect_object_start_interpolation:
+		case _hs_runtime_call_effect_objects_detach:
+		case _hs_runtime_call_effect_breakable_surfaces_reset:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

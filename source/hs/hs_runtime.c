@@ -2274,6 +2274,23 @@ static char const *const hs_runtime_rust_bodies[] =
 	"sound_impulse_stop",
 	"hud_set_help_text",
 	"hud_set_objective_text",
+	/* (objects' creation and deletion, units, 26 October) */
+	"object_create",
+	"object_create_anew",
+	"object_destroy",
+	"object_create_containing",
+	"object_create_anew_containing",
+	"object_destroy_containing",
+	"objects_predict",
+	"object_type_predict",
+	"unit_kill",
+	"unit_kill_silent",
+	"vehicle_hover",
+	"unit_open",
+	"unit_close",
+	"object_teleport",
+	"object_set_facing",
+	"unit_exit_vehicle",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2402,6 +2419,39 @@ static void hs_runtime_effect_run(
 		extern void sound_stop_impulse(long sound_index);
 
 		sound_stop_impulse(call->a);
+		break;
+	}
+	case _hs_runtime_call_effect_object_new_by_name:
+		object_new_by_name((short)call->a);
+		break;
+	case _hs_runtime_call_effect_object_delete:
+		object_delete(call->a);
+		break;
+	case _hs_runtime_call_effect_object_predict:
+		object_predict(call->a);
+		break;
+	case _hs_runtime_call_effect_object_definition_predict:
+		object_definition_predict(call->a);
+		break;
+	case _hs_runtime_call_effect_unit_open:
+	{
+		extern void unit_port_open(long unit_index, boolean open);
+
+		unit_port_open(call->a, (boolean)call->b);
+		break;
+	}
+	case _hs_runtime_call_effect_object_orient:
+	{
+		extern void hs_port_object_orient(long object_index, short cutscene_flag_index, boolean teleport);
+
+		hs_port_object_orient(call->a, (short)call->b, (boolean)call->c);
+		break;
+	}
+	case _hs_runtime_call_effect_unit_exit_vehicle:
+	{
+		extern void unit_port_exit_vehicle(long unit_index, long vehicle_index);
+
+		unit_port_exit_vehicle(call->a, call->b);
 		break;
 	}
 	default:
@@ -4147,6 +4197,13 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_projectiles_delete_all:
 		case _hs_runtime_call_effect_cinematic_stop_presentation:
 		case _hs_runtime_call_effect_sound_stop_impulse:
+		case _hs_runtime_call_effect_object_new_by_name:
+		case _hs_runtime_call_effect_object_delete:
+		case _hs_runtime_call_effect_object_predict:
+		case _hs_runtime_call_effect_object_definition_predict:
+		case _hs_runtime_call_effect_unit_open:
+		case _hs_runtime_call_effect_object_orient:
+		case _hs_runtime_call_effect_unit_exit_vehicle:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

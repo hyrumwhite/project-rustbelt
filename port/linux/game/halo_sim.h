@@ -803,7 +803,14 @@ enum
 	_hs_runtime_call_effect_projectiles_delete_all,
 	_hs_runtime_call_effect_cinematic_stop_presentation, /* the screen effects, the reflection tint, the near clip and deferred errors */
 	_hs_runtime_call_effect_sound_stop_impulse, /* a the impulse sound */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_sound_stop_impulse,
+	_hs_runtime_call_effect_object_new_by_name, /* a the object name */
+	_hs_runtime_call_effect_object_delete, /* a the object */
+	_hs_runtime_call_effect_object_predict, /* a the object */
+	_hs_runtime_call_effect_object_definition_predict, /* a the definition */
+	_hs_runtime_call_effect_unit_open, /* a the unit, b opening: its co-op note and animation state */
+	_hs_runtime_call_effect_object_orient, /* a the object, b the cutscene flag, c teleporting (and its co-op followers) or only facing */
+	_hs_runtime_call_effect_unit_exit_vehicle, /* a the unit, b its vehicle: its seat left, its co-op followers' too */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_unit_exit_vehicle,
 };
 
 /* the runtime's operations the Rust port can run */

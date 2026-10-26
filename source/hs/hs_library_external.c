@@ -107,6 +107,7 @@ symbols in this file:
 #include "object_lists.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
 #include "coop_scripts.h" /* port: port/linux/game/coop_scripts.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c (the library bodies' effects) */
 
 /* ---------- constants */
 
@@ -156,6 +157,7 @@ void hs_object_destroy(
 /* ---------- globals */
 
 extern unsigned long hs_debug_data[];
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 /* ---------- public code */
 
@@ -431,7 +433,7 @@ void hs_object_create(
 				object_name->name);
 		}
 		else
-			object_new_by_name(object_name_index);
+			hs_runtime_effect(_hs_runtime_call_effect_object_new_by_name, object_name_index, 0, 0);
 	}
 
 	return;
@@ -444,7 +446,7 @@ void hs_object_destroy(
 	{
 		if (!object_is_or_contains_player(object_index))
 		{
-			object_delete(object_index);
+			hs_runtime_effect(_hs_runtime_call_effect_object_delete, object_index, 0, 0);
 			return;
 		}
 
@@ -656,11 +658,18 @@ void hs_objects_predict(
 	object_index = object_list_get_first(object_list_index, &reference_index);
 	while (object_index != NONE)
 	{
-		object_predict(object_index);
+		hs_runtime_effect(_hs_runtime_call_effect_object_predict, object_index, 0, 0);
 		object_index = object_list_get_next(object_list_index, &reference_index);
 	}
 
 	return;
+}
+
+/* port: object_type_predict's body, its prediction an effect */
+void hs_object_definition_predict(
+	long definition_index)
+{
+	hs_runtime_effect(_hs_runtime_call_effect_object_definition_predict, definition_index, 0, 0);
 }
 
 void hs_objects_delete_by_definition(
@@ -1004,9 +1013,7 @@ void hs_object_teleport(
 	long object_index,
 	short cutscene_flag_index)
 {
-	hs_object_orient(object_index, cutscene_flag_index, TRUE, TRUE);
-	/* port: co-op players the scripts can't name go with player0 */
-	coop_scripts_teleport_followers(object_index);
+	hs_runtime_effect(_hs_runtime_call_effect_object_orient, object_index, cutscene_flag_index, TRUE);
 
 	return;
 }
@@ -1015,9 +1022,28 @@ void hs_object_set_facing(
 	long object_index,
 	short cutscene_flag_index)
 {
-	hs_object_orient(object_index, cutscene_flag_index, FALSE, TRUE);
+	hs_runtime_effect(_hs_runtime_call_effect_object_orient, object_index, cutscene_flag_index, FALSE);
 
 	return;
+}
+
+/* port: hs_object_teleport's and _set_facing's orientation (their effect,
+_hs_runtime_call_effect_object_orient) */
+void hs_port_object_orient(
+	long object_index,
+	short cutscene_flag_index,
+	boolean teleport)
+{
+	if (teleport)
+	{
+		hs_object_orient(object_index, cutscene_flag_index, TRUE, TRUE);
+		/* port: co-op players the scripts can't name go with player0 */
+		coop_scripts_teleport_followers(object_index);
+	}
+	else
+	{
+		hs_object_orient(object_index, cutscene_flag_index, FALSE, TRUE);
+	}
 }
 
 void hs_teleport_players_not_in_trigger_volume(

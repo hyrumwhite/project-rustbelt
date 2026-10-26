@@ -50,6 +50,8 @@ void hs_object_set_permutation(
 	long object_index,
 	char const *region_name,
 	char const *permutation_name);
+void hs_object_definition_predict(
+	long definition_index);
 void hs_objects_predict(
 	long object_list_index);
 void hs_objects_delete_by_definition(

@@ -697,6 +697,7 @@ symbols in this file:
 #include "coop_enemies.h" /* port: port/linux/game/coop_enemies.c */
 #include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 #include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 /* port: the control and animation impulses the host's actors give their
 units go to the clients' copies (port/linux/game/network_actors.c) */
@@ -4965,9 +4966,7 @@ void unit_scripting_exit_vehicle(
 
 		if (unit->object.parent_object_index!=NONE && unit->unit.parent_seat_index!=NONE)
 		{
-			unit_try_and_exit_seat(unit_index);
-			/* port: co-op players the scripts can't name get out with player0 */
-			coop_scripts_exit_followers(unit_index, vehicle_index);
+			hs_runtime_effect(_hs_runtime_call_effect_unit_exit_vehicle, unit_index, vehicle_index, 0);
 		}
 	}
 
@@ -5441,8 +5440,7 @@ void unit_open(
 {
 	if (unit_index!=NONE)
 	{
-		network_coop_note_unit_open(unit_index, TRUE);
-		unit_animation_set_state(unit_index, _unit_state_opening);
+		hs_runtime_effect(_hs_runtime_call_effect_unit_open, unit_index, TRUE, 0);
 	}
 
 	return;
@@ -5453,11 +5451,31 @@ void unit_close(
 {
 	if (unit_index!=NONE)
 	{
-		network_coop_note_unit_open(unit_index, FALSE);
-		unit_animation_set_state(unit_index, _unit_state_closing);
+		hs_runtime_effect(_hs_runtime_call_effect_unit_open, unit_index, FALSE, 0);
 	}
 
 	return;
+}
+
+/* port: unit_open's and unit_close's co-op note and animation state (their
+effect, _hs_runtime_call_effect_unit_open) */
+void unit_port_open(
+	long unit_index,
+	boolean open)
+{
+	network_coop_note_unit_open(unit_index, open);
+	unit_animation_set_state(unit_index, open ? _unit_state_opening : _unit_state_closing);
+}
+
+/* port: unit_scripting_exit_vehicle's seat left (its effect,
+_hs_runtime_call_effect_unit_exit_vehicle) */
+void unit_port_exit_vehicle(
+	long unit_index,
+	long vehicle_index)
+{
+	unit_try_and_exit_seat(unit_index);
+	/* port: co-op players the scripts can't name get out with player0 */
+	coop_scripts_exit_followers(unit_index, vehicle_index);
 }
 
 void scripting_set_magic_base_seat(

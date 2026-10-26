@@ -754,6 +754,37 @@ enum
 	/* a library function's body, its arguments evaluated by the runtime: a
 	the function, b the thread, c the arguments' address (its frame's) */
 	_hs_runtime_call_library,
+
+	/* a library body's effects on the rest of the game, which the game's
+	body makes through hs_runtime_effect and Rust's through hs_runtime_call
+	(ai_script.c's ai_script_effect_run): in check mode the game's are
+	compared with those Rust's asked */
+	_hs_runtime_call_effect_obey_command_list = 0x40, /* a the actor, b the command list */
+	_hs_runtime_call_effect_vehicle_seats, /* a the vehicle, b and c its seats (bits): the seats the next entries take */
+	_hs_runtime_call_effect_enter_vehicle, /* a the actor, b the vehicle */
+	_hs_runtime_call_effect_obey_advance, /* a the actor */
+	_hs_runtime_call_effect_actor_kill, /* a the actor, b silent */
+	_hs_runtime_call_effect_actor_braindead, /* a the actor, b braindead */
+	_hs_runtime_call_effect_actor_berserk, /* a the actor, b berserk */
+	_hs_runtime_call_effect_set_default_state, /* a the actor, b the state */
+	_hs_runtime_call_effect_unit_exit_seat, /* a the unit */
+	_hs_runtime_call_effect_look_secondary_stop, /* a the actor */
+	_hs_runtime_call_effect_look_at_object, /* a the actor, b the object */
+	_hs_runtime_call_effect_actor_delete, /* a the actor */
+	_hs_runtime_call_effect_encounter_force_activate, /* a the encounter */
+	_hs_runtime_call_effect_magic_sight, /* a the actor, b the unit */
+	_hs_runtime_call_effect_squad_timer_expire, /* a the encounter, b the squad */
+	_hs_runtime_call_effect_ai_erase, /* a the encounter, b the platoon, c the squad */
+	_hs_runtime_call_effect_encounter_create, /* a the encounter, b the platoon, c the squad */
+	_hs_runtime_call_effect_encounter_spawn_actor, /* a the encounter, b the squad */
+	_hs_runtime_call_effect_link_activation, /* a the encounter, b the linked AI */
+	_hs_runtime_call_effect_conversation_stop, /* a the conversation */
+	_hs_runtime_call_effect_conversation_advance, /* a the conversation */
+	_hs_runtime_call_effect_allegiance_create, /* a the teams (16 bits each), b the threshold and decay time, c suspicious and communication (bits) */
+	_hs_runtime_call_effect_allegiance_remove, /* a and b the teams */
+	_hs_runtime_call_effect_actor_set_team, /* a the actor, b the team */
+	_hs_runtime_call_effect_update_team_status,
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_update_team_status,
 };
 
 /* the runtime's operations the Rust port can run */
@@ -2295,6 +2326,7 @@ mode): Rust's runs first, its writes held aside; TRUE if it's checked, for
 the end's comparison */
 int halo_sim_hs_body_check_begin(struct halo_sim_hs_call const *call);
 void halo_sim_hs_body_check_end(struct halo_sim_hs_call const *call, int checking);
+void halo_sim_hs_body_effect(struct halo_sim_hs_call const *call);
 int halo_sim_hs_event_begin(struct halo_sim_hs_call const *call);
 void halo_sim_hs_event_end(struct halo_sim_hs_call const *call, int opened);
 void hs_runtime_call(struct halo_sim_hs_call *call);

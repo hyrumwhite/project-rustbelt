@@ -50,6 +50,15 @@ struct ai_script_actor_reference_iterator
 
 /* ---------- prototypes/AI_SCRIPT.C */
 
+struct halo_sim_hs_call;
+void ai_script_effect_run(
+	struct halo_sim_hs_call *call);
+long hs_runtime_effect(
+	long kind,
+	long a,
+	long b,
+	long c);
+
 void ai_script_initialize(
 	void);
 void ai_script_dispose(

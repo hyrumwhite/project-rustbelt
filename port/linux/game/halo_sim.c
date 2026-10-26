@@ -1806,6 +1806,19 @@ struct halo_sim_hs_body_write
 	unsigned long value;
 };
 
+/* (and the effects on the rest of the game Rust's asked, held back: the
+game's body makes its own through hs_runtime_effect, compared with them in
+order) */
+#define MAXIMUM_HALO_SIM_HS_BODY_EFFECTS 4096
+
+struct halo_sim_hs_body_effect
+{
+	long kind;
+	long a;
+	long b;
+	long c;
+};
+
 struct halo_sim_hs_body_call
 {
 	struct halo_sim_hs_context context;
@@ -1816,6 +1829,8 @@ struct halo_sim_hs_body_call
 	unsigned long write_count;
 	long overflow;
 	struct halo_sim_hs_body_write writes[MAXIMUM_HALO_SIM_HS_BODY_WRITES];
+	unsigned long effect_count;
+	struct halo_sim_hs_body_effect effects[MAXIMUM_HALO_SIM_HS_BODY_EFFECTS];
 };
 
 /* crates/halo_sim's AiUpdateC and AiUpdateCallbacks */
@@ -2811,6 +2826,11 @@ static struct
 	unsigned long bodies_differed;
 	unsigned long bodies_unchecked;
 	struct halo_sim_hs_body_call body;
+	/* (while the game's body runs: its effects so far, and whether one
+	differed from Rust's) */
+	boolean body_open;
+	boolean body_effect_differed;
+	unsigned long body_effect_count;
 	boolean command_run;
 	boolean later_command_run;
 } halo_sim_hs_checks;
@@ -11535,12 +11555,52 @@ int halo_sim_hs_body_check_begin(struct halo_sim_hs_call const *call)
 	body->handled = FALSE;
 	body->write_count = 0;
 	body->overflow = FALSE;
+	body->effect_count = 0;
 	if (halo_sim.hs_body_check(body) != 0 || !body->handled || body->overflow)
 	{
-		halo_sim_hs_checks.bodies_unchecked++;
+		extern char const *hs_runtime_function_name(short function_index);
+
+		/* (the first few said: a body Rust's leaves to the game's, or one
+		that wrote or asked too much) */
+		if (++halo_sim_hs_checks.bodies_unchecked <= 8)
+		{
+			platform_log("halo_sim: library body %s unchecked (%s)", hs_runtime_function_name((short)call->a),
+				body->overflow ? "too much written or asked" : "left to the game's");
+		}
 		return FALSE;
 	}
+	halo_sim_hs_checks.body_open = TRUE;
+	halo_sim_hs_checks.body_effect_differed = FALSE;
+	halo_sim_hs_checks.body_effect_count = 0;
 	return TRUE;
+}
+
+void halo_sim_hs_body_effect(struct halo_sim_hs_call const *call)
+{
+	extern char const *hs_runtime_function_name(short function_index);
+	struct halo_sim_hs_body_call const *body = &halo_sim_hs_checks.body;
+	unsigned long index = halo_sim_hs_checks.body_effect_count++;
+
+	if (!halo_sim_hs_checks.body_open || halo_sim_hs_checks.body_effect_differed)
+		return;
+	if (index >= body->effect_count ||
+		body->effects[index].kind != call->kind ||
+		body->effects[index].a != call->a ||
+		body->effects[index].b != call->b ||
+		body->effects[index].c != call->c)
+	{
+		halo_sim_hs_checks.body_effect_differed = TRUE;
+		if (halo_sim_hs_checks.bodies_differed < 8)
+		{
+			platform_log("halo_sim: library body %s differs: effect %lu of %lu: game %lx (%lx %lx %lx) rust %lx (%lx %lx %lx)",
+				hs_runtime_function_name((short)body->function_index), index, body->effect_count,
+				call->kind, call->a, call->b, call->c,
+				index < body->effect_count ? body->effects[index].kind : 0,
+				index < body->effect_count ? body->effects[index].a : 0,
+				index < body->effect_count ? body->effects[index].b : 0,
+				index < body->effect_count ? body->effects[index].c : 0);
+		}
+	}
 }
 
 void halo_sim_hs_body_check_end(struct halo_sim_hs_call const *call, int checking)
@@ -11551,7 +11611,22 @@ void halo_sim_hs_body_check_end(struct halo_sim_hs_call const *call, int checkin
 
 	if (!checking)
 		return;
+	halo_sim_hs_checks.body_open = FALSE;
 	halo_sim_hs_checks.bodies_checked++;
+	if (!halo_sim_hs_checks.body_effect_differed && halo_sim_hs_checks.body_effect_count != body->effect_count)
+	{
+		halo_sim_hs_checks.body_effect_differed = TRUE;
+		if (halo_sim_hs_checks.bodies_differed < 8)
+		{
+			platform_log("halo_sim: library body %s differs: %lu effects, Rust's %lu",
+				hs_runtime_function_name((short)call->a), halo_sim_hs_checks.body_effect_count, body->effect_count);
+		}
+	}
+	if (halo_sim_hs_checks.body_effect_differed)
+	{
+		halo_sim_hs_checks.bodies_differed++;
+		return;
+	}
 	for (write_index = 0; write_index < body->write_count; write_index++)
 	{
 		struct halo_sim_hs_body_write const *write = &body->writes[write_index];

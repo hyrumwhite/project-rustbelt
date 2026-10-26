@@ -2154,7 +2154,68 @@ static char const *const hs_runtime_rust_bodies[] =
 	"ai_going_to_vehicle",
 	"ai_allegiance_broken",
 	"ai_conversation_line",
+	/* (the AI's orders, through hs_runtime_effect, 26 October) */
+	"ai_command_list",
+	"ai_command_list_by_unit",
+	"ai_go_to_vehicle",
+	"ai_go_to_vehicle_override",
+	"ai_command_list_advance",
+	"ai_command_list_advance_by_unit",
+	"ai_kill",
+	"ai_kill_silent",
+	"ai_braindead",
+	"ai_braindead_by_unit",
+	"ai_berserk",
+	"ai_set_current_state",
+	"ai_set_return_state",
+	"ai_exit_vehicle",
+	"ai_stop_looking",
+	"ai_look_at_object",
+	"ai_detach",
+	"ai_set_respawn",
+	"ai_magically_see_unit",
+	"ai_magically_see_players",
+	"ai_magically_see_encounter",
+	"ai_timer_expire",
+	"ai_erase",
+	"ai_erase_all",
+	"ai_place",
+	"ai_spawn_actor",
+	"ai_link_activation",
+	"ai_conversation_stop",
+	"ai_conversation_advance",
+	"ai_allegiance",
+	"ai_allegiance_remove",
+	"ai_set_team",
 };
+/* port: a library body's effect on the rest of the game, made through here
+by the game's body as Rust's makes it through hs_runtime_call: in check mode
+the body check compares the game's with those Rust's asked (halo_sim.c's
+halo_sim_hs_body_effect). An effect's own effects aren't the body's. */
+static long hs_runtime_effect_depth = 0;
+
+long hs_runtime_effect(
+	long kind,
+	long a,
+	long b,
+	long c)
+{
+	struct halo_sim_hs_call call;
+
+	call.kind = kind;
+	call.a = a;
+	call.b = b;
+	call.c = c;
+	call.result = 0;
+	if (hs_runtime_effect_depth == 0)
+		halo_sim_hs_body_effect(&call);
+	hs_runtime_effect_depth++;
+	ai_script_effect_run(&call);
+	hs_runtime_effect_depth--;
+
+	return call.result;
+}
+
 /* (each library function's runs, for HALO_HS_LIBRARY_COUNTS's) */
 unsigned long hs_runtime_library_counts[1024];
 
@@ -3845,6 +3906,37 @@ void hs_runtime_call(
 
 		case _hs_runtime_call_script_disabled:
 			call->result = hs_scenario_script_disabled((short)call->a) ? 1 : 0;
+			break;
+
+		/* (a Rust body's effects, made as the game's body makes them) */
+		case _hs_runtime_call_effect_obey_command_list:
+		case _hs_runtime_call_effect_vehicle_seats:
+		case _hs_runtime_call_effect_enter_vehicle:
+		case _hs_runtime_call_effect_obey_advance:
+		case _hs_runtime_call_effect_actor_kill:
+		case _hs_runtime_call_effect_actor_braindead:
+		case _hs_runtime_call_effect_actor_berserk:
+		case _hs_runtime_call_effect_set_default_state:
+		case _hs_runtime_call_effect_unit_exit_seat:
+		case _hs_runtime_call_effect_look_secondary_stop:
+		case _hs_runtime_call_effect_look_at_object:
+		case _hs_runtime_call_effect_actor_delete:
+		case _hs_runtime_call_effect_encounter_force_activate:
+		case _hs_runtime_call_effect_magic_sight:
+		case _hs_runtime_call_effect_squad_timer_expire:
+		case _hs_runtime_call_effect_ai_erase:
+		case _hs_runtime_call_effect_encounter_create:
+		case _hs_runtime_call_effect_encounter_spawn_actor:
+		case _hs_runtime_call_effect_link_activation:
+		case _hs_runtime_call_effect_conversation_stop:
+		case _hs_runtime_call_effect_conversation_advance:
+		case _hs_runtime_call_effect_allegiance_create:
+		case _hs_runtime_call_effect_allegiance_remove:
+		case _hs_runtime_call_effect_actor_set_team:
+		case _hs_runtime_call_effect_update_team_status:
+			hs_runtime_effect_depth++;
+			ai_script_effect_run(call);
+			hs_runtime_effect_depth--;
 			break;
 
 		case _hs_runtime_call_game_in_progress:

@@ -470,6 +470,7 @@ symbols in this file:
 #include "scenario/scenario_definitions.h"
 #include "units/bipeds.h"
 #include "units/units.h"
+#include "halo_sim.h"
 
 /* ---------- constants */
 
@@ -667,6 +668,130 @@ static short ai_scripting_command_list_status_internal(
 char const ai_script_squad_separator = '/';
 
 /* ---------- public code */
+
+/* port: a library body's effects (halo_sim.h's _hs_runtime_call_effect_*),
+the game's body's through hs_runtime_effect and Rust's through
+hs_runtime_call; the seats the next vehicle entries take */
+static short ai_script_effect_seat_indices[64];
+static short ai_script_effect_seat_count;
+
+void ai_script_effect_run(
+	struct halo_sim_hs_call *call)
+{
+	switch (call->kind)
+	{
+	case _hs_runtime_call_effect_obey_command_list:
+	{
+		struct action_state_data action_data;
+
+		if (action_obey_command_list_setup(call->a, (short)call->b, &action_data.obey))
+			actor_action_change(call->a, _actor_action_obey, &action_data);
+		break;
+	}
+	case _hs_runtime_call_effect_vehicle_seats:
+	{
+		short seat_index;
+
+		ai_script_effect_seat_count = 0;
+		for (seat_index = 0; seat_index < 64; seat_index++)
+		{
+			unsigned long bits = (unsigned long)(seat_index < 32 ? call->b : call->c);
+
+			if (bits & (1UL << (seat_index & 31)))
+				ai_script_effect_seat_indices[ai_script_effect_seat_count++] = seat_index;
+		}
+		break;
+	}
+	case _hs_runtime_call_effect_enter_vehicle:
+		call->result = actor_action_try_to_enter_vehicle(call->a, call->b, NULL, NONE,
+			ai_script_effect_seat_count, ai_script_effect_seat_indices);
+		break;
+	case _hs_runtime_call_effect_obey_advance:
+		action_obey_advance_command_list(call->a);
+		break;
+	case _hs_runtime_call_effect_actor_kill:
+		actor_kill(call->a, (boolean)call->b, FALSE);
+		break;
+	case _hs_runtime_call_effect_actor_braindead:
+		actor_braindead(call->a, (boolean)call->b);
+		break;
+	case _hs_runtime_call_effect_actor_berserk:
+		actor_berserk(call->a, (boolean)call->b);
+		break;
+	case _hs_runtime_call_effect_set_default_state:
+		call->result = actor_action_set_default_state(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_unit_exit_seat:
+		call->result = unit_try_and_exit_seat(call->a);
+		break;
+	case _hs_runtime_call_effect_look_secondary_stop:
+		actor_look_secondary_stop(call->a);
+		break;
+	case _hs_runtime_call_effect_look_at_object:
+	{
+		struct direction_specification direction;
+
+		direction.type = _direction_specification_object;
+		direction.object_index = call->b;
+		actor_look_secondary(call->a, _secondary_look_scripted, _secondary_look_priority_default, &direction);
+		break;
+	}
+	case _hs_runtime_call_effect_actor_delete:
+		actor_delete(call->a, FALSE);
+		break;
+	case _hs_runtime_call_effect_encounter_force_activate:
+		encounter_force_activate(call->a);
+		break;
+	case _hs_runtime_call_effect_magic_sight:
+	{
+		long prop_index = prop_get_base_by_unit_index(call->a, call->b, TRUE, FALSE);
+
+		if (prop_index != NONE)
+			actor_handle_unit_effect(call->a, prop_index, _ai_unit_effect_magic_sight);
+		break;
+	}
+	case _hs_runtime_call_effect_squad_timer_expire:
+		encounter_squad_timer_expire(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_ai_erase:
+		ai_erase(call->a, call->b, call->c, FALSE);
+		break;
+	case _hs_runtime_call_effect_encounter_create:
+		encounter_create(call->a, call->b, call->c);
+		break;
+	case _hs_runtime_call_effect_encounter_spawn_actor:
+		call->result = encounter_spawn_actor(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_link_activation:
+		call->result = encounter_link_activation(call->a, call->b);
+		break;
+	case _hs_runtime_call_effect_conversation_stop:
+		ai_conversation_stop((short)call->a);
+		break;
+	case _hs_runtime_call_effect_conversation_advance:
+		ai_conversation_advance((short)call->a);
+		break;
+	case _hs_runtime_call_effect_allegiance_create:
+		game_allegiance_create(
+			(short)call->a,
+			(call->c & 1) != 0,
+			(short)(call->a >> 16),
+			(call->c & 2) != 0,
+			(short)call->b,
+			(short)(call->b >> 16),
+			(call->c & 4) != 0);
+		break;
+	case _hs_runtime_call_effect_allegiance_remove:
+		call->result = game_allegiance_remove((short)call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_actor_set_team:
+		actor_set_team(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_update_team_status:
+		ai_update_team_status();
+		break;
+	}
+}
 
 void ai_script_initialize(
 	void)
@@ -1280,7 +1405,7 @@ void ai_scripting_berserk(
 			actor;
 			actor = ai_index_actor_iterator_next(&iterator))
 		{
-			actor_berserk(iterator.actor_index, berserk);
+			hs_runtime_effect(_hs_runtime_call_effect_actor_berserk, iterator.actor_index, berserk, 0);
 		}
 	}
 
@@ -1327,7 +1452,7 @@ void ai_scripting_braindead(
 			actor;
 			actor = ai_index_actor_iterator_next(&iterator))
 		{
-			actor_braindead(iterator.actor_index, braindead);
+			hs_runtime_effect(_hs_runtime_call_effect_actor_braindead, iterator.actor_index, braindead, 0);
 		}
 	}
 
@@ -1435,7 +1560,7 @@ void ai_scripting_timer_expire(
 			squad;
 			squad = ai_index_squad_iterator_next(&iterator))
 		{
-			encounter_squad_timer_expire(iterator.encounter_index, iterator.squad_index);
+			hs_runtime_effect(_hs_runtime_call_effect_squad_timer_expire, iterator.encounter_index, iterator.squad_index, 0);
 		}
 	}
 
@@ -1676,8 +1801,12 @@ void ai_scripting_set_respawn(
 			respawn ? "on" : "off");
 	}
 
-	if (ai_reference != NONE)
-		encounter_set_respawn(ai_reference & UNSIGNED_SHORT_MAX, respawn);
+	if (ai_reference != NONE && ai_globals->ai_initialized_for_map)
+	{
+		/* (encounter_set_respawn) */
+		encounter_get(ai_reference & UNSIGNED_SHORT_MAX)->respawn_enabled = respawn;
+		hs_runtime_effect(_hs_runtime_call_effect_encounter_force_activate, ai_reference & UNSIGNED_SHORT_MAX, 0, 0);
+	}
 
 	return;
 }
@@ -1942,7 +2071,7 @@ void ai_scripting_detach_unit(
 	{
 		long actor_index = unit_get(unit_index)->unit.actor_index;
 		if (actor_index != NONE)
-			actor_delete(actor_index, FALSE);
+			hs_runtime_effect(_hs_runtime_call_effect_actor_delete, actor_index, 0, 0);
 	}
 
 	return;
@@ -2789,7 +2918,7 @@ void ai_scripting_allegiance_remove(
 	}
 
 	if (team1_index != NONE && team2_index != NONE)
-		game_allegiance_remove(team1_index, team2_index);
+		hs_runtime_effect(_hs_runtime_call_effect_allegiance_remove, team1_index, team2_index, 0);
 
 	return;
 }
@@ -2863,7 +2992,7 @@ void ai_scripting_conversation_stop(
 			conversation_name);
 	}
 
-	ai_conversation_stop(conversation_index);
+	hs_runtime_effect(_hs_runtime_call_effect_conversation_stop, conversation_index, 0, 0);
 
 	return;
 }
@@ -2893,7 +3022,7 @@ void ai_scripting_conversation_advance(
 			conversation_name);
 	}
 
-	ai_conversation_advance(conversation_index);
+	hs_runtime_effect(_hs_runtime_call_effect_conversation_advance, conversation_index, 0, 0);
 
 	return;
 }
@@ -2913,7 +3042,7 @@ void ai_scripting_stop_looking(
 	{
 		long actor_index = unit_get(unit_index)->unit.actor_index;
 		if (actor_index != NONE)
-			actor_look_secondary_stop(actor_index);
+			hs_runtime_effect(_hs_runtime_call_effect_look_secondary_stop, actor_index, 0, 0);
 	}
 
 	return;
@@ -2981,7 +3110,7 @@ void ai_scripting_erase_all(
 		error(_error_silent, "%s: ai_erase_all", hs_runtime_get_executing_thread_name());
 	}
 
-	ai_erase(NONE, NONE, NONE, FALSE);
+	hs_runtime_effect(_hs_runtime_call_effect_ai_erase, NONE, NONE, NONE);
 
 	return;
 }
@@ -3073,7 +3202,7 @@ void ai_scripting_spawn_actor(
 		}
 
 		if (squad_index != NONE)
-			encounter_spawn_actor(encounter_index, squad_index);
+			hs_runtime_effect(_hs_runtime_call_effect_encounter_spawn_actor, encounter_index, squad_index, 0);
 	}
 
 	return;
@@ -3356,14 +3485,12 @@ void ai_scripting_allegiance(
 		}
 		}
 
-		game_allegiance_create(
-			team_index0,
-			suspicious && team_index0 == special_team_index,
-			team_index1,
-			suspicious && team_index1 == special_team_index,
-			incident_threshold,
-			incident_decay_time,
-			requires_communication);
+		hs_runtime_effect(_hs_runtime_call_effect_allegiance_create,
+			(team_index0 & UNSIGNED_SHORT_MAX) | (team_index1 << 16),
+			(incident_threshold & UNSIGNED_SHORT_MAX) | (incident_decay_time << 16),
+			(suspicious && team_index0 == special_team_index ? 1 : 0) |
+				(suspicious && team_index1 == special_team_index ? 2 : 0) |
+				(requires_communication ? 4 : 0));
 	}
 
 	return;
@@ -3446,11 +3573,11 @@ void ai_scripting_braindead_by_unit(
 
 			if (unit->unit.actor_index != NONE)
 			{
-				actor_braindead(unit->unit.actor_index, braindead);
+				hs_runtime_effect(_hs_runtime_call_effect_actor_braindead, unit->unit.actor_index, braindead, 0);
 			}
 			else if (unit->unit.swarm_actor_index != NONE)
 			{
-				actor_braindead(unit->unit.swarm_actor_index, braindead);
+				hs_runtime_effect(_hs_runtime_call_effect_actor_braindead, unit->unit.swarm_actor_index, braindead, 0);
 			}
 
 			child_object_index = unit->object.first_child_object_index;
@@ -3464,11 +3591,11 @@ void ai_scripting_braindead_by_unit(
 
 					if (child->unit.actor_index != NONE)
 					{
-						actor_braindead(child->unit.actor_index, braindead);
+						hs_runtime_effect(_hs_runtime_call_effect_actor_braindead, child->unit.actor_index, braindead, 0);
 					}
 					else if (child->unit.swarm_actor_index != NONE)
 					{
-						actor_braindead(child->unit.swarm_actor_index, braindead);
+						hs_runtime_effect(_hs_runtime_call_effect_actor_braindead, child->unit.swarm_actor_index, braindead, 0);
 					}
 				}
 
@@ -3656,7 +3783,7 @@ void ai_scripting_set_return_state(
 					action_class == _action_class_passive ||
 					action_class == _action_class_transitory))
 			{
-				actor_action_set_default_state(iterator.actor_index, NONE);
+				hs_runtime_effect(_hs_runtime_call_effect_set_default_state, iterator.actor_index, NONE, 0);
 			}
 		}
 	}
@@ -3694,11 +3821,10 @@ void ai_scripting_magically_see_unit(
 			long prop_index;
 
 			if (actor->meta.encounter_index != NONE)
-				encounter_force_activate(actor->meta.encounter_index);
+				hs_runtime_effect(_hs_runtime_call_effect_encounter_force_activate, actor->meta.encounter_index, 0, 0);
 
-			prop_index = prop_get_base_by_unit_index(iterator.actor_index, unit_index, TRUE, FALSE);
-			if (prop_index != NONE)
-				actor_handle_unit_effect(iterator.actor_index, prop_index, _ai_unit_effect_magic_sight);
+			(void)prop_index;
+			hs_runtime_effect(_hs_runtime_call_effect_magic_sight, iterator.actor_index, unit_index, 0);
 		}
 	}
 
@@ -3769,7 +3895,7 @@ void ai_scripting_link_activation(
 
 	if (ai_reference != NONE && link_ai_reference != NONE)
 	{
-		if (!encounter_link_activation(ai_reference & UNSIGNED_SHORT_MAX, link_ai_reference))
+		if (!hs_runtime_effect(_hs_runtime_call_effect_link_activation, ai_reference & UNSIGNED_SHORT_MAX, link_ai_reference, 0))
 		{
 			error(
 				_error_silent,
@@ -3876,7 +4002,7 @@ void ai_scripting_exit_vehicle(
 		actor = ai_index_actor_iterator_next(&iterator))
 	{
 		if (actor->input.vehicle_index != NONE && actor->meta.unit_index != NONE)
-			unit_try_and_exit_seat(actor->meta.unit_index);
+			hs_runtime_effect(_hs_runtime_call_effect_unit_exit_seat, actor->meta.unit_index, 0, 0);
 	}
 
 	return;
@@ -3933,7 +4059,7 @@ void ai_scripting_set_current_state(
 
 		ai_index_actor_iterator_new(ai_reference, &iterator);
 		while (ai_index_actor_iterator_next(&iterator))
-			actor_action_set_default_state(iterator.actor_index, current_state);
+			hs_runtime_effect(_hs_runtime_call_effect_set_default_state, iterator.actor_index, current_state, 0);
 	}
 
 	return;
@@ -3960,17 +4086,7 @@ void ai_scripting_command_list(
 
 	ai_index_actor_iterator_new(ai_reference, &iterator);
 	while (ai_index_actor_iterator_next(&iterator))
-	{
-		struct action_state_data action_data;
-
-		if (action_obey_command_list_setup(
-			iterator.actor_index,
-			command_list_index,
-			&action_data.obey))
-		{
-			actor_action_change(iterator.actor_index, _actor_action_obey, &action_data);
-		}
-	}
+		hs_runtime_effect(_hs_runtime_call_effect_obey_command_list, iterator.actor_index, command_list_index, 0);
 
 	return;
 }
@@ -3994,16 +4110,8 @@ void ai_scripting_command_list_by_unit(
 
 		if (unit && unit->unit.actor_index != NONE)
 		{
-			struct actor_datum *actor = actor_get(unit->unit.actor_index);
-			struct action_state_data action_data;
-
-			if (action_obey_command_list_setup(
-				unit->unit.actor_index,
-				command_list_index,
-				&action_data.obey))
-			{
-				actor_action_change(unit->unit.actor_index, _actor_action_obey, &action_data);
-			}
+			actor_get(unit->unit.actor_index);
+			hs_runtime_effect(_hs_runtime_call_effect_obey_command_list, unit->unit.actor_index, command_list_index, 0);
 		}
 	}
 
@@ -4229,7 +4337,7 @@ void ai_scripting_command_list_advance(
 
 	ai_index_actor_iterator_new(ai_reference, &iterator);
 	while (ai_index_actor_iterator_next(&iterator))
-		action_obey_advance_command_list(iterator.actor_index);
+		hs_runtime_effect(_hs_runtime_call_effect_obey_advance, iterator.actor_index, 0, 0);
 
 	return;
 }
@@ -4252,7 +4360,7 @@ void ai_scripting_erase(
 		long platoon_index = ((unsigned long)ai_reference >> 30) == _ai_reference_type_platoon ?
 			(ai_reference >> 16) & UNSIGNED_CHAR_MAX : NONE;
 
-		ai_erase(ai_reference & UNSIGNED_SHORT_MAX, platoon_index, squad_index, FALSE);
+		hs_runtime_effect(_hs_runtime_call_effect_ai_erase, ai_reference & UNSIGNED_SHORT_MAX, platoon_index, squad_index);
 	}
 
 	return;
@@ -4276,7 +4384,7 @@ void ai_scripting_place(
 		long platoon_index = ((unsigned long)ai_reference >> 30) == _ai_reference_type_platoon ?
 			(ai_reference >> 16) & UNSIGNED_CHAR_MAX : NONE;
 
-		encounter_create(ai_reference & UNSIGNED_SHORT_MAX, platoon_index, squad_index);
+		hs_runtime_effect(_hs_runtime_call_effect_encounter_create, ai_reference & UNSIGNED_SHORT_MAX, platoon_index, squad_index);
 	}
 
 	return;
@@ -4299,18 +4407,7 @@ void ai_scripting_look_at_object(
 		long actor_index = unit_get(unit_index)->unit.actor_index;
 
 		if (actor_index != NONE)
-		{
-			struct direction_specification direction;
-
-			direction.type = _direction_specification_object;
-			direction.object_index = object_index;
-
-			actor_look_secondary(
-				actor_index,
-				_secondary_look_scripted,
-				_secondary_look_priority_default,
-				&direction);
-		}
+			hs_runtime_effect(_hs_runtime_call_effect_look_at_object, actor_index, object_index, 0);
 	}
 
 	return;
@@ -4331,10 +4428,10 @@ void ai_scripting_set_team(
 		actor;
 		actor = encounter_actor_iterator_next(&iterator))
 	{
-		actor_set_team(iterator.index, team_index);
+		hs_runtime_effect(_hs_runtime_call_effect_actor_set_team, iterator.index, team_index, 0);
 	}
 
-	ai_update_team_status();
+	hs_runtime_effect(_hs_runtime_call_effect_update_team_status, 0, 0, 0);
 
 	return;
 }
@@ -4358,11 +4455,11 @@ void ai_scripting_command_list_advance_by_unit(
 		{
 			if (unit->unit.actor_index != NONE)
 			{
-				action_obey_advance_command_list(unit->unit.actor_index);
+				hs_runtime_effect(_hs_runtime_call_effect_obey_advance, unit->unit.actor_index, 0, 0);
 			}
 			else if (unit->unit.swarm_actor_index != NONE)
 			{
-				action_obey_advance_command_list(unit->unit.swarm_actor_index);
+				hs_runtime_effect(_hs_runtime_call_effect_obey_advance, unit->unit.swarm_actor_index, 0, 0);
 			}
 		}
 	}
@@ -4574,6 +4671,20 @@ static void ai_scripting_go_to_vehicle_internal(
 
 	qsort(candidates, candidate_count, sizeof(candidates[0]), ai_scripting_vehicle_candidate_qsort);
 
+	{
+		unsigned long seat_bits[2] = { 0, 0 };
+		short seat_index_index;
+
+		for (seat_index_index = 0; seat_index_index < available_seat_count; seat_index_index++)
+		{
+			short seat_index = seat_indices[seat_index_index];
+
+			if (seat_index >= 0 && seat_index < 64)
+				seat_bits[seat_index >> 5] |= 1UL << (seat_index & 31);
+		}
+		hs_runtime_effect(_hs_runtime_call_effect_vehicle_seats, unit_index, (long)seat_bits[0], (long)seat_bits[1]);
+	}
+
 	for (candidate_index = 0; candidate_index < candidate_count; candidate_index++)
 	{
 		if (candidates[candidate_index].already_going_to_vehicle &&
@@ -4582,13 +4693,7 @@ static void ai_scripting_go_to_vehicle_internal(
 			break;
 		}
 
-		actor_action_try_to_enter_vehicle(
-			candidates[candidate_index].actor_index,
-			unit_index,
-			NULL,
-			NONE,
-			available_seat_count,
-			seat_indices);
+		hs_runtime_effect(_hs_runtime_call_effect_enter_vehicle, candidates[candidate_index].actor_index, unit_index, 0);
 	}
 
 	return;
@@ -4631,7 +4736,7 @@ static void ai_scripting_kill_internal(
 
 	ai_index_actor_iterator_new(ai_reference, &iterator);
 	while (ai_index_actor_iterator_next(&iterator))
-		actor_kill(iterator.actor_index, silent, FALSE);
+		hs_runtime_effect(_hs_runtime_call_effect_actor_kill, iterator.actor_index, silent, 0);
 
 	return;
 }

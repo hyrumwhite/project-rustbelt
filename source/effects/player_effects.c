@@ -303,6 +303,29 @@ static void get_shake_matrix(
 
 static struct player_effect_globals_definition *player_effect_globals;
 
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the scripted effect and flags the Rust port's library bodies set
+(hs_runtime_port_game_fields) */
+void player_effect_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_player_effect_scripted] = player_effect_globals ? (unsigned long)&player_effect_globals->scripted_effect : 0;
+	fields[_hs_game_field_player_effect_flags] = player_effect_globals ? (unsigned long)&player_effect_globals->global_flags : 0;
+}
+
+long hs_runtime_effect(long kind, long a, long b, long c);
+
+/* port: a real's bits, an effect's argument */
+static long player_effect_real_bits(
+	real value)
+{
+	long bits;
+
+	csmemcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
 /* port: a player effect's calls of the game (player_effect_call) */
 static void player_effect_call_new(
 	struct halo_sim_player_effect_call *call,
@@ -441,7 +464,7 @@ void scripted_player_effect_set_rotation(
 	real pitch,
 	real roll)
 {
-	network_coop_note_player_effect(_coop_player_effect_rotation, yaw, pitch, roll);
+	hs_runtime_effect(_hs_runtime_call_effect_coop_player_effect_rotation, player_effect_real_bits(yaw), player_effect_real_bits(pitch), player_effect_real_bits(roll));
 	player_effect_globals->scripted_effect.max_rotation.yaw = DEGREES_TO_RADIANS(yaw);
 	player_effect_globals->scripted_effect.max_rotation.pitch = DEGREES_TO_RADIANS(pitch);
 	player_effect_globals->scripted_effect.max_rotation.roll = DEGREES_TO_RADIANS(roll);
@@ -725,7 +748,7 @@ void scripted_player_effect_set_translation(
 {
 	real_vector3d *translation = &player_effect_globals->scripted_effect.max_translation;
 
-	network_coop_note_player_effect(_coop_player_effect_translation, horizontal, vertical, depth);
+	hs_runtime_effect(_hs_runtime_call_effect_coop_player_effect_translation, player_effect_real_bits(horizontal), player_effect_real_bits(vertical), player_effect_real_bits(depth));
 	translation->i = horizontal;
 	translation->j = vertical;
 	translation->k = depth;
@@ -739,7 +762,7 @@ void scripted_player_effect_start(
 {
 	short ticks;
 
-	network_coop_note_player_effect(_coop_player_effect_start, maximum_intensity, attack_time, 0.0f);
+	hs_runtime_effect(_hs_runtime_call_effect_coop_player_effect_start, player_effect_real_bits(maximum_intensity), player_effect_real_bits(attack_time), player_effect_real_bits(0.0f));
 	player_effect_globals->scripted_effect.max_intensity = maximum_intensity;
 
 	ticks = (short)fast_ftol(attack_time * TICKS_PER_SECOND);
@@ -762,7 +785,7 @@ void scripted_player_effect_stop(
 {
 	short ticks = (short)fast_ftol(duration * TICKS_PER_SECOND);
 
-	network_coop_note_player_effect(_coop_player_effect_stop, duration, 0.0f, 0.0f);
+	hs_runtime_effect(_hs_runtime_call_effect_coop_player_effect_stop, player_effect_real_bits(duration), player_effect_real_bits(0.0f), player_effect_real_bits(0.0f));
 	player_effect_globals->scripted_effect.timer = ticks;
 	player_effect_globals->scripted_effect.total_time = ticks;
 	SET_FLAG(

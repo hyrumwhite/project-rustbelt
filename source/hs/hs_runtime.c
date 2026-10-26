@@ -2198,12 +2198,51 @@ static char const *const hs_runtime_rust_bodies[] =
 	"ai_migrate",
 	"ai_migrate_and_speak",
 	"ai_migrate_by_unit",
+	/* (players, the game and cameras, 26 October) */
+	"game_time",
+	"game_difficulty_get_real",
+	"game_difficulty_set",
+	"camera_time",
+	"player_enable_input",
+	"player_camera_control",
+	"player_action_test_reset",
+	"player_action_test_accept",
+	"player_action_test_back",
+	"player_action_test_action",
+	"player_action_test_jump",
+	"player_action_test_primary_trigger",
+	"player_action_test_grenade_trigger",
+	"player_action_test_zoom",
+	"player_action_test_look_relative_up",
+	"player_action_test_look_relative_down",
+	"player_action_test_look_relative_left",
+	"player_action_test_look_relative_right",
+	"player_action_test_look_relative_all_directions",
+	"player_action_test_move_relative_all_directions",
+	"players_unzoom_all",
+	"game_saving",
+	"game_save",
+	"game_save_cancel",
+	"game_save_no_timeout",
+	"game_save_totally_unsafe",
+	"game_won",
+	"game_lost",
+	"game_revert",
+	"map_reset",
+	"game_skip_ticks",
+	"game_speed",
+	"game_reverted",
+	"player_effect_set_max_translation",
+	"player_effect_set_max_rotation",
+	"player_effect_start",
+	"player_effect_stop",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
 the body check compares the game's with those Rust's asked (halo_sim.c's
 halo_sim_hs_body_effect). An effect's own effects aren't the body's. */
 static long hs_runtime_effect_depth = 0;
+static void hs_runtime_effect_run(struct halo_sim_hs_call *call);
 
 long hs_runtime_effect(
 	long kind,
@@ -2221,10 +2260,66 @@ long hs_runtime_effect(
 	if (hs_runtime_effect_depth == 0)
 		halo_sim_hs_body_effect(&call);
 	hs_runtime_effect_depth++;
-	ai_script_effect_run(&call);
+	hs_runtime_effect_run(&call);
 	hs_runtime_effect_depth--;
 
 	return call.result;
+}
+
+/* port: the game's fields the Rust port's library bodies read and write,
+an address each (halo_sim.h's _hs_game_field_*) */
+static unsigned long *hs_runtime_port_game_fields(
+	void)
+{
+	extern void main_port_game_fields(unsigned long *fields);
+	extern void player_control_port_game_fields(unsigned long *fields);
+	extern void scripted_camera_port_game_fields(unsigned long *fields);
+	extern void game_time_port_game_fields(unsigned long *fields);
+	extern void game_state_port_game_fields(unsigned long *fields);
+	extern void player_effect_port_game_fields(unsigned long *fields);
+	extern struct players_globals *players_globals;
+	static unsigned long fields[NUMBER_OF_HS_GAME_FIELDS];
+
+	main_port_game_fields(fields);
+	player_control_port_game_fields(fields);
+	scripted_camera_port_game_fields(fields);
+	game_time_port_game_fields(fields);
+	game_state_port_game_fields(fields);
+	player_effect_port_game_fields(fields);
+	fields[_hs_game_field_players_input_disabled] = players_globals ? (unsigned long)&players_globals->input_disabled : 0;
+
+	return fields;
+}
+
+/* port: an effect run (the game's and Rust's alike): the AI's in ai_script.c */
+static void hs_runtime_effect_run(
+	struct halo_sim_hs_call *call)
+{
+	real a;
+	real b;
+	real c;
+
+	csmemcpy(&a, &call->a, sizeof(a));
+	csmemcpy(&b, &call->b, sizeof(b));
+	csmemcpy(&c, &call->c, sizeof(c));
+	switch (call->kind)
+	{
+	case _hs_runtime_call_effect_coop_player_effect_translation:
+		network_coop_note_player_effect(_coop_player_effect_translation, a, b, c);
+		break;
+	case _hs_runtime_call_effect_coop_player_effect_rotation:
+		network_coop_note_player_effect(_coop_player_effect_rotation, a, b, c);
+		break;
+	case _hs_runtime_call_effect_coop_player_effect_start:
+		network_coop_note_player_effect(_coop_player_effect_start, a, b, c);
+		break;
+	case _hs_runtime_call_effect_coop_player_effect_stop:
+		network_coop_note_player_effect(_coop_player_effect_stop, a, b, c);
+		break;
+	default:
+		ai_script_effect_run(call);
+		break;
+	}
 }
 
 /* (each library function's runs, for HALO_HS_LIBRARY_COUNTS's) */
@@ -3955,8 +4050,12 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_stimulus_maneuvering:
 		case _hs_runtime_call_effect_encounter_reattach:
 		case _hs_runtime_call_effect_team_status_if_teams_differ:
+		case _hs_runtime_call_effect_coop_player_effect_translation:
+		case _hs_runtime_call_effect_coop_player_effect_rotation:
+		case _hs_runtime_call_effect_coop_player_effect_start:
+		case _hs_runtime_call_effect_coop_player_effect_stop:
 			hs_runtime_effect_depth++;
-			ai_script_effect_run(call);
+			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;
 			break;
 
@@ -4141,6 +4240,7 @@ void hs_runtime_port_context(
 	context->allegiance_globals = (unsigned long)game_allegiance_port_globals();
 	context->actor_palette = scenario ? (unsigned long)scenario->ai_actor_palette.address : 0;
 	context->actor_palette_count = scenario ? scenario->ai_actor_palette.count : 0;
+	context->game_fields = (unsigned long)hs_runtime_port_game_fields();
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

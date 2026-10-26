@@ -717,6 +717,31 @@ static char const *scenario_paths[10] =
 static struct _main_globals main_globals = { 0 };
 /* Keep the original globals layout; these clocks belong to pending requests. */
 static long main_loss_last_tick;
+
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: main_globals' fields the Rust port's library bodies set (the save,
+revert, reset, won and lost requests; hs_runtime_port_game_fields) */
+void main_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_main_saving_map] = (unsigned long)&main_globals.saving_map;
+	fields[_hs_game_field_main_save_map_safely] = (unsigned long)&main_globals.save_map_safely;
+	fields[_hs_game_field_main_save_map_timeout] = (unsigned long)&main_globals.save_map_timeout;
+	fields[_hs_game_field_main_ticks_until_next_save_check] = (unsigned long)&main_globals.ticks_until_next_save_check;
+	fields[_hs_game_field_main_ticks_unable_to_save] = (unsigned long)&main_globals.ticks_unable_to_save;
+	fields[_hs_game_field_main_safe_intervals] = (unsigned long)&main_globals.safe_intervals;
+	fields[_hs_game_field_main_won_map] = (unsigned long)&main_globals.won_map;
+	fields[_hs_game_field_main_lost_map] = (unsigned long)&main_globals.lost_map;
+	fields[_hs_game_field_main_loss_timer] = (unsigned long)&main_globals.loss_timer;
+	fields[_hs_game_field_main_loss_last_tick] = (unsigned long)&main_loss_last_tick;
+	fields[_hs_game_field_main_revert_map] = (unsigned long)&main_globals.revert_map;
+	fields[_hs_game_field_main_reset_map] = (unsigned long)&main_globals.reset_map;
+	fields[_hs_game_field_main_switch_to_structure_bsp_index] = (unsigned long)&main_globals.switch_to_structure_bsp_index;
+	fields[_hs_game_field_main_skip_ticks] = (unsigned long)&main_globals.skip_ticks;
+	fields[_hs_game_field_main_skip] = (unsigned long)&main_globals.skip;
+	fields[_hs_game_field_difficulty_level] = (unsigned long)&global_difficulty_level;
+}
 static long main_respawn_last_tick;
 boolean debug_force_frame_rate_update = FALSE;
 boolean debug_no_drawing = FALSE;

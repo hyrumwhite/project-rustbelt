@@ -384,6 +384,23 @@ real player_look_zoomed_scale = 0.5f;
 static struct profile_section player_control_update_section = {"player_control_update", NONE, TRUE};
 
 static struct player_control_globals_data *player_control_globals;
+
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the globals' fields the Rust port's library bodies read and write
+(hs_runtime_port_game_fields) */
+void player_control_port_game_fields(
+	unsigned long *fields)
+{
+	short local_player_index;
+
+	fields[_hs_game_field_player_control_globals] = (unsigned long)player_control_globals;
+	for (local_player_index = 0; local_player_index < MAXIMUM_NUMBER_OF_LOCAL_PLAYERS; local_player_index++)
+	{
+		fields[_hs_game_field_player_control_zoom_level0 + local_player_index] = player_control_globals ?
+			(unsigned long)&player_control_globals->players[local_player_index].zoom_level : 0;
+	}
+}
 short debug_input_target = 0;
 real player_look_yaw_rate[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS] = {0};
 real player_look_pitch_rate[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS] = {0};

@@ -174,6 +174,15 @@ static struct
 	struct game_state_header *header; // 0x18
 } game_state_globals = { 0 };
 
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the revert time the Rust port's game_reverted reads (hs_runtime_port_game_fields) */
+void game_state_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_game_state_revert_time] = (unsigned long)&game_state_globals.revert_time;
+}
+
 typedef void (*game_state_before_load_proc)(void);
 typedef void (*game_state_after_load_proc)(void);
 typedef void (*game_state_before_save_proc)(void);

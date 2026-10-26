@@ -111,6 +111,15 @@ struct game_time_globals_struct
 
 static struct game_time_globals_struct *game_time_globals;
 
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the speed the Rust port's game_speed sets (hs_runtime_port_game_fields) */
+void game_time_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_game_time_speed] = game_time_globals ? (unsigned long)&game_time_globals->speed : 0;
+}
+
 /* ---------- public code */
 
 boolean game_time_initialized(

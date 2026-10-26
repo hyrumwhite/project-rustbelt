@@ -794,7 +794,11 @@ enum
 	_hs_runtime_call_effect_stimulus_maneuvering, /* a the actor, b advancing */
 	_hs_runtime_call_effect_encounter_reattach, /* a the encounterless actor, b the encounter, c the squad */
 	_hs_runtime_call_effect_team_status_if_teams_differ, /* a and b the encounters: the teams' status, if theirs differ by then */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_team_status_if_teams_differ,
+	_hs_runtime_call_effect_coop_player_effect_translation, /* a, b and c (reals): network_coop_note_player_effect's */
+	_hs_runtime_call_effect_coop_player_effect_rotation,
+	_hs_runtime_call_effect_coop_player_effect_start,
+	_hs_runtime_call_effect_coop_player_effect_stop,
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_coop_player_effect_stop,
 };
 
 /* the runtime's operations the Rust port can run */
@@ -905,7 +909,12 @@ struct halo_sim_hs_context
 	/* the scenario's actor palette (its first element) and count */
 	unsigned long actor_palette;
 	long actor_palette_count;
+	/* the game's fields the main loop's, players' and cameras' library
+	bodies read and write: an address each (_hs_game_field_*) */
+	unsigned long game_fields;
 };
+
+#include "hs_game_fields.h"
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's
 actors_port_call; crates/halo_map's ai_update::call) */

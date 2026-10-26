@@ -198,7 +198,7 @@ impl Plugin for BridgePlugin {
             .init_resource::<ForwardInput>()
             .add_systems(First, read_frame.in_set(ReadFrame))
             .add_systems(PreUpdate, (grab_cursor, forward_input, forward_gamepads).chain().after(bevy::input::InputSystems))
-            .add_systems(Update, (toggle_follow, sync_objects, sync_camera, sync_active_bsp).chain())
+            .add_systems(Update, (toggle_follow, sync_objects, sync_camera, sync_active_bsp, sync_breakable_surfaces).chain())
             .add_systems(Startup, spawn_game_banner)
             .add_systems(Update, watch_game);
     }
@@ -822,11 +822,14 @@ fn sync_objects(
         }
         // the rays' copies of the bending parts, skinned again when the
         // nodes moved relative to the root node (and not for a hidden
-        // object, which the rays don't see, but the first-person body)
+        // object, which the rays don't see, but the first-person body, nor
+        // the first-person arms and weapon but camouflaged, as glass)
         let to_root = node_matrices.first().map_or(Mat4::IDENTITY, |root| root.inverse());
         let relative: Vec<Mat4> = node_matrices.iter().map(|m| to_root * *m).collect();
         if !tracked.skins.is_empty()
-            && (object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) == 0 || body)
+            && (object.flags & (OBJECT_HIDDEN | OBJECT_FIRST_PERSON) == 0
+                || body
+                || (tracked.camouflaged && object.flags & OBJECT_HIDDEN == 0))
             && tracked.skinned_to != relative
         {
             // (each its own mesh, made the first time: the one it was spawned
@@ -1068,6 +1071,27 @@ impl ClusterVisibility {
     fn sees(&self, from: i16, to: i16) -> bool {
         let word = from as usize * self.words_per_cluster + to as usize / 32;
         self.pvs.get(word).is_none_or(|bits| bits & (1 << (to as u32 % 32)) != 0)
+    }
+}
+
+/// Hides the game's BSP's breakable surfaces it has broken (c10's windows,
+/// shot out), as structure_render.c leaves out a material naming one.
+fn sync_breakable_surfaces(link: Res<BridgeLink>, level: Res<BridgeLevel>, mut visibility: Query<&mut Visibility>) {
+    let Some(snapshot) = &link.latest else { return };
+    let builder = &level.builder;
+    if !snapshot.map_name().eq_ignore_ascii_case(&builder.stats.map_name) {
+        return;
+    }
+    for &(bsp, index, root) in &builder.breakable_roots {
+        let index = index as usize;
+        let standing = bsp as i32 != snapshot.structure_bsp_index as i32
+            || snapshot.breakable_surfaces.get(index / 8).is_none_or(|bits| bits & (1 << (index % 8)) != 0);
+        let wanted = if standing { Visibility::Inherited } else { Visibility::Hidden };
+        if let Ok(mut v) = visibility.get_mut(root)
+            && *v != wanted
+        {
+            *v = wanted;
+        }
     }
 }
 

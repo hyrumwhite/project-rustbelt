@@ -125,6 +125,9 @@ pub struct Material {
     pub lightmap_texcoords: Vec<[f32; 2]>,
     /// Triangles, three indices each, into `vertices`.
     pub indices: Vec<u32>,
+    /// The breakable surface it shows (the BSP's, drawn while it stands),
+    /// or -1.
+    pub breakable_surface_index: i16,
 }
 
 fn read_material(
@@ -227,5 +230,6 @@ fn read_material(
         }
     }
 
-    Ok(Material { shader, lightmap_index, lightmap_bitmap_index, vertices, lightmap_texcoords, indices })
+    let breakable_surface_index = material.i16(m::BREAKABLE_SURFACE_INDEX)?;
+    Ok(Material { shader, lightmap_index, lightmap_bitmap_index, vertices, lightmap_texcoords, indices, breakable_surface_index })
 }

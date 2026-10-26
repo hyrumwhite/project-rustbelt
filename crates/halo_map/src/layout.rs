@@ -3698,6 +3698,7 @@ pub mod structure_material {
     pub const SHADER: usize = 0x0;
     pub const FIRST_SURFACE_INDEX: usize = 0x14;
     pub const SURFACE_COUNT: usize = 0x18;
+    pub const BREAKABLE_SURFACE_INDEX: usize = 0xac;
     pub const VERTICES: usize = 0xb0;
     pub const LIGHTMAP_VERTICES: usize = 0xc4;
     pub const UNCOMPRESSED_VERTEX_DATA: usize = 0xd8;

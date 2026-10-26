@@ -530,8 +530,6 @@ pub struct LevelBuilder {
     permutation: u16,
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
     animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
-    /// The glassy look of an actively camouflaged object.
-    camouflage: Option<Handle<StandardMaterial>>,
     /// Its liquid glass, in the rays' scene.
     camouflage_glass: Option<Handle<StandardMaterial>>,
     /// Surfaces tinted by a change colour, by shader and colour.
@@ -539,6 +537,10 @@ pub struct LevelBuilder {
     loaded_bsps: Vec<usize>,
     /// Each loaded BSP's root entity, by BSP index.
     pub bsp_roots: Vec<(usize, Entity)>,
+    /// The surfaces of each BSP's breakable surfaces, under an entity each
+    /// (BSP index, breakable surface index): hidden once the game breaks it
+    /// (crate::bridge).
+    pub breakable_roots: Vec<(usize, i16, Entity)>,
     light_proxy: Option<Handle<Mesh>>,
     /// Whether light fixtures get emissive proxies.
     pub fixture_lights: bool,
@@ -597,10 +599,10 @@ impl LevelBuilder {
             models: HashMap::default(),
             animated_models: HashMap::default(),
             coloured_surfaces: HashMap::default(),
-            camouflage: None,
             camouflage_glass: None,
             loaded_bsps: Vec::new(),
             bsp_roots: Vec::new(),
+            breakable_roots: Vec::new(),
             light_proxy: None,
             fixture_lights: true,
             show_light_proxies: false,
@@ -655,7 +657,21 @@ impl LevelBuilder {
                 });
                 let mesh = assets.meshes.add(build_mesh(vertices, &material.indices, shader.uv_scale));
                 let name = format!("{} material {material_index}", reference.name);
-                self.spawn_mesh(commands, level, name, mesh, &surface, raster);
+                // (a breakable surface's, its own parent, to hide when broken)
+                let parent = match material.breakable_surface_index {
+                    index if index >= 0 => match self.breakable_roots.iter().find(|r| r.0 == reference.index && r.1 == index) {
+                        Some(&(_, _, root)) => root,
+                        None => {
+                            let root = commands
+                                .spawn((Name::new(format!("breakable surface {index}")), Transform::default(), Visibility::default(), ChildOf(level)))
+                                .id();
+                            self.breakable_roots.push((reference.index, index, root));
+                            root
+                        }
+                    },
+                    _ => level,
+                };
+                self.spawn_mesh(commands, parent, name, mesh, &surface, raster);
                 self.stats.triangles += material.indices.len() / 3;
             }
             self.loaded_bsps.push(reference.index);
@@ -1384,9 +1400,11 @@ impl LevelBuilder {
         // Solarik composites for the camera, bending the picture behind it
         // and reflecting what is round it (and, as glass, it casts no
         // shadow); the game's own shimmer refracts the picture behind, which
-        // its overlay doesn't have. The first-person arms and weapon, posed
-        // for the camera and unbent for the rays, keep a faint shell.
-        if camouflaged && !self.first_person {
+        // its overlay doesn't have. The first-person arms and weapon too,
+        // their bending parts skinned for the rays as they move
+        // (crate::bridge): a faint shell, they looked painted on beside the
+        // camouflaged enemies' glass.
+        if camouflaged {
             let material = self.camouflage_glass(assets);
             let glass = |commands: &mut Commands, parent: Entity, mesh: Handle<Mesh>| {
                 commands
@@ -1409,27 +1427,6 @@ impl LevelBuilder {
             let skin_parent = nodes.first().copied().unwrap_or(root);
             let skins = model.traced_skins.iter().map(|skin| glass(commands, skin_parent, assets.meshes.add(skin.mesh(&rest)))).collect();
             return (root, nodes.into_iter().map(Some).collect(), skins);
-        }
-        if camouflaged {
-            if raster {
-                // (drawn even where the game's overlay has the other
-                // transparent surfaces: this one is the viewer's own)
-                let material = self.camouflage_material(assets);
-                for part in &model.skinned {
-                    let skin = SkinnedMesh { inverse_bindposes: model.inverse_bindposes.clone(), joints: nodes.clone() };
-                    commands.spawn((
-                        Name::new(format!("{} (camouflaged)", model.name)),
-                        Mesh3d(part.mesh.clone()),
-                        MeshMaterial3d(material.clone()),
-                        bevy::light::NotShadowCaster,
-                        skin,
-                        bevy::camera::visibility::NoFrustumCulling,
-                        Transform::default(),
-                        ChildOf(root),
-                    ));
-                }
-            }
-            return (root, nodes.into_iter().map(Some).collect(), Vec::new());
         }
         // the rays see the rigid pieces; the camera sees the skinned parts,
         // but glass and water: a pane both see, which Solarik ray traces
@@ -1611,22 +1608,6 @@ impl LevelBuilder {
                     alpha_mode: AlphaMode::Blend,
                     cull_mode: None,
                     double_sided: true,
-                    ..default()
-                })
-            })
-            .clone()
-    }
-
-    /// The glassy look of an actively camouflaged object: nearly clear,
-    /// smooth, reflecting what is around it.
-    fn camouflage_material(&mut self, assets: &mut LevelAssets) -> Handle<StandardMaterial> {
-        self.camouflage
-            .get_or_insert_with(|| {
-                assets.materials.add(StandardMaterial {
-                    base_color: Color::srgba(0.55, 0.65, 0.8, 0.08),
-                    alpha_mode: AlphaMode::Blend,
-                    perceptual_roughness: 0.15,
-                    reflectance: 0.3,
                     ..default()
                 })
             })

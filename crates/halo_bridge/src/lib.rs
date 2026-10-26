@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 50;
+pub const VERSION: u32 = 51;
 pub const SCREEN_TEXTURES: usize = 512;
 pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
 pub const TEXT_ATLAS_SIZE: usize = 2048;
@@ -560,6 +560,7 @@ struct Frame {
     screen_draws: [ScreenDraw; SCREEN_DRAWS],
     screen_vertices: [ScreenVertex; SCREEN_VERTICES],
     screen_effect: ScreenEffect,
+    breakable_surfaces: [u8; 32],
 }
 
 /// (Protocol 50) The screen effect over the first player's view of the
@@ -1398,6 +1399,9 @@ pub struct Snapshot {
     pub screen_vertices: Vec<ScreenVertex>,
     /// (Protocol 50) The screen effect over the first player's view.
     pub screen_effect: ScreenEffect,
+    /// (Protocol 51) Which of the structure BSP's breakable surfaces stand
+    /// (bit i of byte i / 8): a material naming a broken one isn't drawn.
+    pub breakable_surfaces: [u8; 32],
 }
 
 impl Snapshot {
@@ -2096,6 +2100,7 @@ impl Bridge {
                         .map(|i| std::ptr::read_volatile(&(*frame).screen_vertices[i]))
                         .collect(),
                     screen_effect: std::ptr::read_volatile(&(*frame).screen_effect),
+                    breakable_surfaces: std::ptr::read_volatile(&(*frame).breakable_surfaces),
                 };
                 fence(Ordering::Acquire);
                 if std::ptr::read_volatile(&(*frame).sequence) != sequence {

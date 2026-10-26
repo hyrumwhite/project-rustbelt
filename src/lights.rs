@@ -122,7 +122,7 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 /// Lights dimmed from their tags' brightness (by the light tag's name, or
 /// a folder's, ending in a backslash): a wide reach is a bright light here
 /// (brightness grows with its square).
-const LIGHT_DIMMING: [(&str, f32); 7] = [
+const LIGHT_DIMMING: [(&str, f32); 8] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights)
     ("characters\\monitor\\monitor dynamic", 0.15),
@@ -136,9 +136,20 @@ const LIGHT_DIMMING: [(&str, f32); 7] = [
     // draws brighter than the walls; play feedback: to 15%)
     ("levels\\b30\\devices\\interior tech objects\\holo control room display\\light", 0.15),
     // (c10's coloured point lights, flanking its doors, some blinking: they
-    // flooded the rooms green and red; play feedback: dramatically down)
-    ("levels\\c10\\scenery\\", 0.1),
+    // flooded the rooms green and red; play feedback: dramatically down,
+    // then half that again)
+    ("levels\\c10\\scenery\\", 0.05),
+    // (the batons, glow sticks: c10's landing zone is strewn with them;
+    // play feedback: too bright)
+    ("scenery\\baton\\baton light dynamic", 0.5),
 ];
+
+/// Lights smaller than [`LIGHT_RADIUS`] (by the light tag's name), raised
+/// this much (metres, the world's up) to clear the ground they lie on: a
+/// baton's light is at its middle, on the ground, and the ground within its
+/// sphere, under the light's surface, went unlit, a dark disc round the
+/// stick.
+const SMALL_LIGHTS: [(&str, f32); 1] = [("scenery\\baton\\baton light dynamic", 0.05)];
 
 /// Whether a light tag's name is the dimmed one, or in the dimmed folder.
 fn dimmed_by(name: &str, dimmed: &str) -> bool {
@@ -156,6 +167,8 @@ struct LightTag {
     muzzle: bool,
     /// Its share of its brightness ([`LIGHT_DIMMING`]).
     dimming: f32,
+    /// Its size, if small ([`SMALL_LIGHTS`]).
+    small: Option<f32>,
 }
 
 pub struct DynamicLightsPlugin;
@@ -263,6 +276,7 @@ fn sync_lights(
             LightTag {
                 muzzle: name.is_some_and(|name| name.ends_with("muzzle flash")),
                 dimming: name.and_then(|name| LIGHT_DIMMING.iter().find(|(dimmed, _)| dimmed_by(name, dimmed))).map_or(1.0, |&(_, dimming)| dimming),
+                small: name.and_then(|name| SMALL_LIGHTS.iter().find(|(small, _)| name.eq_ignore_ascii_case(small))).map(|&(_, size)| size),
             }
         });
         let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0 || tag.muzzle;
@@ -305,7 +319,8 @@ fn sync_lights(
         let reach2 = if spot && !muzzle { light.radius * SPOT_REFERENCE_REACH } else { light.radius * light.radius };
         let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * reach2;
         let range = light.radius * METERS_PER_WORLD_UNIT * RANGE_PER_RADIUS;
-        let radius = if spot { SPOT_RADIUS } else { LIGHT_RADIUS };
+        let radius = if spot { SPOT_RADIUS } else { tag.small.unwrap_or(LIGHT_RADIUS) };
+        let position = position + Vec3::Y * tag.small.map_or(0.0, |size| size * 1.2);
         let source = LightSource { power: radiance * sphere_lumens_per_radiance(radius) };
         let (color, intensity) = source.color_and_intensity(settings.emissive_scale);
         // a light shining every way through a gel of narrow discs: a spot

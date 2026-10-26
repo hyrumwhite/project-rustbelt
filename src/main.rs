@@ -519,7 +519,7 @@ fn main() -> AppExit {
         app.add_systems(
             Update,
             (
-                (adjust_lighting.run_if(bridge::not_forwarding), apply_lighting, follow_camera_sky).chain(),
+                (adjust_lighting.run_if(bridge::not_forwarding), apply_lighting, apply_level_exposure, follow_camera_sky).chain(),
                 print_camera.run_if(bridge::not_forwarding),
             ),
         )
@@ -1013,6 +1013,31 @@ fn adjust_lighting(
     }
 }
 
+/// Levels lit less than their lights say, by the share of the light left:
+/// every light dimmed alike, as a raised exposure.
+const LEVEL_DIMMING: [(&str, f32); 1] = [
+    // (343 Guilty Spark: a spooky level; play feedback: all its lights down
+    // a tenth)
+    ("c10", 0.9),
+];
+
+/// The camera's exposure: the settings', raised for a dimmed level
+/// ([`LEVEL_DIMMING`]).
+fn apply_level_exposure(
+    settings: Res<LightingSettings>,
+    level: Option<Res<bridge::BridgeLevel>>,
+    mut cameras: Query<&mut Exposure>,
+) {
+    let map = level.as_ref().map_or("", |level| level.builder.stats.map_name.as_str());
+    let dimming = LEVEL_DIMMING.iter().find(|(name, _)| map.eq_ignore_ascii_case(name)).map_or(1.0, |&(_, dimming)| dimming);
+    let ev100 = settings.exposure_ev100 - dimming.log2();
+    for mut exposure in &mut cameras {
+        if exposure.ev100 != ev100 {
+            exposure.ev100 = ev100;
+        }
+    }
+}
+
 fn apply_lighting(
     settings: Res<LightingSettings>,
     level_sky: Res<LevelSky>,
@@ -1021,7 +1046,7 @@ fn apply_lighting(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
     mut suns: Query<&mut DirectionalLight>,
-    mut cameras: Query<(&mut Exposure, Option<&mut EnvironmentMapLight>, Option<&mut Skybox>)>,
+    mut cameras: Query<(Option<&mut EnvironmentMapLight>, Option<&mut Skybox>)>,
     mut point_lights: Query<(&LightSource, &mut PointLight)>,
 ) {
     if !settings.is_changed() {
@@ -1049,8 +1074,7 @@ fn apply_lighting(
             sun.illuminance = power * settings.sun_scale;
         }
     }
-    for (mut exposure, environment, skybox) in &mut cameras {
-        exposure.ev100 = settings.exposure_ev100;
+    for (environment, skybox) in &mut cameras {
         if let Some((_, power)) = level_sky.0.sky {
             if let Some(mut environment) = environment {
                 environment.intensity = power * settings.sky_scale;

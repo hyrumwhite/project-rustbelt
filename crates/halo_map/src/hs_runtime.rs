@@ -269,10 +269,19 @@ pub mod call {
     pub const EFFECT_COOP_PLAYER_EFFECT_ROTATION: i32 = 0x64;
     pub const EFFECT_COOP_PLAYER_EFFECT_START: i32 = 0x65;
     pub const EFFECT_COOP_PLAYER_EFFECT_STOP: i32 = 0x66;
+    /// `network_coop_note_hud(a, b)`, `network_coop_note_title(a, b real)`.
+    pub const EFFECT_COOP_HUD: i32 = 0x67;
+    pub const EFFECT_COOP_TITLE: i32 = 0x68;
+    /// `projectiles_delete_all()`.
+    pub const EFFECT_PROJECTILES_DELETE_ALL: i32 = 0x69;
+    /// `cinematic_stop`'s presentation: the screen effects, the models'
+    /// reflection tint, the near clip and the deferred errors
+    /// (`cinematic_port_stop_presentation`).
+    pub const EFFECT_CINEMATIC_STOP_PRESENTATION: i32 = 0x6a;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_COOP_PLAYER_EFFECT_STOP).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_CINEMATIC_STOP_PRESENTATION).contains(&kind)
     }
 }
 
@@ -403,6 +412,62 @@ const PLAYER_CONTROL_CAMERA_CONTROL_DISABLED: u32 = 1 << 0;
 /// `_stopping_bit`).
 const SCRIPTED_PLAYER_EFFECT_ACTIVE: u32 = 1 << 0;
 const SCRIPTED_PLAYER_EFFECT_STOPPING: u32 = 1 << 1;
+/// `struct cinematic_global_data`'s letterbox time, letterbox, progress,
+/// skipping, objects' suppression and queued titles (an index and time,
+/// shorts, each) (cinematics.h); `MAXIMUM_QUEUED_CINEMATIC_TITLES`.
+const CINEMATIC_LETTERBOX_LAST_GAME_TIME: u32 = 0x4;
+const CINEMATIC_SHOW_LETTERBOX: u32 = 0x8;
+const CINEMATIC_IN_PROGRESS: u32 = 0x9;
+const CINEMATIC_CAN_BE_SKIPPED: u32 = 0xa;
+const CINEMATIC_SUPPRESS_BSP_OBJECT_CREATION: u32 = 0xb;
+const CINEMATIC_QUEUED_TITLES: u32 = 0xc;
+const MAXIMUM_QUEUED_CINEMATIC_TITLES: u32 = 4;
+/// `struct rasterizer_cinematic_screen_effect_state` (its parameters first,
+/// 0x38 bytes) and its parameters' fields (tag_layout's probe of
+/// rasterizer_cinematics.c).
+const SCREEN_EFFECT_PARAMETERS_SIZE: u32 = 0x38;
+const SCREEN_EFFECT_HAS_CONTROL: u32 = 0x38;
+const SCREEN_EFFECT_INITIALIZED: u32 = 0x39;
+const SCREEN_EFFECT_CONVOLUTION_RADIUS: u32 = 0x3c;
+const SCREEN_EFFECT_CONVOLUTION_TIME: u32 = 0x44;
+const SCREEN_EFFECT_FILTER_LIGHT_ENHANCEMENT_INTENSITY: u32 = 0x4c;
+const SCREEN_EFFECT_FILTER_DESATURATION_INTENSITY: u32 = 0x54;
+const SCREEN_EFFECT_FILTER_TIME: u32 = 0x5c;
+const SCREEN_EFFECT_NEAR_CLIP_DISTANCE: u32 = 0x74;
+const SCREEN_EFFECT_CONVOLUTION_EXTRA_PASSES: u32 = 0x0;
+const SCREEN_EFFECT_CONVOLUTION_TYPE: u32 = 0x2;
+const SCREEN_EFFECT_FILTER_DESATURATION_TINT: u32 = 0x14;
+const SCREEN_EFFECT_FILTER_DESATURATION_IS_ADDITIVE: u32 = 0x20;
+const SCREEN_EFFECT_FILTER_LIGHT_ENHANCEMENT_USES_CONVOLUTION_MASK: u32 = 0x21;
+const SCREEN_EFFECT_FILTER_DESATURATION_USES_CONVOLUTION_MASK: u32 = 0x22;
+const SCREEN_EFFECT_VIDEO_ON: u32 = 0x23;
+const SCREEN_EFFECT_VIDEO_OVERBRIGHT_MODE: u32 = 0x24;
+const SCREEN_EFFECT_VIDEO_SCANLINE_MAP: u32 = 0x28;
+const SCREEN_EFFECT_VIDEO_NOISE_INTENSITY: u32 = 0x2c;
+const SCREEN_EFFECT_VIDEO_NOISE_MAP_SCALE: u32 = 0x30;
+const SCREEN_EFFECT_VIDEO_NOISE_MAP: u32 = 0x34;
+/// `struct hud_messaging_globals_definition`: its message datums (each of
+/// 0x460 bytes, four messages of 0x8c with their validity at 0x82), the
+/// flash's start and use, and the timer (its reference time, ticks, flash
+/// cutoff, position, corner, paused and enabled) (tag_layout's probe of
+/// hud_messaging.c).
+const HUD_MESSAGING_DATUMS: u32 = 4;
+const HUD_MESSAGING_DATUM_SIZE: u32 = 0x460;
+const HUD_MESSAGES_PER_DATUM: u32 = 4;
+const HUD_MESSAGE_SIZE: u32 = 0x8c;
+const HUD_MESSAGE_VALID: u32 = 0x82;
+const HUD_MESSAGING_FLASH_START_TIME: u32 = 0x1180;
+const HUD_MESSAGING_USE_FLASH: u32 = 0x1184;
+const HUD_MESSAGING_TIMER: u32 = 0x1198;
+const HUD_TIMER_TICKS: u32 = 0x4;
+const HUD_TIMER_FLASH_CUTOFF: u32 = 0x6;
+const HUD_TIMER_POSITION: u32 = 0x8;
+const HUD_TIMER_CORNER: u32 = 0xc;
+const HUD_TIMER_PAUSED: u32 = 0xe;
+const HUD_TIMER_ENABLED: u32 = 0xf;
+/// network_coop.h's HUD notes (`_coop_hud_help_flash`, `_messages_clear`).
+const COOP_HUD_HELP_FLASH: i32 = 2;
+const COOP_HUD_MESSAGES_CLEAR: i32 = 3;
 /// `NUMBER_OF_GAME_DIFFICULTY_LEVELS`.
 const NUMBER_OF_GAME_DIFFICULTY_LEVELS: i16 = 4;
 /// `NUMBER_OF_GAME_TEAMS`, and `struct game_allegiance_globals`' ally and
@@ -703,6 +768,15 @@ pub mod game_field {
     /// flags.
     pub const PLAYER_EFFECT_SCRIPTED: u32 = 25;
     pub const PLAYER_EFFECT_FLAGS: u32 = 26;
+    /// `cinematic_globals`, the screen effect's state (0 for none),
+    /// `hud_scripted_globals`, the unit and weapon HUDs' script flags and
+    /// `hud_messaging_globals`.
+    pub const CINEMATIC_GLOBALS: u32 = 27;
+    pub const SCREEN_EFFECT_GLOBALS: u32 = 28;
+    pub const HUD_SCRIPTED_GLOBALS: u32 = 29;
+    pub const UNIT_HUD_SCRIPT_FLAGS: u32 = 30;
+    pub const WEAPON_HUD_SCRIPT_FLAGS: u32 = 31;
+    pub const HUD_MESSAGING_GLOBALS: u32 = 32;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -4582,6 +4656,249 @@ impl<H: HsHost> Runtime<'_, H> {
                         m.w16(scripted + 28, ticks);
                         m.w16(scripted + 30, ticks);
                         self.set_flag32(flags, SCRIPTED_PLAYER_EFFECT_STOPPING, true);
+                    }
+                }
+                0
+            }
+            // scripted_hud_show_* and _blink_*: the unit HUD's panels'
+            // script flags (not shown, blinking), the crosshair's (shown)
+            name @ ("hud_show_health"
+            | "hud_blink_health"
+            | "hud_show_shield"
+            | "hud_blink_shield"
+            | "hud_show_motion_sensor"
+            | "hud_blink_motion_sensor"
+            | "hud_show_crosshair") => {
+                let on = m.r8(arguments) != 0;
+                let (field, bit, set) = match name {
+                    "hud_show_health" => (game_field::UNIT_HUD_SCRIPT_FLAGS, 0, !on),
+                    "hud_blink_health" => (game_field::UNIT_HUD_SCRIPT_FLAGS, 1, on),
+                    "hud_show_shield" => (game_field::UNIT_HUD_SCRIPT_FLAGS, 2, !on),
+                    "hud_blink_shield" => (game_field::UNIT_HUD_SCRIPT_FLAGS, 3, on),
+                    "hud_show_motion_sensor" => (game_field::UNIT_HUD_SCRIPT_FLAGS, 4, !on),
+                    "hud_blink_motion_sensor" => (game_field::UNIT_HUD_SCRIPT_FLAGS, 5, on),
+                    _ => (game_field::WEAPON_HUD_SCRIPT_FLAGS, 0, on),
+                };
+                let Some(flags) = self.game_field(field) else { return false };
+                self.set_flag32(flags, 1 << bit, set);
+                0
+            }
+            // scripted_show_hud and _help_text: the flag, read back
+            name @ ("show_hud" | "show_hud_help_text") => {
+                let Some(globals) = self.game_field(game_field::HUD_SCRIPTED_GLOBALS) else { return false };
+                let address = globals + (name == "show_hud_help_text") as u32;
+                m.w8(address, m.r8(arguments));
+                m.r8(address) as i32
+            }
+            // scripted_hud_set_flashing_state (noted for network co-op) and
+            // scripted_hud_restart_flashing (its report of no flashing the
+            // game's)
+            "enable_hud_help_flash" => {
+                let Some(globals) = self.game_field(game_field::HUD_MESSAGING_GLOBALS) else { return false };
+                let flash = m.r8(arguments);
+                self.effect(call::EFFECT_COOP_HUD, COOP_HUD_HELP_FLASH, flash as i32, 0);
+                if flash != 0 && m.r8(globals + HUD_MESSAGING_USE_FLASH) == 0 {
+                    m.w32(globals + HUD_MESSAGING_FLASH_START_TIME, self.context.game_time as u32);
+                }
+                m.w8(globals + HUD_MESSAGING_USE_FLASH, flash);
+                0
+            }
+            "hud_help_flash_restart" => {
+                let Some(globals) = self.game_field(game_field::HUD_MESSAGING_GLOBALS) else { return false };
+                if m.r8(globals + HUD_MESSAGING_USE_FLASH) == 0 {
+                    return false;
+                }
+                m.w32(globals + HUD_MESSAGING_FLASH_START_TIME, self.context.game_time as u32);
+                0
+            }
+            // scripted_hud_set_timer_time, _warning_cutoff, _position,
+            // scripted_hud_show_timer and _get_timer_ticks
+            name @ ("hud_set_timer_time"
+            | "hud_set_timer_warning_time"
+            | "hud_set_timer_position"
+            | "show_hud_timer"
+            | "hud_get_timer_ticks") => {
+                let Some(globals) = self.game_field(game_field::HUD_MESSAGING_GLOBALS) else { return false };
+                let timer = globals + HUD_MESSAGING_TIMER;
+                // (minutes, a short, and seconds, a word, as ticks)
+                let ticks = || 30 * (60 * short(0) as i32 + short(1) as u16 as i32);
+                let corner = |corner: i16| corner.clamp(0, 4) as u16;
+                match name {
+                    "hud_set_timer_time" => {
+                        m.w16(timer + HUD_TIMER_TICKS, ticks() as u16);
+                        m.w8(timer + HUD_TIMER_PAUSED, 0);
+                        m.w8(timer + HUD_TIMER_ENABLED, 1);
+                        m.w32(timer, self.context.game_time as u32);
+                        m.w16(timer + HUD_TIMER_CORNER, corner(m.r16(timer + HUD_TIMER_CORNER) as i16));
+                        0
+                    }
+                    "hud_set_timer_warning_time" => {
+                        m.w16(timer + HUD_TIMER_FLASH_CUTOFF, ticks() as u16);
+                        0
+                    }
+                    "hud_set_timer_position" => {
+                        m.w16(timer + HUD_TIMER_POSITION, short(0) as u16);
+                        m.w16(timer + HUD_TIMER_POSITION + 2, short(1) as u16);
+                        m.w16(timer + HUD_TIMER_CORNER, corner(short(2)));
+                        0
+                    }
+                    "show_hud_timer" => {
+                        m.w8(timer + HUD_TIMER_ENABLED, m.r8(arguments));
+                        0
+                    }
+                    _ => {
+                        let timer_ticks = m.r16(timer + HUD_TIMER_TICKS) as i16;
+                        let value = if m.r8(timer + HUD_TIMER_ENABLED) == 0 {
+                            0
+                        } else if timer_ticks == NONE as i16 {
+                            NONE as i16
+                        } else if m.r8(timer + HUD_TIMER_PAUSED) != 0 {
+                            timer_ticks
+                        } else {
+                            (timer_ticks as i32 + m.r32(timer) as i32 - self.context.game_time) as i16
+                        };
+                        short_value(value as i32)
+                    }
+                }
+            }
+            // scripted_hud_messages_clear (noted for network co-op): every
+            // message invalid
+            "hud_clear_messages" => {
+                let Some(globals) = self.game_field(game_field::HUD_MESSAGING_GLOBALS) else { return false };
+                self.effect(call::EFFECT_COOP_HUD, COOP_HUD_MESSAGES_CLEAR, 0, 0);
+                for datum in 0..HUD_MESSAGING_DATUMS {
+                    for message in 0..HUD_MESSAGES_PER_DATUM {
+                        m.w8(globals + datum * HUD_MESSAGING_DATUM_SIZE + message * HUD_MESSAGE_SIZE + HUD_MESSAGE_VALID, 0);
+                    }
+                }
+                0
+            }
+            // cinematic_start and _stop: the letterbox and progress, the
+            // players' input and the dialogue triggers (player_input_enable,
+            // ai_globals_dialogue_triggers_enabled), then the projectiles
+            // deleted or the presentation put back
+            name @ ("cinematic_start" | "cinematic_stop") => {
+                let Some(cinematic) = self.game_field(game_field::CINEMATIC_GLOBALS) else { return false };
+                let Some(input_disabled) = self.game_field(game_field::PLAYERS_INPUT_DISABLED) else { return false };
+                if self.context.ai_globals == 0 {
+                    return false;
+                }
+                let starting = name == "cinematic_start";
+                m.w8(cinematic + CINEMATIC_SHOW_LETTERBOX, starting as u8);
+                m.w8(input_disabled, starting as u8);
+                m.w8(self.context.ai_globals + crate::layout::ai_globals::DIALOGUE_TRIGGERS_ENABLED as u32, !starting as u8);
+                if starting {
+                    m.w32(cinematic + CINEMATIC_LETTERBOX_LAST_GAME_TIME, self.context.game_time as u32);
+                }
+                m.w8(cinematic + CINEMATIC_IN_PROGRESS, starting as u8);
+                let effect = if starting { call::EFFECT_PROJECTILES_DELETE_ALL } else { call::EFFECT_CINEMATIC_STOP_PRESENTATION };
+                self.effect(effect, 0, 0, 0);
+                0
+            }
+            // cinematic_skip_start, _skip_stop, cinematic_show_letterbox and
+            // _suppress_bsp_object_creation
+            name @ ("cinematic_skip_start_internal"
+            | "cinematic_skip_stop_internal"
+            | "cinematic_show_letterbox"
+            | "cinematic_suppress_bsp_object_creation") => {
+                let Some(cinematic) = self.game_field(game_field::CINEMATIC_GLOBALS) else { return false };
+                match name {
+                    "cinematic_skip_start_internal" => m.w8(cinematic + CINEMATIC_CAN_BE_SKIPPED, 1),
+                    "cinematic_skip_stop_internal" => m.w8(cinematic + CINEMATIC_CAN_BE_SKIPPED, 0),
+                    "cinematic_show_letterbox" => {
+                        let show = m.r8(arguments);
+                        m.w8(cinematic + CINEMATIC_SHOW_LETTERBOX, show);
+                        if show != 0 {
+                            m.w32(cinematic + CINEMATIC_LETTERBOX_LAST_GAME_TIME, self.context.game_time as u32);
+                        }
+                    }
+                    _ => m.w8(cinematic + CINEMATIC_SUPPRESS_BSP_OBJECT_CREATION, m.r8(arguments)),
+                }
+                0
+            }
+            // cinematic_set_title (no delay) and _delayed (noted for network
+            // co-op): the first free title slot (none free is the game's
+            // report)
+            name @ ("cinematic_set_title" | "cinematic_set_title_delayed") => {
+                let Some(cinematic) = self.game_field(game_field::CINEMATIC_GLOBALS) else { return false };
+                let title_index = short(0);
+                let delay = if name == "cinematic_set_title" { 0.0f32 } else { f32::from_bits(argument(1) as u32) };
+                self.effect(call::EFFECT_COOP_TITLE, title_index as i32, delay.to_bits() as i32, 0);
+                let slot = (0..MAXIMUM_QUEUED_CINEMATIC_TITLES)
+                    .map(|i| cinematic + CINEMATIC_QUEUED_TITLES + 4 * i)
+                    .find(|&slot| m.r16(slot) as i16 == NONE as i16);
+                if let Some(slot) = slot {
+                    m.w16(slot, title_index as u16);
+                    m.w16(slot + 2, crate::actor_combat::fast_ftol(delay * 30.0).wrapping_neg() as u16);
+                }
+                0
+            }
+            // rasterizer_screen_effect_start (cleared if asked or new), _stop
+            // and rasterizer_set_near_clip_distance; nothing without the state
+            name @ ("cinematic_screen_effect_start"
+            | "cinematic_screen_effect_stop"
+            | "cinematic_set_near_clip_distance"
+            | "cinematic_screen_effect_set_convolution"
+            | "cinematic_screen_effect_set_filter"
+            | "cinematic_screen_effect_set_filter_desaturation_tint") => {
+                let Some(fields) = self.game_field(game_field::SCREEN_EFFECT_GLOBALS).map(Some).or_else(|| {
+                    // (the state's address in the table is 0 without one)
+                    (self.context.game_fields != 0).then_some(None)
+                }) else {
+                    return false;
+                };
+                if let Some(effect) = fields {
+                    let real = |index: u32| f32::from_bits(argument(index) as u32);
+                    // (rasterizer_screen_effects_time: the game time in seconds)
+                    let time = || self.context.game_time as f32 * (1.0f32 / 30.0);
+                    let video_off = || {
+                        m.w8(effect + SCREEN_EFFECT_VIDEO_ON, 0);
+                        m.w16(effect + SCREEN_EFFECT_VIDEO_OVERBRIGHT_MODE, 0);
+                        m.w32(effect + SCREEN_EFFECT_VIDEO_SCANLINE_MAP, 0);
+                        m.w32(effect + SCREEN_EFFECT_VIDEO_NOISE_INTENSITY, 0);
+                        m.w32(effect + SCREEN_EFFECT_VIDEO_NOISE_MAP_SCALE, 0);
+                        m.w32(effect + SCREEN_EFFECT_VIDEO_NOISE_MAP, 0);
+                    };
+                    match name {
+                        "cinematic_screen_effect_start" => {
+                            if m.r8(arguments) != 0 || m.r8(effect + SCREEN_EFFECT_INITIALIZED) == 0 {
+                                for i in 0..SCREEN_EFFECT_PARAMETERS_SIZE / 4 {
+                                    m.w32(effect + 4 * i, 0);
+                                }
+                                m.w8(effect + SCREEN_EFFECT_INITIALIZED, 1);
+                            }
+                            m.w8(effect + SCREEN_EFFECT_HAS_CONTROL, 1);
+                        }
+                        "cinematic_screen_effect_stop" => m.w8(effect + SCREEN_EFFECT_HAS_CONTROL, 0),
+                        "cinematic_set_near_clip_distance" => m.w32(effect + SCREEN_EFFECT_NEAR_CLIP_DISTANCE, argument(0) as u32),
+                        "cinematic_screen_effect_set_convolution" => {
+                            video_off();
+                            m.w16(effect + SCREEN_EFFECT_CONVOLUTION_EXTRA_PASSES, short(0) as u16);
+                            m.w16(effect + SCREEN_EFFECT_CONVOLUTION_TYPE, short(1) as u16);
+                            m.w32(effect + SCREEN_EFFECT_CONVOLUTION_RADIUS, argument(2) as u32);
+                            m.w32(effect + SCREEN_EFFECT_CONVOLUTION_RADIUS + 4, argument(3) as u32);
+                            let now = time();
+                            m.w32(effect + SCREEN_EFFECT_CONVOLUTION_TIME, now.to_bits());
+                            m.w32(effect + SCREEN_EFFECT_CONVOLUTION_TIME + 4, (now + real(4)).to_bits());
+                        }
+                        "cinematic_screen_effect_set_filter" => {
+                            video_off();
+                            m.w32(effect + SCREEN_EFFECT_FILTER_LIGHT_ENHANCEMENT_INTENSITY, argument(0) as u32);
+                            m.w32(effect + SCREEN_EFFECT_FILTER_LIGHT_ENHANCEMENT_INTENSITY + 4, argument(1) as u32);
+                            m.w32(effect + SCREEN_EFFECT_FILTER_DESATURATION_INTENSITY, argument(2) as u32);
+                            m.w32(effect + SCREEN_EFFECT_FILTER_DESATURATION_INTENSITY + 4, argument(3) as u32);
+                            let now = time();
+                            m.w32(effect + SCREEN_EFFECT_FILTER_TIME, now.to_bits());
+                            m.w32(effect + SCREEN_EFFECT_FILTER_TIME + 4, (now + real(5)).to_bits());
+                            m.w8(effect + SCREEN_EFFECT_FILTER_DESATURATION_IS_ADDITIVE, m.r8(arguments + 16));
+                            m.w8(effect + SCREEN_EFFECT_FILTER_LIGHT_ENHANCEMENT_USES_CONVOLUTION_MASK, 0);
+                            m.w8(effect + SCREEN_EFFECT_FILTER_DESATURATION_USES_CONVOLUTION_MASK, 0);
+                        }
+                        _ => {
+                            for i in 0..3 {
+                                m.w32(effect + SCREEN_EFFECT_FILTER_DESATURATION_TINT + 4 * i, argument(i) as u32);
+                            }
+                        }
                     }
                 }
                 0

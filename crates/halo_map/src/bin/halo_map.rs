@@ -623,6 +623,12 @@ fn names(cache: &CacheFile) -> CliResult {
     for (index, conversation) in scenario.block(s::AI_CONVERSATIONS, halo_map::layout::ai_conversation::SIZEOF)?.iter().enumerate() {
         println!("conversation {index}: {}", text(conversation.bytes(halo_map::layout::ai_conversation::NAME, 32)?));
     }
+    // (chapter titles: scenario_cutscene_title, its flags then a name)
+    const CUTSCENE_TITLES: usize = 0x4fc;
+    const CUTSCENE_TITLE_SIZE: usize = 0x60;
+    for (index, title) in scenario.block(CUTSCENE_TITLES, CUTSCENE_TITLE_SIZE)?.iter().enumerate() {
+        println!("cutscene title {index}: {}", text(title.bytes(4, 32)?));
+    }
     // (cutscene flags: scenario_cutscene_flag, a name then a position and facing)
     const CUTSCENE_FLAGS: usize = 0x4e4;
     const CUTSCENE_FLAG_SIZE: usize = 0x5c;

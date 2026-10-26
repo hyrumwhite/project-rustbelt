@@ -43,6 +43,7 @@ enum
 	_hs_game_field_scenario, /* the scenario's tag data (0 for none) */
 	_hs_game_field_hud_globals, /* struct hud_globals_definition (the HUD's globals tag) */
 	_hs_game_field_breakable_surface_globals, /* enabled (boolean) first */
+	_hs_game_field_camera_script_globals, /* struct scripted_camera_globals */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

@@ -137,6 +137,7 @@ symbols in this file:
 
 #include "units/unit_definitions.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c (the library bodies' effects) */
 
 /* network_game_globals.c's */
 boolean network_game_distributed_client(void);
@@ -229,6 +230,8 @@ static struct director_globals director_globals = {0};
 boolean director_camera_switch_fast = FALSE;
 static boolean hyper_key_down = FALSE;
 boolean *director_camera_scripted;
+
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 /* ---------- public code */
 
@@ -654,6 +657,16 @@ static void director_choose_game_perspective(
 }
 
 void director_script_camera(
+	boolean scripted)
+{
+	hs_runtime_effect(_hs_runtime_call_effect_director_script_camera, scripted, 0, 0);
+
+	return;
+}
+
+/* port: director_script_camera itself (its effect,
+_hs_runtime_call_effect_director_script_camera) */
+void director_port_script_camera(
 	boolean scripted)
 {
 	short local_player_index;

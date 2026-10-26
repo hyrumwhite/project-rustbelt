@@ -2298,6 +2298,13 @@ static char const *const hs_runtime_rust_bodies[] =
 	"objects_detach",
 	"breakable_surfaces_enable",
 	"breakable_surfaces_reset",
+	/* (the script cameras, 26 October) */
+	"camera_set",
+	"camera_set_relative",
+	"camera_set_first_person",
+	"camera_set_dead",
+	"camera_set_animation",
+	"camera_control",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2488,6 +2495,20 @@ static void hs_runtime_effect_run(
 		extern void breakable_surfaces_initialize_for_new_map(void);
 
 		breakable_surfaces_initialize_for_new_map();
+		break;
+	}
+	case _hs_runtime_call_effect_scripted_camera_point:
+	{
+		extern void scripted_camera_port_point(short camera_point_index);
+
+		scripted_camera_port_point((short)call->a);
+		break;
+	}
+	case _hs_runtime_call_effect_director_script_camera:
+	{
+		extern void director_port_script_camera(boolean scripted);
+
+		director_port_script_camera((boolean)call->a);
 		break;
 	}
 	default:
@@ -4244,6 +4265,8 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_object_start_interpolation:
 		case _hs_runtime_call_effect_objects_detach:
 		case _hs_runtime_call_effect_breakable_surfaces_reset:
+		case _hs_runtime_call_effect_scripted_camera_point:
+		case _hs_runtime_call_effect_director_script_camera:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

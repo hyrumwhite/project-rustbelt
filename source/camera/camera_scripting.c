@@ -50,6 +50,7 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "scenario/scenario_definitions.h"
 #include "tag_files/tag_groups.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c (the library bodies' effects) */
 
 /* ---------- constants */
 
@@ -151,6 +152,8 @@ void dead_camera_update(
 
 /* ---------- globals */
 
+long hs_runtime_effect(long kind, long a, long b, long c);
+
 /* name from the 2003 PC demo PDB and the HCEX PDB (camera_scripting file static); January's 64 bytes are
  * identical to the demo's and it has no public for it (static) */
 static struct scripted_camera_globals camera_script_globals;
@@ -162,6 +165,7 @@ void scripted_camera_port_game_fields(
 	unsigned long *fields)
 {
 	fields[_hs_game_field_camera_script_timer] = (unsigned long)&camera_script_globals.timer;
+	fields[_hs_game_field_camera_script_globals] = (unsigned long)&camera_script_globals;
 }
 
 static struct scripted_camera_globals camera_script_globals =
@@ -293,23 +297,38 @@ void scripted_camera_set(
 		struct scenario_cutscene_camera_point);
 	camera_time = (short)transition_time / TICKS_PER_SECOND;
 	camera_script_globals.mode = _camera_script_mode_point;
-	camera_script_globals.first_update = TRUE;
 	camera_script_globals.camera_point_index = camera_point_index;
 	camera_script_globals.point = camera_point->position;
-	vectors3d_from_euler_angles3d(
-		&camera_script_globals.forward,
-		&camera_script_globals.up,
-		&camera_point->orientation);
 	if (camera_point->field_of_view != 0.f)
 		camera_script_globals.field_of_view = camera_point->field_of_view;
 	else
 		camera_script_globals.field_of_view = 1.22173047f;
 	camera_script_globals.relative_object_index = relative_object_index;
 	camera_script_globals.timer = (real)camera_time;
+	(void)camera_point;
+	hs_runtime_effect(_hs_runtime_call_effect_scripted_camera_point, camera_point_index, 0, 0);
+	return;
+}
 
+/* port: scripted_camera_set's orientation from the camera point, and the
+director's and observer's update (its effect,
+_hs_runtime_call_effect_scripted_camera_point) */
+void scripted_camera_port_point(
+	short camera_point_index)
+{
+	struct scenario_cutscene_camera_point *camera_point = TAG_BLOCK_GET_ELEMENT(
+		&global_scenario_get()->cutscene_camera_points,
+		camera_point_index,
+		struct scenario_cutscene_camera_point);
+
+	/* (its first update set here, which the director's update reads and clears) */
+	camera_script_globals.first_update = TRUE;
+	vectors3d_from_euler_angles3d(
+		&camera_script_globals.forward,
+		&camera_script_globals.up,
+		&camera_point->orientation);
 	director_update(0.f);
 	observer_update(0.0001f);
-	return;
 }
 
 void scripted_camera_set_absolute(

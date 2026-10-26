@@ -814,7 +814,9 @@ enum
 	_hs_runtime_call_effect_object_start_interpolation, /* a the object, b the ticks */
 	_hs_runtime_call_effect_objects_detach, /* a the parent, b the child: its co-op note and the detaching */
 	_hs_runtime_call_effect_breakable_surfaces_reset,
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_breakable_surfaces_reset,
+	_hs_runtime_call_effect_scripted_camera_point, /* a the cutscene camera point: its orientation, then the director and observer updated */
+	_hs_runtime_call_effect_director_script_camera, /* a scripted */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_director_script_camera,
 };
 
 /* the runtime's operations the Rust port can run */

@@ -278,10 +278,12 @@ pub mod call {
     /// reflection tint, the near clip and the deferred errors
     /// (`cinematic_port_stop_presentation`).
     pub const EFFECT_CINEMATIC_STOP_PRESENTATION: i32 = 0x6a;
+    /// `sound_stop_impulse(a)`.
+    pub const EFFECT_SOUND_STOP_IMPULSE: i32 = 0x6b;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_CINEMATIC_STOP_PRESENTATION).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_SOUND_STOP_IMPULSE).contains(&kind)
     }
 }
 
@@ -465,6 +467,37 @@ const HUD_TIMER_POSITION: u32 = 0x8;
 const HUD_TIMER_CORNER: u32 = 0xc;
 const HUD_TIMER_PAUSED: u32 = 0xe;
 const HUD_TIMER_ENABLED: u32 = 0xf;
+/// recorded_animations.c's `struct animation_thread`: its unit, ticks left
+/// and flags (`_recording_thread_finished_bit` and `_killed_bit`).
+const ANIMATION_THREAD_UNIT_INDEX: u32 = 0x4;
+const ANIMATION_THREAD_TICKS_LEFT: u32 = 0x8;
+const ANIMATION_THREAD_FLAGS: u32 = 0xa;
+const ANIMATION_THREAD_FINISHED_AND_KILLED: u16 = 0b11;
+/// `struct sound_definition`'s scripted impulse's end time and sound;
+/// `struct scenario`'s HUD messages (the tag's index); `struct
+/// hud_message_text_definition`'s elements and messages blocks, `struct
+/// hud_state_message_definition`'s size, first element and element count,
+/// `struct hud_state_message_element`'s size (its type first,
+/// `_hud_message_type_text` 0); `struct hud_globals_definition`'s
+/// objective's up and fade ticks; `struct hud_messaging_globals_definition`'s
+/// help message and objective (its message and uptime) (tag_layout's probe).
+const SOUND_SCRIPTING_TIME: u32 = 0x90;
+const SOUND_SCRIPTING_SOUND_INDEX: u32 = 0x94;
+const SCENARIO_HUD_MESSAGES_INDEX: u32 = 0x5a0;
+const HUD_MESSAGE_TEXT_ELEMENTS: u32 = 0x14;
+const HUD_MESSAGE_TEXT_MESSAGES: u32 = 0x20;
+const HUD_STATE_MESSAGE_SIZE: u32 = 0x40;
+const HUD_STATE_MESSAGE_ELEMENT_START_INDEX: u32 = 0x22;
+const HUD_STATE_MESSAGE_ELEMENT_COUNT: u32 = 0x24;
+const HUD_STATE_MESSAGE_ELEMENT_SIZE: u32 = 0x2;
+const HUD_GLOBALS_OBJECTIVE_UP_TICKS: u32 = 0x11c;
+const HUD_GLOBALS_OBJECTIVE_FADE_TICKS: u32 = 0x11e;
+const HUD_MESSAGING_HELP_MESSAGE: u32 = 0x118c;
+const HUD_MESSAGING_OBJECTIVE_MESSAGE: u32 = 0x1190;
+const HUD_MESSAGING_OBJECTIVE_UPTIME: u32 = 0x1194;
+/// network_coop.h's HUD notes (`_coop_hud_help_text`, `_objective`).
+const COOP_HUD_HELP_TEXT: i32 = 0;
+const COOP_HUD_OBJECTIVE: i32 = 1;
 /// network_coop.h's HUD notes (`_coop_hud_help_flash`, `_messages_clear`).
 const COOP_HUD_HELP_FLASH: i32 = 2;
 const COOP_HUD_MESSAGES_CLEAR: i32 = 3;
@@ -777,6 +810,11 @@ pub mod game_field {
     pub const UNIT_HUD_SCRIPT_FLAGS: u32 = 30;
     pub const WEAPON_HUD_SCRIPT_FLAGS: u32 = 31;
     pub const HUD_MESSAGING_GLOBALS: u32 = 32;
+    /// The recorded animations' threads (a data array), the scenario's tag
+    /// data (0 for none) and the HUD's globals tag (`hud_globals`).
+    pub const ANIMATION_THREADS: u32 = 33;
+    pub const SCENARIO: u32 = 34;
+    pub const HUD_GLOBALS: u32 = 35;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -4897,6 +4935,108 @@ impl<H: HsHost> Runtime<'_, H> {
                         _ => {
                             for i in 0..3 {
                                 m.w32(effect + SCREEN_EFFECT_FILTER_DESATURATION_TINT + 4 * i, argument(i) as u32);
+                            }
+                        }
+                    }
+                }
+                0
+            }
+            // recorded_animation_kill and _get_time_left: the unit's thread
+            // (get_controlling_thread: the first of the unit's)
+            name @ ("recording_kill" | "recording_time") => {
+                let Some(threads) = self.game_field(game_field::ANIMATION_THREADS) else { return false };
+                let unit_index = argument(0);
+                let mut thread = None;
+                let mut index = self.data_next_index(threads, NONE);
+                while index != NONE {
+                    let Some(datum) = self.datum_get(threads, index) else { return false };
+                    if m.r32(datum + ANIMATION_THREAD_UNIT_INDEX) as i32 == unit_index {
+                        thread = Some(datum);
+                        break;
+                    }
+                    index = self.data_next_index(threads, index);
+                }
+                if name == "recording_kill" {
+                    if let Some(thread) = thread {
+                        let flags = thread + ANIMATION_THREAD_FLAGS;
+                        m.w16(flags, m.r16(flags) | ANIMATION_THREAD_FINISHED_AND_KILLED);
+                    }
+                    0
+                } else {
+                    short_value(thread.map_or(0, |thread| m.r16(thread + ANIMATION_THREAD_TICKS_LEFT) as i32))
+                }
+            }
+            // scripted_sound_time: the ticks the scripted impulse has left
+            "sound_impulse_time" => {
+                let sound_index = argument(0);
+                if sound_index == NONE {
+                    0
+                } else {
+                    let Some(sound) = self.tag_data(b"snd!", sound_index) else { return false };
+                    let end = m.r32(sound + SOUND_SCRIPTING_TIME) as i32;
+                    if end == NONE { 0 } else { end.wrapping_sub(self.context.game_time).max(0) }
+                }
+            }
+            // scripted_sound_stop: the scripted impulse stopped and forgotten
+            "sound_impulse_stop" => {
+                let sound_index = argument(0);
+                if sound_index != NONE {
+                    let Some(sound) = self.tag_data(b"snd!", sound_index) else { return false };
+                    let impulse = m.r32(sound + SOUND_SCRIPTING_SOUND_INDEX) as i32;
+                    if impulse != NONE {
+                        self.effect(call::EFFECT_SOUND_STOP_IMPULSE, impulse, 0, 0);
+                        m.w32(sound + SOUND_SCRIPTING_SOUND_INDEX, NONE as u32);
+                        m.w32(sound + SOUND_SCRIPTING_TIME, NONE as u32);
+                    }
+                }
+                0
+            }
+            // scripted_hud_set_state_message (if help text shows) and
+            // _set_objective (a message of only text; another is the game's
+            // report), from the scenario's HUD messages, each noted for
+            // network co-op
+            name @ ("hud_set_help_text" | "hud_set_objective_text") => {
+                let Some(globals) = self.game_field(game_field::HUD_MESSAGING_GLOBALS) else { return false };
+                let Some(scenario) = self.game_field(game_field::SCENARIO) else { return false };
+                let Some(hud_scripted) = self.game_field(game_field::HUD_SCRIPTED_GLOBALS) else { return false };
+                let Some(hud_globals) = self.game_field(game_field::HUD_GLOBALS) else { return false };
+                let message_index = short(0);
+                let help = name == "hud_set_help_text";
+                // (the messages tag, checked before the note: one not found
+                // is the game's)
+                let messages_tag = m.r32(scenario + SCENARIO_HUD_MESSAGES_INDEX) as i32;
+                let wanted = messages_tag != NONE && (!help || m.r8(hud_scripted + 1) != 0);
+                let tag = if wanted {
+                    let Some(tag) = self.tag_data(b"hmt ", messages_tag) else { return false };
+                    Some(tag)
+                } else {
+                    None
+                };
+                let element = |block: u32, index: i32, size: u32| {
+                    let (count, first) = self.tag_block(block);
+                    (0..count).contains(&index).then(|| first + index as u32 * size)
+                };
+                let message = match tag {
+                    Some(tag) => {
+                        let Some(message) = element(tag + HUD_MESSAGE_TEXT_MESSAGES, message_index as i32, HUD_STATE_MESSAGE_SIZE) else {
+                            return false;
+                        };
+                        Some((tag, message))
+                    }
+                    None => None,
+                };
+                self.effect(call::EFFECT_COOP_HUD, if help { COOP_HUD_HELP_TEXT } else { COOP_HUD_OBJECTIVE }, message_index as i32, 0);
+                if let Some((tag, message)) = message {
+                    if help {
+                        m.w32(globals + HUD_MESSAGING_HELP_MESSAGE, message);
+                    } else {
+                        let start = m.r16(message + HUD_STATE_MESSAGE_ELEMENT_START_INDEX) as i32;
+                        if let Some(first) = element(tag + HUD_MESSAGE_TEXT_ELEMENTS, start, HUD_STATE_MESSAGE_ELEMENT_SIZE) {
+                            if m.r8(message + HUD_STATE_MESSAGE_ELEMENT_COUNT) == 1 && m.r8(first) == 0 {
+                                m.w32(globals + HUD_MESSAGING_OBJECTIVE_MESSAGE, message);
+                                let up = m.r16(hud_globals + HUD_GLOBALS_OBJECTIVE_UP_TICKS) as i16 as i32;
+                                let fade = m.r16(hud_globals + HUD_GLOBALS_OBJECTIVE_FADE_TICKS) as i16 as i32;
+                                m.w16(globals + HUD_MESSAGING_OBJECTIVE_UPTIME, (up + fade) as u16);
                             }
                         }
                     }

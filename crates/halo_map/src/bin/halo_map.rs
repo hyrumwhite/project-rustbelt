@@ -623,6 +623,16 @@ fn names(cache: &CacheFile) -> CliResult {
     for (index, conversation) in scenario.block(s::AI_CONVERSATIONS, halo_map::layout::ai_conversation::SIZEOF)?.iter().enumerate() {
         println!("conversation {index}: {}", text(conversation.bytes(halo_map::layout::ai_conversation::NAME, 32)?));
     }
+    // (the HUD messages: the scenario's hud_message_text tag, its messages
+    // block at 0x20 of struct hud_state_message_definition, 0x40 bytes, a
+    // name first)
+    const SCENARIO_HUD_MESSAGES: usize = 0x594;
+    if let Some(datum) = scenario.reference(SCENARIO_HUD_MESSAGES)?.datum {
+        let messages = cache.tag_root(datum, u32::from_be_bytes(*b"hmt "))?;
+        for (index, message) in messages.block(0x20, 0x40)?.iter().enumerate() {
+            println!("hud message {index}: {}", text(message.bytes(0, 32)?));
+        }
+    }
     // (chapter titles: scenario_cutscene_title, its flags then a name)
     const CUTSCENE_TITLES: usize = 0x4fc;
     const CUTSCENE_TITLE_SIZE: usize = 0x60;

@@ -44,6 +44,11 @@ enum
 	_hs_game_field_hud_globals, /* struct hud_globals_definition (the HUD's globals tag) */
 	_hs_game_field_breakable_surface_globals, /* enabled (boolean) first */
 	_hs_game_field_camera_script_globals, /* struct scripted_camera_globals */
+	_hs_game_field_numeric_countdown_timer_milliseconds, /* long */
+	_hs_game_field_numeric_countdown_timer_on, /* on (boolean), then the previous game time */
+	_hs_game_field_time_code_time, /* long */
+	_hs_game_field_time_code_stop_time, /* long */
+	_hs_game_field_magic_base_animation_seat_index, /* short */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

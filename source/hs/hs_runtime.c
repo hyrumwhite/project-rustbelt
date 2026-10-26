@@ -2305,6 +2305,17 @@ static char const *const hs_runtime_rust_bodies[] =
 	"camera_set_dead",
 	"camera_set_animation",
 	"camera_control",
+	"random_range",
+	"real_random_range",
+	"numeric_countdown_timer_set",
+	"numeric_countdown_timer_get",
+	"numeric_countdown_timer_stop",
+	"numeric_countdown_timer_restart",
+	"time_code_show",
+	"time_code_start",
+	"time_code_reset",
+	"pause_hud_timer",
+	"magic_seat_name",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2382,6 +2393,19 @@ static unsigned long *hs_runtime_port_game_fields(
 			extern void breakable_surfaces_port_game_fields(unsigned long *fields);
 
 			breakable_surfaces_port_game_fields(fields);
+		}
+		{
+			extern long numeric_countdown_timer_milliseconds;
+			extern struct numeric_countdown_timer_state numeric_countdown_timer_on;
+			extern long time_code_time;
+			extern long time_code_stop_time;
+			extern short magic_base_animation_seat_index;
+
+			fields[_hs_game_field_numeric_countdown_timer_milliseconds] = (unsigned long)&numeric_countdown_timer_milliseconds;
+			fields[_hs_game_field_numeric_countdown_timer_on] = (unsigned long)&numeric_countdown_timer_on;
+			fields[_hs_game_field_time_code_time] = (unsigned long)&time_code_time;
+			fields[_hs_game_field_time_code_stop_time] = (unsigned long)&time_code_stop_time;
+			fields[_hs_game_field_magic_base_animation_seat_index] = (unsigned long)&magic_base_animation_seat_index;
 		}
 	}
 

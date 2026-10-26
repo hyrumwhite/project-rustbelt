@@ -258,6 +258,49 @@ const UNIT_SEAT_SIZE: u32 = 0x11c;
 const UNIT_SEAT_LABEL: u32 = 4;
 /// `MAXIMUM_WEAPONS_PER_UNIT`.
 const UNIT_WEAPONS: i16 = 4;
+/// `_object_mask_machine`.
+const OBJECT_MASK_MACHINE: u32 = 1 << 7;
+/// `_object_movie_star_bit` of an object's flags; `_object_melee_attack_inhibited_bit`
+/// and `_object_ranged_attack_inhibited_bit` of its damage flags.
+const OBJECT_MOVIE_STAR: u32 = 1 << 22;
+const OBJECT_MELEE_ATTACK_INHIBITED: u16 = 1 << 7;
+const OBJECT_RANGED_ATTACK_INHIBITED: u16 = 1 << 8;
+/// A unit's flags: `_unit_aim_without_turning_bit`, `_not_enterable_by_player_bit`,
+/// `_integrated_light_on_bit`, `_doesnt_drop_items_bit`, `_cannot_blink_bit`,
+/// `_impervious_bit`, `_desired_integrated_light_on_bit` and `_off_bit`.
+const UNIT_AIM_WITHOUT_TURNING: u32 = 1 << 14;
+const UNIT_NOT_ENTERABLE_BY_PLAYER: u32 = 1 << 16;
+const UNIT_INTEGRATED_LIGHT_ON: u32 = 1 << 19;
+const UNIT_DOESNT_DROP_ITEMS: u32 = 1 << 20;
+const UNIT_CANNOT_BLINK: u32 = 1 << 22;
+const UNIT_IMPERVIOUS: u32 = 1 << 23;
+const UNIT_DESIRED_INTEGRATED_LIGHT_ON: u32 = 1 << 28;
+const UNIT_DESIRED_INTEGRATED_LIGHT_OFF: u32 = 1 << 29;
+/// `struct device_datum`'s flags and `struct machine_datum`'s (tag_layout's
+/// probe, OpenCE-bevy ee325349); `_device_position_changed_bit`, and a
+/// machine's `_machine_does_not_operate_automatically_bit`, `_one_sided_bit`
+/// and `_never_appears_locked_bit`.
+const DEVICE_FLAGS: u32 = 0x1a4;
+const MACHINE_FLAGS: u32 = 0x1c4;
+const DEVICE_POSITION_CHANGED: u32 = 1 << 2;
+const MACHINE_DOES_NOT_OPERATE_AUTOMATICALLY: u32 = 1 << 0;
+const MACHINE_ONE_SIDED: u32 = 1 << 1;
+const MACHINE_NEVER_APPEARS_LOCKED: u32 = 1 << 2;
+/// `struct device_datum`'s power velocity (tag_layout's probe).
+const DEVICE_POWER_VELOCITY: u32 = 0x1b0;
+/// `_object_no_collisions_bit` of an object's flags.
+const OBJECT_NO_COLLISIONS: u32 = 1 << 24;
+/// `_object_mask_scenery`, and `struct scenery_datum`'s flags (bit 0: its
+/// animation playing; tag_layout's probe).
+const OBJECT_MASK_SCENERY: u32 = 1 << 6;
+const SCENERY_FLAGS: u32 = 0x1a4;
+/// An object's animation graph, and its animation state's animation and
+/// frame (`struct object_datum`'s `animation`; tag_layout's probe), and a
+/// unit's animation state, `_unit_state_user_animation`.
+const OBJECT_ANIMATION_GRAPH_INDEX: u32 = 0x7c;
+const OBJECT_ANIMATION_INDEX: u32 = 0x80;
+const OBJECT_ANIMATION_FRAME_INDEX: u32 = 0x82;
+const UNIT_STATE_USER_ANIMATION: u8 = 28;
 /// `struct object_list_header_datum`'s count and first reference, and
 /// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
@@ -1563,6 +1606,160 @@ impl<H: HsHost> Runtime<'_, H> {
         Some(true)
     }
 
+    /// The frames left of the object's animation (`unit_get_custom_animation_time`
+    /// and `scenery_get_animation_time`: its frame count less its frame and
+    /// 2, at least 0); None for a graph or animation not found.
+    fn animation_frames_left(&self, object: u32) -> Option<i32> {
+        let m = self.m();
+        let tags = crate::ai_actor::AiStepContext {
+            tag_instances: self.context.tag_instances,
+            tag_count: self.context.tag_count,
+            ..Default::default()
+        };
+        let graph_index = m.r32(object + OBJECT_ANIMATION_GRAPH_INDEX) as i32;
+        let graph = crate::sensing::tag_get(&AsAiMemory(m), &tags, crate::fourcc(b"antr"), graph_index)?;
+        let animations = graph + crate::layout::animation_graph::ANIMATIONS as u32;
+        let (count, array) = (m.r32(animations) as i32, m.r32(animations + 4));
+        let index = m.r16(object + OBJECT_ANIMATION_INDEX) as i16 as i32;
+        if !(0..count).contains(&index) {
+            return None;
+        }
+        let animation = array + index as u32 * crate::layout::animation::SIZEOF as u32;
+        let frame_count = m.r16(animation + crate::layout::animation::FRAME_COUNT as u32) as i16 as i32;
+        let frame_index = m.r16(object + OBJECT_ANIMATION_FRAME_INDEX) as i16 as i32;
+        Some((frame_count - frame_index - 2).max(0))
+    }
+
+    /// `device_group_set_actual_value`: the group's value (clamped), and
+    /// each device it powers or positions there at once; None for no such
+    /// group, or as network co-op's host (whose snaps it counts), left to
+    /// the game's.
+    fn device_group_set_actual_value(&self, group_index: i16, actual_value: f32) -> Option<()> {
+        use crate::layout::device_datum as d;
+        let m = self.m();
+        if self.context.coop_host {
+            return None;
+        }
+        let actual_value = if actual_value < 0.0 {
+            0.0
+        } else if actual_value > 1.0 {
+            1.0
+        } else {
+            actual_value
+        };
+        let group = self.datum_get(self.context.device_groups_data, group_index as i32)?;
+        m.w32(group + DEVICE_GROUP_ACTUAL_VALUE, actual_value.to_bits());
+        for (_, device) in self.objects_of_types(OBJECT_MASK_DEVICE) {
+            if m.r16(device + d::DEVICE_POWER_GROUP_INDEX as u32) as i16 == group_index {
+                self.set_flag32(device + DEVICE_FLAGS, DEVICE_POSITION_CHANGED, true);
+                m.w32(device + d::DEVICE_POWER as u32, actual_value.to_bits());
+                m.w32(device + DEVICE_POWER_VELOCITY, 0);
+            }
+            if m.r16(device + d::DEVICE_POSITION_GROUP_INDEX as u32) as i16 == group_index {
+                self.set_flag32(device + DEVICE_FLAGS, DEVICE_POSITION_CHANGED, true);
+                m.w32(device + d::DEVICE_POSITION as u32, actual_value.to_bits());
+                m.w32(device + d::DEVICE_POSITION_VELOCITY as u32, 0);
+            }
+        }
+        Some(())
+    }
+
+    /// The unit's seats' labels (its definition's seats block), None for a
+    /// definition not found.
+    fn unit_seats(&self, unit: u32) -> Option<Vec<Vec<u8>>> {
+        let m = self.m();
+        let tags = crate::ai_actor::AiStepContext {
+            tag_instances: self.context.tag_instances,
+            tag_count: self.context.tag_count,
+            ..Default::default()
+        };
+        let definition_index = m.r32(unit + crate::layout::unit_datum::DEFINITION_INDEX as u32) as i32;
+        let definition = crate::sensing::tag_get(&AsAiMemory(m), &tags, UNIT_TAG, definition_index)?;
+        let seats = definition + UNIT_DEFINITION_UNIT + UNIT_DEFINITION_SEATS;
+        let (seat_count, seat_array) = (m.r32(seats) as i32, m.r32(seats + 4));
+        Some((0..seat_count.max(0)).map(|i| self.c_string(seat_array + i as u32 * UNIT_SEAT_SIZE + UNIT_SEAT_LABEL)).collect())
+    }
+
+    /// `object_list_new`: a new, empty list (NONE if none is left).
+    fn object_list_new(&self) -> Option<i32> {
+        let m = self.m();
+        let list = self.datum_new(self.context.object_list_header_data);
+        if list != NONE {
+            let header = self.datum_get(self.context.object_list_header_data, list)?;
+            m.w16(header + OBJECT_LIST_HEADER_COUNT, 0);
+            m.w32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE, NONE as u32);
+        }
+        Some(list)
+    }
+
+    /// `object_list_add`: the object first in the list (a full pool lists
+    /// nothing, though the count goes up).
+    fn object_list_add(&self, list: i32, object_index: i32) -> Option<()> {
+        let m = self.m();
+        let header = self.datum_get(self.context.object_list_header_data, list)?;
+        let reference = self.datum_new(self.context.object_list_data);
+        if reference != NONE {
+            let datum = self.datum_get(self.context.object_list_data, reference)?;
+            m.w32(datum + DATA_REFERENCE_DATUM, object_index as u32);
+            m.w32(datum + DATA_REFERENCE_NEXT, m.r32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE));
+            m.w32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE, reference as u32);
+        }
+        let count = m.r16(header + OBJECT_LIST_HEADER_COUNT);
+        m.w16(header + OBJECT_LIST_HEADER_COUNT, count.wrapping_add(1));
+        Some(())
+    }
+
+    /// The datums of a list's units (`unit_try_and_get`: the rest passed
+    /// over); None for a list that isn't there.
+    fn listed_units(&self, list: i32) -> Option<Vec<u32>> {
+        Some(self.object_list(list)?.into_iter().filter_map(|o| self.object_typed(o, OBJECT_MASK_UNIT)).collect())
+    }
+
+    /// The object's datum, for `object_get`, `unit_get` and the like, which
+    /// stop the game at an index of another type: Some(None) for NONE (they
+    /// aren't asked), None to leave the body to the game's.
+    fn typed_or_none(&self, object_index: i32, types: u32) -> Option<Option<u32>> {
+        if object_index == NONE {
+            return Some(None);
+        }
+        self.object_typed(object_index, types).map(Some)
+    }
+
+    /// A flag of 32 bits set or cleared.
+    fn set_flag32(&self, address: u32, flag: u32, set: bool) {
+        let m = self.m();
+        let flags = m.r32(address);
+        m.w32(address, if set { flags | flag } else { flags & !flag });
+    }
+
+    /// `unit_scripting_set_current_vitality_of`'s new body and shield
+    /// vitalities for the object: Some(None) for a dead one, which keeps its
+    /// own; None where the game's would deplete its shield or body (which
+    /// makes effects), left to it.
+    fn current_vitality(&self, object: u32, body_vitality: f32, shield_vitality: f32) -> Option<Option<(f32, f32)>> {
+        use crate::layout::unit_datum as u;
+        let m = self.m();
+        if m.r16(object + u::OBJECT_DAMAGE_FLAGS as u32) & OBJECT_DEAD != 0 {
+            return Some(None);
+        }
+        let f = |offset: usize| f32::from_bits(m.r32(object + offset as u32));
+        let fraction = |value: f32, maximum: f32| {
+            if maximum <= 0.0 {
+                0.0
+            } else if value >= maximum {
+                1.0
+            } else {
+                value / maximum
+            }
+        };
+        let shield = fraction(shield_vitality, f(u::OBJECT_MAXIMUM_SHIELD_VITALITY));
+        let body = fraction(body_vitality, f(u::OBJECT_MAXIMUM_BODY_VITALITY));
+        if (f(u::OBJECT_SHIELD_VITALITY) > 0.0 && shield <= 0.0) || (f(u::OBJECT_BODY_VITALITY) > 0.0 && body <= 0.0) {
+            return None;
+        }
+        Some(Some((body, shield)))
+    }
+
     /// A library function's body that runs here (the arguments evaluated
     /// at `arguments`), with its value returned; false if it has none here
     /// (or meets what the game's would stop at, which it then runs).
@@ -1715,27 +1912,14 @@ impl<H: HsHost> Runtime<'_, H> {
             // hs_players: a new list of each player's unit (object_list_new,
             // object_list_add)
             "players" => {
-                let list = self.datum_new(self.context.object_list_header_data);
+                let Some(list) = self.object_list_new() else { return false };
                 if list != NONE {
-                    let Some(header) = self.datum_get(self.context.object_list_header_data, list) else { return false };
-                    m.w16(header + OBJECT_LIST_HEADER_COUNT, 0);
-                    m.w32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE, NONE as u32);
                     let mut player_index = self.data_next_index(self.context.player_data, NONE);
                     while player_index != NONE {
                         let Some(player) = self.datum_get(self.context.player_data, player_index) else { return false };
                         let unit_index = m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32;
-                        if unit_index != NONE {
-                            // (reference_list_add: a full pool lists nothing,
-                            // though the count goes up)
-                            let reference = self.datum_new(self.context.object_list_data);
-                            if reference != NONE {
-                                let Some(datum) = self.datum_get(self.context.object_list_data, reference) else { return false };
-                                m.w32(datum + DATA_REFERENCE_DATUM, unit_index as u32);
-                                m.w32(datum + DATA_REFERENCE_NEXT, m.r32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE));
-                                m.w32(header + OBJECT_LIST_HEADER_FIRST_REFERENCE, reference as u32);
-                            }
-                            let count = m.r16(header + OBJECT_LIST_HEADER_COUNT);
-                            m.w16(header + OBJECT_LIST_HEADER_COUNT, count.wrapping_add(1));
+                        if unit_index != NONE && self.object_list_add(list, unit_index).is_none() {
+                            return false;
                         }
                         player_index = self.data_next_index(self.context.player_data, player_index);
                     }
@@ -1886,25 +2070,15 @@ impl<H: HsHost> Runtime<'_, H> {
                     0
                 } else {
                     let Some(vehicle) = self.object_typed(vehicle_index, OBJECT_MASK_UNIT) else { return false };
-                    let tags = crate::ai_actor::AiStepContext {
-                        tag_instances: self.context.tag_instances,
-                        tag_count: self.context.tag_count,
-                        ..Default::default()
-                    };
-                    let definition_index = m.r32(vehicle + u::DEFINITION_INDEX as u32) as i32;
-                    let Some(definition) = crate::sensing::tag_get(&AsAiMemory(m), &tags, UNIT_TAG, definition_index) else {
-                        return false;
-                    };
-                    let seats = definition + UNIT_DEFINITION_UNIT + UNIT_DEFINITION_SEATS;
-                    let (seat_count, seat_array) = (m.r32(seats) as i32, m.r32(seats + 4));
+                    let Some(seats) = self.unit_seats(vehicle) else { return false };
                     let name = self.c_string(seat_name);
                     let listed = match self.object_list(list) {
                         Some(objects) => objects,
                         None => return false,
                     };
                     let mut result = false;
-                    for seat_index in 0..seat_count.max(0) {
-                        let label = self.c_string(seat_array + seat_index as u32 * UNIT_SEAT_SIZE + UNIT_SEAT_LABEL);
+                    for (seat_index, label) in seats.into_iter().enumerate() {
+                        let seat_index = seat_index as i32;
                         if !name.eq_ignore_ascii_case(&label) {
                             continue;
                         }
@@ -1958,6 +2132,357 @@ impl<H: HsHost> Runtime<'_, H> {
                     let header = crate::ai_actor::datum_get(&AsAiMemory(m), self.context.object_list_header_data, list);
                     header.map_or(0, |header| short_value(m.r16(header + OBJECT_LIST_HEADER_COUNT) as i32))
                 }
+            }
+            // object_set_ranged_attack_inhibited and _melee_: the object's
+            // damage flag (object_get)
+            name @ ("object_set_ranged_attack_inhibited" | "object_set_melee_attack_inhibited") => {
+                let Some(object) = self.typed_or_none(argument(0), OBJECT_MASK_ALL) else { return false };
+                if let Some(object) = object {
+                    let flag = if name == "object_set_ranged_attack_inhibited" {
+                        OBJECT_RANGED_ATTACK_INHIBITED
+                    } else {
+                        OBJECT_MELEE_ATTACK_INHIBITED
+                    };
+                    let address = object + u::OBJECT_DAMAGE_FLAGS as u32;
+                    let flags = m.r16(address);
+                    m.w16(address, if m.r8(arguments + 4) != 0 { flags | flag } else { flags & !flag });
+                }
+                0
+            }
+            // object_beautify: the object a movie star (object_get)
+            "object_beautify" => {
+                let Some(object) = self.typed_or_none(argument(0), OBJECT_MASK_ALL) else { return false };
+                if let Some(object) = object {
+                    self.set_flag32(object + u::OBJECT_FLAGS as u32, OBJECT_MOVIE_STAR, m.r8(arguments + 4) != 0);
+                }
+                0
+            }
+            // hs_object_set_shield: the maximum times the fraction (clamped)
+            "object_set_shield" => {
+                let Some(object) = self.typed_or_none(argument(0), OBJECT_MASK_ALL) else { return false };
+                if let Some(object) = object {
+                    let mut fraction = f32::from_bits(argument(1) as u32);
+                    if fraction < 0.0 {
+                        fraction = 0.0;
+                    } else if fraction > 1.0 {
+                        fraction = 1.0;
+                    }
+                    let maximum = f32::from_bits(m.r32(object + u::OBJECT_MAXIMUM_SHIELD_VITALITY as u32));
+                    m.w32(object + u::OBJECT_SHIELD_VITALITY as u32, (maximum * fraction).to_bits());
+                }
+                0
+            }
+            // a unit's flag (unit_get): unit_scripting_can_blink (cannot,
+            // inverted), unit_aim_without_turning, unit_set_enterable_by_player
+            // (not enterable, inverted)
+            name @ ("unit_can_blink" | "unit_aim_without_turning" | "unit_set_enterable_by_player") => {
+                let Some(unit) = self.typed_or_none(argument(0), OBJECT_MASK_UNIT) else { return false };
+                if let Some(unit) = unit {
+                    let value = m.r8(arguments + 4) != 0;
+                    let (flag, set) = match name {
+                        "unit_can_blink" => (UNIT_CANNOT_BLINK, !value),
+                        "unit_aim_without_turning" => (UNIT_AIM_WITHOUT_TURNING, value),
+                        _ => (UNIT_NOT_ENTERABLE_BY_PLAYER, !value),
+                    };
+                    self.set_flag32(unit + u::UNIT_FLAGS as u32, flag, set);
+                }
+                0
+            }
+            // unit_scripting_doesnt_drop_items and _impervious: each listed
+            // unit's flag (unit_try_and_get)
+            name @ ("unit_doesnt_drop_items" | "unit_impervious") => {
+                let Some(units) = self.listed_units(argument(0)) else { return false };
+                let (flag, set) = if name == "unit_impervious" {
+                    (UNIT_IMPERVIOUS, m.r8(arguments + 4) != 0)
+                } else {
+                    (UNIT_DOESNT_DROP_ITEMS, true)
+                };
+                for unit in units {
+                    self.set_flag32(unit + u::UNIT_FLAGS as u32, flag, set);
+                }
+                0
+            }
+            // unit_set_desired_flashlight_state (unit_get) and units_ (each
+            // listed unit): the desired on or off flag set
+            name @ ("unit_set_desired_flashlight_state" | "units_set_desired_flashlight_state") => {
+                let units: Vec<u32> = if name == "unit_set_desired_flashlight_state" {
+                    let Some(unit) = self.typed_or_none(argument(0), OBJECT_MASK_UNIT) else { return false };
+                    unit.into_iter().collect()
+                } else {
+                    let Some(units) = self.listed_units(argument(0)) else { return false };
+                    units
+                };
+                let flag = if m.r8(arguments + 4) != 0 { UNIT_DESIRED_INTEGRATED_LIGHT_ON } else { UNIT_DESIRED_INTEGRATED_LIGHT_OFF };
+                for unit in units {
+                    self.set_flag32(unit + u::UNIT_FLAGS as u32, flag, true);
+                }
+                0
+            }
+            // unit_get_current_flashlight_state (unit_get)
+            "unit_get_current_flashlight_state" => {
+                let Some(unit) = self.typed_or_none(argument(0), OBJECT_MASK_UNIT) else { return false };
+                boolean(unit.is_some_and(|unit| m.r32(unit + u::UNIT_FLAGS as u32) & UNIT_INTEGRATED_LIGHT_ON != 0))
+            }
+            // unit_scripting_set_maximum_vitality (the object) and units_
+            // (each listed): a living one's maximums, at full (not as network
+            // co-op's host, where a player's is every player's)
+            name @ ("unit_set_maximum_vitality" | "units_set_maximum_vitality") => {
+                if self.context.coop_host {
+                    return false;
+                }
+                let objects = if name == "unit_set_maximum_vitality" {
+                    vec![argument(0)]
+                } else {
+                    let Some(objects) = self.object_list(argument(0)) else { return false };
+                    objects
+                };
+                let Some(data) =
+                    objects.iter().filter(|&&o| o != NONE).map(|&o| self.object_typed(o, OBJECT_MASK_ALL)).collect::<Option<Vec<_>>>()
+                else {
+                    return false;
+                };
+                let (body, shield) = (f32::from_bits(argument(1) as u32), f32::from_bits(argument(2) as u32));
+                for object in data {
+                    if m.r16(object + u::OBJECT_DAMAGE_FLAGS as u32) & OBJECT_DEAD != 0 {
+                        continue;
+                    }
+                    // (object_initialize_vitality, both given)
+                    m.w32(object + u::OBJECT_MAXIMUM_BODY_VITALITY as u32, body.to_bits());
+                    m.w32(object + u::OBJECT_MAXIMUM_SHIELD_VITALITY as u32, shield.to_bits());
+                    m.w32(object + u::OBJECT_BODY_VITALITY as u32, if body > 0.0 { 1.0f32 } else { 0.0 }.to_bits());
+                    m.w32(object + u::OBJECT_SHIELD_VITALITY as u32, if shield > 0.0 { 1.0f32 } else { 0.0 }.to_bits());
+                }
+                0
+            }
+            // unit_scripting_set_current_vitality (the object) and units_
+            // (each listed): a living one's vitalities as fractions of its
+            // maximums (not as network co-op's host; nor where one would be
+            // depleted, which makes effects: the game's then)
+            name @ ("unit_set_current_vitality" | "units_set_current_vitality") => {
+                if self.context.coop_host {
+                    return false;
+                }
+                let objects = if name == "unit_set_current_vitality" {
+                    vec![argument(0)]
+                } else {
+                    let Some(objects) = self.object_list(argument(0)) else { return false };
+                    objects
+                };
+                let (body, shield) = (f32::from_bits(argument(1) as u32), f32::from_bits(argument(2) as u32));
+                let mut changes = Vec::new();
+                for object_index in objects.into_iter().filter(|&o| o != NONE) {
+                    let Some(object) = self.object_typed(object_index, OBJECT_MASK_ALL) else { return false };
+                    match self.current_vitality(object, body, shield) {
+                        Some(Some(change)) => changes.push((object, change)),
+                        Some(None) => {}
+                        None => return false,
+                    }
+                }
+                for (object, (body, shield)) in changes {
+                    m.w32(object + u::OBJECT_SHIELD_VITALITY as u32, shield.to_bits());
+                    m.w32(object + u::OBJECT_BODY_VITALITY as u32, body.to_bits());
+                }
+                0
+            }
+            // unit_scripting_has_weapon (unit_has_weapon_definition_index):
+            // any of its weapons of the definition
+            "unit_has_weapon" => {
+                let (unit_index, weapon_definition) = (argument(0), argument(1));
+                if unit_index == NONE || weapon_definition == NONE {
+                    0
+                } else {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let mut has = false;
+                    for i in 0..UNIT_WEAPONS as u32 {
+                        let weapon_index = m.r32(unit + u::UNIT_WEAPON_OBJECT_INDICES as u32 + 4 * i) as i32;
+                        if weapon_index != NONE {
+                            let Some(weapon) = self.object_typed(weapon_index, OBJECT_MASK_WEAPON) else { return false };
+                            if m.r32(weapon + u::DEFINITION_INDEX as u32) as i32 == weapon_definition {
+                                has = true;
+                                break;
+                            }
+                        }
+                    }
+                    boolean(has)
+                }
+            }
+            // unit_scripting_vehicle_test_seat: the unit in a seat of the
+            // label
+            "vehicle_test_seat" => {
+                let (vehicle_index, seat_name, unit_index) = (argument(0), argument(1) as u32, argument(2));
+                if vehicle_index == NONE || unit_index == NONE {
+                    0
+                } else {
+                    let Some(vehicle) = self.object_typed(vehicle_index, OBJECT_MASK_UNIT) else { return false };
+                    let Some(seats) = self.unit_seats(vehicle) else { return false };
+                    let name = self.c_string(seat_name);
+                    let mut result = false;
+                    for (seat_index, label) in seats.into_iter().enumerate() {
+                        if !name.eq_ignore_ascii_case(&label) {
+                            continue;
+                        }
+                        let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                        if m.r32(unit + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 == vehicle_index
+                            && m.r16(unit + u::UNIT_PARENT_SEAT_INDEX as u32) as i16 as i32 == seat_index as i32
+                        {
+                            result = true;
+                            break;
+                        }
+                    }
+                    boolean(result)
+                }
+            }
+            // unit_scripting_unit_riders: a new list of its children that
+            // are units in a seat
+            "vehicle_riders" => {
+                let unit_index = argument(0);
+                if unit_index == NONE {
+                    NONE
+                } else {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let Some(list) = self.object_list_new() else { return false };
+                    if list != NONE {
+                        let mut child_index = m.r32(unit + u::OBJECT_FIRST_CHILD_OBJECT_INDEX as u32) as i32;
+                        while child_index != NONE {
+                            let Some(child) = self.object_typed(child_index, OBJECT_MASK_ALL) else { return false };
+                            if 1u32.checked_shl(m.r16(child + u::OBJECT_TYPE as u32) as u32).is_some_and(|bit| OBJECT_MASK_UNIT & bit != 0)
+                                && m.r16(child + u::UNIT_PARENT_SEAT_INDEX as u32) as i16 != NONE as i16
+                                && self.object_list_add(list, child_index).is_none()
+                            {
+                                return false;
+                            }
+                            child_index = m.r32(child + u::OBJECT_NEXT_OBJECT_INDEX as u32) as i32;
+                        }
+                    }
+                    list
+                }
+            }
+            // unit_scripting_unit_driver and _gunner (unit_try_and_get)
+            name @ ("vehicle_driver" | "vehicle_gunner") => match self.object_typed(argument(0), OBJECT_MASK_UNIT) {
+                Some(unit) => {
+                    let field = if name == "vehicle_driver" { u::UNIT_DRIVER_OBJECT_INDEX } else { u::UNIT_GUNNER_OBJECT_INDEX };
+                    m.r32(unit + field as u32) as i32
+                }
+                None => NONE,
+            },
+            // a machine's flag (machine_try_and_get): device_set_never_appears_locked,
+            // device_one_sided_set, device_operates_automatically_set (does
+            // not, inverted)
+            name @ ("device_set_never_appears_locked" | "device_one_sided_set" | "device_operates_automatically_set") => {
+                if let Some(machine) = self.object_typed(argument(0), OBJECT_MASK_MACHINE) {
+                    let value = m.r8(arguments + 4) != 0;
+                    let (flag, set) = match name {
+                        "device_set_never_appears_locked" => (MACHINE_NEVER_APPEARS_LOCKED, value),
+                        "device_one_sided_set" => (MACHINE_ONE_SIDED, value),
+                        _ => (MACHINE_DOES_NOT_OPERATE_AUTOMATICALLY, !value),
+                    };
+                    self.set_flag32(machine + MACHINE_FLAGS, flag, set);
+                }
+                0
+            }
+            // device_get_power (device_get)
+            "device_get_power" => {
+                let Some(device) = self.typed_or_none(argument(0), OBJECT_MASK_DEVICE) else { return false };
+                device.map_or(0.0f32, |device| f32::from_bits(m.r32(device + crate::layout::device_datum::DEVICE_POWER as u32))).to_bits()
+                    as i32
+            }
+            // device_set_power: its power, and its power group's desired
+            // value (a group that powers a device, as its own does, the
+            // game's, whose change makes effects)
+            "device_set_power" => {
+                use crate::layout::device_datum as d;
+                let Some(device) = self.typed_or_none(argument(0), OBJECT_MASK_DEVICE) else { return false };
+                if let Some(device) = device {
+                    let power = f32::from_bits(argument(1) as u32);
+                    let group_index = m.r16(device + d::DEVICE_POWER_GROUP_INDEX as u32) as i16;
+                    if self.device_group_set_desired_value(group_index, power).is_none() {
+                        return false;
+                    }
+                    self.set_flag32(device + DEVICE_FLAGS, DEVICE_POSITION_CHANGED, true);
+                    m.w32(device + d::DEVICE_POWER as u32, power.to_bits());
+                }
+                0
+            }
+            // object_scripting_set_collideable (object_get)
+            "object_set_collideable" => {
+                let Some(object) = self.typed_or_none(argument(0), OBJECT_MASK_ALL) else { return false };
+                if let Some(object) = object {
+                    self.set_flag32(object + u::OBJECT_FLAGS as u32, OBJECT_NO_COLLISIONS, m.r8(arguments + 4) == 0);
+                }
+                0
+            }
+            // unit_is_playing_custom_animation (unit_get)
+            "unit_is_playing_custom_animation" => {
+                let Some(unit) = self.typed_or_none(argument(0), OBJECT_MASK_UNIT) else { return false };
+                boolean(unit.is_some_and(|unit| m.r8(unit + u::UNIT_ANIMATION_STATE as u32) == UNIT_STATE_USER_ANIMATION))
+            }
+            // unit_get_custom_animation_time (unit_get): the frames left of
+            // its custom animation, if it plays one
+            "unit_get_custom_animation_time" => {
+                let Some(unit) = self.typed_or_none(argument(0), OBJECT_MASK_UNIT) else { return false };
+                match unit {
+                    Some(unit) if m.r8(unit + u::UNIT_ANIMATION_STATE as u32) == UNIT_STATE_USER_ANIMATION => {
+                        let Some(frames) = self.animation_frames_left(unit) else { return false };
+                        short_value(frames)
+                    }
+                    _ => 0,
+                }
+            }
+            // scenery_get_animation_time (scenery_get): the frames left of
+            // its animation, if it plays one
+            "scenery_get_animation_time" => {
+                let Some(scenery) = self.object_typed(argument(0), OBJECT_MASK_SCENERY) else { return false };
+                if m.r32(scenery + SCENERY_FLAGS) & 1 != 0 {
+                    let Some(frames) = self.animation_frames_left(scenery) else { return false };
+                    short_value(frames)
+                } else {
+                    0
+                }
+            }
+            // device_set_actual_position: its position group's value at once
+            "device_set_position_immediate" => {
+                let Some(device) = self.typed_or_none(argument(0), OBJECT_MASK_DEVICE) else { return false };
+                if let Some(device) = device {
+                    let group_index = m.r16(device + crate::layout::device_datum::DEVICE_POSITION_GROUP_INDEX as u32) as i16;
+                    if group_index != NONE as i16
+                        && self.device_group_set_actual_value(group_index, f32::from_bits(argument(1) as u32)).is_none()
+                    {
+                        return false;
+                    }
+                }
+                0
+            }
+            // device_group_set_actual_value
+            "device_group_set_immediate" => {
+                if self.device_group_set_actual_value(short(0), f32::from_bits(argument(1) as u32)).is_none() {
+                    return false;
+                }
+                0
+            }
+            // device_group_get_value
+            "device_group_get" => {
+                let Some(group) = self.datum_get(self.context.device_groups_data, short(0) as i32) else { return false };
+                m.r32(group + DEVICE_GROUP_ACTUAL_VALUE) as i32
+            }
+            // device_group_set_desired_value
+            "device_group_set" => match self.device_group_set_desired_value(short(0), f32::from_bits(argument(1) as u32)) {
+                Some(changed) => boolean(changed),
+                None => return false,
+            },
+            // device_group_change_only_once_more_set
+            "device_group_change_only_once_more_set" => {
+                let group_index = short(0);
+                if group_index != NONE as i16 {
+                    let Some(group) = self.datum_get(self.context.device_groups_data, group_index as i32) else { return false };
+                    let flags = m.r16(group + DEVICE_GROUP_FLAGS);
+                    let flags = if m.r8(arguments + 4) != 0 {
+                        flags | DEVICE_GROUP_CAN_CHANGE_ONLY_ONCE
+                    } else {
+                        flags & !DEVICE_GROUP_CAN_CHANGE_ONLY_ONCE
+                    };
+                    m.w16(group + DEVICE_GROUP_FLAGS, flags & !DEVICE_GROUP_CHANGED_ONCE);
+                }
+                0
             }
             // game_difficulty_level_get_ignore_easy: normal at the least
             "game_difficulty_get" => self.context.difficulty.max(DIFFICULTY_NORMAL),

@@ -339,7 +339,7 @@ pub unsafe extern "C" fn halo_sim_hs_update_check(update: *mut HsUpdateC) -> i32
 }
 
 /// halo_sim.c's `MAXIMUM_HALO_SIM_HS_BODY_WRITES`.
-pub const MAXIMUM_BODY_WRITES: usize = 1024;
+pub const MAXIMUM_BODY_WRITES: usize = 8192;
 
 /// A byte a body wrote, held aside.
 #[repr(C)]

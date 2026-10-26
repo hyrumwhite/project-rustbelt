@@ -336,7 +336,7 @@ const ACTION_CONVERSE: i16 = 12;
 const ACTION_AVOID: i16 = 13;
 
 /// Each action's class (actions.c's `global_action_functions`).
-const ACTION_CLASSES: [i16; 14] = [0, 0, 0, 4, 2, 3, 1, 3, 3, 2, 4, 2, 2, 2];
+pub(crate) const ACTION_CLASSES: [i16; 14] = [0, 0, 0, 4, 2, 3, 1, 3, 3, 2, 4, 2, 2, 2];
 
 /// actions.c's panics (`_actor_panic_*`).
 const PANIC_NONE: i16 = 0;

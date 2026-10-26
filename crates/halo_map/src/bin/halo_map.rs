@@ -616,6 +616,10 @@ fn names(cache: &CacheFile) -> CliResult {
             platoons.join(", ")
         );
     }
+    // (a command list's name first)
+    for (index, list) in scenario.block(s::AI_COMMAND_LISTS, halo_map::layout::ai_command_list_definition::SIZEOF)?.iter().enumerate() {
+        println!("command list {index}: {}", text(list.bytes(0, 32)?));
+    }
     for (index, conversation) in scenario.block(s::AI_CONVERSATIONS, halo_map::layout::ai_conversation::SIZEOF)?.iter().enumerate() {
         println!("conversation {index}: {}", text(conversation.bytes(halo_map::layout::ai_conversation::NAME, 32)?));
     }

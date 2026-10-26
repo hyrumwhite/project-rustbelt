@@ -355,9 +355,23 @@ pub struct HsBodyWriteC {
     pub value: u32,
 }
 
+/// halo_sim.c's `MAXIMUM_HALO_SIM_HS_BODY_EFFECTS`.
+pub const MAXIMUM_BODY_EFFECTS: usize = 4096;
+
+/// An effect on the rest of the game a body asked, held back.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HsBodyEffectC {
+    pub kind: i32,
+    pub a: i32,
+    pub b: i32,
+    pub c: i32,
+}
+
 /// A library body to check: the function, its thread and evaluated
-/// arguments; whether it ran here (not left to the game's) and the bytes it
-/// wrote (`overflow` if more than there's room for).
+/// arguments; whether it ran here (not left to the game's), the bytes it
+/// wrote (`overflow` if more than there's room for) and the effects it
+/// asked, in order.
 #[repr(C)]
 pub struct HsBodyCallC {
     pub context: HsContextC,
@@ -368,6 +382,8 @@ pub struct HsBodyCallC {
     pub write_count: u32,
     pub overflow: i32,
     pub writes: [HsBodyWriteC; MAXIMUM_BODY_WRITES],
+    pub effect_count: u32,
+    pub effects: [HsBodyEffectC; MAXIMUM_BODY_EFFECTS],
 }
 
 /// The game's memory read as it is, with what's written held aside (each
@@ -402,11 +418,13 @@ impl HsMemory for OverlayMemory {
     }
 }
 
-/// A body's runtime: the held-aside memory, and no calls of the game's (a
-/// body that asks one isn't checked).
+/// A body's runtime: the held-aside memory, its effects held back for the
+/// game's body to make and compare (their results aren't the body's), and
+/// no other calls of the game's (a body that asks one isn't checked).
 #[derive(Default)]
 struct BodyHost {
     memory: OverlayMemory,
+    effects: RefCell<Vec<HsBodyEffectC>>,
     called: Cell<bool>,
 }
 
@@ -415,7 +433,11 @@ impl HsHost for BodyHost {
         &self.memory
     }
     fn call(&self, call: &mut HsCall) {
-        self.called.set(true);
+        if halo_map::hs_runtime::call::is_effect(call.kind) {
+            self.effects.borrow_mut().push(HsBodyEffectC { kind: call.kind, a: call.a, b: call.b, c: call.c });
+        } else {
+            self.called.set(true);
+        }
         call.result = 0;
     }
 }
@@ -444,7 +466,12 @@ pub unsafe extern "C" fn halo_sim_hs_body_check(body: *mut HsBodyCallC) -> i32 {
     );
     body.handled = (ran && !host.called.get()) as i32;
     let bytes = host.memory.bytes.borrow();
-    body.overflow = (bytes.len() > MAXIMUM_BODY_WRITES) as i32;
+    let effects = host.effects.borrow();
+    body.overflow = (bytes.len() > MAXIMUM_BODY_WRITES || effects.len() > MAXIMUM_BODY_EFFECTS) as i32;
+    body.effect_count = effects.len().min(MAXIMUM_BODY_EFFECTS) as u32;
+    for (i, &effect) in effects.iter().take(MAXIMUM_BODY_EFFECTS).enumerate() {
+        body.effects[i] = effect;
+    }
     body.write_count = 0;
     for (&address, &value) in bytes.iter().take(MAXIMUM_BODY_WRITES) {
         body.writes[body.write_count as usize] = HsBodyWriteC { address, value: value as u32 };

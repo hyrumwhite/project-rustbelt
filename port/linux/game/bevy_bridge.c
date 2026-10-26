@@ -38,6 +38,7 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "physics/point_physics.h"
 #include "cache/cache_files.h"
 #include "render/render_cameras.h"
+#include "camera/camera_scripting.h"
 #include "render/render_cameras_internal.h"
 #include "scenario/scenario.h"
 #include "tag_files/tag_groups.h"
@@ -538,7 +539,9 @@ static short bevy_bridge_contrails(struct bevy_bridge_light *lights, short maxim
 }
 
 /* an object the game does not draw: invisible, or the first-person unit or
-something attached to it */
+something attached to it (the player's, or a script's first-person camera's:
+c10's helmet recording, from a marine's eyes, which the viewer drew from
+inside his head) */
 static unsigned long bevy_bridge_object_flags(long object_index, long first_person_unit)
 {
 	struct object_datum *object = object_get(object_index);
@@ -551,7 +554,7 @@ static unsigned long bevy_bridge_object_flags(long object_index, long first_pers
 		SET_FLAG(flags, _bevy_bridge_object_first_person_bit, TRUE);
 	for (ancestor = object_index; ancestor != NONE; ancestor = object_get(ancestor)->object.parent_object_index)
 	{
-		if (ancestor == first_person_unit)
+		if (ancestor == first_person_unit || scripted_camera_object_is_first_person_camera(ancestor))
 		{
 			SET_FLAG(flags, _bevy_bridge_object_first_person_body_bit, !TEST_FLAG(flags, _bevy_bridge_object_hidden_bit));
 			SET_FLAG(flags, _bevy_bridge_object_hidden_bit, TRUE);
@@ -675,6 +678,7 @@ void bevy_bridge_export_frame(
 	bevy_bridge_screen_flash_type = 0;
 	frame->screen_effect = bevy_bridge_screen_effect;
 	memset(&bevy_bridge_screen_effect, 0, sizeof(bevy_bridge_screen_effect));
+	memcpy(frame->breakable_surfaces, breakable_surface_flags_get(), sizeof(frame->breakable_surfaces));
 	if (bevy_bridge_viewer_draws_hud())
 		bevy_bridge_share_text_atlas(shared);
 	for (window_index = 0; window_index < window_count; window_index++)

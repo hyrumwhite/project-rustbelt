@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 50
+#define BEVY_BRIDGE_VERSION 51
 #define BEVY_BRIDGE_SCREEN_TEXTURES 512
 #define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
 #define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
@@ -589,6 +589,10 @@ struct bevy_bridge_frame
 	struct bevy_bridge_screen_vertex screen_vertices[BEVY_BRIDGE_SCREEN_VERTICES];
 	/* (protocol 50) the screen effect over the first player's view */
 	struct bevy_bridge_screen_effect screen_effect;
+	/* (protocol 51) which of the structure bsp's breakable surfaces stand
+	(bit i of byte i / 8 set): a structure material naming one that is
+	broken is not drawn (structure_render.c) */
+	unsigned char breakable_surfaces[32];
 };
 
 /* what the renderer's window receives, for the game to read as its own */

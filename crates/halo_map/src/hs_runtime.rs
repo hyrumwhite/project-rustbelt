@@ -903,6 +903,14 @@ pub mod game_field {
     /// `camera_script_globals` (camera_scripting.c's `struct
     /// scripted_camera_globals`).
     pub const CAMERA_SCRIPT_GLOBALS: u32 = 37;
+    /// The numeric countdown timer's milliseconds (long) and state (on,
+    /// a boolean, first); the time code's time and stop time (longs);
+    /// units.c's `magic_base_animation_seat_index` (short).
+    pub const NUMERIC_COUNTDOWN_TIMER_MILLISECONDS: u32 = 38;
+    pub const NUMERIC_COUNTDOWN_TIMER_ON: u32 = 39;
+    pub const TIME_CODE_TIME: u32 = 40;
+    pub const TIME_CODE_STOP_TIME: u32 = 41;
+    pub const MAGIC_BASE_ANIMATION_SEAT_INDEX: u32 = 42;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -5472,6 +5480,118 @@ impl<H: HsHost> Runtime<'_, H> {
             // director_script_camera
             "camera_control" => {
                 self.effect(call::EFFECT_DIRECTOR_SCRIPT_CAMERA, m.r8(arguments) as i32, 0, 0);
+                0
+            }
+            // seed_random_range and real_seed_random_range of the global seed
+            name @ ("random_range" | "real_random_range") => {
+                let seed_address = self.context.random_seed;
+                // (seed_random's step)
+                let seed = m.r32(seed_address).wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                m.w32(seed_address, seed);
+                let random = seed >> 16;
+                if name == "random_range" {
+                    let (lower, upper) = (short(0) as i32, short(1) as i32);
+                    short_value(lower + ((upper - lower) as u32).wrapping_mul(random).wrapping_shr(16) as i32)
+                } else {
+                    let (lower, upper) = (f32::from_bits(argument(0) as u32), f32::from_bits(argument(1) as u32));
+                    (lower + (upper - lower) * (random as f32 / 65535.0)).to_bits() as i32
+                }
+            }
+            // shaders.c's numeric countdown timer
+            name @ ("numeric_countdown_timer_set"
+            | "numeric_countdown_timer_get"
+            | "numeric_countdown_timer_stop"
+            | "numeric_countdown_timer_restart") => {
+                let Some(milliseconds) = self.game_field(game_field::NUMERIC_COUNTDOWN_TIMER_MILLISECONDS) else { return false };
+                let Some(on) = self.game_field(game_field::NUMERIC_COUNTDOWN_TIMER_ON) else { return false };
+                match name {
+                    "numeric_countdown_timer_set" => {
+                        m.w32(milliseconds, argument(0) as u32);
+                        m.w8(on, m.r8(arguments + 4));
+                        0
+                    }
+                    "numeric_countdown_timer_stop" => {
+                        m.w8(on, 0);
+                        0
+                    }
+                    "numeric_countdown_timer_restart" => {
+                        m.w8(on, 1);
+                        0
+                    }
+                    _ => {
+                        let ms = m.r32(milliseconds) as i32;
+                        let digit = match short(0) {
+                            -1 => ms,
+                            0 => ms % 10,
+                            1 => ms / 10 % 10,
+                            2 => ms / 100 % 10,
+                            3 => ms / 1000 % 10,
+                            4 => ms / 10_000 % 6,
+                            5 => ms / 60_000 % 10,
+                            6 => ms / 600_000 % 6,
+                            7 => ms / 3_600_000 % 10,
+                            8 => ms / 36_000_000 % 10,
+                            _ => 0,
+                        };
+                        short_value(digit)
+                    }
+                }
+            }
+            // scripted_hud_time_code_show, _start and _reset
+            name @ ("time_code_show" | "time_code_start" | "time_code_reset") => {
+                let Some(time) = self.game_field(game_field::TIME_CODE_TIME) else { return false };
+                let Some(stop) = self.game_field(game_field::TIME_CODE_STOP_TIME) else { return false };
+                let now = self.context.game_time;
+                // (time_code_reset has no arguments to read)
+                let on = || m.r8(arguments) != 0;
+                match name {
+                    "time_code_show" => {
+                        if on() {
+                            m.w32(time, now as u32);
+                            m.w32(stop, now as u32);
+                        } else {
+                            m.w32(time, NONE as u32);
+                        }
+                    }
+                    "time_code_start" => {
+                        if on() {
+                            let elapsed = now.wrapping_sub(m.r32(stop) as i32);
+                            m.w32(time, (m.r32(time) as i32).wrapping_add(elapsed) as u32);
+                            m.w32(stop, NONE as u32);
+                        } else {
+                            m.w32(stop, now as u32);
+                        }
+                    }
+                    _ => {
+                        m.w32(time, now as u32);
+                        if m.r32(stop) as i32 != NONE {
+                            m.w32(stop, now as u32);
+                        }
+                    }
+                }
+                0
+            }
+            // scripted_hud_pause_timer: its ticks kept as of the pause
+            "pause_hud_timer" => {
+                let Some(globals) = self.game_field(game_field::HUD_MESSAGING_GLOBALS) else { return false };
+                let timer = globals + HUD_MESSAGING_TIMER;
+                let paused = m.r8(arguments);
+                m.w8(timer + HUD_TIMER_PAUSED, paused);
+                let ticks = m.r16(timer + HUD_TIMER_TICKS) as i16 as i32;
+                if ticks > 0 {
+                    let now = self.context.game_time as i16 as i32;
+                    let reference = m.r32(timer) as i32;
+                    let ticks = if paused != 0 { ticks + reference - now } else { ticks + now - reference };
+                    m.w16(timer + HUD_TIMER_TICKS, ticks as u16);
+                }
+                0
+            }
+            // scripting_set_magic_base_seat: the base seat of the label
+            "magic_seat_name" => {
+                let Some(seat_index) = self.game_field(game_field::MAGIC_BASE_ANIMATION_SEAT_INDEX) else { return false };
+                let label = self.c_string(argument(0) as u32);
+                let seat = BASE_SEAT_LABELS.iter().position(|base| base.eq_ignore_ascii_case(&label)).map_or(NONE, |i| i as i32);
+                m.w16(seat_index, seat as u16);
                 0
             }
             // game_difficulty_level_get_ignore_easy: normal at the least

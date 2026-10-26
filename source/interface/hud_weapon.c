@@ -485,6 +485,15 @@ void scripted_hud_show_crosshair(
 	return;
 }
 
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the flag the Rust port's library bodies set (hs_runtime_port_game_fields) */
+void hud_weapon_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_weapon_hud_script_flags] = weapon_hud_globals ? (unsigned long)&weapon_hud_globals->script_flags : 0;
+}
+
 /* port: the scripts' crosshair flag, for network co-op
 (port/linux/game/network_coop.c) */
 long hud_weapon_port_script_flags(

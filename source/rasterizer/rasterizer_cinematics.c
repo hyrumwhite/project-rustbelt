@@ -108,6 +108,15 @@ typedef char rasterizer_cinematic_screen_effect_state_near_clip_distance_offset_
 
 static struct rasterizer_cinematic_screen_effect_state *cinematic_screen_effect_globals = NULL;
 
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the screen effect the Rust port's library bodies set (hs_runtime_port_game_fields) */
+void rasterizer_cinematics_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_screen_effect_globals] = (unsigned long)cinematic_screen_effect_globals;
+}
+
 /* ---------- public code */
 
 static real rasterizer_screen_effects_time(

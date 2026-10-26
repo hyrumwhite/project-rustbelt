@@ -75,6 +75,9 @@ symbols in this file:
 #include "text/draw_string.h"
 #include "text/text_group.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c (the library bodies' effects) */
+
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 /* ---------- constants */
 
@@ -193,7 +196,7 @@ void cinematic_start(
 	cinematic_globals->show_letterbox = TRUE;
 	cinematic_globals->letterbox_last_game_time = game_time_get();
 	cinematic_globals->in_progress = TRUE;
-	projectiles_delete_all();
+	hs_runtime_effect(_hs_runtime_call_effect_projectiles_delete_all, 0, 0, 0);
 
 	return;
 }
@@ -246,6 +249,16 @@ void cinematic_stop(
 	player_input_enable(TRUE);
 	ai_globals_dialogue_triggers_enabled(TRUE);
 	cinematic_globals->in_progress = FALSE;
+	hs_runtime_effect(_hs_runtime_call_effect_cinematic_stop_presentation, 0, 0, 0);
+
+	return;
+}
+
+/* port: cinematic_stop's presentation (its effect,
+_hs_runtime_call_effect_cinematic_stop_presentation) */
+void cinematic_port_stop_presentation(
+	void)
+{
 	rasterizer_screen_effects_initialize_for_new_map();
 	if (global_rasterizer_model_ambient_reflection_tint)
 	{
@@ -256,8 +269,6 @@ void cinematic_stop(
 	}
 	rasterizer_set_near_clip_distance(0.0f);
 	display_errors_deferred_until_cinematic_stop();
-
-	return;
 }
 
 void cinematic_set_title_delayed(
@@ -266,7 +277,12 @@ void cinematic_set_title_delayed(
 {
 	short title_slot_index;
 
-	network_coop_note_title(title_index, delay);
+	{
+		long delay_bits;
+
+		csmemcpy(&delay_bits, &delay, sizeof(delay_bits));
+		hs_runtime_effect(_hs_runtime_call_effect_coop_title, title_index, delay_bits, 0);
+	}
 	for (title_slot_index = 0;
 		title_slot_index < MAXIMUM_QUEUED_CINEMATIC_TITLES &&
 		cinematic_globals->queued_titles[title_slot_index].title_index != NONE;

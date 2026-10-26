@@ -382,6 +382,15 @@ void scripted_hud_blink_motion_sensor(
 	return;
 }
 
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the flags the Rust port's library bodies set (hs_runtime_port_game_fields) */
+void hud_unit_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_unit_hud_script_flags] = unit_hud_globals ? (unsigned long)&unit_hud_globals->script_flags : 0;
+}
+
 /* port: the scripts' show and blink flags, for network co-op
 (port/linux/game/network_coop.c) */
 long hud_unit_port_script_flags(

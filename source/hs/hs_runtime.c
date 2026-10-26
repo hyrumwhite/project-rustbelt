@@ -2236,6 +2236,38 @@ static char const *const hs_runtime_rust_bodies[] =
 	"player_effect_set_max_rotation",
 	"player_effect_start",
 	"player_effect_stop",
+	/* (the HUD, cinematics and screen effects, 26 October) */
+	"hud_show_health",
+	"hud_blink_health",
+	"hud_show_shield",
+	"hud_blink_shield",
+	"hud_show_motion_sensor",
+	"hud_blink_motion_sensor",
+	"hud_show_crosshair",
+	"show_hud",
+	"show_hud_help_text",
+	"enable_hud_help_flash",
+	"hud_help_flash_restart",
+	"hud_set_timer_time",
+	"hud_set_timer_warning_time",
+	"hud_set_timer_position",
+	"show_hud_timer",
+	"hud_get_timer_ticks",
+	"hud_clear_messages",
+	"cinematic_start",
+	"cinematic_stop",
+	"cinematic_skip_start_internal",
+	"cinematic_skip_stop_internal",
+	"cinematic_show_letterbox",
+	"cinematic_suppress_bsp_object_creation",
+	"cinematic_set_title",
+	"cinematic_set_title_delayed",
+	"cinematic_screen_effect_start",
+	"cinematic_screen_effect_stop",
+	"cinematic_set_near_clip_distance",
+	"cinematic_screen_effect_set_convolution",
+	"cinematic_screen_effect_set_filter",
+	"cinematic_screen_effect_set_filter_desaturation_tint",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2287,6 +2319,21 @@ static unsigned long *hs_runtime_port_game_fields(
 	game_state_port_game_fields(fields);
 	player_effect_port_game_fields(fields);
 	fields[_hs_game_field_players_input_disabled] = players_globals ? (unsigned long)&players_globals->input_disabled : 0;
+	{
+		extern struct cinematic_global_data *cinematic_globals;
+		extern struct hud_scripted_globals_definition *hud_scripted_globals;
+		extern void rasterizer_cinematics_port_game_fields(unsigned long *fields);
+		extern void hud_unit_port_game_fields(unsigned long *fields);
+		extern void hud_weapon_port_game_fields(unsigned long *fields);
+		extern void hud_messaging_port_game_fields(unsigned long *fields);
+
+		fields[_hs_game_field_cinematic_globals] = (unsigned long)cinematic_globals;
+		fields[_hs_game_field_hud_scripted_globals] = (unsigned long)hud_scripted_globals;
+		rasterizer_cinematics_port_game_fields(fields);
+		hud_unit_port_game_fields(fields);
+		hud_weapon_port_game_fields(fields);
+		hud_messaging_port_game_fields(fields);
+	}
 
 	return fields;
 }
@@ -2316,6 +2363,26 @@ static void hs_runtime_effect_run(
 	case _hs_runtime_call_effect_coop_player_effect_stop:
 		network_coop_note_player_effect(_coop_player_effect_stop, a, b, c);
 		break;
+	case _hs_runtime_call_effect_coop_hud:
+		network_coop_note_hud((short)call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_coop_title:
+		network_coop_note_title((short)call->a, b);
+		break;
+	case _hs_runtime_call_effect_projectiles_delete_all:
+	{
+		extern void projectiles_delete_all(void);
+
+		projectiles_delete_all();
+		break;
+	}
+	case _hs_runtime_call_effect_cinematic_stop_presentation:
+	{
+		extern void cinematic_port_stop_presentation(void);
+
+		cinematic_port_stop_presentation();
+		break;
+	}
 	default:
 		ai_script_effect_run(call);
 		break;
@@ -4054,6 +4121,10 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_coop_player_effect_rotation:
 		case _hs_runtime_call_effect_coop_player_effect_start:
 		case _hs_runtime_call_effect_coop_player_effect_stop:
+		case _hs_runtime_call_effect_coop_hud:
+		case _hs_runtime_call_effect_coop_title:
+		case _hs_runtime_call_effect_projectiles_delete_all:
+		case _hs_runtime_call_effect_cinematic_stop_presentation:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

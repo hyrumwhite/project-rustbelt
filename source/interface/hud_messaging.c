@@ -146,6 +146,9 @@ symbols in this file:
 #include "text/text_group.h"
 #include "text/unicode.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c (the library bodies' effects) */
+
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 #include <stddef.h>
 
@@ -474,6 +477,15 @@ static void render_state_bitmap(
 /* ---------- globals */
 
 static struct hud_messaging_globals_definition *hud_messaging_globals;
+
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the globals the Rust port's library bodies set (hs_runtime_port_game_fields) */
+void hud_messaging_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_hud_messaging_globals] = (unsigned long)hud_messaging_globals;
+}
 struct hud_messaging_parameters_definition *hud_msg_def;
 static char button_mappings[_icon_custom_1 - _icon_action] =
 {
@@ -628,7 +640,7 @@ void scripted_hud_set_flashing_state(
 {
 	long time;
 
-	network_coop_note_hud(_coop_hud_help_flash, flash);
+	hs_runtime_effect(_hs_runtime_call_effect_coop_hud, _coop_hud_help_flash, flash, 0);
 	if (flash && !hud_messaging_globals->use_flash)
 	{
 		time = game_time_get();
@@ -1174,7 +1186,7 @@ void scripted_hud_messages_clear(
 	struct hud_messaging_datum_definition *datum = hud_messaging_globals->message_data;
 	long datum_count = NUMBER_OF_HUD_MESSAGING_DATUMS;
 
-	network_coop_note_hud(_coop_hud_messages_clear, 0);
+	hs_runtime_effect(_hs_runtime_call_effect_coop_hud, _coop_hud_messages_clear, 0, 0);
 	do
 	{
 		struct hud_message_definition *message = datum->messages;

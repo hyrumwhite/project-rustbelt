@@ -33,6 +33,12 @@ enum
 	_hs_game_field_game_state_revert_time, /* long */
 	_hs_game_field_player_effect_scripted, /* translation, rotation, intensity (reals), timer, total (shorts) */
 	_hs_game_field_player_effect_flags, /* unsigned long */
+	_hs_game_field_cinematic_globals, /* struct cinematic_global_data */
+	_hs_game_field_screen_effect_globals, /* struct rasterizer_cinematic_screen_effect_state (0 for none) */
+	_hs_game_field_hud_scripted_globals, /* show_hud, show_hud_help_text (booleans) */
+	_hs_game_field_unit_hud_script_flags, /* long */
+	_hs_game_field_weapon_hud_script_flags, /* long */
+	_hs_game_field_hud_messaging_globals, /* struct hud_messaging_globals_definition */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

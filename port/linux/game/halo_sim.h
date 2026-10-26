@@ -798,7 +798,11 @@ enum
 	_hs_runtime_call_effect_coop_player_effect_rotation,
 	_hs_runtime_call_effect_coop_player_effect_start,
 	_hs_runtime_call_effect_coop_player_effect_stop,
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_coop_player_effect_stop,
+	_hs_runtime_call_effect_coop_hud, /* a the kind, b the value: network_coop_note_hud's */
+	_hs_runtime_call_effect_coop_title, /* a the title, b the delay (real): network_coop_note_title's */
+	_hs_runtime_call_effect_projectiles_delete_all,
+	_hs_runtime_call_effect_cinematic_stop_presentation, /* the screen effects, the reflection tint, the near clip and deferred errors */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_cinematic_stop_presentation,
 };
 
 /* the runtime's operations the Rust port can run */

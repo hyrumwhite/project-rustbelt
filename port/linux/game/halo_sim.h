@@ -856,6 +856,11 @@ struct halo_sim_hs_context
 	/* the loaded tags' table and its count (cache_files_tag_instances) */
 	unsigned long tag_instances;
 	long tag_count;
+	/* ai_globals, the scenario's encounters (their first element) and the
+	teams' allegiances (game_allegiance_port_globals) */
+	unsigned long ai_globals;
+	unsigned long encounters;
+	unsigned long allegiance_globals;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's

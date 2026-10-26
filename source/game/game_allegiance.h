@@ -26,6 +26,8 @@ void game_allegiance_dispose_from_old_map(
 	void);
 void game_allegiance_update(
 	void);
+void *game_allegiance_port_globals(
+	void);
 void game_allegiance_get_teams(
 	unsigned long ally_bitvector[GAME_ALLEGIANCE_BITVECTOR_LONGS],
 	unsigned long friendly_bitvector[GAME_ALLEGIANCE_BITVECTOR_LONGS]);

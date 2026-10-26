@@ -298,6 +298,7 @@ extern struct hs_external_global_definition *hs_external_globals[];
 #include "game/players.h"
 #include "effects/player_effects.h"
 #include "ai/actors.h"
+#include "game/game_allegiance.h"
 static long hs_runtime_call_simple(long kind, long a);
 static long hs_object_list_from_ai_reference(long ai_reference);
 
@@ -2116,6 +2117,43 @@ static char const *const hs_runtime_rust_bodies[] =
 	"scenery_get_animation_time",
 	"device_set_position_immediate",
 	"device_group_set_immediate",
+	/* (the AI, 26 October) */
+	"ai_attack",
+	"ai_defend",
+	"ai_retreat",
+	"ai_maneuver",
+	"ai_maneuver_enable",
+	"ai_is_attacking",
+	"ai_allow_dormant",
+	"ai_timer_start",
+	"ai_automatic_migration_target",
+	"ai_allow_charge",
+	"ai_try_to_fight",
+	"ai_try_to_fight_nothing",
+	"ai_try_to_fight_player",
+	"ai_status",
+	"ai_actors",
+	"ai_playfight",
+	"ai_follow_target_disable",
+	"ai_follow_target_players",
+	"ai_follow_target_unit",
+	"ai_follow_target_ai",
+	"ai_follow_distance",
+	"ai_force_active",
+	"ai_set_deaf",
+	"ai_set_blind",
+	"ai_prefer_target",
+	"ai_force_active_by_unit",
+	"ai_dialogue_triggers",
+	"ai_grenades",
+	"ai_vehicle_enterable_distance",
+	"ai_vehicle_enterable_team",
+	"ai_vehicle_enterable_actor_type",
+	"ai_vehicle_enterable_actors",
+	"ai_vehicle_enterable_disable",
+	"ai_going_to_vehicle",
+	"ai_allegiance_broken",
+	"ai_conversation_line",
 };
 /* (each library function's runs, for HALO_HS_LIBRARY_COUNTS's) */
 unsigned long hs_runtime_library_counts[1024];
@@ -3985,6 +4023,9 @@ void hs_runtime_port_context(
 
 		context->tag_instances = (unsigned long)cache_files_tag_instances(&context->tag_count);
 	}
+	context->ai_globals = (unsigned long)ai_globals;
+	context->encounters = scenario ? (unsigned long)scenario->ai_encounters.address : 0;
+	context->allegiance_globals = (unsigned long)game_allegiance_port_globals();
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

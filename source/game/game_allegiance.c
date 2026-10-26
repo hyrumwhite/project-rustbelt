@@ -118,6 +118,13 @@ static struct game_allegiance_globals *game_allegiance_globals = NULL;
 
 /* ---------- public code */
 
+/* port: the globals, whose bit vectors hs_runtime's Rust bodies read */
+void *game_allegiance_port_globals(
+	void)
+{
+	return game_allegiance_globals;
+}
+
 void game_allegiance_initialize(
 	void)
 {

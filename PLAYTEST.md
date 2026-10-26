@@ -55,7 +55,16 @@ To find anything still left to the game's picture, run with `HALO_RT_OVERLAY_DEB
 - **c10's door lights:** the coloured lights beside the doors are at a tenth of their old brightness.
 - **c10's swamps:** the water's pass is about 8.5 ms cheaper (the frame went from 28 to 20 ms on the opening's view). The stats panel now lists "Glass and water", "Foliage" and "Lit fog", which it used to leave out of its total.
 - **The Flood reveal's helmet recording:** the game's screen effects are drawn now: the video look (green scanlines, noise) and light enhancement (night vision), and desaturation. It was black.
-- **Still open:** grunt blood that disappears with the viewing angle, and the black creeping over glass. Neither reproduced yet. F9 now writes a `.txt` beside each capture with the level, tick and camera; a capture of each, at the moment it happens, gives the exact spot.
+## Fixes from the 25 October findings to check (c10)
+
+- **Blood that came and went with the view:** the game now shares every decal, not only those of the areas in front of the camera.
+- **Windows black beyond a circle round you, and the hatching through the yellow structures:** the glass's reflections now show the room instead of black, and the stripes of noise seen through tinted glass are gone. The glass pass there is about twice as fast (5.4 to 2.75 ms).
+- **Shot-out glass:** the viewer now drops a pane the game has broken. The yellow cast inside the centre structures was the glass, so it goes with it.
+- **Helmet recording:** seen from the marine's eyes, not from inside his head or chest.
+- **Lights:** the door lights are at half their last brightness, the batons (glow sticks) at half, without the dark disc round them, and all of c10 is a tenth darker.
+- **Camouflage:** your own arms and weapon are glass, like camouflaged enemies.
+- **Canopy fog:** above the trees there is only fog, as in MCC.
+- **Not changed:** the boiling floor light near the windows (findings 6 and 8) and Chief's dull visor. c10's jittering scenery lights flicker by design, which keeps the denoiser from settling; they're dimmer now, so see whether it's still bad. The pillar strips' glow looks animated by their shader.
 
 ## Known gaps (not bugs to report)
 

@@ -18,7 +18,9 @@
 // (rasterizer\atmospheric fog density: a ramp; rasterizer\planar fog
 // density: a smoothstep), 16 texels sampled with linear filtering, clamped.
 // The sky (nothing in the depth buffer) is left as it is: the game's fog pass
-// covers the level's surfaces only.
+// covers the level's surfaces only. But where the atmospheric fog is opaque
+// (its maximum density 1), the game draws nothing past its maximum distance:
+// there the sky is fogged as a surface at that distance.
 //
 // Where the picture holds the water (atmospheric.w), a surface under the fog
 // plane seen from above it was seen through the water's surface (the plane,
@@ -126,16 +128,28 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
         z = pane_z;
     }
     var result = Fogged(vec4(0.0), 1.0);
-    if z <= 0.0 {
+    // (the sky, where the atmospheric fog is opaque: the game brings its far
+    // plane in to the fog's maximum distance (render.c), and draws no sky
+    // past it, only fog; as a surface there. c10's swamps: the treetops in
+    // the fog, against the sky, stood out bare)
+    let opaque = fog.atmospheric_color.a >= 1.0 && fog.atmospheric.y > 0.0;
+    if z <= 0.0 && !opaque {
         return result;
     }
     // (the pixel's centre, where the jittered view sampled it)
     let viewport = view.main_pass_viewport;
     let uv = (vec2<f32>(pixel) + 0.5 - viewport.xy) / viewport.zw;
     let ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    let p = view.world_from_clip * vec4(ndc, z, 1.0);
-    let position = p.xyz / p.w;
     let forward = -normalize(view.world_from_view[2].xyz);
+    var position: vec3<f32>;
+    if z <= 0.0 {
+        let near = view.world_from_clip * vec4(ndc, 1.0, 1.0);
+        let ray = near.xyz / near.w - view.world_position;
+        position = view.world_position + ray * (fog.atmospheric.y / max(dot(ray, forward), 1e-6));
+    } else {
+        let p = view.world_from_clip * vec4(ndc, z, 1.0);
+        position = p.xyz / p.w;
+    }
     let view_depth = dot(position - view.world_position, forward);
 
     // (through the water: the camera above the plane, the surface under it)

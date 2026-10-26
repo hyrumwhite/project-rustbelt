@@ -2464,6 +2464,24 @@ const CHIEF_SUIT_ROUGHNESS: f32 = 0.85;
 /// plates alone, as strong as the Elites'.
 const CHIEF_COAT: (f32, f32) = (1.0, 0.1);
 
+/// The Covenant vehicles' and turrets' shaders (their paths' starts), which
+/// get the Elites' coat on their reflection mask's painted panels; not their
+/// glowing parts or burned wrecks. `HALO_RT_COVENANT_COAT=strength,roughness`
+/// overrides it (0 none).
+const COVENANT_VEHICLES: [&str; 5] = [
+    "vehicles\\banshee\\",
+    "vehicles\\ghost\\",
+    "vehicles\\wraith\\",
+    "vehicles\\c_dropship\\",
+    "vehicles\\c gun turret\\",
+];
+
+fn covenant_vehicle(shader: &str) -> bool {
+    let shader = shader.to_ascii_lowercase();
+    COVENANT_VEHICLES.iter().any(|path| shader.starts_with(path))
+        && !["self illuminated", "burned", "destroyed"].iter().any(|part| shader.contains(part))
+}
+
 /// Whether a shader's coat is Solarik's pearl film (its second thin film,
 /// main.rs's `PEARL_FILM`): Chief's armour.
 fn pearl_coat(shader: &str) -> bool {
@@ -2484,7 +2502,8 @@ fn painted(shader: &str) -> Option<[u8; 3]> {
     (c.len() == 3).then(|| [c[0], c[1], c[2]].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
 }
 
-/// A shader's clear coat, if it has one: the Elites' and Chief's armour.
+/// A shader's clear coat, if it has one: the Elites' and Chief's armour, and
+/// the Covenant vehicles' panels.
 /// `HALO_RT_ELITE_COAT` and `HALO_RT_CHIEF_COAT=strength,roughness` override
 /// them (0 none).
 fn clear_coat(shader: &str) -> Option<(f32, f32)> {
@@ -2492,6 +2511,8 @@ fn clear_coat(shader: &str) -> Option<(f32, f32)> {
         (ELITE_COAT, "HALO_RT_ELITE_COAT")
     } else if CHIEF_ARMOUR.iter().any(|name| shader.eq_ignore_ascii_case(name)) {
         (CHIEF_COAT, "HALO_RT_CHIEF_COAT")
+    } else if covenant_vehicle(shader) {
+        (ELITE_COAT, "HALO_RT_COVENANT_COAT")
     } else {
         return None;
     };

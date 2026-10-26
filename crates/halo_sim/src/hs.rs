@@ -425,8 +425,9 @@ impl HsMemory for OverlayMemory {
 }
 
 /// A body's runtime: the held-aside memory, its effects held back for the
-/// game's body to make and compare (their results aren't the body's), and
-/// no other calls of the game's (a body that asks one isn't checked).
+/// game's body to make and compare (their results aren't the body's), its
+/// queries asked of the game as it is, and no other calls of the game's (a
+/// body that asks one isn't checked).
 #[derive(Default)]
 struct BodyHost {
     memory: OverlayMemory,
@@ -441,10 +442,21 @@ impl HsHost for BodyHost {
     fn call(&self, call: &mut HsCall) {
         if halo_map::hs_runtime::call::is_effect(call.kind) {
             self.effects.borrow_mut().push(HsBodyEffectC { kind: call.kind, a: call.a, b: call.b, c: call.c });
+            call.result = 0;
+        } else if halo_map::hs_runtime::call::is_query(call.kind) {
+            // (a question that changes nothing, asked of the game as it is)
+            match crate::world::host() {
+                // SAFETY: the game's callback
+                Some(host) => unsafe { (host.hs.call)(call) },
+                None => {
+                    self.called.set(true);
+                    call.result = 0;
+                }
+            }
         } else {
             self.called.set(true);
+            call.result = 0;
         }
-        call.result = 0;
     }
 }
 

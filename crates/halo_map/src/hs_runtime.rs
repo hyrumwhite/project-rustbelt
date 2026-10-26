@@ -280,10 +280,31 @@ pub mod call {
     pub const EFFECT_CINEMATIC_STOP_PRESENTATION: i32 = 0x6a;
     /// `sound_stop_impulse(a)`.
     pub const EFFECT_SOUND_STOP_IMPULSE: i32 = 0x6b;
+    /// `object_new_by_name(a)`, `object_delete(a)`, `object_predict(a)`,
+    /// `object_definition_predict(a)`.
+    pub const EFFECT_OBJECT_NEW_BY_NAME: i32 = 0x6c;
+    pub const EFFECT_OBJECT_DELETE: i32 = 0x6d;
+    pub const EFFECT_OBJECT_PREDICT: i32 = 0x6e;
+    pub const EFFECT_OBJECT_DEFINITION_PREDICT: i32 = 0x6f;
+    /// The unit `a` opening (`b`) or closing: its co-op note and animation
+    /// state (`unit_port_open`).
+    pub const EFFECT_UNIT_OPEN: i32 = 0x70;
+    /// The object `a` put at the cutscene flag `b` (`c`, with its co-op
+    /// followers) or only facing as it does (`hs_port_object_orient`).
+    pub const EFFECT_OBJECT_ORIENT: i32 = 0x71;
+    /// The unit `a` out of its seat in the vehicle `b`, its co-op followers
+    /// too (`unit_port_exit_vehicle`).
+    pub const EFFECT_UNIT_EXIT_VEHICLE: i32 = 0x72;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_SOUND_STOP_IMPULSE).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_UNIT_EXIT_VEHICLE).contains(&kind)
+    }
+
+    /// Whether the call is a question that changes nothing (a body's check
+    /// asks the game as it is).
+    pub fn is_query(kind: i32) -> bool {
+        kind == OBJECT_FROM_NAME
     }
 }
 
@@ -501,6 +522,21 @@ const COOP_HUD_OBJECTIVE: i32 = 1;
 /// network_coop.h's HUD notes (`_coop_hud_help_flash`, `_messages_clear`).
 const COOP_HUD_HELP_FLASH: i32 = 2;
 const COOP_HUD_MESSAGES_CLEAR: i32 = 3;
+/// `_object_die_act_of_god_bit` and `_silent_bit` of an object's damage
+/// flags; the item types (`_object_mask_item`) and `struct item_datum`'s
+/// flags (`_item_belongs_to_player_bit`); `struct vehicle_datum`'s flags
+/// (a word, bit 1 its hovering) and hover position (tag_layout's probe);
+/// a scenario object name's size (its name first).
+const OBJECT_DIE_ACT_OF_GOD: u16 = 1 << 5;
+const OBJECT_DIE_ACT_OF_GOD_SILENT: u16 = 1 << 6;
+const OBJECT_MASK_ITEM: u32 = 0b111 << 2;
+const ITEM_FLAGS: u32 = 0x1a4;
+const ITEM_BELONGS_TO_PLAYER: u32 = 1 << 1;
+const OBJECT_MASK_VEHICLE: u32 = 1 << 1;
+const VEHICLE_FLAGS: u32 = 0x424;
+const VEHICLE_HOVERING: u16 = 1 << 1;
+const VEHICLE_HOVER_POSITION: u32 = 0x454;
+const SCENARIO_OBJECT_NAME_SIZE: u32 = 36;
 /// `NUMBER_OF_GAME_DIFFICULTY_LEVELS`.
 const NUMBER_OF_GAME_DIFFICULTY_LEVELS: i16 = 4;
 /// `NUMBER_OF_GAME_TEAMS`, and `struct game_allegiance_globals`' ally and
@@ -2759,6 +2795,101 @@ impl<H: HsHost> Runtime<'_, H> {
         }
         let address = self.m().r32(self.context.game_fields + 4 * field);
         (address != 0).then_some(address)
+    }
+
+    /// hs_library_external.c's `object_is_or_contains_player`: the object a
+    /// player's unit, or carrying one, carried by one, or an item a player
+    /// owns; None where the game's would stop.
+    fn object_is_or_contains_player(&self, object_index: i32, depth: u32) -> Option<bool> {
+        use crate::layout::unit_datum as u;
+        let m = self.m();
+        if depth > 64 {
+            return None;
+        }
+        let object = self.object_typed(object_index, OBJECT_MASK_ALL)?;
+        // (player_index_from_unit_index)
+        let is_player = |index: i32| -> Option<bool> {
+            let mut player_index = self.data_next_index(self.context.player_data, NONE);
+            while player_index != NONE {
+                let player = self.datum_get(self.context.player_data, player_index)?;
+                if m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32 == index {
+                    return Some(true);
+                }
+                player_index = self.data_next_index(self.context.player_data, player_index);
+            }
+            Some(false)
+        };
+        if is_player(object_index)? {
+            return Some(true);
+        }
+        let mut child_index = m.r32(object + u::OBJECT_FIRST_CHILD_OBJECT_INDEX as u32) as i32;
+        while child_index != NONE {
+            let child = self.object_typed(child_index, OBJECT_MASK_ALL)?;
+            if self.object_is_or_contains_player(child_index, depth + 1)? {
+                return Some(true);
+            }
+            child_index = m.r32(child + u::OBJECT_NEXT_OBJECT_INDEX as u32) as i32;
+        }
+        let mut parent_index = m.r32(object + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32;
+        let mut count = 0;
+        while parent_index != NONE {
+            let parent = self.object_typed(parent_index, OBJECT_MASK_ALL)?;
+            if is_player(parent_index)? {
+                return Some(true);
+            }
+            parent_index = m.r32(parent + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32;
+            count += 1;
+            if count > 64 {
+                return None;
+            }
+        }
+        let object_type = m.r16(object + u::OBJECT_TYPE as u32) as u32;
+        Some(OBJECT_MASK_ITEM & (1u32.wrapping_shl(object_type)) != 0 && m.r32(object + ITEM_FLAGS) & ITEM_BELONGS_TO_PLAYER != 0)
+    }
+
+    /// `hs_object_destroy`: the object deleted, unless it is or holds a
+    /// player (the game's report); whether it was; None where the game's
+    /// would stop.
+    fn object_destroy(&self, object_index: i32) -> Option<bool> {
+        if object_index == NONE {
+            return Some(false);
+        }
+        if self.object_is_or_contains_player(object_index, 0)? {
+            return Some(false);
+        }
+        self.effect(call::EFFECT_OBJECT_DELETE, object_index, 0, 0);
+        Some(true)
+    }
+
+    /// `hs_object_create` and `_create_anew` of the scenario's object name:
+    /// made if it isn't there (a new one deleting it first, unless it holds
+    /// a player); None where the game's would stop.
+    fn object_create(&self, name_index: i16, anew: bool) -> Option<()> {
+        if name_index == NONE as i16 {
+            return Some(());
+        }
+        let object_index = self.call(call::OBJECT_FROM_NAME, name_index as i32, 0, 0);
+        let missing = object_index == NONE || (anew && self.object_destroy(object_index)?);
+        if missing {
+            self.effect(call::EFFECT_OBJECT_NEW_BY_NAME, name_index as i32, 0, 0);
+        }
+        Some(())
+    }
+
+    /// The scenario's object names holding the text (`strstr`), in order
+    /// (hs_library_external.c's `hs_object_iterate_names_containing`).
+    fn object_names_containing(&self, text: &[u8]) -> Option<Vec<i16>> {
+        let scenario = self.game_field(game_field::SCENARIO)?;
+        let (count, first) = self.tag_block(scenario + crate::layout::scenario::OBJECT_NAMES as u32);
+        Some(
+            (0..count.clamp(0, 0x7fff))
+                .filter(|&index| {
+                    let name = self.c_string(first + index as u32 * SCENARIO_OBJECT_NAME_SIZE);
+                    text.is_empty() || name.windows(text.len()).any(|window| window == text)
+                })
+                .map(|index| index as i16)
+                .collect(),
+        )
     }
 
     /// The body itself ([`Self::library_body`]).
@@ -5039,6 +5170,103 @@ impl<H: HsHost> Runtime<'_, H> {
                                 m.w16(globals + HUD_MESSAGING_OBJECTIVE_UPTIME, (up + fade) as u16);
                             }
                         }
+                    }
+                }
+                0
+            }
+            // hs_object_create, _create_anew and _destroy, and those of the
+            // names holding a text
+            name @ ("object_create" | "object_create_anew") => {
+                if self.object_create(short(0), name == "object_create_anew").is_none() {
+                    return false;
+                }
+                0
+            }
+            "object_destroy" => {
+                if self.object_destroy(argument(0)).is_none() {
+                    return false;
+                }
+                0
+            }
+            name @ ("object_create_containing" | "object_create_anew_containing" | "object_destroy_containing") => {
+                let Some(names) = self.object_names_containing(&self.c_string(argument(0) as u32)) else { return false };
+                for name_index in names {
+                    let done = match name {
+                        "object_create_containing" => self.object_create(name_index, false),
+                        "object_create_anew_containing" => self.object_create(name_index, true),
+                        // (hs_object_destroy_by_name)
+                        _ => {
+                            let object_index = self.call(call::OBJECT_FROM_NAME, name_index as i32, 0, 0);
+                            self.object_destroy(object_index).map(|_| ())
+                        }
+                    };
+                    if done.is_none() {
+                        return false;
+                    }
+                }
+                0
+            }
+            // hs_objects_predict: each listed object's; object_type_predict
+            "objects_predict" => {
+                let Some(objects) = self.object_list(argument(0)) else { return false };
+                for object in objects {
+                    self.effect(call::EFFECT_OBJECT_PREDICT, object, 0, 0);
+                }
+                0
+            }
+            "object_type_predict" => {
+                self.effect(call::EFFECT_OBJECT_DEFINITION_PREDICT, argument(0), 0, 0);
+                0
+            }
+            // unit_kill and _kill_silent: dying by an act of god (unit_get)
+            name @ ("unit_kill" | "unit_kill_silent") => {
+                let Some(unit) = self.object_typed(argument(0), OBJECT_MASK_UNIT) else { return false };
+                let flags = unit + u::OBJECT_DAMAGE_FLAGS as u32;
+                let bit = if name == "unit_kill" { OBJECT_DIE_ACT_OF_GOD } else { OBJECT_DIE_ACT_OF_GOD_SILENT };
+                m.w16(flags, m.r16(flags) | bit);
+                0
+            }
+            // vehicle_hover: where it is held (object_get_origin; one carried
+            // by another is the game's), or let go
+            "vehicle_hover" => {
+                let vehicle_index = argument(0);
+                if vehicle_index != NONE {
+                    let Some(vehicle) = self.object_typed(vehicle_index, OBJECT_MASK_VEHICLE) else { return false };
+                    let flags = vehicle + VEHICLE_FLAGS;
+                    if m.r8(arguments + 4) != 0 {
+                        if m.r32(vehicle + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 != NONE {
+                            return false;
+                        }
+                        for i in 0..3 {
+                            m.w32(vehicle + VEHICLE_HOVER_POSITION + 4 * i, m.r32(vehicle + u::OBJECT_POSITION as u32 + 4 * i));
+                        }
+                        m.w16(flags, m.r16(flags) | VEHICLE_HOVERING);
+                    } else {
+                        m.w16(flags, m.r16(flags) & !VEHICLE_HOVERING);
+                    }
+                }
+                0
+            }
+            // unit_open and unit_close
+            name @ ("unit_open" | "unit_close") => {
+                if argument(0) != NONE {
+                    self.effect(call::EFFECT_UNIT_OPEN, argument(0), (name == "unit_open") as i32, 0);
+                }
+                0
+            }
+            // hs_object_teleport (with its co-op followers) and _set_facing
+            name @ ("object_teleport" | "object_set_facing") => {
+                self.effect(call::EFFECT_OBJECT_ORIENT, argument(0), short(1) as i32, (name == "object_teleport") as i32);
+                0
+            }
+            // unit_scripting_exit_vehicle: a seated unit out (unit_get)
+            "unit_exit_vehicle" => {
+                let unit_index = argument(0);
+                if unit_index != NONE {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let vehicle_index = m.r32(unit + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32;
+                    if vehicle_index != NONE && m.r16(unit + u::UNIT_PARENT_SEAT_INDEX as u32) as i16 != NONE as i16 {
+                        self.effect(call::EFFECT_UNIT_EXIT_VEHICLE, unit_index, vehicle_index, 0);
                     }
                 }
                 0

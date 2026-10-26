@@ -174,7 +174,7 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, w
             wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
             let pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, surface.material.roughness);
 
-            radiance = trace_glossy_path(pixel_id, surface, wo_length, wi, pdf, rng);
+            radiance = trace_glossy_path(pixel_id, surface, wo_length, wi, pdf, false, rng);
             if surface.material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
                 radiance /= pdf;
             }
@@ -186,9 +186,14 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, w
 // A glossy path's radiance, its first hit fogged (SolarikRayFog) for the way
 // beyond the surface it leaves; a path to the sky is left as it is (the
 // application's fog covers its level's surfaces only).
-fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, rng: ptr<function, u32>) -> vec3<f32> {
+// (`cache_rough_hits`: a rough surface the path meets, a ray long enough
+// from where it was, ends it in the world cache, as a rough path does; for
+// a pane's reflection, whose one path a pixel can't afford NEE's noise
+// among a level's many lights: c10's windows, seen at a slant, reflected
+// black, a speck where a light was found)
+fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, cache_rough_hits: bool, rng: ptr<function, u32>) -> vec3<f32> {
     var first_hit = vec4(0.0);
-    let radiance = trace_unfogged_glossy_path(pixel_id, primary_surface, initial_ray_t, initial_wi, initial_p_bounce, rng, &first_hit);
+    let radiance = trace_unfogged_glossy_path(pixel_id, primary_surface, initial_ray_t, initial_wi, initial_p_bounce, cache_rough_hits, rng, &first_hit);
     if first_hit.w <= 0.0 || !ray_fog_active() { return radiance; }
     let forward = -normalize(view.world_from_view[2].xyz);
     let surface_depth = dot(primary_surface.world_position - view.world_position, forward);
@@ -199,7 +204,7 @@ fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initi
 
 // (`first_hit`: where the first ray met a surface, and how far it went; w 0
 // for none)
-fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, rng: ptr<function, u32>, first_hit: ptr<function, vec4<f32>>) -> vec3<f32> {
+fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, cache_rough_hits: bool, rng: ptr<function, u32>, first_hit: ptr<function, vec4<f32>>) -> vec3<f32> {
     var first_ray = true;
     var radiance = vec3(0.0);
     var throughput = vec3(1.0);
@@ -340,7 +345,8 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
         let world_cache_cell_size = get_cell_size(ray_hit.world_position, view.world_position, &rng_copy);
         let ray_longer_than_cell = ray.t > sqrt(3.0) * world_cache_cell_size;
 
-        if i == 2u || (ray_longer_than_cell && path_roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD) {
+        let rough_hit = cache_rough_hits && ray_hit.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
+        if i == 2u || (ray_longer_than_cell && (path_roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD || rough_hit)) {
             let diffuse_brdf = ray_hit.material.base_color / PI;
             radiance += throughput * diffuse_brdf * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
             break;

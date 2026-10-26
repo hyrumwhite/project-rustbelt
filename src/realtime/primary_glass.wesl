@@ -87,7 +87,7 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
     reflection_sum = 0.0;
     var radiance = composite_primary_glass(id.xy, origin, direction, distance, background.rgb / view.exposure, background_point, &rng);
     if reflection_sum > 0.0 {
-        let reflected = trace_glossy_path(id.xy, reflection_surface, reflection_distance, reflection_wi, 1.0, &rng);
+        let reflected = trace_glossy_path(id.xy, reflection_surface, reflection_distance, reflection_wi, 1.0, true, &rng);
         radiance = vec4(radiance.rgb + reflection_weight * (reflection_sum / reflection_luminance) * reflected, radiance.a);
     }
     textureStore(view_output, id.xy, vec4(radiance.rgb * view.exposure, background.a));
@@ -95,6 +95,10 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
     if radiance.a > 0.0 { resolve_background_guides(id.xy); }
 }
 }
+
+// How near the background surface (a fraction of its distance) a surface the
+// rays meet is taken for it.
+const HIDDEN_SURFACE_TOLERANCE = 0.02;
 
 // Front-to-back camera panes split both lobes deterministically. Reflected
 // paths retain the existing bounded glossy estimator; transmission reuses
@@ -124,6 +128,14 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
             // by raster (e.g. a building's back-facing wall), so sky/background
             // cannot stand in for its radiance. Preserve nonglass pixels.
             if has_glass == 0.0 { return vec4(background, 0.0); }
+            // (the background's surface itself, met short of its depth, the
+            // depth buffer's and the rays' geometry apart: in stripes across
+            // all a pane let through, each shaded by one noisy path, hatched
+            // c10's tinted structures and cost a third of the pass)
+            if background_point.w > 0.0 && distance(origin + direction * ray.t, background_point.xyz)
+                <= HIDDEN_SURFACE_TOLERANCE * distance(background_point.xyz, initial_origin) {
+                return vec4(radiance + transmission * behind_near_pane(background, near_pane, background_point), has_glass);
+            }
 @if(RAY_MATERIAL_FOOTPRINTS) {
             let hidden = resolve_ray_hit_filtered(ray, direction, cone);
 }

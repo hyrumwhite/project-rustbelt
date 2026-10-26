@@ -304,6 +304,36 @@ struct rendered_cluster *rendered_cluster_get(
 	return &render.rendered_clusters[rendered_cluster_index];
 }
 
+static void render_decals_draw_clusters(
+	void)
+{
+	short rendered_cluster_index;
+
+	/* port: a Bevy renderer drawing the decals itself is told of every
+	cluster's (no more than the bridge holds): it draws a decal wherever its
+	quads are, and those of the clusters out of the view's frustum, their
+	quads reaching into it, came and went as the view turned; with the
+	renderer drawing another bsp than the game's, the game's clusters say
+	little of what is seen */
+	if (bevy_bridge_viewer_draws_decals())
+	{
+		struct structure_bsp *structure = global_structure_bsp_get();
+		short cluster_index;
+
+		for (cluster_index = 0; cluster_index < structure->clusters.count; cluster_index++)
+			rasterizer_decals_draw(cluster_index);
+		return;
+	}
+	for (rendered_cluster_index = 0;
+		rendered_cluster_index < render.rendered_cluster_count;
+		rendered_cluster_index++)
+	{
+		rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
+	}
+
+	return;
+}
+
 static void render_window(
 	short local_player_index,
 	const struct render_camera *camera,
@@ -314,7 +344,6 @@ static void render_window(
 	boolean has_mirror)
 {
 	struct rasterizer_window_begin_parameters parameters;
-	short rendered_cluster_index;
 
 	profile_render_window_start(TRUE);
 	render.scene_index++;
@@ -353,23 +382,13 @@ static void render_window(
 
 		halo_screen_overlay_world(FALSE);
 		rasterizer_decals_begin(_decal_layer_light);
-		for (rendered_cluster_index = 0;
-			rendered_cluster_index < render.rendered_cluster_count;
-			rendered_cluster_index++)
-		{
-			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
-		}
+		render_decals_draw_clusters();
 		rasterizer_decals_end();
 		halo_screen_overlay_world(TRUE);
 
 		halo_screen_overlay_world(FALSE);
 		rasterizer_decals_begin(_decal_layer_alpha_tested);
-		for (rendered_cluster_index = 0;
-			rendered_cluster_index < render.rendered_cluster_count;
-			rendered_cluster_index++)
-		{
-			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
-		}
+		render_decals_draw_clusters();
 		rasterizer_decals_end();
 		halo_screen_overlay_world(TRUE);
 
@@ -377,23 +396,13 @@ static void render_window(
 
 		halo_screen_overlay_world(FALSE);
 		rasterizer_decals_begin(_decal_layer_primary);
-		for (rendered_cluster_index = 0;
-			rendered_cluster_index < render.rendered_cluster_count;
-			rendered_cluster_index++)
-		{
-			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
-		}
+		render_decals_draw_clusters();
 		rasterizer_decals_end();
 		halo_screen_overlay_world(TRUE);
 
 		halo_screen_overlay_world(FALSE);
 		rasterizer_decals_begin(_decal_layer_secondary);
-		for (rendered_cluster_index = 0;
-			rendered_cluster_index < render.rendered_cluster_count;
-			rendered_cluster_index++)
-		{
-			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
-		}
+		render_decals_draw_clusters();
 		rasterizer_decals_end();
 		halo_screen_overlay_world(TRUE);
 
@@ -415,12 +424,7 @@ static void render_window(
 		rasterizer_transparent_geometry_draw(TRUE);
 
 		rasterizer_decals_begin(_decal_layer_water);
-		for (rendered_cluster_index = 0;
-			rendered_cluster_index < render.rendered_cluster_count;
-			rendered_cluster_index++)
-		{
-			rasterizer_decals_draw(rendered_cluster_get(rendered_cluster_index)->cluster_index);
-		}
+		render_decals_draw_clusters();
 		rasterizer_decals_end();
 
 		structure_render_detail_objects();

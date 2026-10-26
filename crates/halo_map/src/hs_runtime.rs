@@ -295,10 +295,20 @@ pub mod call {
     /// The unit `a` out of its seat in the vehicle `b`, its co-op followers
     /// too (`unit_port_exit_vehicle`).
     pub const EFFECT_UNIT_EXIT_VEHICLE: i32 = 0x72;
+    /// The unit `a` idle again, and its co-op note
+    /// (`unit_port_stop_custom_animation`).
+    pub const EFFECT_UNIT_STOP_CUSTOM_ANIMATION: i32 = 0x73;
+    /// `object_start_interpolation(a, b)`.
+    pub const EFFECT_OBJECT_START_INTERPOLATION: i32 = 0x74;
+    /// The child `b` detached from the parent `a`, and its co-op note
+    /// (`objects_port_scripting_detach`).
+    pub const EFFECT_OBJECTS_DETACH: i32 = 0x75;
+    /// `breakable_surfaces_initialize_for_new_map()`.
+    pub const EFFECT_BREAKABLE_SURFACES_RESET: i32 = 0x76;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_UNIT_EXIT_VEHICLE).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_BREAKABLE_SURFACES_RESET).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
@@ -537,6 +547,12 @@ const VEHICLE_FLAGS: u32 = 0x424;
 const VEHICLE_HOVERING: u16 = 1 << 1;
 const VEHICLE_HOVER_POSITION: u32 = 0x454;
 const SCENARIO_OBJECT_NAME_SIZE: u32 = 36;
+/// `struct unit_datum`'s emotion (a char), magic seat (a char) and emotion
+/// animation (tag_layout's probe); units.c's `base_seat_labels`.
+const UNIT_EMOTION_INDEX: u32 = 0x258;
+const UNIT_MAGIC_SEAT_INDEX: u32 = 0x1bf;
+const UNIT_OVERRIDE_EMOTION_ANIMATION_INDEX: u32 = 0x1ce;
+const BASE_SEAT_LABELS: [&[u8]; 6] = [b"asleep", b"alert", b"stand", b"crouch", b"flee", b"flaming"];
 /// `NUMBER_OF_GAME_DIFFICULTY_LEVELS`.
 const NUMBER_OF_GAME_DIFFICULTY_LEVELS: i16 = 4;
 /// `NUMBER_OF_GAME_TEAMS`, and `struct game_allegiance_globals`' ally and
@@ -851,6 +867,8 @@ pub mod game_field {
     pub const ANIMATION_THREADS: u32 = 33;
     pub const SCENARIO: u32 = 34;
     pub const HUD_GLOBALS: u32 = 35;
+    /// The breakable surfaces' globals (enabled, a boolean, first).
+    pub const BREAKABLE_SURFACE_GLOBALS: u32 = 36;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -5269,6 +5287,81 @@ impl<H: HsHost> Runtime<'_, H> {
                         self.effect(call::EFFECT_UNIT_EXIT_VEHICLE, unit_index, vehicle_index, 0);
                     }
                 }
+                0
+            }
+            // unit_stop_custom_animation: a unit playing one back to idle
+            "unit_stop_custom_animation" => {
+                let unit_index = argument(0);
+                if unit_index != NONE {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    if m.r8(unit + u::UNIT_ANIMATION_STATE as u32) == UNIT_STATE_USER_ANIMATION {
+                        self.effect(call::EFFECT_UNIT_STOP_CUSTOM_ANIMATION, unit_index, 0, 0);
+                    }
+                }
+                0
+            }
+            // unit_set_emotion (its interpolation over 6 ticks an effect)
+            "unit_set_emotion" => {
+                let unit_index = argument(0);
+                if unit_index != NONE {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    m.w8(unit + UNIT_EMOTION_INDEX, m.r8(arguments + 4));
+                    self.effect(call::EFFECT_OBJECT_START_INTERPOLATION, unit_index, 6, 0);
+                }
+                0
+            }
+            // unit_scripting_set_seat: the base seat of the label
+            // (seat_label_to_base_seat_index, any case), NONE for none
+            "unit_set_seat" => {
+                let unit_index = argument(0);
+                if unit_index != NONE {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let label = self.c_string(argument(1) as u32);
+                    let seat = BASE_SEAT_LABELS.iter().position(|base| base.eq_ignore_ascii_case(&label)).map_or(NONE, |i| i as i32);
+                    m.w8(unit + UNIT_MAGIC_SEAT_INDEX, seat as u8);
+                }
+                0
+            }
+            // unit_scripting_set_emotion_animation: the unit's graph's
+            // animation of the name (any case; none found is the game's
+            // warning)
+            "unit_set_emotion_animation" => {
+                let unit_index = argument(0);
+                if unit_index != NONE {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let graph_index = m.r32(unit + OBJECT_ANIMATION_GRAPH_INDEX) as i32;
+                    let Some(graph) = self.tag_data(b"antr", graph_index) else { return false };
+                    let (count, first) = self.tag_block(graph + crate::layout::animation_graph::ANIMATIONS as u32);
+                    let name = self.c_string(argument(1) as u32);
+                    let found = (0..count.clamp(0, 0x7fff)).find(|&index| {
+                        let animation = first + index as u32 * crate::layout::animation::SIZEOF as u32;
+                        name.eq_ignore_ascii_case(&self.c_string(animation))
+                    });
+                    if let Some(index) = found {
+                        m.w16(unit + UNIT_OVERRIDE_EMOTION_ANIMATION_INDEX, index as u16);
+                    }
+                }
+                0
+            }
+            // objects_scripting_detach: a child of the parent let go
+            "objects_detach" => {
+                let (parent_index, child_index) = (argument(0), argument(1));
+                if parent_index != NONE && child_index != NONE {
+                    let Some(child) = self.object_typed(child_index, OBJECT_MASK_ALL) else { return false };
+                    if m.r32(child + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 == parent_index {
+                        self.effect(call::EFFECT_OBJECTS_DETACH, parent_index, child_index, 0);
+                    }
+                }
+                0
+            }
+            // breakable_surfaces_enable and _reset
+            "breakable_surfaces_enable" => {
+                let Some(globals) = self.game_field(game_field::BREAKABLE_SURFACE_GLOBALS) else { return false };
+                m.w8(globals, m.r8(arguments));
+                0
+            }
+            "breakable_surfaces_reset" => {
+                self.effect(call::EFFECT_BREAKABLE_SURFACES_RESET, 0, 0, 0);
                 0
             }
             // game_difficulty_level_get_ignore_easy: normal at the least

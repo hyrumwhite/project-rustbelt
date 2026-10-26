@@ -784,7 +784,17 @@ enum
 	_hs_runtime_call_effect_allegiance_remove, /* a and b the teams */
 	_hs_runtime_call_effect_actor_set_team, /* a the actor, b the team */
 	_hs_runtime_call_effect_update_team_status,
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_update_team_status,
+	_hs_runtime_call_effect_free_actor, /* a the actor: out of its encounter, encounterless */
+	_hs_runtime_call_effect_encounters_update_dirty_status,
+	_hs_runtime_call_effect_attach, /* a the unit, b the encounter, c the squad: an actor of its palette's variant */
+	_hs_runtime_call_effect_attach_free, /* a the unit, b the actor variant */
+	_hs_runtime_call_effect_change_encounter, /* a the actor, b the encounter, c the squad */
+	_hs_runtime_call_effect_teleport_starting_location, /* a the actor, b only if unsupported */
+	_hs_runtime_call_effect_renew_grenades, /* a the actor */
+	_hs_runtime_call_effect_stimulus_maneuvering, /* a the actor, b advancing */
+	_hs_runtime_call_effect_encounter_reattach, /* a the encounterless actor, b the encounter, c the squad */
+	_hs_runtime_call_effect_team_status_if_teams_differ, /* a and b the encounters: the teams' status, if theirs differ by then */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_team_status_if_teams_differ,
 };
 
 /* the runtime's operations the Rust port can run */
@@ -892,6 +902,9 @@ struct halo_sim_hs_context
 	unsigned long ai_globals;
 	unsigned long encounters;
 	unsigned long allegiance_globals;
+	/* the scenario's actor palette (its first element) and count */
+	unsigned long actor_palette;
+	long actor_palette_count;
 };
 
 /* the AI's update's steps and questions (ai.c's ai_update_call, actors.c's

@@ -2187,6 +2187,17 @@ static char const *const hs_runtime_rust_bodies[] =
 	"ai_allegiance",
 	"ai_allegiance_remove",
 	"ai_set_team",
+	"ai_attach",
+	"ai_attach_free",
+	"ai_free",
+	"ai_free_units",
+	"ai_vehicle_encounter",
+	"ai_teleport_to_starting_location",
+	"ai_teleport_to_starting_location_if_unsupported",
+	"ai_renew",
+	"ai_migrate",
+	"ai_migrate_and_speak",
+	"ai_migrate_by_unit",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -3934,6 +3945,16 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_allegiance_remove:
 		case _hs_runtime_call_effect_actor_set_team:
 		case _hs_runtime_call_effect_update_team_status:
+		case _hs_runtime_call_effect_free_actor:
+		case _hs_runtime_call_effect_encounters_update_dirty_status:
+		case _hs_runtime_call_effect_attach:
+		case _hs_runtime_call_effect_attach_free:
+		case _hs_runtime_call_effect_change_encounter:
+		case _hs_runtime_call_effect_teleport_starting_location:
+		case _hs_runtime_call_effect_renew_grenades:
+		case _hs_runtime_call_effect_stimulus_maneuvering:
+		case _hs_runtime_call_effect_encounter_reattach:
+		case _hs_runtime_call_effect_team_status_if_teams_differ:
 			hs_runtime_effect_depth++;
 			ai_script_effect_run(call);
 			hs_runtime_effect_depth--;
@@ -4118,6 +4139,8 @@ void hs_runtime_port_context(
 	context->ai_globals = (unsigned long)ai_globals;
 	context->encounters = scenario ? (unsigned long)scenario->ai_encounters.address : 0;
 	context->allegiance_globals = (unsigned long)game_allegiance_port_globals();
+	context->actor_palette = scenario ? (unsigned long)scenario->ai_actor_palette.address : 0;
+	context->actor_palette_count = scenario ? scenario->ai_actor_palette.count : 0;
 	context->random_seed = (unsigned long)get_global_random_seed_address();
 	context->game_time = game_time_get();
 	context->string_default = (unsigned long)_hs_type_string_default;

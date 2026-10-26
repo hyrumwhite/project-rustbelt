@@ -672,6 +672,10 @@ char const ai_script_squad_separator = '/';
 /* port: a library body's effects (halo_sim.h's _hs_runtime_call_effect_*),
 the game's body's through hs_runtime_effect and Rust's through
 hs_runtime_call; the seats the next vehicle entries take */
+static void ai_scripting_attach_squad(long unit_index, long encounter_index, long squad_index);
+static void ai_scripting_attach_free_actor(long unit_index, long actor_variant_definition_index);
+static void ai_scripting_teleport_actor(long actor_index, boolean only_if_unsupported);
+static void ai_scripting_renew_grenades(long actor_index);
 static short ai_script_effect_seat_indices[64];
 static short ai_script_effect_seat_count;
 
@@ -789,6 +793,40 @@ void ai_script_effect_run(
 		break;
 	case _hs_runtime_call_effect_update_team_status:
 		ai_update_team_status();
+		break;
+	case _hs_runtime_call_effect_free_actor:
+		actor_flush_position_indices(call->a);
+		encounter_detach_actor(call->a, FALSE);
+		encounterless_attach_actor(call->a);
+		break;
+	case _hs_runtime_call_effect_encounters_update_dirty_status:
+		encounters_update_dirty_status();
+		break;
+	case _hs_runtime_call_effect_attach:
+		ai_scripting_attach_squad(call->a, call->b, call->c);
+		break;
+	case _hs_runtime_call_effect_attach_free:
+		ai_scripting_attach_free_actor(call->a, call->b);
+		break;
+	case _hs_runtime_call_effect_change_encounter:
+		actor_change_encounter(call->a, (short)call->b, (short)call->c);
+		break;
+	case _hs_runtime_call_effect_teleport_starting_location:
+		ai_scripting_teleport_actor(call->a, (boolean)call->b);
+		break;
+	case _hs_runtime_call_effect_renew_grenades:
+		ai_scripting_renew_grenades(call->a);
+		break;
+	case _hs_runtime_call_effect_stimulus_maneuvering:
+		actor_stimulus_maneuvering(call->a, (boolean)call->b, FALSE);
+		break;
+	case _hs_runtime_call_effect_encounter_reattach:
+		encounterless_detach_actor(call->a);
+		encounter_attach_actor(call->a, call->b, (short)call->c, TRUE);
+		break;
+	case _hs_runtime_call_effect_team_status_if_teams_differ:
+		if (encounter_get(call->a)->team_index != encounter_get(call->b)->team_index)
+			ai_update_team_status();
 		break;
 	}
 }
@@ -2572,16 +2610,10 @@ static void ai_scripting_migrate_internal(
 							"c:\\halo\\SOURCE\\ai\\ai_script.c",
 							1629,
 							(target_squad_indices[current_squad_index] >= 0) && (target_squad_indices[current_squad_index] < target_encounter_definition->squads.count));
-						actor_change_encounter(
-							iterator.index,
-							target_encounter_index,
-							target_squad_indices[current_squad_index]);
+						hs_runtime_effect(_hs_runtime_call_effect_change_encounter, iterator.index, target_encounter_index, target_squad_indices[current_squad_index]);
 						if (generate_stimulus)
 						{
-							actor_stimulus_maneuvering(
-								iterator.index,
-								advancing_stimulus,
-								FALSE);
+							hs_runtime_effect(_hs_runtime_call_effect_stimulus_maneuvering, iterator.index, advancing_stimulus, 0);
 						}
 					}
 				}
@@ -2665,23 +2697,18 @@ static void ai_scripting_migrate_internal(
 								target_encounter_definition->runtime_structure_bsp_reference_index ==
 									global_structure_bsp_index_get())
 							{
-								encounterless_detach_actor(iterator.index);
-								encounter_attach_actor(
-									iterator.index,
-									actor->meta.disconnected_encounter_index,
-									actor->meta.disconnected_squad_index,
-									TRUE);
+								hs_runtime_effect(_hs_runtime_call_effect_encounter_reattach, iterator.index,
+									actor->meta.disconnected_encounter_index, actor->meta.disconnected_squad_index);
 							}
 						}
 					}
 				}
 			}
 
-			if (source_encounter->team_index != target_encounter->team_index)
-			{
-				ai_update_team_status();
-			}
-			encounters_update_dirty_status();
+			/* (its teams compared as the effect is made, after the actors'
+			changes) */
+			hs_runtime_effect(_hs_runtime_call_effect_team_status_if_teams_differ, source_encounter_index, target_encounter_index, 0);
+			hs_runtime_effect(_hs_runtime_call_effect_encounters_update_dirty_status, 0, 0, 0);
 		}
 	}
 
@@ -2756,10 +2783,10 @@ static void ai_scripting_migrate_by_unit_internal(
 		if (target_squad_index != NONE &&
 			(!same_encounter || target_squad_index != actor->meta.squad_index))
 		{
-			actor_change_encounter(actor_index, target_encounter_index, target_squad_index);
+			hs_runtime_effect(_hs_runtime_call_effect_change_encounter, actor_index, target_encounter_index, target_squad_index);
 			if (generate_stimulus)
 			{
-				actor_stimulus_maneuvering(actor_index, advancing_stimulus, FALSE);
+				hs_runtime_effect(_hs_runtime_call_effect_stimulus_maneuvering, actor_index, advancing_stimulus, 0);
 			}
 		}
 	}
@@ -2825,8 +2852,8 @@ void ai_scripting_migrate_by_unit(
 			unit_index = object_list_get_next(object_list_index, &reference_index);
 		}
 
-		ai_update_team_status();
-		encounters_update_dirty_status();
+		hs_runtime_effect(_hs_runtime_call_effect_update_team_status, 0, 0, 0);
+		hs_runtime_effect(_hs_runtime_call_effect_encounters_update_dirty_status, 0, 0, 0);
 	}
 
 	return;
@@ -3304,10 +3331,7 @@ void ai_scripting_vehicle_encounter(
 				{
 					if (actor->input.vehicle_index == unit_index)
 					{
-						actor_change_encounter(
-							iterator.index,
-							target_encounter_index,
-							target_squad_index);
+						hs_runtime_effect(_hs_runtime_call_effect_change_encounter, iterator.index, target_encounter_index, target_squad_index);
 					}
 				}
 			}
@@ -3318,6 +3342,69 @@ void ai_scripting_vehicle_encounter(
 	}
 
 	return;
+}
+
+/* port: ai_scripting_attach_unit's actor for the unit, of the squad's
+palette entry (its effect, _hs_runtime_call_effect_attach) */
+static void ai_scripting_attach_squad(
+	long unit_index,
+	long encounter_index,
+	long squad_index)
+{
+	struct scenario *scenario = global_scenario_get();
+	struct encounter_definition *encounter_definition = TAG_BLOCK_GET_ELEMENT(
+		&scenario->ai_encounters,
+		DATUM_INDEX_TO_ABSOLUTE_INDEX(encounter_index),
+		struct encounter_definition);
+	struct squad_definition *squad_definition = TAG_BLOCK_GET_ELEMENT(
+		&encounter_definition->squads,
+		squad_index,
+		struct squad_definition);
+
+	/* port: an entry the palette has (a map's index), as the others here */
+	if (VALID_INDEX(squad_definition->actor_palette_index, scenario->ai_actor_palette.count))
+	{
+		struct tag_reference *actor_palette_entry = TAG_BLOCK_GET_ELEMENT(
+			&scenario->ai_actor_palette,
+			squad_definition->actor_palette_index,
+			struct tag_reference);
+
+		if (actor_palette_entry->index != NONE)
+		{
+			long actor_definition_index = actor_variant_definition_get(
+				actor_palette_entry->index)->actor_reference.index;
+
+			if (actor_definition_index != NONE)
+			{
+				actor_create_for_unit(
+					TEST_FLAG(
+						actor_definition_get(actor_definition_index)->flags,
+						_actor_definition_swarm_actor_bit),
+					unit_index,
+					actor_palette_entry->index,
+					encounter_index,
+					squad_index,
+					FALSE,
+					NONE,
+					TEST_FLAG(
+						encounter_definition->flags,
+						_encounter_braindead_bit),
+					squad_definition->initial_state,
+					squad_definition->default_state,
+					NONE,
+					0);
+				encounters_update_dirty_status();
+
+				return;
+			}
+		}
+	}
+
+	error(
+		_error_silent,
+		"ai_attach: no actor variant specified for %s/%s, cannot create actor to attach to biped",
+		encounter_definition->name,
+		squad_definition->name);
 }
 
 void ai_scripting_attach_unit(
@@ -3379,55 +3466,7 @@ void ai_scripting_attach_unit(
 
 			if (VALID_INDEX(squad_index, encounter_definition->squads.count))
 			{
-				struct squad_definition *squad_definition = TAG_BLOCK_GET_ELEMENT(
-					&encounter_definition->squads,
-					squad_index,
-					struct squad_definition);
-
-				/* port: an entry the palette has (a map's index), as the others here */
-				if (VALID_INDEX(squad_definition->actor_palette_index, scenario->ai_actor_palette.count))
-				{
-					struct tag_reference *actor_palette_entry = TAG_BLOCK_GET_ELEMENT(
-						&scenario->ai_actor_palette,
-						squad_definition->actor_palette_index,
-						struct tag_reference);
-
-					if (actor_palette_entry->index != NONE)
-					{
-						long actor_definition_index = actor_variant_definition_get(
-							actor_palette_entry->index)->actor_reference.index;
-
-						if (actor_definition_index != NONE)
-						{
-							actor_create_for_unit(
-								TEST_FLAG(
-									actor_definition_get(actor_definition_index)->flags,
-									_actor_definition_swarm_actor_bit),
-								unit_index,
-								actor_palette_entry->index,
-								encounter_index,
-								squad_index,
-								FALSE,
-								NONE,
-								TEST_FLAG(
-									encounter_definition->flags,
-									_encounter_braindead_bit),
-								squad_definition->initial_state,
-								squad_definition->default_state,
-								NONE,
-								0);
-							encounters_update_dirty_status();
-
-							return;
-						}
-					}
-				}
-
-				error(
-					_error_silent,
-					"ai_attach: no actor variant specified for %s/%s, cannot create actor to attach to biped",
-					encounter_definition->name,
-					squad_definition->name);
+				hs_runtime_effect(_hs_runtime_call_effect_attach, unit_index, encounter_index, squad_index);
 			}
 			else
 			{
@@ -3523,6 +3562,25 @@ void ai_scripting_renew(
 
 			unit->object.body_vitality = unit->object.maximum_body_vitality > 0.0f ? 1.0f : 0.0f;
 			unit->object.shield_vitality = unit->object.maximum_shield_vitality > 0.0f ? 1.0f : 0.0f;
+			(void)actor_variant_definition;
+			hs_runtime_effect(_hs_runtime_call_effect_renew_grenades, iterator.actor_index, 0, 0);
+		}
+	}
+
+	return;
+}
+
+/* port: ai_scripting_renew's grenades for the actor (its effect,
+_hs_runtime_call_effect_renew_grenades) */
+static void ai_scripting_renew_grenades(
+	long actor_index)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	{
+		{
+			struct actor_variant_definition *actor_variant_definition =
+				actor_variant_definition_get(actor->meta.variant_definition_index);
 
 			if (actor_variant_definition->grenade_combat.grenade_type != NONE)
 			{
@@ -3675,6 +3733,19 @@ void ai_scripting_attach_free(
 	if (ai_globals->ai_initialized_for_map &&
 		unit_index != NONE &&
 		actor_variant_definition_index != NONE)
+	{
+		hs_runtime_effect(_hs_runtime_call_effect_attach_free, unit_index, actor_variant_definition_index, 0);
+	}
+
+	return;
+}
+
+/* port: ai_scripting_attach_free's actor for the unit (its effect,
+_hs_runtime_call_effect_attach_free) */
+static void ai_scripting_attach_free_actor(
+	long unit_index,
+	long actor_variant_definition_index)
+{
 	{
 		long actor_definition_index =
 			actor_variant_definition_get(actor_variant_definition_index)->actor_reference.index;
@@ -3933,12 +4004,10 @@ void ai_scripting_free(
 				2769,
 				actor->meta.encounter_index != NONE);
 
-			actor_flush_position_indices(iterator.actor_index);
-			encounter_detach_actor(iterator.actor_index, FALSE);
-			encounterless_attach_actor(iterator.actor_index);
+			hs_runtime_effect(_hs_runtime_call_effect_free_actor, iterator.actor_index, 0, 0);
 		}
 
-		encounters_update_dirty_status();
+		hs_runtime_effect(_hs_runtime_call_effect_encounters_update_dirty_status, 0, 0, 0);
 	}
 
 	return;
@@ -3967,9 +4036,7 @@ void ai_scripting_free_units(
 			unit->unit.actor_index != NONE &&
 			actor_get(unit->unit.actor_index)->meta.encounter_index != NONE)
 		{
-			actor_flush_position_indices(unit->unit.actor_index);
-			encounter_detach_actor(unit->unit.actor_index, FALSE);
-			encounterless_attach_actor(unit->unit.actor_index);
+			hs_runtime_effect(_hs_runtime_call_effect_free_actor, unit->unit.actor_index, 0, 0);
 			freed_count++;
 		}
 
@@ -3977,7 +4044,7 @@ void ai_scripting_free_units(
 	}
 
 	if (freed_count > 0)
-		encounters_update_dirty_status();
+		hs_runtime_effect(_hs_runtime_call_effect_encounters_update_dirty_status, 0, 0, 0);
 
 	return;
 }
@@ -4238,6 +4305,22 @@ static void ai_scripting_teleport_starting_location_private(
 		actor;
 		actor = ai_index_actor_iterator_next(&iterator))
 	{
+		hs_runtime_effect(_hs_runtime_call_effect_teleport_starting_location, iterator.actor_index, only_if_unsupported, 0);
+	}
+
+	return;
+}
+
+/* port: the actor's teleport to its starting location (the effect,
+_hs_runtime_call_effect_teleport_starting_location) */
+static void ai_scripting_teleport_actor(
+	long actor_index,
+	boolean only_if_unsupported)
+{
+	struct actor_datum *actor = actor_get(actor_index);
+
+	do
+	{
 		if (actor->meta.unit_index == NONE)
 			continue;
 		if (only_if_unsupported &&
@@ -4274,10 +4357,10 @@ static void ai_scripting_teleport_starting_location_private(
 				vector3d_from_angle(&forward, starting_location->facing);
 				object_set_position(actor->meta.unit_index, &starting_location->position, &forward, NULL);
 				object_reset(actor->meta.unit_index);
-				actor_move_halt(iterator.actor_index);
+				actor_move_halt(actor_index);
 			}
 		}
-	}
+	} while (FALSE);
 
 	return;
 }

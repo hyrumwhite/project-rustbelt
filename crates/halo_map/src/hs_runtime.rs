@@ -263,10 +263,16 @@ pub mod call {
     /// `ai_update_team_status()` if the encounters `a` and `b`'s teams
     /// differ as it's made (after the effects before it).
     pub const EFFECT_TEAM_STATUS_IF_TEAMS_DIFFER: i32 = 0x62;
+    /// `network_coop_note_player_effect` of the scripted effect's
+    /// translation, rotation, start and stop (`a`, `b` and `c` reals).
+    pub const EFFECT_COOP_PLAYER_EFFECT_TRANSLATION: i32 = 0x63;
+    pub const EFFECT_COOP_PLAYER_EFFECT_ROTATION: i32 = 0x64;
+    pub const EFFECT_COOP_PLAYER_EFFECT_START: i32 = 0x65;
+    pub const EFFECT_COOP_PLAYER_EFFECT_STOP: i32 = 0x66;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_TEAM_STATUS_IF_TEAMS_DIFFER).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_COOP_PLAYER_EFFECT_STOP).contains(&kind)
     }
 }
 
@@ -377,6 +383,28 @@ const NUMBER_OF_ACTOR_DEFAULT_STATES: i16 = 12;
 const GAME_TEAM_PLAYER: i16 = 1;
 const GAME_TEAM_HUMAN: i16 = 2;
 const GAME_TEAM_SENTINEL: i16 = 5;
+/// player_control.c's action bits (`_player_control_action_bit` on), the
+/// look and move flags of all directions, and its camera control's bit.
+const PLAYER_CONTROL_ACTION: u32 = 1 << 0;
+const PLAYER_CONTROL_JUMP: u32 = 1 << 1;
+const PLAYER_CONTROL_ACCEPT: u32 = 1 << 2;
+const PLAYER_CONTROL_BACK: u32 = 1 << 3;
+const PLAYER_CONTROL_PRIMARY_TRIGGER: u32 = 1 << 4;
+const PLAYER_CONTROL_GRENADE_TRIGGER: u32 = 1 << 5;
+const PLAYER_CONTROL_ZOOM: u32 = 1 << 6;
+const PLAYER_CONTROL_LOOK_UP: u32 = 1 << 7;
+const PLAYER_CONTROL_LOOK_DOWN: u32 = 1 << 8;
+const PLAYER_CONTROL_LOOK_LEFT: u32 = 1 << 9;
+const PLAYER_CONTROL_LOOK_RIGHT: u32 = 1 << 10;
+const PLAYER_CONTROL_LOOK_ALL_DIRECTIONS: u32 = 0x780;
+const PLAYER_CONTROL_MOVE_ALL_DIRECTIONS: u32 = 0x7800;
+const PLAYER_CONTROL_CAMERA_CONTROL_DISABLED: u32 = 1 << 0;
+/// The scripted player effect's flags (`_scripted_player_effect_active_bit`,
+/// `_stopping_bit`).
+const SCRIPTED_PLAYER_EFFECT_ACTIVE: u32 = 1 << 0;
+const SCRIPTED_PLAYER_EFFECT_STOPPING: u32 = 1 << 1;
+/// `NUMBER_OF_GAME_DIFFICULTY_LEVELS`.
+const NUMBER_OF_GAME_DIFFICULTY_LEVELS: i16 = 4;
 /// `NUMBER_OF_GAME_TEAMS`, and `struct game_allegiance_globals`' ally and
 /// friendly bit vectors (game_allegiance.c).
 const NUMBER_OF_GAME_TEAMS: i16 = 10;
@@ -626,6 +654,55 @@ pub struct HsContext {
     /// The scenario's actor palette (its first element) and count.
     pub actor_palette: u32,
     pub actor_palette_count: i32,
+    /// The game's fields the main loop's, players' and cameras' bodies read
+    /// and write: an address each ([`game_field`]).
+    pub game_fields: u32,
+}
+
+/// The game's fields in the context's `game_fields` (halo_sim.h's
+/// `_hs_game_field_*`), each the address of what its comment names.
+pub mod game_field {
+    /// `main_globals`' saving (boolean), safely and with a timeout
+    /// (booleans), its save checks' timers (longs) and safe intervals
+    /// (short).
+    pub const MAIN_SAVING_MAP: u32 = 0;
+    pub const MAIN_SAVE_MAP_SAFELY: u32 = 1;
+    pub const MAIN_SAVE_MAP_TIMEOUT: u32 = 2;
+    pub const MAIN_TICKS_UNTIL_NEXT_SAVE_CHECK: u32 = 3;
+    pub const MAIN_TICKS_UNABLE_TO_SAVE: u32 = 4;
+    pub const MAIN_SAFE_INTERVALS: u32 = 5;
+    /// Won and lost (booleans), the loss's timer (short) and its tick
+    /// (main.c's `main_loss_last_tick`, long).
+    pub const MAIN_WON_MAP: u32 = 6;
+    pub const MAIN_LOST_MAP: u32 = 7;
+    pub const MAIN_LOSS_TIMER: u32 = 8;
+    pub const MAIN_LOSS_LAST_TICK: u32 = 9;
+    /// Revert and reset (booleans), the structure to switch to (short),
+    /// the ticks to skip (short) and whether to (boolean).
+    pub const MAIN_REVERT_MAP: u32 = 10;
+    pub const MAIN_RESET_MAP: u32 = 11;
+    pub const MAIN_SWITCH_TO_STRUCTURE_BSP_INDEX: u32 = 12;
+    pub const MAIN_SKIP_TICKS: u32 = 13;
+    pub const MAIN_SKIP: u32 = 14;
+    /// `global_difficulty_level` (short: the next map's).
+    pub const DIFFICULTY_LEVEL: u32 = 15;
+    /// `players_globals->input_disabled` (boolean).
+    pub const PLAYERS_INPUT_DISABLED: u32 = 16;
+    /// `player_control_globals`: the action, action test and suppressed
+    /// action flags and its flags (longs), then each local player's zoom
+    /// level (short).
+    pub const PLAYER_CONTROL_GLOBALS: u32 = 17;
+    pub const PLAYER_CONTROL_ZOOM_LEVEL0: u32 = 18;
+    /// `camera_script_globals.timer`, `game_time_globals->speed` (reals),
+    /// `game_state_globals.revert_time` (long).
+    pub const CAMERA_SCRIPT_TIMER: u32 = 22;
+    pub const GAME_TIME_SPEED: u32 = 23;
+    pub const GAME_STATE_REVERT_TIME: u32 = 24;
+    /// The scripted player effect (its translation and rotation, its
+    /// intensity, its timer and total, shorts) and the player effects'
+    /// flags.
+    pub const PLAYER_EFFECT_SCRIPTED: u32 = 25;
+    pub const PLAYER_EFFECT_FLAGS: u32 = 26;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -2556,6 +2633,22 @@ impl<H: HsHost> Runtime<'_, H> {
         Some(actors)
     }
 
+    /// A body's value returned early (for a body's arm that returns from
+    /// within its match).
+    fn done_with(&self, thread_index: i32, value: i32) -> bool {
+        self.hs_return(thread_index, value);
+        true
+    }
+
+    /// The game field's address ([`game_field`]); None for one not there.
+    fn game_field(&self, field: u32) -> Option<u32> {
+        if self.context.game_fields == 0 {
+            return None;
+        }
+        let address = self.m().r32(self.context.game_fields + 4 * field);
+        (address != 0).then_some(address)
+    }
+
     /// The body itself ([`Self::library_body`]).
     fn library_body_run(&self, definition: u32, thread_index: i32, arguments: u32) -> bool {
         use crate::layout::unit_datum as u;
@@ -4270,6 +4363,226 @@ impl<H: HsHost> Runtime<'_, H> {
                     }
                     self.effect(call::EFFECT_UPDATE_TEAM_STATUS, 0, 0, 0);
                     self.effect(call::EFFECT_ENCOUNTERS_UPDATE_DIRTY_STATUS, 0, 0, 0);
+                }
+                0
+            }
+            // game_time_get, game_difficulty_level_get
+            "game_time" => self.context.game_time,
+            "game_difficulty_get_real" => short_value(self.context.difficulty),
+            // main_set_difficulty: the next map's
+            "game_difficulty_set" => {
+                let difficulty = short(0);
+                if (0..NUMBER_OF_GAME_DIFFICULTY_LEVELS).contains(&difficulty) {
+                    let Some(level) = self.game_field(game_field::DIFFICULTY_LEVEL) else { return false };
+                    m.w16(level, difficulty as u16);
+                }
+                0
+            }
+            // scripted_camera_time: the timer's ticks
+            "camera_time" => {
+                let Some(timer) = self.game_field(game_field::CAMERA_SCRIPT_TIMER) else { return false };
+                short_value(c_long(f32::from_bits(m.r32(timer)) * 30.0) as i16 as i32)
+            }
+            // player_input_enable
+            "player_enable_input" => {
+                let Some(disabled) = self.game_field(game_field::PLAYERS_INPUT_DISABLED) else { return false };
+                m.w8(disabled, (m.r8(arguments) == 0) as u8);
+                0
+            }
+            // scripted_player_control_set_camera_control: the flag, and
+            // the argument back
+            "player_camera_control" => {
+                let Some(globals) = self.game_field(game_field::PLAYER_CONTROL_GLOBALS) else { return false };
+                let camera_control = m.r8(arguments);
+                self.set_flag32(globals + 12, PLAYER_CONTROL_CAMERA_CONTROL_DISABLED, camera_control == 0);
+                camera_control as i32
+            }
+            // player_control_action_test_*: the actions the players took
+            // since the reset (accept, back and action noted as tested, and
+            // suppressed)
+            name @ ("player_action_test_reset"
+            | "player_action_test_accept"
+            | "player_action_test_back"
+            | "player_action_test_action"
+            | "player_action_test_jump"
+            | "player_action_test_primary_trigger"
+            | "player_action_test_grenade_trigger"
+            | "player_action_test_zoom"
+            | "player_action_test_look_relative_up"
+            | "player_action_test_look_relative_down"
+            | "player_action_test_look_relative_left"
+            | "player_action_test_look_relative_right"
+            | "player_action_test_look_relative_all_directions"
+            | "player_action_test_move_relative_all_directions") => {
+                let Some(globals) = self.game_field(game_field::PLAYER_CONTROL_GLOBALS) else { return false };
+                let action_flags = m.r32(globals);
+                let tested = |bit: u32| {
+                    m.w32(globals + 4, m.r32(globals + 4) | bit);
+                    m.w32(globals + 8, m.r32(globals + 8) | bit);
+                    boolean(action_flags & bit != 0)
+                };
+                match name {
+                    "player_action_test_reset" => {
+                        m.w32(globals, 0);
+                        m.w32(globals + 4, 0);
+                        0
+                    }
+                    "player_action_test_accept" => tested(PLAYER_CONTROL_ACCEPT),
+                    "player_action_test_back" => tested(PLAYER_CONTROL_BACK),
+                    "player_action_test_action" => tested(PLAYER_CONTROL_ACTION),
+                    "player_action_test_jump" => boolean(action_flags & PLAYER_CONTROL_JUMP != 0),
+                    "player_action_test_primary_trigger" => boolean(action_flags & PLAYER_CONTROL_PRIMARY_TRIGGER != 0),
+                    "player_action_test_grenade_trigger" => boolean(action_flags & PLAYER_CONTROL_GRENADE_TRIGGER != 0),
+                    "player_action_test_zoom" => boolean(action_flags & PLAYER_CONTROL_ZOOM != 0),
+                    "player_action_test_look_relative_up" => boolean(action_flags & PLAYER_CONTROL_LOOK_UP != 0),
+                    "player_action_test_look_relative_down" => boolean(action_flags & PLAYER_CONTROL_LOOK_DOWN != 0),
+                    "player_action_test_look_relative_left" => boolean(action_flags & PLAYER_CONTROL_LOOK_LEFT != 0),
+                    "player_action_test_look_relative_right" => boolean(action_flags & PLAYER_CONTROL_LOOK_RIGHT != 0),
+                    "player_action_test_look_relative_all_directions" => {
+                        boolean(!action_flags & PLAYER_CONTROL_LOOK_ALL_DIRECTIONS == 0)
+                    }
+                    _ => boolean(!action_flags & PLAYER_CONTROL_MOVE_ALL_DIRECTIONS == 0),
+                }
+            }
+            // players_unzoom_all: each local player's zoom
+            "players_unzoom_all" => {
+                let Some(zooms) = (0..4).map(|i| self.game_field(game_field::PLAYER_CONTROL_ZOOM_LEVEL0 + i)).collect::<Option<Vec<_>>>()
+                else {
+                    return false;
+                };
+                for zoom in zooms {
+                    m.w16(zoom, NONE as u16);
+                }
+                0
+            }
+            // main_saving_map, and main.c's requests of the main loop: the
+            // saves, won, lost, revert, reset and skip
+            name @ ("game_saving"
+            | "game_save"
+            | "game_save_cancel"
+            | "game_save_no_timeout"
+            | "game_save_totally_unsafe"
+            | "game_won"
+            | "game_lost"
+            | "game_revert"
+            | "map_reset"
+            | "game_skip_ticks") => {
+                use game_field as g;
+                let Some(saving) = self.game_field(g::MAIN_SAVING_MAP) else { return false };
+                let Some(fields) = (0..15).map(|i| self.game_field(i)).collect::<Option<Vec<_>>>() else { return false };
+                let field = |f: u32| fields[f as usize];
+                // (main_save_map_safe's and _no_timeout's restart of the checks)
+                let save_checks_restart = || {
+                    m.w8(saving, 1);
+                    m.w8(field(g::MAIN_SAVE_MAP_SAFELY), 1);
+                    m.w32(field(g::MAIN_TICKS_UNTIL_NEXT_SAVE_CHECK), 0);
+                    m.w32(field(g::MAIN_TICKS_UNABLE_TO_SAVE), 0);
+                    m.w16(field(g::MAIN_SAFE_INTERVALS), 0);
+                };
+                let saving_or_waiting = m.r8(saving) == 0 || m.r8(field(g::MAIN_SAVE_MAP_TIMEOUT)) != 0;
+                if name == "game_saving" {
+                    return self.done_with(thread_index, m.r8(saving) as i32);
+                }
+                match name {
+                    "game_save" => {
+                        if saving_or_waiting {
+                            save_checks_restart();
+                            m.w8(field(g::MAIN_SAVE_MAP_TIMEOUT), 1);
+                        }
+                    }
+                    "game_save_no_timeout" => {
+                        if saving_or_waiting {
+                            save_checks_restart();
+                        }
+                        m.w8(field(g::MAIN_SAVE_MAP_TIMEOUT), 0);
+                    }
+                    "game_save_totally_unsafe" => {
+                        m.w8(saving, 1);
+                        m.w8(field(g::MAIN_SAVE_MAP_SAFELY), 0);
+                    }
+                    "game_save_cancel" => m.w8(saving, 0),
+                    "game_won" => {
+                        m.w8(saving, 0);
+                        m.w8(field(g::MAIN_WON_MAP), 1);
+                    }
+                    "game_lost" => {
+                        if m.r8(field(g::MAIN_LOST_MAP)) == 0 {
+                            m.w16(field(g::MAIN_LOSS_TIMER), 0);
+                            m.w32(field(g::MAIN_LOSS_LAST_TICK), self.context.game_time as u32);
+                        }
+                        m.w8(saving, 0);
+                        m.w8(field(g::MAIN_LOST_MAP), 1);
+                    }
+                    "game_revert" | "map_reset" => {
+                        m.w16(field(g::MAIN_SWITCH_TO_STRUCTURE_BSP_INDEX), NONE as u16);
+                        m.w8(saving, 0);
+                        m.w8(field(if name == "game_revert" { g::MAIN_REVERT_MAP } else { g::MAIN_RESET_MAP }), 1);
+                        m.w8(field(g::MAIN_LOST_MAP), 0);
+                    }
+                    _ => {
+                        // (more than 15 is reported, the game's)
+                        let ticks = short(0);
+                        if ticks > 15 {
+                            return false;
+                        }
+                        m.w16(field(g::MAIN_SKIP_TICKS), ticks as u16);
+                        m.w8(field(g::MAIN_SKIP), 1);
+                    }
+                }
+                0
+            }
+            // game_time_set_speed
+            "game_speed" => {
+                let Some(speed) = self.game_field(game_field::GAME_TIME_SPEED) else { return false };
+                m.w32(speed, argument(0) as u32);
+                0
+            }
+            // game_state_reverted: whether the revert was this tick
+            "game_reverted" => {
+                let Some(revert_time) = self.game_field(game_field::GAME_STATE_REVERT_TIME) else { return false };
+                boolean(m.r32(revert_time) as i32 == self.context.game_time)
+            }
+            // scripted_player_effect_set_translation, _set_rotation (in
+            // degrees), _start and _stop (in seconds), each noted for
+            // network co-op's clients first
+            name @ ("player_effect_set_max_translation"
+            | "player_effect_set_max_rotation"
+            | "player_effect_start"
+            | "player_effect_stop") => {
+                let Some(scripted) = self.game_field(game_field::PLAYER_EFFECT_SCRIPTED) else { return false };
+                let Some(flags) = self.game_field(game_field::PLAYER_EFFECT_FLAGS) else { return false };
+                let real = |index: u32| f32::from_bits(argument(index) as u32);
+                let zero = 0.0f32.to_bits() as i32;
+                match name {
+                    "player_effect_set_max_translation" => {
+                        self.effect(call::EFFECT_COOP_PLAYER_EFFECT_TRANSLATION, argument(0), argument(1), argument(2));
+                        for i in 0..3 {
+                            m.w32(scripted + 4 * i, argument(i) as u32);
+                        }
+                    }
+                    "player_effect_set_max_rotation" => {
+                        self.effect(call::EFFECT_COOP_PLAYER_EFFECT_ROTATION, argument(0), argument(1), argument(2));
+                        for i in 0..3 {
+                            // (DEGREES_TO_RADIANS)
+                            m.w32(scripted + 12 + 4 * i, (real(i) * std::f32::consts::PI / 180.0).to_bits());
+                        }
+                    }
+                    "player_effect_start" => {
+                        self.effect(call::EFFECT_COOP_PLAYER_EFFECT_START, argument(0), argument(1), zero);
+                        m.w32(scripted + 24, argument(0) as u32);
+                        let ticks = crate::actor_combat::fast_ftol(real(1) * 30.0) as u16;
+                        m.w16(scripted + 28, ticks);
+                        m.w16(scripted + 30, ticks);
+                        self.set_flag32(flags, SCRIPTED_PLAYER_EFFECT_STOPPING, false);
+                        self.set_flag32(flags, SCRIPTED_PLAYER_EFFECT_ACTIVE, true);
+                    }
+                    _ => {
+                        self.effect(call::EFFECT_COOP_PLAYER_EFFECT_STOP, argument(0), zero, zero);
+                        let ticks = crate::actor_combat::fast_ftol(real(0) * 30.0) as u16;
+                        m.w16(scripted + 28, ticks);
+                        m.w16(scripted + 30, ticks);
+                        self.set_flag32(flags, SCRIPTED_PLAYER_EFFECT_STOPPING, true);
+                    }
                 }
                 0
             }

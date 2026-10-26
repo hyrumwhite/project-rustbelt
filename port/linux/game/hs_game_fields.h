@@ -39,6 +39,9 @@ enum
 	_hs_game_field_unit_hud_script_flags, /* long */
 	_hs_game_field_weapon_hud_script_flags, /* long */
 	_hs_game_field_hud_messaging_globals, /* struct hud_messaging_globals_definition */
+	_hs_game_field_animation_threads, /* the recorded animations' threads (struct data_array) */
+	_hs_game_field_scenario, /* the scenario's tag data (0 for none) */
+	_hs_game_field_hud_globals, /* struct hud_globals_definition (the HUD's globals tag) */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

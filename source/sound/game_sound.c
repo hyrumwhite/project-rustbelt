@@ -115,6 +115,9 @@ symbols in this file:
 #include "structures/structure_bsp_definitions.h"
 #include "structures/structures.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c (the library bodies' effects) */
+
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 /* ---------- constants */
 
@@ -612,7 +615,7 @@ void scripted_sound_stop(
 		definition = sound_definition_get(sound_index);
 		if (definition->scripting_sound_index != NONE)
 		{
-			sound_stop_impulse(definition->scripting_sound_index);
+			hs_runtime_effect(_hs_runtime_call_effect_sound_stop_impulse, definition->scripting_sound_index, 0, 0);
 			definition->scripting_sound_index = NONE;
 			definition->scripting_time = NONE;
 		}

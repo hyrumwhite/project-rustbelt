@@ -619,7 +619,7 @@ void scripted_hud_set_state_message(
 {
 	struct scenario *scenario = global_scenario_get();
 
-	network_coop_note_hud(_coop_hud_help_text, message_index);
+	hs_runtime_effect(_hs_runtime_call_effect_coop_hud, _coop_hud_help_text, message_index, 0);
 	if (hud_scripted_globals->show_hud_help_text &&
 		scenario->hud_messages.index != NONE)
 	{
@@ -671,7 +671,7 @@ void scripted_hud_set_objective(
 {
 	struct scenario *scenario = global_scenario_get();
 
-	network_coop_note_hud(_coop_hud_objective, message_index);
+	hs_runtime_effect(_hs_runtime_call_effect_coop_hud, _coop_hud_objective, message_index, 0);
 	if (scenario->hud_messages.index != NONE)
 	{
 		struct hud_message_text_definition *hud_messages =

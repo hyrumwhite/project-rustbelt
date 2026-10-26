@@ -190,6 +190,15 @@ static struct recorded_animation_definition const *animation_thread_get_animatio
 /* ---------- globals */
 
 static struct data_array *animation_threads;
+
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the threads the Rust port's library bodies read and set (hs_runtime_port_game_fields) */
+void recorded_animations_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_animation_threads] = (unsigned long)animation_threads;
+}
 boolean debug_recording = FALSE;
 static struct animation_thread_debug *animation_threads_debug = NULL;
 

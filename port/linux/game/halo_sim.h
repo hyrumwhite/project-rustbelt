@@ -802,7 +802,8 @@ enum
 	_hs_runtime_call_effect_coop_title, /* a the title, b the delay (real): network_coop_note_title's */
 	_hs_runtime_call_effect_projectiles_delete_all,
 	_hs_runtime_call_effect_cinematic_stop_presentation, /* the screen effects, the reflection tint, the near clip and deferred errors */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_cinematic_stop_presentation,
+	_hs_runtime_call_effect_sound_stop_impulse, /* a the impulse sound */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_sound_stop_impulse,
 };
 
 /* the runtime's operations the Rust port can run */

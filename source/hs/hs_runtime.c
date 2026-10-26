@@ -2268,6 +2268,12 @@ static char const *const hs_runtime_rust_bodies[] =
 	"cinematic_screen_effect_set_convolution",
 	"cinematic_screen_effect_set_filter",
 	"cinematic_screen_effect_set_filter_desaturation_tint",
+	"recording_kill",
+	"recording_time",
+	"sound_impulse_time",
+	"sound_impulse_stop",
+	"hud_set_help_text",
+	"hud_set_objective_text",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2334,6 +2340,14 @@ static unsigned long *hs_runtime_port_game_fields(
 		hud_weapon_port_game_fields(fields);
 		hud_messaging_port_game_fields(fields);
 	}
+	{
+		extern void recorded_animations_port_game_fields(unsigned long *fields);
+		extern struct hud_globals_definition *hud_globals;
+
+		recorded_animations_port_game_fields(fields);
+		fields[_hs_game_field_scenario] = global_scenario_index != NONE ? (unsigned long)global_scenario_get() : 0;
+		fields[_hs_game_field_hud_globals] = (unsigned long)hud_globals;
+	}
 
 	return fields;
 }
@@ -2381,6 +2395,13 @@ static void hs_runtime_effect_run(
 		extern void cinematic_port_stop_presentation(void);
 
 		cinematic_port_stop_presentation();
+		break;
+	}
+	case _hs_runtime_call_effect_sound_stop_impulse:
+	{
+		extern void sound_stop_impulse(long sound_index);
+
+		sound_stop_impulse(call->a);
 		break;
 	}
 	default:
@@ -4125,6 +4146,7 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_coop_title:
 		case _hs_runtime_call_effect_projectiles_delete_all:
 		case _hs_runtime_call_effect_cinematic_stop_presentation:
+		case _hs_runtime_call_effect_sound_stop_impulse:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

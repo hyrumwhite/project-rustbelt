@@ -596,7 +596,7 @@ fn light(cache: &CacheFile, args: &[String]) -> CliResult {
 }
 
 fn names(cache: &CacheFile) -> CliResult {
-    use halo_map::layout::{encounter_definition as e, scenario as s, squad_definition as q};
+    use halo_map::layout::{encounter_definition as e, platoon_definition as p, scenario as s, squad_definition as q};
     /// a scenario object name: its name, then its type and index
     const OBJECT_NAME_SIZE: usize = 36;
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes.split(|&b| b == 0).next().unwrap_or(&[])).into_owned();
@@ -607,7 +607,17 @@ fn names(cache: &CacheFile) -> CliResult {
     for (index, encounter) in scenario.block(s::AI_ENCOUNTERS, e::SIZEOF)?.iter().enumerate() {
         let squads: Vec<String> =
             encounter.block(e::SQUADS, q::SIZEOF)?.iter().map(|q| q.bytes(q::NAME, 32).map(text)).collect::<Result<_, _>>()?;
-        println!("encounter {index}: {} (squads {})", text(encounter.bytes(e::NAME, 32)?), squads.join(", "));
+        let platoons: Vec<String> =
+            encounter.block(e::PLATOONS, p::SIZEOF)?.iter().map(|p| p.bytes(p::NAME, 32).map(text)).collect::<Result<_, _>>()?;
+        println!(
+            "encounter {index}: {} (squads {}; platoons {})",
+            text(encounter.bytes(e::NAME, 32)?),
+            squads.join(", "),
+            platoons.join(", ")
+        );
+    }
+    for (index, conversation) in scenario.block(s::AI_CONVERSATIONS, halo_map::layout::ai_conversation::SIZEOF)?.iter().enumerate() {
+        println!("conversation {index}: {}", text(conversation.bytes(halo_map::layout::ai_conversation::NAME, 32)?));
     }
     // (cutscene flags: scenario_cutscene_flag, a name then a position and facing)
     const CUTSCENE_FLAGS: usize = 0x4e4;

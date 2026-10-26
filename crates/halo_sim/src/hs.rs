@@ -133,6 +133,9 @@ pub struct HsContextC {
     pub command_list_count: i32,
     pub tag_instances: u32,
     pub tag_count: i32,
+    pub ai_globals: u32,
+    pub encounters: u32,
+    pub allegiance_globals: u32,
 }
 
 impl HsContextC {
@@ -182,6 +185,9 @@ impl HsContextC {
             command_list_count: self.command_list_count,
             tag_instances: self.tag_instances,
             tag_count: self.tag_count,
+            ai_globals: self.ai_globals,
+            encounters: self.encounters,
+            allegiance_globals: self.allegiance_globals,
         }
     }
 }

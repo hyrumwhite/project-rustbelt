@@ -305,10 +305,16 @@ pub mod call {
     pub const EFFECT_OBJECTS_DETACH: i32 = 0x75;
     /// `breakable_surfaces_initialize_for_new_map()`.
     pub const EFFECT_BREAKABLE_SURFACES_RESET: i32 = 0x76;
+    /// The script camera's first update, its orientation from the cutscene
+    /// camera point `a`, then the director's and observer's update
+    /// (`scripted_camera_port_point`).
+    pub const EFFECT_SCRIPTED_CAMERA_POINT: i32 = 0x77;
+    /// `director_script_camera(a)` (`director_port_script_camera`).
+    pub const EFFECT_DIRECTOR_SCRIPT_CAMERA: i32 = 0x78;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_BREAKABLE_SURFACES_RESET).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_DIRECTOR_SCRIPT_CAMERA).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
@@ -552,6 +558,31 @@ const SCENARIO_OBJECT_NAME_SIZE: u32 = 36;
 const UNIT_EMOTION_INDEX: u32 = 0x258;
 const UNIT_MAGIC_SEAT_INDEX: u32 = 0x1bf;
 const UNIT_OVERRIDE_EMOTION_ANIMATION_INDEX: u32 = 0x1ce;
+/// camera_scripting.c's `struct scripted_camera_globals`: its first update,
+/// mode (`_camera_script_mode_point` on), camera point, timer, point, field
+/// of view, relative object, animation graph and animation; its default
+/// field of view; `struct scenario`'s cutscene camera points (each 0x68:
+/// a position, a field of view) and `struct animation_graph`'s nodes
+/// (tag_layout's probe).
+const CAMERA_SCRIPT_FIRST_UPDATE: u32 = 0x1;
+const CAMERA_SCRIPT_MODE: u32 = 0x2;
+const CAMERA_SCRIPT_CAMERA_POINT_INDEX: u32 = 0x4;
+const CAMERA_SCRIPT_TIMER: u32 = 0x8;
+const CAMERA_SCRIPT_POINT: u32 = 0xc;
+const CAMERA_SCRIPT_FIELD_OF_VIEW: u32 = 0x30;
+const CAMERA_SCRIPT_RELATIVE_OBJECT_INDEX: u32 = 0x34;
+const CAMERA_SCRIPT_ANIMATION_GRAPH_INDEX: u32 = 0x38;
+const CAMERA_SCRIPT_ANIMATION_INDEX: u32 = 0x3c;
+const CAMERA_SCRIPT_MODE_POINT: u16 = 0;
+const CAMERA_SCRIPT_MODE_ANIMATION: u16 = 1;
+const CAMERA_SCRIPT_MODE_FIRST_PERSON: u16 = 2;
+const CAMERA_SCRIPT_MODE_DEAD: u16 = 3;
+const CAMERA_SCRIPT_DEFAULT_FIELD_OF_VIEW: f32 = 1.22173047;
+const SCENARIO_CUTSCENE_CAMERA_POINTS: u32 = 0x4f0;
+const CUTSCENE_CAMERA_POINT_SIZE: u32 = 0x68;
+const CUTSCENE_CAMERA_POINT_POSITION: u32 = 0x28;
+const CUTSCENE_CAMERA_POINT_FIELD_OF_VIEW: u32 = 0x40;
+const ANIMATION_GRAPH_NODES: u32 = 0x68;
 const BASE_SEAT_LABELS: [&[u8]; 6] = [b"asleep", b"alert", b"stand", b"crouch", b"flee", b"flaming"];
 /// `NUMBER_OF_GAME_DIFFICULTY_LEVELS`.
 const NUMBER_OF_GAME_DIFFICULTY_LEVELS: i16 = 4;
@@ -869,6 +900,9 @@ pub mod game_field {
     pub const HUD_GLOBALS: u32 = 35;
     /// The breakable surfaces' globals (enabled, a boolean, first).
     pub const BREAKABLE_SURFACE_GLOBALS: u32 = 36;
+    /// `camera_script_globals` (camera_scripting.c's `struct
+    /// scripted_camera_globals`).
+    pub const CAMERA_SCRIPT_GLOBALS: u32 = 37;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -5362,6 +5396,82 @@ impl<H: HsHost> Runtime<'_, H> {
             }
             "breakable_surfaces_reset" => {
                 self.effect(call::EFFECT_BREAKABLE_SURFACES_RESET, 0, 0, 0);
+                0
+            }
+            // scripted_camera_set_absolute and scripted_camera_set: the
+            // camera point (its orientation and the director's update an
+            // effect), its transition's whole seconds
+            name @ ("camera_set" | "camera_set_relative") => {
+                let Some(camera) = self.game_field(game_field::CAMERA_SCRIPT_GLOBALS) else { return false };
+                let Some(scenario) = self.game_field(game_field::SCENARIO) else { return false };
+                let point_index = short(0);
+                let transition = short(1);
+                let relative = if name == "camera_set_relative" { argument(2) } else { NONE };
+                let (count, first) = self.tag_block(scenario + SCENARIO_CUTSCENE_CAMERA_POINTS);
+                if !(0..count).contains(&(point_index as i32)) {
+                    return false;
+                }
+                let point = first + point_index as u32 * CUTSCENE_CAMERA_POINT_SIZE;
+                // (its first update is set by the effect, as the director's
+                // update it makes reads and clears it)
+                m.w16(camera + CAMERA_SCRIPT_MODE, CAMERA_SCRIPT_MODE_POINT);
+                m.w16(camera + CAMERA_SCRIPT_CAMERA_POINT_INDEX, point_index as u16);
+                for i in 0..3 {
+                    m.w32(camera + CAMERA_SCRIPT_POINT + 4 * i, m.r32(point + CUTSCENE_CAMERA_POINT_POSITION + 4 * i));
+                }
+                let field_of_view = f32::from_bits(m.r32(point + CUTSCENE_CAMERA_POINT_FIELD_OF_VIEW));
+                let field_of_view = if field_of_view != 0.0 { field_of_view } else { CAMERA_SCRIPT_DEFAULT_FIELD_OF_VIEW };
+                m.w32(camera + CAMERA_SCRIPT_FIELD_OF_VIEW, field_of_view.to_bits());
+                m.w32(camera + CAMERA_SCRIPT_RELATIVE_OBJECT_INDEX, relative as u32);
+                m.w32(camera + CAMERA_SCRIPT_TIMER, ((transition as i32 / 30) as f32).to_bits());
+                self.effect(call::EFFECT_SCRIPTED_CAMERA_POINT, point_index as i32, 0, 0);
+                0
+            }
+            // scripted_camera_set_first_person and _set_dead (no unit is the
+            // game's report)
+            name @ ("camera_set_first_person" | "camera_set_dead") => {
+                let Some(camera) = self.game_field(game_field::CAMERA_SCRIPT_GLOBALS) else { return false };
+                let unit_index = argument(0);
+                if unit_index != NONE {
+                    let mode = if name == "camera_set_first_person" { CAMERA_SCRIPT_MODE_FIRST_PERSON } else { CAMERA_SCRIPT_MODE_DEAD };
+                    m.w16(camera + CAMERA_SCRIPT_MODE, mode);
+                    m.w8(camera + CAMERA_SCRIPT_FIRST_UPDATE, 1);
+                    m.w32(camera + CAMERA_SCRIPT_RELATIVE_OBJECT_INDEX, unit_index as u32);
+                }
+                0
+            }
+            // scripted_camera_set_animation: a camera graph's (one node)
+            // animation of the name (any case), its whole seconds
+            "camera_set_animation" => {
+                let Some(camera) = self.game_field(game_field::CAMERA_SCRIPT_GLOBALS) else { return false };
+                let graph_index = argument(0);
+                if graph_index != NONE {
+                    let Some(graph) = self.tag_data(b"antr", graph_index) else { return false };
+                    if m.r32(graph + ANIMATION_GRAPH_NODES) as i32 == 1 {
+                        let (count, first) = self.tag_block(graph + crate::layout::animation_graph::ANIMATIONS as u32);
+                        let name = self.c_string(argument(1) as u32);
+                        let found = (0..count.clamp(0, 0x7fff)).find(|&index| {
+                            name.eq_ignore_ascii_case(&self.c_string(first + index as u32 * crate::layout::animation::SIZEOF as u32))
+                        });
+                        if let Some(index) = found {
+                            let animation = first + index as u32 * crate::layout::animation::SIZEOF as u32;
+                            let frame_count = m.r16(animation + crate::layout::animation::FRAME_COUNT as u32) as i16 as i32;
+                            m.w16(camera + CAMERA_SCRIPT_CAMERA_POINT_INDEX, NONE as u16);
+                            m.w32(camera + CAMERA_SCRIPT_RELATIVE_OBJECT_INDEX, NONE as u32);
+                            m.w16(camera + CAMERA_SCRIPT_MODE, CAMERA_SCRIPT_MODE_ANIMATION);
+                            m.w8(camera + CAMERA_SCRIPT_FIRST_UPDATE, 1);
+                            m.w16(camera + CAMERA_SCRIPT_ANIMATION_INDEX, index as u16);
+                            m.w32(camera + CAMERA_SCRIPT_ANIMATION_GRAPH_INDEX, graph_index as u32);
+                            m.w32(camera + CAMERA_SCRIPT_FIELD_OF_VIEW, CAMERA_SCRIPT_DEFAULT_FIELD_OF_VIEW.to_bits());
+                            m.w32(camera + CAMERA_SCRIPT_TIMER, ((frame_count / 30) as f32).to_bits());
+                        }
+                    }
+                }
+                0
+            }
+            // director_script_camera
+            "camera_control" => {
+                self.effect(call::EFFECT_DIRECTOR_SCRIPT_CAMERA, m.r8(arguments) as i32, 0, 0);
                 0
             }
             // game_difficulty_level_get_ignore_easy: normal at the least

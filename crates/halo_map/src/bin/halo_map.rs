@@ -633,6 +633,12 @@ fn names(cache: &CacheFile) -> CliResult {
             println!("hud message {index}: {}", text(message.bytes(0, 32)?));
         }
     }
+    // (camera points: scenario_cutscene_camera_point, its flags then a name)
+    const CUTSCENE_CAMERA_POINTS: usize = 0x4f0;
+    const CUTSCENE_CAMERA_POINT_SIZE: usize = 0x68;
+    for (index, point) in scenario.block(CUTSCENE_CAMERA_POINTS, CUTSCENE_CAMERA_POINT_SIZE)?.iter().enumerate() {
+        println!("camera point {index}: {}", text(point.bytes(4, 32)?));
+    }
     // (chapter titles: scenario_cutscene_title, its flags then a name)
     const CUTSCENE_TITLES: usize = 0x4fc;
     const CUTSCENE_TITLE_SIZE: usize = 0x60;

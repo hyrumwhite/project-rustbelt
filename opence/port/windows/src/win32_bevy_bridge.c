@@ -1,0 +1,46 @@
+/*
+WIN32_BEVY_BRIDGE.C
+
+The shared memory of the Bevy bridge on Windows: a named file mapping in
+the session's namespace (port/linux/game/bevy_bridge_protocol.h), which the
+renderer opens by name.
+*/
+
+#include <windows.h>
+#include <stdio.h>
+
+#include "../../linux/game/bevy_bridge_protocol.h"
+
+static void *bevy_bridge_view;
+
+void *bevy_bridge_platform_shared(void)
+{
+	return bevy_bridge_view;
+}
+
+void *bevy_bridge_platform_map(char const *name, unsigned long size)
+{
+	char mapping_name[BEVY_BRIDGE_MAXIMUM_NAME_LENGTH + 8];
+	HANDLE mapping;
+	void *view;
+
+	snprintf(mapping_name, sizeof(mapping_name), "Local\\%s", name);
+	mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, size, mapping_name);
+	if (!mapping)
+		return NULL;
+	view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size);
+	if (!view)
+	{
+		CloseHandle(mapping);
+		return NULL;
+	}
+	/* (the mapping lives as long as the game: the handle is never closed) */
+	ZeroMemory(view, size);
+	bevy_bridge_view = view;
+	return view;
+}
+
+unsigned long bevy_bridge_platform_process_id(void)
+{
+	return GetCurrentProcessId();
+}

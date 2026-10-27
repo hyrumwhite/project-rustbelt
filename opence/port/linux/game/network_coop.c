@@ -1,0 +1,4183 @@
+/*
+NETWORK_COOP.C
+
+Campaign co-op over the network (port/linux/NETCODE.md).
+
+A network game on a campaign map, with no game engine running, is co-op.
+Only the host runs the map's scripts (game.c), so everything the scripts do
+that clients need to see is sent from this file:
+
+- Presentation, every tick: whether a cinematic is playing, the letterbox,
+  the camera, the screen fade, the HUD settings the scripts control (what
+  is shown, the mission timer), the players' maximum vitality, and the
+  cutscene skip vote. A client plays them one a tick by the host's clock, a
+  couple of ticks behind the newest, so the camera keeps an even pace. It
+  starts and stops its own cinematic to match, and looks through the host's
+  camera meanwhile. If the host goes quiet for two seconds, the client ends
+  the cinematic so its players aren't stuck.
+- Events, which happen once: script sounds (dialogue, music, ambience),
+  chapter titles, help and objective text, "Checkpoint" messages, screen
+  shake, nav points, and custom animations on units and scenery. Each is
+  sent in three ticks' messages in case one is lost, and numbered so a
+  client applies each exactly once, in order. The engine calls the
+  network_coop_note_ functions (network_coop.h) to queue them.
+- Devices (doors, elevators, switches, lights). A device moves toward its
+  device group's value (devices.c). On a client nothing sets those values
+  but this file: doors a player walks up to and switches a player uses are
+  decided by the host (the player's action is relayed to it). The host
+  sends a group's value for three ticks when it changes, plus a few groups
+  every tick in rotation, those that have moved since the map loaded more
+  often. A scenario group is identified by its index, which is the same on
+  every machine; a device's own group by the device.
+- Breakable surfaces (glass) the host breaks, each once as it breaks and
+  a few at a time again in rotation (for a late joiner or a lost message).
+- Named objects (scenery and devices) the scripts create or destroy.
+  network_objects.c already handles units, vehicles, weapons and equipment.
+  Twice a second the host sends which object names currently exist. A
+  client that sees the same difference twice in a row, on the same BSP,
+  creates or deletes its copy.
+- State a late joiner would otherwise lack, resent every two seconds and on
+  the tick a machine joins (host_resend): where scripted scenery and
+  machines have moved, how objects look (permutations, scale), what the
+  scripts have attached, the looping sounds playing, the full-screen
+  cinematic effect and the nav points; on a join also the objective, the
+  object names and every device that has moved.
+- The view of a client with nobody to spectate yet: the host's view from
+  behind, eased so it doesn't jerk.
+
+The host also makes up for scripts written for one player: vitality they
+set on player0 is set on every player (a10's shields), and a Pelican's
+Warthog drop brings more Warthogs in a larger game.
+
+Skipping a cutscene is a vote. Pressing the skip key during a skippable
+cutscene votes (a client sends its vote to the host every tick), and the
+host skips once more than half the machines have voted. The skip itself is
+the campaign's: the host reverts to the state saved when the cutscene began
+and the script carries on past it. Clients catch up through the object,
+device and name syncs. The host keeps its clock running through the revert,
+because the netcode needs it to only go forward (network_coop_reverted).
+A failed mission (game_lost, or the scripts' game_revert) reverts the same
+way, rather than leaving the players stuck in the failure's cutscene.
+
+Objects (scenery and devices) that aren't synced by network_objects.c are
+found on a client by their scenario name, or, unnamed, by their object
+index and tag, since the map placed them at the same index everywhere.
+*/
+
+/* ---------- headers */
+
+#include "cseries.h"
+#include "cseries/errors.h"
+#include "cache/cache_files.h"
+#include "camera/camera_scripting.h"
+#include "camera/director.h"
+#include "camera/observer.h"
+#include "cutscene/cinematics.h"
+#include "devices/devices.h"
+#include "effects/effect_definitions.h"
+#include "effects/player_effects.h"
+#include "game/game.h"
+#include "game/game_allegiance.h"
+#include "game/game_engine.h"
+#include "game/players.h"
+#include "game/player_queues_new.h"
+#include "hs/hs.h"
+#include "hs/hs_library_external.h"
+#include "interface/hud.h"
+#include "interface/hud_definitions.h"
+#include "interface/hud_messaging.h"
+#include "interface/hud_unit.h"
+#include "interface/hud_weapon.h"
+#include "main/main.h"
+#include "memory/memory_pool.h"
+#include "models/model_animation_definitions.h"
+#include "models/model_definitions.h"
+#include "models/models.h"
+#include "networking/network_game_globals.h"
+#include "networking/network_game_manager.h"
+#include "objects/object_definitions.h"
+#include "objects/objects.h"
+#include "objects/object_types.h"
+#include "objects/damage.h"
+#include "objects/scenery.h"
+#include "physics/breakable_surfaces.h"
+#include "structures/structure_bsp_definitions.h"
+#include "physics/collisions.h"
+#include "rasterizer/rasterizer_cinematics.h"
+#include "saved games/game_state.h"
+#include "scenario/scenario.h"
+#include "scenario/scenario_definitions.h"
+#include "sound/game_sound.h"
+#include "sound/sound_manager.h"
+#include "sound/sound_definitions.h"
+#include "units/units.h"
+#include "coop_enemies.h"
+#include "coop_spectate.h"
+#include "network_coop.h"
+#include "network_distributed.h"
+#include "network_coop_records.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c */
+
+/* ---------- constants */
+
+/* A joining player with nobody to spectate yet watches the host's view
+from this far behind and above the host's eyes, easing a fraction of the way
+toward it each tick. */
+#define WATCH_HOST_DISTANCE 3.0f
+#define WATCH_HOST_HEIGHT 1.0f
+#define WATCH_HOST_FOLLOW 0.2f
+
+/* how often the host sends again the state a client that joined since, or
+missed a message, would lack (host_resend) */
+#define OBJECT_REFRESH_TICKS (2 * TICKS_PER_SECOND)
+
+/* the screen effect a client takes from its host: the rasterizer's
+convolution types (none, blur, warp) and video overbright modes
+(rasterizer_xbox_screen_effect.c), and at most this many extra convolution
+passes, more than any script asks for */
+#define SCREEN_EFFECT_CONVOLUTION_TYPES 3
+#define SCREEN_EFFECT_OVERBRIGHT_MODES 3
+#define SCREEN_EFFECT_MAXIMUM_EXTRA_PASSES 8
+
+enum
+{
+	/* the farthest an object the cutscene camera films can be from it
+	(camera_object_get) */
+	CAMERA_OBJECT_DISTANCE = 8,
+	/* a client ends the cinematic after this long without hearing from the host */
+	PRESENTATION_SILENCE_TICKS = 2 * TICKS_PER_SECOND,
+	/* A client plays the host's presentations (its cutscene camera, fades,
+	letterbox) one a tick, about this many ticks behind the newest it has,
+	so they keep an even pace however unevenly the network delivers them. */
+	PRESENTATION_DELAY_TICKS = 2,
+	/* (network_coop_records.h's) */
+	PRESENTATION_BUFFER_COUNT = COOP_PRESENTATION_BUFFER_COUNT,
+	/* the field of view (radians) is sent as a word, scaled by this */
+	FIELD_OF_VIEW_SCALE = 10000,
+
+	/* (network_coop_records.h's) */
+	MAXIMUM_QUEUED_EVENTS = COOP_MAXIMUM_QUEUED_EVENTS,
+	EVENT_SENDS = COOP_EVENT_SENDS,
+
+	/* the size of devices.c's device group array (devices_initialize's;
+	every index into the arrays below is checked against this too) */
+	MAXIMUM_DEVICE_GROUPS = 1024,
+	/* a changed group is sent in this many ticks' messages */
+	DEVICE_GROUP_SENDS = 3,
+	/* unchanged groups sent each tick, in rotation */
+	DEVICE_GROUP_REFRESHES_PER_TICK = 8,
+
+	OBJECT_NAMES_INTERVAL_TICKS = TICKS_PER_SECOND / 2,
+	/* (network_coop_records.h's) */
+	OBJECT_NAME_BYTES = COOP_OBJECT_NAME_BYTES,
+	/* the types network_objects.c syncs; the object names sync skips them */
+	NETWORKED_OBJECT_TYPES = _object_mask_biped | _object_mask_vehicle | _object_mask_weapon | _object_mask_equipment,
+
+	/* the host forgets a client's skip vote it hasn't heard again for this long */
+	SKIP_VOTE_HELD_TICKS = TICKS_PER_SECOND,
+	/* After a skip the cutscene stays skippable until the script reaches
+	cinematic_skip_stop; votes still in flight must not skip it again. */
+	SKIP_COOLDOWN_TICKS = 2 * TICKS_PER_SECOND,
+
+	/* a Pelican's Warthog drop: one Warthog for every this many players,
+	at most this many in all */
+	PLAYERS_PER_DROPPED_VEHICLE = 4,
+	MAXIMUM_DROPPED_VEHICLES = 5,
+};
+
+/* (devices.c's literal count: a change there is one here) */
+typedef char device_groups_count_assert[MAXIMUM_DEVICE_GROUPS == 1024 && MAXIMUM_DEVICE_GROUPS == COOP_MAXIMUM_DEVICE_GROUPS ? 1 : -1];
+
+
+/* (distributed_coop_event.kind and an attach's type: network_coop_records.h) */
+
+/* distributed_coop_event.type of an effect: at a cutscene flag (value), or on
+an object's marker (value: its index in the object's model's markers) */
+enum
+{
+	_coop_effect_at_flag,
+	_coop_effect_on_marker,
+};
+
+
+/* which of a device's two groups an entry is */
+enum
+{
+	_device_group_role_power,
+	_device_group_role_position,
+};
+
+/* (distributed_coop_presentation.flags: network_coop_records.h) */
+
+/* ---------- structures */
+
+/* (struct distributed_coop_presentation: network_coop_records.h) */
+
+/* (struct distributed_coop_presentation_message: network_coop_records.h) */
+
+/* (struct distributed_coop_event: network_coop_records.h) */
+
+struct distributed_coop_events_message
+{
+	struct distributed_message_header header;
+	struct distributed_coop_event events[MAXIMUM_QUEUED_EVENTS];
+};
+
+/* A device group's state. group_index is set for a scenario group. For a
+device's own group it is NONE, and the device is found by name_index, or
+(unnamed) by object_index and definition_index. */
+/* (struct distributed_coop_device_group: network_coop_records.h) */
+
+/* (MAXIMUM_DEVICE_GROUPS_PER_MESSAGE: network_coop_records.h) */
+
+/* (struct distributed_coop_device_groups_message: network_coop_records.h) */
+
+/* (struct distributed_coop_object_names and its message: network_coop_records.h) */
+
+/* Where one of the host's scenery or machines is. Scripts move them (a
+cutscene's drop pod) and nothing else tells a client. Found as the
+scenery animations' are (object_find). */
+/* (struct distributed_coop_object_transform: network_coop_records.h) */
+
+#define MAXIMUM_OBJECT_TRANSFORMS_PER_MESSAGE 64
+#define COOP_MOVED_OBJECTS (_object_mask_scenery | _object_mask_machine)
+
+struct distributed_coop_object_transforms_message
+{
+	struct distributed_message_header header;
+	struct distributed_coop_object_transform transforms[MAXIMUM_OBJECT_TRANSFORMS_PER_MESSAGE];
+};
+
+/* How one of the host's objects looks: the permutation of each region of
+its model (NONE for none) and its scale. The scripts change them (a
+helmet off, a ship scaled) and so does damage. */
+/* (struct distributed_coop_object_look: network_coop_records.h) */
+
+#define MAXIMUM_OBJECT_LOOKS_PER_MESSAGE 64
+
+struct distributed_coop_object_looks_message
+{
+	struct distributed_message_header header;
+	struct distributed_coop_object_look looks[MAXIMUM_OBJECT_LOOKS_PER_MESSAGE];
+};
+
+/* a client's vote to skip the cinematic, sent every tick while it stands */
+struct distributed_coop_skip_vote
+{
+	byte voted;
+	byte pad[3];
+};
+
+struct distributed_coop_skip_vote_message
+{
+	struct distributed_message_header header;
+	struct distributed_coop_skip_vote vote;
+};
+
+/* ---------- globals */
+
+/* client: the cinematic it started to match the host's, and the host's
+presentations (network_coop_records.h) */
+static struct coop_client_presentation coop_presentation;
+/* port: the screen effect a client sets (network_coop_handle_screen_effect),
+and the arguments of its presentation messages' step */
+static struct rasterizer_screen_effect_port_state coop_client_screen_effect;
+static struct halo_sim_network_coop_client_messages coop_client_messages_arguments;
+/* port: what the client's tick reads of the game (gathered before its
+step), and its arguments */
+static struct coop_client_tick_inputs coop_client_tick_inputs;
+static struct halo_sim_network_coop_client_tick coop_client_tick_arguments;
+
+/* host: events still to be sent; client: the last one applied
+(network_coop_records.h) */
+static struct coop_events coop_events;
+
+/* host: each device group as last sent (network_coop_records.h) */
+static struct coop_host_devices host_devices;
+/* port: ... and the arguments of its sending (host_send_device_groups) */
+static struct halo_sim_network_coop_device_groups coop_device_groups_arguments;
+
+/* The players' maximum vitality, once the scripts have set a player's: on
+the host as they set it, on a client as the host's presentation has it.
+Every player's unit is kept at it, a new one included. */
+static struct coop_players_vitality players_vitality;
+
+/* host: the client machines it had last tick. On the tick a new one
+appears, and every OBJECT_REFRESH_TICKS, the state a client that joined
+since would lack is sent again (refresh), and on the join every device that
+has moved since the map loaded too (joined). */
+static struct coop_host_resend host_resend;
+/* port: ... the client machines it has now, and the arguments of the step
+that updates them and keeps the players' vitality (host_resend_and_vitality) */
+static struct coop_resend_inputs coop_resend_inputs;
+static struct halo_sim_network_coop_resend coop_resend_arguments;
+
+/* client: the host's snap count last seen for each of its groups
+(network_coop_records.h) */
+static struct coop_client_devices client_devices;
+
+/* client: the script sounds (impulse ones: dialogue) it played lately,
+which a skipped cutscene stops */
+enum
+{
+	/* (network_coop_records.h's) */
+	CLIENT_SCRIPT_SOUND_COUNT = COOP_CLIENT_SCRIPT_SOUND_COUNT,
+};
+
+static struct coop_client_script_sounds client_script_sounds;
+
+/* client: the object names that differed from the host's last time */
+static byte client_names_differing[OBJECT_NAME_BYTES];
+
+/* the cutscene skip vote (network_coop_records.h) */
+static struct coop_skip_vote skip_vote;
+
+/* ---------- prototypes */
+
+static void client_play_presentation(void);
+static void coop_presentation_call(long kind, long a, long b);
+static void client_event_call(long kind, long actor, long a, long b, real const *reals, short real_count,
+	long const *longs, short long_count);
+/* devices.c */
+void device_group_network_masks(word *network_flags, short *runtime_bit);
+/* cache_files.c */
+void *cache_files_tag_instances(long *count);
+/* objects.c */
+struct memory_pool *objects_memory_pool(void);
+/* network_objects.c */
+long const *network_objects_client_has_table(void);
+/* unit_scripting_commands.c */
+void unit_scripting_set_current_vitality_of(long unit_index, real body_vitality, real shield_vitality);
+
+/* ---------- private code */
+
+static boolean coop_game(
+	void)
+{
+	return network_coop_active();
+}
+
+static boolean coop_host(
+	void)
+{
+	return game_connection() == _game_connection_network_server && coop_game();
+}
+
+static boolean coop_client(
+	void)
+{
+	return game_connection() == _game_connection_network_client && coop_game();
+}
+
+/* host: sends count entries of entry_size in message to every client */
+static void send_to_clients(
+	void *message,
+	byte type,
+	short count,
+	word entry_size)
+{
+	distributed_send(message, type, count, (word)(sizeof(struct distributed_message_header) + count * entry_size),
+		_distributed_to_clients);
+}
+
+/* host, each tick: whether a client machine joined since the last, and so
+whether to resend this tick (host_resend) */
+/* port: the game's (halo_sim.c checks Rust's against it), of the machines
+gathered (coop_resend_inputs) */
+static void host_resend_update(
+	void)
+{
+	long const *machines = coop_resend_inputs.machines;
+	short count = coop_resend_inputs.machine_count;
+	short index, known;
+
+	host_resend.joined = FALSE;
+	for (index = 0; index < count && !host_resend.joined; index++)
+	{
+		for (known = 0; known < host_resend.machine_count && host_resend.machines[known] != machines[index]; known++)
+			;
+		host_resend.joined = known == host_resend.machine_count;
+	}
+	csmemcpy(host_resend.machines, machines, count * sizeof(machines[0]));
+	host_resend.machine_count = count;
+	host_resend.refresh = host_resend.joined || game_time_get() % OBJECT_REFRESH_TICKS == 0;
+	if (host_resend.joined)
+		coop_presentation_call(_network_coop_world_call_log_joined, 0, 0);
+}
+
+/* whether the object is a player's unit or carries one (scripts never delete those) */
+static boolean object_holds_player(
+	long object_index)
+{
+	long child_index;
+
+	if (player_index_from_unit_index(object_index) != NONE)
+		return TRUE;
+	for (child_index = object_get(object_index)->object.first_child_object_index; child_index != NONE;
+		child_index = object_get(child_index)->object.next_object_index)
+	{
+		if (object_holds_player(child_index))
+			return TRUE;
+	}
+
+	return FALSE;
+}
+
+/* the object type a scenario object name refers to, or NONE */
+static short object_name_type(
+	short name_index)
+{
+	struct scenario *scenario = global_scenario_get();
+
+	if (name_index < 0 || name_index >= scenario->object_names.count)
+		return NONE;
+
+	return TAG_BLOCK_GET_ELEMENT(&scenario->object_names, name_index, struct scenario_object_name)->runtime_object_type;
+}
+
+/* Client: finds the local copy of an object the host named, of one of the
+types in type_mask, and returns its index (or NONE). An unnamed object sits
+at the same object index on every machine; if its salt differs here,
+matching the absolute index is enough, as long as the tag matches too. */
+static long object_find(
+	short name_index,
+	long object_index,
+	long definition_index,
+	unsigned long type_mask)
+{
+	struct object_datum *object;
+
+	if (name_index != NONE)
+		object_index = object_index_from_name_index(name_index);
+	if (object_index == NONE)
+		return NONE;
+	object = object_try_and_get_and_verify_type(object_index, type_mask);
+	if (!object && name_index == NONE)
+	{
+		struct object_iterator iterator;
+		struct object_datum *candidate;
+
+		object_iterator_new(&iterator, type_mask, 0);
+		while (!object && (candidate = object_iterator_next(&iterator)) != NULL)
+		{
+			if ((iterator.index & 0xFFFF) == (object_index & 0xFFFF))
+			{
+				object = candidate;
+				object_index = iterator.index;
+			}
+		}
+	}
+	if (!object || object->definition_index != definition_index ||
+		(name_index == NONE && object->object.name_index != NONE))
+	{
+		return NONE;
+	}
+
+	return object_index;
+}
+
+/* host: a new event, filled in by the caller; NULL if it isn't wanted or the queue is full */
+static struct distributed_coop_event *event_new(
+	byte kind)
+{
+	struct distributed_coop_event *event;
+
+	if (!coop_host())
+		return NULL;
+	if (coop_events.count == MAXIMUM_QUEUED_EVENTS)
+	{
+		/* port: through the world's calls (the Rust port's) */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_log_events_full;
+		call.actor = NONE;
+		call.a = kind;
+		network_coop_world_call(&call);
+		return NULL;
+	}
+	event = &coop_events.events[coop_events.count];
+	csmemset(event, 0, sizeof(*event));
+	event->kind = kind;
+	event->number = ++coop_events.next_number;
+	event->object_index = NONE;
+	event->target = NONE;
+	event->tag_index = NONE;
+	event->definition_index = NONE;
+	event->name_index = NONE;
+	coop_events.sends[coop_events.count] = 0;
+	coop_events.count++;
+
+	return event;
+}
+
+static void host_send_events(
+	void)
+{
+	short index;
+
+	if (!coop_events.count)
+		return;
+	/* port: through the world's calls (the Rust port's) */
+	{
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_send_events;
+		call.actor = NONE;
+		call.b = coop_events.count;
+		network_coop_world_call(&call);
+	}
+	/* drop the ones sent EVENT_SENDS times, keeping the rest in order */
+	for (index = 0; index < coop_events.count; )
+	{
+		if (++coop_events.sends[index] < EVENT_SENDS)
+		{
+			index++;
+			continue;
+		}
+		coop_events.count--;
+		csmemmove(&coop_events.events[index], &coop_events.events[index + 1],
+			(coop_events.count - index) * sizeof(coop_events.events[0]));
+		csmemmove(&coop_events.sends[index], &coop_events.sends[index + 1],
+			(coop_events.count - index) * sizeof(coop_events.sends[0]));
+	}
+}
+
+/* Fills in the group's value, flags and snap count. Returns FALSE if the
+group doesn't exist. */
+static boolean device_group_state(
+	short group_index,
+	struct distributed_coop_device_group *entry)
+{
+	word flags;
+	boolean runtime;
+
+	if (group_index < 0 || group_index >= MAXIMUM_DEVICE_GROUPS ||
+		!device_group_network_get(group_index, &entry->value, &flags, &runtime))
+	{
+		return FALSE;
+	}
+	entry->flags = (byte)flags;
+	entry->snaps = host_devices.snap_counts[group_index];
+	entry->changed = FALSE;
+
+	return TRUE;
+}
+
+/* Host: lists every device group, scenario groups first, then each device's
+own groups. group_indices gets each entry's group index. Returns the count. */
+static short device_group_entries(
+	struct distributed_coop_device_group *entries,
+	short *group_indices)
+{
+	struct scenario *scenario = global_scenario_get();
+	struct object_iterator iterator;
+	struct device_datum *device;
+	short count = 0, group_index;
+
+	for (group_index = 0; group_index < scenario->device_groups.count && count < MAXIMUM_DEVICE_GROUPS; group_index++)
+	{
+		struct distributed_coop_device_group *entry = &entries[count];
+
+		entry->group_index = group_index;
+		entry->name_index = NONE;
+		entry->object_index = NONE;
+		entry->definition_index = NONE;
+		entry->role = _device_group_role_power;
+		if (device_group_state(group_index, entry))
+			group_indices[count++] = group_index;
+	}
+	object_iterator_new(&iterator, _object_mask_device, 0);
+	while ((device = object_iterator_next(&iterator)) != NULL)
+	{
+		short groups[2];
+		short role;
+
+		groups[_device_group_role_power] = device->device.power_group_index;
+		groups[_device_group_role_position] = device->device.position_group_index;
+		for (role = 0; role < NUMBEROF(groups) && count < MAXIMUM_DEVICE_GROUPS; role++)
+		{
+			struct distributed_coop_device_group *entry = &entries[count];
+			real value;
+			word flags;
+			boolean runtime;
+
+			/* scenario groups were listed above */
+			if (!device_group_network_get(groups[role], &value, &flags, &runtime) || !runtime)
+				continue;
+			entry->group_index = NONE;
+			entry->name_index = device->object.name_index;
+			entry->object_index = iterator.index;
+			entry->definition_index = device->definition_index;
+			entry->role = (byte)role;
+			if (device_group_state(groups[role], entry))
+				group_indices[count++] = groups[role];
+		}
+	}
+
+	return count;
+}
+
+/* client: the local group a host entry refers to, or NONE */
+static short device_group_find(
+	struct distributed_coop_device_group const *entry)
+{
+	struct device_datum *device;
+	long device_index;
+	real value;
+	word flags;
+	boolean runtime;
+	short group_index;
+
+	if (entry->group_index != NONE)
+	{
+		group_index = entry->group_index;
+		return group_index >= 0 && group_index < global_scenario_get()->device_groups.count &&
+			group_index < MAXIMUM_DEVICE_GROUPS &&
+			device_group_network_get(group_index, &value, &flags, &runtime) && !runtime ? group_index : NONE;
+	}
+	device_index = object_find(entry->name_index, entry->object_index, entry->definition_index, _object_mask_device);
+	if (device_index == NONE)
+		return NONE;
+	device = object_get_and_verify_type(device_index, _object_mask_device);
+	switch (entry->role)
+	{
+	case _device_group_role_power: group_index = device->device.power_group_index; break;
+	case _device_group_role_position: group_index = device->device.position_group_index; break;
+	default: return NONE;
+	}
+
+	return group_index >= 0 && group_index < MAXIMUM_DEVICE_GROUPS &&
+		device_group_network_get(group_index, &value, &flags, &runtime) && runtime ? group_index : NONE;
+}
+
+/* host: sends the groups that changed, plus the next few in each rotation:
+one through every group, and a quicker one through the groups that have
+moved since the map loaded. A late joiner loaded the same map, so those are
+the ones it lacks, and a level's few moved devices (a light bridge) reach it
+within a tick or two instead of after a pass through hundreds. */
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_device_groups_game(
+	void)
+{
+	static short group_indices[MAXIMUM_DEVICE_GROUPS];
+	struct distributed_coop_device_group *entries = host_devices.message.groups;
+	short count = device_group_entries(entries, group_indices);
+	short moved_count = 0, moved_index = 0;
+	short index, sent = 0;
+
+	for (index = 0; index < count; index++)
+	{
+		struct distributed_coop_device_group const *entry = &entries[index];
+		short group_index = group_indices[index];
+
+		if (!host_devices.started ||
+			entry->value != host_devices.values[group_index] ||
+			entry->flags != host_devices.flags[group_index] ||
+			entry->snaps != host_devices.snaps[group_index])
+		{
+			host_devices.values[group_index] = entry->value;
+			host_devices.flags[group_index] = entry->flags;
+			host_devices.snaps[group_index] = entry->snaps;
+			/* clients loaded the same map, so the starting state isn't sent */
+			if (host_devices.started)
+			{
+				host_devices.sends[group_index] = DEVICE_GROUP_SENDS;
+				host_devices.moved[group_index] = TRUE;
+			}
+		}
+		if (host_devices.moved[group_index])
+			moved_count++;
+	}
+	if (host_devices.refresh_next >= count)
+		host_devices.refresh_next = 0;
+	if (host_devices.moved_refresh_next >= moved_count)
+		host_devices.moved_refresh_next = 0;
+	for (index = 0; index < count; index++)
+	{
+		struct distributed_coop_device_group *entry = &entries[index];
+		short group_index = group_indices[index];
+		boolean refresh = (index - host_devices.refresh_next + count) % count < DEVICE_GROUP_REFRESHES_PER_TICK;
+
+		if (host_devices.moved[group_index])
+		{
+			refresh = refresh || coop_device_groups_arguments.joined ||
+				(moved_index - host_devices.moved_refresh_next + moved_count) % moved_count < DEVICE_GROUP_REFRESHES_PER_TICK;
+			moved_index++;
+		}
+		entry->changed = host_devices.sends[group_index] != 0;
+		if (entry->changed)
+			host_devices.sends[group_index]--;
+		else if (!refresh)
+			continue;
+		entries[sent++] = *entry;
+	}
+	host_devices.started = TRUE;
+	host_devices.refresh_next = count ? (short)((host_devices.refresh_next + DEVICE_GROUP_REFRESHES_PER_TICK) % count) : 0;
+	host_devices.moved_refresh_next = moved_count ?
+		(short)((host_devices.moved_refresh_next + DEVICE_GROUP_REFRESHES_PER_TICK) % moved_count) : 0;
+	/* (in messages of at most MAXIMUM_DEVICE_GROUPS_PER_MESSAGE, since a
+	message counts its entries in a byte: each moved to the front, where the
+	message's entries begin, over those already sent) */
+	for (index = 0; index < sent; index += MAXIMUM_DEVICE_GROUPS_PER_MESSAGE)
+	{
+		short message_count = (short)MIN(sent - index, MAXIMUM_DEVICE_GROUPS_PER_MESSAGE);
+
+		if (index > 0)
+			csmemcpy(entries, &entries[index], message_count * sizeof(entries[0]));
+		/* port: through the world's calls (the Rust port's) */
+		{
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_world_call_send_device_groups;
+			call.actor = NONE;
+			call.b = message_count;
+			network_coop_world_call(&call);
+		}
+	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise; its world the arguments and the groups as
+last sent (the message among them) */
+static void host_send_device_groups(
+	void)
+{
+	struct halo_sim_network_coop_device_groups *arguments = &coop_device_groups_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	int checking = FALSE;
+	word network_flags;
+	short runtime_bit;
+
+	device_group_network_masks(&network_flags, &runtime_bit);
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->joined = host_resend.joined;
+	arguments->host_devices = (unsigned long)&host_devices;
+	arguments->device_groups = (unsigned long)device_groups_data;
+	arguments->scenario_group_count = global_scenario_get()->device_groups.count;
+	arguments->network_flags = network_flags;
+	arguments->runtime_bit = runtime_bit;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&host_devices;
+	regions[1].size = sizeof(host_devices);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_device_groups, &context, regions, 2,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_device_groups_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_device_groups);
+}
+
+/* Where one of the host's devices is: its position (open, closed, how far
+up an elevator has gone) and power, which the device groups' values only
+aim it at. Found as the scenery animations' are (object_find). */
+/* (struct distributed_coop_device_state: network_coop_records.h) */
+
+#define MAXIMUM_DEVICE_STATES_PER_MESSAGE 64
+
+struct distributed_coop_device_states_message
+{
+	struct distributed_message_header header;
+	struct distributed_coop_device_state states[MAXIMUM_DEVICE_STATES_PER_MESSAGE];
+};
+
+/* a client puts its device where the host's is when the host's is at rest
+there, or when the two are this far apart while it moves (of the device's
+travel, 0 to 1) */
+#define DEVICE_POSITION_TOLERANCE 0.03f
+
+/* host: each device's position and power as last sent, by its absolute
+index, and whether they have changed since the map placed it */
+static struct coop_sent_device host_sent_devices[MAXIMUM_OBJECTS_PER_MAP];
+
+/* host: the structure BSP each client player's machine last said it has,
+NONE before its first input */
+static short host_player_structure_bsps[MAXIMUM_TRACKED_PLAYERS];
+
+/* host, each tick: the devices that moved or changed power (and, with the
+resent state, all that ever have) */
+/* port: the host's world sends are Rust's in Rust's mode (crates/
+halo_map's network_coop): what they send goes out of one message at a time,
+through this call */
+static union
+{
+	struct distributed_coop_device_states_message device_states;
+	struct distributed_coop_object_transforms_message transforms;
+	struct distributed_coop_object_looks_message looks;
+} coop_world_message;
+static struct halo_sim_network_coop_world coop_world_arguments;
+
+/* port: the object names' and screen effect's messages (the Rust port's
+steps fill them), the screen effect as the rasterizer has it and as last
+sent, and the steps' arguments */
+static struct distributed_coop_object_names_message coop_object_names_message;
+static struct distributed_coop_screen_effect_message coop_screen_effect_message;
+static struct rasterizer_screen_effect_port_state host_screen_effect;
+static struct rasterizer_screen_effect_port_state host_sent_screen_effect;
+static struct halo_sim_network_coop_object_names coop_object_names_arguments;
+static struct halo_sim_network_coop_screen_effect coop_screen_effect_arguments;
+/* port: the presentation's message, what it and the skip vote read of the
+game, and their step's arguments */
+static struct distributed_coop_presentation_message coop_presentation_message;
+static struct coop_presentation_inputs coop_presentation_inputs;
+static struct halo_sim_network_coop_presentation coop_presentation_arguments;
+
+void network_coop_world_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_coop_world_call_send:
+		send_to_clients(&coop_world_message, (byte)call->a, (short)call->b, (word)call->actor);
+		break;
+	case _network_coop_world_call_send_device_groups:
+		send_to_clients(&host_devices.message, _distributed_message_coop_device_groups, (short)call->b,
+			sizeof(host_devices.message.groups[0]));
+		break;
+	case _network_coop_world_call_send_events:
+	{
+		static struct distributed_coop_events_message message;
+
+		csmemcpy(message.events, coop_events.events, call->b * sizeof(message.events[0]));
+		send_to_clients(&message, _distributed_message_coop_events, (short)call->b, sizeof(message.events[0]));
+		break;
+	}
+	case _network_coop_world_call_looping_sound_stopped:
+		call->result = looping_sound_definition_get(call->a)->runtime_scripting_sound_index == NONE;
+		break;
+	case _network_coop_world_call_surface_broken:
+		call->result = !breakable_surface_extant((short)call->a);
+		if (call->result)
+		{
+			struct structure_breakable_surface *surface = TAG_BLOCK_GET_ELEMENT(
+				&global_structure_bsp_get()->breakable_surfaces, call->a, struct structure_breakable_surface);
+
+			call->output[0] = surface->centroid.x;
+			call->output[1] = surface->centroid.y;
+			call->output[2] = surface->centroid.z;
+		}
+		break;
+	case _network_coop_world_call_log_events_full:
+		error(_error_silent, "co-op: event queue full; an event of kind %d is not sent", call->a);
+		break;
+	case _network_coop_world_call_send_object_names:
+		send_to_clients(&coop_object_names_message, _distributed_message_coop_object_names, 1,
+			sizeof(coop_object_names_message.names));
+		break;
+	case _network_coop_world_call_send_screen_effect:
+		send_to_clients(&coop_screen_effect_message, _distributed_message_coop_screen_effect, 1,
+			sizeof(coop_screen_effect_message.state));
+		break;
+	case _network_coop_world_call_log_skippable:
+		error(_error_silent, "co-op: the cutscene can be skipped");
+		break;
+	case _network_coop_world_call_skip_cinematic:
+		error(_error_silent, "co-op: skipping the cutscene (%d of %d voted)", call->a, call->b);
+		main_skip_cinematic();
+		break;
+	case _network_coop_world_call_log_joined:
+		error(_error_silent, "co-op: a machine joined; resending the game's state");
+		break;
+	case _network_coop_world_call_initialize_vitality:
+		object_initialize_vitality(call->a, &players_vitality.maximum_body, &players_vitality.maximum_shield);
+		break;
+	case _network_coop_world_call_send_presentation:
+		send_to_clients(&coop_presentation_message, _distributed_message_coop_presentation, 1,
+			sizeof(coop_presentation_message.presentation));
+		break;
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+/* the call of the kind, with a and b */
+static void coop_presentation_call(
+	long kind,
+	long a,
+	long b)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = NONE;
+	call.a = a;
+	call.b = b;
+	network_coop_world_call(&call);
+}
+
+/* the message, of its type, count and entry size, to every client */
+static void coop_world_send(
+	byte type,
+	short count,
+	word entry_size)
+{
+	struct halo_sim_ai_call call;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = _network_coop_world_call_send;
+	call.actor = entry_size;
+	call.a = type;
+	call.b = count;
+	network_coop_world_call(&call);
+}
+
+static void host_send_device_states(
+	void)
+{
+	struct distributed_coop_device_states_message *message = &coop_world_message.device_states;
+	struct object_iterator iterator;
+	struct device_datum *device;
+	short count = 0;
+
+	object_iterator_new(&iterator, _object_mask_device, 0);
+	while ((device = object_iterator_next(&iterator)) != NULL)
+	{
+		short absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.index);
+		struct distributed_coop_device_state *state;
+		boolean changed;
+
+		if (absolute_index < 0 || absolute_index >= MAXIMUM_OBJECTS_PER_MAP)
+			continue;
+		if (host_sent_devices[absolute_index].object_index != iterator.index)
+		{
+			/* (as the map placed it, on every machine) */
+			host_sent_devices[absolute_index].object_index = iterator.index;
+			host_sent_devices[absolute_index].moved = FALSE;
+			host_sent_devices[absolute_index].position = device->device.position;
+			host_sent_devices[absolute_index].power = device->device.power;
+			continue;
+		}
+		changed = host_sent_devices[absolute_index].position != device->device.position ||
+			host_sent_devices[absolute_index].power != device->device.power;
+		if (!changed && !(coop_world_arguments.refresh && host_sent_devices[absolute_index].moved))
+			continue;
+		host_sent_devices[absolute_index].moved = TRUE;
+		host_sent_devices[absolute_index].position = device->device.position;
+		host_sent_devices[absolute_index].power = device->device.power;
+		state = &message->states[count++];
+		state->name_index = device->object.name_index;
+		state->moving = (byte)(device->device.position_velocity != 0.0f);
+		state->pad = 0;
+		state->object_index = iterator.index;
+		state->definition_index = device->definition_index;
+		state->position = device->device.position;
+		state->power = device->device.power;
+		if (count == MAXIMUM_DEVICE_STATES_PER_MESSAGE)
+		{
+			coop_world_send(_distributed_message_coop_device_states, count, sizeof(message->states[0]));
+			count = 0;
+		}
+	}
+	if (count > 0)
+		coop_world_send(_distributed_message_coop_device_states, count, sizeof(message->states[0]));
+}
+
+/* host: where each scenery or machine was last sent, by its absolute
+index, and whether it has moved since the map placed it */
+static struct coop_sent_transform host_sent_transforms[MAXIMUM_OBJECTS_PER_MAP];
+
+/* host, each tick: the scenery and machines that moved (and, every
+OBJECT_REFRESH_TICKS, all that ever have) */
+static void host_send_object_transforms(
+	void)
+{
+	struct distributed_coop_object_transforms_message *message = &coop_world_message.transforms;
+	struct object_iterator iterator;
+	struct object_datum *object;
+	short count = 0;
+
+	object_iterator_new(&iterator, COOP_MOVED_OBJECTS, 0);
+	while ((object = object_iterator_next(&iterator)) != NULL)
+	{
+		short absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.index);
+		struct distributed_coop_object_transform *transform;
+		boolean moving;
+
+		if (object->object.parent_object_index != NONE || absolute_index < 0 || absolute_index >= MAXIMUM_OBJECTS_PER_MAP)
+			continue;
+		if (host_sent_transforms[absolute_index].object_index != iterator.index)
+		{
+			/* an object seen for the first time is where the map placed it, on
+			every machine, so there is nothing to send yet */
+			host_sent_transforms[absolute_index].object_index = iterator.index;
+			host_sent_transforms[absolute_index].moved = FALSE;
+			host_sent_transforms[absolute_index].position = object->object.position;
+			host_sent_transforms[absolute_index].forward = object->object.forward;
+			continue;
+		}
+		moving = distance_squared3d(&host_sent_transforms[absolute_index].position, &object->object.position) >= 0.0001f ||
+			dot_product3d(&host_sent_transforms[absolute_index].forward, &object->object.forward) <= 0.9999f;
+		if (!moving && !(coop_world_arguments.refresh && host_sent_transforms[absolute_index].moved))
+			continue;
+		host_sent_transforms[absolute_index].moved = TRUE;
+		host_sent_transforms[absolute_index].position = object->object.position;
+		host_sent_transforms[absolute_index].forward = object->object.forward;
+		transform = &message->transforms[count++];
+		transform->name_index = object->object.name_index;
+		transform->pad = 0;
+		transform->object_index = iterator.index;
+		transform->definition_index = object->definition_index;
+		transform->position = object->object.position;
+		distributed_vector_pack(&object->object.forward, DISTRIBUTED_UNIT_SCALE, &transform->forward);
+		distributed_vector_pack(&object->object.up, DISTRIBUTED_UNIT_SCALE, &transform->up);
+		if (count == MAXIMUM_OBJECT_TRANSFORMS_PER_MESSAGE)
+		{
+			coop_world_send(_distributed_message_coop_object_transforms, count, sizeof(message->transforms[0]));
+			count = 0;
+		}
+	}
+	if (count > 0)
+		coop_world_send(_distributed_message_coop_object_transforms, count, sizeof(message->transforms[0]));
+}
+
+/* host: how each object looked when last sent, by its absolute index, and
+whether that has changed since it was made */
+static struct coop_sent_look host_sent_looks[MAXIMUM_OBJECTS_PER_MAP];
+
+/* host, each tick: the objects whose looks changed (and, every
+OBJECT_REFRESH_TICKS, all whose looks ever have) */
+static void host_send_object_looks(
+	void)
+{
+	struct distributed_coop_object_looks_message *message = &coop_world_message.looks;
+	struct object_iterator iterator;
+	struct object_datum *object;
+	short count = 0;
+
+	object_iterator_new(&iterator, _object_mask_all, 0);
+	while ((object = object_iterator_next(&iterator)) != NULL)
+	{
+		short absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.index);
+		struct distributed_coop_object_look *look;
+		boolean changing;
+
+		if (absolute_index < 0 || absolute_index >= MAXIMUM_OBJECTS_PER_MAP)
+			continue;
+		if (host_sent_looks[absolute_index].object_index != iterator.index)
+		{
+			/* an object seen for the first time looks the same on every machine */
+			host_sent_looks[absolute_index].object_index = iterator.index;
+			host_sent_looks[absolute_index].changed = FALSE;
+			host_sent_looks[absolute_index].scale = object->object.scale;
+			csmemcpy(host_sent_looks[absolute_index].region_permutations, object->object.region_permutations,
+				sizeof(object->object.region_permutations));
+			continue;
+		}
+		changing = host_sent_looks[absolute_index].scale != object->object.scale ||
+			csmemcmp(host_sent_looks[absolute_index].region_permutations, object->object.region_permutations,
+				sizeof(object->object.region_permutations));
+		if (!changing && !(coop_world_arguments.refresh && host_sent_looks[absolute_index].changed))
+			continue;
+		host_sent_looks[absolute_index].changed = TRUE;
+		host_sent_looks[absolute_index].scale = object->object.scale;
+		csmemcpy(host_sent_looks[absolute_index].region_permutations, object->object.region_permutations,
+			sizeof(object->object.region_permutations));
+		look = &message->looks[count++];
+		look->name_index = object->object.name_index;
+		look->pad = 0;
+		look->object_index = iterator.index;
+		look->definition_index = object->definition_index;
+		csmemcpy(look->region_permutations, object->object.region_permutations, sizeof(look->region_permutations));
+		look->scale = object->object.scale;
+		if (count == MAXIMUM_OBJECT_LOOKS_PER_MESSAGE)
+		{
+			coop_world_send(_distributed_message_coop_object_looks, count, sizeof(message->looks[0]));
+			count = 0;
+		}
+	}
+	if (count > 0)
+		coop_world_send(_distributed_message_coop_object_looks, count, sizeof(message->looks[0]));
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_world_game(
+	void)
+{
+	host_send_object_transforms();
+	host_send_device_states();
+	host_send_object_looks();
+}
+
+/* host, each tick: the scenery and machines that moved, the devices that
+moved or changed power, the objects whose looks changed (and, with the
+resent state, all that ever have) */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the message and the
+records as far as the objects reach. */
+static void host_send_world(
+	void)
+{
+	struct halo_sim_network_coop_world *arguments = &coop_world_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[5];
+	long reach = MIN((long)object_header_data->count, (long)MAXIMUM_OBJECTS_PER_MAP);
+	int checking = FALSE;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->refresh = host_resend.refresh;
+	arguments->sent_transforms = (unsigned long)&host_sent_transforms[0];
+	arguments->sent_devices = (unsigned long)&host_sent_devices[0];
+	arguments->sent_looks = (unsigned long)&host_sent_looks[0];
+	arguments->message = (unsigned long)&coop_world_message;
+	arguments->transforms_type = _distributed_message_coop_object_transforms;
+	arguments->device_states_type = _distributed_message_coop_device_states;
+	arguments->looks_type = _distributed_message_coop_object_looks;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_world_message;
+	regions[1].size = sizeof(coop_world_message);
+	regions[2].address = (unsigned long)&host_sent_transforms[0];
+	regions[2].size = reach * sizeof(host_sent_transforms[0]);
+	regions[3].address = (unsigned long)&host_sent_devices[0];
+	regions[3].size = reach * sizeof(host_sent_devices[0]);
+	regions[4].address = (unsigned long)&host_sent_looks[0];
+	regions[4].size = reach * sizeof(host_sent_looks[0]);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_world, &context, regions, 5,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_world_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_world);
+}
+
+/* ---------- the cinematic screen effect
+
+The scripts' full-screen effects (cinematic_screen_effect_*: blur, warp,
+light enhancement, desaturation, the video effect) are state the host's
+scripts set and a client's never do. The host sends it when it changes and
+every OBJECT_REFRESH_TICKS, for a client that joined since or missed it. */
+
+/* (struct distributed_coop_screen_effect_message: network_coop_records.h) */
+
+/* (host: the state last sent, host_sent_screen_effect, with the world's
+calls) */
+
+/* port: the game's (halo_sim.c checks Rust's against it), of the state the
+rasterizer has (host_screen_effect) */
+static void host_send_screen_effect_game(
+	void)
+{
+	struct distributed_coop_screen_effect_message *message = &coop_screen_effect_message;
+
+	message->state = host_screen_effect;
+	if (!coop_screen_effect_arguments.refresh &&
+		!csmemcmp(&message->state, &host_sent_screen_effect, sizeof(message->state)))
+	{
+		return;
+	}
+	host_sent_screen_effect = message->state;
+	/* port: through the world's calls (the Rust port's) */
+	{
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_send_screen_effect;
+		call.actor = NONE;
+		network_coop_world_call(&call);
+	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the state, the state
+last sent and the message. */
+static void host_send_screen_effect(
+	void)
+{
+	struct halo_sim_network_coop_screen_effect *arguments = &coop_screen_effect_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
+
+	rasterizer_screen_effect_port_get(&host_screen_effect);
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->refresh = host_resend.refresh;
+	arguments->state = (unsigned long)&host_screen_effect;
+	arguments->sent = (unsigned long)&host_sent_screen_effect;
+	arguments->message = (unsigned long)&coop_screen_effect_message;
+	arguments->state_size = sizeof(host_screen_effect);
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&host_screen_effect;
+	regions[1].size = sizeof(host_screen_effect);
+	regions[2].address = (unsigned long)&host_sent_screen_effect;
+	regions[2].size = sizeof(host_sent_screen_effect);
+	regions[3].address = (unsigned long)&coop_screen_effect_message;
+	regions[3].size = sizeof(coop_screen_effect_message);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_screen_effect, &context, regions, 4,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_screen_effect_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_screen_effect);
+}
+
+word network_coop_screen_effect_entry_size(
+	void)
+{
+	return sizeof(struct rasterizer_screen_effect_port_state);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_screen_effect_game(
+	void const *entries,
+	short count)
+{
+	struct rasterizer_screen_effect_port_state state = { 0 };
+	/* every field from the tint onward is a real (rasterizer_cinematics.h) */
+	real const *reals = &state.filter_desaturation_tint.red;
+	short real_count = (short)((sizeof(state) -
+		offsetof(struct rasterizer_screen_effect_port_state, filter_desaturation_tint)) / sizeof(real));
+	short index;
+
+	if (count != 1)
+		return;
+	csmemcpy(&state, entries, sizeof(state));
+	for (index = 0; index < real_count; index++)
+	{
+		if (!distributed_real_valid(reals[index]))
+			return;
+	}
+	/* (what the rasterizer can draw: its convolution types and overbright
+	modes, a script's few extra passes, and video with no convolution, as
+	rasterizer_screen_effect_set_video leaves it) */
+	state.convolution_type = (short)PIN(state.convolution_type, 0, SCREEN_EFFECT_CONVOLUTION_TYPES - 1);
+	state.convolution_extra_passes = (short)PIN(state.convolution_extra_passes, 0, SCREEN_EFFECT_MAXIMUM_EXTRA_PASSES);
+	state.video_overbright_mode = (short)PIN(state.video_overbright_mode, 0, SCREEN_EFFECT_OVERBRIGHT_MODES - 1);
+	if (state.video_on)
+	{
+		state.convolution_type = 0;
+		state.convolution_extra_passes = 0;
+		state.convolution_radius[0] = state.convolution_radius[1] = 0.0f;
+	}
+	/* the game can only blur one window, so split screen goes without */
+	if (coop_client_messages_arguments.window_count > 1)
+	{
+		state.convolution_type = 0;
+		state.convolution_radius[0] = state.convolution_radius[1] = 0.0f;
+	}
+	/* port: (through the world's calls, the Rust port's: the state as set) */
+	coop_client_screen_effect = state;
+	client_event_call(_network_coop_client_call_set_screen_effect, NONE, 0, 0, NULL, 0, NULL, 0);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_buffer_presentation_game(
+	void const *entries,
+	long host_time)
+{
+	short slot;
+
+	coop_presentation.heard_time = coop_client_messages_arguments.now;
+	if (coop_presentation.playing && host_time <= coop_presentation.played_time)
+		return;
+	slot = (short)(host_time % PRESENTATION_BUFFER_COUNT);
+	coop_presentation.buffered[slot] = *(struct distributed_coop_presentation const *)entries;
+	coop_presentation.buffered_times[slot] = host_time;
+	if (!coop_presentation.heard_any || host_time > coop_presentation.newest_time)
+		coop_presentation.newest_time = host_time;
+	coop_presentation.heard_any = TRUE;
+}
+
+/* port: a client's presentation messages (the host's presentation of a tick,
+kept to play in its turn; the scripts' screen effect): Rust's in Rust's mode
+(crates/halo_map's network_coop), checked against the game's otherwise. Its
+world: the arguments, the presentations kept, and the screen effect as
+set. */
+static void client_presentation_message(
+	short kind,
+	void const *entries,
+	short count,
+	long host_time)
+{
+	struct halo_sim_network_coop_client_messages *arguments = &coop_client_messages_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	int checking = FALSE;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->kind = kind;
+	arguments->count = count;
+	arguments->entries = (unsigned long)entries;
+	arguments->host_time = host_time;
+	arguments->now = game_time_get();
+	arguments->window_count = main_get_window_count();
+	arguments->presentation = (unsigned long)&coop_presentation;
+	arguments->screen_effect = (unsigned long)&coop_client_screen_effect;
+	arguments->screen_effect_size = sizeof(coop_client_screen_effect);
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_presentation;
+	regions[1].size = sizeof(coop_presentation);
+	regions[2].address = (unsigned long)&coop_client_screen_effect;
+	regions[2].size = sizeof(coop_client_screen_effect);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_messages, &context, regions, 3,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	if (kind == _coop_client_message_presentation)
+		client_buffer_presentation_game(entries, host_time);
+	else
+		client_apply_screen_effect_game(entries, count);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_messages);
+}
+
+void network_coop_handle_screen_effect(
+	void const *entries,
+	short count)
+{
+	if (coop_client())
+		client_presentation_message(_coop_client_message_screen_effect, entries, count, 0);
+}
+
+/* host: what its scripts have attached, the HUD state they set and the
+looping sounds they started, which a late joiner would lack, and the broken
+surfaces' resend's place (network_coop_records.h) */
+static struct coop_host_queue host_queue;
+/* port: ... and the arguments of their resends and the events' sending */
+static struct halo_sim_network_coop_queue coop_queue_arguments;
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_object_names_game(
+	void)
+{
+	struct distributed_coop_object_names *names = &coop_object_names_message.names;
+	short name_index;
+
+	csmemset(names, 0, sizeof(*names));
+	names->structure_bsp_index = (short)coop_object_names_arguments.structure_bsp_index;
+	names->name_count = (short)MIN(coop_object_names_arguments.name_count, MAXIMUM_OBJECT_NAMES_PER_SCENARIO);
+	for (name_index = 0; name_index < names->name_count; name_index++)
+	{
+		if (object_index_from_name_index(name_index) != NONE)
+			names->present[name_index / 8] |= (byte)(1 << (name_index % 8));
+	}
+	/* port: through the world's calls (the Rust port's) */
+	{
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_send_object_names;
+		call.actor = NONE;
+		network_coop_world_call(&call);
+	}
+}
+
+/* host: which scenario object names its objects have, for the clients to
+delete theirs without */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments and the message. */
+static void host_send_object_names(
+	void)
+{
+	struct halo_sim_network_coop_object_names *arguments = &coop_object_names_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[2];
+	int checking = FALSE;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->object_name_list = (unsigned long)object_name_list_port_get();
+	arguments->name_count = global_scenario_get()->object_names.count;
+	arguments->structure_bsp_index = global_structure_bsp_index_get();
+	arguments->message = (unsigned long)&coop_object_names_message;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_object_names_message;
+	regions[1].size = sizeof(coop_object_names_message);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_object_names, &context, regions, 2,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_object_names_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_object_names);
+}
+
+static void skip_vote_clear(
+	void)
+{
+	short index;
+
+	skip_vote.voted = FALSE;
+	skip_vote.votes = 0;
+	for (index = 0; index < NUMBEROF(skip_vote.client_vote_times); index++)
+	{
+		skip_vote.client_heard_times[index] = NONE;
+		skip_vote.client_vote_times[index] = NONE;
+	}
+}
+
+/* host: counts the votes to skip the cinematic, and skips when more than
+half the machines showing it have voted (one still loading, or joined since
+it began, has no say until it shows it) */
+/* port: the game's (halo_sim.c checks Rust's against it), of the inputs
+gathered (host_presentation_inputs) */
+static void host_count_skip_votes(
+	void)
+{
+	struct coop_presentation_inputs const *inputs = &coop_presentation_inputs;
+	long const *machine_indices = inputs->machine_indices;
+	short machine_count = inputs->machine_count;
+	long now = coop_presentation_arguments.now;
+	boolean skippable = inputs->skippable;
+	boolean was_offered = skip_vote.offered;
+	short index;
+
+	/* Wait until the save the script makes when the cutscene becomes
+	skippable has been written; reverting earlier would go back to the save
+	before it. A save requested later in the cutscene doesn't hold up the
+	vote, since the skip cancels it, as in a solo game. */
+	if (!skippable)
+		skip_vote.skip_save_written = FALSE;
+	else if (!inputs->saving_map)
+		skip_vote.skip_save_written = TRUE;
+	skip_vote.offered = skippable && skip_vote.skip_save_written && now >= skip_vote.cooldown_until;
+	if (skip_vote.offered && !was_offered)
+		coop_presentation_call(_network_coop_world_call_log_skippable, 0, 0);
+	if (!skip_vote.offered)
+	{
+		skip_vote_clear();
+		skip_vote.voters = 0;
+		skip_vote.requested = FALSE;
+		return;
+	}
+	/* already requested: main.c skips at the end of this frame */
+	if (skip_vote.requested)
+		return;
+	/* the host votes too, unless it is a dedicated server with no player */
+	skip_vote.voters = inputs->local_player ? 1 : 0;
+	skip_vote.votes = skip_vote.voted ? 1 : 0;
+	for (index = 0; index < machine_count; index++)
+	{
+		long heard_time = skip_vote.client_heard_times[machine_indices[index]];
+		long vote_time = skip_vote.client_vote_times[machine_indices[index]];
+
+		if (heard_time == NONE || now - heard_time > SKIP_VOTE_HELD_TICKS)
+			continue;
+		skip_vote.voters++;
+		if (vote_time != NONE && now - vote_time <= SKIP_VOTE_HELD_TICKS)
+			skip_vote.votes++;
+	}
+	if (skip_vote.votes * 2 > skip_vote.voters)
+	{
+		skip_vote.requested = TRUE;
+		coop_presentation_call(_network_coop_world_call_skip_cinematic, skip_vote.votes, skip_vote.voters);
+	}
+}
+
+/* the least speed (squared, world units a tick) of an object the cutscene
+camera films when the scripts don't name it */
+#define CAMERA_OBJECT_SPEED 0.01f
+/* the camera an observer accepts (observer.c) */
+#define CAMERA_WORLD_BOUND 5000.0f
+#define CAMERA_MINIMUM_FIELD_OF_VIEW 0.001f
+#define CAMERA_MAXIMUM_FIELD_OF_VIEW (_pi / 2.0f)
+
+/* Host: the object the cutscene camera films: the nearest vehicle moving
+close to it (a camera riding along with a drop pod or a Pelican), else the
+one the scripts set it relative to; NONE for a camera on its own. The last
+one is kept while it stays close, so the camera doesn't jump between two. */
+static long camera_object_get(
+	struct observer_result const *camera)
+{
+	static long filmed = NONE;
+	real nearest = CAMERA_OBJECT_DISTANCE * CAMERA_OBJECT_DISTANCE;
+	struct object_iterator iterator;
+	struct object_datum *object;
+
+	object = object_try_and_get_and_verify_type(filmed, _object_mask_vehicle);
+	if (object && distance_squared3d(&camera->position, &object->object.position) < nearest)
+		return filmed;
+	filmed = NONE;
+	object_iterator_new(&iterator, _object_mask_vehicle, 0);
+	while ((object = object_iterator_next(&iterator)) != NULL)
+	{
+		real distance = distance_squared3d(&camera->position, &object->object.position);
+
+		if (distance < nearest && object->object.parent_object_index == NONE &&
+			magnitude_squared3d(&object->object.translational_velocity) > CAMERA_OBJECT_SPEED)
+		{
+			nearest = distance;
+			filmed = iterator.index;
+		}
+	}
+	if (filmed != NONE)
+		return filmed;
+	return object_try_and_get(scripted_camera_object_relative_to()) ? scripted_camera_object_relative_to() : NONE;
+}
+
+/* host: the presentation sent to every client this tick */
+/* port: the game's (halo_sim.c checks Rust's against it), of the inputs
+gathered (host_presentation_inputs) */
+static void host_presentation(
+	struct distributed_coop_presentation *presentation)
+{
+	struct coop_presentation_inputs const *inputs = &coop_presentation_inputs;
+	long elapsed;
+
+	csmemset(presentation, 0, sizeof(*presentation));
+	SET_FLAG(presentation->flags, _presentation_cinematic_bit, inputs->cinematic);
+	SET_FLAG(presentation->flags, _presentation_letterbox_bit, inputs->letterbox);
+	presentation->fade_ticks = inputs->fade_ticks;
+	presentation->fade_start_time = inputs->fade_start_time;
+	SET_FLAG(presentation->flags, _presentation_fading_out_bit, inputs->fading_out);
+	presentation->fade_color[0] = (byte)(PIN(inputs->fade_color.red, 0.0f, 1.0f) * 255.0f + 0.5f);
+	presentation->fade_color[1] = (byte)(PIN(inputs->fade_color.green, 0.0f, 1.0f) * 255.0f + 0.5f);
+	presentation->fade_color[2] = (byte)(PIN(inputs->fade_color.blue, 0.0f, 1.0f) * 255.0f + 0.5f);
+	elapsed = coop_presentation_arguments.now - presentation->fade_start_time;
+	presentation->fade_elapsed = (short)PIN(elapsed, 0, SHORT_MAX);
+	if (inputs->camera_valid)
+	{
+		presentation->camera_position = inputs->camera_position;
+		distributed_vector_pack(&inputs->camera_forward, DISTRIBUTED_UNIT_SCALE, &presentation->camera_forward);
+		distributed_vector_pack(&inputs->camera_up, DISTRIBUTED_UNIT_SCALE, &presentation->camera_up);
+		presentation->camera_field_of_view =
+			(word)PIN(inputs->camera_field_of_view * FIELD_OF_VIEW_SCALE + 0.5f, 1, UNSIGNED_SHORT_MAX);
+		presentation->camera_object_index = inputs->camera_object_index;
+		if (presentation->camera_object_index != NONE)
+		{
+			vector_from_points3d(&object_get(presentation->camera_object_index)->object.position,
+				&inputs->camera_position, &presentation->camera_object_offset);
+		}
+	}
+	else
+		presentation->camera_object_index = NONE;
+
+	presentation->camera_scripted = (byte)inputs->camera_scripted;
+	presentation->input_disabled = (byte)inputs->input_disabled;
+	presentation->scripted_shake = (byte)inputs->scripted_shake;
+	presentation->players_vitality_set = (byte)inputs->players_vitality_set;
+	presentation->activating_cluster = (short)(inputs->activating_cluster + 1);
+	presentation->players_maximum_body_vitality = inputs->players_maximum_body_vitality;
+	presentation->players_maximum_shield_vitality = inputs->players_maximum_shield_vitality;
+	csmemcpy(presentation->ally_teams, inputs->ally_teams, sizeof(presentation->ally_teams));
+	csmemcpy(presentation->friendly_teams, inputs->friendly_teams, sizeof(presentation->friendly_teams));
+	SET_FLAG(presentation->flags, _presentation_skippable_bit, skip_vote.offered);
+	presentation->skip_votes = (byte)MIN(skip_vote.votes, 255);
+	presentation->skip_voters = (byte)MIN(skip_vote.voters, 255);
+
+	SET_FLAG(presentation->flags, _presentation_show_hud_bit, inputs->show_hud);
+	SET_FLAG(presentation->flags, _presentation_show_help_text_bit, inputs->show_help_text);
+	presentation->unit_hud_flags = inputs->unit_hud_flags;
+	presentation->weapon_hud_flags = inputs->weapon_hud_flags;
+	SET_FLAG(presentation->flags, _presentation_timer_paused_bit, inputs->timer.paused);
+	SET_FLAG(presentation->flags, _presentation_timer_enabled_bit, inputs->timer.enabled);
+	presentation->timer_reference_time = inputs->timer.reference_time;
+	presentation->timer_ticks = inputs->timer.ticks;
+	presentation->timer_flash_cutoff = inputs->timer.flash_cutoff;
+	presentation->timer_x = inputs->timer.x;
+	presentation->timer_y = inputs->timer.y;
+	presentation->timer_corner = inputs->timer.corner;
+}
+
+/* port: what the skip vote and the presentation read of the game, gathered
+before their step */
+static void host_presentation_inputs(
+	struct coop_presentation_inputs *inputs)
+{
+	struct observer_result const *camera = observer_get_camera(0);
+
+	csmemset(inputs, 0, sizeof(*inputs));
+	inputs->machine_count = distributed_client_machines(inputs->machine_indices, HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	inputs->skippable = cinematic_in_progress() && cinematic_can_be_skipped();
+	inputs->saving_map = main_saving_map();
+	inputs->local_player = local_player_get_next(NONE) != NONE;
+	inputs->cinematic = cinematic_in_progress();
+	inputs->letterbox = cinematic_globals->show_letterbox;
+	player_effect_port_screen_fade_get(&inputs->fade_color, &inputs->fade_ticks, &inputs->fading_out,
+		&inputs->fade_start_time);
+	inputs->camera_valid = camera != NULL;
+	if (camera)
+	{
+		inputs->camera_position = camera->position;
+		inputs->camera_forward = camera->forward;
+		inputs->camera_up = camera->up;
+		inputs->camera_field_of_view = camera->field_of_view;
+		inputs->camera_object_index = camera_object_get(camera);
+	}
+	inputs->camera_scripted = *director_camera_scripted != FALSE;
+	inputs->input_disabled = !player_input_enabled();
+	inputs->scripted_shake = player_effect_port_scripted_active() != FALSE;
+	inputs->players_vitality_set = players_vitality.set;
+	inputs->activating_cluster = (short)objects_get_activating_cluster_index();
+	inputs->players_maximum_body_vitality = players_vitality.maximum_body;
+	inputs->players_maximum_shield_vitality = players_vitality.maximum_shield;
+	game_allegiance_get_teams(inputs->ally_teams, inputs->friendly_teams);
+	inputs->show_hud = hud_scripted_globals->show_hud;
+	inputs->show_help_text = hud_scripted_globals->show_hud_help_text;
+	inputs->unit_hud_flags = hud_unit_port_script_flags();
+	inputs->weapon_hud_flags = hud_weapon_port_script_flags();
+	hud_messaging_port_timer_get(&inputs->timer);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_presentation_game(
+	void)
+{
+	host_count_skip_votes();
+	host_presentation(&coop_presentation_message.presentation);
+	coop_presentation_call(_network_coop_world_call_send_presentation, 0, 0);
+}
+
+/* host, each tick: counts the skip vote and sends the presentation (the
+cutscene camera, fades, letterbox, the scripts' HUD and allegiances) */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the inputs gathered,
+the skip vote and the message. */
+static void host_send_presentation(
+	void)
+{
+	struct halo_sim_network_coop_presentation *arguments = &coop_presentation_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
+
+	host_presentation_inputs(&coop_presentation_inputs);
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->inputs = (unsigned long)&coop_presentation_inputs;
+	arguments->skip_vote = (unsigned long)&skip_vote;
+	arguments->message = (unsigned long)&coop_presentation_message;
+	arguments->now = game_time_get();
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_presentation_inputs;
+	regions[1].size = sizeof(coop_presentation_inputs);
+	regions[2].address = (unsigned long)&skip_vote;
+	regions[2].size = sizeof(skip_vote);
+	regions[3].address = (unsigned long)&coop_presentation_message;
+	regions[3].size = sizeof(coop_presentation_message);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_presentation, &context, regions, 4,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_presentation_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_presentation);
+}
+
+static void client_cinematic_end(
+	void)
+{
+	if (!coop_presentation.cinematic_started)
+		return;
+	coop_presentation.cinematic_started = FALSE;
+	/* port: (through the world's calls, the Rust port's) */
+	client_event_call(_network_coop_client_call_cinematic_stop, NONE, 0, 0, NULL, 0, NULL, 0);
+}
+
+/* client with nothing else to watch: moves the camera (position, forward,
+up) behind and above the host's eyes, like spectating a teammate. It eases
+toward the target so the host looking around doesn't jerk it. Returns
+whether the result is a camera the observer can accept. */
+static boolean client_watch_host_from_behind(
+	real_point3d *position,
+	real_vector3d *forward,
+	real_vector3d *up)
+{
+	real_point3d behind;
+	real_vector3d level = { forward->i, forward->j, 0.0f };
+
+	if (normalize3d(&level) == 0.0f)
+		level = *forward;
+	point_from_line3d(position, &level, -WATCH_HOST_DISTANCE, &behind);
+	behind.z += WATCH_HOST_HEIGHT;
+	if (!coop_presentation.watching_host_valid)
+	{
+		coop_presentation.watching_host_valid = TRUE;
+		coop_presentation.watching_host_position = behind;
+		coop_presentation.watching_host_forward = *forward;
+	}
+	else
+	{
+		points_interpolate(&coop_presentation.watching_host_position, &behind, WATCH_HOST_FOLLOW,
+			&coop_presentation.watching_host_position);
+		vectors_interpolate(&coop_presentation.watching_host_forward, forward, WATCH_HOST_FOLLOW,
+			&coop_presentation.watching_host_forward);
+	}
+	if (normalize3d(&coop_presentation.watching_host_forward) == 0.0f)
+		return FALSE;
+	*position = coop_presentation.watching_host_position;
+	*forward = coop_presentation.watching_host_forward;
+	/* World up is not square to a host looking up or down. Rebuild up from
+	   the look direction when that pair would fail the camera check. */
+	up->i = 0.0f;
+	up->j = 0.0f;
+	up->k = 1.0f;
+	if (!distributed_axes_make_valid(forward, up))
+		observer_up_from_forward(forward, up);
+	return valid_real_vector3d_axes2(forward, up);
+}
+
+/* client: looks through the host's camera, or with its own */
+static void client_host_camera_set(
+	boolean host_camera)
+{
+	if (coop_presentation.host_camera == host_camera)
+		return;
+	coop_presentation.host_camera = host_camera;
+	/* port: (through the world's calls, the Rust port's) */
+	client_event_call(_network_coop_client_call_host_camera, NONE, host_camera, 0, NULL, 0, NULL, 0);
+}
+
+/* port: the arguments of the client's events' step (network_coop_handle_events),
+and whether each entry's looping sound was playing as it began (starting
+one changes its tag) */
+static struct halo_sim_network_coop_client_events coop_client_events_arguments;
+static byte coop_client_events_looping_playing[MAXIMUM_QUEUED_EVENTS];
+
+/* port: an event's call (the Rust port's, through the world's calls), its
+longs in input as their bits */
+static void client_event_call(
+	long kind,
+	long actor,
+	long a,
+	long b,
+	real const *reals,
+	short real_count,
+	long const *longs,
+	short long_count)
+{
+	struct halo_sim_ai_call call;
+	short index;
+
+	memset(&call, 0, sizeof(call));
+	call.kind = kind;
+	call.actor = actor;
+	call.a = a;
+	call.b = b;
+	for (index = 0; index < real_count; index++)
+		call.input[index] = reals[index];
+	for (index = 0; index < long_count; index++)
+		csmemcpy(&call.input[real_count + index], &longs[index], sizeof(long));
+	network_coop_client_call(&call);
+}
+
+static void client_apply_hud(
+	struct distributed_coop_event const *event)
+{
+	short message_count = (short)coop_client_events_arguments.hud_message_count;
+
+	switch (event->type)
+	{
+	case _coop_hud_help_text:
+		client_event_call(_network_coop_client_call_hud_help_text, NONE, event->frame != 0, 0, NULL, 0, NULL, 0);
+		if (event->value >= 0 && event->value < message_count)
+			client_event_call(_network_coop_client_call_hud_state_message, NONE, event->value, 0, NULL, 0, NULL, 0);
+		break;
+	case _coop_hud_objective:
+		if (event->value >= 0 && event->value < message_count)
+			client_event_call(_network_coop_client_call_hud_objective, NONE, event->value, 0, NULL, 0, NULL, 0);
+		break;
+	case _coop_hud_help_flash:
+		client_event_call(_network_coop_client_call_hud_flash, NONE, event->value != 0, 0, NULL, 0, NULL, 0);
+		break;
+	case _coop_hud_messages_clear:
+		client_event_call(_network_coop_client_call_hud_clear, NONE, 0, 0, NULL, 0, NULL, 0);
+		break;
+	case _coop_hud_checkpoint:
+		client_event_call(_network_coop_client_call_hud_checkpoint, NONE, event->value != 0, 0, NULL, 0, NULL, 0);
+		break;
+	default:
+		break;
+	}
+}
+
+static void client_apply_player_effect(
+	struct distributed_coop_event const *event)
+{
+	real const *reals = event->reals;
+	real values[3] = { 0.0f, 0.0f, 0.0f };
+
+	switch (event->type)
+	{
+	case _coop_player_effect_translation:
+		/* (the camera's shake, which moves it no further than an observer
+		accepts) */
+		values[0] = PIN(reals[0], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND);
+		values[1] = PIN(reals[1], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND);
+		values[2] = PIN(reals[2], -CAMERA_WORLD_BOUND, CAMERA_WORLD_BOUND);
+		break;
+	case _coop_player_effect_rotation:
+		values[0] = reals[0];
+		values[1] = reals[1];
+		values[2] = reals[2];
+		break;
+	case _coop_player_effect_start:
+		values[0] = PIN(reals[0], 0.0f, 1.0f);
+		values[1] = PIN(reals[1], 0.0f, 60.0f);
+		break;
+	case _coop_player_effect_stop:
+		values[0] = PIN(reals[0], 0.0f, 60.0f);
+		break;
+	default:
+		return;
+	}
+	client_event_call(_network_coop_client_call_player_effect, NONE, event->type, 0, values, 3, NULL, 0);
+}
+
+static void client_apply_nav_point(
+	struct distributed_coop_event const *event)
+{
+	boolean activate = event->value != NONE;
+	boolean flag = event->type == _coop_nav_point_team_flag || event->type == _coop_nav_point_unit_flag;
+	boolean team = event->type == _coop_nav_point_team_flag || event->type == _coop_nav_point_team_object;
+	real offset = event->reals[0];
+
+	if (activate && (event->value < 0 || event->value >= coop_client_events_arguments.arrow_count))
+		return;
+	if (flag && (event->object_index < 0 || event->object_index >= coop_client_events_arguments.cutscene_flag_count))
+		return;
+	if (team && (event->target < 0 || event->target >= NUMBER_OF_SOLO_CAMPAIGN_TEAMS))
+		return;
+	if (!team && !object_try_and_get_and_verify_type(event->target, _object_mask_unit))
+		return;
+	if (event->type > _coop_nav_point_unit_object)
+		return;
+	client_event_call(_network_coop_client_call_nav_point, event->target, event->type, event->value, &offset, 1,
+		&event->object_index, 1);
+}
+
+static void client_apply_unit_animation(
+	struct distributed_coop_event const *event)
+{
+	if (!distributed_object_index_valid(event->object_index) || !network_objects_client_has(event->object_index) ||
+		!object_try_and_get_and_verify_type(event->object_index, _object_mask_unit))
+	{
+		return;
+	}
+	if (event->tag_index == NONE)
+		client_event_call(_network_coop_client_call_unit_stop_animation, event->object_index, 0, 0, NULL, 0, NULL, 0);
+	else if (distributed_graph_animation(event->tag_index, event->value))
+	{
+		long longs[2];
+
+		longs[0] = event->interpolate;
+		longs[1] = event->frame;
+		client_event_call(_network_coop_client_call_unit_play_animation, event->object_index, event->tag_index,
+			event->value, NULL, 0, longs, 2);
+	}
+}
+
+static void client_apply_scenery_animation(
+	struct distributed_coop_event const *event)
+{
+	long scenery_index = object_find(event->name_index, event->object_index, event->definition_index,
+		_object_mask_scenery);
+	struct animation *animation = distributed_graph_animation(event->tag_index, event->value);
+
+	/* scenery animations have no random permutations, so the name finds the same one */
+	if (scenery_index != NONE && animation)
+	{
+		long frame = event->frame;
+
+		client_event_call(_network_coop_client_call_scenery_animation, scenery_index, event->tag_index, event->value,
+			NULL, 0, &frame, 1);
+	}
+}
+
+static void client_apply_sound(
+	struct distributed_coop_event const *event)
+{
+	long object_index = event->object_index != NONE && network_objects_client_has(event->object_index) ?
+		event->object_index : NONE;
+	real scale = PIN(event->reals[0], 0.0f, 1.0f);
+
+	switch (event->type)
+	{
+	case _coop_sound_impulse:
+		if (distributed_tag_of_group(event->tag_index, SOUND_DEFINITION_TAG))
+		{
+			client_event_call(_network_coop_client_call_sound_impulse, object_index, event->tag_index, 0, &scale, 1,
+				NULL, 0);
+			client_script_sounds.definition_indices[client_script_sounds.next] = event->tag_index;
+			client_script_sounds.next = (short)((client_script_sounds.next + 1) % CLIENT_SCRIPT_SOUND_COUNT);
+		}
+		break;
+	case _coop_sound_looping_start:
+		/* a resent sound that is already playing here is left alone */
+		if (distributed_tag_of_group(event->tag_index, LOOPING_SOUND_DEFINITION_TAG) &&
+			looping_sound_definition_get(event->tag_index)->runtime_scripting_sound_index == NONE)
+		{
+			client_event_call(_network_coop_client_call_looping_sound_start, object_index, event->tag_index, 0, &scale,
+				1, NULL, 0);
+		}
+		break;
+	case _coop_sound_looping_stop:
+		if (distributed_tag_of_group(event->tag_index, LOOPING_SOUND_DEFINITION_TAG))
+			client_event_call(_network_coop_client_call_looping_sound_stop, NONE, event->tag_index, 0, NULL, 0, NULL, 0);
+		break;
+	default:
+		break;
+	}
+}
+
+static void client_apply_effect(
+	struct distributed_coop_event const *event)
+{
+	long object_index;
+	struct object_datum *object;
+	struct model *model;
+
+	if (!distributed_tag_of_group(event->tag_index, EFFECT_DEFINITION_TAG))
+		return;
+	if (event->type == _coop_effect_at_flag)
+	{
+		if (event->value >= 0 && event->value < coop_client_events_arguments.cutscene_flag_count)
+			client_event_call(_network_coop_client_call_effect_at_flag, NONE, event->tag_index, event->value, NULL, 0,
+				NULL, 0);
+		return;
+	}
+	object_index = object_find(event->name_index, event->object_index, event->definition_index, _object_mask_all);
+	object = object_index != NONE ? object_get(object_index) : NULL;
+	model = object && object_definition_get(object->definition_index)->object.model.index != NONE ?
+		model_definition_get(object_definition_get(object->definition_index)->object.model.index) : NULL;
+	if (model && event->value >= 0 && event->value < model->markers.count)
+	{
+		client_event_call(_network_coop_client_call_effect_on_marker, object_index, event->tag_index, event->value,
+			NULL, 0, NULL, 0);
+	}
+}
+
+/* the name of a marker of the object's model by its index there; "" (the
+object's origin) for NONE or one it lacks */
+static char const *object_marker_name(
+	long object_index,
+	short marker_index)
+{
+	long model_index = object_definition_get(object_get(object_index)->definition_index)->object.model.index;
+	struct model *model = model_index != NONE ? model_definition_get(model_index) : NULL;
+
+	if (!model || marker_index < 0 || marker_index >= model->markers.count)
+		return "";
+	return TAG_BLOCK_GET_ELEMENT(&model->markers, marker_index, struct model_marker)->name;
+}
+
+/* the index of a marker of the object's model by its name, NONE for "" or
+one it lacks */
+static short object_marker_index(
+	long object_index,
+	char const *marker_name)
+{
+	long model_index = object_definition_get(object_get(object_index)->definition_index)->object.model.index;
+
+	return model_index != NONE && marker_name && marker_name[0] ? model_find_marker(model_index, marker_name) : NONE;
+}
+
+/* An attach or a detach. The parent is object_index, name_index and
+definition_index; the child is target, with its definition in tag_index and
+its name index in reals[0]; value and frame are the parent's and the child's
+markers. */
+static void client_apply_attach(
+	struct distributed_coop_event const *event)
+{
+	long parent_index = object_find(event->name_index, event->object_index, event->definition_index, _object_mask_all);
+	long child_index = object_find((short)PIN(event->reals[0], -1.0f, 32767.0f), event->target, event->tag_index,
+		_object_mask_all);
+	long ancestor_index;
+
+	if (parent_index == NONE || child_index == NONE || parent_index == child_index)
+		return;
+	/* a resent attach this machine already has */
+	if (event->type == _coop_attach && object_get(child_index)->object.parent_object_index == parent_index)
+		return;
+	/* (not to one of its own children, which objects.c cannot do: copies
+	of the hierarchy that differ here, or a host's mistake) */
+	for (ancestor_index = object_get(parent_index)->object.parent_object_index; event->type == _coop_attach &&
+		ancestor_index != NONE; ancestor_index = object_get(ancestor_index)->object.parent_object_index)
+	{
+		if (ancestor_index == child_index)
+			return;
+	}
+	if (event->type == _coop_detach)
+		client_event_call(_network_coop_client_call_detach, parent_index, child_index, 0, NULL, 0, NULL, 0);
+	else
+	{
+		long frame = event->frame;
+
+		client_event_call(_network_coop_client_call_attach, parent_index, child_index, event->value, NULL, 0, &frame, 1);
+	}
+}
+
+/* client: the cutscene was skipped, so the dialogue it started stops (the
+host's went with its revert; its music stops through host_send_looping_sounds) */
+static void client_stop_script_sounds(
+	void)
+{
+	short index;
+
+	for (index = 0; index < CLIENT_SCRIPT_SOUND_COUNT; index++)
+	{
+		long definition_index = client_script_sounds.definition_indices[index];
+
+		if (definition_index != NONE && distributed_tag_of_group(definition_index, SOUND_DEFINITION_TAG))
+			client_event_call(_network_coop_client_call_stop_impulse, NONE, definition_index, 0, NULL, 0, NULL, 0);
+		client_script_sounds.definition_indices[index] = NONE;
+	}
+}
+
+static void client_apply_event(
+	struct distributed_coop_event const *event)
+{
+	switch (event->kind)
+	{
+	case _coop_event_sound:
+		client_apply_sound(event);
+		break;
+	case _coop_event_title:
+		if (event->value >= 0 && event->value < coop_client_events_arguments.chapter_title_count)
+		{
+			real delay = PIN(event->reals[0], 0.0f, 60.0f);
+
+			client_event_call(_network_coop_client_call_title, NONE, event->value, 0, &delay, 1, NULL, 0);
+		}
+		break;
+	case _coop_event_hud:
+		client_apply_hud(event);
+		break;
+	case _coop_event_player_effect:
+		client_apply_player_effect(event);
+		break;
+	case _coop_event_nav_point:
+		client_apply_nav_point(event);
+		break;
+	case _coop_event_unit_animation:
+		client_apply_unit_animation(event);
+		break;
+	case _coop_event_scenery_animation:
+		client_apply_scenery_animation(event);
+		break;
+	case _coop_event_effect:
+		client_apply_effect(event);
+		break;
+	case _coop_event_attach:
+		client_apply_attach(event);
+		break;
+	case _coop_event_reverted:
+		client_stop_script_sounds();
+		break;
+	case _coop_event_surface_broken:
+		if (event->frame == coop_client_events_arguments.structure_bsp_index)
+		{
+			client_event_call(_network_coop_client_call_break_surface, NONE, event->value, 0, event->reals, 3, NULL, 0);
+		}
+		break;
+	case _coop_event_unit_open:
+		if (distributed_object_index_valid(event->object_index) && network_objects_client_has(event->object_index) &&
+			object_try_and_get_and_verify_type(event->object_index, _object_mask_unit))
+		{
+			client_event_call(_network_coop_client_call_unit_open, event->object_index, event->value != 0, 0, NULL, 0,
+				NULL, 0);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+/* client: the HUD settings in the host's presentation */
+static void client_apply_hud_state(
+	struct distributed_coop_presentation const *presentation)
+{
+	struct hud_timer_state timer;
+
+	hud_scripted_globals->show_hud = TEST_FLAG(presentation->flags, _presentation_show_hud_bit);
+	hud_scripted_globals->show_hud_help_text = TEST_FLAG(presentation->flags, _presentation_show_help_text_bit);
+	hud_unit_port_set_script_flags(presentation->unit_hud_flags);
+	hud_weapon_port_set_script_flags(presentation->weapon_hud_flags);
+	timer.reference_time = presentation->timer_reference_time;
+	timer.ticks = presentation->timer_ticks;
+	timer.flash_cutoff = presentation->timer_flash_cutoff;
+	timer.x = presentation->timer_x;
+	timer.y = presentation->timer_y;
+	timer.corner = presentation->timer_corner;
+	timer.paused = TEST_FLAG(presentation->flags, _presentation_timer_paused_bit);
+	timer.enabled = TEST_FLAG(presentation->flags, _presentation_timer_enabled_bit);
+	hud_messaging_port_timer_set(&timer);
+}
+
+/* the players in the game */
+static short coop_player_count(
+	void)
+{
+	struct data_iterator iterator;
+	short count = 0;
+
+	data_iterator_new(&iterator, player_data);
+	while (data_iterator_next(&iterator))
+		count++;
+
+	return count;
+}
+
+static boolean tag_name_has(
+	long definition_index,
+	char const *text)
+{
+	return definition_index != NONE && strstr(tag_get_name(definition_index), text) != NULL;
+}
+
+/* each tick: every player's unit at the players' maximum vitality. The
+host's own units get their current vitality full, as the scripts' set does;
+a client's follows the host's damage states. */
+static void players_vitality_keep(
+	void)
+{
+	struct data_iterator iterator;
+	struct player_datum *player;
+
+	if (!players_vitality.set)
+		return;
+	data_iterator_new(&iterator, player_data);
+	while ((player = data_iterator_next(&iterator)) != NULL)
+	{
+		struct object_datum *unit = object_try_and_get(player->unit_index);
+
+		if (!unit || (unit->object.maximum_body_vitality == players_vitality.maximum_body &&
+			unit->object.maximum_shield_vitality == players_vitality.maximum_shield))
+		{
+			continue;
+		}
+		/* port: (only in the host's step, host_resend_and_vitality: through
+		the world's calls, the Rust port's) */
+		if (coop_host())
+			coop_presentation_call(_network_coop_world_call_initialize_vitality, player->unit_index, 0);
+		else
+		{
+			unit->object.maximum_body_vitality = players_vitality.maximum_body;
+			unit->object.maximum_shield_vitality = players_vitality.maximum_shield;
+		}
+	}
+}
+
+/* ---------- public code */
+
+void network_coop_new_game(
+	void)
+{
+	csmemset(&coop_presentation, 0, sizeof(coop_presentation));
+	csmemset(&coop_events, 0, sizeof(coop_events));
+	csmemset(&host_devices, 0, sizeof(host_devices));
+	csmemset(&client_devices, 0, sizeof(client_devices));
+	csmemset(client_names_differing, 0, sizeof(client_names_differing));
+	csmemset(client_script_sounds.definition_indices, NONE, sizeof(client_script_sounds.definition_indices));
+	csmemset(host_sent_transforms, 0, sizeof(host_sent_transforms));
+	csmemset(host_sent_looks, 0, sizeof(host_sent_looks));
+	csmemset(host_sent_devices, 0, sizeof(host_sent_devices));
+	csmemset(host_player_structure_bsps, NONE, sizeof(host_player_structure_bsps));
+	csmemset(&host_sent_screen_effect, 0, sizeof(host_sent_screen_effect));
+	csmemset(&host_resend, 0, sizeof(host_resend));
+	csmemset(&players_vitality, 0, sizeof(players_vitality));
+	host_queue.attachment_count = 0;
+	host_queue.looping_sound_count = 0;
+	host_queue.hud_state.objective = NONE;
+	host_queue.hud_state.nav_point_count = 0;
+	skip_vote_clear();
+	skip_vote.offered = FALSE;
+	skip_vote.voters = 0;
+	skip_vote.cooldown_until = 0;
+	skip_vote.skip_save_written = FALSE;
+	coop_enemies_new_game();
+}
+
+/* A network game on a campaign scenario with no game engine. Checking the
+scenario matters: the main menu's scene keeps running while a network game
+is set up, also with no game engine, and it is not co-op. */
+boolean network_coop_active(
+	void)
+{
+	short connection = game_connection();
+
+	return (connection == _game_connection_network_server || connection == _game_connection_network_client) &&
+		global_scenario && global_scenario->type == _scenario_type_solo && !game_engine_running();
+}
+
+boolean network_coop_player_collisions(
+	void)
+{
+	struct network_game *game;
+
+	if (!network_coop_active() || !(game = network_game_get_game()))
+		return TRUE;
+	return !TEST_FLAG(game->cooperative_flags, _network_game_cooperative_no_player_collisions_bit);
+}
+
+boolean network_coop_devices_remote(
+	void)
+{
+	return coop_client();
+}
+
+/* units.c: a vehicle left the vehicle carrying it. When a Pelican drops a
+Warthog in a larger game, the host drops more beside it, so every player has
+a ride: one Warthog for every four players, at most five. They go side by
+side, alternately left and right, each only where no wall stands between it
+and the first, and reach the clients as any vehicle does. */
+void network_coop_vehicle_dropped(
+	long vehicle_index,
+	long carrier_index)
+{
+	struct object_datum const *vehicle = object_get(vehicle_index);
+	short wanted = (short)MIN((coop_player_count() + PLAYERS_PER_DROPPED_VEHICLE - 1) / PLAYERS_PER_DROPPED_VEHICLE,
+		MAXIMUM_DROPPED_VEHICLES) - 1;
+	real_vector3d left;
+	short spot, placed = 0;
+
+	if (!coop_host() || wanted <= 0 || !tag_name_has(vehicle->definition_index, "warthog") ||
+		!tag_name_has(object_get(carrier_index)->definition_index, "pelican"))
+	{
+		return;
+	}
+	cross_product3d(&vehicle->object.up, &vehicle->object.forward, &left);
+	for (spot = 1; spot <= 2 * MAXIMUM_DROPPED_VEHICLES && placed < wanted; spot++)
+	{
+		/* (1.5 world units apart: a Warthog's width and a gap) */
+		real distance = 1.5f * ((spot + 1) / 2) * (spot % 2 ? 1.0f : -1.0f);
+		struct object_placement_data data;
+		struct collision_result collision;
+		real_vector3d offset;
+
+		scale_vector3d(&left, distance, &offset);
+		if (collision_test_vector(FLAG(_collision_test_structure_bit), &vehicle->object.position, &offset, NONE,
+			&collision))
+		{
+			continue;
+		}
+		object_placement_data_new(&data, vehicle->definition_index, NONE);
+		point_from_line3d(&vehicle->object.position, &offset, 1.0f, &data.position);
+		data.forward = vehicle->object.forward;
+		data.up = vehicle->object.up;
+		data.translational_velocity = vehicle->object.translational_velocity;
+		if (object_new(&data) != NONE)
+			placed++;
+	}
+	error(_error_silent, "co-op: a Pelican dropped %d more Warthogs for %d players", placed, coop_player_count());
+}
+
+/* unit_scripting_commands.c: the scripts set a unit's maximum (maximum
+TRUE) or current vitality. Campaign scripts name only player0 for what
+every player should have, so in co-op a player's is set on every player's
+unit, and a maximum is kept for those spawned later and sent to the
+clients. FALSE if the unit isn't a co-op player's, for the caller to set. */
+boolean network_coop_set_players_vitality(
+	long unit_index,
+	boolean maximum,
+	real body,
+	real shield)
+{
+	struct data_iterator iterator;
+	struct player_datum *player;
+
+	if (!coop_host() || player_index_from_unit_index(unit_index) == NONE)
+		return FALSE;
+	if (maximum)
+	{
+		players_vitality.set = TRUE;
+		players_vitality.maximum_body = body;
+		players_vitality.maximum_shield = shield;
+	}
+	data_iterator_new(&iterator, player_data);
+	while ((player = data_iterator_next(&iterator)) != NULL)
+	{
+		struct object_datum *unit = object_try_and_get(player->unit_index);
+
+		if (!unit || TEST_FLAG(unit->object.damage_flags, _object_dead_bit))
+			continue;
+		if (maximum)
+			object_initialize_vitality(player->unit_index, &body, &shield);
+		else
+			unit_scripting_set_current_vitality_of(player->unit_index, body, shield);
+	}
+	return TRUE;
+}
+
+void network_coop_note_device_snap(
+	short group_index)
+{
+	if (coop_host() && group_index >= 0 && group_index < MAXIMUM_DEVICE_GROUPS)
+		host_devices.snap_counts[group_index]++;
+}
+
+/* index of the looping sound in host_queue.looping_sounds, or NONE */
+static short host_looping_sound_find(
+	long definition_index)
+{
+	short index;
+
+	for (index = 0; index < host_queue.looping_sound_count; index++)
+	{
+		if (host_queue.looping_sounds[index].definition_index == definition_index)
+			return index;
+	}
+	return NONE;
+}
+
+/* host, each tick: a looping sound that stopped without the scripts
+stopping it (it ended, or a skipped cutscene's revert took it) is stopped on
+the clients too; the rest are started again with the resent state */
+static void host_send_looping_sounds(
+	void)
+{
+	short index = 0;
+
+	while (index < host_queue.looping_sound_count)
+	{
+		long definition_index = host_queue.looping_sounds[index].definition_index;
+		struct distributed_coop_event *event;
+
+		/* port: through the world's calls (the Rust port's) */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_looping_sound_stopped;
+		call.actor = NONE;
+		call.a = definition_index;
+		network_coop_world_call(&call);
+		if (call.result)
+		{
+			if ((event = event_new(_coop_event_sound)) != NULL)
+			{
+				event->type = _coop_sound_looping_stop;
+				event->tag_index = definition_index;
+			}
+			host_queue.looping_sounds[index] = host_queue.looping_sounds[--host_queue.looping_sound_count];
+			continue;
+		}
+		if (coop_queue_arguments.refresh && (event = event_new(_coop_event_sound)) != NULL)
+		{
+			event->type = _coop_sound_looping_start;
+			event->tag_index = definition_index;
+			event->object_index = host_queue.looping_sounds[index].object_index;
+			event->reals[0] = host_queue.looping_sounds[index].scale;
+		}
+		index++;
+	}
+}
+
+void network_coop_note_sound(
+	short kind,
+	long definition_index,
+	long object_index,
+	real scale)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_sound);
+	short index;
+
+	if (!event)
+		return;
+	event->type = (byte)kind;
+	event->tag_index = definition_index;
+	event->object_index = object_index;
+	event->reals[0] = scale;
+
+	index = host_looping_sound_find(definition_index);
+	if (kind == _coop_sound_looping_stop && index != NONE)
+	{
+		host_queue.looping_sounds[index] = host_queue.looping_sounds[--host_queue.looping_sound_count];
+	}
+	else if (kind == _coop_sound_looping_start)
+	{
+		if (index == NONE && host_queue.looping_sound_count < COOP_MAXIMUM_LOOPING_SOUNDS)
+			index = host_queue.looping_sound_count++;
+		if (index != NONE)
+		{
+			host_queue.looping_sounds[index].definition_index = definition_index;
+			host_queue.looping_sounds[index].object_index = object_index;
+			host_queue.looping_sounds[index].scale = scale;
+		}
+	}
+}
+
+void network_coop_note_title(
+	short title_index,
+	real delay)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_title);
+
+	if (!event)
+		return;
+	event->value = title_index;
+	event->reals[0] = delay;
+}
+
+void network_coop_note_hud(
+	short kind,
+	short value)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_hud);
+
+	if (!event)
+		return;
+	event->type = (byte)kind;
+	event->value = value;
+	/* (help text shows only while the scripts show it; the presentation
+	saying so comes a little after the event, so the event carries it) */
+	event->frame = (short)hud_scripted_globals->show_hud_help_text;
+	if (kind == _coop_hud_objective)
+		host_queue.hud_state.objective = value;
+}
+
+void network_coop_note_player_effect(
+	short kind,
+	real a,
+	real b,
+	real c)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_player_effect);
+
+	if (!event)
+		return;
+	event->type = (byte)kind;
+	event->reals[0] = a;
+	event->reals[1] = b;
+	event->reals[2] = c;
+}
+
+static void send_nav_point(
+	short kind,
+	short nav_index,
+	long target,
+	long marker,
+	real vertical_offset)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_nav_point);
+
+	if (!event)
+		return;
+	event->type = (byte)kind;
+	event->value = nav_index;
+	event->target = target;
+	event->object_index = marker;
+	event->reals[0] = vertical_offset;
+}
+
+void network_coop_note_nav_point(
+	short kind,
+	short nav_index,
+	long target,
+	long marker,
+	real vertical_offset)
+{
+	short index;
+
+	if (!coop_host())
+		return;
+	send_nav_point(kind, nav_index, target, marker, vertical_offset);
+	for (index = 0; index < host_queue.hud_state.nav_point_count; index++)
+	{
+		if (host_queue.hud_state.nav_points[index].kind == kind && host_queue.hud_state.nav_points[index].target == target &&
+			host_queue.hud_state.nav_points[index].marker == marker)
+		{
+			break;
+		}
+	}
+	if (nav_index == NONE)
+	{
+		if (index < host_queue.hud_state.nav_point_count)
+			host_queue.hud_state.nav_points[index] = host_queue.hud_state.nav_points[--host_queue.hud_state.nav_point_count];
+		return;
+	}
+	if (index == host_queue.hud_state.nav_point_count)
+	{
+		if (index == COOP_MAXIMUM_NAV_POINTS)
+			return;
+		host_queue.hud_state.nav_point_count++;
+	}
+	host_queue.hud_state.nav_points[index].kind = kind;
+	host_queue.hud_state.nav_points[index].nav_index = nav_index;
+	host_queue.hud_state.nav_points[index].target = target;
+	host_queue.hud_state.nav_points[index].marker = marker;
+	host_queue.hud_state.nav_points[index].vertical_offset = vertical_offset;
+}
+
+/* host: the active nav points again (host_resend), and the objective to a
+machine that joined (it shows on screen when it comes, so not more often) */
+static void host_send_hud_state(
+	void)
+{
+	short index;
+
+	if (!coop_queue_arguments.refresh)
+		return;
+	if (coop_queue_arguments.joined && host_queue.hud_state.objective != NONE)
+	{
+		struct distributed_coop_event *event = event_new(_coop_event_hud);
+
+		if (event)
+		{
+			event->type = _coop_hud_objective;
+			event->value = host_queue.hud_state.objective;
+		}
+	}
+	for (index = 0; index < host_queue.hud_state.nav_point_count; index++)
+	{
+		send_nav_point(host_queue.hud_state.nav_points[index].kind, host_queue.hud_state.nav_points[index].nav_index,
+			host_queue.hud_state.nav_points[index].target, host_queue.hud_state.nav_points[index].marker,
+			host_queue.hud_state.nav_points[index].vertical_offset);
+	}
+}
+
+void network_coop_note_unit_animation(
+	long unit_index,
+	long animation_graph_index,
+	short animation_index,
+	boolean interpolate)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_unit_animation);
+
+	if (!event)
+		return;
+	event->object_index = unit_index;
+	event->tag_index = animation_graph_index;
+	event->value = animation_index;
+	event->interpolate = (byte)interpolate;
+}
+
+void network_coop_note_unit_open(
+	long unit_index,
+	boolean open)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_unit_open);
+
+	if (!event)
+		return;
+	event->object_index = unit_index;
+	event->value = (short)open;
+}
+
+/* unit_custom_animation_at_frame starts the animation and then sets the
+frame in the same call, so the start is still queued and unsent: the frame
+goes into it */
+void network_coop_note_unit_animation_frame(
+	long unit_index,
+	short frame_index)
+{
+	short index;
+
+	if (!coop_host())
+		return;
+	for (index = coop_events.count - 1; index >= 0; index--)
+	{
+		struct distributed_coop_event *event = &coop_events.events[index];
+
+		if (event->kind == _coop_event_unit_animation && event->object_index == unit_index)
+		{
+			if (coop_events.sends[index] == 0)
+				event->frame = frame_index;
+			return;
+		}
+	}
+}
+
+void network_coop_note_scenery_animation(
+	long object_index,
+	long animation_graph_index,
+	short animation_index,
+	short frame_index)
+{
+	struct object_datum *object = object_try_and_get(object_index);
+	struct distributed_coop_event *event;
+
+	if (!object || !(event = event_new(_coop_event_scenery_animation)))
+		return;
+	event->object_index = object_index;
+	event->name_index = object->object.name_index;
+	event->definition_index = object->definition_index;
+	event->tag_index = animation_graph_index;
+	event->value = animation_index;
+	event->frame = frame_index;
+}
+
+/* An attach (with the markers' indexes) or a detach (NONE markers). */
+static void send_attach(
+	byte type,
+	long parent_index,
+	short parent_marker_index,
+	long child_index,
+	short child_marker_index)
+{
+	struct object_datum *parent = object_try_and_get(parent_index);
+	struct object_datum *child = object_try_and_get(child_index);
+	struct distributed_coop_event *event;
+
+	if (!parent || !child || !(event = event_new(_coop_event_attach)))
+		return;
+	event->type = type;
+	event->object_index = parent_index;
+	event->name_index = parent->object.name_index;
+	event->definition_index = parent->definition_index;
+	event->target = child_index;
+	event->tag_index = child->definition_index;
+	event->reals[0] = child->object.name_index;
+	event->value = parent_marker_index;
+	event->frame = child_marker_index;
+}
+
+/* the child's attachment in host_queue.attachments, or NONE */
+static short host_attachment_find(
+	long child_index)
+{
+	short index;
+
+	for (index = 0; index < host_queue.attachment_count; index++)
+	{
+		if (host_queue.attachments[index].child_index == child_index)
+			return index;
+	}
+	return NONE;
+}
+
+static void host_send_attachments(
+	void)
+{
+	short index = 0;
+
+	if (!coop_queue_arguments.refresh)
+		return;
+	while (index < host_queue.attachment_count)
+	{
+		struct object_datum *child = object_try_and_get(host_queue.attachments[index].child_index);
+
+		/* the child is gone or has a new parent: forget it */
+		if (!child || child->object.parent_object_index != host_queue.attachments[index].parent_index)
+		{
+			host_queue.attachments[index] = host_queue.attachments[--host_queue.attachment_count];
+			continue;
+		}
+		send_attach(_coop_attach, host_queue.attachments[index].parent_index, host_queue.attachments[index].parent_marker_index,
+			host_queue.attachments[index].child_index, host_queue.attachments[index].child_marker_index);
+		index++;
+	}
+}
+
+void network_coop_note_attach(
+	long parent_index,
+	char const *parent_marker_name,
+	long child_index,
+	char const *child_marker_name)
+{
+	short parent_marker_index, child_marker_index;
+	short index;
+
+	if (!coop_host() || !object_try_and_get(parent_index) || !object_try_and_get(child_index))
+		return;
+	parent_marker_index = object_marker_index(parent_index, parent_marker_name);
+	child_marker_index = object_marker_index(child_index, child_marker_name);
+	send_attach(_coop_attach, parent_index, parent_marker_index, child_index, child_marker_index);
+
+	index = host_attachment_find(child_index);
+	if (index == NONE)
+	{
+		if (host_queue.attachment_count == COOP_MAXIMUM_ATTACHMENTS)
+			return;
+		index = host_queue.attachment_count++;
+	}
+	host_queue.attachments[index].parent_index = parent_index;
+	host_queue.attachments[index].child_index = child_index;
+	host_queue.attachments[index].parent_marker_index = parent_marker_index;
+	host_queue.attachments[index].child_marker_index = child_marker_index;
+}
+
+void network_coop_note_detach(
+	long parent_index,
+	long child_index)
+{
+	short index;
+
+	if (!coop_host())
+		return;
+	send_attach(_coop_detach, parent_index, NONE, child_index, NONE);
+	index = host_attachment_find(child_index);
+	if (index != NONE)
+		host_queue.attachments[index] = host_queue.attachments[--host_queue.attachment_count];
+}
+
+void network_coop_note_effect(
+	long effect_definition_index,
+	short cutscene_flag_index)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_effect);
+
+	if (!event)
+		return;
+	event->type = _coop_effect_at_flag;
+	event->tag_index = effect_definition_index;
+	event->value = cutscene_flag_index;
+}
+
+void network_coop_note_surface_broken(
+	short breakable_surface_index,
+	real_point3d const *epicenter)
+{
+	struct distributed_coop_event *event = event_new(_coop_event_surface_broken);
+
+	if (!event)
+		return;
+	event->value = breakable_surface_index;
+	event->frame = global_structure_bsp_index;
+	event->reals[0] = epicenter->x;
+	event->reals[1] = epicenter->y;
+	event->reals[2] = epicenter->z;
+}
+
+/* host: a few broken surfaces again each refresh, round them all, for a
+machine that joined since or lost the message (broken from their middle) */
+static void host_send_broken_surfaces(
+	void)
+{
+	enum { SURFACES_PER_REFRESH = 8 };
+	short cursor = host_queue.broken_surface_cursor;
+	short count = (short)coop_queue_arguments.surface_count;
+	short sent = 0;
+	short step;
+
+	if (!coop_queue_arguments.refresh || count <= 0)
+		return;
+	for (step = 0; step < count && sent < SURFACES_PER_REFRESH; step++)
+	{
+		short index = (short)((cursor + step) % count);
+		/* port: through the world's calls (the Rust port's) */
+		struct halo_sim_ai_call call;
+
+		memset(&call, 0, sizeof(call));
+		call.kind = _network_coop_world_call_surface_broken;
+		call.actor = NONE;
+		call.a = index;
+		network_coop_world_call(&call);
+		if (call.result)
+		{
+			real_point3d centroid;
+
+			centroid.x = call.output[0];
+			centroid.y = call.output[1];
+			centroid.z = call.output[2];
+			network_coop_note_surface_broken(index, &centroid);
+			sent++;
+		}
+	}
+	host_queue.broken_surface_cursor = (short)((cursor + step) % count);
+}
+
+void network_coop_note_object_effect(
+	long effect_definition_index,
+	long object_index,
+	char const *marker_name)
+{
+	struct object_datum *object = object_try_and_get(object_index);
+	long model_index = object ? object_definition_get(object->definition_index)->object.model.index : NONE;
+	short marker_index = model_index != NONE ? model_find_marker(model_index, marker_name) : NONE;
+	struct distributed_coop_event *event;
+
+	if (marker_index == NONE || !(event = event_new(_coop_event_effect)))
+		return;
+	event->type = _coop_effect_on_marker;
+	event->tag_index = effect_definition_index;
+	event->object_index = object_index;
+	event->name_index = object->object.name_index;
+	event->definition_index = object->definition_index;
+	event->value = marker_index;
+}
+
+boolean network_coop_skip_offered(
+	void)
+{
+	return coop_client() && skip_vote.offered && coop_presentation.cinematic_started;
+}
+
+boolean network_coop_vote_skip(
+	void)
+{
+	if (!coop_host() && !coop_client())
+		return FALSE;
+	skip_vote.voted = TRUE;
+	return TRUE;
+}
+
+/* The host reverted its game state, clock included. The clock is
+put back, since clients and the netcode expect it to only go forward, and
+the script threads' wake times move by the same amount so they still wake
+when they would have. The revert also renumbered the input queues from the
+old clock (update_queues_reset_and_fill_with_lies); they are renumbered
+from the restored one, or no tick would run until they caught up. And the
+revert is stamped with the restored time, since the script's game_reverted
+compares the stamp with the clock: otherwise it would play the cinematic
+it was meant to skip. */
+void network_coop_reverted(
+	long now)
+{
+	long ticks;
+
+	if (!coop_host())
+		return;
+	ticks = now - game_time_get();
+	if (ticks > 0)
+	{
+		game_time_set_distributed(now);
+		update_queues_reset_and_fill_with_lies();
+		game_state_port_restamp_revert_time();
+		hs_runtime_port_shift_sleep_times(ticks);
+	}
+	/* (the dropships' riders kept are of the game state reverted from) */
+	coop_enemies_reset();
+	error(_error_silent, "co-op: reverted %ld ticks, clock kept at %ld", ticks, now);
+	event_new(_coop_event_reverted);
+}
+
+void network_coop_skip_done(
+	void)
+{
+	if (!coop_host())
+		return;
+	skip_vote_clear();
+	skip_vote.requested = FALSE;
+	skip_vote.cooldown_until = game_time_get() + SKIP_COOLDOWN_TICKS;
+}
+
+boolean network_coop_skip_vote_status(
+	short *votes,
+	short *voters,
+	boolean *voted)
+{
+	boolean offered = coop_host() ? skip_vote.offered : network_coop_skip_offered();
+
+	if (!offered || skip_vote.voters <= 0)
+		return FALSE;
+	*votes = skip_vote.votes;
+	*voters = skip_vote.voters;
+	*voted = skip_vote.voted;
+	return TRUE;
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_send_queue_game(
+	void)
+{
+	host_send_attachments();
+	host_send_looping_sounds();
+	host_send_hud_state();
+	host_send_broken_surfaces();
+	host_send_events();
+}
+
+/* host, each tick: what a late joiner lacks of the scripts' attachments,
+looping sounds and HUD state, and a few broken surfaces, again (with the
+resent state), and the events queued sent */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the events and the
+host's records. */
+static void host_send_queue(
+	void)
+{
+	struct halo_sim_network_coop_queue *arguments = &coop_queue_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[3];
+	int checking = FALSE;
+
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->refresh = host_resend.refresh;
+	arguments->joined = host_resend.joined;
+	arguments->events = (unsigned long)&coop_events;
+	arguments->queue = (unsigned long)&host_queue;
+	arguments->structure_bsp_index = global_structure_bsp_index;
+	arguments->surface_count = global_structure_bsp_get()->breakable_surfaces.count;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_events;
+	regions[1].size = sizeof(coop_events);
+	regions[2].address = (unsigned long)&host_queue;
+	regions[2].size = sizeof(host_queue);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_queue, &context, regions, 3,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_send_queue_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_queue);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void host_resend_and_vitality_game(
+	void)
+{
+	host_resend_update();
+	players_vitality_keep();
+}
+
+/* host, each tick: whether a machine joined and whether to resend, and the
+players' units kept at the vitality the scripts set */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the machines
+gathered, the resend's records and the players' vitality. */
+static void host_resend_and_vitality(
+	void)
+{
+	struct halo_sim_network_coop_resend *arguments = &coop_resend_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
+
+	coop_resend_inputs.machine_count = distributed_client_machines(coop_resend_inputs.machines,
+		HALO_PORT_MAXIMUM_NETWORK_MACHINES);
+	{
+		struct data_iterator iterator;
+		struct player_datum *player;
+		short index;
+
+		coop_resend_inputs.player_count = (short)MIN(player_data->count, HALO_PORT_MAXIMUM_NETWORK_PLAYERS);
+		for (index = 0; index < HALO_PORT_MAXIMUM_NETWORK_PLAYERS; index++)
+		{
+			coop_resend_inputs.player_units[index].unit_index = NONE;
+			coop_resend_inputs.player_units[index].maximum_body = 0.0f;
+			coop_resend_inputs.player_units[index].maximum_shield = 0.0f;
+		}
+		data_iterator_new(&iterator, player_data);
+		while ((player = data_iterator_next(&iterator)) != NULL)
+		{
+			struct object_datum *unit = object_try_and_get(player->unit_index);
+			short absolute_index = (short)DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.datum_index);
+
+			if (unit && absolute_index < HALO_PORT_MAXIMUM_NETWORK_PLAYERS)
+			{
+				coop_resend_inputs.player_units[absolute_index].unit_index = player->unit_index;
+				coop_resend_inputs.player_units[absolute_index].maximum_body = unit->object.maximum_body_vitality;
+				coop_resend_inputs.player_units[absolute_index].maximum_shield = unit->object.maximum_shield_vitality;
+			}
+		}
+	}
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->inputs = (unsigned long)&coop_resend_inputs;
+	arguments->resend = (unsigned long)&host_resend;
+	arguments->vitality = (unsigned long)&players_vitality;
+	regions[0].address = (unsigned long)arguments;
+	regions[0].size = sizeof(*arguments);
+	regions[1].address = (unsigned long)&coop_resend_inputs;
+	regions[1].size = sizeof(coop_resend_inputs);
+	regions[2].address = (unsigned long)&host_resend;
+	regions[2].size = sizeof(host_resend);
+	regions[3].address = (unsigned long)&players_vitality;
+	regions[3].size = sizeof(players_vitality);
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_resend, &context, regions, 4,
+		network_coop_world_call, &checking))
+	{
+		return;
+	}
+	host_resend_and_vitality_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_resend);
+}
+
+/* host, after each tick */
+void network_coop_host_tick(
+	void)
+{
+	if (!coop_game())
+		return;
+	host_resend_and_vitality();
+	coop_enemies_update();
+	host_send_presentation();
+	host_send_device_groups();
+	if (host_resend.joined || game_time_get() % OBJECT_NAMES_INTERVAL_TICKS == 0)
+		host_send_object_names();
+	host_send_world();
+	host_send_screen_effect();
+	host_send_queue();
+}
+
+/* client, after each tick */
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_tick_game(
+	void)
+{
+	client_play_presentation();
+	players_vitality_keep();
+	if (coop_client_tick_inputs.now - coop_presentation.heard_time > PRESENTATION_SILENCE_TICKS)
+	{
+		client_cinematic_end();
+		client_host_camera_set(FALSE);
+		client_event_call(_network_coop_client_call_input_enable, NONE, TRUE, 0, NULL, 0, NULL, 0);
+	}
+	/* sent every tick while a skip is offered, voted or not, because the
+	host only counts machines it hears from */
+	if (!(skip_vote.offered && coop_presentation.cinematic_started))
+		skip_vote.voted = FALSE;
+	else
+		client_event_call(_network_coop_client_call_skip_vote, NONE, skip_vote.voted, 0, NULL, 0, NULL, 0);
+}
+
+/* client, after each tick: the host's presentation played in its turn, the
+players' vitality kept, the cinematic ended when the host goes quiet, and
+the skip vote sent while a skip is offered */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, what it reads of the
+game, the presentation, the skip vote, the players' vitality and the objects
+(their vitality kept). */
+void network_coop_client_tick(
+	void)
+{
+	struct halo_sim_network_coop_client_tick *arguments = &coop_client_tick_arguments;
+	struct coop_client_tick_inputs *inputs = &coop_client_tick_inputs;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[9];
+	struct memory_pool *pool = objects_memory_pool();
+	long region_count = 0;
+	int checking = FALSE;
+
+	/* (a multiplayer game's input and camera are its own) */
+	if (!coop_client())
+		return;
+	csmemset(inputs, 0, sizeof(*inputs));
+	inputs->now = game_time_get();
+	inputs->cinematic_in_progress = cinematic_in_progress();
+	inputs->watching_rider = coop_spectate_watching_rider(0);
+	inputs->nothing_to_watch = coop_spectate_nothing_to_watch(0);
+	inputs->scripted_shake = player_effect_port_scripted_active() != FALSE;
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->inputs = (unsigned long)inputs;
+	arguments->presentation = (unsigned long)&coop_presentation;
+	arguments->skip_vote = (unsigned long)&skip_vote;
+	arguments->vitality = (unsigned long)&players_vitality;
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)inputs;
+	regions[region_count++].size = sizeof(*inputs);
+	regions[region_count].address = (unsigned long)&coop_presentation;
+	regions[region_count++].size = sizeof(coop_presentation);
+	regions[region_count].address = (unsigned long)&skip_vote;
+	regions[region_count++].size = sizeof(skip_vote);
+	regions[region_count].address = (unsigned long)&players_vitality;
+	regions[region_count++].size = sizeof(players_vitality);
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_tick, &context, regions, region_count,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	client_tick_game();
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_tick);
+}
+
+word network_coop_presentation_entry_size(
+	void)
+{
+	return sizeof(struct distributed_coop_presentation);
+}
+
+word network_coop_event_entry_size(
+	void)
+{
+	return sizeof(struct distributed_coop_event);
+}
+
+word network_coop_device_group_entry_size(
+	void)
+{
+	return sizeof(struct distributed_coop_device_group);
+}
+
+void network_coop_note_player_structure_bsp(
+	short player_index,
+	short structure_bsp_index)
+{
+	if (player_index >= 0 && player_index < MAXIMUM_TRACKED_PLAYERS)
+		host_player_structure_bsps[player_index] = structure_bsp_index;
+}
+
+boolean network_coop_player_has_structure_bsp(
+	long player_index)
+{
+	struct player_datum *player;
+
+	if (!network_coop_active())
+		return TRUE;
+	/* (no player, or none of the tracked: whose BSP is not known, which
+	does not keep their predictions out) */
+	player = player_index != NONE ? player_try_and_get(player_index) : NULL;
+	if (!player || DATUM_INDEX_TO_ABSOLUTE_INDEX(player_index) >= MAXIMUM_TRACKED_PLAYERS)
+		return TRUE;
+	return player->local_player_index != NONE ||
+		host_player_structure_bsps[DATUM_INDEX_TO_ABSOLUTE_INDEX(player_index)] == global_structure_bsp_index_get();
+}
+
+word network_coop_device_state_entry_size(
+	void)
+{
+	return sizeof(struct distributed_coop_device_state);
+}
+
+/* client: its devices where the host's are (DEVICE_POSITION_TOLERANCE) */
+/* port: a client's world calls (the Rust port's, crates/halo_map's
+network_coop) */
+void network_coop_client_call(
+	struct halo_sim_ai_call *call)
+{
+	int opened = halo_sim_world_event_begin(call);
+
+	switch (call->kind)
+	{
+	case _network_coop_client_call_device_state:
+		device_port_set_state(call->actor, call->input[0], (boolean)call->a, call->input[1]);
+		break;
+	case _network_coop_client_call_set_position:
+	{
+		real_point3d position;
+		real_vector3d forward, up;
+
+		position.x = call->input[0];
+		position.y = call->input[1];
+		position.z = call->input[2];
+		forward.i = call->input[3];
+		forward.j = call->input[4];
+		forward.k = call->input[5];
+		up.i = call->input[6];
+		up.j = call->input[7];
+		up.k = call->input[8];
+		object_set_position(call->actor, &position, &forward, &up);
+		break;
+	}
+	case _network_coop_client_call_set_permutation:
+		object_get(call->actor)->object.region_permutations[call->a] = (byte)call->b;
+		break;
+	case _network_coop_client_call_set_scale:
+		objects_scripting_set_scale(call->actor, call->input[0], 0);
+		break;
+	case _network_coop_client_call_set_device_group:
+		device_group_network_set((short)call->actor, call->input[0], (word)call->a, (boolean)call->b);
+		break;
+	case _network_coop_client_call_create_named:
+		object_new_by_name((short)call->actor);
+		break;
+	case _network_coop_client_call_delete:
+		object_delete(call->actor);
+		break;
+	case _network_coop_client_call_hud_help_text:
+		hud_scripted_globals->show_hud_help_text = (boolean)call->a;
+		break;
+	case _network_coop_client_call_hud_state_message:
+		scripted_hud_set_state_message((short)call->a);
+		break;
+	case _network_coop_client_call_hud_objective:
+		scripted_hud_set_objective((short)call->a);
+		break;
+	case _network_coop_client_call_hud_flash:
+		scripted_hud_set_flashing_state((boolean)call->a);
+		break;
+	case _network_coop_client_call_hud_clear:
+		scripted_hud_messages_clear();
+		break;
+	case _network_coop_client_call_hud_checkpoint:
+		hud_autosave((boolean)call->a);
+		break;
+	case _network_coop_client_call_player_effect:
+		switch (call->a)
+		{
+		case _coop_player_effect_translation:
+			scripted_player_effect_set_translation(call->input[0], call->input[1], call->input[2]);
+			break;
+		case _coop_player_effect_rotation:
+			scripted_player_effect_set_rotation(call->input[0], call->input[1], call->input[2]);
+			break;
+		case _coop_player_effect_start:
+			scripted_player_effect_start(call->input[0], call->input[1]);
+			break;
+		case _coop_player_effect_stop:
+			scripted_player_effect_stop(call->input[0]);
+			break;
+		}
+		break;
+	case _network_coop_client_call_nav_point:
+	{
+		long object_index;
+		boolean activate = call->b != NONE;
+		real offset = call->input[0];
+
+		csmemcpy(&object_index, &call->input[1], sizeof(long));
+		switch (call->a)
+		{
+		case _coop_nav_point_team_flag:
+			if (activate)
+				hud_activate_team_nav_point_with_flag((short)call->b, (short)call->actor, (short)object_index, offset);
+			else
+				hud_deactivate_team_nav_point_with_flag((short)call->actor, (short)object_index);
+			break;
+		case _coop_nav_point_team_object:
+			if (activate)
+				hud_activate_team_nav_point_with_object((short)call->b, (short)call->actor, object_index, offset);
+			else
+				hud_deactivate_team_nav_point_with_object((short)call->actor, object_index);
+			break;
+		case _coop_nav_point_unit_flag:
+			if (activate)
+				hud_unit_activate_nav_point_with_flag((short)call->b, call->actor, (short)object_index, offset);
+			else
+				hud_unit_deactivate_nav_point_with_flag(call->actor, (short)object_index);
+			break;
+		case _coop_nav_point_unit_object:
+			if (activate)
+				hud_unit_activate_nav_point_with_object((short)call->b, call->actor, object_index, offset);
+			else
+				hud_unit_deactivate_nav_point_with_object(call->actor, object_index);
+			break;
+		}
+		break;
+	}
+	case _network_coop_client_call_unit_stop_animation:
+		unit_stop_custom_animation(call->actor);
+		break;
+	case _network_coop_client_call_unit_play_animation:
+	{
+		long longs[2];
+
+		csmemcpy(longs, &call->input[0], sizeof(longs));
+		unit_port_play_user_animation(call->actor, call->a, (short)call->b, (boolean)longs[0], (short)longs[1]);
+		break;
+	}
+	case _network_coop_client_call_scenery_animation:
+	{
+		long frame;
+
+		csmemcpy(&frame, &call->input[0], sizeof(frame));
+		scenery_animation_start_at_frame(call->actor, call->a, distributed_graph_animation(call->a, (short)call->b)->name,
+			(short)frame);
+		break;
+	}
+	case _network_coop_client_call_sound_impulse:
+		scripted_sound_new(call->a, call->actor, call->input[0]);
+		break;
+	case _network_coop_client_call_looping_sound_start:
+		scripted_looping_sound_start(call->a, call->actor, call->input[0]);
+		break;
+	case _network_coop_client_call_looping_sound_stop:
+		scripted_looping_sound_stop(call->a);
+		break;
+	case _network_coop_client_call_effect_at_flag:
+		hs_effect_new(call->a, (short)call->b);
+		break;
+	case _network_coop_client_call_effect_on_marker:
+	{
+		struct object_datum *object = object_get(call->actor);
+		struct model *model = model_definition_get(object_definition_get(object->definition_index)->object.model.index);
+
+		hs_effect_new_from_object_marker(call->a, call->actor,
+			TAG_BLOCK_GET_ELEMENT(&model->markers, call->b, struct model_marker)->name);
+		break;
+	}
+	case _network_coop_client_call_detach:
+		objects_scripting_detach(call->actor, call->a);
+		break;
+	case _network_coop_client_call_attach:
+	{
+		long frame;
+
+		csmemcpy(&frame, &call->input[0], sizeof(frame));
+		objects_scripting_attach(call->actor, object_marker_name(call->actor, (short)call->b), call->a,
+			object_marker_name(call->a, (short)frame));
+		break;
+	}
+	case _network_coop_client_call_stop_impulse:
+		sound_stop_impulse(sound_definition_get(call->a)->scripting_sound_index);
+		break;
+	case _network_coop_client_call_title:
+		cinematic_set_title_delayed((short)call->a, call->input[0]);
+		break;
+	case _network_coop_client_call_break_surface:
+	{
+		real_point3d epicenter;
+
+		epicenter.x = call->input[0];
+		epicenter.y = call->input[1];
+		epicenter.z = call->input[2];
+		breakable_surface_port_break((short)call->a, &epicenter);
+		break;
+	}
+	case _network_coop_client_call_unit_open:
+		if (call->a)
+			unit_open(call->actor);
+		else
+			unit_close(call->actor);
+		break;
+	case _network_coop_client_call_set_screen_effect:
+		rasterizer_screen_effect_port_set(&coop_client_screen_effect);
+		break;
+	case _network_coop_client_call_input_enable:
+		player_input_enable((boolean)call->a);
+		break;
+	case _network_coop_client_call_allegiance:
+		game_allegiance_set_teams(coop_presentation.buffered[call->a].ally_teams,
+			coop_presentation.buffered[call->a].friendly_teams);
+		break;
+	case _network_coop_client_call_shake_end:
+		player_effect_port_scripted_end();
+		break;
+	case _network_coop_client_call_cinematic_start:
+		cinematic_start();
+		break;
+	case _network_coop_client_call_cinematic_stop:
+		cinematic_stop();
+		break;
+	case _network_coop_client_call_host_camera:
+		director_script_camera((boolean)call->a);
+		break;
+	case _network_coop_client_call_letterbox:
+		cinematic_show_letterbox((boolean)call->a);
+		break;
+	case _network_coop_client_call_activating_cluster:
+		objects_port_set_activating_cluster((short)call->a);
+		break;
+	case _network_coop_client_call_camera:
+	{
+		real_point3d position;
+		real_vector3d forward, up;
+		real field_of_view;
+
+		position.x = call->input[0];
+		position.y = call->input[1];
+		position.z = call->input[2];
+		forward.i = call->input[3];
+		forward.j = call->input[4];
+		forward.k = call->input[5];
+		up.i = call->input[6];
+		up.j = call->input[7];
+		up.k = call->input[8];
+		csmemcpy(&field_of_view, &call->b, sizeof(field_of_view));
+		scripted_camera_set_camera_point_relative(&position, &forward, &up, field_of_view, 0, NONE);
+		break;
+	}
+	case _network_coop_client_call_fade:
+	{
+		real_rgb_color color;
+
+		color.red = call->input[0];
+		color.green = call->input[1];
+		color.blue = call->input[2];
+		player_effect_port_screen_fade_set(&color, (short)call->a, (boolean)call->b, call->actor);
+		break;
+	}
+	case _network_coop_client_call_hud_state:
+		client_apply_hud_state(&coop_presentation.buffered[call->a]);
+		break;
+	case _network_coop_client_call_skip_vote:
+	{
+		struct distributed_coop_skip_vote_message message;
+
+		csmemset(&message.vote, 0, sizeof(message.vote));
+		message.vote.voted = (byte)call->a;
+		distributed_send(&message, _distributed_message_coop_skip_vote, 1, (word)sizeof(message), _distributed_to_host);
+		break;
+	}
+	}
+	halo_sim_world_event_end(call, opened);
+}
+
+static void client_apply_device_states_game(void const *entries, short count);
+static void client_apply_object_transforms_game(void const *entries, short count);
+static void client_apply_object_looks_game(void const *entries, short count);
+
+/* port: the client's world changes from its host (device states, scenery
+transforms, looks): Rust's in Rust's mode (crates/halo_map's network_coop),
+checked against the game's otherwise. Its world: the arguments; the game's
+changes go through calls. */
+static void client_apply_world(
+	short kind,
+	void const *entries,
+	short count)
+{
+	struct halo_sim_network_coop_client_world arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[5];
+	struct memory_pool *pool = objects_memory_pool();
+	long region_count = 0;
+	int checking = FALSE;
+
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.kind = kind;
+	arguments.count = count;
+	arguments.entries = (unsigned long)entries;
+	arguments.object_name_list = (unsigned long)object_name_list_port_get();
+	arguments.tag_instances = (unsigned long)cache_files_tag_instances(&arguments.tag_count);
+	regions[region_count].address = (unsigned long)&arguments;
+	regions[region_count++].size = sizeof(arguments);
+	/* (the objects, which the calls change and the game reads after them:
+	a device's position, an object's scale) */
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_world, &context, regions, region_count,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	switch (kind)
+	{
+	case _coop_client_world_device_states: client_apply_device_states_game(entries, count); break;
+	case _coop_client_world_object_transforms: client_apply_object_transforms_game(entries, count); break;
+	case _coop_client_world_object_looks: client_apply_object_looks_game(entries, count); break;
+	}
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_world);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_device_states_game(
+	void const *entries,
+	short count)
+{
+	struct distributed_coop_device_state const *states = entries;
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		struct distributed_coop_device_state const *state = &states[index];
+		long device_index = object_find(state->name_index, state->object_index, state->definition_index,
+			_object_mask_device);
+		struct device_datum *device;
+		real difference;
+
+		if (device_index == NONE || !distributed_real_valid(state->position) || !distributed_real_valid(state->power))
+			continue;
+		device = object_get_and_verify_type(device_index, _object_mask_device);
+		difference = device->device.position - state->position;
+		if (difference < 0.0f)
+			difference = -difference;
+		/* port: (through the world's calls, the Rust port's) */
+		{
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_client_call_device_state;
+			call.actor = device_index;
+			call.a = (!state->moving && difference > 0.001f) || difference > DEVICE_POSITION_TOLERANCE;
+			call.input[0] = state->power;
+			call.input[1] = state->position;
+			network_coop_client_call(&call);
+		}
+	}
+}
+
+void network_coop_handle_device_states(
+	void const *entries,
+	short count)
+{
+	if (coop_client())
+		client_apply_world(_coop_client_world_device_states, entries, count);
+}
+
+word network_coop_object_transform_entry_size(
+	void)
+{
+	return sizeof(struct distributed_coop_object_transform);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_object_transforms_game(
+	void const *entries,
+	short count)
+{
+	struct distributed_coop_object_transform const *transforms = entries;
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		struct distributed_coop_object_transform const *transform = &transforms[index];
+		long object_index = object_find(transform->name_index, transform->object_index, transform->definition_index,
+			COOP_MOVED_OBJECTS);
+		real_vector3d forward, up;
+
+		if (object_index == NONE || object_get(object_index)->object.parent_object_index != NONE)
+			continue;
+		distributed_vector_unpack(&transform->forward, DISTRIBUTED_UNIT_SCALE, &forward);
+		distributed_vector_unpack(&transform->up, DISTRIBUTED_UNIT_SCALE, &up);
+		if (distributed_point_valid(&transform->position, UNIT_WORLD_BOUND) && distributed_axes_make_valid(&forward, &up))
+		{
+			/* port: (through the world's calls, the Rust port's) */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_client_call_set_position;
+			call.actor = object_index;
+			call.input[0] = transform->position.x;
+			call.input[1] = transform->position.y;
+			call.input[2] = transform->position.z;
+			call.input[3] = forward.i;
+			call.input[4] = forward.j;
+			call.input[5] = forward.k;
+			call.input[6] = up.i;
+			call.input[7] = up.j;
+			call.input[8] = up.k;
+			network_coop_client_call(&call);
+		}
+	}
+}
+
+void network_coop_handle_object_transforms(
+	void const *entries,
+	short count)
+{
+	if (coop_client())
+		client_apply_world(_coop_client_world_object_transforms, entries, count);
+}
+
+word network_coop_object_look_entry_size(
+	void)
+{
+	return sizeof(struct distributed_coop_object_look);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_object_looks_game(
+	void const *entries,
+	short count)
+{
+	struct distributed_coop_object_look const *looks = entries;
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		struct distributed_coop_object_look const *look = &looks[index];
+		long object_index = object_find(look->name_index, look->object_index, look->definition_index, _object_mask_all);
+		struct object_datum *object = object_index != NONE ? object_get(object_index) : NULL;
+		long model_index = object ? object_definition_get(object->definition_index)->object.model.index : NONE;
+		struct model *model = model_index != NONE ? model_definition_get(model_index) : NULL;
+		short region_index;
+
+		if (!object)
+			continue;
+		/* only a permutation its model has, or none */
+		for (region_index = 0; model && region_index < model->regions.count &&
+			region_index < MAXIMUM_REGIONS_PER_OBJECT; region_index++)
+		{
+			byte permutation_index = look->region_permutations[region_index];
+
+			if (permutation_index == (byte)NONE ||
+				permutation_index < TAG_BLOCK_GET_ELEMENT(&model->regions, region_index, struct model_region)->permutations.count)
+			{
+				/* port: (through the world's calls, the Rust port's) */
+				struct halo_sim_ai_call call;
+
+				memset(&call, 0, sizeof(call));
+				call.kind = _network_coop_client_call_set_permutation;
+				call.actor = object_index;
+				call.a = region_index;
+				call.b = permutation_index;
+				network_coop_client_call(&call);
+			}
+		}
+		if (distributed_real_valid(look->scale) && look->scale > 0.0f && look->scale < 100.0f &&
+			look->scale != object->object.scale)
+		{
+			/* port: (through the world's calls, the Rust port's) */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_client_call_set_scale;
+			call.actor = object_index;
+			call.input[0] = look->scale;
+			network_coop_client_call(&call);
+		}
+	}
+}
+
+void network_coop_handle_object_looks(
+	void const *entries,
+	short count)
+{
+	if (coop_client())
+		client_apply_world(_coop_client_world_object_looks, entries, count);
+}
+
+word network_coop_object_names_entry_size(
+	void)
+{
+	return sizeof(struct distributed_coop_object_names);
+}
+
+word network_coop_skip_vote_entry_size(
+	void)
+{
+	return sizeof(struct distributed_coop_skip_vote);
+}
+
+/* host: a client's skip vote */
+void network_coop_handle_skip_vote(
+	long machine_index,
+	void const *entries)
+{
+	struct distributed_coop_skip_vote const *vote = entries;
+
+	if (!coop_host() || machine_index < 0 || machine_index >= HALO_PORT_MAXIMUM_NETWORK_MACHINES)
+		return;
+	skip_vote.client_heard_times[machine_index] = game_time_get();
+	skip_vote.client_vote_times[machine_index] = vote->voted ? game_time_get() : NONE;
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_device_groups_game(
+	void const *entries,
+	short count)
+{
+	struct distributed_coop_device_group const *groups = entries;
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		struct distributed_coop_device_group const *entry = &groups[index];
+		short group_index = device_group_find(entry);
+		real value, here;
+		word flags;
+		boolean runtime, snap;
+
+		if (group_index == NONE || !device_group_network_get(group_index, &here, &flags, &runtime))
+			continue;
+		if (!distributed_real_valid(entry->value))
+			continue;
+		value = PIN(entry->value, 0.0f, 1.0f);
+		/* Jump straight to the value when the host did, or when a rotation
+		entry disagrees with us (we missed the change, or joined late).
+		A change entry animates, as it did on the host. */
+		snap = (client_devices.seen[group_index] && entry->snaps != client_devices.snaps[group_index]) ||
+			(!entry->changed && value != here);
+		if (snap || value != here || entry->flags != (byte)flags)
+		{
+			/* port: (through the world's calls, the Rust port's) */
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = _network_coop_client_call_set_device_group;
+			call.actor = group_index;
+			call.a = entry->flags;
+			call.b = snap;
+			call.input[0] = value;
+			network_coop_client_call(&call);
+		}
+		client_devices.snaps[group_index] = entry->snaps;
+		client_devices.seen[group_index] = TRUE;
+	}
+}
+
+/* client: the host's device groups, each as the host has it (jumping there
+when the host did, or when a rotation's entry disagrees: a change missed, or
+a late join) */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the snap counts seen
+and the game's device groups (which the calls change). */
+void network_coop_handle_device_groups(
+	void const *entries,
+	short count)
+{
+	struct halo_sim_network_coop_client_devices arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[4];
+	int checking = FALSE;
+	word network_flags;
+	short runtime_bit;
+
+	if (!coop_client())
+		return;
+	device_group_network_masks(&network_flags, &runtime_bit);
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.count = count;
+	arguments.entries = (unsigned long)entries;
+	arguments.client_devices = (unsigned long)&client_devices;
+	arguments.device_groups = (unsigned long)device_groups_data;
+	arguments.scenario_group_count = global_scenario_get()->device_groups.count;
+	arguments.network_flags = network_flags;
+	arguments.runtime_bit = runtime_bit;
+	arguments.object_name_list = (unsigned long)object_name_list_port_get();
+	regions[0].address = (unsigned long)&arguments;
+	regions[0].size = sizeof(arguments);
+	regions[1].address = (unsigned long)&client_devices;
+	regions[1].size = sizeof(client_devices);
+	regions[2].address = (unsigned long)device_groups_data;
+	regions[2].size = sizeof(struct data_array);
+	regions[3].address = (unsigned long)device_groups_data->data;
+	regions[3].size = device_groups_data->maximum_count * device_groups_data->size;
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_devices, &context, regions, 4,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	client_apply_device_groups_game(entries, count);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_devices);
+}
+
+/* Client: creates or deletes named scenery and devices to match the host.
+A difference must show up twice in a row, on the same BSP, so a message
+that crosses a BSP switch or a script's create can't cause a false one. */
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_object_names_game(
+	void const *entries)
+{
+	struct distributed_coop_object_names const *names = entries;
+	short name_index;
+
+	if (names->structure_bsp_index != global_structure_bsp_index_get() ||
+		names->name_count != MIN(global_scenario_get()->object_names.count, MAXIMUM_OBJECT_NAMES_PER_SCENARIO))
+	{
+		csmemset(client_names_differing, 0, sizeof(client_names_differing));
+		return;
+	}
+	for (name_index = 0; name_index < names->name_count; name_index++)
+	{
+		byte *differing = &client_names_differing[name_index / 8];
+		byte bit = (byte)(1 << (name_index % 8));
+		boolean host_has = (names->present[name_index / 8] & bit) != 0;
+		long object_index = object_index_from_name_index(name_index);
+		short type = object_name_type(name_index);
+
+		if (type < 0 || type >= NUMBER_OF_OBJECT_TYPES || TEST_FLAG(NETWORKED_OBJECT_TYPES, type) ||
+			host_has == (object_index != NONE))
+		{
+			*differing &= (byte)~bit;
+			continue;
+		}
+		if (!(*differing & bit))
+		{
+			*differing |= bit;
+			continue;
+		}
+		*differing &= (byte)~bit;
+		/* port: (through the world's calls, the Rust port's) */
+		if (host_has || !object_holds_player(object_index))
+		{
+			struct halo_sim_ai_call call;
+
+			memset(&call, 0, sizeof(call));
+			call.kind = host_has ? _network_coop_client_call_create_named : _network_coop_client_call_delete;
+			call.actor = host_has ? name_index : object_index;
+			network_coop_client_call(&call);
+		}
+	}
+}
+
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the differences
+seen, the names' objects, and the objects (which the calls make and
+delete). */
+void network_coop_handle_object_names(
+	void const *entries)
+{
+	struct halo_sim_network_coop_client_names arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[7];
+	struct memory_pool *pool = objects_memory_pool();
+	struct scenario *scenario = global_scenario_get();
+	long region_count = 0;
+	int checking = FALSE;
+
+	if (!coop_client())
+		return;
+	memset(&arguments, 0, sizeof(arguments));
+	arguments.names = (unsigned long)entries;
+	arguments.differing = (unsigned long)client_names_differing;
+	arguments.object_name_list = (unsigned long)object_name_list_port_get();
+	arguments.scenario_names = (unsigned long)scenario->object_names.address;
+	arguments.scenario_name_count = scenario->object_names.count;
+	arguments.structure_bsp_index = global_structure_bsp_index_get();
+	regions[region_count].address = (unsigned long)&arguments;
+	regions[region_count++].size = sizeof(arguments);
+	regions[region_count].address = (unsigned long)client_names_differing;
+	regions[region_count++].size = sizeof(client_names_differing);
+	regions[region_count].address = arguments.object_name_list;
+	regions[region_count++].size = MAXIMUM_OBJECT_NAMES_PER_SCENARIO * sizeof(long);
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)&arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_names, &context, regions, region_count,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	client_apply_object_names_game(entries);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_names);
+}
+
+/* port: the game's (halo_sim.c checks Rust's against it) */
+static void client_apply_events_game(
+	void const *entries,
+	short count)
+{
+	struct distributed_coop_event const *events = entries;
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		/* already applied (the comparison handles the number wrapping) */
+		if (coop_events.applied_any && (short)(events[index].number - coop_events.applied_number) <= 0)
+			continue;
+		coop_events.applied_number = events[index].number;
+		coop_events.applied_any = TRUE;
+		/* (not with a number that isn't one) */
+		if (!distributed_real_valid(events[index].reals[0]) || !distributed_real_valid(events[index].reals[1]) ||
+			!distributed_real_valid(events[index].reals[2]))
+		{
+			continue;
+		}
+		client_apply_event(&events[index]);
+	}
+}
+
+/* client: applies each event once, in order */
+/* port: Rust's in Rust's mode (crates/halo_map's network_coop), checked
+against the game's otherwise. Its world: the arguments, the events applied,
+the script sounds played, and the objects (which the calls change: an
+attach). */
+void network_coop_handle_events(
+	void const *entries,
+	short count)
+{
+	struct halo_sim_network_coop_client_events *arguments = &coop_client_events_arguments;
+	struct halo_sim_world_context context;
+	struct halo_sim_world_region regions[8];
+	struct memory_pool *pool = objects_memory_pool();
+	struct scenario *scenario = global_scenario_get();
+	long region_count = 0;
+	int checking = FALSE;
+
+	if (!coop_client())
+		return;
+	memset(arguments, 0, sizeof(*arguments));
+	arguments->count = count;
+	arguments->entries = (unsigned long)entries;
+	arguments->events = (unsigned long)&coop_events;
+	arguments->script_sounds = (unsigned long)&client_script_sounds;
+	arguments->client_has = (unsigned long)network_objects_client_has_table();
+	arguments->object_name_list = (unsigned long)object_name_list_port_get();
+	arguments->tag_instances = (unsigned long)cache_files_tag_instances(&arguments->tag_count);
+	arguments->hud_message_count = hud_messaging_port_message_count();
+	arguments->arrow_count = hud_globals->waypoint.arrows.count;
+	arguments->cutscene_flag_count = scenario->cutscene_flags.count;
+	arguments->chapter_title_count = scenario->cutscene_chapter_titles.count;
+	arguments->structure_bsp_index = global_structure_bsp_index;
+	arguments->looping_playing = (unsigned long)coop_client_events_looping_playing;
+	{
+		struct distributed_coop_event const *events = entries;
+		short index;
+
+		csmemset(coop_client_events_looping_playing, 0, sizeof(coop_client_events_looping_playing));
+		for (index = 0; index < count && index < MAXIMUM_QUEUED_EVENTS; index++)
+		{
+			coop_client_events_looping_playing[index] = (byte)(events[index].kind == _coop_event_sound &&
+				distributed_tag_of_group(events[index].tag_index, LOOPING_SOUND_DEFINITION_TAG) &&
+				looping_sound_definition_get(events[index].tag_index)->runtime_scripting_sound_index != NONE);
+		}
+	}
+	regions[region_count].address = (unsigned long)coop_client_events_looping_playing;
+	regions[region_count++].size = sizeof(coop_client_events_looping_playing);
+	regions[region_count].address = (unsigned long)arguments;
+	regions[region_count++].size = sizeof(*arguments);
+	regions[region_count].address = (unsigned long)&coop_events;
+	regions[region_count++].size = sizeof(coop_events);
+	regions[region_count].address = (unsigned long)&client_script_sounds;
+	regions[region_count++].size = sizeof(client_script_sounds);
+	regions[region_count].address = (unsigned long)object_header_data;
+	regions[region_count++].size = sizeof(struct data_array);
+	regions[region_count].address = (unsigned long)object_header_data->data;
+	regions[region_count++].size = object_header_data->maximum_count * object_header_data->size;
+	if (pool)
+	{
+		byte *used_end = pool->last_block ? (byte *)pool->last_block + pool->last_block->size : (byte *)pool->base_address;
+		byte *end = used_end + 0x10000 < (byte *)pool->base_address + pool->size ?
+			used_end + 0x10000 : (byte *)pool->base_address + pool->size;
+
+		regions[region_count].address = (unsigned long)pool;
+		regions[region_count++].size = sizeof(*pool);
+		regions[region_count].address = (unsigned long)pool->base_address;
+		regions[region_count++].size = (unsigned long)(end - (byte *)pool->base_address);
+	}
+	memset(&context, 0, sizeof(context));
+	context.game_time = game_time_get();
+	context.object_header_data = (unsigned long)object_header_data;
+	context.player_data = (unsigned long)player_data;
+	context.arguments = (unsigned long)arguments;
+	if (halo_sim_world_step_begin(_halo_sim_world_step_network_coop_client_events, &context, regions, region_count,
+		network_coop_client_call, &checking))
+	{
+		return;
+	}
+	client_apply_events_game(entries, count);
+	if (checking)
+		halo_sim_world_step_check(_halo_sim_world_step_network_coop_client_events);
+}
+
+/* client: keeps the host's presentation of tick host_time, to be played
+in its turn (client_play_presentation) */
+void network_coop_handle_presentation(
+	void const *entries,
+	long host_time)
+{
+	if (coop_client() && host_time >= 0)
+		client_presentation_message(_coop_client_message_presentation, entries, 1, host_time);
+}
+
+static void client_presentation_apply(
+	struct distributed_coop_presentation const *presentation)
+{
+	boolean cinematic = TEST_FLAG(presentation->flags, _presentation_cinematic_bit);
+	long slot = (long)(presentation - coop_presentation.buffered);
+
+	/* port: (the game's changes through the world's calls, the Rust port's;
+	what it reads of the game gathered before the step, coop_client_tick_inputs) */
+	client_event_call(_network_coop_client_call_input_enable, NONE, !presentation->input_disabled, 0, NULL, 0, NULL, 0);
+	if (presentation->players_vitality_set && distributed_real_valid(presentation->players_maximum_body_vitality) &&
+		distributed_real_valid(presentation->players_maximum_shield_vitality) &&
+		presentation->players_maximum_body_vitality > 0.0f && presentation->players_maximum_shield_vitality >= 0.0f)
+	{
+		players_vitality.set = TRUE;
+		players_vitality.maximum_body = presentation->players_maximum_body_vitality;
+		players_vitality.maximum_shield = presentation->players_maximum_shield_vitality;
+	}
+	client_event_call(_network_coop_client_call_allegiance, NONE, slot, 0, NULL, 0, NULL, 0);
+	if (!presentation->scripted_shake && coop_client_tick_inputs.scripted_shake)
+		client_event_call(_network_coop_client_call_shake_end, NONE, 0, 0, NULL, 0, NULL, 0);
+
+	/* a machine that joined mid-cutscene may already have started it */
+	if (cinematic && !coop_presentation.cinematic_started)
+	{
+		if (!coop_client_tick_inputs.cinematic_in_progress)
+			client_event_call(_network_coop_client_call_cinematic_start, NONE, 0, 0, NULL, 0, NULL, 0);
+		coop_presentation.cinematic_started = TRUE;
+	}
+	else if (!cinematic)
+	{
+		client_cinematic_end();
+	}
+	/* Use the host's camera while its scripts control it. Spectate instead
+	when the cutscene leaves the camera with the player, or when the watched
+	teammate rides an AI-flown Pelican (a level's insertion): shots filmed
+	beside a moving Pelican shake against this machine's copy of it. A player
+	with no unit and nobody to watch also gets the host's view, rather than
+	a dead camera at the world origin. */
+	client_host_camera_set((coop_presentation.cinematic_started && presentation->camera_scripted &&
+		!coop_client_tick_inputs.watching_rider) || coop_client_tick_inputs.nothing_to_watch);
+	if (coop_presentation.cinematic_started)
+	{
+		client_event_call(_network_coop_client_call_letterbox, NONE,
+			TEST_FLAG(presentation->flags, _presentation_letterbox_bit) != 0, 0, NULL, 0, NULL, 0);
+	}
+	client_event_call(_network_coop_client_call_activating_cluster, NONE, (short)(presentation->activating_cluster - 1),
+		0, NULL, 0, NULL, 0);
+	if (coop_presentation.host_camera)
+	{
+		real_vector3d forward, up;
+
+		distributed_vector_unpack(&presentation->camera_forward, DISTRIBUTED_UNIT_SCALE, &forward);
+		distributed_vector_unpack(&presentation->camera_up, DISTRIBUTED_UNIT_SCALE, &up);
+		real_point3d position = presentation->camera_position;
+		struct object_datum *filmed = presentation->camera_object_index != NONE &&
+			distributed_object_index_valid(presentation->camera_object_index) ?
+			object_try_and_get(presentation->camera_object_index) : NULL;
+
+		/* place the camera relative to this machine's copy of the filmed
+		object, which may be a tick behind the host's */
+		if (filmed && distributed_real_valid(presentation->camera_object_offset.i) &&
+			distributed_real_valid(presentation->camera_object_offset.j) &&
+			distributed_real_valid(presentation->camera_object_offset.k) &&
+			magnitude_squared3d(&presentation->camera_object_offset) < CAMERA_OBJECT_DISTANCE * CAMERA_OBJECT_DISTANCE * 4.0f)
+		{
+			point_from_line3d(&filmed->object.position, &presentation->camera_object_offset, 1.0f, &position);
+		}
+		/* (where and how widely an observer can look: observer.c's
+		match_assert_valid_observer_command) */
+		if (distributed_point_valid(&position, CAMERA_WORLD_BOUND) && distributed_axes_make_valid(&forward, &up))
+		{
+			boolean camera_ready = TRUE;
+
+			if (!(coop_presentation.cinematic_started && presentation->camera_scripted))
+				camera_ready = client_watch_host_from_behind(&position, &forward, &up);
+			if (camera_ready && valid_real_vector3d_axes2(&forward, &up))
+			{
+				real field_of_view = PIN((real)presentation->camera_field_of_view / FIELD_OF_VIEW_SCALE,
+					CAMERA_MINIMUM_FIELD_OF_VIEW, CAMERA_MAXIMUM_FIELD_OF_VIEW);
+				real reals[9];
+				long field_of_view_bits;
+
+				reals[0] = position.x;
+				reals[1] = position.y;
+				reals[2] = position.z;
+				reals[3] = forward.i;
+				reals[4] = forward.j;
+				reals[5] = forward.k;
+				reals[6] = up.i;
+				reals[7] = up.j;
+				reals[8] = up.k;
+				csmemcpy(&field_of_view_bits, &field_of_view, sizeof(field_of_view_bits));
+				client_event_call(_network_coop_client_call_camera, NONE, 0, field_of_view_bits, reals, 9, NULL, 0);
+			}
+		}
+	}
+	else
+	{
+		coop_presentation.watching_host_valid = FALSE;
+	}
+
+	/* start each new fade, backdated to when the host started it */
+	if (presentation->fade_start_time != coop_presentation.fade_start_time)
+	{
+		real_rgb_color color;
+
+		color.red = presentation->fade_color[0] / 255.0f;
+		color.green = presentation->fade_color[1] / 255.0f;
+		color.blue = presentation->fade_color[2] / 255.0f;
+		client_event_call(_network_coop_client_call_fade, coop_client_tick_inputs.now - presentation->fade_elapsed,
+			presentation->fade_ticks, TEST_FLAG(presentation->flags, _presentation_fading_out_bit) != 0, &color.red, 3,
+			NULL, 0);
+		coop_presentation.fade_start_time = presentation->fade_start_time;
+	}
+
+	skip_vote.offered = TEST_FLAG(presentation->flags, _presentation_skippable_bit);
+	skip_vote.votes = presentation->skip_votes;
+	skip_vote.voters = presentation->skip_voters;
+	client_event_call(_network_coop_client_call_hud_state, NONE, slot, 0, NULL, 0, NULL, 0);
+}
+
+/* client, each tick: plays the next of the host's presentations. It moves
+one host tick a tick, two when it has fallen behind, and waits when it has
+caught up with the newest; a lost tick's place is taken by the one before. */
+static void client_play_presentation(
+	void)
+{
+	struct distributed_coop_presentation const *presentation = NULL;
+	long lag, best_time = NONE;
+	short index;
+
+	if (!coop_presentation.heard_any)
+		return;
+	lag = coop_presentation.newest_time - coop_presentation.played_time;
+	if (!coop_presentation.playing || lag > PRESENTATION_BUFFER_COUNT || lag < -PRESENTATION_BUFFER_COUNT)
+		coop_presentation.played_time = coop_presentation.newest_time - PRESENTATION_DELAY_TICKS;
+	else if (lag > PRESENTATION_DELAY_TICKS + 1)
+		coop_presentation.played_time += 2;
+	else if (lag > 0)
+		coop_presentation.played_time++;
+	else
+		return;
+	coop_presentation.playing = TRUE;
+	for (index = 0; index < PRESENTATION_BUFFER_COUNT; index++)
+	{
+		long time = coop_presentation.buffered_times[index];
+
+		if (time <= coop_presentation.played_time && time > coop_presentation.played_time - PRESENTATION_BUFFER_COUNT &&
+			time > best_time)
+		{
+			best_time = time;
+			presentation = &coop_presentation.buffered[index];
+		}
+	}
+	if (presentation)
+		client_presentation_apply(presentation);
+}

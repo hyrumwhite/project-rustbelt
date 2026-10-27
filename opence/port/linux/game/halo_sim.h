@@ -760,6 +760,11 @@ enum
 	/* a question: the unit a's head marker's position's coordinate c (0 to
 	2; unit_get_head_position), as a real's bits */
 	_hs_runtime_call_unit_head_position,
+	/* questions: dangerous_effects_near_player(), any_player_is_in_the_air()
+	and vehicle_moving_near_any_player(), each a boolean */
+	_hs_runtime_call_dangerous_effects_near_player,
+	_hs_runtime_call_any_player_is_in_the_air,
+	_hs_runtime_call_vehicle_moving_near_any_player,
 
 	/* a library body's effects on the rest of the game, which the game's
 	body makes through hs_runtime_effect and Rust's through hs_runtime_call

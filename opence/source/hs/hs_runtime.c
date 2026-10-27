@@ -283,6 +283,8 @@ extern struct hs_external_global_definition *hs_external_globals[];
 #include "scenario/scenario.h"
 #include "units/units.h" /* port: unit_get_head_position, for a body's question */
 #include "hs_library_external.h" /* port: the library bodies' effects */
+#include "effects/effects.h" /* port: dangerous_effects_near_player, a body's question */
+#include "units/vehicles.h" /* port: vehicle_moving_near_any_player, a body's question */
 #include "scenario/scenario_definitions.h"
 #include "saved games/game_state.h"
 #include "text/draw_string.h"
@@ -2360,6 +2362,9 @@ static char const *const hs_runtime_rust_bodies[] =
 	"ai_reconnect",
 	"player_add_equipment",
 	"magic_melee_attack",
+	"game_safe_to_save",
+	"game_all_quiet",
+	"game_safe_to_speak",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2463,6 +2468,13 @@ static unsigned long *hs_runtime_port_game_fields(
 				extern void hud_nav_points_port_game_fields(unsigned long *fields);
 
 				hud_nav_points_port_game_fields(fields);
+			}
+			{
+				extern struct data_array *prop_data;
+				extern boolean debug_game_save;
+
+				fields[_hs_game_field_prop_data] = (unsigned long)prop_data;
+				fields[_hs_game_field_debug_game_save] = (unsigned long)&debug_game_save;
 			}
 		}
 	}
@@ -4503,6 +4515,18 @@ void hs_runtime_call(
 			call->result = location.cluster_index;
 			break;
 		}
+
+		case _hs_runtime_call_dangerous_effects_near_player:
+			call->result = dangerous_effects_near_player() ? 1 : 0;
+			break;
+
+		case _hs_runtime_call_any_player_is_in_the_air:
+			call->result = any_player_is_in_the_air() ? 1 : 0;
+			break;
+
+		case _hs_runtime_call_vehicle_moving_near_any_player:
+			call->result = vehicle_moving_near_any_player() ? 1 : 0;
+			break;
 
 		case _hs_runtime_call_unit_head_position:
 		{

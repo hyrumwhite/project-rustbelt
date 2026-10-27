@@ -158,6 +158,11 @@ pub mod call {
     /// A body's question: the unit `a`'s head marker's position's
     /// coordinate `c` (`unit_get_head_position`), a real's bits.
     pub const UNIT_HEAD_POSITION: i32 = 19;
+    /// A body's questions, each a boolean: `dangerous_effects_near_player()`,
+    /// `any_player_is_in_the_air()` and `vehicle_moving_near_any_player()`.
+    pub const DANGEROUS_EFFECTS_NEAR_PLAYER: i32 = 20;
+    pub const ANY_PLAYER_IS_IN_THE_AIR: i32 = 21;
+    pub const VEHICLE_MOVING_NEAR_ANY_PLAYER: i32 = 22;
     /// `game_in_progress()`.
     pub const GAME_IN_PROGRESS: i32 = 3;
     /// `object_index_from_name_index(a)`.
@@ -381,7 +386,9 @@ pub mod call {
     /// Whether the call is a question that changes nothing (a body's check
     /// asks the game as it is).
     pub fn is_query(kind: i32) -> bool {
-        kind == OBJECT_FROM_NAME || kind == POINT_CLUSTER || kind == UNIT_HEAD_POSITION
+        kind == OBJECT_FROM_NAME
+            || kind == POINT_CLUSTER
+            || (UNIT_HEAD_POSITION..=VEHICLE_MOVING_NEAR_ANY_PLAYER).contains(&kind)
     }
 }
 
@@ -799,6 +806,26 @@ const COOP_NAV_POINT_TEAM_FLAG: i32 = 0;
 const COOP_NAV_POINT_TEAM_OBJECT: i32 = 1;
 const COOP_NAV_POINT_UNIT_FLAG: i32 = 2;
 const COOP_NAV_POINT_UNIT_OBJECT: i32 = 3;
+/// The object header's active flag; `_object_mask_projectile`; `struct
+/// _item_datum`'s detonation ticks; the unit states and grenade throw state
+/// that endanger (`_unit_state_dying_airborne`, `_dying`, `_throw_grenade`,
+/// `_unit_grenade_throw_ending`) and `_unit_animation_ignore_translation_bit`;
+/// `_unit_is_inconsequential_bit` of `struct _unit_definition`'s flags;
+/// `_prop_state_*` and ai.c's `AI_ENDANGER_PLAYER_RECENT_VISIBILITY_TICKS`.
+const OBJECT_HEADER_ACTIVE: u8 = 1 << 0;
+const OBJECT_MASK_PROJECTILE: u32 = 1 << 5;
+const ITEM_DETONATION_TICKS: u32 = 0x1a8;
+const UNIT_STATE_DYING_AIRBORNE: u8 = 24;
+const UNIT_STATE_DYING: u8 = 25;
+const UNIT_STATE_THROW_GRENADE: u8 = 33;
+const UNIT_GRENADE_THROW_ENDING: u8 = 3;
+const UNIT_ANIMATION_IGNORE_TRANSLATION: u16 = 1 << 2;
+const UNIT_IS_INCONSEQUENTIAL: u32 = 1 << 19;
+const PROP_STATE_BECOMING_UNACKNOWLEDGED: i16 = 2;
+const PROP_STATE_ACKNOWLEDGED: i16 = 3;
+const PROP_STATE_UNINSPECTED_ORPHAN: i16 = 4;
+const PROP_STATE_INSPECTED_ORPHAN: i16 = 5;
+const AI_ENDANGER_PLAYER_RECENT_VISIBILITY_TICKS: i32 = 90;
 /// `struct object_list_header_datum`'s count and first reference, and
 /// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
@@ -1048,6 +1075,9 @@ pub mod game_field {
     /// hud_nav_points.c's nav points (`struct hud_nav_point_player_datum`,
     /// a local player's each).
     pub const NAV_POINT_DATA: u32 = 45;
+    /// The AI's props (a data array), and main.c's `debug_game_save`.
+    pub const PROP_DATA: u32 = 46;
+    pub const DEBUG_GAME_SAVE: u32 = 47;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -2801,6 +2831,123 @@ impl<H: HsHost> Runtime<'_, H> {
             }
         }
         Some(())
+    }
+
+    /// The active objects of the types (an object iterator's with the
+    /// active flag), in order.
+    fn active_objects_of_types(&self, types: u32) -> Vec<(i32, u32)> {
+        use crate::layout::object_header_datum as oh;
+        let m = self.m();
+        self.objects_of_types(types)
+            .into_iter()
+            .filter(|&(index, _)| {
+                self.datum_get(self.context.object_header_data, index)
+                    .is_some_and(|header| m.r8(header + oh::FLAGS as u32) & OBJECT_HEADER_ACTIVE != 0)
+            })
+            .collect()
+    }
+
+    /// `dangerous_projectiles_near_player`: any projectile at all.
+    fn dangerous_projectiles_near_player(&self) -> bool {
+        !self.objects_of_types(OBJECT_MASK_PROJECTILE).is_empty()
+    }
+
+    /// `dangerous_items_near_player`: an active item about to detonate.
+    fn dangerous_items_near_player(&self) -> bool {
+        let m = self.m();
+        self.active_objects_of_types(OBJECT_MASK_ITEM)
+            .into_iter()
+            .any(|(_, item)| m.r16(item + ITEM_DETONATION_TICKS) as i16 > 0)
+    }
+
+    /// `any_unit_is_dangerous`: an active unit throwing a grenade (not
+    /// ending its throw) or dying in place.
+    fn any_unit_is_dangerous(&self) -> bool {
+        use crate::layout::unit_datum as u;
+        let m = self.m();
+        self.active_objects_of_types(OBJECT_MASK_UNIT).into_iter().any(|(_, unit)| {
+            let state = m.r8(unit + u::UNIT_ANIMATION_STATE as u32);
+            (state == UNIT_STATE_THROW_GRENADE && m.r8(unit + u::UNIT_GRENADE_THROW_STATE as u32) != UNIT_GRENADE_THROW_ENDING)
+                || ((state == UNIT_STATE_DYING || state == UNIT_STATE_DYING_AIRBORNE)
+                    && m.r16(unit + UNIT_ANIMATION_FLAGS) & UNIT_ANIMATION_IGNORE_TRANSLATION == 0)
+        })
+    }
+
+    /// `any_player_is_dead`: a player without a unit (network co-op's
+    /// waiting players are the caller's to leave to the game).
+    fn any_player_is_dead(&self) -> Option<bool> {
+        let m = self.m();
+        let mut player_index = self.data_next_index(self.context.player_data, NONE);
+        while player_index != NONE {
+            let player = self.datum_get(self.context.player_data, player_index)?;
+            if m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32 == NONE {
+                return Some(true);
+            }
+            player_index = self.data_next_index(self.context.player_data, player_index);
+        }
+        Some(false)
+    }
+
+    /// ai.c's `ai_enemies_endanger_player(FALSE, NONE)`
+    /// (`ai_enemies_can_see_player`): an enemy's prop of a player that it
+    /// saw lately, or is close to, or that its target is (acknowledged, or
+    /// an orphan it has located or is near).
+    fn ai_enemies_can_see_player(&self) -> Option<bool> {
+        use crate::layout::{actor_datum as a, prop_datum as pr, unit_datum as u};
+        let m = self.m();
+        let props = self.game_field(game_field::PROP_DATA)?;
+        let now = self.context.game_time;
+        let f = |address: u32| f32::from_bits(m.r32(address));
+        let mut prop_index = self.data_next_index(props, NONE);
+        while prop_index != NONE {
+            let prop = self.datum_get(props, prop_index)?;
+            if m.r8(prop + pr::PLAYER as u32) != 0 && m.r8(prop + pr::ENEMY as u32) != 0 {
+                let unit = self.object_typed(m.r32(prop + pr::UNIT_INDEX as u32) as i32, OBJECT_MASK_UNIT)?;
+                if m.r32(unit + u::UNIT_PLAYER_INDEX as u32) as i32 != NONE {
+                    let actor = self.datum_get(self.context.actor_data, m.r32(prop + pr::OWNER_ACTOR_INDEX as u32) as i32)?;
+                    let object_index = if m.r8(actor + a::META_SWARM as u32) != 0 {
+                        m.r32(actor + a::META_SWARM_UNIT_INDEX as u32)
+                    } else {
+                        m.r32(actor + a::META_UNIT_INDEX as u32)
+                    } as i32;
+                    let object = self.object_typed(object_index, OBJECT_MASK_UNIT)?;
+                    let definition = self.tag_data(b"unit", m.r32(object + u::DEFINITION_INDEX as u32) as i32)?;
+                    let distance = f(prop + pr::DISTANCE as u32);
+                    let inconsequential = m.r32(definition + UNIT_DEFINITION_UNIT) & UNIT_IS_INCONSEQUENTIAL != 0 && distance > 4.0;
+                    if !inconsequential {
+                        let state = m.r16(prop + pr::STATE as u32) as i16;
+                        let orphan = (PROP_STATE_UNINSPECTED_ORPHAN..=PROP_STATE_INSPECTED_ORPHAN).contains(&state);
+                        let last_visible = m.r32(prop + pr::LAST_VISIBLE_TIME as u32) as i32;
+                        if !orphan && last_visible != NONE && last_visible.wrapping_add(AI_ENDANGER_PLAYER_RECENT_VISIBILITY_TICKS) >= now {
+                            return Some(true);
+                        }
+                        if !orphan && distance < 4.0 {
+                            return Some(true);
+                        }
+                        if m.r32(actor + a::TARGET_TARGET_PROP_INDEX as u32) as i32 == prop_index {
+                            if (PROP_STATE_BECOMING_UNACKNOWLEDGED..=PROP_STATE_ACKNOWLEDGED).contains(&state) {
+                                return Some(true);
+                            }
+                            if orphan {
+                                if m.r8(prop + pr::DEFINITELY_LOCATED as u32) != 0 {
+                                    return Some(true);
+                                }
+                                let parent = self.datum_get(props, m.r32(prop + pr::PARENT_PROP_INDEX as u32) as i32)?;
+                                if state == PROP_STATE_UNINSPECTED_ORPHAN && distance < 12.0 {
+                                    let (b, c) = (pr::BODY_POSITION as u32, pr::BODY_POSITION as u32);
+                                    let d = [0, 4, 8].map(|i| f(parent + b + i) - f(prop + c + i));
+                                    if d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < 16.0 {
+                                        return Some(true);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            prop_index = self.data_next_index(props, prop_index);
+        }
+        Some(false)
     }
 
     fn animation_frames_left(&self, object: u32) -> Option<i32> {
@@ -6298,6 +6445,47 @@ impl<H: HsHost> Runtime<'_, H> {
                     player_index = self.data_next_index(self.context.player_data, player_index);
                 }
                 0
+            }
+            // game_safe_to_speak, game_all_quiet and game_safe_to_save
+            // (coop_scripts_safe_to_save's; network co-op's, whose
+            // checkpoints wait on players, is the game's, as is the debug
+            // printing of why it isn't safe)
+            name @ ("game_safe_to_speak" | "game_all_quiet" | "game_safe_to_save") => {
+                if self.context.coop_host {
+                    return false;
+                }
+                let query = |kind: i32| self.call(kind, 0, 0, 0) != 0;
+                let result = match name {
+                    "game_safe_to_speak" => {
+                        let Some(dead) = self.any_player_is_dead() else { return false };
+                        !(self.dangerous_projectiles_near_player() || dead)
+                    }
+                    "game_all_quiet" => {
+                        let Some(seen) = self.ai_enemies_can_see_player() else { return false };
+                        !(self.dangerous_projectiles_near_player()
+                            || self.dangerous_items_near_player()
+                            || query(call::DANGEROUS_EFFECTS_NEAR_PLAYER)
+                            || self.any_unit_is_dangerous()
+                            || seen)
+                    }
+                    _ => {
+                        let Some(debug) = self.game_field(game_field::DEBUG_GAME_SAVE) else { return false };
+                        if m.r8(debug) != 0 {
+                            return false;
+                        }
+                        let Some(seen) = self.ai_enemies_can_see_player() else { return false };
+                        let Some(dead) = self.any_player_is_dead() else { return false };
+                        !(seen
+                            || self.dangerous_projectiles_near_player()
+                            || self.dangerous_items_near_player()
+                            || query(call::DANGEROUS_EFFECTS_NEAR_PLAYER)
+                            || self.any_unit_is_dangerous()
+                            || query(call::ANY_PLAYER_IS_IN_THE_AIR)
+                            || dead
+                            || query(call::VEHICLE_MOVING_NEAR_ANY_PLAYER))
+                    }
+                };
+                boolean(result)
             }
             // ai_scripting_reconnect: nothing
             "ai_reconnect" => 0,

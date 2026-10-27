@@ -678,7 +678,8 @@ void _rasterizer_decals_draw(
 				decal->color,
 				(decal->intensity * (decal->color >> 24) + 127) >> 8,
 				vertices,
-				decal->quad_count);
+				decal->quad_count,
+				TEST_FLAG(decal->flags, _decal_permanent_bit));
 			IDirect3DVertexBuffer8_Unlock(local_d3d_vertex_buffer);
 		}
 		return;

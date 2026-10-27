@@ -1138,7 +1138,7 @@ boolean bevy_bridge_viewer_draws_decals(void)
 
 void bevy_bridge_note_decal(long decal_index, long map, short bitmap_index, short layer,
 	short blend_function, unsigned long color, unsigned long intensity,
-	void const *vertices, long quad_count)
+	void const *vertices, long quad_count, boolean permanent)
 {
 	struct bevy_bridge_decal *decal;
 	unsigned long vertex_count = (unsigned long)quad_count * 4;
@@ -1158,7 +1158,7 @@ void bevy_bridge_note_decal(long decal_index, long map, short bitmap_index, shor
 	decal->color[0] = (unsigned char)(color >> 16);
 	decal->color[1] = (unsigned char)(color >> 8);
 	decal->color[2] = (unsigned char)color;
-	decal->color[3] = 0;
+	decal->color[3] = permanent ? 1 : 0;
 	decal->first_vertex = bevy_bridge_decal_vertex_count;
 	decal->quad_count = (unsigned long)quad_count;
 	memcpy(&bevy_bridge_decal_vertices[bevy_bridge_decal_vertex_count], vertices,

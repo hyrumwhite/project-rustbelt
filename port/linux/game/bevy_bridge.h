@@ -100,7 +100,7 @@ drawn, its quads' vertices as the game keeps them (struct
 bevy_bridge_decal_vertex), for the frame's export */
 void bevy_bridge_note_decal(long decal_index, long map, short bitmap_index, short layer,
 	short blend_function, unsigned long color, unsigned long intensity,
-	void const *vertices, long quad_count);
+	void const *vertices, long quad_count, boolean permanent);
 
 /* the overlay buffer to fill with a width x height picture
 (bevy_bridge_protocol.h), or NULL; bevy_bridge_overlay_commit shares it */

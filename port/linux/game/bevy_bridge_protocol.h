@@ -205,7 +205,10 @@ struct bevy_bridge_decal
 	unsigned char blend_function;
 	/* 0..255 */
 	unsigned char intensity;
-	/* red, green, blue (0..255) */
+	/* red, green, blue (0..255), and (protocol 52) 1 for a permanent decal
+	(the level's own, made as its cluster comes into the potentially visible
+	set and deleted as it leaves: the viewer, drawing every cluster, keeps
+	it) */
 	unsigned char color[4];
 	unsigned long first_vertex;
 	unsigned long quad_count;

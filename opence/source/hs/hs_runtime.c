@@ -2365,6 +2365,7 @@ static char const *const hs_runtime_rust_bodies[] =
 	"game_safe_to_save",
 	"game_all_quiet",
 	"game_safe_to_speak",
+	"unit_solo_player_integrated_night_vision_is_active",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2475,6 +2476,7 @@ static unsigned long *hs_runtime_port_game_fields(
 
 				fields[_hs_game_field_prop_data] = (unsigned long)prop_data;
 				fields[_hs_game_field_debug_game_save] = (unsigned long)&debug_game_save;
+				fields[_hs_game_field_players_globals] = (unsigned long)players_globals;
 			}
 		}
 	}

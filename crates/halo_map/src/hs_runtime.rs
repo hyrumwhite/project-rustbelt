@@ -826,6 +826,11 @@ const PROP_STATE_ACKNOWLEDGED: i16 = 3;
 const PROP_STATE_UNINSPECTED_ORPHAN: i16 = 4;
 const PROP_STATE_INSPECTED_ORPHAN: i16 = 5;
 const AI_ENDANGER_PLAYER_RECENT_VISIBILITY_TICKS: i32 = 90;
+/// `struct players_globals`' local players (a player each, or NONE) and
+/// their count; `_weapon_enables_unit_integrated_night_vision_bit`.
+const PLAYERS_GLOBALS_LOCAL_PLAYERS: u32 = 0x4;
+const PLAYERS_GLOBALS_LOCAL_PLAYER_COUNT: u32 = 0x24;
+const WEAPON_ENABLES_UNIT_INTEGRATED_NIGHT_VISION: u32 = 1 << 14;
 /// `struct object_list_header_datum`'s count and first reference, and
 /// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
@@ -1078,6 +1083,8 @@ pub mod game_field {
     /// The AI's props (a data array), and main.c's `debug_game_save`.
     pub const PROP_DATA: u32 = 46;
     pub const DEBUG_GAME_SAVE: u32 = 47;
+    /// players.c's `struct players_globals`.
+    pub const PLAYERS_GLOBALS: u32 = 48;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -6486,6 +6493,47 @@ impl<H: HsHost> Runtime<'_, H> {
                     }
                 };
                 boolean(result)
+            }
+            // unit_solo_player_integrated_night_vision_is_active: the only
+            // local player's unit zoomed with a weapon that gives night
+            // vision (unit_integrated_night_vision_is_active)
+            "unit_solo_player_integrated_night_vision_is_active" => 'body: {
+                let Some(globals) = self.game_field(game_field::PLAYERS_GLOBALS) else { return false };
+                if m.r16(globals + PLAYERS_GLOBALS_LOCAL_PLAYER_COUNT) as i16 != 1 {
+                    break 'body 0;
+                }
+                // local_player_get_next(NONE), then its player
+                let player_index = (0..MAXIMUM_NUMBER_OF_LOCAL_PLAYERS as u32)
+                    .map(|local| m.r32(globals + PLAYERS_GLOBALS_LOCAL_PLAYERS + 4 * local) as i32)
+                    .find(|&player_index| player_index != NONE)
+                    .unwrap_or(NONE);
+                if player_index == NONE {
+                    break 'body 0;
+                }
+                let Some(player) = self.datum_get(self.context.player_data, player_index) else { return false };
+                let unit_index = m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32;
+                if unit_index == NONE {
+                    break 'body 0;
+                }
+                let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                if m.r8(unit + u::UNIT_CURRENT_ZOOM_LEVEL as u32) as i8 == NONE as i8 {
+                    break 'body 0;
+                }
+                let current = m.r16(unit + u::UNIT_CURRENT_WEAPON_INDEX as u32) as i16;
+                if current == NONE as i16 {
+                    break 'body 0;
+                }
+                if !(0..UNIT_WEAPONS).contains(&current) {
+                    return false;
+                }
+                let weapon_index = m.r32(unit + u::UNIT_WEAPON_OBJECT_INDICES as u32 + 4 * current as u32) as i32;
+                if weapon_index == NONE {
+                    break 'body 0;
+                }
+                let Some(weapon) = self.object_typed(weapon_index, OBJECT_MASK_WEAPON) else { return false };
+                let Some(definition) = self.tag_data(b"weap", m.r32(weapon + u::DEFINITION_INDEX as u32) as i32) else { return false };
+                let flags = m.r32(definition + crate::layout::weapon_definition::WEAPON as u32);
+                boolean(flags & WEAPON_ENABLES_UNIT_INTEGRATED_NIGHT_VISION != 0)
             }
             // ai_scripting_reconnect: nothing
             "ai_reconnect" => 0,

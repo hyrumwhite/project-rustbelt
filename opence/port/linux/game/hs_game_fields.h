@@ -54,6 +54,7 @@ enum
 	_hs_game_field_nav_point_data, /* hud_nav_points.c's nav points (struct hud_nav_point_player_datum, a local player's each) */
 	_hs_game_field_prop_data, /* the AI's props (struct data_array) */
 	_hs_game_field_debug_game_save, /* main.c's debug_game_save (boolean) */
+	_hs_game_field_players_globals, /* players.c's struct players_globals */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

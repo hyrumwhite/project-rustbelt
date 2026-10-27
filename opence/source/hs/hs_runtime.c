@@ -2345,6 +2345,14 @@ static char const *const hs_runtime_rust_bodies[] =
 	"sound_looping_set_alternate",
 	"sound_set_gain",
 	"sound_get_gain",
+	"activate_nav_point_flag",
+	"activate_nav_point_object",
+	"activate_team_nav_point_flag",
+	"activate_team_nav_point_object",
+	"deactivate_nav_point_flag",
+	"deactivate_nav_point_object",
+	"deactivate_team_nav_point_flag",
+	"deactivate_team_nav_point_object",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2444,6 +2452,11 @@ static unsigned long *hs_runtime_port_game_fields(
 
 			objects_port_game_fields(fields);
 			game_sound_port_game_fields(fields);
+			{
+				extern void hud_nav_points_port_game_fields(unsigned long *fields);
+
+				hud_nav_points_port_game_fields(fields);
+			}
 		}
 	}
 
@@ -2638,6 +2651,14 @@ static void hs_runtime_effect_run(
 
 		gain.bits = call->c;
 		game_sound_port_looping_sound_start(call->a, call->b, gain.value);
+		break;
+	}
+	case _hs_runtime_call_effect_coop_nav_point:
+	{
+		union { long bits; real value; } vertical_offset;
+
+		vertical_offset.bits = (long)hs_runtime_effect_names[0];
+		network_coop_note_nav_point((short)call->a, (short)(call->a >> 16), call->b, call->c, vertical_offset.value);
 		break;
 	}
 	case _hs_runtime_call_effect_foley_predict:
@@ -4425,6 +4446,7 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_scripted_sound_start:
 		case _hs_runtime_call_effect_looping_sound_start:
 		case _hs_runtime_call_effect_foley_predict:
+		case _hs_runtime_call_effect_coop_nav_point:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

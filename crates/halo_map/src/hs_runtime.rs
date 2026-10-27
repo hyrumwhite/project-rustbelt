@@ -358,10 +358,13 @@ pub mod call {
     pub const EFFECT_LOOPING_SOUND_START: i32 = 0x86;
     /// `scripted_foley_predict(a)`'s requests (`game_sound_port_foley_predict`).
     pub const EFFECT_FOLEY_PREDICT: i32 = 0x87;
+    /// `network_coop_note_nav_point(a's low word, a's high word, b, c, the
+    /// first name's bits as a real)`.
+    pub const EFFECT_COOP_NAV_POINT: i32 = 0x88;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_FOLEY_PREDICT).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_COOP_NAV_POINT).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
@@ -769,6 +772,22 @@ const COOP_SOUND_IMPULSE: i32 = 0;
 const COOP_SOUND_LOOPING_STOP: i32 = 2;
 /// `TICKS_PER_SECOND`.
 const TICKS_PER_SECOND: i32 = 30;
+/// hud_nav_points.c: `struct hud_nav_point_datum` (its nav index, its type
+/// in the low 4 bits of a short's bit fields, its vertical offset and
+/// reference), a local player's 4 of them, `MAXIMUM_NUMBER_OF_LOCAL_PLAYERS`;
+/// `_hud_nav_point_type_*`; network_coop.h's `_coop_nav_point_*`.
+const NAV_POINT_SIZE: u32 = 12;
+const NAV_POINT_TYPE_BITS: u32 = 2;
+const NAV_POINT_Z_OFFSET: u32 = 4;
+const NAV_POINT_REFERENCE_INDEX: u32 = 8;
+const NAV_POINTS_PER_PLAYER: u32 = 4;
+const MAXIMUM_NUMBER_OF_LOCAL_PLAYERS: i16 = 4;
+const NAV_POINT_TYPE_FLAG: i16 = 0;
+const NAV_POINT_TYPE_OBJECT: i16 = 1;
+const COOP_NAV_POINT_TEAM_FLAG: i32 = 0;
+const COOP_NAV_POINT_TEAM_OBJECT: i32 = 1;
+const COOP_NAV_POINT_UNIT_FLAG: i32 = 2;
+const COOP_NAV_POINT_UNIT_OBJECT: i32 = 3;
 /// `struct object_list_header_datum`'s count and first reference, and
 /// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
@@ -1015,6 +1034,9 @@ pub mod game_field {
     pub const OBJECT_GLOBALS: u32 = 43;
     /// game_sound.c's looping sounds (a data array).
     pub const GAME_LOOPING_SOUND_DATA: u32 = 44;
+    /// hud_nav_points.c's nav points (`struct hud_nav_point_player_datum`,
+    /// a local player's each).
+    pub const NAV_POINT_DATA: u32 = 45;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -2653,6 +2675,118 @@ impl<H: HsHost> Runtime<'_, H> {
             m.w32(looping + GAME_LOOPING_SOUND_FLAGS, flags | GAME_LOOPING_SOUND_UNATTACHED_STOP);
             if forget {
                 m.w32(definition + LOOPING_SOUND_SCRIPTING_SOUND_INDEX, NONE as u32);
+            }
+        }
+        Some(())
+    }
+
+    /// `player_index_from_unit_index`: the last player of the unit (a
+    /// player without a unit for NONE), or NONE.
+    fn player_from_unit(&self, unit_index: i32) -> Option<i32> {
+        let m = self.m();
+        let mut found = NONE;
+        let mut player_index = self.data_next_index(self.context.player_data, NONE);
+        while player_index != NONE {
+            let player = self.datum_get(self.context.player_data, player_index)?;
+            if m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32 == unit_index {
+                found = player_index;
+            }
+            player_index = self.data_next_index(self.context.player_data, player_index);
+        }
+        Some(found)
+    }
+
+    /// The players of local players on the team (`hud_activate_team_nav_point`'s
+    /// and `_deactivate_`'s walk).
+    fn local_players_on_team(&self, team_index: i16) -> Option<Vec<i32>> {
+        use crate::layout::player_datum as pd;
+        let m = self.m();
+        let mut players = Vec::new();
+        let mut player_index = self.data_next_index(self.context.player_data, NONE);
+        while player_index != NONE {
+            let player = self.datum_get(self.context.player_data, player_index)?;
+            if m.r16(player + pd::LOCAL_PLAYER_INDEX as u32) as i16 != NONE as i16
+                && m.r16(player + pd::TEAM_INDEX as u32) as i16 == team_index
+            {
+                players.push(player_index);
+            }
+            player_index = self.data_next_index(self.context.player_data, player_index);
+        }
+        Some(players)
+    }
+
+    /// The player's local player's nav points, if it has a local player.
+    fn player_nav_points(&self, player_index: i32) -> Option<Option<u32>> {
+        let m = self.m();
+        if player_index == NONE {
+            return Some(None);
+        }
+        let player = self.datum_get(self.context.player_data, player_index)?;
+        let local = m.r16(player + crate::layout::player_datum::LOCAL_PLAYER_INDEX as u32) as i16;
+        if !(0..MAXIMUM_NUMBER_OF_LOCAL_PLAYERS).contains(&local) {
+            return Some(None);
+        }
+        let data = self.game_field(game_field::NAV_POINT_DATA)?;
+        Some(Some(data + local as u32 * NAV_POINTS_PER_PLAYER * NAV_POINT_SIZE))
+    }
+
+    /// A nav point's type, its 4-bit field sign-extended.
+    fn nav_point_type(&self, nav_point: u32) -> i16 {
+        ((self.m().r16(nav_point + NAV_POINT_TYPE_BITS) << 12) as i16) >> 12
+    }
+
+    /// `hud_activate_nav_point`: the player's nav point of the type and
+    /// reference given the nav index and offset, or else its last empty
+    /// one taken. `Some(false)` where none is left (the game's error),
+    /// which `write` false only tests for.
+    fn nav_point_activate(&self, player_index: i32, nav_index: i16, ty: i16, reference: i32, z_offset: u32, write: bool) -> Option<bool> {
+        let m = self.m();
+        let Some(points) = self.player_nav_points(player_index)? else { return Some(true) };
+        if reference == NONE || nav_index == NONE as i16 {
+            return Some(true);
+        }
+        let mut empty = None;
+        for index in 0..NAV_POINTS_PER_PLAYER {
+            let nav_point = points + index * NAV_POINT_SIZE;
+            let nav_type = self.nav_point_type(nav_point);
+            if nav_type == ty && m.r32(nav_point + NAV_POINT_REFERENCE_INDEX) as i32 == reference {
+                if write {
+                    m.w16(nav_point, nav_index as u16);
+                    m.w32(nav_point + NAV_POINT_Z_OFFSET, z_offset);
+                }
+                return Some(true);
+            }
+            if nav_type == NONE as i16 {
+                empty = Some(nav_point);
+            }
+        }
+        let Some(nav_point) = empty else { return Some(false) };
+        if write {
+            let bits = m.r16(nav_point + NAV_POINT_TYPE_BITS);
+            m.w16(nav_point + NAV_POINT_TYPE_BITS, (bits & !0xf) | (ty as u16 & 0xf));
+            m.w32(nav_point + NAV_POINT_REFERENCE_INDEX, reference as u32);
+            m.w16(nav_point, nav_index as u16);
+            m.w32(nav_point + NAV_POINT_Z_OFFSET, z_offset);
+        }
+        Some(true)
+    }
+
+    /// `hud_deactivate_nav_point`: the player's nav point of the type and
+    /// reference emptied.
+    fn nav_point_deactivate(&self, player_index: i32, ty: i16, reference: i32) -> Option<()> {
+        let m = self.m();
+        let Some(points) = self.player_nav_points(player_index)? else { return Some(()) };
+        if reference == NONE {
+            return Some(());
+        }
+        for index in 0..NAV_POINTS_PER_PLAYER {
+            let nav_point = points + index * NAV_POINT_SIZE;
+            if self.nav_point_type(nav_point) == ty && m.r32(nav_point + NAV_POINT_REFERENCE_INDEX) as i32 == reference {
+                let bits = m.r16(nav_point + NAV_POINT_TYPE_BITS);
+                m.w16(nav_point + NAV_POINT_TYPE_BITS, bits | 0xf);
+                m.w32(nav_point + NAV_POINT_REFERENCE_INDEX, NONE as u32);
+                m.w16(nav_point, NONE as u16);
+                break;
             }
         }
         Some(())
@@ -6020,6 +6154,75 @@ impl<H: HsHost> Runtime<'_, H> {
                 } else {
                     m.r32(gain) as i32
                 }
+            }
+            // hud_unit_activate_nav_point_with_flag and _with_object, and
+            // hud_activate_team_nav_point_with_flag and _with_object: noted
+            // for network co-op, then the unit's player's or each local
+            // player's on the team (none left is the game's error, tested
+            // for first)
+            name @ ("activate_nav_point_flag"
+            | "activate_nav_point_object"
+            | "activate_team_nav_point_flag"
+            | "activate_team_nav_point_object") => {
+                let nav_index = short(0);
+                let flag = name.ends_with("flag");
+                let reference = if flag { short(2) as i32 } else { argument(2) };
+                let ty = if flag { NAV_POINT_TYPE_FLAG } else { NAV_POINT_TYPE_OBJECT };
+                let z_offset = argument(3) as u32;
+                let (kind, target, players) = if name.starts_with("activate_team") {
+                    let team_index = short(1);
+                    let Some(players) = self.local_players_on_team(team_index) else { return false };
+                    let kind = if flag { COOP_NAV_POINT_TEAM_FLAG } else { COOP_NAV_POINT_TEAM_OBJECT };
+                    (kind, team_index as i32, players)
+                } else {
+                    let unit_index = argument(1);
+                    let Some(player_index) = self.player_from_unit(unit_index) else { return false };
+                    let kind = if flag { COOP_NAV_POINT_UNIT_FLAG } else { COOP_NAV_POINT_UNIT_OBJECT };
+                    (kind, unit_index, if player_index != NONE { vec![player_index] } else { Vec::new() })
+                };
+                for &player_index in &players {
+                    match self.nav_point_activate(player_index, nav_index, ty, reference, z_offset, false) {
+                        Some(true) => {}
+                        _ => return false,
+                    }
+                }
+                self.effect(call::EFFECT_NAMES, z_offset as i32, 0, 0);
+                self.effect(call::EFFECT_COOP_NAV_POINT, kind | (nav_index as i32) << 16, target, reference);
+                for &player_index in &players {
+                    if self.nav_point_activate(player_index, nav_index, ty, reference, z_offset, true).is_none() {
+                        return false;
+                    }
+                }
+                0
+            }
+            // hud_unit_deactivate_nav_point_with_flag and _with_object, and
+            // hud_deactivate_team_nav_point_with_flag and _with_object
+            name @ ("deactivate_nav_point_flag"
+            | "deactivate_nav_point_object"
+            | "deactivate_team_nav_point_flag"
+            | "deactivate_team_nav_point_object") => {
+                let flag = name.ends_with("flag");
+                let reference = if flag { short(1) as i32 } else { argument(1) };
+                let ty = if flag { NAV_POINT_TYPE_FLAG } else { NAV_POINT_TYPE_OBJECT };
+                let (kind, target, players) = if name.starts_with("deactivate_team") {
+                    let team_index = short(0);
+                    let Some(players) = self.local_players_on_team(team_index) else { return false };
+                    let kind = if flag { COOP_NAV_POINT_TEAM_FLAG } else { COOP_NAV_POINT_TEAM_OBJECT };
+                    (kind, team_index as i32, players)
+                } else {
+                    let unit_index = argument(0);
+                    let Some(player_index) = self.player_from_unit(unit_index) else { return false };
+                    let kind = if flag { COOP_NAV_POINT_UNIT_FLAG } else { COOP_NAV_POINT_UNIT_OBJECT };
+                    (kind, unit_index, if player_index != NONE { vec![player_index] } else { Vec::new() })
+                };
+                self.effect(call::EFFECT_NAMES, 0f32.to_bits() as i32, 0, 0);
+                self.effect(call::EFFECT_COOP_NAV_POINT, kind | (NONE as i16 as u16 as i32) << 16, target, reference);
+                for player_index in players {
+                    if self.nav_point_deactivate(player_index, ty, reference).is_none() {
+                        return false;
+                    }
+                }
+                0
             }
             // unit_set_emotion (its interpolation over 6 ticks an effect)
             "unit_set_emotion" => {

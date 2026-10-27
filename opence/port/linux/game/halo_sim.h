@@ -837,7 +837,8 @@ enum
 	_hs_runtime_call_effect_scripted_sound_start, /* a the sound, b the object (or NONE), c the scale's bits: its impulse made and kept (game_sound_port_scripted_sound_start) */
 	_hs_runtime_call_effect_looping_sound_start, /* a the looping sound, b the object, c the gain's bits: its co-op note, then it started and kept (game_sound_port_looping_sound_start) */
 	_hs_runtime_call_effect_foley_predict, /* a the looping sound: scripted_foley_predict */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_foley_predict,
+	_hs_runtime_call_effect_coop_nav_point, /* a the kind (_coop_nav_point_*, low word) and nav index (high word), b the target, c the reference, the first name its vertical offset's bits: network_coop_note_nav_point */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_coop_nav_point,
 };
 
 /* the runtime's operations the Rust port can run */

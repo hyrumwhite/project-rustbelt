@@ -51,6 +51,7 @@ enum
 	_hs_game_field_magic_base_animation_seat_index, /* short */
 	_hs_game_field_object_globals, /* objects.c's struct object_globals */
 	_hs_game_field_game_looping_sound_data, /* game_sound.c's looping sounds (struct data_array) */
+	_hs_game_field_nav_point_data, /* hud_nav_points.c's nav points (struct hud_nav_point_player_datum, a local player's each) */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

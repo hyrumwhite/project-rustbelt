@@ -55,6 +55,7 @@ enum
 	_hs_game_field_prop_data, /* the AI's props (struct data_array) */
 	_hs_game_field_debug_game_save, /* main.c's debug_game_save (boolean) */
 	_hs_game_field_players_globals, /* players.c's struct players_globals */
+	_hs_game_field_lights_game_globals, /* object_lights.c's struct lights_game_globals (render_lights, a boolean, first) */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

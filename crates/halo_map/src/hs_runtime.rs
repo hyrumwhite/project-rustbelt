@@ -163,6 +163,10 @@ pub mod call {
     pub const DANGEROUS_EFFECTS_NEAR_PLAYER: i32 = 20;
     pub const ANY_PLAYER_IS_IN_THE_AIR: i32 = 21;
     pub const VEHICLE_MOVING_NEAR_ANY_PLAYER: i32 = 22;
+    /// A body's questions, each a boolean: `player0_look_pitch_is_inverted()`
+    /// and `player0_joystick_set_is_normal()` (player 0's profile).
+    pub const PLAYER0_LOOK_PITCH_IS_INVERTED: i32 = 23;
+    pub const PLAYER0_JOYSTICK_SET_IS_NORMAL: i32 = 24;
     /// `game_in_progress()`.
     pub const GAME_IN_PROGRESS: i32 = 3;
     /// `object_index_from_name_index(a)`.
@@ -377,10 +381,14 @@ pub mod call {
     pub const EFFECT_PLAYER_ADD_EQUIPMENT: i32 = 0x8c;
     /// `unit_melee_attack_begin(a, FALSE, 0)`.
     pub const EFFECT_MELEE_ATTACK_BEGIN: i32 = 0x8d;
+    /// An engine command's body (debug, profiling, cheats, files, menus,
+    /// presentation settings): the library function `a`'s evaluation by the
+    /// game, for the thread `b` with the arguments at `c`.
+    pub const EFFECT_ENGINE: i32 = 0x8e;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_MELEE_ATTACK_BEGIN).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_ENGINE).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
@@ -388,7 +396,7 @@ pub mod call {
     pub fn is_query(kind: i32) -> bool {
         kind == OBJECT_FROM_NAME
             || kind == POINT_CLUSTER
-            || (UNIT_HEAD_POSITION..=VEHICLE_MOVING_NEAR_ANY_PLAYER).contains(&kind)
+            || (UNIT_HEAD_POSITION..=PLAYER0_JOYSTICK_SET_IS_NORMAL).contains(&kind)
     }
 }
 
@@ -790,6 +798,33 @@ const COOP_SOUND_IMPULSE: i32 = 0;
 const COOP_SOUND_LOOPING_STOP: i32 = 2;
 /// `TICKS_PER_SECOND`.
 const TICKS_PER_SECOND: i32 = 30;
+/// The engine commands (hs_runtime.c's `hs_runtime_engine_bodies`): debug
+/// output and dumps, profiling, cheats, the caches, core saves and loads,
+/// the menus' and the network's commands, and presentation settings. Each
+/// body is the game's evaluation, an effect: they act on the engine, not
+/// the simulation's state.
+const ENGINE_BODIES: &[&str] = &[
+    "print", "script_recompile", "script_doc", "help", "objects_dump_memory", "garbage_collect_now",
+    "render_effects", "cheat_all_powerups", "cheat_all_weapons", "cheat_all_vehicles",
+    "cheat_teleport_to_camera", "cheat_active_camouflage", "cheat_active_camouflage_local_player",
+    "cheats_load", "ai_select", "ai_deselect", "debug_camera_load", "debug_camera_save",
+    "game_variant", "map_name", "multiplayer_map_name", "crash", "version", "playback",
+    "texture_cache_flush", "sound_cache_flush", "debug_memory", "debug_memory_by_file",
+    "debug_memory_for_file", "profile_reset", "profile_dump", "profile_activate",
+    "profile_deactivate", "profile_graph_toggle", "debug_pvs", "ai_lines",
+    "ai_debug_sound_point_set", "ai_debug_vocalize", "ai_debug_teleport_to", "ai_debug_speak",
+    "ai_debug_speak_list", "attract_mode_start", "core_save", "core_save_name", "core_load",
+    "core_load_at_startup", "core_load_name", "core_load_name_at_startup", "debug_sounds_enable",
+    "debug_sounds_distances", "debug_sounds_wet", "sound_enable", "sound_class_set_gain",
+    "debug_teleport_player", "cls", "error_overflow_suppression", "structure_lens_flares_place",
+    "player_effect_set_max_rumble", "rasterizer_decals_flush", "rasterizer_fps_accumulate",
+    "rasterizer_model_ambient_reflection_tint", "rasterizer_lights_reset_for_new_map",
+    "script_screen_effect_set_value", "cinematic_screen_effect_set_video", "enumerate_memory_units",
+    "delete_save_game_files", "fast_setup_network_server", "profile_unlock_solo_levels",
+    "player0_look_invert_pitch", "ui_widget_show_path", "display_scenario_help",
+    "network_game_start_now", "xbox_set_machine_name", "sv_say", "sv_end_game",
+    "loose_sounds_reload", "loose_sounds",
+];
 /// hud_nav_points.c: `struct hud_nav_point_datum` (its nav index, its type
 /// in the low 4 bits of a short's bit fields, its vertical offset and
 /// reference), a local player's 4 of them, `MAXIMUM_NUMBER_OF_LOCAL_PLAYERS`;
@@ -1085,6 +1120,9 @@ pub mod game_field {
     pub const DEBUG_GAME_SAVE: u32 = 47;
     /// players.c's `struct players_globals`.
     pub const PLAYERS_GLOBALS: u32 = 48;
+    /// object_lights.c's `struct lights_game_globals` (render_lights, a
+    /// boolean, first).
+    pub const LIGHTS_GAME_GLOBALS: u32 = 49;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -2955,6 +2993,12 @@ impl<H: HsHost> Runtime<'_, H> {
             prop_index = self.data_next_index(props, prop_index);
         }
         Some(false)
+    }
+
+    /// The library function's index in the function table.
+    fn function_index_of(&self, definition: u32) -> Option<i32> {
+        let m = self.m();
+        (0..self.context.function_count.max(0)).find(|&index| m.r32(self.context.functions + 4 * index as u32) == definition)
     }
 
     fn animation_frames_left(&self, object: u32) -> Option<i32> {
@@ -6535,8 +6579,30 @@ impl<H: HsHost> Runtime<'_, H> {
                 let flags = m.r32(definition + crate::layout::weapon_definition::WEAPON as u32);
                 boolean(flags & WEAPON_ENABLES_UNIT_INTEGRATED_NIGHT_VISION != 0)
             }
-            // ai_scripting_reconnect: nothing
-            "ai_reconnect" => 0,
+            // ai_scripting_reconnect: nothing; the tag groups' memory dump
+            // and the radiosity commands, no-ops in this build
+            "ai_reconnect" | "debug_tags" | "radiosity_start" | "radiosity_save" | "radiosity_debug_point" => 0,
+            // ai_globals_ai_active
+            "ai" => {
+                m.w8(self.context.ai_globals, m.r8(arguments));
+                0
+            }
+            // lights_enable: the setting, and its value
+            "render_lights" => {
+                let Some(globals) = self.game_field(game_field::LIGHTS_GAME_GLOBALS) else { return false };
+                let enable = m.r8(arguments);
+                m.w8(globals, enable);
+                boolean(enable != 0)
+            }
+            // player 0's profile's settings, asked of the game
+            "player0_look_pitch_is_inverted" => boolean(self.call(call::PLAYER0_LOOK_PITCH_IS_INVERTED, 0, 0, 0) != 0),
+            "player0_joystick_set_is_normal" => boolean(self.call(call::PLAYER0_JOYSTICK_SET_IS_NORMAL, 0, 0, 0) != 0),
+            // an engine command: the game's evaluation, an effect
+            name if ENGINE_BODIES.contains(&name) => {
+                let Some(function_index) = self.function_index_of(definition) else { return false };
+                self.effect(call::EFFECT_ENGINE, function_index, thread_index, arguments as i32);
+                0
+            }
             // coop_scripts_player_add_equipment: the unit's starting profile
             // (network co-op's, whose followers get it too, is the game's)
             "player_add_equipment" => {

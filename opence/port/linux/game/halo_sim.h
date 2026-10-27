@@ -765,6 +765,10 @@ enum
 	_hs_runtime_call_dangerous_effects_near_player,
 	_hs_runtime_call_any_player_is_in_the_air,
 	_hs_runtime_call_vehicle_moving_near_any_player,
+	/* questions: player0_look_pitch_is_inverted() and
+	player0_joystick_set_is_normal(), each a boolean */
+	_hs_runtime_call_player0_look_pitch_is_inverted,
+	_hs_runtime_call_player0_joystick_set_is_normal,
 
 	/* a library body's effects on the rest of the game, which the game's
 	body makes through hs_runtime_effect and Rust's through hs_runtime_call
@@ -848,7 +852,8 @@ enum
 	_hs_runtime_call_effect_switch_bsp, /* a the structure bsp: scenario_switch_structure_bsp */
 	_hs_runtime_call_effect_player_add_equipment, /* a the unit, b the starting profile, c resetting: player_add_equipment */
 	_hs_runtime_call_effect_melee_attack_begin, /* a the unit: unit_melee_attack_begin(a, FALSE, 0) */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_melee_attack_begin,
+	_hs_runtime_call_effect_engine, /* a the library function, b the thread, c its arguments: an engine command's body (a debug, profiling, cheat, file, menu or presentation setting), run as the game's evaluation */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_engine,
 };
 
 /* the runtime's operations the Rust port can run */

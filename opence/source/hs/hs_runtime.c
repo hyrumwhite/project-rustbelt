@@ -2366,6 +2366,173 @@ static char const *const hs_runtime_rust_bodies[] =
 	"game_all_quiet",
 	"game_safe_to_speak",
 	"unit_solo_player_integrated_night_vision_is_active",
+	"print",
+	"script_recompile",
+	"script_doc",
+	"help",
+	"objects_dump_memory",
+	"garbage_collect_now",
+	"render_effects",
+	"cheat_all_powerups",
+	"cheat_all_weapons",
+	"cheat_all_vehicles",
+	"cheat_teleport_to_camera",
+	"cheat_active_camouflage",
+	"cheat_active_camouflage_local_player",
+	"cheats_load",
+	"ai_select",
+	"ai_deselect",
+	"debug_camera_load",
+	"debug_camera_save",
+	"game_variant",
+	"map_name",
+	"multiplayer_map_name",
+	"crash",
+	"version",
+	"playback",
+	"texture_cache_flush",
+	"sound_cache_flush",
+	"debug_memory",
+	"debug_memory_by_file",
+	"debug_memory_for_file",
+	"profile_reset",
+	"profile_dump",
+	"profile_activate",
+	"profile_deactivate",
+	"profile_graph_toggle",
+	"debug_pvs",
+	"ai_lines",
+	"ai_debug_sound_point_set",
+	"ai_debug_vocalize",
+	"ai_debug_teleport_to",
+	"ai_debug_speak",
+	"ai_debug_speak_list",
+	"attract_mode_start",
+	"core_save",
+	"core_save_name",
+	"core_load",
+	"core_load_at_startup",
+	"core_load_name",
+	"core_load_name_at_startup",
+	"debug_sounds_enable",
+	"debug_sounds_distances",
+	"debug_sounds_wet",
+	"sound_enable",
+	"sound_class_set_gain",
+	"debug_teleport_player",
+	"cls",
+	"error_overflow_suppression",
+	"structure_lens_flares_place",
+	"player_effect_set_max_rumble",
+	"rasterizer_decals_flush",
+	"rasterizer_fps_accumulate",
+	"rasterizer_model_ambient_reflection_tint",
+	"rasterizer_lights_reset_for_new_map",
+	"script_screen_effect_set_value",
+	"cinematic_screen_effect_set_video",
+	"enumerate_memory_units",
+	"delete_save_game_files",
+	"fast_setup_network_server",
+	"profile_unlock_solo_levels",
+	"player0_look_invert_pitch",
+	"ui_widget_show_path",
+	"display_scenario_help",
+	"network_game_start_now",
+	"xbox_set_machine_name",
+	"sv_say",
+	"sv_end_game",
+	"loose_sounds_reload",
+	"loose_sounds",
+	"debug_tags",
+	"radiosity_start",
+	"radiosity_save",
+	"radiosity_debug_point",
+	"ai",
+	"render_lights",
+	"player0_look_pitch_is_inverted",
+	"player0_joystick_set_is_normal",
+};
+/* port: the engine commands among them, whose bodies are an effect each
+that runs the game's evaluation (_hs_runtime_call_effect_engine) */
+static char const *const hs_runtime_engine_bodies[] =
+{
+	"print",
+	"script_recompile",
+	"script_doc",
+	"help",
+	"objects_dump_memory",
+	"garbage_collect_now",
+	"render_effects",
+	"cheat_all_powerups",
+	"cheat_all_weapons",
+	"cheat_all_vehicles",
+	"cheat_teleport_to_camera",
+	"cheat_active_camouflage",
+	"cheat_active_camouflage_local_player",
+	"cheats_load",
+	"ai_select",
+	"ai_deselect",
+	"debug_camera_load",
+	"debug_camera_save",
+	"game_variant",
+	"map_name",
+	"multiplayer_map_name",
+	"crash",
+	"version",
+	"playback",
+	"texture_cache_flush",
+	"sound_cache_flush",
+	"debug_memory",
+	"debug_memory_by_file",
+	"debug_memory_for_file",
+	"profile_reset",
+	"profile_dump",
+	"profile_activate",
+	"profile_deactivate",
+	"profile_graph_toggle",
+	"debug_pvs",
+	"ai_lines",
+	"ai_debug_sound_point_set",
+	"ai_debug_vocalize",
+	"ai_debug_teleport_to",
+	"ai_debug_speak",
+	"ai_debug_speak_list",
+	"attract_mode_start",
+	"core_save",
+	"core_save_name",
+	"core_load",
+	"core_load_at_startup",
+	"core_load_name",
+	"core_load_name_at_startup",
+	"debug_sounds_enable",
+	"debug_sounds_distances",
+	"debug_sounds_wet",
+	"sound_enable",
+	"sound_class_set_gain",
+	"debug_teleport_player",
+	"cls",
+	"error_overflow_suppression",
+	"structure_lens_flares_place",
+	"player_effect_set_max_rumble",
+	"rasterizer_decals_flush",
+	"rasterizer_fps_accumulate",
+	"rasterizer_model_ambient_reflection_tint",
+	"rasterizer_lights_reset_for_new_map",
+	"script_screen_effect_set_value",
+	"cinematic_screen_effect_set_video",
+	"enumerate_memory_units",
+	"delete_save_game_files",
+	"fast_setup_network_server",
+	"profile_unlock_solo_levels",
+	"player0_look_invert_pitch",
+	"ui_widget_show_path",
+	"display_scenario_help",
+	"network_game_start_now",
+	"xbox_set_machine_name",
+	"sv_say",
+	"sv_end_game",
+	"loose_sounds_reload",
+	"loose_sounds",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2477,6 +2644,11 @@ static unsigned long *hs_runtime_port_game_fields(
 				fields[_hs_game_field_prop_data] = (unsigned long)prop_data;
 				fields[_hs_game_field_debug_game_save] = (unsigned long)&debug_game_save;
 				fields[_hs_game_field_players_globals] = (unsigned long)players_globals;
+				{
+					extern struct lights_game_globals *lights_game_globals;
+
+					fields[_hs_game_field_lights_game_globals] = (unsigned long)lights_game_globals;
+				}
 			}
 		}
 	}
@@ -2705,6 +2877,16 @@ static void hs_runtime_effect_run(
 	case _hs_runtime_call_effect_melee_attack_begin:
 		unit_melee_attack_begin(call->a, FALSE, 0);
 		break;
+	case _hs_runtime_call_effect_engine:
+	{
+		struct hs_function_definition *function = hs_function_get((short)call->a);
+		long *ready_arguments = hs_runtime_ready_arguments;
+
+		hs_runtime_ready_arguments = (long *)call->c;
+		function->evaluate((short)call->a, call->b, FALSE);
+		hs_runtime_ready_arguments = ready_arguments;
+		break;
+	}
 	case _hs_runtime_call_effect_foley_predict:
 	{
 		extern void game_sound_port_foley_predict(long definition_index);
@@ -2775,6 +2957,34 @@ static boolean hs_runtime_rust_body(
 {
 	return function_index >= 0 && function_index < 1024 &&
 		(hs_runtime_rust_body_bits_get()[function_index >> 3] & (1 << (function_index & 7))) != 0;
+}
+
+/* (whether the function is an engine command, hs_runtime_engine_bodies'; its
+bits made once) */
+static boolean hs_runtime_engine_body(
+	short function_index)
+{
+	static unsigned char bits[(1024 + 7) / 8];
+	static boolean made = FALSE;
+
+	if (!made)
+	{
+		long index;
+
+		made = TRUE;
+		for (index = 0; index < hs_function_table_count && index < 1024; index++)
+		{
+			struct hs_function_definition const *function = hs_function_get((short)index);
+			short name_index;
+
+			for (name_index = 0; name_index < NUMBEROF(hs_runtime_engine_bodies); name_index++)
+			{
+				if (function && function->name && !strcmp(function->name, hs_runtime_engine_bodies[name_index]))
+					bits[index >> 3] |= (unsigned char)(1 << (index & 7));
+			}
+		}
+	}
+	return function_index >= 0 && function_index < 1024 && (bits[function_index >> 3] & (1 << (function_index & 7))) != 0;
 }
 
 long *hs_macro_function_evaluate(
@@ -4406,9 +4616,17 @@ void hs_runtime_call(
 			checked around the game's) */
 			int body_checking = hs_runtime_rust_body((short)call->a) && halo_sim_hs_body_check_begin(call);
 
-			hs_runtime_ready_arguments = (long *)call->c;
-			function->evaluate((short)call->a, call->b, FALSE);
-			hs_runtime_ready_arguments = NULL;
+			/* (an engine command's body is an effect, as Rust's makes it) */
+			if (hs_runtime_engine_body((short)call->a))
+			{
+				hs_runtime_effect(_hs_runtime_call_effect_engine, call->a, call->b, call->c);
+			}
+			else
+			{
+				hs_runtime_ready_arguments = (long *)call->c;
+				function->evaluate((short)call->a, call->b, FALSE);
+				hs_runtime_ready_arguments = NULL;
+			}
 			halo_sim_hs_body_check_end(call, body_checking);
 			break;
 		}
@@ -4496,6 +4714,7 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_switch_bsp:
 		case _hs_runtime_call_effect_player_add_equipment:
 		case _hs_runtime_call_effect_melee_attack_begin:
+		case _hs_runtime_call_effect_engine:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;
@@ -4515,6 +4734,22 @@ void hs_runtime_call(
 
 			scenario_location_from_point(&location, (real_point3d const *)call->a);
 			call->result = location.cluster_index;
+			break;
+		}
+
+		case _hs_runtime_call_player0_look_pitch_is_inverted:
+		{
+			extern boolean player0_look_pitch_is_inverted(void);
+
+			call->result = player0_look_pitch_is_inverted() ? 1 : 0;
+			break;
+		}
+
+		case _hs_runtime_call_player0_joystick_set_is_normal:
+		{
+			extern boolean player0_joystick_set_is_normal(void);
+
+			call->result = player0_joystick_set_is_normal() ? 1 : 0;
 			break;
 		}
 

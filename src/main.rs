@@ -1235,6 +1235,14 @@ fn dolly_camera(
 ) {
     let Some(reach) = args.dolly else { return };
     let start = *start.get_or_insert(**camera);
+    // (HALO_RT_PAN=<degrees>: from --screenshot-from, turned that much left
+    // more each --screenshot-every, the captures a sweep of views)
+    if let (Some(step), Some(every)) = (std::env::var("HALO_RT_PAN").ok().and_then(|v| v.parse::<f32>().ok()), args.screenshot_every) {
+        let turns = frames.0.saturating_sub(args.screenshot_from) / every.max(1);
+        **camera = start;
+        camera.rotate_y((step * turns as f32).to_radians());
+        return;
+    }
     // (HALO_RT_DOLLY_DURING: it sways on through the captures, taken at one
     // phase of each sweep: the lighting in motion, compared at one place)
     if args.screenshot_every.is_some() && frames.0 >= args.screenshot_from && std::env::var_os("HALO_RT_DOLLY_DURING").is_none() {

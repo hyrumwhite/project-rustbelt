@@ -1284,15 +1284,19 @@ fn forward_input(
     state.keys = [0; 16];
     state.mouse_buttons = 0;
     state.pointer = pointer.map_or(0, |at| halo_bridge::Input::pointer_at(at.x, at.y));
-    // (testing: `HALO_RT_TEST_KEYS=<SDL scancode>@<frame>,...` presses a
-    // key for six frames from that frame, the window's attention or not:
-    // 29@4000 zooms)
+    // (testing: `HALO_RT_TEST_KEYS=<SDL scancode>@<frame>[+<frames>],...`
+    // presses a key from that frame for six frames or as many as given, the
+    // window's attention or not: 29@4000 zooms, 26@4000+300 walks forward)
     *frame += 1;
     if let Ok(text) = std::env::var("HALO_RT_TEST_KEYS") {
         for entry in text.split(',') {
             let Some((scancode, at)) = entry.split_once('@') else { continue };
-            let (Ok(scancode), Ok(at)) = (scancode.trim().parse::<u32>(), at.trim().parse::<u32>()) else { continue };
-            if (at..at + 6).contains(&*frame) {
+            let (at, frames) = at.split_once('+').unwrap_or((at, "6"));
+            let (Ok(scancode), Ok(at), Ok(frames)) = (scancode.trim().parse::<u32>(), at.trim().parse::<u32>(), frames.trim().parse::<u32>())
+            else {
+                continue;
+            };
+            if (at..at + frames).contains(&*frame) {
                 state.active = 1;
                 state.set_key(scancode, true);
             }

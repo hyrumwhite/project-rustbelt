@@ -8,6 +8,12 @@
 //! multiply the light on the surface as they would its colour; burns' glows
 //! add radiance (`shaders/halo_decal.wesl`). Decals are not in the
 //! ray-traced scene, so reflections don't show them.
+//!
+//! The level's own decals (permanent: c10's blood) the game makes as their
+//! cluster comes into the potentially visible set and deletes as it leaves,
+//! where its renderer stopped drawing the cluster's walls; this draws every
+//! cluster, so they are kept, by their shape, until the structure BSP
+//! changes, and one the game makes again takes the kept one's place.
 
 use crate::bridge::{BridgeLevel, BridgeLink};
 use bevy::{
@@ -132,7 +138,11 @@ impl Material for DecalMaterial {
 #[derive(Resource, Default)]
 struct Decals {
     scenario: String,
+    /// The structure BSP the permanent decals are of.
+    bsp: i32,
     tracked: HashMap<u32, Tracked>,
+    /// Permanent decals the game no longer shares, by their shape.
+    kept: HashMap<Shape, Tracked>,
     /// Counts the game's frames seen, for forgetting decals long unseen.
     frame: u64,
     last_frame_index: u32,
@@ -146,18 +156,24 @@ struct Tracked {
     material: Handle<DecalMaterial>,
     /// What makes it the same decal: a datum index the game reuses for a
     /// new decal gets new geometry
-    shape: (u32, u8, u8, u32, [i32; 3]),
+    shape: Shape,
     params: DecalParams,
     last_seen: u64,
     shown: bool,
+    /// The level's own (the game's permanent decal)
+    permanent: bool,
 }
+
+/// A decal's bitmap, blend, quad count and first vertex (1024ths of a
+/// world unit).
+type Shape = (u32, u8, u8, u32, [i32; 3]);
 
 /// A decal unseen for this many of the game's frames (out of view, or gone)
 /// is let go of; one seen again is made again.
 const FORGET_AFTER_FRAMES: u64 = 600;
 
 impl Tracked {
-    fn shape(decal: &Decal, vertices: &[halo_bridge::DecalVertex]) -> (u32, u8, u8, u32, [i32; 3]) {
+    fn shape(decal: &Decal, vertices: &[halo_bridge::DecalVertex]) -> Shape {
         let first = vertices.first().map_or([0; 3], |v| v.position.map(|x| (x * 1024.0) as i32));
         (decal.map, decal.bitmap_index, decal.blend_function, decal.quad_count, first)
     }
@@ -216,7 +232,23 @@ fn follow_decals(
         for (_, tracked) in decals.tracked.drain() {
             commands.entity(tracked.entity).despawn();
         }
+        for (_, kept) in decals.kept.drain() {
+            commands.entity(kept.entity).despawn();
+        }
         decals.scenario = snapshot.scenario_name.clone();
+    }
+    // another structure BSP: none of the old one's kept decals
+    if snapshot.structure_bsp_index != decals.bsp {
+        for (_, kept) in decals.kept.drain() {
+            commands.entity(kept.entity).despawn();
+        }
+        decals.tracked.retain(|_, tracked| {
+            if tracked.permanent {
+                commands.entity(tracked.entity).despawn();
+            }
+            !tracked.permanent
+        });
+        decals.bsp = snapshot.structure_bsp_index;
     }
     decals.frame += 1;
     let frame = decals.frame;
@@ -257,7 +289,29 @@ fn follow_decals(
             continue;
         }
         if let Some(old) = decals.tracked.remove(&decal.decal_index) {
-            commands.entity(old.entity).despawn();
+            // (a kept decal's datum index made another decal)
+            if old.permanent {
+                decals.kept.insert(old.shape, old);
+            } else {
+                commands.entity(old.entity).despawn();
+            }
+        }
+        // (a kept decal the game makes again)
+        let permanent = decal.color[3] != 0;
+        if permanent && let Some(mut kept) = decals.kept.remove(&shape) {
+            kept.last_seen = frame;
+            if !kept.shown {
+                commands.entity(kept.entity).insert(Visibility::Inherited);
+                kept.shown = true;
+            }
+            if kept.params != params {
+                if let Some(mut material) = materials.get_mut(&kept.material) {
+                    material.params = params;
+                }
+                kept.params = params;
+            }
+            decals.tracked.insert(decal.decal_index, kept);
+            continue;
         }
         // its bitmap, from the level's map (display-encoded)
         let Some(level) = level.as_deref_mut() else { continue };
@@ -285,10 +339,20 @@ fn follow_decals(
                 Transform::IDENTITY,
             ))
             .id();
-        decals.tracked.insert(decal.decal_index, Tracked { entity, material, shape, params, last_seen: frame, shown: true });
+        decals.tracked.insert(decal.decal_index, Tracked { entity, material, shape, params, last_seen: frame, shown: true, permanent });
     }
 
-    decals.tracked.retain(|&tracked_index, tracked| {
+    let Decals { tracked, kept, .. } = &mut *decals;
+    tracked.retain(|&tracked_index, tracked| {
+        // (the level's own, no longer shared: kept as it is)
+        if tracked.permanent && tracked.last_seen != frame {
+            if std::env::var_os("HALO_RT_DECAL_LOG").is_some() {
+                info!("decal {:#010x} kept at tick {}", tracked_index, snapshot.game_tick);
+            }
+            let shape = tracked.shape;
+            kept.insert(shape, Tracked { material: tracked.material.clone(), ..*tracked });
+            return false;
+        }
         if frame - tracked.last_seen > FORGET_AFTER_FRAMES {
             commands.entity(tracked.entity).despawn();
             return false;

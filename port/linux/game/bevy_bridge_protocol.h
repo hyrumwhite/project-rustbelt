@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 51
+#define BEVY_BRIDGE_VERSION 52
 #define BEVY_BRIDGE_SCREEN_TEXTURES 512
 #define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
 #define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
@@ -461,6 +461,10 @@ overbright mode (0 to 2) and noise intensity */
 #define BEVY_BRIDGE_SCREEN_EFFECT_ON 1UL
 #define BEVY_BRIDGE_SCREEN_EFFECT_DESATURATION_ADDITIVE 2UL
 #define BEVY_BRIDGE_SCREEN_EFFECT_VIDEO 4UL
+/* (protocol 52) the light enhancement or desaturation fades where the
+mask's blue is over half */
+#define BEVY_BRIDGE_SCREEN_EFFECT_LIGHT_ENHANCEMENT_MASKED 8UL
+#define BEVY_BRIDGE_SCREEN_EFFECT_DESATURATION_MASKED 16UL
 struct bevy_bridge_screen_effect
 {
 	unsigned long flags;
@@ -469,6 +473,15 @@ struct bevy_bridge_screen_effect
 	float desaturation_tint[3];
 	unsigned long video_overbright_mode;
 	float video_noise_intensity;
+	/* (protocol 52) a HUD's zoom: its convolution mask, the bitmap tag (all
+	ones for none) and its bitmap, a texel to a game pixel, centred on the
+	view (its alpha where the picture is warped, its blue how dark), and the
+	convolution (_rasterizer_screen_effect_convolution_type: 0 none, 1 blur,
+	2 warp) and its radius (game pixels) */
+	unsigned long mask_bitmap;
+	unsigned short mask_bitmap_index;
+	unsigned short convolution_type;
+	float convolution_radius;
 };
 
 struct bevy_bridge_screen_map

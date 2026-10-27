@@ -478,11 +478,14 @@ void _rasterizer_screen_effect(
 	/* port: the renderer's, over the scene it draws, when it draws the HUD
 	(bevy_bridge.c): drawn here, it fell on the game's own picture, which
 	holds only what is drawn over the world, and left the scene under it
-	as it was (c10's dark helmet recording unlit, black) */
+	as it was (c10's dark helmet recording unlit, black); a HUD's zoom mask
+	and its warp too (the pistol's and sniper's darkened, warped edges) */
 	if (bevy_bridge_viewer_draws_hud())
 	{
 		if (parameters &&
-			(parameters->filter_light_enhancement_intensity > 0.0f ||
+			(parameters->convolution_type != _rasterizer_screen_effect_convolution_type_none ||
+			parameters->convolution_mask ||
+			parameters->filter_light_enhancement_intensity > 0.0f ||
 			parameters->filter_desaturation_intensity > 0.0f ||
 			parameters->video_on) &&
 			rasterizer_debug_options.screen_effects_enabled &&
@@ -493,7 +496,11 @@ void _rasterizer_screen_effect(
 			memset(&effect, 0, sizeof(effect));
 			effect.flags = BEVY_BRIDGE_SCREEN_EFFECT_ON |
 				(parameters->filter_desaturation_is_additive ? BEVY_BRIDGE_SCREEN_EFFECT_DESATURATION_ADDITIVE : 0) |
-				(parameters->video_on ? BEVY_BRIDGE_SCREEN_EFFECT_VIDEO : 0);
+				(parameters->video_on ? BEVY_BRIDGE_SCREEN_EFFECT_VIDEO : 0) |
+				(parameters->convolution_mask && parameters->filter_light_enhancement_uses_convolution_mask ?
+					BEVY_BRIDGE_SCREEN_EFFECT_LIGHT_ENHANCEMENT_MASKED : 0) |
+				(parameters->convolution_mask && parameters->filter_desaturation_uses_convolution_mask ?
+					BEVY_BRIDGE_SCREEN_EFFECT_DESATURATION_MASKED : 0);
 			effect.light_enhancement = parameters->filter_light_enhancement_intensity;
 			effect.desaturation = parameters->filter_desaturation_intensity;
 			effect.desaturation_tint[0] = parameters->filter_desaturation_tint.red;
@@ -501,6 +508,14 @@ void _rasterizer_screen_effect(
 			effect.desaturation_tint[2] = parameters->filter_desaturation_tint.blue;
 			effect.video_overbright_mode = (unsigned long)PIN(parameters->video_overbright_mode, 0, 2);
 			effect.video_noise_intensity = PIN(parameters->video_noise_intensity, 0.0f, 1.0f);
+			effect.mask_bitmap = 0xFFFFFFFFUL;
+			if (parameters->convolution_mask &&
+				!bevy_bridge_bitmap_tag(parameters->convolution_mask, &effect.mask_bitmap, &effect.mask_bitmap_index))
+			{
+				effect.mask_bitmap = 0xFFFFFFFFUL;
+			}
+			effect.convolution_type = (unsigned short)parameters->convolution_type;
+			effect.convolution_radius = parameters->convolution_radius;
 			bevy_bridge_note_screen_effect(&effect);
 		}
 		rasterizer_profile_end(_rasterizer_profile_screen_effect);

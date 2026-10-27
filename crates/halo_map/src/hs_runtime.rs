@@ -155,6 +155,9 @@ pub mod call {
     /// A body's question: the cluster of the point at the address `a`
     /// (`scenario_location_from_point`), or NONE.
     pub const POINT_CLUSTER: i32 = 18;
+    /// A body's question: the unit `a`'s head marker's position's
+    /// coordinate `c` (`unit_get_head_position`), a real's bits.
+    pub const UNIT_HEAD_POSITION: i32 = 19;
     /// `game_in_progress()`.
     pub const GAME_IN_PROGRESS: i32 = 3;
     /// `object_index_from_name_index(a)`.
@@ -323,16 +326,24 @@ pub mod call {
     /// The scenery `a` playing the graph `b`'s animation `c` (bits 16 on:
     /// its frame): its co-op note.
     pub const EFFECT_SCENERY_ANIMATION_NOTE: i32 = 0x7b;
+    /// Two names (`a` and `b`, their addresses) the next effect takes.
+    pub const EFFECT_NAMES: i32 = 0x7c;
+    /// The child `b` attached to the parent `a` at the names' markers, and
+    /// its co-op note (`objects_port_scripting_attach`).
+    pub const EFFECT_OBJECTS_ATTACH: i32 = 0x7d;
+    /// The unit `a` into the vehicle `b`'s seat `c`, then its co-op
+    /// followers by the first name (`unit_port_scripting_enter_seat`).
+    pub const EFFECT_UNIT_ENTER_SEAT: i32 = 0x7e;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_SCENERY_ANIMATION_NOTE).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_UNIT_ENTER_SEAT).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
     /// asks the game as it is).
     pub fn is_query(kind: i32) -> bool {
-        kind == OBJECT_FROM_NAME || kind == POINT_CLUSTER
+        kind == OBJECT_FROM_NAME || kind == POINT_CLUSTER || kind == UNIT_HEAD_POSITION
     }
 }
 
@@ -699,6 +710,15 @@ const PVS_ACTIVATION_NORMAL: u16 = 0;
 const PVS_ACTIVATION_OBJECT: u16 = 1;
 const PVS_ACTIVATION_CLUSTER: u16 = 2;
 const OBJECT_MASK_CANNOT_INTERPOLATE: u32 = 0xfe0;
+/// `struct scenario`'s cutscene flags (`struct scenario_cutscene_flag`:
+/// a name, then its position).
+const SCENARIO_CUTSCENE_FLAGS: u32 = 0x4e4;
+const CUTSCENE_FLAG_SIZE: u32 = 0x5c;
+const CUTSCENE_FLAG_POSITION: u32 = 0x24;
+/// `struct _object_definition`'s animation graph's tag index (its tag
+/// reference's last long); `_object_type_vehicle`.
+const OBJECT_DEFINITION_ANIMATION_GRAPH_INDEX: u32 = 0x44;
+const OBJECT_TYPE_VEHICLE: u16 = 1;
 /// `struct object_list_header_datum`'s count and first reference, and
 /// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
@@ -2475,6 +2495,57 @@ impl<H: HsHost> Runtime<'_, H> {
         let c = animation_index as u16 as i32 | if interpolate { 1 << 16 } else { 0 };
         self.effect(call::EFFECT_UNIT_USER_ANIMATION_STARTED, unit_index, graph_index, c);
         Some(true)
+    }
+
+    /// `unit_get_head_position`, asked of the game (its head marker, on the
+    /// node matrices it draws with).
+    fn unit_head_position(&self, unit_index: i32) -> [f32; 3] {
+        [0, 1, 2].map(|c| f32::from_bits(self.call(call::UNIT_HEAD_POSITION, unit_index, 0, c) as u32))
+    }
+
+    /// `unit_can_see_point`: the point within the field of view (radians)
+    /// of the unit's looking, from its head.
+    fn unit_can_see_point(&self, unit: u32, unit_index: i32, point: [f32; 3], field_of_view: f32) -> bool {
+        let m = self.m();
+        let head = self.unit_head_position(unit_index);
+        let mut direction = [point[0] - head[0], point[1] - head[1], point[2] - head[2]];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        // normalize3d
+        let magnitude = dot(direction, direction).sqrt();
+        if !(0.0001 > magnitude.abs()) {
+            let scale = 1.0 / magnitude;
+            direction = direction.map(|part| part * scale);
+        }
+        let looking = [0, 1, 2].map(|i| f32::from_bits(m.r32(unit + crate::layout::unit_datum::UNIT_LOOKING_VECTOR as u32 + 4 * i)));
+        dot(direction, looking) > (field_of_view as f64).cos() as f32
+    }
+
+    /// `unit_set_or_test_seat_and_weapon_label` testing a seat label with
+    /// any weapon: whether the unit definition's graph has a seat of the
+    /// label (any case) with a weapon type; None where the game's would stop.
+    fn unit_graph_has_seat(&self, unit: u32, label: &[u8]) -> Option<bool> {
+        use crate::layout::{
+            animation_graph as g, animation_graph_unit_seat as seat, animation_graph_weapon_class as class,
+        };
+        let m = self.m();
+        let definition_index = m.r32(unit + crate::layout::unit_datum::DEFINITION_INDEX as u32) as i32;
+        let definition = self.tag_data(b"unit", definition_index)?;
+        let graph = self.tag_data(b"antr", m.r32(definition + OBJECT_DEFINITION_ANIMATION_GRAPH_INDEX) as i32)?;
+        let (seat_count, seats) = self.tag_block(graph + g::UNIT_SEATS as u32);
+        for seat_index in 0..seat_count.clamp(0, 0x7fff) as u32 {
+            let unit_seat = seats + seat_index * seat::SIZEOF as u32;
+            if !label.eq_ignore_ascii_case(&self.c_string(unit_seat + seat::LABEL as u32)) {
+                continue;
+            }
+            let (class_count, classes) = self.tag_block(unit_seat + seat::WEAPON_CLASSES as u32);
+            for class_index in 0..class_count.clamp(0, 0x7fff) as u32 {
+                let weapon_class = classes + class_index * class::SIZEOF as u32;
+                if (m.r32(weapon_class + class::WEAPON_TYPES as u32) as i32).clamp(0, 0x7fff) > 0 {
+                    return Some(true);
+                }
+            }
+        }
+        Some(false)
     }
 
     fn animation_frames_left(&self, object: u32) -> Option<i32> {
@@ -5599,6 +5670,106 @@ impl<H: HsHost> Runtime<'_, H> {
                     let ty = m.r16(object + u::OBJECT_TYPE as u32) as u32;
                     if OBJECT_MASK_CANNOT_INTERPOLATE & (1 << (ty & 31)) == 0 {
                         self.effect(call::EFFECT_OBJECT_START_INTERPOLATION, object_index, short(2) as i32, 0);
+                    }
+                }
+                0
+            }
+            // hs_objects_can_see_object and hs_objects_can_see_flag: whether
+            // any unit of the list looks within the degrees of the object
+            // (a unit's head, or its bounding sphere's centre) or the
+            // cutscene flag (never flag 0, as hs_unit_can_see_flag has it)
+            name @ ("objects_can_see_object" | "objects_can_see_flag") => {
+                let Some(list) = self.object_list(argument(0)) else { return false };
+                let degrees = f32::from_bits(argument(2) as u32);
+                // DEGREES_TO_RADIANS
+                let field_of_view = degrees * std::f32::consts::PI / 180.0;
+                let point = if name == "objects_can_see_object" {
+                    let object_index = argument(1);
+                    if object_index == NONE {
+                        None
+                    } else if self.object_typed(object_index, OBJECT_MASK_UNIT).is_some() {
+                        Some(self.unit_head_position(object_index))
+                    } else {
+                        let Some(object) = self.object_typed(object_index, OBJECT_MASK_ALL) else { return false };
+                        Some([0, 1, 2].map(|i| f32::from_bits(m.r32(object + u::OBJECT_BOUNDING_SPHERE_CENTER as u32 + 4 * i))))
+                    }
+                } else {
+                    let flag_index = short(1);
+                    if flag_index == 0 {
+                        None
+                    } else {
+                        let Some(scenario) = self.game_field(game_field::SCENARIO) else { return false };
+                        let (count, first) = self.tag_block(scenario + SCENARIO_CUTSCENE_FLAGS);
+                        if !(0..count).contains(&(flag_index as i32)) {
+                            return false;
+                        }
+                        let flag = first + flag_index as u32 * CUTSCENE_FLAG_SIZE;
+                        Some([0, 1, 2].map(|i| f32::from_bits(m.r32(flag + CUTSCENE_FLAG_POSITION + 4 * i))))
+                    }
+                };
+                let mut result = false;
+                for unit_index in list {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { continue };
+                    if let Some(point) = point {
+                        if self.unit_can_see_point(unit, unit_index, point, field_of_view) {
+                            result = true;
+                            break;
+                        }
+                    }
+                }
+                boolean(result)
+            }
+            // objects_scripting_attach: a child without a parent attached at
+            // the markers (the names an effect before the attaching)
+            "objects_attach" => {
+                let (parent_index, child_index) = (argument(0), argument(2));
+                if parent_index != NONE && child_index != NONE {
+                    let Some(child) = self.object_typed(child_index, OBJECT_MASK_ALL) else { return false };
+                    if m.r32(child + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 == NONE {
+                        self.effect(call::EFFECT_NAMES, argument(1), argument(3), 0);
+                        self.effect(call::EFFECT_OBJECTS_ATTACH, parent_index, child_index, 0);
+                    }
+                }
+                0
+            }
+            // unit_scripting_enter_vehicle: a living unit into the vehicle's
+            // first empty seat of the label it can sit in (a vehicle any).
+            // A unit riding something is the game's, which reads whether
+            // leaving its seat freed it.
+            "unit_enter_vehicle" => {
+                let (unit_index, vehicle_index) = (argument(0), argument(1));
+                let seat_name = self.c_string(argument(2) as u32);
+                if unit_index != NONE && vehicle_index != NONE && !seat_name.is_empty() {
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    if m.r16(unit + u::OBJECT_DAMAGE_FLAGS as u32) & OBJECT_DEAD == 0 {
+                        if m.r32(unit + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 != NONE {
+                            return false;
+                        }
+                        let Some(vehicle) = self.object_typed(vehicle_index, OBJECT_MASK_UNIT) else { return false };
+                        let Some(labels) = self.unit_seats(vehicle) else { return false };
+                        let riders = self.objects_of_types(OBJECT_MASK_UNIT);
+                        let is_vehicle = m.r16(unit + u::OBJECT_TYPE as u32) == OBJECT_TYPE_VEHICLE;
+                        for (seat_index, label) in labels.iter().enumerate() {
+                            if !seat_name.eq_ignore_ascii_case(label) {
+                                continue;
+                            }
+                            let filled = riders.iter().any(|&(_, rider)| {
+                                m.r32(rider + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 == vehicle_index
+                                    && m.r16(rider + u::UNIT_PARENT_SEAT_INDEX as u32) as i16 as i32 == seat_index as i32
+                            });
+                            if filled {
+                                continue;
+                            }
+                            let can_sit = is_vehicle || {
+                                let Some(has) = self.unit_graph_has_seat(unit, label) else { return false };
+                                has
+                            };
+                            if can_sit {
+                                self.effect(call::EFFECT_NAMES, argument(2), 0, 0);
+                                self.effect(call::EFFECT_UNIT_ENTER_SEAT, unit_index, vehicle_index, seat_index as i32);
+                                break;
+                            }
+                        }
                     }
                 }
                 0

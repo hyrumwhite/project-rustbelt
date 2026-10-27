@@ -4240,6 +4240,20 @@ void unit_stop_custom_animation(
 	return;
 }
 
+/* port: unit_scripting_enter_vehicle's entering of the seat, then the co-op
+players the scripts can't name boarding with player0 (its effect,
+_hs_runtime_call_effect_unit_enter_seat) */
+void unit_port_scripting_enter_seat(
+	long unit_index,
+	long vehicle_index,
+	short seat_index,
+	char const *seat_name)
+{
+	unit_enter_seat(unit_index, vehicle_index, seat_index);
+	if (unit_get(unit_index)->object.parent_object_index == vehicle_index)
+		coop_scripts_board_followers(unit_index, vehicle_index, seat_name);
+}
+
 /* port: unit_start_user_animation's node matrices and notes once it starts
 one (its effect, _hs_runtime_call_effect_unit_user_animation_started) */
 void unit_port_user_animation_started(
@@ -4859,15 +4873,14 @@ void unit_scripting_enter_vehicle(
 						(unit->object.type==_object_type_vehicle ||
 							unit_set_or_test_seat_and_weapon_label(unit_index, seat->label, NULL, FALSE)))
 					{
-						unit_enter_seat(unit_index, vehicle_index, seat_index);
+						/* port: its co-op followers in the effect too, as
+						only a unit entering a seat here now rides the vehicle */
+						hs_runtime_effect(_hs_runtime_call_effect_names, (long)seat_name, 0, 0);
+						hs_runtime_effect(_hs_runtime_call_effect_unit_enter_seat, unit_index, vehicle_index, seat_index);
 						break;
 					}
 				}
 			}
-
-			/* port: co-op players the scripts can't name board with player0 */
-			if (unit->object.parent_object_index == vehicle_index)
-				coop_scripts_board_followers(unit_index, vehicle_index, seat_name);
 		}
 	}
 

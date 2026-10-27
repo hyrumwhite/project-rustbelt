@@ -4121,11 +4121,23 @@ void objects_scripting_attach(
 		child_object_index !=NONE &&
 		object_get(child_object_index)->object.parent_object_index==NONE)
 	{
-		network_coop_note_attach(parent_object_index, parent_marker_name, child_object_index, child_marker_name);
-		object_attach_to_marker(parent_object_index, parent_marker_name, child_object_index, child_marker_name);
+		hs_runtime_effect(_hs_runtime_call_effect_names, (long)parent_marker_name, (long)child_marker_name, 0);
+		hs_runtime_effect(_hs_runtime_call_effect_objects_attach, parent_object_index, child_object_index, 0);
 	}
 
 	return;
+}
+
+/* port: objects_scripting_attach's co-op note and attaching (its effect,
+_hs_runtime_call_effect_objects_attach) */
+void objects_port_scripting_attach(
+	long parent_object_index,
+	char const *parent_marker_name,
+	long child_object_index,
+	char const *child_marker_name)
+{
+	network_coop_note_attach(parent_object_index, parent_marker_name, child_object_index, child_marker_name);
+	object_attach_to_marker(parent_object_index, parent_marker_name, child_object_index, child_marker_name);
 }
 
 void object_delete_immediately(

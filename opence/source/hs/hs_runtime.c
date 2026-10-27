@@ -281,6 +281,7 @@ extern struct hs_external_global_definition *hs_external_globals[];
 #include "render/render.h"
 #include "render/render_debug.h"
 #include "scenario/scenario.h"
+#include "units/units.h" /* port: unit_get_head_position, for a body's question */
 #include "scenario/scenario_definitions.h"
 #include "saved games/game_state.h"
 #include "text/draw_string.h"
@@ -2326,12 +2327,18 @@ static char const *const hs_runtime_rust_bodies[] =
 	"object_pvs_set_camera",
 	"object_pvs_clear",
 	"object_set_scale",
+	"objects_can_see_object",
+	"objects_can_see_flag",
+	"objects_attach",
+	"unit_enter_vehicle",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
 the body check compares the game's with those Rust's asked (halo_sim.c's
 halo_sim_hs_body_effect). An effect's own effects aren't the body's. */
 static long hs_runtime_effect_depth = 0;
+/* (the names _hs_runtime_call_effect_names gives the next effect) */
+static char const *hs_runtime_effect_names[2];
 static void hs_runtime_effect_run(struct halo_sim_hs_call *call);
 
 long hs_runtime_effect(
@@ -2563,6 +2570,25 @@ static void hs_runtime_effect_run(
 	case _hs_runtime_call_effect_scenery_animation_note:
 		network_coop_note_scenery_animation(call->a, call->b, (short)call->c, (short)(call->c >> 16));
 		break;
+	case _hs_runtime_call_effect_names:
+		hs_runtime_effect_names[0] = (char const *)call->a;
+		hs_runtime_effect_names[1] = (char const *)call->b;
+		break;
+	case _hs_runtime_call_effect_objects_attach:
+	{
+		extern void objects_port_scripting_attach(long parent_object_index, char const *parent_marker_name,
+			long child_object_index, char const *child_marker_name);
+
+		objects_port_scripting_attach(call->a, hs_runtime_effect_names[0], call->b, hs_runtime_effect_names[1]);
+		break;
+	}
+	case _hs_runtime_call_effect_unit_enter_seat:
+	{
+		extern void unit_port_scripting_enter_seat(long unit_index, long vehicle_index, short seat_index, char const *seat_name);
+
+		unit_port_scripting_enter_seat(call->a, call->b, (short)call->c, hs_runtime_effect_names[0]);
+		break;
+	}
 	default:
 		ai_script_effect_run(call);
 		break;
@@ -4322,6 +4348,9 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_unit_user_animation_started:
 		case _hs_runtime_call_effect_unit_user_animation_frame:
 		case _hs_runtime_call_effect_scenery_animation_note:
+		case _hs_runtime_call_effect_names:
+		case _hs_runtime_call_effect_objects_attach:
+		case _hs_runtime_call_effect_unit_enter_seat:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;
@@ -4341,6 +4370,17 @@ void hs_runtime_call(
 
 			scenario_location_from_point(&location, (real_point3d const *)call->a);
 			call->result = location.cluster_index;
+			break;
+		}
+
+		case _hs_runtime_call_unit_head_position:
+		{
+			real_point3d head_position;
+			real coordinate;
+
+			unit_get_head_position(call->a, &head_position);
+			coordinate = head_position.n[call->c >= 0 && call->c < 3 ? call->c : 0];
+			call->result = *(long const *)&coordinate;
 			break;
 		}
 

@@ -757,6 +757,9 @@ enum
 	/* a question a body asks that changes nothing: the cluster of the point
 	at the address a (scenario_location_from_point), or NONE */
 	_hs_runtime_call_point_cluster,
+	/* a question: the unit a's head marker's position's coordinate c (0 to
+	2; unit_get_head_position), as a real's bits */
+	_hs_runtime_call_unit_head_position,
 
 	/* a library body's effects on the rest of the game, which the game's
 	body makes through hs_runtime_effect and Rust's through hs_runtime_call
@@ -822,7 +825,10 @@ enum
 	_hs_runtime_call_effect_unit_user_animation_started, /* a the unit, b the graph, c the animation (bit 16: interpolating): its node matrices, co-op and AI notes */
 	_hs_runtime_call_effect_unit_user_animation_frame, /* a the unit, b the frame: its co-op note */
 	_hs_runtime_call_effect_scenery_animation_note, /* a the scenery, b the graph, c the animation (bits 16 on: the frame): its co-op note */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_scenery_animation_note,
+	_hs_runtime_call_effect_names, /* a and b two names (their addresses) the next effect takes */
+	_hs_runtime_call_effect_objects_attach, /* a the parent, b the child, at the names' markers: its co-op note and the attaching */
+	_hs_runtime_call_effect_unit_enter_seat, /* a the unit, b the vehicle, c the seat: entering it, then its co-op followers (by the name) */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_unit_enter_seat,
 };
 
 /* the runtime's operations the Rust port can run */

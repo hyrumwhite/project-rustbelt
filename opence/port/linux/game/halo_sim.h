@@ -833,7 +833,11 @@ enum
 	_hs_runtime_call_effect_damage_at_flag, /* a the damage effect, b the cutscene flag: its area damage there */
 	_hs_runtime_call_effect_damage_object, /* a the damage effect, b the object: its damage to the object */
 	_hs_runtime_call_effect_object_permute_region, /* a the object, b the region (NONE for all), to the first name's permutation */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_object_permute_region,
+	_hs_runtime_call_effect_coop_sound, /* a the kind (_coop_sound_*), b the sound, c the object, the first name its scale's bits: network_coop_note_sound */
+	_hs_runtime_call_effect_scripted_sound_start, /* a the sound, b the object (or NONE), c the scale's bits: its impulse made and kept (game_sound_port_scripted_sound_start) */
+	_hs_runtime_call_effect_looping_sound_start, /* a the looping sound, b the object, c the gain's bits: its co-op note, then it started and kept (game_sound_port_looping_sound_start) */
+	_hs_runtime_call_effect_foley_predict, /* a the looping sound: scripted_foley_predict */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_foley_predict,
 };
 
 /* the runtime's operations the Rust port can run */

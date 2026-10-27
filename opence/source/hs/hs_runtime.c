@@ -2337,6 +2337,14 @@ static char const *const hs_runtime_rust_bodies[] =
 	"damage_new",
 	"damage_object",
 	"object_set_permutation",
+	"sound_impulse_start",
+	"sound_looping_predict",
+	"sound_looping_start",
+	"sound_looping_stop",
+	"sound_looping_set_scale",
+	"sound_looping_set_alternate",
+	"sound_set_gain",
+	"sound_get_gain",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2432,8 +2440,10 @@ static unsigned long *hs_runtime_port_game_fields(
 		}
 		{
 			extern void objects_port_game_fields(unsigned long *fields);
+			extern void game_sound_port_game_fields(unsigned long *fields);
 
 			objects_port_game_fields(fields);
+			game_sound_port_game_fields(fields);
 		}
 	}
 
@@ -2603,6 +2613,40 @@ static void hs_runtime_effect_run(
 	case _hs_runtime_call_effect_object_permute_region:
 		object_permute_region(call->a, hs_runtime_effect_names[0], (short)call->b, TRUE);
 		break;
+	case _hs_runtime_call_effect_coop_sound:
+	{
+		extern void network_coop_note_sound(short kind, long definition_index, long object_index, real scale);
+		union { long bits; real value; } scale;
+
+		scale.bits = (long)hs_runtime_effect_names[0];
+		network_coop_note_sound((short)call->a, call->b, call->c, scale.value);
+		break;
+	}
+	case _hs_runtime_call_effect_scripted_sound_start:
+	{
+		extern void game_sound_port_scripted_sound_start(long definition_index, long source_object_index, real scale);
+		union { long bits; real value; } scale;
+
+		scale.bits = call->c;
+		game_sound_port_scripted_sound_start(call->a, call->b, scale.value);
+		break;
+	}
+	case _hs_runtime_call_effect_looping_sound_start:
+	{
+		extern void game_sound_port_looping_sound_start(long sound_index, long source_object_index, real gain);
+		union { long bits; real value; } gain;
+
+		gain.bits = call->c;
+		game_sound_port_looping_sound_start(call->a, call->b, gain.value);
+		break;
+	}
+	case _hs_runtime_call_effect_foley_predict:
+	{
+		extern void game_sound_port_foley_predict(long definition_index);
+
+		game_sound_port_foley_predict(call->a);
+		break;
+	}
 	case _hs_runtime_call_effect_unit_enter_seat:
 	{
 		extern void unit_port_scripting_enter_seat(long unit_index, long vehicle_index, short seat_index, char const *seat_name);
@@ -4377,6 +4421,10 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_damage_at_flag:
 		case _hs_runtime_call_effect_damage_object:
 		case _hs_runtime_call_effect_object_permute_region:
+		case _hs_runtime_call_effect_coop_sound:
+		case _hs_runtime_call_effect_scripted_sound_start:
+		case _hs_runtime_call_effect_looping_sound_start:
+		case _hs_runtime_call_effect_foley_predict:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

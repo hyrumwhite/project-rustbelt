@@ -50,6 +50,7 @@ enum
 	_hs_game_field_time_code_stop_time, /* long */
 	_hs_game_field_magic_base_animation_seat_index, /* short */
 	_hs_game_field_object_globals, /* objects.c's struct object_globals */
+	_hs_game_field_game_looping_sound_data, /* game_sound.c's looping sounds (struct data_array) */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

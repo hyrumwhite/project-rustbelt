@@ -230,6 +230,15 @@ static void scripted_looping_sound_stop_internal(
 
 struct game_sound_globals *game_sound_globals;
 struct data_array *game_looping_sound_data;
+
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the data the Rust port's library bodies set (hs_runtime_port_game_fields) */
+void game_sound_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_game_looping_sound_data] = (unsigned long)game_looping_sound_data;
+}
 unsigned long combined_pas[BIT_VECTOR_SIZE_IN_LONGS(MAXIMUM_CLUSTERS_PER_STRUCTURE)];
 
 /* ---------- public code */
@@ -538,12 +547,37 @@ void scripted_sound_new(
 
 	if (definition_index != NONE)
 	{
-		network_coop_note_sound(_coop_sound_impulse, definition_index, source_object_index, scale);
+		union { long bits; real value; } bits;
+
+		bits.value = scale;
+		hs_runtime_effect(_hs_runtime_call_effect_names, bits.bits, 0, 0);
+		hs_runtime_effect(_hs_runtime_call_effect_coop_sound, _coop_sound_impulse, definition_index, source_object_index);
 		definition = sound_definition_get(definition_index);
-		sound_stop_impulse(definition->scripting_sound_index);
+		hs_runtime_effect(_hs_runtime_call_effect_sound_stop_impulse, definition->scripting_sound_index, 0, 0);
 		definition->scripting_time = game_time_get()
 			+ (long)definition->longest_permutation_length * TICKS_PER_SECOND / 1000;
 		scale = PIN(scale, 0.f, 1.f);
+		bits.value = scale;
+		hs_runtime_effect(_hs_runtime_call_effect_scripted_sound_start, definition_index, source_object_index, bits.bits);
+	}
+
+	return;
+}
+
+/* port: scripted_sound_new's impulse, made and kept (its effect,
+_hs_runtime_call_effect_scripted_sound_start) */
+void game_sound_port_scripted_sound_start(
+	long definition_index,
+	long source_object_index,
+	real scale)
+{
+	struct sound_definition *definition = sound_definition_get(definition_index);
+	struct object_marker marker;
+	real_vector3d forward;
+	real_point3d position;
+	long impulse_sound_index;
+
+	{
 		if (source_object_index != NONE)
 		{
 			short node_index;
@@ -627,10 +661,20 @@ void scripted_sound_stop(
 void scripted_foley_predict(
 	long definition_index)
 {
+	if (definition_index != NONE)
+		hs_runtime_effect(_hs_runtime_call_effect_foley_predict, definition_index, 0, 0);
+
+	return;
+}
+
+/* port: scripted_foley_predict's requests (its effect,
+_hs_runtime_call_effect_foley_predict) */
+void game_sound_port_foley_predict(
+	long definition_index)
+{
 	struct looping_sound_definition *definition;
 	short track_index;
 
-	if (definition_index != NONE)
 	{
 		definition = looping_sound_definition_get(definition_index);
 		for (track_index = 0; track_index < definition->tracks.count; track_index++)
@@ -752,7 +796,13 @@ void scripted_looping_sound_stop(
 	long sound_index)
 {
 	if (sound_index != NONE)
-		network_coop_note_sound(_coop_sound_looping_stop, sound_index, NONE, 0.0f);
+	{
+		union { long bits; real value; } bits;
+
+		bits.value = 0.0f;
+		hs_runtime_effect(_hs_runtime_call_effect_names, bits.bits, 0, 0);
+		hs_runtime_effect(_hs_runtime_call_effect_coop_sound, _coop_sound_looping_stop, sound_index, NONE);
+	}
 	scripted_looping_sound_stop_internal(sound_index, FALSE);
 
 	return;
@@ -769,9 +819,30 @@ void scripted_looping_sound_start(
 
 	if (sound_index != NONE)
 	{
+		union { long bits; real value; } bits;
+
 		definition = looping_sound_definition_get(sound_index);
 		scripted_looping_sound_stop(sound_index);
-		/* after the stop above, so clients get them in the same order */
+		bits.value = gain;
+		hs_runtime_effect(_hs_runtime_call_effect_looping_sound_start, sound_index, source_object_index, bits.bits);
+	}
+
+	return;
+}
+
+/* port: scripted_looping_sound_start's co-op note and start, after its stop
+(its effect, _hs_runtime_call_effect_looping_sound_start) */
+void game_sound_port_looping_sound_start(
+	long sound_index,
+	long source_object_index,
+	real gain)
+{
+	struct looping_sound_definition *definition = looping_sound_definition_get(sound_index);
+	long looping_sound_index;
+	struct game_looping_sound_datum *looping_sound;
+
+	{
+		/* after the stop, so clients get them in the same order */
 		network_coop_note_sound(_coop_sound_looping_start, sound_index, source_object_index, gain);
 		match_assert(
 			"c:\\halo\\SOURCE\\sound\\game_sound.c",

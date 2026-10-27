@@ -347,10 +347,21 @@ pub mod call {
     pub const EFFECT_DAMAGE_OBJECT: i32 = 0x82;
     /// `object_permute_region(a, the first name, b, TRUE)`.
     pub const EFFECT_OBJECT_PERMUTE_REGION: i32 = 0x83;
+    /// `network_coop_note_sound(a, b, c, the first name's bits as a real)`.
+    pub const EFFECT_COOP_SOUND: i32 = 0x84;
+    /// The sound `a`'s scripted impulse on the object `b` (or none), at the
+    /// scale `c` (a real's bits), made and kept
+    /// (`game_sound_port_scripted_sound_start`).
+    pub const EFFECT_SCRIPTED_SOUND_START: i32 = 0x85;
+    /// The looping sound `a` started on the object `b` at the gain `c` (a
+    /// real's bits), with its co-op note (`game_sound_port_looping_sound_start`).
+    pub const EFFECT_LOOPING_SOUND_START: i32 = 0x86;
+    /// `scripted_foley_predict(a)`'s requests (`game_sound_port_foley_predict`).
+    pub const EFFECT_FOLEY_PREDICT: i32 = 0x87;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_OBJECT_PERMUTE_REGION).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_FOLEY_PREDICT).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
@@ -734,6 +745,30 @@ const OBJECT_DEFINITION_ANIMATION_GRAPH_INDEX: u32 = 0x44;
 const OBJECT_TYPE_VEHICLE: u16 = 1;
 /// `struct _object_definition`'s model's tag index.
 const OBJECT_DEFINITION_MODEL_INDEX: u32 = 0x34;
+/// `struct sound_definition`'s longest permutation (milliseconds); `struct
+/// looping_sound_definition`'s flags (`_looping_sound_stops_music_bit` 0
+/// unused here), scripting sound and tracks, `struct looping_sound_track`'s
+/// size and gain; `struct hs_sound_definition`'s gain; `struct
+/// game_looping_sound_datum`'s flags and scale, `_game_looping_sound_*`;
+/// `struct cache_file_tag_instance`'s size, group, tag index and name.
+const SOUND_LONGEST_PERMUTATION_LENGTH: u32 = 0x84;
+const SOUND_GAIN: u32 = 0x28;
+const LOOPING_SOUND_SCRIPTING_SOUND_INDEX: u32 = 0x1c;
+const LOOPING_SOUND_TRACKS: u32 = 0x3c;
+const LOOPING_SOUND_TRACK_GAIN: u32 = 0x4;
+const GAME_LOOPING_SOUND_FLAGS: u32 = 0x4;
+const GAME_LOOPING_SOUND_SCALE: u32 = 0x8;
+const GAME_LOOPING_SOUND_UNATTACHED_STOP: u32 = 1 << 1;
+const GAME_LOOPING_SOUND_ALTERNATE: u32 = 1 << 3;
+const GAME_LOOPING_SOUND_SCRIPTED: u32 = 1 << 4;
+const TAG_INSTANCE_SIZE: u32 = 0x20;
+const TAG_INSTANCE_TAG_INDEX: u32 = 0xc;
+const TAG_INSTANCE_NAME: u32 = 0x10;
+/// `_coop_sound_*`.
+const COOP_SOUND_IMPULSE: i32 = 0;
+const COOP_SOUND_LOOPING_STOP: i32 = 2;
+/// `TICKS_PER_SECOND`.
+const TICKS_PER_SECOND: i32 = 30;
 /// `struct object_list_header_datum`'s count and first reference, and
 /// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
@@ -978,6 +1013,8 @@ pub mod game_field {
     pub const MAGIC_BASE_ANIMATION_SEAT_INDEX: u32 = 42;
     /// objects.c's `struct object_globals`.
     pub const OBJECT_GLOBALS: u32 = 43;
+    /// game_sound.c's looping sounds (a data array).
+    pub const GAME_LOOPING_SOUND_DATA: u32 = 44;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -2561,6 +2598,64 @@ impl<H: HsHost> Runtime<'_, H> {
             }
         }
         Some(false)
+    }
+
+    /// `tag_loaded`: the loaded tag of the group (its own) and name (any
+    /// case), or NONE.
+    fn tag_loaded(&self, group: &[u8; 4], name: &[u8]) -> i32 {
+        let m = self.m();
+        let group = u32::from_be_bytes(*group);
+        for absolute_index in 0..self.context.tag_count.max(0) as u32 {
+            let instance = self.context.tag_instances + absolute_index * TAG_INSTANCE_SIZE;
+            if m.r32(instance) == group && name.eq_ignore_ascii_case(&self.c_string(m.r32(instance + TAG_INSTANCE_NAME))) {
+                return m.r32(instance + TAG_INSTANCE_TAG_INDEX) as i32;
+            }
+        }
+        NONE
+    }
+
+    /// `hs_sound_get_gain_reference`: the gain of the sound of the name, or
+    /// of the looping sound's first track; None for neither (the game's
+    /// message).
+    fn sound_gain_address(&self, name: &[u8]) -> Option<u32> {
+        let sound_index = self.tag_loaded(b"snd!", name);
+        if sound_index != NONE {
+            return Some(self.tag_data(b"snd!", sound_index)? + SOUND_GAIN);
+        }
+        let looping_index = self.tag_loaded(b"lsnd", name);
+        if looping_index != NONE {
+            let (count, first) = self.tag_block(self.tag_data(b"lsnd", looping_index)? + LOOPING_SOUND_TRACKS);
+            if count > 0 {
+                return Some(first + LOOPING_SOUND_TRACK_GAIN);
+            }
+        }
+        None
+    }
+
+    /// `scripted_looping_sound_stop`: its co-op note (an effect), then
+    /// `scripted_looping_sound_stop_internal`'s: the looping sound it
+    /// started no longer scripted, stopping, and forgotten (unless a start
+    /// follows, whose effect then keeps the new one there).
+    fn looping_sound_stop(&self, sound_index: i32, forget: bool) -> Option<()> {
+        let m = self.m();
+        if sound_index == NONE {
+            return Some(());
+        }
+        self.effect(call::EFFECT_NAMES, 0f32.to_bits() as i32, 0, 0);
+        self.effect(call::EFFECT_COOP_SOUND, COOP_SOUND_LOOPING_STOP, sound_index, NONE);
+        let definition = self.tag_data(b"lsnd", sound_index)?;
+        let looping_index = m.r32(definition + LOOPING_SOUND_SCRIPTING_SOUND_INDEX) as i32;
+        if looping_index != NONE {
+            let data = self.game_field(game_field::GAME_LOOPING_SOUND_DATA)?;
+            let looping = self.datum_get(data, looping_index)?;
+            let flags = m.r32(looping + GAME_LOOPING_SOUND_FLAGS) & !GAME_LOOPING_SOUND_SCRIPTED;
+            // unattached_looping_sound_stop
+            m.w32(looping + GAME_LOOPING_SOUND_FLAGS, flags | GAME_LOOPING_SOUND_UNATTACHED_STOP);
+            if forget {
+                m.w32(definition + LOOPING_SOUND_SCRIPTING_SOUND_INDEX, NONE as u32);
+            }
+        }
+        Some(())
     }
 
     fn animation_frames_left(&self, object: u32) -> Option<i32> {
@@ -5848,6 +5943,83 @@ impl<H: HsHost> Runtime<'_, H> {
                     self.effect(call::EFFECT_OBJECT_PERMUTE_REGION, object_index, desired_region_index as i16 as i32, 0);
                 }
                 0
+            }
+            // scripted_sound_new: its co-op note, the last impulse stopped,
+            // the time it lasts, then its impulse (an effect, which keeps it)
+            "sound_impulse_start" => {
+                let (definition_index, object_index) = (argument(0), argument(1));
+                if definition_index != NONE {
+                    let Some(definition) = self.tag_data(b"snd!", definition_index) else { return false };
+                    let scale = f32::from_bits(argument(2) as u32);
+                    self.effect(call::EFFECT_NAMES, argument(2), 0, 0);
+                    self.effect(call::EFFECT_COOP_SOUND, COOP_SOUND_IMPULSE, definition_index, object_index);
+                    self.effect(call::EFFECT_SOUND_STOP_IMPULSE, m.r32(definition + SOUND_SCRIPTING_SOUND_INDEX) as i32, 0, 0);
+                    let length = m.r32(definition + SOUND_LONGEST_PERMUTATION_LENGTH) as i32;
+                    let time = self.context.game_time.wrapping_add(length.wrapping_mul(TICKS_PER_SECOND) / 1000);
+                    m.w32(definition + SOUND_SCRIPTING_TIME, time as u32);
+                    // PIN
+                    let scale = if scale < 0.0 { 0.0 } else if scale > 1.0 { 1.0 } else { scale };
+                    self.effect(call::EFFECT_SCRIPTED_SOUND_START, definition_index, object_index, scale.to_bits() as i32);
+                }
+                0
+            }
+            // scripted_foley_predict
+            "sound_looping_predict" => {
+                if argument(0) != NONE {
+                    self.effect(call::EFFECT_FOLEY_PREDICT, argument(0), 0, 0);
+                }
+                0
+            }
+            // scripted_looping_sound_stop
+            "sound_looping_stop" => {
+                if self.looping_sound_stop(argument(0), true).is_none() {
+                    return false;
+                }
+                0
+            }
+            // scripted_looping_sound_start: stopped first, then started (an
+            // effect, which keeps it)
+            "sound_looping_start" => {
+                let sound_index = argument(0);
+                if sound_index != NONE {
+                    if self.tag_data(b"lsnd", sound_index).is_none() || self.looping_sound_stop(sound_index, false).is_none() {
+                        return false;
+                    }
+                    self.effect(call::EFFECT_LOOPING_SOUND_START, sound_index, argument(1), argument(2));
+                }
+                0
+            }
+            // scripted_looping_sound_set_scale and _set_alternate: the
+            // looping sound it started, if it plays
+            name @ ("sound_looping_set_scale" | "sound_looping_set_alternate") => {
+                let sound_index = argument(0);
+                if sound_index != NONE {
+                    let Some(definition) = self.tag_data(b"lsnd", sound_index) else { return false };
+                    let looping_index = m.r32(definition + LOOPING_SOUND_SCRIPTING_SOUND_INDEX) as i32;
+                    if looping_index != NONE {
+                        let Some(data) = self.game_field(game_field::GAME_LOOPING_SOUND_DATA) else { return false };
+                        let Some(looping) = self.datum_get(data, looping_index) else { return false };
+                        if name == "sound_looping_set_scale" {
+                            let scale = f32::from_bits(argument(1) as u32);
+                            let scale = if scale < 0.0 { 0.0 } else if scale > 1.0 { 1.0 } else { scale };
+                            m.w32(looping + GAME_LOOPING_SOUND_SCALE, scale.to_bits());
+                        } else {
+                            self.set_flag32(looping + GAME_LOOPING_SOUND_FLAGS, GAME_LOOPING_SOUND_ALTERNATE, m.r8(arguments + 4) != 0);
+                        }
+                    }
+                }
+                0
+            }
+            // hs_sound_set_gain and hs_sound_get_gain (a sound not loaded is
+            // the game's message)
+            name @ ("sound_set_gain" | "sound_get_gain") => {
+                let Some(gain) = self.sound_gain_address(&self.c_string(argument(0) as u32)) else { return false };
+                if name == "sound_set_gain" {
+                    m.w32(gain, argument(1) as u32);
+                    0
+                } else {
+                    m.r32(gain) as i32
+                }
             }
             // unit_set_emotion (its interpolation over 6 ticks an effect)
             "unit_set_emotion" => {

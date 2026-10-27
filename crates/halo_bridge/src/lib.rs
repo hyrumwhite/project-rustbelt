@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 51;
+pub const VERSION: u32 = 52;
 pub const SCREEN_TEXTURES: usize = 512;
 pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
 pub const TEXT_ATLAS_SIZE: usize = 2048;
@@ -577,6 +577,15 @@ pub struct ScreenEffect {
     pub desaturation_tint: [f32; 3],
     pub video_overbright_mode: u32,
     pub video_noise_intensity: f32,
+    /// (Protocol 52) A HUD's zoom: its convolution mask (the bitmap tag,
+    /// all ones for none, and its bitmap), a texel to a game pixel, centred
+    /// on the view (its alpha where the picture is warped, its blue how
+    /// dark), and its convolution ([`CONVOLUTION_WARP`] and the rest) and
+    /// radius in game pixels.
+    pub mask_bitmap: u32,
+    pub mask_bitmap_index: u16,
+    pub convolution_type: u16,
+    pub convolution_radius: f32,
 }
 
 pub const SCREEN_EFFECT_ON: u32 = 1;
@@ -584,6 +593,13 @@ pub const SCREEN_EFFECT_ON: u32 = 1;
 pub const SCREEN_EFFECT_DESATURATION_ADDITIVE: u32 = 2;
 /// The video effect (scanlines, noise, overbright): a helmet recording.
 pub const SCREEN_EFFECT_VIDEO: u32 = 4;
+/// (Protocol 52) The light enhancement or desaturation fades where the
+/// zoom mask's blue is over half.
+pub const SCREEN_EFFECT_LIGHT_ENHANCEMENT_MASKED: u32 = 8;
+pub const SCREEN_EFFECT_DESATURATION_MASKED: u32 = 16;
+/// [`ScreenEffect::convolution_type`]s: a blur, or a warp (the zoom's).
+pub const CONVOLUTION_BLUR: u16 = 1;
+pub const CONVOLUTION_WARP: u16 = 2;
 
 /// (Protocol 26) a vehicle as its physics shape is placed
 /// (`physics_instance_new`: `object_get_origin`, `object_get_orientation`).

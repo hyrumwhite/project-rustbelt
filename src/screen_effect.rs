@@ -31,7 +31,10 @@ use bevy::{
         RenderApp, RenderStartup,
     },
 };
-use halo_bridge::{SCREEN_EFFECT_DESATURATION_ADDITIVE, SCREEN_EFFECT_ON, SCREEN_EFFECT_VIDEO};
+use halo_bridge::{
+    CONVOLUTION_WARP, SCREEN_EFFECT_DESATURATION_ADDITIVE, SCREEN_EFFECT_DESATURATION_MASKED,
+    SCREEN_EFFECT_LIGHT_ENHANCEMENT_MASKED, SCREEN_EFFECT_ON, SCREEN_EFFECT_VIDEO,
+};
 
 /// The game's view's height in pixels: its screen effect's maps are a texel
 /// to a pixel of it (852 by 480, drawn larger).
@@ -70,6 +73,10 @@ struct ScreenEffectUniform {
     /// the video's noise intensity, the noise map's offset (texels), the
     /// game's view's height
     video: Vec4,
+    /// a HUD's zoom: 1 with its mask, its warp's radius (game pixels, 0
+    /// none), 1 if the light enhancement and 1 if the desaturation fade
+    /// with the mask
+    zoom: Vec4,
 }
 
 /// The latest frame's screen effect (none when `on` is false), and the
@@ -81,6 +88,7 @@ pub struct HaloScreenEffect {
     uniform: ScreenEffectUniform,
     scanline_map: Option<Handle<Image>>,
     noise_map: Option<Handle<Image>>,
+    mask_map: Option<Handle<Image>>,
 }
 
 fn follow_screen_effect(
@@ -127,6 +135,16 @@ fn follow_screen_effect(
         (h & 0xff) as f32
     };
     let (scanline_map, noise_map) = maps.as_ref().map_or((None, None), |(_, s, n)| (s.clone(), n.clone()));
+    // a HUD's zoom mask (the pistol's, the sniper's)
+    let mask_map = (shared.mask_bitmap != u32::MAX)
+        .then(|| {
+            let builder = &mut level.as_deref_mut()?.builder;
+            builder.textures.get(&builder.cache, shared.mask_bitmap, shared.mask_bitmap_index as usize, false, &mut images)
+        })
+        .flatten();
+    // (the game's only convolution here is the zoom's warp; a blur is a
+    // cinematic one no level's script asks for)
+    let warp = if shared.convolution_type == CONVOLUTION_WARP { shared.convolution_radius.max(0.0) } else { 0.0 };
     *effect = HaloScreenEffect {
         on: true,
         uniform: ScreenEffectUniform {
@@ -144,9 +162,16 @@ fn follow_screen_effect(
                 hash(snapshot.game_tick.wrapping_mul(2) + 1),
                 GAME_VIEW_HEIGHT,
             ),
+            zoom: Vec4::new(
+                f32::from(u8::from(mask_map.is_some())),
+                warp,
+                f32::from(u8::from(shared.flags & SCREEN_EFFECT_LIGHT_ENHANCEMENT_MASKED != 0)),
+                f32::from(u8::from(shared.flags & SCREEN_EFFECT_DESATURATION_MASKED != 0)),
+            ),
         },
         scanline_map,
         noise_map,
+        mask_map,
     };
 }
 
@@ -156,6 +181,8 @@ struct ScreenEffectPipeline {
     sampler: Sampler,
     /// the maps': they tile
     map_sampler: Sampler,
+    /// the zoom's mask's and warp's: filtered, clamped
+    linear_sampler: Sampler,
     shader: Handle<Shader>,
 }
 
@@ -171,6 +198,8 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
             ),
         ),
     );
@@ -182,6 +211,11 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
             address_mode_v: AddressMode::Repeat,
             mag_filter: FilterMode::Nearest,
             min_filter: FilterMode::Nearest,
+            ..default()
+        }),
+        linear_sampler: device.create_sampler(&SamplerDescriptor {
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
             ..default()
         }),
         shader: load_embedded_asset!(assets.as_ref(), "shaders/halo_screen_effect.wesl"),
@@ -245,6 +279,8 @@ fn draw_screen_effect(
             map(&effect.scanline_map),
             map(&effect.noise_map),
             &effect_pipeline.map_sampler,
+            map(&effect.mask_map),
+            &effect_pipeline.linear_sampler,
         )),
     );
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {

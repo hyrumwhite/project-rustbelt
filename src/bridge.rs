@@ -1277,12 +1277,27 @@ fn forward_input(
     scroll: Res<bevy::input::mouse::AccumulatedMouseScroll>,
     mut forward: ResMut<ForwardInput>,
     mut link: ResMut<BridgeLink>,
+    mut frame: Local<u32>,
 ) {
     let ForwardInput { active, pointer, state, .. } = &mut *forward;
     state.active = u32::from(*active);
     state.keys = [0; 16];
     state.mouse_buttons = 0;
     state.pointer = pointer.map_or(0, |at| halo_bridge::Input::pointer_at(at.x, at.y));
+    // (testing: `HALO_RT_TEST_KEYS=<SDL scancode>@<frame>,...` presses a
+    // key for six frames from that frame, the window's attention or not:
+    // 29@4000 zooms)
+    *frame += 1;
+    if let Ok(text) = std::env::var("HALO_RT_TEST_KEYS") {
+        for entry in text.split(',') {
+            let Some((scancode, at)) = entry.split_once('@') else { continue };
+            let (Ok(scancode), Ok(at)) = (scancode.trim().parse::<u32>(), at.trim().parse::<u32>()) else { continue };
+            if (at..at + 6).contains(&*frame) {
+                state.active = 1;
+                state.set_key(scancode, true);
+            }
+        }
+    }
     if *active {
         for key in keys.get_pressed().filter(|k| !VIEWER_KEYS.contains(k)) {
             if let Some(scancode) = scancode(*key) {

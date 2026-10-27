@@ -268,6 +268,14 @@ const FLOODLIGHT_RADIANCE: f32 = 18000.0;
 /// How far it reaches (metres): the game's lights reach their radius, which
 /// lights only a fixture's own surroundings; a floodlight throws farther.
 const FLOODLIGHT_RANGE: f32 = 15.0;
+/// Fixtures whose light shines every way (in the game, the lightmaps' and a
+/// lens flare) that get a big spot light at their light's marker: the
+/// fixture, the cone's falloff and cutoff (degrees), brightness (times a
+/// floodlight's), reach (metres), and the way it shines in the fixture's
+/// own Halo space (its tag says none). c10's two foglights by the
+/// facility's entrance, which face out from it, over the hill and trees.
+const LAMP_SPOTLIGHTS: [(&str, f32, f32, f32, f32, [f32; 3]); 1] =
+    [("levels\\b40\\devices\\b40_foglight\\b40_foglight", 30.0, 55.0, 6.0, 35.0, [-1.0, 0.0, -0.2])];
 /// Radiance of fully self-illuminated texels, relative to radiosity power
 /// (with the default emissive scale and exposure, about display white).
 const SELF_ILLUMINATION_RADIANCE: f32 = 2.5;
@@ -1031,7 +1039,16 @@ impl LevelBuilder {
             // (struct light_definition: the radius, the falloff and cutoff
             // angles, the upper colour)
             let (radius, falloff, cutoff) = (f(0x4), f(0x10), f(0x14));
-            if cutoff <= 0.0 || cutoff >= std::f32::consts::FRAC_PI_2 || radius <= 0.0 {
+            // (one shining every way: a lamp's big spot light, if it is one)
+            let lamp = self.cache.tag(datum).ok().and_then(|tag| LAMP_SPOTLIGHTS.iter().find(|(name, ..)| tag.name.eq_ignore_ascii_case(name)));
+            let (falloff, cutoff, brightness, range, aim) = match lamp {
+                Some(&(_, falloff, cutoff, brightness, reach, aim)) => {
+                    (falloff.to_radians(), cutoff.to_radians(), brightness, reach.max(range), Some(aim))
+                }
+                None if cutoff > 0.0 && cutoff < std::f32::consts::FRAC_PI_2 => (falloff, cutoff, 1.0, range, None),
+                None => continue,
+            };
+            if radius <= 0.0 {
                 continue;
             }
             let color = Vec3::new(f(0x4c), f(0x50), f(0x54));
@@ -1046,6 +1063,7 @@ impl LevelBuilder {
                 Some(matrix_multiply(&matrix_inverse(&node.default_inverse), &local))
             });
             let (position, forward) = matrix.map_or(([0.0; 3], [1.0, 0.0, 0.0]), |m| (m.position, m.forward));
+            let forward = aim.unwrap_or(forward);
             let position = Vec3::from(halo_to_bevy(position, METERS_PER_WORLD_UNIT));
             let forward = Vec3::from(halo_to_bevy(forward, 1.0)).normalize_or(Vec3::X);
             // (HALO_RT_LIGHT_LOG: each, in the log)
@@ -1055,7 +1073,7 @@ impl LevelBuilder {
                     placement.position, if matrix.is_some() { "found" } else { "not found" }, falloff.to_degrees(), cutoff.to_degrees()
                 );
             }
-            let power = color * FLOODLIGHT_RADIANCE * radius * scale * sphere_lumens_per_radiance(FLOODLIGHT_RADIUS);
+            let power = color * FLOODLIGHT_RADIANCE * radius * scale * brightness * sphere_lumens_per_radiance(FLOODLIGHT_RADIUS);
             let outer = cutoff.min(std::f32::consts::FRAC_PI_2 - 0.01);
             commands.spawn((
                 Name::new("light fixture spot light"),

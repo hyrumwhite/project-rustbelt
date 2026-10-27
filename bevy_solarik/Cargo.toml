@@ -1,0 +1,112 @@
+[workspace]
+members = [".", "vendor/bevy_render", "vendor/bevy_pbr"]
+exclude = ["vendor/wgpu-core", "vendor/wgpu-hal"]
+resolver = "3"
+
+[package]
+name = "bevy_solarik"
+version = "0.1.0"
+edition = "2024"
+description = "Ray-traced lighting for Bevy 0.20 with sky illumination, analytic lights, glass transport and a reference pathtracer"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/AlrikOlson/bevy_solarik"
+readme = "README.md"
+keywords = ["bevy", "raytracing", "restir", "lighting", "rendering"]
+categories = ["game-development", "rendering"]
+
+[features]
+# bevy_pbr's dfg_lut (which this crate needs) turns on bevy_image's KTX2 +
+# zstd support but leaves the zstd backend to the application, and bevy_image
+# refuses to compile without one. Bevy's own default is the pure-Rust decoder;
+# `default-features = false` plus `zstd_c` picks the C one instead.
+default = ["zstd_rust"]
+zstd_rust = ["bevy_image/zstd_rust"]
+zstd_c = ["bevy_image/zstd_c"]
+# DLSS Ray Reconstruction as the denoiser (dlss_wgpu through bevy_anti_alias;
+# needs DLSS_SDK, VULKAN_SDK and libclang at build time).
+dlss = ["bevy_anti_alias/dlss"]
+force_disable_dlss = ["bevy_anti_alias/force_disable_dlss"]
+# StandardMaterial's clear coat texture (bevy_pbr's multi-layer textures),
+# which the rays then read too; without it a coat is uniform.
+pbr_multi_layer_material_textures = ["bevy_pbr/pbr_multi_layer_material_textures"]
+# Native capture probes; no systems or readbacks in default builds.
+graphics_debug = ["bevy_pbr/graphics_debug"]
+
+[patch.crates-io]
+wgpu-core = { path = "vendor/wgpu-core" }
+wgpu-hal = { path = "vendor/wgpu-hal" }
+bevy_render = { path = "vendor/bevy_render" }
+bevy_pbr = { path = "vendor/bevy_pbr" }
+bevy_anti_alias = { path = "vendor/bevy_anti_alias" }
+
+[dev-dependencies]
+bevy_shape = "=0.20.0"
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+futures-lite = "2"
+wesl = { version = "0.6.0", features = ["naga-ext"] }
+serde_json = "1"
+
+[dependencies]
+bevy_anti_alias = "0.20.0"
+bevy_app = "0.20.0"
+bevy_asset = "0.20.0"
+bevy_camera = "0.20.0"
+bevy_color = "0.20.0"
+bevy_core_pipeline = "0.20.0"
+bevy_derive = "0.20.0"
+bevy_diagnostic = "0.20.0"
+bevy_ecs = "0.20.0"
+bevy_extract = "0.20.0"
+bevy_image = "0.20.0"
+bevy_material = "0.20.0"
+bevy_math = "0.20.0"
+bevy_mesh = "0.20.0"
+bevy_pbr = { version = "0.20.0", features = ["dfg_lut"] }
+bevy_platform = { version = "0.20.0", default-features = false, features = ["std"] }
+bevy_post_process = "0.20.0"
+bevy_reflect = "0.20.0"
+bevy_render = { version = "0.20.0", path = "vendor/bevy_render" }
+bevy_shader = "0.20.0"
+bevy_time = "0.20.0"
+bevy_transform = "0.20.0"
+bevy_utils = "0.20.0"
+bytemuck = "1"
+blake3 = "1"
+derive_more = { version = "2", default-features = false, features = ["from"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+# Solarik's lint policy; adjust it to support this crate's correctness and maintainability.
+[lints.clippy]
+alloc_instead_of_core = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+doc_markdown = "warn"
+manual_let_else = "warn"
+match_same_arms = "warn"
+needless_lifetimes = "allow"
+nonstandard_macro_braces = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+ptr_as_ptr = "warn"
+ptr_cast_constness = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+ref_as_ptr = "warn"
+semicolon_if_nothing_returned = "warn"
+std_instead_of_alloc = "warn"
+std_instead_of_core = "warn"
+too_long_first_doc_paragraph = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+undocumented_unsafe_blocks = "warn"
+unwrap_or_default = "warn"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "warn"
+unused_qualifications = "warn"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(docsrs_dep)"]

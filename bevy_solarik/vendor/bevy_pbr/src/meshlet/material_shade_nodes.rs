@@ -1,0 +1,374 @@
+use super::{
+    InstanceManager,
+    material_pipeline_prepare::{
+        MeshletViewMaterialsDeferredGBufferPrepass, MeshletViewMaterialsMainOpaquePass,
+        MeshletViewMaterialsPrepass,
+    },
+    resource_manager::{MeshletViewBindGroups, MeshletViewResources},
+};
+use crate::{MaterialBindGroupAllocators, MeshViewBindGroup, PrepassViewBindGroup};
+use bevy_camera::MainPassResolutionOverride;
+use bevy_camera::Viewport;
+use bevy_core_pipeline::prepass::{
+    MotionVectorPrepass, PreviousViewUniformOffset, ViewPrepassTextures,
+};
+use bevy_ecs::{prelude::*, query::Has};
+use bevy_render::{
+    camera::ExtractedCamera,
+    diagnostic::RecordDiagnostics,
+    render_resource::{
+        LoadOp, Operations, PipelineCache, RenderPassDepthStencilAttachment, RenderPassDescriptor,
+        StoreOp,
+    },
+    renderer::{RenderContext, ViewQuery},
+    view::{ViewTarget, ViewUniformOffset},
+};
+
+///
+/// Fullscreen shading pass based on the visibility buffer generated from rasterizing meshlets.
+pub fn meshlet_main_opaque_pass(
+    view: ViewQuery<(
+        &ExtractedCamera,
+        &ViewTarget,
+        &MeshViewBindGroup,
+        Option<&MainPassResolutionOverride>,
+        &MeshletViewMaterialsMainOpaquePass,
+        &MeshletViewBindGroups,
+        &MeshletViewResources,
+    )>,
+    instance_manager: Res<InstanceManager>,
+    pipeline_cache: Res<PipelineCache>,
+    material_allocators: Res<MaterialBindGroupAllocators>,
+    mut ctx: RenderContext,
+) {
+    let (
+        camera,
+        target,
+        mesh_view_bind_group,
+        resolution_override,
+        meshlet_view_materials,
+        meshlet_view_bind_groups,
+        meshlet_view_resources,
+    ) = view.into_inner();
+
+    if meshlet_view_materials.is_empty() {
+        return;
+    }
+
+    let (Some(meshlet_material_depth), Some(meshlet_material_shade_bind_group)) = (
+        meshlet_view_resources.material_depth.as_ref(),
+        meshlet_view_bind_groups.material_shade.as_ref(),
+    ) else {
+        return;
+    };
+
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics
+        .as_deref()
+        .filter(|_| bevy_render::diagnostic::profile_enabled());
+    let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("meshlet_material_opaque_3d_pass"),
+        color_attachments: &[Some(target.get_color_attachment())],
+        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+            view: &meshlet_material_depth.default_view,
+            depth_ops: Some(Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let span = diagnostics.time_span(&mut render_pass, "meshlet/opaque_shade");
+
+    if let Some(viewport) =
+        Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
+    {
+        render_pass.set_camera_viewport(&viewport);
+    }
+
+    render_pass.set_bind_group(
+        0,
+        &mesh_view_bind_group.main,
+        &mesh_view_bind_group.main_offsets,
+    );
+    render_pass.set_bind_group(1, &mesh_view_bind_group.binding_array, &[]);
+    render_pass.set_bind_group(2, meshlet_material_shade_bind_group, &[]);
+
+    // 1 fullscreen triangle draw per material
+    for material in meshlet_view_materials.iter() {
+        if instance_manager.material_present_in_scene(&material.id)
+            && let Some(material_pipeline) = pipeline_cache.get_render_pipeline(material.pipeline)
+            && let Some(material_bind_group) = material.bind_group(&material_allocators)
+        {
+            let x = material.id * 3;
+            render_pass.set_render_pipeline(material_pipeline);
+            render_pass.set_bind_group(3, material_bind_group, &[]);
+            render_pass.draw(x..(x + 3), 0..1);
+        }
+    }
+    span.end(&mut render_pass);
+}
+
+///
+/// Fullscreen pass to generate prepass textures based on the visibility buffer generated from rasterizing meshlets.
+pub fn meshlet_prepass(
+    view: ViewQuery<(
+        &ExtractedCamera,
+        &ViewPrepassTextures,
+        &ViewUniformOffset,
+        &PreviousViewUniformOffset,
+        Option<&MainPassResolutionOverride>,
+        Has<MotionVectorPrepass>,
+        &MeshletViewMaterialsPrepass,
+        &MeshletViewBindGroups,
+        &MeshletViewResources,
+    )>,
+    prepass_view_bind_group: Res<PrepassViewBindGroup>,
+    instance_manager: Res<InstanceManager>,
+    pipeline_cache: Res<PipelineCache>,
+    material_allocators: Res<MaterialBindGroupAllocators>,
+    mut ctx: RenderContext,
+) {
+    let (
+        camera,
+        view_prepass_textures,
+        view_uniform_offset,
+        previous_view_uniform_offset,
+        resolution_override,
+        view_has_motion_vector_prepass,
+        meshlet_view_materials,
+        meshlet_view_bind_groups,
+        meshlet_view_resources,
+    ) = view.into_inner();
+
+    if meshlet_view_materials.is_empty() {
+        return;
+    }
+
+    let (Some(meshlet_material_depth), Some(meshlet_material_shade_bind_group)) = (
+        meshlet_view_resources.material_depth.as_ref(),
+        meshlet_view_bind_groups.material_shade.as_ref(),
+    ) else {
+        return;
+    };
+
+    let color_attachments = vec![
+        view_prepass_textures
+            .normal
+            .as_ref()
+            .map(|normals_texture| normals_texture.get_attachment()),
+        view_prepass_textures
+            .motion_vectors
+            .as_ref()
+            .map(|motion_vectors_texture| motion_vectors_texture.get_attachment()),
+        // Use None in place of Deferred attachments
+        None,
+        None,
+    ];
+
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics
+        .as_deref()
+        .filter(|_| bevy_render::diagnostic::profile_enabled());
+    let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("meshlet_material_prepass"),
+        color_attachments: &color_attachments,
+        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+            view: &meshlet_material_depth.default_view,
+            depth_ops: Some(Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let span = diagnostics.time_span(&mut render_pass, "meshlet/prepass_shade");
+
+    if let Some(viewport) =
+        Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
+    {
+        render_pass.set_camera_viewport(&viewport);
+    }
+
+    if view_has_motion_vector_prepass {
+        render_pass.set_bind_group(
+            0,
+            prepass_view_bind_group.motion_vectors.as_ref().unwrap(),
+            &[
+                view_uniform_offset.offset,
+                previous_view_uniform_offset.offset,
+            ],
+        );
+    } else {
+        render_pass.set_bind_group(
+            0,
+            prepass_view_bind_group.no_motion_vectors.as_ref().unwrap(),
+            &[view_uniform_offset.offset],
+        );
+    }
+
+    render_pass.set_bind_group(1, &prepass_view_bind_group.empty_bind_group, &[]);
+    render_pass.set_bind_group(2, meshlet_material_shade_bind_group, &[]);
+
+    // 1 fullscreen triangle draw per material
+    for material in meshlet_view_materials.iter() {
+        if instance_manager.material_present_in_scene(&material.id)
+            && let Some(material_pipeline) = pipeline_cache.get_render_pipeline(material.pipeline)
+            && let Some(material_bind_group) = material.bind_group(&material_allocators)
+        {
+            let x = material.id * 3;
+            render_pass.set_render_pipeline(material_pipeline);
+            render_pass.set_bind_group(3, material_bind_group, &[]);
+            render_pass.draw(x..(x + 3), 0..1);
+        }
+    }
+    span.end(&mut render_pass);
+}
+
+/// Fullscreen pass to generate a gbuffer based on the visibility buffer generated from rasterizing meshlets.
+pub fn meshlet_deferred_gbuffer_prepass(
+    view: ViewQuery<(
+        &ExtractedCamera,
+        &ViewPrepassTextures,
+        &ViewUniformOffset,
+        &PreviousViewUniformOffset,
+        Option<&MainPassResolutionOverride>,
+        Has<MotionVectorPrepass>,
+        &MeshletViewMaterialsDeferredGBufferPrepass,
+        &MeshletViewBindGroups,
+        &MeshletViewResources,
+    )>,
+    prepass_view_bind_group: Res<PrepassViewBindGroup>,
+    instance_manager: Res<InstanceManager>,
+    pipeline_cache: Res<PipelineCache>,
+    material_allocators: Res<MaterialBindGroupAllocators>,
+    frame: Res<bevy_diagnostic::FrameCount>,
+    mut ctx: RenderContext,
+) {
+    let (
+        camera,
+        view_prepass_textures,
+        view_uniform_offset,
+        previous_view_uniform_offset,
+        resolution_override,
+        view_has_motion_vector_prepass,
+        meshlet_view_materials,
+        meshlet_view_bind_groups,
+        meshlet_view_resources,
+    ) = view.into_inner();
+
+    if meshlet_view_materials.is_empty() {
+        return;
+    }
+
+    let (Some(meshlet_material_depth), Some(meshlet_material_shade_bind_group)) = (
+        meshlet_view_resources.material_depth.as_ref(),
+        meshlet_view_bind_groups.material_shade.as_ref(),
+    ) else {
+        return;
+    };
+
+    let color_attachments = vec![
+        view_prepass_textures
+            .normal
+            .as_ref()
+            .map(|normals_texture| normals_texture.get_attachment()),
+        view_prepass_textures
+            .motion_vectors
+            .as_ref()
+            .map(|motion_vectors_texture| motion_vectors_texture.get_attachment()),
+        view_prepass_textures
+            .deferred
+            .as_ref()
+            .map(|deferred_texture| deferred_texture.get_attachment()),
+        view_prepass_textures
+            .deferred_lighting_pass_id
+            .as_ref()
+            .map(|deferred_lighting_pass_id| deferred_lighting_pass_id.get_attachment()),
+    ];
+
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics
+        .as_deref()
+        .filter(|_| bevy_render::diagnostic::profile_enabled());
+    let mut render_pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("meshlet_material_deferred_prepass"),
+        color_attachments: &color_attachments,
+        depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+            view: &meshlet_material_depth.default_view,
+            depth_ops: Some(Operations {
+                load: LoadOp::Load,
+                store: StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let span = diagnostics.time_span(&mut render_pass, "meshlet/gbuffer_shade");
+
+    if let Some(viewport) =
+        Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
+    {
+        render_pass.set_camera_viewport(&viewport);
+    }
+
+    if view_has_motion_vector_prepass {
+        render_pass.set_bind_group(
+            0,
+            prepass_view_bind_group.motion_vectors.as_ref().unwrap(),
+            &[
+                view_uniform_offset.offset,
+                previous_view_uniform_offset.offset,
+            ],
+        );
+    } else {
+        render_pass.set_bind_group(
+            0,
+            prepass_view_bind_group.no_motion_vectors.as_ref().unwrap(),
+            &[view_uniform_offset.offset],
+        );
+    }
+
+    render_pass.set_bind_group(1, &prepass_view_bind_group.empty_bind_group, &[]);
+    render_pass.set_bind_group(2, meshlet_material_shade_bind_group, &[]);
+
+    // 1 fullscreen triangle draw per material
+    let mut draws = 0u32;
+    let mut missing_bindings = 0u32;
+    for material in meshlet_view_materials.iter() {
+        if !instance_manager.material_present_in_scene(&material.id) {
+            continue;
+        }
+        let Some(material_bind_group) = material.bind_group(&material_allocators) else {
+            missing_bindings += 1;
+            continue;
+        };
+        if let Some(material_pipeline) = pipeline_cache.get_render_pipeline(material.pipeline) {
+            let x = material.id * 3;
+            render_pass.set_render_pipeline(material_pipeline);
+            render_pass.set_bind_group(3, material_bind_group, &[]);
+            render_pass.draw(x..(x + 3), 0..1);
+            draws += 1;
+        }
+    }
+    let _source = bevy_render::diagnostic::profile_source_frame(frame.0);
+    bevy_render::diagnostic::profile_value(
+        "meshlet.gbuffer_material_draws",
+        f64::from(draws),
+        "count",
+    );
+    bevy_render::diagnostic::profile_value(
+        "meshlet.gbuffer_missing_bindings",
+        f64::from(missing_bindings),
+        "count",
+    );
+    span.end(&mut render_pass);
+}

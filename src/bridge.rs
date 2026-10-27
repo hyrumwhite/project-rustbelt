@@ -547,8 +547,13 @@ fn sync_objects(
     // (the game draws no sky from a cluster that has none: an interior's
     // windows onto nothing stay dark, as b30's Shaft B cutscene's)
     let skyless = camera_cluster >= 0 && active_visibility.is_some_and(|v| v.skies.get(camera_cluster as usize).is_some_and(|&sky| sky < 0));
-    if camera_sky.none != skyless {
-        camera_sky.none = skyless;
+    // (nor past an opaque atmospheric fog: the game brings its far plane in
+    // to the fog's maximum distance and draws only fog there, as the fog
+    // pass does (halo_fog.wesl); the sky drawn under that fog showed through
+    // its filtered edge round every leaf against it, in blue: c10's swamps)
+    let fogged_out = snapshot.fog.as_ref().is_some_and(|fog| fog.atmospheric_maximum_density >= 1.0 && fog.atmospheric_maximum_distance > 0.0);
+    if camera_sky.none != (skyless || fogged_out) {
+        camera_sky.none = skyless || fogged_out;
     }
     // A skyless cluster that sees clusters with sky looks through its
     // openings onto the outdoors with no sky behind it: the game draws the

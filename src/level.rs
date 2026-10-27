@@ -258,6 +258,16 @@ const LIGHT_PROXY_OFFSET: f32 = 0.3;
 const LIGHT_PROXY_RADIANCE: f32 = 4000.0;
 /// How far a fixture's light reaches (metres): Halo's fixtures give none.
 const FIXTURE_LIGHT_RANGE: f32 = 30.0;
+/// A fixture's attached spot light (c10's floodlights, `ground_bright`):
+/// a sphere this size (metres), as the game's spot lights (`crate::lights`).
+const FLOODLIGHT_RADIUS: f32 = 0.15;
+/// Its radiance per unit of the light's colour and radius (world units),
+/// as the game's spot lights': `RADIANCE_PER_REACH2` × `SPOT_LIGHT_SCALE` ×
+/// `SPOT_REFERENCE_REACH`.
+const FLOODLIGHT_RADIANCE: f32 = 18000.0;
+/// How far it reaches (metres): the game's lights reach their radius, which
+/// lights only a fixture's own surroundings; a floodlight throws farther.
+const FLOODLIGHT_RANGE: f32 = 15.0;
 /// Radiance of fully self-illuminated texels, relative to radiosity power
 /// (with the default emissive scale and exposure, about display white).
 const SELF_ILLUMINATION_RADIANCE: f32 = 2.5;
@@ -791,6 +801,8 @@ impl LevelBuilder {
                 && self.fixture_lights
             {
                 self.spawn_fixture_light(commands, object, Vec3::from(light.color) * light.intensity, assets);
+            } else if placement.kind == objects::ObjectKind::LightFixture && self.fixture_lights {
+                self.spawn_fixture_spotlights(commands, object, placement);
             }
             self.stats.objects += 1;
         }
@@ -987,6 +999,81 @@ impl LevelBuilder {
             source.insert((Mesh3d(mesh), MeshMaterial3d(material)));
         }
         self.stats.lights += 1;
+    }
+
+    /// A light fixture's own spot lights, where its placement gives it no
+    /// light (c10's floodlights, `ground_bright`: in the game their light is
+    /// the lightmaps' and their tag's only a lens flare): each spot light its
+    /// tag attaches, at the attachment's marker, along it, in the light's
+    /// colour and cone. (Tuning: `HALO_RT_FLOODLIGHTS=brightness[,range in
+    /// metres]`, 0 none.)
+    fn spawn_fixture_spotlights(&mut self, commands: &mut Commands, object: Entity, placement: &objects::Placement) {
+        use halo_map::{collision::matrix_inverse, markers, pose::matrix_multiply};
+        let (scale, range) = std::env::var("HALO_RT_FLOODLIGHTS").ok().map_or((1.0, FLOODLIGHT_RANGE), |text| {
+            let mut values = text.split(',').map(|v| v.trim().parse::<f32>().ok());
+            (values.next().flatten().unwrap_or(1.0), values.next().flatten().unwrap_or(FLOODLIGHT_RANGE))
+        });
+        let Some(datum) = placement.definition.datum else { return };
+        if scale <= 0.0 {
+            return;
+        }
+        let Ok(root) = self.cache.tag_root(datum, halo_map::groups::OBJECT) else { return };
+        // (struct object_attachment: its type, then its marker's name)
+        let Ok(attachments) = root.block(halo_map::layout::_object_definition::ATTACHMENTS, 0x48) else { return };
+        let model = objects::object_model(&self.cache, placement.definition).ok().flatten().and_then(|m| m.datum);
+        let marker_set = model.and_then(|model| markers::ModelMarkers::load(&self.cache, model).ok());
+        let nodes = model.and_then(|model| halo_map::model::Model::load(&self.cache, model).ok()).map(|m| m.nodes);
+        for attachment in attachments.iter() {
+            let Ok(light) = attachment.reference(0) else { continue };
+            let Some(light_datum) = light.datum.filter(|_| light.group == halo_map::groups::LIGHT) else { continue };
+            let Ok(definition) = self.cache.tag_root(light_datum, halo_map::groups::LIGHT) else { continue };
+            let f = |offset: usize| definition.f32(offset).unwrap_or(0.0);
+            // (struct light_definition: the radius, the falloff and cutoff
+            // angles, the upper colour)
+            let (radius, falloff, cutoff) = (f(0x4), f(0x10), f(0x14));
+            if cutoff <= 0.0 || cutoff >= std::f32::consts::FRAC_PI_2 || radius <= 0.0 {
+                continue;
+            }
+            let color = Vec3::new(f(0x4c), f(0x50), f(0x54));
+            // where its marker is on the model, in the object's space (its
+            // node at rest)
+            let name = attachment.bytes(0x10, 32).ok().map(|bytes| String::from_utf8_lossy(bytes.split(|&b| b == 0).next().unwrap_or(&[])).into_owned());
+            let matrix = name.as_deref().and_then(|name| {
+                let marker = marker_set.as_ref()?.markers.iter().find(|m| m.name.eq_ignore_ascii_case(name.as_bytes()))?;
+                let instance = marker.instances.first()?;
+                let node = nodes.as_ref()?.get(instance.node as usize)?;
+                let local = markers::matrix_from_point_and_quaternion(instance.translation, instance.rotation);
+                Some(matrix_multiply(&matrix_inverse(&node.default_inverse), &local))
+            });
+            let (position, forward) = matrix.map_or(([0.0; 3], [1.0, 0.0, 0.0]), |m| (m.position, m.forward));
+            let position = Vec3::from(halo_to_bevy(position, METERS_PER_WORLD_UNIT));
+            let forward = Vec3::from(halo_to_bevy(forward, 1.0)).normalize_or(Vec3::X);
+            // (HALO_RT_LIGHT_LOG: each, in the log)
+            if std::env::var_os("HALO_RT_LIGHT_LOG").is_some() {
+                info!(
+                    "fixture spot light at {:?} (marker {name:?} {}): {position} along {forward}, colour {color}, radius {radius}, cone {:.0}..{:.0} deg",
+                    placement.position, if matrix.is_some() { "found" } else { "not found" }, falloff.to_degrees(), cutoff.to_degrees()
+                );
+            }
+            let power = color * FLOODLIGHT_RADIANCE * radius * scale * sphere_lumens_per_radiance(FLOODLIGHT_RADIUS);
+            let outer = cutoff.min(std::f32::consts::FRAC_PI_2 - 0.01);
+            commands.spawn((
+                Name::new("light fixture spot light"),
+                SpotLight {
+                    radius: FLOODLIGHT_RADIUS,
+                    range,
+                    outer_angle: outer,
+                    inner_angle: falloff.clamp(0.0, outer * 0.99),
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                LightSource { power },
+                bevy::camera::visibility::NoFrustumCulling,
+                Transform::from_translation(position).looking_to(forward, if forward.y.abs() > 0.99 { Vec3::X } else { Vec3::Y }),
+                ChildOf(object),
+            ));
+            self.stats.lights += 1;
+        }
     }
 
     fn spawn_mesh(

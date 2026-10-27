@@ -1047,13 +1047,23 @@ fn apply_lighting(
     mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
     mut suns: Query<&mut DirectionalLight>,
     mut cameras: Query<(Option<&mut EnvironmentMapLight>, Option<&mut Skybox>)>,
-    mut point_lights: Query<(&LightSource, &mut PointLight)>,
+    mut point_lights: Query<(Ref<LightSource>, &mut PointLight)>,
+    mut spot_lights: Query<(Ref<LightSource>, &mut SpotLight)>,
 ) {
-    if !settings.is_changed() {
-        return;
-    }
+    // (and the lights made since: a level's fixtures' spot lights)
+    let changed = settings.is_changed();
     for (source, mut light) in &mut point_lights {
-        (light.color, light.intensity) = source.color_and_intensity(settings.emissive_scale);
+        if changed || source.is_added() {
+            (light.color, light.intensity) = source.color_and_intensity(settings.emissive_scale);
+        }
+    }
+    for (source, mut light) in &mut spot_lights {
+        if changed || source.is_added() {
+            (light.color, light.intensity) = source.color_and_intensity(settings.emissive_scale);
+        }
+    }
+    if !changed {
+        return;
     }
     let emissive = |surface: &EmissiveSurface| {
         let radiance = surface.radiance * settings.emissive_scale;

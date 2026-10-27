@@ -288,12 +288,15 @@ fn follow_decals(
         decals.tracked.insert(decal.decal_index, Tracked { entity, material, shape, params, last_seen: frame, shown: true });
     }
 
-    decals.tracked.retain(|_, tracked| {
+    decals.tracked.retain(|&tracked_index, tracked| {
         if frame - tracked.last_seen > FORGET_AFTER_FRAMES {
             commands.entity(tracked.entity).despawn();
             return false;
         }
         if tracked.last_seen != frame && tracked.shown {
+            if std::env::var_os("HALO_RT_DECAL_LOG").is_some() {
+                info!("decal {:#010x} not shared at tick {}", tracked_index, snapshot.game_tick);
+            }
             commands.entity(tracked.entity).insert(Visibility::Hidden);
             tracked.shown = false;
         }

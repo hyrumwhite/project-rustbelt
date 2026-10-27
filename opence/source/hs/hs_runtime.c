@@ -282,6 +282,7 @@ extern struct hs_external_global_definition *hs_external_globals[];
 #include "render/render_debug.h"
 #include "scenario/scenario.h"
 #include "units/units.h" /* port: unit_get_head_position, for a body's question */
+#include "hs_library_external.h" /* port: the library bodies' effects */
 #include "scenario/scenario_definitions.h"
 #include "saved games/game_state.h"
 #include "text/draw_string.h"
@@ -2331,6 +2332,11 @@ static char const *const hs_runtime_rust_bodies[] =
 	"objects_can_see_flag",
 	"objects_attach",
 	"unit_enter_vehicle",
+	"effect_new",
+	"effect_new_on_object_marker",
+	"damage_new",
+	"damage_object",
+	"object_set_permutation",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2582,6 +2588,21 @@ static void hs_runtime_effect_run(
 		objects_port_scripting_attach(call->a, hs_runtime_effect_names[0], call->b, hs_runtime_effect_names[1]);
 		break;
 	}
+	case _hs_runtime_call_effect_effect_at_flag:
+		hs_port_effect_new(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_effect_at_marker:
+		hs_port_effect_new_from_object_marker(call->a, call->b, hs_runtime_effect_names[0]);
+		break;
+	case _hs_runtime_call_effect_damage_at_flag:
+		hs_port_damage_new(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_damage_object:
+		hs_port_damage_object(call->a, call->b);
+		break;
+	case _hs_runtime_call_effect_object_permute_region:
+		object_permute_region(call->a, hs_runtime_effect_names[0], (short)call->b, TRUE);
+		break;
 	case _hs_runtime_call_effect_unit_enter_seat:
 	{
 		extern void unit_port_scripting_enter_seat(long unit_index, long vehicle_index, short seat_index, char const *seat_name);
@@ -4351,6 +4372,11 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_names:
 		case _hs_runtime_call_effect_objects_attach:
 		case _hs_runtime_call_effect_unit_enter_seat:
+		case _hs_runtime_call_effect_effect_at_flag:
+		case _hs_runtime_call_effect_effect_at_marker:
+		case _hs_runtime_call_effect_damage_at_flag:
+		case _hs_runtime_call_effect_damage_object:
+		case _hs_runtime_call_effect_object_permute_region:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

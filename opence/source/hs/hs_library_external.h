@@ -56,6 +56,12 @@ void hs_objects_predict(
 	long object_list_index);
 void hs_objects_delete_by_definition(
 	long definition_index);
+/* port: the library bodies' effects (hs_runtime.c's hs_runtime_effect_run) */
+void hs_port_effect_new(long effect_definition_index, short cutscene_flag_index);
+void hs_port_effect_new_from_object_marker(long effect_definition_index, long object_index, char const *marker_name);
+void hs_port_damage_new(long damage_effect_index, short cutscene_flag_index);
+void hs_port_damage_object(long damage_effect_index, long object_index);
+
 void hs_effect_new(
 	long effect_definition_index,
 	short cutscene_flag_index);

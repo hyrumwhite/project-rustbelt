@@ -334,10 +334,23 @@ pub mod call {
     /// The unit `a` into the vehicle `b`'s seat `c`, then its co-op
     /// followers by the first name (`unit_port_scripting_enter_seat`).
     pub const EFFECT_UNIT_ENTER_SEAT: i32 = 0x7e;
+    /// The effect `a` at the cutscene flag `b`, and its co-op note
+    /// (`hs_port_effect_new`).
+    pub const EFFECT_EFFECT_AT_FLAG: i32 = 0x7f;
+    /// The effect `a` on the object `b` at the first name's marker, and its
+    /// co-op note (`hs_port_effect_new_from_object_marker`).
+    pub const EFFECT_EFFECT_AT_MARKER: i32 = 0x80;
+    /// The damage effect `a`'s area damage at the cutscene flag `b`
+    /// (`hs_port_damage_new`).
+    pub const EFFECT_DAMAGE_AT_FLAG: i32 = 0x81;
+    /// The damage effect `a` on the object `b` (`hs_port_damage_object`).
+    pub const EFFECT_DAMAGE_OBJECT: i32 = 0x82;
+    /// `object_permute_region(a, the first name, b, TRUE)`.
+    pub const EFFECT_OBJECT_PERMUTE_REGION: i32 = 0x83;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_UNIT_ENTER_SEAT).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_OBJECT_PERMUTE_REGION).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
@@ -719,6 +732,8 @@ const CUTSCENE_FLAG_POSITION: u32 = 0x24;
 /// reference's last long); `_object_type_vehicle`.
 const OBJECT_DEFINITION_ANIMATION_GRAPH_INDEX: u32 = 0x44;
 const OBJECT_TYPE_VEHICLE: u16 = 1;
+/// `struct _object_definition`'s model's tag index.
+const OBJECT_DEFINITION_MODEL_INDEX: u32 = 0x34;
 /// `struct object_list_header_datum`'s count and first reference, and
 /// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
@@ -5771,6 +5786,66 @@ impl<H: HsHost> Runtime<'_, H> {
                             }
                         }
                     }
+                }
+                0
+            }
+            // hs_effect_new and hs_damage_new: the effect, or the area
+            // damage, at a cutscene flag the scenario has
+            name @ ("effect_new" | "damage_new") => {
+                let Some(scenario) = self.game_field(game_field::SCENARIO) else { return false };
+                let flag_index = short(1);
+                let (count, _) = self.tag_block(scenario + SCENARIO_CUTSCENE_FLAGS);
+                if !(0..count).contains(&(flag_index as i32)) {
+                    return false;
+                }
+                let kind = if name == "effect_new" { call::EFFECT_EFFECT_AT_FLAG } else { call::EFFECT_DAMAGE_AT_FLAG };
+                self.effect(kind, argument(0), flag_index as i32, 0);
+                0
+            }
+            // hs_effect_new_from_object_marker (the marker's name an effect
+            // before it)
+            "effect_new_on_object_marker" => {
+                let (effect_index, object_index) = (argument(0), argument(1));
+                if effect_index != NONE && object_index != NONE {
+                    self.effect(call::EFFECT_NAMES, argument(2), 0, 0);
+                    self.effect(call::EFFECT_EFFECT_AT_MARKER, effect_index, object_index, 0);
+                }
+                0
+            }
+            // hs_damage_object
+            "damage_object" => {
+                let object_index = argument(1);
+                if object_index != NONE {
+                    self.effect(call::EFFECT_DAMAGE_OBJECT, argument(0), object_index, 0);
+                }
+                0
+            }
+            // hs_object_set_permutation: the region of the name in the
+            // object's model (any case; all regions for ""), its
+            // permutation an effect (the name before it)
+            "object_set_permutation" => {
+                use crate::layout::{model as md, model_region as region};
+                let object_index = argument(0);
+                if object_index != NONE {
+                    let Some(object) = self.object_typed(object_index, OBJECT_MASK_ALL) else { return false };
+                    let definition_index = m.r32(object + crate::layout::unit_datum::DEFINITION_INDEX as u32) as i32;
+                    let Some(definition) = self.tag_data(b"obje", definition_index) else { return false };
+                    let region_name = self.c_string(argument(1) as u32);
+                    let mut desired_region_index = NONE;
+                    if !region_name.is_empty() {
+                        let model_index = m.r32(definition + OBJECT_DEFINITION_MODEL_INDEX) as i32;
+                        if model_index != NONE {
+                            let Some(model) = self.tag_data(b"mode", model_index) else { return false };
+                            let (count, first) = self.tag_block(model + md::REGIONS as u32);
+                            if let Some(index) = (0..count.clamp(0, 0x7fff)).find(|&index| {
+                                region_name.eq_ignore_ascii_case(&self.c_string(first + index as u32 * region::SIZEOF as u32))
+                            }) {
+                                desired_region_index = index;
+                            }
+                        }
+                    }
+                    self.effect(call::EFFECT_NAMES, argument(2), 0, 0);
+                    self.effect(call::EFFECT_OBJECT_PERMUTE_REGION, object_index, desired_region_index as i16 as i32, 0);
                 }
                 0
             }

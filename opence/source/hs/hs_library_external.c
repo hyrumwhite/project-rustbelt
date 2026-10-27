@@ -639,11 +639,8 @@ void hs_object_set_permutation(
 				}
 			}
 		}
-		object_permute_region(
-			object_index,
-			permutation_name,
-			desired_region_index,
-			TRUE);
+		hs_runtime_effect(_hs_runtime_call_effect_names, (long)permutation_name, 0, 0);
+		hs_runtime_effect(_hs_runtime_call_effect_object_permute_region, object_index, desired_region_index, 0);
 	}
 
 	return;
@@ -693,6 +690,17 @@ void hs_effect_new(
 	long effect_definition_index,
 	short cutscene_flag_index)
 {
+	hs_runtime_effect(_hs_runtime_call_effect_effect_at_flag, effect_definition_index, cutscene_flag_index, 0);
+
+	return;
+}
+
+/* port: hs_effect_new's co-op note and effect (its effect,
+_hs_runtime_call_effect_effect_at_flag) */
+void hs_port_effect_new(
+	long effect_definition_index,
+	short cutscene_flag_index)
+{
 	struct scenario_cutscene_flag *cutscene_flag;
 	real_vector3d forward;
 
@@ -729,38 +737,60 @@ void hs_effect_new_from_object_marker(
 	{
 		if (object_index != NONE)
 		{
-			struct object_marker marker;
-
-			/* port: and on network co-op's clients (port/linux/game/network_coop.c) */
-			network_coop_note_object_effect(effect_definition_index, object_index, marker_name);
-
-			if (object_get_marker_by_name(
-				object_index,
-				marker_name,
-				&marker,
-				1))
-			{
-				effect_new_attached_from_markers(
-					effect_definition_index,
-					NONE,
-					object_index,
-					marker.node_index,
-					1,
-					&marker_name,
-					&marker.matrix.position,
-					&marker.matrix.forward,
-					1.f,
-					1.f,
-					NULL,
-					NULL);
-			}
+			hs_runtime_effect(_hs_runtime_call_effect_names, (long)marker_name, 0, 0);
+			hs_runtime_effect(_hs_runtime_call_effect_effect_at_marker, effect_definition_index, object_index, 0);
 		}
 	}
 
 	return;
 }
 
+/* port: hs_effect_new_from_object_marker's co-op note and effect (its
+effect, _hs_runtime_call_effect_effect_at_marker) */
+void hs_port_effect_new_from_object_marker(
+	long effect_definition_index,
+	long object_index,
+	char const *marker_name)
+{
+	struct object_marker marker;
+
+	/* port: and on network co-op's clients (port/linux/game/network_coop.c) */
+	network_coop_note_object_effect(effect_definition_index, object_index, marker_name);
+
+	if (object_get_marker_by_name(
+		object_index,
+		marker_name,
+		&marker,
+		1))
+	{
+		effect_new_attached_from_markers(
+			effect_definition_index,
+			NONE,
+			object_index,
+			marker.node_index,
+			1,
+			&marker_name,
+			&marker.matrix.position,
+			&marker.matrix.forward,
+			1.f,
+			1.f,
+			NULL,
+			NULL);
+	}
+}
+
 void hs_damage_new(
+	long damage_effect_index,
+	short cutscene_flag_index)
+{
+	hs_runtime_effect(_hs_runtime_call_effect_damage_at_flag, damage_effect_index, cutscene_flag_index, 0);
+
+	return;
+}
+
+/* port: hs_damage_new's area damage (its effect,
+_hs_runtime_call_effect_damage_at_flag) */
+void hs_port_damage_new(
 	long damage_effect_index,
 	short cutscene_flag_index)
 {
@@ -784,6 +814,19 @@ void hs_damage_object(
 	long object_index)
 {
 	if (object_index != NONE)
+	{
+		hs_runtime_effect(_hs_runtime_call_effect_damage_object, damage_effect_index, object_index, 0);
+	}
+
+	return;
+}
+
+/* port: hs_damage_object's damage (its effect,
+_hs_runtime_call_effect_damage_object) */
+void hs_port_damage_object(
+	long damage_effect_index,
+	long object_index)
+{
 	{
 		struct damage_data damage;
 

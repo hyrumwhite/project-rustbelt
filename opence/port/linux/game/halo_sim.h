@@ -828,7 +828,12 @@ enum
 	_hs_runtime_call_effect_names, /* a and b two names (their addresses) the next effect takes */
 	_hs_runtime_call_effect_objects_attach, /* a the parent, b the child, at the names' markers: its co-op note and the attaching */
 	_hs_runtime_call_effect_unit_enter_seat, /* a the unit, b the vehicle, c the seat: entering it, then its co-op followers (by the name) */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_unit_enter_seat,
+	_hs_runtime_call_effect_effect_at_flag, /* a the effect, b the cutscene flag: its co-op note and the effect there (hs_port_effect_new) */
+	_hs_runtime_call_effect_effect_at_marker, /* a the effect, b the object, at the first name's marker: its co-op note and the effect */
+	_hs_runtime_call_effect_damage_at_flag, /* a the damage effect, b the cutscene flag: its area damage there */
+	_hs_runtime_call_effect_damage_object, /* a the damage effect, b the object: its damage to the object */
+	_hs_runtime_call_effect_object_permute_region, /* a the object, b the region (NONE for all), to the first name's permutation */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_object_permute_region,
 };
 
 /* the runtime's operations the Rust port can run */

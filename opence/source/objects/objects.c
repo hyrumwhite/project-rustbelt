@@ -210,6 +210,15 @@ struct memory_pool *objects_memory_pool(
 }
 static struct object_globals *object_globals = NULL;
 
+#include "hs_game_fields.h" /* port: port/linux/game */
+
+/* port: the globals the Rust port's library bodies set (hs_runtime_port_game_fields) */
+void objects_port_game_fields(
+	unsigned long *fields)
+{
+	fields[_hs_game_field_object_globals] = (unsigned long)object_globals;
+}
+
 boolean debug_objects_names;
 boolean debug_objects_pathfinding_spheres;
 boolean debug_objects_physics;
@@ -1797,7 +1806,7 @@ void objects_scripting_set_scale(
 		object->object.scale = scale;
 		if (!TEST_FLAG(_object_mask_cannot_interpolate, object->object.type))
 		{
-			object_start_interpolation(object_index, interpolation_frame_count);
+			hs_runtime_effect(_hs_runtime_call_effect_object_start_interpolation, object_index, interpolation_frame_count, 0);
 		}
 	}
 

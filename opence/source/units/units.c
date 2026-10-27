@@ -2363,7 +2363,7 @@ boolean unit_custom_animation_at_frame(
 		{
 			unit->object.animation.state.frame_index = frame_index;
 			success = TRUE;
-			network_coop_note_unit_animation_frame(unit_index, frame_index);
+			hs_runtime_effect(_hs_runtime_call_effect_unit_user_animation_frame, unit_index, frame_index, 0);
 		}
 	}
 
@@ -4169,7 +4169,7 @@ boolean unit_start_user_animation(
 					{
 						if (interpolate)
 						{
-							object_start_interpolation(unit_index, 6);
+							hs_runtime_effect(_hs_runtime_call_effect_object_start_interpolation, unit_index, 6, 0);
 						}
 
 						unit->unit.animation.state =
@@ -4182,15 +4182,9 @@ boolean unit_start_user_animation(
 							unit->unit.animation.flags,
 							_unit_animation_postpone_weapon_ik_until_interpolation_ends_bit,
 							TRUE);
-						object_compute_node_matrices_recursive(unit_index);
 						animation_started = TRUE;
-						network_coop_note_unit_animation(unit_index, animation_graph_index, animation_index,
-							interpolate);
-						if (unit->unit.player_index == NONE)
-						{
-							network_actors_note_user_animation(unit_index, animation_graph_index, animation_index,
-								interpolate);
-						}
+						hs_runtime_effect(_hs_runtime_call_effect_unit_user_animation_started, unit_index, animation_graph_index,
+							(unsigned short)animation_index | (interpolate ? 1 << 16 : 0));
 					}
 				}
 			}
@@ -4244,6 +4238,22 @@ void unit_stop_custom_animation(
 	}
 
 	return;
+}
+
+/* port: unit_start_user_animation's node matrices and notes once it starts
+one (its effect, _hs_runtime_call_effect_unit_user_animation_started) */
+void unit_port_user_animation_started(
+	long unit_index,
+	long animation_graph_index,
+	short animation_index,
+	boolean interpolate)
+{
+	object_compute_node_matrices_recursive(unit_index);
+	network_coop_note_unit_animation(unit_index, animation_graph_index, animation_index, interpolate);
+	if (unit_get(unit_index)->unit.player_index == NONE)
+	{
+		network_actors_note_user_animation(unit_index, animation_graph_index, animation_index, interpolate);
+	}
 }
 
 /* port: unit_stop_custom_animation's idling and co-op note (its effect,

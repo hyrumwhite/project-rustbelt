@@ -2316,6 +2316,16 @@ static char const *const hs_runtime_rust_bodies[] =
 	"time_code_reset",
 	"pause_hud_timer",
 	"magic_seat_name",
+	"custom_animation",
+	"custom_animation_list",
+	"unit_custom_animation_at_frame",
+	"scenery_animation_start",
+	"scenery_animation_start_at_frame",
+	"object_pvs_activate",
+	"object_pvs_set_object",
+	"object_pvs_set_camera",
+	"object_pvs_clear",
+	"object_set_scale",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2406,6 +2416,11 @@ static unsigned long *hs_runtime_port_game_fields(
 			fields[_hs_game_field_time_code_time] = (unsigned long)&time_code_time;
 			fields[_hs_game_field_time_code_stop_time] = (unsigned long)&time_code_stop_time;
 			fields[_hs_game_field_magic_base_animation_seat_index] = (unsigned long)&magic_base_animation_seat_index;
+		}
+		{
+			extern void objects_port_game_fields(unsigned long *fields);
+
+			objects_port_game_fields(fields);
 		}
 	}
 
@@ -2535,6 +2550,19 @@ static void hs_runtime_effect_run(
 		director_port_script_camera((boolean)call->a);
 		break;
 	}
+	case _hs_runtime_call_effect_unit_user_animation_started:
+	{
+		extern void unit_port_user_animation_started(long unit_index, long animation_graph_index, short animation_index, boolean interpolate);
+
+		unit_port_user_animation_started(call->a, call->b, (short)call->c, (call->c >> 16) & 1);
+		break;
+	}
+	case _hs_runtime_call_effect_unit_user_animation_frame:
+		network_coop_note_unit_animation_frame(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_scenery_animation_note:
+		network_coop_note_scenery_animation(call->a, call->b, (short)call->c, (short)(call->c >> 16));
+		break;
 	default:
 		ai_script_effect_run(call);
 		break;
@@ -4291,6 +4319,9 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_breakable_surfaces_reset:
 		case _hs_runtime_call_effect_scripted_camera_point:
 		case _hs_runtime_call_effect_director_script_camera:
+		case _hs_runtime_call_effect_unit_user_animation_started:
+		case _hs_runtime_call_effect_unit_user_animation_frame:
+		case _hs_runtime_call_effect_scenery_animation_note:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;
@@ -4303,6 +4334,15 @@ void hs_runtime_call(
 		case _hs_runtime_call_object_from_name:
 			call->result = object_index_from_name_index((short)call->a);
 			break;
+
+		case _hs_runtime_call_point_cluster:
+		{
+			struct location location;
+
+			scenario_location_from_point(&location, (real_point3d const *)call->a);
+			call->result = location.cluster_index;
+			break;
+		}
 
 		case _hs_runtime_call_object_list_from_ai:
 			call->result = object_list_from_ai_reference(call->a);

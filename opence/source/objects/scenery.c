@@ -44,6 +44,7 @@ symbols in this file:
 #include "scenario/scenario_definitions.h"
 #include "tag_files/tag_files.h"
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 /* ---------- constants */
 
@@ -245,8 +246,8 @@ static void scenery_animation_start_private(
 			scenery->object.object.animation.state.frame_index =
 				frame_index < 0 ? 0 : MIN(frame_index, animation->frame_count - 1);
 			scenery->object.object.animation.animation_graph_index = animation_graph_index;
-			network_coop_note_scenery_animation(object_index, animation_graph_index, animation_index,
-				scenery->object.object.animation.state.frame_index);
+			hs_runtime_effect(_hs_runtime_call_effect_scenery_animation_note, object_index, animation_graph_index,
+				(unsigned short)animation_index | ((long)scenery->object.object.animation.state.frame_index << 16));
 		}
 		else
 		{

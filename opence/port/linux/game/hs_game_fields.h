@@ -49,6 +49,7 @@ enum
 	_hs_game_field_time_code_time, /* long */
 	_hs_game_field_time_code_stop_time, /* long */
 	_hs_game_field_magic_base_animation_seat_index, /* short */
+	_hs_game_field_object_globals, /* objects.c's struct object_globals */
 	NUMBER_OF_HS_GAME_FIELDS
 };
 

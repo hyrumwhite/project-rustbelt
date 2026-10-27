@@ -152,6 +152,9 @@ pub mod call {
     /// A library function's body, its arguments evaluated by the runtime:
     /// `a` the function, `b` the thread, `c` the arguments' address.
     pub const LIBRARY: i32 = 17;
+    /// A body's question: the cluster of the point at the address `a`
+    /// (`scenario_location_from_point`), or NONE.
+    pub const POINT_CLUSTER: i32 = 18;
     /// `game_in_progress()`.
     pub const GAME_IN_PROGRESS: i32 = 3;
     /// `object_index_from_name_index(a)`.
@@ -311,16 +314,25 @@ pub mod call {
     pub const EFFECT_SCRIPTED_CAMERA_POINT: i32 = 0x77;
     /// `director_script_camera(a)` (`director_port_script_camera`).
     pub const EFFECT_DIRECTOR_SCRIPT_CAMERA: i32 = 0x78;
+    /// The unit `a` started the graph `b`'s user animation `c` (bit 16:
+    /// interpolating): its node matrices, and its co-op and AI notes
+    /// (`unit_port_user_animation_started`).
+    pub const EFFECT_UNIT_USER_ANIMATION_STARTED: i32 = 0x79;
+    /// The unit `a`'s user animation at the frame `b`: its co-op note.
+    pub const EFFECT_UNIT_USER_ANIMATION_FRAME: i32 = 0x7a;
+    /// The scenery `a` playing the graph `b`'s animation `c` (bits 16 on:
+    /// its frame): its co-op note.
+    pub const EFFECT_SCENERY_ANIMATION_NOTE: i32 = 0x7b;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_DIRECTOR_SCRIPT_CAMERA).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_SCENERY_ANIMATION_NOTE).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
     /// asks the game as it is).
     pub fn is_query(kind: i32) -> bool {
-        kind == OBJECT_FROM_NAME
+        kind == OBJECT_FROM_NAME || kind == POINT_CLUSTER
     }
 }
 
@@ -669,6 +681,24 @@ const OBJECT_ANIMATION_GRAPH_INDEX: u32 = 0x7c;
 const OBJECT_ANIMATION_INDEX: u32 = 0x80;
 const OBJECT_ANIMATION_FRAME_INDEX: u32 = 0x82;
 const UNIT_STATE_USER_ANIMATION: u8 = 28;
+/// `struct unit_animation`'s flags (a word, 11 bytes before `struct
+/// unit_datum`'s animation state),
+/// `_unit_animation_postpone_weapon_ik_until_interpolation_ends_bit` and
+/// `_animation_base`; an object's flag 7, which scenery starting an
+/// animation clears.
+const UNIT_ANIMATION_FLAGS: u32 = 0x248;
+const UNIT_ANIMATION_POSTPONE_WEAPON_IK: u16 = 1 << 0;
+const ANIMATION_BASE: i16 = 0;
+const OBJECT_FLAG_7: u32 = 1 << 7;
+/// objects.c's `struct object_globals`: the PVS activation's type (a
+/// short) and its object (a long) or cluster (a short), `_pvs_activation_*`;
+/// `_object_mask_cannot_interpolate`.
+const OBJECT_GLOBALS_PVS_ACTIVATION_TYPE: u32 = 0x90;
+const OBJECT_GLOBALS_PVS_ACTIVATION: u32 = 0x94;
+const PVS_ACTIVATION_NORMAL: u16 = 0;
+const PVS_ACTIVATION_OBJECT: u16 = 1;
+const PVS_ACTIVATION_CLUSTER: u16 = 2;
+const OBJECT_MASK_CANNOT_INTERPOLATE: u32 = 0xfe0;
 /// `struct object_list_header_datum`'s count and first reference, and
 /// `struct data_reference`'s datum and next reference.
 const OBJECT_LIST_HEADER_COUNT: u32 = 6;
@@ -911,6 +941,8 @@ pub mod game_field {
     pub const TIME_CODE_TIME: u32 = 40;
     pub const TIME_CODE_STOP_TIME: u32 = 41;
     pub const MAGIC_BASE_ANIMATION_SEAT_INDEX: u32 = 42;
+    /// objects.c's `struct object_globals`.
+    pub const OBJECT_GLOBALS: u32 = 43;
 }
 
 /// `(long)value` as x86 truncates it.
@@ -2342,6 +2374,109 @@ impl<H: HsHost> Runtime<'_, H> {
     /// The frames left of the object's animation (`unit_get_custom_animation_time`
     /// and `scenery_get_animation_time`: its frame count less its frame and
     /// 2, at least 0); None for a graph or animation not found.
+    /// `animation_graph_get_animation_by_name` (`_stricmp`): the graph's
+    /// animations (count and first) and the index of the one of the name,
+    /// if any; None for a graph that isn't there.
+    fn animation_by_name(&self, graph_index: i32, name: &[u8]) -> Option<((i32, u32), Option<i16>)> {
+        let graph = self.tag_data(b"antr", graph_index)?;
+        let (count, first) = self.tag_block(graph + crate::layout::animation_graph::ANIMATIONS as u32);
+        let found = (0..count.clamp(0, 0x7fff)).find(|&index| {
+            name.eq_ignore_ascii_case(&self.c_string(first + index as u32 * crate::layout::animation::SIZEOF as u32))
+        });
+        Some(((count, first), found.map(|index| index as i16)))
+    }
+
+    /// `animation_choose_random_permutation_internal` affecting the game's
+    /// state: one of the animation's permutations by weight, from the global
+    /// seed (drawn even for none).
+    fn animation_random_permutation(&self, (count, first): (i32, u32), animation_index: i16) -> i16 {
+        use crate::layout::animation as a;
+        let m = self.m();
+        let seed = m.r32(self.context.random_seed).wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        m.w32(self.context.random_seed, seed);
+        let random = (seed >> 16) as f32 / 65535.0;
+        let valid = |index: i16| index >= 0 && (index as i32) < count;
+        let first_animation_index = animation_index;
+        let mut animation_index = animation_index;
+        let mut permutation_count = 0;
+        while animation_index != NONE as i16 {
+            let over = permutation_count >= count;
+            permutation_count += 1;
+            if !valid(animation_index) || over {
+                return if valid(first_animation_index) { first_animation_index } else { NONE as i16 };
+            }
+            let animation = first + animation_index as u32 * a::SIZEOF as u32;
+            if random <= f32::from_bits(m.r32(animation + a::RUNTIME_NORMALIZED_WEIGHT as u32)) {
+                break;
+            }
+            animation_index = m.r16(animation + a::NEXT_ANIMATION_INDEX as u32) as i16;
+        }
+        animation_index
+    }
+
+    /// `unit_start_user_animation` for an animation the graph has (found
+    /// by name): whether it started (a permutation of it, a base
+    /// animation, unless the unit plays one of the same parent short of its
+    /// key frame). None where the game's would stop, before anything is
+    /// written.
+    fn unit_start_user_animation(
+        &self,
+        unit_index: i32,
+        graph_index: i32,
+        animations: (i32, u32),
+        base_index: i16,
+        interpolate: bool,
+    ) -> Option<bool> {
+        use crate::layout::{animation as a, unit_datum as u};
+        let m = self.m();
+        let unit = self.object_typed(unit_index, OBJECT_MASK_UNIT)?;
+        let (count, first) = animations;
+        let element = |index: i16| (index >= 0 && (index as i32) < count).then(|| first + index as u32 * a::SIZEOF as u32);
+        // (before the seed is drawn: TAG_BLOCK_GET_ELEMENT's assertions)
+        let current_index = m.r16(unit + OBJECT_ANIMATION_INDEX) as i16;
+        let playing = m.r8(unit + u::UNIT_ANIMATION_STATE as u32) == UNIT_STATE_USER_ANIMATION && current_index != NONE as i16;
+        if playing {
+            element(current_index)?;
+        }
+        let seed = m.r32(self.context.random_seed);
+        let animation_index = self.animation_random_permutation(animations, base_index);
+        let Some(animation) = element(animation_index) else {
+            // (none: the game's assertion, its seed the game's to draw)
+            m.w32(self.context.random_seed, seed);
+            return None;
+        };
+        if m.r16(animation + a::TYPE as u32) as i16 != ANIMATION_BASE {
+            return Some(false);
+        }
+        if playing {
+            let current = element(current_index)?;
+            let parent = |animation: u32| m.r16(animation + a::RUNTIME_PARENT_ANIMATION_INDEX as u32);
+            if parent(current) == parent(animation) {
+                let frame_index = m.r16(unit + OBJECT_ANIMATION_FRAME_INDEX) as i16;
+                let key_frame_index = m.r16(current + a::PRIVATE_KEY_FRAME_INDEX as u32) as i16;
+                if frame_index as i32 + 2 == key_frame_index as i32 {
+                    m.w16(unit + OBJECT_ANIMATION_FRAME_INDEX, frame_index.wrapping_sub(1) as u16);
+                    return Some(false);
+                } else if frame_index < key_frame_index {
+                    return Some(false);
+                }
+            }
+        }
+        if interpolate {
+            self.effect(call::EFFECT_OBJECT_START_INTERPOLATION, unit_index, 6, 0);
+        }
+        m.w8(unit + u::UNIT_ANIMATION_STATE as u32, UNIT_STATE_USER_ANIMATION);
+        // unit_set_animation
+        m.w32(unit + OBJECT_ANIMATION_GRAPH_INDEX, graph_index as u32);
+        m.w16(unit + OBJECT_ANIMATION_INDEX, animation_index as u16);
+        m.w16(unit + OBJECT_ANIMATION_FRAME_INDEX, 0);
+        let flags = m.r16(unit + UNIT_ANIMATION_FLAGS);
+        m.w16(unit + UNIT_ANIMATION_FLAGS, flags | UNIT_ANIMATION_POSTPONE_WEAPON_IK);
+        let c = animation_index as u16 as i32 | if interpolate { 1 << 16 } else { 0 };
+        self.effect(call::EFFECT_UNIT_USER_ANIMATION_STARTED, unit_index, graph_index, c);
+        Some(true)
+    }
+
     fn animation_frames_left(&self, object: u32) -> Option<i32> {
         let m = self.m();
         let tags = crate::ai_actor::AiStepContext {
@@ -5338,6 +5473,132 @@ impl<H: HsHost> Runtime<'_, H> {
                     let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
                     if m.r8(unit + u::UNIT_ANIMATION_STATE as u32) == UNIT_STATE_USER_ANIMATION {
                         self.effect(call::EFFECT_UNIT_STOP_CUSTOM_ANIMATION, unit_index, 0, 0);
+                    }
+                }
+                0
+            }
+            // unit_start_user_animation, unit_scripting_start_user_animation_list
+            // (each unit's, while all have started) and
+            // unit_custom_animation_at_frame (then at the frame, if the
+            // animation has it). An animation the graph hasn't is the game's
+            // warning.
+            name @ ("custom_animation" | "custom_animation_list" | "unit_custom_animation_at_frame") => 'body: {
+                let graph_index = argument(1);
+                let interpolate = m.r8(arguments + 12) != 0;
+                let units = if name == "custom_animation_list" {
+                    // (unit_try_and_get: those that are units)
+                    let Some(list) = self.object_list(argument(0)) else { return false };
+                    list.into_iter().filter(|&index| self.object_typed(index, OBJECT_MASK_UNIT).is_some()).collect()
+                } else if argument(0) != NONE {
+                    vec![argument(0)]
+                } else {
+                    Vec::new()
+                };
+                if units.is_empty() || graph_index == NONE {
+                    // (none started: a list of no units has all of them)
+                    break 'body boolean(name == "custom_animation_list" && units.is_empty());
+                }
+                let Some((animations, found)) = self.animation_by_name(graph_index, &self.c_string(argument(2) as u32)) else {
+                    return false;
+                };
+                let Some(base_index) = found else { return false };
+                let mut result = true;
+                for &unit_index in &units {
+                    let Some(started) = self.unit_start_user_animation(unit_index, graph_index, animations, base_index, interpolate)
+                    else {
+                        return false;
+                    };
+                    result = started;
+                    if !result {
+                        break;
+                    }
+                }
+                if name == "unit_custom_animation_at_frame" && result {
+                    use crate::layout::animation as a;
+                    let unit_index = units[0];
+                    let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_UNIT) else { return false };
+                    let frame_index = short(4);
+                    let index = m.r16(unit + OBJECT_ANIMATION_INDEX) as i16 as u32;
+                    let frame_count = m.r16(animations.1 + index * a::SIZEOF as u32 + a::FRAME_COUNT as u32) as i16;
+                    result = frame_index >= 0 && frame_index < frame_count;
+                    if result {
+                        m.w16(unit + OBJECT_ANIMATION_FRAME_INDEX, frame_index as u16);
+                        self.effect(call::EFFECT_UNIT_USER_ANIMATION_FRAME, unit_index, frame_index as i32, 0);
+                    }
+                }
+                boolean(result)
+            }
+            // scenery_animation_start and _at_frame (scenery_animation_start_private):
+            // an animation the graph hasn't is the game's warning
+            name @ ("scenery_animation_start" | "scenery_animation_start_at_frame") => {
+                use crate::layout::animation as a;
+                let (object_index, graph_index) = (argument(0), argument(1));
+                if object_index != NONE && graph_index != NONE {
+                    let Some(scenery) = self.object_typed(object_index, OBJECT_MASK_SCENERY) else { return false };
+                    let Some(((_, first), found)) = self.animation_by_name(graph_index, &self.c_string(argument(2) as u32))
+                    else {
+                        return false;
+                    };
+                    let Some(animation_index) = found else { return false };
+                    let frame_index = if name == "scenery_animation_start" { 0 } else { short(3) };
+                    let animation = first + animation_index as u32 * a::SIZEOF as u32;
+                    let frame_count = m.r16(animation + a::FRAME_COUNT as u32) as i16;
+                    m.w32(scenery + SCENERY_FLAGS, m.r32(scenery + SCENERY_FLAGS) | 1);
+                    self.set_flag32(scenery + u::OBJECT_FLAGS as u32, OBJECT_FLAG_7, false);
+                    m.w16(scenery + OBJECT_ANIMATION_INDEX, animation_index as u16);
+                    let frame_index = if frame_index < 0 { 0 } else { frame_index.min(frame_count.wrapping_sub(1)) };
+                    m.w16(scenery + OBJECT_ANIMATION_FRAME_INDEX, frame_index as u16);
+                    m.w32(scenery + OBJECT_ANIMATION_GRAPH_INDEX, graph_index as u32);
+                    let c = animation_index as u16 as i32 | (frame_index as i32) << 16;
+                    self.effect(call::EFFECT_SCENERY_ANIMATION_NOTE, object_index, graph_index, c);
+                }
+                0
+            }
+            // object_pvs_activate and object_pvs_set_object, object_pvs_clear
+            name @ ("object_pvs_activate" | "object_pvs_set_object" | "object_pvs_clear") => {
+                let Some(globals) = self.game_field(game_field::OBJECT_GLOBALS) else { return false };
+                let object_index = if name == "object_pvs_clear" { NONE } else { argument(0) };
+                if object_index == NONE {
+                    m.w16(globals + OBJECT_GLOBALS_PVS_ACTIVATION_TYPE, PVS_ACTIVATION_NORMAL);
+                } else {
+                    m.w16(globals + OBJECT_GLOBALS_PVS_ACTIVATION_TYPE, PVS_ACTIVATION_OBJECT);
+                    m.w32(globals + OBJECT_GLOBALS_PVS_ACTIVATION, object_index as u32);
+                }
+                0
+            }
+            // object_pvs_set_camera_point: the camera point's cluster (one
+            // outside the map is the game's, which reports it)
+            "object_pvs_set_camera" => {
+                let Some(globals) = self.game_field(game_field::OBJECT_GLOBALS) else { return false };
+                let point_index = short(0);
+                if point_index == NONE as i16 {
+                    m.w16(globals + OBJECT_GLOBALS_PVS_ACTIVATION_TYPE, PVS_ACTIVATION_NORMAL);
+                } else {
+                    let Some(scenario) = self.game_field(game_field::SCENARIO) else { return false };
+                    let (count, first) = self.tag_block(scenario + SCENARIO_CUTSCENE_CAMERA_POINTS);
+                    if !(0..count).contains(&(point_index as i32)) {
+                        return false;
+                    }
+                    let point = first + point_index as u32 * CUTSCENE_CAMERA_POINT_SIZE;
+                    let cluster_index = self.call(call::POINT_CLUSTER, (point + CUTSCENE_CAMERA_POINT_POSITION) as i32, 0, 0);
+                    if cluster_index as i16 == NONE as i16 {
+                        return false;
+                    }
+                    m.w16(globals + OBJECT_GLOBALS_PVS_ACTIVATION_TYPE, PVS_ACTIVATION_CLUSTER);
+                    m.w16(globals + OBJECT_GLOBALS_PVS_ACTIVATION, cluster_index as u16);
+                }
+                0
+            }
+            // objects_scripting_set_scale (its interpolation an effect, for
+            // the types that interpolate)
+            "object_set_scale" => {
+                let object_index = argument(0);
+                if object_index != NONE {
+                    let Some(object) = self.object_typed(object_index, OBJECT_MASK_ALL) else { return false };
+                    m.w32(object + u::OBJECT_SCALE as u32, argument(1) as u32);
+                    let ty = m.r16(object + u::OBJECT_TYPE as u32) as u32;
+                    if OBJECT_MASK_CANNOT_INTERPOLATE & (1 << (ty & 31)) == 0 {
+                        self.effect(call::EFFECT_OBJECT_START_INTERPOLATION, object_index, short(2) as i32, 0);
                     }
                 }
                 0

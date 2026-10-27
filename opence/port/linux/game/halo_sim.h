@@ -754,6 +754,9 @@ enum
 	/* a library function's body, its arguments evaluated by the runtime: a
 	the function, b the thread, c the arguments' address (its frame's) */
 	_hs_runtime_call_library,
+	/* a question a body asks that changes nothing: the cluster of the point
+	at the address a (scenario_location_from_point), or NONE */
+	_hs_runtime_call_point_cluster,
 
 	/* a library body's effects on the rest of the game, which the game's
 	body makes through hs_runtime_effect and Rust's through hs_runtime_call
@@ -816,7 +819,10 @@ enum
 	_hs_runtime_call_effect_breakable_surfaces_reset,
 	_hs_runtime_call_effect_scripted_camera_point, /* a the cutscene camera point: its orientation, then the director and observer updated */
 	_hs_runtime_call_effect_director_script_camera, /* a scripted */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_director_script_camera,
+	_hs_runtime_call_effect_unit_user_animation_started, /* a the unit, b the graph, c the animation (bit 16: interpolating): its node matrices, co-op and AI notes */
+	_hs_runtime_call_effect_unit_user_animation_frame, /* a the unit, b the frame: its co-op note */
+	_hs_runtime_call_effect_scenery_animation_note, /* a the scenery, b the graph, c the animation (bits 16 on: the frame): its co-op note */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_scenery_animation_note,
 };
 
 /* the runtime's operations the Rust port can run */

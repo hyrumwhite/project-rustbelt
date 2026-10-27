@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/halo_map", "crates/halo_bridge", "crates/halo_sim"]
+# (Solarik is a workspace of its own; OpenCE is C)
+exclude = ["bevy_solarik", "opence"]
 
 [package]
 name = "halo_rt"
@@ -25,8 +27,8 @@ halo_bridge = { path = "crates/halo_bridge" }
 bevy = { version = "=0.20.0", features = ["https", "free_camera"] }
 # Solarik, a fork of bevy_solari (glass, alpha-masked foliage, point and spot
 # lights, sky lighting, a reference pathtracer that keeps accumulating), as a
-# sibling checkout of https://github.com/AlrikOlson/bevy_solarik
-bevy_solarik = { path = "../bevy_solarik", features = ["pbr_multi_layer_material_textures"] }
+# subtree of https://github.com/AlrikOlson/bevy_solarik (its halo-rt branch)
+bevy_solarik = { path = "bevy_solarik", features = ["pbr_multi_layer_material_textures"] }
 argh = "0.1.12"
 # (src/lens_flares.rs: its vertices into a buffer)
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -39,11 +41,11 @@ rand = "0.10.0"
 # Solarik's forks of Bevy's renderer and wgpu, which it needs Bevy's own
 # crates to use too (a dependency's patches aren't inherited)
 [patch.crates-io]
-bevy_render = { path = "../bevy_solarik/vendor/bevy_render" }
-bevy_pbr = { path = "../bevy_solarik/vendor/bevy_pbr" }
-bevy_anti_alias = { path = "../bevy_solarik/vendor/bevy_anti_alias" }
-wgpu-core = { path = "../bevy_solarik/vendor/wgpu-core" }
-wgpu-hal = { path = "../bevy_solarik/vendor/wgpu-hal" }
+bevy_render = { path = "bevy_solarik/vendor/bevy_render" }
+bevy_pbr = { path = "bevy_solarik/vendor/bevy_pbr" }
+bevy_anti_alias = { path = "bevy_solarik/vendor/bevy_anti_alias" }
+wgpu-core = { path = "bevy_solarik/vendor/wgpu-core" }
+wgpu-hal = { path = "bevy_solarik/vendor/wgpu-hal" }
 
 # Fast-ish iteration: light optimization for our code, full optimization for deps.
 [profile.dev]

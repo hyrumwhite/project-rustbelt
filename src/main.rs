@@ -265,7 +265,7 @@ impl Args {
 
     /// `--maps-dir` alone when given; otherwise $HALO_MAPS, ./maps, a maps
     /// folder next to the executable, and where OpenCE's Windows build
-    /// extracts the disc's maps (../OpenCE/build/windows/maps).
+    /// extracts the disc's maps (opence/build/windows/maps).
     fn map_dirs(&self) -> Vec<PathBuf> {
         if let Some(dir) = &self.maps_dir {
             return vec![dir.clone()];
@@ -275,7 +275,7 @@ impl Args {
         if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("maps"))) {
             dirs.push(exe_dir);
         }
-        dirs.push(PathBuf::from("../OpenCE/build/windows/maps"));
+        dirs.push(PathBuf::from("opence/build/windows/maps"));
         dirs
     }
 }

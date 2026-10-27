@@ -8,10 +8,10 @@ draws it path traced; at the game's menus, or on a level named
 (`halo_rt.exe b30`). The game's data is never embedded: the maps come from
 HALO_MAPS, --maps-dir, or a maps folder beside the executable.
 
-    python tools/package.py [--opence ../OpenCE-bevy] [--no-dlss]
+    python tools/package.py [--opence opence] [--no-dlss]
 
-Builds, in order: OpenCE (ninja, in its checkout, with LLVM's clang on the
-PATH), halo_sim for i686-pc-windows-msvc, then the viewer.
+Builds, in order: OpenCE (in opence/: configure.py the first time, then
+ninja, with LLVM's clang on the PATH), halo_sim for i686-pc-windows-msvc, then the viewer.
 """
 
 import argparse
@@ -32,7 +32,7 @@ def run(command, cwd, env=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--opence", type=Path, default=REPO.parent / "OpenCE-bevy", help="the OpenCE checkout")
+    parser.add_argument("--opence", type=Path, default=REPO / "opence", help="the OpenCE checkout")
     parser.add_argument("--no-dlss", action="store_true", help="without DLSS")
     args = parser.parse_args()
     opence = args.opence.resolve()
@@ -40,6 +40,8 @@ def main():
     env = dict(os.environ)
     if LLVM.is_dir():
         env["PATH"] = f"{LLVM}{os.pathsep}{env.get('PATH', '')}"
+    if not (opence / "build.ninja").is_file():
+        run([sys.executable, "configure.py"], cwd=opence, env=env)
     run([sys.executable, "-m", "ninja"], cwd=opence, env=env)
     run(["cargo", "build", "-p", "halo_sim", "--release", "--target", "i686-pc-windows-msvc"], cwd=REPO)
     features = "bundle" if args.no_dlss else "dlss,bundle"

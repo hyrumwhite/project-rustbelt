@@ -1,6 +1,6 @@
 # Halo: Combat Evolved on Bevy (Solari + DLSS) — Roadmap
 
-Goal: run Halo: CE — from the [OpenCE](../OpenCE) decompilation (Xbox build 2342) and the retail
+Goal: run Halo: CE — from the [OpenCE](opence) decompilation (Xbox build 2342) and the retail
 Xbox maps — with Bevy as the renderer, lit by Solari real-time ray tracing and DLSS Ray
 Reconstruction.
 
@@ -121,7 +121,7 @@ On b30, every transparent surface is drawn except one meter and one plasma shade
 
 Deliverable: `cargo run --release --features dlss -- b30 --opence <OpenCE>\build\windows\halo.exe` starts the game hidden and plays it in the Bevy window, ray traced.
 
-OpenCE side, branch `bevy-bridge` (worktree `../OpenCE-bevy`):
+OpenCE side, branch `bevy-bridge` (now the subtree `opence/`):
 - [x] `port/linux/game/bevy_bridge.c`: with `game.bevy_bridge` on, `render_frame` writes the first player's camera and every object's interpolated node matrices, definition, region permutations and visibility to shared memory (`bevy_bridge_protocol.h`; two frame buffers with sequence locks; a named file mapping on Windows, POSIX shm elsewhere)
 - [x] The first-person weapon and hands, recorded as `first_person_weapon_draw` poses them
 - [x] Input from the renderer: `bevy_bridge_input.c` turns the forwarded keyboard and mouse into SDL events before the platform layer polls, so bindings, menus and aiming work unchanged

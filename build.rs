@@ -4,7 +4,7 @@
 //! unpacks them at start-up. The game's data (the maps) is never embedded.
 //!
 //! Where they come from: `HALO_RT_OPENCE_BUILD` (default
-//! `../OpenCE-bevy/build/windows`), `HALO_RT_SIM_DLL` (default
+//! `opence/build/windows`), `HALO_RT_SIM_DLL` (default
 //! `target/i686-pc-windows-msvc/release/halo_sim.dll`) and `DLSS_SDK`
 //! (`.cargo/config.toml` sets `vendor/DLSS`). `tools/package.py` builds all
 //! of them first.
@@ -27,7 +27,7 @@ fn main() {
     let from_env = |name: &str, default: &str| {
         env::var_os(name).map(PathBuf::from).unwrap_or_else(|| manifest.join(default))
     };
-    let opence = from_env("HALO_RT_OPENCE_BUILD", "../OpenCE-bevy/build/windows");
+    let opence = from_env("HALO_RT_OPENCE_BUILD", "opence/build/windows");
     let sim = from_env("HALO_RT_SIM_DLL", "target/i686-pc-windows-msvc/release/halo_sim.dll");
     // (the published name, and where it comes from)
     let mut files: Vec<(String, PathBuf)> = vec![

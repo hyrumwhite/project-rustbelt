@@ -1,6 +1,6 @@
 """Generate crates/halo_map/src/layout.rs from OpenCE's C headers.
 
-    python tools/tag_layout/gen.py [--opence ../OpenCE] [--clang clang]
+    python tools/tag_layout/gen.py [--opence opence] [--clang clang]
 
 Compiles each probe*.c with the flags OpenCE's Windows build gives game units
 (i686-pc-windows-msvc, MSVC layout) to LLVM IR, reads each `layout__*`
@@ -32,7 +32,7 @@ def find_clang(explicit):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--opence", type=Path, default=REPO.parent / "OpenCE")
+    parser.add_argument("--opence", type=Path, default=REPO / "opence")
     parser.add_argument("--clang")
     args = parser.parse_args()
     opence = args.opence.resolve()

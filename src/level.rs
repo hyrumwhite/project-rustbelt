@@ -541,6 +541,9 @@ pub struct LevelBuilder {
     /// (BSP index, breakable surface index): hidden once the game breaks it
     /// (crate::bridge).
     pub breakable_roots: Vec<(usize, i16, Entity)>,
+    /// Each loaded BSP's water surfaces' heights (world units, their
+    /// vertices' mean): the fog pass's water is only a fog plane on one.
+    pub water_heights: Vec<f32>,
     light_proxy: Option<Handle<Mesh>>,
     /// Whether light fixtures get emissive proxies.
     pub fixture_lights: bool,
@@ -603,6 +606,7 @@ impl LevelBuilder {
             loaded_bsps: Vec::new(),
             bsp_roots: Vec::new(),
             breakable_roots: Vec::new(),
+            water_heights: Vec::new(),
             light_proxy: None,
             fixture_lights: true,
             show_light_proxies: false,
@@ -648,6 +652,10 @@ impl LevelBuilder {
                     self.stats.skipped_transparent += 1;
                     continue;
                 };
+                if material.shader.group == halo_map::fourcc(b"swat") && !material.vertices.is_empty() {
+                    let height = material.vertices.iter().map(|v| v.position[2]).sum::<f32>() / material.vertices.len() as f32;
+                    self.water_heights.push(height);
+                }
                 let vertices = material.vertices.iter().map(|v| SourceVertex {
                     position: v.position,
                     normal: v.normal,

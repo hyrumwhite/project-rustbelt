@@ -57,6 +57,10 @@ pub struct FogPlugin;
 #[derive(Resource)]
 pub struct ViewerWater;
 
+/// How near a water surface's height the fog plane is the water's (world
+/// units).
+const WATER_PLANE_TOLERANCE: f32 = 0.1;
+
 /// The fog lit by the scene's lights (Solarik's lit fog: single scattering
 /// of the lights along each view ray, through the game's fog): its strength,
 /// and whether the sun lights it too (the game's fog colour already stands
@@ -251,6 +255,7 @@ fn follow_fog(
     camera: Single<(Entity, Option<&HaloFog>), With<Camera3d>>,
     mut logged: Local<Option<halo_bridge::Fog>>,
     mut logged_screen: Local<Option<u32>>,
+    mut logged_water: Local<Option<bool>>,
     mut level: Option<ResMut<crate::bridge::BridgeLevel>>,
     mut images: ResMut<Assets<Image>>,
     viewer_water: Option<Res<ViewerWater>>,
@@ -282,7 +287,19 @@ fn follow_fog(
         .zip(snapshot.camera.as_ref())
         .and_then(|(fog, camera)| HaloFog::new(fog, screen, camera.position))
         .map(|mut fog| {
-            fog.atmospheric.w = if viewer_water.is_some() { 1.0 } else { 0.0 };
+            // (the fog plane the water's surface, as b30's sea: not c10's
+            // mist above its swamps, under which its land was fogged as if
+            // seen through water whenever the eye was over the plane)
+            let on_water = snapshot.fog.as_ref().is_some_and(|shared| {
+                let [i, j, k, d] = shared.plane;
+                k > 0.99 && i.abs() < 0.01 && j.abs() < 0.01
+                    && level.as_deref().is_some_and(|level| level.builder.water_heights.iter().any(|height| (height - d).abs() < WATER_PLANE_TOLERANCE))
+            });
+            if *logged_water != Some(on_water) {
+                info!("the fog plane {} the water's surface", if on_water { "is" } else { "isn't" });
+                *logged_water = Some(on_water);
+            }
+            fog.atmospheric.w = if viewer_water.is_some() && on_water { 1.0 } else { 0.0 };
             fog
         });
     // the same fog over what reflections see beyond their surfaces

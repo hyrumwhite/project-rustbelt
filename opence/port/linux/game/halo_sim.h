@@ -838,7 +838,12 @@ enum
 	_hs_runtime_call_effect_looping_sound_start, /* a the looping sound, b the object, c the gain's bits: its co-op note, then it started and kept (game_sound_port_looping_sound_start) */
 	_hs_runtime_call_effect_foley_predict, /* a the looping sound: scripted_foley_predict */
 	_hs_runtime_call_effect_coop_nav_point, /* a the kind (_coop_nav_point_*, low word) and nav index (high word), b the target, c the reference, the first name its vertical offset's bits: network_coop_note_nav_point */
-	_hs_runtime_call_effect_last = _hs_runtime_call_effect_coop_nav_point,
+	_hs_runtime_call_effect_objects_memory_compact,
+	_hs_runtime_call_effect_object_teleport_to_flag, /* a the object, b the cutscene flag: hs_object_orient teleporting, without co-op followers */
+	_hs_runtime_call_effect_switch_bsp, /* a the structure bsp: scenario_switch_structure_bsp */
+	_hs_runtime_call_effect_player_add_equipment, /* a the unit, b the starting profile, c resetting: player_add_equipment */
+	_hs_runtime_call_effect_melee_attack_begin, /* a the unit: unit_melee_attack_begin(a, FALSE, 0) */
+	_hs_runtime_call_effect_last = _hs_runtime_call_effect_melee_attack_begin,
 };
 
 /* the runtime's operations the Rust port can run */

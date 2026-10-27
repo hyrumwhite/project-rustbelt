@@ -2353,6 +2353,13 @@ static char const *const hs_runtime_rust_bodies[] =
 	"deactivate_nav_point_object",
 	"deactivate_team_nav_point_flag",
 	"deactivate_team_nav_point_object",
+	"object_destroy_all",
+	"objects_delete_by_definition",
+	"volume_teleport_players_not_inside",
+	"switch_bsp",
+	"ai_reconnect",
+	"player_add_equipment",
+	"magic_melee_attack",
 };
 /* port: a library body's effect on the rest of the game, made through here
 by the game's body as Rust's makes it through hs_runtime_call: in check mode
@@ -2661,6 +2668,29 @@ static void hs_runtime_effect_run(
 		network_coop_note_nav_point((short)call->a, (short)(call->a >> 16), call->b, call->c, vertical_offset.value);
 		break;
 	}
+	case _hs_runtime_call_effect_objects_memory_compact:
+	{
+		extern void objects_memory_compact(void);
+
+		objects_memory_compact();
+		break;
+	}
+	case _hs_runtime_call_effect_object_teleport_to_flag:
+		hs_port_object_teleport_to_flag(call->a, (short)call->b);
+		break;
+	case _hs_runtime_call_effect_switch_bsp:
+		scenario_switch_structure_bsp((short)call->a);
+		break;
+	case _hs_runtime_call_effect_player_add_equipment:
+	{
+		extern void player_add_equipment(long unit_index, short starting_profile_index, boolean reset_equipment);
+
+		player_add_equipment(call->a, (short)call->b, (boolean)call->c);
+		break;
+	}
+	case _hs_runtime_call_effect_melee_attack_begin:
+		unit_melee_attack_begin(call->a, FALSE, 0);
+		break;
 	case _hs_runtime_call_effect_foley_predict:
 	{
 		extern void game_sound_port_foley_predict(long definition_index);
@@ -4447,6 +4477,11 @@ void hs_runtime_call(
 		case _hs_runtime_call_effect_looping_sound_start:
 		case _hs_runtime_call_effect_foley_predict:
 		case _hs_runtime_call_effect_coop_nav_point:
+		case _hs_runtime_call_effect_objects_memory_compact:
+		case _hs_runtime_call_effect_object_teleport_to_flag:
+		case _hs_runtime_call_effect_switch_bsp:
+		case _hs_runtime_call_effect_player_add_equipment:
+		case _hs_runtime_call_effect_melee_attack_begin:
 			hs_runtime_effect_depth++;
 			hs_runtime_effect_run(call);
 			hs_runtime_effect_depth--;

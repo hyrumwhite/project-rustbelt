@@ -194,6 +194,7 @@ symbols in this file:
 #include "sound/sound_manager.h"
 #include "structures/structure_bsp_definitions.h"
 #include "units/units.h"
+#include "halo_sim.h" /* port: port/linux/game/halo_sim.c (the library bodies' effects) */
 
 /* ---------- constants */
 
@@ -1048,6 +1049,15 @@ long scenario_fog_region_get_fog_index(
 	}
 
 	return NONE;
+}
+
+/* port: the library body switch_bsp's (its effect, _hs_runtime_call_effect_switch_bsp) */
+void scenario_scripting_switch_structure_bsp(
+	short structure_bsp_index)
+{
+	extern long hs_runtime_effect(long kind, long a, long b, long c);
+
+	hs_runtime_effect(_hs_runtime_call_effect_switch_bsp, structure_bsp_index, 0, 0);
 }
 
 boolean scenario_switch_structure_bsp(

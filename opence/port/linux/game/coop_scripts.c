@@ -38,6 +38,8 @@ fires for whoever walks into it, and what it starts is sent to the clients
 
 #include "coop_scripts.h"
 #include "network_coop.h"
+#include "halo_sim.h" /* the library bodies' effects */
+long hs_runtime_effect(long kind, long a, long b, long c);
 
 #include <string.h>
 
@@ -258,7 +260,7 @@ void coop_scripts_player_add_equipment(
 	short count = players_following(unit_index, followers, NUMBEROF(followers));
 	short index;
 
-	player_add_equipment(unit_index, starting_profile_index, reset_equipment);
+	hs_runtime_effect(_hs_runtime_call_effect_player_add_equipment, unit_index, starting_profile_index, reset_equipment);
 	for (index = 0; index < count; index++)
-		player_add_equipment(followers[index], starting_profile_index, reset_equipment);
+		hs_runtime_effect(_hs_runtime_call_effect_player_add_equipment, followers[index], starting_profile_index, reset_equipment);
 }

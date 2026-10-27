@@ -506,7 +506,7 @@ void hs_object_destroy_all(
 			if (object->object.parent_object_index == NONE &&
 				!object_is_or_contains_player(iterator.index))
 			{
-				object_delete(iterator.index);
+				hs_runtime_effect(_hs_runtime_call_effect_object_delete, iterator.index, 0, 0);
 			}
 		}
 	}
@@ -679,9 +679,9 @@ void hs_objects_delete_by_definition(
 	while ((object = object_iterator_next(&iterator)) != NULL)
 	{
 		if (object->definition_index == definition_index)
-			object_delete(iterator.index);
+			hs_runtime_effect(_hs_runtime_call_effect_object_delete, iterator.index, 0, 0);
 	}
-	objects_memory_compact();
+	hs_runtime_effect(_hs_runtime_call_effect_objects_memory_compact, 0, 0, 0);
 
 	return;
 }
@@ -1072,6 +1072,15 @@ void hs_object_set_facing(
 
 /* port: hs_object_teleport's and _set_facing's orientation (their effect,
 _hs_runtime_call_effect_object_orient) */
+/* port: hs_teleport_players_not_in_trigger_volume's teleport (its effect,
+_hs_runtime_call_effect_object_teleport_to_flag) */
+void hs_port_object_teleport_to_flag(
+	long object_index,
+	short cutscene_flag_index)
+{
+	hs_object_orient(object_index, cutscene_flag_index, TRUE, TRUE);
+}
+
 void hs_port_object_orient(
 	long object_index,
 	short cutscene_flag_index,
@@ -1115,11 +1124,7 @@ void hs_teleport_players_not_in_trigger_volume(
 				player_teleport(player_index, first_unit_index, &object_get(first_unit_index)->object.position);
 				continue;
 			}
-			hs_object_orient(
-				player->unit_index,
-				cutscene_flag_index,
-				TRUE,
-				TRUE);
+			hs_runtime_effect(_hs_runtime_call_effect_object_teleport_to_flag, player->unit_index, cutscene_flag_index, 0);
 			first_unit_index = player->unit_index;
 		}
 	}

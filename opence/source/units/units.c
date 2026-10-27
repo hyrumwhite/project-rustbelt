@@ -4634,7 +4634,7 @@ boolean unit_throw_grenade_begin(
 void scripting_magic_melee_attack(
 	void)
 {
-	unit_melee_attack_begin(player_get(0)->unit_index, FALSE, 0);
+	hs_runtime_effect(_hs_runtime_call_effect_melee_attack_begin, player_get(0)->unit_index, 0, 0);
 
 	return;
 }

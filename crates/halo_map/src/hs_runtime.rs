@@ -361,10 +361,21 @@ pub mod call {
     /// `network_coop_note_nav_point(a's low word, a's high word, b, c, the
     /// first name's bits as a real)`.
     pub const EFFECT_COOP_NAV_POINT: i32 = 0x88;
+    /// `objects_memory_compact()`.
+    pub const EFFECT_OBJECTS_MEMORY_COMPACT: i32 = 0x89;
+    /// The object `a` teleported to the cutscene flag `b`, without co-op
+    /// followers (`hs_port_object_teleport_to_flag`).
+    pub const EFFECT_OBJECT_TELEPORT_TO_FLAG: i32 = 0x8a;
+    /// `scenario_switch_structure_bsp(a)`.
+    pub const EFFECT_SWITCH_BSP: i32 = 0x8b;
+    /// `player_add_equipment(a, b, c)`.
+    pub const EFFECT_PLAYER_ADD_EQUIPMENT: i32 = 0x8c;
+    /// `unit_melee_attack_begin(a, FALSE, 0)`.
+    pub const EFFECT_MELEE_ATTACK_BEGIN: i32 = 0x8d;
 
     /// Whether the call is a body's effect.
     pub fn is_effect(kind: i32) -> bool {
-        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_COOP_NAV_POINT).contains(&kind)
+        (EFFECT_OBEY_COMMAND_LIST..=EFFECT_MELEE_ATTACK_BEGIN).contains(&kind)
     }
 
     /// Whether the call is a question that changes nothing (a body's check
@@ -6222,6 +6233,93 @@ impl<H: HsHost> Runtime<'_, H> {
                         return false;
                     }
                 }
+                0
+            }
+            // hs_object_destroy_all: every top-level object that isn't or
+            // holds a player deleted (an effect each). Players in a seat or
+            // attached are the game's, whose loop sees them freed.
+            "object_destroy_all" => {
+                let mut player_index = self.data_next_index(self.context.player_data, NONE);
+                while player_index != NONE {
+                    let Some(player) = self.datum_get(self.context.player_data, player_index) else { return false };
+                    let unit_index = m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32;
+                    if unit_index != NONE {
+                        let Some(unit) = self.object_typed(unit_index, OBJECT_MASK_ALL) else { return false };
+                        if m.r32(unit + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 != NONE {
+                            return false;
+                        }
+                    }
+                    player_index = self.data_next_index(self.context.player_data, player_index);
+                }
+                let mut deleted = Vec::new();
+                for (object_index, object) in self.objects_of_types(OBJECT_MASK_ALL) {
+                    if m.r32(object + u::OBJECT_PARENT_OBJECT_INDEX as u32) as i32 == NONE {
+                        let Some(holds_player) = self.object_is_or_contains_player(object_index, 0) else { return false };
+                        if !holds_player {
+                            deleted.push(object_index);
+                        }
+                    }
+                }
+                for object_index in deleted {
+                    self.effect(call::EFFECT_OBJECT_DELETE, object_index, 0, 0);
+                }
+                0
+            }
+            // hs_objects_delete_by_definition: each object of the definition
+            // deleted, then the objects' memory compacted (effects)
+            "objects_delete_by_definition" => {
+                let definition_index = argument(0);
+                for (object_index, object) in self.objects_of_types(OBJECT_MASK_ALL) {
+                    if m.r32(object + crate::layout::unit_datum::DEFINITION_INDEX as u32) as i32 == definition_index {
+                        self.effect(call::EFFECT_OBJECT_DELETE, object_index, 0, 0);
+                    }
+                }
+                self.effect(call::EFFECT_OBJECTS_MEMORY_COMPACT, 0, 0, 0);
+                0
+            }
+            // hs_teleport_players_not_in_trigger_volume: each player's unit
+            // outside the volume to the flag (network co-op's, which gathers
+            // the rest round the first, is the game's)
+            "volume_teleport_players_not_inside" => {
+                if self.context.coop_host {
+                    return false;
+                }
+                let (volume_index, flag_index) = (short(0), short(1));
+                let mut player_index = self.data_next_index(self.context.player_data, NONE);
+                while player_index != NONE {
+                    let Some(player) = self.datum_get(self.context.player_data, player_index) else { return false };
+                    let unit_index = m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32;
+                    if unit_index != NONE {
+                        let Some(inside) = self.trigger_volume_test_object(volume_index, unit_index) else { return false };
+                        if !inside {
+                            self.effect(call::EFFECT_OBJECT_TELEPORT_TO_FLAG, unit_index, flag_index as i32, 0);
+                        }
+                    }
+                    player_index = self.data_next_index(self.context.player_data, player_index);
+                }
+                0
+            }
+            // ai_scripting_reconnect: nothing
+            "ai_reconnect" => 0,
+            // coop_scripts_player_add_equipment: the unit's starting profile
+            // (network co-op's, whose followers get it too, is the game's)
+            "player_add_equipment" => {
+                if self.context.coop_host {
+                    return false;
+                }
+                self.effect(call::EFFECT_PLAYER_ADD_EQUIPMENT, argument(0), short(1) as i32, m.r8(arguments + 8) as i32);
+                0
+            }
+            // scripting_magic_melee_attack: player 0's unit's melee
+            "magic_melee_attack" => {
+                let Some(player) = self.datum_get(self.context.player_data, 0) else { return false };
+                let unit_index = m.r32(player + crate::layout::player_datum::UNIT_INDEX as u32) as i32;
+                self.effect(call::EFFECT_MELEE_ATTACK_BEGIN, unit_index, 0, 0);
+                0
+            }
+            // scenario_switch_structure_bsp
+            "switch_bsp" => {
+                self.effect(call::EFFECT_SWITCH_BSP, short(0) as i32, 0, 0);
                 0
             }
             // unit_set_emotion (its interpolation over 6 ticks an effect)

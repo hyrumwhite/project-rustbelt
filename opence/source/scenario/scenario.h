@@ -118,6 +118,7 @@ boolean scenario_location_potentially_visible(const struct location *location);
 short scenario_object_name_index_from_string(struct scenario *scenario, const char *name);
 long scenario_fog_region_get_fog_index(short fog_region_index);
 boolean scenario_switch_structure_bsp(short structure_bsp_index);
+void scenario_scripting_switch_structure_bsp(short structure_bsp_index); /* port: switch_bsp's body */
 void scenario_reload_structure_bsp_if_necessary(void);
 short scenario_get_structure_reference_index_from_tag_index(struct scenario *scenario, long structure_bsp_index);
 boolean scenario_trigger_volume_test_point(short trigger_volume_index, const real_point3d *position);

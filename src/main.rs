@@ -446,6 +446,7 @@ fn main() -> AppExit {
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
         .add_systems(Update, (start_camera, sync_sky_light))
         .init_resource::<ResetHistory>()
+        .insert_resource(ActiveBsp(args.bsp))
         .init_resource::<level::PeriodicTables>()
         .add_systems(Update, (level::animate_self_illumination.after(apply_lighting), level::animate_transparent))
         .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate))
@@ -472,7 +473,7 @@ fn main() -> AppExit {
             .add_plugins((bridge::BridgePlugin, lights::DynamicLightsPlugin))
             .add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin)
             .add_systems(PreUpdate, follow_level)
-            .add_systems(Update, follow_bsp_sky)
+            .add_systems(Update, (follow_bsp_sky, follow_active_bsp))
             .add_systems(Last, log_heartbeat);
         if args.camera.is_some() {
             app.insert_resource(bridge::FollowGame(false));
@@ -1124,6 +1125,63 @@ const LEVEL_DIMMING: [(&str, f32); 1] = [
     ("c10", 0.9),
 ];
 
+/// Levels whose light is not their maps' (by map name, and BSP where only
+/// one is meant): the share kept of the sun's and sky's light (`ambient`;
+/// the sky itself drawn as it was) and of their lamps' and glowing
+/// surfaces' (`lamps`).
+/// - Truth and Reconciliation's canyon (a50's first BSP) is night, dark
+///   enough in the game to want night vision: its floodlights lit the
+///   pale rock round them like day; dimmed, their pools stand out. (The
+///   moon and sky lit little of it.) The ship's BSPs keep their lamps.
+/// - The Forerunner structures, lit inside by their own light strips, are
+///   darker within (play feedback: a30's bridge room bright from its
+///   door); the sun lights them outside.
+const LEVEL_LIGHTING: [(&str, Option<usize>, f32, f32); 7] = [
+    ("a50", Some(0), 0.12, 0.2),
+    ("a30", None, 1.0, FORERUNNER_LAMPS),
+    ("b30", None, 1.0, FORERUNNER_LAMPS),
+    ("b40", None, 1.0, FORERUNNER_LAMPS),
+    ("c10", None, 1.0, FORERUNNER_LAMPS),
+    ("c20", None, 1.0, FORERUNNER_LAMPS),
+    ("c40", None, 1.0, FORERUNNER_LAMPS),
+];
+/// The Forerunner levels' lamps' share (see [`LEVEL_LIGHTING`]).
+const FORERUNNER_LAMPS: f32 = 0.4;
+
+/// A level's (ambient, lamps) light in a BSP (see [`LEVEL_LIGHTING`]).
+/// (tuning: `HALO_RT_LEVEL_LIGHT=ambient,lamps` for any level)
+fn level_lighting(map: &str, bsp: Option<usize>) -> (f32, f32) {
+    let tuned = std::env::var("HALO_RT_LEVEL_LIGHT").ok().and_then(|text| {
+        let (ambient, lamps) = text.split_once(',')?;
+        Some((ambient.trim().parse().ok()?, lamps.trim().parse().ok()?))
+    });
+    tuned
+        .or_else(|| {
+            LEVEL_LIGHTING
+                .iter()
+                .find(|(name, only, _, _)| map.eq_ignore_ascii_case(name) && only.is_none_or(|only| bsp == Some(only)))
+                .map(|&(_, _, ambient, lamps)| (ambient, lamps))
+        })
+        .unwrap_or((1.0, 1.0))
+}
+
+/// The BSP the level is seen in: the one asked for (`--bsp`), or the
+/// bridged game's.
+#[derive(Resource, Default)]
+struct ActiveBsp(Option<usize>);
+
+/// Bridged: the game's BSP as the active one.
+fn follow_active_bsp(link: Option<Res<bridge::BridgeLink>>, stats: Res<LevelStats>, mut active: ResMut<ActiveBsp>) {
+    let Some(snapshot) = link.as_ref().and_then(|link| link.latest.as_ref()) else { return };
+    if !snapshot.map_name().eq_ignore_ascii_case(&stats.map_name) {
+        return;
+    }
+    let bsp = usize::try_from(snapshot.structure_bsp_index).ok();
+    if active.0 != bsp {
+        active.0 = bsp;
+    }
+}
+
 /// The camera's exposure: the settings', raised for a dimmed level
 /// ([`LEVEL_DIMMING`]).
 fn apply_level_exposure(
@@ -1143,6 +1201,8 @@ fn apply_level_exposure(
 
 fn apply_lighting(
     settings: Res<LightingSettings>,
+    stats: Res<LevelStats>,
+    active_bsp: Res<ActiveBsp>,
     level_sky: Res<LevelSky>,
     surfaces: Query<(&EmissiveSurface, &MeshMaterial3d<StandardMaterial>)>,
     environment_surfaces: Query<(&EmissiveSurface, &MeshMaterial3d<HaloEnvironmentMaterial>)>,
@@ -1153,23 +1213,26 @@ fn apply_lighting(
     mut point_lights: Query<(Ref<LightSource>, &mut PointLight)>,
     mut spot_lights: Query<(Ref<LightSource>, &mut SpotLight)>,
 ) {
+    // (the level's own: see LEVEL_LIGHTING)
+    let (ambient, lamps) = level_lighting(&stats.map_name, active_bsp.0);
+    let emissive_scale = settings.emissive_scale * lamps;
     // (and the lights made since: a level's fixtures' spot lights)
-    let changed = settings.is_changed();
+    let changed = settings.is_changed() || stats.is_changed() || active_bsp.is_changed();
     for (source, mut light) in &mut point_lights {
         if changed || source.is_added() {
-            (light.color, light.intensity) = source.color_and_intensity(settings.emissive_scale);
+            (light.color, light.intensity) = source.color_and_intensity(emissive_scale);
         }
     }
     for (source, mut light) in &mut spot_lights {
         if changed || source.is_added() {
-            (light.color, light.intensity) = source.color_and_intensity(settings.emissive_scale);
+            (light.color, light.intensity) = source.color_and_intensity(emissive_scale);
         }
     }
     if !changed {
         return;
     }
     let emissive = |surface: &EmissiveSurface| {
-        let radiance = surface.radiance * settings.emissive_scale;
+        let radiance = surface.radiance * emissive_scale;
         LinearRgba::rgb(radiance.x, radiance.y, radiance.z)
     };
     for (surface, material) in &surfaces {
@@ -1184,13 +1247,13 @@ fn apply_lighting(
     }
     if let Some((_, _, power)) = level_sky.0.sun {
         for mut sun in &mut suns {
-            sun.illuminance = power * settings.sun_scale;
+            sun.illuminance = power * settings.sun_scale * ambient;
         }
     }
     for (environment, skybox) in &mut cameras {
         if let Some((_, power)) = level_sky.0.sky {
             if let Some(mut environment) = environment {
-                environment.intensity = power * settings.sky_scale;
+                environment.intensity = power * settings.sky_scale * ambient;
             }
             if let Some(mut skybox) = skybox {
                 skybox.brightness = power * settings.sky_scale;

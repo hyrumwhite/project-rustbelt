@@ -318,6 +318,9 @@ pub struct LevelAssets<'a> {
     pub water_ripples: Option<&'a mut bevy_solarik::water_ripples::WaterRippleMaterials>,
     /// The materials whose coat is Solarik's pearl film, for its rays.
     pub pearl_coats: Option<&'a mut bevy_solarik::lommel::PearlCoatMaterials>,
+    /// The glass panes whose texture is their grime layer, for Solarik's
+    /// rays.
+    pub glass_grime: Option<&'a mut bevy_solarik::glass_grime::GlassGrimeMaterials>,
     pub images: &'a mut Assets<Image>,
     pub inverse_bindposes: &'a mut Assets<SkinnedMeshInverseBindposes>,
     /// The game's default detail texture (see [`crate::material::NeutralDetail`]).
@@ -2085,26 +2088,23 @@ impl LevelBuilder {
     /// glass is a blended material with full specular transmission; its
     /// alpha is coverage (zero a hole), so a pane is fully covered and
     /// tinted, and reflects by Fresnel. A glass's diffuse map (grime and
-    /// smudges, which Halo blends over it) darkens its tint where the map
-    /// covers it, and its head-on reflection's strength (colour times alpha,
-    /// added over the pane in Halo) raises its reflectance: half of it as
-    /// the reflectance at normal incidence, from plain glass's up to 0.25.
-    /// (b30's glass floor, a30's too: 0.75 of a pale blue, read 0.18.)
+    /// smudges, which Halo blends over it, lit) is Solarik's grime layer
+    /// over the pane, its texture with the tint its colour. Its
+    /// head-on reflection's strength (colour times alpha, added over the
+    /// pane in Halo) raises its reflectance: half of it as the reflectance
+    /// at normal incidence, from plain glass's up to 0.25. (b30's glass
+    /// floor, a30's too: 0.75 of a pale blue, read 0.18.)
     fn glass_or_water_material(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<Handle<StandardMaterial>> {
         let texture = |map: Option<TagRef>, this: &mut Self, assets: &mut LevelAssets| {
             map.and_then(|m| m.datum).and_then(|d| this.textures.permuted(&this.cache, d, this.permutation, true, assets.images))
         };
         let material = if let Some(glass) = info.glass {
             let [r, g, b] = glass.tint;
-            let base_color_texture = match (glass.tint_map, glass.diffuse_map.and_then(|m| m.datum)) {
-                (None, Some(diffuse)) => {
-                    self.textures.baked(&self.cache, crate::textures::Bake::GlassGrime { diffuse }, self.permutation, assets.images)
-                }
-                _ => texture(glass.tint_map, self, assets),
-            };
+            let layered = glass.tint_map.is_none() && glass.diffuse_map.and_then(|m| m.datum).is_some();
+            let base_color_texture = texture(if layered { glass.diffuse_map } else { glass.tint_map }, self, assets);
             let [pr, pg, pb, pa] = glass.reflection_perpendicular;
             let head_on = (0.5 * pa * (0.2126 * pr + 0.7152 * pg + 0.0722 * pb)).clamp(PLAIN_GLASS_F0, 0.25);
-            StandardMaterial {
+            let material = StandardMaterial {
                 base_color: Color::srgba(r, g, b, 1.0),
                 base_color_texture,
                 perceptual_roughness: 0.05,
@@ -2115,7 +2115,8 @@ impl LevelBuilder {
                 cull_mode: None,
                 double_sided: true,
                 ..default()
-            }
+            };
+            (material, layered)
         } else {
             let water = info.water?;
             let [r, g, b, _] = water.perpendicular_tint;
@@ -2160,7 +2161,12 @@ impl LevelBuilder {
             }
             return Some(material);
         };
-        Some(assets.materials.add(material))
+        let (material, layered) = material;
+        let material = assets.materials.add(material);
+        if layered && let Some(registry) = assets.glass_grime.as_deref_mut() {
+            registry.0.insert(material.id());
+        }
+        Some(material)
     }
 
     /// A transparent chicago or generic shader's combiner material: its maps

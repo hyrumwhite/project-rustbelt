@@ -38,6 +38,7 @@ pub mod stellar_disks;
 pub mod surface_detail;
 pub mod thin_volume;
 pub mod water_ripples;
+pub mod glass_grime;
 
 /// The solarik prelude.
 ///

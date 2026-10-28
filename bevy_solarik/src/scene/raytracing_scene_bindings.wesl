@@ -96,6 +96,9 @@ const MATERIAL_FLAG_DOUBLE_SIDED = 8u;
 // An ALPHA_BLEND pane as thick as alpha_cutoff: the camera sees through it
 // bent (primary_glass.wesl).
 const MATERIAL_FLAG_REFRACT = 64u;
+// A thin pane whose base colour texture is a grime layer over it (colour,
+// coverage: ResolvedMaterial.grime), not its tint or coverage (glass_grime.rs).
+const MATERIAL_FLAG_GRIME = 256u;
 
 const TEXTURE_MAP_NONE = 0xFFFFFFFFu;
 
@@ -443,7 +446,7 @@ fn candidate_is_solid(candidate: RayIntersection, include_glass: bool, origin: v
 
 fn resolve_material_alpha(material: Material, uv: vec2<f32>) -> f32 {
     var alpha = material.base_color_alpha;
-    if material.base_color_texture_id != TEXTURE_MAP_NONE {
+    if material.base_color_texture_id != TEXTURE_MAP_NONE && (material.flags & MATERIAL_FLAG_GRIME) == 0u {
         alpha *= sample_texture_alpha(material.base_color_texture_id, uv);
     }
     return alpha;
@@ -479,6 +482,9 @@ fn ray_texture_lod(id: u32, uv_width: vec2f) -> f32 {
 }
 fn sample_texture_filtered(id: u32, uv: vec2f, width: vec2f) -> vec3f {
     return textureSampleLevel(textures[id], samplers[id], uv, ray_texture_lod(id, width)).rgb;
+}
+fn sample_texture_rgba_filtered(id: u32, uv: vec2f, width: vec2f) -> vec4f {
+    return textureSampleLevel(textures[id], samplers[id], uv, ray_texture_lod(id, width));
 }
 // A triangle's two UV gradients in world space, including nonuniform scale.
 fn ray_uv_width(vertices: array<Vertex,3>, positions: array<vec3f,3>, width: f32) -> vec2f {
@@ -517,6 +523,8 @@ struct ResolvedMaterial {
     clearcoat_perceptual_roughness: f32,
     // The coat is the second thin film (brdf.wesl's THIN_FILM_PEARL).
     pearl_coat: bool,
+    // A thin pane's grime layer (MATERIAL_FLAG_GRIME): colour, coverage.
+    grime: vec4<f32>,
 }
 
 fn emitted_radiance(material: ResolvedMaterial, outgoing: vec3<f32>) -> vec3<f32> {
@@ -547,8 +555,13 @@ fn resolve_material_filtered(material: Material, uv: vec2f, uv_width: vec2f) -> 
     var m: ResolvedMaterial;
 
     m.base_color = material.base_color.rgb;
+    m.grime = vec4(0.0);
     if material.base_color_texture_id != TEXTURE_MAP_NONE {
-        m.base_color *= sample_texture_filtered(material.base_color_texture_id, uv, uv_width);
+        if (material.flags & MATERIAL_FLAG_GRIME) != 0u {
+            m.grime = sample_texture_rgba_filtered(material.base_color_texture_id, uv, uv_width);
+        } else {
+            m.base_color *= sample_texture_filtered(material.base_color_texture_id, uv, uv_width);
+        }
     }
 
     m.emission_cone = material.emission_cone;

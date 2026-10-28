@@ -26,6 +26,8 @@ import bevy_solarik::scene::ray_fog::fog_ray_segment;
 import bevy_solarik::scene::ray_fog::ray_fog_active;
 import bevy_solarik::realtime::specular_gi::trace_glossy_path;
 import bevy_solarik::realtime::surface_path::shade_surface_path;
+import bevy_solarik::realtime::world_cache_query::query_world_cache;
+import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_LIFETIME;
 import bevy_solarik::realtime::realtime_bindings::view_output;
 import bevy_solarik::realtime::realtime_bindings::depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
@@ -33,6 +35,7 @@ import bevy_solarik::realtime::realtime_bindings::constants;
 import bevy_solarik::realtime::realtime_bindings::primary_background;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::resolve_dlss_rr_textures::resolve_background_guides;
 import bevy_pbr::render::utils::rand_f;
+import bevy_render::maths::PI;
 
 enable wgpu_ray_query;
 
@@ -201,6 +204,16 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
             if dot(reflect(direction, rippled), facing) > 0.0 {
                 pane_normal = rippled;
             }
+        }
+        // (its grime layer over it, Halo's glass's diffuse map, lit as its
+        // lightmap lights it in Halo: a diffuse surface where it covers the
+        // pane, lit by the world cache (a path for it cost a30's glass floor
+        // 2.5 ms); what it covers is hidden)
+        let grime = hit.material.grime;
+        if grime.a > 0.0 {
+            let irradiance = query_world_cache(hit.world_position, facing, view.world_position, length(hit.world_position - initial_origin), WORLD_CACHE_CELL_LIFETIME, rng);
+            radiance += transmission * grime.a * grime.rgb / PI * irradiance;
+            transmission *= 1.0 - grime.a;
         }
         let weights = thin_glass_weights(-direction, pane_normal, hit.material.base_color, alpha, hit.material.reflectance);
         radiance += transmission * alpha * emitted_radiance(hit.material, -direction);

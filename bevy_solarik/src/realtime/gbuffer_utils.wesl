@@ -34,7 +34,7 @@ fn gpixel_resolve(gpixel: vec4<u32>, depth: f32, pixel_id: vec2<u32>, view_size:
     let clearcoat = f32(coat_props & 0x0fu) / 15.0;
     let clearcoat_perceptual_roughness = f32(coat_props >> 4u) / 30.0;
     let material = ResolvedMaterial(base_color, emissive, reflectance, perceptual_roughness, roughness, metallic, transmission, vec4(0.0), gaussian_weight, (gpixel.a & 0x10000000u) != 0u,
-        clearcoat, clearcoat_perceptual_roughness, (gpixel.a & 0x40000000u) != 0u);
+        clearcoat, clearcoat_perceptual_roughness, (gpixel.a & 0x40000000u) != 0u, vec4(0.0));
 
     return ResolvedGPixel(world_position, world_normal, material);
 }

@@ -425,13 +425,14 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     mesh_allocator: Res<MeshAllocator>,
     mut blas_manager: ResMut<BlasManager>,
     material_assets: Res<StandardMaterialAssets>,
-    (collimated, detailed, gaussian, lommel, ripples, pearl): (
+    (collimated, detailed, gaussian, lommel, ripples, pearl, grime): (
         Res<CollimatedMaterials>,
         Res<DetailedRayMaterials>,
         Res<GaussianRayMaterials>,
         Res<crate::lommel::LommelRayMaterials>,
         Res<crate::water_ripples::WaterRippleMaterials>,
         Res<crate::lommel::PearlCoatMaterials>,
+        Res<crate::glass_grime::GlassGrimeMaterials>,
     ),
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
@@ -543,6 +544,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         || lommel.is_changed()
         || pearl.is_changed()
         || ripples.is_changed()
+        || grime.is_changed()
         || texture_assets.is_changed()
         || fallback_texture.is_changed();
     // Pending geometry retains ownership but needs another full readiness pass.
@@ -910,7 +912,12 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             alpha_cutoff: alpha.cutoff,
             flags: alpha.flags
                 | if lommel.0.contains(asset_id) { 32 } else { 0 }
-                | if pearl.0.contains(asset_id) { 128 } else { 0 },
+                | if pearl.0.contains(asset_id) { 128 } else { 0 }
+                | if grime.0.contains(asset_id) && alpha.flags & MATERIAL_FLAG_ALPHA_BLEND != 0 {
+                    MATERIAL_FLAG_GRIME
+                } else {
+                    0
+                },
             base_color_alpha: LinearRgba::from(material.base_color).alpha,
             reflectance: material.reflectance,
             gaussian: gaussian_parameters,
@@ -1642,6 +1649,9 @@ const MATERIAL_FLAG_DOUBLE_SIDED: u32 = 8;
 /// the camera sees what lies behind bent by the pane's normals, as through a
 /// body of glass that deep (`cutoff` holds the depth, metres).
 const MATERIAL_FLAG_REFRACT: u32 = 64;
+/// A thin pane whose base colour texture is a grime layer over it
+/// (`glass_grime`), not its tint or coverage.
+const MATERIAL_FLAG_GRIME: u32 = 256;
 
 /// How the rays treat a material's alpha: exactly one of `OPAQUE`,
 /// `ALPHA_MASK` (test the base colour alpha against `cutoff`) or

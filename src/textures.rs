@@ -45,9 +45,6 @@ pub enum Bake {
     /// multipurpose map's alpha says, as the Xbox model shader does:
     /// `base * lerp(1, color, multipurpose.a)` (8-bit, display-encoded).
     ChangeColor { base: Option<u32>, multipurpose: u32, color: [u8; 3] },
-    /// A glass pane's tint from its diffuse map, the grime Halo blends over
-    /// it: white (clear) to the map's colour by its alpha, opaque.
-    GlassGrime { diffuse: u32 },
 }
 
 /// Roughness where a surface's specular mask is zero.
@@ -302,20 +299,6 @@ fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Resul
             let mask = rgba8(cache, multipurpose, permutation)?;
             let base = base.map(|b| rgba8(cache, b, permutation)).transpose()?;
             Ok(change_color(&mask, base.as_ref(), color))
-        }
-        Bake::GlassGrime { diffuse } => {
-            let map = rgba8(cache, diffuse, permutation)?;
-            let data = map
-                .data
-                .chunks_exact(4)
-                .take((map.width * map.height) as usize)
-                .flat_map(|t| {
-                    let a = t[3] as f32 / 255.0;
-                    let mix = |c: u8| (255.0 + (c as f32 - 255.0) * a).round() as u8;
-                    [mix(t[0]), mix(t[1]), mix(t[2]), 255]
-                })
-                .collect();
-            Ok((map.width, map.height, data, true))
         }
         Bake::MetallicRoughness { mask, channel, unmasked, roughness, metallic, cloth } => {
             let mask = rgba8(cache, mask, permutation)?;

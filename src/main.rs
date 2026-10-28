@@ -26,6 +26,7 @@ mod lights;
 mod material;
 mod options;
 mod overlay;
+mod reveal;
 mod screen_effect;
 mod sky;
 #[cfg(feature = "dlss")]
@@ -437,7 +438,7 @@ fn main() -> AppExit {
         bevy::winit::UpdateMode::Continuous
     };
     app.insert_resource(bevy::winit::WinitSettings { focused_mode: bevy::winit::UpdateMode::Continuous, unfocused_mode });
-    app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin))
+    app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin, reveal::RevealPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))
         .insert_resource(saved.as_ref().map_or_else(LightingSettings::default, |s| s.lighting.clone()))
@@ -667,6 +668,12 @@ fn load_level(
 ) {
     let level_sky = sky::SkyLighting::from_map(&cache);
     let cache = std::sync::Arc::new(cache);
+    // (covered until it is in place)
+    commands.queue(|world: &mut World| {
+        if let Some(mut reveal) = world.get_resource_mut::<reveal::LevelReveal>() {
+            reveal.restart();
+        }
+    });
     // (the last level's water panes' ripples)
     params.water_ripples.0.clear();
     let mut assets = LevelAssets {

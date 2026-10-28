@@ -45,6 +45,59 @@ pub enum Bake {
     /// multipurpose map's alpha says, as the Xbox model shader does:
     /// `base * lerp(1, color, multipurpose.a)` (8-bit, display-encoded).
     ChangeColor { base: Option<u32>, multipurpose: u32, color: [u8; 3] },
+    /// A human weapon's metal finish from its base map and its reflection
+    /// mask (the multipurpose map's red), at the base map's resolution: its
+    /// colour (`color`, sRGB, the base map's alpha kept) or its
+    /// metallic/roughness texture (G roughness, B metallic). See
+    /// [`GunmetalFinish`]'s fields, as f32 bits in its order.
+    Gunmetal { base: u32, mask: u32, color: bool, finish: [u32; 8] },
+}
+
+/// A human weapon's finish (see [`Bake::Gunmetal`]). The base map's light
+/// greys are bare metal, its near-blacks black paint; where the mask is
+/// bright, worn edges and scratches show bare metal through either.
+#[derive(Clone, Copy, Debug)]
+pub struct GunmetalFinish {
+    /// The finish's roughness where the mask is dark.
+    pub roughness: f32,
+    /// Roughness where the mask is full (worn, polished metal).
+    pub worn_roughness: f32,
+    /// The black paint's least albedo (linear): the base map's near-black,
+    /// painted for Halo's diffuse light only, is darker than any paint and
+    /// showed no shape in the sun.
+    pub paint_floor: f32,
+    /// The base map's luminance (linear) from which a texel turns from paint
+    /// to bare metal, and to which it is all metal.
+    pub metal_from: f32,
+    pub metal_to: f32,
+    /// A metal's reflectance: the base map's colour (linear) times this, at
+    /// most `metal_cap` (bare steel's).
+    pub metal_scale: f32,
+    pub metal_cap: f32,
+    /// A full mask's bare metal reflectance at the least (worn edges on
+    /// black paint).
+    pub worn_metal: f32,
+}
+
+impl GunmetalFinish {
+    pub fn bits(&self) -> [u32; 8] {
+        [
+            self.roughness,
+            self.worn_roughness,
+            self.paint_floor,
+            self.metal_from,
+            self.metal_to,
+            self.metal_scale,
+            self.metal_cap,
+            self.worn_metal,
+        ]
+        .map(f32::to_bits)
+    }
+
+    fn from_bits(bits: [u32; 8]) -> Self {
+        let [roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal] = bits.map(f32::from_bits);
+        GunmetalFinish { roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal }
+    }
 }
 
 /// Roughness where a surface's specular mask is zero.
@@ -287,6 +340,52 @@ fn change_color(mask: &bitmap::Decoded, base: Option<&bitmap::Decoded>, color: [
     (w, h, out, true)
 }
 
+/// See [`Bake::Gunmetal`].
+fn gunmetal(base: &bitmap::Decoded, mask: &bitmap::Decoded, color: bool, finish: GunmetalFinish) -> (u32, u32, Vec<u8>, bool) {
+    let to_linear = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let to_srgb = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        let c = if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+        (c * 255.0).round() as u8
+    };
+    let smoothstep = |from: f32, to: f32, x: f32| {
+        let t = ((x - from) / (to - from).max(1e-6)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let (w, h) = (base.width, base.height);
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let (mx, my) = (x * mask.width / w, y * mask.height / h);
+            let worn = mask.data[((my * mask.width + mx) * 4) as usize] as f32 / 255.0;
+            let o = ((y * w + x) * 4) as usize;
+            let texel = [base.data[o], base.data[o + 1], base.data[o + 2], base.data[o + 3]];
+            let linear = [0, 1, 2].map(|c| to_linear(texel[c]));
+            let luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+            let bare = smoothstep(finish.metal_from, finish.metal_to, luminance);
+            let metal = bare.max(worn);
+            if color {
+                // paint: the base map's colour, lifted to the paint's floor;
+                // metal: its reflectance, from the base map's colour
+                let lift = (finish.paint_floor - luminance).max(0.0);
+                for c in 0..3 {
+                    let paint = linear[c] + lift;
+                    let steel = (linear[c] * finish.metal_scale).min(finish.metal_cap).max(finish.worn_metal * worn);
+                    out.push(to_srgb(paint + (steel - paint) * metal));
+                }
+                out.push(texel[3]);
+            } else {
+                let roughness = finish.roughness + (finish.worn_roughness - finish.roughness) * worn;
+                out.extend([(worn * 255.0).round() as u8, (roughness * 255.0).round() as u8, (metal * 255.0).round() as u8, 255]);
+            }
+        }
+    }
+    (w, h, out, color)
+}
+
 /// (width, height, RGBA8 texels, sRGB-encoded)
 fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Result<(u32, u32, Vec<u8>, bool)> {
     match bake {
@@ -299,6 +398,11 @@ fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Resul
             let mask = rgba8(cache, multipurpose, permutation)?;
             let base = base.map(|b| rgba8(cache, b, permutation)).transpose()?;
             Ok(change_color(&mask, base.as_ref(), color))
+        }
+        Bake::Gunmetal { base, mask, color, finish } => {
+            let base = rgba8(cache, base, permutation)?;
+            let mask = rgba8(cache, mask, permutation)?;
+            Ok(gunmetal(&base, &mask, color, GunmetalFinish::from_bits(finish)))
         }
         Bake::MetallicRoughness { mask, channel, unmasked, roughness, metallic, cloth } => {
             let mask = rgba8(cache, mask, permutation)?;

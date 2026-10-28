@@ -730,10 +730,11 @@ impl LevelBuilder {
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
         let mut placements = objects::placements(&self.cache)?;
-        // `HALO_RT_PLACE=<biped, vehicle or weapon tag>@x,y,z,yaw`: one more there
-        // (Halo world units, yaw in degrees), to look at its materials where
-        // the light suits
-        if let Ok(spec) = std::env::var("HALO_RT_PLACE") {
+        // `HALO_RT_PLACE=<biped, vehicle or weapon tag>@x,y,z,yaw[;...]`: more
+        // there (Halo world units, yaw in degrees), to look at their materials
+        // where the light suits
+        let specs = std::env::var("HALO_RT_PLACE").unwrap_or_default();
+        for spec in specs.split(';').filter(|s| !s.is_empty()) {
             let parsed = spec.split_once('@').and_then(|(name, at)| {
                 let v: Vec<f32> = at.split(',').filter_map(|v| v.trim().parse().ok()).collect();
                 let weapon = halo_map::fourcc(b"weap");
@@ -1921,7 +1922,7 @@ impl LevelBuilder {
             } else {
                 Color::srgb(0.2, 0.2, 0.2)
             },
-            base_color_texture: base_color_texture.clone(),
+            base_color_texture: shine.base_color_texture.clone().or_else(|| base_color_texture.clone()),
             perceptual_roughness: shine.roughness,
             metallic: shine.metallic,
             metallic_roughness_texture: shine.texture,
@@ -2387,7 +2388,7 @@ impl LevelBuilder {
     fn shininess(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Shininess {
         use crate::textures::{Bake, MATTE_ROUGHNESS};
         use shader::SpecularMask;
-        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, reflectance: MATTE_REFLECTANCE, texture: None };
+        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, reflectance: MATTE_REFLECTANCE, texture: None, base_color_texture: None };
         let Some(reflection) = info.reflection.filter(|_| !self.matte) else { return matte };
         let r = reflection.perpendicular_brightness.max(reflection.parallel_brightness).clamp(0.0, 1.0);
         if r < 0.02 || reflection.cube_map.is_none() {
@@ -2433,6 +2434,17 @@ impl LevelBuilder {
         // MODEL_UNMASKED_ROUGHNESS)
         let gloss = if model { r * r } else { 1.0 };
         let reflectance = MATTE_REFLECTANCE + (0.5 - MATTE_REFLECTANCE) * gloss;
+        // a human weapon's metal finish, where Halo gives it a bright
+        // reflection (not the AR's rubber grip)
+        if let Some(finish) = gunmetal(&info.name).filter(|_| model && r >= 0.5)
+            && let (Some(base), Some(mask)) = (info.base_map.and_then(|b| b.datum), info.multipurpose_map.and_then(|m| m.datum))
+            && reflection.mask == SpecularMask::MultipurposeRed
+        {
+            let mut bake = |color| self.textures.baked(&self.cache, Bake::Gunmetal { base, mask, color, finish: finish.bits() }, self.permutation, assets.images);
+            if let (Some(base_color_texture), Some(texture)) = (bake(true), bake(false)) {
+                return Shininess { roughness: 1.0, metallic: 1.0, reflectance: 0.5, texture: Some(texture), base_color_texture: Some(base_color_texture) };
+            }
+        }
         let mask = match reflection.mask {
             // an alpha-tested base map's alpha is its cut-out, not a mask
             SpecularMask::BaseAlpha if !info.alpha_tested => info.base_map.and_then(|b| b.datum).map(|d| (d, 3)),
@@ -2459,8 +2471,8 @@ impl LevelBuilder {
         });
         match texture {
             // the texture holds the values; the factors multiply them
-            Some(texture) => Shininess { roughness: 1.0, metallic: 1.0, reflectance, texture: Some(texture) },
-            None => Shininess { roughness, metallic, reflectance, texture: None },
+            Some(texture) => Shininess { roughness: 1.0, metallic: 1.0, reflectance, texture: Some(texture), base_color_texture: None },
+            None => Shininess { roughness, metallic, reflectance, texture: None, base_color_texture: None },
         }
     }
 
@@ -2675,6 +2687,60 @@ struct Shininess {
     /// StandardMaterial's reflectance (0.5: the usual 4% head-on).
     reflectance: f32,
     texture: Option<Handle<Image>>,
+    /// In place of the base map (a human weapon's finish's colour).
+    base_color_texture: Option<Handle<Image>>,
+}
+
+/// The human weapons drawn with a metal finish (by the shader tag's path).
+/// Halo reflects its cube map only where their masks say and leaves the rest
+/// matte; with a model's unmasked sheen (a smooth dielectric) the dark AR
+/// and sniper rifle looked like plastic, the sniper's black flat in the sun.
+/// The AR is dark metal all over. The sniper rifle's dark greys (its scope)
+/// are black paint, which as metal or lifted turned grey in the sun; its
+/// light greys are bare metal.
+const GUNMETAL_WEAPONS: [(&str, crate::textures::GunmetalFinish); 2] = [
+    (
+        "weapons\\assault rifle\\",
+        crate::textures::GunmetalFinish {
+            roughness: 0.5,
+            worn_roughness: 0.3,
+            paint_floor: 0.03,
+            metal_from: 0.012,
+            metal_to: 0.035,
+            metal_scale: 2.0,
+            metal_cap: 0.6,
+            worn_metal: 0.3,
+        },
+    ),
+    (
+        "weapons\\sniper rifle\\",
+        crate::textures::GunmetalFinish {
+            roughness: 0.4,
+            worn_roughness: 0.3,
+            paint_floor: 0.0,
+            metal_from: 0.06,
+            metal_to: 0.12,
+            metal_scale: 2.0,
+            metal_cap: 0.6,
+            worn_metal: 0.0,
+        },
+    ),
+];
+
+/// A human weapon's finish (see [`GUNMETAL_WEAPONS`]).
+/// (tuning: `HALO_RT_GUNMETAL=roughness,worn roughness,paint floor,metal from,metal to,metal scale,metal cap,worn metal`,
+/// or `off`)
+fn gunmetal(shader: &str) -> Option<crate::textures::GunmetalFinish> {
+    let (_, finish) = GUNMETAL_WEAPONS.iter().find(|(path, _)| shader.starts_with(path))?;
+    if std::env::var("HALO_RT_GUNMETAL").is_ok_and(|v| v == "off") {
+        return None;
+    }
+    let tuned = std::env::var("HALO_RT_GUNMETAL").ok().and_then(|text| {
+        let v: Vec<f32> = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        let [roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal] = v[..] else { return None };
+        Some(crate::textures::GunmetalFinish { roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal })
+    });
+    Some(tuned.unwrap_or(*finish))
 }
 
 /// A bitmap group's first bitmap's size.

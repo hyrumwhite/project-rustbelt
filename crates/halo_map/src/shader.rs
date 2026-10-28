@@ -654,6 +654,10 @@ pub struct ShaderInfo {
     /// Alpha-tested: an environment shader by its flag (the bump map's alpha
     /// cuts it out), a model shader unless flagged otherwise (the base map's).
     pub alpha_tested: bool,
+    /// A model shader drawn blended over what is behind it by its base
+    /// map's alpha, without depth writes (its alpha-blended decal flag: a50's
+    /// doors' floor symbols).
+    pub alpha_blended_decal: bool,
     /// Drawn without back-face culling (a model shader's two-sided flags).
     pub two_sided: bool,
     pub uv_scale: [f32; 2],
@@ -713,6 +717,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         self_illumination_map: None,
         environment_type: None,
         alpha_tested: false,
+        alpha_blended_decal: false,
         two_sided: false,
         uv_scale: [1.0, 1.0],
         transparent: None,
@@ -833,6 +838,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         // culling; the base map's alpha cuts the rest out
         let flags = root.u16(m::FLAGS)?;
         info.alpha_tested = flags & (1 << 2 | 1 << 3) == 0;
+        info.alpha_blended_decal = flags & (1 << 3) != 0;
         info.two_sided = flags & (1 << 1 | 1 << 5) != 0;
         info.multipurpose_map = present(root.reference(m::MULTIPURPOSE_MAP)?);
         // (0 none, 1-4 A-D)

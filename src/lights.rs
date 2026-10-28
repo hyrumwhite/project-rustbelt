@@ -9,7 +9,8 @@
 //! along their weapon's. Explosions, grenades and bolts stay round. A light
 //! shining every way through a gel of a few narrow discs (a10's spinning
 //! alarm lights: two) is a spot light for each, turned with the light. They
-//! are kept in pools and reused frame to frame; unused ones are hidden.
+//! keep their entities from frame to frame (by their tag and object), and
+//! the unused are hidden, then reused.
 //! Projectiles glow too: the plasma bolts by the lights their tags attach,
 //! which in the game are only lens flares and light nothing (the game
 //! shares them anyway, at their tags' colour and reach); rockets, needles,
@@ -122,7 +123,7 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 /// Lights dimmed from their tags' brightness (by the light tag's name, or
 /// a folder's, ending in a backslash): a wide reach is a bright light here
 /// (brightness grows with its square).
-const LIGHT_DIMMING: [(&str, f32); 8] = [
+const LIGHT_DIMMING: [(&str, f32); 9] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights)
     ("characters\\monitor\\monitor dynamic", 0.15),
@@ -142,14 +143,21 @@ const LIGHT_DIMMING: [(&str, f32); 8] = [
     // (the batons, glow sticks: c10's landing zone is strewn with them;
     // play feedback: too bright)
     ("scenery\\baton\\baton light dynamic", 0.5),
+    // (a50's doors' lock lights, red, green or white, reaching 2.5 from
+    // the middle of each door: they flooded the ship's rooms; play
+    // feedback: much too bright. With its small sphere's twenty-fifth
+    // (`SMALL_LIGHTS`), a twelfth of the tag's.)
+    ("levels\\a50\\devices\\small door\\small door light", 2.0),
 ];
 
 /// Lights smaller than [`LIGHT_RADIUS`] (by the light tag's name), raised
 /// this much (metres, the world's up) to clear the ground they lie on: a
 /// baton's light is at its middle, on the ground, and the ground within its
 /// sphere, under the light's surface, went unlit, a dark disc round the
-/// stick.
-const SMALL_LIGHTS: [(&str, f32); 1] = [("scenery\\baton\\baton light dynamic", 0.05)];
+/// stick. a50's doors' lock lights are in each door's middle, and the door
+/// cut their spheres in half: a dark disc in a bright ring on the door.
+const SMALL_LIGHTS: [(&str, f32); 2] =
+    [("scenery\\baton\\baton light dynamic", 0.05), ("levels\\a50\\devices\\small door\\small door light", 0.05)];
 
 /// Whether a light tag's name is the dimmed one, or in the dimmed folder.
 fn dimmed_by(name: &str, dimmed: &str) -> bool {
@@ -179,10 +187,71 @@ impl Plugin for DynamicLightsPlugin {
     }
 }
 
+/// A light's entity from frame to frame, by its tag, its object and its
+/// place among that pair's (gel beams, contrail glows). Handed out by the
+/// lights' order in the game's list, entities swapped lights whenever
+/// another came or went (a muzzle flash, a bolt), and the lighting's
+/// history went with them: the Warthog's headlights flickered for a frame.
+type LightKey = (u32, u32, u32);
+
 #[derive(Resource, Default)]
 struct DynamicLights {
-    points: Vec<Entity>,
-    spots: Vec<Entity>,
+    points: HashMap<LightKey, Entity>,
+    spots: HashMap<LightKey, Entity>,
+    /// Hidden, for the lights to come.
+    free_points: Vec<Entity>,
+    free_spots: Vec<Entity>,
+}
+
+/// A spot light's entity: the one it had, a free one, or a new one (made as
+/// it is now, to shine this frame).
+#[allow(clippy::too_many_arguments)]
+fn place_spot(
+    commands: &mut Commands,
+    spots: &mut Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
+    last: &mut HashMap<LightKey, Entity>,
+    free: &mut Vec<Entity>,
+    now: &mut HashMap<LightKey, Entity>,
+    key: LightKey,
+    light: SpotLight,
+    transform: Transform,
+) {
+    let reused = last.remove(&key).or_else(|| free.pop());
+    let entity = match reused.map(|entity| (entity, spots.get_mut(entity))) {
+        Some((entity, Ok((mut light_component, mut light_transform, mut visibility)))) => {
+            *light_component = light;
+            *light_transform = transform;
+            visibility.set_if_neq(Visibility::Inherited);
+            entity
+        }
+        _ => commands.spawn((Name::new("spotlight"), light, transform, Visibility::Inherited, NoFrustumCulling)).id(),
+    };
+    now.insert(key, entity);
+}
+
+/// A point light's entity (as [`place_spot`]).
+#[allow(clippy::too_many_arguments)]
+fn place_point(
+    commands: &mut Commands,
+    points: &mut Query<(&mut PointLight, &mut Transform, &mut Visibility), Without<SpotLight>>,
+    last: &mut HashMap<LightKey, Entity>,
+    free: &mut Vec<Entity>,
+    now: &mut HashMap<LightKey, Entity>,
+    key: LightKey,
+    light: PointLight,
+    transform: Transform,
+) {
+    let reused = last.remove(&key).or_else(|| free.pop());
+    let entity = match reused.map(|entity| (entity, points.get_mut(entity))) {
+        Some((entity, Ok((mut light_component, mut light_transform, mut visibility)))) => {
+            *light_component = light;
+            *light_transform = transform;
+            visibility.set_if_neq(Visibility::Inherited);
+            entity
+        }
+        _ => commands.spawn((Name::new("light"), light, transform, Visibility::Inherited, NoFrustumCulling)).id(),
+    };
+    now.insert(key, entity);
 }
 
 fn sync_lights(
@@ -266,7 +335,15 @@ fn sync_lights(
     let lights = snapshot.lights.iter().filter(|light| {
         light.definition_flags & LIGHT_CONTRAIL == 0 && !in_solid.0.contains(&(light.definition_index, light.object_index))
     });
-    let (mut used_points, mut used_spots) = (0, 0);
+    let pools = &mut *pools;
+    let (mut last_points, mut last_spots) = (std::mem::take(&mut pools.points), std::mem::take(&mut pools.spots));
+    // (each tag and object's lights so far, numbering them)
+    let mut placed: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut key = |light: &Light| {
+        let count = placed.entry((light.definition_index, light.object_index)).or_insert(0);
+        *count += 1;
+        (light.definition_index, light.object_index, *count - 1)
+    };
     for light in lights.chain(&projectile_lights).chain(&contrail_lights) {
         let near = snapshot.camera.as_ref().filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
         let own = light.first_person != 0;
@@ -351,17 +428,8 @@ fn sync_lights(
                 // (never frustum culled, here and below: Bevy would leave a
                 // light out of the scene with its range off screen, and its
                 // bounces with it)
-                if used_spots == pools.spots.len() {
-                    let entity = commands
-                        .spawn((Name::new("spotlight"), SpotLight { radius: SPOT_RADIUS, shadow_maps_enabled: false, ..default() }, Visibility::Hidden, NoFrustumCulling))
-                        .id();
-                    pools.spots.push(entity);
-                }
-                let entity = pools.spots[used_spots];
-                used_spots += 1;
-                let Ok((mut light_component, mut transform, mut visibility)) = spots.get_mut(entity) else { continue };
                 let outer = beam.cutoff_angle.clamp(0.01, SPOT_WIDEST);
-                *light_component = SpotLight {
+                let spot_light = SpotLight {
                     color,
                     intensity,
                     range,
@@ -371,21 +439,12 @@ fn sync_lights(
                     shadow_maps_enabled: false,
                     ..default()
                 };
-                *transform = Transform::from_translation(position).looking_to(forward, if forward.y.abs() > 0.99 { Vec3::X } else { Vec3::Y });
-                visibility.set_if_neq(Visibility::Inherited);
+                let transform = Transform::from_translation(position).looking_to(forward, if forward.y.abs() > 0.99 { Vec3::X } else { Vec3::Y });
+                place_spot(&mut commands, &mut spots, &mut last_spots, &mut pools.free_spots, &mut pools.spots, key(light), spot_light, transform);
             }
             continue;
         }
         if spot {
-            if used_spots == pools.spots.len() {
-                let entity = commands
-                    .spawn((Name::new("spotlight"), SpotLight { radius, shadow_maps_enabled: false, ..default() }, Visibility::Hidden, NoFrustumCulling))
-                    .id();
-                pools.spots.push(entity);
-            }
-            let entity = pools.spots[used_spots];
-            used_spots += 1;
-            let Ok((mut light_component, mut transform, mut visibility)) = spots.get_mut(entity) else { continue };
             let (cutoff, falloff) = if muzzle {
                 (MUZZLE_CUTOFF, MUZZLE_FALLOFF)
             } else if vehicle {
@@ -396,7 +455,7 @@ fn sync_lights(
                 (light.cutoff_angle, light.falloff_angle)
             };
             let outer = cutoff.clamp(0.01, SPOT_WIDEST);
-            *light_component = SpotLight {
+            let spot_light = SpotLight {
                 color,
                 intensity,
                 range,
@@ -407,32 +466,25 @@ fn sync_lights(
                 ..default()
             };
             // (a spot light shines along its -Z)
-            *transform = Transform::from_translation(position).looking_to(forward, if forward.y.abs() > 0.99 { Vec3::X } else { Vec3::Y });
-            visibility.set_if_neq(Visibility::Inherited);
+            let transform = Transform::from_translation(position).looking_to(forward, if forward.y.abs() > 0.99 { Vec3::X } else { Vec3::Y });
+            place_spot(&mut commands, &mut spots, &mut last_spots, &mut pools.free_spots, &mut pools.spots, key(light), spot_light, transform);
         } else {
-            if used_points == pools.points.len() {
-                let entity = commands
-                    .spawn((Name::new("light"), PointLight { radius, shadow_maps_enabled: false, ..default() }, Visibility::Hidden, NoFrustumCulling))
-                    .id();
-                pools.points.push(entity);
-            }
-            let entity = pools.points[used_points];
-            used_points += 1;
-            let Ok((mut light_component, mut transform, mut visibility)) = points.get_mut(entity) else { continue };
-            *light_component = PointLight { color, intensity, range, radius, shadow_maps_enabled: false, ..default() };
-            *transform = Transform::from_translation(position);
-            visibility.set_if_neq(Visibility::Inherited);
+            let point_light = PointLight { color, intensity, range, radius, shadow_maps_enabled: false, ..default() };
+            let transform = Transform::from_translation(position);
+            place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform);
         }
     }
-    // (the rest go dark)
-    for &entity in pools.points.iter().skip(used_points) {
+    // (the rest go dark, free for the lights to come)
+    for (_, entity) in last_points {
         if let Ok((_, _, mut visibility)) = points.get_mut(entity) {
             visibility.set_if_neq(Visibility::Hidden);
         }
+        pools.free_points.push(entity);
     }
-    for &entity in pools.spots.iter().skip(used_spots) {
+    for (_, entity) in last_spots {
         if let Ok((_, _, mut visibility)) = spots.get_mut(entity) {
             visibility.set_if_neq(Visibility::Hidden);
         }
+        pools.free_spots.push(entity);
     }
 }

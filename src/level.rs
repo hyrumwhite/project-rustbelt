@@ -281,6 +281,43 @@ const FLOODLIGHT_RANGE: f32 = 15.0;
 /// facility's entrance, which face out from it, over the hill and trees.
 const LAMP_SPOTLIGHTS: [(&str, f32, f32, f32, f32, [f32; 3]); 1] =
     [("levels\\b40\\devices\\b40_foglight\\b40_foglight", 30.0, 55.0, 6.0, 35.0, [-1.0, 0.0, -0.2])];
+/// Fixtures whose spot lights are restyled (see [`FixtureSpotLook`]).
+/// Truth and Reconciliation's ceiling lamps (a50's ship, 90 of them,
+/// flanking every door) lit the wall a hand's breadth below them in a hard
+/// bright oval beside each door (aimed straight down, still: the wall is
+/// that near); dimmed, with their cones widened to fade out, it is a glow.
+/// Their near-white is a soft teal, the ship's own (play feedback).
+const FIXTURE_SPOT_LOOKS: [(&str, FixtureSpotLook); 1] = [(
+    "levels\\a50\\devices\\light_ceiling\\light_ceiling",
+    FixtureSpotLook { brightness: 0.35, falloff: 0.0, cutoff: 65.0, color: Some([0.45, 0.78, 0.78]) },
+)];
+
+/// A fixture's spot light restyled: its brightness (times its own), its
+/// cone's falloff and cutoff (degrees), and colour (`None` its own).
+#[derive(Clone, Copy)]
+struct FixtureSpotLook {
+    brightness: f32,
+    falloff: f32,
+    cutoff: f32,
+    color: Option<[f32; 3]>,
+}
+
+/// A fixture's restyled spot light (see [`FIXTURE_SPOT_LOOKS`]).
+/// (tuning: `HALO_RT_FIXTURE_LOOK=brightness,falloff,cutoff[,r,g,b]` for
+/// the fixtures listed)
+fn fixture_spot_look(fixture: &str) -> Option<FixtureSpotLook> {
+    let listed = FIXTURE_SPOT_LOOKS.iter().find(|(name, _)| fixture.eq_ignore_ascii_case(name))?.1;
+    let tuned = std::env::var("HALO_RT_FIXTURE_LOOK").ok().and_then(|text| {
+        let values: Vec<f32> = text.split(',').map(|v| v.trim().parse().ok()).collect::<Option<_>>()?;
+        let look = |color| FixtureSpotLook { brightness: values[0], falloff: values[1], cutoff: values[2], color };
+        match values[..] {
+            [_, _, _] => Some(look(None)),
+            [_, _, _, r, g, b] => Some(look(Some([r, g, b]))),
+            _ => None,
+        }
+    });
+    Some(tuned.unwrap_or(listed))
+}
 /// Radiance of fully self-illuminated texels, relative to radiosity power
 /// (with the default emissive scale and exposure, about display white).
 const SELF_ILLUMINATION_RADIANCE: f32 = 2.5;
@@ -1065,7 +1102,13 @@ impl LevelBuilder {
             if radius <= 0.0 {
                 continue;
             }
-            let color = Vec3::new(f(0x4c), f(0x50), f(0x54));
+            let mut color = Vec3::new(f(0x4c), f(0x50), f(0x54));
+            let (mut falloff, mut cutoff, mut brightness) = (falloff, cutoff, brightness);
+            let look = self.cache.tag(datum).ok().and_then(|tag| fixture_spot_look(&tag.name));
+            if let Some(look) = look {
+                (falloff, cutoff, brightness) = (look.falloff.to_radians(), look.cutoff.to_radians(), brightness * look.brightness);
+                color = look.color.map_or(color, Vec3::from);
+            }
             // where its marker is on the model, in the object's space (its
             // node at rest)
             let name = attachment.bytes(0x10, 32).ok().map(|bytes| String::from_utf8_lossy(bytes.split(|&b| b == 0).next().unwrap_or(&[])).into_owned());
@@ -1987,8 +2030,10 @@ impl LevelBuilder {
             material.base_color_texture.clone()
         };
         // a model shader's cut-out (the game's alpha test, reference 0x7f, on
-        // the base map's alpha: leaves, grilles) and its two sides
-        if info.environment.is_none() && info.alpha_tested && base_color_texture.is_some() {
+        // the base map's alpha: leaves, grilles) and its two sides; an
+        // alpha-blended decal cut out the same way, its shape kept (a50's
+        // doors' symbols, drawn opaque, were blue squares)
+        if info.environment.is_none() && (info.alpha_tested || info.alpha_blended_decal) && base_color_texture.is_some() {
             material.alpha_mode = AlphaMode::Mask(0.5);
         }
         if info.two_sided {
@@ -2723,8 +2768,10 @@ const MODEL_SHEEN: [(&str, [f32; 2]); 1] = [("vehicles\\warthog\\", [0.3, 0.8])]
 
 /// Models whose detail maps are strengthened (by the shader tag's path):
 /// their departure from neutral times this. Chief's corroded metal gives
-/// his plates much of their depth.
-const MODEL_DETAIL_GAINS: [(&str, f32); 1] = [("characters\\cyborg\\", 2.0)];
+/// his plates much of their depth. (First match wins.) His first-person
+/// hands keep theirs: their detail has no mask, covering them wholly, and
+/// doubled its dark pits went black whatever lit them.
+const MODEL_DETAIL_GAINS: [(&str, f32); 2] = [("characters\\cyborg\\fp\\", 1.0), ("characters\\cyborg\\", 2.0)];
 
 /// A model shader's detail gain (see [`MODEL_DETAIL_GAINS`]).
 /// (tuning: `HALO_RT_DETAIL_GAIN=<shader path prefix>=gain;...`)

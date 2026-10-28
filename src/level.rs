@@ -445,7 +445,7 @@ const MODEL_SHINE: [(&str, f32); 9] = [
     ("characters\\marine", 0.5),
     ("characters\\grunt\\", 0.8),
     ("vehicles\\scorpion\\", 0.15),
-    ("vehicles\\warthog\\", 0.35),
+    ("vehicles\\warthog\\", 0.25),
     ("vehicles\\pelican\\", 0.35),
     // (Covenant crates)
     ("scenery\\c_storage\\", 0.7),
@@ -456,7 +456,7 @@ const MODEL_SHINE: [(&str, f32); 9] = [
 /// Models whose reflection is paint's sheen, not bare metal (by the shader
 /// tag's path): the share of their metalness they keep. Halo adds a model's
 /// reflection over its full colour; as metal it greyed the Warthog's olive.
-const MODEL_METAL: [(&str, f32); 2] = [("vehicles\\warthog\\", 0.2), ("vehicles\\pelican\\", 0.2)];
+const MODEL_METAL: [(&str, f32); 2] = [("vehicles\\warthog\\", 0.1), ("vehicles\\pelican\\", 0.2)];
 
 /// The roughness a model's gloss fades toward as [`MODEL_SHINE`] dulls it.
 const DULL_ROUGHNESS: f32 = 0.6;
@@ -1918,7 +1918,7 @@ impl LevelBuilder {
         let shine = self.shininess(info, assets);
         let material = StandardMaterial {
             base_color: if base_color_texture.is_some() || !emits {
-                Color::WHITE
+                Color::linear_rgb(shine.paint, shine.paint, shine.paint)
             } else {
                 Color::srgb(0.2, 0.2, 0.2)
             },
@@ -2388,7 +2388,7 @@ impl LevelBuilder {
     fn shininess(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Shininess {
         use crate::textures::{Bake, MATTE_ROUGHNESS};
         use shader::SpecularMask;
-        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, reflectance: MATTE_REFLECTANCE, texture: None, base_color_texture: None };
+        let matte = Shininess { roughness: MATTE_ROUGHNESS, metallic: 0.0, reflectance: MATTE_REFLECTANCE, texture: None, base_color_texture: None, paint: 1.0 };
         let Some(reflection) = info.reflection.filter(|_| !self.matte) else { return matte };
         let r = reflection.perpendicular_brightness.max(reflection.parallel_brightness).clamp(0.0, 1.0);
         if r < 0.02 || reflection.cube_map.is_none() {
@@ -2406,7 +2406,9 @@ impl LevelBuilder {
         let mut shine = MODEL_SHINE.iter().find(|(path, _)| model && info.name.starts_with(path)).map_or(1.0, |&(_, shine)| shine);
         // (some painted, not bare metal: their gloss is a dielectric's sheen)
         let mut metal = MODEL_METAL.iter().find(|(path, _)| model && info.name.starts_with(path)).map_or(1.0, |&(_, metal)| metal);
-        // (tuning: `HALO_RT_MODEL_TUNE=<shader path prefix>=shine,metal;...`)
+        // (and their sheen and paint: see MODEL_SHEEN)
+        let (mut sheen, mut paint) = MODEL_SHEEN.iter().find(|(path, _)| model && info.name.starts_with(path)).map_or((1.0, 1.0), |&(_, v)| (v[0], v[1]));
+        // (tuning: `HALO_RT_MODEL_TUNE=<shader path prefix>=shine,metal[,sheen,paint];...`)
         if let Ok(text) = std::env::var("HALO_RT_MODEL_TUNE") {
             for entry in text.split(';') {
                 let Some((prefix, values)) = entry.split_once('=') else { continue };
@@ -2419,6 +2421,12 @@ impl LevelBuilder {
                 }
                 if let Some(Some(value)) = values.next() {
                     metal = value;
+                }
+                if let Some(Some(value)) = values.next() {
+                    sheen = value;
+                }
+                if let Some(Some(value)) = values.next() {
+                    paint = value;
                 }
             }
         }
@@ -2433,7 +2441,7 @@ impl LevelBuilder {
         // a dim reflection's sheen, between matte and a plastic's (see
         // MODEL_UNMASKED_ROUGHNESS)
         let gloss = if model { r * r } else { 1.0 };
-        let reflectance = MATTE_REFLECTANCE + (0.5 - MATTE_REFLECTANCE) * gloss;
+        let reflectance = MATTE_REFLECTANCE + (0.5 - MATTE_REFLECTANCE) * gloss * sheen;
         // a human weapon's metal finish, where Halo gives it a bright
         // reflection (not the AR's rubber grip)
         if let Some(finish) = gunmetal(&info.name).filter(|_| model && r >= 0.5)
@@ -2442,7 +2450,7 @@ impl LevelBuilder {
         {
             let mut bake = |color| self.textures.baked(&self.cache, Bake::Gunmetal { base, mask, color, finish: finish.bits() }, self.permutation, assets.images);
             if let (Some(base_color_texture), Some(texture)) = (bake(true), bake(false)) {
-                return Shininess { roughness: 1.0, metallic: 1.0, reflectance: 0.5, texture: Some(texture), base_color_texture: Some(base_color_texture) };
+                return Shininess { roughness: 1.0, metallic: 1.0, reflectance: 0.5, texture: Some(texture), base_color_texture: Some(base_color_texture), paint: 1.0 };
             }
         }
         let mask = match reflection.mask {
@@ -2485,8 +2493,8 @@ impl LevelBuilder {
         });
         match texture {
             // the texture holds the values; the factors multiply them
-            Some(texture) => Shininess { roughness: 1.0, metallic: 1.0, reflectance, texture: Some(texture), base_color_texture: None },
-            None => Shininess { roughness, metallic, reflectance, texture: None, base_color_texture: None },
+            Some(texture) => Shininess { roughness: 1.0, metallic: 1.0, reflectance, texture: Some(texture), base_color_texture: None, paint },
+            None => Shininess { roughness, metallic, reflectance, texture: None, base_color_texture: None, paint },
         }
     }
 
@@ -2703,7 +2711,14 @@ struct Shininess {
     texture: Option<Handle<Image>>,
     /// In place of the base map (a human weapon's finish's colour).
     base_color_texture: Option<Handle<Image>>,
+    /// The base colour's factor (see MODEL_SHEEN).
+    paint: f32,
 }
+
+/// Models whose paint is duller than their maps (by the shader tag's path):
+/// the share of their sheen (reflectance where unmasked) and of their base
+/// colour they keep. The Warthog's flat light-grey panels caught the sun.
+const MODEL_SHEEN: [(&str, [f32; 2]); 1] = [("vehicles\\warthog\\", [0.3, 0.8])];
 
 /// Models whose masks' pattern is brought out (by the shader tag's path): a
 /// power and a gain on the mask (`min(mask^power * gain, 1)`). The Covenant

@@ -6598,10 +6598,12 @@ impl<H: HsHost> Runtime<'_, H> {
             "player0_look_pitch_is_inverted" => boolean(self.call(call::PLAYER0_LOOK_PITCH_IS_INVERTED, 0, 0, 0) != 0),
             "player0_joystick_set_is_normal" => boolean(self.call(call::PLAYER0_JOYSTICK_SET_IS_NORMAL, 0, 0, 0) != 0),
             // an engine command: the game's evaluation, an effect
+            // (the game's evaluation returns the value itself, hs_return
+            // popping the thread's frame, so this doesn't)
             name if ENGINE_BODIES.contains(&name) => {
                 let Some(function_index) = self.function_index_of(definition) else { return false };
                 self.effect(call::EFFECT_ENGINE, function_index, thread_index, arguments as i32);
-                0
+                return true;
             }
             // coop_scripts_player_add_equipment: the unit's starting profile
             // (network co-op's, whose followers get it too, is the game's)

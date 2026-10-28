@@ -2709,7 +2709,20 @@ struct Shininess {
 /// power and a gain on the mask (`min(mask^power * gain, 1)`). The Covenant
 /// weapons' masks cover their hulls, bright with a faint mottling, which
 /// as it was left them an even gloss; deepened, it shows them worked alloy.
-const MASK_CURVES: [(&str, [f32; 2]); 2] = [("weapons\\plasma", [3.0, 2.5]), ("weapons\\needler", [3.0, 2.5])];
+/// The Covenant vehicles' are alike. The Warthog's marks its glossy paint
+/// (not wear: as wear its hood was bare steel); a milder curve brings out
+/// the grime in it.
+const MASK_CURVES: [(&str, [f32; 2]); 8] = [
+    ("weapons\\plasma", COVENANT_MASK_CURVE),
+    ("weapons\\needler", COVENANT_MASK_CURVE),
+    ("vehicles\\ghost\\", COVENANT_MASK_CURVE),
+    ("vehicles\\banshee\\", COVENANT_MASK_CURVE),
+    ("vehicles\\wraith\\", COVENANT_MASK_CURVE),
+    ("vehicles\\c_dropship\\", COVENANT_MASK_CURVE),
+    ("vehicles\\c gun turret\\", COVENANT_MASK_CURVE),
+    ("vehicles\\warthog\\", [2.0, 2.0]),
+];
+const COVENANT_MASK_CURVE: [f32; 2] = [3.0, 2.5];
 
 /// The human weapons drawn with a metal finish (by the shader tag's path).
 /// Halo reflects its cube map only where their masks say and leaves the rest
@@ -2743,22 +2756,24 @@ const fn finish(roughness: f32, worn_roughness: f32, paint_floor: f32, metal_fro
 /// (tuning: `HALO_RT_GUNMETAL=[<shader path prefix>=]roughness,worn roughness,paint floor,metal from,metal to,metal scale,metal cap,worn metal,worn gain;...`,
 /// or `off`)
 fn gunmetal(shader: &str) -> Option<GunmetalFinish> {
-    let (_, finish) = GUNMETAL_WEAPONS.iter().find(|(path, _)| shader.starts_with(path))?;
+    let finish = GUNMETAL_WEAPONS.iter().find(|(path, _)| shader.starts_with(path)).map(|&(_, finish)| finish);
     let tuning = std::env::var("HALO_RT_GUNMETAL").unwrap_or_default();
     if tuning == "off" {
         return None;
     }
+    // (a prefix's entry gives any model the finish; a bare one, the table's)
     let tuned = tuning.split(';').find_map(|entry| {
         let values = match entry.split_once('=') {
-            Some((prefix, values)) if shader.starts_with(prefix) => values,
+            Some((prefix, values)) if !prefix.is_empty() && shader.starts_with(prefix) => values,
             Some(_) => return None,
-            None => entry,
+            None if finish.is_some() => entry,
+            None => return None,
         };
         let v: Vec<f32> = values.split(',').filter_map(|v| v.trim().parse().ok()).collect();
         let bits: [f32; 9] = v.try_into().ok()?;
         Some(GunmetalFinish::from_bits(bits.map(f32::to_bits)))
     });
-    Some(tuned.unwrap_or(*finish))
+    tuned.or(finish)
 }
 
 /// A bitmap group's first bitmap's size.

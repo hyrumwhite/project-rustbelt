@@ -307,6 +307,10 @@ pub struct HaloTransparentMaterial {
     pub blend: u16,
     /// Culled from behind (not two-sided).
     pub one_sided: bool,
+    /// A decal (the shader's flag): drawn with a depth bias toward the
+    /// camera, as the game draws one (its z bias), over the surface it lies
+    /// on (a30's wall lights, which fought with their walls).
+    pub decal: bool,
     /// A sky layer: drawn in the transmissive phase (see
     /// `crate::level::LevelBuilder::spawn_sky`).
     pub sky: bool,
@@ -440,13 +444,19 @@ impl HaloTransparentMaterial {
 pub struct HaloTransparentKey {
     blend: u16,
     one_sided: bool,
+    decal: bool,
 }
 
 impl From<&HaloTransparentMaterial> for HaloTransparentKey {
     fn from(material: &HaloTransparentMaterial) -> Self {
-        HaloTransparentKey { blend: material.blend, one_sided: material.one_sided }
+        HaloTransparentKey { blend: material.blend, one_sided: material.one_sided, decal: material.decal }
     }
 }
+
+/// A decal's depth bias (Bevy's reversed depth: toward the camera): the
+/// game's z bias of 8 is 8 depth units plus 2 times the polygon's slope.
+const DECAL_DEPTH_BIAS: bevy::render::render_resource::DepthBiasState =
+    bevy::render::render_resource::DepthBiasState { constant: 8, slope_scale: 2.0, clamp: 0.0 };
 
 impl Material for HaloTransparentMaterial {
     fn fragment_shader() -> ShaderRef {
@@ -476,6 +486,11 @@ impl Material for HaloTransparentMaterial {
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         use bevy::render::render_resource::{BlendComponent, BlendFactor, BlendOperation, BlendState, Face};
         descriptor.primitive.cull_mode = if key.bind_group_data.one_sided { Some(Face::Back) } else { None };
+        if key.bind_group_data.decal
+            && let Some(depth_stencil) = descriptor.depth_stencil.as_mut()
+        {
+            depth_stencil.bias = DECAL_DEPTH_BIAS;
+        }
         // (a meter's blend takes a constant colour, its tint, which the
         // shader applies: tint mode 1, src times the tint's alpha plus what's
         // there times its colour, taken as its mean in the alpha; tint mode 2,

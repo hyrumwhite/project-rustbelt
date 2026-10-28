@@ -471,6 +471,7 @@ fn main() -> AppExit {
             .add_plugins((bridge::BridgePlugin, lights::DynamicLightsPlugin))
             .add_plugins(bevy::diagnostic::SystemInformationDiagnosticsPlugin)
             .add_systems(PreUpdate, follow_level)
+            .add_systems(Update, follow_bsp_sky)
             .add_systems(Last, log_heartbeat);
         if args.camera.is_some() {
             app.insert_resource(bridge::FollowGame(false));
@@ -704,22 +705,40 @@ fn load_level(
     {
         error!("placing objects: {e}");
     }
-    let sky_model = halo_map::sky::skies(&cache).ok().and_then(|s| s.into_iter().find_map(|s| s.model)).and_then(|m| m.datum);
-    if let Some(model) = sky_model {
-        if let Err(e) = builder.spawn_sky(model, &mut commands, &mut assets) {
+    // Each sky with a model, and its cubemaps; the one drawn is the BSP's
+    // (its clusters'), the first sky with a model where none says
+    let skies = halo_map::sky::skies(&cache).unwrap_or_default();
+    let bsp_skies = bsp_sky_indices(&cache);
+    let first = skies.iter().position(|s| s.model.and_then(|m| m.datum).is_some());
+    let shown = args
+        .bsp
+        .and_then(|b| bsp_skies.get(b).copied().flatten())
+        .filter(|&i| skies.get(i).is_some_and(|s| s.model.and_then(|m| m.datum).is_some()))
+        .or(first);
+    let mut cubemaps = Vec::new();
+    for (index, sky) in skies.iter().enumerate() {
+        let Some(model) = sky.model.and_then(|m| m.datum) else {
+            cubemaps.push(None);
+            continue;
+        };
+        let visibility = if Some(index) == shown { Visibility::Inherited } else { Visibility::Hidden };
+        if let Err(e) = builder.spawn_sky(model, index, visibility, &mut commands, &mut assets) {
             error!("sky: {e}");
         }
-        match sky::sky_model_cubemap(&cache, model, assets.images) {
-            Ok(Some(cubemaps)) => commands.insert_resource(SkyCubemap(cubemaps.lighting, cubemaps.background)),
-            Ok(None) => commands.remove_resource::<SkyCubemap>(),
+        cubemaps.push(match sky::sky_model_cubemap(&cache, model, assets.images) {
+            Ok(Some(cubemaps)) => Some(SkyCubemap(cubemaps.lighting, cubemaps.background)),
+            Ok(None) => None,
             Err(e) => {
                 error!("sky environment map: {e}");
-                commands.remove_resource::<SkyCubemap>();
+                None
             }
-        }
-    } else {
-        commands.remove_resource::<SkyCubemap>();
+        });
     }
+    match shown.and_then(|i| cubemaps.get(i).cloned().flatten()) {
+        Some(cubemap) => commands.insert_resource(cubemap),
+        None => commands.remove_resource::<SkyCubemap>(),
+    }
+    commands.insert_resource(SkySelection { bsp_skies, cubemaps, shown });
     if let Some((direction, color, power)) = level_sky.sun {
         commands.spawn((
             Name::new("sun"),
@@ -778,8 +797,83 @@ struct CameraStart(Transform);
 
 /// The sky model rendered into cubemaps: the environment light's and the
 /// skybox's (see [`sky::SkyModelCubemaps`]).
-#[derive(Resource)]
+#[derive(Resource, Clone)]
 struct SkyCubemap(Handle<Image>, Handle<Image>);
+
+/// The level's skies: the one each BSP's clusters name (by BSP index), each
+/// sky's cubemaps (by sky index, None without a model), and the sky drawn.
+#[derive(Resource)]
+struct SkySelection {
+    bsp_skies: Vec<Option<usize>>,
+    cubemaps: Vec<Option<SkyCubemap>>,
+    shown: Option<usize>,
+}
+
+/// The sky each BSP's clusters name, by BSP index: the one most of them do
+/// (a cluster with none is indoors). Halo draws the sky of the camera's
+/// cluster; a level's BSPs each name one (a30's two).
+fn bsp_sky_indices(cache: &CacheFile) -> Vec<Option<usize>> {
+    use halo_map::layout::{structure_bsp, structure_cluster};
+    let Ok(references) = halo_map::bsp::references(cache) else { return Vec::new() };
+    let count = references.iter().map(|r| r.index as usize + 1).max().unwrap_or(0);
+    let mut skies = vec![None; count];
+    for reference in &references {
+        let Ok(bsp) = halo_map::bsp::Bsp::load(cache, reference) else { continue };
+        let Ok(clusters) = bsp.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF) else { continue };
+        let mut counts = std::collections::BTreeMap::<usize, usize>::new();
+        for cluster in clusters.iter() {
+            if let Ok(sky) = usize::try_from(cluster.i16(structure_cluster::SKY_INDEX).unwrap_or(-1)) {
+                *counts.entry(sky).or_default() += 1;
+            }
+        }
+        skies[reference.index as usize] = counts.into_iter().max_by_key(|&(_, n)| n).map(|(sky, _)| sky);
+    }
+    skies
+}
+
+/// Bridged: the sky of the BSP the game is in, its model drawn and its
+/// cubemaps the camera's environment light and skybox (a30's second half,
+/// under its own sky: the first's land and sea, laid out about the first
+/// BSP, showed there cut off and out of place).
+fn follow_bsp_sky(
+    link: Option<Res<bridge::BridgeLink>>,
+    stats: Res<LevelStats>,
+    selection: Option<ResMut<SkySelection>>,
+    mut commands: Commands,
+    mut domes: Query<(&level::SkyIndex, &mut Visibility)>,
+    mut cameras: Query<(&mut EnvironmentMapLight, &mut Skybox), With<Camera3d>>,
+) {
+    let (Some(link), Some(mut selection)) = (link, selection) else { return };
+    let Some(snapshot) = &link.latest else { return };
+    if !snapshot.map_name().eq_ignore_ascii_case(&stats.map_name) {
+        return;
+    }
+    let Some(wanted) = usize::try_from(snapshot.structure_bsp_index)
+        .ok()
+        .and_then(|b| selection.bsp_skies.get(b).copied().flatten())
+        .filter(|&i| selection.cubemaps.get(i).is_some_and(Option::is_some))
+    else {
+        return;
+    };
+    if selection.shown == Some(wanted) {
+        return;
+    }
+    info!("the game's BSP {} is under sky {wanted}", snapshot.structure_bsp_index);
+    selection.shown = Some(wanted);
+    for (index, mut visibility) in &mut domes {
+        let shown = if index.0 == wanted { Visibility::Inherited } else { Visibility::Hidden };
+        if *visibility != shown {
+            *visibility = shown;
+        }
+    }
+    let Some(cubemap) = selection.cubemaps[wanted].clone() else { return };
+    for (mut environment, mut skybox) in &mut cameras {
+        environment.diffuse_map = cubemap.0.clone();
+        environment.specular_map = cubemap.0.clone();
+        skybox.image = Some(cubemap.1.clone());
+    }
+    commands.insert_resource(cubemap);
+}
 
 fn bsp_overview(cache: &CacheFile, index: usize) -> Option<Transform> {
     let reference = halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index == index)?;

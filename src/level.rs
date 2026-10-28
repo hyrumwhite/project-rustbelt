@@ -228,6 +228,11 @@ pub struct HaloObject;
 #[derive(Component)]
 pub struct SkyDome;
 
+/// A sky model's index in the scenario's skies: a level's BSPs' clusters
+/// name the one drawn over them (a30's second BSP has its own).
+#[derive(Component)]
+pub struct SkyIndex(pub usize);
+
 /// Metres per sky model unit. A sky is drawn around the camera at no
 /// particular size, behind the level (the game draws it first); this puts it
 /// far beyond any level. Its domes are ~10⁵ units across, but some of its
@@ -413,6 +418,9 @@ const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
 /// the usual sheen of the sky on them washed grass out grey looking toward the
 /// sun (a30's fields).
 const MATTE_REFLECTANCE: f32 = 0.25;
+/// A glass pane's reflectance at normal incidence at the least: the 0.6
+/// reflectance every pane had before Halo's own reflection strength scaled it.
+const PLAIN_GLASS_F0: f32 = 0.16 * 0.6 * 0.6;
 
 /// How deep an actively camouflaged body's glass is (metres): how far it
 /// bends the picture behind it.
@@ -834,6 +842,8 @@ impl LevelBuilder {
     pub fn spawn_sky(
         &mut self,
         model_datum: u32,
+        sky_index: usize,
+        visibility: Visibility,
         commands: &mut Commands,
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
@@ -841,7 +851,7 @@ impl LevelBuilder {
         let cache = self.cache.clone();
         let model = Model::load(&cache, model_datum)?;
         let dome = commands
-            .spawn((Name::new(model.name.clone()), SkyDome, Transform::default(), Visibility::default()))
+            .spawn((Name::new(model.name.clone()), SkyDome, SkyIndex(sky_index), Transform::default(), visibility))
             .id();
         self.adopt(commands, dome);
         let mut layer = 0;
@@ -2074,18 +2084,32 @@ impl LevelBuilder {
     /// tint of what is seen through them, and a reflection. Solarik's thin
     /// glass is a blended material with full specular transmission; its
     /// alpha is coverage (zero a hole), so a pane is fully covered and
-    /// tinted, and reflects by Fresnel.
+    /// tinted, and reflects by Fresnel. A glass's diffuse map (grime and
+    /// smudges, which Halo blends over it) darkens its tint where the map
+    /// covers it, and its head-on reflection's strength (colour times alpha,
+    /// added over the pane in Halo) raises its reflectance: half of it as
+    /// the reflectance at normal incidence, from plain glass's up to 0.25.
+    /// (b30's glass floor, a30's too: 0.75 of a pale blue, read 0.18.)
     fn glass_or_water_material(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<Handle<StandardMaterial>> {
         let texture = |map: Option<TagRef>, this: &mut Self, assets: &mut LevelAssets| {
             map.and_then(|m| m.datum).and_then(|d| this.textures.permuted(&this.cache, d, this.permutation, true, assets.images))
         };
         let material = if let Some(glass) = info.glass {
             let [r, g, b] = glass.tint;
+            let base_color_texture = match (glass.tint_map, glass.diffuse_map.and_then(|m| m.datum)) {
+                (None, Some(diffuse)) => {
+                    self.textures.baked(&self.cache, crate::textures::Bake::GlassGrime { diffuse }, self.permutation, assets.images)
+                }
+                _ => texture(glass.tint_map, self, assets),
+            };
+            let [pr, pg, pb, pa] = glass.reflection_perpendicular;
+            let head_on = (0.5 * pa * (0.2126 * pr + 0.7152 * pg + 0.0722 * pb)).clamp(PLAIN_GLASS_F0, 0.25);
             StandardMaterial {
                 base_color: Color::srgba(r, g, b, 1.0),
-                base_color_texture: texture(glass.tint_map, self, assets),
+                base_color_texture,
                 perceptual_roughness: 0.05,
-                reflectance: 0.6,
+                // (Solarik's thin glass: F0 = 0.16 reflectance squared)
+                reflectance: (head_on / 0.16).sqrt(),
                 specular_transmission: 1.0,
                 alpha_mode: AlphaMode::Blend,
                 cull_mode: None,
@@ -2212,6 +2236,7 @@ impl LevelBuilder {
             depth_bias,
             blend: blend as u16,
             one_sided: !sky && transparent.flags & shader::TransparentInfo::TWO_SIDED == 0,
+            decal: !sky && transparent.flags & shader::TransparentInfo::DECAL != 0,
             sky,
             animation: Some(std::sync::Arc::new(transparent.clone())),
             object: None,
@@ -2287,6 +2312,7 @@ impl LevelBuilder {
             depth_bias: 0.0,
             blend: 10,
             one_sided: false,
+            decal: false,
             sky: false,
             animation: None,
             object: None,
@@ -2328,6 +2354,7 @@ impl LevelBuilder {
             depth_bias: 0.0,
             blend,
             one_sided: meter.flags & shader::MeterInfo::TWO_SIDED == 0,
+            decal: false,
             sky: false,
             animation: None,
             object: None,

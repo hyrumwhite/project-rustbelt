@@ -885,6 +885,12 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
             reflection_perpendicular: argb(root, g::REFLECTION_VIEW_PERPENDICULAR_COLOR)?,
             reflection_parallel: argb(root, g::REFLECTION_VIEW_PARALLEL_COLOR)?,
         });
+        // (the diffuse map's scale, where it, not a tint map, is the pane's
+        // texture: the meshes' coordinates take it)
+        if root.reference(g::TINT_MAP)?.datum.is_none() && root.reference(g::DIFFUSE_MAP)?.datum.is_some() {
+            let scale = root.f32(g::DIFFUSE_MAP_SCALE)?;
+            info.uv_scale = [if scale == 0.0 { 1.0 } else { scale }; 2];
+        }
     }
     if shader_type == ShaderType::Water {
         use layout::shader_transparent_water_definition as w;

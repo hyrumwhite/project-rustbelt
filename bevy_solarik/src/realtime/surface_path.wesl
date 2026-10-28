@@ -53,6 +53,11 @@ fn shade_surface_path(initial: ResolvedRayHitFull, initial_wo: vec3<f32>, rng: p
 // The incoming path owns initial emission and its MIS weight. This entry
 // point adds only scattering, so a secondary handoff cannot count it twice.
 fn shade_surface_scattering(initial: ResolvedRayHitFull, initial_wo: vec3<f32>, rng: ptr<function, u32>) -> vec3<f32> {
+    return shade_surface_scattering_vertices(initial, initial_wo, 4u, rng);
+}
+
+// (`vertices`: at most this many, the last direct light only)
+fn shade_surface_scattering_vertices(initial: ResolvedRayHitFull, initial_wo: vec3<f32>, vertices: u32, rng: ptr<function, u32>) -> vec3<f32> {
     var hit = initial;
 @if(RAY_MATERIAL_FOOTPRINTS) {
     var cone = initial.ray_cone;
@@ -65,7 +70,7 @@ fn shade_surface_scattering(initial: ResolvedRayHitFull, initial_wo: vec3<f32>, 
     let vertex_count = 1u;
 }
 @if(!(PRIMARY_CANOPY_DIRECT_ONLY)) {
-    let vertex_count = 4u;
+    let vertex_count = vertices;
 }
     for (var bounce = 0u; bounce < vertex_count; bounce += 1u) {
         let last = bounce + 1u == vertex_count;

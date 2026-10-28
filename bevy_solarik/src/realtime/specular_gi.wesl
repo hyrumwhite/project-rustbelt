@@ -20,7 +20,7 @@ import bevy_solarik::scene::brdf::clearcoat_albedo;
 import bevy_solarik::scene::brdf::clearcoat_roughness;
 import bevy_solarik::scene::brdf::CLEARCOAT_MIN_PERCEPTUAL_ROUGHNESS;
 import bevy_solarik::scene::brdf::sample_glossy_lobes;
-import bevy_solarik::realtime::surface_path::shade_surface_scattering;
+import bevy_solarik::realtime::surface_path::shade_surface_scattering_vertices;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::ResolvedGPixel;
 import bevy_solarik::scene::sampling::analytic_light_radiance;
@@ -79,6 +79,7 @@ enable wgpu_ray_query;
 
 const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = 0.4;
 const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0225;
+const BLURRY_LEAF_ROUGHNESS: f32 = 0.05;
 
 @compute @workgroup_size(8, 8, 1)
 fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -335,8 +336,13 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
         // Two-sided leaf radiance cannot terminate in the one-sided cache.
         // The incoming emission/MIS and PSR above remain owned by this path;
         // continue scattering with the bounded two-sided surface estimator.
+        // A blurry reflection's (roughness above BLURRY_LEAF_ROUGHNESS)
+        // takes the leaf's direct light alone: its bounces were most of the
+        // pass's cost where such a surface faced foliage (a30's Forerunner
+        // metal by its pines, 4.8 ms to 2.4) and changed nothing seen.
         if ray_hit.material.diffuse_transmission > 0.0 || ray_hit.material.lommel {
-            radiance += throughput * shade_surface_scattering(ray_hit, wo, rng);
+            let leaf_vertices = select(4u, 1u, primary_surface.material.roughness > BLURRY_LEAF_ROUGHNESS);
+            radiance += throughput * shade_surface_scattering_vertices(ray_hit, wo, leaf_vertices, rng);
             break;
         }
 

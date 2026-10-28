@@ -162,7 +162,7 @@ fn hud_image(width: u32, height: u32) -> Image {
 }
 
 /// One of the screen flash's layers: a colour its blend multiplies the
-/// picture by, adds to it or takes from it.
+/// picture by, adds to it, takes from it, or takes the greater or lesser of.
 #[derive(AsBindGroup, Asset, TypePath, Debug, Clone)]
 #[bind_group_data(FlashBlend)]
 pub(crate) struct FlashMaterial {
@@ -176,6 +176,8 @@ pub(crate) enum FlashBlend {
     Multiply,
     Add,
     Subtract,
+    Max,
+    Min,
 }
 
 impl From<&FlashMaterial> for FlashBlend {
@@ -194,6 +196,8 @@ impl UiMaterial for FlashMaterial {
             FlashBlend::Multiply => (BlendFactor::Zero, BlendFactor::Src, BlendOperation::Add),
             FlashBlend::Add => (BlendFactor::One, BlendFactor::One, BlendOperation::Add),
             FlashBlend::Subtract => (BlendFactor::One, BlendFactor::One, BlendOperation::ReverseSubtract),
+            FlashBlend::Max => (BlendFactor::One, BlendFactor::One, BlendOperation::Max),
+            FlashBlend::Min => (BlendFactor::One, BlendFactor::One, BlendOperation::Min),
         };
         let keep = BlendComponent { src_factor: BlendFactor::Zero, dst_factor: BlendFactor::One, operation: BlendOperation::Add };
         if let Some(fragment) = &mut descriptor.fragment {
@@ -204,15 +208,18 @@ impl UiMaterial for FlashMaterial {
     }
 }
 
-/// The screen flash's layers: a multiply, then an add or a subtract.
+/// The screen flash's layers: a multiply, then an add or a subtract, then a
+/// max and a min.
 #[derive(Resource)]
-struct FlashLayers([Handle<FlashMaterial>; 3]);
+struct FlashLayers([Handle<FlashMaterial>; 5]);
 
 fn spawn_flash(mut commands: Commands, mut materials: ResMut<Assets<FlashMaterial>>) {
     let layers = [
         (FlashBlend::Multiply, Vec4::ONE),
         (FlashBlend::Add, Vec4::ZERO),
         (FlashBlend::Subtract, Vec4::ZERO),
+        (FlashBlend::Max, Vec4::ZERO),
+        (FlashBlend::Min, Vec4::ONE),
     ]
     .map(|(blend, colour)| materials.add(FlashMaterial { colour, blend }));
     for layer in &layers {
@@ -231,18 +238,31 @@ fn spawn_flash(mut commands: Commands, mut materials: ResMut<Assets<FlashMateria
 /// display's encoding and some take the picture or a constant colour as a
 /// factor; each is a multiply by one colour and an add (or subtract) of
 /// another: lighten f + d(1 - a), darken d - f, tint a + d(1 - inverse),
-/// invert s + d(1 - f - s). Max and min take the nearest of lighten and
-/// darken. A multiply in the display's encoding is the same multiply in light
-/// by its colour to the 2.2; the added colours are converted alike.
-fn follow_flash(link: Res<BridgeLink>, layers: Res<FlashLayers>, mut materials: ResMut<Assets<FlashMaterial>>, mut last: Local<Option<[Vec4; 3]>>) {
+/// invert s + d(1 - f - s). Max and min are the blend's max and min, which
+/// leave its factors out: max(f - a, d) and min(f + a, d) (the combiners'
+/// c0 - c0.a and c0 + c0.a), so a flash as opaque as it is bright (the
+/// needler's) leaves the picture as it is. A multiply in the display's
+/// encoding is the same multiply in light by its colour to the 2.2; the
+/// added colours are converted alike, and a max or min of them is the same
+/// in light.
+fn follow_flash(link: Res<BridgeLink>, layers: Res<FlashLayers>, mut materials: ResMut<Assets<FlashMaterial>>, mut last: Local<Option<[Vec4; 5]>>) {
     let Some(snapshot) = link.latest.as_ref() else { return };
     let (kind, intensity, [a, r, g, b]) = snapshot.screen_flash;
     let colour = Vec3::new(r, g, b);
     let flash = colour * intensity;
     let alpha = a * intensity;
+    let (mut maximum, mut minimum) = (Vec3::ZERO, Vec3::ONE);
     let (multiply, add, subtract) = match kind {
-        1 | 3 => (Vec3::splat(1.0 - alpha), flash, Vec3::ZERO),
-        2 | 4 => (Vec3::ONE, Vec3::ZERO, flash),
+        1 => (Vec3::splat(1.0 - alpha), flash, Vec3::ZERO),
+        2 => (Vec3::ONE, Vec3::ZERO, flash),
+        3 => {
+            maximum = flash - Vec3::splat(alpha);
+            (Vec3::ONE, Vec3::ZERO, Vec3::ZERO)
+        }
+        4 => {
+            minimum = flash + Vec3::splat(alpha);
+            (Vec3::ONE, Vec3::ZERO, Vec3::ZERO)
+        }
         5 => {
             // the combiners' c0 * (2 c0 - 1) + c0.a
             let s = (flash * (2.0 * flash - 1.0) + alpha).clamp(Vec3::ZERO, Vec3::ONE);
@@ -252,7 +272,7 @@ fn follow_flash(link: Res<BridgeLink>, layers: Res<FlashLayers>, mut materials: 
         _ => (Vec3::ONE, Vec3::ZERO, Vec3::ZERO),
     };
     let to_light = |c: Vec3| c.clamp(Vec3::ZERO, Vec3::ONE).powf(2.2);
-    let colours = [to_light(multiply).extend(1.0), to_light(add).extend(1.0), to_light(subtract).extend(1.0)];
+    let colours = [multiply, add, subtract, maximum, minimum].map(|c| to_light(c).extend(1.0));
     if *last == Some(colours) {
         return;
     }

@@ -1971,7 +1971,7 @@ impl LevelBuilder {
             if CHIEF_ARMOUR.iter().any(|name| info.name.eq_ignore_ascii_case(name))
                 && let Some(multipurpose) = info.multipurpose_map.and_then(|m| m.datum)
             {
-                let bake = crate::textures::Bake::MetallicRoughness { mask: multipurpose, channel: 2, unmasked: 0, roughness: 0, metallic: 0, cloth: None };
+                let bake = crate::textures::Bake::MetallicRoughness { mask: multipurpose, channel: 2, unmasked: 0, roughness: 0, metallic: 0, cloth: None, curve: None };
                 material.clearcoat_texture = self.textures.baked(&self.cache, bake, self.permutation, assets.images);
             }
         }
@@ -2456,7 +2456,21 @@ impl LevelBuilder {
         // left Covenant crates looking dusty).
         let unmasked = if model { dull(MATTE_ROUGHNESS + (MODEL_UNMASKED_ROUGHNESS - MATTE_ROUGHNESS) * gloss) } else { MATTE_ROUGHNESS };
         let texture = mask.and_then(|(mask, channel)| {
+            // the mask reshaped to bring out its pattern (see MASK_CURVES)
+            // (tuning: `HALO_RT_MASK_CURVE=<shader path prefix>=power,gain;...`)
+            let tuned = std::env::var("HALO_RT_MASK_CURVE").ok().and_then(|text| {
+                text.split(';').find_map(|entry| {
+                    let (prefix, values) = entry.split_once('=')?;
+                    let (power, gain) = values.split_once(',')?;
+                    (!prefix.is_empty() && info.name.starts_with(prefix))
+                        .then(|| Some([power.trim().parse::<f32>().ok()?, gain.trim().parse::<f32>().ok()?]))?
+                })
+            });
+            let curve = tuned
+                .or_else(|| MASK_CURVES.iter().find(|(path, _)| model && info.name.starts_with(path)).map(|&(_, curve)| curve))
+                .map(|curve| curve.map(f32::to_bits));
             let bake = Bake::MetallicRoughness {
+                curve,
                 mask,
                 channel,
                 unmasked: unmasked.to_bits(),
@@ -2691,6 +2705,12 @@ struct Shininess {
     base_color_texture: Option<Handle<Image>>,
 }
 
+/// Models whose masks' pattern is brought out (by the shader tag's path): a
+/// power and a gain on the mask (`min(mask^power * gain, 1)`). The Covenant
+/// weapons' masks cover their hulls, bright with a faint mottling, which
+/// as it was left them an even gloss; deepened, it shows them worked alloy.
+const MASK_CURVES: [(&str, [f32; 2]); 2] = [("weapons\\plasma", [3.0, 2.5]), ("weapons\\needler", [3.0, 2.5])];
+
 /// The human weapons drawn with a metal finish (by the shader tag's path).
 /// Halo reflects its cube map only where their masks say and leaves the rest
 /// matte; with a model's unmasked sheen (a smooth dielectric) the dark AR
@@ -2701,7 +2721,7 @@ struct Shininess {
 /// their masks' wear (dim: the pistol's and shotgun's polished parts, the
 /// rocket launcher's, the grenade's scuffs) brought out as bare steel.
 const GUNMETAL_WEAPONS: [(&str, GunmetalFinish); 6] = [
-    ("weapons\\assault rifle\\", finish(0.5, 0.3, 0.03, 0.012, 0.035, 0.3, 1.0)),
+    ("weapons\\assault rifle\\", finish(0.5, 0.3, 0.03, 0.0, 0.001, 0.3, 2.0)),
     ("weapons\\sniper rifle\\", finish(0.4, 0.3, 0.0, 0.06, 0.12, 0.0, 1.0)),
     ("weapons\\pistol\\", PAINTED_WEAPON),
     ("weapons\\shotgun\\", PAINTED_WEAPON),

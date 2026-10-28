@@ -40,7 +40,9 @@ pub enum Bake {
     /// channel of the same map and a roughness's bits), that channel keeps
     /// the result and its zero is a matte dielectric of that roughness
     /// (Chief's plates, the change colour's mask, over his cloth suit).
-    MetallicRoughness { mask: u32, channel: u8, unmasked: u32, roughness: u32, metallic: u32, cloth: Option<(u8, u32)> },
+    /// `curve` (a power's and a gain's bits, or None) reshapes the mask
+    /// first: `min(mask^power * gain, 1)`.
+    MetallicRoughness { mask: u32, channel: u8, unmasked: u32, roughness: u32, metallic: u32, cloth: Option<(u8, u32)>, curve: Option<[u32; 2]> },
     /// A model base map tinted by an object's change colour where the
     /// multipurpose map's alpha says, as the Xbox model shader does:
     /// `base * lerp(1, color, multipurpose.a)` (8-bit, display-encoded).
@@ -117,13 +119,13 @@ impl TextureCache {
         let result = match bake_rgba(cache, bake, permutation) {
             Ok((width, height, data, srgb)) => {
                 let format = if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
-                let mut image = Image::new(
-                    Extent3d { width, height, depth_or_array_layers: 1 },
-                    TextureDimension::D2,
-                    data,
-                    format,
-                    RenderAssetUsages::RENDER_WORLD,
-                );
+                // (with mips, as the maps they replace have: without, they
+                // shimmered at a distance)
+                let (data, levels) = with_mips(width, height, data);
+                let size = Extent3d { width, height, depth_or_array_layers: 1 };
+                let mut image = Image::new_uninit(size, TextureDimension::D2, format, RenderAssetUsages::RENDER_WORLD);
+                image.texture_descriptor.mip_level_count = levels;
+                image.data = Some(data);
                 image.sampler = repeat_sampler();
                 Some(images.add(image))
             }
@@ -344,6 +346,93 @@ fn change_color(mask: &bitmap::Decoded, base: Option<&bitmap::Decoded>, color: [
     (w, h, out, true)
 }
 
+/// `image` at (u, v) (repeating), each channel by Catmull-Rom's cubic
+/// through the four nearest texels each way (0 to 255).
+fn bicubic(image: &bitmap::Decoded, u: f32, v: f32) -> [f32; 4] {
+    let (w, h) = (image.width as i64, image.height as i64);
+    let (x, y) = (u * w as f32 - 0.5, v * h as f32 - 0.5);
+    let (x0, y0) = (x.floor(), y.floor());
+    let (tx, ty) = (x - x0, y - y0);
+    let weights = |t: f32| {
+        let (t2, t3) = (t * t, t * t * t);
+        [(-t3 + 2.0 * t2 - t) * 0.5, (3.0 * t3 - 5.0 * t2 + 2.0) * 0.5, (-3.0 * t3 + 4.0 * t2 + t) * 0.5, (t3 - t2) * 0.5]
+    };
+    let (wx, wy) = (weights(tx), weights(ty));
+    let mut out = [0.0; 4];
+    for (j, wy) in wy.iter().enumerate() {
+        let row = (y0 as i64 - 1 + j as i64).rem_euclid(h);
+        for (i, wx) in wx.iter().enumerate() {
+            let column = (x0 as i64 - 1 + i as i64).rem_euclid(w);
+            let o = ((row * w + column) * 4) as usize;
+            for c in 0..4 {
+                out[c] += image.data[o + c] as f32 * wx * wy;
+            }
+        }
+    }
+    out
+}
+
+/// RGBA8 texels followed by their mips, each the last's 2x2 average, to
+/// 1x1 (an odd size's last row or column dropped): the data and its count
+/// of levels.
+fn with_mips(width: u32, height: u32, mut data: Vec<u8>) -> (Vec<u8>, u32) {
+    let (mut w, mut h) = (width as usize, height as usize);
+    let mut start = 0;
+    let mut levels = 1;
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = Vec::with_capacity(nw * nh * 4);
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let mut sum = 0u32;
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let (sx, sy) = ((x * 2 + dx).min(w - 1), (y * 2 + dy).min(h - 1));
+                        sum += data[start + (sy * w + sx) * 4 + c] as u32;
+                    }
+                    next.push(((sum + 2) / 4) as u8);
+                }
+            }
+        }
+        start = data.len();
+        data.extend(next);
+        (w, h) = (nw, nh);
+        levels += 1;
+    }
+    (data, levels)
+}
+
+/// How far a weapon's base map is blurred to decide paint from bare metal
+/// (a Gaussian's sigma, texels): its compression's 4x4 blocks, near the
+/// threshold, flipped one by one into squares of metal and paint (the AR's
+/// top cover).
+const GUNMETAL_DECISION_BLUR: f32 = 2.0;
+
+/// `image`'s red channel blurred by a Gaussian of `sigma` texels (repeating).
+fn blur_red(image: &mut bitmap::Decoded, sigma: f32) {
+    if sigma <= 0.0 {
+        return;
+    }
+    let radius = (sigma * 3.0).ceil() as i64;
+    let kernel: Vec<f32> = (-radius..=radius).map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp()).collect();
+    let total: f32 = kernel.iter().sum();
+    let (w, h) = (image.width as i64, image.height as i64);
+    let red: Vec<f32> = (0..w * h).map(|i| image.data[(i * 4) as usize] as f32).collect();
+    let mut rows = vec![0.0; red.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let sum: f32 = kernel.iter().enumerate().map(|(k, weight)| red[(y * w + (x + k as i64 - radius).rem_euclid(w)) as usize] * weight).sum();
+            rows[(y * w + x) as usize] = sum / total;
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let sum: f32 = kernel.iter().enumerate().map(|(k, weight)| rows[((y + k as i64 - radius).rem_euclid(h) * w + x) as usize] * weight).sum();
+            image.data[((y * w + x) * 4) as usize] = (sum / total).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
 /// See [`Bake::Gunmetal`].
 fn gunmetal(base: &bitmap::Decoded, mask: &bitmap::Decoded, color: bool, finish: GunmetalFinish) -> (u32, u32, Vec<u8>, bool) {
     let to_linear = |c: u8| {
@@ -359,20 +448,33 @@ fn gunmetal(base: &bitmap::Decoded, mask: &bitmap::Decoded, color: bool, finish:
         let t = ((x - from) / (to - from).max(1e-6)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     };
-    let (w, h) = (base.width, base.height);
+    // upsampled smoothly to about 1024 (up to 8 times): in first person a
+    // texel of the AR's 512 spans several pixels, and a dropped AR's map is
+    // 128 wide; the wear's steps between paint and metal showed
+    let scale = (1024 / base.width.max(base.height).max(1)).clamp(1, 8).next_power_of_two().min(8);
+    // the decision's base map: blurred, its colour kept in the red, green
+    // and blue as the copies' red channels
+    let blurred = [0, 1, 2].map(|c| {
+        let mut channel = bitmap::Decoded { data: base.data.chunks_exact(4).flat_map(|t| [t[c], 0, 0, 0]).collect(), ..base.clone() };
+        blur_red(&mut channel, GUNMETAL_DECISION_BLUR);
+        channel
+    });
+    let (w, h) = (base.width * scale, base.height * scale);
     let mut out = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
-            let (mx, my) = (x * mask.width / w, y * mask.height / h);
-            let worn = (mask.data[((my * mask.width + mx) * 4) as usize] as f32 / 255.0 * finish.worn_gain).min(1.0);
-            let o = ((y * w + x) * 4) as usize;
-            let texel = [base.data[o], base.data[o + 1], base.data[o + 2], base.data[o + 3]];
+            let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+            let worn = (bicubic(mask, u, v)[0] / 255.0 * finish.worn_gain).clamp(0.0, 1.0);
+            let texel = bicubic(base, u, v).map(|c| c.round().clamp(0.0, 255.0) as u8);
             let linear = [0, 1, 2].map(|c| to_linear(texel[c]));
             let luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-            // (light greys only: a colour is paint however light)
-            let (max, min) = (linear.iter().copied().fold(0.0, f32::max), linear.iter().copied().fold(1.0, f32::min));
-            let saturation = if max > 0.0 { (max - min) / max } else { 0.0 };
-            let bare = smoothstep(finish.metal_from, finish.metal_to, luminance) * (1.0 - smoothstep(0.15, 0.35, saturation));
+            // (decided on the blurred map; light greys only: a colour is
+            // paint however light, and a near-black's hue is noise)
+            let smooth = [0, 1, 2].map(|c| to_linear(bicubic(&blurred[c], u, v)[0].round().clamp(0.0, 255.0) as u8));
+            let smooth_luminance = 0.2126 * smooth[0] + 0.7152 * smooth[1] + 0.0722 * smooth[2];
+            let (max, min) = (smooth.iter().copied().fold(0.0, f32::max), smooth.iter().copied().fold(1.0, f32::min));
+            let saturation = (max - min) / (max + 0.05);
+            let bare = smoothstep(finish.metal_from, finish.metal_to, smooth_luminance) * (1.0 - smoothstep(0.15, 0.35, saturation));
             let metal = bare.max(worn);
             if color {
                 // paint: the base map's colour, lifted to the paint's floor;
@@ -415,8 +517,14 @@ fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Resul
             let mask = rgba8(cache, mask, permutation)?;
             Ok(gunmetal(&base, &mask, color, GunmetalFinish::from_bits(finish)))
         }
-        Bake::MetallicRoughness { mask, channel, unmasked, roughness, metallic, cloth } => {
-            let mask = rgba8(cache, mask, permutation)?;
+        Bake::MetallicRoughness { mask, channel, unmasked, roughness, metallic, cloth, curve } => {
+            let mut mask = rgba8(cache, mask, permutation)?;
+            if let Some([power, gain]) = curve.map(|c| c.map(f32::from_bits)) {
+                for texel in mask.data.chunks_exact_mut(4) {
+                    let m = texel[channel as usize] as f32 / 255.0;
+                    texel[channel as usize] = ((m.powf(power) * gain).min(1.0) * 255.0).round() as u8;
+                }
+            }
             let cloth = cloth.map(|(channel, roughness)| (channel as usize, f32::from_bits(roughness)));
             Ok(metallic_roughness(&mask, channel as usize, f32::from_bits(unmasked), f32::from_bits(roughness), f32::from_bits(metallic), cloth))
         }

@@ -2697,48 +2697,46 @@ struct Shininess {
 /// and sniper rifle looked like plastic, the sniper's black flat in the sun.
 /// The AR is dark metal all over. The sniper rifle's dark greys (its scope)
 /// are black paint, which as metal or lifted turned grey in the sun; its
-/// light greys are bare metal.
-const GUNMETAL_WEAPONS: [(&str, crate::textures::GunmetalFinish); 2] = [
-    (
-        "weapons\\assault rifle\\",
-        crate::textures::GunmetalFinish {
-            roughness: 0.5,
-            worn_roughness: 0.3,
-            paint_floor: 0.03,
-            metal_from: 0.012,
-            metal_to: 0.035,
-            metal_scale: 2.0,
-            metal_cap: 0.6,
-            worn_metal: 0.3,
-        },
-    ),
-    (
-        "weapons\\sniper rifle\\",
-        crate::textures::GunmetalFinish {
-            roughness: 0.4,
-            worn_roughness: 0.3,
-            paint_floor: 0.0,
-            metal_from: 0.06,
-            metal_to: 0.12,
-            metal_scale: 2.0,
-            metal_cap: 0.6,
-            worn_metal: 0.0,
-        },
-    ),
+/// light greys are bare metal. The others are painted like the sniper rifle,
+/// their masks' wear (dim: the pistol's and shotgun's polished parts, the
+/// rocket launcher's, the grenade's scuffs) brought out as bare steel.
+const GUNMETAL_WEAPONS: [(&str, GunmetalFinish); 6] = [
+    ("weapons\\assault rifle\\", finish(0.5, 0.3, 0.03, 0.012, 0.035, 0.3, 1.0)),
+    ("weapons\\sniper rifle\\", finish(0.4, 0.3, 0.0, 0.06, 0.12, 0.0, 1.0)),
+    ("weapons\\pistol\\", PAINTED_WEAPON),
+    ("weapons\\shotgun\\", PAINTED_WEAPON),
+    ("weapons\\rocket launcher\\", PAINTED_WEAPON),
+    ("weapons\\frag grenade\\", PAINTED_WEAPON),
 ];
+const PAINTED_WEAPON: GunmetalFinish = finish(0.45, 0.3, 0.0, 0.06, 0.12, 0.3, 2.0);
+
+use crate::textures::GunmetalFinish;
+
+/// A weapon's finish: roughness, worn roughness, the paint's floor, the
+/// luminance from and to which it is bare metal, worn steel's reflectance and
+/// the mask's gain (metal reflectance twice the base map's, at most 0.6).
+const fn finish(roughness: f32, worn_roughness: f32, paint_floor: f32, metal_from: f32, metal_to: f32, worn_metal: f32, worn_gain: f32) -> GunmetalFinish {
+    GunmetalFinish { roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale: 2.0, metal_cap: 0.6, worn_metal, worn_gain }
+}
 
 /// A human weapon's finish (see [`GUNMETAL_WEAPONS`]).
-/// (tuning: `HALO_RT_GUNMETAL=roughness,worn roughness,paint floor,metal from,metal to,metal scale,metal cap,worn metal`,
+/// (tuning: `HALO_RT_GUNMETAL=[<shader path prefix>=]roughness,worn roughness,paint floor,metal from,metal to,metal scale,metal cap,worn metal,worn gain;...`,
 /// or `off`)
-fn gunmetal(shader: &str) -> Option<crate::textures::GunmetalFinish> {
+fn gunmetal(shader: &str) -> Option<GunmetalFinish> {
     let (_, finish) = GUNMETAL_WEAPONS.iter().find(|(path, _)| shader.starts_with(path))?;
-    if std::env::var("HALO_RT_GUNMETAL").is_ok_and(|v| v == "off") {
+    let tuning = std::env::var("HALO_RT_GUNMETAL").unwrap_or_default();
+    if tuning == "off" {
         return None;
     }
-    let tuned = std::env::var("HALO_RT_GUNMETAL").ok().and_then(|text| {
-        let v: Vec<f32> = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-        let [roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal] = v[..] else { return None };
-        Some(crate::textures::GunmetalFinish { roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal })
+    let tuned = tuning.split(';').find_map(|entry| {
+        let values = match entry.split_once('=') {
+            Some((prefix, values)) if shader.starts_with(prefix) => values,
+            Some(_) => return None,
+            None => entry,
+        };
+        let v: Vec<f32> = values.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        let bits: [f32; 9] = v.try_into().ok()?;
+        Some(GunmetalFinish::from_bits(bits.map(f32::to_bits)))
     });
     Some(tuned.unwrap_or(*finish))
 }

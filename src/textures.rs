@@ -50,12 +50,12 @@ pub enum Bake {
     /// colour (`color`, sRGB, the base map's alpha kept) or its
     /// metallic/roughness texture (G roughness, B metallic). See
     /// [`GunmetalFinish`]'s fields, as f32 bits in its order.
-    Gunmetal { base: u32, mask: u32, color: bool, finish: [u32; 8] },
+    Gunmetal { base: u32, mask: u32, color: bool, finish: [u32; 9] },
 }
 
 /// A human weapon's finish (see [`Bake::Gunmetal`]). The base map's light
-/// greys are bare metal, its near-blacks black paint; where the mask is
-/// bright, worn edges and scratches show bare metal through either.
+/// greys are bare metal, its near-blacks and colours paint; where the mask
+/// is bright, worn edges and scratches show bare steel through either.
 #[derive(Clone, Copy, Debug)]
 pub struct GunmetalFinish {
     /// The finish's roughness where the mask is dark.
@@ -74,13 +74,15 @@ pub struct GunmetalFinish {
     /// most `metal_cap` (bare steel's).
     pub metal_scale: f32,
     pub metal_cap: f32,
-    /// A full mask's bare metal reflectance at the least (worn edges on
+    /// A full mask's bare steel reflectance at the least (worn edges on
     /// black paint).
     pub worn_metal: f32,
+    /// The mask's gain: its wear, dim in most of these maps, stronger.
+    pub worn_gain: f32,
 }
 
 impl GunmetalFinish {
-    pub fn bits(&self) -> [u32; 8] {
+    pub fn bits(&self) -> [u32; 9] {
         [
             self.roughness,
             self.worn_roughness,
@@ -90,13 +92,15 @@ impl GunmetalFinish {
             self.metal_scale,
             self.metal_cap,
             self.worn_metal,
+            self.worn_gain,
         ]
         .map(f32::to_bits)
     }
 
-    fn from_bits(bits: [u32; 8]) -> Self {
-        let [roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal] = bits.map(f32::from_bits);
-        GunmetalFinish { roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal }
+    pub fn from_bits(bits: [u32; 9]) -> Self {
+        let [roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal, worn_gain] =
+            bits.map(f32::from_bits);
+        GunmetalFinish { roughness, worn_roughness, paint_floor, metal_from, metal_to, metal_scale, metal_cap, worn_metal, worn_gain }
     }
 }
 
@@ -360,20 +364,27 @@ fn gunmetal(base: &bitmap::Decoded, mask: &bitmap::Decoded, color: bool, finish:
     for y in 0..h {
         for x in 0..w {
             let (mx, my) = (x * mask.width / w, y * mask.height / h);
-            let worn = mask.data[((my * mask.width + mx) * 4) as usize] as f32 / 255.0;
+            let worn = (mask.data[((my * mask.width + mx) * 4) as usize] as f32 / 255.0 * finish.worn_gain).min(1.0);
             let o = ((y * w + x) * 4) as usize;
             let texel = [base.data[o], base.data[o + 1], base.data[o + 2], base.data[o + 3]];
             let linear = [0, 1, 2].map(|c| to_linear(texel[c]));
             let luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
-            let bare = smoothstep(finish.metal_from, finish.metal_to, luminance);
+            // (light greys only: a colour is paint however light)
+            let (max, min) = (linear.iter().copied().fold(0.0, f32::max), linear.iter().copied().fold(1.0, f32::min));
+            let saturation = if max > 0.0 { (max - min) / max } else { 0.0 };
+            let bare = smoothstep(finish.metal_from, finish.metal_to, luminance) * (1.0 - smoothstep(0.15, 0.35, saturation));
             let metal = bare.max(worn);
             if color {
                 // paint: the base map's colour, lifted to the paint's floor;
-                // metal: its reflectance, from the base map's colour
+                // bare metal: its reflectance, from the base map's colour;
+                // worn through paint: grey steel
                 let lift = (finish.paint_floor - luminance).max(0.0);
+                let worn_through = worn * (1.0 - bare);
+                let steel_grey = (luminance * finish.metal_scale).min(finish.metal_cap).max(finish.worn_metal);
                 for c in 0..3 {
                     let paint = linear[c] + lift;
-                    let steel = (linear[c] * finish.metal_scale).min(finish.metal_cap).max(finish.worn_metal * worn);
+                    let tinted = (linear[c] * finish.metal_scale).min(finish.metal_cap);
+                    let steel = tinted + (steel_grey - tinted) * worn_through;
                     out.push(to_srgb(paint + (steel - paint) * metal));
                 }
                 out.push(texel[3]);

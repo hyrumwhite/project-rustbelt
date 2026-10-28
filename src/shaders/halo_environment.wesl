@@ -187,7 +187,9 @@ fn fragment(
             mask = select(channel, 1.0 - channel, (halo.modes.x & 1u) == 1u);
         }
         let neutral = select(0.5, 1.0, halo.modes.y == 1u);
-        let detail = mix(vec3<f32>(neutral), to_gamma(primary.rgb), mask);
+        // (its gain in micro_scale.x, which a model's detail doesn't use:
+        // its departure from neutral strengthened)
+        let detail = mix(vec3<f32>(neutral), to_gamma(primary.rgb), mask * halo.micro_scale.x);
         colour = saturate(detail_combine(to_gamma(base.rgb), detail, halo.modes.y));
     } else {
         let w = select(secondary.a, base.a, halo.modes.x != 0u);

@@ -2063,7 +2063,8 @@ impl LevelBuilder {
             extension: HaloEnvironment {
                 params: HaloEnvironmentParams {
                     detail_scales: scale.extend(1.0).extend(1.0),
-                    micro_scale: Vec4::ONE,
+                    // (x: the detail's gain, see MODEL_DETAIL_GAINS)
+                    micro_scale: Vec4::new(model_detail_gain(&info.name), 1.0, 1.0, 1.0),
                     modes: UVec4::new(
                         detail.mask as u32,
                         detail.function as u32,
@@ -2720,6 +2721,23 @@ struct Shininess {
 /// colour they keep. The Warthog's flat light-grey panels caught the sun.
 const MODEL_SHEEN: [(&str, [f32; 2]); 1] = [("vehicles\\warthog\\", [0.3, 0.8])];
 
+/// Models whose detail maps are strengthened (by the shader tag's path):
+/// their departure from neutral times this. Chief's corroded metal gives
+/// his plates much of their depth.
+const MODEL_DETAIL_GAINS: [(&str, f32); 1] = [("characters\\cyborg\\", 2.0)];
+
+/// A model shader's detail gain (see [`MODEL_DETAIL_GAINS`]).
+/// (tuning: `HALO_RT_DETAIL_GAIN=<shader path prefix>=gain;...`)
+fn model_detail_gain(shader: &str) -> f32 {
+    let tuned = std::env::var("HALO_RT_DETAIL_GAIN").ok().and_then(|text| {
+        text.split(';').find_map(|entry| {
+            let (prefix, gain) = entry.split_once('=')?;
+            (!prefix.is_empty() && shader.starts_with(prefix)).then(|| gain.trim().parse().ok())?
+        })
+    });
+    tuned.or_else(|| MODEL_DETAIL_GAINS.iter().find(|(path, _)| shader.starts_with(path)).map(|&(_, gain)| gain)).unwrap_or(1.0)
+}
+
 /// Models whose masks' pattern is brought out (by the shader tag's path): a
 /// power and a gain on the mask (`min(mask^power * gain, 1)`). The Covenant
 /// weapons' masks cover their hulls, bright with a faint mottling, which
@@ -2727,7 +2745,7 @@ const MODEL_SHEEN: [(&str, [f32; 2]); 1] = [("vehicles\\warthog\\", [0.3, 0.8])]
 /// The Covenant vehicles' are alike. The Warthog's marks its glossy paint
 /// (not wear: as wear its hood was bare steel); a milder curve brings out
 /// the grime in it.
-const MASK_CURVES: [(&str, [f32; 2]); 8] = [
+const MASK_CURVES: [(&str, [f32; 2]); 9] = [
     ("weapons\\plasma", COVENANT_MASK_CURVE),
     ("weapons\\needler", COVENANT_MASK_CURVE),
     ("vehicles\\ghost\\", COVENANT_MASK_CURVE),
@@ -2736,6 +2754,8 @@ const MASK_CURVES: [(&str, [f32; 2]); 8] = [
     ("vehicles\\c_dropship\\", COVENANT_MASK_CURVE),
     ("vehicles\\c gun turret\\", COVENANT_MASK_CURVE),
     ("vehicles\\warthog\\", [2.0, 2.0]),
+    // (Chief's: doubled, his shine's variation with his detail's)
+    ("characters\\cyborg\\", [1.0, 2.0]),
 ];
 const COVENANT_MASK_CURVE: [f32; 2] = [3.0, 2.5];
 

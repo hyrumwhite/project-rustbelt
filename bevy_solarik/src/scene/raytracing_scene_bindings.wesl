@@ -523,6 +523,8 @@ struct ResolvedMaterial {
     clearcoat_perceptual_roughness: f32,
     // The coat is the second thin film (brdf.wesl's THIN_FILM_PEARL).
     pearl_coat: bool,
+    // The coat is plain, a 4% dielectric's (no thin film).
+    plain_coat: bool,
     // A thin pane's grime layer (MATERIAL_FLAG_GRIME): colour, coverage.
     grime: vec4<f32>,
 }
@@ -573,6 +575,7 @@ fn resolve_material_filtered(material: Material, uv: vec2f, uv_width: vec2f) -> 
     m.reflectance = material.reflectance;
     m.lommel = (material.flags & 32u) != 0u;
     m.pearl_coat = (material.flags & 128u) != 0u;
+    m.plain_coat = (material.flags & 512u) != 0u;
     // Realtime estimators opt in only once both hemispheres are supported.
 @if(FOLIAGE_TRANSMISSION) {
     m.diffuse_transmission = f32(material.flags >> 16u) / 65535.0;

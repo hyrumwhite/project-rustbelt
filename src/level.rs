@@ -395,6 +395,8 @@ pub struct LevelAssets<'a> {
     pub water_ripples: Option<&'a mut bevy_solarik::water_ripples::WaterRippleMaterials>,
     /// The materials whose coat is Solarik's pearl film, for its rays.
     pub pearl_coats: Option<&'a mut bevy_solarik::lommel::PearlCoatMaterials>,
+    /// The materials whose coat is plain (no thin film), for Solarik's rays.
+    pub plain_coats: Option<&'a mut bevy_solarik::lommel::PlainCoatMaterials>,
     /// The glass panes whose texture is their grime layer, for Solarik's
     /// rays.
     pub glass_grime: Option<&'a mut bevy_solarik::glass_grime::GlassGrimeMaterials>,
@@ -1966,6 +1968,9 @@ impl LevelBuilder {
                 if info.as_ref().is_some_and(|i| pearl_coat(&i.name)) && let Some(pearl) = assets.pearl_coats.as_deref_mut() {
                     pearl.0.insert(standard.id());
                 }
+                if info.as_ref().is_some_and(|i| human_eyes(&i.name)) && let Some(plain) = assets.plain_coats.as_deref_mut() {
+                    plain.0.insert(standard.id());
+                }
                 Surface::Solid(SolidSurface { standard, raster: raster.or(solid.raster.clone()), ..solid.clone() })
             }
             _ => base.clone(),
@@ -2109,6 +2114,10 @@ impl LevelBuilder {
             material.clearcoat = strength;
             material.clearcoat_perceptual_roughness = roughness;
             material.clearcoat_texture = material.metallic_roughness_texture.clone();
+            // (the eyes' all over)
+            if human_eyes(&info.name) {
+                material.clearcoat_texture = None;
+            }
             // Chief's only on his armour plates: the multipurpose map's blue,
             // the change colour's mask (its red, the reflection mask, takes
             // in his black suit too), baked into the red the coat reads
@@ -2161,7 +2170,9 @@ impl LevelBuilder {
                 Some(self.environment_material(environment, base_map.clone(), &material, info, assets))
             }
             // (a model's detail map: the camera's; the rays keep the base)
-            (None, Some(base_map)) if info.model_detail.is_some() => {
+            // (and the human eyes', with no detail, for its G-buffer flag:
+            // their coat plain)
+            (None, Some(base_map)) if info.model_detail.is_some() || human_eyes(&info.name) => {
                 self.model_detail_material(base_map.clone(), &material, info, assets)
             }
             _ => None,
@@ -2180,12 +2191,17 @@ impl LevelBuilder {
         if pearl_coat(&info.name) && let Some(pearl) = assets.pearl_coats.as_deref_mut() {
             pearl.0.insert(standard.id());
         }
+        if human_eyes(&info.name) && let Some(plain) = assets.plain_coats.as_deref_mut() {
+            plain.0.insert(standard.id());
+        }
         Some(Surface::Solid(SolidSurface { standard, raster, radiance, unseen, seen_as }))
     }
 
     /// A `shader_model`'s camera material with its detail map (see
     /// `shader::ModelDetail` and `halo_environment.wesl`'s model mode), over
-    /// `standard`; None if its detail map can't be had.
+    /// `standard`; None if its detail map can't be had. A shader without one
+    /// gets the neutral detail at no gain, which leaves its base map as it is
+    /// (the human eyes', for their plain coat's G-buffer flag).
     fn model_detail_material(
         &mut self,
         base_map: Handle<Image>,
@@ -2193,8 +2209,16 @@ impl LevelBuilder {
         info: &ShaderInfo,
         assets: &mut LevelAssets,
     ) -> Option<Handle<HaloEnvironmentMaterial>> {
-        let detail = info.model_detail?;
-        let detail_map = self.textures.permuted(&self.cache, detail.map.datum?, self.permutation, true, assets.images)?;
+        let (detail, detail_map, gain) = match info.model_detail {
+            Some(detail) => {
+                let map = self.textures.permuted(&self.cache, detail.map.datum?, self.permutation, true, assets.images)?;
+                (detail, map, model_detail_gain(&info.name))
+            }
+            None => {
+                let none = halo_map::shader::ModelDetail { map: TagRef { group: 0, datum: None }, function: 0, mask: 0, scale: [1.0, 1.0] };
+                (none, assets.neutral_detail.clone(), 0.0)
+            }
+        };
         // (the mask, read as it is stored)
         let multipurpose = info
             .multipurpose_map
@@ -2210,12 +2234,14 @@ impl LevelBuilder {
                 params: HaloEnvironmentParams {
                     detail_scales: scale.extend(1.0).extend(1.0),
                     // (x: the detail's gain, see MODEL_DETAIL_GAINS)
-                    micro_scale: Vec4::new(model_detail_gain(&info.name), 1.0, 1.0, 1.0),
+                    micro_scale: Vec4::new(gain, 1.0, 1.0, 1.0),
                     modes: UVec4::new(
                         detail.mask as u32,
                         detail.function as u32,
                         0,
-                        crate::material::MODEL_DETAIL | if pearl_coat(&info.name) { crate::material::PEARL_COAT } else { 0 },
+                        crate::material::MODEL_DETAIL
+                            | if pearl_coat(&info.name) { crate::material::PEARL_COAT } else { 0 }
+                            | if human_eyes(&info.name) { crate::material::PLAIN_COAT } else { 0 },
                     ),
                     ..default()
                 },
@@ -2809,6 +2835,19 @@ fn covenant_vehicle(shader: &str) -> bool {
         && !["self illuminated", "burned", "destroyed"].iter().any(|part| shader.contains(part))
 }
 
+/// The human characters' eye shaders (the marines' `eyes_<name>`, Johnson's,
+/// Keyes' `captain_eyes`: their eyes are meshes of their own), which get a
+/// plain clear coat, a wet eye's gloss (`HALO_RT_EYE_COAT=strength,roughness`,
+/// 0 none).
+fn human_eyes(shader: &str) -> bool {
+    let shader = shader.to_ascii_lowercase();
+    ["characters\\marine", "characters\\captain"].iter().any(|path| shader.starts_with(path))
+        && shader.rsplit('\\').next().is_some_and(|name| name.contains("eyes"))
+}
+/// The eyes' coat: full strength, near a mirror (the G-buffer's thirtieths:
+/// 2/30).
+const EYE_COAT: (f32, f32) = (1.0, 0.067);
+
 /// Whether a shader's coat is Solarik's pearl film (its second thin film,
 /// main.rs's `PEARL_FILM`): Chief's armour.
 fn pearl_coat(shader: &str) -> bool {
@@ -2829,8 +2868,8 @@ fn painted(shader: &str) -> Option<[u8; 3]> {
     (c.len() == 3).then(|| [c[0], c[1], c[2]].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
 }
 
-/// A shader's clear coat, if it has one: the Elites' and Chief's armour, and
-/// the Covenant vehicles' panels.
+/// A shader's clear coat, if it has one: the Elites' and Chief's armour, the
+/// Covenant vehicles' panels, and the human eyes.
 /// `HALO_RT_ELITE_COAT` and `HALO_RT_CHIEF_COAT=strength,roughness` override
 /// them (0 none).
 fn clear_coat(shader: &str) -> Option<(f32, f32)> {
@@ -2840,6 +2879,8 @@ fn clear_coat(shader: &str) -> Option<(f32, f32)> {
         (CHIEF_COAT, "HALO_RT_CHIEF_COAT")
     } else if covenant_vehicle(shader) {
         (ELITE_COAT, "HALO_RT_COVENANT_COAT")
+    } else if human_eyes(shader) {
+        (EYE_COAT, "HALO_RT_EYE_COAT")
     } else {
         return None;
     };

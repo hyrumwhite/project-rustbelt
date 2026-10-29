@@ -425,7 +425,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     mesh_allocator: Res<MeshAllocator>,
     mut blas_manager: ResMut<BlasManager>,
     material_assets: Res<StandardMaterialAssets>,
-    (collimated, detailed, gaussian, lommel, ripples, pearl, grime): (
+    (collimated, detailed, gaussian, lommel, ripples, pearl, grime, plain): (
         Res<CollimatedMaterials>,
         Res<DetailedRayMaterials>,
         Res<GaussianRayMaterials>,
@@ -433,6 +433,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         Res<crate::water_ripples::WaterRippleMaterials>,
         Res<crate::lommel::PearlCoatMaterials>,
         Res<crate::glass_grime::GlassGrimeMaterials>,
+        Res<crate::lommel::PlainCoatMaterials>,
     ),
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
@@ -543,6 +544,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         || gaussian.is_changed()
         || lommel.is_changed()
         || pearl.is_changed()
+        || plain.is_changed()
         || ripples.is_changed()
         || grime.is_changed()
         || texture_assets.is_changed()
@@ -913,6 +915,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             flags: alpha.flags
                 | if lommel.0.contains(asset_id) { 32 } else { 0 }
                 | if pearl.0.contains(asset_id) { 128 } else { 0 }
+                | if plain.0.contains(asset_id) { 512 } else { 0 }
                 | if grime.0.contains(asset_id) && alpha.flags & MATERIAL_FLAG_ALPHA_BLEND != 0 {
                     MATERIAL_FLAG_GRIME
                 } else {

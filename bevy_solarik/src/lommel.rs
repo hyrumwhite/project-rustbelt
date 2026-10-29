@@ -45,6 +45,13 @@ pub struct LommelRayMaterials(pub HashSet<AssetId<StandardMaterial>>);
 #[derive(Resource, Clone, Default, ExtractResource)]
 #[extract_app(bevy_render::RenderApp)]
 pub struct PearlCoatMaterials(pub HashSet<AssetId<StandardMaterial>>);
+/// Materials whose clear coat is plain (a 4% dielectric's, never a thin
+/// film's, whatever THIN_FILM_COAT says), for the rays; the camera's G-buffer
+/// marks them itself (bit 31, `plain_coat_gbuffer`). Caller owns entry
+/// lifetime.
+#[derive(Resource, Clone, Default, ExtractResource)]
+#[extract_app(bevy_render::RenderApp)]
+pub struct PlainCoatMaterials(pub HashSet<AssetId<StandardMaterial>>);
 pub struct LommelSeeligerPlugin;
 impl Plugin for LommelSeeligerPlugin {
     fn build(&self, app: &mut App) {
@@ -54,6 +61,8 @@ impl Plugin for LommelSeeligerPlugin {
         app.add_plugins(ExtractResourcePlugin::<LommelRayMaterials>::default());
         app.init_resource::<PearlCoatMaterials>();
         app.add_plugins(ExtractResourcePlugin::<PearlCoatMaterials>::default());
+        app.init_resource::<PlainCoatMaterials>();
+        app.add_plugins(ExtractResourcePlugin::<PlainCoatMaterials>::default());
         app.add_plugins(MaterialPlugin::<LommelMaterial>::default());
     }
 }

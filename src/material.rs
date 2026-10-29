@@ -210,6 +210,8 @@ pub const ENVIRONMENT_TEXTURE_ANIMATION: u32 = 1 << 3;
 pub const MODEL_DETAIL: u32 = 1 << 4;
 /// A pearl coat (Solarik's second thin film): the G-buffer's flag bit 30.
 pub const PEARL_COAT: u32 = 1 << 5;
+/// A plain coat (no thin film): the G-buffer's flag bit 31.
+pub const PLAIN_COAT: u32 = 1 << 6;
 
 const SHADER: &str = "embedded://halo_rt/shaders/halo_environment.wesl";
 

@@ -231,6 +231,10 @@ fn fragment(
     if (halo.modes.w & 32u) != 0u {
         out.deferred.a |= 0x40000000u;
     }
+    // a plain coat (PLAIN_COAT): lommel_math.wesl's plain_coat_gbuffer
+    if (halo.modes.w & 64u) != 0u {
+        out.deferred.a |= 0x80000000u;
+    }
 } @else {
     out.color = apply_pbr_lighting(pbr_input);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);

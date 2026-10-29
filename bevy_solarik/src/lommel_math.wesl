@@ -11,6 +11,12 @@ fn pearl_coat_gbuffer(gbuffer: vec4<u32>) -> vec4<u32> {
     result.a |= 0x40000000u;
     return result;
 }
+// A plain coat (PlainCoatMaterials), in the flags' bit 31.
+fn plain_coat_gbuffer(gbuffer: vec4<u32>) -> vec4<u32> {
+    var result = gbuffer;
+    result.a |= 0x80000000u;
+    return result;
+}
 fn lommel_gbuffer(gbuffer:vec4<u32>,enabled:f32)->vec4<u32> {
     var result=gbuffer;
     if enabled>0.0 {result.a|=0x10000000u;}

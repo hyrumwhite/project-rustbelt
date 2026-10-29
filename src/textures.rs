@@ -19,6 +19,9 @@ pub struct TextureCache {
     counts: HashMap<u32, usize>,
     /// 3D bitmaps (plasma's noise), by tag.
     volumes: HashMap<u32, Option<Handle<Image>>>,
+    /// Bitmaps' mean linear colours (each texel's times its alpha, for an
+    /// additive shader's light), by tag and image.
+    means: HashMap<(u32, u16), Option<[f32; 3]>>,
     /// Whether the GPU takes BC (DXT) textures as they are.
     pub bc_supported: bool,
     pub failures: usize,
@@ -110,6 +113,25 @@ impl GunmetalFinish {
 pub const MATTE_ROUGHNESS: f32 = 0.9;
 
 impl TextureCache {
+    /// A bitmap image's mean linear colour, each texel's weighted by its
+    /// alpha where `alpha` (an alpha-multiplied additive blend), at the base
+    /// level (the image for a shader permutation, as [`TextureCache::permuted`]).
+    pub fn mean_linear(&mut self, cache: &CacheFile, datum: u32, permutation: u16, alpha: bool) -> Option<[f32; 3]> {
+        *self.means.entry((datum, permutation | if alpha { 0x8000 } else { 0 })).or_insert_with(|| {
+            let image = rgba8(cache, datum, permutation).ok()?;
+            let mut sum = [0.0f64; 3];
+            let mut count = 0usize;
+            for texel in image.data.chunks_exact(4).take((image.width * image.height) as usize) {
+                let a = if alpha { texel[3] as f64 / 255.0 } else { 1.0 };
+                for c in 0..3 {
+                    sum[c] += (texel[c] as f64 / 255.0).powf(2.2) * a;
+                }
+                count += 1;
+            }
+            (count > 0).then(|| sum.map(|s| (s / count as f64) as f32))
+        })
+    }
+
     /// A bake from its bitmaps' images for a shader permutation (see
     /// [`TextureCache::permuted`]).
     pub fn baked(&mut self, cache: &CacheFile, bake: Bake, permutation: u16, images: &mut Assets<Image>) -> Option<Handle<Image>> {

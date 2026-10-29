@@ -322,6 +322,46 @@ fn fixture_spot_look(fixture: &str) -> Option<FixtureSpotLook> {
 /// (with the default emissive scale and exposure, about display white).
 const SELF_ILLUMINATION_RADIANCE: f32 = 2.5;
 
+/// Glowing see-through surfaces light the scene (play feedback: a50's dark
+/// ship; its holograms, energy doors and grav lift lit nothing): a
+/// transparent shader added to the picture (additively, not a decal) is an
+/// emitter the rays alone see, as a level's light cards are, its picture
+/// drawn over it as before. Its radiance is its first map's mean colour (by
+/// alpha, alpha-multiplied) as self-illumination's, times this: their maps
+/// are mostly dark round their bright lines (a hologram's mean is 2%), and
+/// at self-illumination's own they lit nothing to see. (Tuning:
+/// `HALO_RT_GLOW_LIGHT=<share>`, 0 none.)
+const GLOW_LIGHT: f32 = 8.0;
+/// Glowing surfaces that light nothing (a shader path's start, or a word
+/// in its name): what a weapon or effect holds is its own (its lights are
+/// the game's), and the volumetric cones picture a fixture's light, which
+/// the fixture already casts; b40's dome is a sky.
+const GLOW_UNLIT: [&str; 5] = ["weapons\\", "effects\\", "sky\\", "vol", "levels\\b40\\shaders\\b40_domesky"];
+/// The most a glowing surface's light reaches (radiance, before its tint):
+/// an energy door's white map, whole, would light like the ship's own lamps
+/// (theirs are near 100; a hologram's, mostly dark, under 1).
+const GLOW_MOST: f32 = 8.0;
+
+/// Emitters restyled (by shader tag): their light's gain, and its colour
+/// (`None` its own; else this, at its own luminance). Truth and
+/// Reconciliation's white light strips (a50's ship, d20's the same) a soft
+/// teal, as its ceiling lamps (`FIXTURE_SPOT_LOOKS`; play feedback: the
+/// ship's light all white); its grav lift's column, a dim purple that lit
+/// nothing at night, brighter.
+const EMITTER_LOOKS: [(&str, f32, Option<[f32; 3]>); 4] = [
+    ("levels\\a50\\shaders\\covenant light bright white", 1.0, Some(SHIP_TEAL)),
+    ("levels\\a50\\shaders\\covenant light dim white", 1.0, Some(SHIP_TEAL)),
+    ("levels\\d20\\shaders\\covenant light 40 white", 1.0, Some(SHIP_TEAL)),
+    ("levels\\a50\\shaders\\grav lift energy", 12.0, None),
+];
+/// Truth and Reconciliation's light, a soft teal of luminance one.
+const SHIP_TEAL: [f32; 3] = [0.63, 1.09, 1.09];
+
+/// An emitter's restyling (see [`EMITTER_LOOKS`]).
+fn emitter_look(shader: &str) -> Option<(f32, Option<[f32; 3]>)> {
+    EMITTER_LOOKS.iter().find(|(name, ..)| shader.eq_ignore_ascii_case(name)).map(|&(_, gain, tint)| (gain, tint))
+}
+
 /// What a loaded level contains, for the overlay.
 #[derive(Resource, Default, Clone)]
 pub struct LevelStats {
@@ -1017,6 +1057,44 @@ impl LevelBuilder {
         Ok(())
     }
 
+    /// A glowing see-through surface's light, if its shader is one (see
+    /// [`GLOW_LIGHT`]).
+    fn glow_radiance(&mut self, info: &ShaderInfo) -> Option<Vec3> {
+        use shader::{BlendFunction, TransparentInfo};
+        let scale = std::env::var("HALO_RT_GLOW_LIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(GLOW_LIGHT);
+        let transparent = info.transparent.as_ref()?;
+        let alpha = match transparent.blend {
+            BlendFunction::Add => false,
+            BlendFunction::AlphaMultiplyAdd => true,
+            _ => return None,
+        };
+        if scale <= 0.0
+            || info.meter.is_some()
+            || transparent.flags & TransparentInfo::DECAL != 0
+            || transparent.first_map_type != 0
+            || GLOW_UNLIT.iter().any(|unlit| if unlit.contains('\\') { info.name.starts_with(unlit) } else { info.name.contains(unlit) })
+        {
+            return None;
+        }
+        let map = transparent.maps.first()?.as_ref()?.bitmap.datum?;
+        let mean = Vec3::from(self.textures.mean_linear(&self.cache, map, self.permutation, alpha)?);
+        // a generic shader's colour: its first stage colour that has one (an
+        // energy door's map is white, its blue the stage's), white
+        // otherwise
+        let tint = transparent
+            .stage_colors
+            .iter()
+            .map(|stage| Vec3::new(stage.color1[0], stage.color1[1], stage.color1[2]).max(Vec3::new(stage.color0[0], stage.color0[1], stage.color0[2])))
+            .find(|color| color.max_element() > 0.0)
+            .map_or(Vec3::ONE, |color| color / color.max_element());
+        let radiance = (mean * SELF_ILLUMINATION_RADIANCE * scale).min(Vec3::splat(GLOW_MOST)) * tint;
+        // (HALO_RT_GLOW_LOG: each, in the log)
+        if std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+            info!("glowing surface {}: mean {mean:.4}, radiance {radiance:.3}", info.name);
+        }
+        (radiance.max_element() > 1e-3).then_some(radiance)
+    }
+
     /// A light fixture's light: a point light just in front of it, as
     /// bright as the emissive sphere that stood in for it under Solari (a
     /// sphere of radiance L and radius r is L π r² candela, 4π times that in
@@ -1523,6 +1601,21 @@ impl LevelBuilder {
         let mut animated_shaders: Vec<ShaderUse> = Vec::new();
         let mut animated_by_shader: HashMap<ShaderUse, Surface> = HashMap::new();
         let mut animate = |builder: &mut Self, surface: Surface, shader: Option<ShaderUse>, assets: &mut LevelAssets| -> Surface {
+            // a glowing surface's picture, as a transparent surface's below
+            // (its light, the rays', keeps still)
+            if let (Surface::Solid(solid @ SolidSurface { unseen: true, seen_as: Some(material), .. }), Some(shader)) = (&surface, shader) {
+                if let Some(copy) = animated_by_shader.get(&shader) {
+                    return copy.clone();
+                }
+                let Some(mut copy) = assets.transparent_materials.get(material).cloned() else { return surface };
+                if !copy.animation.as_ref().is_some_and(|a| a.uses_object()) && copy.meter.is_none() && copy.plasma.is_none() {
+                    return surface;
+                }
+                copy.object = Some(root);
+                let copy = Surface::Solid(SolidSurface { seen_as: Some(assets.transparent_materials.add(copy)), ..solid.clone() });
+                animated_by_shader.insert(shader, copy.clone());
+                return copy;
+            }
             // a transparent surface its object's functions or colours drive:
             // a copy of its material for this object (`ObjectFunctions` on
             // the root, `animate_transparent`)
@@ -1934,6 +2027,14 @@ impl LevelBuilder {
             .and_then(|datum| self.textures.permuted(&self.cache, datum, self.permutation, true, assets.images));
         let radiance = Vec3::from(info.emitted_light) * info.emitted_power;
         let emits = info.emitted_power > 0.0 && radiance != Vec3::ZERO;
+        // (or a glowing see-through surface's light: see GLOW_LIGHT)
+        let glow = if emits { None } else { self.glow_radiance(info) };
+        let (radiance, emits) = glow.map_or((radiance, emits), |glow| (glow, true));
+        // (some restyled: see EMITTER_LOOKS)
+        let radiance = emitter_look(&info.name).map_or(radiance, |(gain, tint)| {
+            let tinted = tint.map_or(radiance, |tint| Vec3::from(tint) * radiance.dot(Vec3::new(0.2126, 0.7152, 0.0722)));
+            tinted * gain
+        });
 
         if info.shader_type.is_transparent() && !emits {
             if let Some(material) = self.glass_or_water_material(info, assets) {

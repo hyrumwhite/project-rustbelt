@@ -14,6 +14,7 @@ import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
 import bevy_solarik::realtime::gbuffer_utils::raster_reconstruction_error;
+import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
 import bevy_solarik::realtime::presample_light_tiles::unpack_resolved_light_sample;
 import bevy_solarik::realtime::presample_light_tiles::light_tile_seed;
 import bevy_solarik::scene::sampling::LightSample;
@@ -99,7 +100,7 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
-    let diffuse_brdf = surface.material.base_color / PI;
+    let diffuse_brdf = target_brdf(surface.material);
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, diffuse_brdf, workgroup_id.xy, &rng);
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, diffuse_brdf,
@@ -123,7 +124,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
-    let diffuse_brdf = surface.material.base_color / PI;
+    let diffuse_brdf = target_brdf(surface.material);
     let input_reservoir = load_reservoir_b(global_id.xy);
     let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
     let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, diffuse_brdf,
@@ -343,7 +344,7 @@ fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, world
     // Check if the pixel features have changed heavily between the current and previous frame
     let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
     let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, temporal_pixel_id, 0), temporal_depth, temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
-    let temporal_diffuse_brdf = temporal_surface.material.base_color / PI;
+    let temporal_diffuse_brdf = target_brdf(temporal_surface.material);
     if pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), vec3(0.0));
     }
@@ -358,7 +359,7 @@ fn load_spatial_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<
 
         let spatial_depth = textureLoad(depth_buffer, spatial_pixel_id, 0);
         let spatial_surface = gpixel_resolve(textureLoad(gbuffer, spatial_pixel_id, 0), spatial_depth, spatial_pixel_id, view.main_pass_viewport.zw, view.world_from_clip);
-        let spatial_diffuse_brdf = spatial_surface.material.base_color / PI;
+        let spatial_diffuse_brdf = target_brdf(spatial_surface.material);
         if pixel_dissimilar(depth, world_position, spatial_surface.world_position, world_normal, spatial_surface.world_normal, view) {
             continue;
         }
@@ -395,6 +396,19 @@ fn empty_reservoir() -> Reservoir {
         0.0,
         0.0,
     );
+}
+
+// The least albedo a surface's lights are weighed by (a dielectric's
+// reflectance): weighed by the diffuse colour alone, a black surface found
+// no light, and so took no highlight either (the shading's BRDF has its
+// specular lobe): a Covenant crate's bevels, mapped on its texture's black
+// outlines, went black beside its glossy body's bright highlight.
+const TARGET_ALBEDO_FLOOR: f32 = 0.04;
+
+// The diffuse BRDF lights are weighed by when one is picked (see
+// TARGET_ALBEDO_FLOOR); the shading evaluates the surface's own.
+fn target_brdf(material: ResolvedMaterial) -> vec3<f32> {
+    return max(material.base_color, vec3(TARGET_ALBEDO_FLOOR)) / PI;
 }
 
 fn reservoir_valid(reservoir: Reservoir) -> bool {

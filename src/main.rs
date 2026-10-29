@@ -29,6 +29,7 @@ mod overlay;
 mod reveal;
 mod screen_effect;
 mod sky;
+mod sprite_lights;
 #[cfg(feature = "dlss")]
 mod sky_overlay;
 mod textures;
@@ -499,7 +500,7 @@ fn main() -> AppExit {
                 app.add_plugins((hud::HudPlugin, screen_effect::ScreenEffectPlugin));
             }
             if args.viewer_effects() {
-                app.add_plugins(effects::EffectsPlugin);
+                app.add_plugins((effects::EffectsPlugin, sprite_lights::SpriteLightsPlugin));
                 // (the lens flares are added in the fog pass; without it the
                 // game draws them)
                 if args.viewer_fog() {

@@ -552,7 +552,8 @@ network tests (port/linux/game/network_test.c), different for each seed:
 it walks and strafes in circles, turns, fires every few seconds, jumps now
 and then and throws a grenade every seven seconds; "look:<seed>" stands
 still, only turning and looking up and down (where remote players aim and
-whether they stand) */
+whether they stand); "throw" stands still, throwing a grenade every four
+seconds (the effects' light, in the viewer) */
 static int test_input_holding_action;
 static Uint64 test_input_holding_action_since;
 
@@ -571,6 +572,7 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	static int checked;
 	static int seed = -1;
 	static int looking;
+	static int throwing;
 	double t;
 
 	if (!checked)
@@ -582,6 +584,11 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 			seed = atoi(setting + 4);
 		else if (!strcmp(setting, "bot"))
 			seed = 0;
+		else if (!strcmp(setting, "throw"))
+		{
+			seed = 0;
+			throwing = 1;
+		}
 		else if (!strncmp(setting, "look:", 5))
 		{
 			seed = atoi(setting + 5);
@@ -598,6 +605,12 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 		return;
 	}
 	t = (double)SDL_GetTicks() / 1000.0 + seed * 1.7;
+	if (throwing)
+	{
+		if (fmod(t, 4.0) < 0.2)
+			pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = 255;
+		return;
+	}
 	if (looking)
 	{
 		pad->sThumbRX = (SHORT)(sin(t * 0.5) * 14000.0);

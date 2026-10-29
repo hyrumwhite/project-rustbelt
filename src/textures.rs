@@ -22,6 +22,9 @@ pub struct TextureCache {
     /// Bitmaps' mean linear colours (each texel's times its alpha, for an
     /// additive shader's light), by tag and image.
     means: HashMap<(u32, u16), Option<[f32; 3]>>,
+    /// Bitmap images' linear colours summed (a summed-area table), for a
+    /// sprite's share of its sheet, by tag and image.
+    sums: HashMap<(u32, u16), Option<SummedArea>>,
     /// Whether the GPU takes BC (DXT) textures as they are.
     pub bc_supported: bool,
     pub failures: usize,
@@ -112,7 +115,69 @@ impl GunmetalFinish {
 /// Roughness where a surface's specular mask is zero.
 pub const MATTE_ROUGHNESS: f32 = 0.9;
 
+/// An image's linear colours summed from its corner: entry (x, y) is the
+/// sum of the texels left of x and above y.
+pub struct SummedArea {
+    width: u32,
+    height: u32,
+    sums: Vec<[f32; 3]>,
+}
+
+impl SummedArea {
+    fn new(image: &bitmap::Decoded) -> Self {
+        let (width, height) = (image.width, image.height);
+        let stride = width as usize + 1;
+        let mut sums = vec![[0.0f32; 3]; stride * (height as usize + 1)];
+        for y in 0..height as usize {
+            let mut row = [0.0f32; 3];
+            for x in 0..width as usize {
+                let texel = &image.data[(y * width as usize + x) * 4..][..3];
+                for c in 0..3 {
+                    row[c] += (texel[c] as f32 / 255.0).powf(2.2);
+                    sums[(y + 1) * stride + x + 1][c] = sums[y * stride + x + 1][c] + row[c];
+                }
+            }
+        }
+        SummedArea { width, height, sums }
+    }
+
+    /// The mean linear colour within texture coordinates `min` to `max`
+    /// (a span of a whole image or more: the image's).
+    pub fn mean(&self, min: [f32; 2], max: [f32; 2]) -> [f32; 3] {
+        let span = |lo: f32, hi: f32, size: u32| -> (usize, usize) {
+            if hi - lo >= 1.0 {
+                return (0, size as usize);
+            }
+            // (wrapped into the image, its span cut at its edge)
+            let width = hi - lo;
+            let lo = lo - lo.floor();
+            let hi = (lo + width).min(1.0);
+            let a = ((lo * size as f32).floor() as usize).min(size as usize - 1);
+            let b = ((hi * size as f32).ceil() as usize).clamp(a + 1, size as usize);
+            (a, b)
+        };
+        let (x0, x1) = span(min[0], max[0], self.width);
+        let (y0, y1) = span(min[1], max[1], self.height);
+        let stride = self.width as usize + 1;
+        let at = |x: usize, y: usize| self.sums[y * stride + x];
+        let count = ((x1 - x0) * (y1 - y0)) as f32;
+        let mut mean = [0.0; 3];
+        for (c, m) in mean.iter_mut().enumerate() {
+            *m = (at(x1, y1)[c] - at(x0, y1)[c] - at(x1, y0)[c] + at(x0, y0)[c]) / count;
+        }
+        mean
+    }
+}
+
 impl TextureCache {
+    /// A bitmap image's summed linear colours (see [`SummedArea`]).
+    pub fn summed_area(&mut self, cache: &CacheFile, datum: u32, index: u16) -> Option<&SummedArea> {
+        self.sums
+            .entry((datum, index))
+            .or_insert_with(|| rgba8(cache, datum, index).ok().filter(|image| image.width > 0 && image.height > 0).map(|image| SummedArea::new(&image)))
+            .as_ref()
+    }
+
     /// A bitmap image's mean linear colour, each texel's weighted by its
     /// alpha where `alpha` (an alpha-multiplied additive blend), at the base
     /// level (the image for a shader permutation, as [`TextureCache::permuted`]).

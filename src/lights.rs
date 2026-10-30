@@ -122,8 +122,8 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 
 /// Lights dimmed from their tags' brightness (by the light tag's name, or
 /// a folder's, ending in a backslash): a wide reach is a bright light here
-/// (brightness grows with its square).
-const LIGHT_DIMMING: [(&str, f32); 9] = [
+/// (brightness grows with its square). Dimmed to 0, left out.
+const LIGHT_DIMMING: [(&str, f32); 10] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights)
     ("characters\\monitor\\monitor dynamic", 0.15),
@@ -148,6 +148,12 @@ const LIGHT_DIMMING: [(&str, f32); 9] = [
     // feedback: much too bright. With its small sphere's twenty-fifth
     // (`SMALL_LIGHTS`), a twelfth of the tag's.)
     ("levels\\a50\\devices\\small door\\small door light", 2.0),
+    // (a10's command displays', at each object's origin, inside the
+    // bridge's console under its holographic panel: its sphere cut a dark
+    // disc in the console in a bright ring, play feedback's "donut", and
+    // wherever it was moved clear, the panel's glass reflected it a white
+    // ball, however small or dim; the bridge's lamps light the console)
+    ("levels\\a10\\devices\\command display\\command display", 0.0),
 ];
 
 /// Lights smaller than [`LIGHT_RADIUS`] (by the light tag's name), raised
@@ -369,6 +375,10 @@ fn sync_lights(
                 snapshot.game_tick, light.position, light.forward, light.color, light.radius, light.cutoff_angle.to_degrees(), light.falloff_angle.to_degrees(),
                 snapshot.camera.as_ref().map(|c| c.forward), near_camera.is_some(), light.definition_index, light.definition_flags, light.object_index
             );
+        }
+        // (dimmed to none: left out)
+        if tag.dimming <= 0.0 {
+            continue;
         }
         let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
         let vehicle = spot && !muzzle && near_camera.is_none();

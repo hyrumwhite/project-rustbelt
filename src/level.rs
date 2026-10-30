@@ -534,6 +534,11 @@ const PLAIN_GLASS_F0: f32 = 0.16 * 0.6 * 0.6;
 /// How deep an actively camouflaged body's glass is (metres): how far it
 /// bends the picture behind it.
 const CAMOUFLAGE_THICKNESS: f32 = 0.6;
+/// The first-person arms' and weapon's: at a limb's depth, a hand's breadth
+/// from the camera, each flat face of the weapon bent the picture behind it
+/// its own way, and the weapon broke into shards (play feedback: as if its
+/// colliders showed).
+const FIRST_PERSON_CAMOUFLAGE_THICKNESS: f32 = 0.05;
 
 /// Roughness where a reflective model shader's specular mask is zero: a
 /// plastic's sheen, not the matte of surfaces Halo gives no reflection. That
@@ -546,8 +551,10 @@ const MODEL_UNMASKED_ROUGHNESS: f32 = 0.45;
 /// tag's path): the share of their gloss and metal they keep, the rest
 /// toward [`DULL_ROUGHNESS`] (lit by the level's own lights, Chief's
 /// armour and the vehicles shone like chrome).
-const MODEL_SHINE: [(&str, f32); 9] = [
+const MODEL_SHINE: [(&str, f32); 10] = [
     ("characters\\cyborg\\", 0.3),
+    // (the Hunters' armour, a dull metal: play feedback, near a mirror)
+    ("characters\\hunter\\", 0.3),
     ("characters\\marine", 0.5),
     ("characters\\grunt\\", 0.8),
     ("vehicles\\scorpion\\", 0.15),
@@ -562,7 +569,10 @@ const MODEL_SHINE: [(&str, f32); 9] = [
 /// Models whose reflection is paint's sheen, not bare metal (by the shader
 /// tag's path): the share of their metalness they keep. Halo adds a model's
 /// reflection over its full colour; as metal it greyed the Warthog's olive.
-const MODEL_METAL: [(&str, f32); 2] = [("vehicles\\warthog\\", 0.1), ("vehicles\\pelican\\", 0.2)];
+/// More than one keeps a dulled model metal: the Hunters' armour, which
+/// [`MODEL_SHINE`] dulls, metalness and all, to 0.3 of Halo's (its metalness
+/// 0.9 of what its mask says, as before; rough, 0.44).
+const MODEL_METAL: [(&str, f32); 3] = [("vehicles\\warthog\\", 0.1), ("vehicles\\pelican\\", 0.2), ("characters\\hunter\\", 3.3)];
 
 /// The roughness a model's gloss fades toward as [`MODEL_SHINE`] dulls it.
 const DULL_ROUGHNESS: f32 = 0.6;
@@ -666,7 +676,7 @@ pub struct LevelBuilder {
     models: HashMap<(u32, [u8; 8]), Option<ModelMeshes>>,
     animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
     /// Its liquid glass, in the rays' scene.
-    camouflage_glass: Option<Handle<StandardMaterial>>,
+    camouflage_glass: [Option<Handle<StandardMaterial>>; 2],
     /// Surfaces tinted by a change colour, by shader and colour.
     coloured_surfaces: HashMap<(ShaderUse, [u8; 3]), Surface>,
     loaded_bsps: Vec<usize>,
@@ -737,7 +747,7 @@ impl LevelBuilder {
             models: HashMap::default(),
             animated_models: HashMap::default(),
             coloured_surfaces: HashMap::default(),
-            camouflage_glass: None,
+            camouflage_glass: [None, None],
             loaded_bsps: Vec::new(),
             bsp_roots: Vec::new(),
             breakable_roots: Vec::new(),
@@ -1905,16 +1915,17 @@ impl LevelBuilder {
 
     /// An actively camouflaged object's liquid glass: clear but for a cool
     /// tinge, smooth, as thick as a limb (Solarik bends the picture behind
-    /// it through that depth).
+    /// it through that depth); the first person's thin.
     fn camouflage_glass(&mut self, assets: &mut LevelAssets) -> Handle<StandardMaterial> {
-        self.camouflage_glass
+        let thickness = if self.first_person { FIRST_PERSON_CAMOUFLAGE_THICKNESS } else { CAMOUFLAGE_THICKNESS };
+        self.camouflage_glass[self.first_person as usize]
             .get_or_insert_with(|| {
                 assets.materials.add(StandardMaterial {
                     base_color: Color::srgb(0.93, 0.97, 1.0),
                     perceptual_roughness: 0.05,
                     reflectance: 0.5,
                     specular_transmission: 1.0,
-                    thickness: CAMOUFLAGE_THICKNESS,
+                    thickness,
                     alpha_mode: AlphaMode::Blend,
                     cull_mode: None,
                     double_sided: true,
@@ -2013,7 +2024,7 @@ impl LevelBuilder {
                 if info.as_ref().is_some_and(|i| pearl_coat(&i.name)) && let Some(pearl) = assets.pearl_coats.as_deref_mut() {
                     pearl.0.insert(standard.id());
                 }
-                if info.as_ref().is_some_and(|i| human_eyes(&i.name)) && let Some(plain) = assets.plain_coats.as_deref_mut() {
+                if info.as_ref().is_some_and(|i| plain_coat(&i.name)) && let Some(plain) = assets.plain_coats.as_deref_mut() {
                     plain.0.insert(standard.id());
                 }
                 Surface::Solid(SolidSurface { standard, raster: raster.or(solid.raster.clone()), ..solid.clone() })
@@ -2165,8 +2176,9 @@ impl LevelBuilder {
             }
             // Chief's only on his armour plates: the multipurpose map's blue,
             // the change colour's mask (its red, the reflection mask, takes
-            // in his black suit too), baked into the red the coat reads
-            if CHIEF_ARMOUR.iter().any(|name| info.name.eq_ignore_ascii_case(name))
+            // in his black suit too), baked into the red the coat reads; the
+            // Hunters' only on their worms, the same blue
+            if (CHIEF_ARMOUR.iter().any(|name| info.name.eq_ignore_ascii_case(name)) || hunter_worms(&info.name))
                 && let Some(multipurpose) = info.multipurpose_map.and_then(|m| m.datum)
             {
                 let bake = crate::textures::Bake::MetallicRoughness { mask: multipurpose, channel: 2, unmasked: 0, roughness: 0, metallic: 0, cloth: None, curve: None };
@@ -2215,9 +2227,9 @@ impl LevelBuilder {
                 Some(self.environment_material(environment, base_map.clone(), &material, info, assets))
             }
             // (a model's detail map: the camera's; the rays keep the base)
-            // (and the human eyes', with no detail, for its G-buffer flag:
-            // their coat plain)
-            (None, Some(base_map)) if info.model_detail.is_some() || human_eyes(&info.name) => {
+            // (and the plain coats', with no detail, for its G-buffer flag:
+            // the human eyes', the Hunters' worms')
+            (None, Some(base_map)) if info.model_detail.is_some() || plain_coat(&info.name) => {
                 self.model_detail_material(base_map.clone(), &material, info, assets)
             }
             _ => None,
@@ -2236,7 +2248,7 @@ impl LevelBuilder {
         if pearl_coat(&info.name) && let Some(pearl) = assets.pearl_coats.as_deref_mut() {
             pearl.0.insert(standard.id());
         }
-        if human_eyes(&info.name) && let Some(plain) = assets.plain_coats.as_deref_mut() {
+        if plain_coat(&info.name) && let Some(plain) = assets.plain_coats.as_deref_mut() {
             plain.0.insert(standard.id());
         }
         let light_gain = emitter_light_gain(&info.name);
@@ -2247,7 +2259,7 @@ impl LevelBuilder {
     /// `shader::ModelDetail` and `halo_environment.wesl`'s model mode), over
     /// `standard`; None if its detail map can't be had. A shader without one
     /// gets the neutral detail at no gain, which leaves its base map as it is
-    /// (the human eyes', for their plain coat's G-buffer flag).
+    /// (the plain coats', for their G-buffer flag).
     fn model_detail_material(
         &mut self,
         base_map: Handle<Image>,
@@ -2287,7 +2299,7 @@ impl LevelBuilder {
                         0,
                         crate::material::MODEL_DETAIL
                             | if pearl_coat(&info.name) { crate::material::PEARL_COAT } else { 0 }
-                            | if human_eyes(&info.name) { crate::material::PLAIN_COAT } else { 0 },
+                            | if plain_coat(&info.name) { crate::material::PLAIN_COAT } else { 0 },
                     ),
                     ..default()
                 },
@@ -2894,6 +2906,22 @@ fn human_eyes(shader: &str) -> bool {
 /// 2/30).
 const EYE_COAT: (f32, f32) = (1.0, 0.067);
 
+/// The Hunters' torso shader, whose orange (the multipurpose map's blue: the
+/// worm colony showing between its plates, and the spines on its back) gets
+/// a plain clear coat, wet (play feedback; `HALO_RT_HUNTER_COAT=strength,
+/// roughness`, 0 none).
+fn hunter_worms(shader: &str) -> bool {
+    shader.eq_ignore_ascii_case("characters\\hunter\\shaders\\hunter torso")
+}
+/// The worms' coat: full strength, near a mirror (4/30).
+const HUNTER_COAT: (f32, f32) = (1.0, 0.133);
+
+/// Whether a shader's coat is plain (no thin film): the human eyes', the
+/// Hunters' worms'.
+fn plain_coat(shader: &str) -> bool {
+    human_eyes(shader) || hunter_worms(shader)
+}
+
 /// Whether a shader's coat is Solarik's pearl film (its second thin film,
 /// main.rs's `PEARL_FILM`): Chief's armour.
 fn pearl_coat(shader: &str) -> bool {
@@ -2915,7 +2943,7 @@ fn painted(shader: &str) -> Option<[u8; 3]> {
 }
 
 /// A shader's clear coat, if it has one: the Elites' and Chief's armour, the
-/// Covenant vehicles' panels, and the human eyes.
+/// Covenant vehicles' panels, the human eyes and the Hunters' worms.
 /// `HALO_RT_ELITE_COAT` and `HALO_RT_CHIEF_COAT=strength,roughness` override
 /// them (0 none).
 fn clear_coat(shader: &str) -> Option<(f32, f32)> {
@@ -2927,6 +2955,8 @@ fn clear_coat(shader: &str) -> Option<(f32, f32)> {
         (ELITE_COAT, "HALO_RT_COVENANT_COAT")
     } else if human_eyes(shader) {
         (EYE_COAT, "HALO_RT_EYE_COAT")
+    } else if hunter_worms(shader) {
+        (HUNTER_COAT, "HALO_RT_HUNTER_COAT")
     } else {
         return None;
     };

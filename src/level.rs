@@ -286,10 +286,11 @@ const LAMP_SPOTLIGHTS: [(&str, f32, f32, f32, f32, [f32; 3]); 1] =
 /// flanking every door) lit the wall a hand's breadth below them in a hard
 /// bright oval beside each door (aimed straight down, still: the wall is
 /// that near); dimmed, with their cones widened to fade out, it is a glow.
-/// Their near-white is a soft teal, the ship's own (play feedback).
+/// Their near-white is a soft pink, the ship's own (play feedback: teal
+/// first, then pink asked for).
 const FIXTURE_SPOT_LOOKS: [(&str, FixtureSpotLook); 1] = [(
     "levels\\a50\\devices\\light_ceiling\\light_ceiling",
-    FixtureSpotLook { brightness: 0.35, falloff: 0.0, cutoff: 65.0, color: Some([0.45, 0.78, 0.78]) },
+    FixtureSpotLook { brightness: 0.35, falloff: 0.0, cutoff: 65.0, color: Some([1.10, 0.57, 0.92]) },
 )];
 
 /// A fixture's spot light restyled: its brightness (times its own), its
@@ -345,17 +346,39 @@ const GLOW_MOST: f32 = 8.0;
 /// Emitters restyled (by shader tag): their light's gain, and its colour
 /// (`None` its own; else this, at its own luminance). Truth and
 /// Reconciliation's white light strips (a50's ship, d20's the same) a soft
-/// teal, as its ceiling lamps (`FIXTURE_SPOT_LOOKS`; play feedback: the
-/// ship's light all white); its grav lift's column, a dim purple that lit
-/// nothing at night, brighter.
+/// pink, as its ceiling lamps (`FIXTURE_SPOT_LOOKS`; play feedback: the
+/// ship's light all white, then teal, then pink); its grav lift's column, a
+/// dim purple that lit nothing at night, brighter.
 const EMITTER_LOOKS: [(&str, f32, Option<[f32; 3]>); 4] = [
-    ("levels\\a50\\shaders\\covenant light bright white", 1.0, Some(SHIP_TEAL)),
-    ("levels\\a50\\shaders\\covenant light dim white", 1.0, Some(SHIP_TEAL)),
-    ("levels\\d20\\shaders\\covenant light 40 white", 1.0, Some(SHIP_TEAL)),
+    ("levels\\a50\\shaders\\covenant light bright white", 1.0, Some(SHIP_PINK)),
+    ("levels\\a50\\shaders\\covenant light dim white", 1.0, Some(SHIP_PINK)),
+    ("levels\\d20\\shaders\\covenant light 40 white", 1.0, Some(SHIP_PINK)),
     ("levels\\a50\\shaders\\grav lift energy", 12.0, None),
 ];
-/// Truth and Reconciliation's light, a soft teal of luminance one.
-const SHIP_TEAL: [f32; 3] = [0.63, 1.09, 1.09];
+/// Truth and Reconciliation's light, a soft pink of luminance one.
+const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
+
+/// Emitters whose light (the rays' emission alone; the camera sees them as
+/// before) is raised, by shader tag: Truth and Reconciliation's small blue
+/// and green circuit lights, mostly dark texture round their dots, and the
+/// long blue strips of its big rooms, self-illuminated at display white,
+/// lit nothing to see (play feedback). (Tuning: `HALO_RT_SHIP_LIGHT=<gain>`
+/// for all of them, 1 as Halo's.)
+const EMITTER_LIGHT_GAINS: [(&str, f32); 7] = [
+    ("levels\\a50\\shaders\\covenant circuits", 12.0),
+    ("levels\\a50\\shaders\\covenant circuits 0percent", 12.0),
+    ("levels\\a50\\shaders\\covenant circuits 25percent", 12.0),
+    ("levels\\a50\\shaders\\covenant circuits 50percent", 12.0),
+    ("levels\\a50\\shaders\\cov circuits orng 25per", 12.0),
+    ("levels\\a50\\shaders\\cov circuits purp 25per", 12.0),
+    ("levels\\a50\\shaders\\covenant metal strips wide", 12.0),
+];
+
+/// An emitter's light gain (see [`EMITTER_LIGHT_GAINS`]).
+fn emitter_light_gain(shader: &str) -> f32 {
+    let Some(&(_, gain)) = EMITTER_LIGHT_GAINS.iter().find(|(name, _)| shader.eq_ignore_ascii_case(name)) else { return 1.0 };
+    std::env::var("HALO_RT_SHIP_LIGHT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(gain)
+}
 
 /// An emitter's restyling (see [`EMITTER_LOOKS`]).
 fn emitter_look(shader: &str) -> Option<(f32, Option<[f32; 3]>)> {
@@ -429,6 +452,10 @@ struct SolidSurface {
     raster: Option<Handle<HaloEnvironmentMaterial>>,
     /// Emitted light (see [`EmissiveSurface`]).
     radiance: Option<Vec3>,
+    /// The rays' emission times this, where the camera has its own
+    /// material (`raster`): light cast, not looks (see
+    /// [`EMITTER_LIGHT_GAINS`]).
+    light_gain: f32,
     /// For the rays only: a transparent shader's radiosity emitter (c10's
     /// light cards, an invisible bitmap added), which lit the lightmaps but
     /// which the camera doesn't see (the game's overlay draws whatever it
@@ -1344,7 +1371,9 @@ impl LevelBuilder {
                 ChildOf(parent),
             ));
             if let Some(radiance) = surface.radiance {
-                entity.insert(EmissiveSurface { radiance });
+                // (raised for light alone where the camera draws its own)
+                let gain = if surface.raster.is_some() { surface.light_gain } else { 1.0 };
+                entity.insert(EmissiveSurface { radiance: radiance * gain });
                 self.stats.emissive_meshes += 1;
             }
             if let Some((root, base, shader)) = &self.recolour {
@@ -1366,6 +1395,22 @@ impl LevelBuilder {
                 ChildOf(parent),
             ));
             skinned(&mut drawn, skin.clone());
+            // (a self-occluding object's part's depth, before it, as for any
+            // transparent part: Cortana's glow, her eyes behind their lids)
+            if self.self_occluding
+                && let Some(masks) = &self.glass_sky_mask
+                && !self.ignores_effect.contains(&material.id())
+            {
+                let mut depth = commands.spawn((
+                    Name::new("self-occluding depth"),
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(masks.self_occlusion.clone()),
+                    bevy::light::NotShadowCaster,
+                    Transform::default(),
+                    ChildOf(parent),
+                ));
+                skinned(&mut depth, skin.clone());
+            }
             self.stats.transparent_meshes += 1;
         }
         if raster_use && !surface.unseen {
@@ -2024,7 +2069,7 @@ impl LevelBuilder {
                 perceptual_roughness: 0.9,
                 ..default()
             });
-            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, unseen: false, seen_as: None }));
+            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, light_gain: 1.0, unseen: false, seen_as: None }));
         };
         let base_color_texture = info
             .base_map
@@ -2194,7 +2239,8 @@ impl LevelBuilder {
         if human_eyes(&info.name) && let Some(plain) = assets.plain_coats.as_deref_mut() {
             plain.0.insert(standard.id());
         }
-        Some(Surface::Solid(SolidSurface { standard, raster, radiance, unseen, seen_as }))
+        let light_gain = emitter_light_gain(&info.name);
+        Some(Surface::Solid(SolidSurface { standard, raster, radiance, light_gain, unseen, seen_as }))
     }
 
     /// A `shader_model`'s camera material with its detail map (see

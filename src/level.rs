@@ -287,30 +287,41 @@ const LAMP_SPOTLIGHTS: [(&str, f32, f32, f32, f32, [f32; 3]); 1] =
 /// bright oval beside each door (aimed straight down, still: the wall is
 /// that near); dimmed, with their cones widened to fade out, it is a glow.
 /// Their near-white is a soft pink, the ship's own (play feedback: teal
-/// first, then pink asked for).
-const FIXTURE_SPOT_LOOKS: [(&str, FixtureSpotLook); 1] = [(
-    "levels\\a50\\devices\\light_ceiling\\light_ceiling",
-    FixtureSpotLook { brightness: 0.35, falloff: 0.0, cutoff: 65.0, color: Some([1.10, 0.57, 0.92]) },
-)];
+/// first, then pink asked for). Its four big ceiling lamps (three bulbs in
+/// an oval, a volumetric cone under each) high over its large rooms lit
+/// nothing to see: the floor lay at the floodlights' reach, 15 metres; a
+/// strong spot light reaching it (play feedback).
+const FIXTURE_SPOT_LOOKS: [(&str, FixtureSpotLook); 2] = [
+    (
+        "levels\\a50\\devices\\light_ceiling\\light_ceiling",
+        FixtureSpotLook { brightness: 0.35, falloff: 0.0, cutoff: 65.0, color: Some([1.10, 0.57, 0.92]), range: None },
+    ),
+    (
+        "levels\\a50\\devices\\light_ceiling_large\\light_ceiling_large",
+        FixtureSpotLook { brightness: 6.0, falloff: 6.0, cutoff: 40.0, color: None, range: Some(40.0) },
+    ),
+];
 
 /// A fixture's spot light restyled: its brightness (times its own), its
-/// cone's falloff and cutoff (degrees), and colour (`None` its own).
+/// cone's falloff and cutoff (degrees), colour (`None` its own) and reach
+/// (metres, `None` a floodlight's).
 #[derive(Clone, Copy)]
 struct FixtureSpotLook {
     brightness: f32,
     falloff: f32,
     cutoff: f32,
     color: Option<[f32; 3]>,
+    range: Option<f32>,
 }
 
 /// A fixture's restyled spot light (see [`FIXTURE_SPOT_LOOKS`]).
 /// (tuning: `HALO_RT_FIXTURE_LOOK=brightness,falloff,cutoff[,r,g,b]` for
-/// the fixtures listed)
+/// the fixtures listed, keeping each one's reach)
 fn fixture_spot_look(fixture: &str) -> Option<FixtureSpotLook> {
     let listed = FIXTURE_SPOT_LOOKS.iter().find(|(name, _)| fixture.eq_ignore_ascii_case(name))?.1;
     let tuned = std::env::var("HALO_RT_FIXTURE_LOOK").ok().and_then(|text| {
         let values: Vec<f32> = text.split(',').map(|v| v.trim().parse().ok()).collect::<Option<_>>()?;
-        let look = |color| FixtureSpotLook { brightness: values[0], falloff: values[1], cutoff: values[2], color };
+        let look = |color| FixtureSpotLook { brightness: values[0], falloff: values[1], cutoff: values[2], color, range: listed.range };
         match values[..] {
             [_, _, _] => Some(look(None)),
             [_, _, _, r, g, b] => Some(look(Some([r, g, b]))),
@@ -343,17 +354,43 @@ const GLOW_UNLIT: [&str; 5] = ["weapons\\", "effects\\", "sky\\", "vol", "levels
 /// (theirs are near 100; a hologram's, mostly dark, under 1).
 const GLOW_MOST: f32 = 8.0;
 
+/// Light strips added to a level where it has none (play feedback): an
+/// emitting rectangle, level with the world's floor, facing up, in a BSP
+/// of a level (its scenario's name), its corners (world units), and its
+/// radiance. a50's prison block, its cells all but black: a teal strip in
+/// the trench under its corridor's grate, lighting the corridor through it.
+/// (Tuning: `HALO_RT_ADDED_STRIPS=<gain>`, 0 none.)
+const ADDED_LIGHT_STRIPS: [AddedLightStrip; 1] = [AddedLightStrip {
+    map: "a50",
+    bsp: 3,
+    from: [-14.75, -116.85, -21.27],
+    to: [-8.15, -116.31, -21.27],
+    radiance: [24.0, 80.0, 72.0],
+}];
+
+/// See [`ADDED_LIGHT_STRIPS`].
+struct AddedLightStrip {
+    map: &'static str,
+    bsp: usize,
+    from: [f32; 3],
+    to: [f32; 3],
+    radiance: [f32; 3],
+}
+
 /// Emitters restyled (by shader tag): their light's gain, and its colour
 /// (`None` its own; else this, at its own luminance). Truth and
 /// Reconciliation's white light strips (a50's ship, d20's the same) a soft
 /// pink, as its ceiling lamps (`FIXTURE_SPOT_LOOKS`; play feedback: the
 /// ship's light all white, then teal, then pink); its grav lift's column, a
-/// dim purple that lit nothing at night, brighter.
-const EMITTER_LOOKS: [(&str, f32, Option<[f32; 3]>); 4] = [
+/// dim purple that lit nothing at night, brighter; a10's bridge console's
+/// cyan strip under its holographic panel brighter, for the command
+/// display's light left out (`LIGHT_DIMMING`; play feedback: glowing).
+const EMITTER_LOOKS: [(&str, f32, Option<[f32; 3]>); 5] = [
     ("levels\\a50\\shaders\\covenant light bright white", 1.0, Some(SHIP_PINK)),
     ("levels\\a50\\shaders\\covenant light dim white", 1.0, Some(SHIP_PINK)),
     ("levels\\d20\\shaders\\covenant light 40 white", 1.0, Some(SHIP_PINK)),
     ("levels\\a50\\shaders\\grav lift energy", 12.0, None),
+    ("levels\\a10\\shaders\\monitor glow", 8.0, None),
 ];
 /// Truth and Reconciliation's light, a soft pink of luminance one.
 const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
@@ -362,10 +399,9 @@ const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
 /// before) is raised, by shader tag: Truth and Reconciliation's small blue
 /// and green circuit lights, mostly dark texture round their dots, and the
 /// long blue strips of its big rooms, self-illuminated at display white,
-/// lit nothing to see (play feedback); and a10's bridge console's cyan
-/// strip under its holographic panel, for the command display's light
-/// left out (`LIGHT_DIMMING`; play feedback). (Tuning:
-/// `HALO_RT_SHIP_LIGHT=<gain>` for all of them, 1 as Halo's.)
+/// lit nothing to see (play feedback); a10's monitors, its bridge's
+/// navigation screens and the rest, for its bridge scenes (play feedback).
+/// (Tuning: `HALO_RT_SHIP_LIGHT=<gain>` for all of them, 1 as Halo's.)
 const EMITTER_LIGHT_GAINS: [(&str, f32); 8] = [
     ("levels\\a50\\shaders\\covenant circuits", 12.0),
     ("levels\\a50\\shaders\\covenant circuits 0percent", 12.0),
@@ -374,7 +410,7 @@ const EMITTER_LIGHT_GAINS: [(&str, f32); 8] = [
     ("levels\\a50\\shaders\\cov circuits orng 25per", 12.0),
     ("levels\\a50\\shaders\\cov circuits purp 25per", 12.0),
     ("levels\\a50\\shaders\\covenant metal strips wide", 12.0),
-    ("levels\\a10\\shaders\\monitor glow", 8.0),
+    ("levels\\a10\\shaders\\monitors", 16.0),
 ];
 
 /// An emitter's light gain (see [`EMITTER_LIGHT_GAINS`]).
@@ -456,9 +492,12 @@ struct SolidSurface {
     /// Emitted light (see [`EmissiveSurface`]).
     radiance: Option<Vec3>,
     /// The rays' emission times this, where the camera has its own
-    /// material (`raster`): light cast, not looks (see
+    /// material (`raster` or `seen_standard`): light cast, not looks (see
     /// [`EMITTER_LIGHT_GAINS`]).
     light_gain: f32,
+    /// The camera's copy of `standard`, its emission not raised, for an
+    /// emitter with a light gain and no `raster`.
+    seen_standard: Option<Handle<StandardMaterial>>,
     /// For the rays only: a transparent shader's radiosity emitter (c10's
     /// light cards, an invisible bitmap added), which lit the lightmaps but
     /// which the camera doesn't see (the game's overlay draws whatever it
@@ -537,11 +576,13 @@ const PLAIN_GLASS_F0: f32 = 0.16 * 0.6 * 0.6;
 /// How deep an actively camouflaged body's glass is (metres): how far it
 /// bends the picture behind it.
 const CAMOUFLAGE_THICKNESS: f32 = 0.6;
-/// The first-person arms' and weapon's: at a limb's depth, a hand's breadth
-/// from the camera, each flat face of the weapon bent the picture behind it
-/// its own way, and the weapon broke into shards (play feedback: as if its
-/// colliders showed).
-const FIRST_PERSON_CAMOUFLAGE_THICKNESS: f32 = 0.05;
+/// The first-person arms' and weapon's: none, a thin pane's glass that
+/// reflects without bending what lies behind. At a limb's depth, a hand's
+/// breadth from the camera, each flat face of the weapon bent the picture
+/// behind it its own way, and the weapon broke into shards (play feedback:
+/// as if its colliders showed); at 0.05 metres still slabs of the doorway
+/// behind, out of place in its outline.
+const FIRST_PERSON_CAMOUFLAGE_THICKNESS: f32 = 0.0;
 
 /// Roughness where a reflective model shader's specular mask is zero: a
 /// plastic's sheen, not the matte of surfaces Halo gives no reflection. That
@@ -554,7 +595,7 @@ const MODEL_UNMASKED_ROUGHNESS: f32 = 0.45;
 /// tag's path): the share of their gloss and metal they keep, the rest
 /// toward [`DULL_ROUGHNESS`] (lit by the level's own lights, Chief's
 /// armour and the vehicles shone like chrome).
-const MODEL_SHINE: [(&str, f32); 10] = [
+const MODEL_SHINE: [(&str, f32); 9] = [
     ("characters\\cyborg\\", 0.3),
     // (the Hunters' armour, a dull metal: play feedback, near a mirror)
     ("characters\\hunter\\", 0.3),
@@ -563,8 +604,6 @@ const MODEL_SHINE: [(&str, f32); 10] = [
     ("vehicles\\scorpion\\", 0.15),
     ("vehicles\\warthog\\", 0.25),
     ("vehicles\\pelican\\", 0.35),
-    // (Covenant crates)
-    ("scenery\\c_storage\\", 0.7),
     ("scenery\\rocks\\", 0.6),
     ("scenery\\cutscene_small_rock\\", 0.6),
 ];
@@ -829,6 +868,37 @@ impl LevelBuilder {
                 };
                 self.spawn_mesh(commands, parent, name, mesh, &surface, raster);
                 self.stats.triangles += material.indices.len() / 3;
+            }
+            // (and the light strips added to it: see ADDED_LIGHT_STRIPS)
+            let gain = std::env::var("HALO_RT_ADDED_STRIPS").ok().and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(1.0);
+            let map_name = self.stats.map_name.clone();
+            for strip in ADDED_LIGHT_STRIPS.iter().filter(|s| s.bsp == reference.index && map_name.eq_ignore_ascii_case(s.map)) {
+                if gain <= 0.0 {
+                    break;
+                }
+                let [x0, y0, z] = strip.from;
+                let [x1, y1, _] = strip.to;
+                let corner = |x: f32, y: f32| SourceVertex {
+                    position: [x, y, z],
+                    normal: [0.0, 0.0, 1.0],
+                    binormal: [0.0, 1.0, 0.0],
+                    tangent: [1.0, 0.0, 0.0],
+                    texcoord: [0.0, 0.0],
+                };
+                let vertices = [corner(x0, y0), corner(x1, y0), corner(x1, y1), corner(x0, y1)];
+                let mesh = assets.meshes.add(build_model_mesh(vertices.into_iter(), &[0, 1, 2, 0, 2, 3], [1.0, 1.0]));
+                let standard = assets.materials.add(StandardMaterial { base_color: Color::BLACK, ..default() });
+                let radiance = Some(Vec3::from(strip.radiance) * gain);
+                let surface = Surface::Solid(SolidSurface {
+                    standard,
+                    raster: None,
+                    radiance,
+                    light_gain: 1.0,
+                    seen_standard: None,
+                    unseen: false,
+                    seen_as: None,
+                });
+                self.spawn_mesh(commands, level, format!("{} added light strip", reference.name), mesh, &surface, raster);
             }
             self.loaded_bsps.push(reference.index);
             self.bsp_roots.push((reference.index, level));
@@ -1223,11 +1293,12 @@ impl LevelBuilder {
                 continue;
             }
             let mut color = Vec3::new(f(0x4c), f(0x50), f(0x54));
-            let (mut falloff, mut cutoff, mut brightness) = (falloff, cutoff, brightness);
+            let (mut falloff, mut cutoff, mut brightness, mut range) = (falloff, cutoff, brightness, range);
             let look = self.cache.tag(datum).ok().and_then(|tag| fixture_spot_look(&tag.name));
             if let Some(look) = look {
                 (falloff, cutoff, brightness) = (look.falloff.to_radians(), look.cutoff.to_radians(), brightness * look.brightness);
                 color = look.color.map_or(color, Vec3::from);
+                range = look.range.unwrap_or(range);
             }
             // where its marker is on the model, in the object's space (its
             // node at rest)
@@ -1384,9 +1455,9 @@ impl LevelBuilder {
                 ChildOf(parent),
             ));
             if let Some(radiance) = surface.radiance {
-                // (raised for light alone where the camera draws its own;
-                // where it doesn't, as a10's console strip, its glow too)
-                entity.insert(EmissiveSurface { radiance: radiance * surface.light_gain });
+                // (raised for light alone where the camera draws its own)
+                let gain = if surface.raster.is_some() || surface.seen_standard.is_some() { surface.light_gain } else { 1.0 };
+                entity.insert(EmissiveSurface { radiance: radiance * gain });
                 self.stats.emissive_meshes += 1;
             }
             if let Some((root, base, shader)) = &self.recolour {
@@ -1430,7 +1501,7 @@ impl LevelBuilder {
             match (&surface.raster, traced) {
                 // the same entity, when the camera sees what the rays do and
                 // nothing moves it differently
-                (None, Some(traced)) if skin.is_none() => {
+                (None, Some(traced)) if skin.is_none() && surface.seen_standard.is_none() => {
                     commands.entity(traced).insert(Mesh3d(mesh));
                 }
                 (raster, _) => {
@@ -1438,7 +1509,7 @@ impl LevelBuilder {
                     match raster {
                         // the camera sees the Halo material; rays see the standard one
                         Some(material) => drawn.insert(MeshMaterial3d(material.clone())),
-                        None => drawn.insert(MeshMaterial3d(surface.standard.clone())),
+                        None => drawn.insert(MeshMaterial3d(surface.seen_standard.clone().unwrap_or_else(|| surface.standard.clone()))),
                     };
                     if let Some(radiance) = surface.radiance {
                         drawn.insert(EmissiveSurface { radiance });
@@ -1742,13 +1813,30 @@ impl LevelBuilder {
                     ))
                     .id()
             };
-            for piece in &model.pieces {
+            // (its solid surfaces alone: a transparent one, a weapon's
+            // muzzle flash or a glowing card the game draws only now and
+            // then, as glass was a slab out from the first-person weapon,
+            // the "shards" of play feedback)
+            let solid = |surface: &Surface| matches!(surface, Surface::Solid(SolidSurface { unseen: false, .. }));
+            for piece in model.pieces.iter().filter(|piece| solid(&piece.surface)) {
                 glass(commands, nodes[piece.node], piece.mesh.clone());
             }
             // (its bending parts skinned anew as its nodes move, as below)
             let rest = vec![Mat4::IDENTITY; model.default_inverses.len()];
             let skin_parent = nodes.first().copied().unwrap_or(root);
-            let skins = model.traced_skins.iter().map(|skin| glass(commands, skin_parent, assets.meshes.add(skin.mesh(&rest)))).collect();
+            // (each skin its entity, as crate::bridge pairs them; hidden
+            // for a transparent one)
+            let skins = model
+                .traced_skins
+                .iter()
+                .map(|skin| {
+                    let entity = glass(commands, skin_parent, assets.meshes.add(skin.mesh(&rest)));
+                    if !solid(&skin.surface) {
+                        commands.entity(entity).insert(Visibility::Hidden);
+                    }
+                    entity
+                })
+                .collect();
             return (root, nodes.into_iter().map(Some).collect(), skins);
         }
         // the rays see the rigid pieces; the camera sees the skinned parts,
@@ -2083,7 +2171,7 @@ impl LevelBuilder {
                 perceptual_roughness: 0.9,
                 ..default()
             });
-            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, light_gain: 1.0, unseen: false, seen_as: None }));
+            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, light_gain: 1.0, seen_standard: None, unseen: false, seen_as: None }));
         };
         let base_color_texture = info
             .base_map
@@ -2237,6 +2325,24 @@ impl LevelBuilder {
             }
             _ => None,
         };
+        // an alpha-tested shader_environment's cut-out (the game's alpha
+        // test on its bump map's alpha: grates, grilles) for the rays too,
+        // their base colour's alpha at the bump map's tiling: they were
+        // solid sheets, and no light came through them (play feedback)
+        if let (Some(environment), true, Some(base)) = (&info.environment, info.alpha_tested, info.base_map.and_then(|b| b.datum))
+            && let Some(map) = environment.bump_map
+            && let Some(bump) = map.bitmap.datum
+        {
+            let rescale = match (environment.rescale_bump_map, bitmap_size(&self.cache, base), bitmap_size(&self.cache, bump)) {
+                (true, Some(base), Some(bump)) => base / bump,
+                _ => Vec2::ONE,
+            };
+            let scale = (rescale * map.scale).to_array().map(f32::to_bits);
+            if let Some(texture) = self.textures.baked(&self.cache, crate::textures::Bake::CutOut { base, bump, scale }, self.permutation, assets.images) {
+                material.base_color_texture = Some(texture);
+                material.alpha_mode = AlphaMode::Mask(0.5);
+            }
+        }
         let unseen = info.shader_type.is_transparent();
         // (and the rays don't see it either: masked out everywhere, every
         // ray passes through it, so nothing reflects it and it shadows
@@ -2247,6 +2353,9 @@ impl LevelBuilder {
             material.alpha_mode = AlphaMode::Mask(0.5);
         }
         let seen_as = if unseen { self.transparent_material(info, 0.0, false, assets) } else { None };
+        let light_gain = emitter_light_gain(&info.name);
+        let seen_standard =
+            (light_gain != 1.0 && raster.is_none() && radiance.is_some()).then(|| assets.materials.add(material.clone()));
         let standard = assets.materials.add(material);
         if pearl_coat(&info.name) && let Some(pearl) = assets.pearl_coats.as_deref_mut() {
             pearl.0.insert(standard.id());
@@ -2254,8 +2363,7 @@ impl LevelBuilder {
         if plain_coat(&info.name) && let Some(plain) = assets.plain_coats.as_deref_mut() {
             plain.0.insert(standard.id());
         }
-        let light_gain = emitter_light_gain(&info.name);
-        Some(Surface::Solid(SolidSurface { standard, raster, radiance, light_gain, unseen, seen_as }))
+        Some(Surface::Solid(SolidSurface { standard, raster, radiance, light_gain, seen_standard, unseen, seen_as }))
     }
 
     /// A `shader_model`'s camera material with its detail map (see
@@ -2896,14 +3004,14 @@ fn covenant_vehicle(shader: &str) -> bool {
         && !["self illuminated", "burned", "destroyed"].iter().any(|part| shader.contains(part))
 }
 
-/// The human characters' eye shaders (the marines' `eyes_<name>`, Johnson's,
-/// Keyes' `captain_eyes`: their eyes are meshes of their own), which get a
-/// plain clear coat, a wet eye's gloss (`HALO_RT_EYE_COAT=strength,roughness`,
-/// 0 none).
+/// Keyes' eye shader (`captain_eyes`: his eyes are meshes of their own),
+/// which gets a plain clear coat, a wet eye's gloss
+/// (`HALO_RT_EYE_COAT=strength,roughness`, 0 none). The marines' and
+/// Johnson's (`eyes_<name>`) have none: their eyes are flat planes, and the
+/// coat's reflection lay across them strangely (play feedback).
 fn human_eyes(shader: &str) -> bool {
     let shader = shader.to_ascii_lowercase();
-    ["characters\\marine", "characters\\captain"].iter().any(|path| shader.starts_with(path))
-        && shader.rsplit('\\').next().is_some_and(|name| name.contains("eyes"))
+    shader.starts_with("characters\\captain") && shader.rsplit('\\').next().is_some_and(|name| name.contains("eyes"))
 }
 /// The eyes' coat: full strength, near a mirror (the G-buffer's thirtieths:
 /// 2/30).
@@ -3013,7 +3121,7 @@ fn model_detail_gain(shader: &str) -> f32 {
 /// The Covenant vehicles' are alike. The Warthog's marks its glossy paint
 /// (not wear: as wear its hood was bare steel); a milder curve brings out
 /// the grime in it.
-const MASK_CURVES: [(&str, [f32; 2]); 9] = [
+const MASK_CURVES: [(&str, [f32; 2]); 10] = [
     ("weapons\\plasma", COVENANT_MASK_CURVE),
     ("weapons\\needler", COVENANT_MASK_CURVE),
     ("vehicles\\ghost\\", COVENANT_MASK_CURVE),
@@ -3024,6 +3132,10 @@ const MASK_CURVES: [(&str, [f32; 2]); 9] = [
     ("vehicles\\warthog\\", [2.0, 2.0]),
     // (Chief's: doubled, his shine's variation with his detail's)
     ("characters\\cyborg\\", [1.0, 2.0]),
+    // (the Covenant crates': dim, a quarter on the whole, it left them a
+    // flat rubber; raised, undulled, a worked metal with sharp highlights,
+    // play feedback)
+    ("scenery\\c_storage\\", [0.8, 1.6]),
 ];
 const COVENANT_MASK_CURVE: [f32; 2] = [3.0, 2.5];
 

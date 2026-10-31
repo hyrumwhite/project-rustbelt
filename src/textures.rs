@@ -59,6 +59,11 @@ pub enum Bake {
     /// metallic/roughness texture (G roughness, B metallic). See
     /// [`GunmetalFinish`]'s fields, as f32 bits in its order.
     Gunmetal { base: u32, mask: u32, color: bool, finish: [u32; 9] },
+    /// An alpha-tested `shader_environment`'s base map (sRGB) with its
+    /// cut-out for alpha: its bump map's alpha, which repeats `scale` times
+    /// (f32 bits) over the base map, as the camera's material samples it.
+    /// At the finer of the two's sizes (at most 2048 a side).
+    CutOut { base: u32, bump: u32, scale: [u32; 2] },
 }
 
 /// A human weapon's finish (see [`Bake::Gunmetal`]). The base map's light
@@ -433,6 +438,25 @@ fn change_color(mask: &bitmap::Decoded, base: Option<&bitmap::Decoded>, color: [
     (w, h, out, true)
 }
 
+/// See [`Bake::CutOut`].
+fn cut_out(base: &bitmap::Decoded, bump: &bitmap::Decoded, scale: [f32; 2]) -> (u32, u32, Vec<u8>, bool) {
+    let finer = |base: u32, bump: u32, scale: f32| (base as f32).max(bump as f32 * scale.abs()).clamp(1.0, 2048.0) as u32;
+    let (w, h) = (finer(base.width, bump.width, scale[0]), finer(base.height, bump.height, scale[1]));
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+            let (bx, by) = ((u * base.width as f32) as u32 % base.width, (v * base.height as f32) as u32 % base.height);
+            let texel = &base.data[((by * base.width + bx) * 4) as usize..][..3];
+            let at = |t: f32, size: u32| ((t.rem_euclid(1.0) * size as f32) as u32).min(size - 1);
+            let (mx, my) = (at(u * scale[0], bump.width), at(v * scale[1], bump.height));
+            out.extend_from_slice(texel);
+            out.push(bump.data[((my * bump.width + mx) * 4 + 3) as usize]);
+        }
+    }
+    (w, h, out, true)
+}
+
 /// `image` at (u, v) (repeating), each channel by Catmull-Rom's cubic
 /// through the four nearest texels each way (0 to 255).
 fn bicubic(image: &bitmap::Decoded, u: f32, v: f32) -> [f32; 4] {
@@ -593,6 +617,11 @@ fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Resul
             let mask = rgba8(cache, multipurpose, permutation)?;
             let base = base.map(|b| rgba8(cache, b, permutation)).transpose()?;
             Ok(modulate_base(&mask, base.as_ref(), |texel| [texel[1] as f32 / 255.0; 3]))
+        }
+        Bake::CutOut { base, bump, scale } => {
+            let base = rgba8(cache, base, permutation)?;
+            let bump = rgba8(cache, bump, permutation)?;
+            Ok(cut_out(&base, &bump, scale.map(f32::from_bits)))
         }
         Bake::ChangeColor { base, multipurpose, color } => {
             let mask = rgba8(cache, multipurpose, permutation)?;

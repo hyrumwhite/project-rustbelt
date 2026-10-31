@@ -84,6 +84,11 @@ static short bevy_bridge_recorded_count;
 /* whether the renderer's camera is the listener (for the log) */
 static boolean bevy_bridge_listening;
 
+/* the most dynamic lights listed each frame, of which the frame holds the
+player's and the nearest; and whether that overflow is in the log yet */
+#define BEVY_BRIDGE_LISTED_LIGHTS 256
+static boolean bevy_bridge_lights_overflow_logged;
+
 /* the overlay buffer being filled, or NONE */
 static long bevy_bridge_overlay_buffer = NONE;
 
@@ -635,6 +640,8 @@ void bevy_bridge_export_frame(
 	struct object_datum *object;
 	short window_index;
 	long first_person_unit = NONE;
+	real_point3d camera_position = { 0.0f, 0.0f, 0.0f };
+	boolean camera_known = FALSE;
 
 	if (!shared)
 		return;
@@ -717,6 +724,8 @@ void bevy_bridge_export_frame(
 			bevy_bridge_decal_vertex_count * sizeof(struct bevy_bridge_decal_vertex));
 		memset(&bevy_bridge_fog_screen, 0, sizeof(bevy_bridge_fog_screen));
 		first_person_unit = bevy_bridge_first_person_unit(window->local_player_index);
+		camera_position = window->render_camera.position;
+		camera_known = TRUE;
 		frame->ray_test_count = bevy_bridge_ray_tests(frame->ray_tests, &window->render_camera.position,
 			&window->render_camera.forward, &window->render_camera.up);
 		bevy_bridge_vehicle_ray_tests(frame, &window->render_camera.position);
@@ -729,29 +738,22 @@ void bevy_bridge_export_frame(
 	bevy_bridge_sprite_batch_count = 0;
 	bevy_bridge_sprite_vertex_count = 0;
 
-	/* the dynamic lights */
+	/* the dynamic lights: more than the frame holds, the player's own first,
+	then the nearest the camera (a50 late on, its doors' lights all over
+	the ship: the flashlight, switched on last, fell past the frame's and
+	cast nothing; play feedback) */
 	{
-		struct lights_port_light lights[BEVY_BRIDGE_MAXIMUM_LIGHTS];
-		short count = global_scenario_index != NONE ? lights_port_list(lights, BEVY_BRIDGE_MAXIMUM_LIGHTS) : 0;
+		struct lights_port_light lights[BEVY_BRIDGE_LISTED_LIGHTS];
+		boolean own[BEVY_BRIDGE_LISTED_LIGHTS];
+		real keys[BEVY_BRIDGE_LISTED_LIGHTS];
+		short order[BEVY_BRIDGE_LISTED_LIGHTS];
+		short listed = global_scenario_index != NONE ? lights_port_list(lights, BEVY_BRIDGE_LISTED_LIGHTS) : 0;
+		short count = listed < BEVY_BRIDGE_MAXIMUM_LIGHTS ? listed : BEVY_BRIDGE_MAXIMUM_LIGHTS;
 		short index;
 
-		for (index = 0; index < count; index++)
+		for (index = 0; index < listed; index++)
 		{
-			struct bevy_bridge_light *out = &frame->lights[index];
-
-			bevy_bridge_point(out->position, &lights[index].position);
-			bevy_bridge_vector(out->forward, &lights[index].forward);
-			bevy_bridge_vector(out->up, &lights[index].up);
-			out->color[0] = lights[index].color.red;
-			out->color[1] = lights[index].color.green;
-			out->color[2] = lights[index].color.blue;
-			out->radius = lights[index].radius;
-			out->cutoff_angle = lights[index].cutoff_angle;
-			out->falloff_angle = lights[index].falloff_angle;
-			out->definition_index = (unsigned long)lights[index].definition_index;
-			out->definition_flags = (unsigned long)lights[index].definition_flags;
-			out->object_index = (unsigned long)lights[index].object_index;
-			out->first_person = 0;
+			own[index] = FALSE;
 			if (first_person_unit != NONE)
 			{
 				long ancestor;
@@ -765,11 +767,56 @@ void bevy_bridge_export_frame(
 				{
 					if (ancestor == first_person_unit)
 					{
-						out->first_person = 1;
+						own[index] = TRUE;
 						break;
 					}
 				}
 			}
+			keys[index] = own[index] ? -1.0f :
+				camera_known ? distance_squared3d(&camera_position, &lights[index].position) : (real)index;
+			order[index] = index;
+		}
+		/* (in the game's order, but past the frame's: a stable insertion
+		sort by the keys) */
+		if (listed > BEVY_BRIDGE_MAXIMUM_LIGHTS)
+		{
+			for (index = 1; index < listed; index++)
+			{
+				short moved = order[index];
+				short slot = index;
+
+				while (slot > 0 && keys[order[slot - 1]] > keys[moved])
+				{
+					order[slot] = order[slot - 1];
+					slot--;
+				}
+				order[slot] = moved;
+			}
+		}
+		for (index = 0; index < count; index++)
+		{
+			struct bevy_bridge_light *out = &frame->lights[index];
+			short source = order[index];
+
+			bevy_bridge_point(out->position, &lights[source].position);
+			bevy_bridge_vector(out->forward, &lights[source].forward);
+			bevy_bridge_vector(out->up, &lights[source].up);
+			out->color[0] = lights[source].color.red;
+			out->color[1] = lights[source].color.green;
+			out->color[2] = lights[source].color.blue;
+			out->radius = lights[source].radius;
+			out->cutoff_angle = lights[source].cutoff_angle;
+			out->falloff_angle = lights[source].falloff_angle;
+			out->definition_index = (unsigned long)lights[source].definition_index;
+			out->definition_flags = (unsigned long)lights[source].definition_flags;
+			out->object_index = (unsigned long)lights[source].object_index;
+			out->first_person = own[source] ? 1 : 0;
+		}
+		if (listed > BEVY_BRIDGE_MAXIMUM_LIGHTS && !bevy_bridge_lights_overflow_logged)
+		{
+			bevy_bridge_lights_overflow_logged = TRUE;
+			platform_log("bevy bridge: %d dynamic lights, the frame holds %d: the player's and the nearest kept",
+				(int)listed, (int)BEVY_BRIDGE_MAXIMUM_LIGHTS);
 		}
 		if (global_scenario_index != NONE)
 			count += bevy_bridge_contrails(&frame->lights[count], (short)(BEVY_BRIDGE_MAXIMUM_LIGHTS - count));

@@ -123,7 +123,7 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 /// Lights dimmed from their tags' brightness (by the light tag's name, or
 /// a folder's, ending in a backslash): a wide reach is a bright light here
 /// (brightness grows with its square). Dimmed to 0, left out.
-const LIGHT_DIMMING: [(&str, f32); 10] = [
+const LIGHT_DIMMING: [(&str, f32); 11] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights)
     ("characters\\monitor\\monitor dynamic", 0.15),
@@ -154,6 +154,9 @@ const LIGHT_DIMMING: [(&str, f32); 10] = [
     // wherever it was moved clear, the panel's glass reflected it a white
     // ball, however small or dim; the bridge's lamps light the console)
     ("levels\\a10\\devices\\command display\\command display", 0.0),
+    // (a10's alarm klaxons' red, flashing through the bridge scenes; play
+    // feedback: 30% down)
+    ("levels\\a10\\devices\\alert_light\\alert_light", 0.7),
 ];
 
 /// Lights smaller than [`LIGHT_RADIUS`] (by the light tag's name), raised

@@ -362,9 +362,11 @@ const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
 /// before) is raised, by shader tag: Truth and Reconciliation's small blue
 /// and green circuit lights, mostly dark texture round their dots, and the
 /// long blue strips of its big rooms, self-illuminated at display white,
-/// lit nothing to see (play feedback). (Tuning: `HALO_RT_SHIP_LIGHT=<gain>`
-/// for all of them, 1 as Halo's.)
-const EMITTER_LIGHT_GAINS: [(&str, f32); 7] = [
+/// lit nothing to see (play feedback); and a10's bridge console's cyan
+/// strip under its holographic panel, for the command display's light
+/// left out (`LIGHT_DIMMING`; play feedback). (Tuning:
+/// `HALO_RT_SHIP_LIGHT=<gain>` for all of them, 1 as Halo's.)
+const EMITTER_LIGHT_GAINS: [(&str, f32); 8] = [
     ("levels\\a50\\shaders\\covenant circuits", 12.0),
     ("levels\\a50\\shaders\\covenant circuits 0percent", 12.0),
     ("levels\\a50\\shaders\\covenant circuits 25percent", 12.0),
@@ -372,6 +374,7 @@ const EMITTER_LIGHT_GAINS: [(&str, f32); 7] = [
     ("levels\\a50\\shaders\\cov circuits orng 25per", 12.0),
     ("levels\\a50\\shaders\\cov circuits purp 25per", 12.0),
     ("levels\\a50\\shaders\\covenant metal strips wide", 12.0),
+    ("levels\\a10\\shaders\\monitor glow", 8.0),
 ];
 
 /// An emitter's light gain (see [`EMITTER_LIGHT_GAINS`]).
@@ -1381,9 +1384,9 @@ impl LevelBuilder {
                 ChildOf(parent),
             ));
             if let Some(radiance) = surface.radiance {
-                // (raised for light alone where the camera draws its own)
-                let gain = if surface.raster.is_some() { surface.light_gain } else { 1.0 };
-                entity.insert(EmissiveSurface { radiance: radiance * gain });
+                // (raised for light alone where the camera draws its own;
+                // where it doesn't, as a10's console strip, its glow too)
+                entity.insert(EmissiveSurface { radiance: radiance * surface.light_gain });
                 self.stats.emissive_meshes += 1;
             }
             if let Some((root, base, shader)) = &self.recolour {

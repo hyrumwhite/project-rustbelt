@@ -422,16 +422,18 @@ fn trace_triangle_ray_impl(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_
 // (It was a trace from each pane to the next, ordered: a50's Covenant ship,
 // its glowing panes in every room, 2.8 ms a frame over the lighting passes.)
 // Non-opaque geometry is built without duplicate candidates, so each pane
-// counts once. (`distance`: the furthest t that could have affected it)
+// counts once. (`distance`: the furthest t that could have affected it; the
+// nearest blocker's with `closest`, else any blocker's, ending sooner)
 struct TransmissionRay { energy: vec4<f32>, distance: f32 }
-fn trace_transmission_ray(ray_origin: vec3f, ray_direction: vec3f, ray_t_max: f32, include_coverage: bool) -> TransmissionRay {
+fn trace_transmission_ray(ray_origin: vec3f, ray_direction: vec3f, ray_t_max: f32, include_coverage: bool, closest: bool) -> TransmissionRay {
     let minimum = max(RAY_T_MIN, max(max(abs(ray_origin.x), abs(ray_origin.y)), abs(ray_origin.z)) * sky_light.relative_ray_min);
     let maximum = min(ray_t_max, ray_max_distance());
     if minimum > maximum { return TransmissionRay(vec4(1.0), max(ray_t_max, 0.0)); }
     let near = sky_light.near_rays;
     let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
     var rq: ray_query;
-    rayQueryInitialize(&rq, tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, cull_mask, minimum, maximum, ray_origin, ray_direction));
+    let flags = select(RAY_FLAG_TERMINATE_ON_FIRST_HIT, RAY_FLAG_NONE, closest);
+    rayQueryInitialize(&rq, tlas, RayDesc(flags, cull_mask, minimum, maximum, ray_origin, ray_direction));
     var energy = vec4(1.0);
     while rayQueryProceed(&rq) {
         let candidate = rayQueryGetCandidateIntersection(&rq);

@@ -96,9 +96,10 @@ fn cache_support_rejects_moving_distant_blockers_and_preserves_bounded_unaffecte
         let support_struct = &sampling[sampling.find("struct ShadowTransmission").unwrap()
             ..sampling.find("fn trace_light_transmission(").unwrap()];
         let source = format!(
-            "{}\n{support_struct}\n{}\n{}",
+            "{}\n{support_struct}\n{}\n{}\n{}",
             include_str!("cache_locality_fixture.wgsl"),
             function(sampling, "trace_shadow_transmission_with_support"),
+            function(sampling, "trace_shadow_transport"),
             function(
                 include_str!("../src/realtime/world_cache_compact.wesl"),
                 "cache_support_is_valid"

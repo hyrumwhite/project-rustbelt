@@ -40,7 +40,7 @@ fn resolve_material_alpha(material: RawMaterial, uv: vec2f) -> f32 { return conf
 // The synthetic panes walked in order, front to back, as the production
 // single traversal must agree with, through its per-pane energy.
 struct TransmissionRay { energy: vec4f, distance: f32 }
-fn trace_transmission_ray(origin: vec3f, direction: vec3f, ray_t_max: f32, include_coverage: bool) -> TransmissionRay {
+fn trace_transmission_ray(origin: vec3f, direction: vec3f, ray_t_max: f32, include_coverage: bool, closest: bool) -> TransmissionRay {
     var energy = vec4(1.0);
     var lo = RAY_T_MIN;
     loop {

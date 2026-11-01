@@ -32,7 +32,7 @@ fn trace_glass_ray(origin:vec3<f32>, direction:vec3<f32>, lo:f32, hi:f32)->RayIn
 fn resolve_ray_hit_full(ray:RayIntersection)->Hit { return Hit(vec3(0.0,0.0,1.0),Material(vec3(1.0),0.5),vec2(0.0)); }
 fn resolve_material_alpha(material:RawMaterial,uv:vec2<f32>)->f32 { return 1.0; }
 struct TransmissionRay { energy: vec4<f32>, distance: f32 }
-fn trace_transmission_ray(o:vec3<f32>,d:vec3<f32>,t:f32,c:bool)->TransmissionRay { return TransmissionRay(vec4(0.0),0.0); }
+fn trace_transmission_ray(o:vec3<f32>,d:vec3<f32>,t:f32,c:bool,n:bool)->TransmissionRay { return TransmissionRay(vec4(0.0),0.0); }
 fn thin_glass_weights(wo:vec3<f32>,n:vec3<f32>,t:vec3<f32>,a:f32,r:f32)->vec4<f32> { return vec4(0.0); }
 @compute @workgroup_size(1)
 fn probe(@builtin(global_invocation_id) id:vec3<u32>) {

@@ -444,9 +444,13 @@ struct ShadowTransmission {
     distance: f32,
 }
 fn trace_light_transmission(origin: vec3<f32>, light_position: vec4<f32>) -> vec4<f32> {
-    return trace_light_transmission_with_support(origin, light_position).energy;
+    return trace_light_transport(origin, light_position, false).energy;
 }
 fn trace_light_transmission_with_support(origin: vec3<f32>, light_position: vec4<f32>) -> ShadowTransmission {
+    return trace_light_transport(origin, light_position, true);
+}
+// (`closest`: the distance must be the nearest blocker's, see trace_shadow_transport)
+fn trace_light_transport(origin: vec3<f32>, light_position: vec4<f32>, closest: bool) -> ShadowTransmission {
     var direction = light_position.xyz;
     var distance = ray_max_distance();
     if light_position.w != LIGHT_SAMPLE_DIRECTIONAL {
@@ -454,10 +458,10 @@ fn trace_light_transmission_with_support(origin: vec3<f32>, light_position: vec4
         distance = length(delta);
         if distance <= RAY_T_MIN { return ShadowTransmission(vec4(0.0), 0.0); }
         direction = delta / distance;
-        return trace_shadow_transmission_with_support(origin, direction, distance - RAY_T_MIN, true);
+        return trace_shadow_transport(origin, direction, distance - RAY_T_MIN, true, closest);
     }
     // A directional light comes from beyond the air.
-    var shadow = trace_shadow_transmission_with_support(origin, direction, distance - RAY_T_MIN, true);
+    var shadow = trace_shadow_transport(origin, direction, distance - RAY_T_MIN, true, closest);
     shadow.energy = vec4(shadow.energy.rgb * directional_light_transmittance(origin, direction), shadow.energy.a);
     return shadow;
 }
@@ -470,9 +474,16 @@ fn trace_shadow_transmission(origin: vec3<f32>, direction: vec3<f32>, ray_t_max:
 
 // GI endpoint/visibility tracing already samples diffuse alpha coverage.
 fn trace_shadow_transmission_impl(origin: vec3<f32>, direction: vec3<f32>, ray_t_max: f32, include_coverage: bool) -> vec4<f32> {
-    return trace_shadow_transmission_with_support(origin, direction, ray_t_max, include_coverage).energy;
+    return trace_shadow_transport(origin, direction, ray_t_max, include_coverage, false).energy;
 }
 fn trace_shadow_transmission_with_support(origin: vec3<f32>, direction: vec3<f32>, ray_t_max: f32, include_coverage: bool) -> ShadowTransmission {
+    return trace_shadow_transport(origin, direction, ray_t_max, include_coverage, true);
+}
+// (`closest`: through panes, the distance is the nearest blocker's, as the
+// ordered walk found it, for the world cache's support radius: a traversal
+// stopping at its first hit finds any blocker, often a further one, whose
+// cells changes further away would reset)
+fn trace_shadow_transport(origin: vec3<f32>, direction: vec3<f32>, ray_t_max: f32, include_coverage: bool, closest: bool) -> ShadowTransmission {
     // Only actual admitted TLAS materials decide this shortcut. Mixed panes
     // and diffuse coverage retain the complete ordered transport below.
     if !scene_requires_ordered_transport() {
@@ -483,7 +494,7 @@ fn trace_shadow_transmission_with_support(origin: vec3<f32>, direction: vec3<f32
             select(hit.t, ray_t_max, scene_hit_is_miss(hit)));
     }
     if ray_t_max < RAY_T_MIN { return ShadowTransmission(vec4(1.0), max(ray_t_max, 0.0)); }
-    let ray = trace_transmission_ray(origin, direction, ray_t_max, include_coverage);
+    let ray = trace_transmission_ray(origin, direction, ray_t_max, include_coverage, closest);
     return ShadowTransmission(ray.energy, ray.distance);
 }
 // End shadow transport

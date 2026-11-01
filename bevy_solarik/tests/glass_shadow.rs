@@ -149,7 +149,8 @@ fn glass_shadow_gpu() {
             let result: &[f32] = bytemuck::cast_slice(&data);
             let f = 0.04 + 0.96 * (1.0 - cosine).powi(5);
             let reflection = 2.0 * f / (1.0 + f);
-            let blocked = opaque > 0.0 || count > 32.0;
+            // (one traversal: no limit on the panes counted)
+            let blocked = opaque > 0.0;
             let panes = if distance < 1.0 { 0 } else { count as i32 };
             for (i, value) in result[..4].iter().enumerate() {
                 let single = if diffuse >= 2.0 {

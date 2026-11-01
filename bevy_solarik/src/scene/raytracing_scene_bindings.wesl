@@ -6,6 +6,7 @@ import bevy_solarik::scene::scene_hit::scene_coarse;
 import bevy_solarik::scene::scene_hit::scene_hit_is_coarse;
 import bevy_solarik::scene::scene_hit::scene_hit_is_triangle;
 import bevy_solarik::scene::scene_hit::SCENE_HIT_INVALID;
+import bevy_solarik::scene::thin_glass::shadow_pane_energy;
 import bevy_solarik::filtered_canopy_scene::forest_trace_scene_impl;
 import bevy_solarik::filtered_canopy_scene::forest_next_seed;
 import bevy_solarik::filtered_canopy_conditioning::ForestConditioned;
@@ -413,6 +414,49 @@ fn trace_triangle_ray_impl(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_
         }
     }
     return rayQueryGetCommittedIntersection(&rq);
+}
+
+// A shadow ray's straight-through energy (rgb, and a: the probability of
+// the competing BSDF path) in one traversal: panes' energies multiply, in
+// any order, and the first solid hit (or one dimming it to nothing) ends it.
+// (It was a trace from each pane to the next, ordered: a50's Covenant ship,
+// its glowing panes in every room, 2.8 ms a frame over the lighting passes.)
+// Non-opaque geometry is built without duplicate candidates, so each pane
+// counts once. (`distance`: the furthest t that could have affected it)
+struct TransmissionRay { energy: vec4<f32>, distance: f32 }
+fn trace_transmission_ray(ray_origin: vec3f, ray_direction: vec3f, ray_t_max: f32, include_coverage: bool) -> TransmissionRay {
+    let minimum = max(RAY_T_MIN, max(max(abs(ray_origin.x), abs(ray_origin.y)), abs(ray_origin.z)) * sky_light.relative_ray_min);
+    let maximum = min(ray_t_max, ray_max_distance());
+    if minimum > maximum { return TransmissionRay(vec4(1.0), max(ray_t_max, 0.0)); }
+    let near = sky_light.near_rays;
+    let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
+    var rq: ray_query;
+    rayQueryInitialize(&rq, tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, cull_mask, minimum, maximum, ray_origin, ray_direction));
+    var energy = vec4(1.0);
+    while rayQueryProceed(&rq) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        if candidate.kind != RAY_QUERY_INTERSECTION_TRIANGLE { continue; }
+        let material = materials[material_ids[candidate.instance_custom_data]];
+        let glass = (material.flags & MATERIAL_FLAG_ALPHA_BLEND) != 0u;
+        let diffuse = (material.flags & MATERIAL_FLAG_DIFFUSE_BLEND) != 0u;
+        if !glass && !diffuse {
+            if candidate_is_solid(candidate, false, ray_origin, ray_direction) { rayQueryConfirmIntersection(&rq); }
+            continue;
+        }
+        if diffuse && !include_coverage { continue; }
+        let hit = resolve_ray_hit_full(scene_triangle(candidate.t, candidate.instance_custom_data,
+            candidate.primitive_index, candidate.barycentrics, candidate.front_face));
+        let alpha = clamp(resolve_material_alpha(material, hit.uv), 0.0, 1.0);
+        energy *= shadow_pane_energy(glass, -ray_direction, hit.geometric_world_normal,
+            hit.material.base_color, alpha, hit.material.reflectance, include_coverage);
+        if all(energy.rgb <= vec3(0.0)) { rayQueryConfirmIntersection(&rq); }
+    }
+    let committed = rayQueryGetCommittedIntersection(&rq);
+    if committed.kind != RAY_QUERY_INTERSECTION_NONE { return TransmissionRay(vec4(0.0), committed.t); }
+    // (a canopy is solid to light)
+    let canopy = forest_trace_scene_impl(ray_origin, ray_direction, RAY_T_MIN, maximum, forest_next_seed(), false);
+    if canopy.event.normal_hit.w > 0.0 { return TransmissionRay(vec4(0.0), maximum); }
+    return TransmissionRay(energy, max(ray_t_max, 0.0));
 }
 
 // Alpha test for a candidate hit on non-opaque geometry.

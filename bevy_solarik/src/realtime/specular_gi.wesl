@@ -80,6 +80,11 @@ enable wgpu_ray_query;
 const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = 0.4;
 const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0225;
 const BLURRY_LEAF_ROUGHNESS: f32 = 0.05;
+// A blurry reflection (roughness above this) ends at the surface it meets,
+// a ray long enough away, in the world cache: that surface's own light and
+// bounces were most of the pass's cost on a50's glossy Covenant floors
+// (3.6 ms to 2.5) and blurred to the cache's look anyway (1% brighter).
+const BLURRY_REFLECTION_CACHE_ROUGHNESS: f32 = 0.15;
 
 @compute @workgroup_size(8, 8, 1)
 fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -352,7 +357,8 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
         let ray_longer_than_cell = ray.t > sqrt(3.0) * world_cache_cell_size;
 
         let rough_hit = cache_rough_hits && ray_hit.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
-        if i == 2u || (ray_longer_than_cell && (path_roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD || rough_hit)) {
+        let blurry_reflection = i == 0u && primary_surface.material.roughness > BLURRY_REFLECTION_CACHE_ROUGHNESS;
+        if i == 2u || (ray_longer_than_cell && (path_roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD || rough_hit || blurry_reflection)) {
             let diffuse_brdf = ray_hit.material.base_color / PI;
             radiance += throughput * diffuse_brdf * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
             break;

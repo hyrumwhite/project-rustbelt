@@ -37,6 +37,27 @@ fn resolve_ray_hit_full(ray: Ray) -> ResolvedRayHitFull {
         ResolvedMaterial(config[0].rgb,config[1].x),vec2(0.0));
 }
 fn resolve_material_alpha(material: RawMaterial, uv: vec2f) -> f32 { return config[0].a; }
+// The synthetic panes walked in order, front to back, as the production
+// single traversal must agree with, through its per-pane energy.
+struct TransmissionRay { energy: vec4f, distance: f32 }
+fn trace_transmission_ray(origin: vec3f, direction: vec3f, ray_t_max: f32, include_coverage: bool) -> TransmissionRay {
+    var energy = vec4(1.0);
+    var lo = RAY_T_MIN;
+    loop {
+        if ray_t_max < lo { return TransmissionRay(energy, max(ray_t_max, 0.0)); }
+        let ray = trace_glass_ray(origin, direction, lo, ray_t_max);
+        if scene_hit_is_miss(ray) { return TransmissionRay(energy, ray_t_max); }
+        let flags = scene_hit_material(ray).flags;
+        if (flags & (MATERIAL_FLAG_ALPHA_BLEND | MATERIAL_FLAG_DIFFUSE_BLEND)) == 0u { return TransmissionRay(vec4(0.0), ray.t); }
+        let hit = resolve_ray_hit_full(ray);
+        let alpha = clamp(scene_hit_alpha(ray, hit.uv), 0.0, 1.0);
+        energy *= shadow_pane_energy((flags & MATERIAL_FLAG_ALPHA_BLEND) != 0u, -direction,
+            hit.geometric_world_normal, hit.material.base_color, alpha, hit.material.reflectance, include_coverage);
+        if all(energy.rgb <= vec3(0.0)) { return TransmissionRay(vec4(0.0), ray.t); }
+        lo = ray.t + RAY_T_MIN;
+    }
+    return TransmissionRay(vec4(0.0), 0.0);
+}
 @compute @workgroup_size(1)
 fn probe() {
     materials[0].flags = select(MATERIAL_FLAG_ALPHA_BLEND,MATERIAL_FLAG_DIFFUSE_BLEND,config[1].w>0.0);

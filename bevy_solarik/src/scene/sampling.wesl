@@ -1,6 +1,4 @@
 import bevy_solarik::scene::scene_hit::scene_hit_is_miss;
-import bevy_solarik::scene::raytracing_scene_bindings::scene_hit_material;
-import bevy_solarik::scene::raytracing_scene_bindings::scene_hit_alpha;
 import bevy_solarik::scene::raytracing_scene_bindings::scene_requires_ordered_transport;
 @if((PRIMARY_CANOPY_DIRECT_ONLY)) import bevy_solarik::realtime::primary_light_trace::light_trace_set;
 import bevy_pbr::render::pbr_lighting::D_GGX;
@@ -10,11 +8,9 @@ import bevy_pbr::render::utils::rand_u;
 import bevy_pbr::render::utils::rand_range_u;
 import bevy_render::maths::PI_2;
 import bevy_render::maths::orthonormalize;
-import bevy_solarik::scene::thin_glass::thin_glass_weights;
 import bevy_solarik::scene::raytracing_scene_bindings::sky_light;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_light_transmittance;
-import bevy_solarik::scene::raytracing_scene_bindings::trace_glass_ray;
-import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
+import bevy_solarik::scene::raytracing_scene_bindings::trace_transmission_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_ALPHA_BLEND;
 import bevy_solarik::scene::raytracing_scene_bindings::trace_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
@@ -486,29 +482,9 @@ fn trace_shadow_transmission_with_support(origin: vec3<f32>, direction: vec3<f32
         return ShadowTransmission(vec4(select(0.0, 1.0, scene_hit_is_miss(hit))),
             select(hit.t, ray_t_max, scene_hit_is_miss(hit)));
     }
-    var transmission = vec4(1.0);
-    var ray_t_min = RAY_T_MIN;
-    for (var panes = 0u; panes <= 32u; panes += 1u) {
-        if ray_t_max < ray_t_min { return ShadowTransmission(transmission, max(ray_t_max, 0.0)); }
-        let ray = trace_glass_ray(origin, direction, ray_t_min, ray_t_max);
-        if scene_hit_is_miss(ray) { return ShadowTransmission(transmission, ray_t_max); }
-        if panes == 32u { return ShadowTransmission(vec4(0.0), ray.t); }
-        let raw_material = scene_hit_material(ray);
-        let hit = resolve_ray_hit_full(ray);
-        let alpha = clamp(scene_hit_alpha(ray, hit.uv), 0.0, 1.0);
-        if (raw_material.flags & MATERIAL_FLAG_ALPHA_BLEND) != 0u {
-            let weights = thin_glass_weights(-direction, hit.geometric_world_normal,
-                hit.material.base_color, alpha, hit.material.reflectance);
-            transmission *= vec4(weights.rgb, 1.0 - weights.a);
-        } else if (raw_material.flags & MATERIAL_FLAG_DIFFUSE_BLEND) != 0u {
-            if include_coverage { transmission *= 1.0 - alpha; }
-        } else {
-            return ShadowTransmission(vec4(0.0), ray.t);
-        }
-        if all(transmission.rgb <= vec3(0.0)) { return ShadowTransmission(vec4(0.0), ray.t); }
-        ray_t_min = ray.t + RAY_T_MIN;
-    }
-    return ShadowTransmission(vec4(0.0), max(ray_t_max, 0.0));
+    if ray_t_max < RAY_T_MIN { return ShadowTransmission(vec4(1.0), max(ray_t_max, 0.0)); }
+    let ray = trace_transmission_ray(origin, direction, ray_t_max, include_coverage);
+    return ShadowTransmission(ray.energy, ray.distance);
 }
 // End shadow transport
 

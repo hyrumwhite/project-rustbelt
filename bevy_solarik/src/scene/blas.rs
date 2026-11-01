@@ -419,9 +419,10 @@ fn blas_size(
         index_format: Some(IndexFormat::Uint32),
         index_count: Some(index_slice.range.len() as u32),
         // Without OPAQUE every hit on this geometry is a candidate the
-        // shader's trace_ray loop alpha-tests before confirming.
+        // shader's trace_ray loop alpha-tests before confirming; once each
+        // (a shadow ray multiplies in each pane it passes).
         flags: if non_opaque {
-            AccelerationStructureGeometryFlags::empty()
+            AccelerationStructureGeometryFlags::NO_DUPLICATE_ANY_HIT_INVOCATION
         } else {
             AccelerationStructureGeometryFlags::OPAQUE
         },

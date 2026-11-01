@@ -27,6 +27,17 @@ fn thin_glass_weights(wo: vec3<f32>, normal: vec3<f32>, base_color: vec3<f32>, a
     return vec4(transmission, reflection);
 }
 
+// A shadow ray's straight-through energy (rgb, and a: the probability of
+// the competing BSDF path) past one see-through surface: a pane, or a
+// diffuse-blended surface's uncovered share (`include_coverage`).
+fn shadow_pane_energy(glass: bool, wo: vec3<f32>, normal: vec3<f32>, base_color: vec3<f32>, alpha: f32, reflectance: f32, include_coverage: bool) -> vec4<f32> {
+    if glass {
+        let weights = thin_glass_weights(wo, normal, base_color, alpha, reflectance);
+        return vec4(weights.rgb, 1.0 - weights.a);
+    }
+    return vec4(select(1.0, 1.0 - alpha, include_coverage));
+}
+
 fn sample_thin_glass(wo: vec3<f32>, normal: vec3<f32>, base_color: vec3<f32>, alpha: f32, reflectance: f32, u: f32) -> ThinGlassSample {
     let weights = thin_glass_weights(wo, normal, base_color, alpha, reflectance);
     if u < weights.a {

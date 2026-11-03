@@ -399,16 +399,18 @@ const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
 /// before) is raised, by shader tag: Truth and Reconciliation's small blue
 /// and green circuit lights, mostly dark texture round their dots, and the
 /// long blue strips of its big rooms, self-illuminated at display white,
-/// lit nothing to see (play feedback); a10's monitors, its bridge's
+/// lit nothing to see (play feedback; the circuits down to 3 on 2 November,
+/// the ship's rooms having their lamps now: many bright dots made the
+/// first-person rifle's lighting jump between states); a10's monitors, its bridge's
 /// navigation screens and the rest, for its bridge scenes (play feedback).
 /// (Tuning: `HALO_RT_SHIP_LIGHT=<gain>` for all of them, 1 as Halo's.)
 const EMITTER_LIGHT_GAINS: [(&str, f32); 8] = [
-    ("levels\\a50\\shaders\\covenant circuits", 12.0),
-    ("levels\\a50\\shaders\\covenant circuits 0percent", 12.0),
-    ("levels\\a50\\shaders\\covenant circuits 25percent", 12.0),
-    ("levels\\a50\\shaders\\covenant circuits 50percent", 12.0),
-    ("levels\\a50\\shaders\\cov circuits orng 25per", 12.0),
-    ("levels\\a50\\shaders\\cov circuits purp 25per", 12.0),
+    ("levels\\a50\\shaders\\covenant circuits", 3.0),
+    ("levels\\a50\\shaders\\covenant circuits 0percent", 3.0),
+    ("levels\\a50\\shaders\\covenant circuits 25percent", 3.0),
+    ("levels\\a50\\shaders\\covenant circuits 50percent", 3.0),
+    ("levels\\a50\\shaders\\cov circuits orng 25per", 3.0),
+    ("levels\\a50\\shaders\\cov circuits purp 25per", 3.0),
     ("levels\\a50\\shaders\\covenant metal strips wide", 12.0),
     ("levels\\a10\\shaders\\monitors", 16.0),
 ];

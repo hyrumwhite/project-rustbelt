@@ -552,7 +552,8 @@ network tests (port/linux/game/network_test.c), different for each seed:
 it walks and strafes in circles, turns, fires every few seconds, jumps now
 and then and throws a grenade every seven seconds; "look:<seed>" stands
 still, only turning and looking up and down (where remote players aim and
-whether they stand); "throw" stands still, throwing a grenade every four
+whether they stand); "walk:<seed>" walks forward and back without
+turning (lighting on the first-person weapon in motion); "throw" stands still, throwing a grenade every four
 seconds (the effects' light, in the viewer) */
 static int test_input_holding_action;
 static Uint64 test_input_holding_action_since;
@@ -572,6 +573,7 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	static int checked;
 	static int seed = -1;
 	static int looking;
+	static int walking;
 	static int throwing;
 	double t;
 
@@ -594,6 +596,11 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 			seed = atoi(setting + 5);
 			looking = 1;
 		}
+		else if (!strncmp(setting, "walk:", 5))
+		{
+			seed = atoi(setting + 5);
+			walking = 1;
+		}
 	}
 	if (seed < 0)
 		return;
@@ -609,6 +616,11 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	{
 		if (fmod(t, 4.0) < 0.2)
 			pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = 255;
+		return;
+	}
+	if (walking)
+	{
+		pad->sThumbLY = (SHORT)(sin(t * 0.6) * 32000.0);
 		return;
 	}
 	if (looking)

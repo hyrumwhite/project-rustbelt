@@ -834,7 +834,11 @@ static void get_particle_world_position(
 			break;
 		}
 	}
-	match_vassert("c:\\halo\\SOURCE\\objects\\widgets\\glow.c", 1079, marker_index < glow->number_of_markers - 1, "marker_index<glow->number_of_markers-1");
+	/* port: a time at the glow's very end (a wrap can land on total
+	exactly) is in no segment, which halted the game (a50, 2 November):
+	it is in the last one */
+	if (marker_index >= glow->number_of_markers - 1)
+		marker_index = (short)(glow->number_of_markers - 2);
 	particle->parent_marker_index = PIN(marker_index, 0, glow->number_of_markers - 1);
 
 	match_vassert("c:\\halo\\SOURCE\\objects\\widgets\\glow.c", 1083, glow->number_of_markers > 1, "glow->number_of_markers > 1");
@@ -956,7 +960,9 @@ static void get_particle_world_position(
 					break;
 				}
 			}
-			match_vassert("c:\\halo\\SOURCE\\objects\\widgets\\glow.c", 1180, marker_index < glow->number_of_markers - 1, "marker_index<glow->number_of_markers-1");
+			/* port: as above, a time in no segment is in the last one */
+			if (marker_index >= glow->number_of_markers - 1)
+				marker_index = (short)(glow->number_of_markers - 2);
 			marker_index = PIN(marker_index, 0, glow->number_of_markers - 1);
 
 			first_marker_index = marker_index;

@@ -14,6 +14,7 @@ import bevy_solarik::realtime::surface_path::shade_surface_scattering;
 import bevy_solarik::realtime::sky_sampling::sample_sky_mixture;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
+import bevy_solarik::realtime::gbuffer_utils::temporal_pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
 import bevy_solarik::scene::sampling::sample_random_light_transmitted;
 import bevy_solarik::scene::sampling::shade_gi_connection;
@@ -257,7 +258,7 @@ fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, world
     let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
     let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, temporal_pixel_id, 0), temporal_depth, temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
     let temporal_diffuse_brdf = temporal_surface.material.base_color / PI;
-    if pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
+    if temporal_pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view, previous_view.view_from_world) {
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), vec3(0.0));
     }
 

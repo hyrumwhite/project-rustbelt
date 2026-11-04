@@ -12,6 +12,7 @@ import bevy_solarik::scene::brdf::evaluate_clearcoat_brdf;
 import bevy_solarik::scene::brdf::clearcoat_roughness;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
+import bevy_solarik::realtime::gbuffer_utils::temporal_pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
 import bevy_solarik::realtime::gbuffer_utils::raster_reconstruction_error;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
@@ -345,7 +346,7 @@ fn load_temporal_reservoir_inner(temporal_pixel_id: vec2<u32>, depth: f32, world
     let temporal_depth = textureLoad(previous_depth_buffer, temporal_pixel_id, 0);
     let temporal_surface = gpixel_resolve(textureLoad(previous_gbuffer, temporal_pixel_id, 0), temporal_depth, temporal_pixel_id, view.main_pass_viewport.zw, previous_view.world_from_clip);
     let temporal_diffuse_brdf = target_brdf(temporal_surface.material);
-    if pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view) {
+    if temporal_pixel_dissimilar(depth, world_position, temporal_surface.world_position, world_normal, temporal_surface.world_normal, view, previous_view.view_from_world) {
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), vec3(0.0));
     }
 

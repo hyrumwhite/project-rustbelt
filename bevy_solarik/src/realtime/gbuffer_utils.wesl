@@ -71,6 +71,22 @@ fn pixel_dissimilar(depth: f32, world_position: vec3<f32>, other_world_position:
     return tangent_plane_distance / view_z > 0.003 || dot(normal, other_normal) < 0.0;
 }
 
+// A previous frame's pixel unlike this one's (see `pixel_dissimilar`), in the
+// world or else in each frame's view: a surface carried with the camera (the
+// first-person arms and weapon) keeps its place in the view while the world
+// moves past, so walking failed every pixel of it by the world's measure, and
+// they shaded from fresh samples alone, sparse and jumping, while anything
+// still kept its history.
+fn temporal_pixel_dissimilar(depth: f32, world_position: vec3<f32>, previous_world_position: vec3<f32>, normal: vec3<f32>, previous_normal: vec3<f32>, view: View, previous_view_from_world: mat4x4<f32>) -> bool {
+    if !pixel_dissimilar(depth, world_position, previous_world_position, normal, previous_normal, view) { return false; }
+    let view_position = (view.view_from_world * vec4(world_position, 1.0)).xyz;
+    let previous_view_position = (previous_view_from_world * vec4(previous_world_position, 1.0)).xyz;
+    let view_normal = (view.view_from_world * vec4(normal, 0.0)).xyz;
+    let previous_view_normal = (previous_view_from_world * vec4(previous_normal, 0.0)).xyz;
+    let tangent_plane_distance = abs(dot(view_normal, previous_view_position - view_position));
+    return tangent_plane_distance / max(-view_position.z, 1e-4) > 0.003 || dot(view_normal, previous_view_normal) < 0.0;
+}
+
 fn permute_pixel(pixel_id: vec2<u32>, frame_index: u32, view_size: vec2<f32>) -> vec2<u32> {
     let r = frame_index;
     let offset = vec2(r & 3u, (r >> 2u) & 3u);

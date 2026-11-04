@@ -85,10 +85,6 @@ const OTHERS_MUZZLE_FORWARD: f32 = 0.3;
 const MUZZLE_FALLOFF: f32 = 0.45;
 const MUZZLE_CUTOFF: f32 = 1.2;
 const MUZZLE_LIGHT_SCALE: f32 = 0.15;
-/// Others' muzzle flashes, this share of that: marines firing from the
-/// vehicle the player drove lit the rocks beside it white for a tick at
-/// each shot (b40; play feedback: rocks lighting up with no clear cause).
-const OTHERS_MUZZLE_SCALE: f32 = 0.4;
 /// Up to this cutoff angle (radians, from the light's axis) a light is a
 /// spot light (the Warthog's headlights: a hemisphere, 90 degrees).
 const SPOT_CUTOFF: f32 = std::f32::consts::FRAC_PI_2 + 0.001;
@@ -420,10 +416,8 @@ fn sync_lights(
         };
         let drop = if vehicle { Vec3::NEG_Y * VEHICLE_SPOT_DROP } else { Vec3::ZERO };
         let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT)) + forward * ahead + drop;
-        let scale = if muzzle && near_camera.is_some() {
+        let scale = if muzzle {
             MUZZLE_LIGHT_SCALE
-        } else if muzzle {
-            MUZZLE_LIGHT_SCALE * OTHERS_MUZZLE_SCALE
         } else if vehicle {
             SPOT_LIGHT_SCALE * VEHICLE_SPOT_SCALE
         } else if flashlight {

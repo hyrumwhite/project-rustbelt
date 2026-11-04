@@ -1556,6 +1556,7 @@ fn update_control_text(
     follow: Option<Res<bridge::FollowGame>>,
     forward: Option<Res<bridge::ForwardInput>>,
     overlay: Option<Res<overlay::OverlayStats>>,
+    args: Res<Args>,
     time: Res<Time>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
     // (seconds counted, the game's frames per second, frames drawn since the
@@ -1597,10 +1598,20 @@ fn update_control_text(
             }
         );
         if let Some(overlay) = overlay {
-            s += &format!(
-                "the game's overlay (HUD, effects, transparent surfaces): {}x{}\n",
-                overlay.size.0, overlay.size.1
-            );
+            // (what the game still draws into it: the rest is this viewer's)
+            let drawn: Vec<&str> = [
+                (!args.draws_hud(), "HUD"),
+                (!args.viewer_effects(), "effects"),
+                (!args.viewer_transparent(), "transparent surfaces"),
+                (!args.viewer_glass(), "glass and water"),
+                (!args.viewer_decals(), "decals"),
+                (!args.viewer_fog(), "fog"),
+            ]
+            .into_iter()
+            .filter_map(|(drawn, what)| drawn.then_some(what))
+            .collect();
+            let drawn = if drawn.is_empty() { "the screen's quads".to_string() } else { drawn.join(", ") };
+            s += &format!("the game's overlay ({drawn}): {}x{}\n", overlay.size.0, overlay.size.1);
         }
     }
     if let Some(stats) = stats {

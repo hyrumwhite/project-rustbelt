@@ -20,7 +20,9 @@ use bevy_asset::{AssetId, Handle};
 use bevy_color::{ColorToComponents, LinearRgba};
 use bevy_ecs::{
     change_detection::DetectChanges,
+    component::Component,
     entity::Entity,
+    query::Has,
     resource::Resource,
     system::{Local, Query, Res, ResMut},
 };
@@ -35,6 +37,7 @@ use bevy_platform::{
 };
 use bevy_render::scene_slots::SceneInstance;
 use bevy_render::{
+    extract_component::ExtractComponent,
     extract_resource::ExtractResource,
     mesh::allocator::MeshAllocator,
     render_asset::RenderAssets,
@@ -72,6 +75,15 @@ pub struct SolarikSkyLight {
     /// Multiplier on the cubemap's radiance.
     pub intensity: f32,
 }
+
+/// A point or spot light whose sphere smooth surfaces don't show: it lights
+/// the scene as any other, but a mirror's or a pane's ray that passes it sees
+/// nothing there. For a light whose source the application draws itself (a
+/// game's effects: an explosion's flash, a particle's glow, whose sprites are
+/// the picture of it): its sphere, as a pane sees it, was a flat disc.
+#[derive(Component, ExtractComponent, Clone, Copy, Default, Debug)]
+#[extract_app(bevy_render::RenderApp)]
+pub struct SolarikUnreflectedLight;
 
 /// Where rays see only instances with [`super::RaytracingMask::NEAR`]: those
 /// leaving a point within `radius` of `centre` (world space, metres; none
@@ -421,7 +433,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     directional_lights_query: Query<(Entity, &ExtractedDirectionalLight)>,
     // Point and spot lights: bevy_pbr extracts both into ExtractedPointLight
     // (spot_light_angles tells them apart).
-    local_lights_query: Query<(Entity, &ExtractedPointLight)>,
+    local_lights_query: Query<(Entity, &ExtractedPointLight, Has<SolarikUnreflectedLight>)>,
     mesh_allocator: Res<MeshAllocator>,
     mut blas_manager: ResMut<BlasManager>,
     material_assets: Res<StandardMaterialAssets>,
@@ -515,7 +527,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             .collect(),
         local: local_lights_query
             .iter()
-            .map(|(entity, light)| (entity, GpuLocalLight::new(light)))
+            .map(|(entity, light, unreflected)| (entity, GpuLocalLight::new(light, unreflected)))
             .collect(),
         sky: sky_light.image.as_ref().map(Handle::id),
         sky_intensity: sky_light.intensity,
@@ -1151,14 +1163,14 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     // Point and spot lights are sphere lights of the light's radius, in the
     // raster path's candela; a light that cannot light anything (no power)
     // is left out so it costs no candidates.
-    for (entity, local_light) in &local_lights_query {
+    for (entity, local_light, unreflected) in &local_lights_query {
         if local_light.intensity <= 0.0 || local_light.color == LinearRgba::BLACK {
             continue;
         }
         let local_lights = local_lights.get_mut();
         let local_light_id = local_lights.len() as u32;
 
-        local_lights.push(GpuLocalLight::new(local_light));
+        local_lights.push(GpuLocalLight::new(local_light, unreflected));
         light_fluxes.push(local_flux(
             local_light.color.to_vec3(),
             local_light.intensity,
@@ -1799,11 +1811,14 @@ struct GpuLocalLight {
     /// no cone (a point light).
     cos_outer: f32,
     cos_inner: f32,
-    _padding: bevy_math::Vec2,
+    /// 1 for a [`SolarikUnreflectedLight`]: smooth surfaces' rays pass its
+    /// sphere.
+    unreflected: f32,
+    _padding: f32,
 }
 
 impl GpuLocalLight {
-    fn new(light: &ExtractedPointLight) -> Self {
+    fn new(light: &ExtractedPointLight, unreflected: bool) -> Self {
         let radius = light.radius.max(LOCAL_LIGHT_MIN_RADIUS);
         let area = 4.0 * PI * radius * radius;
         let radiance = light.color.to_vec3() * (light.intensity / (PI * radius * radius));
@@ -1820,7 +1835,8 @@ impl GpuLocalLight {
             range: light.range,
             cos_outer,
             cos_inner,
-            _padding: bevy_math::Vec2::ZERO,
+            unreflected: f32::from(u8::from(unreflected)),
+            _padding: 0.0,
         }
     }
 }
@@ -2227,7 +2243,7 @@ mod tests {
         // L × area × cos / d² over the whole sphere, whose expectation on the
         // facing side is L × π r² / d² (a quarter of the area sees the
         // receiver on average), so L × area / 4 must equal I.
-        let light = GpuLocalLight::new(&extracted_light(800.0, 0.05, None));
+        let light = GpuLocalLight::new(&extracted_light(800.0, 0.05, None), false);
         let intensity = 800.0 / (4.0 * PI);
         assert_eq!(light.radius, 0.05);
         assert!((light.radiance.x * light.inverse_pdf / 4.0 - intensity).abs() < 1e-3);
@@ -2242,7 +2258,7 @@ mod tests {
     fn zero_radius_lights_get_the_floor_radius() {
         // glTF lights arrive with radius 0; the sphere must stay finite and
         // its photometry unchanged.
-        let light = GpuLocalLight::new(&extracted_light(800.0, 0.0, None));
+        let light = GpuLocalLight::new(&extracted_light(800.0, 0.0, None), false);
         assert_eq!(light.radius, LOCAL_LIGHT_MIN_RADIUS);
         let intensity = 800.0 / (4.0 * PI);
         assert!((light.radiance.x * light.inverse_pdf / 4.0 - intensity).abs() < 1e-3);
@@ -2253,7 +2269,7 @@ mod tests {
     fn spot_light_carries_its_cone_and_direction() {
         let inner = 0.3f32;
         let outer = 0.5f32;
-        let light = GpuLocalLight::new(&extracted_light(1000.0, 0.0, Some((inner, outer))));
+        let light = GpuLocalLight::new(&extracted_light(1000.0, 0.0, Some((inner, outer))), false);
         assert!((light.cos_outer - outer.cos()).abs() < 1e-6);
         assert!((light.cos_inner - inner.cos()).abs() < 1e-6);
         // The cone points along the transform's forward axis, as bevy_pbr.

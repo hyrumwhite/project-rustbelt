@@ -355,6 +355,8 @@ fn analytic_light_radiance(origin: vec3<f32>, wi: vec3<f32>, limit: f32, owned: 
     var radiance = vec3(0.0);
     for (var i = 0u; i < arrayLength(&local_lights); i += 1u) {
         let light = local_lights[i];
+        // (one whose source the application draws itself: not seen here)
+        if light.unreflected > 0.5 { continue; }
         let offset = origin - light.position;
         let b = dot(offset, wi);
         let c = dot(offset, offset) - light.radius * light.radius;

@@ -142,7 +142,9 @@ struct LocalLight {
     // cos of the outer and inner cone angles; -1 for both means no cone.
     cos_outer: f32,
     cos_inner: f32,
-    _padding: vec2<f32>,
+    // 1 for a light smooth surfaces' rays pass (SolarikUnreflectedLight).
+    unreflected: f32,
+    _padding: f32,
 }
 
 // The sky: a cubemap in the scene's radiance units, scaled by `intensity`

@@ -395,6 +395,13 @@ const EMITTER_LOOKS: [(&str, f32, Option<[f32; 3]>); 5] = [
     ("levels\\a50\\shaders\\grav lift energy", 12.0, None),
     ("levels\\a10\\shaders\\monitor glow", 8.0, None),
 ];
+/// Light cards that light both ways, by shader tag: an emitter lights the
+/// side its face is turned to (Solarik's, as Halo's lightmapper), and the
+/// Library's door lights, a white card each side of its big doors and a
+/// warm invisible one behind it, lit the far side alone, the near one
+/// barely (play feedback, 4 November: lights flanking a door that cast no
+/// light). Their backs are emitters too, for the rays alone.
+const EMITTERS_BOTH_WAYS: [&str; 1] = ["levels\\c20\\shaders\\c20 light bright white"];
 /// Truth and Reconciliation's light, a soft pink of luminance one.
 const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
 
@@ -406,8 +413,12 @@ const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
 /// the ship's rooms having their lamps now: many bright dots made the
 /// first-person rifle's lighting jump between states); a10's monitors, its bridge's
 /// navigation screens and the rest, for its bridge scenes (play feedback).
+/// The Library's holographic panels (c20's own, amber, and b30's tall blue
+/// ones stacked under them), mostly dark round their lines: they lit
+/// nothing in its dark halls (play feedback, 4 November). (b30's, flush on
+/// the wall, some turned to face it, lit it as bright as themselves at 12.)
 /// (Tuning: `HALO_RT_SHIP_LIGHT=<gain>` for all of them, 1 as Halo's.)
-const EMITTER_LIGHT_GAINS: [(&str, f32); 8] = [
+const EMITTER_LIGHT_GAINS: [(&str, f32); 13] = [
     ("levels\\a50\\shaders\\covenant circuits", 3.0),
     ("levels\\a50\\shaders\\covenant circuits 0percent", 3.0),
     ("levels\\a50\\shaders\\covenant circuits 25percent", 3.0),
@@ -416,6 +427,11 @@ const EMITTER_LIGHT_GAINS: [(&str, f32); 8] = [
     ("levels\\a50\\shaders\\cov circuits purp 25per", 3.0),
     ("levels\\a50\\shaders\\covenant metal strips wide", 12.0),
     ("levels\\a10\\shaders\\monitors", 16.0),
+    ("levels\\c20\\devices\\holo control\\shaders\\c20 holo control", 6.0),
+    ("levels\\c20\\devices\\holo control\\shaders\\c20 holo control blink", 6.0),
+    ("levels\\c20\\devices\\holo control\\shaders\\c20 holo control blink slow", 6.0),
+    ("levels\\b30\\devices\\interior tech objects\\holo control\\shaders\\holo control", 3.0),
+    ("levels\\c20\\shaders\\c20 light bright white", 4.0),
 ];
 
 /// An emitter's light gain (see [`EMITTER_LIGHT_GAINS`]).
@@ -871,8 +887,26 @@ impl LevelBuilder {
                     },
                     _ => level,
                 };
-                self.spawn_mesh(commands, parent, name, mesh, &surface, raster);
+                self.spawn_mesh(commands, parent, name.clone(), mesh, &surface, raster);
                 self.stats.triangles += material.indices.len() / 3;
+                // (and its back, for an emitter that lights both ways: see
+                // EMITTERS_BOTH_WAYS)
+                if let Surface::Solid(solid) = &surface
+                    && solid.radiance.is_some()
+                    && let Some(datum) = material.shader.datum
+                    && self.cache.tag(datum).is_ok_and(|tag| EMITTERS_BOTH_WAYS.iter().any(|n| tag.name.eq_ignore_ascii_case(n)))
+                {
+                    let back = material.vertices.iter().map(|v| SourceVertex {
+                        position: v.position,
+                        normal: v.normal.map(|n| -n),
+                        binormal: v.binormal,
+                        tangent: v.tangent,
+                        texcoord: v.texcoord,
+                    });
+                    let indices: Vec<_> = material.indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
+                    let mesh = assets.meshes.add(build_mesh(back, &indices, shader.uv_scale));
+                    self.spawn_mesh(commands, parent, format!("{name} back"), mesh, &surface, false);
+                }
             }
             // (and the light strips added to it: see ADDED_LIGHT_STRIPS)
             let gain = std::env::var("HALO_RT_ADDED_STRIPS").ok().and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(1.0);

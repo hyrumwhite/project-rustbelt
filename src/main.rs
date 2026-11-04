@@ -1215,8 +1215,8 @@ fn apply_lighting(
     stats: Res<LevelStats>,
     active_bsp: Res<ActiveBsp>,
     level_sky: Res<LevelSky>,
-    surfaces: Query<(&EmissiveSurface, &MeshMaterial3d<StandardMaterial>)>,
-    environment_surfaces: Query<(&EmissiveSurface, &MeshMaterial3d<HaloEnvironmentMaterial>)>,
+    surfaces: Query<(Ref<EmissiveSurface>, &MeshMaterial3d<StandardMaterial>)>,
+    environment_surfaces: Query<(Ref<EmissiveSurface>, &MeshMaterial3d<HaloEnvironmentMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut environment_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
     mut suns: Query<&mut DirectionalLight>,
@@ -1239,22 +1239,25 @@ fn apply_lighting(
             (light.color, light.intensity) = source.color_and_intensity(emissive_scale);
         }
     }
-    if !changed {
-        return;
-    }
     let emissive = |surface: &EmissiveSurface| {
         let radiance = surface.radiance * emissive_scale;
         LinearRgba::rgb(radiance.x, radiance.y, radiance.z)
     };
+    // (and the surfaces made since: the game's objects, spawned as they
+    // appear, whose shaders the level doesn't share kept no emission and lit
+    // nothing, c20's holograms)
     for (surface, material) in &surfaces {
-        if let Some(mut material) = materials.get_mut(&material.0) {
-            material.emissive = emissive(surface);
+        if (changed || surface.is_added()) && let Some(mut material) = materials.get_mut(&material.0) {
+            material.emissive = emissive(&surface);
         }
     }
     for (surface, material) in &environment_surfaces {
-        if let Some(mut material) = environment_materials.get_mut(&material.0) {
-            material.base.emissive = emissive(surface);
+        if (changed || surface.is_added()) && let Some(mut material) = environment_materials.get_mut(&material.0) {
+            material.base.emissive = emissive(&surface);
         }
+    }
+    if !changed {
+        return;
     }
     if let Some((_, _, power)) = level_sky.0.sun {
         for mut sun in &mut suns {

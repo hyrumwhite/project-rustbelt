@@ -124,6 +124,22 @@ fn skyless_survey(cache: &CacheFile) -> CliResult {
                     .collect();
                 if all_held && !firing.is_empty() {
                     println!("    seen sky clusters (cluster, joined by a portal): {seen_sky:?}");
+                    // (past each opening onto the sky: whether the other BSP
+                    // holds the place, a metre and three on)
+                    let beyond: Vec<(usize, [bool; 2])> = seen_sky
+                        .iter()
+                        .flat_map(|&(s, _)| a.clusters.cluster_portals.get(s).map(|v| v.as_slice()).unwrap_or(&[]).iter().map(move |&p| (s, p)))
+                        .filter_map(|(s, p)| {
+                            let portal = &a.clusters.portals[p as usize];
+                            let other = portal.clusters.iter().copied().find(|&k| k as usize != s)?;
+                            (other >= 0 && (other as usize == c || seen.contains(&(other as usize)))).then_some(())?;
+                            let in_sky = |q: [f32; 3]| a.clusters.cluster_from_leaf(a.collision.leaf_from_point(q)) == s as i16;
+                            let past = [1.0, 3.0].map(|d| portal.past(d, in_sky).is_some_and(held));
+                            Some((p as usize, past))
+                        })
+                        .collect();
+                    println!("    past the openings onto the sky (portal, held at 1 m, 3 m): {beyond:?}");
+                    println!("    the other BSP closes them all: {}", beyond.iter().all(|(_, held)| !held[0]));
                     println!("  RULE: bsp {} cluster {c} draws bsp {} (its clusters {:?}, {} clusters, sky {:?})", a.index, o.index, firing, o.skies.len(), firing.iter().map(|&f| o.skies[f as usize]).collect::<Vec<_>>());
                 }
             }

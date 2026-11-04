@@ -569,12 +569,17 @@ fn sync_objects(
     // interior's shaft). There the viewer draws the other BSP, whose copy of
     // the room sees no sky: what the window was built to look onto. (Only
     // where the other BSP holds all of the interior the game's camera sees,
-    // so all that goes is the outdoors the game shows against black.)
+    // so all that goes is the outdoors the game shows against black, and
+    // closes each opening onto it with a wall of its own: b30's room alone.
+    // A seam room, whose other copy runs on into nothing, is drawn as the
+    // game draws it, the land beyond and all: b40's tunnel to the second
+    // canyon, from BSP 0, showed rocks and trees over the void.)
     let drawn = match (snapshot.camera, active_visibility.filter(|v| skyless && v.sees_sky(camera_cluster))) {
         (Some(camera), Some(active)) => all_visibility.iter().enumerate().find_map(|(index, other)| {
             let other = other.as_ref().filter(|_| index as i32 != snapshot.structure_bsp_index)?;
             let cluster = other.cluster(camera.position);
-            (cluster >= 0 && !other.sees_sky(cluster) && other.holds_interior_seen(active, camera_cluster)).then_some(index)
+            (cluster >= 0 && !other.sees_sky(cluster) && other.holds_interior_seen(active, camera_cluster) && other.closes_openings_seen(active, camera_cluster))
+                .then_some(index)
         }),
         _ => None,
     };
@@ -1075,6 +1080,26 @@ impl ClusterVisibility {
         (0..active.skies.len()).filter(|&to| active.skies[to] < 0 && active.sees(from, to as i16)).all(|to| {
             let portals = active.clusters.cluster_portals.get(to).map(|p| p.as_slice()).unwrap_or(&[]);
             portals.iter().all(|&p| active.clusters.portals.get(p as usize).is_none_or(|portal| self.cluster(portal.centroid) >= 0))
+        })
+    }
+
+    /// Whether this BSP closes each opening onto the outdoors that `active`'s
+    /// cluster `from` sees (the portals joining the clusters without sky it
+    /// sees, or its own, to those with sky): a metre past each, this BSP has
+    /// no cluster, its own wall stands there. (b30's control room, whose
+    /// window BSP 1 closes with the shaft; where the other BSP's copy runs on
+    /// past the opening into nothing it built, b40's tunnel out into the
+    /// second canyon, from BSP 0, it would show the void the game doesn't:
+    /// the game draws its own BSP's land there.)
+    fn closes_openings_seen(&self, active: &ClusterVisibility, from: i16) -> bool {
+        let interior = |k: i16| k >= 0 && (k == from || (active.skies.get(k as usize).is_some_and(|&sky| sky < 0) && active.sees(from, k)));
+        active.clusters.portals.iter().all(|portal| {
+            let [a, b] = portal.clusters;
+            let outdoors = [(a, b), (b, a)].into_iter().find(|&(inside, outside)| {
+                interior(inside) && outside >= 0 && active.skies.get(outside as usize).is_some_and(|&sky| sky >= 0) && active.sees(from, outside)
+            });
+            let Some((_, outside)) = outdoors else { return true };
+            portal.past(1.0, |p| active.cluster(p) == outside).is_none_or(|p| self.cluster(p) < 0)
         })
     }
 

@@ -700,6 +700,33 @@ pub struct Portal {
     pub vertices: Vec<[f32; 3]>,
 }
 
+impl Portal {
+    /// The portal's unit normal, from its vertices (Newell's method); None
+    /// for a degenerate one.
+    pub fn normal(&self) -> Option<[f32; 3]> {
+        let mut n = [0.0f32; 3];
+        for (i, a) in self.vertices.iter().enumerate() {
+            let b = self.vertices[(i + 1) % self.vertices.len()];
+            n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+            n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+            n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        (length > 1e-6).then(|| n.map(|v| v / length))
+    }
+
+    /// The point `distance` from the centroid along the normal, on whichever
+    /// side `side` accepts (the portal's clusters are on either); None if
+    /// it accepts neither.
+    pub fn past(&self, distance: f32, side: impl Fn([f32; 3]) -> bool) -> Option<[f32; 3]> {
+        let n = self.normal()?;
+        [distance, -distance]
+            .map(|d| [0, 1, 2].map(|i| self.centroid[i] + n[i] * d))
+            .into_iter()
+            .find(|&p| side(p))
+    }
+}
+
 /// `MAXIMUM_VERTICES_PER_CLUSTER_PORTAL`.
 const MAXIMUM_VERTICES_PER_CLUSTER_PORTAL: usize = 128;
 /// `MAXIMUM_CLUSTERS_PER_STRUCTURE`.

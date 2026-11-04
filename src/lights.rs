@@ -10,7 +10,10 @@
 //! shining every way through a gel of a few narrow discs (a10's spinning
 //! alarm lights: two) is a spot light for each, turned with the light. They
 //! keep their entities from frame to frame (by their tag and object), and
-//! the unused are hidden, then reused.
+//! the unused are hidden, then reused. Smooth surfaces don't show their
+//! spheres (`SolarikUnreflectedLight`): the game's picture of a light is its
+//! effect's sprites, and in a pane a sphere was a flat disc (b40's glass:
+//! play feedback, circles).
 //! Projectiles glow too: the plasma bolts by the lights their tags attach,
 //! which in the game are only lens flares and light nothing (the game
 //! shares them anyway, at their tags' colour and reach); rockets, needles,
@@ -25,7 +28,8 @@ use crate::{
     LightingSettings,
 };
 use bevy::{camera::visibility::NoFrustumCulling, platform::collections::HashMap, prelude::*};
-use halo_bridge::{Light, LIGHT_CONTRAIL, LIGHT_MUZZLE_FLASH};
+use bevy_solarik::scene::SolarikUnreflectedLight;
+use halo_bridge::{Light, LIGHT_CONTRAIL, LIGHT_MUZZLE_FLASH, OBJECT_OUTSIDE_OF_MAP};
 use halo_map::{
     light_gel::{gel_beams, GelBeam},
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
@@ -81,6 +85,10 @@ const OTHERS_MUZZLE_FORWARD: f32 = 0.3;
 const MUZZLE_FALLOFF: f32 = 0.45;
 const MUZZLE_CUTOFF: f32 = 1.2;
 const MUZZLE_LIGHT_SCALE: f32 = 0.15;
+/// Others' muzzle flashes, this share of that: marines firing from the
+/// vehicle the player drove lit the rocks beside it white for a tick at
+/// each shot (b40; play feedback: rocks lighting up with no clear cause).
+const OTHERS_MUZZLE_SCALE: f32 = 0.4;
 /// Up to this cutoff angle (radians, from the light's axis) a light is a
 /// spot light (the Warthog's headlights: a hemisphere, 90 degrees).
 const SPOT_CUTOFF: f32 = std::f32::consts::FRAC_PI_2 + 0.001;
@@ -123,7 +131,7 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 /// Lights dimmed from their tags' brightness (by the light tag's name, or
 /// a folder's, ending in a backslash): a wide reach is a bright light here
 /// (brightness grows with its square). Dimmed to 0, left out.
-const LIGHT_DIMMING: [(&str, f32); 11] = [
+const LIGHT_DIMMING: [(&str, f32); 13] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights)
     ("characters\\monitor\\monitor dynamic", 0.15),
@@ -157,6 +165,13 @@ const LIGHT_DIMMING: [(&str, f32); 11] = [
     // (a10's alarm klaxons' red, flashing through the bridge scenes; play
     // feedback: 30% down)
     ("levels\\a10\\devices\\alert_light\\alert_light", 0.7),
+    // (the broken machines' sparks, flickering, on b40 and others: they
+    // lit the walls round them brightly; play feedback: much too bright)
+    ("scenery\\emitters\\sparks constant\\sparks flicker", 0.25),
+    // (the Ghost's bolts', at each as it leaves the guns, two in turn: the
+    // ground before a firing Ghost glowed bright cyan; play feedback:
+    // dimmer)
+    ("vehicles\\ghost\\ghost bolt", 0.35),
 ];
 
 /// Lights smaller than [`LIGHT_RADIUS`] (by the light tag's name), raised
@@ -165,8 +180,16 @@ const LIGHT_DIMMING: [(&str, f32); 11] = [
 /// sphere, under the light's surface, went unlit, a dark disc round the
 /// stick. a50's doors' lock lights are in each door's middle, and the door
 /// cut their spheres in half: a dark disc in a bright ring on the door.
-const SMALL_LIGHTS: [(&str, f32); 2] =
-    [("scenery\\baton\\baton light dynamic", 0.05), ("levels\\a50\\devices\\small door\\small door light", 0.05)];
+/// b40's door blinkers, white, pulsing, reaching 3 world units, sit a
+/// hand's breadth over the plate before each of its doors: the plate cut
+/// a dark disc round each, and the pulse flooded the white halls (play
+/// feedback: its "direction indicators" much too bright, with a "donut
+/// hole"); a twenty-fifth of the light, as the small sphere's.
+const SMALL_LIGHTS: [(&str, f32); 3] = [
+    ("scenery\\baton\\baton light dynamic", 0.05),
+    ("levels\\a50\\devices\\small door\\small door light", 0.05),
+    ("levels\\b40\\scenery\\b40_doorblinker\\doorblinker", 0.05),
+];
 
 /// Whether a light tag's name is the dimmed one, or in the dimmed folder.
 fn dimmed_by(name: &str, dimmed: &str) -> bool {
@@ -233,7 +256,7 @@ fn place_spot(
             visibility.set_if_neq(Visibility::Inherited);
             entity
         }
-        _ => commands.spawn((Name::new("spotlight"), light, transform, Visibility::Inherited, NoFrustumCulling)).id(),
+        _ => commands.spawn((Name::new("spotlight"), light, transform, Visibility::Inherited, NoFrustumCulling, SolarikUnreflectedLight)).id(),
     };
     now.insert(key, entity);
 }
@@ -258,7 +281,7 @@ fn place_point(
             visibility.set_if_neq(Visibility::Inherited);
             entity
         }
-        _ => commands.spawn((Name::new("light"), light, transform, Visibility::Inherited, NoFrustumCulling)).id(),
+        _ => commands.spawn((Name::new("light"), light, transform, Visibility::Inherited, NoFrustumCulling, SolarikUnreflectedLight)).id(),
     };
     now.insert(key, entity);
 }
@@ -289,10 +312,12 @@ fn sync_lights(
     }
     // the glowing projectiles' lights, round from their middles (by no tag:
     // neither muzzle flashes nor gelled; hidden ones too: a projectile
-    // without a model, a Sentinel's beam, the game hides)
+    // without a model, a Sentinel's beam, the game hides; not those outside
+    // the map: b40's two Wraith mortars, kept at the world's origin)
     let projectile_lights: Vec<Light> = snapshot
         .objects
         .iter()
+        .filter(|object| object.object_flags & OBJECT_OUTSIDE_OF_MAP == 0)
         .filter_map(|object| {
             let (color, radius) = (*glows.entry(object.definition_index).or_insert_with(|| {
                 let tag = level.as_ref()?.builder.cache.tag(object.definition_index).ok()?;
@@ -395,8 +420,10 @@ fn sync_lights(
         };
         let drop = if vehicle { Vec3::NEG_Y * VEHICLE_SPOT_DROP } else { Vec3::ZERO };
         let position = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT)) + forward * ahead + drop;
-        let scale = if muzzle {
+        let scale = if muzzle && near_camera.is_some() {
             MUZZLE_LIGHT_SCALE
+        } else if muzzle {
+            MUZZLE_LIGHT_SCALE * OTHERS_MUZZLE_SCALE
         } else if vehicle {
             SPOT_LIGHT_SCALE * VEHICLE_SPOT_SCALE
         } else if flashlight {

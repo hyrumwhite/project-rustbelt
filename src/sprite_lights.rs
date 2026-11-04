@@ -14,7 +14,9 @@
 //! The lights keep their entities from frame to frame by place (each
 //! cluster takes the last frame's nearest), as the dynamic lights do by
 //! their tags: lights trading places took their lighting's history with
-//! them.
+//! them. Smooth surfaces don't show their spheres, as the game's lights'
+//! (`src/lights.rs`): a grenade's fire, a sphere up to 1.5 metres across,
+//! was a big flat disc in a pane.
 //!
 //! Tuning: `HALO_RT_PARTICLE_LIGHT=<gain>` (0 none);
 //! `HALO_RT_PARTICLE_LIGHT_LOG` logs the brightest clusters.
@@ -25,6 +27,7 @@ use crate::{
     LightingSettings,
 };
 use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
+use bevy_solarik::scene::SolarikUnreflectedLight;
 use halo_bridge::{DECAL_BLEND_ADD, DECAL_BLEND_ALPHA_MULTIPLY_ADD, LIGHT_CONTRAIL, SPRITE_LENS_FLARE};
 use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 
@@ -36,6 +39,12 @@ use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 /// fading over most of a second (a50's canyon, with `HALO_TEST_INPUT=throw`;
 /// at 300 the orange outshone the flash).
 const PARTICLE_LIGHT: f32 = 100.0;
+/// Particles that light by a share of that (their bitmap's tag name): the
+/// sparks, streams of white-hot streaks, from b40's broken machines and
+/// struck vehicles, lit the walls round them brightly (play feedback: much
+/// too bright).
+const PARTICLE_LIGHT_SHARES: [(&str, f32); 2] =
+    [("effects\\particles\\flash\\bitmaps\\sparks", 0.2), ("effects\\particles\\flash\\bitmaps\\sparks impact", 0.2)];
 /// Radiance of a displayed white sprite, as self-illumination's
 /// (`level::SELF_ILLUMINATION_RADIANCE`: with the default emissive scale and
 /// exposure, about display white).
@@ -152,6 +161,10 @@ fn sprite_lights(
             }
             let first = batch.first_vertex as usize;
             let Some(vertices) = snapshot.sprite_vertices.get(first..first + batch.quad_count as usize * 4) else { continue };
+            let share = builder.cache.tag(batch.map).ok().and_then(|tag| {
+                PARTICLE_LIGHT_SHARES.iter().find(|(name, _)| tag.name.eq_ignore_ascii_case(name)).map(|&(_, share)| share)
+            });
+            let gain = gain * share.unwrap_or(1.0);
             let Some(sheet) = builder.textures.summed_area(&builder.cache, batch.map, batch.bitmap_index) else { continue };
             for quad in vertices.chunks_exact(4) {
                 let corner = |i: usize| Vec3::from(halo_to_bevy(quad[i].position, METERS_PER_WORLD_UNIT));
@@ -254,7 +267,7 @@ fn sprite_lights(
                 i
             }
             None => {
-                let entity = commands.spawn((Name::new("particle light"), light, transform, Visibility::Inherited, NoFrustumCulling)).id();
+                let entity = commands.spawn((Name::new("particle light"), light, transform, Visibility::Inherited, NoFrustumCulling, SolarikUnreflectedLight)).id();
                 state.lights.push((entity, middle, true));
                 taken.push(false);
                 state.lights.len() - 1

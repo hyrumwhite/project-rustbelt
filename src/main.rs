@@ -459,8 +459,10 @@ fn main() -> AppExit {
     if std::env::var_os("HALO_RT_CACHE_LOG").is_some() {
         app.add_systems(PostUpdate, log_world_cache);
     }
+    // (the CPU's times always, for a capture's note; logged with the GPU's)
+    app.add_plugins(cpu_times::CpuTimesPlugin);
     if std::env::var_os("HALO_RT_GPU_LOG").is_some() {
-        app.add_systems(Last, log_gpu_times).add_plugins(cpu_times::CpuTimesPlugin);
+        app.add_systems(Last, log_gpu_times);
     }
     if args.dolly.is_some() {
         app.add_systems(Update, dolly_camera);
@@ -905,6 +907,12 @@ fn log_gpu_times(store: Res<bevy::diagnostic::DiagnosticsStore>, mut last: Local
         return;
     }
     *last = Some(std::time::Instant::now());
+    info!("{}", gpu_times(&store));
+}
+
+/// The GPU time of each render pass Bevy's render diagnostics time
+/// (milliseconds, averaged), and their sum, as a line.
+fn gpu_times(store: &bevy::diagnostic::DiagnosticsStore) -> String {
     let mut times: Vec<(String, f64)> = store
         .iter()
         .filter(|d| d.path().as_str().ends_with("/elapsed_gpu"))
@@ -916,7 +924,7 @@ fn log_gpu_times(store: Res<bevy::diagnostic::DiagnosticsStore>, mut last: Local
     times.sort_by(|a, b| b.1.total_cmp(&a.1));
     let total: f64 = times.iter().map(|t| t.1).sum();
     let list: Vec<String> = times.iter().filter(|t| t.1 >= 0.02).map(|(name, ms)| format!("{name} {ms:.2}")).collect();
-    info!("gpu {total:.2} ms: {}", list.join(", "));
+    format!("gpu {total:.2} ms: {}", list.join(", "))
 }
 
 fn log_heartbeat(world: &World, mut last: Local<Option<std::time::Instant>>) {
@@ -1328,12 +1336,15 @@ fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With
 
 /// F9, in play too: save the window's picture (in `captures` beside the
 /// program) and log where it was taken, in the log and a `.txt` beside it:
-/// the level, the game's tick and the camera, as a `--camera` argument.
+/// the level, the game's tick and the camera, as a `--camera` argument; and
+/// the frame's times, the CPU's and the GPU's by pass (for a slow place:
+/// play feedback's dips, which no scripted run had staged).
 fn capture(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     camera: Single<&Transform, With<Camera3d>>,
     link: Option<Res<bridge::BridgeLink>>,
+    diagnostics: Option<Res<bevy::diagnostic::DiagnosticsStore>>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     if !keys.just_pressed(KeyCode::F9) {
@@ -1354,7 +1365,9 @@ fn capture(
     let place = format!("{level} at tick {}, {}", game.map_or(0, |g| g.game_tick), camera_argument(&camera));
     info!("capture: {} - {place}", path.display());
     // (and beside it: a packaged run's log goes nowhere)
-    if let Err(error) = std::fs::write(path.with_extension("txt"), format!("{place}\n")) {
+    let times = [cpu_times::latest(), diagnostics.as_deref().map(gpu_times)].into_iter().flatten();
+    let note: String = std::iter::once(place.clone()).chain(times).map(|line| line + "\n").collect();
+    if let Err(error) = std::fs::write(path.with_extension("txt"), note) {
         warn!("capture: can't write where it was taken: {error}");
     }
     commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));

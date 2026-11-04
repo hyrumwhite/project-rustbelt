@@ -48,6 +48,7 @@ symbols in this file:
 #include "cache/texture_cache.h"
 #include "cseries/cseries.h"
 #include "cseries/errors.h"
+#include "game/game.h"
 #include "interface/hud_draw.h"
 #include "bitmaps/bitmap_color_conversion.h"
 #include "math/real_math.h"
@@ -59,6 +60,7 @@ symbols in this file:
 #include "saved games/game_state.h"
 #include "shaders/shader_definitions.h"
 #include "shaders/shaders.h"
+#include "tag_files/tag_files.h"
 #include "tag_files/tag_groups.h"
 
 /* ---------- constants */
@@ -260,6 +262,22 @@ static void lightning_offset_marker_position(
 	return;
 }
 
+/* port: b40's bridge lightning restyled blue-green: its tags' tint, green
+(0.24, 1, 0.37), added in the renderer's high range, showed bright green
+over the bridges' teal energy ropes (play feedback: more blue/green) */
+static void lightning_port_tint(long definition_index, real_argb_color *tint)
+{
+	static char const restyled[] = "levels\\b40\\scenery\\bridge lightning markers\\";
+	char const *name = tag_get_name(definition_index);
+
+	if (name && !csstrncmp(name, restyled, sizeof(restyled) - 1))
+	{
+		tint->red = 0.2f;
+		tint->green = 0.75f;
+		tint->blue = 0.7f;
+	}
+}
+
 /* ---------- public code */
 
 void lightning_submit(
@@ -291,7 +309,15 @@ void lightning_submit(
 			{
 				struct intermediate_lightning_point points[MAXIMUM_LIGHTNING_POINTS];
 				short instance_index;
+				/* port: its jitter drawn anew each tick, not each frame: at a
+				renderer's hundred frames a second b40's bridge lightning
+				flickered three times as fast as the Xbox's thirty (play
+				feedback: flickers very quickly); the frame's random sequence
+				is put back after */
+				unsigned long *seed = get_global_local_random_seed_address();
+				unsigned long frame_seed = *seed;
 
+				*seed = (unsigned long)object_index*2654435761UL ^ (unsigned long)game_time_get()*40503UL;
 				for (instance_index = 0; instance_index < definition->count; instance_index++)
 				{
 					short point_count = 0;
@@ -331,6 +357,7 @@ void lightning_submit(
 								&marker_definition->random_position_bounds);
 							points[0].width = marker_definition->thickness;
 							points[0].color = marker_definition->tint;
+							lightning_port_tint(lightning->definition_index, &points[0].color);
 							points[0].valid = TRUE;
 							first_marker = FALSE;
 						}
@@ -524,6 +551,7 @@ void lightning_submit(
 								&next_marker_definition->random_position_bounds);
 							points[point_count+segment_point_count].width = next_marker_definition->thickness;
 							points[point_count+segment_point_count].color = next_marker_definition->tint;
+							lightning_port_tint(lightning->definition_index, &points[point_count+segment_point_count].color);
 							points[point_count+segment_point_count].valid = TRUE;
 
 							vector_from_points3d(
@@ -590,6 +618,7 @@ void lightning_submit(
 						}
 					}
 				}
+				*seed = frame_seed;
 			}
 		}
 	}

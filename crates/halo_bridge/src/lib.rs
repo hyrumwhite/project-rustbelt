@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 52;
+pub const VERSION: u32 = 53;
 pub const SCREEN_TEXTURES: usize = 512;
 pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
 pub const TEXT_ATLAS_SIZE: usize = 2048;
@@ -66,7 +66,7 @@ pub const RANDOM_DIRECTIONS: usize = 4096;
 /// The steps of each ray test's point physics.
 pub const POINT_PHYSICS_STEPS: usize = 90;
 pub const RAY_TESTS: usize = 16;
-pub const MAXIMUM_LIGHTS: usize = 64;
+pub const MAXIMUM_LIGHTS: usize = 192;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;

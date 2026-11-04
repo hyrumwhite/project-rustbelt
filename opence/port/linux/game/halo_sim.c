@@ -11437,17 +11437,24 @@ int halo_sim_hs_begin(long operation, long expression, long *result, int *checki
 	{
 		real_point3d position;
 		float yaw = 0.0f;
+		float pitch = 0.0f;
 		long player_index = local_player_get_player_index(0);
 
 		halo_sim_teleport_done = TRUE;
+		/* (and a fifth, the aim's pitch in degrees, as a capture's
+		--camera gives it: the sky overhead, a lamp up a wall) */
 		if (player_index != NONE
-			&& sscanf(getenv("HALO_SIM_TELEPORT"), "%f,%f,%f,%f", &position.x, &position.y, &position.z, &yaw) >= 3
+			&& sscanf(getenv("HALO_SIM_TELEPORT"), "%f,%f,%f,%f,%f", &position.x, &position.y, &position.z, &yaw, &pitch) >= 3
 			&& player_get(player_index)->unit_index != NONE)
 		{
 			real_vector3d forward = { cosf(yaw * 0.0174533f), sinf(yaw * 0.0174533f), 0.0f };
+			real_vector3d aim = {
+				forward.i * cosf(pitch * 0.0174533f),
+				forward.j * cosf(pitch * 0.0174533f),
+				sinf(pitch * 0.0174533f) };
 
 			object_set_position(player_get(player_index)->unit_index, &position, &forward, NULL);
-			player_control_set_facing(0, &forward);
+			player_control_set_facing(0, &aim);
 			platform_log("halo_sim: the player moved to %f,%f,%f", position.x, position.y, position.z);
 		}
 		/* (and HALO_SIM_POWER_DEVICES: each machine whose tag's name holds

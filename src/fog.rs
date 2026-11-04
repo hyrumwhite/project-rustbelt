@@ -114,7 +114,8 @@ pub struct HaloFog {
     plane: Vec4,
     /// rgb, maximum density
     planar_color: Vec4,
-    /// maximum distance and depth, the camera's density
+    /// maximum distance and depth, the camera's density, 1 when the level's
+    /// sky has no model (the sky shows the atmospheric fog's colour)
     planar: Vec4,
     /// the fog screen: rgb, mode (0 none, 1 added by depth, 2 blended)
     screen_color: Vec4,
@@ -256,6 +257,7 @@ fn follow_fog(
     mut logged: Local<Option<halo_bridge::Fog>>,
     mut logged_screen: Local<Option<u32>>,
     mut logged_water: Local<Option<bool>>,
+    mut modelless_sky: Local<Option<(String, bool)>>,
     mut level: Option<ResMut<crate::bridge::BridgeLevel>>,
     mut images: ResMut<Assets<Image>>,
     viewer_water: Option<Res<ViewerWater>>,
@@ -274,6 +276,18 @@ fn follow_fog(
         info!("the game's fog: {fog:?}");
         *logged = Some(fog);
     }
+    // (whether the level's skies have no model: the game clears its picture
+    // to the atmospheric fog's colour (rasterizer_window_begin), and with
+    // no sky drawn over it that is the sky: b40's snowy white, where a blue
+    // stood in, flat, over its canyons; play feedback: the sky incomplete)
+    if let Some(level) = level.as_deref()
+        && modelless_sky.as_ref().is_none_or(|(name, _)| *name != level.builder.stats.map_name)
+    {
+        let skies = halo_map::sky::skies(&level.builder.cache).unwrap_or_default();
+        let modelless = !skies.is_empty() && skies.iter().all(|sky| sky.model.and_then(|m| m.datum).is_none());
+        *modelless_sky = Some((level.builder.stats.map_name.clone(), modelless));
+    }
+    let modelless = modelless_sky.as_ref().is_some_and(|(_, modelless)| *modelless);
     let screen = snapshot.fog_screen.as_ref();
     if screen.map(|s| s.map) != *logged_screen {
         if let Some(screen) = screen {
@@ -300,6 +314,7 @@ fn follow_fog(
                 *logged_water = Some(on_water);
             }
             fog.atmospheric.w = if viewer_water.is_some() && on_water { 1.0 } else { 0.0 };
+            fog.planar.w = if modelless { 1.0 } else { 0.0 };
             fog
         });
     // the same fog over what reflections see beyond their surfaces

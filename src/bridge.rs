@@ -377,9 +377,11 @@ struct Tracked {
 
 /// How far round the first-person camera rays don't meet the player's own
 /// body (metres): the first-person arms and weapon, which sit inside it,
-/// lie within, and the camera's own rays start there. Further away, the
-/// body shades the world.
-const NEAR_RAYS_RADIUS: f32 = 1.0;
+/// lie within (their nodes up to 0.69 m from the camera, b40), and the
+/// camera's own rays start there. Further away, the body shades the world.
+/// A wall within it lost the body's shadow in a disc there (at a metre, the
+/// disc grew and shrank with the wall's distance; play feedback).
+const NEAR_RAYS_RADIUS: f32 = 0.85;
 
 /// The game's objects drawn so far, by object datum index.
 #[derive(Resource, Default)]

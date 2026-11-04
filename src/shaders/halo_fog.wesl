@@ -20,7 +20,9 @@
 // The sky (nothing in the depth buffer) is left as it is: the game's fog pass
 // covers the level's surfaces only. But where the atmospheric fog is opaque
 // (its maximum density 1), the game draws nothing past its maximum distance:
-// there the sky is fogged as a surface at that distance.
+// there the sky is fogged as a surface at that distance. And where the
+// level's sky has no model (b40's), the sky is the game's clear: the fog's
+// colour.
 //
 // Where the picture holds the water (atmospheric.w), a surface under the fog
 // plane seen from above it was seen through the water's surface (the plane,
@@ -54,7 +56,8 @@ struct HaloFog {
     plane: vec4<f32>,
     // rgb, maximum density
     planar_color: vec4<f32>,
-    // maximum distance and depth (metres), the camera's density
+    // maximum distance and depth (metres), the camera's density, 1 when the
+    // level's sky has no model
     planar: vec4<f32>,
     // the fog screen: rgb, and its mode (0 none, 1 added by depth, 2 blended)
     screen_color: vec4<f32>,
@@ -133,6 +136,12 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
     // past it, only fog; as a surface there. c10's swamps: the treetops in
     // the fog, against the sky, stood out bare)
     let opaque = fog.atmospheric_color.a >= 1.0 && fog.atmospheric.y > 0.0;
+    // (the sky, where the level's has no model: the game clears its picture
+    // to the fog's colour, and draws no sky over it: b40's snowy white)
+    if z <= 0.0 && !opaque && fog.planar.w > 0.5 {
+        result.fogged = vec4(fog.atmospheric_color.rgb, 1.0);
+        return result;
+    }
     if z <= 0.0 && !opaque {
         return result;
     }

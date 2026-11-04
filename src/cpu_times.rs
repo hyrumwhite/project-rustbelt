@@ -1,6 +1,7 @@
-//! (`HALO_RT_GPU_LOG=1`) The CPU's side of a frame, logged beside the GPU's
-//! pass times: the main schedule's time, and the render thread's without
-//! its wait for a window texture (which waits on the GPU and the display).
+//! The CPU's side of a frame: the main schedule's time, and the render
+//! thread's without its wait for a window texture (which waits on the GPU
+//! and the display), each 5 seconds; logged beside the GPU's pass times
+//! (`HALO_RT_GPU_LOG=1`), and the latest written with each F9 capture.
 
 use bevy::{
     prelude::*,
@@ -46,6 +47,16 @@ struct Marks {
     wait: Option<Instant>,
 }
 
+/// The latest 5 seconds' times, as the log puts them (for a capture).
+pub fn latest() -> Option<String> {
+    latest_line().lock().ok()?.clone()
+}
+
+fn latest_line() -> &'static Mutex<Option<String>> {
+    static LATEST: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    LATEST.get_or_init(Default::default)
+}
+
 fn totals() -> &'static Mutex<(Totals, Marks)> {
     static TOTALS: OnceLock<Mutex<(Totals, Marks)>> = OnceLock::new();
     TOTALS.get_or_init(Default::default)
@@ -65,13 +76,19 @@ fn main_ended() {
     let since = *totals.since.get_or_insert_with(Instant::now);
     if since.elapsed().as_secs_f32() >= 5.0 {
         let per = |d: Duration, n: u32| d.as_secs_f32() * 1000.0 / n.max(1) as f32;
-        info!(
+        let line = format!(
             "cpu: main {:.2} ms, render {:.2} ms (and {:.2} ms waiting for the window), {:.0} frames/s",
             per(totals.main, totals.main_frames),
             per(totals.render, totals.render_frames),
             per(totals.window_wait, totals.render_frames),
             totals.render_frames as f32 / since.elapsed().as_secs_f32()
         );
+        if std::env::var_os("HALO_RT_GPU_LOG").is_some() {
+            info!("{line}");
+        }
+        if let Ok(mut latest) = latest_line().lock() {
+            *latest = Some(line);
+        }
         *totals = Totals::default();
     }
 }

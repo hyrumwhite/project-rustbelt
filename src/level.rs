@@ -277,10 +277,13 @@ const FLOODLIGHT_RANGE: f32 = 15.0;
 /// lens flare) that get a big spot light at their light's marker: the
 /// fixture, the cone's falloff and cutoff (degrees), brightness (times a
 /// floodlight's), reach (metres), and the way it shines in the fixture's
-/// own Halo space (its tag says none). c10's two foglights by the
-/// facility's entrance, which face out from it, over the hill and trees.
+/// own Halo space (its tag says none). The foglights (c10's two by the
+/// facility's entrance, facing out over the hill and trees; b40's, on its
+/// garage's walls, turned on their sides): along the model's -Z, its lens's
+/// facing and its volumetric cone's (their own -X, aimed by eye on c10,
+/// lit the wall beside b40's; play feedback: light cast to their left).
 const LAMP_SPOTLIGHTS: [(&str, f32, f32, f32, f32, [f32; 3]); 1] =
-    [("levels\\b40\\devices\\b40_foglight\\b40_foglight", 30.0, 55.0, 6.0, 35.0, [-1.0, 0.0, -0.2])];
+    [("levels\\b40\\devices\\b40_foglight\\b40_foglight", 30.0, 55.0, 6.0, 35.0, [0.0, 0.0, -1.0])];
 /// Fixtures whose spot lights are restyled (see [`FixtureSpotLook`]).
 /// Truth and Reconciliation's ceiling lamps (a50's ship, 90 of them,
 /// flanking every door) lit the wall a hand's breadth below them in a hard

@@ -554,7 +554,8 @@ and then and throws a grenade every seven seconds; "look:<seed>" stands
 still, only turning and looking up and down (where remote players aim and
 whether they stand); "walk:<seed>" walks forward and back without
 turning (lighting on the first-person weapon in motion); "throw" stands still, throwing a grenade every four
-seconds (the effects' light, in the viewer) */
+seconds (the effects' light, in the viewer), "throw:<seconds>" from that
+many seconds in (a level's grenades kept for a place a test teleports to) */
 static int test_input_holding_action;
 static Uint64 test_input_holding_action_since;
 
@@ -575,6 +576,7 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	static int looking;
 	static int walking;
 	static int throwing;
+	static double throwing_from;
 	double t;
 
 	if (!checked)
@@ -590,6 +592,12 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 		{
 			seed = 0;
 			throwing = 1;
+		}
+		else if (!strncmp(setting, "throw:", 6))
+		{
+			seed = 0;
+			throwing = 1;
+			throwing_from = atof(setting + 6);
 		}
 		else if (!strncmp(setting, "look:", 5))
 		{
@@ -614,7 +622,7 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	t = (double)SDL_GetTicks() / 1000.0 + seed * 1.7;
 	if (throwing)
 	{
-		if (fmod(t, 4.0) < 0.2)
+		if (t >= throwing_from && fmod(t, 4.0) < 0.2)
 			pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = 255;
 		return;
 	}

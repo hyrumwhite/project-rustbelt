@@ -15,6 +15,7 @@
 
 mod bridge;
 mod bundle;
+mod clusters;
 mod cpu_times;
 mod decals;
 mod effects;
@@ -461,6 +462,9 @@ fn main() -> AppExit {
     }
     // (the CPU's times always, for a capture's note; logged with the GPU's)
     app.add_plugins(cpu_times::CpuTimesPlugin);
+    // (the lights in sight of the camera's cluster, for their share of the
+    // rays' light samples)
+    app.add_systems(Update, clusters::mark_seen_lights);
     if std::env::var_os("HALO_RT_GPU_LOG").is_some() {
         app.add_systems(Last, log_gpu_times);
     }
@@ -801,6 +805,7 @@ fn load_level(
     };
     commands.insert_resource(CameraStart(transform));
     commands.insert_resource(stats);
+    commands.insert_resource(clusters::LevelClusters(builder.clusters.clone()));
 
     if args.bridge {
         commands.insert_resource(bridge::BridgeLevel { builder, raster: !args.pathtracer });
@@ -1179,7 +1184,7 @@ fn level_lighting(map: &str, bsp: Option<usize>) -> (f32, f32) {
 /// The BSP the level is seen in: the one asked for (`--bsp`), or the
 /// bridged game's.
 #[derive(Resource, Default)]
-struct ActiveBsp(Option<usize>);
+pub(crate) struct ActiveBsp(pub(crate) Option<usize>);
 
 /// Bridged: the game's BSP as the active one.
 fn follow_active_bsp(link: Option<Res<bridge::BridgeLink>>, stats: Res<LevelStats>, mut active: ResMut<ActiveBsp>) {

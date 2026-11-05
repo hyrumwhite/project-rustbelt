@@ -25,7 +25,7 @@ mod tlas;
 mod types;
 
 use bevy_shader::load_shader_library;
-pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSkyLight, SolarikUnreflectedLight};
+pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSeenLights, SolarikSkyLight, SolarikUnreflectedLight};
 pub use ray_settings::SolarikRaySettings;
 pub use types::{RaytracingMask, RaytracingMesh3d};
 
@@ -85,6 +85,7 @@ impl Plugin for RaytracingScenePlugin {
         app.init_resource::<SolarikSkyLight>();
         app.init_resource::<SolarikNearRays>();
         app.init_resource::<SolarikRayFog>();
+        app.init_resource::<SolarikSeenLights>();
         app.init_resource::<SolarikAlphaTesting>();
         app.init_resource::<SolarikRaySettings>();
         app.init_resource::<SolarikDeformableMeshes>();
@@ -113,6 +114,7 @@ impl Plugin for RaytracingScenePlugin {
             ExtractResourcePlugin::<SolarikSkyLight>::default(),
             ExtractResourcePlugin::<SolarikNearRays>::default(),
             ExtractResourcePlugin::<SolarikRayFog>::default(),
+            ExtractResourcePlugin::<SolarikSeenLights>::default(),
             ExtractResourcePlugin::<SolarikAlphaTesting>::default(),
             ExtractResourcePlugin::<SolarikRaySettings>::default(),
             ExtractResourcePlugin::<SolarikDeformableMeshes>::default(),

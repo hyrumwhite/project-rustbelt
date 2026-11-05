@@ -14,6 +14,7 @@ import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::temporal_pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
+@if((CELL_LOOKUP_GEOMETRIC)) import bevy_solarik::realtime::gbuffer_utils::pixel_geometric_normal;
 import bevy_solarik::realtime::gbuffer_utils::raster_reconstruction_error;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
 import bevy_solarik::realtime::presample_light_tiles::unpack_resolved_light_sample;
@@ -78,6 +79,19 @@ const INITIAL_SAMPLES = 32u;
 // Jefferies tubes a wall beside a dim red strip went from lit and dark by
 // turns to steady, its three-shot spread 0.35 to 0.01; 24 did no better.)
 const CELL_SAMPLES = 8u;
+// The share of its unshadowed contribution a tile candidate is weighed by
+// when the pixel's cell has light slots and this light is in none of them
+// (DI_SLOT_VISIBILITY_PRIOR). The resampling weighs candidates by their
+// unshadowed contribution, so the brightest light wins whether or not the
+// pixel can see it, and the shadow ray then drops it: in b40's elevator
+// shaft 92% of the pixels' picks were dropped, in c20's halls 63%, and
+// those pixels shaded from reuse alone. The slots hold the lights that
+// shadow-tested light reached the cell: a light in none of them is weighed
+// as mostly hidden. The target function may be anything positive where the
+// light contributes, so this changes variance alone: the pick's weight
+// divides by this target and the shading multiplies by the real, traced
+// contribution.
+const SLOT_VISIBILITY_PRIOR: f32 = 0.1;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 const CONFIDENCE_WEIGHT_CAP = 8.0;
 @if((RASTER_SUBPIXEL_BITS))
@@ -85,6 +99,14 @@ const RASTER_SUBPIXEL_STEP = 1.0 / f32(1u << constants::RASTER_SUBPIXEL_BITS);
 // Vulkan's guaranteed minimum, used by tools without adapter specialization.
 @if((!(RASTER_SUBPIXEL_BITS)))
 const RASTER_SUBPIXEL_STEP = 1.0 / 16.0;
+
+// (SOLARIK_SHADER_DEFS=VISUALIZE_DI_PICK, with HALO_RT_NO_DLSS=1: what the
+// initial candidates found. Red: the share of the tile candidates with any
+// contribution; green: the share of the cell candidates with any; blue: the
+// pick was shadow-tested dark and dropped. The later passes leave the view.)
+@if(VISUALIZE_DI_PICK) {
+var<private> debug_di_pick: vec3<f32>;
+}
 
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -102,12 +124,15 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 
     let diffuse_brdf = target_brdf(surface.material);
-    let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, diffuse_brdf, workgroup_id.xy, &rng);
+    let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, diffuse_brdf, workgroup_id.xy, global_id.xy, depth, &rng);
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, diffuse_brdf,
         temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
 
     store_reservoir_b(global_id.xy, merge_result.merged_reservoir);
+@if(VISUALIZE_DI_PICK) {
+    textureStore(view_output, global_id.xy, vec4(debug_di_pick, 1.0));
+}
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -135,6 +160,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Reusable weights use an unoccluded target in both resampling modes.
     // RGB connection transport belongs only to this receiver's shading.
     store_reservoir_a(global_id.xy, combined_reservoir);
+@if(VISUALIZE_DI_PICK) {
+    return;
+}
 
     let wo = normalize(view.world_position - surface.world_position);
     var brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
@@ -167,7 +195,7 @@ fn shade_di_reservoir(result: ReservoirMergeResult, world_position: vec3<f32>, w
     return result.selected_sample_radiance * result.merged_reservoir.unbiased_contribution_weight * transmission.rgb;
 }
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, rng: ptr<function, u32>) -> Reservoir {
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, diffuse_brdf: vec3<f32>, workgroup_id: vec2<u32>, pixel_id: vec2<u32>, depth: f32, rng: ptr<function, u32>) -> Reservoir {
     var workgroup_rng = light_tile_seed((workgroup_id.x * 5782582u) + workgroup_id.y, lighting_constants.frame_index);
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -186,7 +214,13 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     }
     var light_slots = vec4(WORLD_CACHE_NO_LIGHT);
 @if(DI_CELL_LIGHTS) {
-    let cell = find_world_cache_cell(world_position, world_normal, view.world_position, rng);
+    // (CELL_LOOKUP_GEOMETRIC: the cell by the surface's geometric normal, as
+    // the cells were keyed, see pixel_geometric_normal)
+    var lookup_normal = world_normal;
+@if(CELL_LOOKUP_GEOMETRIC) {
+    lookup_normal = pixel_geometric_normal(pixel_id, depth, world_normal, view.main_pass_viewport.zw, view.world_from_clip, depth_buffer);
+}
+    let cell = find_world_cache_cell(world_position, lookup_normal, view.world_position, rng);
     if cell >= 0 {
         light_slots = world_cache_light_slots[cell];
     }
@@ -202,20 +236,32 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     var selected_sample = LightSample(0u, 0u);
     var selected_tile_sample = 0xFFFFFFFFu;
     var selected_light_position = vec4(0.0);
+@if(VISUALIZE_DI_PICK) {
+    debug_di_pick = vec3(0.0);
+}
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
         // (the sun has a sample of its own, below)
         if resolved_light_sample.world_position.w == LIGHT_SAMPLE_DIRECTIONAL { continue; }
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
-        let target_function = luminance(light_contribution.radiance * diffuse_brdf * saturate(dot(light_contribution.wi, world_normal)));
-        if target_function <= 0.0 { continue; }
+        let target_function_unseen = luminance(light_contribution.radiance * diffuse_brdf * saturate(dot(light_contribution.wi, world_normal)));
+        if target_function_unseen <= 0.0 { continue; }
+@if(VISUALIZE_DI_PICK) {
+        debug_di_pick.r += 1.0 / f32(INITIAL_SAMPLES);
+}
 
+        var target_function = target_function_unseen;
         var resampling_weight = target_function * resolved_light_sample.inverse_pdf / f32(INITIAL_SAMPLES);
         if cell_samples > 0u {
             let light_id = light_tile_samples[tile_sample].light_id >> 16u;
             let tile_probability = light_sources[light_id].selection_probability / sun_share;
             let cell_probability = world_cache_slot_light_probability(light_slots, slot_probabilities, light_id);
+            // (DI_SLOT_VISIBILITY_PRIOR: a light the cell's slots don't know
+            // is weighed as if mostly hidden; see SLOT_VISIBILITY_PRIOR)
+@if(DI_SLOT_VISIBILITY_PRIOR) {
+            if cell_probability <= 0.0 { target_function *= SLOT_VISIBILITY_PRIOR; }
+}
             resampling_weight = target_function * resolved_light_sample.inverse_pdf * tile_probability
                 / (f32(INITIAL_SAMPLES) * tile_probability + f32(cell_samples) * cell_probability);
         }
@@ -241,6 +287,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
         let target_function = luminance(light_contribution.radiance * diffuse_brdf * saturate(dot(light_contribution.wi, world_normal)));
         if target_function <= 0.0 { continue; }
+@if(VISUALIZE_DI_PICK) {
+        debug_di_pick.g += 1.0 / f32(cell_samples);
+}
 
         let tile_probability = light_source.selection_probability / sun_share;
         let cell_probability = world_cache_slot_light_probability(light_slots, slot_probabilities, light_id);
@@ -301,6 +350,9 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             let transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), selected_light_position);
             if max(transmission.r, max(transmission.g, transmission.b)) <= 0.0 {
                 reservoir.unbiased_contribution_weight = 0.0;
+@if(VISUALIZE_DI_PICK) {
+                debug_di_pick.b = 1.0;
+}
             }
         }
     }

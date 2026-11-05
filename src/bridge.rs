@@ -11,6 +11,7 @@
 //! mouse play the game (forwarded through the bridge; F12 lets go), so the
 //! game's own window can stay in the background.
 
+use crate::clusters::ClusterVisibility;
 use crate::level::{halo_affine, halo_to_bevy_affine, AnimatedModel, LevelAssets, LevelBuilder, TracedMesh};
 use crate::material::{HaloEnvironmentMaterial, HaloTransparentMaterial, NeutralDetail};
 use bevy_solarik::prelude::RaytracingMesh3d;
@@ -1022,93 +1023,6 @@ const BOUNDS_SAMPLES: [[f32; 3]; 15] = [
     [-1.0, -1.0, 1.0],
     [-1.0, -1.0, -1.0],
 ];
-
-pub struct ClusterVisibility {
-    collision: halo_map::collision::CollisionBsp,
-    clusters: halo_map::collision::StructureClusters,
-    /// A bit vector of the clusters each cluster sees (32-bit words).
-    pvs: Vec<u32>,
-    words_per_cluster: usize,
-    /// Each cluster's sky (the scenario's), -1 for none: the game draws no
-    /// sky from a camera in such a cluster (`structure_visibility_find_camera`).
-    skies: Vec<i16>,
-}
-
-impl ClusterVisibility {
-    /// Each of the level's BSPs', by BSP index.
-    fn load_all(cache: &halo_map::CacheFile) -> Vec<Option<Self>> {
-        let count = halo_map::bsp::references(cache).map(|r| r.iter().map(|r| r.index as usize + 1).max().unwrap_or(0)).unwrap_or(0);
-        (0..count).map(|index| Self::load(cache, index as i32)).collect()
-    }
-
-    /// BSP `index`'s, None if it can't be read.
-    fn load(cache: &halo_map::CacheFile, index: i32) -> Option<Self> {
-        use halo_map::layout::{structure_bsp, structure_cluster};
-        let reference = halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index as i32 == index)?;
-        let bsp = halo_map::bsp::Bsp::load(cache, &reference).ok()?;
-        let clusters = bsp.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF).ok()?;
-        let count = clusters.count;
-        let skies = clusters.iter().map(|c| c.i16(structure_cluster::SKY_INDEX).unwrap_or(0)).collect();
-        let pvs: Vec<u32> = bsp.root.data_bytes(structure_bsp::CLUSTER_DATA).ok()?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
-        let words_per_cluster = count.div_ceil(32);
-        if count == 0 || pvs.len() < count * words_per_cluster {
-            return None;
-        }
-        Some(ClusterVisibility {
-            collision: halo_map::collision::CollisionBsp::load(&bsp).ok()?,
-            clusters: halo_map::collision::StructureClusters::load(cache, &bsp).ok()?,
-            pvs,
-            words_per_cluster,
-            skies,
-        })
-    }
-
-    /// The cluster a point (world units) is in, -1 outside the BSP.
-    fn cluster(&self, point: [f32; 3]) -> i16 {
-        self.clusters.cluster_from_leaf(self.collision.leaf_from_point(point))
-    }
-
-    /// Whether cluster `from` sees any cluster with a sky.
-    fn sees_sky(&self, from: i16) -> bool {
-        from >= 0 && self.skies.iter().enumerate().any(|(to, &sky)| sky >= 0 && self.sees(from, to as i16))
-    }
-
-    /// Whether this BSP holds the interior that `active`'s cluster `from`
-    /// sees: the portals of each cluster without sky it sees, by their
-    /// centres.
-    fn holds_interior_seen(&self, active: &ClusterVisibility, from: i16) -> bool {
-        (0..active.skies.len()).filter(|&to| active.skies[to] < 0 && active.sees(from, to as i16)).all(|to| {
-            let portals = active.clusters.cluster_portals.get(to).map(|p| p.as_slice()).unwrap_or(&[]);
-            portals.iter().all(|&p| active.clusters.portals.get(p as usize).is_none_or(|portal| self.cluster(portal.centroid) >= 0))
-        })
-    }
-
-    /// Whether this BSP closes each opening onto the outdoors that `active`'s
-    /// cluster `from` sees (the portals joining the clusters without sky it
-    /// sees, or its own, to those with sky): a metre past each, this BSP has
-    /// no cluster, its own wall stands there. (b30's control room, whose
-    /// window BSP 1 closes with the shaft; where the other BSP's copy runs on
-    /// past the opening into nothing it built, b40's tunnel out into the
-    /// second canyon, from BSP 0, it would show the void the game doesn't:
-    /// the game draws its own BSP's land there.)
-    fn closes_openings_seen(&self, active: &ClusterVisibility, from: i16) -> bool {
-        let interior = |k: i16| k >= 0 && (k == from || (active.skies.get(k as usize).is_some_and(|&sky| sky < 0) && active.sees(from, k)));
-        active.clusters.portals.iter().all(|portal| {
-            let [a, b] = portal.clusters;
-            let outdoors = [(a, b), (b, a)].into_iter().find(|&(inside, outside)| {
-                interior(inside) && outside >= 0 && active.skies.get(outside as usize).is_some_and(|&sky| sky >= 0) && active.sees(from, outside)
-            });
-            let Some((_, outside)) = outdoors else { return true };
-            portal.past(1.0, |p| active.cluster(p) == outside).is_none_or(|p| self.cluster(p) < 0)
-        })
-    }
-
-    /// Whether cluster `from` sees cluster `to` (`structure_bsp_get_cluster_pvs`).
-    fn sees(&self, from: i16, to: i16) -> bool {
-        let word = from as usize * self.words_per_cluster + to as usize / 32;
-        self.pvs.get(word).is_none_or(|bits| bits & (1 << (to as u32 % 32)) != 0)
-    }
-}
 
 /// Hides the game's BSP's breakable surfaces it has broken (c10's windows,
 /// shot out), as structure_render.c leaves out a material naming one.

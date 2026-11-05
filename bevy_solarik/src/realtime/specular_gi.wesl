@@ -23,6 +23,7 @@ import bevy_solarik::scene::brdf::sample_glossy_lobes;
 import bevy_solarik::realtime::surface_path::shade_surface_scattering_vertices;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::ResolvedGPixel;
+@if((CELL_LOOKUP_GEOMETRIC)) import bevy_solarik::realtime::gbuffer_utils::pixel_geometric_normal;
 import bevy_solarik::scene::sampling::analytic_light_radiance;
 import bevy_solarik::scene::ray_fog::ray_fog_active;
 import bevy_solarik::scene::ray_fog::fog_ray_segment;
@@ -51,13 +52,18 @@ import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
 import bevy_solarik::realtime::world_cache_query::query_world_cache;
+import bevy_solarik::realtime::world_cache_query::cell_key_normal;
 import bevy_solarik::realtime::world_cache_query::find_world_cache_cell;
+import bevy_solarik::realtime::world_cache_query::find_world_cache_cell_once;
+import bevy_solarik::realtime::world_cache_query::quantize_normal;
 import bevy_solarik::realtime::world_cache_query::world_cache_slot_light;
 import bevy_solarik::realtime::world_cache_query::world_cache_slot_probabilities;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_NO_LIGHT;
 import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
 import bevy_solarik::realtime::world_cache_query::get_cell_size;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_LIFETIME;
+import bevy_solarik::realtime::realtime_bindings::world_cache_geometry_data;
+import bevy_solarik::scene::sampling::trace_point_visibility;
 import bevy_solarik::realtime::realtime_bindings::view_output;
 import bevy_solarik::realtime::realtime_bindings::gi_reservoirs_a;
 import bevy_solarik::realtime::realtime_bindings::gbuffer;
@@ -113,9 +119,74 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     radiance *= view.exposure;
 
+// (VISUALIZE_CACHE_AGE is drawn by restir_gi's initial pass)
+@if(VISUALIZE_DI_PICK) {
+    return;
+}
+@if(VISUALIZE_CACHE_AGE) {
+    return;
+}
     var pixel_color = textureLoad(view_output, global_id.xy);
     pixel_color += vec4(radiance, 0.0);
     textureStore(view_output, global_id.xy, pixel_color);
+
+// (SOLARIK_SHADER_DEFS=VISUALIZE_CELL_KEY_PROBE: where the cell for this
+// pixel's surface is keyed. Green: found at the surface's own normal key
+// (floor(2n) of its shading normal, or with CELL_LOOKUP_GEOMETRIC its
+// geometric normal). Else the first neighbouring normal key, each component
+// off by -1, 0 or 1, that holds a cell, as a colour: (offset + 1) / 2 per
+// component, so grey is none... and magenta if no neighbouring key holds
+// one either. The pixel's key itself: VISUALIZE_NORMAL_KEY, (key + 2) / 4.)
+@if(VISUALIZE_CELL_KEY_PROBE) {
+    var probe_normal = surface.world_normal;
+@if(CELL_LOOKUP_GEOMETRIC) {
+    probe_normal = pixel_geometric_normal(global_id.xy, depth, surface.world_normal, view.main_pass_viewport.zw, view.world_from_clip, depth_buffer);
+}
+    // (grey-coded, with a calibration strip in the top rows, so the picture
+    // decodes exactly through the tonemapper: scripts/boil/view_shares.py.
+    // Code 27 = found at its own key, 28 = none, else the offset's index
+    // x + 3 y + 9 z, each component + 1)
+    var code = 28u;
+    if find_world_cache_cell(surface.world_position, probe_normal, view.world_position, &rng) >= 0 {
+        code = 27u;
+    } else {
+        let own = quantize_normal(probe_normal);
+        for (var i = 0u; i < 27u && code == 28u; i++) {
+            let offset = vec3(f32(i % 3u), f32((i / 3u) % 3u), f32(i / 9u)) - 1.0;
+            if all(offset == vec3(0.0)) { continue; }
+            if find_world_cache_cell_once(surface.world_position, probe_normal, own + offset, view.world_position, &rng) >= 0 {
+                code = i;
+            }
+        }
+    }
+    textureStore(view_output, global_id.xy, vec4(vec3(debug_grey_code(f32(code), 32.0, global_id.xy)), 1.0));
+}
+@if(VISUALIZE_NORMAL_KEY) {
+    var key_normal = surface.world_normal;
+@if(CELL_LOOKUP_GEOMETRIC) {
+    key_normal = pixel_geometric_normal(global_id.xy, depth, surface.world_normal, view.main_pass_viewport.zw, view.world_from_clip, depth_buffer);
+}
+    // (grey-coded as the probe: the key's components + 2, as x + 4 y + 16 z)
+    let key = quantize_normal(key_normal) + 2.0;
+    textureStore(view_output, global_id.xy, vec4(vec3(debug_grey_code(key.x + 4.0 * key.y + 16.0 * key.z, 64.0, global_id.xy)), 1.0));
+}
+// (SOLARIK_SHADER_DEFS=VISUALIZE_CELL_LEAK: whether the cache cell at this
+// pixel's surface keeps its position somewhere the surface can't see (behind
+// a wall, inside a rock): red if so, green if in sight, magenta for no cell)
+@if(VISUALIZE_CELL_LEAK) {
+    var debug_normal = surface.world_normal;
+@if(CELL_LOOKUP_GEOMETRIC) {
+    debug_normal = pixel_geometric_normal(global_id.xy, depth, surface.world_normal, view.main_pass_viewport.zw, view.world_from_clip, depth_buffer);
+}
+    let debug_cell = find_world_cache_cell(surface.world_position, debug_normal, view.world_position, &rng);
+    var debug_colour = vec3(1.0, 0.0, 1.0);
+    if debug_cell >= 0 {
+        let cell_position = world_cache_geometry_data[debug_cell].world_position;
+        let seen = trace_point_visibility(surface.world_position + surface.world_normal * RAY_T_MIN, cell_position + world_cache_geometry_data[debug_cell].world_normal * RAY_T_MIN);
+        debug_colour = vec3(1.0 - seen, seen, 0.0);
+    }
+    textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
+}
 
 @if(VISUALIZE_WORLD_CACHE) {
     textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, ray_max_distance(), WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
@@ -124,7 +195,11 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
 // offers ReSTIR DI, a colour each by its share; magenta where it finds no
 // cell, black where the cell has none)
 @if(VISUALIZE_CELL_LIGHTS) {
-    let debug_cell = find_world_cache_cell(surface.world_position, surface.world_normal, view.world_position, &rng);
+    var debug_normal = surface.world_normal;
+@if(CELL_LOOKUP_GEOMETRIC) {
+    debug_normal = pixel_geometric_normal(global_id.xy, depth, surface.world_normal, view.main_pass_viewport.zw, view.world_from_clip, depth_buffer);
+}
+    let debug_cell = find_world_cache_cell(surface.world_position, debug_normal, view.world_position, &rng);
     var debug_colour = vec3(1.0, 0.0, 1.0);
     if debug_cell >= 0 {
         let slots = world_cache_light_slots[debug_cell];
@@ -142,6 +217,19 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
 }
+}
+
+// A debug view's code, 0 to `levels` - 1, as a grey the picture decodes
+// exactly through the tonemapper (scripts/boil/view_shares.py): the codes
+// span greys 0.15 to 0.8, and the left edge's eight columns hold a strip
+// from 0 at the top to 1 at the bottom to read the tonemapper's curve from.
+// (The top rows held the strip, and the glass and foliage passes, which
+// draw after this one, overwrote its right half in b40's shaft.)
+fn debug_grey_code(code: f32, levels: f32, pixel: vec2<u32>) -> f32 {
+    if pixel.x < 8u {
+        return (f32(pixel.y) + 0.5) / view.main_pass_viewport.w;
+    }
+    return 0.15 + 0.65 * (code + 0.5) / levels;
 }
 
 struct GlossyLobe {
@@ -354,7 +442,7 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
         let rough_hit = cache_rough_hits && ray_hit.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
         if i == 2u || (ray_longer_than_cell && (path_roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD || rough_hit)) {
             let diffuse_brdf = ray_hit.material.base_color / PI;
-            radiance += throughput * diffuse_brdf * query_world_cache(ray_hit.world_position, ray_hit.geometric_world_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
+            radiance += throughput * diffuse_brdf * query_world_cache(ray_hit.world_position, cell_key_normal(ray_hit.geometric_world_normal, ray_hit.triangle_world_normal), view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
             break;
         } else if !surface_perfect_mirror {
             // Sample direct lighting (NEE)

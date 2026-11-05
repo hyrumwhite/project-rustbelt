@@ -26,7 +26,10 @@ import bevy_solarik::scene::raytracing_scene_bindings::sample_sky;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::realtime::world_cache_query::query_two_sided_world_cache;
+import bevy_solarik::realtime::world_cache_query::cell_key_normal;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_LIFETIME;
+@if((VISUALIZE_CACHE_AGE)) import bevy_solarik::realtime::world_cache_query::world_cache_debug_samples;
+@if((VISUALIZE_CACHE_AGE)) import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_MAX_TEMPORAL_SAMPLES;
 import bevy_solarik::realtime::realtime_bindings::view_output;
 import bevy_solarik::realtime::realtime_bindings::gi_reservoirs_a;
 import bevy_solarik::realtime::realtime_bindings::gi_reservoirs_b;
@@ -77,7 +80,27 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
+@if(VISUALIZE_CACHE_AGE) {
+    world_cache_debug_samples = -2.0;
+}
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, &rng);
+// (SOLARIK_SHADER_DEFS=VISUALIZE_CACHE_AGE, with HALO_RT_NO_DLSS=1: the
+// samples in the cache cell this pixel's diffuse bounce read, red at one to
+// green at the full history, blue for a cell made just now; magenta where
+// the bounce's point found no cell; black for a bounce that read no cell,
+// to the sky, an emitter, or none. The later passes leave the view.)
+@if(VISUALIZE_CACHE_AGE) {
+    var debug_colour = vec3(0.0);
+    if world_cache_debug_samples == -1.0 {
+        debug_colour = vec3(1.0, 0.0, 1.0);
+    } else if world_cache_debug_samples == 0.0 {
+        debug_colour = vec3(0.0, 0.0, 1.0);
+    } else if world_cache_debug_samples > 0.0 {
+        let t = saturate(world_cache_debug_samples / WORLD_CACHE_MAX_TEMPORAL_SAMPLES);
+        debug_colour = vec3(1.0 - t, t, 0.0);
+    }
+    textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
+}
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
@@ -112,6 +135,12 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     // Endpoint radiance, age and unoccluded weights survive spatial reuse.
     gi_reservoirs_a[pixel_index] = combined_reservoir;
+@if(VISUALIZE_DI_PICK) {
+    return;
+}
+@if(VISUALIZE_CACHE_AGE) {
+    return;
+}
 
     let wo = normalize(view.world_position - surface.world_position);
     let brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
@@ -203,14 +232,14 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     // consumes material weights, before the existing albedo / PI below.
 @if(REGIONAL_HISTORY) {
     let cached = query_two_sided_world_cache_with_support(sample_point.world_position,
-        sample_point.geometric_world_normal, sample_point.material.diffuse_transmission,
+        cell_key_normal(sample_point.geometric_world_normal, sample_point.triangle_world_normal), sample_point.material.diffuse_transmission,
         view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
     reservoir.radiance = cached.rgb;
     reservoir.support_radius = max(ray.t + RAY_T_MIN, cached.w) * 1.00001 + 0.01;
 }
 @if(!(REGIONAL_HISTORY)) {
     reservoir.radiance = query_two_sided_world_cache(sample_point.world_position,
-        sample_point.geometric_world_normal, sample_point.material.diffuse_transmission,
+        cell_key_normal(sample_point.geometric_world_normal, sample_point.triangle_world_normal), sample_point.material.diffuse_transmission,
         view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
 }
     reservoir.unbiased_contribution_weight = direction_sample.inverse_pdf;

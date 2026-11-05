@@ -940,6 +940,31 @@ pub fn init_solari_lighting_pipelines(
         if !std::env::var("SOLARIK_CELL_LIGHTS").is_ok_and(|v| v == "0") {
             shader_defs.push("DI_CELL_LIGHTS".into());
         }
+        // The world cache's cells keyed by the triangle plane normal on both
+        // sides, the camera's pixel's from its depths (on by default;
+        // SOLARIK_CELL_KEY_PLANE=0 for the vertex normals, as upstream): a
+        // bump-mapped G-buffer normal found another key than the hit's
+        // smoothed vertex normal for three pixels in four of c20's halls, so
+        // no light candidates by place there (4 November 2026; see
+        // world_cache_query.wesl, cell_key_normal).
+        if !std::env::var("SOLARIK_CELL_KEY_PLANE").is_ok_and(|v| v == "0") {
+            shader_defs.push("CELL_KEY_PLANE".into());
+            shader_defs.push("CELL_LOOKUP_GEOMETRIC".into());
+        }
+        // A new cell keeps the query's own point, not the jittered one (on by
+        // default; SOLARIK_CACHE_CELL_UNJITTERED=0 as upstream): the jittered
+        // point lay inside the rock for 38% of b40's canyon wall.
+        if !std::env::var("SOLARIK_CACHE_CELL_UNJITTERED").is_ok_and(|v| v == "0") {
+            shader_defs.push("CACHE_CELL_UNJITTERED".into());
+        }
+        // A tile candidate the pixel's cell's slots don't know is weighed as
+        // mostly hidden (SOLARIK_SLOT_PRIOR=1; see restir_di's
+        // SLOT_VISIBILITY_PRIOR). Off: with the cells keyed by the plane it
+        // measured 7% steadier in b40's shaft and the same in c20's halls,
+        // too little for a change to the estimator (4 November 2026).
+        if std::env::var("SOLARIK_SLOT_PRIOR").is_ok_and(|v| v == "1") {
+            shader_defs.push("DI_SLOT_VISIBILITY_PRIOR".into());
+        }
         if std::env::var("SOLARIK_ADAPTIVE_CACHE_BUDGET").is_ok_and(|v| v == "1") {
             shader_defs.push("ADAPTIVE_CACHE_BUDGET".into());
         }

@@ -27,6 +27,7 @@ use halo_map::{
     shader::{self, ShaderInfo, ShaderType},
     CacheFile, TagRef,
 };
+use crate::clusters::{ClusterVisibility, LightPlace};
 use std::sync::Arc;
 
 /// An object's model shaders whose self-illumination animates
@@ -752,6 +753,9 @@ pub struct LevelBuilder {
     /// Each loaded BSP's water surfaces' heights (world units, their
     /// vertices' mean): the fog pass's water is only a fog plane on one.
     pub water_heights: Vec<f32>,
+    /// Each loaded BSP's clusters and visibility, by BSP index (None where
+    /// unread): the emitters' places (crate::clusters).
+    pub clusters: Vec<Option<Arc<ClusterVisibility>>>,
     light_proxy: Option<Handle<Mesh>>,
     /// Whether light fixtures get emissive proxies.
     pub fixture_lights: bool,
@@ -815,6 +819,7 @@ impl LevelBuilder {
             bsp_roots: Vec::new(),
             breakable_roots: Vec::new(),
             water_heights: Vec::new(),
+            clusters: Vec::new(),
             light_proxy: None,
             fixture_lights: true,
             show_light_proxies: false,
@@ -842,11 +847,19 @@ impl LevelBuilder {
         commands: &mut Commands,
         assets: &mut LevelAssets,
     ) -> halo_map::Result<()> {
+        // (HALO_RT_NO_CLUSTER_LIGHTS=1 for A/B: each emissive material one light)
+        let no_cluster_lights = std::env::var_os("HALO_RT_NO_CLUSTER_LIGHTS").is_some();
         for reference in bsp::references(&self.cache)? {
             if only.is_some_and(|i| i != reference.index) {
                 continue;
             }
             let loaded = bsp::Bsp::load(&self.cache, &reference)?;
+            if self.clusters.len() <= reference.index {
+                self.clusters.resize(reference.index + 1, None);
+            }
+            if self.clusters[reference.index].is_none() {
+                self.clusters[reference.index] = ClusterVisibility::load(&self.cache, reference.index as i32).map(Arc::new);
+            }
             let level = commands
                 .spawn((Name::new(reference.name.clone()), Transform::default(), Visibility::default()))
                 .id();
@@ -887,7 +900,39 @@ impl LevelBuilder {
                     },
                     _ => level,
                 };
-                self.spawn_mesh(commands, parent, name.clone(), mesh, &surface, raster);
+                // (an emitter in chunks, one a cluster, each a light of its
+                // own place for the rays: a lightmap page's material was one
+                // light, its triangles drawn uniformly wherever they were,
+                // so a cell's slot that found a strip's material still drew
+                // the strips on other floors; the camera's copy stays whole)
+                let chunks = match &surface {
+                    Surface::Solid(solid) if solid.radiance.is_some() && !no_cluster_lights => self.emissive_chunks(reference.index, &material),
+                    _ => Vec::new(),
+                };
+                if chunks.len() > 1 {
+                    if raster {
+                        self.spawn_mesh_as(commands, parent, name.clone(), mesh, &surface, MeshUse::Raster(None));
+                    }
+                    for (cluster, indices) in chunks {
+                        let vertices = material.vertices.iter().map(|v| SourceVertex {
+                            position: v.position,
+                            normal: v.normal,
+                            binormal: v.binormal,
+                            tangent: v.tangent,
+                            texcoord: v.texcoord,
+                        });
+                        let chunk = assets.meshes.add(build_mesh(vertices, &indices, shader.uv_scale));
+                        if let Some(traced) = self.spawn_mesh_as(commands, parent, format!("{name} cluster {cluster}"), chunk, &surface, MeshUse::Traced) {
+                            commands.entity(traced).insert(LightPlace { bsp: reference.index, cluster });
+                        }
+                    }
+                } else {
+                    let mode = if raster { MeshUse::Both } else { MeshUse::Traced };
+                    let traced = self.spawn_mesh_as(commands, parent, name.clone(), mesh, &surface, mode);
+                    if let (Some(traced), [(cluster, _)]) = (traced, chunks.as_slice()) {
+                        commands.entity(traced).insert(LightPlace { bsp: reference.index, cluster: *cluster });
+                    }
+                }
                 self.stats.triangles += material.indices.len() / 3;
                 // (and its back, for an emitter that lights both ways: see
                 // EMITTERS_BOTH_WAYS)
@@ -1379,6 +1424,29 @@ impl LevelBuilder {
             ));
             self.stats.lights += 1;
         }
+    }
+
+    /// An emissive BSP material's triangles by the cluster each is in (by
+    /// its centre; -1 for none): the cluster and the triangles' indices. One
+    /// chunk, or none, when the BSP's clusters can't be read.
+    fn emissive_chunks(&self, bsp: usize, material: &bsp::Material) -> Vec<(i16, Vec<u32>)> {
+        let Some(visibility) = self.clusters.get(bsp).and_then(|v| v.as_ref()) else { return Vec::new() };
+        let mut chunks: Vec<(i16, Vec<u32>)> = Vec::new();
+        for triangle in material.indices.chunks_exact(3) {
+            let mut centre = [0.0f32; 3];
+            for &index in triangle {
+                let position = material.vertices[index as usize].position;
+                for axis in 0..3 {
+                    centre[axis] += position[axis] / 3.0;
+                }
+            }
+            let cluster = visibility.cluster(centre);
+            match chunks.iter_mut().find(|(c, _)| *c == cluster) {
+                Some((_, indices)) => indices.extend_from_slice(triangle),
+                None => chunks.push((cluster, triangle.to_vec())),
+            }
+        }
+        chunks
     }
 
     fn spawn_mesh(

@@ -85,6 +85,30 @@ pub struct SolarikSkyLight {
 #[extract_app(bevy_render::RenderApp)]
 pub struct SolarikUnreflectedLight;
 
+/// The lights in sight of the camera's place, by what the application knows
+/// of its level (a game's clusters and their visibility sets): their
+/// main-world entities (an emissive mesh's, or a point or spot light's).
+/// Light selection gives them `share` of the samples that aren't the sun's,
+/// collectively, by their power among themselves, and the rest to every
+/// light by power as before. Selection is otherwise global and blind to
+/// where a light shines: in a room lit by a few small strips, nine pixels in
+/// ten picked a light behind a wall (b40's elevator shaft, 92%), and the
+/// shadow ray dropped it. Each sample is still divided by its actual
+/// probability, so only variance changes. Empty: no change.
+/// (`SOLARIK_SEEN_LIGHT_SHARE` overrides `share`; 0 turns it off.)
+#[derive(Resource, ExtractResource, Clone, Debug)]
+#[extract_app(bevy_render::RenderApp)]
+pub struct SolarikSeenLights {
+    pub entities: HashSet<Entity>,
+    pub share: f32,
+}
+
+impl Default for SolarikSeenLights {
+    fn default() -> Self {
+        Self { entities: HashSet::default(), share: 0.5 }
+    }
+}
+
 /// Where rays see only instances with [`super::RaytracingMask::NEAR`]: those
 /// leaving a point within `radius` of `centre` (world space, metres; none
 /// with a radius of zero). A first-person view's centre is the camera: its
@@ -450,7 +474,13 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
     (dfg_lut, time): (Res<DfgLut>, Res<bevy_time::Time>),
-    (sky_light, near_rays, ray_fog): (Res<SolarikSkyLight>, Res<SolarikNearRays>, Res<SolarikRayFog>),
+    (sky_light, near_rays, ray_fog, seen_lights, main_entities): (
+        Res<SolarikSkyLight>,
+        Res<SolarikNearRays>,
+        Res<SolarikRayFog>,
+        Res<SolarikSeenLights>,
+        Query<&bevy_render::sync_world::MainEntity>,
+    ),
     (alpha_testing, ray_settings, planet, atmosphere, rings, readiness, canopy): (
         Res<SolarikAlphaTesting>,
         Res<SolarikRaySettings>,
@@ -797,6 +827,13 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     let mut scan_textures = CachedBindingArray::new();
     let mut scan_samplers = Vec::new();
     let mut light_fluxes = Vec::new();
+    // (beside each flux, whether the light is in sight of the camera's place,
+    // SolarikSeenLights)
+    let mut light_seen = Vec::new();
+    let seen = |render_entity: Entity| {
+        !seen_lights.entities.is_empty()
+            && main_entities.get(render_entity).is_ok_and(|main| seen_lights.entities.contains(&main.id()))
+    };
 
     let mut material_id_map: HashMap<AssetId<StandardMaterial>, u32, FixedHasher> =
         HashMap::default();
@@ -1075,6 +1112,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                         1.0
                     },
             );
+            light_seen.push(seen(entity.entity));
             light_sources
                 .get_mut()
                 .push(GpuLightSource::new_emissive_mesh_light(
@@ -1149,6 +1187,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             luminance(directional_light.color.to_vec3())
                 * f64::from(directional_light.illuminance.max(0.0)),
         );
+        light_seen.push(false);
 
         light_sources
             .get_mut()
@@ -1176,6 +1215,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             local_light.intensity,
             local_light.spot_light_angles,
         ));
+        light_seen.push(seen(entity));
 
         light_sources
             .get_mut()
@@ -1243,6 +1283,38 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             }
         }
     }
+    // The lights in sight of the camera's place take `seen_share` of the
+    // selection that isn't the sun's, among themselves by power, and every
+    // light keeps the rest by power (SolarikSeenLights; each sample is still
+    // divided by its actual probability).
+    let seen_share = std::env::var("SOLARIK_SEEN_LIGHT_SHARE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(f64::from(seen_lights.share))
+        .clamp(0.0, 1.0);
+    debug_assert_eq!(light_seen.len(), light_fluxes.len());
+    let mut seen_count = 0usize;
+    if seen_share > 0.0 && light_seen.len() == light_fluxes.len() {
+        let (total, seen_total) = light_fluxes.iter().zip(&is_directional).zip(&light_seen).fold(
+            (0.0, 0.0),
+            |(t, s), ((&f, &directional), &seen)| {
+                if directional || !(f > 0.0) { (t, s) } else { (t + f, if seen { s + f } else { s }) }
+            },
+        );
+        if total > 0.0 && seen_total > 0.0 {
+            for ((flux, &directional), &seen) in light_fluxes.iter_mut().zip(&is_directional).zip(&light_seen) {
+                if directional || !(*flux > 0.0) {
+                    continue;
+                }
+                let own = *flux;
+                *flux = own / total * (1.0 - seen_share);
+                if seen {
+                    *flux += own / seen_total * seen_share;
+                    seen_count += 1;
+                }
+            }
+        }
+    }
     let (directional_flux, other_flux) = light_fluxes.iter().zip(&is_directional).fold(
         (0.0, 0.0),
         |(d, o), (&f, &directional)| if directional { (d + f, o) } else { (d, o + f) },
@@ -1269,7 +1341,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             .take(12)
             .map(|(i, f, k)| format!("#{i} kind {k:#x}: {:.4}", f / total))
             .collect();
-        tracing::info!("light fluxes: {} sources, total {total:.3e}; top shares {}", light_fluxes.len(), top.join(", "));
+        tracing::info!("light fluxes: {} sources ({seen_count} seen, share {seen_share}), total {total:.3e}; top shares {}", light_fluxes.len(), top.join(", "));
     }
     for (source, bin) in light_sources
         .get_mut()

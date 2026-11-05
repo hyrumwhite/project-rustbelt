@@ -46,6 +46,43 @@ fn reconstruct_world_position(pixel_id: vec2<u32>, depth: f32, view_size: vec2<f
     return world_pos.xyz / world_pos.w;
 }
 
+// The pixel's surface's geometric normal, from the depths round it: on each
+// axis the neighbour nearer in depth (so a silhouette's far side is left
+// out), the cross product of the two steps, turned to the shading normal's
+// side. The world cache keys its cells by the geometric normal of the GI
+// rays' hits (floor(2n)); a camera pixel keyed by its normal-mapped shading
+// normal found another key wherever the map tilted a component past a
+// step (in c20's halls, 73% of the pixels found no cell, so no light
+// candidates by place).
+fn pixel_geometric_normal(pixel_id: vec2<u32>, depth: f32, shading_normal: vec3<f32>, view_size: vec2<f32>, world_from_clip: mat4x4<f32>, depth_buffer: texture_depth_2d) -> vec3<f32> {
+    let p = vec2<i32>(pixel_id);
+    let limit = vec2<i32>(view_size) - 1;
+    let centre = reconstruct_world_position(pixel_id, depth, view_size, world_from_clip);
+    var axes: array<vec3<f32>, 2>;
+    for (var axis = 0u; axis < 2u; axis++) {
+        let step = select(vec2(0, 1), vec2(1, 0), axis == 0u);
+        let plus = clamp(p + step, vec2(0), limit);
+        let minus = clamp(p - step, vec2(0), limit);
+        let depth_plus = textureLoad(depth_buffer, plus, 0);
+        let depth_minus = textureLoad(depth_buffer, minus, 0);
+        let use_plus = depth_minus == 0.0 || (depth_plus != 0.0 && abs(depth_plus - depth) <= abs(depth_minus - depth));
+        let other = select(minus, plus, use_plus);
+        let other_depth = select(depth_minus, depth_plus, use_plus);
+        if other_depth == 0.0 || all(other == p) {
+            return shading_normal;
+        }
+        let position = reconstruct_world_position(vec2<u32>(other), other_depth, view_size, world_from_clip);
+        axes[axis] = select(centre - position, position - centre, use_plus);
+    }
+    let normal = cross(axes[0], axes[1]);
+    let length_squared = dot(normal, normal);
+    if length_squared <= 0.0 {
+        return shading_normal;
+    }
+    let unit = normal / sqrt(length_squared);
+    return select(-unit, unit, dot(unit, shading_normal) >= 0.0);
+}
+
 // Rasterized vertices have quantized framebuffer XY. Interpolating their depth
 // and unprojecting the exact pixel centre can therefore fall below the surface.
 // Propagate one subpixel step through the homogeneous quotient, onto the normal.

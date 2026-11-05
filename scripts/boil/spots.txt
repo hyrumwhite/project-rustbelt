@@ -1,0 +1,16 @@
+# The boiling spots and the guards, one a line: name map bsp camera [dolly]
+# camera is a capture's --camera (x,y,z,yaw,pitch); bsp from `point_bsp`
+# (crates/halo_map/examples) at that position; dolly is the sway's reach in
+# metres for the in-motion series (0 for still only).
+#
+# Open reports (4 November 2026):
+b40_shaft    b40 8 269.18,-588.08,23.09,177.4,-19.1 1
+b40_canyon   b40 2 277.89,-649.78,63.10,-80.3,22.2  4
+c20_hall     c20 1 61.16,-32.86,10.52,-144.5,29.7   1
+# Guards (fixed, must not regress):
+a10_tube     a10 4 -59.40,30.69,2.65,1.1,-7.1       1
+a10_corridor a10 1 -22.35,14.25,0.62,91.6,-2.1      1
+b30_passage  b30 0 -6.35,26.32,13.62,-88.4,28.1     1
+b30_beach    b30 0 -50.0,8.4,5.2,180,-12            1
+# (the canyon at a Banshee's pace: 20 m each way in 120 frames, about 50 m/s)
+b40_canyon_fast b40 2 277.89,-649.78,63.10,-80.3,22.2 20

@@ -35,6 +35,7 @@ import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_HISTORY_FRAMES;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_MAX_GI_RAY_DISTANCE;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_UPDATES_SOFT_CAP;
 import bevy_solarik::realtime::world_cache_query::query_two_sided_world_cache_with_support;
+import bevy_solarik::realtime::world_cache_query::cell_key_normal;
 import bevy_solarik::realtime::realtime_bindings::light_tile_resolved_samples;
 import bevy_solarik::realtime::realtime_bindings::light_tile_samples;
 import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
@@ -150,7 +151,7 @@ fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         let ray_hit = resolve_ray_hit_full(ray);
 }
         let cell_life = atomicLoad(&world_cache_life[cell_index]);
-        let radiance = query_two_sided_world_cache_with_support(ray_hit.world_position, ray_hit.geometric_world_normal, ray_hit.material.diffuse_transmission, view.world_position, ray.t, cell_life, &rng);
+        let radiance = query_two_sided_world_cache_with_support(ray_hit.world_position, cell_key_normal(ray_hit.geometric_world_normal, ray_hit.triangle_world_normal), ray_hit.material.diffuse_transmission, view.world_position, ray.t, cell_life, &rng);
         pending = vec4(pending.rgb + transmission * ray_hit.material.base_color * radiance.rgb,
             max(pending.w, distance(geometry_data.world_position, ray_hit.world_position) + radiance.w));
     }
@@ -247,13 +248,20 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
         // selection)
         let light_inverse_pdf = light_contribution.inverse_pdf * tile_probability;
         let slot_probability = world_cache_slot_light_probability(slots, slot_probabilities, light_id);
-        let resampling_weight = target_function * light_inverse_pdf / (tile_count * tile_probability + f32(slot_count) * slot_probability);
+        // (DI_SLOT_VISIBILITY_PRIOR: a light the slots don't know, weighed
+        // as mostly hidden, as restir_di's candidates; the slots are updated
+        // by what the shadow ray finds, so an unknown light still enters)
+        var prior = 1.0;
+@if(DI_SLOT_VISIBILITY_PRIOR) {
+        if slot_count > 0u && slot_probability <= 0.0 { prior = 0.1; }
+}
+        let resampling_weight = prior * target_function * light_inverse_pdf / (tile_count * tile_probability + f32(slot_count) * slot_probability);
 
         weight_sum += resampling_weight;
 
         if rand_f(rng) < resampling_weight / weight_sum {
             selected_sample_radiance = contribution;
-            selected_sample_target_function = target_function;
+            selected_sample_target_function = prior * target_function;
             selected_sample_world_position = resolved_light_sample.world_position;
             selected_light = light_id;
             selected_light_inverse_pdf = light_inverse_pdf;

@@ -81,8 +81,17 @@ fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view
     return query_world_cache_with_support(world_position_in, world_normal, view_position, ray_t, cell_lifetime, rng).rgb;
 }
 
+// (VISUALIZE_CACHE_AGE: the samples in the cell the last query found, 0 for
+// one it made, -1 for none)
+@if(VISUALIZE_CACHE_AGE) {
+var<private> world_cache_debug_samples: f32;
+}
+
 @if((!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER))
 fn query_world_cache_with_support(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, ray_t: f32, cell_lifetime: u32, rng: ptr<function, u32>) -> vec4<f32> {
+@if(VISUALIZE_CACHE_AGE) {
+    world_cache_debug_samples = -1.0;
+}
     var world_position = world_position_in;
     var cell_size = get_cell_size(world_position, view_position, rng);
 
@@ -123,11 +132,26 @@ fn query_world_cache_with_support(world_position_in: vec3<f32>, world_normal: ve
         if existing_checksum == checksum {
             // Cache entry already exists - get radiance
             let geometry = world_cache_geometry_data[key];
+@if(VISUALIZE_CACHE_AGE) {
+            world_cache_debug_samples = world_cache_radiance[key].a;
+}
             return vec4(world_cache_radiance[key].rgb,
                 geometry.support_radius + distance(world_position_in, geometry.world_position));
         } else if existing_checksum == WORLD_CACHE_EMPTY_CELL {
             // Cell is empty - initialize it
+@if(VISUALIZE_CACHE_AGE) {
+            world_cache_debug_samples = 0.0;
+}
+            // (CACHE_CELL_UNJITTERED: the cell keeps the query's own point,
+            // on its surface; the jittered point, half a cell off in the
+            // tangent plane, lay inside a rock or behind a wall for 38% of
+            // b40's canyon wall and the cell's rays started there)
+@if(CACHE_CELL_UNJITTERED) {
+            world_cache_geometry_data[key].world_position = world_position_in;
+}
+@if(!CACHE_CELL_UNJITTERED) {
             world_cache_geometry_data[key].world_position = world_position;
+}
             world_cache_geometry_data[key].world_normal = world_normal;
             world_cache_geometry_data[key].last_traced_frame = 0u;
             world_cache_geometry_data[key].support_radius = 0.0;
@@ -140,6 +164,23 @@ fn query_world_cache_with_support(world_position_in: vec3<f32>, world_normal: ve
     }
 
     return vec4(0.0);
+}
+
+// The normal a ray hit's cache cell is keyed by: its smoothed vertex normal
+// (upstream), or with CELL_KEY_PLANE its triangle's plane normal, turned to
+// the hit's side. The camera's pixel looks its cell up by its G-buffer
+// normal, bump-mapped by the raster material, which on c20's slab walls
+// fell in another floor(2n) bucket than the slab's vertex normal for three
+// pixels in four (no light candidates by place there); keyed by the plane
+// on both sides (the pixel's from its depths, pixel_geometric_normal), a
+// flat wall is one key.
+fn cell_key_normal(vertex_normal: vec3<f32>, plane_normal: vec3<f32>) -> vec3<f32> {
+@if(CELL_KEY_PLANE) {
+    return select(-plane_normal, plane_normal, dot(plane_normal, vertex_normal) >= 0.0);
+}
+@if(!CELL_KEY_PLANE) {
+    return vertex_normal;
+}
 }
 
 // An empty light slot.

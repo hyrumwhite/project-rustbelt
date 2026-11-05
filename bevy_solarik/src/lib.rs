@@ -53,6 +53,8 @@ pub mod prelude {
 }
 
 use crate::realtime::SolarikLightingPlugin;
+#[cfg(feature = "nrc")]
+pub use crate::realtime::{NrcSupported, SolarikNrcInitPlugin, SolarikNrcSceneBounds};
 use crate::scene::RaytracingScenePlugin;
 use bevy_app::{PluginGroup, PluginGroupBuilder};
 use bevy_render::settings::WgpuFeatures;

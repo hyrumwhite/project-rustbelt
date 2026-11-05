@@ -531,11 +531,13 @@ pub fn nrc_decode_log_luv_hdr(packed_color: u32) -> Float3 {
 pub const NRC_ONE_OVER_PI: f32 = 0.318309886183790671538_f64 as f32;
 pub const NRC_ONE_OVER_TWO_PI: f32 = 0.159154943091895335769_f64 as f32;
 
-/// `NrcCartesianToSphericalUnorm`
+/// `NrcCartesianToSphericalUnorm`, with z clamped to [-1, 1] before `acos`
+/// (the HLSL has none; see the WGSL: a GPU-normalized z can round past 1 at
+/// a pole, and a NaN must not reach the network's inputs).
 pub fn nrc_cartesian_to_spherical_unorm(p: Float3) -> Float2 {
     let p = normalize(p);
     [
-        p[2].acos() * NRC_ONE_OVER_PI,
+        p[2].clamp(-1.0, 1.0).acos() * NRC_ONE_OVER_PI,
         (-p[1]).atan2(-p[0]) * NRC_ONE_OVER_TWO_PI + 0.5,
     ]
 }

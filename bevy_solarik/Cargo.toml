@@ -31,6 +31,10 @@ force_disable_dlss = ["bevy_anti_alias/force_disable_dlss"]
 pbr_multi_layer_material_textures = ["bevy_pbr/pbr_multi_layer_material_textures"]
 # Native capture probes; no systems or readbacks in default builds.
 graphics_debug = ["bevy_pbr/graphics_debug"]
+# NVIDIA's Neural Radiance Cache answering the diffuse GI's query (Vulkan,
+# Windows x64; docs/nrc-integration.md in the game's repository). Nothing
+# runs without SolarikNrcInitPlugin, which the application adds.
+nrc = ["dep:nrc_wgpu", "dep:nrc_records", "bevy_render/raw_vulkan_init"]
 
 [patch.crates-io]
 wgpu-core = { path = "vendor/wgpu-core" }
@@ -74,6 +78,9 @@ bytemuck = "1"
 blake3 = "1"
 derive_more = { version = "2", default-features = false, features = ["from"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+# (feature nrc: the library bound to wgpu, and the record formats' shaders)
+nrc_wgpu = { path = "../crates/nrc_wgpu", optional = true }
+nrc_records = { path = "../crates/nrc_records", optional = true }
 
 # Solarik's lint policy; adjust it to support this crate's correctness and maintainability.
 [lints.clippy]

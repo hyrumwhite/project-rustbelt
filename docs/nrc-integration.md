@@ -244,3 +244,172 @@ The setting also changes training speed: at 4.0 (internal values 1 to 4) the fra
 What this changes in the cost table: `QueryAndTrain` 0.77 to 0.91 ms instead of 1.0 to 1.5, plus the record writes inside the GI and training passes, plus the training pass's own tracing (not measured here). The net estimate drops from +2.3 to 3.0 ms to roughly **+1.6 to 2.2 ms**.
 
 Knobs: run names as arguments run a subset (`full queries training v1 v2 v8 switch atomic atomic1 device1 static sanity`); `SPIKE_EXIT_FRACTION` (default 0; 0.25 tested: no validation errors, converges to 0.014), `SPIKE_MAX_RADIANCE`, `SPIKE_PRIMARY`, `SPIKE_REPORT_LOSS`. The whole set runs in about 6 seconds. Each frame the example asserts the Queries counter against the expected count and the QueryRadiance capacity (945,515), and before teardown it asserts no validation, wgpu or NRC errors (the library's known leak report at device destruction follows).
+
+## Integration design (5 November)
+
+The first Solarik step: the diffuse GI query answered by NRC, a training pass, the pass split, behind a Cargo feature and an environment variable. The world cache keeps running (its DI slots feed ReSTIR DI; its GI side is the fallback during NRC's warm-up and the A/B baseline). Specular GI and the glass panes stay on the world cache for now.
+
+### Switches
+
+- Cargo feature `nrc` on `bevy_solarik` (`dep:nrc_wgpu`, `dep:nrc_records`, both path dependencies on `../crates/...`) and on the game (`nrc = ["bevy_solarik/nrc"]`). The game's `build.rs` passes `cargo:rustc-link-arg-bins=/DELAYLOAD:NRC_Vulkan.dll` with the feature (nrc_wgpu's own link arg reaches only its own binaries).
+- At run time `SOLARIK_NRC=1`: the game adds `SolarikNrcInitPlugin` before `DefaultPlugins` (it registers the Vulkan creation callbacks, so it must come before `RenderPlugin`). Without it nothing NRC-related runs and the shaders compile as before (no `NRC` shader def).
+- `SOLARIK_NRC_DIR`: the directory with the four DLLs; default `nrc_wgpu::sdk_bin_dir()` (`vendor/NRC/Bin/x64` on the build machine). Bundling into `src/bundle.rs` is a later step (the DLLs are 120 MB).
+- `SOLARIK_NRC_WARMUP`: frames after `Configure` during which the GI reads the world cache instead (default 120).
+- `SOLARIK_SHADER_DEFS=VISUALIZE_NRC`: the resolve pass writes the query radiance to the view (a direct cache view).
+
+### Rust, in `bevy_solarik/src/realtime/nrc.rs` (feature `nrc`)
+
+The crate denies `unsafe_code`; the callback registration and the `as_hal` calls get item-level `#[allow(unsafe_code, reason = ...)]`, as bevy_anti_alias's DLSS module does.
+
+- `SolarikNrcInitPlugin` (main app, before `RenderPlugin`): `nrc_wgpu::load_library(dir, true)`; on failure log and return. Then `RawVulkanInitSettings::add_create_instance_callback` → `nrc_wgpu::register_instance_extensions(args)`, and `add_create_device_callback` → `nrc_wgpu::register_device_extensions(args, adapter)`; on success `additional_features.insert::<NrcSupported>()`, on failure remove it and log. Inserts `NrcLibraryDir(PathBuf)` into the main world.
+- `SolarikNrcSceneBounds { min: Vec3, max: Vec3 }`: a main-world resource the application sets (every surface a ray can hit lies inside), extracted with `ExtractResourcePlugin`. Absent: ±1000 m and one warning.
+- `NrcSupported`: the marker type for `AdditionalVulkanFeatures`.
+- `NrcState` (render world resource): `Arc<Nrc>`, `NrcContext`, the `ContextSettings` last configured, `configured_frame: Option<u32>` (the `FrameCount` at the last configure), `constants: Buffer` (96 bytes, `UNIFORM | COPY_DST`), `counters: Buffer` (8 bytes, `STORAGE | COPY_SRC | COPY_DST`; the device-local counters the shaders add to; see "Spike results"), `bind_group_layout: BindGroupLayoutDescriptor`, `bind_group: Option<BindGroup>` (rebuilt on configure, the buffers may be new), `frame_settings: FrameSettings`, `training_dimensions: [u32; 2]`, `warmup_frames: u32`, `recorded_this_frame: bool`.
+- `init_nrc` (RenderStartup, chained before `init_solari_lighting_pipelines`): if `AdditionalVulkanFeatures::has::<NrcSupported>()` and the library dir resource exists: `Nrc::initialize(&NrcInitSettings::new(dir))`, `NrcContext::new(&nrc, render_device.wgpu_device())`, the two buffers, the layout; insert `NrcState`. Any error: log at error level, no resource, the renderer runs without NRC.
+- `prepare_nrc` (Render, `PrepareResources`, after `prepare_solari_lighting_resources`): for the view with `SolarikLightingResources`, the wanted `ContextSettings { learn_irradiance: true, include_direct_lighting: true, request_reset: bounds changed, scene_bounds from SolarikNrcSceneBounds, smallest_resolvable_feature_size: 0.01, frame_dimensions: view_size, training_dimensions: compute_ideal_training_dimensions(view_size, 0, 0.0), samples_per_pixel: 1, max_path_vertices: 8 }`. When it differs from the last (ignoring `request_reset`), or the bounds changed: `context.configure(&settings)` (hitches: allowed), rebuild the bind group, set `configured_frame`. One view only (the first); more views log a warning once.
+- `nrc_end_frame` (Render, after `RenderSystems::Render`, i.e. after the graph's command buffers were submitted): if `recorded_this_frame` → `context.end_frame(&render_queue)`; clear the flag. (`RenderContextState::queue` appends each render system's command buffers to `PendingCommandBuffers`; the submit is in `render_system`, in the `Render` set.)
+- `frame_settings`: the defaults, `max_expected_average_radiance_value` 1.0 (the shaders hand NRC exposed radiance, see below), `train_the_cache: true`, `termination_heuristic_threshold` and `training_termination_heuristic_threshold` 0.1, `proportion_unbiased` 1/16, `num_training_iterations` 4.
+
+#### The NRC bind group (group 2 of the pipelines that use it)
+
+| binding | WGSL | buffer |
+|---|---|---|
+| 0 | `var<uniform> nrc_constants: NrcConstants` | `NrcState::constants`, written each frame after `BeginFrame` from `PopulateShaderConstants`, with `pad0 = 1` when NRC answers are to be used (frames since configure ≥ warm-up) else 0 |
+| 1 | `var<storage, read_write> nrc_query_path_info: array<u32>` | `BufferIdx::QueryPathInfo` |
+| 2 | `var<storage, read_write> nrc_training_path_info: array<u32>` | `BufferIdx::TrainingPathInfo` |
+| 3 | `var<storage, read_write> nrc_training_path_vertices: array<u32>` | `BufferIdx::TrainingPathVertices` |
+| 4 | `var<storage, read_write> nrc_query_radiance_params: array<u32>` | `BufferIdx::QueryRadianceParams` |
+| 5 | `var<storage, read_write> nrc_counters: array<atomic<u32>>` | `NrcState::counters` (ours, device local) |
+| 6 | `var<storage, read> nrc_query_radiance: array<f32>` | `BufferIdx::QueryRadiance` |
+
+All compute stage, `storage_buffer_sized(false, None)` / `storage_buffer_read_only_sized(false, None)` / `uniform_buffer::<NrcConstants>(false)` (no dynamic offset).
+
+#### Pipelines (in `init_solari_lighting_pipelines`, when `NrcState` exists)
+
+- `gi_initial_and_temporal_pipeline`: the same entry (`initial_and_temporal`, restir_gi.wesl) with the extra def `NRC` and the NRC layout as its third bind group layout; with `NRC` the entry does the initial sampling only.
+- `nrc_training_pipeline`: `nrc_training.wesl`, entry `nrc_train`, defs `NRC`, `FOLIAGE_TRANSMISSION`, NRC layout at group 2. Dispatched `(training_dimensions.x.div_ceil(8), training_dimensions.y.div_ceil(8), 1)`.
+- `nrc_resolve_pipeline`: restir_gi.wesl, entry `nrc_resolve_and_temporal`, def `NRC`, NRC layout at group 2. Dispatched `(dx, dy, 1)`.
+- `prepare_primary_glass` waits for them too.
+
+#### The node, per frame (the non-primary `solarik_lighting`), with NRC
+
+```
+sky distribution, presample light tiles, world cache (unchanged)
+drop(pass)
+  encoder A (its own, raw only): context.begin_frame(&frame_settings); ctx.add_command_buffer(A.finish())
+  queue.write_buffer(constants, PopulateShaderConstants with pad0)   (after BeginFrame: the multiplier follows the frame settings)
+  ctx.command_encoder().clear_buffer(counters)
+pass = begin_compute_pass; bind groups 0 scene, 1 lighting (+offsets), 2 nrc
+  training pass            span "solarik_lighting/nrc_training"
+  direct lighting          (unchanged; group 2 stays bound, DI's layouts do not reach it)
+  gi initial               (the NRC variant)
+drop(pass)
+  ctx.command_encoder().copy_buffer_to_buffer(counters → BufferIdx::Counter buffer, 8 bytes)
+  encoder B (its own, raw only): context.query_and_train(false); ctx.add_command_buffer(B.finish())
+pass = begin_compute_pass; bind groups 0, 1, 2 nrc
+  nrc resolve + temporal   span "solarik_lighting/nrc_resolve"
+  gi spatial and shade
+specular GI, lit fog (unchanged; specular rebinds group 2 to the DLSS textures when present)
+drop(pass) ... (unchanged)
+recorded_this_frame = true
+```
+
+`ctx.add_command_buffer` finishes the current wgpu encoder, queues it, queues the raw one, and the next `ctx.command_encoder()` starts a fresh encoder, so the submit order is preserved. The library's commands never share an encoder with wgpu's (wgpu panics otherwise).
+
+### Shaders
+
+#### `bevy_solarik/src/realtime/nrc.wesl` (`load_shader_library!`, module `bevy_solarik::realtime::nrc`)
+
+A real file in the source tree (the shader test harness in `tests/support/shader_graph.rs` loads every `.wesl` under `src`): a short header with the seven bindings above (group 2), then `crates/nrc_records/shaders/nrc_records.wgsl` and `nrc_buffers.wgsl` verbatim. A test (`bevy_solarik/tests/nrc_module.rs`) reads the three files and asserts the module is header + the two sources, so they cannot drift. If wesl-rs rejects the hex float literal `0x1.0001p-16f`, change the constant in `nrc_records.wgsl` to `bitcast<f32>(0x37800080u)` (the same bits) and rerun that crate's tests.
+
+Everything NRC is under `@if(NRC)` in the existing shaders, so the default build compiles the same WGSL as before.
+
+#### Units
+
+NRC is handed exposed radiance: every radiance written into a training vertex or the sky term is multiplied by `view.exposure`, and the resolve divides the query result by `view.exposure`. Then `max_expected_average_radiance_value = 1` is about right (exposed scene radiance averages 0.1 to 1) and the LogLuv range is used well. Positions are Bevy world positions (meters), encoded with `nrc_encode_position(p, nrc_constants)`.
+
+#### Surface attributes (both passes, the same way)
+
+- position: the hit's `world_position`;
+- normal: the shading normal (`world_normal`), for a leaf the side facing the viewer (restir_gi already flips `sample_point_world_normal` for `diffuse_transmission > 0`);
+- view direction: the unit vector from the surface toward where the ray came from (`wo`), as NVIDIA's `viewVector`;
+- roughness: `material.roughness` (linear);
+- albedo: `calculate_diffuse_color(material.base_color, material.metallic, 0.0, 0.0)` (bevy_pbr's; brdf.wesl imports it);
+- specular F0: `calculate_F0(material.base_color, material.metallic, vec3(material.reflectance))`;
+- delta lobe: `material.roughness <= MIRROR_ROUGHNESS_THRESHOLD && material.metallic > 0.9999`.
+
+#### `nrc_training.wesl` (`embedded_asset!`), entry `nrc_train`, workgroup 8x8
+
+One thread per training path over `nrc_constants.training_dimensions`. A port of NVIDIA's update-mode flow (`NrcCreatePathState`, `NrcUpdateOnHit`, `NrcSetBrdfPdf`, `NrcUpdateOnMiss`, `NrcWriteFinalPathInfo` of `vendor/NRC/Include/Nrc.hlsli`) around a bounce loop built from Solarik's pieces (`surface_path.wesl` is the model: `sample_random_light_transmitted`, `evaluate_brdf`, `evaluate_brdf_pdf`, `evaluate_and_sample_brdf`, `power_heuristic`, `random_emissive_light_solid_angle_pdf`, `emitted_radiance`, `trace_ray`, `resolve_ray_hit_full`, `sample_sky`).
+
+- The path's first vertex is a camera pixel: `pixel = min(vec2u((vec2f(id.xy) + rand2) * viewport / vec2f(training_dimensions)), viewport - 1)`, its surface from the G-buffer (`gpixel_resolve`), `wo` toward the camera, `hit_distance` the distance to the camera. `rng` from the pixel index and `constants.frame_index` (a stream of its own, e.g. `^ 0x5bd1e995u`), `forest_set_seed` likewise. A sky pixel (depth 0) writes a training path info with vertex count 0 and `NRC_PATH_FLAG_HAS_EXITED_SCENE`, query index `0xffffffff`, and returns.
+- Segment accounting, as NVIDIA's: `radiance` and `throughput` are reset to 0 and 1 when a vertex is recorded; what accumulates between two recorded vertices (NEE at the vertex, emission met by the scatter ray, the sky on a miss) finalizes the earlier vertex (`nrc_update_training_path_vertex`) when the next one is recorded, or at the end (`NrcWriteFinalPathInfo`). The library reconstructs each vertex's target as `radiance_i + throughput_i * target_{i+1}`, the last one's from its self-training query.
+- Per hit, in order: spread radius update (primary from `hit_distance / sqrt(cos_gamma / 4π)`, then `cumul += hit_distance / sqrt(cos_gamma * brdf_pdf)` unless the previous hit was delta; the previous-was-delta flag); a delta vertex is not recorded (NVIDIA skips it with the heuristic on: no NEE, bounce on); otherwise finalize and write the previous vertex if any, `vertex_count++`, reset accumulators, make the new packed vertex (kept in a `var`, written when finalized); `terminate = bounce == max_path_vertices - 1`, and for a path without `NRC_PATH_FLAG_IS_UNBIASED`: if `nrc_evaluate_termination_heuristic(state, training_termination_heuristic_threshold)` then `terminate |= HEURISTIC_RESET flag set`, set the flag, `cumul = 0` (run to the heuristic twice). `terminate` → break (TerminateImmediately: the cache includes direct light, so the last vertex gets no NEE; its target is the self-training query).
+- NEE at a recorded vertex as `surface_path.wesl` does (the power heuristic against the BRDF pdf times the continuation probability when `brdf_rays_can_hit`), times `view.exposure`, into `radiance` (throughput is 1 here).
+- Scatter: `evaluate_and_sample_brdf`; `pdf <= 0` → `throughput = 0`, break. `throughput *= next.throughput`, `state.brdf_pdf = next.pdf`. `trace_ray(offset origin, wi, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE)` (thin panes skipped, as the GI sample rays do). Miss: `radiance += throughput * sample_sky(wi) * view.exposure`, `HAS_EXITED_SCENE`, break. Hit: `resolve_ray_hit_full`; emission `radiance += throughput * emitted_radiance(material, -wi) * view.exposure * power_heuristic(next.pdf, random_emissive_light_solid_angle_pdf(candidate, hit.world_position))` (weight 1 after a delta bounce); then `hit = candidate`, `wo = -wi`, `hit_distance = ray.t`.
+- At the end (`NrcWriteFinalPathInfo`, update mode): if `vertex_count > 0`: finalize and write the current vertex with (`radiance`, `throughput`); if not exited and `max_path_vertices > 1`: `query_index = nrc_increment_counter(NRC_COUNTER_QUERIES)` and `nrc_write_radiance_params(query_index, nrc_create_radiance_params(nrc_unpack_path_vertex_with(vertex, radiance, throughput)))`. Then `nrc_write_training_path_info(nrc_calculate_training_path_index(training_dimensions, id.xy), {packed_data, query_index})`.
+- `0xffffffff` is "no query" (NVIDIA's `NrcCreatePathState`). Positions in the spherical encodings: `nrc_safe_cartesian_to_spherical_unorm` as is (the NaN at the poles is the HLSL's too; a normal never has |z| rounding past 1 after `normalize`... it can; clamp `p.z` to [-1, 1] before `acos` in `nrc_records.wgsl` is allowed, with a comment, and the crate's tests rerun).
+
+#### `restir_gi.wesl` under `@if(NRC)`
+
+- `generate_initial_reservoir`: where the world cache is queried (the `!(NO_WORLD_CACHE)` branch), when `nrc_constants.pad0 != 0u`: take a query index (`nrc_increment_counter`), write `NrcRadianceParams` for the sample point (view direction `-ray_direction`, the attributes above), remember the index and `nrc_encode_log_luv_hdr(max(albedo + F0, 0))` in two `var<private>`s, leave `reservoir.radiance = 0` and `unbiased_contribution_weight = direction_sample.inverse_pdf`, and return without the `base_color / PI` factor (the query answers the full outgoing radiance toward the receiver, albedo included). Otherwise (warm-up) the world cache path as before. With `REGIONAL_HISTORY`, `support_radius = ray_max_distance()` for an NRC sample.
+- `initial_and_temporal`: with `NRC`, after `generate_initial_reservoir`, `nrc_write_query_path_info(pixel_index, NrcPackedQueryPathInfo(prefix, query_index))` (`0xffffffff` and 0 when there was no query, also on the early returns for depth 0 and mirrors), then `gi_reservoirs_b[pixel_index] = initial_reservoir; return;` (no temporal step).
+- New entry `nrc_resolve_and_temporal` (8x8): the same early returns; `var reservoir = gi_reservoirs_b[pixel_index]`; `let info = nrc_read_query_path_info(pixel_index)`; if `info.query_buffer_index != 0xffffffffu`: `reservoir.radiance = max(vec3(0), nrc_decode_log_luv_hdr(info.prefix_throughput) * nrc_unpack_query_radiance(nrc_constants, nrc_read_query_radiance(info.query_buffer_index)) / view.exposure)`; with `VISUALIZE_NRC` store that radiance times exposure to `view_output` and return. Then the temporal step exactly as `initial_and_temporal` does it today (`load_temporal_reservoir`, `merge_reservoirs`), `gi_reservoirs_b[pixel_index] = merged`.
+
+### Scene bounds from the game
+
+`load_level` knows every BSP it loads (`halo_map::bsp::Bsp::world_bounds`): the union over the level's BSPs, converted with `halo_to_bevy` (axes change: take min/max per component after conversion), plus a 50 m margin for objects and the sky's water, becomes `SolarikNrcSceneBounds`. (A level change replaces it; the bounds change makes `prepare_nrc` reconfigure with `request_reset`.)
+
+### Checks
+
+- `cargo test -p nrc_records --release -- --ignored` still passes if `nrc_records.wgsl` changed.
+- The WESL compiles: a test over `tests/support/shader_graph.rs` validating `bevy_solarik::realtime::restir_gi` with and without `NRC` (and `REGIONAL_HISTORY`, `FOLIAGE_TRANSMISSION`, `WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION`), and `bevy_solarik::realtime::nrc_training` with `NRC`, `FOLIAGE_TRANSMISSION`; `scene_shader_variants` still passes.
+- `cargo build --release --features dlss,nrc` builds the game; `cargo build --release --features dlss` (no nrc) is unchanged.
+- In the game, `SOLARIK_NRC=1` with `HALO_RT_GPU_LOG=1`: no validation errors, the `nrc_training` and `nrc_resolve` spans in the log, the NRC log (target `nrc`) quiet; `SOLARIK_SHADER_DEFS=VISUALIZE_NRC` shows a plausible lit scene after the warm-up.
+- Then `scripts/boil/run.sh nrc` against the `default` table (the plan's step 6).
+
+## Integration results (5 November)
+
+The design above is built and runs in the game (`cargo build --release --features dlss,nrc`, then `SOLARIK_NRC=1`). Two Opus agents wrote it, the shaders and the Rust side in parallel against the design, and it was reviewed and measured here. The default build compiles the same WGSL as before (checked by dumping the compiled modules with and without the change).
+
+What was checked before the harness:
+- `SOLARIK_SHADER_DEFS=VISUALIZE_NRC` (with `HALO_RT_NO_DLSS=1`) at b30's beach shows the answers at the sample points: black where the sample ray hit the sky (no query), the sand's radiance elsewhere. In b40's shaft the same view is near black, because that shaft's diffuse GI is a few percent of the picture (the strips' direct light is the rest), not because the answers are missing.
+- `HALO_RT_CACHE_LOG=1` prints an `nrc N:` line every 40 frames (the game's `log_world_cache`): the frame's query count (745,000 in the shaft, 141,000 at the beach where most sample rays reach the sky), the first answer, the first query record's position and albedo, the first training path's packed data (3 vertices, heuristic stop) and its first vertex's radiance and throughput.
+- The NRC render against the default capture at the same spot: the beach within noise (mean 124.0 against 123.7 of 255), the shaft 3% darker (30.8 against 31.9), the left wall and the floor alike.
+
+`scripts/boil/run.sh nrc` against the `default` table (the same build, NRC on by the environment; the world cache still running, its GI side the warm-up fallback):
+
+```
+spot             gpu direct  cache diffGI specGI   dlss | stillWdr stillP90 still3s |   noise noiseP95 | moveWdr  move3s
+b40_shaft      10.13   2.68   1.26   0.76   1.38   1.32 |   0.019   0.052   0.074 |   0.148    0.46 |   0.034   0.154
+b40_canyon      8.28   1.94   1.28   0.68   0.63   1.31 |   0.004   0.005   0.013 |   0.072    0.24 |   0.005   0.020
+c20_hall        6.74   1.86   1.10   0.43   0.44   1.31 |   0.003   0.005   0.014 |   0.086    0.30 |   0.005   0.027
+a10_tube        7.21   1.84   1.05   0.51   0.91   1.31 |   0.002   0.003   0.006 |   0.011    0.05 |   0.003   0.011
+a10_corridor    7.82   1.91   1.12   0.52   1.26   1.31 |   0.006   0.014   0.019 |   0.101    0.26 |   0.015   0.043
+b30_passage     9.29   2.08   1.15   0.81   1.76   1.32 |   0.010   0.018   0.015 |   0.061    0.21 |   0.008   0.032
+b30_beach       6.46   1.16   1.09   0.44   0.44   1.32 |   0.005   0.012   0.032 |   0.187    0.50 |   0.007   0.048
+b40_canyon_fast 8.45   1.94   1.26   0.68   0.64   1.32 |   0.004   0.006   0.013 |   0.073    0.24 |   0.006   0.023
+```
+
+Reading it against `default` (the table in `boiling-plan.md`; `diffGI` is now the initial pass alone, the spatial pass is a span of its own):
+
+| | default | nrc | note |
+|---|---|---|---|
+| shaft: diffuse GI passes | 1.71 | 0.76 + 0.62 + 0.24 training + 0.21 resolve = 1.83 | the initial pass no longer hashes into the cache |
+| shaft: timed total | 10.06 | 10.13 | |
+| `QueryAndTrain` | | not in the total | the library's commands carry no timestamps; the spike measured 0.77 ms at this query count, 0.9 with 8-vertex paths |
+| real cost | | about +0.9 ms a frame | with `sample_gi` still running (0.4 to 0.6 ms to take back when the fallback goes) |
+| still three-shot spread, shaft | 0.053 | 0.074 | worse |
+| still P90, corridor / passage | 0.007 / 0.005 | 0.014 / 0.018 | worse |
+| noise, shaft / tube | 0.126 / 0.014 | 0.148 / 0.011 | mixed |
+| motion three-shot, shaft | 0.128 | 0.154 | worse |
+| everything else | | within the run-to-run spread | |
+
+So the first NRC frame costs about what was estimated and is as steady as the world cache at five spots and a little less steady at three (the shaft, the corridor, the passage), in stills above all: the network keeps training on 21,867 noisy paths a frame and its answer at a fixed point breathes (the drift the plan warned of; the spike measured 0.05% a frame on a synthetic scene, a real scene with one light sample per vertex trains noisier). The cache's boiling in motion (the shaft's 0.128) is not improved yet either: the ReSTIR temporal step still resamples a new sample point every frame, and the answer's smoothness only helps once the drift is below the cache's cell noise.
+
+Knobs to try next, in order, each one a harness run:
+1. `self_training_attenuation` below 1 and `learning_rate` below 1e-2 (the breathing), and `num_training_iterations` 2 (half the training per frame).
+2. More signal per training vertex: two light samples at each vertex (the cache takes four per update), and `proportion_primary_segments_to_train_on` above 0.05 (the visible surfaces are what the queries ask about).
+3. Then the step the design deferred: drop `sample_gi` once the warm-up is over (the cache's DI slots stay), and move specular GI's rough hits onto the query.
+
+Diagnostics left in: the `nrc N:` log line, `VISUALIZE_NRC`, and the `nrc_training` / `nrc_resolve` spans. Bundling the DLLs is still to do (`src/bundle.rs`, 120 MB).

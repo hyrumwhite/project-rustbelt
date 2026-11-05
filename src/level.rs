@@ -849,11 +849,22 @@ impl LevelBuilder {
     ) -> halo_map::Result<()> {
         // (HALO_RT_NO_CLUSTER_LIGHTS=1 for A/B: each emissive material one light)
         let no_cluster_lights = std::env::var_os("HALO_RT_NO_CLUSTER_LIGHTS").is_some();
+        // (the box NRC's position encoding spans: the loaded BSPs' bounds)
+        #[cfg(feature = "nrc")]
+        let mut nrc_bounds: Option<(Vec3, Vec3)> = None;
         for reference in bsp::references(&self.cache)? {
             if only.is_some_and(|i| i != reference.index) {
                 continue;
             }
             let loaded = bsp::Bsp::load(&self.cache, &reference)?;
+            #[cfg(feature = "nrc")]
+            if let Ok([x, y, z]) = loaded.world_bounds() {
+                // (the axes change: min and max per component after the conversion)
+                let a = Vec3::from(halo_to_bevy([x[0], y[0], z[0]], METERS_PER_WORLD_UNIT));
+                let b = Vec3::from(halo_to_bevy([x[1], y[1], z[1]], METERS_PER_WORLD_UNIT));
+                let (min, max) = (a.min(b), a.max(b));
+                nrc_bounds = Some(nrc_bounds.map_or((min, max), |(lo, hi)| (lo.min(min), hi.max(max))));
+            }
             if self.clusters.len() <= reference.index {
                 self.clusters.resize(reference.index + 1, None);
             }
@@ -987,6 +998,16 @@ impl LevelBuilder {
             self.loaded_bsps.push(reference.index);
             self.bsp_roots.push((reference.index, level));
             self.stats.bsps += 1;
+        }
+        // Plus a margin for the objects and the sky's water outside the
+        // BSPs; a new level's bounds reset the cache.
+        #[cfg(feature = "nrc")]
+        if let Some((min, max)) = nrc_bounds {
+            const MARGIN: f32 = 50.0;
+            commands.insert_resource(bevy_solarik::SolarikNrcSceneBounds {
+                min: min - Vec3::splat(MARGIN),
+                max: max + Vec3::splat(MARGIN),
+            });
         }
         self.stats.texture_failures = self.textures.failures;
         Ok(())

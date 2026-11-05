@@ -387,14 +387,18 @@ fn nrc_decode_log_luv_hdr(packed_color: u32) -> vec3<f32> {
     return max(nrc_xyz_to_rgb_rec709(xyz), vec3<f32>(0.0));
 }
 
-// NrcCartesianToSphericalUnorm. (Like the HLSL, no clamp before acos: a
-// normalized z that rounds past 1 gives NaN.)
+// NrcCartesianToSphericalUnorm, with one change: z is clamped to [-1, 1]
+// before acos. The HLSL has no clamp, and a normalized z within an ulp of a
+// pole can round past 1 on the GPU (an approximate rsqrt), giving a NaN
+// theta; Solarik's surfaces hand NRC normals and view directions straight
+// from normalize(), and a NaN network input would reach the training
+// gradients. The clamp changes nothing for |z| <= 1.
 const NRC_ONE_OVER_PI: f32 = 0.318309886183790671538; // 1/pi
 const NRC_ONE_OVER_TWO_PI: f32 = 0.159154943091895335769; // 1/2pi
 fn nrc_cartesian_to_spherical_unorm(p_in: vec3<f32>) -> vec2<f32> {
     let p = normalize(p_in);
     var sph: vec2<f32>;
-    sph.x = acos(p.z) * NRC_ONE_OVER_PI;
+    sph.x = acos(clamp(p.z, -1.0, 1.0)) * NRC_ONE_OVER_PI;
     sph.y = atan2(-p.y, -p.x) * NRC_ONE_OVER_TWO_PI + 0.5;
     return sph;
 }

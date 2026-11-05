@@ -427,6 +427,12 @@ fn main() -> AppExit {
 
     #[cfg(feature = "dlss")]
     app.insert_resource(DlssProjectId(bevy::asset::uuid::uuid!("3f1d6a2e-8a4b-4f5e-9c3d-1b2a7e6f0d91")));
+    // NVIDIA's Neural Radiance Cache for the diffuse GI (SOLARIK_NRC=1): its
+    // Vulkan extensions are registered before the renderer creates its device
+    #[cfg(feature = "nrc")]
+    if std::env::var("SOLARIK_NRC").is_ok_and(|v| v == "1") {
+        app.add_plugins(bevy_solarik::SolarikNrcInitPlugin);
+    }
 
     // (unfocused too, at full speed: Bevy's default updates an unfocused
     // window 60 times a second, which held scripted captures, and perhaps a
@@ -1421,6 +1427,23 @@ fn log_world_cache(frames: Res<CaptureFrames>, diagnostics: Res<DiagnosticsStore
         line += &format!(" {}={value}", name.trim_start_matches("world_cache_"));
     }
     info!("{line}");
+    // (with SOLARIK_NRC=1: NRC's query count and the first words of its
+    // records, the floats by their bits; see bevy_solarik's nrc.rs)
+    let mut line = format!("nrc {}:", frames.0);
+    let mut any = false;
+    for (name, float) in [("nrc_queries", false), ("nrc_answer0", true), ("nrc_query0_position_x", true), ("nrc_query0_albedo_r", true), ("nrc_vertex0_radiance", false), ("nrc_vertex0_throughput", false), ("nrc_path0_packed", false)] {
+        let path = DiagnosticPath::new(format!("render/solarik_lighting/{name}"));
+        let Some(value) = diagnostics.get(&path).and_then(Diagnostic::value) else { continue };
+        any = true;
+        if float {
+            line += &format!(" {}={value}", name.trim_start_matches("nrc_"));
+        } else {
+            line += &format!(" {}={:#x}", name.trim_start_matches("nrc_"), value as u32);
+        }
+    }
+    if any {
+        info!("{line}");
+    }
 }
 
 /// `--dolly`: sways the camera forward and back from where it started, and

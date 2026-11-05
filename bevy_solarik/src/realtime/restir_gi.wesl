@@ -45,6 +45,23 @@ import bevy_solarik::realtime::realtime_bindings::Reservoir;
 import bevy_solarik::realtime::specular_gi::DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
 @if((REGIONAL_HISTORY)) import bevy_solarik::scene::raytracing_scene_bindings::scene_support_is_valid;
 @if((REGIONAL_HISTORY)) import bevy_solarik::realtime::world_cache_query::query_two_sided_world_cache_with_support;
+@if((NRC)) import bevy_pbr::render::pbr_functions::calculate_diffuse_color;
+@if((NRC)) import bevy_pbr::render::pbr_functions::calculate_F0;
+@if((NRC)) import bevy_solarik::scene::raytracing_scene_bindings::ResolvedRayHitFull;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_constants;
+@if((NRC)) import bevy_solarik::realtime::nrc::NrcRadianceParams;
+@if((NRC)) import bevy_solarik::realtime::nrc::NrcPackedQueryPathInfo;
+@if((NRC)) import bevy_solarik::realtime::nrc::NRC_COUNTER_QUERIES;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_encode_position;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_safe_cartesian_to_spherical_unorm;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_encode_log_luv_hdr;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_decode_log_luv_hdr;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_unpack_query_radiance;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_increment_counter;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_write_radiance_params;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_write_query_path_info;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_read_query_path_info;
+@if((NRC)) import bevy_solarik::realtime::nrc::nrc_read_query_radiance;
 
 // https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf
 enable wgpu_ray_query;
@@ -61,6 +78,18 @@ const MAX_GI_SAMPLE_AGE = 16.0;
 // re-trace covers the whole scene, and under ray_max_distance().
 const SKY_SAMPLE_DISTANCE = 10000.0;
 
+// NRC (docs/nrc-integration.md): the initial pass writes a cache query for
+// its sample point instead of reading the world cache, the library answers
+// every query at once between the passes (QueryAndTrain), and
+// nrc_resolve_and_temporal puts the answers into the reservoirs before the
+// temporal step, which needs the radiance for its target function. These
+// hold the query generate_initial_reservoir made for this pixel, if any
+// (0xffffffff: none), and its prefix throughput (LogLuv).
+@if((NRC))
+var<private> nrc_query_index: u32 = 0xffffffffu;
+@if((NRC))
+var<private> nrc_query_prefix: u32 = 0u;
+
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
@@ -71,11 +100,17 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
+@if(NRC) {
+        write_nrc_query_path_info(pixel_index);
+}
         gi_reservoirs_b[pixel_index] = empty_reservoir();
         return;
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
     if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
+@if(NRC) {
+        write_nrc_query_path_info(pixel_index);
+}
         gi_reservoirs_b[pixel_index] = empty_reservoir();
         return;
     }
@@ -101,8 +136,64 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
 }
+@if(NRC) {
+    // The sample's radiance is not known until QueryAndTrain has run: keep
+    // the initial reservoir, nrc_resolve_and_temporal finishes it.
+    write_nrc_query_path_info(pixel_index);
+    gi_reservoirs_b[pixel_index] = initial_reservoir;
+    return;
+}
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
+        temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
+
+    gi_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
+}
+
+// After QueryAndTrain: the NRC answer for each pixel's sample point becomes
+// the reservoir's radiance, then the temporal step initial_and_temporal
+// leaves out with NRC.
+@compute @workgroup_size(8, 8, 1)
+@if((NRC))
+fn nrc_resolve_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
+
+    let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
+    // (Not initial_and_temporal's stream: its first numbers drew the sample.)
+    var rng = (pixel_index + constants.frame_index) ^ 0x3c6ef372u;
+
+    // The same early returns as initial_and_temporal, which has already
+    // stored their empty reservoirs.
+    let depth = textureLoad(depth_buffer, global_id.xy, 0);
+    if depth == 0.0 { return; }
+    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD { return; }
+
+    var reservoir = gi_reservoirs_b[pixel_index];
+    let info = nrc_read_query_path_info(pixel_index);
+    var answer = vec3(0.0);
+    if info.query_buffer_index != 0xffffffffu {
+        // The library learns radiance divided by the query's albedo + F0
+        // (learn_irradiance), in its own scale, from exposed radiance; the
+        // prefix throughput and the unpack multiplier undo the first two and
+        // the exposure the last. The result is the outgoing radiance toward
+        // this pixel's surface, the albedo included.
+        answer = max(vec3(0.0), nrc_decode_log_luv_hdr(info.prefix_throughput)
+            * nrc_unpack_query_radiance(nrc_constants, nrc_read_query_radiance(info.query_buffer_index)) / view.exposure);
+        reservoir.radiance = answer;
+    }
+// (SOLARIK_SHADER_DEFS=VISUALIZE_NRC: the cache's answers at the diffuse
+// bounce's sample points, black where the pixel made no query: the sky, an
+// emitter, the world cache during NRC's warm-up. spatial_and_shade leaves
+// the view.)
+@if(VISUALIZE_NRC) {
+    textureStore(view_output, global_id.xy, vec4(answer * view.exposure, 1.0));
+    gi_reservoirs_b[pixel_index] = reservoir;
+    return;
+}
+
+    let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
+    let merge_result = merge_reservoirs(reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
 
     gi_reservoirs_b[pixel_index] = merge_result.merged_reservoir;
@@ -139,6 +230,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
 }
 @if(VISUALIZE_CACHE_AGE) {
+    return;
+}
+@if(NRC && VISUALIZE_NRC) {
     return;
 }
 
@@ -228,6 +322,19 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     reservoir.unbiased_contribution_weight = direct_lighting.inverse_pdf * direction_sample.inverse_pdf;
 }
 @if(!(NO_WORLD_CACHE)) {
+@if(NRC) {
+    // NRC answers once it has warmed up (pad0, set by the renderer); until
+    // then the world cache below. The query's answer is the full outgoing
+    // radiance toward us, albedo included, so the base_color / PI factor
+    // below is not applied; the resolve fills reservoir.radiance. (With
+    // REGIONAL_HISTORY the support stays the whole scene, as set above: the
+    // network's answer depends on everything it has seen.)
+    if nrc_constants.pad0 != 0u {
+        write_nrc_query(sample_point, -ray_direction);
+        reservoir.unbiased_contribution_weight = direction_sample.inverse_pdf;
+        return reservoir;
+    }
+}
     // Cache entries are incident hemisphere irradiance; only the endpoint
     // consumes material weights, before the existing albedo / PI below.
 @if(REGIONAL_HISTORY) {
@@ -249,6 +356,44 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     reservoir.radiance *= sample_point_diffuse_brdf;
 
     return reservoir;
+}
+
+// NrcUpdateOnHit in query mode, querying at the first vertex (the sample
+// point is already one bounce in, so the termination heuristic has nothing to
+// wait for). The surface is described as nrc_training.wesl describes its
+// training vertices, or the network is asked about inputs it never saw: the
+// shading normal (a leaf's side facing `wo`), `wo` toward the receiver,
+// linear roughness, bevy_pbr's albedo and F0.
+@if((NRC))
+fn write_nrc_query(sample_point: ResolvedRayHitFull, wo: vec3<f32>) {
+    let material = sample_point.material;
+    var normal = sample_point.world_normal;
+    if material.diffuse_transmission > 0.0 && dot(normal, wo) < 0.0 {
+        normal = -normal;
+    }
+    let albedo = calculate_diffuse_color(material.base_color, material.metallic, 0.0, 0.0);
+    let specular = calculate_F0(material.base_color, material.metallic, vec3(material.reflectance));
+
+    var params: NrcRadianceParams;
+    params.encoded_position = nrc_encode_position(sample_point.world_position, nrc_constants);
+    params.roughness = material.roughness;
+    params.normal = nrc_safe_cartesian_to_spherical_unorm(normal);
+    params.view_direction = nrc_safe_cartesian_to_spherical_unorm(wo);
+    params.albedo = albedo;
+    params.specular = specular;
+    nrc_query_index = nrc_increment_counter(NRC_COUNTER_QUERIES);
+    nrc_write_radiance_params(nrc_query_index, params);
+    // learn_irradiance: the answer is radiance / (albedo + F0), so that is the
+    // prefix throughput (the path's own throughput is 1: the reservoir
+    // weights the connection to the receiver itself).
+    nrc_query_prefix = nrc_encode_log_luv_hdr(max(albedo + specular, vec3(0.0)));
+}
+
+// NrcWriteFinalPathInfo in query mode: one query path per pixel (one sample
+// per pixel, so the query path index is the pixel index).
+@if((NRC))
+fn write_nrc_query_path_info(pixel_index: u32) {
+    nrc_write_query_path_info(pixel_index, NrcPackedQueryPathInfo(nrc_query_prefix, nrc_query_index));
 }
 
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {

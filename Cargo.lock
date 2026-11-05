@@ -1740,6 +1740,8 @@ dependencies = [
  "blake3",
  "bytemuck",
  "derive_more",
+ "nrc_records",
+ "nrc_wgpu",
  "tracing",
 ]
 

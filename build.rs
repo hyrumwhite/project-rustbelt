@@ -17,6 +17,13 @@ use std::{
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // (NRC_Vulkan.dll is loaded from SOLARIK_NRC_DIR at run time; as a
+    // load-time import it would have to sit beside the exe. nrc_wgpu's own
+    // link argument reaches only its own binaries, its build script brings
+    // delayimp.lib)
+    if env::var_os("CARGO_FEATURE_NRC").is_some() {
+        println!("cargo:rustc-link-arg-bins=/DELAYLOAD:NRC_Vulkan.dll");
+    }
     for name in ["HALO_RT_OPENCE_BUILD", "HALO_RT_SIM_DLL", "DLSS_SDK"] {
         println!("cargo:rerun-if-env-changed={name}");
     }

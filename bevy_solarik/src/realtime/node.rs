@@ -24,7 +24,7 @@ use bevy_render::{
             storage_buffer_sized, texture_2d, texture_depth_2d, texture_storage_2d, uniform_buffer,
         },
     },
-    renderer::{RenderAdapter, RenderContext, RenderDevice, ViewQuery},
+    renderer::{RenderAdapter, RenderContext, RenderDevice, RenderQueue, ViewQuery},
     view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
 };
 use bevy_render::{
@@ -72,6 +72,56 @@ pub struct SolarikLightingPipelines {
     specular_gi_with_psr_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     resolve_dlss_rr_textures_pipeline: CachedComputePipelineId,
+    /// The NRC frame's pipelines, when NRC initialized.
+    #[cfg(feature = "nrc")]
+    nrc: Option<super::nrc::NrcPipelineIds>,
+}
+
+/// Without the `nrc` feature there is never an NRC frame; this stands in for
+/// `nrc::NrcFrame` so the node reads the same either way.
+#[cfg(not(feature = "nrc"))]
+mod no_nrc {
+    use bevy_render::{
+        render_resource::{BindGroup, ComputePipeline},
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+    };
+
+    pub(super) enum NrcFrame {}
+
+    impl NrcFrame {
+        pub(super) fn begin_frame(
+            &mut self,
+            _: &mut RenderContext,
+            _: &RenderDevice,
+            _: &RenderQueue,
+            _: u32,
+        ) -> bool {
+            match *self {}
+        }
+        pub(super) fn bind_group(&self) -> &BindGroup {
+            match *self {}
+        }
+        pub(super) fn gi_initial_pipeline(&self) -> &ComputePipeline {
+            match *self {}
+        }
+        pub(super) fn training_pipeline(&self) -> &ComputePipeline {
+            match *self {}
+        }
+        pub(super) fn resolve_pipeline(&self) -> &ComputePipeline {
+            match *self {}
+        }
+        pub(super) fn training_workgroups(&self) -> (u32, u32) {
+            match *self {}
+        }
+        pub(super) fn query_and_train(
+            &mut self,
+            _: &mut RenderContext,
+            _: &RenderDevice,
+            _: &impl bevy_render::diagnostic::RecordDiagnostics,
+        ) -> bool {
+            match *self {}
+        }
+    }
 }
 
 #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
@@ -140,6 +190,7 @@ pub fn prepare_primary_glass(
     mut phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
     mut transmissive_phases: ResMut<ViewSortedRenderPhases<bevy_pbr::Transmissive3d>>,
     mut ready_views: ResMut<PrimaryGlassViews>,
+    #[cfg(feature = "nrc")] nrc_state: Option<Res<super::nrc::NrcState>>,
 ) {
     ready_views.0.clear();
     let Some(p) = pipelines else {
@@ -189,6 +240,11 @@ pub fn prepare_primary_glass(
     .into_iter()
     .any(|id| cache.get_compute_pipeline(id).is_none())
     {
+        return;
+    }
+    // (the lighting node waits for NRC's pipelines too)
+    #[cfg(feature = "nrc")]
+    if super::nrc::pipelines_pending(p.nrc.as_ref(), nrc_state.as_deref(), &cache) {
         return;
     }
     let glass_main_entities: HashSet<_> = scene
@@ -250,11 +306,14 @@ pub fn solarik_lighting<const PRIMARY: bool>(
     previous_view_uniforms: Res<PreviousViewUniforms>,
     frame_count: Res<FrameCount>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    #[cfg(feature = "nrc")] nrc_state: Option<ResMut<super::nrc::NrcState>>,
     #[cfg(feature = "graphics_debug")] query_capture: Option<
         Res<super::query_capture::PrimaryQueryCapture>,
     >,
     mut ctx: RenderContext,
 ) {
+    let view_entity = view.entity();
     #[cfg(any(not(feature = "dlss"), feature = "force_disable_dlss"))]
     let (
         solarik_lighting,
@@ -393,6 +452,27 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         foliage_pipeline
     };
     let foliage_pipeline = pipeline_cache.get_compute_pipeline(foliage_pipeline);
+
+    // NRC answers the diffuse GI's query for the view it is configured for
+    // (never in the primary compositor); otherwise the world cache does.
+    #[cfg(feature = "nrc")]
+    let nrc_frame = match super::nrc::NrcFrame::prepare(
+        nrc_state.filter(|_| !PRIMARY),
+        pipelines.nrc.as_ref(),
+        &pipeline_cache,
+        view_entity,
+        solarik_lighting_resources.view_size,
+    ) {
+        super::nrc::NrcReadiness::Ready(frame) => Some(frame),
+        super::nrc::NrcReadiness::Pending => return,
+        super::nrc::NrcReadiness::Off => None,
+    };
+    #[cfg(not(feature = "nrc"))]
+    let nrc_frame: Option<no_nrc::NrcFrame> = {
+        let _ = view_entity;
+        None
+    };
+    let mut nrc_frame = nrc_frame;
 
     let view_target_attachment = view_target.get_unsampled_color_attachment();
 
@@ -696,6 +776,51 @@ pub fn solarik_lighting<const PRIMARY: bool>(
 
     d.end(&mut pass);
 
+    // NRC's BeginFrame goes between two of the lighting's encoders (wgpu
+    // panics when the library's raw commands share one with its own), then
+    // the training pass writes its paths before the GI's queries. Group 2
+    // stays NRC's from here through the GI's initial pass: direct
+    // lighting's layouts do not reach it.
+    if nrc_frame.is_some() {
+        drop(pass);
+        let began = nrc_frame
+            .as_mut()
+            .is_some_and(|nrc| nrc.begin_frame(&mut ctx, &render_device, &render_queue, render_frame));
+        if !began {
+            nrc_frame = None;
+        }
+        pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
+            label: Some("solarik_lighting_nrc_training"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, scene_bind_group, &[]);
+        pass.set_bind_group(
+            1,
+            &bind_group,
+            &[
+                view_uniform_offset.offset,
+                previous_view_uniform_offset.offset,
+            ],
+        );
+        if let Some(nrc) = &nrc_frame {
+            pass.set_bind_group(2, nrc.bind_group(), &[]);
+            let d = diagnostics.time_span(&mut pass, "solarik_lighting/nrc_training");
+            pass.set_pipeline(nrc.training_pipeline());
+            pass.set_immediates(
+                0,
+                bytemuck::cast_slice(&[
+                    frame_index,
+                    reset_flags,
+                    render_frame,
+                    stable_radius.to_bits(),
+                ]),
+            );
+            let (x, y) = nrc.training_workgroups();
+            pass.dispatch_workgroups(x, y, 1);
+            d.end(&mut pass);
+        }
+    }
+
     let d = diagnostics.time_span(&mut pass, "solarik_lighting/direct_lighting");
 
     pass.set_pipeline(di_initial_and_temporal_pipeline);
@@ -724,9 +849,15 @@ pub fn solarik_lighting<const PRIMARY: bool>(
 
     d.end(&mut pass);
 
-    let d = diagnostics.time_span(&mut pass, "solarik_lighting/diffuse_indirect_lighting");
+    let mut d = diagnostics.time_span(&mut pass, "solarik_lighting/diffuse_indirect_lighting");
 
-    pass.set_pipeline(gi_initial_and_temporal_pipeline);
+    // (with NRC the initial samples only, their queries written; the
+    // temporal step follows NRC's answers in the resolve pass)
+    pass.set_pipeline(
+        nrc_frame
+            .as_ref()
+            .map_or(gi_initial_and_temporal_pipeline, |nrc| nrc.gi_initial_pipeline()),
+    );
     pass.set_immediates(
         0,
         bytemuck::cast_slice(&[
@@ -737,6 +868,49 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         ]),
     );
     pass.dispatch_workgroups(dx, dy, 1);
+
+    // QueryAndTrain in an encoder of its own, after the frame's queries and
+    // training paths are written, then the answers resolved into the
+    // reservoirs with the temporal step. (Should QueryAndTrain fail, this
+    // frame's spatial pass sees the bare initial samples, and the next
+    // frame takes the world cache path.)
+    if nrc_frame.is_some() {
+        d.end(&mut pass);
+        drop(pass);
+        let answered = nrc_frame
+            .as_mut()
+            .is_some_and(|nrc| nrc.query_and_train(&mut ctx, &render_device, &diagnostics));
+        pass = ctx.command_encoder().begin_compute_pass(&ComputePassDescriptor {
+            label: Some("solarik_lighting_nrc_resolve"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, scene_bind_group, &[]);
+        pass.set_bind_group(
+            1,
+            &bind_group,
+            &[
+                view_uniform_offset.offset,
+                previous_view_uniform_offset.offset,
+            ],
+        );
+        if let Some(nrc) = nrc_frame.as_ref().filter(|_| answered) {
+            pass.set_bind_group(2, nrc.bind_group(), &[]);
+            let d = diagnostics.time_span(&mut pass, "solarik_lighting/nrc_resolve");
+            pass.set_pipeline(nrc.resolve_pipeline());
+            pass.set_immediates(
+                0,
+                bytemuck::cast_slice(&[
+                    frame_index,
+                    reset_flags,
+                    render_frame,
+                    stable_radius.to_bits(),
+                ]),
+            );
+            pass.dispatch_workgroups(dx, dy, 1);
+            d.end(&mut pass);
+        }
+        d = diagnostics.time_span(&mut pass, "solarik_lighting/diffuse_indirect_spatial");
+    }
 
     pass.set_pipeline(gi_spatial_and_shade_pipeline);
     pass.set_immediates(
@@ -833,6 +1007,7 @@ pub fn init_solari_lighting_pipelines(
     pipeline_cache: Res<PipelineCache>,
     scene_bindings: Res<RaytracingSceneBindings>,
     asset_server: Res<AssetServer>,
+    #[cfg(feature = "nrc")] nrc_state: Option<Res<super::nrc::NrcState>>,
 ) {
     let raster_subpixel_bits = adapter
         .raster_subpixel_precision_bits()
@@ -1033,7 +1208,49 @@ pub fn init_solari_lighting_pipelines(
         })
     };
 
+    // NRC's variant of the GI's initial pass is a pipeline of its own: the
+    // plain one stays for the frames NRC does not serve (another view, a
+    // failure that turned it off).
+    #[cfg(feature = "nrc")]
+    let nrc = nrc_state.map(|state| {
+        let layout = Some(&state.bind_group_layout);
+        super::nrc::NrcPipelineIds {
+            gi_initial: create_pipeline(
+                "solarik_lighting_nrc_gi_initial_pipeline",
+                "initial_and_temporal",
+                load_embedded_asset!(asset_server.as_ref(), "restir_gi.wesl"),
+                layout,
+                vec![
+                    "WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION".into(),
+                    "FOLIAGE_TRANSMISSION".into(),
+                    "NRC".into(),
+                ],
+            ),
+            training: create_pipeline(
+                "solarik_lighting_nrc_training_pipeline",
+                "nrc_train",
+                load_embedded_asset!(asset_server.as_ref(), "nrc_training.wesl"),
+                layout,
+                vec!["NRC".into(), "FOLIAGE_TRANSMISSION".into()],
+            ),
+            // (the defs of the pass whose temporal step it takes over)
+            resolve: create_pipeline(
+                "solarik_lighting_nrc_resolve_pipeline",
+                "nrc_resolve_and_temporal",
+                load_embedded_asset!(asset_server.as_ref(), "restir_gi.wesl"),
+                layout,
+                vec![
+                    "WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION".into(),
+                    "FOLIAGE_TRANSMISSION".into(),
+                    "NRC".into(),
+                ],
+            ),
+        }
+    });
+
     commands.insert_resource(SolarikLightingPipelines {
+        #[cfg(feature = "nrc")]
+        nrc,
         bind_group_layout: bind_group_layout.clone(),
         bind_group_layout_world_cache_active_cells_dispatch:
             bind_group_layout_world_cache_active_cells_dispatch.clone(),

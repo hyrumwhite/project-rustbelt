@@ -2,6 +2,8 @@ mod extract;
 #[cfg(feature = "graphics_debug")]
 pub mod graphics_debug;
 mod lit_fog_composite;
+#[cfg(feature = "nrc")]
+mod nrc;
 mod node;
 mod prepare;
 #[cfg(feature = "graphics_debug")]
@@ -34,6 +36,9 @@ use node::{
 use prepare::prepare_solari_lighting_resources;
 use tracing::warn;
 
+#[cfg(feature = "nrc")]
+pub use nrc::{NrcState, NrcSupported, SolarikNrcInitPlugin, SolarikNrcSceneBounds};
+
 /// Raytraced direct and indirect lighting.
 ///
 /// When using this plugin, it's highly recommended to set `shadow_maps_enabled: false` on all lights, as Solarik replaces
@@ -63,6 +68,15 @@ impl Plugin for SolarikLightingPlugin {
 
         load_shader_library!(app, "resolve_dlss_rr_textures.wesl");
 
+        #[cfg(feature = "nrc")]
+        {
+            load_shader_library!(app, "nrc.wesl");
+            embedded_asset!(app, "nrc_training.wesl");
+            app.add_plugins(bevy_render::extract_resource::ExtractResourcePlugin::<
+                SolarikNrcSceneBounds,
+            >::default());
+        }
+
         app.insert_resource(DefaultOpaqueRendererMethod::deferred());
     }
 
@@ -78,6 +92,26 @@ impl Plugin for SolarikLightingPlugin {
             );
             return;
         }
+
+        // NRC's systems: none of them acts without the state init_nrc
+        // inserts, which needs SolarikNrcInitPlugin's device
+        #[cfg(feature = "nrc")]
+        {
+            nrc::copy_library_dir(app);
+            app.sub_app_mut(RenderApp)
+                .add_systems(
+                    RenderStartup,
+                    nrc::init_nrc.before(init_solari_lighting_pipelines),
+                )
+                .add_systems(
+                    Render,
+                    nrc::prepare_nrc
+                        .in_set(RenderSystems::PrepareResources)
+                        .after(prepare_solari_lighting_resources),
+                )
+                .add_systems(Render, nrc::nrc_end_frame.after(RenderSystems::Render));
+        }
+        let render_app = app.sub_app_mut(RenderApp);
 
         render_app
             .init_resource::<PrimaryGlassViews>()

@@ -171,7 +171,20 @@ pub struct NrcState {
     /// Frames after a configure during which the GI reads the world cache
     /// (`SOLARIK_NRC_WARMUP`, default 120): an untrained network's answers
     /// are worse than the cache's.
+    ///
+    /// The training knobs read the environment too while they are tuned
+    /// (`SOLARIK_NRC_ITERATIONS` 2, `SOLARIK_NRC_LEARNING_RATE` 5e-3,
+    /// `SOLARIK_NRC_ATTENUATION` 0.5, `SOLARIK_NRC_PRIMARY` 0.05); see
+    /// `docs/nrc-integration.md`.
     warmup_frames: u32,
+    /// Light samples at each training vertex (`SOLARIK_NRC_LIGHT_SAMPLES`,
+    /// default 1; the world cache takes four an update), to the shader as
+    /// `pad1`.
+    light_samples: u32,
+    /// `SOLARIK_NRC_FREEZE=1`: stop training once the warm-up is over (a
+    /// diagnostic: whether the wander is the network drifting or its answers
+    /// varying from point to point).
+    freeze_after_warmup: bool,
     /// `BeginFrame` was submitted this frame, so `EndFrame` is due.
     recorded_this_frame: bool,
     /// A call failed; NRC stays off for the session.
@@ -260,10 +273,9 @@ pub fn init_nrc(
             ),
         ),
     );
-    let warmup_frames = std::env::var("SOLARIK_NRC_WARMUP")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(120);
+    let warmup_frames = env_or("SOLARIK_NRC_WARMUP", 120u32);
+    let light_samples = env_or("SOLARIK_NRC_LIGHT_SAMPLES", 1u32).clamp(1, 16);
+    let freeze_after_warmup = env_or("SOLARIK_NRC_FREEZE", 0u32) != 0;
     let frame_settings = FrameSettings {
         // (the shaders hand NRC exposed radiance, which averages 0.1 to 1)
         max_expected_average_radiance_value: 1.0,
@@ -271,9 +283,24 @@ pub fn init_nrc(
         termination_heuristic_threshold: 0.1,
         training_termination_heuristic_threshold: 0.1,
         proportion_unbiased: 1.0 / 16.0,
-        num_training_iterations: 4,
+        // (the training knobs, from the environment while they are tuned;
+        // the defaults are half the library's: the measured breathing in
+        // stills at a10's corridor and b30's passage went with them, see
+        // docs/nrc-integration.md)
+        num_training_iterations: env_or("SOLARIK_NRC_ITERATIONS", 2u32),
+        learning_rate: env_or("SOLARIK_NRC_LEARNING_RATE", 5e-3f32),
+        self_training_attenuation: env_or("SOLARIK_NRC_ATTENUATION", 0.5f32),
+        proportion_primary_segments_to_train_on: env_or("SOLARIK_NRC_PRIMARY", 0.05f32),
         ..FrameSettings::default()
     };
+    info!(
+        target: "nrc",
+        "NRC training: {} iterations, learning rate {}, self-training attenuation {}, primary segments {}, {light_samples} light sample(s) a vertex",
+        frame_settings.num_training_iterations,
+        frame_settings.learning_rate,
+        frame_settings.self_training_attenuation,
+        frame_settings.proportion_primary_segments_to_train_on,
+    );
     info!(target: "nrc", "NRC initialized from {} (warm-up {warmup_frames} frames)", dir.0.display());
     commands.insert_resource(NrcState {
         _nrc: nrc,
@@ -288,11 +315,21 @@ pub fn init_nrc(
         frame_settings,
         training_dimensions: [0, 0],
         warmup_frames,
+        light_samples,
+        freeze_after_warmup,
         recorded_this_frame: false,
         disabled: false,
         warned_views: false,
         warned_bounds: false,
     });
+}
+
+/// An environment variable parsed as `T`, or `default` when unset or unparsable.
+fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 /// Configures the context for the lighting view when its size or the scene
@@ -353,7 +390,9 @@ pub fn prepare_nrc(
         request_reset: false,
         scene_bounds_min: bounds_min,
         scene_bounds_max: bounds_max,
-        smallest_resolvable_feature_size: 0.01,
+        // (`SOLARIK_NRC_FEATURE_SIZE`, metres: the hash grid's finest level;
+        // coarser smooths the answers from point to point)
+        smallest_resolvable_feature_size: env_or("SOLARIK_NRC_FEATURE_SIZE", 0.01f32),
         frame_dimensions,
         training_dimensions,
         samples_per_pixel: 1,
@@ -549,7 +588,12 @@ impl<'a> NrcFrame<'a> {
         let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("solarik_nrc_begin_frame"),
         });
-        let frame_settings = state.frame_settings;
+        let since_configure = state.configured_frame.map_or(0, |f| frame.wrapping_sub(f));
+        let warm = since_configure >= state.warmup_frames;
+        let frame_settings = FrameSettings {
+            train_the_cache: !(state.freeze_after_warmup && warm),
+            ..state.frame_settings
+        };
         if let Err(e) = state.context.begin_frame(&mut encoder, &frame_settings) {
             state.fail("BeginFrame", &e);
             return false;
@@ -565,8 +609,9 @@ impl<'a> NrcFrame<'a> {
             }
         };
         // pad0: whether the GI uses NRC's answers yet (else the world cache)
-        let since_configure = state.configured_frame.map_or(0, |f| frame.wrapping_sub(f));
-        constants.pad[0] = u32::from(since_configure >= state.warmup_frames);
+        constants.pad[0] = u32::from(warm);
+        // pad1: light samples at each training vertex
+        constants.pad[1] = state.light_samples;
         render_queue.write_buffer(&state.constants, 0, bytemuck::bytes_of(&constants));
         ctx.command_encoder().clear_buffer(&state.counters, 0, None);
         true

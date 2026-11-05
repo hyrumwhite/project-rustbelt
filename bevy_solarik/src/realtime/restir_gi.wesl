@@ -136,6 +136,15 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
 }
+// (SOLARIK_SHADER_DEFS=VISUALIZE_GI_INITIAL, with HALO_RT_NO_DLSS=1: the
+// initial sample's radiance from the world cache, times 32 as VISUALIZE_NRC
+// with VISUALIZE_NRC_GAIN shows NRC's answers for the same points. The later
+// passes leave the view.)
+@if(VISUALIZE_GI_INITIAL) {
+    textureStore(view_output, global_id.xy, vec4(initial_reservoir.radiance * view.exposure * 32.0, 1.0));
+    gi_reservoirs_b[pixel_index] = initial_reservoir;
+    return;
+}
 @if(NRC) {
     // The sample's radiance is not known until QueryAndTrain has run: keep
     // the initial reservoir, nrc_resolve_and_temporal finishes it.
@@ -180,6 +189,12 @@ fn nrc_resolve_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>)
         // this pixel's surface, the albedo included.
         answer = max(vec3(0.0), nrc_decode_log_luv_hdr(info.prefix_throughput)
             * nrc_unpack_query_radiance(nrc_constants, nrc_read_query_radiance(info.query_buffer_index)) / view.exposure);
+// (SOLARIK_SHADER_DEFS=NRC_CONSTANT_ANSWER, a diagnostic: the answer replaced
+// by a flat exposed radiance of 0.1 times the sample point's albedo, to tell
+// the answers' own variation from the rest of the NRC path.)
+@if(NRC_CONSTANT_ANSWER) {
+        answer = nrc_decode_log_luv_hdr(info.prefix_throughput) * 0.1 / view.exposure;
+}
         reservoir.radiance = answer;
     }
 // (SOLARIK_SHADER_DEFS=VISUALIZE_NRC: the cache's answers at the diffuse
@@ -187,7 +202,9 @@ fn nrc_resolve_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>)
 // emitter, the world cache during NRC's warm-up. spatial_and_shade leaves
 // the view.)
 @if(VISUALIZE_NRC) {
-    textureStore(view_output, global_id.xy, vec4(answer * view.exposure, 1.0));
+    var shown = answer * view.exposure;
+@if(VISUALIZE_NRC_GAIN) { shown *= 32.0; } // (dim interiors: the answers are a few percent)
+    textureStore(view_output, global_id.xy, vec4(shown, 1.0));
     gi_reservoirs_b[pixel_index] = reservoir;
     return;
 }
@@ -232,7 +249,7 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(VISUALIZE_CACHE_AGE) {
     return;
 }
-@if(NRC && VISUALIZE_NRC) {
+@if((NRC && VISUALIZE_NRC) || VISUALIZE_GI_INITIAL) {
     return;
 }
 

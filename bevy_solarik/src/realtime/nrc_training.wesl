@@ -219,18 +219,26 @@ fn nrc_train(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
             // NEE, as surface_path.wesl does it: MIS by the power heuristic
             // against the BRDF sample that follows (throughput is 1 here,
-            // just reset).
+            // just reset). pad1 light samples, averaged: each one pairs with
+            // the single BRDF sample as an estimator of its own, so the
+            // average stays unbiased and the emission weight below is
+            // unchanged.
             if arrayLength(&light_sources) > 0u {
-                let shadow = sample_random_light_transmitted(surface.world_position,
-                    surface.world_normal, surface.geometric_world_normal, &rng);
-                let light = shadow.light;
-                var weight = 1.0;
-                if light.brdf_rays_can_hit {
-                    weight = power_heuristic(light.solid_angle_pdf,
-                        evaluate_brdf_pdf(wo, light.wi, surface.world_normal, surface.material) * shadow.continuation_probability);
+                let light_samples = max(nrc_constants.pad1, 1u);
+                var direct = vec3(0.0);
+                for (var s = 0u; s < light_samples; s++) {
+                    let shadow = sample_random_light_transmitted(surface.world_position,
+                        surface.world_normal, surface.geometric_world_normal, &rng);
+                    let light = shadow.light;
+                    var weight = 1.0;
+                    if light.brdf_rays_can_hit {
+                        weight = power_heuristic(light.solid_angle_pdf,
+                            evaluate_brdf_pdf(wo, light.wi, surface.world_normal, surface.material) * shadow.continuation_probability);
+                    }
+                    direct += light.radiance * light.inverse_pdf * weight
+                        * evaluate_brdf(wo, light.wi, surface.world_normal, surface.material);
                 }
-                radiance += light.radiance * light.inverse_pdf * weight
-                    * evaluate_brdf(wo, light.wi, surface.world_normal, surface.material);
+                radiance += direct / f32(light_samples);
             }
         }
 

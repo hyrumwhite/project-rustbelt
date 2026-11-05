@@ -2,3 +2,6 @@
 /vendor
 *.dll
 /dist
+
+# NVIDIA NRC writes a session log into the working directory
+nrc_session_log.txt

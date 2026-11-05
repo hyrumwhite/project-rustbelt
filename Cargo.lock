@@ -4062,6 +4062,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "610a5acd306ec67f907abe5567859a3c693fb9886eb1f012ab8f2a47bef3db51"
 
 [[package]]
+name = "nrc_records"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "futures-lite",
+ "naga",
+ "wgpu",
+]
+
+[[package]]
+name = "nrc_wgpu"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "bytemuck",
+ "cc",
+ "futures-lite",
+ "log",
+ "nrc_records",
+ "thiserror 2.0.21",
+ "wgpu",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "ntapi"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6242,6 +6267,7 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu-core",
  "wgpu-hal",

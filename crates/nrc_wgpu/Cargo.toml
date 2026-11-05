@@ -1,0 +1,33 @@
+[package]
+name = "nrc_wgpu"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+description = "NVIDIA Neural Radiance Cache (NRC, Vulkan) bound to wgpu"
+build = "build.rs"
+
+[dependencies]
+# The same wgpu as bevy_solarik (its vendored wgpu-core/wgpu-hal through the
+# root manifest's [patch.crates-io]), so there is one wgpu in the build
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+ash = "0.38"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+log = "0.4"
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security_WinTrust",
+    "Win32_Security_Cryptography",
+    "Win32_System_LibraryLoader",
+] }
+
+[dev-dependencies]
+futures-lite = "2.6.1"
+# the record formats in WGSL, for examples/spike.rs
+nrc_records = { path = "../nrc_records" }
+
+[build-dependencies]
+cc = "1.6.0"

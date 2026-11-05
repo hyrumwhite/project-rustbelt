@@ -1,0 +1,18 @@
+[package]
+name = "nrc_records"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+description = "NVIDIA Neural Radiance Cache shader-side record formats: a WGSL port of the SDK's HLSL helpers and its CPU reference"
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+
+[dev-dependencies]
+# The workspace's wgpu (Solarik's pin; wgpu-core/wgpu-hal come from the root
+# [patch.crates-io], so only one wgpu is compiled) for the ignored GPU test,
+# and its naga for the plain validation test.
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }
+naga = { version = "=30.0.1", features = ["wgsl-in"] }
+futures-lite = "2.6.1"

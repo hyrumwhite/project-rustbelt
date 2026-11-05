@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/halo_map", "crates/halo_bridge", "crates/halo_sim"]
+members = ["crates/halo_map", "crates/halo_bridge", "crates/halo_sim", "crates/nrc_records", "crates/nrc_wgpu"]
 # (Solarik is a workspace of its own; OpenCE is C)
 exclude = ["bevy_solarik", "opence"]
 

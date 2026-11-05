@@ -108,11 +108,11 @@ Settings to start from: `learnIrradiance = true` (the consumers multiply by `bas
 
 | Item | Estimate at 1280x720 DLAA | Basis |
 |---|---|---|
-| `QueryAndTrain` | 1.0 to 1.5 ms | NVIDIA's paper: 2.6 ms for queries + training at 1080p on an RTX 3090; 0.92M queries here instead of 2.1M, and a 5080 |
+| `QueryAndTrain` | **0.77 to 0.91 ms, measured** (3 to 8 vertex paths, 0.92M queries; see the spike sections) | was estimated at 1.0 to 1.5 from NVIDIA's paper: 2.6 ms at 1080p on an RTX 3090 |
 | training path tracer | 0.7 to 1.1 ms | 21,867 paths x ~3 vertices x (1 ray + 1 shadow ray) is about 130k rays; the cache's `sample_gi` + `sample_di` do ~200k rays in 1.2 to 1.7 ms |
 | resolve + reservoir split | ~0.1 ms | one buffer read and write per pixel |
 | world cache GI removed | -0.4 to -0.6 ms | `sample_gi` and the blend |
-| net | +2.3 to +3.0 ms | |
+| net | +1.6 to +2.2 ms (was +2.3 to +3.0 before the spike) | |
 
 Against today's table: shaft 10.06 to about 12.8, canyon 8.69 to about 11.4, hall 6.47 to about 9.2 ms, all under 16.7 ms. DLSS Performance at 1440p would not fit with it. Numbers to be replaced by the spike's measurements.
 
@@ -145,6 +145,27 @@ Brings its own:
 6. **Measure (2 to 3 days).** `scripts/boil/run.sh nrc` against the `default` table; play A/B at the three spots; then decide whether to drop `sample_gi`.
 7. **Bundle (half a day).** DLLs into `src/bundle.rs`, `depsDirectoryPath`, signature check, README license lines.
 
+## Spike results (5 November)
+
+**Binding crate `crates/nrc_wgpu`** (C++ shim compiled with `cc`, delay-loaded `NRC_Vulkan.dll`, WinVerifyTrust on the four DLLs, device-creation callbacks, app-managed buffers, per-frame calls; `cargo test -p nrc_wgpu --release -- --ignored --nocapture` is the smoke test). Measured on the RTX 5080, driver 616.56, Vulkan validation on, 1280x720, 197x111 training, 8 vertices:
+
+| | |
+|---|---|
+| `QueryAndTrain` with zero queries and zero training records, GPU (Vulkan timestamps, median of 8 frames) | **1.24 ms** |
+| the same call, CPU time to record | 0.35 ms (13 ms on the first frame) |
+| `Configure` | 7.4 ms |
+| buffers | 92.1 MB, as the probe said |
+
+This empty-input number turned out to be a special case, not a floor: with real records the call is faster (0.77 ms at full 720p load; see "Synthetic-load spike" below, surprise 3).
+
+What the crate had to do that the guide does not say:
+- **Buffers are created with ash, not wgpu.** The vendored wgpu-hal only sets `SHADER_DEVICE_ADDRESS` on acceleration-structure buffers, so the crate creates each `VkBuffer` and its memory itself (with the usage `GetBufferUsageFlags` returns plus storage and transfer, `DEVICE_ADDRESS` allocation flag, host-visible for the Counter buffer the library flags for readback) and hands them to wgpu through `create_buffer_from_hal`, which then owns and frees them. Every buffer-sized-zero slot (the debug one) gets a 256-byte placeholder: the library writes a descriptor for all nine and a null buffer fails validation.
+- **The library's own barriers name the ray-tracing shader stage**, which validation only allows with the `rayTracingPipeline` feature. The device callback enables `VK_KHR_ray_tracing_pipeline` when the GPU has it. Not in the SDK's extension list.
+- **NRC commands need their own command encoder.** wgpu-core panics when raw Vulkan commands and wgpu commands share an encoder, so `begin_frame` and `query_and_train` take an encoder used for nothing else, submitted in order between the pass encoders. In Solarik's node that means the lighting pass gets split into encoders around the two calls.
+- **The feature names the library returns are sType strings** (`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES`), matched to the Vulkan 1.2 feature structs and switched on in the pNext chain (in place if wgpu already chained the struct, else added and leaked).
+- **The library leaks its own Vulkan objects at shutdown** (55 after `Destroy` + `Shutdown`: CUDA modules and functions, a descriptor pool, a fence, 9 internal buffers). Harmless at process exit; a validation message on device destruction.
+- **The game's `build.rs` must emit `cargo:rustc-link-arg-bins=/DELAYLOAD:NRC_Vulkan.dll`**, or the DLL becomes a load-time import that has to sit next to the exe (the crate's own flag reaches only its tests and examples).
+
 ## Plan B: take SHaRC's ideas without the network
 
 RTXGI's other library, SHaRC, is a spatial hash radiance cache: structurally what Solarik's world cache already is. Its recent changes list what a hash cache needs that ours lacks, and each is a small, measurable change inside the existing estimator:
@@ -162,3 +183,64 @@ These do not remove cells, so they do not address birth noise in motion the way 
 - [NRC integration guide](https://github.com/NVIDIA-RTX/RTXGI/blob/main/Docs/NrcGuide.md), [RTXGI readme and prerequisites](https://github.com/NVIDIA-RTX/RTXGI), [NRC library](https://github.com/NVIDIA-RTX/NRC) (headers v0.16).
 - [Real-time Neural Radiance Caching for Path Tracing (Müller et al., 2021)](https://research.nvidia.com/labs/rtr/publication/muller2021nrc): the 2.6 ms at 1080p on an RTX 3090 figure.
 - Driver 617.42 release: [TechSpot listing](https://www.techspot.com/drivers/driver/file/information/18443/).
+
+## Synthetic-load spike (5 November)
+
+`cargo run -p nrc_wgpu --release --example spike` (`crates/nrc_wgpu/examples/spike.rs` + `spike.wgsl`, records from `nrc_records`). It feeds the library a scene with a known answer: outgoing irradiance c(p) = 0.2 + 0.6 * p.x / 10, grey, in a 0..10 box, every surface albedo 1, specular 0, roughness 1. The training fill pass writes 197x111 paths of V vertices the way `NrcUpdateOnHit` (update mode) and `NrcWriteFinalPathInfo` do: random position, normal and view direction per vertex, each finalized with radiance c(p_i) and throughput 0 (so every vertex's target is its own c), a self-training query at the last vertex, packedData = V. The query fill pass writes one query per pixel at 1280x720 (random point, prefix throughput LogLuv(1)) and keeps 4,096 sampled positions; after `QueryAndTrain` a gather pass reads those answers back, unpacks them, and compares with c(p). Settings as in the plan: `learnIrradiance`, `includeDirectLighting`, 8 max vertices, `FrameSettings` defaults (4 iterations, max expected radiance 1). RTX 5080, driver 616.56, Vulkan validation on; 240 frames per run, a fresh context per run; GPU times are Vulkan timestamps, median of frames 40..240.
+
+**Verdict: the records are right and the network learns the function. `QueryAndTrain` at full 720p load costs 0.77 ms (0.91 ms with 8-vertex paths), not the 1.8 to 2.5 ms guessed above. No validation errors during the frames.**
+
+### GPU time per configuration (ms)
+
+| run | queries/frame | training records/frame (library's count) | training fill | query fill | `QueryAndTrain` |
+|---|---|---|---|---|---|
+| 1. full load, 3 vertices | 943,467 | 22,948 | 0.032 | 0.196 | **0.771** |
+| 2. queries only (`train_the_cache` off, no training fill, after 120 trained frames) | 921,600 | (22,994, from the stale buffers) | - | 0.192 | 0.485 |
+| 3. training only (no pixel queries; the 21,867 self-training queries remain) | 21,867 | 22,948 | 0.031 | - | 0.473 |
+| 4a. full load, 1 vertex | 943,467 | **0** | 0.024 | 0.197 | 1.258 |
+| 4c. full load, 2 vertices | 943,467 | 1,075 | 0.028 | 0.196 | 0.746 |
+| 4b. full load, 8 vertices | 943,467 | 132,308 | 0.053 | 0.197 | 0.910 |
+| 1b. as 1, the fill's atomics on NRC's Counter buffer, one per workgroup | 943,467 | 22,948 | 0.046 | 0.587 | 0.772 |
+| 1c. as 1, atomics on NRC's Counter buffer, one per thread | 943,467 | 22,948 | 0.046 | 1.160 | 0.770 |
+| 1d. as 1, own device-local counter, one atomic per thread | 943,467 | 22,948 | 0.035 | 0.214 | 0.770 |
+
+Roughly: inference over 0.92M queries 0.3 ms, the 4 training iterations 0.29 ms, and a fixed part of about 0.18 ms. (The fill passes do the minimum: a few hashes and the record writes; in Solarik the record writes fold into passes that already exist.)
+
+### Convergence
+
+Mean / 95th percentile absolute error of the unpacked radiance against c(p) over the 4,096 sampled queries. The error of the best constant (the flat average) is 0.15; "fit" is the least-squares line predicted = a c + b at frame 240 (a flat answer would show a = 0).
+
+| run | frame 10 | 30 | 60 | 120 | 240 | fit at 240 | bias, frames 120..240 |
+|---|---|---|---|---|---|---|---|
+| 1. full load, 3 vertices | 0.305 / 0.570 | 0.129 / 0.277 | 0.044 / 0.119 | 0.040 / 0.068 | **0.0064 / 0.020** | 0.975c + 0.010 | -0.040 .. -0.002 |
+| 2. queries only (frozen after 120 frames) | 0.039 / 0.066 | 0.039 / 0.067 | 0.038 / 0.064 | 0.039 / 0.066 | 0.039 / 0.067 | 0.923c + 0.000 | -0.039 .. -0.037 |
+| 3. training only (error at the self-training queries) | 0.295 / 0.564 | 0.126 / 0.271 | 0.043 / 0.122 | 0.039 / 0.067 | 0.0068 / 0.020 | 0.973c + 0.011 | |
+| 4a. 1 vertex | 0.485 / 0.744 | 0.498 / 0.760 | 0.497 / 0.765 | 0.499 / 0.774 | 0.497 / 0.770 | 0.000c + 0.000 | never trains |
+| 4c. 2 vertices | 0.308 / 0.571 | 0.117 / 0.277 | 0.039 / 0.117 | 0.021 / 0.059 | 0.010 / 0.027 | 0.985c + 0.010 | |
+| 4b. 8 vertices | 0.300 / 0.565 | 0.130 / 0.276 | 0.045 / 0.123 | 0.037 / 0.062 | 0.0069 / 0.021 | 0.972c + 0.011 | |
+| S. full load, error at the training positions | 0.297 / 0.565 | 0.128 / 0.278 | 0.041 / 0.115 | 0.039 / 0.066 | 0.0072 / 0.021 | 0.968c + 0.014 | |
+
+Run 1 at intermediate frames: MAE 0.034 at 90, 0.030 at 150, 0.013 at 180, 0.0066 at 210. The shape is the same in every run: the slope is learned in about 60 frames (a = 0.72 at frame 60, 0.93 at 120), then a global offset of about -0.04 decays over the next 60 to 100 frames. How far that offset has gone by frame 120 varies from run to run (MAE 0.010 to 0.040 at frame 120 across repeats; the record order changes with the atomics, so runs are not bit-identical). Call it **2.5 to 3 seconds at 60 frames/s to converge from a cold start**, and about 1 second before the shape is right.
+
+- **Responsiveness** (run 5: c(p) flipped to 0.8 - 0.6 p.x / 10 at frame 120): MAE 0.29 on the first frame after, 0.23 after 8 frames, 0.19 after 16, 0.13 after 32, 0.047 after 64, **under 0.02 after 89 frames** (1.5 s), 0.011 after 119. A lighting change (a door opening, a light switching) takes about a second and a half to settle.
+- **Stability at fixed points** (run 6: the same 921,600 query points every frame): the mean frame-to-frame change of a point's answer is 0.0147 in frames 2..30, 0.00088 in 30..120 and **0.00049 in 120..240**, about 0.1% of the signal per frame. Converged, the cache does not boil; what is left is the slow global offset drift (a few hundredths over a hundred frames).
+- **The position encoding is right**: the error at the training positions themselves (run S) equals the error at random pixel positions, and the fit slope is about 0.97 in every trained run.
+
+### The unpack multiplier
+
+`radiance_unpack_multiplier` is **0.05** with `max_expected_average_radiance_value` = 1, and 0.025 at 0.5, 0.2 at 4: it is **max expected radiance / 20**. The query buffer holds radiance / multiplier (about 4 to 16 for this scene), and `NrcUnpackQueryRadiance` (`packed * radianceUnpackMultiplier`; the `NrcHelpers.hlsli` comment says it "puts them back into the correct value range") gives the real value. **With it, the unpacked mean matches c with no extra factor** (frame 240: mean 0.4950 against 0.4972 wanted; 0.4973 against 0.4972 at max radiance 4). Read it after `BeginFrame` with the frame's settings; it did not change between frames.
+
+The setting also changes training speed: at 4.0 (internal values 1 to 4) the frame-60 error is 0.024 instead of 0.044, and the frame-240 error is similar (0.010). Worth tuning against Halo's actual radiance range.
+
+### Surprises
+
+1. **The Counter buffer is in host memory, and every shader atomic on it is a PCIe round trip.** The library asks for a readback heap for `Counter`, so `nrc_wgpu` puts it in host-visible, host-cached memory. Incrementing it from a shader costs about 40 ns per atomic: 1.16 ms for 921,600 per-thread atomics (the driver merges them per warp: 28,800 round trips) and 0.59 ms with one atomic per 64-thread workgroup. **Fix used by the spike, no crate change**: the fill passes count on their own 8-byte device-local buffer (cleared each frame, as `BeginFrame` clears NRC's), then one `copy_buffer_to_buffer` of the 8 bytes into NRC's Counter before `QueryAndTrain`. The query fill drops to 0.196 ms (0.214 with per-thread atomics). Solarik must do the same; using the library's Counter directly would add 0.6 to 1.2 ms.
+2. **The last vertex of a training path is never trained on.** The library's own TrainingRecords count (Counter[1], read back after `QueryAndTrain`) is 5% of the vertex-0s (`proportionPrimarySegmentsToTrainOn` = 0.05) plus every vertex from 1 to V-2: 22,948 for V = 3 (21,867 + about 1,090), 132,308 for V = 8, 1,075 for V = 2, **0 for V = 1**. The last vertex only anchors the self-training query. Paths that exited the scene do train their last vertex (25% exited gave 28,363 records, as predicted). So **a 1-vertex training path teaches nothing**, even with the primary proportion at 1.0, and the training pass must trace at least two vertices, preferably three. Solarik's training pass must not stop at the first hit.
+3. **With zero training records `QueryAndTrain` gets slower**: 1.26 ms against 0.77 ms. That is the 1.24 ms the empty smoke test measured, so the "fixed cost" in the spike results above was this empty-input path, not a floor. With real input the whole call is 0.77 ms.
+4. **`report_loss` is broken on Vulkan** (SDK 0.16): passing a loss pointer makes `QueryAndTrain` return `InternalError`, and the log says `tiny-cuda-nn/reduce_sum.h:134 cudaMemcpyAsync(... DeviceToHost ...) failed: operation not supported`. A synchronous device-to-host copy cannot happen inside a Vulkan-recorded CUDA launch. No training loss is available; the readback error against a known answer (this spike) or `DirectCacheView` are the substitutes. The example skips it unless `SPIKE_REPORT_LOSS=1`.
+5. **`train_the_cache = false` still generates training records** from whatever is in the training buffers (22,994 from the warm-up's stale paths with no training fill that frame), and the call costs 0.485 ms; with training off it is mostly inference.
+6. **Frozen weights show the warm-up state**: run 2 keeps the frame-120 network, error 0.039 with the -0.04 offset still in it. That is what a game frame sees for the first two seconds after a level load, which supports keeping the world cache's GI as the warm-up fallback.
+
+What this changes in the cost table: `QueryAndTrain` 0.77 to 0.91 ms instead of 1.0 to 1.5, plus the record writes inside the GI and training passes, plus the training pass's own tracing (not measured here). The net estimate drops from +2.3 to 3.0 ms to roughly **+1.6 to 2.2 ms**.
+
+Knobs: run names as arguments run a subset (`full queries training v1 v2 v8 switch atomic atomic1 device1 static sanity`); `SPIKE_EXIT_FRACTION` (default 0; 0.25 tested: no validation errors, converges to 0.014), `SPIKE_MAX_RADIANCE`, `SPIKE_PRIMARY`, `SPIKE_REPORT_LOSS`. The whole set runs in about 6 seconds. Each frame the example asserts the Queries counter against the expected count and the QueryRadiance capacity (945,515), and before teardown it asserts no validation, wgpu or NRC errors (the library's known leak report at device destruction follows).

@@ -1,6 +1,7 @@
 import bevy_solarik::filtered_canopy_scene::forest_set_seed;
 import bevy_solarik::scene::scene_hit::scene_hit_is_miss;
 import bevy_pbr::render::utils::rand_f;
+import bevy_pbr::render::utils::rand_u;
 import bevy_pbr::render::utils::rand_vec2f;
 import bevy_pbr::render::pbr_functions::calculate_diffuse_color;
 import bevy_pbr::render::pbr_functions::calculate_F0;
@@ -11,12 +12,17 @@ import bevy_solarik::scene::sampling::analytic_light_radiance;
 import bevy_solarik::scene::sampling::sample_random_light_transmitted;
 import bevy_solarik::scene::sampling::random_emissive_light_solid_angle_pdf;
 import bevy_solarik::scene::sampling::power_heuristic;
+import bevy_solarik::scene::sampling::LightSample;
+import bevy_solarik::scene::sampling::resolve_light_sample;
+import bevy_solarik::scene::sampling::calculate_resolved_light_contribution;
+import bevy_solarik::scene::sampling::trace_light_transmission_with_support;
 import bevy_solarik::scene::thin_glass::offset_thin_glass_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::trace_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
 import bevy_solarik::scene::raytracing_scene_bindings::sample_sky;
 import bevy_solarik::scene::raytracing_scene_bindings::emitted_radiance;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
+import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
@@ -26,6 +32,10 @@ import bevy_solarik::realtime::realtime_bindings::gbuffer;
 import bevy_solarik::realtime::realtime_bindings::depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::constants;
+import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
+import bevy_solarik::realtime::world_cache_query::find_world_cache_cell;
+import bevy_solarik::realtime::world_cache_query::world_cache_slot_probabilities;
+import bevy_solarik::realtime::light_ris::sample_light_ris;
 import bevy_solarik::realtime::nrc::nrc_constants;
 import bevy_solarik::realtime::nrc::NrcPathState;
 import bevy_solarik::realtime::nrc::NrcPackedPathVertex;
@@ -120,7 +130,7 @@ fn training_vertex(surface: TrainingSurface, wo: vec3<f32>) -> NrcPackedPathVert
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn nrc_train(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
     let training_dimensions = nrc_constants.training_dimensions;
     if any(global_id.xy >= training_dimensions) { return; }
     let path_index = nrc_calculate_training_path_index(training_dimensions, global_id.xy);
@@ -166,6 +176,9 @@ fn nrc_train(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let max_path_vertices = nrc_constants.max_path_vertices;
     for (var bounce = 0u; bounce < max_path_vertices; bounce += 1u) {
         let delta = is_delta_lobe(surface.material);
+        // This vertex's NEE was the cell's resampled light sample (below),
+        // which leaves the emission its scatter ray meets to the NEE.
+        var ris_nee = false;
 
         // NrcUpdateOnHit, update mode. The path's spread (a ray cone's
         // footprint) drives the termination heuristic: the primary footprint
@@ -217,28 +230,85 @@ fn nrc_train(@builtin(global_invocation_id) global_id: vec3<u32>) {
             // the vertex's direct light; adding NEE would count it twice.
             if terminate { break; }
 
-            // NEE, as surface_path.wesl does it: MIS by the power heuristic
-            // against the BRDF sample that follows (throughput is 1 here,
-            // just reset). pad1 light samples, averaged: each one pairs with
-            // the single BRDF sample as an estimator of its own, so the
-            // average stays unbiased and the emission weight below is
-            // unchanged.
+            // NEE as the world cache's update takes its direct light
+            // (world_cache_update.wesl's sample_di): where the vertex finds a
+            // cache cell, pad1 samples resampled from 128 candidates of the
+            // presampled light tiles and 16 of the cell's light slots (the
+            // lights that reach this place), each shadow-tested, averaged,
+            // and the sun's own shadow-tested sample. A light picked
+            // uniformly from b40's 464 emitters is almost always one that
+            // does not light the vertex, so almost every training vertex
+            // recorded no direct light and a rare one a huge value, which
+            // the network under-fitted (its answers 3.6 times darker than
+            // the cache's in the shaft). The slots are only read: the
+            // cache's update owns them. The full BRDF is applied to the
+            // pick (the sampler's target is the receiver's irradiance, so
+            // its weight is the radiance without the cosine).
+            //
+            // A leaf (diffuse transmission) keeps the uniform sampler: the
+            // resampling's target is zero for a light behind the surface,
+            // which a leaf transmits; so does a vertex without a cell.
             if arrayLength(&light_sources) > 0u {
                 let light_samples = max(nrc_constants.pad1, 1u);
                 var direct = vec3(0.0);
-                for (var s = 0u; s < light_samples; s++) {
-                    let shadow = sample_random_light_transmitted(surface.world_position,
-                        surface.world_normal, surface.geometric_world_normal, &rng);
-                    let light = shadow.light;
-                    var weight = 1.0;
-                    if light.brdf_rays_can_hit {
-                        weight = power_heuristic(light.solid_angle_pdf,
-                            evaluate_brdf_pdf(wo, light.wi, surface.world_normal, surface.material) * shadow.continuation_probability);
-                    }
-                    direct += light.radiance * light.inverse_pdf * weight
-                        * evaluate_brdf(wo, light.wi, surface.world_normal, surface.material);
+                var cell = -1;
+                if surface.material.diffuse_transmission <= 0.0 {
+                    cell = find_world_cache_cell(surface.world_position, surface.world_normal, view.world_position, &rng);
                 }
-                radiance += direct / f32(light_samples);
+                if cell >= 0 {
+                    // MIS: a resampled pick has no density of its own to
+                    // weigh against the BRDF's, so the NEE takes weight 1
+                    // and the emission met by this vertex's scatter ray
+                    // weight 0 (below): every emissive mesh is among the
+                    // tiles' candidates, so the NEE alone covers them.
+                    ris_nee = true;
+                    let slots = world_cache_light_slots[cell];
+                    let slot_probabilities = world_cache_slot_probabilities(slots);
+                    for (var s = 0u; s < light_samples; s++) {
+                        // (each sample from a tile of its own, as sample_di)
+                        let light = sample_light_ris(surface.world_position, surface.world_normal,
+                            workgroup_id.xy + vec2(0u, s * 7919u), slots, slot_probabilities, &rng);
+                        if any(light.radiance > vec3(0.0)) {
+                            direct += light.radiance * evaluate_brdf(wo, light.wi, surface.world_normal, surface.material);
+                        }
+                    }
+                    radiance += direct / f32(light_samples);
+                    // The sun by itself (the tiles hold none), as sample_di:
+                    // reached by NEE alone, weight 1 (a scatter ray that
+                    // leaves the scene meets the sky texture, not the sun).
+                    if arrayLength(&directional_lights) > 0u {
+                        let light_id = directional_lights[0].light_source_index;
+                        let resolved = resolve_light_sample(LightSample(light_id << 16u, rand_u(&rng)), light_sources[light_id]);
+                        let sun = calculate_resolved_light_contribution(resolved, surface.world_position, surface.world_normal);
+                        let sun_radiance = sun.radiance * sun.inverse_pdf;
+                        if any(sun_radiance > vec3(0.0)) && dot(sun.wi, surface.world_normal) > 0.0 {
+                            let shadow = trace_light_transmission_with_support(surface.world_position + (surface.world_normal * RAY_T_MIN), resolved.world_position);
+                            radiance += sun_radiance * shadow.energy.rgb
+                                * evaluate_brdf(wo, sun.wi, surface.world_normal, surface.material);
+                        }
+                    }
+                } else {
+                    // The uniform sampler, as surface_path.wesl does it: MIS
+                    // by the power heuristic against the BRDF sample that
+                    // follows (throughput is 1 here, just reset). pad1 light
+                    // samples, averaged: each one pairs with the single BRDF
+                    // sample as an estimator of its own, so the average
+                    // stays unbiased and the emission weight below is
+                    // unchanged.
+                    for (var s = 0u; s < light_samples; s++) {
+                        let shadow = sample_random_light_transmitted(surface.world_position,
+                            surface.world_normal, surface.geometric_world_normal, &rng);
+                        let light = shadow.light;
+                        var weight = 1.0;
+                        if light.brdf_rays_can_hit {
+                            weight = power_heuristic(light.solid_angle_pdf,
+                                evaluate_brdf_pdf(wo, light.wi, surface.world_normal, surface.material) * shadow.continuation_probability);
+                        }
+                        direct += light.radiance * light.inverse_pdf * weight
+                            * evaluate_brdf(wo, light.wi, surface.world_normal, surface.material);
+                    }
+                    radiance += direct / f32(light_samples);
+                }
             }
         }
 
@@ -270,10 +340,15 @@ fn nrc_train(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
         let candidate = resolve_ray_hit_full(ray);
         // Emission met by the scatter ray belongs to the segment of the
-        // vertex it left, MIS-weighted against that vertex's NEE (weight 1
-        // after a mirror, where there was no NEE).
+        // vertex it left, MIS-weighted against that vertex's NEE: weight 1
+        // after a mirror, where there was no NEE; 0 after a resampled NEE,
+        // which has no single light density to weigh against and takes
+        // weight 1 itself (counting the emission here too would count the
+        // light twice); the power heuristic after the uniform sampler's NEE.
         var emission_weight = 1.0;
-        if !delta {
+        if ris_nee {
+            emission_weight = 0.0;
+        } else if !delta {
             emission_weight = power_heuristic(next.pdf,
                 random_emissive_light_solid_angle_pdf(candidate, surface.world_position));
         }

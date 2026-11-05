@@ -62,6 +62,7 @@ impl Plugin for SolarikLightingPlugin {
         load_shader_library!(app, "foliage_math.wesl");
         load_shader_library!(app, "surface_path.wesl");
         load_shader_library!(app, "world_cache_query.wesl");
+        load_shader_library!(app, "light_ris.wesl");
         embedded_asset!(app, "world_cache_compact.wesl");
         load_shader_library!(app, "world_cache_priority.wesl");
         embedded_asset!(app, "world_cache_update.wesl");

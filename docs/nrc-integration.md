@@ -413,3 +413,78 @@ Knobs to try next, in order, each one a harness run:
 3. Then the step the design deferred: drop `sample_gi` once the warm-up is over (the cache's DI slots stay), and move specular GI's rough hits onto the query.
 
 Diagnostics left in: the `nrc N:` log line, `VISUALIZE_NRC`, and the `nrc_training` / `nrc_resolve` spans. Bundling the DLLs is still to do (`src/bundle.rs`, 120 MB).
+
+## Tuning and diagnosis (5 November, later)
+
+The knobs of the results section are now read from the environment (`nrc.rs`, `env_or`): `SOLARIK_NRC_ITERATIONS`, `SOLARIK_NRC_LEARNING_RATE`, `SOLARIK_NRC_ATTENUATION`, `SOLARIK_NRC_PRIMARY`, `SOLARIK_NRC_LIGHT_SAMPLES` (light samples at each training vertex, averaged; `NrcConstants.pad1`), `SOLARIK_NRC_FEATURE_SIZE` (the hash grid's finest level, metres) and `SOLARIK_NRC_FREEZE` (no training after the warm-up). Each run below is `scripts/boil/run.sh` at the three spots the results section found less steady, or the shaft alone; the `default` and `nrc` lines are the earlier tables.
+
+Knob 1, the training damped (2 iterations, learning rate 5e-3, self-training attenuation 0.5; now the defaults):
+
+```
+spot            still: Wdr   P90   3s     noise   move: Wdr  3s
+a10_corridor  default 0.004 0.007 0.018   0.098   0.006 0.040
+              nrc     0.006 0.014 0.019   0.101   0.015 0.043
+              damped  0.004 0.008 0.018   0.099   0.009 0.041
+b30_passage   default 0.003 0.005 0.012   0.056   0.005 0.030
+              nrc     0.010 0.018 0.015   0.061   0.008 0.032
+              damped  0.004 0.006 0.014   0.061   0.006 0.030
+b40_shaft     default 0.015 0.038 0.053   0.126   0.029 0.128
+              nrc     0.019 0.052 0.074   0.148   0.034 0.154
+              damped  0.019 0.051 0.075   0.154   0.033 0.152
+```
+
+The corridor and the passage are back at the default's stills: that breathing was the network drifting, and half the training per frame is enough against it. The shaft did not move, and it did not move for any of the runs after either, all to the third decimal (still P90 / three-shot / motion three-shot):
+
+| shaft run | still P90 | still 3s | move 3s | what it tells |
+|---|---|---|---|---|
+| default | 0.038 | 0.053 | 0.128 | |
+| nrc, damped, 4 light samples a vertex + primary 0.25 | 0.052 | 0.075 | 0.153 | not the training rate, not the light sample count |
+| feature size 10 cm, 40 cm (1 cm before) | 0.053 | 0.075 | 0.152 | not the hash grid's resolution |
+| frozen after the warm-up | 0.052 | 0.075 | 0.154 | not drift: a network that no longer changes wanders as much |
+| the cache's answers through the split pipeline (`SOLARIK_NRC_WARMUP=1000000`) | 0.039 | 0.052 | 0.128 | the initial / resolve split and the second rng stream are not it |
+| a flat answer (`SOLARIK_SHADER_DEFS=NRC_CONSTANT_ANSWER`) | 0.040 | 0.053 | 0.125 | the default again: the wander is in the answers' own values |
+
+So the shaft's extra wander is the variation of NRC's answers from one sample point to the next (the ReSTIR GI draws a new sample point every frame; the answers at those points scatter more than the cache's cell values did, and the temporal and spatial reuse and DLSS-RR carry that scatter into the picture). Two views of the same sample points, both times 32 (`VISUALIZE_NRC` with `VISUALIZE_NRC_GAIN` under NRC; the new `VISUALIZE_GI_INITIAL` under the cache; `HALO_RT_NO_DLSS=1`; the mean of ten captures 40 frames apart over the view without the HUD rows):
+
+| | world cache | NRC |
+|---|---|---|
+| mean level | 59.2 | 16.4 |
+| frame-to-frame std of a 19-pixel box, relative | 0.038 | 0.119 |
+| share of pixels above four times their 19-pixel mean | 0.26% | 0.81% |
+| the ratio cache / NRC by cache level | | 1.6 (dim), 3.2 (middle), 4.3 (bright) |
+
+NRC's answers are 3.6 times lower than the cache's at the shaft, everywhere (the far wall 3.4, the ledge 3.2 to 4.5), and three times rougher. The final image is only 3% darker because the shaft's GI is a few percent of it. (The answers that the per-pixel view shows are noisy by construction, one random hemisphere direction a pixel, for both.)
+
+The first concrete difference found between the two estimators: the cache update samples its lights with `sample_random_light_ris` (128 candidates from the light tiles plus 16 from the cell's light slots, resampled, shadow-tested; `world_cache_update.wesl`), while the training pass picks a light with `sample_random_light_transmitted`, uniformly-ish from all 464 emissive meshes plus sun and sky. Almost every training vertex then records zero direct light and a rare one a huge value; the network (Adam on a relative L2 loss) under-fits such a target toward the dark side and what it fits is rough. The fix under way is the cache's sampler in the training pass (an Opus agent is doing it; its result goes below). Four uniform samples a vertex did not raise the level (the shaft still 33.0 against the default's 34.1), which fits: four draws from 466 lights still mostly miss.
+
+Not settled: which level is right. `--pathtracer` at the shaft spot renders near black (a mean of 0.85 against the real-time 31 after 3000 accumulated frames; `scripts/boil/out/ref/b40_shaft/`), so the reference mode needs a look of its own before it can arbitrate (the emissive scale or the light sampling of the strips, probably).
+
+A trap met on the way: `restir_gi.wesl` and this document are CRLF files; a Python replacement written against LF text matched nothing, the build then had nothing to do, and two harness runs measured the unchanged shader before `grep -c` caught it.
+
+### The cache's light sampler in the training pass
+
+Done (commit `549d4f04`, an Opus agent against the spec above, reviewed): `sample_random_light_ris` moved to `light_ris.wesl` with a variant that hands back the pick's direction and its radiance without the receiver cosine; the training applies the full BRDF to it, takes the sun's own shadow-tested sample as the update does, reads the vertex's cell slots (`find_world_cache_cell`, read only, atomic loads) and after such a vertex leaves out the emission its scatter ray meets (weight 0: the NEE covers every emissive light, there is no single density to weigh against). Leaves (the resampling's target is zero behind the surface, which a leaf transmits) and vertices without a cell keep the uniform sampler with its MIS. The cache update's compiled WGSL is unchanged (dumped and compared for three def sets). Then the tile candidate count became a knob (`SOLARIK_NRC_TILE_CANDIDATES`, `NrcConstants.pad2`, default 32; the update's 128).
+
+| shaft | answers' view mean (cache 59.1) | still mean (default 34.1) | nrc_training ms | gpu total | still P90 / 3s | motion 3s |
+|---|---|---|---|---|---|---|
+| uniform light pick (`nrc_damped`) | 16.4 | 33.0 | 0.24 | 10.12 | 0.051 / 0.075 | 0.152 |
+| resampled, 128 candidates (`nrc_ris`) | 70.7 | 34.2 | 1.50 | 11.31 | 0.048 / 0.068 | 0.142 |
+| resampled, 32 candidates (`nrc_ris32`) | | 34.2 | 0.93 | 11.04 | 0.048 / 0.066 | 0.142 |
+| default | | 34.1 | | 10.06 | 0.038 / 0.053 | 0.128 |
+
+So the dark answers were the training's light sampling: the level is now 20% above the cache's in the answers' view, and the final picture matches the default to 0.3% (the GI's share there is small). The corridor and the passage match the default in every column with it. The shaft is steadier than with the uniform pick but still not the default's (0.066 against 0.053 in stills, 0.142 against 0.128 in motion): the answers vary more from point to point than the cache's cell values, which is partly the thing itself (a continuous field against 30 cm cells with a half-cell jitter) and partly the network's own roughness; which of the two is not separated yet, and which level is right is not either (`--pathtracer` renders the shaft black, above).
+
+The cost, b40's shaft, timed spans and the untimed `QueryAndTrain` from the spike's measurement:
+
+| diffuse GI | default | NRC (32 candidates) |
+|---|---|---|
+| initial + spatial | 1.71 | 0.76 + 0.86 |
+| training | | 0.93 (the cell lookup and two shadow rays a vertex; 0.24 with the uniform pick) |
+| resolve | | 0.21 |
+| QueryAndTrain | | about 0.9 |
+| the cache's GI side, to drop after the warm-up | 0.4 to 0.6 | 0.4 to 0.6 for now |
+| total | 1.71 | about 3.7, about 3.2 once `sample_gi` goes |
+
+Where that leaves NRC as the diffuse GI's source: correct in level, about 1.5 ms a frame dearer than the world cache, as steady as it at seven spots and a little less at the shaft. On its own it is not a boiling fix. What it still offers that the cache cannot is the multi-bounce answer and a single query for specular GI's rough hits (the deferred step), and the training pass's cost has room (the two shadow rays a vertex could be one; the primary vertex's NEE could come from the DI pass's reservoir).
+
+Knobs left to try, cheap ones first: `SOLARIK_NRC_LIGHT_SAMPLES=2` with 16 candidates (the same cost, two picks), `SOLARIK_NRC_PRIMARY` up (the visible surfaces are what the queries ask about), and querying one bounce later where the spread radius is small (NVIDIA's own rule; it trades a ray for a smoother answer at near sample points, which is the shaft's case).

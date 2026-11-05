@@ -181,6 +181,10 @@ pub struct NrcState {
     /// default 1; the world cache takes four an update), to the shader as
     /// `pad1`.
     light_samples: u32,
+    /// Light candidates from the tile at each training vertex's resampled
+    /// light sample (`SOLARIK_NRC_TILE_CANDIDATES`, default 32; the cache
+    /// update takes 128), to the shader as `pad2`.
+    tile_candidates: u32,
     /// `SOLARIK_NRC_FREEZE=1`: stop training once the warm-up is over (a
     /// diagnostic: whether the wander is the network drifting or its answers
     /// varying from point to point).
@@ -276,6 +280,7 @@ pub fn init_nrc(
     let warmup_frames = env_or("SOLARIK_NRC_WARMUP", 120u32);
     let light_samples = env_or("SOLARIK_NRC_LIGHT_SAMPLES", 1u32).clamp(1, 16);
     let freeze_after_warmup = env_or("SOLARIK_NRC_FREEZE", 0u32) != 0;
+    let tile_candidates = env_or("SOLARIK_NRC_TILE_CANDIDATES", 32u32).clamp(1, 128);
     let frame_settings = FrameSettings {
         // (the shaders hand NRC exposed radiance, which averages 0.1 to 1)
         max_expected_average_radiance_value: 1.0,
@@ -295,7 +300,7 @@ pub fn init_nrc(
     };
     info!(
         target: "nrc",
-        "NRC training: {} iterations, learning rate {}, self-training attenuation {}, primary segments {}, {light_samples} light sample(s) a vertex",
+        "NRC training: {} iterations, learning rate {}, self-training attenuation {}, primary segments {}, {light_samples} light sample(s) a vertex, {tile_candidates} tile candidates",
         frame_settings.num_training_iterations,
         frame_settings.learning_rate,
         frame_settings.self_training_attenuation,
@@ -316,6 +321,7 @@ pub fn init_nrc(
         training_dimensions: [0, 0],
         warmup_frames,
         light_samples,
+        tile_candidates,
         freeze_after_warmup,
         recorded_this_frame: false,
         disabled: false,
@@ -612,6 +618,8 @@ impl<'a> NrcFrame<'a> {
         constants.pad[0] = u32::from(warm);
         // pad1: light samples at each training vertex
         constants.pad[1] = state.light_samples;
+        // pad2: tile candidates at each training vertex's light sample
+        constants.pad[2] = state.tile_candidates;
         render_queue.write_buffer(&state.constants, 0, bytemuck::bytes_of(&constants));
         ctx.command_encoder().clear_buffer(&state.counters, 0, None);
         true

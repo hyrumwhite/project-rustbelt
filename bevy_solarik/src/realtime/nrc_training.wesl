@@ -266,8 +266,10 @@ fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
                     let slot_probabilities = world_cache_slot_probabilities(slots);
                     for (var s = 0u; s < light_samples; s++) {
                         // (each sample from a tile of its own, as sample_di)
+                        // (pad2 tile candidates, SOLARIK_NRC_TILE_CANDIDATES: the
+                        // update's 128 cost the training pass 1.5 ms a frame)
                         let light = sample_light_ris(surface.world_position, surface.world_normal,
-                            workgroup_id.xy + vec2(0u, s * 7919u), slots, slot_probabilities, &rng);
+                            workgroup_id.xy + vec2(0u, s * 7919u), slots, slot_probabilities, max(nrc_constants.pad2, 1u), &rng);
                         if any(light.radiance > vec3(0.0)) {
                             direct += light.radiance * evaluate_brdf(wo, light.wi, surface.world_normal, surface.material);
                         }

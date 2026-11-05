@@ -57,7 +57,7 @@ struct RisLightSample {
 // estimate (exposed), for the slots. Returns the irradiance contribution and
 // the support radius.
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, slots: vec4<u32>, slot_probabilities: vec4<f32>, rng: ptr<function, u32>, seen_light: ptr<function, u32>, seen_weight: ptr<function, f32>) -> vec4<f32> {
-    let sample = sample_light_ris(world_position, world_normal, workgroup_id, slots, slot_probabilities, rng);
+    let sample = sample_light_ris(world_position, world_normal, workgroup_id, slots, slot_probabilities, WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT, rng);
     if sample.seen_light != WORLD_CACHE_NO_LIGHT {
         *seen_light = sample.seen_light;
         *seen_weight = sample.seen_weight;
@@ -67,8 +67,11 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
 
 // sample_random_light_ris with everything it learned: also the pick's
 // direction and its radiance without the receiver cosine. The slots are only
-// read.
-fn sample_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, slots: vec4<u32>, slot_probabilities: vec4<f32>, rng: ptr<function, u32>) -> RisLightSample {
+// read. `tile_candidates` is how many candidates come from the tile (the
+// cache update takes WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT; a caller with
+// many samples to take, as the NRC training pass, fewer: the estimate stays
+// unbiased, its variance grows).
+fn sample_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, slots: vec4<u32>, slot_probabilities: vec4<f32>, tile_candidates: u32, rng: ptr<function, u32>) -> RisLightSample {
     var workgroup_rng = light_tile_seed((workgroup_id.x * 5782582u) + workgroup_id.y, constants.frame_index);
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -78,7 +81,7 @@ fn sample_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgrou
         if sun_probability < 0.999 { sun_share = 1.0 - sun_probability; }
     }
     let slot_count = select(0u, WORLD_CACHE_SLOT_LIGHT_SAMPLE_COUNT, any(slot_probabilities > vec4(0.0)));
-    let tile_count = f32(WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT);
+    let tile_count = f32(tile_candidates);
 
     var weight_sum = 0.0;
     var selected_sample_radiance = vec3(0.0);
@@ -88,7 +91,7 @@ fn sample_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgrou
     var selected_sample_world_position = vec4(0.0);
     var selected_light = WORLD_CACHE_NO_LIGHT;
     var selected_light_inverse_pdf = 0.0;
-    for (var i = 0u; i < WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT; i++) {
+    for (var i = 0u; i < tile_candidates; i++) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
         let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
         // (the sun has a sample of its own, sample_di)

@@ -527,6 +527,11 @@ fn main() -> AppExit {
 
     if args.pathtracer {
         app.add_plugins(PathtracingPlugin);
+        // (the same lighting as the real-time path, or the reference is of
+        // another scene: without these the emitters kept their unscaled
+        // emission, the sun and the sky theirs, and b40's shaft rendered near
+        // black against the real-time picture)
+        app.add_systems(Update, (apply_lighting, apply_level_exposure, follow_camera_sky).chain());
     } else {
         app.add_plugins(options::OptionsPlugin);
         if let Some(saved) = saved {

@@ -20,6 +20,7 @@ fn diagnostic_views_compose() {
         "realtime::restir_gi",
         "realtime::specular_gi",
         "realtime::world_cache_update",
+        "realtime::world_cache_priority",
         "realtime::primary_glass",
     ];
     let views = [
@@ -41,13 +42,14 @@ fn diagnostic_views_compose() {
                 }
                 if unjittered {
                     definitions.push("CACHE_CELL_UNJITTERED".into());
+                    definitions.push("CACHE_WARM_START".into());
                 }
                 if let Some(view) = view {
                     definitions.push((*view).into());
                 }
                 for consumer in consumers {
                     let mut stage_definitions = definitions.clone();
-                    if consumer == "realtime::world_cache_update" {
+                    if consumer == "realtime::world_cache_update" || consumer == "realtime::world_cache_priority" {
                         stage_definitions.push("WORLD_CACHE_PRIORITY_ATOMIC_BUFFER".into());
                     }
                     graph.validate(&format!("bevy_solarik::{consumer}"), &stage_definitions);

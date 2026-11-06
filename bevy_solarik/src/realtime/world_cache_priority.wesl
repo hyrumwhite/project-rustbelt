@@ -1,4 +1,5 @@
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_UPDATES_SOFT_CAP;
+@if(CACHE_WARM_START) import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_WARM_START_MARK;
 import bevy_solarik::realtime::realtime_bindings::constants;
 import bevy_solarik::realtime::realtime_bindings::world_cache_a;
 import bevy_solarik::realtime::realtime_bindings::world_cache_b;
@@ -49,6 +50,12 @@ fn world_cache_cell_age(cell: u32) -> u32 {
 }
 
 fn world_cache_priority_bucket(cell: u32) -> u32 {
+@if(CACHE_WARM_START) {
+    // (a cell warm-started from its parent, marked by a sample count just
+    // under four that no ordinary cell holds, is unlit until its first real
+    // update; see world_cache_query's WORLD_CACHE_WARM_START_MARK)
+    if world_cache_radiance[cell].a == WORLD_CACHE_WARM_START_MARK { return 0u; }
+}
     if world_cache_radiance[cell].a == 0.0 { return 0u; }
     let age = world_cache_cell_age(cell);
 @if(ADAPTIVE_CACHE_BUDGET) {

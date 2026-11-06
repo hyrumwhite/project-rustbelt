@@ -48,12 +48,12 @@ pass() { # pass <line> <name>: one pass's ms from a GPU log line
 # minute or so, and captures before that show the raw emissives; the driver
 # keeps the compiled pipelines for the runs after. WARM=0 skips it.)
 if [ "${WARM:-0}" != "0" ]; then
-  read -r name map bsp cam dolly <<< "$(echo "$spots" | head -1)"
+  read -r name map bsp cam dolly period <<< "$(echo "$spots" | head -1)"
   run "$out/warm" "$map" --viewer --bsp "$bsp" --camera "$cam" --screenshot "$out/warm/x.png" --screenshot-after 9000
 fi
 
 printf '%-13s %6s %6s %6s %6s %6s %6s | %7s %7s %7s | %7s %7s | %7s %7s\n' spot gpu direct cache diffGI specGI dlss stillWdr stillP90 still3s noise noiseP95 moveWdr move3s >> "$table"
-while read -r name map bsp cam dolly; do
+while read -r name map bsp cam dolly period; do
   d="$out/$name"
   gpu=; direct=; cache=; dgi=; sgi=; dlss=; sw=; sp=; s3=; nz=; np=; mw=; m3=
   if [[ ",$modes," == *,still,* ]]; then
@@ -70,7 +70,13 @@ while read -r name map bsp cam dolly; do
     n=$(python "$here/noise.py" "$d/series"); nz=$(echo "$n" | grep -o 'noise mean [0-9.]*' | awk '{print $3}'); np=$(echo "$n" | grep -o 'p95 [0-9.]*' | awk '{print $2}')
   fi
   if [[ ",$modes," == *,motion,* ]] && [ "${dolly:-0}" != "0" ]; then
-    HALO_RT_DOLLY_DURING=1 run "$d/motion" "$map" --viewer --bsp "$bsp" --camera "$cam" --dolly "$dolly" --screenshot "$d/motion/x.png" --screenshot-every 120 --screenshot-from 9030 --screenshot-after 13710
+    # (a period of its own: a level flight, the mid-sweep capture a quarter
+    # period in, seven of them)
+    if [ -n "${period:-}" ]; then
+      HALO_RT_DOLLY_DURING=1 HALO_RT_DOLLY_PERIOD=$period HALO_RT_DOLLY_LEVEL=1 run "$d/motion" "$map" --viewer --bsp "$bsp" --camera "$cam" --dolly "$dolly" --screenshot "$d/motion/x.png" --screenshot-every "$period" --screenshot-from $((9000 + period / 4)) --screenshot-after $((9000 + period / 4 + 6 * period))
+    else
+      HALO_RT_DOLLY_DURING=1 run "$d/motion" "$map" --viewer --bsp "$bsp" --camera "$cam" --dolly "$dolly" --screenshot "$d/motion/x.png" --screenshot-every 120 --screenshot-from 9030 --screenshot-after 13710
+    fi
     b=$(python "$here/blotch.py" "$d/motion"); mw=$(echo "$b" | grep -o 'wander mean [0-9.]*' | awk '{print $3}')
     m3=$(python "$here/three_shot.py" "$d/motion" | grep -o 'mean [0-9.]*' | awk '{print $2}')
   fi

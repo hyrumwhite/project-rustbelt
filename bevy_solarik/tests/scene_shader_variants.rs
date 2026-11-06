@@ -14,6 +14,7 @@ fn scene_consumers_compose_across_production_feature_variants() {
         "realtime::restir_di",
         "realtime::presample_light_tiles",
         "realtime::world_cache_update",
+        "realtime::world_cache_priority",
         "realtime::specular_gi",
         "realtime::surface_path",
         "realtime::resolve_dlss_rr_textures",
@@ -25,6 +26,8 @@ fn scene_consumers_compose_across_production_feature_variants() {
             ShaderDefVal::UInt("WORLD_CACHE_SIZE".into(), 1 << 20),
             ShaderDefVal::UInt("RASTER_SUBPIXEL_BITS".into(), 8),
             "BINDLESS_SURFACE_DETAIL".into(),
+            // (on by default in node.rs)
+            "CACHE_WARM_START".into(),
         ];
         for (index, name) in [
             "RAY_MATERIAL_FOOTPRINTS",
@@ -48,6 +51,12 @@ fn scene_consumers_compose_across_production_feature_variants() {
             let mut stage_definitions = definitions.clone();
             if consumer == "filtered_canopy_prepass" && bits & 1 != 0 {
                 stage_definitions.push("WRITE_NORMAL".into());
+            }
+            if consumer == "realtime::world_cache_priority" {
+                stage_definitions.push("WORLD_CACHE_PRIORITY_ATOMIC_BUFFER".into());
+                if bits & 8 != 0 {
+                    stage_definitions.push("ADAPTIVE_CACHE_BUDGET".into());
+                }
             }
             if consumer == "realtime::world_cache_update" {
                 stage_definitions.push("WORLD_CACHE_PRIORITY_ATOMIC_BUFFER".into());

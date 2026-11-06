@@ -1407,8 +1407,14 @@ fn start_camera(mut frames: Local<u32>, mut camera: Single<&mut Camera, With<Sol
     }
 }
 
-/// Frames in one forward-and-back sweep of `--dolly`.
+/// Frames in one forward-and-back sweep of `--dolly` (`HALO_RT_DOLLY_PERIOD`
+/// for another: a long one with a long reach is a flight, the mid-sweep spot
+/// reached fresh each time after its cache cells have died).
 const DOLLY_PERIOD: u32 = 120;
+
+fn dolly_period() -> u32 {
+    std::env::var("HALO_RT_DOLLY_PERIOD").ok().and_then(|v| v.trim().parse().ok()).filter(|&p: &u32| p > 0).unwrap_or(DOLLY_PERIOD)
+}
 
 /// Frames since the app started, as `--screenshot` and `--dolly` count them
 /// (one count, so a capture's frame is the dolly's).
@@ -1477,8 +1483,15 @@ fn dolly_camera(
         camera.translation = start.translation;
         return;
     }
-    let phase = (frames.0 % DOLLY_PERIOD) as f32 / DOLLY_PERIOD as f32 * std::f32::consts::TAU;
-    camera.translation = start.translation + *start.forward() * reach * 0.5 * (1.0 - phase.cos());
+    let period = dolly_period();
+    let phase = (frames.0 % period) as f32 / period as f32 * std::f32::consts::TAU;
+    // (HALO_RT_DOLLY_LEVEL: along the ground, the view's pitch left out, as
+    // a flight down a canyon goes)
+    let mut forward = *start.forward();
+    if std::env::var_os("HALO_RT_DOLLY_LEVEL").is_some() {
+        forward = Vec3::new(forward.x, forward.y, 0.0).normalize_or(forward);
+    }
+    camera.translation = start.translation + forward * reach * 0.5 * (1.0 - phase.cos());
 }
 
 #[cfg(feature = "dlss")]

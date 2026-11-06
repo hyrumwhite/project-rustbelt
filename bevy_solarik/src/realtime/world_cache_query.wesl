@@ -43,6 +43,23 @@ const WORLD_CACHE_POSITION_LOD_SCALE: f32 = 15.0;
 /// Marker value for an empty cell
 const WORLD_CACHE_EMPTY_CELL: u32 = 0u;
 
+// (CACHE_WARM_START) A new cell starts from its parent's radiance (the cell
+// one level of detail coarser at the same point and normal) when the parent
+// has had at least WORLD_CACHE_WARM_START_MIN_SAMPLES updates, as worth
+// WORLD_CACHE_WARM_START_SAMPLES samples: its first real update then blends
+// at about 1/5 instead of replacing a zero with one GI ray and four light
+// samples. The sample count stored is WORLD_CACHE_WARM_START_MARK, just
+// under four, a value no ordinary cell holds (their counts are whole
+// numbers, min(a + 1, 32) from 0): world_cache_priority_bucket reads it as
+// still unlit, so the cell keeps its first-light update, and that update's
+// a + 1 (4.999) clears the mark and blends at 1/4.999.
+@if(CACHE_WARM_START)
+const WORLD_CACHE_WARM_START_SAMPLES: f32 = 4.0;
+@if(CACHE_WARM_START)
+const WORLD_CACHE_WARM_START_MARK: f32 = WORLD_CACHE_WARM_START_SAMPLES - 0.001;
+@if(CACHE_WARM_START)
+const WORLD_CACHE_WARM_START_MIN_SAMPLES: f32 = 4.0;
+
 // Cache entries remain incident irradiance for one oriented hemisphere.
 // Apply the authored thin-leaf split only at consumption, never to stored
 // entries. Opposite normals select independent geometry, visibility and history.
@@ -156,6 +173,30 @@ fn query_world_cache_with_support(world_position_in: vec3<f32>, world_normal: ve
             world_cache_geometry_data[key].last_traced_frame = 0u;
             world_cache_geometry_data[key].support_radius = 0.0;
             world_cache_light_slots[key] = vec4(WORLD_CACHE_NO_LIGHT);
+@if(CACHE_WARM_START) {
+            // (the parent of the jittered point the key was made from: the
+            // cell grids are powers of two of the base size, so this is the
+            // next level's cell that holds the whole of this one)
+            let parent = find_world_cache_parent(world_position, cell_size, world_normal_quantized);
+            if parent >= 0 {
+                let parent_radiance = world_cache_radiance[parent];
+                let parent_geometry = world_cache_geometry_data[parent];
+                let cell_position = world_cache_geometry_data[key].world_position;
+                let parent_distance = distance(parent_geometry.world_position, cell_position);
+                // (a level's quantised coordinates hash alike at every level:
+                // a parent stored more than a few of its cells away is some
+                // other place's cell, not this one's)
+                if parent_radiance.a >= WORLD_CACHE_WARM_START_MIN_SAMPLES && parent_distance < cell_size * 6.0 {
+                    let support = parent_geometry.support_radius + parent_distance;
+                    world_cache_radiance[key] = vec4(parent_radiance.rgb, WORLD_CACHE_WARM_START_MARK);
+                    world_cache_geometry_data[key].support_radius = support;
+@if(VISUALIZE_CACHE_AGE) {
+                    world_cache_debug_samples = WORLD_CACHE_WARM_START_MARK;
+}
+                    return vec4(parent_radiance.rgb, support + distance(world_position_in, cell_position));
+                }
+            }
+}
             return vec4(0.0);
         } else {
             // Collision - linear probe to next entry
@@ -164,6 +205,23 @@ fn query_world_cache_with_support(world_position_in: vec3<f32>, world_normal: ve
     }
 
     return vec4(0.0);
+}
+
+// (CACHE_WARM_START) The cell one level of detail coarser than `cell_size`
+// at a point, under the same quantised normal, -1 for none: read only, as
+// find_world_cache_cell_once, the parent neither made nor kept alive.
+@if(CACHE_WARM_START)
+fn find_world_cache_parent(world_position: vec3<f32>, cell_size: f32, world_normal_quantized: vec3<u32>) -> i32 {
+    let parent_position_quantized = bitcast<vec3<u32>>(quantize_position(world_position, cell_size * 2.0));
+    var key = compute_key(parent_position_quantized, world_normal_quantized);
+    let checksum = compute_checksum(parent_position_quantized, world_normal_quantized);
+    for (var i = 0u; i < WORLD_CACHE_MAX_SEARCH_STEPS; i++) {
+        let existing_checksum = atomicLoad(&world_cache_checksums[key]);
+        if existing_checksum == checksum { return i32(key); }
+        if existing_checksum == WORLD_CACHE_EMPTY_CELL { return -1; }
+        key = wrap_key(key + 1u);
+    }
+    return -1;
 }
 
 // The normal a ray hit's cache cell is keyed by: its smoothed vertex normal

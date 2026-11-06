@@ -1132,6 +1132,13 @@ pub fn init_solari_lighting_pipelines(
         if !std::env::var("SOLARIK_CACHE_CELL_UNJITTERED").is_ok_and(|v| v == "0") {
             shader_defs.push("CACHE_CELL_UNJITTERED".into());
         }
+        // A new cell starts from its parent level of detail's radiance as
+        // four samples (on by default; SOLARIK_CACHE_WARM_START=0 as
+        // upstream): a cell born from one GI ray and four light samples was
+        // noisy for its first updates, and a moving camera keeps making them.
+        if !std::env::var("SOLARIK_CACHE_WARM_START").is_ok_and(|v| v == "0") {
+            shader_defs.push("CACHE_WARM_START".into());
+        }
         // A tile candidate the pixel's cell's slots don't know is weighed as
         // mostly hidden (SOLARIK_SLOT_PRIOR=1; see restir_di's
         // SLOT_VISIBILITY_PRIOR). Off: with the cells keyed by the plane it

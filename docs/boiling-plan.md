@@ -284,6 +284,20 @@ Against `warm` (the morning's table): the shaft's stills 0.054 to 0.029, its mot
 - Shade lit by the sky alone: after 2b, if sky-lit shade still wanders, give cells whose direct sample is zero a second GI ray per update (a cheap test inside `sample_gi`, cost proportional to such cells).
 - Distant silhouettes and alpha-tested foliage (the 20 October leftovers) stay out of this plan; they are a different estimator (`primary_foliage`).
 
+### Phase 4 (6 November): what the captures name, and the shade's second ray
+
+The cost split first. Of the 1110 F9 captures in `dist/captures`, 29 carry times (the ones since the capture gained its `cpu:` and `gpu` lines), b40 and c20 of 3 November, none of a fight below 60 frames/s (median 88, the lowest 67). The slow ones among them are of two kinds, and neither is the lighting of the empty canyon:
+
+| frames | frames/s | CPU main / render ms | GPU ms | what stands out |
+|---|---|---|---|---|
+| c20 at tick 18911 (three captures) | 67 | 2.0 / 14.5 | 8.8 | the render thread is the frame: 14.5 ms against a GPU of 8.8, every pass at its median |
+| b40 at tick 2394 (seven captures, camera 46, 28, 49 looking back) | 76 | 1.2 / 5.5 | 11.7 | the GPU is the frame: specular GI 2.8 (its median 1.35), diffuse GI 1.7 (1.2), direct 2.8 (2.4) |
+| the rest | 78 to 116 | about 2 / 6 | 7 to 9.1 | |
+
+So the capture line could not yet say what the render thread does in its 14.5 ms (the plan's suspects: BLAS refits, the dynamic lights, particles), only that it is the thread, not the GPU. The capture now splits it (`src/cpu_times.rs`): `render 11.44 ms (views 1.2, prepare 6.0, graph 4.1; and 0.04 ms waiting for the window)`, where views is the assets, meshes, views and pipelines (ExtractCommands to PrepareViews), prepare is the queue and the prepare sets (the scene's acceleration structures and uploads live there), and graph is the render graph's encoding and submit. The next fight capture names the stretch; the plan's rule stands: fix what it names, not a lighting cut pre-empting it. The b40 GPU dip is a view question (specular GI doubled where the view had more rough metal in it, the Pelican's hull at the drop, probably): a capture at that camera in the game, with `HALO_RT_GPU_LOG=1`, would say whether it is the pass's ray count or its hits' shading.
+
+The shade's second ray (`CACHE_SHADE_SECOND_RAY`, `world_cache_update.wesl`): a cell whose direct sample found nothing this update (no sun, no emitter in reach) traces two cosine rays instead of one and takes their mean, so the sky's irradiance in a canyon's shade is estimated from two directions an update rather than one; the cost is a ray on the cells in shade only. The full table against `p3_final` (`p4_shade`): every boiling column within 0.003 at every spot, the cache pass 0.03 to 0.08 ms dearer (the passage the most, 1.23 to 1.31; the shaft's total 9.92 to 9.94). The harness cannot see what it is for, for the reason 2b's result gave (the sway keeps the cells warm and the viewer has no Banshee flight through shade), so it stays on behind its switch, `SOLARIK_CACHE_SHADE_SECOND_RAY=0`, as the user's A/B on the canyon's shaded walls, with 2b's. The two remaining Phase 4 items wait on the user: a fight capture with the new render-thread split, and the specular GI's doubling at b40's drop.
+
 ## Phase 5: paying for it
 
 Everything above is either free (1, 2a, 2b) or bounded (2c, 3, 4). If the interior total rises past the 0.3 ms rule, these pay it back in order: the cache search at 64 candidates (Phase 3), 16 DI tile candidates (Phase 3), and the world cache update soft cap (40000 cells a frame; check `HALO_RT_CACHE_LOG` for how often it binds).

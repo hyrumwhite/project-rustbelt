@@ -51,6 +51,7 @@ fn diagnostic_views_compose() {
                     definitions.push("CACHE_WARM_START".into());
                     definitions.push("GI_ADAPTIVE_SPATIAL".into());
                     definitions.push("CELL_LOOKUP_NEIGHBOURS".into());
+                    definitions.push("CACHE_SHADE_SECOND_RAY".into());
                 }
                 if let Some(view) = view {
                     definitions.push((*view).into());

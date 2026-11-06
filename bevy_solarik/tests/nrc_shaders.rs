@@ -19,6 +19,7 @@ fn base_defs() -> Vec<ShaderDefVal> {
         "BINDLESS_SURFACE_DETAIL".into(),
         "GI_ADAPTIVE_SPATIAL".into(),
         "CELL_LOOKUP_NEIGHBOURS".into(),
+        "CACHE_SHADE_SECOND_RAY".into(),
     ]
 }
 

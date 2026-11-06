@@ -1,7 +1,11 @@
 //! The CPU's side of a frame: the main schedule's time, and the render
 //! thread's without its wait for a window texture (which waits on the GPU
-//! and the display), each 5 seconds; logged beside the GPU's pass times
-//! (`HALO_RT_GPU_LOG=1`), and the latest written with each F9 capture.
+//! and the display), split by its schedule's stretches (views: assets,
+//! meshes, views and pipelines; prepare: the queue and the prepare sets,
+//! where the scene's acceleration structures and uploads are; graph: the
+//! render graph's encoding and submit; cleanup), each 5 seconds; logged
+//! beside the GPU's pass times (`HALO_RT_GPU_LOG=1`), and the latest written
+//! with each F9 capture.
 
 use bevy::{
     prelude::*,
@@ -24,6 +28,9 @@ impl Plugin for CpuTimesPlugin {
                 render_started.in_set(RenderSystems::ExtractCommands),
                 window_wait_started.in_set(RenderSystems::PrepareViews).before(prepare_windows),
                 window_wait_ended.in_set(RenderSystems::PrepareViews).after(prepare_windows),
+                views_ended.after(RenderSystems::PrepareViews).before(RenderSystems::Queue),
+                prepare_ended.after(RenderSystems::PrepareBindGroups).before(RenderSystems::Render),
+                graph_ended.after(RenderSystems::Render).before(RenderSystems::Cleanup),
                 render_ended.in_set(RenderSystems::PostCleanup),
             ),
         );
@@ -35,6 +42,9 @@ struct Totals {
     main: Duration,
     main_frames: u32,
     render: Duration,
+    views: Duration,
+    prepare: Duration,
+    graph: Duration,
     window_wait: Duration,
     render_frames: u32,
     since: Option<Instant>,
@@ -44,6 +54,7 @@ struct Totals {
 struct Marks {
     main: Option<Instant>,
     render: Option<Instant>,
+    phase: Option<Instant>,
     wait: Option<Instant>,
 }
 
@@ -77,9 +88,12 @@ fn main_ended() {
     if since.elapsed().as_secs_f32() >= 5.0 {
         let per = |d: Duration, n: u32| d.as_secs_f32() * 1000.0 / n.max(1) as f32;
         let line = format!(
-            "cpu: main {:.2} ms, render {:.2} ms (and {:.2} ms waiting for the window), {:.0} frames/s",
+            "cpu: main {:.2} ms, render {:.2} ms (views {:.2}, prepare {:.2}, graph {:.2}; and {:.2} ms waiting for the window), {:.0} frames/s",
             per(totals.main, totals.main_frames),
             per(totals.render, totals.render_frames),
+            per(totals.views, totals.render_frames),
+            per(totals.prepare, totals.render_frames),
+            per(totals.graph, totals.render_frames),
             per(totals.window_wait, totals.render_frames),
             totals.render_frames as f32 / since.elapsed().as_secs_f32()
         );
@@ -94,7 +108,32 @@ fn main_ended() {
 }
 
 fn render_started() {
-    totals().lock().unwrap().1.render = Some(Instant::now());
+    let now = Instant::now();
+    let mut guard = totals().lock().unwrap();
+    guard.1.render = Some(now);
+    guard.1.phase = Some(now);
+}
+
+// The stretch since the last mark, into one of the totals.
+fn phase_ended(into: fn(&mut Totals) -> &mut Duration) {
+    let now = Instant::now();
+    let mut guard = totals().lock().unwrap();
+    let (totals, marks) = &mut *guard;
+    if let Some(started) = marks.phase.replace(now) {
+        *into(totals) += now.saturating_duration_since(started);
+    }
+}
+
+fn views_ended() {
+    phase_ended(|t| &mut t.views);
+}
+
+fn prepare_ended() {
+    phase_ended(|t| &mut t.prepare);
+}
+
+fn graph_ended() {
+    phase_ended(|t| &mut t.graph);
 }
 
 fn window_wait_started() {
@@ -110,6 +149,9 @@ fn window_wait_ended() {
         // (the render thread's own time leaves out the wait)
         if let Some(render) = marks.render.as_mut() {
             *render += waited;
+        }
+        if let Some(phase) = marks.phase.as_mut() {
+            *phase += waited;
         }
     }
 }

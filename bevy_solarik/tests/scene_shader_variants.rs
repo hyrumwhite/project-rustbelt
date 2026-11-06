@@ -36,6 +36,7 @@ fn scene_consumers_compose_across_production_feature_variants() {
             "CACHE_WARM_START".into(),
             "GI_ADAPTIVE_SPATIAL".into(),
             "CELL_LOOKUP_NEIGHBOURS".into(),
+            "CACHE_SHADE_SECOND_RAY".into(),
         ];
         for (index, name) in [
             "RAY_MATERIAL_FOOTPRINTS",

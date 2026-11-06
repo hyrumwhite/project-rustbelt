@@ -1163,6 +1163,11 @@ pub fn init_solari_lighting_pipelines(
         if std::env::var("SOLARIK_GI_ADAPTIVE_SPATIAL").is_ok_and(|v| v == "1") {
             shader_defs.push("GI_ADAPTIVE_SPATIAL".into());
         }
+        // A cache cell whose direct sample is dark traces two bounce rays an
+        // update (on by default; SOLARIK_CACHE_SHADE_SECOND_RAY=0 as before).
+        if !std::env::var("SOLARIK_CACHE_SHADE_SECOND_RAY").is_ok_and(|v| v == "0") {
+            shader_defs.push("CACHE_SHADE_SECOND_RAY".into());
+        }
         // A failed cell lookup probes the six keys one normal component off
         // (on by default; SOLARIK_CELL_LOOKUP_NEIGHBOURS=0 as before).
         if !std::env::var("SOLARIK_CELL_LOOKUP_NEIGHBOURS").is_ok_and(|v| v == "0") {

@@ -114,35 +114,55 @@ fn sample_gi(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     var rng = cell_index + constants.frame_index;
     forest_set_seed(vec2u(cell_index,constants.frame_index^0x79b4da17u));
 
-    let ray_direction = sample_cosine_hemisphere(geometry_data.world_normal, &rng);
+    var pending = world_cache_active_cells_new_radiance[active_cell_id.x];
+    var rays = 1u;
+@if(CACHE_SHADE_SECOND_RAY) {
+    // A cell whose direct sample found nothing this update (the sun behind
+    // the canyon wall, no emitter in reach) is lit by what its bounce ray
+    // finds alone, sky above all, and one cosine ray an update of a half
+    // hidden sky is a noisy estimate of it: such a cell traces two and takes
+    // their mean (docs/boiling-plan.md, Phase 4; the cost is a ray on the
+    // cells in shade only).
+    if all(pending.rgb == vec3(0.0)) { rays = 2u; }
+}
+    for (var i = 0u; i < rays; i++) {
+        let sample = sample_gi_ray(cell_index, geometry_data.world_position, geometry_data.world_normal, &rng);
+        pending = vec4(pending.rgb + sample.rgb / f32(rays), max(pending.w, sample.w));
+    }
+    world_cache_active_cells_new_radiance[active_cell_id.x] = pending;
+}
+
+// One cosine-weighted bounce ray from a cell: its radiance (sky or the cache
+// at the hit, through any thin panes) and the support distance it saw.
+fn sample_gi_ray(cell_index: u32, world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> vec4<f32> {
+    let ray_direction = sample_cosine_hemisphere(world_normal, rng);
     // Traced to the end of the world so that geometry beyond the GI ray
     // distance is not mistaken for sky; such far hits contribute nothing, as
     // upstream's shorter ray had them.
-    let ray = trace_ray(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
+    let ray = trace_ray(world_position + (world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
     // trace_ray skips thin panes when finding the endpoint. Apply their energy
     // to this new cache sample once, excluding the endpoint itself.
     let connection_distance = select(ray.t - RAY_T_MIN, ray_max_distance(), scene_hit_is_miss(ray));
-    var pending = world_cache_active_cells_new_radiance[active_cell_id.x];
-    pending.w = max(pending.w, connection_distance + 2.0 * RAY_T_MIN);
-    let transmission = trace_shadow_transmission_impl(geometry_data.world_position + geometry_data.world_normal * RAY_T_MIN, ray_direction, connection_distance, false).rgb;
+    var sample = vec4(0.0, 0.0, 0.0, connection_distance + 2.0 * RAY_T_MIN);
+    let transmission = trace_shadow_transmission_impl(world_position + world_normal * RAY_T_MIN, ray_direction, connection_distance, false).rgb;
     if scene_hit_is_miss(ray) {
         // Escaped to the sky: cosine sampling turns radiance into irradiance
         // with a factor of pi, the same units the cached direct light is in.
-        pending = vec4(pending.rgb + transmission * PI * sample_sky(ray_direction), pending.w);
+        sample = vec4(transmission * PI * sample_sky(ray_direction), sample.w);
     } else if ray.t <= WORLD_CACHE_MAX_GI_RAY_DISTANCE {
 @if(RAY_MATERIAL_FOOTPRINTS) {
-        let cone = primary_ray_cone(view.clip_from_view, view.main_pass_viewport.zw, distance(geometry_data.world_position, view.world_position) + ray.t);
+        let cone = primary_ray_cone(view.clip_from_view, view.main_pass_viewport.zw, distance(world_position, view.world_position) + ray.t);
         let ray_hit = resolve_ray_hit_filtered(ray, ray_direction, cone);
 }
 @if(!(RAY_MATERIAL_FOOTPRINTS)) {
         let ray_hit = resolve_ray_hit_full(ray);
 }
         let cell_life = atomicLoad(&world_cache_life[cell_index]);
-        let radiance = query_two_sided_world_cache_with_support(ray_hit.world_position, cell_key_normal(ray_hit.geometric_world_normal, ray_hit.triangle_world_normal), ray_hit.material.diffuse_transmission, view.world_position, ray.t, cell_life, &rng);
-        pending = vec4(pending.rgb + transmission * ray_hit.material.base_color * radiance.rgb,
-            max(pending.w, distance(geometry_data.world_position, ray_hit.world_position) + radiance.w));
+        let radiance = query_two_sided_world_cache_with_support(ray_hit.world_position, cell_key_normal(ray_hit.geometric_world_normal, ray_hit.triangle_world_normal), ray_hit.material.diffuse_transmission, view.world_position, ray.t, cell_life, rng);
+        sample = vec4(transmission * ray_hit.material.base_color * radiance.rgb,
+            max(sample.w, distance(world_position, ray_hit.world_position) + radiance.w));
     }
-    world_cache_active_cells_new_radiance[active_cell_id.x] = pending;
+    return sample;
 }
 
 @compute @workgroup_size(64, 1, 1)

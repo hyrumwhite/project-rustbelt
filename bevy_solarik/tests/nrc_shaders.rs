@@ -1,7 +1,8 @@
 //! The NRC shaders (feature `nrc`) through the actual Bevy WESL compiler and
 //! naga's validator: the generated record module on its own, the training
-//! pass, and restir_gi with `NRC` next to each def it is combined with in the
-//! game. (restir_gi without `NRC` is covered by scene_shader_variants.rs.)
+//! pass, restir_gi with `NRC` next to each def it is combined with in the
+//! game, and specular_gi and the resolve with `NRC_SPECULAR`. (restir_gi
+//! without `NRC` is covered by scene_shader_variants.rs.)
 #[path = "support/shader_graph.rs"]
 mod shader_graph;
 use bevy_shader::ShaderDefVal;
@@ -74,5 +75,47 @@ fn nrc_shaders_compile() {
         let mut names = vec!["NRC"];
         names.extend_from_slice(extra);
         graph.validate("bevy_solarik::realtime::restir_gi", &with(&names));
+    }
+    // NRC_SPECULAR: the resolve reads the specular slot (and its view).
+    for extra in [
+        &[][..],
+        &["VISUALIZE_NRC_SPECULAR"],
+        &["VISUALIZE_NRC"],
+        &["REGIONAL_HISTORY", "FOLIAGE_TRANSMISSION", "RAY_MATERIAL_FOOTPRINTS"],
+        &["WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION", "FOLIAGE_TRANSMISSION"],
+    ] {
+        let mut names = vec!["NRC", "NRC_SPECULAR"];
+        names.extend_from_slice(extra);
+        graph.validate("bevy_solarik::realtime::restir_gi", &with(&names));
+    }
+    // The specular pass writing its query: plain and with the PSR guides
+    // (their textures at group 3 then, NRC's buffers at group 2).
+    for extra in [
+        &["FOLIAGE_TRANSMISSION"][..],
+        &["FOLIAGE_TRANSMISSION", "DLSS_RR_GUIDE_BUFFERS"],
+        &["FOLIAGE_TRANSMISSION", "RAY_MATERIAL_FOOTPRINTS"],
+        &["FOLIAGE_TRANSMISSION", "RAY_MATERIAL_FOOTPRINTS", "DLSS_RR_GUIDE_BUFFERS", "REGIONAL_HISTORY"],
+    ] {
+        let mut names = vec!["NRC", "NRC_SPECULAR"];
+        names.extend_from_slice(extra);
+        graph.validate("bevy_solarik::realtime::specular_gi", &with(&names));
+    }
+    // Its second stage, the surfaces reusing the GI reservoir: no NRC
+    // bindings, the guide textures at group 2.
+    for extra in [
+        &["FOLIAGE_TRANSMISSION"][..],
+        &["FOLIAGE_TRANSMISSION", "DLSS_RR_GUIDE_BUFFERS"],
+        &["FOLIAGE_TRANSMISSION", "RAY_MATERIAL_FOOTPRINTS", "DLSS_RR_GUIDE_BUFFERS"],
+    ] {
+        let mut names = vec!["NRC_SPECULAR_REUSE"];
+        names.extend_from_slice(extra);
+        graph.validate("bevy_solarik::realtime::specular_gi", &with(&names));
+    }
+    // primary_glass imports specular_gi's path; it never gets NRC_SPECULAR,
+    // with or without NRC among its defs.
+    for extra in [&[][..], &["NRC"], &["NRC", "DLSS_RR_GUIDE_BUFFERS"]] {
+        let mut names = vec!["FOLIAGE_TRANSMISSION"];
+        names.extend_from_slice(extra);
+        graph.validate("bevy_solarik::realtime::primary_glass", &with(&names));
     }
 }

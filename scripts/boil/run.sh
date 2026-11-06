@@ -37,6 +37,8 @@ run() { # run <dir> <args...>: one viewer run, its log in <dir>/log.txt
   mkdir -p "$dir"; rm -f "$dir"/x_*.png
   timeout 900 "$exe" "$@" > "$dir/log.txt" 2>&1
 }
+# (two spans summed: the specular pass is two stages with NRC's specular query)
+pass2() { python -c "import sys; a=sys.argv[1]; print(round(float(a) if a else 0, 2) + (float(sys.argv[2]) if sys.argv[2] else 0))" "$(pass "$1" "$2")" "$(pass "$1" "$3")"; }
 gpu_line() { # the last GPU pass log of a run
   sed 's/\x1b\[[0-9;]*m//g' "$1/log.txt" | grep -a 'gpu [0-9.]* ms' | tail -1 | sed 's/.*halo_rt: //'
 }
@@ -61,7 +63,7 @@ while read -r name map bsp cam dolly period; do
     line=$(gpu_line "$d/still")
     gpu=$(echo "$line" | grep -o 'gpu [0-9.]*' | awk '{print $2}')
     direct=$(pass "$line" direct_lighting); cache=$(pass "$line" world_cache)
-    dgi=$(pass "$line" diffuse_indirect_lighting); sgi=$(pass "$line" specular_indirect_lighting); dlss=$(pass "$line" dlss_ray_reconstruction)
+    dgi=$(pass "$line" diffuse_indirect_lighting); sgi=$(pass2 "$line" specular_indirect_lighting specular_indirect_reuse); dlss=$(pass "$line" dlss_ray_reconstruction)
     b=$(python "$here/blotch.py" "$d/still"); sw=$(echo "$b" | grep -o 'wander mean [0-9.]*' | awk '{print $3}'); sp=$(echo "$b" | grep -o 'p90 [0-9.]*' | head -1 | awk '{print $2}')
     s3=$(python "$here/three_shot.py" "$d/still" | grep -o 'mean [0-9.]*' | awk '{print $2}')
   fi

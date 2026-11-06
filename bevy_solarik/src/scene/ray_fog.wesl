@@ -63,3 +63,16 @@ fn fog_decode(encoded: vec3<f32>) -> vec3<f32> {
     let high = pow((max(encoded, vec3(0.0)) + 0.055) / 1.055, vec3(2.4));
     return select(high, low, encoded <= vec3(0.04045));
 }
+
+// The factor fog_ray_segment applies to the radiance it is handed, alone (the
+// fogged radiance is that times this plus the in-scattered colour): for a
+// path whose radiance is only partly known when the segment is fogged.
+// (specular_gi's NRC query, whose answer arrives in a later pass: its prefix
+// throughput takes this, the radiance gathered so far the in-scatter too.)
+@if((NRC_SPECULAR))
+fn fog_ray_segment_transmittance(surface_depth: f32, surface_height: f32, segment: f32, hit_height: f32) -> f32 {
+    if !ray_fog_active() { return 1.0; }
+    let near = ray_fog_layers(surface_depth, surface_height);
+    let far = ray_fog_layers(surface_depth + segment, hit_height);
+    return (1.0 - far.a) / max(1.0 - near.a, 1e-4);
+}

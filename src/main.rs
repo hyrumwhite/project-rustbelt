@@ -1716,6 +1716,9 @@ fn update_performance_text(
     add("Direct", "render/solarik_lighting/direct_lighting/elapsed_gpu");
     add("Diffuse indirect", "render/solarik_lighting/diffuse_indirect_lighting/elapsed_gpu");
     add("Specular indirect", "render/solarik_lighting/specular_indirect_lighting/elapsed_gpu");
+    // (with NRC's specular query, the pass's second stage: the rough surfaces
+    // that reuse the GI reservoir, after the GI's spatial pass)
+    add("Specular reuse", "render/solarik_lighting/specular_indirect_reuse/elapsed_gpu");
     // (the camera's glass and water, and its foliage: c10's swamp water was
     // 13.5 ms the panel didn't show)
     add("Glass and water", "render/solarik_lighting/primary_glass/elapsed_gpu");

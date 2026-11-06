@@ -49,16 +49,29 @@ enable wgpu_ray_query;
 @group(1) @binding(28) var lit_fog_history_a: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(29) var lit_fog_history_b: texture_storage_2d<rgba16float, read_write>;
 
-@if((DLSS_RR_GUIDE_BUFFERS))
+// The DLSS guide textures: group 2, or group 3 in the specular pass with
+// NRC_SPECULAR, which binds NRC's buffers at group 2 as every NRC pass does
+// (nrc.wesl).
+@if((DLSS_RR_GUIDE_BUFFERS && !NRC_SPECULAR))
 @group(2) @binding(0) var diffuse_albedo: texture_storage_2d<rgba8unorm, write>;
-@if((DLSS_RR_GUIDE_BUFFERS))
+@if((DLSS_RR_GUIDE_BUFFERS && !NRC_SPECULAR))
 @group(2) @binding(1) var specular_albedo: texture_storage_2d<rgba8unorm, write>;
-@if((DLSS_RR_GUIDE_BUFFERS))
+@if((DLSS_RR_GUIDE_BUFFERS && !NRC_SPECULAR))
 @group(2) @binding(2) var normal_roughness: texture_storage_2d<rgba16float, write>;
-@if((DLSS_RR_GUIDE_BUFFERS))
+@if((DLSS_RR_GUIDE_BUFFERS && !NRC_SPECULAR))
 @group(2) @binding(3) var dlss_rr_depth: texture_storage_2d<r32float, write>;
-@if((DLSS_RR_GUIDE_BUFFERS))
+@if((DLSS_RR_GUIDE_BUFFERS && !NRC_SPECULAR))
 @group(2) @binding(4) var specular_motion_vectors: texture_storage_2d<rg16float, write>;
+@if((DLSS_RR_GUIDE_BUFFERS && NRC_SPECULAR))
+@group(3) @binding(0) var diffuse_albedo: texture_storage_2d<rgba8unorm, write>;
+@if((DLSS_RR_GUIDE_BUFFERS && NRC_SPECULAR))
+@group(3) @binding(1) var specular_albedo: texture_storage_2d<rgba8unorm, write>;
+@if((DLSS_RR_GUIDE_BUFFERS && NRC_SPECULAR))
+@group(3) @binding(2) var normal_roughness: texture_storage_2d<rgba16float, write>;
+@if((DLSS_RR_GUIDE_BUFFERS && NRC_SPECULAR))
+@group(3) @binding(3) var dlss_rr_depth: texture_storage_2d<r32float, write>;
+@if((DLSS_RR_GUIDE_BUFFERS && NRC_SPECULAR))
+@group(3) @binding(4) var specular_motion_vectors: texture_storage_2d<rg16float, write>;
 
 // frame_index retains the renderer's scrambled RNG seed. It is not a clock.
 // reset bit 0: all history; bit 1: geometry changed; bit 2: regional support available.

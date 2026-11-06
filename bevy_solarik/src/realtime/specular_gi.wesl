@@ -76,6 +76,12 @@ import bevy_solarik::realtime::realtime_bindings::constants;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::realtime_bindings::specular_motion_vectors;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::realtime_bindings::previous_view;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::resolve_dlss_rr_textures::env_brdf_approx2;
+@if((NRC_SPECULAR)) import bevy_solarik::realtime::nrc::nrc_constants;
+@if((NRC_SPECULAR)) import bevy_solarik::realtime::nrc::NrcPackedQueryPathInfo;
+@if((NRC_SPECULAR)) import bevy_solarik::realtime::nrc::nrc_encode_log_luv_hdr;
+@if((NRC_SPECULAR)) import bevy_solarik::realtime::nrc::nrc_write_query_path_info;
+@if((NRC_SPECULAR)) import bevy_solarik::realtime::nrc_query::write_nrc_query_record;
+@if((NRC_SPECULAR)) import bevy_solarik::scene::ray_fog::fog_ray_segment_transmittance;
 
 enable wgpu_ray_query;
 
@@ -87,6 +93,24 @@ const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = 0.4;
 const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0225;
 const BLURRY_LEAF_ROUGHNESS: f32 = 0.05;
 
+// NRC_SPECULAR (docs/nrc-integration.md, "Specular GI on the query"): where
+// the main lobe's glossy path would end in the world cache it writes an NRC
+// query instead, into the pixel's second query path slot (the GI's initial
+// pass has the first), and nrc_resolve_and_temporal adds the answer times
+// the prefix throughput to the view after QueryAndTrain. One slot a pixel:
+// the clear coat's path, called second, keeps the world cache, which
+// `nrc_specular_slot_open` (true only while the main lobe is traced) tells
+// it. The prefix gathers the path's factors as they are applied, from the
+// query outward: the throughput to the hit, the first segment's fog, the
+// lobe's 1 / pdf and the surface's BRDF; the query index stays 0xffffffff
+// where the path ended elsewhere.
+@if((NRC_SPECULAR))
+var<private> nrc_specular_slot_open: bool = false;
+@if((NRC_SPECULAR))
+var<private> nrc_specular_query_index: u32 = 0xffffffffu;
+@if((NRC_SPECULAR))
+var<private> nrc_specular_prefix: vec3<f32> = vec3(0.0);
+
 @compute @workgroup_size(8, 8, 1)
 fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
@@ -94,19 +118,50 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pixel_index = global_id.x + global_id.y * u32(view.main_pass_viewport.z);
     var rng = pixel_index + constants.frame_index;
     forest_set_seed(vec2u(pixel_index,constants.frame_index^0x57a7619bu));
+@if(NRC_SPECULAR) {
+    // The resolve reads every pixel's second slot each frame: an empty path
+    // info first, before any return (the sky, a rough surface that reuses
+    // the GI reservoir, a path that ends elsewhere leave it so).
+    let nrc_slot = u32(view.main_pass_viewport.z) * u32(view.main_pass_viewport.w) + pixel_index;
+    nrc_write_query_path_info(nrc_slot, NrcPackedQueryPathInfo(0u, 0xffffffffu));
+}
 
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
     if depth == 0.0 {
         return;
     }
     let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+// With NRC's specular query the pass runs in two stages: this one
+// (NRC_SPECULAR) before QueryAndTrain for the surfaces that trace a glossy
+// path, and NRC_SPECULAR_REUSE at the usual place, after the GI's spatial
+// pass, for the rough surfaces whose lobe reuses this frame's ReSTIR GI
+// reservoir (glossy_lobe reads gi_reservoirs_a, which spatial_and_shade
+// writes; read before it, the reservoir is last frame's or unresolved).
+@if(NRC_SPECULAR) {
+    if surface.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD { return; }
+}
+@if(NRC_SPECULAR_REUSE) {
+    if surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD { return; }
+}
 
     let wo_unnormalized = view.world_position - surface.world_position;
     let wo_length = length(wo_unnormalized);
     let wo = wo_unnormalized / wo_length;
 
+@if(NRC_SPECULAR) {
+    nrc_specular_slot_open = true;
+}
     let lobe = glossy_lobe(global_id.xy, pixel_index, surface, wo, wo_length, &rng);
     var radiance = lobe.radiance * evaluate_base_specular_brdf(wo, lobe.wi, surface.world_normal, surface.material);
+@if(NRC_SPECULAR) {
+    nrc_specular_slot_open = false;
+    if nrc_specular_query_index != 0xffffffffu {
+        // The surface's BRDF, as the lobe's radiance just took it; no
+        // exposure: the answer is exposed radiance already.
+        let prefix = nrc_specular_prefix * evaluate_base_specular_brdf(wo, lobe.wi, surface.world_normal, surface.material);
+        nrc_write_query_path_info(nrc_slot, NrcPackedQueryPathInfo(nrc_encode_log_luv_hdr(max(prefix, vec3(0.0))), nrc_specular_query_index));
+    }
+}
     // A clear coat's reflection: its own path, as a surface of the coat's roughness.
     if clearcoat_albedo(surface.material, 1.0) > 0.0 {
         var coat_surface = surface;
@@ -266,6 +321,9 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, w
             radiance = trace_glossy_path(pixel_id, surface, wo_length, wi, pdf, false, rng);
             if surface.material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
                 radiance /= pdf;
+@if(NRC_SPECULAR) {
+                if nrc_specular_slot_open { nrc_specular_prefix /= pdf; }
+}
             }
         }
     }
@@ -287,6 +345,14 @@ fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initi
     let forward = -normalize(view.world_from_view[2].xyz);
     let surface_depth = dot(primary_surface.world_position - view.world_position, forward);
     let plane = sky_light.fog.plane;
+@if(NRC_SPECULAR) {
+    // The query's answer is fogged as the rest of the path's radiance, less
+    // the in-scatter, which the radiance returned here carries once.
+    if nrc_specular_slot_open && nrc_specular_query_index != 0xffffffffu {
+        nrc_specular_prefix *= fog_ray_segment_transmittance(surface_depth, dot(plane.xyz, primary_surface.world_position) - plane.w,
+            first_hit.w, dot(plane.xyz, first_hit.xyz) - plane.w);
+    }
+}
     return fog_ray_segment(radiance, surface_depth, dot(plane.xyz, primary_surface.world_position) - plane.w,
         first_hit.w, dot(plane.xyz, first_hit.xyz) - plane.w, view.exposure);
 }
@@ -441,6 +507,23 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
 
         let rough_hit = cache_rough_hits && ray_hit.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
         if i == 2u || (ray_longer_than_cell && (path_roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD || rough_hit)) {
+@if(NRC_SPECULAR) {
+            // The main lobe's path asks NRC instead, once it has warmed up
+            // (pad0): the answer is the hit's outgoing radiance toward the
+            // path, so the prefix is the throughput to here (times the hit's
+            // albedo + F0, write_nrc_query_record's learn_irradiance factor),
+            // not the cache's base_color / PI. The resolve adds it.
+            if nrc_specular_slot_open && nrc_specular_query_index == 0xffffffffu && nrc_constants.pad0 != 0u {
+                // (the cell at the hit made or renewed as the cache read
+                // below would, the value unused: ReSTIR DI's cell lights
+                // need the cells this read kept alive)
+                _ = query_world_cache(ray_hit.world_position, cell_key_normal(ray_hit.geometric_world_normal, ray_hit.triangle_world_normal), view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
+                let record = write_nrc_query_record(ray_hit, wo, throughput);
+                nrc_specular_query_index = record.query_index;
+                nrc_specular_prefix = record.prefix_throughput;
+                break;
+            }
+}
             let diffuse_brdf = ray_hit.material.base_color / PI;
             radiance += throughput * diffuse_brdf * query_world_cache(ray_hit.world_position, cell_key_normal(ray_hit.geometric_world_normal, ray_hit.triangle_world_normal), view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
             break;

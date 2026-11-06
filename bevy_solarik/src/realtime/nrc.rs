@@ -5,7 +5,8 @@
 //! The application adds [`SolarikNrcInitPlugin`] before `RenderPlugin` (it
 //! registers the Vulkan creation callbacks) and sets
 //! [`SolarikNrcSceneBounds`]. Each frame the lighting node then records the
-//! library's `BeginFrame`, a training pass, the GI's queries, the library's
+//! library's `BeginFrame`, a training pass, the GI's queries, the specular
+//! GI's (`SOLARIK_NRC_SPECULAR`, on by default), the library's
 //! `QueryAndTrain` and a resolve pass (`node.rs`); [`nrc_end_frame`] calls
 //! `EndFrame` after the frame's submit. Any failure is logged (target `nrc`)
 //! and leaves the renderer on the world cache, as without the feature.
@@ -133,13 +134,32 @@ pub(crate) struct NrcPipelineIds {
     pub gi_initial: CachedComputePipelineId,
     /// `nrc_training.wesl`'s `nrc_train`.
     pub training: CachedComputePipelineId,
-    /// `restir_gi`'s `nrc_resolve_and_temporal`.
+    /// `restir_gi`'s `nrc_resolve_and_temporal` (with `NRC_SPECULAR` when
+    /// the specular query is on: it adds the specular slot's answers too).
     pub resolve: CachedComputePipelineId,
+    /// `specular_gi` with `NRC` and `NRC_SPECULAR`, when the specular query
+    /// is on: its glossy path's cache read becomes a query in the pixel's
+    /// second slot, so it runs before `QueryAndTrain`.
+    pub specular: Option<CachedComputePipelineId>,
+    /// The same with `DLSS_RR_GUIDE_BUFFERS` (its guide textures at group 3,
+    /// NRC's buffers at group 2), for the views with ray reconstruction.
+    pub specular_psr: Option<CachedComputePipelineId>,
+    /// `specular_gi` with `NRC_SPECULAR_REUSE`: the second stage, after the
+    /// GI's spatial pass, for the rough surfaces whose lobe reuses the ReSTIR
+    /// GI reservoir (no NRC bindings).
+    pub specular_reuse: Option<CachedComputePipelineId>,
+    /// The same with `DLSS_RR_GUIDE_BUFFERS` (guide textures at group 2).
+    pub specular_reuse_psr: Option<CachedComputePipelineId>,
 }
 
 impl NrcPipelineIds {
-    fn all(&self) -> [CachedComputePipelineId; 3] {
+    fn all(&self) -> impl Iterator<Item = CachedComputePipelineId> {
         [self.gi_initial, self.training, self.resolve]
+            .into_iter()
+            .chain(self.specular)
+            .chain(self.specular_psr)
+            .chain(self.specular_reuse)
+            .chain(self.specular_reuse_psr)
     }
 }
 
@@ -189,6 +209,18 @@ pub struct NrcState {
     /// diagnostic: whether the wander is the network drifting or its answers
     /// varying from point to point).
     freeze_after_warmup: bool,
+    /// The specular GI's glossy paths query NRC where they would read the
+    /// world cache (`SOLARIK_NRC_SPECULAR=0` turns it off): a second query
+    /// slot a pixel (`samples_per_pixel: 2`) and the specular pass moved
+    /// ahead of `QueryAndTrain`.
+    specular: bool,
+    /// With the specular query on, the world cache's `sample_gi` pass can be
+    /// left out once the warm-up has passed (`SOLARIK_NRC_DROP_CACHE_GI=1`;
+    /// off by default): the NRC path no longer reads the cells' bounce light,
+    /// but the glass's grime and the clear coat's termination still do, and
+    /// the pass measured only 0.1 to 0.2 ms once the cells were kept alive
+    /// by the touch, so the cells keep their bounce light.
+    drop_cache_gi: bool,
     /// `BeginFrame` was submitted this frame, so `EndFrame` is due.
     recorded_this_frame: bool,
     /// A call failed; NRC stays off for the session.
@@ -198,6 +230,20 @@ pub struct NrcState {
 }
 
 impl NrcState {
+    /// Whether the specular GI writes NRC queries (`SOLARIK_NRC_SPECULAR`):
+    /// `node.rs` then adds the specular pipelines and `NRC_SPECULAR` to the
+    /// resolve.
+    pub(crate) fn specular_query(&self) -> bool {
+        self.specular
+    }
+
+    /// Whether the warm-up since the last configure has passed at `frame`
+    /// (the shaders use NRC's answers from then on, `pad0`).
+    fn warm(&self, frame: u32) -> bool {
+        let since_configure = self.configured_frame.map_or(0, |f| frame.wrapping_sub(f));
+        since_configure >= self.warmup_frames
+    }
+
     /// Logs a failed NRC call once and turns NRC off for the session.
     fn fail(&mut self, what: &str, e: &NrcError) {
         if !self.disabled {
@@ -281,6 +327,8 @@ pub fn init_nrc(
     let light_samples = env_or("SOLARIK_NRC_LIGHT_SAMPLES", 1u32).clamp(1, 16);
     let freeze_after_warmup = env_or("SOLARIK_NRC_FREEZE", 0u32) != 0;
     let tile_candidates = env_or("SOLARIK_NRC_TILE_CANDIDATES", 32u32).clamp(1, 128);
+    let specular = env_or("SOLARIK_NRC_SPECULAR", 1u32) != 0;
+    let drop_cache_gi = specular && env_or("SOLARIK_NRC_DROP_CACHE_GI", 0u32) != 0;
     let frame_settings = FrameSettings {
         // (the shaders hand NRC exposed radiance, which averages 0.1 to 1)
         max_expected_average_radiance_value: 1.0,
@@ -310,7 +358,13 @@ pub fn init_nrc(
         frame_settings.proportion_primary_segments_to_train_on,
         frame_settings.termination_heuristic_threshold,
     );
-    info!(target: "nrc", "NRC initialized from {} (warm-up {warmup_frames} frames)", dir.0.display());
+    info!(
+        target: "nrc",
+        "NRC initialized from {} (warm-up {warmup_frames} frames; specular query {}, the cache's GI pass {} after the warm-up)",
+        dir.0.display(),
+        if specular { "on" } else { "off" },
+        if drop_cache_gi { "dropped" } else { "kept" },
+    );
     commands.insert_resource(NrcState {
         _nrc: nrc,
         context,
@@ -327,6 +381,8 @@ pub fn init_nrc(
         light_samples,
         tile_candidates,
         freeze_after_warmup,
+        specular,
+        drop_cache_gi,
         recorded_this_frame: false,
         disabled: false,
         warned_views: false,
@@ -405,7 +461,9 @@ pub fn prepare_nrc(
         smallest_resolvable_feature_size: env_or("SOLARIK_NRC_FEATURE_SIZE", 0.01f32),
         frame_dimensions,
         training_dimensions,
-        samples_per_pixel: 1,
+        // (the library sizes the query path info and radiance params
+        // buffers by it: the GI's slot, and the specular pass's second)
+        samples_per_pixel: if state.specular { 2 } else { 1 },
         max_path_vertices: 8,
     };
     let bounds_changed = state.settings.is_some_and(|last| {
@@ -497,7 +555,7 @@ pub(crate) fn pipelines_pending(
         return false;
     };
     !state.disabled
-        && ids.all().into_iter().any(|id| {
+        && ids.all().any(|id| {
             matches!(
                 cache.get_compute_pipeline_state(id),
                 CachedPipelineState::Queued | CachedPipelineState::Creating(_)
@@ -512,6 +570,10 @@ pub(crate) struct NrcFrame<'a> {
     gi_initial: &'a ComputePipeline,
     training: &'a ComputePipeline,
     resolve: &'a ComputePipeline,
+    specular: Option<&'a ComputePipeline>,
+    specular_psr: Option<&'a ComputePipeline>,
+    specular_reuse: Option<&'a ComputePipeline>,
+    specular_reuse_psr: Option<&'a ComputePipeline>,
 }
 
 /// Whether the node runs this frame with NRC.
@@ -546,10 +608,40 @@ impl<'a> NrcFrame<'a> {
             return NrcReadiness::Off;
         };
         let pipeline = |id| cache.get_compute_pipeline(id);
-        if let (Some(gi_initial), Some(training), Some(resolve)) =
-            (pipeline(ids.gi_initial), pipeline(ids.training), pipeline(ids.resolve))
-        {
-            return NrcReadiness::Ready(NrcFrame { state, bind_group, gi_initial, training, resolve });
+        // (a specular pipeline asked for must be there too: the resolve
+        // reads the specular slot either way)
+        let optional = |id: Option<CachedComputePipelineId>| match id {
+            Some(id) => pipeline(id).map(Some),
+            None => Some(None),
+        };
+        if let (
+            Some(gi_initial),
+            Some(training),
+            Some(resolve),
+            Some(specular),
+            Some(specular_psr),
+            Some(specular_reuse),
+            Some(specular_reuse_psr),
+        ) = (
+            pipeline(ids.gi_initial),
+            pipeline(ids.training),
+            pipeline(ids.resolve),
+            optional(ids.specular),
+            optional(ids.specular_psr),
+            optional(ids.specular_reuse),
+            optional(ids.specular_reuse_psr),
+        ) {
+            return NrcReadiness::Ready(NrcFrame {
+                state,
+                bind_group,
+                gi_initial,
+                training,
+                resolve,
+                specular,
+                specular_psr,
+                specular_reuse,
+                specular_reuse_psr,
+            });
         }
         if pipelines_pending(Some(ids), Some(&state), cache) {
             return NrcReadiness::Pending;
@@ -576,6 +668,28 @@ impl<'a> NrcFrame<'a> {
         self.resolve
     }
 
+    /// The specular pass that writes NRC queries, when the specular query is
+    /// on (`psr`: the view's DLSS ray reconstruction variant). The node then
+    /// runs it before `QueryAndTrain` instead of after the GI.
+    pub(crate) fn specular_pipeline(&self, psr: bool) -> Option<&'a ComputePipeline> {
+        if psr { self.specular_psr } else { self.specular }
+    }
+
+    /// The specular pass's second stage, at the usual place after the GI's
+    /// spatial pass, when the first ran ahead of `QueryAndTrain`: the rough
+    /// surfaces that reuse this frame's ReSTIR GI reservoir.
+    pub(crate) fn specular_reuse_pipeline(&self, psr: bool) -> Option<&'a ComputePipeline> {
+        if psr { self.specular_reuse_psr } else { self.specular_reuse }
+    }
+
+    /// Whether the world cache's `sample_gi` pass is left out this frame:
+    /// the specular query on, `SOLARIK_NRC_DROP_CACHE_GI=1`, and the
+    /// warm-up over (until then the shaders read the cache instead, and the
+    /// cells need their bounce light for it).
+    pub(crate) fn drops_cache_gi(&self, frame: u32) -> bool {
+        self.specular.is_some() && self.state.drop_cache_gi && self.state.warm(frame)
+    }
+
     /// The training pass's workgroups (8x8 threads, one per training path).
     pub(crate) fn training_workgroups(&self) -> (u32, u32) {
         let [x, y] = self.state.training_dimensions;
@@ -598,8 +712,7 @@ impl<'a> NrcFrame<'a> {
         let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("solarik_nrc_begin_frame"),
         });
-        let since_configure = state.configured_frame.map_or(0, |f| frame.wrapping_sub(f));
-        let warm = since_configure >= state.warmup_frames;
+        let warm = state.warm(frame);
         let frame_settings = FrameSettings {
             train_the_cache: !(state.freeze_after_warmup && warm),
             ..state.frame_settings

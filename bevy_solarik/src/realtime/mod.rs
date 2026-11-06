@@ -73,6 +73,7 @@ impl Plugin for SolarikLightingPlugin {
         #[cfg(feature = "nrc")]
         {
             load_shader_library!(app, "nrc.wesl");
+            load_shader_library!(app, "nrc_query.wesl");
             embedded_asset!(app, "nrc_training.wesl");
             app.add_plugins(bevy_render::extract_resource::ExtractResourcePlugin::<
                 SolarikNrcSceneBounds,

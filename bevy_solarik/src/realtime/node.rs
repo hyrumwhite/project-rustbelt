@@ -110,6 +110,15 @@ mod no_nrc {
         pub(super) fn resolve_pipeline(&self) -> &ComputePipeline {
             match *self {}
         }
+        pub(super) fn specular_pipeline(&self, _: bool) -> Option<&'static ComputePipeline> {
+            match *self {}
+        }
+        pub(super) fn specular_reuse_pipeline(&self, _: bool) -> Option<&'static ComputePipeline> {
+            match *self {}
+        }
+        pub(super) fn drops_cache_gi(&self, _: u32) -> bool {
+            match *self {}
+        }
         pub(super) fn training_workgroups(&self) -> (u32, u32) {
             match *self {}
         }
@@ -356,6 +365,11 @@ pub fn solarik_lighting<const PRIMARY: bool>(
 
     #[cfg(not(all(feature = "dlss", not(feature = "force_disable_dlss"))))]
     let specular_gi_pipeline = pipelines.specular_gi_pipeline;
+    // (whether the specular pass is the ray reconstruction variant)
+    #[cfg(not(all(feature = "dlss", not(feature = "force_disable_dlss"))))]
+    let specular_psr = false;
+    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+    let specular_psr = view_dlss_rr_textures.is_some();
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
     let specular_gi_pipeline = if view_dlss_rr_textures.is_some() {
         pipelines.specular_gi_with_psr_pipeline
@@ -753,20 +767,30 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         0,
     );
 
-    pass.set_pipeline(sample_gi_for_world_cache_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[
-            frame_index,
-            reset_flags,
-            render_frame,
-            stable_radius.to_bits(),
-        ]),
-    );
-    pass.dispatch_workgroups_indirect(
-        &solarik_lighting_resources.world_cache_active_cells_dispatch,
-        0,
-    );
+    // With NRC answering both the diffuse and the specular GI's queries
+    // after its warm-up, nothing reads the cells' bounce light: their GI
+    // rays are left out (sample_gi only adds to what sample_di wrote for
+    // the cell, so the blend takes the direct light alone; the active cells
+    // and their indirect dispatch are the same either way).
+    let drop_cache_gi = nrc_frame
+        .as_ref()
+        .is_some_and(|nrc| nrc.drops_cache_gi(render_frame));
+    if !drop_cache_gi {
+        pass.set_pipeline(sample_gi_for_world_cache_pipeline);
+        pass.set_immediates(
+            0,
+            bytemuck::cast_slice(&[
+                frame_index,
+                reset_flags,
+                render_frame,
+                stable_radius.to_bits(),
+            ]),
+        );
+        pass.dispatch_workgroups_indirect(
+            &solarik_lighting_resources.world_cache_active_cells_dispatch,
+            0,
+        );
+    }
 
     pass.set_pipeline(blend_new_world_cache_samples_pipeline);
     pass.dispatch_workgroups_indirect(
@@ -869,6 +893,22 @@ pub fn solarik_lighting<const PRIMARY: bool>(
     );
     pass.dispatch_workgroups(dx, dy, 1);
 
+    // With the specular query on, the specular pass goes here, its queries
+    // written before QueryAndTrain (group 2 is still NRC's; the guide
+    // textures at group 3 in the ray reconstruction variant). Its own
+    // radiance goes into the view as later; the resolve adds the answers.
+    // (Ahead of the resolve is safe for the GI: the specular pass writes the
+    // view, which both add to, and the guide textures, which no GI pass
+    // reads.)
+    // (its surfaces that reuse the ReSTIR GI reservoir wait for the spatial
+    // pass, in a second stage at the usual place: nrc_specular_reuse)
+    let nrc_specular = nrc_frame
+        .as_ref()
+        .and_then(|nrc| nrc.specular_pipeline(specular_psr));
+    let nrc_specular_reuse = nrc_frame
+        .as_ref()
+        .and_then(|nrc| nrc.specular_reuse_pipeline(specular_psr));
+
     // QueryAndTrain in an encoder of its own, after the frame's queries and
     // training paths are written, then the answers resolved into the
     // reservoirs with the temporal step. (Should QueryAndTrain fail, this
@@ -876,6 +916,25 @@ pub fn solarik_lighting<const PRIMARY: bool>(
     // frame takes the world cache path.)
     if nrc_frame.is_some() {
         d.end(&mut pass);
+        if let Some(pipeline) = nrc_specular {
+            let d = diagnostics.time_span(&mut pass, "solarik_lighting/specular_indirect_lighting");
+            #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+            if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
+                pass.set_bind_group(3, bind_group_resolve_dlss_rr_textures, &[]);
+            }
+            pass.set_pipeline(pipeline);
+            pass.set_immediates(
+                0,
+                bytemuck::cast_slice(&[
+                    frame_index,
+                    reset_flags,
+                    render_frame,
+                    stable_radius.to_bits(),
+                ]),
+            );
+            pass.dispatch_workgroups(dx, dy, 1);
+            d.end(&mut pass);
+        }
         drop(pass);
         let answered = nrc_frame
             .as_mut()
@@ -926,23 +985,31 @@ pub fn solarik_lighting<const PRIMARY: bool>(
 
     d.end(&mut pass);
 
-    let d = diagnostics.time_span(&mut pass, "solarik_lighting/specular_indirect_lighting");
-    #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
-    if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
-        pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
+    // (here unless it ran ahead of QueryAndTrain with NRC; then its second
+    // stage, the surfaces reusing the reservoir spatial_and_shade just wrote)
+    let specular_here = match nrc_specular {
+        None => Some((specular_gi_pipeline, "solarik_lighting/specular_indirect_lighting")),
+        Some(_) => nrc_specular_reuse.map(|p| (p, "solarik_lighting/specular_indirect_reuse")),
+    };
+    if let Some((pipeline, span)) = specular_here {
+        let d = diagnostics.time_span(&mut pass, span);
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        if let Some(bind_group_resolve_dlss_rr_textures) = &bind_group_resolve_dlss_rr_textures {
+            pass.set_bind_group(2, bind_group_resolve_dlss_rr_textures, &[]);
+        }
+        pass.set_pipeline(pipeline);
+        pass.set_immediates(
+            0,
+            bytemuck::cast_slice(&[
+                frame_index,
+                reset_flags,
+                render_frame,
+                stable_radius.to_bits(),
+            ]),
+        );
+        pass.dispatch_workgroups(dx, dy, 1);
+        d.end(&mut pass);
     }
-    pass.set_pipeline(specular_gi_pipeline);
-    pass.set_immediates(
-        0,
-        bytemuck::cast_slice(&[
-            frame_index,
-            reset_flags,
-            render_frame,
-            stable_radius.to_bits(),
-        ]),
-    );
-    pass.dispatch_workgroups(dx, dy, 1);
-    d.end(&mut pass);
 
     // lit fog, when asked for (and compiled: it doesn't hold the rest back)
     if ray_fog.lit.x > 0.0 {
@@ -1084,18 +1151,17 @@ pub fn init_solari_lighting_pipelines(
     .then(|| {
         super::query_capture::PrimaryQueryCapture::new(&device, &pipeline_cache, direct_capture)
     });
-    let create_pipeline = |label: &'static str,
-                           entry_point: &'static str,
-                           shader: Handle<Shader>,
-                           extra_bind_group_layout: Option<&BindGroupLayoutDescriptor>,
-                           extra_shader_defs: Vec<ShaderDefVal>| {
+    // (groups 2 and on from `extra_bind_group_layouts`, in order)
+    let create_pipeline_with_layouts = |label: &'static str,
+                                        entry_point: &'static str,
+                                        shader: Handle<Shader>,
+                                        extra_bind_group_layouts: &[&BindGroupLayoutDescriptor],
+                                        extra_shader_defs: Vec<ShaderDefVal>| {
         let mut layout = vec![
             scene_bindings.bind_group_layout.clone(),
             bind_group_layout.clone(),
         ];
-        if let Some(extra_bind_group_layout) = extra_bind_group_layout {
-            layout.push(extra_bind_group_layout.clone());
-        }
+        layout.extend(extra_bind_group_layouts.iter().map(|&l| l.clone()));
 
         let mut shader_defs = vec![ShaderDefVal::UInt(
             "WORLD_CACHE_SIZE".into(),
@@ -1248,6 +1314,13 @@ pub fn init_solari_lighting_pipelines(
             ..default()
         })
     };
+    let create_pipeline = |label: &'static str,
+                           entry_point: &'static str,
+                           shader: Handle<Shader>,
+                           extra_bind_group_layout: Option<&BindGroupLayoutDescriptor>,
+                           extra_shader_defs: Vec<ShaderDefVal>| {
+        create_pipeline_with_layouts(label, entry_point, shader, extra_bind_group_layout.as_slice(), extra_shader_defs)
+    };
 
     // NRC's variant of the GI's initial pass is a pipeline of its own: the
     // plain one stays for the frames NRC does not serve (another view, a
@@ -1255,6 +1328,73 @@ pub fn init_solari_lighting_pipelines(
     #[cfg(feature = "nrc")]
     let nrc = nrc_state.map(|state| {
         let layout = Some(&state.bind_group_layout);
+        // With the specular query on, the specular pass writes its queries
+        // (NRC_SPECULAR, NRC's buffers at group 2) and the resolve adds their
+        // answers; the plain specular pipelines stay for frames without NRC.
+        let specular = state.specular_query();
+        let mut resolve_defs: Vec<ShaderDefVal> = vec![
+            "WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION".into(),
+            "FOLIAGE_TRANSMISSION".into(),
+            "NRC".into(),
+        ];
+        if specular {
+            resolve_defs.push("NRC_SPECULAR".into());
+        }
+        // (the second stage, NRC_SPECULAR_REUSE: the rough surfaces after
+        // the GI's spatial pass, bound as the plain specular pipelines)
+        let specular_reuse_pipeline = specular.then(|| {
+            create_pipeline(
+                "solarik_lighting_nrc_specular_reuse_pipeline",
+                "specular_gi",
+                load_embedded_asset!(asset_server.as_ref(), "specular_gi.wesl"),
+                None,
+                vec!["FOLIAGE_TRANSMISSION".into(), "NRC_SPECULAR_REUSE".into()],
+            )
+        });
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        let specular_reuse_psr_pipeline = specular.then(|| {
+            create_pipeline(
+                "solarik_lighting_nrc_specular_reuse_with_psr_pipeline",
+                "specular_gi",
+                load_embedded_asset!(asset_server.as_ref(), "specular_gi.wesl"),
+                Some(&bind_group_layout_resolve_dlss_rr_textures),
+                vec![
+                    "FOLIAGE_TRANSMISSION".into(),
+                    "DLSS_RR_GUIDE_BUFFERS".into(),
+                    "NRC_SPECULAR_REUSE".into(),
+                ],
+            )
+        });
+        #[cfg(not(all(feature = "dlss", not(feature = "force_disable_dlss"))))]
+        let specular_reuse_psr_pipeline = None;
+        let specular_pipeline = specular.then(|| {
+            create_pipeline(
+                "solarik_lighting_nrc_specular_gi_pipeline",
+                "specular_gi",
+                load_embedded_asset!(asset_server.as_ref(), "specular_gi.wesl"),
+                layout,
+                vec!["FOLIAGE_TRANSMISSION".into(), "NRC".into(), "NRC_SPECULAR".into()],
+            )
+        });
+        // (the guide textures move to group 3 with NRC_SPECULAR,
+        // realtime_bindings.wesl)
+        #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
+        let specular_psr_pipeline = specular.then(|| {
+            create_pipeline_with_layouts(
+                "solarik_lighting_nrc_specular_gi_with_psr_pipeline",
+                "specular_gi",
+                load_embedded_asset!(asset_server.as_ref(), "specular_gi.wesl"),
+                &[&state.bind_group_layout, &bind_group_layout_resolve_dlss_rr_textures],
+                vec![
+                    "FOLIAGE_TRANSMISSION".into(),
+                    "DLSS_RR_GUIDE_BUFFERS".into(),
+                    "NRC".into(),
+                    "NRC_SPECULAR".into(),
+                ],
+            )
+        });
+        #[cfg(not(all(feature = "dlss", not(feature = "force_disable_dlss"))))]
+        let specular_psr_pipeline = None;
         super::nrc::NrcPipelineIds {
             gi_initial: create_pipeline(
                 "solarik_lighting_nrc_gi_initial_pipeline",
@@ -1280,12 +1420,12 @@ pub fn init_solari_lighting_pipelines(
                 "nrc_resolve_and_temporal",
                 load_embedded_asset!(asset_server.as_ref(), "restir_gi.wesl"),
                 layout,
-                vec![
-                    "WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION".into(),
-                    "FOLIAGE_TRANSMISSION".into(),
-                    "NRC".into(),
-                ],
+                resolve_defs,
             ),
+            specular: specular_pipeline,
+            specular_psr: specular_psr_pipeline,
+            specular_reuse: specular_reuse_pipeline,
+            specular_reuse_psr: specular_reuse_psr_pipeline,
         }
     });
 

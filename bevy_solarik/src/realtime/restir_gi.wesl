@@ -46,20 +46,13 @@ import bevy_solarik::realtime::realtime_bindings::Reservoir;
 import bevy_solarik::realtime::specular_gi::DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
 @if((REGIONAL_HISTORY)) import bevy_solarik::scene::raytracing_scene_bindings::scene_support_is_valid;
 @if((REGIONAL_HISTORY)) import bevy_solarik::realtime::world_cache_query::query_two_sided_world_cache_with_support;
-@if((NRC)) import bevy_pbr::render::pbr_functions::calculate_diffuse_color;
-@if((NRC)) import bevy_pbr::render::pbr_functions::calculate_F0;
 @if((NRC)) import bevy_solarik::scene::raytracing_scene_bindings::ResolvedRayHitFull;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_constants;
-@if((NRC)) import bevy_solarik::realtime::nrc::NrcRadianceParams;
 @if((NRC)) import bevy_solarik::realtime::nrc::NrcPackedQueryPathInfo;
-@if((NRC)) import bevy_solarik::realtime::nrc::NRC_COUNTER_QUERIES;
-@if((NRC)) import bevy_solarik::realtime::nrc::nrc_encode_position;
-@if((NRC)) import bevy_solarik::realtime::nrc::nrc_safe_cartesian_to_spherical_unorm;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_encode_log_luv_hdr;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_decode_log_luv_hdr;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_unpack_query_radiance;
-@if((NRC)) import bevy_solarik::realtime::nrc::nrc_increment_counter;
-@if((NRC)) import bevy_solarik::realtime::nrc::nrc_write_radiance_params;
+@if((NRC)) import bevy_solarik::realtime::nrc_query::write_nrc_query_record;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_write_query_path_info;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_read_query_path_info;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_read_query_radiance;
@@ -213,6 +206,33 @@ fn nrc_resolve_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>)
     // (Not initial_and_temporal's stream: its first numbers drew the sample.)
     var rng = (pixel_index + constants.frame_index) ^ 0x3c6ef372u;
 
+@if(NRC_SPECULAR) {
+    // specular_gi's query, in the pixel's second slot (empty unless the main
+    // lobe's glossy path asked): its answer times the prefix throughput into
+    // the view, before the early returns below, since mirrors are the pixels
+    // with specular paths. Exposed radiance as the view holds it: the
+    // network learnt exposed radiance and the prefix holds no exposure (the
+    // specular pass multiplied its own radiance by it before adding; the
+    // GI's answer below is divided by it only for its unexposed reservoir).
+    let specular_info = nrc_read_query_path_info(u32(view.main_pass_viewport.z) * u32(view.main_pass_viewport.w) + pixel_index);
+    var specular_answer = vec3(0.0);
+    if specular_info.query_buffer_index != 0xffffffffu {
+        specular_answer = max(vec3(0.0), nrc_decode_log_luv_hdr(specular_info.prefix_throughput)
+            * nrc_unpack_query_radiance(nrc_constants, nrc_read_query_radiance(specular_info.query_buffer_index)));
+    }
+// (SOLARIK_SHADER_DEFS=VISUALIZE_NRC_SPECULAR, with HALO_RT_NO_DLSS=1: the
+// specular slot's answer alone, as it is added to the view; black where the
+// glossy path ended elsewhere or the pixel traced none. The GI's temporal
+// step is left out, and spatial_and_shade leaves the view.)
+@if(VISUALIZE_NRC_SPECULAR) {
+    textureStore(view_output, global_id.xy, vec4(specular_answer, 1.0));
+    return;
+}
+    if specular_info.query_buffer_index != 0xffffffffu {
+        textureStore(view_output, global_id.xy, textureLoad(view_output, global_id.xy) + vec4(specular_answer, 0.0));
+    }
+}
+
     // The same early returns as initial_and_temporal, which has already
     // stored their empty reservoirs.
     let depth = textureLoad(depth_buffer, global_id.xy, 0);
@@ -321,6 +341,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(NRC && NRC_QUERY_AT_SPREAD && VISUALIZE_NRC_BOUNCED) {
     return;
 }
+@if(NRC_SPECULAR && VISUALIZE_NRC_SPECULAR) {
+    return;
+}
 
     let wo = normalize(view.world_position - surface.world_position);
     let brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
@@ -416,6 +439,15 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     // REGIONAL_HISTORY the support stays the whole scene, as set above: the
     // network's answer depends on everything it has seen.)
     if nrc_constants.pad0 != 0u {
+        // The cell at the sample point is made or renewed as the cache read
+        // below would (the value unused): the cells live by being queried,
+        // and ReSTIR DI's cell light candidates and the training pass's light
+        // sample look them up without making them. Without this the cells at
+        // the camera's surfaces died out under NRC (docs/nrc-integration.md,
+        // "Built (6 November)").
+        _ = query_two_sided_world_cache(sample_point.world_position,
+            cell_key_normal(sample_point.geometric_world_normal, sample_point.triangle_world_normal), sample_point.material.diffuse_transmission,
+            view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
 @if(NRC_QUERY_AT_SPREAD) {
         // NVIDIA's query rule: at the sample point only once the path's
         // footprint there is wide enough, else one bounce more; the radiance
@@ -455,10 +487,8 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
 // NrcUpdateOnHit in query mode, querying at the first vertex (the sample
 // point is already one bounce in, so the termination heuristic has nothing to
-// wait for). The surface is described as nrc_training.wesl describes its
-// training vertices, or the network is asked about inputs it never saw: the
-// shading normal (a leaf's side facing `wo`), `wo` toward the receiver,
-// linear roughness, bevy_pbr's albedo and F0.
+// wait for), `wo` toward the receiver. (The record itself is nrc_query.wesl's,
+// shared with specular_gi's query.)
 @if((NRC))
 fn write_nrc_query(sample_point: ResolvedRayHitFull, wo: vec3<f32>) {
     // (the path's own throughput is 1: the reservoir weights the connection
@@ -470,26 +500,9 @@ fn write_nrc_query(sample_point: ResolvedRayHitFull, wo: vec3<f32>) {
 // whose throughput (from the sample point on) is `throughput`.
 @if((NRC))
 fn write_nrc_query_with_throughput(sample_point: ResolvedRayHitFull, wo: vec3<f32>, throughput: vec3<f32>) {
-    let material = sample_point.material;
-    var normal = sample_point.world_normal;
-    if material.diffuse_transmission > 0.0 && dot(normal, wo) < 0.0 {
-        normal = -normal;
-    }
-    let albedo = calculate_diffuse_color(material.base_color, material.metallic, 0.0, 0.0);
-    let specular = calculate_F0(material.base_color, material.metallic, vec3(material.reflectance));
-
-    var params: NrcRadianceParams;
-    params.encoded_position = nrc_encode_position(sample_point.world_position, nrc_constants);
-    params.roughness = material.roughness;
-    params.normal = nrc_safe_cartesian_to_spherical_unorm(normal);
-    params.view_direction = nrc_safe_cartesian_to_spherical_unorm(wo);
-    params.albedo = albedo;
-    params.specular = specular;
-    nrc_query_index = nrc_increment_counter(NRC_COUNTER_QUERIES);
-    nrc_write_radiance_params(nrc_query_index, params);
-    // learn_irradiance: the answer is radiance / (albedo + F0), so that times
-    // the path's throughput is the prefix throughput.
-    nrc_query_prefix = nrc_encode_log_luv_hdr(max(throughput * (albedo + specular), vec3(0.0)));
+    let record = write_nrc_query_record(sample_point, wo, throughput);
+    nrc_query_index = record.query_index;
+    nrc_query_prefix = nrc_encode_log_luv_hdr(record.prefix_throughput);
 }
 
 // NRC_QUERY_AT_SPREAD: NrcUpdateOnHit in query mode with its termination

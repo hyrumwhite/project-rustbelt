@@ -46,6 +46,9 @@ pub struct BlasManager {
     triangle_edges: HashMap<AssetId<Mesh>, Vec<[Vec3; 2]>>,
     // A mesh can be replaced while an older allocation is still queued.
     compaction_queue: VecDeque<(AssetId<Mesh>, u64, u32, bool)>,
+    /// This frame's builds, queued for compaction from the next frame on,
+    /// their build submitted by then.
+    compaction_arrivals: Vec<(AssetId<Mesh>, u64, u32, bool)>,
     opacity: OpacityBook,
     /// Meshes whose BLAS was dropped because its opacity no longer matched
     /// the materials on it; rebuilt by `prepare_raytracing_blas` next frame.
@@ -207,16 +210,23 @@ pub fn prepare_raytracing_blas(
         blas_manager.opacity.forget(asset_id);
     }
 
+    let edges_profile = bevy_render::diagnostic::profile_scope("scene.blas_prepare_edges");
     for (asset_id, mesh) in &extracted_meshes.extracted {
         if is_mesh_raytracing_compatible(mesh) {
             if let Some(bounds) = super::history::Bounds::from_mesh(mesh) {
                 blas_manager.bounds.insert(*asset_id, bounds);
             }
-            blas_manager
-                .triangle_edges
-                .insert(*asset_id, triangle_edges(mesh));
+            // (the edges serve the emissive light sampling's area; a deformable
+            // mesh keeps its first pose's, its area hardly moving with the pose,
+            // rather than walking every triangle of every skinned part a frame)
+            if !(deformable.0.contains(asset_id) && blas_manager.triangle_edges.contains_key(asset_id)) {
+                blas_manager
+                    .triangle_edges
+                    .insert(*asset_id, triangle_edges(mesh));
+            }
         }
     }
+    drop(edges_profile);
 
     // Meshes whose opacity changed keep their allocation; only the BLAS is
     // rebuilt (a mesh that was freed meanwhile is simply skipped).
@@ -274,7 +284,7 @@ pub fn prepare_raytracing_blas(
                 );
             } else {
                 blas_manager.updatable.remove(&asset_id);
-                blas_manager.compaction_queue.push_back((
+                blas_manager.compaction_arrivals.push((
                     asset_id,
                     revision,
                     blas_size.vertex_count,
@@ -313,8 +323,11 @@ pub fn prepare_raytracing_blas(
     use bevy_render::diagnostic::RecordDiagnostics;
     let diagnostics = diagnostics.as_deref();
     let span = diagnostics.time_span(&mut command_encoder, "scene/blas_build");
+    let encode_profile = bevy_render::diagnostic::profile_scope("scene.blas_prepare_encode");
     command_encoder.build_acceleration_structures(&build_entries, &[]);
     span.end(&mut command_encoder);
+    drop(encode_profile);
+    let _submit_profile = bevy_render::diagnostic::profile_scope("scene.blas_prepare_submit");
     render_queue.submit([command_encoder.finish()]);
 }
 
@@ -360,6 +373,7 @@ pub fn publish_readiness(
 /// submission locks them in the opposite order. Run this bounded work alone
 /// in the render schedule, including against device-only asset uploads.
 pub fn compact_raytracing_blas(world: &mut bevy_ecs::world::World) {
+    let _profile = bevy_render::diagnostic::profile_scope("scene.blas_compact");
     world.resource_scope(
         |world, mut manager: bevy_ecs::change_detection::Mut<BlasManager>| {
             compact_ready_blas(&mut manager, world.resource::<RenderQueue>());
@@ -406,6 +420,10 @@ fn compact_ready_blas(blas_manager: &mut BlasManager, render_queue: &RenderQueue
             .compaction_queue
             .push_back((mesh, revision, vertex_count, true));
     }
+    // (this frame's builds join the queue for the next frame, their build
+    // submitted by then)
+    let arrivals = std::mem::take(&mut blas_manager.compaction_arrivals);
+    blas_manager.compaction_queue.extend(arrivals);
 }
 
 fn blas_size(

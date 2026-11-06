@@ -1023,13 +1023,18 @@ where
                 // alignment requirements
                 if let Some(size) = BufferSize::new((len as u64).next_multiple_of(slot_size)) {
                     // Write the data in.
-                    if let Some(mut buffer) = render_queue.write_buffer_with(
+                    let write_profile = crate::diagnostic::profile_scope("mesh.copy_write_buffer_with");
+                    let view = render_queue.write_buffer_with(
                         buffer,
                         allocated_range.allocation.offset as u64 * slot_size,
                         size,
-                    ) {
+                    );
+                    drop(write_profile);
+                    if let Some(mut buffer) = view {
                         let slice = buffer.slice(..len);
                         fill_data(slice);
+                        let _profile = crate::diagnostic::profile_scope("mesh.copy_view_drop");
+                        drop(buffer);
                     }
                 }
 
@@ -1067,6 +1072,92 @@ where
             }
         }
     }
+
+    /// As [`Self::copy_element_data`], a general slab's write staged through
+    /// `staged` (a slice of the belt's chunk and one copy command, the
+    /// frame's copies in one encoder) rather than a queue write of its own:
+    /// each of those allocates and maps a staging buffer, which for the
+    /// hundreds of skinned parts a frame cost more than the data.
+    pub fn copy_element_data_staged(
+        &mut self,
+        key: &I::Key,
+        len: usize,
+        fill_data: impl Fn(WriteOnly<[u8]>),
+        render_device: &RenderDevice,
+        staged: &mut StagedCopies<'_>,
+    ) {
+        let Some(slab_id) = self.key_to_slab.get(key) else {
+            error!("Use-after-free: attempted to copy element data for an unallocated key");
+            return;
+        };
+        if !matches!(self.slabs.get(slab_id), Some(Slab::General(_))) {
+            // (a large object's buffer is made with its data in place)
+            return self.copy_element_data(key, len, fill_data, render_device, staged.queue);
+        }
+        let Some(Slab::General(general_slab)) = self.slabs.get_mut(slab_id) else {
+            return;
+        };
+        let Some(buffer) = &general_slab.buffer else {
+            return;
+        };
+        // (a pending allocation, made this frame; or the key's resident one,
+        // kept for data of the same size: see `can_reuse_allocation`)
+        let pending = general_slab.pending_allocations.remove(key);
+        let Some(offset) = pending
+            .as_ref()
+            .or_else(|| general_slab.resident_allocations.get(key))
+            .map(|allocated| allocated.allocation.offset)
+        else {
+            return;
+        };
+        let slot_size = general_slab.element_layout.slot_size();
+        // (size rounded up to the slot size, as the queue write's is)
+        if let Some(size) = BufferSize::new((len as u64).next_multiple_of(slot_size)) {
+            let mut view =
+                staged
+                    .belt
+                    .write_buffer(staged.encoder, buffer, offset as u64 * slot_size, size);
+            fill_data(view.slice(..len));
+        }
+        if let Some(allocated_range) = pending {
+            general_slab
+                .resident_allocations
+                .insert(key.clone(), allocated_range);
+        }
+    }
+
+    /// Whether `key`'s resident general-slab allocation would hold
+    /// `data_byte_len` bytes of `layout` as a fresh allocation would (the same
+    /// slot count, the same layout), so new data can be written over it in
+    /// place instead of freeing and allocating again: a mesh changed every
+    /// frame (a skinned part posed again) then keeps its place in the slab.
+    pub fn can_reuse_allocation(&self, key: &I::Key, data_byte_len: u64, layout: &I::Layout) -> bool {
+        let Some(slab_id) = self.key_to_slab.get(key) else {
+            return false;
+        };
+        let Some(Slab::General(slab)) = self.slabs.get(slab_id) else {
+            return false;
+        };
+        if slab.element_layout != *layout || slab.pending_allocations.contains_key(key) {
+            return false;
+        }
+        let Some(allocated) = slab.resident_allocations.get(key) else {
+            return false;
+        };
+        let data_element_count = data_byte_len.div_ceil(layout.size()) as u32;
+        let data_slot_count = data_element_count.div_ceil(layout.elements_per_slot());
+        let padding = data_slot_count * layout.elements_per_slot() - data_element_count;
+        allocated.slot_count == data_slot_count && allocated.padding == padding
+    }
+}
+
+/// A frame's staged copies: the belt the data is written into and the
+/// encoder its copy commands go to (see
+/// [`SlabAllocator::copy_element_data_staged`]).
+pub struct StagedCopies<'a> {
+    pub belt: &'a mut wgpu::util::StagingBelt,
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub queue: &'a RenderQueue,
 }
 
 /// The results of [`GeneralSlab::grow_if_necessary`].

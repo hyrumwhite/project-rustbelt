@@ -399,6 +399,8 @@ pub fn prepare_assets<A: RenderAsset>(
     param: StaticSystemParam<<A as RenderAsset>::Param>,
     bpf: Res<RenderAssetBytesPerFrameLimiter>,
 ) {
+    // (the renderer's CPU profile: one scope per asset type, by its name)
+    let _profile = crate::diagnostic::profile_scope(core::any::type_name::<A>());
     let mut wrote_asset_count = 0;
 
     let mut param = param.into_inner();

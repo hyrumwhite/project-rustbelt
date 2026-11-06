@@ -298,6 +298,29 @@ So the capture line could not yet say what the render thread does in its 14.5 ms
 
 The shade's second ray (`CACHE_SHADE_SECOND_RAY`, `world_cache_update.wesl`): a cell whose direct sample found nothing this update (no sun, no emitter in reach) traces two cosine rays instead of one and takes their mean, so the sky's irradiance in a canyon's shade is estimated from two directions an update rather than one; the cost is a ray on the cells in shade only. The full table against `p3_final` (`p4_shade`): every boiling column within 0.003 at every spot, the cache pass 0.03 to 0.08 ms dearer (the passage the most, 1.23 to 1.31; the shaft's total 9.92 to 9.94). The harness cannot see what it is for, for the reason 2b's result gave (the sway keeps the cells warm and the viewer has no Banshee flight through shade), so it stays on behind its switch, `SOLARIK_CACHE_SHADE_SECOND_RAY=0`, as the user's A/B on the canyon's shaded walls, with 2b's. The two remaining Phase 4 items wait on the user: a fight capture with the new render-thread split, and the specular GI's doubling at b40's drop.
 
+### Phase 4, the fight (6 November, later): the render thread split, and three fixes in it
+
+The user's b30 beach fight (nine F9 captures, ticks 1226 to 2180, 73 to 79 frames/s) was render-thread bound: the thread 10.1 to 10.8 ms against a GPU of 8.2 to 9.8, every GPU pass at its median, and the capture's split named views 3.8 to 4.0 and prepare 3.8 to 4.3 (a quiet a10 1 and 2.5). So the lighting is not what a fight costs; the scene's CPU side is. The split was taken one level finer (`src/cpu_times.rs`: extract, assets with the BLAS inside, meshes, specialize, views, queue, resources with the scene bindings inside, batches, bind groups, graph), and the renderer's own CPU scopes, which nothing consumed, are now summed and logged with it (`BEVY_RENDER_PROFILE=1`, the `cpu scopes:` line, with the counters it keeps). A scripted b30 run (the game's own camera at the landing, the beach fight going on in front of it, 100 s with `HALO_RT_GPU_LOG=1`) reproduces the captures' thread at 9.8 to 10.4 ms, so the rest needed no captures.
+
+What the frame held, 170 to 210 skinned parts a frame (every marine's and Covenant's bending parts, posed again each frame the nodes move):
+
+| stretch | ms | what |
+|---|---|---|
+| assets | 3.1 to 3.5 | the mesh allocator freeing and allocating every posed part again (0.2) and copying its data in with one `write_buffer_with` an element, 635 a frame, each of which allocates and maps a staging buffer in wgpu (1.8 ms) besides the packing (0.5); the BLAS system 0.9 (the triangle edges of every part walked again for the light sampling's area, 0.4; its own submit 0.4) |
+| resources | 3.0 to 3.2 | the scene bindings 2.9: the dependencies observed over all 1180 instances (0.9, every frame, since a refit bumps the BLAS generation and a transform the instance inputs), the rows uploaded (1.0, 850 to 1010 geometry rows dirty a frame), the instances 0.35, the TLAS build and its submit |
+| graph | 2.3 to 2.6 | the render graph's encoding and submit |
+| main thread | 3.2 to 3.7 | the posing itself and the bridge |
+
+Done, each measured in the scripted run at a like number of parts:
+
+- The mesh allocator stages the frame's copies through a `StagingBelt` into one encoder and one submit (`copy_element_data_staged`, vendored `bevy_render`): the copies 2.55 to 1.0 ms (the packing 0.47, the submit 0.26).
+- A modified mesh whose data has the size and layout of its allocation keeps it and is written over in place (`can_reuse_allocation`, `mesh_reusable`; the allocator's own TODO): 168 of 172 parts a frame reuse, the free and the staging 0.2 to 0.02, and their rows' buffer offsets no longer change (geometry rows dirty 1010 to 850).
+- A deformable mesh keeps its first pose's triangle edges (`prepare_raytracing_blas`): 0.42 to 0.10.
+- The bridge writes an object node's transform only when it moved (`src/bridge.rs`): fewer changed instances for the binder, though most of the fight's 280 a frame do move.
+- Tried and reverted: the four prepare-time submits (mesh copies, BLAS builds, row uploads, TLAS build) collected into one before the graph. The bindings stretch fell 0.8 ms and the graph stretch rose 0.9: a submit's cost is what it carries (wgpu's tracking of the builds' resources), not the call.
+
+The render thread in the scripted fight: 9.8 to 10.4 ms before, 8.4 to 9.1 after (at 185 to 215 parts). Left in it, by size: the scene bindings (dependencies 0.86 over all instances each frame, the row upload 0.86, its TLAS submit), the graph 2.1 to 2.4, the main thread's posing 3.4, the BLAS submit 0.36 and the mesh copies' 0.26. The fight is no longer the frame at this spot (GPU 8.7 to 9.8), but a c20-sized fight would still be; the bindings' all-instance observe is the next thing to make incremental.
+
 ## Phase 5: paying for it
 
 Everything above is either free (1, 2a, 2b) or bounded (2c, 3, 4). If the interior total rises past the 0.3 ms rule, these pay it back in order: the cache search at 64 candidates (Phase 3), 16 DI tile candidates (Phase 3), and the world cache update soft cap (40000 cells a frame; check `HALO_RT_CACHE_LOG` for how often it binds).

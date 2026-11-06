@@ -12,9 +12,10 @@ use bevy_ecs::{
 };
 use bevy_log::warn;
 use bevy_mesh::Indices;
+use bevy_platform::collections::HashSet;
 use bevy_shape::{Aabb2d, BoundingVolume};
 use glam::Vec4;
-use wgpu::{BufferUsages, COPY_BUFFER_ALIGNMENT, DownlevelFlags};
+use wgpu::{BufferUsages, COPY_BUFFER_ALIGNMENT, CommandEncoderDescriptor, DownlevelFlags, util::StagingBelt};
 
 #[cfg(feature = "morph")]
 use bevy_mesh::morph::MorphAttributes;
@@ -26,7 +27,7 @@ use crate::{
     renderer::{RenderAdapter, RenderDevice, RenderQueue},
     slab_allocator::{
         Slab, SlabAllocationBufferSlice, SlabAllocator, SlabAllocatorSettings, SlabId, SlabItem,
-        SlabItemLayout,
+        SlabItemLayout, StagedCopies,
     },
 };
 
@@ -56,6 +57,11 @@ pub struct MeshAllocator {
     /// WebGL 2. On this platform, we must give each vertex array its own
     /// buffer, because we can't adjust the first vertex when we perform a draw.
     general_vertex_slabs_supported: bool,
+
+    /// The belt the frame's mesh data is staged through, its copies in one
+    /// encoder (see [`SlabAllocator::copy_element_data_staged`]); taken out
+    /// for the copies, so never `None` between frames.
+    staging_belt: Option<StagingBelt>,
 }
 
 /// Tunable parameters that customize the behavior of the allocator.
@@ -237,9 +243,12 @@ impl FromWorld for MeshAllocator {
         let mut slab_allocator = SlabAllocator::new();
         slab_allocator.extra_buffer_usages |= mesh_allocator_settings.extra_buffer_usages;
 
+        let staging_belt = StagingBelt::new(world.resource::<RenderDevice>().wgpu_device().clone(), 4 << 20);
+
         Self {
             slab_allocator,
             general_vertex_slabs_supported,
+            staging_belt: Some(staging_belt),
         }
     }
 }
@@ -263,13 +272,33 @@ pub fn allocate_and_free_meshes(
     {
         return;
     }
+    crate::diagnostic::profile_value("mesh.extracted", extracted_meshes.extracted.len() as f64, "count");
+    crate::diagnostic::profile_value("mesh.modified", extracted_meshes.modified.len() as f64, "count");
+    // Modified meshes whose data has the size and layout of their allocation
+    // keep it: their data is written over it below (a skinned part posed
+    // again each frame).
+    let reused: HashSet<AssetId<Mesh>> = extracted_meshes
+        .extracted
+        .iter()
+        .filter(|(mesh_id, mesh)| {
+            extracted_meshes.modified.contains(mesh_id)
+                && !extracted_meshes.removed.contains(mesh_id)
+                && mesh_allocator.mesh_reusable(mesh_id, mesh, &mut mesh_vertex_buffer_layouts, &render_device)
+        })
+        .map(|(mesh_id, _)| *mesh_id)
+        .collect();
+    crate::diagnostic::profile_value("mesh.reused", reused.len() as f64, "count");
     // Process removed or modified meshes.
-    mesh_allocator.free_meshes(&extracted_meshes);
+    let free_profile = crate::diagnostic::profile_scope("mesh.free");
+    mesh_allocator.free_meshes(&extracted_meshes, &reused);
+    drop(free_profile);
 
     // Process newly-added or modified meshes.
+    let _allocate_profile = crate::diagnostic::profile_scope("mesh.allocate");
     mesh_allocator.allocate_meshes(
         &mesh_allocator_settings,
         &extracted_meshes,
+        &reused,
         &mut mesh_vertex_buffer_layouts,
         &render_device,
         &render_queue,
@@ -427,17 +456,25 @@ impl MeshAllocator {
         &mut self,
         mesh_allocator_settings: &MeshAllocatorSettings,
         extracted_meshes: &ExtractedAssets<RenderMesh>,
+        reused: &HashSet<AssetId<Mesh>>,
         mesh_vertex_buffer_layouts: &mut MeshVertexBufferLayouts,
         render_device: &RenderDevice,
         render_queue: &RenderQueue,
     ) {
+        let stage_profile = crate::diagnostic::profile_scope("mesh.allocate_stage");
         let mut allocation_stage = self.slab_allocator.stage_allocation();
+        let mut vertex_bytes = 0u64;
 
         // Loop over each mesh that was extracted this frame.
         for (mesh_id, mesh) in &extracted_meshes.extracted {
             let vertex_buffer_size = mesh.get_vertex_buffer_size() as u64;
             if vertex_buffer_size == 0 {
                 warn!("Mesh {:?} contains no vertices.", mesh_id);
+                continue;
+            }
+            vertex_bytes += vertex_buffer_size;
+            if reused.contains(mesh_id) {
+                // (its allocation kept; the data is copied over it below)
                 continue;
             }
 
@@ -500,21 +537,41 @@ impl MeshAllocator {
             }
         }
 
-        // Perform growth.
-        allocation_stage.commit(render_device, render_queue);
+        drop(stage_profile);
+        crate::diagnostic::profile_value("mesh.vertex_kbytes", vertex_bytes as f64 / 1024.0, "count");
 
-        // Copy new mesh data in.
-        for (mesh_id, mesh) in &extracted_meshes.extracted {
-            let vertex_buffer_size = mesh.get_vertex_buffer_size() as u64;
-            if vertex_buffer_size == 0 {
-                continue;
+        // Perform growth.
+        let commit_profile = crate::diagnostic::profile_scope("mesh.allocate_commit");
+        allocation_stage.commit(render_device, render_queue);
+        drop(commit_profile);
+
+        // Copy new mesh data in: the frame's copies staged through the belt
+        // into one encoder, submitted here (before anything reads them; one
+        // submit for them all, deferred to the frame's other builds', cost
+        // more in the submit than it saved).
+        let _copy_profile = crate::diagnostic::profile_scope("mesh.allocate_copy");
+        let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("mesh_copies"),
+        });
+        let mut belt = self.staging_belt.take().expect("the mesh allocator's staging belt");
+        {
+            let mut staged = StagedCopies { belt: &mut belt, encoder: &mut encoder, queue: render_queue };
+            for (mesh_id, mesh) in &extracted_meshes.extracted {
+                let vertex_buffer_size = mesh.get_vertex_buffer_size() as u64;
+                if vertex_buffer_size == 0 {
+                    continue;
+                }
+                self.copy_mesh_metadata(mesh_id, mesh, render_device, &mut staged);
+                self.copy_mesh_vertex_data(mesh_id, mesh, render_device, &mut staged);
+                self.copy_mesh_index_data(mesh_id, mesh, render_device, &mut staged);
+                #[cfg(feature = "morph")]
+                self.copy_mesh_morph_target_data(mesh_id, mesh, render_device, &mut staged);
             }
-            self.copy_mesh_metadata(mesh_id, mesh, render_device, render_queue);
-            self.copy_mesh_vertex_data(mesh_id, mesh, render_device, render_queue);
-            self.copy_mesh_index_data(mesh_id, mesh, render_device, render_queue);
-            #[cfg(feature = "morph")]
-            self.copy_mesh_morph_target_data(mesh_id, mesh, render_device, render_queue);
         }
+        belt.finish_and_recall_on_submit(&encoder);
+        let _submit_profile = crate::diagnostic::profile_scope("mesh.allocate_submit");
+        render_queue.submit([encoder.finish()]);
+        self.staging_belt = Some(belt);
     }
 
     /// Copies vertex array data from a mesh into the appropriate spot in the
@@ -524,7 +581,7 @@ impl MeshAllocator {
         mesh_id: &AssetId<Mesh>,
         mesh: &Mesh,
         render_device: &RenderDevice,
-        render_queue: &RenderQueue,
+        staged: &mut StagedCopies<'_>,
     ) {
         const UV_RANGES_NONE: [Option<Aabb2d>; 2] = [None; 2];
         let metadata = match (mesh.final_aabb, mesh.final_uv_ranges) {
@@ -555,12 +612,12 @@ impl MeshAllocator {
             }
         };
         // Call the generic function.
-        self.copy_element_data(
+        self.copy_element_data_staged(
             &MeshAllocationKey::new(*mesh_id, ElementClass::Metadata),
             size_of::<MeshMetadata>(),
             |mut slice| slice.copy_from_slice(bytemuck::cast_slice(&[metadata])),
             render_device,
-            render_queue,
+            staged,
         );
     }
 
@@ -571,15 +628,18 @@ impl MeshAllocator {
         mesh_id: &AssetId<Mesh>,
         mesh: &Mesh,
         render_device: &RenderDevice,
-        render_queue: &RenderQueue,
+        staged: &mut StagedCopies<'_>,
     ) {
         // Call the generic function.
-        self.copy_element_data(
+        self.copy_element_data_staged(
             &MeshAllocationKey::new(*mesh_id, ElementClass::Vertex),
             mesh.get_vertex_buffer_size(),
-            |slice| mesh.write_packed_vertex_buffer_data(slice),
+            |slice| {
+                let _profile = crate::diagnostic::profile_scope("mesh.copy_pack_vertices");
+                mesh.write_packed_vertex_buffer_data(slice);
+            },
             render_device,
-            render_queue,
+            staged,
         );
     }
 
@@ -590,19 +650,19 @@ impl MeshAllocator {
         mesh_id: &AssetId<Mesh>,
         mesh: &Mesh,
         render_device: &RenderDevice,
-        render_queue: &RenderQueue,
+        staged: &mut StagedCopies<'_>,
     ) {
         let Some(index_data) = mesh.get_index_buffer_bytes() else {
             return;
         };
 
         // Call the generic function.
-        self.copy_element_data(
+        self.copy_element_data_staged(
             &MeshAllocationKey::new(*mesh_id, ElementClass::Index),
             index_data.len(),
             |mut slice| slice.copy_from_slice(index_data),
             render_device,
-            render_queue,
+            staged,
         );
     }
 
@@ -614,29 +674,89 @@ impl MeshAllocator {
         mesh_id: &AssetId<Mesh>,
         mesh: &Mesh,
         render_device: &RenderDevice,
-        render_queue: &RenderQueue,
+        staged: &mut StagedCopies<'_>,
     ) {
         let Some(morph_targets) = mesh.get_morph_targets() else {
             return;
         };
 
         // Call the generic function.
-        self.copy_element_data(
+        self.copy_element_data_staged(
             &MeshAllocationKey::new(*mesh_id, ElementClass::MorphTarget),
             size_of_val(morph_targets),
             |mut slice| slice.copy_from_slice(bytemuck::cast_slice(morph_targets)),
             render_device,
-            render_queue,
+            staged,
         );
+    }
+
+    /// Whether a modified mesh's new data fits its live allocations exactly
+    /// (every element class it has: the same slot count and layout as a fresh
+    /// allocation would take, and no class gained or lost), so it can keep
+    /// them and have the data written over (see
+    /// [`SlabAllocator::can_reuse_allocation`]).
+    fn mesh_reusable(
+        &self,
+        mesh_id: &AssetId<Mesh>,
+        mesh: &Mesh,
+        mesh_vertex_buffer_layouts: &mut MeshVertexBufferLayouts,
+        render_device: &RenderDevice,
+    ) -> bool {
+        if !self.general_vertex_slabs_supported {
+            return false;
+        }
+        #[cfg(feature = "morph")]
+        if mesh.get_morph_targets().is_some() || self.mesh_morph_target_slice(mesh_id).is_some() {
+            return false;
+        }
+        let vertex_buffer_size = mesh.get_vertex_buffer_size() as u64;
+        if vertex_buffer_size == 0 {
+            return false;
+        }
+        let has_metadata = mesh.final_aabb.is_some() || mesh.final_uv_ranges.iter().any(Option::is_some);
+        let metadata_key = MeshAllocationKey::new(*mesh_id, ElementClass::Metadata);
+        if has_metadata {
+            if crate::storage_buffers_are_unsupported(&render_device.limits())
+                || !self.slab_allocator.can_reuse_allocation(
+                    &metadata_key,
+                    size_of::<MeshMetadata>() as u64,
+                    &ElementLayout::metadata(true),
+                )
+            {
+                return false;
+            }
+        } else if self.mesh_metadata_slice(mesh_id).is_some() {
+            return false;
+        }
+        let vertex_element_layout = ElementLayout::vertex(mesh_vertex_buffer_layouts, mesh);
+        if !self.slab_allocator.can_reuse_allocation(
+            &MeshAllocationKey::new(*mesh_id, ElementClass::Vertex),
+            vertex_buffer_size,
+            &vertex_element_layout,
+        ) {
+            return false;
+        }
+        match (mesh.get_index_buffer_bytes(), ElementLayout::index(mesh)) {
+            (Some(index_buffer_data), Some(index_element_layout)) => self.slab_allocator.can_reuse_allocation(
+                &MeshAllocationKey::new(*mesh_id, ElementClass::Index),
+                index_buffer_data.len() as u64,
+                &index_element_layout,
+            ),
+            _ => self.mesh_index_slice(mesh_id).is_none(),
+        }
     }
 
     /// Frees allocations for meshes that were removed, modified, or re-extracted
     /// this frame.
-    fn free_meshes(&mut self, extracted_meshes: &ExtractedAssets<RenderMesh>) {
+    fn free_meshes(
+        &mut self,
+        extracted_meshes: &ExtractedAssets<RenderMesh>,
+        reused: &HashSet<AssetId<Mesh>>,
+    ) {
         let mut deallocation_stage = self.slab_allocator.stage_deallocation();
 
-        // TODO: Consider explicitly reusing allocations for changed meshes of
-        // the same size
+        // (a modified mesh in `reused` keeps its allocation: see
+        // `mesh_reusable`)
 
         // Free every mesh that `allocate_meshes` is about to reallocate. Despite
         // its name, `added` holds every mesh extracted this frame rather than only
@@ -650,6 +770,9 @@ impl MeshAllocator {
             .chain(extracted_meshes.added.iter());
 
         for mesh_id in meshes_to_free {
+            if reused.contains(mesh_id) {
+                continue;
+            }
             deallocation_stage.free(&MeshAllocationKey::new(*mesh_id, ElementClass::Metadata));
             deallocation_stage.free(&MeshAllocationKey::new(*mesh_id, ElementClass::Vertex));
             deallocation_stage.free(&MeshAllocationKey::new(*mesh_id, ElementClass::Index));
@@ -794,10 +917,11 @@ mod tests {
     ///
     /// Clearing `general_vertex_slabs_supported` sends every vertex array into a
     /// slab of its own.
-    fn mesh_allocator(general_vertex_slabs_supported: bool) -> MeshAllocator {
+    fn mesh_allocator(general_vertex_slabs_supported: bool, render_device: &RenderDevice) -> MeshAllocator {
         MeshAllocator {
             slab_allocator: SlabAllocator::new(),
             general_vertex_slabs_supported,
+            staging_belt: Some(StagingBelt::new(render_device.wgpu_device().clone(), 4 << 20)),
         }
     }
 
@@ -863,7 +987,7 @@ mod tests {
         let (render_device, render_queue) = create_dummy_device();
         let settings = MeshAllocatorSettings::default();
         let mut mesh_vertex_buffer_layouts = MeshVertexBufferLayouts::default();
-        let mut mesh_allocator = mesh_allocator(true);
+        let mut mesh_allocator = mesh_allocator(true, &render_device);
 
         let mesh_id = mesh_id(1);
         let extracted_meshes = extracted_mesh(mesh_id, test_mesh());
@@ -871,6 +995,7 @@ mod tests {
         mesh_allocator.allocate_meshes(
             &settings,
             &extracted_meshes,
+            &HashSet::default(),
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
@@ -879,7 +1004,7 @@ mod tests {
 
         // Being present in `added` alone must be enough to release the previous
         // allocation.
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
 
         assert!(
             mesh_allocator.key_to_slab.is_empty(),
@@ -898,7 +1023,7 @@ mod tests {
         let (render_device, render_queue) = create_dummy_device();
         let settings = MeshAllocatorSettings::default();
         let mut mesh_vertex_buffer_layouts = MeshVertexBufferLayouts::default();
-        let mut mesh_allocator = mesh_allocator(true);
+        let mut mesh_allocator = mesh_allocator(true, &render_device);
 
         let mesh_id = mesh_id(1);
         mesh_allocator.allocate_meshes(
@@ -912,7 +1037,7 @@ mod tests {
 
         let mut extracted_meshes = ExtractedAssets::<RenderMesh>::default();
         extracted_meshes.modified.insert(mesh_id);
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
 
         assert!(
             mesh_allocator.key_to_slab.is_empty(),
@@ -928,13 +1053,14 @@ mod tests {
         let (render_device, render_queue) = create_dummy_device();
         let settings = MeshAllocatorSettings::default();
         let mut mesh_vertex_buffer_layouts = MeshVertexBufferLayouts::default();
-        let mut mesh_allocator = mesh_allocator(true);
+        let mut mesh_allocator = mesh_allocator(true, &render_device);
 
         let mesh_id = mesh_id(1);
         let extracted_meshes = extracted_mesh(mesh_id, full_mesh());
         mesh_allocator.allocate_meshes(
             &settings,
             &extracted_meshes,
+            &HashSet::default(),
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
@@ -962,7 +1088,7 @@ mod tests {
             ElementClass::MorphTarget
         ));
 
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
 
         assert!(
             mesh_allocator.key_to_slab.is_empty(),
@@ -978,7 +1104,7 @@ mod tests {
         let (render_device, render_queue) = create_dummy_device();
         let settings = MeshAllocatorSettings::default();
         let mut mesh_vertex_buffer_layouts = MeshVertexBufferLayouts::default();
-        let mut mesh_allocator = mesh_allocator(true);
+        let mut mesh_allocator = mesh_allocator(true, &render_device);
 
         let mesh_id = mesh_id(1);
         mesh_allocator.allocate_meshes(
@@ -996,10 +1122,11 @@ mod tests {
 
         // The same ID comes back as a bare vertex-only mesh.
         let extracted_meshes = extracted_mesh(mesh_id, test_mesh());
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
         mesh_allocator.allocate_meshes(
             &settings,
             &extracted_meshes,
+            &HashSet::default(),
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
@@ -1032,7 +1159,7 @@ mod tests {
         let (render_device, render_queue) = create_dummy_device();
         let settings = MeshAllocatorSettings::default();
         let mut mesh_vertex_buffer_layouts = MeshVertexBufferLayouts::default();
-        let mut mesh_allocator = mesh_allocator(true);
+        let mut mesh_allocator = mesh_allocator(true, &render_device);
 
         let mesh_id = mesh_id(1);
         mesh_allocator.allocate_meshes(
@@ -1049,10 +1176,11 @@ mod tests {
         // Adding a normal attribute widens the vertex, which needs a slab with a
         // different element layout.
         let extracted_meshes = extracted_mesh(mesh_id, wider_vertex_mesh());
-        mesh_allocator.free_meshes(&extracted_meshes);
+        mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
         mesh_allocator.allocate_meshes(
             &settings,
             &extracted_meshes,
+            &HashSet::default(),
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
@@ -1111,10 +1239,11 @@ mod tests {
         let mut baseline = None;
         for _ in 0..rounds {
             let extracted_meshes = build(mesh_id, build_mesh());
-            mesh_allocator.free_meshes(&extracted_meshes);
+            mesh_allocator.free_meshes(&extracted_meshes, &HashSet::default());
             mesh_allocator.allocate_meshes(
                 &settings,
                 &extracted_meshes,
+                &HashSet::default(),
                 &mut mesh_vertex_buffer_layouts,
                 &render_device,
                 &render_queue,

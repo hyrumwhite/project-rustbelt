@@ -31,7 +31,7 @@ pub use types::{RaytracingMask, RaytracingMesh3d};
 
 use crate::SolarikPlugins;
 use bevy_app::{App, Plugin};
-use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_render::{
     ExtractSchedule, GpuResourceAppExt, Render, RenderApp, RenderSystems,
     extract_resource::ExtractResourcePlugin,
@@ -44,7 +44,15 @@ use bevy_render::{
     renderer::RenderDevice,
 };
 use binder::prepare_raytracing_scene_bindings;
-use blas::{BlasManager, compact_raytracing_blas, prepare_raytracing_blas};
+use blas::BlasManager;
+// (public, with the set below: the game's cpu_times marks the BLAS builds' and
+// the scene bindings' time)
+pub use blas::{compact_raytracing_blas, prepare_raytracing_blas};
+
+/// The set `prepare_raytracing_scene_bindings` runs in (the TLAS's instances,
+/// the materials, the light lists and the bindings), for ordering against it.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PrepareSceneBindings;
 pub use blas::SolarikDeformableMeshes;
 use extract::{StandardMaterialAssets, extract_raytracing_scene};
 use tracing::warn;
@@ -153,6 +161,7 @@ impl Plugin for RaytracingScenePlugin {
                         .after(prepare_raytracing_blas),
                     prepare_raytracing_scene_bindings
                         .in_set(RenderSystems::PrepareResources)
+                        .in_set(PrepareSceneBindings)
                         .after(crate::filtered_canopy::PrepareCanopy),
                     blas::publish_readiness
                         .in_set(RenderSystems::PrepareResources)

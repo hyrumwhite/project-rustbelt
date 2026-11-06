@@ -834,7 +834,13 @@ fn sync_objects(
             if let Some(entity) = entity
                 && let Ok(mut transform) = transforms.get_mut(*entity)
             {
-                *transform = Transform::from_matrix(matrix);
+                // (written only when it moved: a write marks the transform
+                // changed, and every changed instance is a row the scene
+                // uploads again and a root the binder revisits each frame)
+                let moved = Transform::from_matrix(matrix);
+                if *transform != moved {
+                    *transform = moved;
+                }
             }
         }
         // the rays' copies of the bending parts, skinned again when the

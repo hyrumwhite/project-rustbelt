@@ -16,7 +16,8 @@ b30_passage  b30 0 -6.35,26.32,13.62,-88.4,28.1     1
 b30_beach    b30 0 -50.0,8.4,5.2,180,-12            1
 # (the canyon at a Banshee's pace: 20 m each way in 120 frames, about 50 m/s)
 b40_canyon_fast b40 2 277.89,-649.78,63.10,-80.3,22.2 20
-# (a flight: 100 m each way along the ground in 600 frames, 31 m/s mid-sweep,
-# the sixth column the sweep's period; the mid-sweep spot is reached fresh
-# each time, 10 s after its last visit, its cache cells long dead)
-b40_canyon_flight b40 2 277.89,-649.78,63.10,-80.3,22.2 100 600
+# (a flight, the sixth column the sway's period, e.g. 100 m each way along
+# the ground in 600 frames: the spot is reached again 10 s after its last
+# visit, its cache cells long dead. None yet: the dolly moves along the view,
+# and from the canyon spot, which looks at the wall, 100 m ends inside it;
+# a flight needs a path chosen in the open, the user's Banshee run.)

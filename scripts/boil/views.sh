@@ -25,14 +25,16 @@ label=${1:?label}; spot=${2:?spot}; shift 2
 views=${@:-VISUALIZE_DI_PICK VISUALIZE_CACHE_AGE VISUALIZE_CELL_LEAK VISUALIZE_CELL_LIGHTS}
 exe="$repo/target/release/halo_rt.exe"
 export HALO_MAPS="${HALO_MAPS:-C:\\Users\\hyrum\\Downloads\\halo-windows-release\\maps}" HALO_RT_NO_DLSS=1
-read -r name map bsp cam dolly < <(grep -v '^#' "$here/spots.txt" | grep -E "^$spot\b")
+read -r name map bsp cam dolly period < <(grep -v '^#' "$here/spots.txt" | grep -E "^$spot\b")
+# (a spot with a sway period of its own: a level flight, see run.sh)
+if [ -n "${period:-}" ]; then export HALO_RT_DOLLY_PERIOD=$period HALO_RT_DOLLY_LEVEL=1; motion_at=$((9000 + period / 4)); else motion_at=9030; fi
 [ -z "${name:-}" ] && { echo "no spot $spot in spots.txt"; exit 1; }
 out="$here/out/$label/$spot/views"; mkdir -p "$out"
 for view in $views; do
   SOLARIK_SHADER_DEFS="$view,${EXTRA_DEFS:-}" timeout 600 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --screenshot "$out/${view#VISUALIZE_}_still.png" --screenshot-after 9000 > "$out/${view#VISUALIZE_}_still.log" 2>&1
   python "$here/view_shares.py" "$out/${view#VISUALIZE_}_still.png"
   if [ "${dolly:-0}" != "0" ]; then
-    SOLARIK_SHADER_DEFS="$view,${EXTRA_DEFS:-}" HALO_RT_DOLLY_DURING=1 timeout 600 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --dolly "$dolly" --screenshot "$out/${view#VISUALIZE_}_motion.png" --screenshot-after 9030 > "$out/${view#VISUALIZE_}_motion.log" 2>&1
+    SOLARIK_SHADER_DEFS="$view,${EXTRA_DEFS:-}" HALO_RT_DOLLY_DURING=1 timeout 600 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --dolly "$dolly" --screenshot "$out/${view#VISUALIZE_}_motion.png" --screenshot-after $motion_at > "$out/${view#VISUALIZE_}_motion.log" 2>&1
   fi
 done
 echo "views: $out"

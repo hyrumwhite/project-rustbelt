@@ -1184,6 +1184,11 @@ pub fn init_solari_lighting_pipelines(
             ("GI_CONFIDENCE_CAP", "SOLARIK_GI_CONFIDENCE_CAP", 8),
             ("CACHE_TILE_CANDIDATES", "SOLARIK_CACHE_TILE_CANDIDATES", 128),
             ("GI_ADAPTIVE_CONFIDENCE", "SOLARIK_GI_ADAPTIVE_CONFIDENCE", 4),
+            // (the roughness in hundredths above which specular GI reuses the
+            // diffuse GI reservoir instead of tracing, and a glossy path ends;
+            // 40 until 6 November: at 30 the harness pictures are the same and
+            // a smooth-floored b40 corridor 0.8 ms cheaper, docs/boiling-plan.md)
+            ("SPECULAR_REUSE_ROUGHNESS", "SOLARIK_SPECULAR_REUSE_ROUGHNESS", 30),
         ] {
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).filter(|&v: &u32| v > 0).unwrap_or(default);
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));

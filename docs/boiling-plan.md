@@ -321,6 +321,28 @@ Done, each measured in the scripted run at a like number of parts:
 
 The render thread in the scripted fight: 9.8 to 10.4 ms before, 8.4 to 9.1 after (at 185 to 215 parts). Left in it, by size: the scene bindings (dependencies 0.86 over all instances each frame, the row upload 0.86, its TLAS submit), the graph 2.1 to 2.4, the main thread's posing 3.4, the BLAS submit 0.36 and the mesh copies' 0.26. The fight is no longer the frame at this spot (GPU 8.7 to 9.8), but a c20-sized fight would still be; the bindings' all-instance observe is the next thing to make incremental.
 
+### Phase 4, the b40 corridor's specular GI (6 November, later)
+
+The 3 November b40 capture with specular GI at 2.8 ms (tick 2394, camera 46.06, 27.58, 48.62, 178.8, -12.1) is not the Pelican drop but the corridor after it, a Ghost and a plasma sword on a wide smooth metal floor. A scripted b40 run with the camera detached there (`game.sh`, `--camera` with `--opence`) reproduces it from the first frames and holds it: specular 2.95 to 3.07 ms, direct 3.0, the GPU 11.6 to 12.2 against the harness's b40 spots' 8.7 to 9.9. It is the view, not a transient: the floor fills half the picture, its roughness is under the reuse threshold of 0.4, so every one of its pixels traces a glossy path (a bounce to the far wall, a light sample and its shadow ray, the cache at the rough hit), where at the harness spots most pixels are rough and reuse the diffuse GI's reservoir instead.
+
+The threshold is now a knob (`SOLARIK_SPECULAR_REUSE_ROUGHNESS`, hundredths, 40 until now; `tuning.wesl` as the Phase 3 ones), and at that camera:
+
+| reuse roughness | specular GI ms | GPU ms | picture (floor region mean) |
+|---|---|---|---|
+| 0.4 (the default until now) | 3.05 | 12.0 | 55.3 |
+| 0.3 | 2.25 | 11.2 | 56.5 |
+| 0.2 | 1.74 | 10.6 | 56.6 |
+
+So the floor's roughness lies between 0.2 and 0.4, and its traced reflection is not visible in the picture at any of the three (the stacked crops in the scratchpad: the same floor, the reused GI 2% brighter). The harness at the two spots with the most mid-rough metal (`spec30`, `spec20` against `p3_final`):
+
+| | specular GI ms, shaft / passage | GPU ms | boiling columns | still mean, shaft / passage | pixels differing from 0.4 by more than 16/255 |
+|---|---|---|---|---|---|
+| 0.4 | 1.37 / 1.74 | 9.92 / 8.99 | | 33.87 / 17.51 | |
+| 0.3 | 1.01 / 0.73 | 9.54 / 8.08 | all within 0.002 | 33.95 / 17.50 | |
+| 0.2 | 0.92 / 0.51 | 9.43 / 7.82 | all within 0.002 | 33.93 / 17.51 | 0.1% / 0.03% |
+
+The glossy paths traced on surfaces of roughness 0.2 to 0.4 give the picture nothing the diffuse GI's reservoir does not at these spots (the difference maps show the shaft's far strip edge and nothing in the passage), for 0.4 to 1.3 ms a frame. The default is now 0.3, the conservative half (`SOLARIK_SPECULAR_REUSE_ROUGHNESS=40` is the old look, `=20` the rest of the saving), the user's A/B on Covenant and vehicle metal to settle it; the gate here is the look, not the boiling, which did not move.
+
 ## Phase 5: paying for it
 
 Everything above is either free (1, 2a, 2b) or bounded (2c, 3, 4). If the interior total rises past the 0.3 ms rule, these pay it back in order: the cache search at 64 candidates (Phase 3), 16 DI tile candidates (Phase 3), and the world cache update soft cap (40000 cells a frame; check `HALO_RT_CACHE_LOG` for how often it binds).

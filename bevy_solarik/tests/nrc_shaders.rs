@@ -17,6 +17,7 @@ fn base_defs() -> Vec<ShaderDefVal> {
         ShaderDefVal::UInt("GI_CONFIDENCE_CAP".into(), 8),
         ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
         ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
+        ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
         "BINDLESS_SURFACE_DETAIL".into(),
         "GI_ADAPTIVE_SPATIAL".into(),
         "CELL_LOOKUP_NEIGHBOURS".into(),

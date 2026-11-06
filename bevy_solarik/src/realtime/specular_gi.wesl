@@ -70,6 +70,7 @@ import bevy_solarik::realtime::realtime_bindings::gbuffer;
 import bevy_solarik::realtime::realtime_bindings::depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::constants;
+import bevy_solarik::realtime::tuning::SPECULAR_REUSE_ROUGHNESS;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::realtime_bindings::diffuse_albedo;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::realtime_bindings::specular_albedo;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::realtime_bindings::normal_roughness;
@@ -89,7 +90,10 @@ enable wgpu_ray_query;
 
 
 
-const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = 0.4;
+// (a tuning knob from the environment, SOLARIK_SPECULAR_REUSE_ROUGHNESS in
+// hundredths, 30 by default: above it a surface reuses the diffuse GI's
+// reservoir instead of tracing a glossy path, and a glossy path ends at it)
+const DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD: f32 = SPECULAR_REUSE_ROUGHNESS;
 const SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD: f32 = 0.0225;
 const BLURRY_LEAF_ROUGHNESS: f32 = 0.05;
 

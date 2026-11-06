@@ -17,6 +17,7 @@ fn diagnostic_views_compose() {
         ShaderDefVal::UInt("GI_CONFIDENCE_CAP".into(), 8),
         ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
         ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
+        ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
         "BINDLESS_SURFACE_DETAIL".into(),
         "DI_CELL_LIGHTS".into(),
         "DI_SLOT_VISIBILITY_PRIOR".into(),

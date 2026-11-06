@@ -62,6 +62,23 @@ import bevy_solarik::realtime::specular_gi::DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_write_query_path_info;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_read_query_path_info;
 @if((NRC)) import bevy_solarik::realtime::nrc::nrc_read_query_radiance;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_pbr::render::utils::rand_u;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::brdf::evaluate_brdf;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::brdf::evaluate_and_sample_brdf;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::sampling::LightSample;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::sampling::resolve_light_sample;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::sampling::calculate_resolved_light_contribution;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::sampling::trace_light_transmission_with_support;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::thin_glass::offset_thin_glass_ray;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::realtime::world_cache_query::find_world_cache_cell;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::realtime::world_cache_query::world_cache_slot_probabilities;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::realtime::light_ris::sample_light_ris;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::realtime::nrc::NrcPathState;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::realtime::nrc::nrc_evaluate_termination_heuristic;
 
 // https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf
 enable wgpu_ray_query;
@@ -89,6 +106,13 @@ const SKY_SAMPLE_DISTANCE = 10000.0;
 var<private> nrc_query_index: u32 = 0xffffffffu;
 @if((NRC))
 var<private> nrc_query_prefix: u32 = 0u;
+// (NRC_QUERY_AT_SPREAD: the light tile the extra bounce's resampled NEE
+// draws from, this pixel's 8x8 workgroup, as the training pass's tile; and
+// whether this pixel took the extra bounce, for VISUALIZE_NRC_BOUNCED.)
+@if((NRC && NRC_QUERY_AT_SPREAD))
+var<private> nrc_light_tile: vec2<u32> = vec2(0u);
+@if((NRC && NRC_QUERY_AT_SPREAD))
+var<private> nrc_bounced: bool = false;
 
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -117,6 +141,9 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 @if(VISUALIZE_CACHE_AGE) {
     world_cache_debug_samples = -2.0;
+}
+@if(NRC && NRC_QUERY_AT_SPREAD) {
+    nrc_light_tile = global_id.xy / 8u;
 }
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, &rng);
 // (SOLARIK_SHADER_DEFS=VISUALIZE_CACHE_AGE, with HALO_RT_NO_DLSS=1: the
@@ -149,6 +176,19 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // The sample's radiance is not known until QueryAndTrain has run: keep
     // the initial reservoir, nrc_resolve_and_temporal finishes it.
     write_nrc_query_path_info(pixel_index);
+// (SOLARIK_SHADER_DEFS=NRC_QUERY_AT_SPREAD,VISUALIZE_NRC_BOUNCED, with
+// HALO_RT_NO_DLSS=1: magenta where the sample took the extra bounce, green
+// where it queried at the sample point, black for no query (the sky, an
+// emitter, a mirror receiver). The later passes leave the view.)
+@if(NRC_QUERY_AT_SPREAD && VISUALIZE_NRC_BOUNCED) {
+    var bounce_colour = vec3(0.0);
+    if nrc_bounced {
+        bounce_colour = vec3(1.0, 0.0, 1.0);
+    } else if nrc_query_index != 0xffffffffu {
+        bounce_colour = vec3(0.0, 1.0, 0.0);
+    }
+    textureStore(view_output, global_id.xy, vec4(bounce_colour, 1.0));
+}
     gi_reservoirs_b[pixel_index] = initial_reservoir;
     return;
 }
@@ -195,16 +235,27 @@ fn nrc_resolve_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>)
 @if(NRC_CONSTANT_ANSWER) {
         answer = nrc_decode_log_luv_hdr(info.prefix_throughput) * 0.1 / view.exposure;
 }
-        reservoir.radiance = answer;
+        // Added, not replacing: a query at the sample point itself leaves
+        // the initial radiance at zero (the answer is all of it), while
+        // NRC_QUERY_AT_SPREAD's extra bounce leaves the sample point's direct
+        // light there (and the answer is what the bounce's hit sends back).
+        reservoir.radiance += answer;
     }
-// (SOLARIK_SHADER_DEFS=VISUALIZE_NRC: the cache's answers at the diffuse
-// bounce's sample points, black where the pixel made no query: the sky, an
-// emitter, the world cache during NRC's warm-up. spatial_and_shade leaves
-// the view.)
-@if(VISUALIZE_NRC) {
-    var shown = answer * view.exposure;
+// (SOLARIK_SHADER_DEFS=VISUALIZE_NRC: the diffuse bounce's sample points'
+// radiance as the reservoir now holds it, the total: the cache's answer plus
+// what the initial pass gathered itself (nothing for a query at the sample
+// point; the direct light there, or the sky, after NRC_QUERY_AT_SPREAD's
+// extra bounce; a lommel surface's own shading). Black where there was
+// nothing: the sky, an emitter. During NRC's warm-up the world cache's
+// value. spatial_and_shade leaves the view.)
+@if(VISUALIZE_NRC && !(NRC_QUERY_AT_SPREAD && VISUALIZE_NRC_BOUNCED)) {
+    var shown = reservoir.radiance * view.exposure;
 @if(VISUALIZE_NRC_GAIN) { shown *= 32.0; } // (dim interiors: the answers are a few percent)
     textureStore(view_output, global_id.xy, vec4(shown, 1.0));
+    gi_reservoirs_b[pixel_index] = reservoir;
+    return;
+}
+@if(NRC_QUERY_AT_SPREAD && VISUALIZE_NRC_BOUNCED) {
     gi_reservoirs_b[pixel_index] = reservoir;
     return;
 }
@@ -250,6 +301,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
 }
 @if((NRC && VISUALIZE_NRC) || VISUALIZE_GI_INITIAL) {
+    return;
+}
+@if(NRC && NRC_QUERY_AT_SPREAD && VISUALIZE_NRC_BOUNCED) {
     return;
 }
 
@@ -347,7 +401,16 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     // REGIONAL_HISTORY the support stays the whole scene, as set above: the
     // network's answer depends on everything it has seen.)
     if nrc_constants.pad0 != 0u {
+@if(NRC_QUERY_AT_SPREAD) {
+        // NVIDIA's query rule: at the sample point only once the path's
+        // footprint there is wide enough, else one bounce more; the radiance
+        // then holds what that bounce gathered itself (scene units).
+        reservoir.radiance = nrc_query_at_spread(world_position, world_normal, sample_point,
+            ray_direction, ray.t, direction_sample.inverse_pdf, rng);
+}
+@if(!(NRC_QUERY_AT_SPREAD)) {
         write_nrc_query(sample_point, -ray_direction);
+}
         reservoir.unbiased_contribution_weight = direction_sample.inverse_pdf;
         return reservoir;
     }
@@ -383,6 +446,15 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 // linear roughness, bevy_pbr's albedo and F0.
 @if((NRC))
 fn write_nrc_query(sample_point: ResolvedRayHitFull, wo: vec3<f32>) {
+    // (the path's own throughput is 1: the reservoir weights the connection
+    // to the receiver itself)
+    write_nrc_query_with_throughput(sample_point, wo, vec3(1.0));
+}
+
+// The query record for a surface seen from `wo`, at the end of a path prefix
+// whose throughput (from the sample point on) is `throughput`.
+@if((NRC))
+fn write_nrc_query_with_throughput(sample_point: ResolvedRayHitFull, wo: vec3<f32>, throughput: vec3<f32>) {
     let material = sample_point.material;
     var normal = sample_point.world_normal;
     if material.diffuse_transmission > 0.0 && dot(normal, wo) < 0.0 {
@@ -400,10 +472,99 @@ fn write_nrc_query(sample_point: ResolvedRayHitFull, wo: vec3<f32>) {
     params.specular = specular;
     nrc_query_index = nrc_increment_counter(NRC_COUNTER_QUERIES);
     nrc_write_radiance_params(nrc_query_index, params);
-    // learn_irradiance: the answer is radiance / (albedo + F0), so that is the
-    // prefix throughput (the path's own throughput is 1: the reservoir
-    // weights the connection to the receiver itself).
-    nrc_query_prefix = nrc_encode_log_luv_hdr(max(albedo + specular, vec3(0.0)));
+    // learn_irradiance: the answer is radiance / (albedo + F0), so that times
+    // the path's throughput is the prefix throughput.
+    nrc_query_prefix = nrc_encode_log_luv_hdr(max(throughput * (albedo + specular), vec3(0.0)));
+}
+
+// NRC_QUERY_AT_SPREAD: NrcUpdateOnHit in query mode with its termination
+// heuristic (vendor/NRC/Include/Nrc.hlsli). The cache's answer at a point is
+// a blur over about the cache's resolution there; asked with a footprint
+// smaller than that (a sample point a metre or two from the receiver) it
+// shows as blotches. So the path's spread is computed as the training pass
+// computes it (the primary vertex is the receiver seen from the camera, the
+// first bounce the sample point), and only once it has passed
+// termination_heuristic_threshold times the primary spread is the query made
+// at the sample point. Otherwise one more bounce, and at most one: the
+// sample point's direct light by the cache's resampled light sampler and the
+// sun's own sample (as the training pass takes its NEE), a BRDF-sampled ray,
+// and the query at its hit (no emission added there: the resampled NEE
+// covers every emissive light, as the training's ris_nee). Returns the
+// radiance the bounce gathered itself (scene units), zero when the query is
+// made at the sample point. The extra bounce is not taken (the query made at
+// the sample point) for a mirror or a leaf (the training records no mirror
+// vertex, and takes a leaf's NEE with the uniform sampler, whose MIS this has
+// no pair for), without a cache cell (no light slots), or when the BRDF
+// sample fails.
+@if((NRC && NRC_QUERY_AT_SPREAD))
+fn nrc_query_at_spread(world_position: vec3<f32>, world_normal: vec3<f32>, sample_point: ResolvedRayHitFull,
+    ray_direction: vec3<f32>, sample_distance: f32, inverse_pdf: f32, rng: ptr<function, u32>) -> vec3<f32> {
+    let wo = -ray_direction;
+    let material = sample_point.material;
+    let normal = sample_point.world_normal;
+
+    // The spread: the primary footprint from the camera distance and cos
+    // gamma, then the growth to the sample point from the sample's pdf.
+    var state = NrcPathState(0u, 0xffffffffu, 0.0, 0.0, 0u, 0.0);
+    let primary_distance = distance(view.world_position, world_position);
+    let primary_cos_gamma = abs(dot(normalize(view.world_position - world_position), world_normal));
+    state.primary_spread_radius = primary_distance / sqrt(primary_cos_gamma / (4.0 * PI));
+    let cos_gamma = abs(dot(wo, normal));
+    // (cos_gamma times the pdf, the inverse of the sample's inverse pdf)
+    state.cumul_spread_radius = sample_distance / sqrt(cos_gamma / inverse_pdf);
+
+    let delta = material.roughness <= MIRROR_ROUGHNESS_THRESHOLD && material.metallic > 0.9999;
+    if nrc_evaluate_termination_heuristic(state, nrc_constants.termination_heuristic_threshold)
+        || delta || material.diffuse_transmission > 0.0 {
+        write_nrc_query(sample_point, wo);
+        return vec3(0.0);
+    }
+    let cell = find_world_cache_cell(sample_point.world_position, normal, view.world_position, rng);
+    if cell < 0 {
+        write_nrc_query(sample_point, wo);
+        return vec3(0.0);
+    }
+    let next = evaluate_and_sample_brdf(wo, normal, material, rng);
+    if next.pdf <= 0.0 {
+        write_nrc_query(sample_point, wo);
+        return vec3(0.0);
+    }
+    nrc_bounced = true;
+
+    // NEE at the sample point, as the training pass's (the slots only read).
+    var radiance = vec3(0.0);
+    if arrayLength(&light_sources) > 0u {
+        let slots = world_cache_light_slots[cell];
+        let slot_probabilities = world_cache_slot_probabilities(slots);
+        let light = sample_light_ris(sample_point.world_position, normal, nrc_light_tile,
+            slots, slot_probabilities, max(nrc_constants.pad2, 1u), rng);
+        if any(light.radiance > vec3(0.0)) {
+            radiance += light.radiance * evaluate_brdf(wo, light.wi, normal, material);
+        }
+        // The sun by itself (the tiles hold none).
+        if arrayLength(&directional_lights) > 0u {
+            let light_id = directional_lights[0].light_source_index;
+            let resolved = resolve_light_sample(LightSample(light_id << 16u, rand_u(rng)), light_sources[light_id]);
+            let sun = calculate_resolved_light_contribution(resolved, sample_point.world_position, normal);
+            let sun_radiance = sun.radiance * sun.inverse_pdf;
+            if any(sun_radiance > vec3(0.0)) && dot(sun.wi, normal) > 0.0 {
+                let shadow = trace_light_transmission_with_support(sample_point.world_position + (normal * RAY_T_MIN), resolved.world_position);
+                radiance += sun_radiance * shadow.energy.rgb * evaluate_brdf(wo, sun.wi, normal, material);
+            }
+        }
+    }
+
+    // The bounce.
+    let wi = next.wi;
+    let origin = offset_thin_glass_ray(sample_point.world_position, sample_point.geometric_world_normal, wi, RAY_T_MIN);
+    let bounce = trace_ray(origin, wi, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
+    if scene_hit_is_miss(bounce) {
+        // The sky ends the path: no query.
+        return radiance + sample_sky(wi) * next.throughput;
+    }
+    let hit = resolve_ray_hit_full(bounce);
+    write_nrc_query_with_throughput(hit, -wi, next.throughput);
+    return radiance;
 }
 
 // NrcWriteFinalPathInfo in query mode: one query path per pixel (one sample

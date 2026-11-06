@@ -45,6 +45,16 @@ fn nrc_shaders_compile() {
         &["WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION"],
         &["RAY_MATERIAL_FOOTPRINTS"],
         &["VISUALIZE_NRC"],
+        &["NRC_QUERY_AT_SPREAD"],
+        &["NRC_QUERY_AT_SPREAD", "VISUALIZE_NRC", "VISUALIZE_NRC_GAIN"],
+        &["NRC_QUERY_AT_SPREAD", "VISUALIZE_NRC", "VISUALIZE_NRC_BOUNCED"],
+        &[
+            "NRC_QUERY_AT_SPREAD",
+            "REGIONAL_HISTORY",
+            "FOLIAGE_TRANSMISSION",
+            "RAY_MATERIAL_FOOTPRINTS",
+            "DLSS_RR_GUIDE_BUFFERS",
+        ],
         &[
             "REGIONAL_HISTORY",
             "FOLIAGE_TRANSMISSION",

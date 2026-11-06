@@ -285,7 +285,10 @@ pub fn init_nrc(
         // (the shaders hand NRC exposed radiance, which averages 0.1 to 1)
         max_expected_average_radiance_value: 1.0,
         train_the_cache: true,
-        termination_heuristic_threshold: 0.1,
+        // (the query side's heuristic, used by restir_gi's
+        // NRC_QUERY_AT_SPREAD: query once the path's spread has passed this
+        // times the primary vertex's, else bounce once more)
+        termination_heuristic_threshold: env_or("SOLARIK_NRC_QUERY_THRESHOLD", 0.1f32),
         training_termination_heuristic_threshold: 0.1,
         proportion_unbiased: 1.0 / 16.0,
         // (the training knobs, from the environment while they are tuned;
@@ -300,11 +303,12 @@ pub fn init_nrc(
     };
     info!(
         target: "nrc",
-        "NRC training: {} iterations, learning rate {}, self-training attenuation {}, primary segments {}, {light_samples} light sample(s) a vertex, {tile_candidates} tile candidates",
+        "NRC training: {} iterations, learning rate {}, self-training attenuation {}, primary segments {}, {light_samples} light sample(s) a vertex, {tile_candidates} tile candidates, query threshold {}",
         frame_settings.num_training_iterations,
         frame_settings.learning_rate,
         frame_settings.self_training_attenuation,
         frame_settings.proportion_primary_segments_to_train_on,
+        frame_settings.termination_heuristic_threshold,
     );
     info!(target: "nrc", "NRC initialized from {} (warm-up {warmup_frames} frames)", dir.0.display());
     commands.insert_resource(NrcState {

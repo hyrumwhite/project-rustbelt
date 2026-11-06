@@ -42,9 +42,16 @@ const PARTICLE_LIGHT: f32 = 100.0;
 /// Particles that light by a share of that (their bitmap's tag name): the
 /// sparks, streams of white-hot streaks, from b40's broken machines and
 /// struck vehicles, lit the walls round them brightly (play feedback: much
-/// too bright).
-const PARTICLE_LIGHT_SHARES: [(&str, f32); 2] =
-    [("effects\\particles\\flash\\bitmaps\\sparks", 0.2), ("effects\\particles\\flash\\bitmaps\\sparks impact", 0.2)];
+/// too bright). The ice chips a vehicle's wheels throw on b40's frozen
+/// lakes (`effects\\particles\\solid\\ice`, the one alpha-multiply-add
+/// particle in the game: glass shards, drawn added for their glint) are
+/// solid, and lit the ice round a moving Warthog as a flashing white light
+/// (play feedback, 6 November): they light nothing.
+const PARTICLE_LIGHT_SHARES: [(&str, f32); 3] = [
+    ("effects\\particles\\flash\\bitmaps\\sparks", 0.2),
+    ("effects\\particles\\flash\\bitmaps\\sparks impact", 0.2),
+    ("effects\\particles\\solid\\bitmaps\\glass breakable large", 0.0),
+];
 /// Radiance of a displayed white sprite, as self-illumination's
 /// (`level::SELF_ILLUMINATION_RADIANCE`: with the default emissive scale and
 /// exposure, about display white).

@@ -41,6 +41,7 @@ import bevy_solarik::realtime::realtime_bindings::previous_depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::previous_view;
 import bevy_solarik::realtime::realtime_bindings::constants;
+import bevy_solarik::realtime::tuning::{GI_CONFIDENCE_CAP, GI_ADAPTIVE_CONFIDENCE};
 import bevy_solarik::realtime::realtime_bindings::Reservoir;
 import bevy_solarik::realtime::specular_gi::DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
 @if((REGIONAL_HISTORY)) import bevy_solarik::scene::raytracing_scene_bindings::scene_support_is_valid;
@@ -87,7 +88,8 @@ enable wgpu_ray_query;
 
 
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
-const CONFIDENCE_WEIGHT_CAP = 8.0;
+// (SOLARIK_GI_CONFIDENCE_CAP, tuning.wesl)
+const CONFIDENCE_WEIGHT_CAP = GI_CONFIDENCE_CAP;
 // Confidence limits influence, not lifetime. Bright old samples can keep winning.
 const MAX_GI_SAMPLE_AGE = 16.0;
 // Where a sample that escaped to the sky is said to sit: far enough along its
@@ -288,9 +290,22 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let input_reservoir = gi_reservoirs_b[pixel_index];
     let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
-    let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
+    var merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.diffuse_brdf, &rng);
     var combined_reservoir = merge_result.merged_reservoir;
+@if(GI_ADAPTIVE_SPATIAL) {
+    // A pixel with a short history (its temporal sample refused by a
+    // disocclusion or a fast camera, or a frame or two old) merges a second
+    // spatial neighbour: one more sample where the estimate is roughest,
+    // nothing where the history carries it (docs/boiling-plan.md, Phase 3;
+    // SOLARIK_GI_ADAPTIVE_CONFIDENCE is the threshold, tuning.wesl).
+    if input_reservoir.confidence_weight < GI_ADAPTIVE_CONFIDENCE {
+        let second = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
+        merge_result = merge_reservoirs(combined_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
+            second.reservoir, second.world_position, second.world_normal, second.diffuse_brdf, &rng);
+        combined_reservoir = merge_result.merged_reservoir;
+    }
+}
 
     // Endpoint radiance, age and unoccluded weights survive spatial reuse.
     gi_reservoirs_a[pixel_index] = combined_reservoir;

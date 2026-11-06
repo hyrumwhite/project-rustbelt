@@ -230,6 +230,54 @@ Only after Phases 1 and 2, because every number here was tuned against bad pools
 
 Gate per change: the full table, with the guards; keep only what moves a boiling spot without moving a guard.
 
+### Phase 3 result (6 November): the DI candidates re-split, the caps left alone
+
+The five constants became shader values read from the environment (`bevy_solarik/src/realtime/tuning.wesl`; `node.rs` reads `SOLARIK_DI_TILE_CANDIDATES`, `SOLARIK_DI_CELL_CANDIDATES`, `SOLARIK_DI_CONFIDENCE_CAP`, `SOLARIK_GI_CONFIDENCE_CAP`, `SOLARIK_CACHE_TILE_CANDIDATES`, and `restir_di`, `restir_gi` and `world_cache_query` take them from there), so the whole sweep ran on one build (`scripts/boil/out/phase3.sh`, `phase3b.sh`). The baseline is `warm` (the fresh table; the shaft had drifted since `default`, 9.8 ms and noise 0.138 against 10.06 and 0.126). The shaft and the three guards:
+
+| variant | shaft still P90 / 3s | shaft noise | shaft motion 3s | shaft direct ms | hall / corridor / fast canyon motion 3s | direct ms at the guards |
+|---|---|---|---|---|---|---|
+| `warm` (32 tile, 8 cell, caps 8, cache 128) | 0.039 / 0.054 | 0.138 | 0.126 | 2.71 | 0.027 / 0.040 / 0.023 | 1.85 / 1.89 / 2.33 |
+| 24 tile, 16 cell | 0.034 / 0.043 | 0.122 | 0.102 | 3.01 | 0.027 / 0.039 / 0.023 | +0.11 each |
+| 16 tile, 16 cell | 0.033 / 0.045 | 0.115 | 0.106 | 2.80 | 0.025 / 0.039 / 0.023 | -0.09 each |
+| 16 tile, 32 cell | 0.029 / 0.039 | 0.113 | 0.092 | 3.80 | 0.024 / 0.039 / 0.023 | +0.55 each |
+| DI confidence cap 16 | 0.038 / 0.053 | 0.121 | 0.117 | 2.69 | 0.032 / 0.040 / 0.023 | same |
+| GI confidence cap 16 | 0.039 / 0.054 | 0.139 | 0.126 | 2.69 | 0.028 / 0.040 / 0.024 | same |
+| cache 64 tile candidates | 0.039 / 0.054 | 0.141 | 0.125 | 2.68 | 0.027 / 0.040 / 0.023 | cache pass -0.34 each |
+| 16 tile, 16 cell, cache 64 | 0.035 / 0.045 | 0.115 | 0.106 | 2.74 | 0.025 / 0.039 / 0.023 | cache pass -0.34 each |
+
+What it says:
+
+- The cell candidates carry the shaft. 24+16 and 16+16 land within 0.004 of each other in every column, so doubling the draws from the cell's four light slots is the gain and the tile count only pays for it: a cell's slots already name the lights that matter, and each extra draw is another point on those strips, a candidate for the one shadow ray, where the tile's draws are mostly lights that do not reach the pixel. 32 cell candidates steady the shaft further (0.092 in motion) but the resolve of each candidate costs: 1.0 ms at the shaft, 0.55 at the guards, past the 0.3 ms rule. 16 and 16 are the new defaults (`node.rs`); the full `p3_new` table with them equals `warm` at the other seven spots (within 0.002 everywhere, the direct pass 0.1 ms cheaper, the shaft's total 9.83 against 9.80).
+- The confidence caps are not the shaft's problem. GI cap 16 changes nothing there; DI cap 16 takes 0.009 off the shaft's motion but adds 0.005 to the hall's (the longer history lags the sway), and nothing in the stills. The plan's expectation, that more history is less boiling once the picks are good, was wrong for these spots: the wander is in the sample points, not the history length. Both stay at 8 (the knobs remain).
+- Cache 64 tile candidates saves 0.34 ms at every spot and moves no boiling column, alone or with the new DI split (the hall's stills in the lone run were run noise; the combined run reads 0.004 / 0.013 as `warm`). It is Phase 5's first payback, ready as `SOLARIK_CACHE_TILE_CANDIDATES=64`, and the default stays at 128 until the interior total needs it: the working rules say the metrics underrate what the cache's search does for stability, and nothing has to be paid for yet.
+
+The two reuse items, each alone against `p3_new` (the 16 and 16 defaults) at the same four spots:
+
+| | shaft still P90 / 3s | shaft noise | shaft motion 3s | shaft direct ms | hall stills P90 / 3s | hall / corridor / fast canyon motion 3s |
+|---|---|---|---|---|---|---|
+| `p3_new` | 0.033 / 0.044 | 0.113 | 0.107 | 2.75 | 0.004 / 0.013 | 0.025 / 0.039 / 0.023 |
+| adaptive second spatial neighbour (`GI_ADAPTIVE_SPATIAL`) | 0.034 / 0.045 | 0.114 | 0.106 | 2.79 | 0.009 / 0.017 | 0.025 / 0.039 / 0.023 |
+| the lookup's residual (`CELL_LOOKUP_NEIGHBOURS`) | 0.018 / 0.028 | 0.101 | 0.079 | 2.83 | 0.005 / 0.013 | 0.025 / 0.039 / 0.023 |
+
+- The adaptive neighbour (a pixel whose input reservoir's confidence is under `SOLARIK_GI_ADAPTIVE_CONFIDENCE`, 4, merges a second spatial neighbour in `spatial_and_shade`) does nothing at the shaft and roughens the hall's stills: the GI reservoir's age limit (16 frames) empties a pixel's history on schedule, so a short history is a still's ordinary state for three frames in sixteen, and the second neighbour there is a different sample where the picture was settling. Off (`SOLARIK_GI_ADAPTIVE_SPATIAL=1` to try it); the "young cell" half of the plan's condition was not built, since the confidence half already showed the idea does not reach the shaft's wander.
+- The lookup's residual is the largest single gain of the plan so far. When the four normal tries of `find_world_cache_cell` fail, the six keys one quantised normal component away are probed (`world_cache_query.wesl`; the probes run on the missing pixels only, 0.08 ms in the shaft's direct pass, 0.02 at the guards). The shaft's stills drop from 0.044 to 0.028, motion from 0.107 to 0.079, noise 0.113 to 0.101, and the guards do not move. On by default (`SOLARIK_CELL_LOOKUP_NEIGHBOURS=0` off). The 13% of the shaft's pixels that found no cell were drawing their light from the tile alone, 16 candidates from the whole level's table, and those were the picks that wandered: the cell's four slots, reached by the neighbouring key, are what steadied them, the same lever as the cell candidates above.
+
+The no-cell view confirms where it acts (`VISUALIZE_CELL_LIGHTS` at the shaft, `p3_final` and `p3_lookup_off` views): pixels without a cell fall from 11.2% to 2.9%, and the DI pick view's pixels with no live cell candidate from 1.6% to 0.9%. The full table with Phase 3's defaults (`p3_final`: DI 16 tile and 16 cell candidates, the lookup's six probes, caps 8, cache 128; `scripts/boil/out/p3_final/table.txt`, the table to compare against from here):
+
+```
+spot             gpu direct  cache diffGI specGI   dlss | stillWdr stillP90 still3s |   noise noiseP95 | moveWdr  move3s
+b40_shaft       9.92   2.84   1.27   1.45   1.37   1.31 |   0.009   0.019   0.029 |   0.099    0.32 |   0.018   0.080
+b40_canyon      8.64   2.26   1.29   1.53   0.71   1.31 |   0.003   0.004   0.012 |   0.061    0.24 |   0.004   0.019
+c20_hall        6.38   1.77   1.15   0.80   0.48   1.31 |   0.003   0.004   0.013 |   0.085    0.30 |   0.005   0.026
+a10_tube        6.85   1.76   1.07   0.86   0.91   1.31 |   0.002   0.003   0.007 |   0.012    0.08 |   0.002   0.010
+a10_corridor    7.54   1.83   1.13   1.01   1.27   1.32 |   0.003   0.007   0.018 |   0.099    0.28 |   0.006   0.039
+b30_passage     8.99   1.97   1.23   1.44   1.74   1.31 |   0.003   0.005   0.012 |   0.054    0.22 |   0.005   0.030
+b30_beach       6.69   1.43   1.17   0.96   0.43   1.31 |   0.004   0.011   0.031 |   0.192    0.51 |   0.007   0.048
+b40_canyon_fast   8.65   2.27   1.30   1.53   0.71   1.31 |   0.003   0.004   0.012 |   0.060    0.24 |   0.005   0.023
+```
+
+Against `warm` (the morning's table): the shaft's stills 0.054 to 0.029, its motion 0.126 to 0.080, its noise 0.138 to 0.099, for 0.12 ms on its total (9.80 to 9.92, the direct pass 2.71 to 2.84); every other spot within 0.004 in every boiling column and within 0.05 ms, the hall 0.08 ms cheaper. The shaft is now in the range of the other interiors in stills and within a factor of two in motion, where it was four. Phase 3 is done; what the shaft still has (0.080 in motion against the corridor's 0.039) is the next candidate pool question: 32 cell candidates showed the cell's sample points are still the lever, at a resolve cost, so a cheaper way to more samples on the cell's lights (resolve the four slots' lights once and draw points on them, rather than resolve each draw) is the item to carry into Phase 5's accounting.
+
 ## Phase 4: outdoors (1 to 2 days)
 
 - The 46 frames/s dips are in fights, not in the lighting of the empty canyon (9.3 ms GPU, render thread 4.7 ms). Capture a fight with F9 (the `.txt` now carries CPU and GPU times by pass) and split the cost: BLAS refits, the 192 dynamic lights, particles, or the CPU. Fix what the capture names; do not pre-empt it with lighting cuts.

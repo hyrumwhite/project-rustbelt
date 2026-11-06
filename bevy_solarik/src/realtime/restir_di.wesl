@@ -57,6 +57,9 @@ import bevy_solarik::realtime::realtime_bindings::previous_depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::previous_view;
 import bevy_solarik::realtime::realtime_bindings::constants as lighting_constants;
+import bevy_solarik::realtime::tuning::DI_TILE_CANDIDATES;
+import bevy_solarik::realtime::tuning::DI_CELL_CANDIDATES;
+import bevy_solarik::realtime::tuning::DI_CONFIDENCE_CAP;
 import bevy_solarik::realtime::realtime_bindings::ResolvedLightSamplePacked;
 
 // https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf
@@ -68,7 +71,8 @@ enable wgpu_ray_query;
 // (32 and a confidence cap of 8, from 8 and 20: a sample reused for 20
 // frames over 30 pixels made patches of light that came and went, which
 // DLSS-RR keeps as detail; interiors boiled)
-const INITIAL_SAMPLES = 32u;
+// (SOLARIK_DI_TILE_CANDIDATES, tuning.wesl)
+const INITIAL_SAMPLES = DI_TILE_CANDIDATES;
 // Candidates from the lights in sight of the pixel's world cache cell, beside
 // the tiles' (which draw from the whole level by power), with
 // on by default (SOLARIK_CELL_LIGHTS=0 leaves them out): a narrow corridor's recessed fixtures, among hundreds
@@ -78,7 +82,8 @@ const INITIAL_SAMPLES = 32u;
 // gives the cell, and half the screen finding its cell again, in a10's
 // Jefferies tubes a wall beside a dim red strip went from lit and dark by
 // turns to steady, its three-shot spread 0.35 to 0.01; 24 did no better.)
-const CELL_SAMPLES = 8u;
+// (SOLARIK_DI_CELL_CANDIDATES)
+const CELL_SAMPLES = DI_CELL_CANDIDATES;
 // The share of its unshadowed contribution a tile candidate is weighed by
 // when the pixel's cell has light slots and this light is in none of them
 // (DI_SLOT_VISIBILITY_PRIOR). The resampling weighs candidates by their
@@ -93,7 +98,8 @@ const CELL_SAMPLES = 8u;
 // contribution.
 const SLOT_VISIBILITY_PRIOR: f32 = 0.1;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
-const CONFIDENCE_WEIGHT_CAP = 8.0;
+// (SOLARIK_DI_CONFIDENCE_CAP)
+const CONFIDENCE_WEIGHT_CAP = DI_CONFIDENCE_CAP;
 @if((RASTER_SUBPIXEL_BITS))
 const RASTER_SUBPIXEL_STEP = 1.0 / f32(1u << constants::RASTER_SUBPIXEL_BITS);
 // Vulkan's guaranteed minimum, used by tools without adapter specialization.

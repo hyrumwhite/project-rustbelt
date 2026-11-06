@@ -11,6 +11,12 @@ fn diagnostic_views_compose() {
     let base = vec![
         ShaderDefVal::UInt("WORLD_CACHE_SIZE".into(), 1 << 20),
         ShaderDefVal::UInt("RASTER_SUBPIXEL_BITS".into(), 8),
+        ShaderDefVal::UInt("DI_TILE_CANDIDATES".into(), 16),
+        ShaderDefVal::UInt("DI_CELL_CANDIDATES".into(), 16),
+        ShaderDefVal::UInt("DI_CONFIDENCE_CAP".into(), 8),
+        ShaderDefVal::UInt("GI_CONFIDENCE_CAP".into(), 8),
+        ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
+        ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
         "BINDLESS_SURFACE_DETAIL".into(),
         "DI_CELL_LIGHTS".into(),
         "DI_SLOT_VISIBILITY_PRIOR".into(),
@@ -43,6 +49,8 @@ fn diagnostic_views_compose() {
                 if unjittered {
                     definitions.push("CACHE_CELL_UNJITTERED".into());
                     definitions.push("CACHE_WARM_START".into());
+                    definitions.push("GI_ADAPTIVE_SPATIAL".into());
+                    definitions.push("CELL_LOOKUP_NEIGHBOURS".into());
                 }
                 if let Some(view) = view {
                     definitions.push((*view).into());

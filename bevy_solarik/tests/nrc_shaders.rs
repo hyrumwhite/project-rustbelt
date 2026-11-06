@@ -10,7 +10,15 @@ fn base_defs() -> Vec<ShaderDefVal> {
     vec![
         ShaderDefVal::UInt("WORLD_CACHE_SIZE".into(), 1 << 20),
         ShaderDefVal::UInt("RASTER_SUBPIXEL_BITS".into(), 8),
+        ShaderDefVal::UInt("DI_TILE_CANDIDATES".into(), 16),
+        ShaderDefVal::UInt("DI_CELL_CANDIDATES".into(), 16),
+        ShaderDefVal::UInt("DI_CONFIDENCE_CAP".into(), 8),
+        ShaderDefVal::UInt("GI_CONFIDENCE_CAP".into(), 8),
+        ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
+        ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
         "BINDLESS_SURFACE_DETAIL".into(),
+        "GI_ADAPTIVE_SPATIAL".into(),
+        "CELL_LOOKUP_NEIGHBOURS".into(),
     ]
 }
 

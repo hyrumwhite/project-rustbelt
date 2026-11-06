@@ -1107,6 +1107,21 @@ pub fn init_solari_lighting_pipelines(
             raster_subpixel_bits,
         ));
         shader_defs.push("BINDLESS_SURFACE_DETAIL".into());
+        // (the tuning knobs of tuning.wesl, from the environment while
+        // docs/boiling-plan.md's Phase 3 tunes them; the DI candidates are
+        // Phase 3's result, 16 and 16 from 32 and 8, the rest as the constants
+        // were)
+        for (name, env, default) in [
+            ("DI_TILE_CANDIDATES", "SOLARIK_DI_TILE_CANDIDATES", 16u32),
+            ("DI_CELL_CANDIDATES", "SOLARIK_DI_CELL_CANDIDATES", 16),
+            ("DI_CONFIDENCE_CAP", "SOLARIK_DI_CONFIDENCE_CAP", 8),
+            ("GI_CONFIDENCE_CAP", "SOLARIK_GI_CONFIDENCE_CAP", 8),
+            ("CACHE_TILE_CANDIDATES", "SOLARIK_CACHE_TILE_CANDIDATES", 128),
+            ("GI_ADAPTIVE_CONFIDENCE", "SOLARIK_GI_ADAPTIVE_CONFIDENCE", 4),
+        ] {
+            let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).filter(|&v: &u32| v > 0).unwrap_or(default);
+            shader_defs.push(ShaderDefVal::UInt(name.into(), value));
+        }
         // (diagnostics: extra definitions, comma separated)
         if let Ok(defs) = std::env::var("SOLARIK_SHADER_DEFS") {
             shader_defs.extend(defs.split(',').filter(|d| !d.is_empty()).map(|d| d.trim().to_string().into()));
@@ -1138,6 +1153,20 @@ pub fn init_solari_lighting_pipelines(
         // noisy for its first updates, and a moving camera keeps making them.
         if !std::env::var("SOLARIK_CACHE_WARM_START").is_ok_and(|v| v == "0") {
             shader_defs.push("CACHE_WARM_START".into());
+        }
+        // The GI spatial pass merges a second neighbour where the pixel's
+        // history is short (SOLARIK_GI_ADAPTIVE_SPATIAL=1; the threshold is
+        // SOLARIK_GI_ADAPTIVE_CONFIDENCE above). Off: it did nothing for the
+        // shaft and roughened the hall's stills (the age limit empties a
+        // pixel's reservoir every 16 frames, so short histories happen in a
+        // still too); docs/boiling-plan.md, Phase 3.
+        if std::env::var("SOLARIK_GI_ADAPTIVE_SPATIAL").is_ok_and(|v| v == "1") {
+            shader_defs.push("GI_ADAPTIVE_SPATIAL".into());
+        }
+        // A failed cell lookup probes the six keys one normal component off
+        // (on by default; SOLARIK_CELL_LOOKUP_NEIGHBOURS=0 as before).
+        if !std::env::var("SOLARIK_CELL_LOOKUP_NEIGHBOURS").is_ok_and(|v| v == "0") {
+            shader_defs.push("CELL_LOOKUP_NEIGHBOURS".into());
         }
         // A tile candidate the pixel's cell's slots don't know is weighed as
         // mostly hidden (SOLARIK_SLOT_PRIOR=1; see restir_di's

@@ -1,4 +1,5 @@
 import bevy_pbr::render::utils::rand_f;
+import bevy_solarik::realtime::tuning::CACHE_TILE_CANDIDATES;
 import bevy_pbr::render::utils::rand_vec2f;
 import bevy_render::maths::orthonormalize;
 import bevy_solarik::realtime::realtime_bindings::world_cache_life;
@@ -20,7 +21,8 @@ enable wgpu_ray_query;
 /// How responsive the world cache is to changes in lighting (higher is less responsive but more stable, lower is more responsive but less stable)
 const WORLD_CACHE_MAX_TEMPORAL_SAMPLES: f32 = 32.0;
 /// How many direct light samples each cell takes when updating each frame
-const WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT: u32 = 128u;
+/// (SOLARIK_CACHE_TILE_CANDIDATES, tuning.wesl)
+const WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT: u32 = CACHE_TILE_CANDIDATES;
 // Shadow-tested light samples a cell takes each update.
 const WORLD_CACHE_DIRECT_LIGHT_SAMPLES_PER_UPDATE: u32 = 4u;
 // How many rendered frames a cell's history may span, in updates.
@@ -339,6 +341,20 @@ fn find_world_cache_cell(world_position: vec3<f32>, world_normal: vec3<f32>, vie
         let cell = find_world_cache_cell_once(world_position, world_normal, tries[attempt], view_position, rng);
         if cell >= 0 { return cell; }
     }
+@if(CELL_LOOKUP_NEIGHBOURS) {
+    // The lookup's residual (docs/boiling-plan.md): a pixel whose quantised
+    // normal is one component off its cell's (a facet at a quantisation
+    // step, the depth-derived normal's noise) found nothing above; the six
+    // keys one component away are probed, on the pixels that miss only.
+    for (var axis = 0u; axis < 3u; axis++) {
+        var offset = vec3(0.0);
+        offset[axis] = 1.0;
+        let above = find_world_cache_cell_once(world_position, world_normal, quantized + offset, view_position, rng);
+        if above >= 0 { return above; }
+        let below = find_world_cache_cell_once(world_position, world_normal, quantized - offset, view_position, rng);
+        if below >= 0 { return below; }
+    }
+}
     return -1;
 }
 

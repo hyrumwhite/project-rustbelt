@@ -232,6 +232,10 @@ pub struct MaterialBindGroupNonBindlessAllocator {
     /// To prepare the bind groups, call
     /// [`MaterialBindGroupAllocator::prepare_bind_groups`].
     to_prepare: HashSet<MaterialBindGroupIndex>,
+    /// Prepared bind groups whose materials' data changed in place
+    /// ([`Self::try_update_data`]), to write over their uniform buffers in
+    /// [`Self::write_buffers`].
+    to_write: HashSet<MaterialBindGroupIndex>,
     /// A list of free bind group indices.
     free_indices: Vec<MaterialBindGroupIndex>,
 }
@@ -261,8 +265,9 @@ enum MaterialNonBindlessAllocatedBindGroup {
         /// happen if a shader buffer changes, causing the bind group to become
         /// invalid.
         layout: BindGroupLayoutDescriptor,
-        /// Uniform buffers referenced by the bind group.
-        #[expect(dead_code, reason = "These buffers are only referenced by bind groups")]
+        /// Uniform buffers referenced by the bind group (the bindings'
+        /// `Data`, in their order); written over when the data changes in
+        /// place.
         uniform_buffers: Vec<Buffer>,
     },
 }
@@ -679,10 +684,10 @@ impl MaterialBindGroupAllocator {
                 ref mut material_bind_group_bindless_allocator,
             ) => material_bind_group_bindless_allocator
                 .try_update_data(existing_binding_id, unprepared_bind_group),
-            MaterialBindGroupAllocator::NonBindless(_) => {
-                // TODO: Have a fast path for non-bindless materials.
-                false
-            }
+            MaterialBindGroupAllocator::NonBindless(
+                ref mut material_bind_group_non_bindless_allocator,
+            ) => material_bind_group_non_bindless_allocator
+                .try_update_data(existing_binding_id, unprepared_bind_group),
         }
     }
 
@@ -731,9 +736,9 @@ impl MaterialBindGroupAllocator {
             MaterialBindGroupAllocator::Bindless(
                 ref mut material_bind_group_bindless_allocator,
             ) => material_bind_group_bindless_allocator.write_buffers(render_device, render_queue),
-            MaterialBindGroupAllocator::NonBindless(_) => {
-                // Not applicable.
-            }
+            MaterialBindGroupAllocator::NonBindless(
+                ref mut material_bind_group_non_bindless_allocator,
+            ) => material_bind_group_non_bindless_allocator.write_buffers(render_queue),
         }
     }
 
@@ -2380,6 +2385,7 @@ impl MaterialBindGroupNonBindlessAllocator {
             label,
             bind_groups: vec![],
             to_prepare: HashSet::default(),
+            to_write: HashSet::default(),
             free_indices: vec![],
         }
     }
@@ -2449,11 +2455,115 @@ impl MaterialBindGroupNonBindlessAllocator {
     }
 
     /// Deallocates the bind group with the given binding ID.
+    /// The fast path for a material changed in place (see
+    /// [`MaterialBindGroupAllocator::try_update_data`]): when the new bind
+    /// group binds the buffers, textures and samplers the prepared one does
+    /// and its data has the same sizes, the data is kept, to be written over
+    /// the uniform buffers the bind group already has
+    /// ([`Self::write_buffers`]), and the bind group stands. A material
+    /// animated every frame (a transparent surface's maps scrolling, its
+    /// colours cycling) then costs an upload, not a buffer and a bind group
+    /// each frame: a hundred of them cost 3 ms a frame.
+    fn try_update_data(
+        &mut self,
+        existing_binding_id: MaterialBindingId,
+        unprepared_bind_group: &mut BindGroupBuilder,
+    ) -> bool {
+        let Some(Some(MaterialNonBindlessAllocatedBindGroup::Prepared {
+            bind_group: prepared_bind_group,
+            ..
+        })) = self
+            .bind_groups
+            .get_mut(*existing_binding_id.group as usize)
+        else {
+            crate::diagnostic::profile_value("material.update_not_prepared", 1.0, "count");
+            return false;
+        };
+        let old = &mut prepared_bind_group.bindings.0;
+        let new = &unprepared_bind_group.binding_resources.0;
+        if old.len() != new.len() {
+            crate::diagnostic::profile_value("material.update_other_length", 1.0, "count");
+            return false;
+        }
+        let same = old
+            .iter()
+            .zip(new.iter())
+            .all(|((old_index, old), (new_index, new))| {
+                old_index == new_index
+                    && match (old, new) {
+                        (
+                            OwnedBindingResource::Buffer(old),
+                            UnpreparedBindingResource::Buffer(new),
+                        ) => old.id() == new.id(),
+                        (
+                            OwnedBindingResource::ShaderBuffer(old),
+                            UnpreparedBindingResource::ShaderBuffer(new),
+                        ) => old == new,
+                        (
+                            OwnedBindingResource::TextureView(old_dimension, old),
+                            UnpreparedBindingResource::TextureView(new_dimension, new),
+                        ) => old_dimension == new_dimension && old.id() == new.id(),
+                        (
+                            OwnedBindingResource::Sampler(old_type, old),
+                            UnpreparedBindingResource::Sampler(new_type, new),
+                        ) => old_type == new_type && old.id() == new.id(),
+                        (
+                            OwnedBindingResource::Data(old),
+                            UnpreparedBindingResource::Data(range),
+                        ) => old.0.len() == range.len(),
+                        _ => false,
+                    }
+            });
+        if !same {
+            crate::diagnostic::profile_value("material.update_other_bindings", 1.0, "count");
+            return false;
+        }
+        for ((_, old), (_, new)) in old.iter_mut().zip(new.iter()) {
+            if let (OwnedBindingResource::Data(data), UnpreparedBindingResource::Data(range)) =
+                (old, new)
+            {
+                data.0.copy_from_slice(
+                    &unprepared_bind_group.data_buffer
+                        [(range.start as usize)..(range.end as usize)],
+                );
+            }
+        }
+        self.to_write.insert(existing_binding_id.group);
+        unprepared_bind_group.clear();
+        true
+    }
+
+    /// Writes the data of the materials changed in place since the last call
+    /// ([`Self::try_update_data`]) over their uniform buffers.
+    fn write_buffers(&mut self, render_queue: &RenderQueue) {
+        for group in mem::take(&mut self.to_write) {
+            let Some(Some(MaterialNonBindlessAllocatedBindGroup::Prepared {
+                bind_group,
+                uniform_buffers,
+                ..
+            })) = self.bind_groups.get(*group as usize)
+            else {
+                continue;
+            };
+            let mut buffers = uniform_buffers.iter();
+            for (_, binding) in bind_group.bindings.iter() {
+                let OwnedBindingResource::Data(data) = binding else {
+                    continue;
+                };
+                let Some(buffer) = buffers.next() else {
+                    break;
+                };
+                render_queue.write_buffer(buffer, 0, &data.0);
+            }
+        }
+    }
+
     fn free(&mut self, binding_id: MaterialBindingId) {
         debug_assert_eq!(binding_id.slot, MaterialBindGroupSlot(0));
         debug_assert!(self.bind_groups[*binding_id.group as usize].is_some());
         self.bind_groups[*binding_id.group as usize] = None;
         self.to_prepare.remove(&binding_id.group);
+        self.to_write.remove(&binding_id.group);
         self.free_indices.push(binding_id.group);
     }
 
@@ -2487,6 +2597,8 @@ impl MaterialBindGroupNonBindlessAllocator {
     ) {
         self.invalidate_bind_group_for_changed_shader_buffers_if_needed(changed_shader_buffers);
 
+        let _profile = crate::diagnostic::profile_scope("material.prepare_bind_groups");
+        crate::diagnostic::profile_value("material.bind_groups_made", self.to_prepare.len() as f64, "count");
         for bind_group_index in mem::take(&mut self.to_prepare) {
             let Some(MaterialNonBindlessAllocatedBindGroup::Unprepared {
                 bind_group: unprepared_bind_group,
@@ -2782,16 +2894,20 @@ impl RenderMaterialBindings {
     where
         M: AsBindGroup + Asset + Clone,
     {
+        let _profile = crate::diagnostic::profile_scope("material.binding");
         let actual_material_layout = pipeline_cache.get_bind_group_layout(material_layout);
 
         // Ask the material to build the bind group.
-        let result = match material.build_bind_group(
+        let build_profile = crate::diagnostic::profile_scope("material.build_bind_group");
+        let built = material.build_bind_group(
             &actual_material_layout,
             render_device,
             material_param,
             false,
             &mut self.bind_group_builder,
-        ) {
+        );
+        drop(build_profile);
+        let result = match built {
             Ok(()) => {
                 let bind_group_allocator =
                     bind_group_allocators.get_mut(&TypeId::of::<M>()).unwrap();
@@ -2806,8 +2922,10 @@ impl RenderMaterialBindings {
                         if bind_group_allocator
                             .try_update_data(old_binding, &mut self.bind_group_builder)
                         {
+                            crate::diagnostic::profile_value("material.updated_in_place", 1.0, "count");
                             Ok(old_binding)
                         } else {
+                            crate::diagnostic::profile_value("material.reallocated", 1.0, "count");
                             // Otherwise, fall back to the slow path. Deallocate
                             // the GPU resource bindings, and reallocate them.
                             bind_group_allocator.free(old_binding);
@@ -2817,10 +2935,13 @@ impl RenderMaterialBindings {
                             Ok(new_binding)
                         }
                     }
-                    Entry::Vacant(vacant_entry) => Ok(*vacant_entry.insert(
-                        bind_group_allocator
-                            .allocate_unprepared(&mut self.bind_group_builder, material_layout),
-                    )),
+                    Entry::Vacant(vacant_entry) => {
+                        crate::diagnostic::profile_value("material.new", 1.0, "count");
+                        Ok(*vacant_entry.insert(
+                            bind_group_allocator
+                                .allocate_unprepared(&mut self.bind_group_builder, material_layout),
+                        ))
+                    }
                 }
             }
             Err(AsBindGroupError::RetryNextUpdate) => {

@@ -343,6 +343,35 @@ So the floor's roughness lies between 0.2 and 0.4, and its traced reflection is 
 
 The glossy paths traced on surfaces of roughness 0.2 to 0.4 give the picture nothing the diffuse GI's reservoir does not at these spots (the difference maps show the shaft's far strip edge and nothing in the passage), for 0.4 to 1.3 ms a frame. The default is now 0.3, the conservative half (`SOLARIK_SPECULAR_REUSE_ROUGHNESS=40` is the old look, `=20` the rest of the saving), the user's A/B on Covenant and vehicle metal to settle it; the gate here is the look, not the boiling, which did not move.
 
+### Phase 4 in play (6 November, evening): the A/Bs, and the library
+
+The user's two sessions, b40 and c20 (the defaults, then `SOLARIK_SPECULAR_REUSE_ROUGHNESS=20 SOLARIK_CACHE_WARM_START=0 SOLARIK_CACHE_SHADE_SECOND_RAY=0`):
+
+- Specular reuse: at 20 the frozen lake "looks more dull and marble-like"; 30 stays the default. The lake on foot is where the knob shows (`b40_1794005139544`, camera 190.98,-540.08,12.97: specular GI 4.0 ms of 12 at 30), not the corridor.
+- Warm start and the shade's second ray: on a Banshee canyon flight the bounce light on the far wall "looked better on the first run" (the defaults, both on), "but that might be entirely placebo". Both stay on.
+- Found on the way: a Warthog on the frozen lake lit the ice with a flashing white light. The game's ice chips (`effects\particles\solid\ice`, its one alpha-multiply-add particle: glass shards added for their glint) counted as glowing sprites in `src/sprite_lights.rs`; their bitmap's share is now 0.
+
+The captures with times (b40 fights at 1794005053..743, c20's library fights at 1794005862..6124) are render-thread bound as the b30 beach was, and further:
+
+| | render thread ms | GPU ms | frames/s | assets [blas] | resources [bindings] | graph |
+|---|---|---|---|---|---|---|
+| b40, fights | 14.2 to 17.5 | 7.7 to 9.5 | 55 to 70 | 3.7 to 7.0 [1.8 to 4.4] | 2.4 to 3.8 [2.2 to 3.6] | 3.6 to 4.8 |
+| c20, the library | 16.6 to 20.1 | 8.0 to 9.2 | 48 to 58 | 4.8 to 7.2 [4.7 to 7.2] | 3.3 to 5.2 [3.1 to 4.9] | 5.2 to 6.2 |
+
+So the library's frame looked like the BLAS stretch first (4.7 to 7.2 ms, against the beach's 0.9 after its edges fix), then the bindings, then the graph.
+
+**The BLAS stretch was the materials.** A scripted c20 run (`game.sh c20`, the game's own camera, 110 s, `BEVY_RENDER_PROFILE=1`) has the thread at 8.9 to 9.5 ms with the stretch at 3.4, but the BLAS systems inside it at 0.3: the stretch's span ran from before the mesh allocator to after `compact_raytracing_blas`, which takes `&mut World`, so the executor drains every system in flight before it, and the span took their time. The capture line now spans the BLAS system alone and the compaction wait as `compact` (0.3 and 2.7 here), and the renderer's erased assets (the materials) have CPU scopes: `MeshMaterial3d<HaloTransparentMaterial>` 3.2 ms a frame, 522 materials prepared a frame. They are the transparent surfaces' animated materials (`animate_transparent`: every scrolling map and cycling colour writes its material's params each frame; the library's walls are full of them, and each object's copy is its own), and each prepare made a uniform buffer and a bind group (`bind groups` stretch 1.5 ms, 466 bind groups a frame), because:
+
+- Bevy's `RenderMaterialBindings::prepare_material` has a fast path for a changed material that binds the same resources (`try_update_data`), but only for bindless materials; for non-bindless ones it was a TODO. It is now implemented in the vendored `bevy_render` (`MaterialBindGroupNonBindlessAllocator::try_update_data`, `write_buffers`): the same buffers, textures and samplers and data of the same sizes keep the bind group, the new bytes are written over its uniform buffers in `PrepareBindGroups`.
+- The `#[uniform]` derive makes a new GPU buffer in `build_bind_group` (a `Buffer` binding, different every time), so no two prepares could match. The `#[data]` attribute keeps the bytes on the CPU (the same uniform buffer in the shader); `HaloTransparentMaterial` and `HaloEnvironment` now use it (`src/material.rs`), their params converted by `AsBindGroupShaderType`.
+
+| scripted c20 | render thread ms | assets [blas] [compact] | bind groups | the transparent materials' prepare | updated in place / reallocated a frame |
+|---|---|---|---|---|---|
+| before | 8.9 to 9.5 | 3.4 [0.3] [2.7] | 1.5 | 3.25 | 57 / 465 |
+| after | 5.5 to 5.6 | 0.96 [0.28] [0.18] | 0.75 | 0.76 | 522 / 0.3 |
+
+The stills of the two runs show the same room with its animated strips (`scratchpad/game/lib_scopes`, `lib_data`). Left in the library's thread: the scene bindings 1.8, the graph 1.3, the bind groups 0.75 and the materials' 0.76 (522 `build_bind_group`s at 0.2, the rest the erased-asset loop). The b40 fights' 14 to 17.5 ms thread had the same shape (assets 3.7 to 7.0) and should fall by as much: for the user's next session.
+
 ## Phase 5: paying for it
 
 Everything above is either free (1, 2a, 2b) or bounded (2c, 3, 4). If the interior total rises past the 0.3 ms rule, these pay it back in order: the cache search at 64 candidates (Phase 3), 16 DI tile candidates (Phase 3), and the world cache update soft cap (40000 cells a frame; check `HALO_RT_CACHE_LOG` for how often it binds).

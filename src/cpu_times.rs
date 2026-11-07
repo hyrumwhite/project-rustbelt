@@ -36,8 +36,13 @@ impl Plugin for CpuTimesPlugin {
             (
                 render_started.in_set(RenderSystems::ExtractCommands),
                 stretch_ended::<EXTRACT>.after(RenderSystems::ExtractCommands).before(RenderSystems::PrepareAssets),
-                span_started::<BLAS>.in_set(RenderSystems::PrepareAssets).before(prepare_raytracing_blas),
-                span_ended::<BLAS>.in_set(RenderSystems::PrepareAssets).after(compact_raytracing_blas),
+                span_started::<BLAS>
+                    .in_set(RenderSystems::PrepareAssets)
+                    .after(bevy::render::mesh::allocator::allocate_and_free_meshes)
+                    .before(prepare_raytracing_blas),
+                span_ended::<BLAS>.in_set(RenderSystems::PrepareAssets).after(prepare_raytracing_blas).before(compact_raytracing_blas),
+                span_started::<COMPACT>.in_set(RenderSystems::PrepareAssets).after(prepare_raytracing_blas).before(compact_raytracing_blas),
+                span_ended::<COMPACT>.in_set(RenderSystems::PrepareAssets).after(compact_raytracing_blas),
                 stretch_ended::<ASSETS>.after(RenderSystems::PrepareAssets).before(RenderSystems::PrepareMeshes),
                 stretch_ended::<MESHES>.after(RenderSystems::PrepareMeshes).before(RenderSystems::CreateViews),
                 stretch_ended::<SPECIALIZE>.after(RenderSystems::Specialize).before(RenderSystems::PrepareViews),
@@ -73,10 +78,11 @@ const STRETCH_NAMES: [&str; STRETCHES] =
     ["extract", "assets", "meshes", "specialize", "views", "queue", "resources", "batches", "bind groups", "graph"];
 const BLAS: usize = 0;
 const BINDINGS: usize = 1;
-const SPANS: usize = 2;
-const SPAN_NAMES: [&str; SPANS] = ["blas", "bindings"];
+const COMPACT: usize = 2;
+const SPANS: usize = 3;
+const SPAN_NAMES: [&str; SPANS] = ["blas", "bindings", "compact"];
 // (the stretch each span sits inside, for the line's brackets)
-const SPAN_STRETCH: [usize; SPANS] = [ASSETS, RESOURCES];
+const SPAN_STRETCH: [usize; SPANS] = [ASSETS, RESOURCES, ASSETS];
 
 #[derive(Default)]
 struct Totals {

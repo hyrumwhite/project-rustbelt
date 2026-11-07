@@ -377,6 +377,11 @@ pub fn prepare_erased_assets<A: ErasedRenderAsset>(
     bpf: Res<RenderAssetBytesPerFrameLimiter>,
 ) {
     let mut wrote_asset_count = 0;
+    let _profile = crate::diagnostic::profile_scope(core::any::type_name::<A>());
+    crate::diagnostic::profile_value("erased.extracted", extracted_assets.extracted.len() as f64, "count");
+    crate::diagnostic::profile_value("erased.removed", extracted_assets.removed.len() as f64, "count");
+    crate::diagnostic::profile_value("erased.added", extracted_assets.added.len() as f64, "count");
+    crate::diagnostic::profile_value("erased.modified", extracted_assets.modified.len() as f64, "count");
 
     let mut param = param.into_inner();
     let queued_assets = core::mem::take(&mut prepare_next_frame.assets);

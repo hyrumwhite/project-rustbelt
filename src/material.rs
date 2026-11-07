@@ -166,9 +166,16 @@ pub struct HaloEnvironmentParams {
 }
 
 /// `shader_environment`'s diffuse layers (see `halo_environment.wesl`).
+///
+/// (The params are a `data` binding, not a `uniform`: the same uniform
+/// buffer in the shader, but its bytes stay on the CPU until the bind group
+/// is made, so a material changed in place, its self-illumination animated
+/// every frame, writes over the buffer it has rather than making a buffer
+/// and a bind group a frame; see `try_update_data` in the vendored
+/// `bevy_render::material_bind_groups`.)
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[data(100, HaloEnvironmentParams)]
 pub struct HaloEnvironment {
-    #[uniform(100)]
     pub params: HaloEnvironmentParams,
     #[texture(101)]
     #[sampler(102)]
@@ -271,8 +278,11 @@ impl HaloCombinerParams {
 /// transparent surfaces.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[bind_group_data(HaloTransparentKey)]
+#[data(0, HaloCombinerParams)]
 pub struct HaloTransparentMaterial {
-    #[uniform(0)]
+    /// (A `data` binding, as [`HaloEnvironment`]'s: the hundreds of these
+    /// animated every frame in a fight cost 3 ms a frame as uniforms, a
+    /// buffer and a bind group each, and cost an upload each now.)
     pub params: HaloCombinerParams,
     #[texture(1)]
     #[sampler(2)]
@@ -335,6 +345,18 @@ pub struct HaloTransparentMaterial {
     /// its colours follow its object's functions.
     #[reflect(ignore)]
     pub plasma: Option<std::sync::Arc<halo_map::shader::PlasmaInfo>>,
+}
+
+impl bevy::render::render_resource::AsBindGroupShaderType<HaloCombinerParams> for HaloTransparentMaterial {
+    fn as_bind_group_shader_type(&self, _images: &bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>) -> HaloCombinerParams {
+        self.params.clone()
+    }
+}
+
+impl bevy::render::render_resource::AsBindGroupShaderType<HaloEnvironmentParams> for HaloEnvironment {
+    fn as_bind_group_shader_type(&self, _images: &bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>) -> HaloEnvironmentParams {
+        self.params.clone()
+    }
 }
 
 static NEUTRAL_VOLUME: std::sync::OnceLock<Handle<Image>> = std::sync::OnceLock::new();

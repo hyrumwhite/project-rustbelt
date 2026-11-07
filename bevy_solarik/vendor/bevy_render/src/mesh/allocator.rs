@@ -263,6 +263,7 @@ pub fn allocate_and_free_meshes(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
 ) {
+    let _profile = crate::diagnostic::profile_scope("mesh.system");
     // Clear the list of meshes displaced by last frame's slab growth.
     mesh_allocator.clear_displaced_keys();
 

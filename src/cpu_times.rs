@@ -163,27 +163,32 @@ fn main_ended() {
             per(totals.window_wait),
             totals.render_frames as f32 / since.elapsed().as_secs_f32()
         );
+        // (a scope's ms a frame, and its count a frame when not one)
+        let scopes: Vec<String> = totals
+            .profile
+            .iter()
+            .map(|(name, (ms, n))| {
+                let per_frame = *n as f32 / frames;
+                if (per_frame - 1.0).abs() < 0.05 {
+                    format!("{name} {:.2}", *ms as f32 / frames)
+                } else {
+                    format!("{name} {:.2} ({per_frame:.1}/frame)", *ms as f32 / frames)
+                }
+            })
+            .collect();
+        let scopes = (!scopes.is_empty()).then(|| format!("cpu scopes: {}", scopes.join(", ")));
         if std::env::var_os("HALO_RT_GPU_LOG").is_some() {
             info!("{line}");
-            if !totals.profile.is_empty() {
-                // (a scope's ms a frame, and its count a frame when not one)
-                let scopes: Vec<String> = totals
-                    .profile
-                    .iter()
-                    .map(|(name, (ms, n))| {
-                        let per_frame = *n as f32 / frames;
-                        if (per_frame - 1.0).abs() < 0.05 {
-                            format!("{name} {:.2}", *ms as f32 / frames)
-                        } else {
-                            format!("{name} {:.2} ({per_frame:.1}/frame)", *ms as f32 / frames)
-                        }
-                    })
-                    .collect();
-                info!("cpu scopes: {}", scopes.join(", "));
+            if let Some(scopes) = &scopes {
+                info!("{scopes}");
             }
         }
         if let Ok(mut latest) = latest_line().lock() {
-            *latest = Some(line);
+            // (a capture's `.txt` gets the scopes too, when they are on)
+            *latest = Some(match scopes {
+                Some(scopes) => format!("{line}\n{scopes}"),
+                None => line,
+            });
         }
         *totals = Totals::default();
     }

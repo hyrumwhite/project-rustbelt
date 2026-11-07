@@ -34,8 +34,11 @@ struct InstanceGeometryIds {
     index_buffer_id: u32,
     index_buffer_offset: u32,
     triangle_count: u32,
-    light_probability: f32,
+    // The instance's light in `light_sources`, NO_LIGHT_INDEX when none.
+    light_index: u32,
 }
+
+const NO_LIGHT_INDEX = 0xFFFFFFFFu;
 
 struct VertexBuffer { vertices: array<PackedVertex> }
 
@@ -866,7 +869,10 @@ fn resolve_triangle_data_filtered(instance_id: u32, triangle_id: u32, barycentri
     resolved.triangle_area = triangle_area;
     resolved.triangle_world_normal = normalize(cross(triangle_edge0, triangle_edge1));
     resolved.triangle_count = instance_geometry_ids.triangle_count;
-    resolved.light_probability = instance_geometry_ids.light_probability;
+    resolved.light_probability = 0.0;
+    if instance_geometry_ids.light_index != NO_LIGHT_INDEX && instance_geometry_ids.light_index < arrayLength(&light_sources) {
+        resolved.light_probability = light_sources[instance_geometry_ids.light_index].selection_probability;
+    }
     resolved.material = resolved_material;
 @if(RAY_MATERIAL_FOOTPRINTS) {
     resolved.ray_cone = cone;

@@ -924,23 +924,37 @@ fn log_gpu_times(store: Res<bevy::diagnostic::DiagnosticsStore>, mut last: Local
     }
     *last = Some(std::time::Instant::now());
     info!("{}", gpu_times(&store));
+    info!("{}", node_cpu_times(&store));
 }
 
 /// The GPU time of each render pass Bevy's render diagnostics time
 /// (milliseconds, averaged), and their sum, as a line.
 fn gpu_times(store: &bevy::diagnostic::DiagnosticsStore) -> String {
+    node_times(store, "/elapsed_gpu", "gpu")
+}
+
+/// The same passes' time on the CPU, encoding their commands (the render
+/// graph's thread time, the `graph` stretch of the `cpu:` line, split by
+/// node as far as the nodes time themselves; submit and present are not in
+/// it).
+fn node_cpu_times(store: &bevy::diagnostic::DiagnosticsStore) -> String {
+    node_times(store, "/elapsed_cpu", "nodes cpu")
+}
+
+fn node_times(store: &bevy::diagnostic::DiagnosticsStore, field: &str, label: &str) -> String {
     let mut times: Vec<(String, f64)> = store
         .iter()
-        .filter(|d| d.path().as_str().ends_with("/elapsed_gpu"))
+        .filter(|d| d.path().as_str().ends_with(field))
         // (not those left from frames long gone: a span timed only on the
         // frames it runs keeps its last average, BLAS builds at load)
         .filter(|d| d.measurement().is_some_and(|m| m.time.elapsed().as_secs_f32() < 1.0))
-        .filter_map(|d| Some((d.path().as_str().trim_end_matches("/elapsed_gpu").to_string(), d.average()?)))
+        .filter_map(|d| Some((d.path().as_str().trim_end_matches(field).to_string(), d.average()?)))
         .collect();
     times.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let total: f64 = times.iter().map(|t| t.1).sum();
+    // (the frame's envelope spans are the whole frame, not a part of it)
+    let total: f64 = times.iter().filter(|t| !t.0.starts_with("render/frame_gpu")).map(|t| t.1).sum();
     let list: Vec<String> = times.iter().filter(|t| t.1 >= 0.02).map(|(name, ms)| format!("{name} {ms:.2}")).collect();
-    format!("gpu {total:.2} ms: {}", list.join(", "))
+    format!("{label} {total:.2} ms: {}", list.join(", "))
 }
 
 fn log_heartbeat(world: &World, mut last: Local<Option<std::time::Instant>>) {
@@ -1384,7 +1398,9 @@ fn capture(
     let place = format!("{level} at tick {}, {}", game.map_or(0, |g| g.game_tick), camera_argument(&camera));
     info!("capture: {} - {place}", path.display());
     // (and beside it: a packaged run's log goes nowhere)
-    let times = [cpu_times::latest(), diagnostics.as_deref().map(gpu_times)].into_iter().flatten();
+    let times = [cpu_times::latest(), diagnostics.as_deref().map(gpu_times), diagnostics.as_deref().map(node_cpu_times)]
+        .into_iter()
+        .flatten();
     let note: String = std::iter::once(place.clone()).chain(times).map(|line| line + "\n").collect();
     if let Err(error) = std::fs::write(path.with_extension("txt"), note) {
         warn!("capture: can't write where it was taken: {error}");

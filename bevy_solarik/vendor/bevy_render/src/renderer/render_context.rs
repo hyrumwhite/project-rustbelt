@@ -74,6 +74,9 @@ impl PendingCommandBuffers {
     pub fn finish(&mut self) -> impl Iterator<Item = CommandBuffer> {
         #[cfg(feature = "trace")]
         let _finish_command_buffers_span = info_span!("finish_command_buffers").entered();
+        // (eager: the encoders are finished in parallel here, before the
+        // submit; `graph.submit_set` less this is the queue's submit)
+        let _profile = crate::diagnostic::profile_scope("graph.finish_buffers");
 
         let commands = self.0.commands.drain(..);
 
@@ -303,6 +306,7 @@ impl<'w> FlushCommands<'w> {
     pub fn flush(&mut self) {
         let mut buffers = self.pending.finish().peekable();
         if buffers.peek().is_some() {
+            let _profile = crate::diagnostic::profile_scope("graph.flush_submit");
             self.queue.submit(buffers);
         }
     }

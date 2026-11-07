@@ -60,7 +60,36 @@ impl RenderGraph {
             )
                 .chain_weak(),
         );
+        schedule.add_systems((
+            submit_set_started
+                .after(RenderGraphSystems::Render)
+                .before(RenderGraphSystems::Submit),
+            submit_set_ended
+                .after(RenderGraphSystems::Submit)
+                .before(RenderGraphSystems::Finish),
+        ));
         schedule
+    }
+}
+
+/// When the [`RenderGraphSystems::Submit`] set started: its time (the
+/// command buffers finished and submitted, by `bevy_core_pipeline`) is the
+/// CPU profile's `graph.submit_set`; less `graph.finish_buffers`, the queue's
+/// submit itself.
+static SUBMIT_SET_STARTED: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+fn submit_set_started() {
+    *SUBMIT_SET_STARTED.lock().unwrap() = Some(std::time::Instant::now());
+}
+
+fn submit_set_ended() {
+    if let Some(started) = SUBMIT_SET_STARTED.lock().unwrap().take() {
+        crate::diagnostic::profile_value(
+            "graph.submit_set",
+            started.elapsed().as_secs_f64() * 1000.0,
+            "ms",
+        );
     }
 }
 
@@ -92,9 +121,13 @@ pub fn render_system(
     #[cfg(feature = "trace")]
     let _span = info_span!("main_render_schedule").entered();
 
-    world.run_schedule(RenderGraph);
+    {
+        let _profile = crate::diagnostic::profile_scope("graph.schedule");
+        world.run_schedule(RenderGraph);
+    }
 
     {
+        let _profile = crate::diagnostic::profile_scope("graph.final_submit");
         let render_device = world.resource::<RenderDevice>();
         let render_queue = world.resource::<RenderQueue>();
 
@@ -110,6 +143,7 @@ pub fn render_system(
     {
         #[cfg(feature = "trace")]
         let _span = info_span!("present_frames").entered();
+        let _profile = crate::diagnostic::profile_scope("graph.present");
 
         if let Ok((views, mut windows, render_queue)) = present_state.get_mut(world) {
             for (window_entity, mut window) in &mut windows {

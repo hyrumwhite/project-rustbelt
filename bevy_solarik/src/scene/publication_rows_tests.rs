@@ -131,7 +131,7 @@ fn full_forest_rows_match_dense_reference_through_remaps_motion_and_settling() {
                     vertex_buffer_offset: part * 10,
                     index_buffer_offset: part * 30,
                     triangle_count: 10,
-                    light_probability: 0.0,
+                    light_index: u32::MAX,
                 },
                 part + 1,
             )
@@ -235,7 +235,7 @@ fn binding_only_republication_preserves_matrix_bytes_until_source_is_ready() {
 }
 
 #[test]
-fn final_emitter_probability_marks_geometry_without_material_or_transform_changes() {
+fn light_index_change_marks_geometry_without_material_or_transform_changes() {
     let (slots, inputs) = fixture(1);
     let mut rows = Records::new(1);
     let sources = vec![(GpuInstanceGeometryIds::default(), 7)];
@@ -245,15 +245,16 @@ fn final_emitter_probability_marks_geometry_without_material_or_transform_change
         (vec![], vec![])
     );
     let before = rows.transforms.clone();
-    let mut dirty = Vec::new();
-    super::set_light_probability(0, 0.75, &mut rows.geometry, &mut dirty);
-    assert_eq!(dirty, [0]);
-    assert_eq!(rows.geometry[0].light_probability, 0.75);
+    let lit = vec![(GpuInstanceGeometryIds { light_index: 3, ..Default::default() }, 7)];
+    assert_eq!(
+        retained(&mut rows, &inputs, &slots, &lit, &[], false),
+        (vec![0], vec![])
+    );
+    assert_eq!(rows.geometry[0].light_index, 3);
     assert_eq!(rows.materials, [7]);
     assert_eq!(rows.transforms, before);
-    dirty.clear();
-    super::set_light_probability(0, 0.75, &mut rows.geometry, &mut dirty);
-    assert!(dirty.is_empty());
-    super::set_light_probability(0, 0.0, &mut rows.geometry, &mut dirty);
-    assert_eq!(dirty, [0]);
+    assert_eq!(
+        retained(&mut rows, &inputs, &slots, &lit, &[], false),
+        (vec![], vec![])
+    );
 }

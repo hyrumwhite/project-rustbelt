@@ -39,18 +39,6 @@ pub(super) fn write(
     changed
 }
 
-pub(super) fn set_light_probability(
-    index: usize,
-    probability: f32,
-    geometries: &mut [GpuInstanceGeometryIds],
-    dirty: &mut Vec<u32>,
-) {
-    if geometries[index].light_probability.to_bits() != probability.to_bits() {
-        geometries[index].light_probability = probability;
-        dirty.push(index as u32);
-    }
-}
-
 #[cfg(test)]
 #[path = "publication_rows_tests.rs"]
 mod tests;

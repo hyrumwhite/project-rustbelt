@@ -372,6 +372,24 @@ So the library's frame looked like the BLAS stretch first (4.7 to 7.2 ms, agains
 
 The stills of the two runs show the same room with its animated strips (`scratchpad/game/lib_scopes`, `lib_data`). Left in the library's thread: the scene bindings 1.8, the graph 1.3, the bind groups 0.75 and the materials' 0.76 (522 `build_bind_group`s at 0.2, the rest the erased-asset loop). The b40 fights' 14 to 17.5 ms thread had the same shape (assets 3.7 to 7.0) and should fall by as much: for the user's next session.
 
+**The library played again (6 November, night).** The user's captures, the same ground as the earlier session's:
+
+| library, F9 captures | render thread ms | GPU ms | fps |
+|---|---|---|---|
+| earlier session, the opening fights | 16.6 to 20.1 | | 48 to 58 |
+| this build, the opening fights | 6.8 | 8.2 to 8.4 | 90 to 92 |
+| this build, the second floor's fights | 9.6 to 10.8 | 8.6 to 8.9 | 75 to 91 |
+| this build, the big late fights (third and fourth floors) | 12.7 to 15.8 | 9.0 to 9.7 | 61 to 76 |
+
+The dips the user felt with many enemies together are the CPU: the GPU holds at 9 to 9.7 ms while the thread climbs to 15.8 and the window wait falls to nothing. The scene is twice the opening's by then (the heartbeat: 9.4k entities and 3.5k meshes at the start, 18 to 19.8k entities and 6.0 to 6.4k meshes on the upper floors; the bridge draws 717 of 849 objects: the bodies stay). Three brackets grow with it: the graph 1.6 in the quiet opening, 4.0 to 7.4 in the big fights; the compaction wait, 0.1 to 0.4 on the lower floors, 1.7 to 3.2 up there; the bindings 2.5 to 3.3.
+
+Done for it, awaiting the user's next captures:
+
+- The capture `.txt` carries the renderer's CPU scopes (`BEVY_RENDER_PROFILE=1` at launch) and a `nodes cpu` line, the render graph's nodes timed on the CPU as the diagnostics already timed them (`elapsed_cpu`, beside `elapsed_gpu`). The graph stretch is split in the scopes: `graph.schedule` (the graph's systems), `graph.submit_set` (the command buffers finished, `graph.finish_buffers`, and submitted: `bevy_core_pipeline`'s system, so timed around its set), `graph.final_submit`, `graph.present`. In a scripted c20 the graph's 1.3 ms is: schedule 1.1 (the timed nodes 0.3 of it, the submit set 0.6, of which finishing the buffers 0.3), present 0.1.
+- The binder's light probability left the geometry rows (`scene.geometry_dirty_rows` 1069 a frame against 97 transform-dirty rows): the row carries the instance's index in `light_sources` (`light_index`, stable until the lights change), and the hit shader reads the selection probability there (`raytracing_scene_bindings.wesl`), where the buffer is rewritten every frame anyway. Geometry-dirty rows now equal transform-dirty rows (98 or 241 a frame in the scripted runs); `scene.upload` 0.54 to 0.47.
+
+Scripted fights did not reproduce the user's: `ai_place` of the first floor's encounters from the start room (scratchpad `fight.sh`: the flood stay beyond the door; 11.6k entities, the thread 8.1 ms with `mesh.system` 1.6 for 271 skinned meshes a frame, 3.7 MB of vertices) and `HALO_SIM_TELEPORT` to the user's spots (`fight2.sh`, `fight3.sh` by env: the teleport at tick 1200 restarts the level, the tick count back to 0, on the same floor as well as another; the opening cutscene, perhaps). The user's own captures with the scopes on are the next data.
+
 ## Phase 5: paying for it
 
 Everything above is either free (1, 2a, 2b) or bounded (2c, 3, 4). If the interior total rises past the 0.3 ms rule, these pay it back in order: the cache search at 64 candidates (Phase 3), 16 DI tile candidates (Phase 3), and the world cache update soft cap (40000 cells a frame; check `HALO_RT_CACHE_LOG` for how often it binds).

@@ -1050,7 +1050,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                         index_buffer_id,
                         index_buffer_offset: index_slice.range.start,
                         triangle_count: (index_slice.range.len() / 3) as u32,
-                        light_probability: 0.0,
+                        light_index: NO_LIGHT,
                     },
                 ))
             })
@@ -1072,10 +1072,21 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                 .insert(entity.entity);
         }
         assert!(slot.index < (1 << 24), "TLAS custom slot capacity");
+        // (a masked body's emission, a first-person player's glowing weapon,
+        // is no light: at the camera, among the hands holding it, its shadow
+        // rays came and went, and in a10's Jefferies tubes, the walls an arm's
+        // length away, they boiled, 0.03 to 0.23; rays that meet it still
+        // see it glow)
+        let is_light = material.emissive != Vec3::ZERO && input.mask == 0xFF;
+        let geometry = GpuInstanceGeometryIds {
+            // (the source pushed below, at this index)
+            light_index: if is_light { light_sources.get().len() as u32 } else { NO_LIGHT },
+            ..geometry.clone()
+        };
         let changed = publication_rows::write(
             index,
             input,
-            (geometry, material_id),
+            (&geometry, material_id),
             (
                 transforms.get_mut(),
                 previous_frame_transforms.get_mut(),
@@ -1093,12 +1104,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         let transform = transforms.get()[index];
         slots.activate(slot);
 
-        // (a masked body's emission, a first-person player's glowing weapon,
-        // is no light: at the camera, among the hands holding it, its shadow
-        // rays came and went, and in a10's Jefferies tubes, the walls an arm's
-        // length away, they boiled, 0.03 to 0.23; rays that meet it still
-        // see it glow)
-        if material.emissive != Vec3::ZERO && input.mask == 0xFF {
+        if is_light {
             // Texture-average emission is not available on the CPU. The
             // material factor is a power estimate; PDFs remain exact.
             light_fluxes.push(
@@ -1351,14 +1357,6 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         source.selection_probability = bin.probability;
         source.alias_threshold = bin.threshold;
         source.alias_index = bin.alias;
-        if source.kind & 1 == 0 {
-            publication_rows::set_light_probability(
-                source.id as usize,
-                bin.probability,
-                geometry_ids.get_mut(),
-                &mut geometry_dirty_indices,
-            );
-        }
     }
 
     let upload_profile = bevy_render::diagnostic::profile_scope("scene.upload");
@@ -1701,8 +1699,16 @@ struct GpuInstanceGeometryIds {
     index_buffer_id: u32,
     index_buffer_offset: u32,
     triangle_count: u32,
-    light_probability: f32,
+    /// The instance's light in `light_sources`, [`NO_LIGHT`] when it is
+    /// none: the shader reads its selection probability there. (The row
+    /// carried the probability itself, and with every emissive surface's
+    /// share moving a little as the camera moves, a thousand rows were
+    /// re-uploaded a frame; the index moves only when the lights do.)
+    light_index: u32,
 }
+
+/// A geometry row's `light_index` when the instance is no light.
+const NO_LIGHT: u32 = u32::MAX;
 
 #[derive(ShaderType)]
 struct GpuMaterial {

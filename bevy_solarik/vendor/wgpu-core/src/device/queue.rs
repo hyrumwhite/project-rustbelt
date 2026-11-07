@@ -1351,6 +1351,8 @@ impl Queue {
     ) -> Result<SubmissionIndex, (SubmissionIndex, QueueSubmitError)> {
         profiling::scope!("Queue::submit");
         api_log!("Queue::submit");
+        crate::stats::SUBMITS.inc();
+        crate::stats::SUBMITTED_BUFFERS.add(command_buffers.len() as u64);
 
         let snatch_guard = self.device.snatchable_lock.read();
         let mut submission = self
@@ -1454,6 +1456,7 @@ impl Queue {
                         }
 
                         //Note: locking the trackers has to be done after the storages
+                        let started = crate::stats::start();
                         let mut trackers = self.device.trackers.lock();
                         if let Err(e) =
                             baked.initialize_buffer_memory(&mut trackers, &submission.snatch_guard)
@@ -1480,6 +1483,7 @@ impl Queue {
                         if let Err(e) = baked.encoder.close_and_push_front() {
                             break 'error Err(e.into());
                         }
+                        crate::stats::add(crate::stats::Kind::SubmitTrackers, started);
 
                         // Transition surface textures into `Present` state.
                         // Note: we could technically do it after all of the command buffers,
@@ -1528,12 +1532,15 @@ impl Queue {
 
             let pending_writes = self.pending_writes.lock();
 
+            let started = crate::stats::start();
             let SubmissionResult { snatch_guard } = match submission.submit(pending_writes) {
                 Ok(result) => result,
                 Err(e) => break 'error Err(e.into()),
             };
+            crate::stats::add(crate::stats::Kind::SubmitHal, started);
 
             profiling::scope!("cleanup");
+            let started = crate::stats::start();
 
             // This will schedule destruction of all resources that are no longer needed
             // by the user but used in the command stream, among other things.
@@ -1553,6 +1560,7 @@ impl Queue {
                 Err(WaitIdleError::Timeout) => unreachable!("Cannot get Timeout from Poll"),
             };
 
+            crate::stats::add(crate::stats::Kind::SubmitCleanup, started);
             Ok(closures)
         };
 
@@ -2063,6 +2071,7 @@ fn validate_command_buffer(
 
     {
         profiling::scope!("check resource state");
+        let started = crate::stats::start();
 
         {
             profiling::scope!("buffers");
@@ -2108,16 +2117,21 @@ fn validate_command_buffer(
         {
             profiling::scope!("bind groups");
             for bind_group in &cmd_buf_data.trackers.bind_groups {
+                crate::stats::SUBMIT_BIND_GROUPS.inc();
+                crate::stats::SUBMIT_BIND_GROUP_ENTRIES.add(bind_group.used.len() as u64);
                 // This checks the bind group and all resources it references.
                 bind_group.try_raw(snatch_guard)?;
             }
         }
 
+        crate::stats::add(crate::stats::Kind::SubmitCheck, started);
+        let started = crate::stats::start();
         if let Err(e) =
             cmd_buf_data.validate_acceleration_structure_actions(snatch_guard, command_index_guard)
         {
             return Err(e.into());
         }
+        crate::stats::add(crate::stats::Kind::SubmitAs, started);
     }
     Ok(())
 }

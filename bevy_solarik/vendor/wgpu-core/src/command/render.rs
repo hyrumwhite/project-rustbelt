@@ -2297,6 +2297,8 @@ pub(super) fn encode_render_pass(
     multiview_mask: Option<NonZeroU32>,
 ) -> Result<(), RenderPassError> {
     let pass_scope = PassErrorScope::Pass;
+    let setup_started = crate::stats::start();
+    crate::stats::RENDER_PASSES.inc();
 
     let device = parent_state.device;
 
@@ -2392,6 +2394,7 @@ pub(super) fn encode_render_pass(
             active_pipeline_statistics_query: None,
         };
 
+        crate::stats::add(crate::stats::Kind::RenderPassSetup, setup_started);
         for command in base.commands.drain(..) {
             match command {
                 ArcRenderCommand::SetBindGroup {
@@ -2477,6 +2480,8 @@ pub(super) fn encode_render_pass(
                     first_vertex,
                     first_instance,
                 } => {
+                    crate::stats::DRAWS.inc();
+                    let draw_started = crate::stats::start();
                     let scope = PassErrorScope::Draw {
                         kind: DrawKind::Draw,
                         family: DrawCommandFamily::Draw,
@@ -2489,6 +2494,7 @@ pub(super) fn encode_render_pass(
                         first_instance,
                     )
                     .map_pass_err(scope)?;
+                    crate::stats::add(crate::stats::Kind::RenderDraw, draw_started);
                 }
                 ArcRenderCommand::DrawIndexed {
                     index_count,
@@ -2497,6 +2503,8 @@ pub(super) fn encode_render_pass(
                     base_vertex,
                     first_instance,
                 } => {
+                    crate::stats::DRAWS.inc();
+                    let draw_started = crate::stats::start();
                     let scope = PassErrorScope::Draw {
                         kind: DrawKind::Draw,
                         family: DrawCommandFamily::DrawIndexed,
@@ -2510,18 +2518,22 @@ pub(super) fn encode_render_pass(
                         first_instance,
                     )
                     .map_pass_err(scope)?;
+                    crate::stats::add(crate::stats::Kind::RenderDraw, draw_started);
                 }
                 ArcRenderCommand::DrawMeshTasks {
                     group_count_x,
                     group_count_y,
                     group_count_z,
                 } => {
+                    crate::stats::DRAWS.inc();
+                    let draw_started = crate::stats::start();
                     let scope = PassErrorScope::Draw {
                         kind: DrawKind::Draw,
                         family: DrawCommandFamily::DrawMeshTasks,
                     };
                     draw_mesh_tasks(&mut state, group_count_x, group_count_y, group_count_z)
                         .map_pass_err(scope)?;
+                    crate::stats::add(crate::stats::Kind::RenderDraw, draw_started);
                 }
                 ArcRenderCommand::DrawIndirect {
                     buffer,
@@ -2532,6 +2544,8 @@ pub(super) fn encode_render_pass(
                     vertex_or_index_limit: _,
                     instance_limit: _,
                 } => {
+                    crate::stats::DRAWS.inc();
+                    let draw_started = crate::stats::start();
                     let scope = PassErrorScope::Draw {
                         kind: if count != 1 {
                             DrawKind::MultiDrawIndirect
@@ -2550,6 +2564,7 @@ pub(super) fn encode_render_pass(
                         family,
                     )
                     .map_pass_err(scope)?;
+                    crate::stats::add(crate::stats::Kind::RenderDraw, draw_started);
                 }
                 ArcRenderCommand::MultiDrawIndirectCount {
                     buffer,
@@ -2559,6 +2574,8 @@ pub(super) fn encode_render_pass(
                     max_count,
                     family,
                 } => {
+                    crate::stats::DRAWS.inc();
+                    let draw_started = crate::stats::start();
                     let scope = PassErrorScope::Draw {
                         kind: DrawKind::MultiDrawIndirectCount,
                         family,
@@ -2574,6 +2591,7 @@ pub(super) fn encode_render_pass(
                         family,
                     )
                     .map_pass_err(scope)?;
+                    crate::stats::add(crate::stats::Kind::RenderDraw, draw_started);
                 }
                 ArcRenderCommand::PushDebugGroup { color: _, len } => {
                     pass::push_debug_group(&mut state.pass, &base.string_data, len);

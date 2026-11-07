@@ -44,7 +44,14 @@ struct HaloFogLayers {
     planar: vec4<f32>,
 }
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> combiner: HaloCombiner;
+// The material's slot in the combiner table (x).
+struct HaloCombinerSlot {
+    index: vec4<u32>,
+}
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var<uniform> slot: HaloCombinerSlot;
+// The combiner table (src/combiners.rs): every transparent material's
+// params, the animated ones rewritten each frame.
+@group(constants::MATERIAL_BIND_GROUP) @binding(16) var<storage, read> combiners: array<HaloCombiner>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var map0: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(2) var map0_sampler: sampler;
 @group(constants::MATERIAL_BIND_GROUP) @binding(3) var map1: texture_2d<f32>;
@@ -67,7 +74,7 @@ fn word(words: array<vec4<u32>, 2>, index: u32) -> u32 {
 
 fn uv_for(map: u32, uv: vec2<f32>) -> vec2<f32> {
     let p = vec4(uv, 0.0, 1.0);
-    return vec2(dot(combiner.map_rows[map * 2u], p), dot(combiner.map_rows[map * 2u + 1u], p));
+    return vec2(dot(combiners[slot.index.x].map_rows[map * 2u], p), dot(combiners[slot.index.x].map_rows[map * 2u + 1u], p));
 }
 
 // metres in a world unit (halo_map::math::METERS_PER_WORLD_UNIT)
@@ -77,10 +84,10 @@ const METERS_PER_WORLD_UNIT: f32 = 3.048;
 // space, and scaled by the distance (in world units) where it says
 fn first_map_uv(in: VertexOutput) -> vec2<f32> {
     var uv = in.uv;
-    if (combiner.modes.z & 8u) != 0u {
+    if (combiners[slot.index.x].modes.z & 8u) != 0u {
         uv = in.position.xy / view.viewport.zw;
     }
-    if (combiner.modes.z & 64u) != 0u {
+    if (combiners[slot.index.x].modes.z & 64u) != 0u {
         let forward = -normalize(view.world_from_view[2].xyz);
         uv *= max(dot(in.world_position.xyz - view.world_position, forward), 0.0) / METERS_PER_WORLD_UNIT;
     }
@@ -95,9 +102,9 @@ fn first_map_direction(in: VertexOutput) -> vec3<f32> {
     let incident = normalize(in.world_position.xyz - view.world_position);
     let normal = normalize(in.world_normal);
     var d = reflect(incident, normal);
-    if combiner.fade.z > 2.5 {
+    if combiners[slot.index.x].fade.z > 2.5 {
         d = incident;
-    } else if combiner.fade.z > 1.5 {
+    } else if combiners[slot.index.x].fade.z > 1.5 {
         d = normal;
     }
     return vec3(d.x, -d.z, d.y);
@@ -151,10 +158,10 @@ fn surface_fog(in: VertexOutput) -> vec2<f32> {
 // surface, perpendicular (seen head on) or parallel (edge on), times its scale
 fn surface_fade(in: VertexOutput) -> f32 {
     let facing = abs(dot(normalize(in.world_normal), normalize(view.world_position - in.world_position.xyz)));
-    switch combiner.modes.w {
-        case 1u: { return (1.0 - facing) * combiner.fade.x; }
-        case 2u: { return facing * combiner.fade.x; }
-        default: { return combiner.fade.x; }
+    switch combiners[slot.index.x].modes.w {
+        case 1u: { return (1.0 - facing) * combiners[slot.index.x].fade.x; }
+        case 2u: { return facing * combiners[slot.index.x].fade.x; }
+        default: { return combiners[slot.index.x].fade.x; }
     }
 }
 
@@ -164,11 +171,11 @@ fn to_gamma(c: vec4<f32>) -> vec4<f32> {
 }
 
 fn read_register(registers: ptr<function, array<vec4<f32>, 16>>, index: u32, stage: u32) -> vec4<f32> {
-    let unique_c0 = (combiner.program.y & 0x1000u) != 0u;
-    let unique_c1 = (combiner.program.y & 0x10000u) != 0u;
+    let unique_c0 = (combiners[slot.index.x].program.y & 0x1000u) != 0u;
+    let unique_c1 = (combiners[slot.index.x].program.y & 0x10000u) != 0u;
     switch index {
-        case 1u: { return combiner.constant0[select(0u, stage, unique_c0)]; }
-        case 2u: { return combiner.constant1[select(0u, stage, unique_c1)]; }
+        case 1u: { return combiners[slot.index.x].constant0[select(0u, stage, unique_c0)]; }
+        case 2u: { return combiners[slot.index.x].constant1[select(0u, stage, unique_c1)]; }
         default: { return (*registers)[index]; }
     }
 }
@@ -215,8 +222,8 @@ fn output_mapping(value: vec4<f32>, flags: u32) -> vec4<f32> {
 fn final_input(registers: ptr<function, array<vec4<f32>, 16>>, input: u32, alpha_portion: bool) -> vec4<f32> {
     let index = input & 0x0fu;
     var source = (*registers)[index];
-    if index == 1u { source = combiner.constant0[0]; }
-    if index == 2u { source = combiner.constant1[0]; }
+    if index == 1u { source = combiners[slot.index.x].constant0[0]; }
+    if index == 2u { source = combiners[slot.index.x].constant1[0]; }
     let alpha_channel = (input & 0x10u) != 0u;
     var value: vec4<f32>;
     if alpha_portion {
@@ -234,9 +241,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     for (var i = 0u; i < 16u; i++) {
         registers[i] = vec4<f32>(0.0);
     }
-    let present = combiner.modes.y;
+    let present = combiners[slot.index.x].modes.y;
     if (present & 1u) != 0u {
-        if combiner.fade.z > 0.5 {
+        if combiners[slot.index.x].fade.z > 0.5 {
             registers[8] = to_gamma(textureSample(cube0, cube0_sampler, first_map_direction(in)));
         } else {
             registers[8] = to_gamma(textureSample(map0, map0_sampler, uv_for(0u, first_map_uv(in))));
@@ -253,29 +260,29 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // vertex colour) times their scale, moved by their direction with time;
     // v1 its colour (and alpha) from parallel to perpendicular by the view's
     // angle; v0 white (the draw's colour constant 0)
-    if (combiner.modes.z & 512u) != 0u {
+    if (combiners[slot.index.x].modes.z & 512u) != 0u {
         var position = vec3(0.0);
 @if(VERTEX_COLORS) {
         position = in.color.xyz;
 }
-        let n0 = combiner.map_rows[0];
-        let n1 = combiner.map_rows[1];
+        let n0 = combiners[slot.index.x].map_rows[0];
+        let n1 = combiners[slot.index.x].map_rows[1];
         registers[8] = textureSample(noise0, noise0_sampler, position * n0.x + n0.yzw);
         registers[9] = textureSample(noise1, noise1_sampler, position * n1.x + n1.yzw);
         let facing = abs(dot(normalize(in.world_normal), normalize(view.world_position - in.world_position.xyz)));
-        registers[5] = saturate(combiner.constant0[0] + combiner.constant1[0] * facing);
+        registers[5] = saturate(combiners[slot.index.x].constant0[0] + combiners[slot.index.x].constant1[0] * facing);
         registers[12] = vec4<f32>(0.0, 0.0, 0.0, registers[8].a);
     }
     // r0's alpha starts as t0's
     registers[12] = vec4<f32>(0.0, 0.0, 0.0, registers[8].a);
 
-    let mux_msb = (combiner.program.y & 0x100u) != 0u;
-    for (var stage = 0u; stage < min(combiner.program.x, 8u); stage++) {
+    let mux_msb = (combiners[slot.index.x].program.y & 0x100u) != 0u;
+    for (var stage = 0u; stage < min(combiners[slot.index.x].program.x, 8u); stage++) {
         var results: array<vec4<f32>, 6>; // rgb AB, CD, SUM; alpha AB, CD, SUM
         for (var portion = 0u; portion < 2u; portion++) {
             let alpha = portion == 1u;
-            let inputs = select(word(combiner.rgb_inputs, stage), word(combiner.alpha_inputs, stage), alpha);
-            let outputs = select(word(combiner.rgb_outputs, stage), word(combiner.alpha_outputs, stage), alpha);
+            let inputs = select(word(combiners[slot.index.x].rgb_inputs, stage), word(combiners[slot.index.x].alpha_inputs, stage), alpha);
+            let outputs = select(word(combiners[slot.index.x].rgb_outputs, stage), word(combiners[slot.index.x].alpha_outputs, stage), alpha);
             let flags = outputs >> 12u;
             let a = combiner_input(&registers, (inputs >> 24u) & 0xffu, alpha, stage);
             let b = combiner_input(&registers, (inputs >> 16u) & 0xffu, alpha, stage);
@@ -298,7 +305,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // write back once both portions have read their inputs
         for (var portion = 0u; portion < 2u; portion++) {
             let alpha = portion == 1u;
-            let outputs = select(word(combiner.rgb_outputs, stage), word(combiner.alpha_outputs, stage), alpha);
+            let outputs = select(word(combiners[slot.index.x].rgb_outputs, stage), word(combiners[slot.index.x].alpha_outputs, stage), alpha);
             let destinations = array<u32, 3>((outputs >> 4u) & 0x0fu, outputs & 0x0fu, (outputs >> 8u) & 0x0fu);
             for (var k = 0u; k < 3u; k++) {
                 let destination = destinations[k];
@@ -317,8 +324,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // final combiner: rgb = A*B + (1-A)*C + D, alpha = G
-    let abcd = combiner.program.z;
-    let efg = combiner.program.w;
+    let abcd = combiners[slot.index.x].program.z;
+    let efg = combiners[slot.index.x].program.w;
     let e = final_input(&registers, (efg >> 24u) & 0xffu, false);
     let f = final_input(&registers, (efg >> 16u) & 0xffu, false);
     registers[15] = vec4<f32>(e.rgb * f.rgb, 0.0);
@@ -332,20 +339,20 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // the game's alpha test (reference 0x7f); a meter's alpha kill (its
     // map's zero alpha)
-    if (combiner.modes.z & 1u) != 0u && alpha < 127.5 / 255.0 {
+    if (combiners[slot.index.x].modes.z & 1u) != 0u && alpha < 127.5 / 255.0 {
         discard;
     }
-    if (combiner.modes.z & 256u) != 0u && registers[8].a <= 0.0 {
+    if (combiners[slot.index.x].modes.z & 256u) != 0u && registers[8].a <= 0.0 {
         discard;
     }
-    if combiner.fade.y > 0.5 {
+    if combiners[slot.index.x].fade.y > 0.5 {
         return vec4(1.0, 0.0, 1.0, 0.5);
     }
     // the fade toward the blend's neutral, then the fog: written as each blend
     // state takes it (material.rs)
     let fog = surface_fog(in);
     let fade = surface_fade(in) * fog.x;
-    switch combiner.modes.x {
+    switch combiners[slot.index.x].modes.x {
         // alpha blend: by its coverage
         case 0u: { return vec4(pow(rgb, vec3(2.2)) * fog.y, alpha * fade); }
         // multiply, min: the factor toward 1
@@ -356,12 +363,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         case 7u: { return vec4(pow(rgb, vec3(2.2)) * fade * fog.y, alpha * fade); }
         // a meter: its blend's constant colour, the tint (stage 3's c1)
         case 8u: {
-            let tint = combiner.constant1[3];
+            let tint = combiners[slot.index.x].constant1[3];
             let keep = dot(pow(tint.rgb, vec3(2.2)), vec3(1.0 / 3.0));
             return vec4(pow(rgb, vec3(2.2)) * tint.a * fade * fog.y, 1.0 - keep);
         }
         case 9u: {
-            let tint = combiner.constant1[3];
+            let tint = combiners[slot.index.x].constant1[3];
             return vec4(pow(rgb, vec3(2.2)) * pow(tint.rgb, vec3(2.2)) * fade * fog.y, alpha);
         }
         // plasma: added by its alpha

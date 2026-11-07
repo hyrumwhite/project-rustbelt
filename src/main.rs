@@ -17,6 +17,7 @@ mod bridge;
 mod bundle;
 mod clusters;
 mod cpu_times;
+mod combiners;
 mod decals;
 mod effects;
 mod lens_flares;
@@ -456,7 +457,7 @@ fn main() -> AppExit {
         .init_resource::<ResetHistory>()
         .insert_resource(ActiveBsp(args.bsp))
         .init_resource::<level::PeriodicTables>()
-        .add_systems(Update, (level::animate_self_illumination.after(apply_lighting), level::animate_transparent))
+        .add_systems(Update, level::animate_self_illumination.after(apply_lighting))
         .add_systems(PostUpdate, level::follow_camera.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, reset_history_on_cuts.before(TransformSystems::Propagate))
         .add_systems(PostUpdate, level::sync_traced_visibility.after(bevy::camera::visibility::VisibilitySystems::VisibilityPropagate));

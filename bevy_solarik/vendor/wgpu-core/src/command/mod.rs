@@ -1117,6 +1117,13 @@ impl CommandEncoder {
         }
 
         for command in commands {
+            let kind = match &command {
+                ArcCommand::RunRenderPass { .. } => crate::stats::Kind::EncodeRender,
+                ArcCommand::RunComputePass { .. } => crate::stats::Kind::EncodeCompute,
+                ArcCommand::BuildAccelerationStructures { .. } => crate::stats::Kind::EncodeAs,
+                _ => crate::stats::Kind::EncodeOther,
+            };
+            let started = crate::stats::start();
             if matches!(
                 command,
                 ArcCommand::RunRenderPass { .. }
@@ -1300,6 +1307,7 @@ impl CommandEncoder {
                     }
                 }
             }
+            crate::stats::add(kind, started);
         }
 
         if debug_scope_depth > 0 {

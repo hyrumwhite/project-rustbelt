@@ -48,6 +48,10 @@ impl BufferBindGroupState {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.buffers.len()
+    }
+
     /// Optimize the buffer bind group state by sorting it by ID.
     ///
     /// When this list of states is merged into a tracker, the memory

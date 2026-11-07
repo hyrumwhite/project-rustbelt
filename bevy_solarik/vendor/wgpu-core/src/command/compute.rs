@@ -342,7 +342,9 @@ impl<'scope, 'snatch_guard, 'cmd_enc> State<'scope, 'snatch_guard, 'cmd_enc> {
         indirect_buffer: Option<&Arc<Buffer>>,
         track_indirect_buffer: bool,
     ) -> Result<(), ComputePassErrorInner> {
+        let started = crate::stats::start();
         for bind_group in self.pass.binder.list_active() {
+            crate::stats::BIND_GROUP_ENTRIES.add(bind_group.used.len() as u64);
             unsafe { self.pass.scope.merge_bind_group(&bind_group.used)? };
         }
 
@@ -387,6 +389,7 @@ impl<'scope, 'snatch_guard, 'cmd_enc> State<'scope, 'snatch_guard, 'cmd_enc> {
             &mut self.intermediate_trackers,
             self.pass.base.snatch_guard,
         );
+        crate::stats::add(crate::stats::Kind::ComputeFlush, started);
         Ok(())
     }
 }
@@ -660,6 +663,8 @@ pub(super) fn encode_compute_pass(
     mut timestamp_writes: Option<ArcPassTimestampWrites>,
 ) -> Result<(), ComputePassError> {
     let pass_scope = PassErrorScope::Pass;
+    let setup_started = crate::stats::start();
+    crate::stats::COMPUTE_PASSES.inc();
 
     let device = parent_state.device;
 
@@ -785,6 +790,7 @@ pub(super) fn encode_compute_pass(
         state.pass.base.raw_encoder.begin_compute_pass(&hal_desc);
     }
 
+    crate::stats::add(crate::stats::Kind::ComputePassSetup, setup_started);
     for command in base.commands.drain(..) {
         match command {
             ArcComputeCommand::SetBindGroup {
@@ -833,10 +839,12 @@ pub(super) fn encode_compute_pass(
                     naga::valid::ImmediateSlots::from_range(offset, size_bytes);
             }
             ArcComputeCommand::DispatchWorkgroups(groups) => {
+                crate::stats::DISPATCHES.inc();
                 let scope = PassErrorScope::Dispatch { indirect: false };
                 dispatch_workgroups(&mut state, groups).map_pass_err(scope)?;
             }
             ArcComputeCommand::DispatchWorkgroupsIndirect { buffer, offset } => {
+                crate::stats::DISPATCHES.inc();
                 let scope = PassErrorScope::Dispatch { indirect: true };
                 dispatch_workgroups_indirect(&mut state, device, buffer, offset)
                     .map_pass_err(scope)?;

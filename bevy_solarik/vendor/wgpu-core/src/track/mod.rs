@@ -443,6 +443,11 @@ pub(crate) struct BindGroupStates {
 }
 
 impl BindGroupStates {
+    /// The buffers and texture views, counted (a bindless group's thousands).
+    pub fn len(&self) -> usize {
+        self.buffers.len() + self.views.len()
+    }
+
     pub fn new() -> Self {
         Self {
             buffers: BufferBindGroupState::new(),

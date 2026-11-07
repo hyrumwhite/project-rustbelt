@@ -100,12 +100,14 @@ pub struct ObjectFunctions {
 
 /// Each animated transparent surface's maps and colours at this time
 /// (`shader_texture_animation_evaluate`, the generic stages' colour
-/// animation), with its object's functions where it has one. Raster only, so
-/// a change every frame costs a uniform's upload.
+/// animation), with its object's functions where it has one. Written into
+/// the combiner table's slot (one buffer rewritten a frame), not the
+/// material (whose every change cost the asset pipeline a frame).
 pub fn animate_transparent(
     time: Res<Time>,
     objects: Query<&ObjectFunctions>,
     mut materials: ResMut<Assets<HaloTransparentMaterial>>,
+    mut table: ResMut<crate::combiners::CombinerTable>,
 ) {
     let seconds = if std::env::var_os("HALO_RT_FREEZE_ANIMATION").is_some() { 0.0 } else { time.elapsed_secs() };
     let animated: Vec<_> = materials
@@ -132,7 +134,8 @@ pub fn animate_transparent(
         // its moving noise left be, rather than rewriting the material every
         // frame for each shielded unit)
         let unseen = |p: &crate::material::HaloCombinerParams| p.constant0[0].w <= 0.0 && p.constant0[0].w + p.constant1[0].w <= 0.0;
-        if material.plasma.is_some() && unseen(&params) && unseen(&material.params) {
+        let slot = material.slot;
+        if material.plasma.is_some() && unseen(&params) && table.params(slot).is_some_and(unseen) {
             continue;
         }
         // a numeric counter's digit, when it changes
@@ -148,16 +151,7 @@ pub fn animate_transparent(
         {
             material.map0 = frame;
         }
-        let Some(material) = materials.get(id) else { continue };
-        if params.map_rows != material.params.map_rows
-            || params.constant0 != material.params.constant0
-            || params.constant1 != material.params.constant1
-            || params.fade != material.params.fade
-        {
-            if let Some(mut material) = materials.get_mut(id) {
-                material.params = params;
-            }
-        }
+        table.set(slot, &params);
     }
 }
 
@@ -2724,6 +2718,8 @@ impl LevelBuilder {
             noise1: crate::material::neutral_volume(),
             cube0: crate::material::neutral_cube(),
             fog: if sky { crate::fog::no_fog_layers() } else { crate::fog::fog_layers() },
+            slot: crate::combiners::NO_SLOT,
+            combiners: crate::combiners::combiners(),
         };
         if let Some(cube) = cube {
             material.cube0 = cube;
@@ -2796,6 +2792,8 @@ impl LevelBuilder {
             numeric: None,
             meter: None,
             plasma: Some(std::sync::Arc::new(plasma)),
+            slot: crate::combiners::NO_SLOT,
+            combiners: crate::combiners::combiners(),
         };
         if let Some(params) = material.animate(None, None, 0.0, &periodic_function) {
             material.params = params;
@@ -2842,6 +2840,8 @@ impl LevelBuilder {
             noise1: crate::material::neutral_volume(),
             cube0: crate::material::neutral_cube(),
             fog: crate::fog::fog_layers(),
+            slot: crate::combiners::NO_SLOT,
+            combiners: crate::combiners::combiners(),
         };
         let periodic = periodic_function;
         if let Some(params) = material.animate(None, None, 0.0, &periodic) {

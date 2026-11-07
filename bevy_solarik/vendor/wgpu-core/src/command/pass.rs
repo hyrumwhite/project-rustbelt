@@ -102,6 +102,7 @@ where
         // render passes, and is used to fail submission of the command buffer if
         // any resource in any of the bind groups has been destroyed, whether or
         // not the bind group is actually used by the pipeline.
+        crate::stats::SET_BIND_GROUPS.inc();
         let bind_group = state.base.tracker.bind_groups.insert_single(bind_group);
 
         bind_group.same_device(device)?;
@@ -112,6 +113,7 @@ where
             // Merge the bind group's resources into the tracker. We only do this
             // for render passes. For compute passes it is done per dispatch in
             // [`flush_bindings`].
+            crate::stats::BIND_GROUP_ENTRIES.add(bind_group.used.len() as u64);
             unsafe {
                 state.scope.merge_bind_group(&bind_group.used)?;
             }

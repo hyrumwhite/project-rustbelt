@@ -30,6 +30,7 @@ impl Plugin for HaloMaterialsPlugin {
             MaterialPlugin::<HaloTransparentMaterial>::default(),
             MaterialPlugin::<GlassSkyMask>::default(),
             MaterialPlugin::<SkyWaterMaterial>::default(),
+            crate::combiners::CombinersPlugin,
         ));
         let mut masks = app.world_mut().resource_mut::<Assets<GlassSkyMask>>();
         let far = masks.add(GlassSkyMask { distance: GLASS_SKY_MASK_DISTANCE, ..default() });
@@ -232,8 +233,9 @@ impl MaterialExtension for HaloEnvironment {
     }
 }
 
-/// `HaloCombiner` in `halo_transparent.wesl`.
-#[derive(ShaderType, Debug, Clone, Default, Reflect)]
+/// `HaloCombiner` in `halo_transparent.wesl`: a slot of the
+/// [`crate::combiners::CombinerTable`].
+#[derive(ShaderType, Debug, Clone, Default, Reflect, PartialEq)]
 pub struct HaloCombinerParams {
     pub rgb_inputs: [UVec4; 2],
     pub rgb_outputs: [UVec4; 2],
@@ -276,14 +278,28 @@ impl HaloCombinerParams {
 /// A transparent chicago or generic shader, evaluated as its Xbox combiner
 /// program (see `halo_transparent.wesl`). Raster only: Solari does not trace
 /// transparent surfaces.
+/// A transparent material's data binding: its slot in the combiner table.
+#[derive(ShaderType, Debug, Clone, Default, Reflect)]
+pub struct HaloCombinerSlot {
+    pub index: UVec4,
+}
+
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 #[bind_group_data(HaloTransparentKey)]
-#[data(0, HaloCombinerParams)]
+#[data(0, HaloCombinerSlot)]
 pub struct HaloTransparentMaterial {
-    /// (A `data` binding, as [`HaloEnvironment`]'s: the hundreds of these
-    /// animated every frame in a fight cost 3 ms a frame as uniforms, a
-    /// buffer and a bind group each, and cost an upload each now.)
+    /// Its combiner's params as made (the animation's base): what the
+    /// shader reads is the table's slot, written from these when the
+    /// material is registered and by `animate_transparent` as it changes.
+    /// (As the material's own uniform, then its data binding, the hundreds
+    /// animated every frame cost the asset pipeline a frame each.)
     pub params: HaloCombinerParams,
+    /// Its slot in the combiner table ([`crate::combiners::register_slots`]
+    /// gives it; a copy of a material is given its own).
+    pub slot: u32,
+    /// The combiner table's buffer ([`crate::combiners::combiners`], shared).
+    #[storage(16, read_only)]
+    pub combiners: Handle<bevy::render::storage::ShaderBuffer>,
     #[texture(1)]
     #[sampler(2)]
     pub map0: Handle<Image>,
@@ -347,9 +363,9 @@ pub struct HaloTransparentMaterial {
     pub plasma: Option<std::sync::Arc<halo_map::shader::PlasmaInfo>>,
 }
 
-impl bevy::render::render_resource::AsBindGroupShaderType<HaloCombinerParams> for HaloTransparentMaterial {
-    fn as_bind_group_shader_type(&self, _images: &bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>) -> HaloCombinerParams {
-        self.params.clone()
+impl bevy::render::render_resource::AsBindGroupShaderType<HaloCombinerSlot> for HaloTransparentMaterial {
+    fn as_bind_group_shader_type(&self, _images: &bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>) -> HaloCombinerSlot {
+        HaloCombinerSlot { index: UVec4::new(self.slot, 0, 0, 0) }
     }
 }
 

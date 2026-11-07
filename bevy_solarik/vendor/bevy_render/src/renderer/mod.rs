@@ -91,6 +91,10 @@ fn submit_set_ended() {
             "ms",
         );
     }
+    // (wgpu's own counters of the frame: what the finish and the submit do)
+    for (name, value, unit) in wgpu::wgc::stats::take() {
+        crate::diagnostic::profile_value(name, value, unit);
+    }
 }
 
 /// System sets for the root [`RenderGraph`] schedule.

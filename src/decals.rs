@@ -56,8 +56,12 @@ struct DecalParams {
 
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 #[bind_group_data(DecalKey)]
+#[data(0, DecalParams)]
 pub struct DecalMaterial {
-    #[uniform(0)]
+    /// (A `data` binding, as the transparent material's: a fading decal's
+    /// params change every frame, and in b40's fights 330 decals a frame
+    /// were each given a new buffer and bind group, 5.8 ms; the data
+    /// binding is an upload.)
     params: DecalParams,
     #[texture(1)]
     #[sampler(2)]
@@ -69,6 +73,12 @@ pub struct DecalMaterial {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DecalKey {
     blend: u8,
+}
+
+impl bevy::render::render_resource::AsBindGroupShaderType<DecalParams> for DecalMaterial {
+    fn as_bind_group_shader_type(&self, _images: &bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>) -> DecalParams {
+        self.params
+    }
 }
 
 impl From<&DecalMaterial> for DecalKey {

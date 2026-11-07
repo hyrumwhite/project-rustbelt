@@ -147,6 +147,10 @@ impl TextureViewBindGroupState {
         Self { views: Vec::new() }
     }
 
+    pub fn len(&self) -> usize {
+        self.views.len()
+    }
+
     /// Optimize the texture bind group state by sorting it by ID.
     ///
     /// When this list of states is merged into a tracker, the memory

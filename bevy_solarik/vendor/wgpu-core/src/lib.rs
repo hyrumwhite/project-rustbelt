@@ -92,6 +92,7 @@ pub mod ray_tracing;
 pub mod registry;
 pub mod resource;
 mod snatch;
+pub mod stats;
 pub mod storage;
 mod timestamp_normalization;
 mod track;

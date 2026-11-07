@@ -176,7 +176,15 @@ pub fn animate_self_illumination(
     for object in &objects {
         for (material, raster, animation) in &object.materials {
             let phase = if animation.random_phase { object.phase } else { 0.0 };
-            let fraction = functions.periodic(animation.function, seconds / animation.period + phase);
+            let mut fraction = functions.periodic(animation.function, seconds / animation.period + phase);
+            // (in steps: each change is two materials through the asset
+            // pipeline and the binder's rows, and 70 flickering objects
+            // changed every frame in the library; a 32nd of the glow's
+            // range is below what the eye picks from a pulsing light)
+            let steps = self_illumination_steps();
+            if steps > 0.0 {
+                fraction = (fraction * steps).round() / steps;
+            }
             let mut color = Vec3::from(animation.lower) + (Vec3::from(animation.upper) - Vec3::from(animation.lower)) * fraction;
             if let Some(source) = animation.color_source {
                 color *= Vec3::from(object.change_colors[source]).clamp(Vec3::ZERO, Vec3::ONE);
@@ -202,6 +210,15 @@ pub fn animate_self_illumination(
 
 /// rasterizer_xbox_models.c's self-illumination phase: the first of the
 /// object's random numbers, seeded by its object index.
+/// The steps a self-illumination's glow moves in (`HALO_RT_SELF_ILLUMINATION_STEPS`,
+/// default 32; 0 for every change of the game's 255).
+fn self_illumination_steps() -> f32 {
+    static STEPS: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *STEPS.get_or_init(|| {
+        std::env::var("HALO_RT_SELF_ILLUMINATION_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(32.0)
+    })
+}
+
 pub fn self_illumination_phase(object_index: u32) -> f32 {
     let seed = object_index.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
     (seed >> 16) as f32 / 65535.0

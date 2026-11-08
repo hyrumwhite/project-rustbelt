@@ -523,6 +523,7 @@ pub struct Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
+        crate::stats::buffer_dropped(&self.label);
         if let Some(raw) = self.timestamp_normalization_bind_group.take() {
             raw.dispose(self.device.raw());
         }

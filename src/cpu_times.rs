@@ -177,6 +177,18 @@ fn main_ended() {
             })
             .collect();
         let scopes = (!scopes.is_empty()).then(|| format!("cpu scopes: {}", scopes.join(", ")));
+        // (the live wgpu buffers by label, the twelve most: what a level's
+        // play accumulates)
+        let buffers = {
+            let labels = bevy::render::diagnostic::live_buffers_by_label();
+            let total: i64 = labels.iter().map(|(_, n)| n).sum();
+            let top: Vec<String> = labels.iter().take(12).map(|(label, n)| format!("{label} {n}")).collect();
+            (!labels.is_empty()).then(|| format!("buffers {total}: {}", top.join(", ")))
+        };
+        let scopes = match (scopes, buffers) {
+            (Some(scopes), Some(buffers)) => Some(format!("{scopes}\n{buffers}")),
+            (scopes, buffers) => scopes.or(buffers),
+        };
         if std::env::var_os("HALO_RT_GPU_LOG").is_some() {
             info!("{line}");
             if let Some(scopes) = &scopes {

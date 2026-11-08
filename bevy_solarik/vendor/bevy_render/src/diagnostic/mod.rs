@@ -4,6 +4,11 @@
 
 mod cpu_profile;
 mod span_stack;
+/// The live wgpu buffers by label, most first (`wgpu_core::stats`).
+pub fn live_buffers_by_label() -> Vec<(String, i64)> {
+    wgpu::wgc::stats::buffers_by_label()
+}
+
 pub use cpu_profile::{
     CpuProfileGuard, CpuProfileSample, CpuProfileSourceGuard, profile_enabled, profile_scope,
     profile_source_frame, profile_value, take_cpu_profile,

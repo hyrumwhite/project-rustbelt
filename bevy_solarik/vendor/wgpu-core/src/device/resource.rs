@@ -1140,6 +1140,7 @@ impl Device {
             timestamp_normalization_bind_group,
             indirect_validation_bind_groups,
         };
+        crate::stats::buffer_made(&buffer.label);
 
         let buffer = Arc::new(buffer);
 
@@ -1337,6 +1338,7 @@ impl Device {
             timestamp_normalization_bind_group,
             indirect_validation_bind_groups,
         };
+        crate::stats::buffer_made(&buffer.label);
 
         let buffer = Arc::new(buffer);
 

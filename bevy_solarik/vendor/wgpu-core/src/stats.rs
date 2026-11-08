@@ -62,6 +62,51 @@ pub static TRACKER_BUFFERS_LIVE: Gauge = Gauge::new();
 pub static TRACKER_TEXTURES_PEAK: Gauge = Gauge::new();
 pub static TRACKER_TEXTURES_LIVE: Gauge = Gauge::new();
 
+/// The live buffers by their label (digit runs as `#`, so a numbered
+/// family counts as one): to name what a level's play accumulates (the
+/// user's hour in the library grew the device from 1k to 66k buffers, and
+/// every pass's tables with it).
+static BUFFER_LABELS: parking_lot::Mutex<Option<crate::FastHashMap<alloc::string::String, i64>>> =
+    parking_lot::Mutex::new(None);
+
+fn label_key(label: &str) -> alloc::string::String {
+    let mut key = alloc::string::String::with_capacity(label.len());
+    let mut in_digits = false;
+    for c in label.chars() {
+        if c.is_ascii_digit() {
+            if !in_digits {
+                key.push('#');
+            }
+            in_digits = true;
+        } else {
+            in_digits = false;
+            key.push(c);
+        }
+    }
+    key
+}
+
+pub fn buffer_made(label: &str) {
+    let mut labels = BUFFER_LABELS.lock();
+    *labels.get_or_insert_with(Default::default).entry(label_key(label)).or_insert(0) += 1;
+}
+
+pub fn buffer_dropped(label: &str) {
+    let mut labels = BUFFER_LABELS.lock();
+    *labels.get_or_insert_with(Default::default).entry(label_key(label)).or_insert(0) -= 1;
+}
+
+/// The live buffers by label, most first.
+pub fn buffers_by_label() -> alloc::vec::Vec<(alloc::string::String, i64)> {
+    let labels = BUFFER_LABELS.lock();
+    let mut out: alloc::vec::Vec<(alloc::string::String, i64)> = labels
+        .as_ref()
+        .map(|labels| labels.iter().filter(|(_, n)| **n != 0).map(|(l, n)| (l.clone(), *n)).collect())
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
 /// Bind groups checked at submit.
 pub static SUBMIT_BIND_GROUPS: Counter = Counter::new();
 /// Their resources checked at submit.

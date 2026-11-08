@@ -928,10 +928,10 @@ impl CommandEncoder {
                         api: EncodingApi::Undecided,
                         label: label.to_string(),
                     },
-                    trackers: Tracker::new(
-                        device.ordered_buffer_usages,
-                        device.ordered_texture_usages,
-                    ),
+                    // (pooled: a fresh tracker's tables grow to the device's
+                    // highest resource index at their first use, a walk of
+                    // that length for each of a frame's command buffers)
+                    trackers: device.pooled_tracker(),
                     buffer_memory_init_actions: Default::default(),
                     texture_memory_actions: Default::default(),
                     as_actions: Default::default(),

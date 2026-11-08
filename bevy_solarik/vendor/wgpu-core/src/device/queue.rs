@@ -355,6 +355,15 @@ pub(crate) struct EncoderInFlight {
     pub(crate) pending_blas_s: FastHashMap<TrackerIndex, Arc<Blas>>,
 }
 
+impl EncoderInFlight {
+    /// Done with: its tracker back to the device's pool (emptied by what
+    /// it held), the rest dropped.
+    pub(crate) fn retire(self) {
+        let EncoderInFlight { inner, trackers, .. } = self;
+        inner.device.recycle_tracker(trackers);
+    }
+}
+
 /// A private command encoder for writes made directly on the device
 /// or queue.
 ///

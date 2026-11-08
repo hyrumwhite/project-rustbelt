@@ -153,9 +153,24 @@ struct MaterialKey {
     bitmap_index: u16,
     blend: u16,
     nonlinear_tint: bool,
-    /// a zsprite's z-map and radius (its bits; none: `u32::MAX`, 0)
+    /// a zsprite's z-map and radius (none: `u32::MAX`, 0). The radius in
+    /// steps of a twelfth of an octave ([`radius_step`]): a particle's grows
+    /// as it does, and keyed by its bits every bolt's glow was a new
+    /// material, kept here with its uniform buffer (the library's play made
+    /// 57,000 of them in an hour, and the renderer's per-pass bookkeeping
+    /// is sized to the device's highest buffer index).
     zmap: u32,
     zsprite_radius: u32,
+}
+
+/// A zsprite radius (world units) in twelfths of an octave, 1 and up.
+fn radius_step(radius: f32) -> u32 {
+    ((radius.max(1e-4).log2() * 12.0).round() as i32 + 1024).max(1) as u32
+}
+
+/// The radius a step stands for (world units).
+fn step_radius(step: u32) -> f32 {
+    2f32.powf((step as i32 - 1024) as f32 / 12.0)
 }
 
 /// The sprite meshes (one a batch, reused frame to frame) and materials.
@@ -275,7 +290,7 @@ fn follow_sprites(
             blend: blend_function,
             nonlinear_tint: shader_flags & SPRITE_NONLINEAR_TINT != 0,
             zmap: if zsprite { batch.secondary_map } else { u32::MAX },
-            zsprite_radius: if zsprite { batch.secondary_radius.to_bits() } else { 0 },
+            zsprite_radius: if zsprite { radius_step(batch.secondary_radius) } else { 0 },
         };
         let material = match sprites.materials.get(&key) {
             Some(material) => material.clone(),
@@ -303,7 +318,7 @@ fn follow_sprites(
                         .flatten();
                     Some((map, zmap))
                 }).map(|(map, zmap)| {
-                    let radius = f32::from_bits(key.zsprite_radius) * METERS_PER_WORLD_UNIT;
+                    let radius = if key.zsprite_radius == 0 { 0.0 } else { step_radius(key.zsprite_radius) * METERS_PER_WORLD_UNIT };
                     materials.add(SpriteMaterial {
                         params: SpriteParams {
                             mode: Vec4::new(blend_function as f32, radiance_scale, if key.nonlinear_tint { 1.0 } else { 0.0 }, debug),

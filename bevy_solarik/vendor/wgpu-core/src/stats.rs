@@ -38,6 +38,30 @@ pub static SET_BIND_GROUPS: Counter = Counter::new();
 /// while encoding: a render pass's at each `set_bind_group`, a compute pass's
 /// at each dispatch, every bound group's.
 pub static BIND_GROUP_ENTRIES: Counter = Counter::new();
+/// A value set, not summed: the last written is reported.
+pub struct Gauge(AtomicU64);
+
+impl Gauge {
+    const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+    #[inline]
+    pub fn set(&self, value: u64) {
+        self.0.store(value, Relaxed);
+    }
+    fn get(&self) -> u64 {
+        self.0.load(Relaxed)
+    }
+}
+
+/// The device's buffer tracker indices: the high-water mark (what every
+/// pass's tables are sized to) and those in use.
+pub static TRACKER_BUFFERS_PEAK: Gauge = Gauge::new();
+pub static TRACKER_BUFFERS_LIVE: Gauge = Gauge::new();
+/// The texture tracker indices, likewise.
+pub static TRACKER_TEXTURES_PEAK: Gauge = Gauge::new();
+pub static TRACKER_TEXTURES_LIVE: Gauge = Gauge::new();
+
 /// Bind groups checked at submit.
 pub static SUBMIT_BIND_GROUPS: Counter = Counter::new();
 /// Their resources checked at submit.
@@ -147,6 +171,14 @@ pub fn take() -> alloc::vec::Vec<(&'static str, f64, &'static str)> {
         ("wgpu.submitted_buffers", &SUBMITTED_BUFFERS),
     ] {
         out.push((name, counter.take() as f64, "count"));
+    }
+    for (name, gauge) in [
+        ("wgpu.tracker_buffers_peak", &TRACKER_BUFFERS_PEAK),
+        ("wgpu.tracker_buffers_live", &TRACKER_BUFFERS_LIVE),
+        ("wgpu.tracker_textures_peak", &TRACKER_TEXTURES_PEAK),
+        ("wgpu.tracker_textures_live", &TRACKER_TEXTURES_LIVE),
+    ] {
+        out.push((name, gauge.get() as f64, "count"));
     }
     out
 }

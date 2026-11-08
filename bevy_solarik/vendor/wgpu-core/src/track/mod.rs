@@ -187,6 +187,11 @@ impl TrackerIndexAllocator {
     pub fn size(&self) -> usize {
         self.next_index.0 as usize
     }
+
+    /// The indices in use (`size` is the high-water mark).
+    pub fn live(&self) -> usize {
+        self.next_index.0 as usize - self.unused.len()
+    }
 }
 
 impl fmt::Debug for TrackerIndexAllocator {
@@ -221,6 +226,10 @@ impl SharedTrackerIndexAllocator {
 
     pub fn size(&self) -> usize {
         self.inner.lock().size()
+    }
+
+    pub fn live(&self) -> usize {
+        self.inner.lock().live()
     }
 }
 
@@ -674,6 +683,23 @@ impl Tracker {
             bundles: StatelessTracker::new(),
             query_sets: QuerySetTracker::new(),
         }
+    }
+
+    /// Emptied for another pass (`Device::recycle_tracker`), touching only
+    /// what it holds: a fresh tracker's vectors grow to the device's highest
+    /// resource index at their first use, and with that index a high-water
+    /// mark, each compute pass's intermediate tracker cost that length.
+    pub fn reset_sparse(&mut self) {
+        self.buffers.reset_sparse();
+        self.textures.reset_sparse();
+        self.blas_s = BlasTracker::new();
+        self.tlas_s = StatelessTracker::new();
+        self.views = StatelessTracker::new();
+        self.bind_groups = StatelessTracker::new();
+        self.compute_pipelines = StatelessTracker::new();
+        self.render_pipelines = StatelessTracker::new();
+        self.bundles = StatelessTracker::new();
+        self.query_sets = QuerySetTracker::new();
     }
 
     /// Iterates through all resources in the given bind group and adopts

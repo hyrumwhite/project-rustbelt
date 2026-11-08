@@ -192,6 +192,14 @@ impl TextureStateSet {
         self.complex.clear();
     }
 
+    /// One entry back to untracked (its complex state let go).
+    fn reset(&mut self, index: usize) {
+        if self.simple[index] == TextureUses::COMPLEX {
+            self.complex.remove(&index);
+        }
+        self.simple[index] = TextureUses::UNINITIALIZED;
+    }
+
     fn set_size(&mut self, size: usize) {
         self.simple.resize(size, TextureUses::UNINITIALIZED);
     }
@@ -288,9 +296,14 @@ impl TextureUsageScope {
         self.set.tracker_assert_in_bounds(index);
     }
 
+    /// Emptied by its owned entries (see `ResourceMetadata::clear`); the
+    /// vectors keep their length for the next pass.
     pub fn clear(&mut self) {
-        self.set.clear();
-        self.metadata.clear();
+        let Self { set, metadata, .. } = self;
+        for index in metadata.owned_indices() {
+            set.reset(index);
+        }
+        metadata.clear();
     }
 
     /// Sets the size of all the vectors inside the tracker.
@@ -464,6 +477,24 @@ impl TextureTracker {
         self.end_set.set_size(size);
 
         self.metadata.set_size(size);
+    }
+
+    /// Emptied for another pass by its owned entries, the vectors keeping
+    /// their length (as `BufferTracker::reset_sparse`).
+    pub fn reset_sparse(&mut self) {
+        let Self {
+            start_set,
+            end_set,
+            metadata,
+            temp,
+            ..
+        } = self;
+        for index in metadata.owned_indices() {
+            start_set.reset(index);
+            end_set.reset(index);
+        }
+        metadata.clear();
+        temp.clear();
     }
 
     /// Extend the vectors to let the given index be valid.
@@ -672,6 +703,8 @@ impl TextureTracker {
             };
 
             unsafe { scope.metadata.remove(index) };
+            // (its state too: the scope is emptied by what it owns)
+            scope.set.reset(index);
         }
     }
 }

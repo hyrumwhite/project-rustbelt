@@ -1353,6 +1353,13 @@ impl Queue {
         api_log!("Queue::submit");
         crate::stats::SUBMITS.inc();
         crate::stats::SUBMITTED_BUFFERS.add(command_buffers.len() as u64);
+        {
+            let indices = &self.device.tracker_indices;
+            crate::stats::TRACKER_BUFFERS_PEAK.set(indices.buffers.size() as u64);
+            crate::stats::TRACKER_BUFFERS_LIVE.set(indices.buffers.live() as u64);
+            crate::stats::TRACKER_TEXTURES_PEAK.set(indices.textures.size() as u64);
+            crate::stats::TRACKER_TEXTURES_LIVE.set(indices.textures.live() as u64);
+        }
 
         let snatch_guard = self.device.snatchable_lock.read();
         let mut submission = self

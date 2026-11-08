@@ -95,9 +95,14 @@ impl BufferUsageScope {
         strict_assert!(index < self.state.len());
         self.metadata.tracker_assert_in_bounds(index);
     }
+    /// Emptied by its owned entries (see `ResourceMetadata::clear`); the
+    /// vectors keep their length for the next pass.
     pub fn clear(&mut self) {
-        self.state.clear();
-        self.metadata.clear();
+        let Self { state, metadata, .. } = self;
+        for index in metadata.owned_indices() {
+            state[index] = BufferUses::empty();
+        }
+        metadata.clear();
     }
 
     /// Sets the size of all the vectors inside the tracker.
@@ -329,6 +334,25 @@ impl BufferTracker {
         if index >= self.start.len() {
             self.set_size(index + 1);
         }
+    }
+
+    /// Emptied for another pass by its owned entries, the vectors keeping
+    /// their length (a fresh tracker grows to the device's highest index at
+    /// its first use, and that is the length of a walk each pass).
+    pub fn reset_sparse(&mut self) {
+        let Self {
+            start,
+            end,
+            metadata,
+            temp,
+            ..
+        } = self;
+        for index in metadata.owned_indices() {
+            start[index] = BufferUses::empty();
+            end[index] = BufferUses::empty();
+        }
+        metadata.clear();
+        temp.clear();
     }
 
     /// Returns true if the given buffer is tracked.

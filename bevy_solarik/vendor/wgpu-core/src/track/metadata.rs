@@ -34,9 +34,17 @@ impl<T: Clone> ResourceMetadata<T> {
         resize_bitvec(&mut self.owned, size);
     }
 
+    /// Emptied, touching only the owned entries (the vectors keep their
+    /// length). The tables are sized to the device's highest resource index
+    /// ever given, a high-water mark, and a walk of their whole length cost
+    /// each pass's scope and tracker that length: milliseconds a frame late
+    /// in a level.
     pub(super) fn clear(&mut self) {
-        self.resources.clear();
-        self.owned.fill(false);
+        let Self { owned, resources } = self;
+        for index in iterate_bitvec_indices(owned) {
+            resources[index] = None;
+        }
+        owned.fill(false);
     }
 
     /// Ensures a given index is in bounds for all arrays and does

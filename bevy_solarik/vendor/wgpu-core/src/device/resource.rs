@@ -273,6 +273,9 @@ pub struct Device {
     pub(crate) instance_flags: wgt::InstanceFlags,
     pub(crate) deferred_destroy: Mutex<Vec<DeferredDestroy>>,
     pub(crate) usage_scopes: UsageScopePool,
+    /// Command buffer trackers for the compute passes' intermediate
+    /// barriers, kept at their size (`pooled_tracker`, `recycle_tracker`).
+    pub(crate) tracker_pool: parking_lot::Mutex<Vec<crate::track::Tracker>>,
     pub(crate) indirect_validation: Option<crate::indirect_validation::IndirectValidation>,
     // Optional so that we can late-initialize this after the queue is created.
     pub(crate) timestamp_normalizer:
@@ -558,6 +561,7 @@ impl Device {
             instance_flags,
             deferred_destroy: Mutex::new(rank::DEVICE_DEFERRED_DESTROY, Vec::new()),
             usage_scopes: Mutex::new(rank::DEVICE_USAGE_SCOPES, Default::default()),
+            tracker_pool: parking_lot::Mutex::new(Vec::new()),
             timestamp_normalizer: OnceCellOrLock::new(),
             indirect_validation,
         })
@@ -5454,6 +5458,20 @@ impl Device {
                 texture.destroy();
             }
         }
+    }
+
+    /// A tracker for a pass's intermediate barriers, from the pool (its
+    /// vectors already the device's size) or new.
+    pub(crate) fn pooled_tracker(&self) -> crate::track::Tracker {
+        self.tracker_pool.lock().pop().unwrap_or_else(|| {
+            crate::track::Tracker::new(self.ordered_buffer_usages, self.ordered_texture_usages)
+        })
+    }
+
+    /// A pass's tracker back to the pool, emptied by what it held.
+    pub(crate) fn recycle_tracker(&self, mut tracker: crate::track::Tracker) {
+        tracker.reset_sparse();
+        self.tracker_pool.lock().push(tracker);
     }
 
     pub(crate) fn new_usage_scope(&self) -> UsageScope<'_> {

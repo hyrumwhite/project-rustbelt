@@ -713,10 +713,7 @@ pub(super) fn encode_compute_pass(
 
         immediate_slots_set: Default::default(),
 
-        intermediate_trackers: Tracker::new(
-            device.ordered_buffer_usages,
-            device.ordered_texture_usages,
-        ),
+        intermediate_trackers: device.pooled_tracker(),
     };
 
     let indices = &device.tracker_indices;
@@ -963,6 +960,7 @@ pub(super) fn encode_compute_pass(
         .raw_encoder
         .close_and_swap()
         .map_pass_err(pass_scope)?;
+    device.recycle_tracker(intermediate_trackers);
 
     Ok(())
 }

@@ -40,8 +40,11 @@ impl Plugin for CanopyPlugin {
             .add_systems(ExtractSchedule, scene::extract)
             .add_systems(
                 Render,
+                // (before the views, with the scene bindings that read it:
+                // see `scene::mod`)
                 scene::prepare
-                    .in_set(RenderSystems::PrepareResources)
+                    .after(RenderSystems::PrepareAssets)
+                    .before(RenderSystems::PrepareMeshes)
                     .in_set(PrepareCanopy),
             )
             .add_systems(RenderStartup, super::prepass::init)

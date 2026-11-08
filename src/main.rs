@@ -614,6 +614,11 @@ fn default_plugins(args: &Args, overlay: bool) -> impl PluginGroup {
     // (a scripted capture opens behind the window in use, without taking
     // the keyboard)
     let mut window = Window { title, focused: args.screenshot.is_none(), ..default() };
+    // (`HALO_RT_FRAME_LATENCY=n`: the swap chain's frames in flight, wgpu's
+    // 2 by default; an A/B for the GPU's idle between frames)
+    if let Some(latency) = std::env::var("HALO_RT_FRAME_LATENCY").ok().and_then(|v| v.parse::<u32>().ok()).and_then(std::num::NonZero::new) {
+        window.desired_maximum_frame_latency = Some(latency);
+    }
     // (`HALO_RT_NO_VSYNC=1`: frames as fast as they come, for timing)
     if std::env::var_os("HALO_RT_NO_VSYNC").is_some() {
         window.present_mode = bevy::window::PresentMode::AutoNoVsync;

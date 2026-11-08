@@ -208,6 +208,37 @@ impl RecordDiagnostics for DiagnosticsRecorder {
     }
 }
 
+/// `HALO_RT_GPU_TIMELINE=1`: every 300th frame, the frame's timed spans in
+/// the GPU's order (ms from the first span's start, plus the span's length)
+/// with the gaps between them where the GPU ran nothing timed: where a
+/// frame's envelope exceeds its recorded work.
+fn timeline_log(
+    intervals: &[(u64, u64, Range<usize>)],
+    first: u64,
+    components: &[Cow<'static, str>],
+    timestamp_period_ns: f32,
+) {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static FRAMES: AtomicU32 = AtomicU32::new(0);
+    if std::env::var_os("HALO_RT_GPU_TIMELINE").is_none()
+        || FRAMES.fetch_add(1, Ordering::Relaxed) % 300 != 100
+    {
+        return;
+    }
+    let ms = |ticks: u64| ticks as f64 * timestamp_period_ns as f64 / 1e6;
+    let mut line = String::new();
+    let mut end = first;
+    for (begin, finish, range) in intervals {
+        let name = components[range.clone()].last().map(|c| c.as_ref()).unwrap_or("?");
+        if *begin > end && ms(*begin - end) >= 0.05 {
+            line.push_str(&format!(" [gap {:.2}]", ms(*begin - end)));
+        }
+        line.push_str(&format!(" {name} {:.2}+{:.2}", ms(*begin - first), ms(finish.saturating_sub(*begin))));
+        end = end.max(*finish);
+    }
+    tracing::info!("gpu timeline (ms from the first span):{line}");
+}
+
 struct SpanRecord {
     thread_id: ThreadId,
     path_range: Range<usize>,
@@ -616,15 +647,16 @@ impl FrameData {
                 .filter_map(|span| {
                     let begin = *timestamps.get(span.begin_timestamp_index? as usize)?;
                     let end = *timestamps.get(span.end_timestamp_index? as usize)?;
-                    (begin > 0 && end >= begin).then_some((begin, end))
+                    (begin > 0 && end >= begin).then_some((begin, end, span.path_range.clone()))
                 })
                 .collect();
-            intervals.sort_unstable();
-            if let Some(&(first, _)) = intervals.first() {
+            intervals.sort_unstable_by_key(|v| (v.0, v.1));
+            if let Some(&(first, ..)) = intervals.first() {
                 let last = intervals.iter().map(|v| v.1).max().unwrap();
+                timeline_log(&intervals, first, &self.path_components, timestamp_period_ns);
                 let mut end = first;
                 let mut active = 0u64;
-                for (begin, finish) in intervals {
+                for (begin, finish, _) in intervals {
                     active += finish.saturating_sub(end.max(begin));
                     end = end.max(finish);
                 }

@@ -6,13 +6,15 @@
 //!
 //! The stretches, in the render schedule's order: extract (the extract
 //! commands applied), assets (meshes and images to the GPU, with the BLAS
-//! builds and compactions inside it, timed on their own as `blas`), meshes
-//! (the extracted meshes prepared), specialize (views created, the material
-//! meshes specialized), views (the views prepared, the window wait taken
-//! out), queue (the phases queued and sorted), resources (the prepare set's
-//! buffers and uniforms, with the scene's bindings and instance rows inside
-//! it, timed as `bindings`), batches (the phases batched and written), bind
-//! groups, graph (the render graph's encoding and submit), cleanup.
+//! builds and compactions inside it, timed on their own as `blas`), scene
+//! (the ray-traced scene's bindings and instance rows, `bindings`, before
+//! the views so that they overlap the previous frame's GPU work rather than
+//! follow the window wait), meshes (the extracted meshes prepared),
+//! specialize (views created, the material meshes specialized), views (the
+//! views prepared, the window wait taken out), queue (the phases queued and
+//! sorted), resources (the prepare set's buffers and uniforms), batches (the
+//! phases batched and written), bind groups, graph (the render graph's
+//! encoding and submit), cleanup.
 
 use bevy::{
     prelude::*,
@@ -43,15 +45,21 @@ impl Plugin for CpuTimesPlugin {
                 span_ended::<BLAS>.in_set(RenderSystems::PrepareAssets).after(prepare_raytracing_blas).before(compact_raytracing_blas),
                 span_started::<COMPACT>.in_set(RenderSystems::PrepareAssets).after(prepare_raytracing_blas).before(compact_raytracing_blas),
                 span_ended::<COMPACT>.in_set(RenderSystems::PrepareAssets).after(compact_raytracing_blas),
-                stretch_ended::<ASSETS>.after(RenderSystems::PrepareAssets).before(RenderSystems::PrepareMeshes),
+                stretch_ended::<ASSETS>.after(RenderSystems::PrepareAssets).before(PrepareSceneBindings),
+                span_started::<BINDINGS>.after(RenderSystems::PrepareAssets).before(PrepareSceneBindings),
+                span_ended::<BINDINGS>.after(PrepareSceneBindings).before(RenderSystems::PrepareMeshes),
+                stretch_ended::<SCENE>.after(PrepareSceneBindings).before(RenderSystems::PrepareMeshes),
+            ),
+        );
+        app.sub_app_mut(RenderApp).add_systems(
+            Render,
+            (
                 stretch_ended::<MESHES>.after(RenderSystems::PrepareMeshes).before(RenderSystems::CreateViews),
                 stretch_ended::<SPECIALIZE>.after(RenderSystems::Specialize).before(RenderSystems::PrepareViews),
                 window_wait_started.in_set(RenderSystems::PrepareViews).before(prepare_windows),
                 window_wait_ended.in_set(RenderSystems::PrepareViews).after(prepare_windows),
                 stretch_ended::<VIEWS>.after(RenderSystems::PrepareViews).before(RenderSystems::Queue),
                 stretch_ended::<QUEUE>.after(RenderSystems::PhaseSort).before(RenderSystems::Prepare),
-                span_started::<BINDINGS>.in_set(RenderSystems::PrepareResources).before(PrepareSceneBindings),
-                span_ended::<BINDINGS>.in_set(RenderSystems::PrepareResources).after(PrepareSceneBindings),
                 stretch_ended::<RESOURCES>.after(RenderSystems::PrepareResources).before(RenderSystems::PrepareResourcesBatchPhases),
                 stretch_ended::<BATCHES>.after(RenderSystems::PrepareResourcesFlush).before(RenderSystems::PrepareBindGroups),
                 stretch_ended::<BIND_GROUPS>.after(RenderSystems::PrepareBindGroups).before(RenderSystems::Render),
@@ -65,24 +73,25 @@ impl Plugin for CpuTimesPlugin {
 // The render thread's stretches, in order, and the two spans inside them.
 const EXTRACT: usize = 0;
 const ASSETS: usize = 1;
-const MESHES: usize = 2;
-const SPECIALIZE: usize = 3;
-const VIEWS: usize = 4;
-const QUEUE: usize = 5;
-const RESOURCES: usize = 6;
-const BATCHES: usize = 7;
-const BIND_GROUPS: usize = 8;
-const GRAPH: usize = 9;
-const STRETCHES: usize = 10;
+const SCENE: usize = 2;
+const MESHES: usize = 3;
+const SPECIALIZE: usize = 4;
+const VIEWS: usize = 5;
+const QUEUE: usize = 6;
+const RESOURCES: usize = 7;
+const BATCHES: usize = 8;
+const BIND_GROUPS: usize = 9;
+const GRAPH: usize = 10;
+const STRETCHES: usize = 11;
 const STRETCH_NAMES: [&str; STRETCHES] =
-    ["extract", "assets", "meshes", "specialize", "views", "queue", "resources", "batches", "bind groups", "graph"];
+    ["extract", "assets", "scene", "meshes", "specialize", "views", "queue", "resources", "batches", "bind groups", "graph"];
 const BLAS: usize = 0;
 const BINDINGS: usize = 1;
 const COMPACT: usize = 2;
 const SPANS: usize = 3;
 const SPAN_NAMES: [&str; SPANS] = ["blas", "bindings", "compact"];
 // (the stretch each span sits inside, for the line's brackets)
-const SPAN_STRETCH: [usize; SPANS] = [ASSETS, RESOURCES, ASSETS];
+const SPAN_STRETCH: [usize; SPANS] = [ASSETS, SCENE, ASSETS];
 
 #[derive(Default)]
 struct Totals {

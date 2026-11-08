@@ -159,8 +159,16 @@ impl Plugin for RaytracingScenePlugin {
                     compact_raytracing_blas
                         .in_set(RenderSystems::PrepareAssets)
                         .after(prepare_raytracing_blas),
+                    // (Before the views are prepared, not in the prepare set
+                    // after them: preparing the views acquires the window's
+                    // texture, which waits until the GPU has finished the
+                    // previous frame, and the scene's 2 to 3 ms done after
+                    // that wait were 2 to 3 ms the GPU then sat idle for.
+                    // Everything this reads is extracted or prepared with the
+                    // assets.)
                     prepare_raytracing_scene_bindings
-                        .in_set(RenderSystems::PrepareResources)
+                        .after(RenderSystems::PrepareAssets)
+                        .before(RenderSystems::PrepareMeshes)
                         .in_set(PrepareSceneBindings)
                         .after(crate::filtered_canopy::PrepareCanopy),
                     blas::publish_readiness

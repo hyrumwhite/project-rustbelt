@@ -336,6 +336,11 @@ impl BufferTracker {
         }
     }
 
+    /// The tables' length (0 until a first use grows them).
+    pub fn size(&self) -> usize {
+        self.start.len()
+    }
+
     /// Emptied for another pass by its owned entries, the vectors keeping
     /// their length (a fresh tracker grows to the device's highest index at
     /// its first use, and that is the length of a walk each pass).

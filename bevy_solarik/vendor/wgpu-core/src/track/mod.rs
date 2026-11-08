@@ -689,6 +689,13 @@ impl Tracker {
     /// what it holds: a fresh tracker's vectors grow to the device's highest
     /// resource index at their first use, and with that index a high-water
     /// mark, each compute pass's intermediate tracker cost that length.
+    /// Whether its tables were ever grown (a tracker never used, the
+    /// pending writes', is not worth pooling: pooled, those piled up by the
+    /// thousand and were what the pool handed out).
+    pub fn is_sized(&self) -> bool {
+        self.buffers.size() > 0
+    }
+
     pub fn reset_sparse(&mut self) {
         self.buffers.reset_sparse();
         self.textures.reset_sparse();

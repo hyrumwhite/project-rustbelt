@@ -61,6 +61,8 @@ pub static TRACKER_BUFFERS_LIVE: Gauge = Gauge::new();
 /// The texture tracker indices, likewise.
 pub static TRACKER_TEXTURES_PEAK: Gauge = Gauge::new();
 pub static TRACKER_TEXTURES_LIVE: Gauge = Gauge::new();
+/// Trackers in the device's pool.
+pub static TRACKER_POOL: Gauge = Gauge::new();
 
 /// The live buffers by their label (digit runs as `#`, so a numbered
 /// family counts as one): to name what a level's play accumulates (the
@@ -86,14 +88,37 @@ fn label_key(label: &str) -> alloc::string::String {
     key
 }
 
-pub fn buffer_made(label: &str) {
-    let mut labels = BUFFER_LABELS.lock();
-    *labels.get_or_insert_with(Default::default).entry(label_key(label)).or_insert(0) += 1;
+/// An unlabelled buffer's key: its size and usage, which tell it apart.
+fn buffer_key(label: &str, size: u64, usage: u32) -> alloc::string::String {
+    if label.is_empty() {
+        alloc::format!("(no label, {size} B, usage {usage:#x})")
+    } else {
+        label_key(label)
+    }
 }
 
-pub fn buffer_dropped(label: &str) {
+pub fn buffer_made(label: &str, size: u64, usage: u32) {
     let mut labels = BUFFER_LABELS.lock();
-    *labels.get_or_insert_with(Default::default).entry(label_key(label)).or_insert(0) -= 1;
+    *labels.get_or_insert_with(Default::default).entry(buffer_key(label, size, usage)).or_insert(0) += 1;
+}
+
+pub fn buffer_dropped(label: &str, size: u64, usage: u32) {
+    let mut labels = BUFFER_LABELS.lock();
+    *labels.get_or_insert_with(Default::default).entry(buffer_key(label, size, usage)).or_insert(0) -= 1;
+}
+
+/// The command buffer trackers' pool, off with `WGPU_TRACKER_POOL=0` (an
+/// A/B: the pooled trackers keep their tables at the device's size).
+pub fn tracker_pool_enabled() -> bool {
+    #[cfg(feature = "std")]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("WGPU_TRACKER_POOL").is_none_or(|v| v != "0"))
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        true
+    }
 }
 
 /// The live buffers by label, most first.
@@ -140,9 +165,13 @@ pub enum Kind {
     RenderDraw,
     /// A compute pass's setup, before its commands (within `EncodeCompute`).
     ComputePassSetup,
+    /// A tracker taken from the device's pool.
+    TrackerPop,
+    /// A tracker emptied and returned to the pool.
+    TrackerRecycle,
 }
 
-const KINDS: usize = 13;
+const KINDS: usize = 15;
 
 const NAMES: [&str; KINDS] = [
     "wgpu.encode_render",
@@ -158,6 +187,8 @@ const NAMES: [&str; KINDS] = [
     "wgpu.render_pass_setup",
     "wgpu.render_draw",
     "wgpu.compute_pass_setup",
+    "wgpu.tracker_pop",
+    "wgpu.tracker_recycle",
 ];
 
 static NANOS: [Counter; KINDS] = [const { Counter::new() }; KINDS];
@@ -222,6 +253,7 @@ pub fn take() -> alloc::vec::Vec<(&'static str, f64, &'static str)> {
         ("wgpu.tracker_buffers_live", &TRACKER_BUFFERS_LIVE),
         ("wgpu.tracker_textures_peak", &TRACKER_TEXTURES_PEAK),
         ("wgpu.tracker_textures_live", &TRACKER_TEXTURES_LIVE),
+        ("wgpu.tracker_pool", &TRACKER_POOL),
     ] {
         out.push((name, gauge.get() as f64, "count"));
     }

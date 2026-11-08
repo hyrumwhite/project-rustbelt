@@ -447,7 +447,7 @@ fn main() -> AppExit {
         bevy::winit::UpdateMode::Continuous
     };
     app.insert_resource(bevy::winit::WinitSettings { focused_mode: bevy::winit::UpdateMode::Continuous, unfocused_mode });
-    app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin, reveal::RevealPlugin))
+    app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin, reveal::RevealPlugin, cpu_times::BufferFloodPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))
         .insert_resource(saved.as_ref().map_or_else(LightingSettings::default, |s| s.lighting.clone()))

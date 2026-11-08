@@ -126,6 +126,31 @@ fn main_started() {
     totals().lock().unwrap().1.main = Some(Instant::now());
 }
 
+/// `HALO_RT_BUFFER_FLOOD=n`: n small buffers made at startup and kept, to
+/// raise the device's resource index as an hour's play does (what the
+/// renderer's per-pass bookkeeping is sized to) without the play.
+pub struct BufferFloodPlugin;
+
+impl bevy::app::Plugin for BufferFloodPlugin {
+    fn build(&self, app: &mut bevy::app::App) {
+        let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) else { return };
+        render_app.add_systems(bevy::render::RenderStartup, flood_buffers);
+    }
+}
+
+#[derive(bevy::prelude::Resource)]
+struct BufferFlood(#[allow(dead_code)] Vec<bevy::render::render_resource::Buffer>);
+
+fn flood_buffers(mut commands: bevy::prelude::Commands, device: bevy::prelude::Res<bevy::render::renderer::RenderDevice>) {
+    let Some(count) = std::env::var("HALO_RT_BUFFER_FLOOD").ok().and_then(|v| v.parse::<usize>().ok()) else { return };
+    use bevy::render::render_resource::{BufferDescriptor, BufferUsages};
+    let buffers = (0..count)
+        .map(|_| device.create_buffer(&BufferDescriptor { label: Some("debug flood"), size: 16, usage: BufferUsages::STORAGE, mapped_at_creation: false }))
+        .collect();
+    info!("buffer flood: {count} buffers kept");
+    commands.insert_resource(BufferFlood(buffers));
+}
+
 fn main_ended() {
     let mut guard = totals().lock().unwrap();
     let (totals, marks) = &mut *guard;

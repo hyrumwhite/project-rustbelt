@@ -1140,7 +1140,7 @@ impl Device {
             timestamp_normalization_bind_group,
             indirect_validation_bind_groups,
         };
-        crate::stats::buffer_made(&buffer.label);
+        crate::stats::buffer_made(&buffer.label, buffer.size, buffer.usage.bits());
 
         let buffer = Arc::new(buffer);
 
@@ -1338,7 +1338,7 @@ impl Device {
             timestamp_normalization_bind_group,
             indirect_validation_bind_groups,
         };
-        crate::stats::buffer_made(&buffer.label);
+        crate::stats::buffer_made(&buffer.label, buffer.size, buffer.usage.bits());
 
         let buffer = Arc::new(buffer);
 
@@ -5465,15 +5465,41 @@ impl Device {
     /// A tracker for a pass's intermediate barriers, from the pool (its
     /// vectors already the device's size) or new.
     pub(crate) fn pooled_tracker(&self) -> crate::track::Tracker {
-        self.tracker_pool.lock().pop().unwrap_or_else(|| {
+        let started = crate::stats::start();
+        let pooled = if crate::stats::tracker_pool_enabled() {
+            let mut pool = self.tracker_pool.lock();
+            let pooled = pool.pop();
+            crate::stats::TRACKER_POOL.set(pool.len() as u64);
+            pooled
+        } else {
+            None
+        };
+        let tracker = pooled.unwrap_or_else(|| {
             crate::track::Tracker::new(self.ordered_buffer_usages, self.ordered_texture_usages)
-        })
+        });
+        crate::stats::add(crate::stats::Kind::TrackerPop, started);
+        tracker
     }
 
     /// A pass's tracker back to the pool, emptied by what it held.
     pub(crate) fn recycle_tracker(&self, mut tracker: crate::track::Tracker) {
+        if !crate::stats::tracker_pool_enabled() {
+            return;
+        }
+        // (only one grown to the device's size, and a few dozen of them: a
+        // frame's command buffers in flight)
+        if !tracker.is_sized() {
+            return;
+        }
+        let started = crate::stats::start();
         tracker.reset_sparse();
-        self.tracker_pool.lock().push(tracker);
+        let mut pool = self.tracker_pool.lock();
+        if pool.len() < 128 {
+            pool.push(tracker);
+        }
+        crate::stats::TRACKER_POOL.set(pool.len() as u64);
+        drop(pool);
+        crate::stats::add(crate::stats::Kind::TrackerRecycle, started);
     }
 
     pub(crate) fn new_usage_scope(&self) -> UsageScope<'_> {

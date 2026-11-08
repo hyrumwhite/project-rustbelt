@@ -925,6 +925,15 @@ short lights_port_list(
 		{
 			continue;
 		}
+		/* (a light the game disconnected from the map, a holstered weapon's:
+		its renderer finds lights by their clusters, so it neither draws it
+		nor keeps its colour up; listed, a plasma rifle's glow stayed lit
+		where the weapon was put away until it was drawn again) */
+		if (TEST_FLAG(light->flags, _point_light_connects_to_map_bit) &&
+			!TEST_FLAG(light->flags, _point_light_connected_to_map_bit))
+		{
+			continue;
+		}
 		definition = light_definition_get(light->definition_index);
 		if (flare && (!definition || definition->radius <= 0.0f))
 			continue;

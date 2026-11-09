@@ -1,4 +1,7 @@
 import bevy_solarik::realtime::tuning::CACHE_HISTORY_CLAMP;
+import bevy_solarik::realtime::tuning::CACHE_DROP_DETECT;
+import bevy_solarik::realtime::tuning::CACHE_DROP_THRESHOLD;
+import bevy_solarik::realtime::tuning::CACHE_DROP_FLOOR;
 import bevy_solarik::filtered_canopy_scene::forest_set_seed;
 import bevy_solarik::scene::scene_hit::scene_hit_is_miss;
 @if((RAY_MATERIAL_FOOTPRINTS)) import bevy_solarik::scene::raytracing_scene_bindings::primary_ray_cone;
@@ -181,7 +184,7 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     // https://bsky.app/profile/gboisse.bsky.social/post/3m5blga3ftk2a
     var sample_count = min(old_radiance.a + 1.0, WORLD_CACHE_MAX_TEMPORAL_SAMPLES);
     let update_probability = min(1.0, f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count));
-    let history = cache_history_length(sample_count, luminance(old_radiance.rgb), luminance_delta, update_probability);
+    let history = cache_history_length(sample_count, luminance(old_radiance.rgb), luminance(new_radiance), luminance_delta, update_probability);
     var blend_amount = 1.0 / history;
     // (the history the blend used is the history kept: a cell that followed
     // a change, a grenade's flash, keeps a short one, and lets the flash go
@@ -189,7 +192,8 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     // sat in a 32-sample history and left over a second: the change
     // detector's delta is smoothed and was slow to see the drop)
     if CACHE_HISTORY_CLAMP != 0u {
-        sample_count = min(sample_count, history);
+        // (never below the floor: a cell rebuilding from one sample boiled)
+        sample_count = min(sample_count, max(history, f32(CACHE_DROP_FLOOR)));
     }
     if (constants.reset & 1u) != 0u {
         blend_amount = 1.0;
@@ -214,12 +218,24 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 
 // Convert the history horizon from rendered frames to successful cell updates.
 // Otherwise the update budget silently stretches history as the cache grows.
-fn cache_history_length(sample_count: f32, old_luminance: f32, luminance_delta: f32, update_probability: f32) -> f32 {
+fn cache_history_length(sample_count: f32, old_luminance: f32, new_luminance: f32, luminance_delta: f32, update_probability: f32) -> f32 {
     // The history shortens as the cell's light changes: in proportion to the
     // change (an eighth root made every single-sample update's noise read as
     // a change, keeping a few samples where 32 were meant).
     let alpha = abs(luminance_delta) / max(old_luminance, 0.001);
-    let max_sample_count = mix(WORLD_CACHE_MAX_TEMPORAL_SAMPLES, 1.0, saturate(alpha));
+    var max_sample_count = mix(WORLD_CACHE_MAX_TEMPORAL_SAMPLES, 1.0, saturate(alpha));
+    if CACHE_DROP_DETECT != 0u {
+        // (a drop seen the update it comes: the smoothed delta takes updates
+        // to see a flash end, and the cell held the flash meanwhile, for
+        // seconds in a closed room. Only a drop past the threshold counts,
+        // a bolt passing or a sample's dip not at all, and what it leaves
+        // is the floor at most: cut to a sample by every passing light, a
+        // hallway after a firefight boiled)
+        let threshold = f32(CACHE_DROP_THRESHOLD) / 100.0;
+        let drop = max(old_luminance - new_luminance, 0.0) / max(old_luminance, 0.001);
+        let past = saturate((drop - threshold) / max(1.0 - threshold, 0.01));
+        max_sample_count = min(max_sample_count, mix(WORLD_CACHE_MAX_TEMPORAL_SAMPLES, f32(CACHE_DROP_FLOOR), past));
+    }
     // (and at most WORLD_CACHE_HISTORY_FRAMES frames' updates: at 16, a big
     // cache, a cell updated one frame in four, kept four samples)
     let frame_limited_samples = max(1.0, WORLD_CACHE_HISTORY_FRAMES * clamp(update_probability, 0.0, 1.0));

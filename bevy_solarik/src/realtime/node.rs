@@ -1198,7 +1198,14 @@ pub fn init_solari_lighting_pipelines(
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));
         }
         // (the switches, 0 allowed: the cache's history clamp, tuning.wesl)
-        for (name, env, default) in [("CACHE_HISTORY_CLAMP", "SOLARIK_CACHE_HISTORY_CLAMP", 0u32)] {
+        for (name, env, default) in [
+            ("CACHE_HISTORY_CLAMP", "SOLARIK_CACHE_HISTORY_CLAMP", 0u32),
+            ("CACHE_DROP_DETECT", "SOLARIK_CACHE_DROP_DETECT", 0u32),
+            // (a drop past 60 hundredths of the cell's light counts; it, and
+            // the clamp, leave a cell 4 samples at the fewest)
+            ("CACHE_DROP_THRESHOLD", "SOLARIK_CACHE_DROP_THRESHOLD", 60u32),
+            ("CACHE_DROP_FLOOR", "SOLARIK_CACHE_DROP_FLOOR", 4u32),
+        ] {
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default);
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));
         }

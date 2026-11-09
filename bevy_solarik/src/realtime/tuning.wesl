@@ -18,3 +18,10 @@ const SPECULAR_REUSE_ROUGHNESS: f32 = f32(constants::SPECULAR_REUSE_ROUGHNESS) /
 // a cell that just followed a change holds a short history and lets go of a
 // flash as fast as it took it; 0: the count climbs regardless, as before)
 const CACHE_HISTORY_CLAMP: u32 = constants::CACHE_HISTORY_CLAMP;
+// (1: a cell's light dropping is seen the update it drops, not when the
+// smoothed delta catches up: a flash let go in a few updates; 0: as before)
+const CACHE_DROP_DETECT: u32 = constants::CACHE_DROP_DETECT;
+// (the drop, in hundredths of the cell's light, below which a drop is not
+// one; and the fewest samples a drop, or the clamp, leaves a cell)
+const CACHE_DROP_THRESHOLD: u32 = constants::CACHE_DROP_THRESHOLD;
+const CACHE_DROP_FLOOR: u32 = constants::CACHE_DROP_FLOOR;

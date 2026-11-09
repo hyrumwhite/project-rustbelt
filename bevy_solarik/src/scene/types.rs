@@ -42,4 +42,10 @@ impl RaytracingMask {
     pub const NEAR: u8 = 1 << 0;
     /// Seen by rays from everywhere else only.
     pub const AWAY: RaytracingMask = RaytracingMask(1 << 1);
+    /// Met by no ray at all, and a light source still, where its emission
+    /// is: an emitter the rays never see (a light card that lit a level's
+    /// lightmaps, a lamp's volumetric cone), which as an alpha-masked
+    /// surface (every ray passing through it) cost its any-hit test to every
+    /// ray crossing it.
+    pub const LIGHT_ONLY: RaytracingMask = RaytracingMask(0);
 }

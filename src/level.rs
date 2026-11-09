@@ -412,8 +412,33 @@ const EMITTER_LOOKS: [(&str, f32, Option<[f32; 3]>); 5] = [
 /// Library's door lights, a white card each side of its big doors and a
 /// warm invisible one behind it, lit the far side alone, the near one
 /// barely (play feedback, 4 November: lights flanking a door that cast no
-/// light). Their backs are emitters too, for the rays alone.
-const EMITTERS_BOTH_WAYS: [&str; 1] = ["levels\\c20\\shaders\\c20 light bright white"];
+/// light). Their backs are emitters too, for the rays alone. And the
+/// volumetric cone under Assault on the Control Room's ceiling spotlights
+/// (b40's, 92 of them, the fixture's model), a lamp's light pictured, whose
+/// radiosity power lit the floor round its foot and left the foot itself,
+/// which sees only its inside, a dark disc (play feedback, 8 November:
+/// lights occluded by their base). (Tuning: `HALO_RT_EMITTERS_BOTH_WAYS=0`
+/// leaves every back out.)
+const EMITTERS_BOTH_WAYS: [&str; 2] = ["levels\\c20\\shaders\\c20 light bright white", "levels\\b40\\shaders\\b40_volumelight"];
+
+/// Whether an unseen emitter (a transparent shader's radiosity emitter,
+/// which the rays never see: `SolidSurface::unseen`) is a light-only
+/// instance (`RaytracingMask::LIGHT_ONLY`, met by no ray) rather than an
+/// alpha-masked surface every ray passes through, paying its any-hit test:
+/// b40's 92 spotlight cones, each a room's width of masked triangles in the
+/// middle of its corridor, cost the lighting passes 0.8 ms at the user's
+/// lamp spot once their backs emitted too. The light is the same either
+/// way: rays never met them. (Tuning: `HALO_RT_LIGHT_ONLY_EMITTERS=0`, the
+/// masked surfaces.)
+fn light_only_emitters() -> bool {
+    std::env::var("HALO_RT_LIGHT_ONLY_EMITTERS").map_or(true, |v| v.trim() != "0")
+}
+
+/// Whether a shader's emitter lights both ways (see [`EMITTERS_BOTH_WAYS`]).
+fn emits_both_ways(shader: &str) -> bool {
+    EMITTERS_BOTH_WAYS.iter().any(|n| shader.eq_ignore_ascii_case(n))
+        && std::env::var("HALO_RT_EMITTERS_BOTH_WAYS").map_or(true, |v| v.trim() != "0")
+}
 /// Truth and Reconciliation's light, a soft pink of luminance one.
 const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
 
@@ -969,7 +994,7 @@ impl LevelBuilder {
                 if let Surface::Solid(solid) = &surface
                     && solid.radiance.is_some()
                     && let Some(datum) = material.shader.datum
-                    && self.cache.tag(datum).is_ok_and(|tag| EMITTERS_BOTH_WAYS.iter().any(|n| tag.name.eq_ignore_ascii_case(n)))
+                    && self.cache.tag(datum).is_ok_and(|tag| emits_both_ways(&tag.name))
                 {
                     let back = material.vertices.iter().map(|v| SourceVertex {
                         position: v.position,
@@ -1606,6 +1631,11 @@ impl LevelBuilder {
                 let gain = if surface.raster.is_some() || surface.seen_standard.is_some() { surface.light_gain } else { 1.0 };
                 entity.insert(EmissiveSurface { radiance: radiance * gain });
                 self.stats.emissive_meshes += 1;
+                // (an unseen emitter: met by no ray, instead of passed
+                // through by every one; see light_only_emitters)
+                if surface.unseen && light_only_emitters() {
+                    entity.insert(bevy_solarik::scene::RaytracingMask::LIGHT_ONLY);
+                }
             }
             if let Some((root, base, shader)) = &self.recolour {
                 entity.insert(Recolourable { root: *root, base: base.clone(), shader: *shader, traced: true });
@@ -2151,6 +2181,21 @@ impl LevelBuilder {
                     texcoord: v.texcoord,
                 });
                 let mesh = assets.meshes.add(build_model_mesh(vertices, &part.indices, shader.uv_scale));
+                // (and its back, for an emitter that lights both ways: see
+                // EMITTERS_BOTH_WAYS)
+                let both_ways = matches!(&surface, Surface::Solid(solid) if solid.radiance.is_some())
+                    && shader_ref.datum.and_then(|d| cache.tag(d).ok()).is_some_and(|tag| emits_both_ways(&tag.name));
+                if both_ways {
+                    let back = part.vertices.iter().map(|v| SourceVertex {
+                        position: v.position,
+                        normal: v.normal.map(|n| -n),
+                        binormal: v.binormal,
+                        tangent: v.tangent,
+                        texcoord: v.texcoord,
+                    });
+                    let indices: Vec<_> = part.indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
+                    out.push((assets.meshes.add(build_model_mesh(back, &indices, shader.uv_scale)), surface.clone(), indices.len() / 3));
+                }
                 out.push((mesh, surface, part.indices.len() / 3));
             }
         }
@@ -3425,18 +3470,21 @@ pub struct OnBsps(pub u32);
 /// back; not a masked one (`RaytracingMask`), hidden for the camera alone:
 /// the first-person player's body, which shadows the world. (It went out
 /// once the body's skinned meshes were changed in place: a new mesh every
-/// frame had put it back each time, and the player lost their shadow.)
+/// frame had put it back each time, and the player lost their shadow.) A
+/// light-only emitter (`RaytracingMask::LIGHT_ONLY`) is masked for another
+/// reason and goes out with its level's BSP like any other.
 pub fn sync_traced_visibility(
     mut commands: Commands,
     traced: Query<
-        (Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>, Has<bevy_solarik::scene::RaytracingMask>),
+        (Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>, Option<&bevy_solarik::scene::RaytracingMask>),
         Or<(Changed<InheritedVisibility>, Changed<bevy_solarik::scene::RaytracingMask>)>,
     >,
-    all: Query<(Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>, Has<bevy_solarik::scene::RaytracingMask>)>,
+    all: Query<(Entity, &TracedMesh, &InheritedVisibility, Has<RaytracingMesh3d>, Option<&bevy_solarik::scene::RaytracingMask>)>,
     mut unmasked: RemovedComponents<bevy_solarik::scene::RaytracingMask>,
 ) {
     let unmasked: Vec<Entity> = unmasked.read().collect();
-    for (entity, mesh, visibility, in_scene, masked) in traced.iter().chain(unmasked.iter().filter_map(|&e| all.get(e).ok())) {
+    for (entity, mesh, visibility, in_scene, mask) in traced.iter().chain(unmasked.iter().filter_map(|&e| all.get(e).ok())) {
+        let masked = mask.is_some_and(|mask| *mask != bevy_solarik::scene::RaytracingMask::LIGHT_ONLY);
         let wanted = visibility.get() || masked;
         if wanted && !in_scene {
             commands.entity(entity).insert(RaytracingMesh3d(mesh.0.clone()));

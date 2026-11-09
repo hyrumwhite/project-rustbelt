@@ -1077,7 +1077,9 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         // rays came and went, and in a10's Jefferies tubes, the walls an arm's
         // length away, they boiled, 0.03 to 0.23; rays that meet it still
         // see it glow)
-        let is_light = material.emissive != Vec3::ZERO && input.mask == 0xFF;
+        // (and a light-only instance, `RaytracingMask::LIGHT_ONLY`, is one,
+        // the light being all it is for)
+        let is_light = material.emissive != Vec3::ZERO && (input.mask == 0xFF || input.mask == 0);
         let geometry = GpuInstanceGeometryIds {
             // (the source pushed below, at this index)
             light_index: if is_light { light_sources.get().len() as u32 } else { NO_LIGHT },

@@ -39,6 +39,8 @@ fn main() -> ExitCode {
         "shader" => shader(&cache, &args[2..]),
         "model" => model_dump(&cache, &args[2..]),
         "where" => where_point(&cache, &args[2..]),
+        "near" => near_point(&cache, &args[2..]),
+        "lightmap" => lightmap_near(&cache, &args[2..]),
         "skyless" => skyless_survey(&cache),
         "sky" => skies(&cache),
         "bitmap" => export_bitmap(&cache, &args[2..]),
@@ -162,6 +164,112 @@ fn skyless_survey(cache: &CacheFile) -> CliResult {
 /// Each BSP's view from a point: its cluster there, the cluster's sky, what
 /// its potentially visible set holds, its portals, and how far rays round
 /// the point go before they meet a surface.
+/// The BSP surfaces near a point (`halo_map near <map> <bsp> x,y,z radius`,
+/// world units; a viewer `--camera` position is in metres, 3.048 a unit): by
+/// material, the triangles with a vertex within the radius, their centre
+/// and mean normal, and the shader's emission.
+fn near_point(cache: &CacheFile, args: &[String]) -> CliResult {
+    let usage = "usage: halo_map near <map> <bsp> x,y,z radius";
+    let index: usize = args.first().ok_or(usage)?.parse()?;
+    let point: Vec<f32> = args.get(1).ok_or(usage)?.split(',').map(|v| v.parse()).collect::<Result<_, _>>()?;
+    let radius: f32 = args.get(2).ok_or(usage)?.parse()?;
+    let reference = bsp::references(cache)?.into_iter().find(|r| r.index == index).ok_or("no such bsp")?;
+    let loaded = bsp::Bsp::load(cache, &reference)?;
+    for material in loaded.materials()? {
+        let name = material.shader.datum.and_then(|d| cache.tags.iter().find(|t| t.datum == d)).map_or("?", |t| t.name.as_str());
+        let near: Vec<&[u32]> = material
+            .indices
+            .chunks_exact(3)
+            .filter(|tri| tri.iter().any(|&i| dist(material.vertices[i as usize].position, [point[0], point[1], point[2]]) <= radius))
+            .collect();
+        if near.is_empty() {
+            continue;
+        }
+        let n = (near.len() * 3) as f32;
+        let (mut centre, mut normal, mut lowest, mut highest) = ([0.0f32; 3], [0.0f32; 3], f32::MAX, f32::MIN);
+        for tri in &near {
+            for &i in *tri {
+                let v = &material.vertices[i as usize];
+                centre = add(centre, [v.position[0] / n, v.position[1] / n, v.position[2] / n]);
+                normal = add(normal, v.normal);
+                lowest = lowest.min(v.position[2]);
+                highest = highest.max(v.position[2]);
+            }
+        }
+        let emission = halo_map::shader::shader_info(cache, material.shader).ok().flatten().map(|i| format!("{:?} x{}", i.emitted_light, i.emitted_power)).unwrap_or_default();
+        println!(
+            "{name}: {} triangles, centre {:.2?}, z {lowest:.2}..{highest:.2}, normal {:.2?} {emission}",
+            near.len(),
+            centre,
+            normalize(normal)
+        );
+    }
+    Ok(())
+}
+
+/// The baked light on the BSP surfaces near a point (`halo_map lightmap
+/// <map> <bsp> x,y,z radius`, world units): by material, the mean of its
+/// lightmap over the triangles with a vertex within the radius (sampled at
+/// each triangle's vertices, edge midpoints and centre; linear, from the
+/// lightmap's sRGB), with the brightest sample — what Bungie's radiosity
+/// made of the level's emitters, to compare a render's pools against.
+fn lightmap_near(cache: &CacheFile, args: &[String]) -> CliResult {
+    let usage = "usage: halo_map lightmap <map> <bsp> x,y,z radius";
+    let index: usize = args.first().ok_or(usage)?.parse()?;
+    let point: Vec<f32> = args.get(1).ok_or(usage)?.split(',').map(|v| v.parse()).collect::<Result<_, _>>()?;
+    let point = [point[0], point[1], point[2]];
+    let radius: f32 = args.get(2).ok_or(usage)?.parse()?;
+    let reference = bsp::references(cache)?.into_iter().find(|r| r.index == index).ok_or("no such bsp")?;
+    let loaded = bsp::Bsp::load(cache, &reference)?;
+    let pages = bitmap::bitmaps(cache, loaded.lightmap_bitmaps()?.datum.ok_or("no lightmap bitmaps")?)?;
+    let mut decoded: BTreeMap<usize, bitmap::Decoded> = BTreeMap::new();
+    let linear = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    for material in loaded.materials()? {
+        if material.lightmap_bitmap_index < 0 || material.lightmap_texcoords.len() != material.vertices.len() {
+            continue;
+        }
+        let near: Vec<&[u32]> = material
+            .indices
+            .chunks_exact(3)
+            .filter(|tri| tri.iter().any(|&i| dist(material.vertices[i as usize].position, point) <= radius))
+            .collect();
+        if near.is_empty() {
+            continue;
+        }
+        let page_index = material.lightmap_bitmap_index as usize;
+        if !decoded.contains_key(&page_index) {
+            let page = pages.get(page_index).ok_or("lightmap page out of range")?;
+            decoded.insert(page_index, page.decode_rgba8(cache)?);
+        }
+        let page = &decoded[&page_index];
+        let (w, h) = (page.width as usize, page.height as usize);
+        let sample = |uv: [f32; 2]| -> f32 {
+            let x = ((uv[0].rem_euclid(1.0) * w as f32) as usize).min(w - 1);
+            let y = ((uv[1].rem_euclid(1.0) * h as f32) as usize).min(h - 1);
+            let p = &page.data[(y * w + x) * 4..(y * w + x) * 4 + 3];
+            0.2126 * linear(p[0]) + 0.7152 * linear(p[1]) + 0.0722 * linear(p[2])
+        };
+        let (mut sum, mut count, mut brightest) = (0.0f32, 0usize, 0.0f32);
+        for tri in &near {
+            let uv = [0, 1, 2].map(|k| material.lightmap_texcoords[tri[k] as usize]);
+            let mid = |a: [f32; 2], b: [f32; 2]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+            let centre = [(uv[0][0] + uv[1][0] + uv[2][0]) / 3.0, (uv[0][1] + uv[1][1] + uv[2][1]) / 3.0];
+            for p in [uv[0], uv[1], uv[2], mid(uv[0], uv[1]), mid(uv[1], uv[2]), mid(uv[2], uv[0]), centre] {
+                let l = sample(p);
+                sum += l;
+                count += 1;
+                brightest = brightest.max(l);
+            }
+        }
+        let name = material.shader.datum.and_then(|d| cache.tags.iter().find(|t| t.datum == d)).map_or("?", |t| t.name.as_str());
+        println!("{name}: {} triangles, lightmap page {page_index} ({w}x{h}): mean {:.4}, brightest {:.4}", near.len(), sum / count as f32, brightest);
+    }
+    Ok(())
+}
+
 fn where_point(cache: &CacheFile, args: &[String]) -> CliResult {
     use halo_map::collision::{CollisionBsp, StructureClusters};
     use halo_map::layout::{structure_bsp, structure_cluster};
@@ -779,4 +887,13 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 }
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    dot(sub(a, b), sub(a, b)).sqrt()
+}
+
+fn normalize(a: [f32; 3]) -> [f32; 3] {
+    let l = dot(a, a).sqrt().max(1e-9);
+    [a[0] / l, a[1] / l, a[2] / l]
 }

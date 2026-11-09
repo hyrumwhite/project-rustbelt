@@ -1707,7 +1707,7 @@ impl LevelBuilder {
         assets: &mut LevelAssets,
     ) -> halo_map::Result<AnimatedModel> {
         let cache = self.cache.clone();
-        let model = Model::load(&cache, datum)?;
+        let model = { let _profile = bevy::render::diagnostic::profile_scope("main.model_load"); Model::load(&cache, datum)? };
         let mut pieces = Vec::new();
         let mut traced_skins = Vec::new();
         let mut skinned = Vec::new();
@@ -1723,7 +1723,7 @@ impl LevelBuilder {
                     .unwrap_or(TagRef { group: 0, datum: None });
                 let permutation = model.shader_permutations.get(part.shader_index.max(0) as usize).copied().unwrap_or(0);
                 let shader_use = shader_ref.datum.map(|datum| ShaderUse { datum, permutation });
-                let shader = self.surface(shader_ref, permutation, assets);
+                let shader = { let _profile = bevy::render::diagnostic::profile_scope("main.model_surface"); self.surface(shader_ref, permutation, assets) };
                 if let Some(text) = std::env::var_os("HALO_RT_OBJECT_LOG")
                     && model.name.contains(text.to_string_lossy().as_ref())
                 {
@@ -3483,6 +3483,7 @@ fn build_mesh(vertices: impl Iterator<Item = SourceVertex>, indices: &[u32], uv_
 /// [`build_mesh`] for a model's part, its triangles turned to face their
 /// vertices' normals (see below).
 fn build_model_mesh(vertices: impl Iterator<Item = SourceVertex>, indices: &[u32], uv_scale: [f32; 2]) -> Mesh {
+    let _profile = bevy::render::diagnostic::profile_scope("main.model_mesh");
     build_mesh_oriented(vertices, indices, uv_scale, true)
 }
 

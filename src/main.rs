@@ -723,6 +723,10 @@ fn load_level(
     let bc_supported = params.render_device.features().contains(WgpuFeatures::TEXTURE_COMPRESSION_BC);
     let start = std::time::Instant::now();
     let mut builder = LevelBuilder::new(cache.clone(), bc_supported);
+    // (HALO_RT_ASYNC_BAKES_ALWAYS: the level's own gunmetal bakes on workers
+    // too, to see the placeholders replaced; the bridge sets it for the
+    // objects that come later, the viewer never)
+    builder.textures.set_async_bakes(std::env::var_os("HALO_RT_ASYNC_BAKES_ALWAYS").is_some());
     builder.root = Some(root);
     builder.glass_sky_mask = Some(params.glass_sky_mask.clone());
     builder.fixture_lights = !args.no_fixture_lights;
@@ -826,6 +830,7 @@ fn load_level(
     commands.insert_resource(clusters::LevelClusters(builder.clusters.clone()));
 
     if args.bridge {
+        builder.textures.set_async_bakes(true);
         commands.insert_resource(bridge::BridgeLevel { builder, raster: !args.pathtracer });
     }
 }

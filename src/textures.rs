@@ -6,7 +6,9 @@ use bevy::{
     platform::collections::HashMap,
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    tasks::{futures_lite::future, AsyncComputeTaskPool, Task},
 };
+use std::sync::Arc;
 use halo_map::{bitmap, CacheFile};
 
 /// Converted bitmaps, by (bitmap tag datum, bitmap index), so shaders that
@@ -15,6 +17,14 @@ use halo_map::{bitmap, CacheFile};
 pub struct TextureCache {
     images: HashMap<(u32, usize, bool), Option<Handle<Image>>>,
     baked: HashMap<(Bake, u16), Option<Handle<Image>>>,
+    /// Bakes under way on worker threads (the gunmetal ones, half a second
+    /// each on the main thread: the game froze at the first rocket), each
+    /// with the handle its placeholder holds, replaced when it lands
+    /// ([`TextureCache::poll_bakes`]). Only where someone polls
+    /// ([`TextureCache::set_async_bakes`]: the bridge; the viewer bakes
+    /// at load, in line).
+    pending: Vec<PendingBake>,
+    async_bakes: bool,
     /// Each bitmap tag's image count, for [`TextureCache::permuted`].
     counts: HashMap<u32, usize>,
     /// 3D bitmaps (plasma's noise), by tag.
@@ -28,6 +38,25 @@ pub struct TextureCache {
     /// Whether the GPU takes BC (DXT) textures as they are.
     pub bc_supported: bool,
     pub failures: usize,
+}
+
+/// A bake under way on a worker: the placeholder's handle and the task.
+struct PendingBake {
+    handle: Handle<Image>,
+    task: Task<halo_map::Result<(u32, u32, Vec<u8>, bool)>>,
+}
+
+/// A baked RGBA8 image with its mips (as the maps they replace have:
+/// without, they shimmered at a distance) and a repeating sampler.
+fn baked_image(width: u32, height: u32, data: Vec<u8>, srgb: bool) -> Image {
+    let format = if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
+    let (data, levels) = with_mips(width, height, data);
+    let size = Extent3d { width, height, depth_or_array_layers: 1 };
+    let mut image = Image::new_uninit(size, TextureDimension::D2, format, RenderAssetUsages::RENDER_WORLD);
+    image.texture_descriptor.mip_level_count = levels;
+    image.data = Some(data);
+    image.sampler = repeat_sampler();
+    image
 }
 
 /// An emissive texture made on the CPU from Halo maps.
@@ -207,23 +236,35 @@ impl TextureCache {
 
     /// A bake from its bitmaps' images for a shader permutation (see
     /// [`TextureCache::permuted`]).
-    pub fn baked(&mut self, cache: &CacheFile, bake: Bake, permutation: u16, images: &mut Assets<Image>) -> Option<Handle<Image>> {
+    /// Bakes on worker threads where they are slow (the bridge polls them).
+    pub fn set_async_bakes(&mut self, on: bool) {
+        self.async_bakes = on;
+    }
+
+    pub fn baked(&mut self, cache: &Arc<CacheFile>, bake: Bake, permutation: u16, images: &mut Assets<Image>) -> Option<Handle<Image>> {
         if let Some(cached) = self.baked.get(&(bake, permutation)) {
             return cached.clone();
         }
-        let result = match bake_rgba(cache, bake, permutation) {
-            Ok((width, height, data, srgb)) => {
-                let format = if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
-                // (with mips, as the maps they replace have: without, they
-                // shimmered at a distance)
-                let (data, levels) = with_mips(width, height, data);
-                let size = Extent3d { width, height, depth_or_array_layers: 1 };
-                let mut image = Image::new_uninit(size, TextureDimension::D2, format, RenderAssetUsages::RENDER_WORLD);
-                image.texture_descriptor.mip_level_count = levels;
-                image.data = Some(data);
-                image.sampler = repeat_sampler();
-                Some(images.add(image))
+        // (a gunmetal bake: half a second of the main thread for a weapon
+        // first seen, the game frozen meanwhile; on a worker instead, its
+        // place held by the base map, or a plain finish, until it lands)
+        if self.async_bakes && let Bake::Gunmetal { base, color, .. } = bake {
+            let placeholder = if color {
+                rgba8(cache, base, permutation).ok().map(|decoded| baked_image(decoded.width, decoded.height, decoded.data, true))
+            } else {
+                Some(baked_image(1, 1, vec![0, 128, 0, 255], false))
+            };
+            let handle = placeholder.map(|image| images.add(image));
+            if let Some(handle) = &handle {
+                let cache = cache.clone();
+                let task = AsyncComputeTaskPool::get().spawn(async move { bake_rgba(&cache, bake, permutation) });
+                self.pending.push(PendingBake { handle: handle.clone(), task });
             }
+            self.baked.insert((bake, permutation), handle.clone());
+            return handle;
+        }
+        let result = match bake_rgba(cache, bake, permutation) {
+            Ok((width, height, data, srgb)) => Some(images.add(baked_image(width, height, data, srgb))),
             Err(e) => {
                 warn!("emissive bake: {e}");
                 self.failures += 1;
@@ -232,6 +273,25 @@ impl TextureCache {
         };
         self.baked.insert((bake, permutation), result.clone());
         result
+    }
+
+    /// The bakes that landed since: their images put in place of their
+    /// placeholders (the same handle, so the materials follow). How many.
+    pub fn poll_bakes(&mut self, images: &mut Assets<Image>) -> usize {
+        let mut landed = 0;
+        self.pending.retain_mut(|pending| match future::block_on(future::poll_once(&mut pending.task)) {
+            None => true,
+            Some(Ok((width, height, data, srgb))) => {
+                let _ = images.insert(pending.handle.id(), baked_image(width, height, data, srgb));
+                landed += 1;
+                false
+            }
+            Some(Err(e)) => {
+                warn!("gunmetal bake: {e}");
+                false
+            }
+        });
+        landed
     }
 
     /// A bitmap's image for a shader permutation: image `permutation % count`,
@@ -551,17 +611,55 @@ fn blur_red(image: &mut bitmap::Decoded, sigma: f32) {
     }
 }
 
+/// A bicubic sample's four taps along one axis of an image of `size`:
+/// the first texel and the four weights, for a coordinate in 0..1.
+fn bicubic_taps(size: u32, t: f32) -> (i64, [f32; 4]) {
+    let x = t * size as f32 - 0.5;
+    let x0 = x.floor();
+    let t = x - x0;
+    let (t2, t3) = (t * t, t * t * t);
+    (x0 as i64 - 1, [(-t3 + 2.0 * t2 - t) * 0.5, (3.0 * t3 - 5.0 * t2 + 2.0) * 0.5, (-3.0 * t3 + 4.0 * t2 + t) * 0.5, (t3 - t2) * 0.5])
+}
+
+/// The texel offsets (into RGBA8 data) and weights of a bicubic sample of a
+/// `w` by `h` image, repeating, from taps along each axis.
+fn bicubic_footprint(w: i64, h: i64, (x0, wx): &(i64, [f32; 4]), (y0, wy): &(i64, [f32; 4])) -> [(usize, f32); 16] {
+    let mut out = [(0usize, 0.0f32); 16];
+    for j in 0..4 {
+        let row = (y0 + j as i64).rem_euclid(h);
+        for i in 0..4 {
+            let column = (x0 + i as i64).rem_euclid(w);
+            out[j * 4 + i] = (((row * w + column) * 4) as usize, wx[i] * wy[j]);
+        }
+    }
+    out
+}
+
+/// The sRGB transfer curve as tables: a byte to linear, and linear in
+/// 1/8191 steps to a byte (the bake once took a `powf` nine times a texel
+/// over a million texels).
+fn srgb_tables() -> (&'static [f32; 256], &'static [u8; 8192]) {
+    static TABLES: std::sync::OnceLock<([f32; 256], [u8; 8192])> = std::sync::OnceLock::new();
+    let (linear, encoded) = TABLES.get_or_init(|| {
+        let linear = std::array::from_fn(|i| {
+            let c = i as f32 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        });
+        let encoded = std::array::from_fn(|i| {
+            let c = i as f32 / 8191.0;
+            let c = if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+            (c * 255.0).round() as u8
+        });
+        (linear, encoded)
+    });
+    (linear, encoded)
+}
+
 /// See [`Bake::Gunmetal`].
 fn gunmetal(base: &bitmap::Decoded, mask: &bitmap::Decoded, color: bool, finish: GunmetalFinish) -> (u32, u32, Vec<u8>, bool) {
-    let to_linear = |c: u8| {
-        let c = c as f32 / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-    };
-    let to_srgb = |c: f32| {
-        let c = c.clamp(0.0, 1.0);
-        let c = if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
-        (c * 255.0).round() as u8
-    };
+    let (linear_of, encoded_of) = srgb_tables();
+    let to_linear = |c: u8| linear_of[c as usize];
+    let to_srgb = |c: f32| encoded_of[(c.clamp(0.0, 1.0) * 8191.0).round() as usize];
     let smoothstep = |from: f32, to: f32, x: f32| {
         let t = ((x - from) / (to - from).max(1e-6)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
@@ -578,17 +676,39 @@ fn gunmetal(base: &bitmap::Decoded, mask: &bitmap::Decoded, color: bool, finish:
         channel
     });
     let (w, h) = (base.width * scale, base.height * scale);
+    let (bw, bh) = (base.width as i64, base.height as i64);
+    let (mw, mh) = (mask.width as i64, mask.height as i64);
+    // (the taps along each axis once per column and row, not per texel)
+    let base_columns: Vec<_> = (0..w).map(|x| bicubic_taps(base.width, (x as f32 + 0.5) / w as f32)).collect();
+    let base_rows: Vec<_> = (0..h).map(|y| bicubic_taps(base.height, (y as f32 + 0.5) / h as f32)).collect();
+    let mask_columns: Vec<_> = (0..w).map(|x| bicubic_taps(mask.width, (x as f32 + 0.5) / w as f32)).collect();
+    let mask_rows: Vec<_> = (0..h).map(|y| bicubic_taps(mask.height, (y as f32 + 0.5) / h as f32)).collect();
     let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for y in 0..h {
-        for x in 0..w {
-            let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
-            let worn = (bicubic(mask, u, v)[0] / 255.0 * finish.worn_gain).clamp(0.0, 1.0);
-            let texel = bicubic(base, u, v).map(|c| c.round().clamp(0.0, 255.0) as u8);
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let base_taps = bicubic_footprint(bw, bh, &base_columns[x], &base_rows[y]);
+            let mask_taps = bicubic_footprint(mw, mh, &mask_columns[x], &mask_rows[y]);
+            let mut texel = [0.0f32; 4];
+            let mut smooth_raw = [0.0f32; 3];
+            for (offset, weight) in base_taps {
+                for c in 0..4 {
+                    texel[c] += base.data[offset + c] as f32 * weight;
+                }
+                for c in 0..3 {
+                    smooth_raw[c] += blurred[c].data[offset] as f32 * weight;
+                }
+            }
+            let mut mask_red = 0.0f32;
+            for (offset, weight) in mask_taps {
+                mask_red += mask.data[offset] as f32 * weight;
+            }
+            let worn = (mask_red / 255.0 * finish.worn_gain).clamp(0.0, 1.0);
+            let texel = texel.map(|c| c.round().clamp(0.0, 255.0) as u8);
             let linear = [0, 1, 2].map(|c| to_linear(texel[c]));
             let luminance = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
             // (decided on the blurred map; light greys only: a colour is
             // paint however light, and a near-black's hue is noise)
-            let smooth = [0, 1, 2].map(|c| to_linear(bicubic(&blurred[c], u, v)[0].round().clamp(0.0, 255.0) as u8));
+            let smooth = smooth_raw.map(|c| to_linear(c.round().clamp(0.0, 255.0) as u8));
             let smooth_luminance = 0.2126 * smooth[0] + 0.7152 * smooth[1] + 0.0722 * smooth[2];
             let (max, min) = (smooth.iter().copied().fold(0.0, f32::max), smooth.iter().copied().fold(1.0, f32::min));
             let saturation = (max - min) / (max + 0.05);

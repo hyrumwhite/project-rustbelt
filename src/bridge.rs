@@ -200,6 +200,7 @@ impl Plugin for BridgePlugin {
             .add_systems(First, read_frame.in_set(ReadFrame))
             .add_systems(PreUpdate, (grab_cursor, forward_input, forward_gamepads).chain().after(bevy::input::InputSystems))
             .add_systems(Update, (toggle_follow, sync_objects, sync_camera, sync_active_bsp, sync_breakable_surfaces).chain())
+            .add_systems(Update, poll_texture_bakes.after(sync_objects))
             .add_systems(Startup, spawn_game_banner)
             .add_systems(Update, watch_game);
     }
@@ -330,6 +331,16 @@ impl BridgeLink {
         self.pending.drain(..position);
         self.latest = self.pending.pop_front();
         true
+    }
+}
+
+/// The texture bakes under way on workers (a weapon's gunmetal, half a
+/// second each), put in place as they land.
+fn poll_texture_bakes(level: Option<ResMut<BridgeLevel>>, mut images: ResMut<Assets<Image>>) {
+    let Some(mut level) = level else { return };
+    let landed = level.builder.textures.poll_bakes(&mut images);
+    if landed > 0 && std::env::var_os("HALO_RT_OBJECT_LOG").is_some() {
+        info!("{landed} texture bakes landed");
     }
 }
 

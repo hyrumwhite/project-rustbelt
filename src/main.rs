@@ -963,8 +963,11 @@ fn node_times(store: &bevy::diagnostic::DiagnosticsStore, field: &str, label: &s
         .filter_map(|d| Some((d.path().as_str().trim_end_matches(field).to_string(), d.average()?)))
         .collect();
     times.sort_by(|a, b| b.1.total_cmp(&a.1));
-    // (the frame's envelope spans are the whole frame, not a part of it)
-    let total: f64 = times.iter().filter(|t| !t.0.starts_with("render/frame_gpu")).map(|t| t.1).sum();
+    // (the frame's envelope spans are the whole frame, not a part of it; and
+    // a span with spans inside it, as the direct lighting pass has its two
+    // halves, counts by its parts, not twice)
+    let is_parent = |name: &str| times.iter().any(|(other, _)| other.len() > name.len() && other.starts_with(name) && other.as_bytes()[name.len()] == b'/');
+    let total: f64 = times.iter().filter(|t| !t.0.starts_with("render/frame_gpu") && !is_parent(&t.0)).map(|t| t.1).sum();
     let list: Vec<String> = times.iter().filter(|t| t.1 >= 0.02).map(|(name, ms)| format!("{name} {ms:.2}")).collect();
     format!("{label} {total:.2} ms: {}", list.join(", "))
 }

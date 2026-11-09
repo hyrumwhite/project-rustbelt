@@ -196,6 +196,9 @@ pub struct RaytracingSceneBindings {
     #[cfg(feature = "graphics_debug")]
     /// Capture-only prepared scene generations and readback handles.
     pub debug: super::graphics_debug::SceneSnapshot,
+    /// How many light sources the scene has this frame (the lighting's
+    /// table of emissive triangles is built a workgroup a light).
+    pub light_source_count: u32,
 }
 
 #[derive(Default)]
@@ -821,6 +824,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     materials.get_mut().clear();
     detail_parameters.get_mut().clear();
     light_sources.get_mut().clear();
+    let mut light_triangles_used: u32 = 0;
     directional_lights.get_mut().clear();
     local_lights.get_mut().clear();
     previous_frame_light_id_translations.get_mut().clear();
@@ -1121,11 +1125,19 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                     },
             );
             light_seen.push(seen(entity.entity));
+            // (its triangles' place in the lighting's table, while it has room)
+            let triangle_offset = if light_triangles_used + geometry.triangle_count <= LIGHT_TRIANGLE_TABLE_CAPACITY {
+                light_triangles_used += geometry.triangle_count;
+                light_triangles_used - geometry.triangle_count
+            } else {
+                NO_LIGHT_TRIANGLES
+            };
             light_sources
                 .get_mut()
                 .push(GpuLightSource::new_emissive_mesh_light(
                     slot.index,
                     geometry.triangle_count,
+                    triangle_offset,
                 ));
 
             this_frame_entity_to_light_id.insert(entity, light_sources.get().len() as u32 - 1);
@@ -1239,6 +1251,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             .push(entity.into());
     }
 
+    raytracing_scene_bindings.light_source_count = light_sources.get().len() as u32;
     raytracing_scene_bindings.settle_light_history =
         previous_frame_light_entities != raytracing_scene_bindings.previous_frame_light_entities;
     for previous_frame_light_entity in previous_frame_light_entities {
@@ -1641,6 +1654,7 @@ impl RaytracingSceneBindings {
             settle_light_history: false,
             #[cfg(feature = "graphics_debug")]
             debug: super::graphics_debug::SceneSnapshot::default(),
+            light_source_count: 0,
             glass_entities: HashSet::default(),
             has_foliage: false,
             has_canopy: false,
@@ -1805,6 +1819,13 @@ pub(super) fn material_alpha(material: &StandardMaterial) -> MaterialAlpha {
     }
 }
 
+/// The most emissive triangles the lighting's table of them holds
+/// (realtime/light_triangles.wesl, 64 bytes each): a light past it resolves
+/// its samples from its vertices as before.
+pub const LIGHT_TRIANGLE_TABLE_CAPACITY: u32 = 1 << 18;
+/// An emissive mesh light's `triangle_offset` when the table has no room.
+const NO_LIGHT_TRIANGLES: u32 = u32::MAX;
+
 #[derive(ShaderType, Default)]
 struct GpuLightSource {
     kind: u32,
@@ -1812,10 +1833,14 @@ struct GpuLightSource {
     selection_probability: f32,
     alias_threshold: f32,
     alias_index: u32,
+    /// An emissive mesh's first triangle in the lighting's table of emissive
+    /// triangles, `NO_LIGHT_TRIANGLES` when it has none (other kinds leave
+    /// it).
+    triangle_offset: u32,
 }
 
 impl GpuLightSource {
-    fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32) -> GpuLightSource {
+    fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32, triangle_offset: u32) -> GpuLightSource {
         if triangle_count > u16::MAX as u32 {
             panic!("Too many triangles ({triangle_count}) in an emissive mesh, maximum is 65535.");
         }
@@ -1823,6 +1848,7 @@ impl GpuLightSource {
         Self {
             kind: triangle_count << 1,
             id: instance_id,
+            triangle_offset,
             ..Default::default()
         }
     }
@@ -2286,7 +2312,7 @@ mod tests {
         // Emissive meshes: triangle count in the upper bits, low bit clear;
         // the fork relies on this staying as upstream left it. Every other
         // light sets the low bit and picks its kind above it.
-        assert_eq!(GpuLightSource::new_emissive_mesh_light(7, 12).kind, 24);
+        assert_eq!(GpuLightSource::new_emissive_mesh_light(7, 12, 0).kind, 24);
         assert_eq!(GpuLightSource::new_directional_light(0).kind, 1);
         assert_eq!(GpuLightSource::new_point_light(3).kind, 3);
         assert_eq!(GpuLightSource::new_point_light(3).id, 3);

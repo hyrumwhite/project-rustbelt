@@ -53,6 +53,8 @@ pub struct SolarikLightingResources {
     pub sky_distribution: Buffer,
     pub light_tile_samples: Buffer,
     pub light_tile_resolved_samples: Buffer,
+    /// The emissive triangles in world space (light_triangles.wesl).
+    pub light_triangles: Buffer,
     pub di_reservoirs_a: TextureView,
     pub di_reservoirs_b: TextureView,
     pub gi_reservoirs_a: Buffer,
@@ -144,6 +146,13 @@ pub fn prepare_solari_lighting_resources(
             size: LIGHT_TILE_BLOCKS
                 * LIGHT_TILE_SAMPLES_PER_BLOCK
                 * RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let light_triangles = render_device.create_buffer(&BufferDescriptor {
+            label: Some("solarik_lighting_light_triangles"),
+            size: crate::scene::LIGHT_TRIANGLE_TABLE_CAPACITY as u64 * 64,
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -300,6 +309,7 @@ pub fn prepare_solari_lighting_resources(
             sky_distribution,
             light_tile_samples,
             light_tile_resolved_samples,
+            light_triangles,
             di_reservoirs_a,
             di_reservoirs_b,
             gi_reservoirs_a,

@@ -51,6 +51,7 @@ impl Plugin for SolarikLightingPlugin {
         load_shader_library!(app, "primary_light_trace.wesl");
         load_shader_library!(app, "realtime_bindings.wesl");
         load_shader_library!(app, "presample_light_tiles.wesl");
+        load_shader_library!(app, "light_triangles.wesl");
         embedded_asset!(app, "restir_di.wesl");
         embedded_asset!(app, "restir_gi.wesl");
         load_shader_library!(app, "sky_sampling.wesl");

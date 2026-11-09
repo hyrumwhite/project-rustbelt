@@ -25,7 +25,7 @@ mod tlas;
 mod types;
 
 use bevy_shader::load_shader_library;
-pub use binder::{RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSeenLights, SolarikSkyLight, SolarikUnreflectedLight};
+pub use binder::{LIGHT_TRIANGLE_TABLE_CAPACITY, RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSeenLights, SolarikSkyLight, SolarikUnreflectedLight};
 pub use ray_settings::SolarikRaySettings;
 pub use types::{RaytracingMask, RaytracingMesh3d};
 

@@ -22,6 +22,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::LightSource;
 import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_SOURCE_KIND_DIRECTIONAL;
 import bevy_solarik::scene::raytracing_scene_bindings::light_source_is_emissive_mesh;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_triangle_data_full;
+import bevy_solarik::realtime::light_triangles::resolve_light_triangle;
 import bevy_solarik::scene::raytracing_scene_bindings::materials;
 import bevy_solarik::scene::raytracing_scene_bindings::material_ids;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_material_alpha;
@@ -282,18 +283,19 @@ fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) ->
         let triangle_count = light_source.kind >> 1u;
         let triangle_id = light_sample.light_id & 0xFFFFu;
         let barycentrics = triangle_barycentrics(light_sample.seed);
-        let triangle_data = resolve_triangle_data_full(light_source.id, triangle_id, barycentrics);
+        // (the light's own resolve, not the full hit's: see resolve_light_triangle)
+        let triangle_data = resolve_light_triangle(light_source, triangle_id, barycentrics);
 
         let raw_material = materials[material_ids[light_source.id]];
-        var emission = triangle_data.material.emissive.rgb;
+        var emission = triangle_data.emissive;
         if (raw_material.flags & (MATERIAL_FLAG_DIFFUSE_BLEND | MATERIAL_FLAG_ALPHA_BLEND)) != 0u {
             emission *= clamp(resolve_material_alpha(raw_material, triangle_data.uv), 0.0, 1.0);
         }
         return ResolvedLightSample(
             vec4(triangle_data.world_position, LIGHT_SAMPLE_EMISSIVE_MESH),
-            triangle_data.triangle_world_normal,
+            triangle_data.normal,
             emission,
-            f32(triangle_count) * triangle_data.triangle_area,
+            f32(triangle_count) * triangle_data.area,
             raw_material.emission_cone.xyz,
             vec2(raw_material.emission_cone.w, 0.0),
             select(0.0, -2.0, raw_material.emission_cone.w > 0.0),

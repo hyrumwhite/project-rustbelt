@@ -117,6 +117,10 @@ struct LightSource {
     selection_probability: f32,
     alias_threshold: f32,
     alias_index: u32,
+    // An emissive mesh's first triangle in the lighting's table of emissive
+    // triangles (realtime/light_triangles.wesl), NO_LIGHT_TRIANGLES when it
+    // has none; other kinds leave it.
+    triangle_offset: u32,
 }
 
 const LIGHT_SOURCE_KIND_EMISSIVE_MESH = 0u;

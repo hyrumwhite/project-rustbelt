@@ -55,6 +55,7 @@ pub struct SolarikLightingPipelines {
     sample_gi_for_world_cache_pipeline: CachedComputePipelineId,
     blend_new_world_cache_samples_pipeline: CachedComputePipelineId,
     presample_light_tiles_pipeline: CachedComputePipelineId,
+    build_light_triangles_pipeline: CachedComputePipelineId,
     di_initial_and_temporal_pipeline: CachedComputePipelineId,
     di_spatial_and_shade_pipeline: CachedComputePipelineId,
     gi_initial_and_temporal_pipeline: CachedComputePipelineId,
@@ -227,6 +228,7 @@ pub fn prepare_primary_glass(
         p.sample_gi_for_world_cache_pipeline,
         p.blend_new_world_cache_samples_pipeline,
         p.presample_light_tiles_pipeline,
+        p.build_light_triangles_pipeline,
         p.di_initial_and_temporal_pipeline,
         p.di_spatial_and_shade_pipeline,
         p.gi_initial_and_temporal_pipeline,
@@ -392,6 +394,7 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         Some(sample_gi_for_world_cache_pipeline),
         Some(blend_new_world_cache_samples_pipeline),
         Some(presample_light_tiles_pipeline),
+        Some(build_light_triangles_pipeline),
         Some(di_initial_and_temporal_pipeline),
         Some(di_spatial_and_shade_pipeline),
         Some(gi_initial_and_temporal_pipeline),
@@ -421,6 +424,7 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         pipeline_cache.get_compute_pipeline(pipelines.sample_gi_for_world_cache_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.blend_new_world_cache_samples_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.presample_light_tiles_pipeline),
+        pipeline_cache.get_compute_pipeline(pipelines.build_light_triangles_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.di_initial_and_temporal_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.di_spatial_and_shade_pipeline),
         pipeline_cache.get_compute_pipeline(pipelines.gi_initial_and_temporal_pipeline),
@@ -525,6 +529,7 @@ pub fn solarik_lighting<const PRIMARY: bool>(
             &s.lit_fog_raw,
             &s.lit_fog_history[0],
             &s.lit_fog_history[1],
+            s.light_triangles.as_entire_binding(),
         )),
     );
     let bind_group_world_cache_active_cells_dispatch = render_device.create_bind_group(
@@ -703,6 +708,10 @@ pub fn solarik_lighting<const PRIMARY: bool>(
     d.end(&mut pass);
 
     let d = diagnostics.time_span(&mut pass, "solarik_lighting/presample_light_tiles");
+    // (the emissive triangles in world space first, a workgroup a light: the
+    // tiles and every light sample after them resolve from the table)
+    pass.set_pipeline(build_light_triangles_pipeline);
+    pass.dispatch_workgroups(scene_bindings.light_source_count.max(1), 1, 1);
     pass.set_pipeline(presample_light_tiles_pipeline);
     pass.set_immediates(
         0,
@@ -847,6 +856,11 @@ pub fn solarik_lighting<const PRIMARY: bool>(
 
     let d = diagnostics.time_span(&mut pass, "solarik_lighting/direct_lighting");
 
+    // (the pass's two halves timed within it: `di_initial_temporal` the
+    // candidates, their shadow tests and the temporal reuse;
+    // `di_spatial_shade` the spatial reuse, the final shadow ray and the
+    // shading)
+    let half = diagnostics.time_span(&mut pass, "solarik_lighting/di_initial_temporal");
     pass.set_pipeline(di_initial_and_temporal_pipeline);
     pass.set_immediates(
         0,
@@ -858,7 +872,9 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         ]),
     );
     pass.dispatch_workgroups(dx, dy, 1);
+    half.end(&mut pass);
 
+    let half = diagnostics.time_span(&mut pass, "solarik_lighting/di_spatial_shade");
     pass.set_pipeline(di_spatial_and_shade_pipeline);
     pass.set_immediates(
         0,
@@ -870,6 +886,7 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         ]),
     );
     pass.dispatch_workgroups(dx, dy, 1);
+    half.end(&mut pass);
 
     d.end(&mut pass);
 
@@ -1119,6 +1136,8 @@ pub fn init_solari_lighting_pipelines(
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
+                // (the emissive triangles' table)
+                storage_buffer_sized(false, None),
             ),
         ),
     );
@@ -1562,6 +1581,13 @@ pub fn init_solari_lighting_pipelines(
             "solarik_lighting_presample_light_tiles_pipeline",
             "presample_light_tiles",
             load_embedded_asset!(asset_server.as_ref(), "presample_light_tiles.wesl"),
+            None,
+            vec![],
+        ),
+        build_light_triangles_pipeline: create_pipeline(
+            "solarik_lighting_build_light_triangles_pipeline",
+            "build_light_triangles",
+            load_embedded_asset!(asset_server.as_ref(), "light_triangles.wesl"),
             None,
             vec![],
         ),

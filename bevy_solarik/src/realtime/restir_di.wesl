@@ -114,6 +114,12 @@ const RASTER_SUBPIXEL_STEP = 1.0 / 16.0;
 var<private> debug_di_pick: vec3<f32>;
 }
 
+// (Timing switches, SOLARIK_SHADER_DEFS=DI_TIME_NO_...: each leaves a stage
+// out so the pass's two spans say what it costs; the picture is wrong with
+// any of them. NO_PICK_RAY: the initial pick's shadow test; NO_SUN_RAY: the
+// sun candidate's; NO_FINAL_RAY: the shading's; NO_TEMPORAL and NO_SPATIAL:
+// the reuse, the canonical reservoir kept.)
+
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
@@ -131,11 +137,16 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
 
     let diffuse_brdf = target_brdf(surface.material);
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, diffuse_brdf, workgroup_id.xy, global_id.xy, depth, &rng);
+@if(DI_TIME_NO_TEMPORAL) {
+    store_reservoir_b(global_id.xy, initial_reservoir);
+}
+@if((!(DI_TIME_NO_TEMPORAL))) {
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, diffuse_brdf,
         temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
 
     store_reservoir_b(global_id.xy, merge_result.merged_reservoir);
+}
 @if(VISUALIZE_DI_PICK) {
     textureStore(view_output, global_id.xy, vec4(debug_di_pick, 1.0));
 }
@@ -158,7 +169,10 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let diffuse_brdf = target_brdf(surface.material);
     let input_reservoir = load_reservoir_b(global_id.xy);
-    let spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
+    var spatial = NeighborInfo(empty_reservoir(), surface.world_position, surface.world_normal, vec3(0.0));
+@if((!(DI_TIME_NO_SPATIAL))) {
+    spatial = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
+}
     let merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, diffuse_brdf,
         spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.diffuse_brdf, &rng);
     let combined_reservoir = merge_result.merged_reservoir;
@@ -196,8 +210,11 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 fn shade_di_reservoir(result: ReservoirMergeResult, world_position: vec3<f32>, world_normal: vec3<f32>, raster_error: f32) -> vec3<f32> {
     if !reservoir_valid(result.merged_reservoir) { return vec3(0.0); }
-    let transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, raster_error),
+    var transmission = vec4(1.0);
+@if((!(DI_TIME_NO_FINAL_RAY))) {
+    transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, raster_error),
         result.selected_light_world_position);
+}
     return result.selected_sample_radiance * result.merged_reservoir.unbiased_contribution_weight * transmission.rgb;
 }
 
@@ -324,7 +341,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         let contribution = calculate_resolved_light_contribution(resolved, world_position, world_normal);
         let target_function = luminance(contribution.radiance * diffuse_brdf * saturate(dot(contribution.wi, world_normal)));
         if target_function > 0.0 {
-            let transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), resolved.world_position);
+            var transmission = vec4(1.0);
+@if((!(DI_TIME_NO_SUN_RAY))) {
+            transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), resolved.world_position);
+}
             if max(transmission.r, max(transmission.g, transmission.b)) > 0.0 {
                 let resampling_weight = target_function * contribution.inverse_pdf;
                 weight_sum += resampling_weight;
@@ -353,7 +373,10 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         // lit or dark as one hidden light came and went). The sun was tested
         // above.
         if !sun_selected {
-            let transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), selected_light_position);
+            var transmission = vec4(1.0);
+@if((!(DI_TIME_NO_PICK_RAY))) {
+            transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), selected_light_position);
+}
             if max(transmission.r, max(transmission.g, transmission.b)) <= 0.0 {
                 reservoir.unbiased_contribution_weight = 0.0;
 @if(VISUALIZE_DI_PICK) {

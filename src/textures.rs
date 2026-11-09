@@ -179,7 +179,10 @@ impl TextureCache {
     pub fn summed_area(&mut self, cache: &CacheFile, datum: u32, index: u16) -> Option<&SummedArea> {
         self.sums
             .entry((datum, index))
-            .or_insert_with(|| rgba8(cache, datum, index).ok().filter(|image| image.width > 0 && image.height > 0).map(|image| SummedArea::new(&image)))
+            .or_insert_with(|| {
+                let _profile = bevy::render::diagnostic::profile_scope("main.summed_area");
+                rgba8(cache, datum, index).ok().filter(|image| image.width > 0 && image.height > 0).map(|image| SummedArea::new(&image))
+            })
             .as_ref()
     }
 
@@ -250,6 +253,7 @@ impl TextureCache {
         if let Some(volume) = self.volumes.get(&datum) {
             return volume.clone();
         }
+        let _profile = bevy::render::diagnostic::profile_scope("main.volume_decode");
         let volume = bitmap::bitmaps(cache, datum)
             .ok()
             .and_then(|b| b.into_iter().next())
@@ -294,6 +298,9 @@ impl TextureCache {
     ) -> Option<Handle<Image>> {
         let bc_supported = self.bc_supported;
         let entry = self.images.entry((datum, index, srgb)).or_insert_with(|| {
+            // (a bitmap decoded on first sight: the main thread's, timed for
+            // the frame spike log of cpu_times)
+            let _profile = bevy::render::diagnostic::profile_scope("main.texture_decode");
             let name = cache.tag(datum).map(|t| t.name.clone()).unwrap_or_default();
             match convert(cache, datum, index, srgb, bc_supported) {
                 Ok(image) => Some(images.add(image)),

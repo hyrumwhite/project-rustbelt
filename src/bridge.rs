@@ -489,6 +489,7 @@ fn sync_objects(
 ) {
     let Some(snapshot) = &link.latest else { return };
     let started = std::time::Instant::now();
+    let _profile = bevy::render::diagnostic::profile_scope("main.sync_objects");
     timing.frame(snapshot.frame_index);
     let flat_normal = flat_normal.get_or_insert_with(|| images.add(crate::material::flat_normal_image())).clone();
     let to_bevy = halo_to_bevy_affine();

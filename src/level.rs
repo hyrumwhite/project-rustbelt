@@ -1686,6 +1686,7 @@ impl LevelBuilder {
         if let Some(cached) = self.animated_models.get(&(datum, permutations)) {
             return cached.clone();
         }
+        let _profile = bevy::render::diagnostic::profile_scope("main.animated_model");
         let built = match self.build_animated_model(datum, &permutations, assets) {
             Ok(model) => Some(Arc::new(model)),
             Err(e) => {

@@ -163,16 +163,30 @@ fn flood_buffers(mut commands: bevy::prelude::Commands, device: bevy::prelude::R
 fn main_ended() {
     let mut guard = totals().lock().unwrap();
     let (totals, marks) = &mut *guard;
+    let mut frame_ms = 0.0;
     if let Some(started) = marks.main.take() {
-        totals.main += started.elapsed();
+        let took = started.elapsed();
+        frame_ms = took.as_secs_f64() * 1000.0;
+        totals.main += took;
         totals.main_frames += 1;
     }
+    let mut spike: Vec<(&'static str, f64)> = Vec::new();
     for sample in bevy::render::diagnostic::take_cpu_profile() {
         if sample.unit == "ms" || sample.unit == "count" {
             let entry = totals.profile.entry(sample.name).or_default();
             entry.0 += sample.value;
             entry.1 += 1;
         }
+        if sample.unit == "ms" && sample.value >= 1.0 {
+            spike.push((sample.name, sample.value));
+        }
+    }
+    // (a main frame over 50 ms: what filled it, by the scopes of that frame,
+    // the main thread's `main.*` among them; BEVY_RENDER_PROFILE=1)
+    if frame_ms >= 50.0 && !spike.is_empty() {
+        spike.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let top: Vec<String> = spike.iter().take(8).map(|(name, ms)| format!("{name} {ms:.1}")).collect();
+        info!("main frame spike: {frame_ms:.0} ms: {}", top.join(", "));
     }
     let since = *totals.since.get_or_insert_with(Instant::now);
     if since.elapsed().as_secs_f32() >= 5.0 {

@@ -37,6 +37,13 @@ const MAX_REFITS: u32 = 240;
 #[extract_app(bevy_render::RenderApp)]
 pub struct SolarikDeformableMeshes(pub HashSet<AssetId<Mesh>>);
 
+/// Deformable meshes whose vertices a compute pass wrote in place this frame
+/// (the game's skinned copies, `halo_rt::rt_skinning`): refit as a modified
+/// deformable mesh is, though no asset changed. Filled before
+/// `prepare_raytracing_blas` each frame, by whoever writes them.
+#[derive(Resource, Default)]
+pub struct SolarikSkinnedRefits(pub HashSet<AssetId<Mesh>>);
+
 #[derive(Resource, Default)]
 pub struct BlasManager {
     pub(crate) generation: u64,
@@ -136,6 +143,7 @@ pub fn prepare_raytracing_blas(
     ),
     readiness: Res<bevy_render::scene_readiness::SceneGeometryReadiness>,
     deformable: Res<SolarikDeformableMeshes>,
+    skinned: Res<SolarikSkinnedRefits>,
     mesh_allocator: Res<MeshAllocator>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
@@ -174,6 +182,7 @@ pub fn prepare_raytracing_blas(
     let refits: HashSet<AssetId<Mesh>> = extracted_meshes
         .modified
         .iter()
+        .chain(skinned.0.iter())
         .filter(|asset_id| {
             deformable.0.contains(*asset_id)
                 && !extracted_meshes.removed.contains(*asset_id)
@@ -241,7 +250,38 @@ pub fn prepare_raytracing_blas(
         })
         .collect();
 
-    if extracted_meshes.extracted.is_empty() && rebuilds.is_empty() {
+    // The skinned copies (written in place by a compute pass, no extraction):
+    // refits where their BLAS allows, and where it does not (refit MAX_REFITS
+    // times, its tree built for a pose long gone; or built static before it
+    // was marked deformable) a build afresh, as a modified deformable mesh
+    // gets, keeping the mesh's edges and bounds, which are its geometry's.
+    let mut skinned_refits: Vec<AssetId<Mesh>> = Vec::new();
+    let mut skinned_rebuilds: Vec<AssetId<Mesh>> = Vec::new();
+    for asset_id in skinned.0.iter() {
+        if extracted_meshes.extracted.iter().any(|(id, _)| id == asset_id)
+            || extracted_meshes.removed.contains(asset_id)
+            || !deformable.0.contains(asset_id)
+            || mesh_allocator.mesh_vertex_slice(asset_id).is_none()
+            || mesh_allocator.mesh_index_slice(asset_id).is_none()
+        {
+            continue;
+        }
+        if refits.contains(asset_id) {
+            skinned_refits.push(*asset_id);
+        } else {
+            blas_manager.updatable.remove(asset_id);
+            if blas_manager.blas.remove(asset_id).is_some() {
+                blas_manager.generation = blas_manager.generation.wrapping_add(1);
+            }
+            blas_manager.revisions.remove(asset_id);
+            blas_manager.opacity.forget(asset_id);
+            skinned_rebuilds.push(*asset_id);
+        }
+    }
+    bevy_render::diagnostic::profile_value("scene.skinned_refits", skinned_refits.len() as f64, "count");
+    bevy_render::diagnostic::profile_value("scene.skinned_rebuilds", skinned_rebuilds.len() as f64, "count");
+
+    if extracted_meshes.extracted.is_empty() && rebuilds.is_empty() && skinned_refits.is_empty() && skinned_rebuilds.is_empty() {
         return;
     }
 
@@ -253,6 +293,8 @@ pub fn prepare_raytracing_blas(
         .filter(|(_, mesh)| is_mesh_raytracing_compatible(mesh))
         .map(|(asset_id, _)| *asset_id)
         .chain(rebuilds)
+        .chain(skinned_refits)
+        .chain(skinned_rebuilds)
         .filter(|asset_id| scheduled.insert(*asset_id))
         .map(|asset_id| {
             let vertex_slice = mesh_allocator.mesh_vertex_slice(&asset_id).unwrap();

@@ -19,6 +19,7 @@ mod clusters;
 mod cpu_times;
 mod combiners;
 mod decals;
+mod rt_skinning;
 mod effects;
 mod lens_flares;
 mod fog;
@@ -447,7 +448,7 @@ fn main() -> AppExit {
         bevy::winit::UpdateMode::Continuous
     };
     app.insert_resource(bevy::winit::WinitSettings { focused_mode: bevy::winit::UpdateMode::Continuous, unfocused_mode });
-    app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin, reveal::RevealPlugin, cpu_times::BufferFloodPlugin))
+    app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin, reveal::RevealPlugin, cpu_times::BufferFloodPlugin, rt_skinning::RtSkinningPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))
         .insert_resource(saved.as_ref().map_or_else(LightingSettings::default, |s| s.lighting.clone()))

@@ -469,7 +469,7 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid, mut deformable, mut pearl_coats, mut glass_grime, mut plain_coats): (
+    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid, mut deformable, mut pearl_coats, mut glass_grime, mut plain_coats, mut skin_jobs): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<&mut crate::level::AnimatedSelfIllumination>,
         Query<&Children>,
@@ -482,6 +482,7 @@ fn sync_objects(
         ResMut<bevy_solarik::lommel::PearlCoatMaterials>,
         ResMut<bevy_solarik::glass_grime::GlassGrimeMaterials>,
         ResMut<bevy_solarik::lommel::PlainCoatMaterials>,
+        ResMut<crate::rt_skinning::RtSkinJobs>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -863,6 +864,17 @@ fn sync_objects(
             for ((skin, entity), mesh) in tracked.model.traced_skins.iter().zip(&tracked.skins).zip(&mut tracked.skin_meshes) {
                 timing.skins += 1;
                 timing.skinned_vertices += skin.vertex_count() as u64;
+                // (on the GPU: the copy made once, posed as the camera's
+                // skinned mesh then; after that a job a move, the compute pass
+                // writing the copy's slab from the camera's mesh and these
+                // matrices: `crate::rt_skinning`)
+                if crate::rt_skinning::gpu_skinning()
+                    && !no_refit()
+                    && let (Some(mesh), Some(raster)) = (mesh.as_ref(), skin.raster_mesh())
+                {
+                    skin_jobs.push(raster.id(), mesh.id(), &relative);
+                    continue;
+                }
                 let posed = skin.mesh(&relative);
                 // (`HALO_RT_NO_REFIT=1`: a new mesh each time, its acceleration
                 // structure built afresh, as before 2026-10-23)

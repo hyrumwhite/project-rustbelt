@@ -53,7 +53,7 @@ pub use blas::{compact_raytracing_blas, prepare_raytracing_blas};
 /// the materials, the light lists and the bindings), for ordering against it.
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PrepareSceneBindings;
-pub use blas::SolarikDeformableMeshes;
+pub use blas::{SolarikDeformableMeshes, SolarikSkinnedRefits};
 use extract::{StandardMaterialAssets, extract_raytracing_scene};
 use tracing::warn;
 
@@ -140,6 +140,7 @@ impl Plugin for RaytracingScenePlugin {
         render_app.init_resource::<SolarikAlphaTesting>();
         render_app.init_resource::<SolarikRaySettings>();
         render_app.init_resource::<SolarikDeformableMeshes>();
+        render_app.init_resource::<SolarikSkinnedRefits>();
 
         render_app
             .init_gpu_resource::<BlasManager>()

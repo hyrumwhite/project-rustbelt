@@ -676,11 +676,19 @@ pub struct TracedSkin {
     indices: Vec<u32>,
     surface: Surface,
     shader: Option<ShaderUse>,
+    /// The camera's skinned mesh of the same part (its rest pose, joints and
+    /// weights), which the GPU skinning reads (`crate::rt_skinning`).
+    raster_mesh: Option<Handle<Mesh>>,
 }
 
 impl TracedSkin {
     pub fn vertex_count(&self) -> usize {
         self.positions.len()
+    }
+
+    /// The camera's skinned mesh this is the rays' copy of.
+    pub fn raster_mesh(&self) -> Option<&Handle<Mesh>> {
+        self.raster_mesh.as_ref()
     }
 
     /// The part skinned to the nodes' transforms (Bevy space, each node's
@@ -1799,6 +1807,7 @@ impl LevelBuilder {
                         indices,
                         surface: surface.clone(),
                         shader: shader_use,
+                        raster_mesh: None,
                     });
                 }
                 let mut by_node: HashMap<usize, Vec<u32>> = HashMap::default();
@@ -1837,8 +1846,12 @@ impl LevelBuilder {
                     .map(|v| [v.position[0], v.position[1], v.position[2], 1.0])
                     .collect();
                 let modifier_mesh = assets.meshes.add(mesh.clone().with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, rest));
+                let mesh = assets.meshes.add(mesh);
+                if !rigid && let Some(traced) = traced_skins.last_mut() {
+                    traced.raster_mesh = Some(mesh.clone());
+                }
                 skinned.push(SkinnedPart {
-                    mesh: assets.meshes.add(mesh),
+                    mesh,
                     modifier_mesh,
                     surface: surface.clone(),
                     shader: shader_use,

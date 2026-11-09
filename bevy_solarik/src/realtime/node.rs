@@ -1182,7 +1182,11 @@ pub fn init_solari_lighting_pipelines(
             ("DI_CELL_CANDIDATES", "SOLARIK_DI_CELL_CANDIDATES", 16),
             ("DI_CONFIDENCE_CAP", "SOLARIK_DI_CONFIDENCE_CAP", 8),
             ("GI_CONFIDENCE_CAP", "SOLARIK_GI_CONFIDENCE_CAP", 8),
-            ("CACHE_TILE_CANDIDATES", "SOLARIK_CACHE_TILE_CANDIDATES", 128),
+            // (64 since 8 November, Phase 5's first payback: 0.34 ms off
+            // the cache pass at every harness spot with no boiling column
+            // moved, and the user's A/B in b40's shaft and corridor saw no
+            // difference; 128 the old)
+            ("CACHE_TILE_CANDIDATES", "SOLARIK_CACHE_TILE_CANDIDATES", 64),
             ("GI_ADAPTIVE_CONFIDENCE", "SOLARIK_GI_ADAPTIVE_CONFIDENCE", 4),
             // (the roughness in hundredths above which specular GI reuses the
             // diffuse GI reservoir instead of tracing, and a glossy path ends;

@@ -171,6 +171,12 @@ impl RenderContextStateInner {
 
 wgpu_wrapper!(struct WgpuRenderContextStateInner(RenderContextStateInner));
 
+/// `HALO_RT_GPU_TIMELINE` set: a GPU span around every node's command buffers.
+fn gpu_timeline_wanted() -> bool {
+    static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WANTED.get_or_init(|| std::env::var_os("HALO_RT_GPU_TIMELINE").is_some())
+}
+
 /// A resource that holds the current render context state, including command encoder and command buffers.
 /// This is used internally by the [`RenderContext`] system parameter. Implements [`SystemBuffer`] to
 /// append command buffers and unfinished encoders in topological system order. Pending encoders are
@@ -218,6 +224,42 @@ impl SystemBuffer for RenderContextState {
         for command in &mut inner.commands {
             if let PendingCommandBuffer::Encoder { name, .. } = command {
                 *name = _system_meta.name().clone().into();
+            }
+        }
+
+        // (HALO_RT_GPU_TIMELINE: every node's command buffers between two GPU
+        // timestamps named for the system, so the timeline log can name the
+        // GPU's time in nodes that time nothing themselves: the spans sit
+        // outside the nodes' own in the recorder's tree, so they double the
+        // frame's sums and are only made when asked for)
+        if !inner.commands.is_empty() && gpu_timeline_wanted() {
+            if let (Some(render_device), Some(recorder)) = (
+                inner.render_device.clone(),
+                world.get_resource::<DiagnosticsRecorder>(),
+            ) {
+                use crate::diagnostic::RecordDiagnostics;
+                let name = _system_meta.name().to_string();
+                let name: Cow<'static, str> =
+                    Cow::Owned(name.rsplit("::").next().unwrap_or(&name).to_string());
+                let mut begin = render_device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("node span begin") });
+                recorder.begin_time_span(&mut begin, name);
+                let mut end = render_device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("node span end") });
+                recorder.end_time_span(&mut end);
+                inner.commands.insert(
+                    0,
+                    PendingCommandBuffer::Encoder {
+                        encoder: begin,
+                        #[cfg(feature = "trace")]
+                        name: "node span begin".into(),
+                    },
+                );
+                inner.commands.push(PendingCommandBuffer::Encoder {
+                    encoder: end,
+                    #[cfg(feature = "trace")]
+                    name: "node span end".into(),
+                });
             }
         }
 

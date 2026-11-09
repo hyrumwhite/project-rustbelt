@@ -262,6 +262,7 @@ pub fn allocate_and_free_meshes(
     mut mesh_vertex_buffer_layouts: ResMut<MeshVertexBufferLayouts>,
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
+    diagnostics: Option<Res<crate::diagnostic::internal::DiagnosticsRecorder>>,
 ) {
     let _profile = crate::diagnostic::profile_scope("mesh.system");
     // Clear the list of meshes displaced by last frame's slab growth.
@@ -303,6 +304,7 @@ pub fn allocate_and_free_meshes(
         &mut mesh_vertex_buffer_layouts,
         &render_device,
         &render_queue,
+        diagnostics.as_deref(),
     );
 }
 
@@ -461,6 +463,7 @@ impl MeshAllocator {
         mesh_vertex_buffer_layouts: &mut MeshVertexBufferLayouts,
         render_device: &RenderDevice,
         render_queue: &RenderQueue,
+        diagnostics: Option<&crate::diagnostic::internal::DiagnosticsRecorder>,
     ) {
         let stage_profile = crate::diagnostic::profile_scope("mesh.allocate_stage");
         let mut allocation_stage = self.slab_allocator.stage_allocation();
@@ -554,6 +557,10 @@ impl MeshAllocator {
         let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("mesh_copies"),
         });
+        // (timed on the GPU as `mesh/copies`: the frame's first submit, before
+        // the BLAS builds; outside the graph's spans otherwise)
+        use crate::diagnostic::RecordDiagnostics;
+        let span = diagnostics.time_span(&mut encoder, "mesh/copies");
         let mut belt = self.staging_belt.take().expect("the mesh allocator's staging belt");
         {
             let mut staged = StagedCopies { belt: &mut belt, encoder: &mut encoder, queue: render_queue };
@@ -569,6 +576,7 @@ impl MeshAllocator {
                 self.copy_mesh_morph_target_data(mesh_id, mesh, render_device, &mut staged);
             }
         }
+        span.end(&mut encoder);
         belt.finish_and_recall_on_submit(&encoder);
         let _submit_profile = crate::diagnostic::profile_scope("mesh.allocate_submit");
         render_queue.submit([encoder.finish()]);
@@ -1000,6 +1008,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            None,
         );
         assert!(mesh_allocator.mesh_vertex_slice(&mesh_id).is_some());
 
@@ -1033,6 +1042,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            None,
         );
         assert!(mesh_allocator.mesh_vertex_slice(&mesh_id).is_some());
 
@@ -1065,6 +1075,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            None,
         );
 
         assert!(has_allocation(
@@ -1114,6 +1125,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            None,
         );
         assert!(has_allocation(
             &mesh_allocator,
@@ -1131,6 +1143,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            None,
         );
 
         assert!(has_allocation(
@@ -1169,6 +1182,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            None,
         );
         assert_eq!(mesh_allocator.slab_count(), 1);
         let original_slab =
@@ -1185,6 +1199,7 @@ mod tests {
             &mut mesh_vertex_buffer_layouts,
             &render_device,
             &render_queue,
+            None,
         );
 
         let new_slab =
@@ -1248,6 +1263,7 @@ mod tests {
                 &mut mesh_vertex_buffer_layouts,
                 &render_device,
                 &render_queue,
+                None,
             );
 
             let size = mesh_allocator.slabs_size();

@@ -27,7 +27,7 @@ nrc = ["bevy_solarik/nrc"]
 [dependencies]
 halo_map = { path = "crates/halo_map" }
 halo_bridge = { path = "crates/halo_bridge" }
-bevy = { version = "=0.20.0", features = ["https", "free_camera"] }
+bevy = { version = "=0.20.0", features = ["https", "free_camera", "debug"] }
 # Solarik, a fork of bevy_solari (glass, alpha-masked foliage, point and spot
 # lights, sky lighting, a reference pathtracer that keeps accumulating), as a
 # subtree of https://github.com/AlrikOlson/bevy_solarik (its halo-rt branch)

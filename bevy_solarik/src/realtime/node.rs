@@ -1197,10 +1197,14 @@ pub fn init_solari_lighting_pipelines(
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).filter(|&v: &u32| v > 0).unwrap_or(default);
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));
         }
-        // (the switches, 0 allowed: the cache's history clamp, tuning.wesl)
+        // (the switches, 0 allowed: the world cache's history clamp and
+        // drop detector, tuning.wesl; on since 9 November: a flash in a
+        // closed room sat in the cache for ten seconds, and with these it
+        // leaves in a few updates; the harness tables base64 and cachefast
+        // hold every boiling column, docs/boiling-plan.md)
         for (name, env, default) in [
-            ("CACHE_HISTORY_CLAMP", "SOLARIK_CACHE_HISTORY_CLAMP", 0u32),
-            ("CACHE_DROP_DETECT", "SOLARIK_CACHE_DROP_DETECT", 0u32),
+            ("CACHE_HISTORY_CLAMP", "SOLARIK_CACHE_HISTORY_CLAMP", 1u32),
+            ("CACHE_DROP_DETECT", "SOLARIK_CACHE_DROP_DETECT", 1u32),
             // (a drop past 60 hundredths of the cell's light counts; it, and
             // the clamp, leave a cell 4 samples at the fewest)
             ("CACHE_DROP_THRESHOLD", "SOLARIK_CACHE_DROP_THRESHOLD", 60u32),

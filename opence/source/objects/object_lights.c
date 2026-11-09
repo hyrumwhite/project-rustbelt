@@ -144,6 +144,7 @@ symbols in this file:
    path (see OBJECTS_H_FILE in objects.h) */
 #define OBJECTS_H_FILE "c:\\halo\\source\\objects\\objects.h"
 
+#include <stdlib.h>
 #include "cseries/cseries.h"
 #include "cseries/errors.h"
 #include "cseries/profile.h"
@@ -893,6 +894,25 @@ long light_new_unattached(
 	return light_index;
 }
 
+/* HALO_LIGHT_FADE_POWER: the power a transition light's fade is raised to
+for the viewer (2; 1 the game's own line) */
+static long lights_port_fade_power(void)
+{
+	static long power = -1;
+
+	if (power < 0)
+	{
+		char const *setting = getenv("HALO_LIGHT_FADE_POWER");
+
+		power = setting ? atol(setting) : 2;
+		if (power < 1)
+			power = 1;
+		if (power > 8)
+			power = 8;
+	}
+	return power;
+}
+
 short lights_port_list(
 	struct lights_port_light *lights,
 	short maximum)
@@ -960,6 +980,35 @@ short lights_port_list(
 			lights[count].up = markers[0].matrix.up;
 		}
 		lights[count].color = flare ? definition->color_upper_bound.rgb : light->color;
+		/* a transition light (an explosion's: parent_light_index holds its
+		start) at its curve's square (HALO_LIGHT_FADE_POWER, 2): the game
+		fades a frag's light over 1.5 s in a straight line, which clipped
+		at the flash on the original's screen and read as a burst and a
+		quick fall; in the ray-traced picture's range the same line read as
+		a light that lingered */
+		if (!flare && light->parent_light_index != NONE && definition && definition->transition_duration > 0.0f)
+		{
+			long power = lights_port_fade_power();
+			real intensity = (1.0f - transition_function_evaluate(
+				definition->falloff_function,
+				(real)(game_time_get() - light->parent_light_index) / definition->transition_duration))
+				* light->intensity_scale;
+			real curved;
+			long i;
+
+			if (intensity < 0.0f)
+				intensity = 0.0f;
+			if (intensity > 1.0f)
+				intensity = 1.0f;
+			for (curved = 1.0f, i = 0; i < power; i++)
+				curved *= intensity;
+			rgb_colors_interpolate(
+				&lights[count].color,
+				definition->color_interpolation_flags,
+				&definition->color_lower_bound.rgb,
+				&definition->color_upper_bound.rgb,
+				curved);
+		}
 		lights[count].radius = flare ? definition->radius : light->radius;
 		lights[count].cutoff_angle = definition ? definition->cutoff_angle : _pi;
 		lights[count].falloff_angle = definition ? definition->falloff_angle : _pi;

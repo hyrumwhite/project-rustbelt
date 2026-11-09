@@ -14,3 +14,7 @@ const GI_ADAPTIVE_CONFIDENCE: f32 = f32(constants::GI_ADAPTIVE_CONFIDENCE);
 // (in hundredths from the environment: the roughness above which specular GI
 // reuses the diffuse GI's reservoir instead of tracing a glossy path)
 const SPECULAR_REUSE_ROUGHNESS: f32 = f32(constants::SPECULAR_REUSE_ROUGHNESS) / 100.0;
+// (1: a cache cell's stored sample count is the history its blend used, so
+// a cell that just followed a change holds a short history and lets go of a
+// flash as fast as it took it; 0: the count climbs regardless, as before)
+const CACHE_HISTORY_CLAMP: u32 = constants::CACHE_HISTORY_CLAMP;

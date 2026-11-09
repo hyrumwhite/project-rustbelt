@@ -1,3 +1,4 @@
+import bevy_solarik::realtime::tuning::CACHE_HISTORY_CLAMP;
 import bevy_solarik::filtered_canopy_scene::forest_set_seed;
 import bevy_solarik::scene::scene_hit::scene_hit_is_miss;
 @if((RAY_MATERIAL_FOOTPRINTS)) import bevy_solarik::scene::raytracing_scene_bindings::primary_ray_cone;
@@ -178,9 +179,18 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
     let luminance_delta = world_cache_luminance_deltas[cell_index];
 
     // https://bsky.app/profile/gboisse.bsky.social/post/3m5blga3ftk2a
-    let sample_count = min(old_radiance.a + 1.0, WORLD_CACHE_MAX_TEMPORAL_SAMPLES);
+    var sample_count = min(old_radiance.a + 1.0, WORLD_CACHE_MAX_TEMPORAL_SAMPLES);
     let update_probability = min(1.0, f32(WORLD_CACHE_CELL_UPDATES_SOFT_CAP) / f32(world_cache_active_cells_count));
-    var blend_amount = cache_blend_amount(sample_count, luminance(old_radiance.rgb), luminance_delta, update_probability);
+    let history = cache_history_length(sample_count, luminance(old_radiance.rgb), luminance_delta, update_probability);
+    var blend_amount = 1.0 / history;
+    // (the history the blend used is the history kept: a cell that followed
+    // a change, a grenade's flash, keeps a short one, and lets the flash go
+    // as fast as it took it; with the count climbing regardless, the flash
+    // sat in a 32-sample history and left over a second: the change
+    // detector's delta is smoothed and was slow to see the drop)
+    if CACHE_HISTORY_CLAMP != 0u {
+        sample_count = min(sample_count, history);
+    }
     if (constants.reset & 1u) != 0u {
         blend_amount = 1.0;
     }
@@ -204,7 +214,7 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 
 // Convert the history horizon from rendered frames to successful cell updates.
 // Otherwise the update budget silently stretches history as the cache grows.
-fn cache_blend_amount(sample_count: f32, old_luminance: f32, luminance_delta: f32, update_probability: f32) -> f32 {
+fn cache_history_length(sample_count: f32, old_luminance: f32, luminance_delta: f32, update_probability: f32) -> f32 {
     // The history shortens as the cell's light changes: in proportion to the
     // change (an eighth root made every single-sample update's noise read as
     // a change, keeping a few samples where 32 were meant).
@@ -213,5 +223,5 @@ fn cache_blend_amount(sample_count: f32, old_luminance: f32, luminance_delta: f3
     // (and at most WORLD_CACHE_HISTORY_FRAMES frames' updates: at 16, a big
     // cache, a cell updated one frame in four, kept four samples)
     let frame_limited_samples = max(1.0, WORLD_CACHE_HISTORY_FRAMES * clamp(update_probability, 0.0, 1.0));
-    return 1.0 / min(sample_count, min(max_sample_count, frame_limited_samples));
+    return max(1.0, min(sample_count, min(max_sample_count, frame_limited_samples)));
 }

@@ -1197,6 +1197,11 @@ pub fn init_solari_lighting_pipelines(
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).filter(|&v: &u32| v > 0).unwrap_or(default);
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));
         }
+        // (the switches, 0 allowed: the cache's history clamp, tuning.wesl)
+        for (name, env, default) in [("CACHE_HISTORY_CLAMP", "SOLARIK_CACHE_HISTORY_CLAMP", 0u32)] {
+            let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default);
+            shader_defs.push(ShaderDefVal::UInt(name.into(), value));
+        }
         // (diagnostics: extra definitions, comma separated)
         if let Ok(defs) = std::env::var("SOLARIK_SHADER_DEFS") {
             shader_defs.extend(defs.split(',').filter(|d| !d.is_empty()).map(|d| d.trim().to_string().into()));

@@ -432,7 +432,8 @@ const EMITTER_LOOKS: [(&str, f32, Option<[f32; 3]>); 5] = [
 /// Library's door lights, a white card each side of its big doors and a
 /// warm invisible one behind it, lit the far side alone, the near one
 /// barely (play feedback, 4 November: lights flanking a door that cast no
-/// light). Their backs are emitters too, for the rays alone. And the
+/// light). Their backs are emitters too, for the rays alone (the BSP's,
+/// the viewer's scenery's and the game's objects' models). And the
 /// volumetric cone under Assault on the Control Room's ceiling spotlights
 /// (b40's, 92 of them, the fixture's model), a lamp's light pictured, whose
 /// radiosity power lit the floor round its foot and left the foot itself,
@@ -2032,6 +2033,10 @@ impl LevelBuilder {
                     self.stats.skipped_transparent += 1;
                     continue;
                 };
+                // (and its back, for an emitter that lights both ways: see
+                // EMITTERS_BOTH_WAYS; the rays' alone, none for the camera)
+                let both_ways = matches!(&surface, Surface::Solid(solid) if solid.radiance.is_some())
+                    && shader_ref.datum.and_then(|d| cache.tag(d).ok()).is_some_and(|tag| emits_both_ways(&tag.name));
                 let last_node = model.nodes.len().saturating_sub(1) as u16;
                 let joints: Vec<[u16; 4]> = part
                     .vertices
@@ -2130,6 +2135,12 @@ impl LevelBuilder {
                 for (node, indices) in by_node {
                     let mesh = assets.meshes.add(build_model_mesh(source().map(inset), &indices, shader.uv_scale));
                     pieces.push(ModelPiece { node, mesh, surface: surface.clone(), shader: shader_use });
+                    if both_ways {
+                        let back = |v: SourceVertex| SourceVertex { normal: v.normal.map(|n| -n), ..inset(v) };
+                        let indices: Vec<u32> = indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
+                        let mesh = assets.meshes.add(build_model_mesh(source().map(back), &indices, shader.uv_scale));
+                        pieces.push(ModelPiece { node, mesh, surface: surface.clone(), shader: shader_use });
+                    }
                 }
                 // the whole part, skinned: each vertex follows its nodes by
                 // their weights, so joints bend without seams
@@ -2143,6 +2154,27 @@ impl LevelBuilder {
                 let mesh = assets.meshes.add(mesh);
                 if !rigid && let Some(traced) = traced_skins.last_mut() {
                     traced.raster_mesh = Some(mesh.clone());
+                }
+                // (a bending part's back after the front has its camera
+                // mesh: none of its own, so it is skinned on the CPU, the
+                // GPU's skinning writing the camera's front)
+                if !rigid
+                    && both_ways
+                    && let Some(front) = traced_skins.last()
+                {
+                    let back = TracedSkin {
+                        positions: front.positions.clone(),
+                        normals: front.normals.iter().map(|n| -*n).collect(),
+                        tangents: front.tangents.iter().map(|t| t.with_w(-t.w)).collect(),
+                        uvs: front.uvs.clone(),
+                        joints: front.joints.clone(),
+                        weights: front.weights.clone(),
+                        indices: front.indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect(),
+                        surface: front.surface.clone(),
+                        shader: front.shader,
+                        raster_mesh: None,
+                    };
+                    traced_skins.push(back);
                 }
                 skinned.push(SkinnedPart {
                     mesh,

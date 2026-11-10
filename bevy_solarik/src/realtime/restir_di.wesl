@@ -29,6 +29,7 @@ import bevy_solarik::scene::sampling::trace_light_transmission;
 import bevy_solarik::scene::sampling::balance_heuristic;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
 import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_SOURCE_KIND_DIRECTIONAL;
 import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
 import bevy_solarik::realtime::world_cache_query::find_world_cache_cell;
@@ -231,7 +232,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     // picked alike after. Each candidate is weighted by the balance heuristic
     // of the two, so a light the cell missed still comes by the tiles.
     var sun_share = 1.0;
-    if arrayLength(&directional_lights) > 0u {
+    if has_sun() {
         let sun_probability = light_sources[directional_lights[0].light_source_index].selection_probability;
         if sun_probability < 0.999 { sun_share = 1.0 - sun_probability; }
     }
@@ -334,7 +335,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     // brightest candidate yet lit nothing, and won most pixels (a fixed
     // share of the tiles' samples was the sun's); outdoors, it reaches
     // every pixel instead of half.
-    if arrayLength(&directional_lights) > 0u {
+    if has_sun() {
         let light_id = directional_lights[0].light_source_index;
         let candidate = LightSample(light_id << 16u, rand_u(rng));
         let resolved = resolve_light_sample(candidate, light_sources[light_id]);

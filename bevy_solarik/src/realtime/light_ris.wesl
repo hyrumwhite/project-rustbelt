@@ -11,6 +11,7 @@ import bevy_solarik::scene::sampling::LIGHT_SAMPLE_DIRECTIONAL;
 import bevy_solarik::scene::sampling::trace_light_transmission_with_support;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
 import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_SOURCE_KIND_DIRECTIONAL;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT;
@@ -76,7 +77,7 @@ fn sample_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgrou
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
     var sun_share = 1.0;
-    if arrayLength(&directional_lights) > 0u {
+    if has_sun() {
         let sun_probability = light_sources[directional_lights[0].light_source_index].selection_probability;
         if sun_probability < 0.999 { sun_share = 1.0 - sun_probability; }
     }

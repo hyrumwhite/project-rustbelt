@@ -31,6 +31,9 @@ pub struct TextureCache {
     volumes: HashMap<u32, Option<Handle<Image>>>,
     /// Bitmaps decoded for `footprint_mean`.
     decoded: HashMap<(u32, u16), Option<bitmap::Decoded>>,
+    /// Those bitmaps' texels as linear luminance, for an emitter's pieces
+    /// (see [`TextureCache::luminance`]).
+    luminance: HashMap<(u32, u16), Option<Arc<LuminanceGrid>>>,
     /// Bitmaps' mean linear colours (each texel's times its alpha, for an
     /// additive shader's light), by tag and image.
     means: HashMap<(u32, u16), Option<[f32; 3]>>,
@@ -40,6 +43,39 @@ pub struct TextureCache {
     /// Whether the GPU takes BC (DXT) textures as they are.
     pub bc_supported: bool,
     pub failures: usize,
+}
+
+/// A bitmap image's linear luminance per texel (see
+/// [`TextureCache::luminance`]).
+pub struct LuminanceGrid {
+    pub width: usize,
+    pub height: usize,
+    /// Row by row.
+    pub texels: Vec<f32>,
+    /// The brightest texel's.
+    pub peak: f32,
+}
+
+impl LuminanceGrid {
+    /// The luminance at a uv as the rays' light sampling reads the card:
+    /// filtered between its four nearest texels at the top mip, repeating
+    /// (the cards' sampler), so a bright texel shows in its neighbours'
+    /// halves too.
+    pub fn bilinear(&self, u: f32, v: f32) -> f32 {
+        if !u.is_finite() || !v.is_finite() {
+            return 0.0;
+        }
+        let (w, h) = (self.width as i64, self.height as i64);
+        let x = u.rem_euclid(1.0) * w as f32 - 0.5;
+        let y = v.rem_euclid(1.0) * h as f32 - 0.5;
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let at = |i: i64, j: i64| self.texels[(j.rem_euclid(h) * w + i.rem_euclid(w)) as usize];
+        let (i, j) = (x0 as i64, y0 as i64);
+        let top = at(i, j) * (1.0 - fx) + at(i + 1, j) * fx;
+        let bottom = at(i, j + 1) * (1.0 - fx) + at(i + 1, j + 1) * fx;
+        top * (1.0 - fy) + bottom * fy
+    }
 }
 
 /// A bake under way on a worker: the placeholder's handle and the task.
@@ -319,6 +355,32 @@ impl TextureCache {
             }
         });
         landed
+    }
+
+    /// A bitmap image's texels as linear luminance (gamma 2.2, as
+    /// [`TextureCache::footprint_mean`]), for measuring what a light card
+    /// shows under each piece of the emitter that carries it (see
+    /// `LevelBuilder::refined_emitter`). Shared, so the caller can measure
+    /// while it holds the level builder.
+    pub fn luminance(&mut self, cache: &CacheFile, datum: u32, permutation: u16) -> Option<Arc<LuminanceGrid>> {
+        if let Some(grid) = self.luminance.get(&(datum, permutation)) {
+            return grid.clone();
+        }
+        let image = self.decoded.entry((datum, permutation)).or_insert_with(|| rgba8(cache, datum, permutation).ok()).as_ref();
+        let size = |image: &&bitmap::Decoded| image.width as usize * image.height as usize;
+        let grid = image.filter(|image| size(image) > 0 && image.data.len() >= size(image) * 4).map(|image| {
+            let linear = |c: u8| (c as f32 / 255.0).powf(2.2);
+            let texels: Vec<f32> = image
+                .data
+                .chunks_exact(4)
+                .take(image.width as usize * image.height as usize)
+                .map(|t| 0.2126 * linear(t[0]) + 0.7152 * linear(t[1]) + 0.0722 * linear(t[2]))
+                .collect();
+            let peak = texels.iter().copied().fold(0.0f32, f32::max);
+            Arc::new(LuminanceGrid { width: image.width as usize, height: image.height as usize, texels, peak })
+        });
+        self.luminance.insert((datum, permutation), grid.clone());
+        grid
     }
 
     /// A bitmap's image for a shader permutation: image `permutation % count`,

@@ -15,6 +15,7 @@ import bevy_solarik::scene::sampling::resolve_light_sample;
 import bevy_solarik::scene::sampling::LightSample;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
 import bevy_pbr::render::utils::rand_u;
 import bevy_solarik::scene::sampling::trace_light_transmission_with_support;
 import bevy_solarik::scene::sampling::trace_shadow_transmission_impl;
@@ -95,7 +96,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
     // The sun by itself, one shadow-tested sample an update (the tiles hold
     // none, presample_light_tiles: indoors, behind the hull, the sun's
     // fixed share of them took half the candidates and lit nothing)
-    if arrayLength(&directional_lights) > 0u {
+    if has_sun() {
         let light_id = directional_lights[0].light_source_index;
         let resolved = resolve_light_sample(LightSample(light_id << 16u, rand_u(&rng)), light_sources[light_id]);
         let sun = calculate_resolved_light_contribution(resolved, geometry_data.world_position, geometry_data.world_normal);

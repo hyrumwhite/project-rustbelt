@@ -132,6 +132,21 @@ fn light_source_is_emissive_mesh(light_source: LightSource) -> bool {
     return (light_source.kind & 1u) == 0u;
 }
 
+// Whether the scene has a sun. The list's length alone won't say: an empty
+// list is uploaded as one zeroed element, whose index names light 0, an
+// emissive mesh, which the passes then took for the sun (a false pool of
+// light on c20's index hall pillar). (SOLARIK_SHADER_DEFS=PHANTOM_SUN: the
+// length alone, as before.)
+fn has_sun() -> bool {
+@if(PHANTOM_SUN) {
+    return arrayLength(&directional_lights) > 0u;
+}
+@if((!(PHANTOM_SUN))) {
+    return arrayLength(&directional_lights) > 0u
+        && light_sources[directional_lights[0].light_source_index].kind == LIGHT_SOURCE_KIND_DIRECTIONAL;
+}
+}
+
 // A point or spot light as a sphere light of the light's radius, in the
 // raster path's units (bevy_pbr's candela). Mirrors GpuLocalLight in
 // binder.rs.

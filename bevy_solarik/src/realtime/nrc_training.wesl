@@ -23,6 +23,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::sample_sky;
 import bevy_solarik::scene::raytracing_scene_bindings::emitted_radiance;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
@@ -278,7 +279,7 @@ fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
                     // The sun by itself (the tiles hold none), as sample_di:
                     // reached by NEE alone, weight 1 (a scatter ray that
                     // leaves the scene meets the sky texture, not the sun).
-                    if arrayLength(&directional_lights) > 0u {
+                    if has_sun() {
                         let light_id = directional_lights[0].light_source_index;
                         let resolved = resolve_light_sample(LightSample(light_id << 16u, rand_u(&rng)), light_sources[light_id]);
                         let sun = calculate_resolved_light_contribution(resolved, surface.world_position, surface.world_normal);

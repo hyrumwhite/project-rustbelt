@@ -22,3 +22,7 @@ b40_canyon_fast b40 2 277.89,-649.78,63.10,-80.3,22.2 20
 # and from the canyon spot, which looks at the wall, 100 m ends inside it;
 # a flight needs a path chosen in the open, the user's Banshee run.)
 c20_index    c20 0 -0.48,-0.38,-4.82,58.0,21.8    1
+# (the user's boiling series with every card patterned, 10 November: a50's
+# muster bay corridor and c20's first strip-lit hall)
+a50_muster   a50 1 15.24,1.73,-19.22,70.2,8.6     1
+c20_strips   c20 0 -14.87,14.37,-4.28,-25.5,-3.7  1

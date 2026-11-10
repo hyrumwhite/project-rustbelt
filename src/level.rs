@@ -5,7 +5,7 @@ use crate::{
     material::{
         HaloCombinerParams, HaloEnvironment, HaloEnvironmentMaterial, HaloEnvironmentParams, HaloTransparentMaterial,
     },
-    textures::TextureCache,
+    textures::{LuminanceGrid, TextureCache},
 };
 use bevy_solarik::prelude::RaytracingMesh3d;
 use bevy::{
@@ -366,11 +366,19 @@ const EMITTER_MAP_SHARE: f32 = 0.85;
 /// [`LevelBuilder::emitter_map`]), by shader tag: b40's direction markers,
 /// pentagonal plates whose card is a lit outline, lit the plate and the
 /// floor round it to white at their animation's peak (play feedback, 9
-/// November). Every card patterned (`HALO_RT_EMITTER_MAPS=1`) moved the
-/// harness: the shaft's noise and motion calmer (0.101 to 0.056, 0.081 to
-/// 0.061), its stills and the library's index hall's wandering more (0.010
-/// to 0.015; 0.002 to 0.010), so the rule stays with the listed shaders.
+/// November). Every card patterned (`HALO_RT_EMITTER_MAPS=1`) is the look
+/// liked in play, and in the harness still a little less steady than the
+/// whole surfaces and 0.1 to 0.26 ms dearer (10 November, refined, the
+/// invisible lights whole: c20's strip hall's stills 0.010 to 0.013, its
+/// index hall's noise 0.024 to 0.039, the shaft's stills 0.010 to 0.012),
+/// so the rule stays with the listed shaders.
 const EMITTER_MAPPED: [&str; 1] = [r"levels\b40\shaders\b40_light_yellow"];
+/// A light card whose brightest texel is under this (linear luminance)
+/// shows nothing: an invisible light (Bungie's `_inv_` shaders, c10's
+/// `1blue`), its card drawing nothing and its radiosity power lighting the
+/// room, which emits whole as its shader says (see
+/// [`LevelBuilder::emitter_map`]).
+const EMITTER_MAP_BLACK: f32 = 0.02;
 /// Glowing surfaces that light nothing (a shader path's start, or a word
 /// in its name): what a weapon or effect holds is its own (its lights are
 /// the game's), and the volumetric cones picture a fixture's light, which
@@ -451,6 +459,64 @@ fn emits_both_ways(shader: &str) -> bool {
     EMITTERS_BOTH_WAYS.iter().any(|n| shader.eq_ignore_ascii_case(n))
         && std::env::var("HALO_RT_EMITTERS_BOTH_WAYS").map_or(true, |v| v.trim() != "0")
 }
+/// Whether a light card's emitter is refined to the texels that emit (see
+/// [`refined_emitter`]). (Tuning: `HALO_RT_EMITTER_REFINE=0`, the BSP's own
+/// triangles as before.)
+fn emitter_refine() -> bool {
+    std::env::var("HALO_RT_EMITTER_REFINE").map_or(true, |v| v.trim() != "0")
+}
+
+/// Whether a light card's emitter, by its shader's tag name, is refined:
+/// all, unless `HALO_RT_EMITTER_REFINE_ONLY=<word>` (diagnostics) names a
+/// part of the names to refine (any case), the others as with
+/// `HALO_RT_EMITTER_REFINE=0`. Read once.
+fn emitter_refine_only(shader: &str) -> bool {
+    static ONLY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let only = ONLY.get_or_init(|| std::env::var("HALO_RT_EMITTER_REFINE_ONLY").ok().map(|v| v.trim().to_lowercase()).filter(|v| !v.is_empty()));
+    only.as_ref().is_none_or(|word| shader.to_lowercase().contains(word.as_str()))
+}
+
+/// [`EMITTER_DEEPEST`], or `HALO_RT_EMITTER_DEEPEST=<n>` (diagnostics: 0
+/// splits nothing, leaving the drop alone to look at). Read once.
+fn emitter_deepest() -> u32 {
+    static DEEPEST: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *DEEPEST.get_or_init(|| std::env::var("HALO_RT_EMITTER_DEEPEST").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(EMITTER_DEEPEST))
+}
+
+/// [`EMITTER_DROP_SHARE`], or `HALO_RT_EMITTER_DROP_SHARE=<share>`
+/// (diagnostics: 0 drops nothing). Read once.
+fn emitter_drop_share() -> f64 {
+    static SHARE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| std::env::var("HALO_RT_EMITTER_DROP_SHARE").ok().and_then(|v| v.trim().parse::<f32>().ok()).map_or(EMITTER_DROP_SHARE, f64::from))
+}
+
+/// A refined emitter's pieces per source triangle, aimed at (see
+/// [`refined_emitter`]): its light shared out in this many even parts...
+const EMITTER_PIECES_PER_TRIANGLE: usize = 16;
+/// ... but at least this many a light...
+const EMITTER_FEWEST_TARGET: usize = 32;
+/// ... and at most this many.
+const EMITTER_MOST_TARGET: usize = 1024;
+/// The most times a piece is split in four (a source triangle's finest
+/// pieces, a 1024th of it). (Diagnostics: `HALO_RT_EMITTER_DEEPEST=<n>`,
+/// see [`emitter_deepest`].)
+const EMITTER_DEEPEST: u32 = 5;
+/// The share of a refined emitter's light its dropped dark pieces may hold.
+/// (Diagnostics: `HALO_RT_EMITTER_DROP_SHARE=<share>`, see
+/// [`emitter_drop_share`].)
+const EMITTER_DROP_SHARE: f64 = 0.01;
+/// A piece is dark where nothing under it reaches this share of its card's
+/// brightest texel: one a lit line crosses is kept, whatever its mean.
+const EMITTER_DARK: f32 = 0.02;
+/// The most pieces one light keeps (its pieces coarsened until it fits;
+/// Solarik's limit is 65535).
+const EMITTER_MOST_PIECES: usize = 2048;
+/// The most pieces a level's refined emitters keep in all: a quarter of
+/// Solarik's emissive triangle table (`LIGHT_TRIANGLE_TABLE_CAPACITY`, 1 <<
+/// 18), the rest for the other emitters; past it, an emitter keeps its own
+/// triangles.
+const EMITTER_PIECES_BUDGET: usize = 1 << 16;
+
 /// Truth and Reconciliation's light, a soft pink of luminance one.
 const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
 
@@ -851,6 +917,7 @@ pub struct LevelBuilder {
 }
 
 /// One vertex in Halo's convention, as BSPs and models both provide.
+#[derive(Clone, Copy)]
 struct SourceVertex {
     position: [f32; 3],
     normal: [f32; 3],
@@ -912,6 +979,8 @@ impl LevelBuilder {
         // (the emitters patterned by their cards, weighed by what the cards
         // show over the level's meshes)
         self.weigh_emitter_maps(assets)?;
+        // (the pieces the level's refined emitters keep: see refined_emitter)
+        let mut refine_budget = EMITTER_PIECES_BUDGET;
         // (the box NRC's position encoding spans: the loaded BSPs' bounds)
         #[cfg(feature = "nrc")]
         let mut nrc_bounds: Option<(Vec3, Vec3)> = None;
@@ -983,22 +1052,64 @@ impl LevelBuilder {
                     Surface::Solid(solid) if solid.radiance.is_some() && !no_cluster_lights => self.emissive_chunks(reference.index, &material),
                     _ => Vec::new(),
                 };
+                // (a light card's emitter, which no ray meets, refined to
+                // the texels that emit: see refined_emitter)
+                let card = match &surface {
+                    Surface::Solid(solid)
+                        if solid.unseen
+                            && solid.radiance.is_some()
+                            && emitter_refine()
+                            && emitter_refine_only(&material.shader.datum.and_then(|d| self.cache.tag(d).ok()).map_or_else(String::new, |t| t.name.clone())) =>
+                    {
+                        solid.emitter_map.and_then(|datum| self.textures.luminance(&self.cache, datum, 0))
+                    }
+                    _ => None,
+                };
+                let sources: Vec<SourceVertex> = if card.is_some() {
+                    material
+                        .vertices
+                        .iter()
+                        .map(|v| SourceVertex { position: v.position, normal: v.normal, binormal: v.binormal, tangent: v.tangent, texcoord: v.texcoord })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let mut tally = RefineTally::default();
+                let mut refine = |indices: &[u32], sources: &[SourceVertex], tally: &mut RefineTally| -> Option<Mesh> {
+                    let card = card.as_deref()?;
+                    let (vertices, indices) = refined_emitter(sources, indices, card, shader.uv_scale, &mut refine_budget, tally)?;
+                    Some(build_mesh(vertices.into_iter(), &indices, shader.uv_scale))
+                };
                 if chunks.len() > 1 {
                     if raster {
                         self.spawn_mesh_as(commands, parent, name.clone(), mesh, &surface, MeshUse::Raster(None));
                     }
                     for (cluster, indices) in chunks {
-                        let vertices = material.vertices.iter().map(|v| SourceVertex {
-                            position: v.position,
-                            normal: v.normal,
-                            binormal: v.binormal,
-                            tangent: v.tangent,
-                            texcoord: v.texcoord,
-                        });
-                        let chunk = assets.meshes.add(build_mesh(vertices, &indices, shader.uv_scale));
+                        let chunk = match refine(&indices, &sources, &mut tally) {
+                            Some(refined) => assets.meshes.add(refined),
+                            None => {
+                                let vertices = material.vertices.iter().map(|v| SourceVertex {
+                                    position: v.position,
+                                    normal: v.normal,
+                                    binormal: v.binormal,
+                                    tangent: v.tangent,
+                                    texcoord: v.texcoord,
+                                });
+                                assets.meshes.add(build_mesh(vertices, &indices, shader.uv_scale))
+                            }
+                        };
                         if let Some(traced) = self.spawn_mesh_as(commands, parent, format!("{name} cluster {cluster}"), chunk, &surface, MeshUse::Traced) {
                             commands.entity(traced).insert(LightPlace { bsp: reference.index, cluster });
                         }
+                    }
+                } else if let Some(refined) = refine(&material.indices, &sources, &mut tally) {
+                    // (the camera's card whole, the rays' emitter refined)
+                    if raster {
+                        self.spawn_mesh_as(commands, parent, name.clone(), mesh, &surface, MeshUse::Raster(None));
+                    }
+                    let traced = self.spawn_mesh_as(commands, parent, name.clone(), assets.meshes.add(refined), &surface, MeshUse::Traced);
+                    if let (Some(traced), [(cluster, _)]) = (traced, chunks.as_slice()) {
+                        commands.entity(traced).insert(LightPlace { bsp: reference.index, cluster: *cluster });
                     }
                 } else {
                     let mode = if raster { MeshUse::Both } else { MeshUse::Traced };
@@ -1023,8 +1134,27 @@ impl LevelBuilder {
                         texcoord: v.texcoord,
                     });
                     let indices: Vec<_> = material.indices.chunks_exact(3).flat_map(|t| [t[0], t[2], t[1]]).collect();
-                    let mesh = assets.meshes.add(build_mesh(back, &indices, shader.uv_scale));
+                    let backs: Vec<SourceVertex> = sources.iter().map(|v| SourceVertex { normal: v.normal.map(|n| -n), ..*v }).collect();
+                    let mesh = match refine(&indices, &backs, &mut tally) {
+                        Some(refined) => assets.meshes.add(refined),
+                        None => assets.meshes.add(build_mesh(back, &indices, shader.uv_scale)),
+                    };
                     self.spawn_mesh(commands, parent, format!("{name} back"), mesh, &surface, false);
+                }
+                // (HALO_RT_GLOW_LOG: each refined emitter, in the log)
+                if card.is_some() && std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+                    let shader_name = material.shader.datum.and_then(|d| self.cache.tag(d).ok()).map_or_else(String::new, |t| t.name.clone());
+                    let share = if tally.energy > 0.0 { tally.dropped_energy / tally.energy * 100.0 } else { 0.0 };
+                    info!(
+                        "emitter refined {shader_name} ({name}): {} triangles to {} kept (aimed at {} in {} lights), {} dropped ({share:.3}% of its light); unrefined: {} no light, {} over the cap, {} budget spent, {} nothing to refine",
+                        tally.source, tally.kept, tally.target, tally.refined, tally.dropped, tally.no_light, tally.over_cap, tally.over_budget, tally.nothing
+                    );
+                    if let Some((peak, mean)) = tally.dark_card {
+                        info!("emitter refined {shader_name} ({name}): no light under its card, its peak {peak:.4}, its mean over the mesh {mean:.6}");
+                    }
+                    for note in &tally.notes {
+                        info!("emitter refined {shader_name} ({name}): {note}");
+                    }
                 }
             }
             // (and the light strips added to it: see ADDED_LIGHT_STRIPS)
@@ -1062,6 +1192,9 @@ impl LevelBuilder {
             self.loaded_bsps.push(reference.index);
             self.bsp_roots.push((reference.index, level));
             self.stats.bsps += 1;
+        }
+        if refine_budget < EMITTER_PIECES_BUDGET && std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+            info!("emitters refined: {} triangles of their budget of {EMITTER_PIECES_BUDGET}", EMITTER_PIECES_BUDGET - refine_budget);
         }
         // Plus a margin for the objects and the sky's water outside the
         // BSPs; a new level's bounds reset the cache.
@@ -1347,8 +1480,11 @@ impl LevelBuilder {
     /// triangle, lit the plate and the floor round it to white at their
     /// animation's peak (play feedback, 9 November: the light should fill
     /// the triangle). The emission in the bright texels is the shader's
-    /// own, so the light cast falls by the map's mean. (Tuning:
-    /// `HALO_RT_EMITTER_MAPS=0`, the whole surface as before.)
+    /// own, so the light cast falls by the map's mean. A black card
+    /// ([`EMITTER_MAP_BLACK`]) patterns nothing: patterned, every invisible
+    /// light went out (every card patterned, 10 November). (Tuning:
+    /// `HALO_RT_EMITTER_MAPS=0`, the whole surface as before;
+    /// `HALO_RT_EMITTER_MAPS_BLACK=1`, black cards patterned too.)
     fn emitter_map(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<(u32, Handle<Image>)> {
         use shader::BlendFunction;
         // (the listed shaders; HALO_RT_EMITTER_MAPS=1 every card, 0 none)
@@ -1369,6 +1505,17 @@ impl LevelBuilder {
             return None;
         }
         let datum = map.bitmap.datum?;
+        // (a black card, an invisible light: whole, unless asked; the
+        // image the handle below is made of, permutation % count)
+        if std::env::var("HALO_RT_EMITTER_MAPS_BLACK").map_or(true, |v| v.trim() != "1") {
+            let peak = self.textures.luminance(&self.cache, datum, self.permutation)?.peak;
+            if peak < EMITTER_MAP_BLACK {
+                if std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+                    info!("emitter map {}: its card is black (peak {peak:.4}), the whole surface emits", info.name);
+                }
+                return None;
+            }
+        }
         Some((datum, self.textures.permuted(&self.cache, datum, self.permutation, true, assets.images)?))
     }
 
@@ -1415,6 +1562,10 @@ impl LevelBuilder {
             // (a card showing almost nothing over its mesh is left as it is:
             // raising its light a hundredfold would be a mistake of ours)
             if mean < 0.02 {
+                if std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+                    let name = shader.and_then(|d| self.cache.tag(d).ok()).map_or_else(String::new, |t| t.name.clone());
+                    info!("emitter map {name}: mean {mean:.4} over its meshes, left as it is (nearly black there)");
+                }
                 continue;
             }
             let gain = (share / mean).min(1.0 / mean);
@@ -3636,6 +3787,253 @@ fn placement_transform(placement: &Placement) -> Transform {
     let to_bevy = Mat3::from_cols(Vec3::X, Vec3::NEG_Z, Vec3::Y);
     let rotation = Quat::from_mat3(&(to_bevy * halo_rotation * to_bevy.transpose()));
     Transform::from_translation(Vec3::from(placement.bevy_position())).with_rotation(rotation.normalize())
+}
+
+/// A material's refined emitters' counts, for the log (see
+/// [`refined_emitter`]).
+#[derive(Default)]
+struct RefineTally {
+    source: usize,
+    kept: usize,
+    dropped: usize,
+    /// The pieces aimed at by the lights refined, and how many they are.
+    target: usize,
+    refined: usize,
+    /// Each piece's area (world units squared) times its card's mean.
+    energy: f64,
+    dropped_energy: f64,
+    /// Lights that kept their own triangles, by why: their card shows
+    /// nothing over them (it emits nothing: the card's peak and the mean
+    /// measured, the last such), they kept over [`EMITTER_MOST_PIECES`]
+    /// unsplit, the level's budget was spent, or no piece was split or
+    /// dropped.
+    no_light: usize,
+    dark_card: Option<(f32, f64)>,
+    over_cap: usize,
+    over_budget: usize,
+    nothing: usize,
+    /// Under `HALO_RT_GLOW_LOG`: each light's dropped pieces (the first
+    /// few) and where the light is, for the log.
+    notes: Vec<String>,
+}
+
+/// A piece of a refined emitter: its corners, area, card mean and most,
+/// and how many times it was split.
+type EmitterPiece = ([SourceVertex; 3], f64, f32, f32, u32);
+
+/// A light card's emitter (a transparent shader's radiosity emitter, its
+/// emission patterned by its card: see [`LevelBuilder::emitter_map`]) as
+/// pieces of near equal light, for the rays alone (it is unseen: no ray
+/// meets it, the camera draws its card). Solarik's light sampling picks a
+/// light's triangle uniformly by index and a uniform point on it, so on a
+/// card lit in a thin strip or a glow's centre most candidates landed on
+/// dim texels, and the patterned cards boiled more than the whole surfaces
+/// had. Pieces of equal area with the dark ones dropped did nothing: the
+/// cards are soft glows, nearly nothing under them dark enough to drop
+/// (c20's strips kept 20061 of 20064 pieces), and equal pieces left the
+/// pick as blind as before. So the light is shared out instead: a light's
+/// energy (area times the card's mean) over a target count
+/// ([`EMITTER_PIECES_PER_TRIANGLE`] a source triangle, between
+/// [`EMITTER_FEWEST_TARGET`] and [`EMITTER_MOST_TARGET`]), and a piece
+/// holding more is split in four at its edges' midpoints, down to
+/// [`EMITTER_DEEPEST`] times or about a texel: the uniform pick then goes
+/// by power, the bright texels in many small pieces, the dim glow in a few
+/// large ones. (Measured, 10 November: c20's index hall's still wander
+/// 0.010 to 0.003 with every card patterned, its strip hall's 0.018 to
+/// 0.014 with the invisible lights patterned out as first played; b40's
+/// shaft the same; about 0.1 ms.) The card is measured under each piece as
+/// the rays sample it (filtered, repeating); the darkest pieces go while
+/// what they held stays within [`EMITTER_DROP_SHARE`] of the light and none
+/// has a texel brighter than [`EMITTER_DARK`] of the card's peak; what
+/// they held isn't made up.
+/// The share doubled while a light keeps over [`EMITTER_MOST_PIECES`];
+/// `None` (its own triangles) when it is still over unsplit, past the
+/// level's `budget`, or where nothing was split or dropped. The pieces'
+/// vertices, three each, and their indices, wound as the source's.
+fn refined_emitter(
+    sources: &[SourceVertex],
+    indices: &[u32],
+    card: &LuminanceGrid,
+    uv_scale: [f32; 2],
+    budget: &mut usize,
+    tally: &mut RefineTally,
+) -> Option<(Vec<SourceVertex>, Vec<u32>)> {
+    tally.source += indices.len() / 3;
+    let (w, h) = (card.width as f32, card.height as f32);
+    let texels = |v: &SourceVertex| Vec2::new(v.texcoord[0] * uv_scale[0] * w, v.texcoord[1] * uv_scale[1] * h);
+    let measure = |corners: [SourceVertex; 3], depth: u32| -> EmitterPiece {
+        let [p, q, r] = corners.map(|v| Vec3::from(v.position));
+        let area = (q - p).cross(r - p).length() as f64 / 2.0;
+        let (mean, most) = card_under(card, corners.map(|v| texels(&v)));
+        (corners, area, mean, most, depth)
+    };
+    let energy_of = |piece: &EmitterPiece| piece.1 * piece.2 as f64;
+    let roots: Vec<EmitterPiece> = indices
+        .chunks_exact(3)
+        .filter_map(|t| Some([*sources.get(t[0] as usize)?, *sources.get(t[1] as usize)?, *sources.get(t[2] as usize)?]))
+        .map(|corners| measure(corners, 0))
+        .collect();
+    let energy: f64 = roots.iter().map(energy_of).sum();
+    if !(energy > 0.0) {
+        tally.no_light += 1;
+        let area: f64 = roots.iter().map(|r| r.1).sum();
+        tally.dark_card = Some((card.peak, if area > 0.0 { energy / area } else { 0.0 }));
+        return None;
+    }
+    let target = (EMITTER_PIECES_PER_TRIANGLE * roots.len()).clamp(EMITTER_FEWEST_TARGET, EMITTER_MOST_TARGET);
+    let mut share = energy / target as f64;
+    let (deepest, drop_share) = (emitter_deepest(), emitter_drop_share());
+    loop {
+        // (split by need: a piece over the share in four, its corners'
+        // three and the middle one, each wound as the source)
+        let mut pieces: Vec<EmitterPiece> = Vec::new();
+        let mut work: Vec<EmitterPiece> = roots.clone();
+        let mut split = false;
+        while let Some(piece) = work.pop() {
+            let [a, b, c] = piece.0;
+            let longest = [(a, b), (b, c), (c, a)].iter().map(|(p, q)| texels(p).distance(texels(q))).fold(0.0f32, f32::max);
+            if energy_of(&piece) <= share || piece.4 >= deepest || !(longest > 1.0) {
+                pieces.push(piece);
+                continue;
+            }
+            split = true;
+            let half = |p: &SourceVertex, q: &SourceVertex| lerp_vertex(p, q, q, [0.5, 0.5, 0.0]);
+            let (ab, bc, ca) = (half(&a, &b), half(&b, &c), half(&c, &a));
+            for corners in [[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]] {
+                work.push(measure(corners, piece.4 + 1));
+            }
+        }
+        // (the darkest first, dropped while within the share)
+        let mut order: Vec<usize> = (0..pieces.len()).collect();
+        order.sort_by(|&x, &y| pieces[x].2.total_cmp(&pieces[y].2));
+        let mut drop = vec![false; pieces.len()];
+        let mut dropped_energy = 0.0f64;
+        for &i in &order {
+            let held = energy_of(&pieces[i]);
+            if pieces[i].3 <= EMITTER_DARK * card.peak && dropped_energy + held <= drop_share * energy {
+                drop[i] = true;
+                dropped_energy += held;
+            }
+        }
+        let kept = drop.iter().filter(|d| !**d).count();
+        if kept > EMITTER_MOST_PIECES {
+            // (coarser, unless nothing is split already)
+            if split {
+                share *= 2.0;
+                continue;
+            }
+            tally.over_cap += 1;
+            return None;
+        }
+        // (HALO_RT_GLOW_LOG: what was dropped, and where)
+        if kept < pieces.len() && std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+            let bounds = |corners: &[SourceVertex; 3]| {
+                let t = corners.map(|v| texels(&v));
+                t[0].max(t[1]).max(t[2]) - t[0].min(t[1]).min(t[2])
+            };
+            let centre = |corners: &[SourceVertex; 3]| corners.iter().map(|v| Vec3::from(v.position)).sum::<Vec3>() / 3.0;
+            let dropped: Vec<&EmitterPiece> = pieces.iter().zip(&drop).filter(|(_, d)| **d).map(|(p, _)| p).collect();
+            for piece in dropped.iter().take(6) {
+                let (extent, at) = (bounds(&piece.0), centre(&piece.0));
+                tally.notes.push(format!(
+                    "dropped a piece of depth {}, area {:.4}, {:.1} x {:.1} texels, mean {:.5}, most {:.5}, at {:.2}, {:.2}, {:.2}",
+                    piece.4, piece.1, extent.x, extent.y, piece.2, piece.3, at.x, at.y, at.z
+                ));
+            }
+            if dropped.len() > 6 {
+                tally.notes.push(format!("and {} more dropped", dropped.len() - 6));
+            }
+            let largest = roots.iter().map(|r| bounds(&r.0)).max_by(|a, b| a.max_element().total_cmp(&b.max_element())).unwrap_or_default();
+            let at = roots.iter().map(|r| centre(&r.0)).sum::<Vec3>() / roots.len().max(1) as f32;
+            tally.notes.push(format!(
+                "a light of {} triangles, {} pieces, {} dropped: its largest triangle {:.1} x {:.1} texels, its centre at {:.2}, {:.2}, {:.2} (card {} x {}, peak {:.4})",
+                roots.len(), pieces.len(), dropped.len(), largest.x, largest.y, at.x, at.y, at.z, card.width, card.height, card.peak
+            ));
+        }
+        if kept == 0 {
+            tally.no_light += 1;
+            return None;
+        }
+        if !split && kept == pieces.len() {
+            tally.nothing += 1;
+            return None;
+        }
+        if kept > *budget {
+            tally.over_budget += 1;
+            return None;
+        }
+        *budget -= kept;
+        tally.kept += kept;
+        tally.dropped += pieces.len() - kept;
+        tally.target += target;
+        tally.refined += 1;
+        tally.energy += energy;
+        tally.dropped_energy += dropped_energy;
+        let vertices: Vec<SourceVertex> = pieces.iter().zip(&drop).filter(|(_, d)| !**d).flat_map(|(p, _)| p.0).collect();
+        let indices = (0..vertices.len() as u32).collect();
+        return Some((vertices, indices));
+    }
+}
+
+/// A vertex between three by barycentric weights, its directions
+/// renormalized.
+fn lerp_vertex(a: &SourceVertex, b: &SourceVertex, c: &SourceVertex, weights: [f32; 3]) -> SourceVertex {
+    let mix = |f: fn(&SourceVertex) -> [f32; 3]| Vec3::from(f(a)) * weights[0] + Vec3::from(f(b)) * weights[1] + Vec3::from(f(c)) * weights[2];
+    let direction = |f: fn(&SourceVertex) -> [f32; 3]| {
+        let v = mix(f);
+        if v.length_squared() > 1e-12 { v.normalize().to_array() } else { f(a) }
+    };
+    let uv = Vec2::from(a.texcoord) * weights[0] + Vec2::from(b.texcoord) * weights[1] + Vec2::from(c.texcoord) * weights[2];
+    SourceVertex {
+        position: mix(|v| v.position).to_array(),
+        normal: direction(|v| v.normal),
+        binormal: direction(|v| v.binormal),
+        tangent: direction(|v| v.tangent),
+        texcoord: uv.to_array(),
+    }
+}
+
+/// A card's mean and most luminance under a triangle (its corners in
+/// texels): filtered lookups at its corners, edge midpoints and centre, and
+/// on a half-texel grid over its bounds inside it, so a lit line one texel
+/// wide falls on some (a broad triangle's grid coarser, at most 192 a side).
+fn card_under(card: &LuminanceGrid, corners: [Vec2; 3]) -> (f32, f32) {
+    let [p, q, r] = corners;
+    if !(p.is_finite() && q.is_finite() && r.is_finite()) {
+        return (0.0, 0.0);
+    }
+    let (w, h) = (card.width as f32, card.height as f32);
+    let (mut sum, mut count, mut most) = (0.0f32, 0usize, 0.0f32);
+    let mut sample = |x: Vec2| {
+        let l = card.bilinear(x.x / w, x.y / h);
+        sum += l;
+        count += 1;
+        most = most.max(l);
+    };
+    for x in [p, q, r, (p + q) / 2.0, (q + r) / 2.0, (r + p) / 2.0, (p + q + r) / 3.0] {
+        sample(x);
+    }
+    let (lo, hi) = (p.min(q).min(r), p.max(q).max(r));
+    let step = ((hi - lo).max_element() / 192.0).max(0.5);
+    // (inside by the edge functions, either winding, a little loose)
+    let doubled = (q - p).perp_dot(r - p);
+    if doubled.abs() > 1e-6 {
+        let slack = -1e-4 * doubled.abs();
+        let mut y = lo.y + step / 2.0;
+        while y < hi.y {
+            let mut x = lo.x + step / 2.0;
+            while x < hi.x {
+                let at = Vec2::new(x, y);
+                let e = [(q - p).perp_dot(at - p), (r - q).perp_dot(at - q), (p - r).perp_dot(at - r)];
+                if e.iter().all(|&e| e * doubled.signum() >= slack) {
+                    sample(at);
+                }
+                x += step;
+            }
+            y += step;
+        }
+    }
+    (sum / count.max(1) as f32, most)
 }
 
 /// Halo triangles as a Solari-compatible mesh: positions, normals, UV0 and

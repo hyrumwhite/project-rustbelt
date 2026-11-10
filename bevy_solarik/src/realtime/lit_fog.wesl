@@ -35,6 +35,7 @@ import bevy_solarik::scene::ray_fog::fog_decode;
 import bevy_solarik::scene::raytracing_scene_bindings::sky_light;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
 import bevy_solarik::scene::sampling::LightSample;
 import bevy_solarik::scene::sampling::ResolvedLightSample;
 import bevy_solarik::scene::sampling::resolve_light_sample;
@@ -148,7 +149,7 @@ fn scattered_light(pixel: vec2<u32>) -> vec3<f32> {
     if weight_sum > 0.0 {
         arriving += chosen_radiance * (weight_sum / chosen_target) * trace_light_visibility(point, chosen_position);
     }
-    if lit.y > 0.5 && arrayLength(&directional_lights) > 0u {
+    if lit.y > 0.5 && has_sun() {
         let light_id = directional_lights[0].light_source_index;
         let sun = resolve_light_sample(LightSample(light_id << 16u, rand_u(&rng)), light_sources[light_id]);
         let contribution = calculate_resolved_light_contribution(sun, point, forward);

@@ -66,6 +66,7 @@ import bevy_solarik::realtime::specular_gi::DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::thin_glass::offset_thin_glass_ray;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::realtime::realtime_bindings::world_cache_light_slots;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::realtime::world_cache_query::find_world_cache_cell;
@@ -570,7 +571,7 @@ fn nrc_query_at_spread(world_position: vec3<f32>, world_normal: vec3<f32>, sampl
             radiance += light.radiance * evaluate_brdf(wo, light.wi, normal, material);
         }
         // The sun by itself (the tiles hold none).
-        if arrayLength(&directional_lights) > 0u {
+        if has_sun() {
             let light_id = directional_lights[0].light_source_index;
             let resolved = resolve_light_sample(LightSample(light_id << 16u, rand_u(rng)), light_sources[light_id]);
             let sun = calculate_resolved_light_contribution(resolved, sample_point.world_position, normal);

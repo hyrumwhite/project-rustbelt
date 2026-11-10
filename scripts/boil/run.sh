@@ -21,7 +21,7 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 label=${1:?label}; shift
-exe="$repo/target/release/halo_rt.exe"
+exe="${EXE:-$repo/target/release/halo_rt.exe}"
 export HALO_MAPS="${HALO_MAPS:-C:\\Users\\hyrum\\Downloads\\halo-windows-release\\maps}"
 modes=${MODES:-still,series,motion}
 out="$here/out/$label"; mkdir -p "$out"

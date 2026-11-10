@@ -359,6 +359,18 @@ const SELF_ILLUMINATION_RADIANCE: f32 = 2.5;
 /// at self-illumination's own they lit nothing to see. (Tuning:
 /// `HALO_RT_GLOW_LIGHT=<share>`, 0 none.)
 const GLOW_LIGHT: f32 = 8.0;
+/// The share of a whole-surface emitter's light that one patterned by its
+/// card casts (see [`LevelBuilder::weigh_emitter_maps`]).
+const EMITTER_MAP_SHARE: f32 = 0.85;
+/// Transparent radiosity emitters patterned by their cards (see
+/// [`LevelBuilder::emitter_map`]), by shader tag: b40's direction markers,
+/// pentagonal plates whose card is a lit outline, lit the plate and the
+/// floor round it to white at their animation's peak (play feedback, 9
+/// November). Every card patterned (`HALO_RT_EMITTER_MAPS=1`) moved the
+/// harness: the shaft's noise and motion calmer (0.101 to 0.056, 0.081 to
+/// 0.061), its stills and the library's index hall's wandering more (0.010
+/// to 0.015; 0.002 to 0.010), so the rule stays with the listed shaders.
+const EMITTER_MAPPED: [&str; 1] = [r"levels\b40\shaders\b40_light_yellow"];
 /// Glowing surfaces that light nothing (a shader path's start, or a word
 /// in its name): what a weapon or effect holds is its own (its lights are
 /// the game's), and the volumetric cones picture a fixture's light, which
@@ -565,6 +577,10 @@ struct SolidSurface {
     /// the transparent surfaces (b30's control room hologram): its
     /// transparent material, drawn over the unseen emitter.
     seen_as: Option<Handle<HaloTransparentMaterial>>,
+    /// The light card's bitmap that patterns this emitter's emission (see
+    /// [`LevelBuilder::emitter_map`]), for the level to weigh its light by
+    /// what the card shows over the meshes that carry it.
+    emitter_map: Option<u32>,
 }
 
 /// A shader's material and the texture coordinate scale it applies.
@@ -893,6 +909,9 @@ impl LevelBuilder {
     ) -> halo_map::Result<()> {
         // (HALO_RT_NO_CLUSTER_LIGHTS=1 for A/B: each emissive material one light)
         let no_cluster_lights = std::env::var_os("HALO_RT_NO_CLUSTER_LIGHTS").is_some();
+        // (the emitters patterned by their cards, weighed by what the cards
+        // show over the level's meshes)
+        self.weigh_emitter_maps(assets)?;
         // (the box NRC's position encoding spans: the loaded BSPs' bounds)
         #[cfg(feature = "nrc")]
         let mut nrc_bounds: Option<(Vec3, Vec3)> = None;
@@ -1036,6 +1055,7 @@ impl LevelBuilder {
                     seen_standard: None,
                     unseen: false,
                     seen_as: None,
+                    emitter_map: None,
                 });
                 self.spawn_mesh(commands, level, format!("{} added light strip", reference.name), mesh, &surface, raster);
             }
@@ -1313,6 +1333,98 @@ impl LevelBuilder {
                     ChildOf(dome),
                 ));
                 layer += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// A transparent radiosity emitter's light card, for its emission's
+    /// pattern: the first stage map of an added card, where the map is not
+    /// scaled or moved (one set of texture coordinates). Halo's radiosity
+    /// took the shader's emitted light over the whole surface; here the
+    /// card's own picture emits, and the surface round its shape goes dark:
+    /// b40's direction markers, pentagonal plates whose card is a lit
+    /// triangle, lit the plate and the floor round it to white at their
+    /// animation's peak (play feedback, 9 November: the light should fill
+    /// the triangle). The emission in the bright texels is the shader's
+    /// own, so the light cast falls by the map's mean. (Tuning:
+    /// `HALO_RT_EMITTER_MAPS=0`, the whole surface as before.)
+    fn emitter_map(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<(u32, Handle<Image>)> {
+        use shader::BlendFunction;
+        // (the listed shaders; HALO_RT_EMITTER_MAPS=1 every card, 0 none)
+        let listed = EMITTER_MAPPED.iter().any(|name| info.name.eq_ignore_ascii_case(name));
+        match std::env::var("HALO_RT_EMITTER_MAPS").ok().as_deref().map(str::trim) {
+            Some("0") => return None,
+            Some("1") => {}
+            _ if !listed => return None,
+            _ => {}
+        }
+        let transparent = info.transparent.as_ref()?;
+        if transparent.first_map_type != 0 || !matches!(transparent.blend, BlendFunction::Add | BlendFunction::AlphaMultiplyAdd) {
+            return None;
+        }
+        let map = transparent.maps.first()?.as_ref()?;
+        let still = |channel: &shader::AnimationChannel| channel.function == 0 || channel.scale == 0.0;
+        if map.uv_scale != [1.0, 1.0] || map.uv_offset != [0.0, 0.0] || map.rotation != 0.0 || !still(&map.animation.u) || !still(&map.animation.v) {
+            return None;
+        }
+        let datum = map.bitmap.datum?;
+        Some((datum, self.textures.permuted(&self.cache, datum, self.permutation, true, assets.images)?))
+    }
+
+    /// Weighs the light of the emitters patterned by their cards (see
+    /// [`LevelBuilder::emitter_map`]) by what the cards show over the BSPs'
+    /// meshes that carry them: the card emits in its bright texels at the
+    /// shader's own radiance, so the light cast falls by the card's mean
+    /// over the mesh (a lit triangle on a dark plate, a third); raised
+    /// again so that the light cast is `EMITTER_MAP_SHARE` of the whole
+    /// surface's (play feedback, 9 November: the marker's light to fill its
+    /// triangle, or failing that 15% less of it). Once per level, before
+    /// the meshes are spawned: the surfaces are shared by shader. (Every
+    /// card patterned, `HALO_RT_EMITTER_MAPS=1`: b40's corridor strips were
+    /// 8 to 30% lit over their meshes, gains 3 to 10.)
+    fn weigh_emitter_maps(&mut self, assets: &mut LevelAssets) -> halo_map::Result<()> {
+        let share: f32 = std::env::var("HALO_RT_EMITTER_MAP_SHARE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(EMITTER_MAP_SHARE);
+        let cache = self.cache.clone();
+        let mut sums: HashMap<Option<u32>, (f64, usize)> = HashMap::default();
+        for reference in bsp::references(&cache)? {
+            let loaded = bsp::Bsp::load(&cache, &reference)?;
+            for material in loaded.materials()? {
+                if material.indices.is_empty() {
+                    continue;
+                }
+                let Some(Surface::Solid(SolidSurface { emitter_map: Some(datum), .. })) = self.surface(material.shader, 0, assets).surface else {
+                    continue;
+                };
+                // (each triangle's corners, edge midpoints and centre)
+                let uvs = material.indices.chunks_exact(3).flat_map(|tri| {
+                    let [a, b, c] = [0, 1, 2].map(|i| material.vertices[tri[i] as usize].texcoord);
+                    let mid = |p: [f32; 2], q: [f32; 2]| [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+                    [a, b, c, mid(a, b), mid(b, c), mid(c, a), [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0]]
+                });
+                let count = material.indices.len() / 3 * 7;
+                if let Some(mean) = self.textures.footprint_mean(&cache, datum, 0, uvs) {
+                    let entry = sums.entry(material.shader.datum).or_default();
+                    entry.0 += mean as f64 * count as f64;
+                    entry.1 += count;
+                }
+            }
+        }
+        for (shader, (sum, count)) in sums {
+            let mean = (sum / count.max(1) as f64) as f32;
+            // (a card showing almost nothing over its mesh is left as it is:
+            // raising its light a hundredfold would be a mistake of ours)
+            if mean < 0.02 {
+                continue;
+            }
+            let gain = (share / mean).min(1.0 / mean);
+            if let Some(ShaderSurface { surface: Some(Surface::Solid(solid)), .. }) = self.surfaces.get_mut(&(shader, 0)) {
+                if let Some(radiance) = solid.radiance.as_mut() {
+                    *radiance *= gain;
+                }
+                if std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+                    info!("emitter map {shader:?}: mean {mean:.3} over its meshes, light gain {gain:.2}");
+                }
             }
         }
         Ok(())
@@ -2369,7 +2481,7 @@ impl LevelBuilder {
                 perceptual_roughness: 0.9,
                 ..default()
             });
-            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, light_gain: 1.0, seen_standard: None, unseen: false, seen_as: None }));
+            return Some(Surface::Solid(SolidSurface { standard, raster: None, radiance: None, light_gain: 1.0, seen_standard: None, unseen: false, seen_as: None, emitter_map: None }));
         };
         let base_color_texture = info
             .base_map
@@ -2392,6 +2504,9 @@ impl LevelBuilder {
             }
             return self.transparent_material(info, 0.0, false, assets).map(Surface::Transparent);
         }
+        // (a transparent radiosity emitter's light in its card's own pattern:
+        // see emitter_map)
+        let emitter_map = if emits && glow.is_none() && info.shader_type.is_transparent() { self.emitter_map(info, assets) } else { None };
         let self_illumination = info.self_illumination.and_then(|si| match si {
             shader::SelfIllumination::Model { multipurpose_map, color_upper, .. } => {
                 let bake = crate::textures::Bake::ModelSelfIllumination {
@@ -2427,6 +2542,7 @@ impl LevelBuilder {
             emissive_texture: match &self_illumination {
                 Some((texture, _)) => Some(texture.clone()),
                 None if emits && info.shader_type == ShaderType::Environment => base_color_texture.clone(),
+                None if emitter_map.is_some() => emitter_map.as_ref().map(|(_, image)| image.clone()),
                 None => None,
             },
             ..default()
@@ -2561,7 +2677,7 @@ impl LevelBuilder {
         if plain_coat(&info.name) && let Some(plain) = assets.plain_coats.as_deref_mut() {
             plain.0.insert(standard.id());
         }
-        Some(Surface::Solid(SolidSurface { standard, raster, radiance, light_gain, seen_standard, unseen, seen_as }))
+        Some(Surface::Solid(SolidSurface { standard, raster, radiance, light_gain, seen_standard, unseen, seen_as, emitter_map: emitter_map.map(|(datum, _)| datum) }))
     }
 
     /// A `shader_model`'s camera material with its detail map (see

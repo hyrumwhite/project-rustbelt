@@ -29,6 +29,8 @@ pub struct TextureCache {
     counts: HashMap<u32, usize>,
     /// 3D bitmaps (plasma's noise), by tag.
     volumes: HashMap<u32, Option<Handle<Image>>>,
+    /// Bitmaps decoded for `footprint_mean`.
+    decoded: HashMap<(u32, u16), Option<bitmap::Decoded>>,
     /// Bitmaps' mean linear colours (each texel's times its alpha, for an
     /// additive shader's light), by tag and image.
     means: HashMap<(u32, u16), Option<[f32; 3]>>,
@@ -232,6 +234,31 @@ impl TextureCache {
             }
             (count > 0).then(|| sum.map(|s| (s / count as f64) as f32))
         })
+    }
+
+    /// The mean linear luminance of a bitmap's texels at these uvs (tiling),
+    /// for an emitter's light card over the mesh that carries it (see
+    /// `LevelBuilder::emitter_map`): the share of the card's light the mesh
+    /// shows. The decoded image is kept for the level's other meshes.
+    pub fn footprint_mean(&mut self, cache: &CacheFile, datum: u32, permutation: u16, uvs: impl Iterator<Item = [f32; 2]>) -> Option<f32> {
+        let image = self.decoded.entry((datum, permutation)).or_insert_with(|| rgba8(cache, datum, permutation).ok()).as_ref()?;
+        let (w, h) = (image.width as usize, image.height as usize);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let (mut sum, mut count) = (0.0f64, 0usize);
+        for [u, v] in uvs {
+            if !u.is_finite() || !v.is_finite() {
+                continue;
+            }
+            let x = ((u.rem_euclid(1.0) * w as f32) as usize).min(w - 1);
+            let y = ((v.rem_euclid(1.0) * h as f32) as usize).min(h - 1);
+            let texel = &image.data[(y * w + x) * 4..(y * w + x) * 4 + 3];
+            let linear = |c: u8| (c as f64 / 255.0).powf(2.2);
+            sum += 0.2126 * linear(texel[0]) + 0.7152 * linear(texel[1]) + 0.0722 * linear(texel[2]);
+            count += 1;
+        }
+        (count > 0).then(|| (sum / count as f64) as f32)
     }
 
     /// A bake from its bitmaps' images for a shader permutation (see

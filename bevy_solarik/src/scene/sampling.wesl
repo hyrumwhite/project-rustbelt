@@ -17,6 +17,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
+import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_SOURCE_FLAG_UNSEEN;
 import bevy_solarik::scene::raytracing_scene_bindings::local_lights;
 import bevy_solarik::scene::raytracing_scene_bindings::LightSource;
 import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_SOURCE_KIND_DIRECTIONAL;
@@ -291,13 +292,19 @@ fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) ->
         if (raw_material.flags & (MATERIAL_FLAG_DIFFUSE_BLEND | MATERIAL_FLAG_ALPHA_BLEND)) != 0u {
             emission *= clamp(resolve_material_alpha(raw_material, triangle_data.uv), 0.0, 1.0);
         }
+        // (spot_cos.y, unused by an emissive mesh: 1 for a light-only one,
+        // with UNSEEN_LIGHT_NEE; see calculate_resolved_light_contribution)
+        var unseen = 0.0;
+@if(UNSEEN_LIGHT_NEE) {
+        unseen = select(0.0, 1.0, (light_source.flags & LIGHT_SOURCE_FLAG_UNSEEN) != 0u);
+}
         return ResolvedLightSample(
             vec4(triangle_data.world_position, LIGHT_SAMPLE_EMISSIVE_MESH),
             triangle_data.normal,
             emission,
             f32(triangle_count) * triangle_data.area,
             raw_material.emission_cone.xyz,
-            vec2(raw_material.emission_cone.w, 0.0),
+            vec2(raw_material.emission_cone.w, unseen),
             select(0.0, -2.0, raw_material.emission_cone.w > 0.0),
         );
     }
@@ -323,7 +330,14 @@ fn calculate_resolved_light_contribution(resolved_light_sample: ResolvedLightSam
 
     // Only emissive meshes are geometry a BRDF ray can hit; the others are
     // reached by next-event estimation alone, so their MIS weight is 1.
-    let brdf_rays_can_hit = resolved_light_sample.world_position.w == LIGHT_SAMPLE_EMISSIVE_MESH;
+    var brdf_rays_can_hit = resolved_light_sample.world_position.w == LIGHT_SAMPLE_EMISSIVE_MESH;
+    // (SOLARIK_SHADER_DEFS=UNSEEN_LIGHT_NEE: a light-only emitter too, which
+    // no ray meets, marked in its sample's spot_cos.y by resolve_light_sample;
+    // its NEE weight was cut for a BRDF hit that never comes, its light lost
+    // round every invisible card)
+@if(UNSEEN_LIGHT_NEE) {
+    brdf_rays_can_hit = brdf_rays_can_hit && resolved_light_sample.spot_cos.y < 0.5;
+}
     var solid_angle_pdf = 0.0;
     if brdf_rays_can_hit && resolved_light_sample.inverse_pdf > 0.0 {
         solid_angle_pdf = area_to_solid_angle_pdf(1.0 / resolved_light_sample.inverse_pdf,

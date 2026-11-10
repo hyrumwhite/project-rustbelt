@@ -1138,6 +1138,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                     slot.index,
                     geometry.triangle_count,
                     triangle_offset,
+                    input.mask == 0,
                 ));
 
             this_frame_entity_to_light_id.insert(entity, light_sources.get().len() as u32 - 1);
@@ -1837,10 +1838,17 @@ struct GpuLightSource {
     /// triangles, `NO_LIGHT_TRIANGLES` when it has none (other kinds leave
     /// it).
     triangle_offset: u32,
+    /// `LIGHT_SOURCE_FLAG_*` (raytracing_scene_bindings.wesl): bit 0, a
+    /// light-only instance ([`super::RaytracingMask::LIGHT_ONLY`]), which no
+    /// ray meets.
+    flags: u32,
 }
 
+/// [`GpuLightSource::flags`]: no ray meets it.
+const LIGHT_SOURCE_FLAG_UNSEEN: u32 = 1;
+
 impl GpuLightSource {
-    fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32, triangle_offset: u32) -> GpuLightSource {
+    fn new_emissive_mesh_light(instance_id: u32, triangle_count: u32, triangle_offset: u32, light_only: bool) -> GpuLightSource {
         if triangle_count > u16::MAX as u32 {
             panic!("Too many triangles ({triangle_count}) in an emissive mesh, maximum is 65535.");
         }
@@ -1849,6 +1857,7 @@ impl GpuLightSource {
             kind: triangle_count << 1,
             id: instance_id,
             triangle_offset,
+            flags: if light_only { LIGHT_SOURCE_FLAG_UNSEEN } else { 0 },
             ..Default::default()
         }
     }
@@ -2312,7 +2321,7 @@ mod tests {
         // Emissive meshes: triangle count in the upper bits, low bit clear;
         // the fork relies on this staying as upstream left it. Every other
         // light sets the low bit and picks its kind above it.
-        assert_eq!(GpuLightSource::new_emissive_mesh_light(7, 12, 0).kind, 24);
+        assert_eq!(GpuLightSource::new_emissive_mesh_light(7, 12, 0, false).kind, 24);
         assert_eq!(GpuLightSource::new_directional_light(0).kind, 1);
         assert_eq!(GpuLightSource::new_point_light(3).kind, 3);
         assert_eq!(GpuLightSource::new_point_light(3).id, 3);

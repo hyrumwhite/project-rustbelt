@@ -580,9 +580,22 @@ fn emissive_mis_weight(i: u32, initial_roughness: f32, p_bounce: f32, ray_hit: R
         // The first bounce gets MIS weight 0.0 or 1.0 depending on if ReSTIR DI shaded using the specular lobe or not
         if initial_roughness <= SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD {
             return 1.0;
-        } else {
-            return 0.0;
         }
+        // Above it, shared with ReSTIR DI by the power heuristic, as the
+        // later bounces are, DI taking the rest (restir_di's
+        // glossy_light_weight). (SOLARIK_SHADER_DEFS=DI_GLOSSY_UNSHARED: 0,
+        // DI's whole, as before; DI_GLOSSY_RAY_ONLY, a diagnostic: 1 for a
+        // light DI could have picked, whose share DI then leaves.)
+@if(DI_GLOSSY_UNSHARED) {
+        return 0.0;
+}
+@if((!(DI_GLOSSY_UNSHARED))) {
+        let p_light = random_emissive_light_solid_angle_pdf(ray_hit, previous_position);
+@if(DI_GLOSSY_RAY_ONLY) {
+        if p_light > 0.0 { return 1.0; }
+}
+        return power_heuristic(p_bounce, p_light);
+}
     }
 }
 

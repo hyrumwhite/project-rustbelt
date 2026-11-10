@@ -121,12 +121,18 @@ struct LightSource {
     // triangles (realtime/light_triangles.wesl), NO_LIGHT_TRIANGLES when it
     // has none; other kinds leave it.
     triangle_offset: u32,
+    // LIGHT_SOURCE_FLAG_*.
+    flags: u32,
 }
 
 const LIGHT_SOURCE_KIND_EMISSIVE_MESH = 0u;
 const LIGHT_SOURCE_KIND_DIRECTIONAL = 1u;
 const LIGHT_SOURCE_KIND_POINT = 3u;
 const LIGHT_SOURCE_KIND_SPOT = 5u;
+
+// A light source no ray can meet: a light-only instance (an emitter the rays
+// never see, its instance mask 0), sampled as a light alone.
+const LIGHT_SOURCE_FLAG_UNSEEN = 1u;
 
 fn light_source_is_emissive_mesh(light_source: LightSource) -> bool {
     return (light_source.kind & 1u) == 0u;

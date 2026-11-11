@@ -366,12 +366,13 @@ const EMITTER_MAP_SHARE: f32 = 0.85;
 /// [`LevelBuilder::emitter_map`]), by shader tag: b40's direction markers,
 /// pentagonal plates whose card is a lit outline, lit the plate and the
 /// floor round it to white at their animation's peak (play feedback, 9
-/// November). Every card patterned (`HALO_RT_EMITTER_MAPS=1`) is the look
-/// liked in play, and in the harness still a little less steady than the
-/// whole surfaces and 0.1 to 0.26 ms dearer (10 November, refined, the
-/// invisible lights whole: c20's strip hall's stills 0.010 to 0.013, its
-/// index hall's noise 0.024 to 0.039, the shaft's stills 0.010 to 0.012),
-/// so the rule stays with the listed shaders.
+/// November). Every card is patterned by default since 11 November 2026,
+/// the look liked in play (the user's choice), though in the harness a
+/// little less steady than the whole surfaces and 0.1 to 0.26 ms dearer
+/// (10 November, refined, the invisible lights whole: c20's strip hall's
+/// stills 0.010 to 0.013, its index hall's noise 0.024 to 0.039, the
+/// shaft's stills 0.010 to 0.012). This list is what
+/// `HALO_RT_EMITTER_MAPS=listed` patterns, the default until then.
 const EMITTER_MAPPED: [&str; 1] = [r"levels\b40\shaders\b40_light_yellow"];
 /// A light card whose brightest texel is under this (linear luminance)
 /// shows nothing: an invisible light (Bungie's `_inv_` shaders, c10's
@@ -1483,17 +1484,18 @@ impl LevelBuilder {
     /// the triangle). The emission in the bright texels is the shader's
     /// own, so the light cast falls by the map's mean. A black card
     /// ([`EMITTER_MAP_BLACK`]) patterns nothing: patterned, every invisible
-    /// light went out (every card patterned, 10 November). (Tuning:
-    /// `HALO_RT_EMITTER_MAPS=0`, the whole surface as before;
-    /// `HALO_RT_EMITTER_MAPS_BLACK=1`, black cards patterned too.)
+    /// light went out (every card patterned, 10 November). Every card by
+    /// default. (Tuning: `HALO_RT_EMITTER_MAPS=0`, the whole surface as
+    /// before; `=listed`, the shaders of [`EMITTER_MAPPED`] alone; `=1`, every
+    /// card, as the default; `HALO_RT_EMITTER_MAPS_BLACK=1`, black cards
+    /// patterned too.)
     fn emitter_map(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<(u32, Handle<Image>)> {
         use shader::BlendFunction;
-        // (the listed shaders; HALO_RT_EMITTER_MAPS=1 every card, 0 none)
-        let listed = EMITTER_MAPPED.iter().any(|name| info.name.eq_ignore_ascii_case(name));
+        // (every card; HALO_RT_EMITTER_MAPS=0 none, =listed the listed
+        // shaders alone)
         match std::env::var("HALO_RT_EMITTER_MAPS").ok().as_deref().map(str::trim) {
             Some("0") => return None,
-            Some("1") => {}
-            _ if !listed => return None,
+            Some("listed") if !EMITTER_MAPPED.iter().any(|name| info.name.eq_ignore_ascii_case(name)) => return None,
             _ => {}
         }
         let transparent = info.transparent.as_ref()?;
@@ -1529,8 +1531,8 @@ impl LevelBuilder {
     /// surface's (play feedback, 9 November: the marker's light to fill its
     /// triangle, or failing that 15% less of it). Once per level, before
     /// the meshes are spawned: the surfaces are shared by shader. (Every
-    /// card patterned, `HALO_RT_EMITTER_MAPS=1`: b40's corridor strips were
-    /// 8 to 30% lit over their meshes, gains 3 to 10.)
+    /// card patterned, the default: b40's corridor strips were 8 to 30% lit
+    /// over their meshes, gains 3 to 10.)
     fn weigh_emitter_maps(&mut self, assets: &mut LevelAssets) -> halo_map::Result<()> {
         let share: f32 = std::env::var("HALO_RT_EMITTER_MAP_SHARE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(EMITTER_MAP_SHARE);
         let cache = self.cache.clone();

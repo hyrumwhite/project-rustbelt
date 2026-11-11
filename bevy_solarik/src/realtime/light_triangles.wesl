@@ -15,6 +15,7 @@
 // offset NO_LIGHT_TRIANGLES) resolves from its vertices as before.
 
 import bevy_solarik::scene::raytracing_scene_bindings::LightSource;
+import bevy_solarik::scene::raytracing_scene_bindings::Material;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::materials;
 import bevy_solarik::scene::raytracing_scene_bindings::material_ids;
@@ -47,25 +48,42 @@ struct LightTriangle {
     emissive: vec3<f32>,
 }
 
-fn resolve_light_triangle(light_source: LightSource, triangle_id: u32, barycentrics: vec3<f32>) -> LightTriangle {
-    var positions: array<vec3<f32>, 3>;
-    var uvs: array<vec2<f32>, 3>;
-    var material_id: u32;
+// A triangle as its record holds it: its corners and uvs in world space and
+// its material. One read serves a point's evaluation (light_triangle_at) and
+// a receiver's test of the triangle (sampling.wesl, near_triangle_warp).
+struct LightTriangleVertices {
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    p2: vec3<f32>,
+    uv0: vec2<f32>,
+    uv1: vec2<f32>,
+    uv2: vec2<f32>,
+    material_id: u32,
+}
+
+fn load_light_triangle(light_source: LightSource, triangle_id: u32) -> LightTriangleVertices {
     if light_source.triangle_offset != NO_LIGHT_TRIANGLES {
         let record = light_triangles[light_source.triangle_offset + triangle_id];
-        positions = array<vec3<f32>, 3>(record.a.xyz, record.b.xyz, record.c.xyz);
-        uvs = array<vec2<f32>, 3>(vec2(record.a.w, record.b.w), vec2(record.c.w, record.d.x), record.d.yz);
-        material_id = bitcast<u32>(record.d.w);
-    } else {
-        material_id = material_ids[light_source.id];
-        let vertices = load_vertices(geometry_ids[light_source.id], triangle_id);
-        positions = transform_positions(transforms[light_source.id], vertices);
-        uvs = array<vec2<f32>, 3>(vertices[0].uv, vertices[1].uv, vertices[2].uv);
+        return LightTriangleVertices(record.a.xyz, record.b.xyz, record.c.xyz,
+            vec2(record.a.w, record.b.w), vec2(record.c.w, record.d.x), record.d.yz, bitcast<u32>(record.d.w));
     }
-    let material = materials[material_id];
-    let world_position = mat3x3(positions[0], positions[1], positions[2]) * barycentrics;
-    let uv = mat3x2(uvs[0], uvs[1], uvs[2]) * barycentrics;
-    let face = cross(positions[0] - positions[1], positions[0] - positions[2]);
+    let vertices = load_vertices(geometry_ids[light_source.id], triangle_id);
+    let positions = transform_positions(transforms[light_source.id], vertices);
+    return LightTriangleVertices(positions[0], positions[1], positions[2],
+        vertices[0].uv, vertices[1].uv, vertices[2].uv, material_ids[light_source.id]);
+}
+
+fn resolve_light_triangle(light_source: LightSource, triangle_id: u32, barycentrics: vec3<f32>) -> LightTriangle {
+    let triangle = load_light_triangle(light_source, triangle_id);
+    return light_triangle_at(triangle, materials[triangle.material_id], barycentrics);
+}
+
+// A point of a loaded triangle, its material (`materials[triangle.material_id]`)
+// read by the caller, which needs it too (sampling.wesl's emissive resolve).
+fn light_triangle_at(triangle: LightTriangleVertices, material: Material, barycentrics: vec3<f32>) -> LightTriangle {
+    let world_position = mat3x3(triangle.p0, triangle.p1, triangle.p2) * barycentrics;
+    let uv = mat3x2(triangle.uv0, triangle.uv1, triangle.uv2) * barycentrics;
+    let face = cross(triangle.p0 - triangle.p1, triangle.p0 - triangle.p2);
     var emissive = material.emissive.rgb;
     if material.emissive_texture_id != TEXTURE_MAP_NONE {
         emissive *= sample_texture_filtered(material.emissive_texture_id, uv, vec2f(0.0));

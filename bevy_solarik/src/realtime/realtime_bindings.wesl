@@ -88,7 +88,9 @@ struct ResolvedLightSamplePacked {
     radiance: u32,
     inverse_pdf: f32,
     // Point/spot lights: octahedral cone axis, cos(outer)/cos(inner) as two
-    // f16, and the range (negative for every other kind of light).
+    // f16, and the range (negative for every other kind of light: an
+    // emissive mesh's farthest corner distance negated,
+    // presample_light_tiles.wesl).
     spot_direction: u32,
     spot_cos: u32,
     range: f32,

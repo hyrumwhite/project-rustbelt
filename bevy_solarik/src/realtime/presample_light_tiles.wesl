@@ -65,9 +65,14 @@ fn seed_hash(input: u32) -> u32 {
 
 // The kind rides in two signs: a negative inverse_pdf is a directional light
 // (upstream), a positive range is a point/spot light (whose range is always
-// positive; emissive meshes store -1).
+// positive). An emissive mesh stores the distance from its point to the
+// triangle's farthest corner negated in the range, and its near distance (signed: the unseen mark) in spot_cos.y as an
+// f16 rounded away from 0, so that sampling.wesl's near pre-test stays on
+// the safe side; a directional light -1. An emissive mesh's emission cone is
+// its spot_cos.x above 0.
 fn pack_resolved_light_sample(sample: ResolvedLightSample) -> ResolvedLightSamplePacked {
     let local = sample.world_position.w == LIGHT_SAMPLE_LOCAL;
+    let emissive = sample.world_position.w == LIGHT_SAMPLE_EMISSIVE_MESH;
     return ResolvedLightSamplePacked(
         sample.world_position.x,
         sample.world_position.y,
@@ -75,9 +80,9 @@ fn pack_resolved_light_sample(sample: ResolvedLightSample) -> ResolvedLightSampl
         pack2x16unorm(octahedral_encode(sample.world_normal)),
         vec3_to_rgb9e5_(log2(sample.radiance * view.exposure + 1.0)),
         sample.inverse_pdf * select(1.0, -1.0, sample.world_position.w == LIGHT_SAMPLE_DIRECTIONAL),
-        pack2x16unorm(octahedral_encode(select(vec3(0.0, 0.0, 1.0), sample.spot_direction, local || sample.range == -2.0))),
-        pack2x16float(sample.spot_cos),
-        select(select(-1.0, -2.0, sample.range == -2.0), max(sample.range, 1e-4), local),
+        pack2x16unorm(octahedral_encode(select(vec3(0.0, 0.0, 1.0), sample.spot_direction, local || (emissive && sample.spot_cos.x > 0.0)))),
+        pack2x16float(select(sample.spot_cos, vec2(sample.spot_cos.x, clamp(sample.spot_cos.y * 1.001, -65000.0, 65000.0)), emissive)),
+        select(select(-1.0, -max(sample.range, 0.0), emissive), max(sample.range, 1e-4), local),
     );
 }
 
@@ -91,6 +96,6 @@ fn unpack_resolved_light_sample(packed: ResolvedLightSamplePacked, exposure: f32
         abs(packed.inverse_pdf),
         octahedral_decode(unpack2x16unorm(packed.spot_direction)),
         unpack2x16float(packed.spot_cos),
-        select(0.0, packed.range, local || packed.range == -2.0),
+        select(select(0.0, -packed.range, kind == LIGHT_SAMPLE_EMISSIVE_MESH), packed.range, local),
     );
 }

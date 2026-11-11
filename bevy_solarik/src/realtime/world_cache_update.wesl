@@ -13,6 +13,7 @@ import bevy_render::maths::PI;
 import bevy_solarik::scene::sampling::calculate_resolved_light_contribution;
 import bevy_solarik::scene::sampling::resolve_light_sample;
 import bevy_solarik::scene::sampling::LightSample;
+import bevy_solarik::scene::sampling::is_finite_f32;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
 import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
@@ -205,13 +206,20 @@ fn blend_new_samples(@builtin(global_invocation_id) active_cell_id: vec3<u32>) {
 
     // Exponential history retains old contributions unless fully replaced.
     // Round support outward; nonfinite support deliberately fails local reuse.
-    let new_support = pending.w * 1.00001 + 0.01;
-    let old_support = world_cache_geometry_data[cell_index].support_radius;
-    world_cache_geometry_data[cell_index].support_radius = select(
-        max(old_support, new_support), new_support, blend_amount == 1.0);
-    world_cache_radiance[cell_index] = vec4(blended_radiance, sample_count);
-    world_cache_luminance_deltas[cell_index] = blended_luminance_delta;
-    world_cache_geometry_data[cell_index].last_traced_frame = constants.render_frame;
+    // (A non-finite new radiance is an update that didn't happen: blended, it
+    // stays in the cell for good, and the cache's rays spread it to every
+    // cell; b40's shaft went black so. The count of updated cells below still
+    // counts it.)
+    let finite = is_finite_f32(new_radiance.r) && is_finite_f32(new_radiance.g) && is_finite_f32(new_radiance.b);
+    if finite {
+        let new_support = pending.w * 1.00001 + 0.01;
+        let old_support = world_cache_geometry_data[cell_index].support_radius;
+        world_cache_geometry_data[cell_index].support_radius = select(
+            max(old_support, new_support), new_support, blend_amount == 1.0);
+        world_cache_radiance[cell_index] = vec4(blended_radiance, sample_count);
+        world_cache_luminance_deltas[cell_index] = blended_luminance_delta;
+        world_cache_geometry_data[cell_index].last_traced_frame = constants.render_frame;
+    }
     if active_cell_id.x % 64u == 0u {
         atomicAdd(&world_cache_b[PRIORITY_UPDATED_COUNT], min(64u, selected_count - active_cell_id.x));
     }

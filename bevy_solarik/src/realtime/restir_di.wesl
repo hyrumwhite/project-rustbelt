@@ -25,6 +25,16 @@ import bevy_solarik::scene::sampling::NULL_LIGHT_ID;
 import bevy_solarik::scene::sampling::calculate_resolved_light_contribution;
 import bevy_solarik::scene::sampling::resolve_and_calculate_light_contribution;
 import bevy_solarik::scene::sampling::resolve_light_sample;
+import bevy_solarik::scene::sampling::NearLightCandidate;
+import bevy_solarik::scene::sampling::light_may_be_near;
+import bevy_solarik::scene::sampling::near_light_candidate;
+import bevy_solarik::scene::sampling::resolve_near_light_sample;
+import bevy_solarik::scene::sampling::is_finite_f32;
+import bevy_solarik::scene::sampling::light_triangle_may_be_near;
+import bevy_solarik::scene::sampling::resolve_emissive_light_sample;
+import bevy_solarik::realtime::light_triangles::load_light_triangle;
+import bevy_solarik::scene::raytracing_scene_bindings::LightSource;
+import bevy_solarik::scene::raytracing_scene_bindings::light_source_is_emissive_mesh;
 import bevy_solarik::scene::sampling::trace_light_transmission;
 import bevy_solarik::scene::sampling::balance_heuristic;
 import bevy_solarik::scene::sampling::power_heuristic;
@@ -120,6 +130,18 @@ const RASTER_SUBPIXEL_STEP = 1.0 / 16.0;
 var<private> debug_di_pick: vec3<f32>;
 }
 
+// (SOLARIK_SHADER_DEFS=VISUALIZE_LIGHT_NEAR, with HALO_RT_NO_DLSS=1: the near
+// sampling's verdicts at the initial candidates (sampling.wesl,
+// near_light_candidate). Red: the share of the tile candidates that passed
+// light_may_be_near and were not warped; green: the share of the tile
+// candidates warped plus the share of the cell candidates warped; blue: the
+// share of the cell candidates that passed the cheap rejects and were not
+// warped (the closest point or the solid angle said far). It takes the one-loop form
+// (LIGHT_NEAR_INLINE) itself. The later passes leave the view.)
+@if(VISUALIZE_LIGHT_NEAR) {
+var<private> debug_light_near: vec3<f32>;
+}
+
 // (Timing switches, SOLARIK_SHADER_DEFS=DI_TIME_NO_...: each leaves a stage
 // out so the pass's two spans say what it costs; the picture is wrong with
 // any of them. NO_PICK_RAY: the initial pick's shadow test; NO_SUN_RAY: the
@@ -156,6 +178,9 @@ fn initial_and_temporal(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin
 @if(VISUALIZE_DI_PICK) {
     textureStore(view_output, global_id.xy, vec4(debug_di_pick, 1.0));
 }
+@if(VISUALIZE_LIGHT_NEAR) {
+    textureStore(view_output, global_id.xy, vec4(debug_light_near, 1.0));
+}
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -187,6 +212,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // RGB connection transport belongs only to this receiver's shading.
     store_reservoir_a(global_id.xy, combined_reservoir);
 @if(VISUALIZE_DI_PICK) {
+    return;
+}
+@if(VISUALIZE_LIGHT_NEAR) {
     return;
 }
 
@@ -241,7 +269,6 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
     var reservoir = empty_reservoir();
-    var weight_sum = 0.0;
 
     // Two strategies pick a light: the tiles, by the table's selection
     // probability (over what isn't the sun's, presample_light_tiles), and the
@@ -273,47 +300,49 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         cell_samples = CELL_SAMPLES;
     }
 
-    var reservoir_target_function = 0.0;
-    var selected_sample = LightSample(0u, 0u);
-    var selected_tile_sample = 0xFFFFFFFFu;
-    var selected_light_position = vec4(0.0);
+    var pick = InitialPick(0.0, 0.0, LightSample(0u, 0u), 0xFFFFFFFFu, vec4(0.0));
 @if(VISUALIZE_DI_PICK) {
     debug_di_pick = vec3(0.0);
 }
+    let candidates = InitialCandidates(world_position, world_normal, lobe, cell_samples, light_slots, slot_probabilities, sun_share);
+@if(VISUALIZE_LIGHT_NEAR) {
+    debug_light_near = vec3(0.0);
+}
+    // (a candidate that may be near put off to a second pass, but with
+    // LIGHT_NEAR_INLINE: see sampling.wesl)
+@if((!(LIGHT_NEAR_INLINE || VISUALIZE_LIGHT_NEAR || LIGHT_NEAR_AREA))) {
+    var deferred_tiles: array<u32, INITIAL_DEFERRED>;
+    var deferred_tile_count = 0u;
+    var deferred_cells: array<LightSample, INITIAL_DEFERRED>;
+    var deferred_cell_count = 0u;
+}
     for (var i = 0u; i < INITIAL_SAMPLES; i++) {
         let tile_sample = light_tile_start + rand_range_u(1024u, rng);
-        let resolved_light_sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+        let tile_resolved = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
         // (the sun has a sample of its own, below)
-        if resolved_light_sample.world_position.w == LIGHT_SAMPLE_DIRECTIONAL { continue; }
-        let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
-        let target_function_unseen = light_target_function(lobe, light_contribution.radiance, light_contribution.wi, world_normal,
-            GlossyMisLight(light_tile_samples[tile_sample].light_id >> 16u, light_contribution.brdf_rays_can_hit, light_contribution.solid_angle_pdf));
-        if target_function_unseen <= 0.0 { continue; }
-@if(VISUALIZE_DI_PICK) {
-        debug_di_pick.r += 1.0 / f32(INITIAL_SAMPLES);
+        if tile_resolved.world_position.w == LIGHT_SAMPLE_DIRECTIONAL { continue; }
+        // (a near triangle's point taken by solid angle from here, its
+        // record read only where the presampled point says it may be near:
+        // see near_light_candidate)
+        var candidate = NearLightCandidate(LightSample(NULL_LIGHT_ID, 0u), tile_resolved, tile_resolved.inverse_pdf, false);
+        if light_may_be_near(tile_resolved, world_position) {
+@if((!(LIGHT_NEAR_INLINE || VISUALIZE_LIGHT_NEAR || LIGHT_NEAR_AREA))) {
+            if deferred_tile_count < INITIAL_DEFERRED {
+                deferred_tiles[deferred_tile_count] = tile_sample;
+                deferred_tile_count += 1u;
+                continue;
+            }
 }
-
-        var target_function = target_function_unseen;
-        var resampling_weight = target_function * resolved_light_sample.inverse_pdf / f32(INITIAL_SAMPLES);
-        if cell_samples > 0u {
-            let light_id = light_tile_samples[tile_sample].light_id >> 16u;
-            let tile_probability = light_sources[light_id].selection_probability / sun_share;
-            let cell_probability = world_cache_slot_light_probability(light_slots, slot_probabilities, light_id);
-            // (DI_SLOT_VISIBILITY_PRIOR: a light the cell's slots don't know
-            // is weighed as if mostly hidden; see SLOT_VISIBILITY_PRIOR)
-@if(DI_SLOT_VISIBILITY_PRIOR) {
-            if cell_probability <= 0.0 { target_function *= SLOT_VISIBILITY_PRIOR; }
+            let tile_light_sample = light_tile_samples[tile_sample];
+            candidate = near_light_candidate(tile_light_sample, light_sources[tile_light_sample.light_id >> 16u], tile_resolved, world_position);
+@if(VISUALIZE_LIGHT_NEAR) {
+            debug_light_near.r += select(1.0, 0.0, candidate.near) / f32(INITIAL_SAMPLES);
 }
-            resampling_weight = target_function * resolved_light_sample.inverse_pdf * tile_probability
-                / (f32(INITIAL_SAMPLES) * tile_probability + f32(cell_samples) * cell_probability);
         }
-
-        weight_sum += resampling_weight;
-        if rand_f(rng) < resampling_weight / weight_sum {
-            reservoir_target_function = target_function;
-            selected_tile_sample = tile_sample;
-            selected_light_position = resolved_light_sample.world_position;
-        }
+@if(VISUALIZE_LIGHT_NEAR) {
+        debug_light_near.g += select(0.0, 1.0, candidate.near) / f32(INITIAL_SAMPLES);
+}
+        stream_tile_candidate(candidates, candidate, tile_sample, &pick, rng);
     }
     for (var i = 0u; i < cell_samples; i++) {
         let light_id = world_cache_slot_light(light_slots[world_cache_draw_slot(slot_probabilities, rand_f(rng))]);
@@ -325,28 +354,48 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             triangle_id = rand_range_u(light_source.kind >> 1u, rng);
         }
         let light_sample = LightSample((light_id << 16u) | triangle_id, rand_u(rng));
-        let resolved_light_sample = resolve_light_sample(light_sample, light_source);
-        let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, world_position, world_normal);
-        let target_function = light_target_function(lobe, light_contribution.radiance, light_contribution.wi, world_normal,
-            GlossyMisLight(light_id, light_contribution.brdf_rays_can_hit, light_contribution.solid_angle_pdf));
-        if target_function <= 0.0 { continue; }
-@if(VISUALIZE_DI_PICK) {
-        debug_di_pick.g += 1.0 / f32(cell_samples);
-}
-
-        let tile_probability = light_source.selection_probability / sun_share;
-        let cell_probability = world_cache_slot_light_probability(light_slots, slot_probabilities, light_id);
-        let resampling_weight = target_function * resolved_light_sample.inverse_pdf
-            / (f32(INITIAL_SAMPLES) * tile_probability + f32(cell_samples) * cell_probability);
-
-        weight_sum += resampling_weight;
-        if rand_f(rng) < resampling_weight / weight_sum {
-            reservoir_target_function = target_function;
-            selected_tile_sample = 0xFFFFFFFFu;
-            selected_sample = light_sample;
-            selected_light_position = resolved_light_sample.world_position;
+@if((!(LIGHT_NEAR_INLINE || VISUALIZE_LIGHT_NEAR || LIGHT_NEAR_AREA))) {
+        // (the cheap rejects alone here; one that passes waits)
+        if light_source_is_emissive_mesh(light_source) {
+            let triangle = load_light_triangle(light_source, triangle_id);
+            if deferred_cell_count < INITIAL_DEFERRED && light_triangle_may_be_near(triangle, world_position) {
+                deferred_cells[deferred_cell_count] = light_sample;
+                deferred_cell_count += 1u;
+                continue;
+            }
+            let resolved = resolve_emissive_light_sample(light_source, triangle, light_sample.seed);
+            stream_cell_candidate(candidates, NearLightCandidate(light_sample, resolved, resolved.inverse_pdf, false), light_id, light_source, &pick, rng);
+            continue;
         }
+}
+        // (a near triangle's point by solid angle, as above)
+        let candidate = resolve_near_light_sample(light_sample, light_source, world_position);
+@if(VISUALIZE_LIGHT_NEAR) {
+        debug_light_near.g += select(0.0, 1.0, candidate.near) / f32(cell_samples);
+        if !candidate.near && light_source_is_emissive_mesh(light_source)
+            && light_triangle_may_be_near(load_light_triangle(light_source, triangle_id), world_position) {
+            debug_light_near.b += 1.0 / f32(cell_samples);
+        }
+}
+        stream_cell_candidate(candidates, candidate, light_id, light_source, &pick, rng);
     }
+@if((!(LIGHT_NEAR_INLINE || VISUALIZE_LIGHT_NEAR || LIGHT_NEAR_AREA))) {
+    // (the deferred candidates: the near path, run by the lanes that have
+    // any together)
+    for (var i = 0u; i < deferred_tile_count; i++) {
+        let tile_sample = deferred_tiles[i];
+        let tile_resolved = unpack_resolved_light_sample(light_tile_resolved_samples[tile_sample], view.exposure);
+        let tile_light_sample = light_tile_samples[tile_sample];
+        let candidate = near_light_candidate(tile_light_sample, light_sources[tile_light_sample.light_id >> 16u], tile_resolved, world_position);
+        stream_tile_candidate(candidates, candidate, tile_sample, &pick, rng);
+    }
+    for (var i = 0u; i < deferred_cell_count; i++) {
+        let light_sample = deferred_cells[i];
+        let light_id = light_sample.light_id >> 16u;
+        let light_source = light_sources[light_id];
+        stream_cell_candidate(candidates, resolve_near_light_sample(light_sample, light_source, world_position), light_id, light_source, &pick, rng);
+    }
+}
 
     var sun_selected = false;
     // The sun, one sample of its own in every pixel, shadow-tested before
@@ -368,27 +417,27 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 }
             if max(transmission.r, max(transmission.g, transmission.b)) > 0.0 {
                 let resampling_weight = target_function * contribution.inverse_pdf;
-                weight_sum += resampling_weight;
-                if rand_f(rng) < resampling_weight / weight_sum {
-                    reservoir_target_function = target_function;
+                pick.weight_sum += resampling_weight;
+                if rand_f(rng) < resampling_weight / pick.weight_sum {
+                    pick.target_function = target_function;
                     sun_selected = true;
-                    selected_sample = candidate;
-                    selected_light_position = resolved.world_position;
+                    pick.sample = candidate;
+                    pick.light_position = resolved.world_position;
                 }
             }
         }
     }
 
-    if reservoir_target_function != 0.0 {
-        reservoir.sample = selected_sample;
-        if selected_tile_sample != 0xFFFFFFFFu && !sun_selected {
-            reservoir.sample = light_tile_samples[selected_tile_sample];
+    if pick.target_function != 0.0 {
+        reservoir.sample = pick.sample;
+        if pick.tile_sample != 0xFFFFFFFFu && !sun_selected {
+            reservoir.sample = light_tile_samples[pick.tile_sample];
         }
     }
 
     if reservoir_valid(reservoir) {
-        let inverse_target_function = select(0.0, 1.0 / reservoir_target_function, reservoir_target_function > 0.0);
-        reservoir.unbiased_contribution_weight = weight_sum * inverse_target_function;
+        let inverse_target_function = select(0.0, 1.0 / pick.target_function, pick.target_function > 0.0);
+        reservoir.unbiased_contribution_weight = pick.weight_sum * inverse_target_function;
         // A light out of sight lights nothing: it is dropped before reuse
         // spreads it (over 30 pixels and 8 frames, the patches of a corridor
         // lit or dark as one hidden light came and went). The sun was tested
@@ -396,7 +445,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         if !sun_selected {
             var transmission = vec4(1.0);
 @if((!(DI_TIME_NO_PICK_RAY))) {
-            transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), selected_light_position);
+            transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), pick.light_position);
 }
             if max(transmission.r, max(transmission.g, transmission.b)) <= 0.0 {
                 reservoir.unbiased_contribution_weight = 0.0;
@@ -409,6 +458,96 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
 
     reservoir.confidence_weight = 1.0;
     return reservoir;
+}
+
+// The initial pick, which each candidate streams into.
+struct InitialPick {
+    weight_sum: f32,
+    target_function: f32,
+    sample: LightSample,
+    // The tile sample picked, or 0xFFFFFFFF for the pick's own `sample`.
+    tile_sample: u32,
+    light_position: vec4<f32>,
+}
+
+// What every initial candidate at a pixel is weighed by.
+struct InitialCandidates {
+    world_position: vec3<f32>,
+    world_normal: vec3<f32>,
+    lobe: TargetLobe,
+    cell_samples: u32,
+    light_slots: vec4<u32>,
+    slot_probabilities: vec4<f32>,
+    sun_share: f32,
+}
+
+// The most initial candidates of a kind the first pass puts off (a
+// candidate past it is taken inline).
+const INITIAL_DEFERRED: u32 = 16u;
+
+// A tile candidate weighed and streamed into the pick (one place for the
+// first pass and the second).
+fn stream_tile_candidate(c: InitialCandidates, candidate: NearLightCandidate, tile_sample: u32, pick: ptr<function, InitialPick>, rng: ptr<function, u32>) {
+    let resolved_light_sample = candidate.resolved;
+    let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, c.world_position, c.world_normal);
+    let target_function_unseen = light_target_function(c.lobe, light_contribution.radiance, light_contribution.wi, c.world_normal,
+        GlossyMisLight(light_tile_samples[tile_sample].light_id >> 16u, light_contribution.brdf_rays_can_hit, light_contribution.solid_angle_pdf));
+    if !(target_function_unseen > 0.0) || !is_finite_f32(target_function_unseen) { return; }
+@if(VISUALIZE_DI_PICK) {
+    debug_di_pick.r += 1.0 / f32(INITIAL_SAMPLES);
+}
+
+    var target_function = target_function_unseen;
+    var resampling_weight = target_function * candidate.inverse_pdf / f32(INITIAL_SAMPLES);
+    if c.cell_samples > 0u {
+        let light_id = light_tile_samples[tile_sample].light_id >> 16u;
+        let tile_probability = light_sources[light_id].selection_probability / c.sun_share;
+        let cell_probability = world_cache_slot_light_probability(c.light_slots, c.slot_probabilities, light_id);
+        // (DI_SLOT_VISIBILITY_PRIOR: a light the cell's slots don't know
+        // is weighed as if mostly hidden; see SLOT_VISIBILITY_PRIOR)
+@if(DI_SLOT_VISIBILITY_PRIOR) {
+        if cell_probability <= 0.0 { target_function *= SLOT_VISIBILITY_PRIOR; }
+}
+        resampling_weight = target_function * candidate.inverse_pdf * tile_probability
+            / (f32(INITIAL_SAMPLES) * tile_probability + f32(c.cell_samples) * cell_probability);
+    }
+    // (no non-finite weight into the reservoir: see is_finite_f32)
+    if !is_finite_f32(resampling_weight) || resampling_weight < 0.0 { return; }
+
+    (*pick).weight_sum += resampling_weight;
+    if rand_f(rng) < resampling_weight / (*pick).weight_sum {
+        (*pick).target_function = target_function;
+        // (a warped point is its own sample, not the tile's)
+        (*pick).tile_sample = select(tile_sample, 0xFFFFFFFFu, candidate.near);
+        (*pick).sample = candidate.light_sample;
+        (*pick).light_position = resolved_light_sample.world_position;
+    }
+}
+
+// A cell candidate weighed and streamed into the pick (as above).
+fn stream_cell_candidate(c: InitialCandidates, candidate: NearLightCandidate, light_id: u32, light_source: LightSource, pick: ptr<function, InitialPick>, rng: ptr<function, u32>) {
+    let resolved_light_sample = candidate.resolved;
+    let light_contribution = calculate_resolved_light_contribution(resolved_light_sample, c.world_position, c.world_normal);
+    let target_function = light_target_function(c.lobe, light_contribution.radiance, light_contribution.wi, c.world_normal,
+        GlossyMisLight(light_id, light_contribution.brdf_rays_can_hit, light_contribution.solid_angle_pdf));
+    if !(target_function > 0.0) || !is_finite_f32(target_function) { return; }
+@if(VISUALIZE_DI_PICK) {
+    debug_di_pick.g += 1.0 / f32(c.cell_samples);
+}
+
+    let tile_probability = light_source.selection_probability / c.sun_share;
+    let cell_probability = world_cache_slot_light_probability(c.light_slots, c.slot_probabilities, light_id);
+    let resampling_weight = target_function * candidate.inverse_pdf
+        / (f32(INITIAL_SAMPLES) * tile_probability + f32(c.cell_samples) * cell_probability);
+    if !is_finite_f32(resampling_weight) || resampling_weight < 0.0 { return; }
+
+    (*pick).weight_sum += resampling_weight;
+    if rand_f(rng) < resampling_weight / (*pick).weight_sum {
+        (*pick).target_function = target_function;
+        (*pick).tile_sample = 0xFFFFFFFFu;
+        (*pick).sample = candidate.light_sample;
+        (*pick).light_position = resolved_light_sample.world_position;
+    }
 }
 
 fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> NeighborInfo {
@@ -614,8 +753,14 @@ fn reservoir_valid(reservoir: Reservoir) -> bool {
 }
 
 fn pack_reservoir(reservoir: Reservoir) -> vec4<u32> {
-    let weights = bitcast<vec2<u32>>(vec2<f32>(reservoir.confidence_weight, reservoir.unbiased_contribution_weight));
-    return vec4<u32>(reservoir.sample.light_id, reservoir.sample.seed, weights);
+    // (a non-finite weight is dropped here, not carried by the reuse from
+    // frame to frame)
+    var stored = reservoir;
+    if !is_finite_f32(stored.unbiased_contribution_weight) || !is_finite_f32(stored.confidence_weight) {
+        stored = empty_reservoir();
+    }
+    let weights = bitcast<vec2<u32>>(vec2<f32>(stored.confidence_weight, stored.unbiased_contribution_weight));
+    return vec4<u32>(stored.sample.light_id, stored.sample.seed, weights);
 }
 
 fn store_reservoir_a(pixel: vec2<u32>, reservoir: Reservoir) {

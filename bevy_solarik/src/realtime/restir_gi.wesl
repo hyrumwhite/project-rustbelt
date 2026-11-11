@@ -333,6 +333,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(VISUALIZE_DI_PICK) {
     return;
 }
+@if(VISUALIZE_LIGHT_NEAR) {
+    return;
+}
 @if(VISUALIZE_CACHE_AGE) {
     return;
 }

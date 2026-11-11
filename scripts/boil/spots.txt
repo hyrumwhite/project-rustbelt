@@ -26,3 +26,8 @@ c20_index    c20 0 -0.48,-0.38,-4.82,58.0,21.8    1
 # muster bay corridor and c20's first strip-lit hall)
 a50_muster   a50 1 15.24,1.73,-19.22,70.2,8.6     1
 c20_strips   c20 0 -14.87,14.37,-4.28,-25.5,-3.7  1
+# (the user's boiling series of 10 November, afternoon, every card patterned:
+# b40's hall with the slat strips on both sides, from outside the tunnel and
+# inside it; F9 b40_1794335630353 and b40_1794335636454)
+b40_hall_out b40 4 42.47,-106.56,0.62,7.5,-6.2    1
+b40_hall_in  b40 4 43.33,-106.46,0.76,4.4,-22.8   1

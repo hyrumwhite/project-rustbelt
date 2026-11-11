@@ -1212,6 +1212,10 @@ pub fn init_solari_lighting_pipelines(
             // 40 until 6 November: at 30 the harness pictures are the same and
             // a smooth-floored b40 corridor 0.8 ms cheaper, docs/boiling-plan.md)
             ("SPECULAR_REUSE_ROUGHNESS", "SOLARIK_SPECULAR_REUSE_ROUGHNESS", 30),
+            // (the near distance in hundredths of the square root of an
+            // emissive triangle's area, within which a receiver takes its
+            // point by solid angle: sampling.wesl, near_triangle_warp)
+            ("LIGHT_NEAR_DISTANCE", "SOLARIK_LIGHT_NEAR_DISTANCE", 100),
         ] {
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).filter(|&v: &u32| v > 0).unwrap_or(default);
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));

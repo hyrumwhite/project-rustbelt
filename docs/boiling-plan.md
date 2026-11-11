@@ -504,6 +504,8 @@ Done:
 
 Everything above is either free (1, 2a, 2b) or bounded (2c, 3, 4). If the interior total rises past the 0.3 ms rule, these pay it back in order: the cache search at 64 candidates (Phase 3), 16 DI tile candidates (Phase 3), and the world cache update soft cap (40000 cells a frame; check `HALO_RT_CACHE_LOG` for how often it binds).
 
+As the work was wrapped up (11 November): the cache search at 64 and the 16 tile candidates are taken, the near-field sampling and every card patterned added 0.15 to 0.50 ms a spot and were kept by the user's choice, and nothing has been paid back for them. What could be, with what is measured and what is a guess, is in docs/gpu-headroom.md, to revisit when the frame needs the room.
+
 ## Working rules (from boiling.md's lessons)
 
 - Prefer changes that keep the estimator the same: 1b and 2a are reweighting and placement, the estimators are unchanged. Anything that routes more light through the cache is a stability risk the metrics underrate.

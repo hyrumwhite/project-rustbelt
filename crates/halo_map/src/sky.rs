@@ -31,6 +31,12 @@ const LIGHT_POWER: usize = 0x5C;
 const LIGHT_DIRECTION: usize = 0x68;
 const LIGHT_DIAMETER: usize = 0x70;
 
+/// The unit vector towards a sky light (Halo coordinates) from its yaw and
+/// pitch (radians), as the tag holds them.
+pub fn light_direction(yaw: f32, pitch: f32) -> [f32; 3] {
+    [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin()]
+}
+
 /// The scenario's skies.
 pub fn skies(cache: &CacheFile) -> Result<Vec<Sky>> {
     let scenario = cache.scenario()?;
@@ -48,7 +54,7 @@ pub fn skies(cache: &CacheFile) -> Result<Vec<Sky>> {
                 Ok(SkyLight {
                     color: light.vec3(LIGHT_COLOR)?,
                     power: light.f32(LIGHT_POWER)?,
-                    direction: [pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin()],
+                    direction: light_direction(yaw, pitch),
                     diameter: light.f32(LIGHT_DIAMETER)?,
                 })
             })

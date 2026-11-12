@@ -1,10 +1,23 @@
-//! Prints a map's skies and the skies its BSPs' clusters use: `skies <map>`.
+//! Prints a map's skies, their lights, and the skies its BSPs' clusters use:
+//! `skies <map>`.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cache = halo_map::CacheFile::open(std::path::Path::new(&args[1])).unwrap();
     for (index, sky) in halo_map::sky::skies(&cache).unwrap().iter().enumerate() {
         let model = sky.model.and_then(|m| m.datum).and_then(|d| cache.tag(d).ok()).map(|t| t.name.clone());
         println!("sky {index}: {} model {:?} lights {}", sky.name, model, sky.lights.len());
+        for (light_index, light) in sky.lights.iter().enumerate() {
+            // (the tag's yaw and pitch, back from the direction)
+            let [x, y, z] = light.direction;
+            println!(
+                "  light {light_index}: colour {:?} power {} yaw {:.1} pitch {:.1} diameter {:.2} degrees",
+                light.color,
+                light.power,
+                y.atan2(x).to_degrees(),
+                z.clamp(-1.0, 1.0).asin().to_degrees(),
+                light.diameter.to_degrees()
+            );
+        }
     }
     use halo_map::layout::{structure_bsp, structure_cluster};
     for reference in halo_map::bsp::references(&cache).unwrap() {

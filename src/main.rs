@@ -693,7 +693,7 @@ fn load_level(
     commands: &mut Commands,
     params: &mut LevelAssetParams,
 ) {
-    let level_sky = sky::SkyLighting::from_map(&cache);
+    let level_sky = sky::SkyLighting::from_map(&cache, &cache.header.name);
     let cache = std::sync::Arc::new(cache);
     // (covered until it is in place)
     commands.queue(|world: &mut World| {

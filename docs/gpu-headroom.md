@@ -80,6 +80,6 @@ Neither switch is a candidate here: they are the look and the stability that wer
 
 ## The gate for any of these
 
-- The full harness against `cards_default` (`scripts/boil/run.sh <label>`, about 1 h 50 min): no boiling column moves.
+- The full harness against `cards_default` (`scripts/boil/run.sh <label>`, about 1 h 50 min; the canyon's rows against `sun_b40`, taken after b40's sun moved on 12 November): no boiling column moves.
 - The flash counts, which the harness's stills cannot rank: `scripts/boil/flash.sh` at `c20_strips`, `b40_hall_out`, `b40_hall_in` and `b40_shaft` (today, of 300 captures with a flash over 100%: 0 to 3).
 - Then the user's A/B in play, each change behind its own switch.

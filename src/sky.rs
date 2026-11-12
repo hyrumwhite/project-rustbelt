@@ -25,8 +25,41 @@ pub struct SkyLighting {
     pub sky: Option<(Color, f32)>,
 }
 
+/// Levels whose sun stands elsewhere than their sky tag says: (map, yaw,
+/// pitch), degrees, in the tag's own terms. Their lightmaps were baked with
+/// this sun (fitted against them by halo_map's `lightmap_sun` example); b40's
+/// sky tag holds yaw 45, pitch 69, at which the canyon floors lie almost
+/// wholly in the cliffs' shadow, where the lightmaps (and MCC) light most of
+/// them and shade only near the cliffs.
+const BAKED_SUNS: &[(&str, f32, f32)] = &[("b40", 45.0, 83.0)];
+
+/// The sun's yaw and pitch (degrees) on `map`, the sky tag's being `tag`:
+/// [`BAKED_SUNS`]'s where it lists the map, else the tag's. `text` is
+/// `HALO_RT_SUN_DIRECTION`: `tag` the tag's on every level (the old rule),
+/// `yaw,pitch` that direction on any level (tuning).
+fn sun_angles(map: &str, tag: (f32, f32), text: Option<&str>) -> (f32, f32) {
+    match text.map(str::trim) {
+        Some("tag") => return tag,
+        Some(text) => {
+            let tuned = text
+                .split_once(',')
+                .and_then(|(yaw, pitch)| Some((yaw.trim().parse().ok()?, pitch.trim().parse().ok()?)));
+            match tuned {
+                Some(angles) => return angles,
+                None => warn!("HALO_RT_SUN_DIRECTION={text}: expected tag or yaw,pitch (degrees); ignored"),
+            }
+        }
+        None => {}
+    }
+    BAKED_SUNS
+        .iter()
+        .find(|(name, _, _)| map.eq_ignore_ascii_case(name))
+        .map_or(tag, |&(_, yaw, pitch)| (yaw, pitch))
+}
+
 impl SkyLighting {
-    pub fn from_map(cache: &CacheFile) -> Self {
+    /// `map` is the map's name (`b40`), for [`BAKED_SUNS`].
+    pub fn from_map(cache: &CacheFile, map: &str) -> Self {
         let skies = sky::skies(cache).unwrap_or_else(|e| {
             warn!("sky: {e}");
             Vec::new()
@@ -36,7 +69,18 @@ impl SkyLighting {
             .iter()
             .filter(|l| l.diameter <= SUN_MAX_DIAMETER && l.power > 0.0)
             .max_by(|a, b| a.power.total_cmp(&b.power))
-            .map(|l| (Vec3::from(halo_to_bevy(l.direction, 1.0)).normalize(), color(l.color), l.power));
+            .map(|l| {
+                let [x, y, z] = l.direction;
+                let tag = (y.atan2(x).to_degrees(), z.clamp(-1.0, 1.0).asin().to_degrees());
+                let (yaw, pitch) = sun_angles(map, tag, std::env::var("HALO_RT_SUN_DIRECTION").ok().as_deref());
+                if (yaw - tag.0).abs() > 0.01 || (pitch - tag.1).abs() > 0.01 {
+                    info!("sun: yaw {yaw:.1} pitch {pitch:.1} (the sky tag's: {:.1}, {:.1})", tag.0, tag.1);
+                } else {
+                    info!("sun: yaw {yaw:.1} pitch {pitch:.1}");
+                }
+                let direction = sky::light_direction(yaw.to_radians(), pitch.to_radians());
+                (Vec3::from(halo_to_bevy(direction, 1.0)).normalize(), color(l.color), l.power)
+            });
         let sky = lights
             .iter()
             .filter(|l| l.diameter > SUN_MAX_DIAMETER && l.power > 0.0)
@@ -153,4 +197,39 @@ fn cubemap(size: u32, images: &mut Assets<Image>, colour: impl Fn(Vec3) -> [f32;
     image.texture_view_descriptor =
         Some(TextureViewDescriptor { dimension: Some(TextureViewDimension::Cube), ..default() });
     images.add(image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TAG: (f32, f32) = (45.0, 69.0);
+
+    #[test]
+    fn baked_sun_replaces_the_tags() {
+        assert_eq!(sun_angles("b40", TAG, None), (45.0, 83.0));
+        assert_eq!(sun_angles("B40", TAG, None), (45.0, 83.0));
+    }
+
+    #[test]
+    fn other_levels_keep_the_tags() {
+        assert_eq!(sun_angles("b30", (50.0, 35.0), None), (50.0, 35.0));
+    }
+
+    #[test]
+    fn tag_switch_keeps_the_tags() {
+        assert_eq!(sun_angles("b40", TAG, Some("tag")), TAG);
+    }
+
+    #[test]
+    fn tuned_direction_on_any_level() {
+        assert_eq!(sun_angles("b40", TAG, Some("10,20")), (10.0, 20.0));
+        assert_eq!(sun_angles("a10", TAG, Some(" 10 , 20 ")), (10.0, 20.0));
+    }
+
+    #[test]
+    fn garbage_is_ignored() {
+        assert_eq!(sun_angles("b40", TAG, Some("high")), (45.0, 83.0));
+        assert_eq!(sun_angles("b30", TAG, Some("10,x")), TAG);
+    }
 }

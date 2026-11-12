@@ -27,6 +27,7 @@ import bevy_solarik::scene::ray_fog::ray_fog_active;
 import bevy_solarik::realtime::specular_gi::trace_glossy_path;
 import bevy_solarik::realtime::surface_path::shade_surface_path;
 import bevy_solarik::realtime::world_cache_query::query_world_cache;
+import bevy_solarik::realtime::world_cache_query::query_world_cache_spread;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_CELL_LIFETIME;
 import bevy_solarik::realtime::realtime_bindings::view_output;
 import bevy_solarik::realtime::realtime_bindings::depth_buffer;
@@ -89,10 +90,25 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
     let background = textureLoad(view_output, id.xy);
     reflection_sum = 0.0;
     var radiance = composite_primary_glass(id.xy, origin, direction, distance, background.rgb / view.exposure, background_point, &rng);
+    // (diagnostics, SOLARIK_SHADER_DEFS: GLASS_VIEW_REFLECTION the panes'
+    // reflected light alone, as weighted; GLASS_VIEW_MIRROR the reflected
+    // path's radiance unweighted, a mirror's; GLASS_NO_REFLECTION none)
+    var reflection = vec3(0.0);
+@if(!(GLASS_NO_REFLECTION)) {
     if reflection_sum > 0.0 {
         let reflected = trace_glossy_path(id.xy, reflection_surface, reflection_distance, reflection_wi, 1.0, true, &rng);
-        radiance = vec4(radiance.rgb + reflection_weight * (reflection_sum / reflection_luminance) * reflected, radiance.a);
+        reflection = reflection_weight * (reflection_sum / reflection_luminance) * reflected;
+@if(GLASS_VIEW_MIRROR) {
+        reflection = reflected;
+}
     }
+}
+@if(GLASS_VIEW_REFLECTION || GLASS_VIEW_MIRROR) {
+    radiance = vec4(reflection, radiance.a);
+}
+@if(!(GLASS_VIEW_REFLECTION || GLASS_VIEW_MIRROR)) {
+    radiance = vec4(radiance.rgb + reflection, radiance.a);
+}
     textureStore(view_output, id.xy, vec4(radiance.rgb * view.exposure, background.a));
 @if(DLSS_RR_GUIDE_BUFFERS) {
     if radiance.a > 0.0 { resolve_background_guides(id.xy); }
@@ -208,10 +224,25 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
         // (its grime layer over it, Halo's glass's diffuse map, lit as its
         // lightmap lights it in Halo: a diffuse surface where it covers the
         // pane, lit by the world cache (a path for it cost a30's glass floor
-        // 2.5 ms); what it covers is hidden)
+        // 2.5 ms); what it covers is hidden. The film takes the light of
+        // both sides, what falls on the side looked at and what falls on the
+        // far side and scatters through it: lit from the near side alone, a
+        // grimy pane in a dim room with a bright space behind showed almost
+        // nothing. The far side's cell is the same point under the opposite
+        // normal, the cells keyed by both, as a leaf's back is.
+        // SOLARIK_SHADER_DEFS=GLASS_GRIME_ONE_SIDED the old, the near side
+        // alone. Each side's read is one cell, grime_irradiance; the spread
+        // read of the pane reflections (query_world_cache_spread) was tried
+        // here too, cost 0.29 ms at a10's bridge and showed no gain, the
+        // film already steady by the single cell;
+        // SOLARIK_SHADER_DEFS=GLASS_GRIME_SPREAD turns it on)
         let grime = hit.material.grime;
         if grime.a > 0.0 {
-            let irradiance = query_world_cache(hit.world_position, facing, view.world_position, length(hit.world_position - initial_origin), WORLD_CACHE_CELL_LIFETIME, rng);
+            let grime_ray_t = length(hit.world_position - initial_origin);
+            var irradiance = grime_irradiance(hit.world_position, facing, grime_ray_t, rng);
+@if(!(GLASS_GRIME_ONE_SIDED)) {
+            irradiance += grime_irradiance(hit.world_position, -facing, grime_ray_t, rng);
+}
             radiance += transmission * grime.a * grime.rgb / PI * irradiance;
             transmission *= 1.0 - grime.a;
         }
@@ -232,6 +263,19 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
     }
     // A bounded chain cannot assume unvisited panes are transparent.
     return vec4(radiance, has_glass);
+}
+
+// (the world cache's irradiance for a pane's grime on one side: one cell,
+// query_world_cache; GLASS_GRIME_SPREAD the four cells around the point,
+// query_world_cache_spread, as the pane reflections read it: 0.29 ms at
+// a10's bridge and no gain seen)
+fn grime_irradiance(position: vec3f, normal: vec3f, ray_t: f32, rng: ptr<function, u32>) -> vec3f {
+@if(GLASS_GRIME_SPREAD) {
+    return query_world_cache_spread(position, normal, view.world_position, ray_t, WORLD_CACHE_CELL_LIFETIME, rng);
+}
+@if(!(GLASS_GRIME_SPREAD)) {
+    return query_world_cache(position, normal, view.world_position, ray_t, WORLD_CACHE_CELL_LIFETIME, rng);
+}
 }
 
 // What a first-person pane lets through, fogged (SolarikRayFog) from the

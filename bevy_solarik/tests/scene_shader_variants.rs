@@ -32,6 +32,11 @@ fn scene_consumers_compose_across_production_feature_variants() {
             ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
             ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
             ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
+            ShaderDefVal::UInt("CACHE_HISTORY_CLAMP".into(), 1),
+            ShaderDefVal::UInt("CACHE_DROP_DETECT".into(), 1),
+            ShaderDefVal::UInt("CACHE_DROP_THRESHOLD".into(), 60),
+            ShaderDefVal::UInt("CACHE_DROP_FLOOR".into(), 4),
+            ShaderDefVal::UInt("LIGHT_NEAR_DISTANCE".into(), 100),
             "BINDLESS_SURFACE_DETAIL".into(),
             // (on by default in node.rs)
             "CACHE_WARM_START".into(),
@@ -85,6 +90,24 @@ fn scene_consumers_compose_across_production_feature_variants() {
                 graph.validate(&module, &direct_definitions);
                 stage_definitions.push("PRIMARY_CANOPY_QUERY_ONLY".into());
                 graph.validate(&module, &stage_definitions);
+            }
+            // (the glass switches, each alone: the old reflected path, the
+            // grime's near side alone, the reflection diagnostics, the
+            // reflection's and the grime's single-cell cache reads)
+            if consumer == "realtime::primary_glass" || consumer == "realtime::specular_gi" {
+                for name in [
+                    "GLASS_REFLECTION_PATHS",
+                    "GLASS_GRIME_ONE_SIDED",
+                    "GLASS_VIEW_REFLECTION",
+                    "GLASS_VIEW_MIRROR",
+                    "GLASS_NO_REFLECTION",
+                    "GLASS_REFLECTION_ONE_CELL",
+                    "GLASS_GRIME_SPREAD",
+                ] {
+                    let mut glass_definitions = stage_definitions.clone();
+                    glass_definitions.push(name.into());
+                    graph.validate(&module, &glass_definitions);
+                }
             }
         }
     }

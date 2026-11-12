@@ -45,6 +45,11 @@ const WORLD_CACHE_POSITION_LOD_SCALE: f32 = 15.0;
 /// Marker value for an empty cell
 const WORLD_CACHE_EMPTY_CELL: u32 = 0u;
 
+// (query_world_cache_spread's lookups' distance from the point, in cells: far
+// enough that two of the four rarely share a cell after the query's own
+// half-cell jitter)
+const WORLD_CACHE_SPREAD_RADIUS: f32 = 1.25;
+
 // (CACHE_WARM_START) A new cell starts from its parent's radiance (the cell
 // one level of detail coarser at the same point and normal) when the parent
 // has had at least WORLD_CACHE_WARM_START_MIN_SAMPLES updates, as worth
@@ -98,6 +103,57 @@ fn query_two_sided_world_cache_with_support(world_position: vec3<f32>, world_nor
 @if((!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER))
 fn query_world_cache(world_position_in: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, ray_t: f32, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
     return query_world_cache_with_support(world_position_in, world_normal, view_position, ray_t, cell_lifetime, rng).rgb;
+}
+
+// (for a view that shows single cells magnified, a pane's reflection or the
+// grime on a pane: four cells read around the point, on a circle of
+// WORLD_CACHE_SPREAD_RADIUS cells in the surface's plane at a random angle,
+// and the brightest and the darkest dropped, the two between averaged: one
+// spiking cell, or one cell just made and still black, never shows. The
+// lighting read this way is blurred over about half a metre at the nearest
+// LOD. Each lookup is an ordinary query, its own jitter and keeping its cell
+// alive)
+@if((!WORLD_CACHE_NON_ATOMIC_LIFE_BUFFER))
+fn query_world_cache_spread(world_position: vec3<f32>, world_normal: vec3<f32>, view_position: vec3<f32>, ray_t: f32, cell_lifetime: u32, rng: ptr<function, u32>) -> vec3<f32> {
+    let cell_size = get_cell_size(world_position, view_position, rng);
+    let TBN = orthonormalize(world_normal);
+    let angle = rand_f(rng) * 6.2831853;
+    var sum = vec3(0.0);
+    var brightest = vec3(0.0);
+    var darkest = vec3(0.0);
+    var brightest_luminance = 0.0;
+    var darkest_luminance = 0.0;
+    for (var k = 0u; k < 4u; k++) {
+        let a = angle + f32(k) * 1.5707963;
+        let p = world_position + (cos(a) * TBN[0] + sin(a) * TBN[1]) * cell_size * WORLD_CACHE_SPREAD_RADIUS;
+        let value = query_world_cache(p, world_normal, view_position, ray_t, cell_lifetime, rng);
+        let value_luminance = dot(value, vec3(0.2126, 0.7152, 0.0722));
+        sum += value;
+        // (the first lookup starts both and the second replaces one of
+        // them, the brightest if brighter, else the darkest, so the two are
+        // always different lookups, equal values included)
+        if k == 0u {
+            brightest = value;
+            brightest_luminance = value_luminance;
+            darkest = value;
+            darkest_luminance = value_luminance;
+        } else if k == 1u {
+            if value_luminance > brightest_luminance {
+                brightest = value;
+                brightest_luminance = value_luminance;
+            } else {
+                darkest = value;
+                darkest_luminance = value_luminance;
+            }
+        } else if value_luminance > brightest_luminance {
+            brightest = value;
+            brightest_luminance = value_luminance;
+        } else if value_luminance < darkest_luminance {
+            darkest = value;
+            darkest_luminance = value_luminance;
+        }
+    }
+    return (sum - brightest - darkest) * 0.5;
 }
 
 // (VISUALIZE_CACHE_AGE: the samples in the cell the last query found, 0 for

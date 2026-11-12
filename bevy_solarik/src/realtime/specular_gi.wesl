@@ -52,6 +52,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
 import bevy_solarik::realtime::world_cache_query::query_world_cache;
+import bevy_solarik::realtime::world_cache_query::query_world_cache_spread;
 import bevy_solarik::realtime::world_cache_query::cell_key_normal;
 import bevy_solarik::realtime::world_cache_query::find_world_cache_cell;
 import bevy_solarik::realtime::world_cache_query::find_world_cache_cell_once;
@@ -340,14 +341,15 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, w
 // A glossy path's radiance, its first hit fogged (SolarikRayFog) for the way
 // beyond the surface it leaves; a path to the sky is left as it is (the
 // application's fog covers its level's surfaces only).
-// (`cache_rough_hits`: a rough surface the path meets, a ray long enough
-// from where it was, ends it in the world cache, as a rough path does; for
-// a pane's reflection, whose one path a pixel can't afford NEE's noise
-// among a level's many lights: c10's windows, seen at a slant, reflected
-// black, a speck where a light was found)
-fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, cache_rough_hits: bool, rng: ptr<function, u32>) -> vec3<f32> {
+// (`pane_reflection`: a pane's or water's reflection, primary_glass's one
+// path a pixel, which can't afford NEE's noise among a level's many lights
+// (c10's windows, seen at a slant, reflected black, a speck where a light
+// was found): the first opaque surface it meets that is not a mirror ends it
+// in the world cache, its emission and its base colour times the cache's
+// irradiance; further panes, leaves and mirrors are followed as any path's)
+fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, pane_reflection: bool, rng: ptr<function, u32>) -> vec3<f32> {
     var first_hit = vec4(0.0);
-    let radiance = trace_unfogged_glossy_path(pixel_id, primary_surface, initial_ray_t, initial_wi, initial_p_bounce, cache_rough_hits, rng, &first_hit);
+    let radiance = trace_unfogged_glossy_path(pixel_id, primary_surface, initial_ray_t, initial_wi, initial_p_bounce, pane_reflection, rng, &first_hit);
     if first_hit.w <= 0.0 || !ray_fog_active() { return radiance; }
     let forward = -normalize(view.world_from_view[2].xyz);
     let surface_depth = dot(primary_surface.world_position - view.world_position, forward);
@@ -366,7 +368,7 @@ fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initi
 
 // (`first_hit`: where the first ray met a surface, and how far it went; w 0
 // for none)
-fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, cache_rough_hits: bool, rng: ptr<function, u32>, first_hit: ptr<function, vec4<f32>>) -> vec3<f32> {
+fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, pane_reflection: bool, rng: ptr<function, u32>, first_hit: ptr<function, vec4<f32>>) -> vec3<f32> {
     var first_ray = true;
     var radiance = vec3(0.0);
     var throughput = vec3(1.0);
@@ -512,8 +514,26 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
         let world_cache_cell_size = get_cell_size(ray_hit.world_position, view.world_position, &rng_copy);
         let ray_longer_than_cell = ray.t > sqrt(3.0) * world_cache_cell_size;
 
-        let rough_hit = cache_rough_hits && ray_hit.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
-        if i == 2u || (ray_longer_than_cell && (path_roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD || rough_hit)) {
+        var ends_in_cache = i == 2u || (ray_longer_than_cell && path_roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD);
+        // (a pane's reflection ends at its first opaque hit that is not a
+        // mirror, however smooth or near: that removed the salt and pepper of
+        // the light sample and the bounce there (a10's bridge monitors) and
+        // saved time, but the moving blobs stayed: they are the world
+        // cache's cells seen one by one in the reflection, which is why the
+        // read below is the spread one (query_world_cache_spread;
+        // SOLARIK_SHADER_DEFS=GLASS_REFLECTION_ONE_CELL the single cell).
+        // Glossy highlights on what it reflects are lost. The block's NRC
+        // query never runs for it: the slot is the specular pass's.
+        // SOLARIK_SHADER_DEFS=GLASS_REFLECTION_PATHS the old, a rough hit
+        // farther than a cell alone)
+@if(GLASS_REFLECTION_PATHS) {
+        ends_in_cache = ends_in_cache || (pane_reflection && ray_longer_than_cell
+            && ray_hit.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD);
+}
+@if(!(GLASS_REFLECTION_PATHS)) {
+        ends_in_cache = ends_in_cache || (pane_reflection && !surface_perfect_mirror);
+}
+        if ends_in_cache {
 @if(NRC_SPECULAR) {
             // The main lobe's path asks NRC instead, once it has warmed up
             // (pad0): the answer is the hit's outgoing radiance toward the
@@ -532,7 +552,19 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
             }
 }
             let diffuse_brdf = ray_hit.material.base_color / PI;
-            radiance += throughput * diffuse_brdf * query_world_cache(ray_hit.world_position, cell_key_normal(ray_hit.geometric_world_normal, ray_hit.triangle_world_normal), view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
+            let cache_normal = cell_key_normal(ray_hit.geometric_world_normal, ray_hit.triangle_world_normal);
+            var cache_irradiance = vec3(0.0);
+@if(GLASS_REFLECTION_ONE_CELL) {
+            cache_irradiance = query_world_cache(ray_hit.world_position, cache_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
+}
+@if(!(GLASS_REFLECTION_ONE_CELL)) {
+            if pane_reflection {
+                cache_irradiance = query_world_cache_spread(ray_hit.world_position, cache_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
+            } else {
+                cache_irradiance = query_world_cache(ray_hit.world_position, cache_normal, view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
+            }
+}
+            radiance += throughput * diffuse_brdf * cache_irradiance;
             break;
         } else if !surface_perfect_mirror {
             // Sample direct lighting (NEE)

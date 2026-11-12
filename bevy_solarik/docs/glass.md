@@ -289,6 +289,46 @@ of at least 1.2 before the fix. Every pane now uses the physical oracle:
 python tests/glass_scene.py --check ../artifacts/bevy-sponza/mask_ownership_analytic/seq_0000.png
 ```
 
+## What a pane's reflection reads, grime and bump
+
+(November 2026; measured on a game's levels, the numbers in the host's docs/glass-plan.md.)
+
+A camera pane's reflected path (`trace_unfogged_glossy_path` with `pane_reflection`,
+glass and water alike) ends at its first opaque hit that is not a mirror, whatever
+its roughness or distance: the surface's emission, plus its base colour times the
+world cache's irradiance there. Mirrors, further panes and leaves are followed as
+before. The sky and emitters reflect sharp; lit surfaces reflect as the cache has
+them, without their glossy highlights. `SOLARIK_SHADER_DEFS=GLASS_REFLECTION_PATHS`
+restores the path that took a light sample and bounced on at near or smooth hits.
+
+That read is `query_world_cache_spread`, not one cell. A mirror shows the cache's
+cells one by one, each wandering on its own, and DLSS-RR (no guide for the
+reflection, see Limits) turned the mosaic into soft blobs that came and went over
+seconds. The spread takes four ordinary jittered queries on a circle of
+`WORLD_CACHE_SPREAD_RADIUS` (1.25) cells round the hit, in the surface's plane at
+a random angle, drops the brightest and the darkest and averages the two between.
+The mean is unchanged; the blobs are gone; three more lookups a pane pixel (0.3 ms
+with panes over 62% of a 1280x720 frame in several layers).
+`SOLARIK_SHADER_DEFS=GLASS_REFLECTION_ONE_CELL` is the single cell.
+
+A grime layer (`GlassGrimeMaterials`: the base colour texture a diffuse film over
+the pane, its coverage in alpha) is lit by the cache's irradiance on both sides of
+the pane, summed: what falls on the side looked at and what falls on the far side
+and scatters through. The far side's cell is the same point under the opposite
+normal. The sum is not energy conserving for a pane lit strongly from both sides;
+it errs bright by at most the dimmer side. `SOLARIK_SHADER_DEFS=GLASS_GRIME_ONE_SIDED`
+is the near side alone. Each side reads one cell; `GLASS_GRIME_SPREAD` gives the
+film the spread read too (0.29 ms in the same frame, no gain seen).
+
+A pane whose material is in `WaterRippleMaterials` reflects about its rippled
+normal in the camera's pane pass. A still bump map registers as one ripple with no
+drift and no fade (a host's bumped glass); the map's level of detail follows the
+ray's footprint, so a distant pane settles toward flat.
+
+Diagnostic views of the pass, by `SOLARIK_SHADER_DEFS`: `GLASS_VIEW_REFLECTION`
+(the panes' reflected light alone, as weighted), `GLASS_VIEW_MIRROR` (the reflected
+path's radiance unweighted), `GLASS_NO_REFLECTION`.
+
 ## Opaque interiors behind glass
 
 A ray-visible wall can be absent from the raster background when its material
@@ -423,3 +463,11 @@ or numerical equality. The analytic fixture is the quantitative glass evidence.
   objects are still drawn later and cannot interleave correctly with traced panes.
 - A single background DLSS guide cannot describe both reflection and transmission;
   moving reflections may ghost. Layer-aware reconstruction remains future work.
+- A pane's reflection of a lit surface is the world cache's irradiance there
+  (four cells' trimmed mean): no glossy highlights on reflected surfaces, and
+  detail finer than a cell (about 0.15 m at the finest level) is the surface's
+  base colour alone.
+- A pane's bump (its ripple entry) bends the camera's view of it only. A pane
+  seen in another reflection, or lit through, is flat.
+- The pane pass's cache reads are compiled without
+  `WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION`.

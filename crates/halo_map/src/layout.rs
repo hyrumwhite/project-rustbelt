@@ -3568,6 +3568,15 @@ pub mod shader_transparent_glass_definition {
     pub const REFLECTION_VIEW_PARALLEL_COLOR: usize = 0x9c;
     pub const DIFFUSE_MAP_SCALE: usize = 0x154;
     pub const DIFFUSE_MAP: usize = 0x158;
+    // (by hand, rasterizer_xbox_transparent_geometry.c's
+    // shader_transparent_glass_definition and its offset asserts)
+    pub const FLAGS: usize = 0x28;
+    pub const REFLECTION_TYPE: usize = 0x8a;
+    pub const REFLECTION_MAP: usize = 0xac;
+    pub const REFLECTION_BUMP_MAP_SCALE: usize = 0xbc;
+    pub const REFLECTION_BUMP_MAP: usize = 0xc0;
+    pub const DIFFUSE_DETAIL_MAP_SCALE: usize = 0x168;
+    pub const DIFFUSE_DETAIL_MAP: usize = 0x16c;
 }
 
 pub mod shader_transparent_water_definition {

@@ -11,20 +11,26 @@ fn main() {
         let Ok(Some(info)) = halo_map::shader::shader_info(&cache, reference) else { continue };
         let Some(glass) = info.glass else { continue };
         let name = |r: Option<halo_map::TagRef>| r.and_then(|r| r.datum).and_then(|d| cache.tag(d).ok()).map(|t| t.name.clone());
+        // (a bitmap's first image's format and size)
+        let format = |r: Option<halo_map::TagRef>| {
+            r.and_then(|r| r.datum)
+                .and_then(|d| halo_map::bitmap::bitmaps(&cache, d).ok())
+                .and_then(|b| b.first().map(|b| format!("{:?} {}x{}", b.format, b.width, b.height)))
+        };
         println!("{}: tint {:?} tint map {:?} diffuse map {:?} reflection perpendicular {:?} parallel {:?}", info.name, glass.tint, name(glass.tint_map), name(glass.diffuse_map), glass.reflection_perpendicular, glass.reflection_parallel);
-        // (and the rest of the definition, rasterizer_xbox_transparent_geometry.c's layout)
-        if let Ok(root) = cache.tag_root(tag.datum, tag.group) {
-            let reference = |offset| root.reference(offset).ok().and_then(|r| name(Some(r)));
-            println!(
-                "  flags {:#x} reflection type {} map {:?} bump map {:?} (scale {}) detail map {:?} (scale {})",
-                root.u16(0x28).unwrap_or(0),
-                root.i16(0x8a).unwrap_or(-1),
-                reference(0xac),
-                reference(0xc0),
-                root.f32(0xbc).unwrap_or(0.0),
-                reference(0x16c),
-                root.f32(0x168).unwrap_or(0.0)
-            );
-        }
+        println!(
+            "  flags {:#x} reflection type {} map {:?} bump map {:?} [{}] (scale {}) bumped {} diffuse scale {} detail map {:?} (scale {}) uv scale {:?}",
+            glass.flags,
+            glass.reflection_type,
+            name(glass.reflection_map),
+            name(glass.reflection_bump_map),
+            format(glass.reflection_bump_map).unwrap_or_default(),
+            glass.reflection_bump_map_scale,
+            glass.bumped_reflection(),
+            glass.diffuse_map_scale,
+            name(glass.diffuse_detail_map),
+            glass.diffuse_detail_map_scale,
+            info.uv_scale
+        );
     }
 }

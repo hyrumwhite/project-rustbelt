@@ -515,6 +515,35 @@ pub struct Glass {
     /// Reflection colour seen head-on and at grazing angles (RGBA).
     pub reflection_perpendicular: [f32; 4],
     pub reflection_parallel: [f32; 4],
+    /// `_shader_transparent_glass_flag_*` (bit 2 two-sided, bit 3 the bump
+    /// map a specular mask).
+    pub flags: u16,
+    /// 0 bumped cube map, 1 flat cube map, 2 dynamic mirror.
+    pub reflection_type: i16,
+    pub reflection_map: Option<TagRef>,
+    /// The reflection's bump map and its tiling over the texture
+    /// coordinates (as stored: 0 is the game's 0).
+    pub reflection_bump_map: Option<TagRef>,
+    pub reflection_bump_map_scale: f32,
+    /// The diffuse map's tiling (as stored), and the detail map that
+    /// multiplies it, with its own.
+    pub diffuse_map_scale: f32,
+    pub diffuse_detail_map: Option<TagRef>,
+    pub diffuse_detail_map_scale: f32,
+}
+
+impl Glass {
+    /// Whether the game bends the pane's reflection by its bump map: a
+    /// bumped cube map with a bump map that is not a specular mask, in a
+    /// reflection pass that is drawn (a cube map and some strength;
+    /// rasterizer_xbox_transparent_geometry.c's glass case).
+    pub fn bumped_reflection(&self) -> bool {
+        self.reflection_type == 0
+            && self.reflection_bump_map.is_some()
+            && self.flags & (1 << 3) == 0
+            && self.reflection_map.is_some()
+            && (self.reflection_perpendicular[3] > 0.0 || self.reflection_parallel[3] > 0.0)
+    }
 }
 
 /// `shader_transparent_water`.
@@ -890,6 +919,14 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
             diffuse_map: present(root.reference(g::DIFFUSE_MAP)?),
             reflection_perpendicular: argb(root, g::REFLECTION_VIEW_PERPENDICULAR_COLOR)?,
             reflection_parallel: argb(root, g::REFLECTION_VIEW_PARALLEL_COLOR)?,
+            flags: root.u16(g::FLAGS)?,
+            reflection_type: root.i16(g::REFLECTION_TYPE)?,
+            reflection_map: present(root.reference(g::REFLECTION_MAP)?),
+            reflection_bump_map: present(root.reference(g::REFLECTION_BUMP_MAP)?),
+            reflection_bump_map_scale: root.f32(g::REFLECTION_BUMP_MAP_SCALE)?,
+            diffuse_map_scale: root.f32(g::DIFFUSE_MAP_SCALE)?,
+            diffuse_detail_map: present(root.reference(g::DIFFUSE_DETAIL_MAP)?),
+            diffuse_detail_map_scale: root.f32(g::DIFFUSE_DETAIL_MAP_SCALE)?,
         });
         // (the diffuse map's scale, where it, not a tint map, is the pane's
         // texture: the meshes' coordinates take it)

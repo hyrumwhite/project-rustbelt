@@ -3008,6 +3008,36 @@ impl LevelBuilder {
         if layered && let Some(registry) = assets.glass_grime.as_deref_mut() {
             registry.0.insert(material.id());
         }
+        // (a bumped reflection, Halo's: its bump map as the pane's one still
+        // ripple, which Solarik bends the pane's reflection by; b40's
+        // circuits on the hallway glass. The game tiles it over the vertices'
+        // coordinates (a model's times its base map scale, which its
+        // vertices already carry) at its scale; the mesh's are already times
+        // the shader's uv scale. HALO_RT_NO_GLASS_BUMP=1 leaves them flat)
+        if let Some(glass) = info.glass.filter(shader::Glass::bumped_reflection)
+            && !std::env::var("HALO_RT_NO_GLASS_BUMP").is_ok_and(|v| v == "1")
+            && let Some(registry) = assets.water_ripples.as_deref_mut()
+            && let Some(datum) = glass.reflection_bump_map.and_then(|m| m.datum)
+            && let Some(map) = self.textures.permuted(&self.cache, datum, self.permutation, false, assets.images)
+        {
+            let scale = if glass.reflection_bump_map_scale == 0.0 { 1.0 } else { glass.reflection_bump_map_scale };
+            let flat = || assets.flat_normal.clone();
+            registry.0.insert(
+                material.id(),
+                bevy_solarik::water_ripples::WaterRipples {
+                    maps: [map, flat(), flat(), flat()],
+                    scale: scale / info.uv_scale[0].max(1e-4),
+                    drift: Vec2::ZERO,
+                    ripples: [Vec4::new(1.0, 0.0, 0.0, 1.0), Vec4::new(1.0, 0.0, 0.0, 0.0), Vec4::new(1.0, 0.0, 0.0, 0.0), Vec4::new(1.0, 0.0, 0.0, 0.0)],
+                    drifts: [Vec2::ZERO; 4],
+                    // (one level: water_ripple_normal never fades it)
+                    levels: 1.0,
+                    fade: 0.0,
+                    lod_bias: 0.0,
+                    size: bitmap_size(&self.cache, datum).map_or(crate::material::WATER_BUMPMAP_SIZE, |size| size.x),
+                },
+            );
+        }
         Some(material)
     }
 

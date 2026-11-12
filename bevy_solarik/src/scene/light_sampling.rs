@@ -211,4 +211,18 @@ mod tests {
         );
         assert_eq!(local_flux(Vec3::ZERO, 100.0, None), 0.0);
     }
+
+    #[test]
+    fn cone_past_the_horizon_flux_stays_positive() {
+        // A cone wider than a hemisphere (cosines negative): the same
+        // integral, more than a hemisphere's and less than the sphere's.
+        let (inner, outer) = (95f32.to_radians(), 97f32.to_radians());
+        let flux = local_flux(Vec3::ONE, 1.0, Some((inner, outer)));
+        let solid_angle = 2.0 * PI * (1.0 - inner.cos() + (inner.cos() - outer.cos()) / 3.0);
+        assert!((flux - f64::from(solid_angle)).abs() < 1e-6);
+        assert!(flux.is_finite() && flux > f64::from(2.0 * PI) && flux < f64::from(4.0 * PI));
+        // π, the whole sphere, is a point light's.
+        let whole = local_flux(Vec3::ONE, 1.0, Some((PI, PI)));
+        assert!((whole - local_flux(Vec3::ONE, 1.0, None)).abs() < 1e-5);
+    }
 }

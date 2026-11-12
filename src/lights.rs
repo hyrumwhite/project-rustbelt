@@ -28,7 +28,7 @@ use crate::{
     LightingSettings,
 };
 use bevy::{camera::visibility::NoFrustumCulling, platform::collections::HashMap, prelude::*};
-use bevy_solarik::scene::SolarikUnreflectedLight;
+use bevy_solarik::scene::{SolarikLightCone, SolarikUnreflectedLight};
 use halo_bridge::{Light, LIGHT_CONTRAIL, LIGHT_MUZZLE_FLASH, OBJECT_OUTSIDE_OF_MAP};
 use halo_map::{
     light_gel::{gel_beams, GelBeam},
@@ -169,6 +169,83 @@ const LIGHT_DIMMING: [(&str, f32); 13] = [
     // dimmer)
     ("vehicles\\ghost\\ghost bolt", 0.35),
 ];
+/// b40's door blinkers' light tag (see [`UPWARD_LIGHTS`]).
+const DOOR_BLINKER_LIGHT: &str = "levels\\b40\\scenery\\b40_doorblinker\\doorblinker";
+
+/// Lights that shine every way but down onto their own object, by tag
+/// ([`Upward`]): b40's door blinkers, its direction markers, sit a hand's
+/// breadth over the block before each door; as a sphere the light lit the
+/// block's top to white and flooded the floor, hiding the glyph (the user's
+/// captures; `HALO_RT_MARKER_POINT_LIGHT=1`, the old look); the glyph card
+/// alone (`crate::level`'s GLOWS_FOLLOWING_OBJECT) lit the walls hardly at
+/// all at any radiance short of thousands, where the original lights them
+/// brightly at the pulse's peak. So it shines in a cone about straight up,
+/// a little wider than the hemisphere: the walls and ceiling as the
+/// original's, the block dark, the floor faintly and by what the walls
+/// return. A plain hemisphere left the walls' base dark below the light's
+/// horizon, 15 to 20 cm, where the original lights them to the floor
+/// (`HALO_RT_MARKER_LIGHT_INNER=89 HALO_RT_MARKER_LIGHT_OUTER=89.4` is
+/// that). Lowered 5 cm to sit just clear of the block's top; its share 0.2
+/// by MCC's capture of the wall's pulse. (Tuning:
+/// `HALO_RT_MARKER_LIGHT=<share>`, 0 none, the card alone;
+/// `HALO_RT_MARKER_LIGHT_INNER=<degrees>`;
+/// `HALO_RT_MARKER_LIGHT_OUTER=<degrees>`;
+/// `HALO_RT_MARKER_LIGHT_RAISE=<metres>`; each read once.)
+const UPWARD_LIGHTS: [(&str, Upward); 1] = [(
+    DOOR_BLINKER_LIGHT,
+    Upward { inner: MARKER_LIGHT_INNER, outer: MARKER_LIGHT_OUTER, share: MARKER_LIGHT, raise: MARKER_LIGHT_RAISE },
+)];
+/// b40's door blinkers' soft inner angle (radians from straight up, 95
+/// degrees; see [`UPWARD_LIGHTS`]).
+const MARKER_LIGHT_INNER: f32 = 1.658;
+/// b40's door blinkers' outer angle (radians from straight up, 97 degrees,
+/// a little below the horizon: the walls' base; see [`UPWARD_LIGHTS`]).
+const MARKER_LIGHT_OUTER: f32 = 1.693;
+/// b40's door blinkers' share of a point light's brightness, by MCC's
+/// capture of the wall's pulse (see [`UPWARD_LIGHTS`]).
+const MARKER_LIGHT: f32 = 0.2;
+/// b40's door blinkers' raise (metres; see [`UPWARD_LIGHTS`]): the 5 cm
+/// sphere about 2 cm clear of the block's top, its horizon 12 cm over the
+/// object.
+const MARKER_LIGHT_RAISE: f32 = -0.05;
+
+/// A light shining every way but down: a cone about the world's up (a
+/// point light with a `SolarikLightCone`: Bevy's spot cones stop short of
+/// a hemisphere), soft from the inner angle to the outer, at a share of a
+/// point light's brightness, raised (or lowered) from the game's position
+/// in place of [`SMALL_LIGHTS`]' raise.
+#[derive(Clone, Copy, Debug)]
+struct Upward {
+    /// Where its softening starts from the up (radians).
+    inner: f32,
+    /// Where it ends from the up (radians; past the horizon, short of
+    /// straight down).
+    outer: f32,
+    /// Its share of a point light's brightness.
+    share: f32,
+    /// How far it is raised (metres, the world's up; negative lower).
+    raise: f32,
+}
+
+/// A light's upward cone, if it shines so (see [`UPWARD_LIGHTS`]): none in
+/// the old look (`crate::level::marker_point_light`). The outer angle at
+/// most straight down, the inner at most the outer.
+fn upward_light(name: &str) -> Option<Upward> {
+    type Tuned = (Option<f32>, Option<f32>, Option<f32>, Option<f32>);
+    static TUNED: std::sync::OnceLock<Tuned> = std::sync::OnceLock::new();
+    if crate::level::marker_point_light() {
+        return None;
+    }
+    let &(_, upward) = UPWARD_LIGHTS.iter().find(|(tag, _)| name.eq_ignore_ascii_case(tag))?;
+    let (inner, outer, share, raise) = *TUNED.get_or_init(|| {
+        let read = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<f32>().ok());
+        let angle = |name: &str| read(name).map(f32::to_radians);
+        (angle("HALO_RT_MARKER_LIGHT_INNER"), angle("HALO_RT_MARKER_LIGHT_OUTER"), read("HALO_RT_MARKER_LIGHT"), read("HALO_RT_MARKER_LIGHT_RAISE"))
+    });
+    let outer = outer.unwrap_or(upward.outer).clamp(0.0, std::f32::consts::PI);
+    let inner = inner.unwrap_or(upward.inner).clamp(0.0, outer);
+    Some(Upward { inner, outer, share: share.unwrap_or(upward.share), raise: raise.unwrap_or(upward.raise) })
+}
 
 /// Lights smaller than [`LIGHT_RADIUS`] (by the light tag's name), raised
 /// this much (metres, the world's up) to clear the ground they lie on: a
@@ -177,14 +254,17 @@ const LIGHT_DIMMING: [(&str, f32); 13] = [
 /// stick. a50's doors' lock lights are in each door's middle, and the door
 /// cut their spheres in half: a dark disc in a bright ring on the door.
 /// b40's door blinkers, white, pulsing, reaching 3 world units, sit a
-/// hand's breadth over the plate before each of its doors: the plate cut
+/// hand's breadth over the block before each of its doors: the block cut
 /// a dark disc round each, and the pulse flooded the white halls (play
 /// feedback: its "direction indicators" much too bright, with a "donut
-/// hole"); a twenty-fifth of the light, as the small sphere's.
+/// hole"); a twenty-fifth of the light, as the small sphere's. Since 12
+/// November a cone shining up from there, a little wider than the
+/// hemisphere (`UPWARD_LIGHTS`), the sphere with
+/// `HALO_RT_MARKER_POINT_LIGHT=1`.
 const SMALL_LIGHTS: [(&str, f32); 3] = [
     ("scenery\\baton\\baton light dynamic", 0.05),
     ("levels\\a50\\devices\\small door\\small door light", 0.05),
-    ("levels\\b40\\scenery\\b40_doorblinker\\doorblinker", 0.05),
+    (DOOR_BLINKER_LIGHT, 0.05),
 ];
 
 /// Whether a light tag's name is the dimmed one, or in the dimmed folder.
@@ -205,6 +285,8 @@ struct LightTag {
     dimming: f32,
     /// Its size, if small ([`SMALL_LIGHTS`]).
     small: Option<f32>,
+    /// Its upward cone, if it shines every way but down ([`UPWARD_LIGHTS`]).
+    upward: Option<Upward>,
 }
 
 pub struct DynamicLightsPlugin;
@@ -257,27 +339,45 @@ fn place_spot(
     now.insert(key, entity);
 }
 
-/// A point light's entity (as [`place_spot`]).
+/// The point lights' query: each one's cone, if it has one.
+type PointLights<'w, 's> =
+    Query<'w, 's, (&'static mut PointLight, &'static mut Transform, &'static mut Visibility, Option<&'static SolarikLightCone>), Without<SpotLight>>;
+
+/// A point light's entity (as [`place_spot`]), with its cone or none (a
+/// reused entity's given or taken away when it differs).
 #[allow(clippy::too_many_arguments)]
 fn place_point(
     commands: &mut Commands,
-    points: &mut Query<(&mut PointLight, &mut Transform, &mut Visibility), Without<SpotLight>>,
+    points: &mut PointLights,
     last: &mut HashMap<LightKey, Entity>,
     free: &mut Vec<Entity>,
     now: &mut HashMap<LightKey, Entity>,
     key: LightKey,
     light: PointLight,
     transform: Transform,
+    cone: Option<SolarikLightCone>,
 ) {
     let reused = last.remove(&key).or_else(|| free.pop());
     let entity = match reused.map(|entity| (entity, points.get_mut(entity))) {
-        Some((entity, Ok((mut light_component, mut light_transform, mut visibility)))) => {
+        Some((entity, Ok((mut light_component, mut light_transform, mut visibility, had)))) => {
             *light_component = light;
             *light_transform = transform;
             visibility.set_if_neq(Visibility::Inherited);
+            if had.copied() != cone {
+                match cone {
+                    Some(cone) => commands.entity(entity).insert(cone),
+                    None => commands.entity(entity).remove::<SolarikLightCone>(),
+                };
+            }
             entity
         }
-        _ => commands.spawn((Name::new("light"), light, transform, Visibility::Inherited, NoFrustumCulling, SolarikUnreflectedLight)).id(),
+        _ => {
+            let mut spawned = commands.spawn((Name::new("light"), light, transform, Visibility::Inherited, NoFrustumCulling, SolarikUnreflectedLight));
+            if let Some(cone) = cone {
+                spawned.insert(cone);
+            }
+            spawned.id()
+        }
     };
     now.insert(key, entity);
 }
@@ -287,7 +387,7 @@ fn sync_lights(
     link: Res<BridgeLink>,
     settings: Res<LightingSettings>,
     mut pools: ResMut<DynamicLights>,
-    mut points: Query<(&mut PointLight, &mut Transform, &mut Visibility), Without<SpotLight>>,
+    mut points: PointLights,
     mut spots: Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
     level: Option<Res<BridgeLevel>>,
     in_solid: Res<crate::bridge::LightsInSolid>,
@@ -384,6 +484,7 @@ fn sync_lights(
                 muzzle: name.is_some_and(|name| name.ends_with("muzzle flash")),
                 dimming: name.and_then(|name| LIGHT_DIMMING.iter().find(|(dimmed, _)| dimmed_by(name, dimmed))).map_or(1.0, |&(_, dimming)| dimming),
                 small: name.and_then(|name| SMALL_LIGHTS.iter().find(|(small, _)| name.eq_ignore_ascii_case(small))).map(|&(_, size)| size),
+                upward: name.and_then(upward_light),
             }
         });
         let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0 || tag.muzzle;
@@ -395,13 +496,15 @@ fn sync_lights(
         if std::env::var_os("HALO_RT_LIGHT_LOG").is_some() {
             let distance = snapshot.camera.as_ref().map(|c| Vec3::from(c.position).distance(Vec3::from(light.position)));
             info!(
-                "light at tick {}: position {:?} forward {:?} colour {:?} radius {} cutoff {:.1} falloff {:.1} deg, {distance:?} from the camera (forward {:?}), own {own} muzzle {muzzle} aimed by the camera {} tag {:#x} flags {:#x} object {:#x}",
+                "light at tick {}: position {:?} forward {:?} colour {:?} radius {} cutoff {:.1} falloff {:.1} deg, {distance:?} from the camera (forward {:?}), own {own} muzzle {muzzle} aimed by the camera {} upward {:?} tag {:#x} flags {:#x} object {:#x}",
                 snapshot.game_tick, light.position, light.forward, light.color, light.radius, light.cutoff_angle.to_degrees(), light.falloff_angle.to_degrees(),
-                snapshot.camera.as_ref().map(|c| c.forward), near_camera.is_some(), light.definition_index, light.definition_flags, light.object_index
+                snapshot.camera.as_ref().map(|c| c.forward), near_camera.is_some(), tag.upward, light.definition_index, light.definition_flags, light.object_index
             );
         }
-        // (dimmed to none: left out)
-        if tag.dimming <= 0.0 {
+        // (one shining upward: a point light's but for its cone)
+        let upward = tag.upward.filter(|_| !spot);
+        // (dimmed to none, or shining upward at no share: left out)
+        if tag.dimming <= 0.0 || upward.is_some_and(|upward| upward.share <= 0.0) {
             continue;
         }
         let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
@@ -425,20 +528,21 @@ fn sync_lights(
         } else if spot {
             SPOT_LIGHT_SCALE
         } else {
-            POINT_LIGHT_SCALE
+            POINT_LIGHT_SCALE * upward.map_or(1.0, |upward| upward.share)
         } * tag.dimming;
         let reach2 = if spot && !muzzle { light.radius * SPOT_REFERENCE_REACH } else { light.radius * light.radius };
         let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * reach2;
         let range = light.radius * METERS_PER_WORLD_UNIT * RANGE_PER_RADIUS;
         let radius = if spot { SPOT_RADIUS } else { tag.small.unwrap_or(LIGHT_RADIUS) };
-        let position = position + Vec3::Y * tag.small.map_or(0.0, |size| size * 1.2);
+        // (an upward light at its own height, the rest clear of the ground)
+        let position = position + Vec3::Y * upward.map_or_else(|| tag.small.map_or(0.0, |size| size * 1.2), |upward| upward.raise);
         let source = LightSource { power: radiance * sphere_lumens_per_radiance(radius) };
         let (color, intensity) = source.color_and_intensity(settings.emissive_scale);
         // a light shining every way through a gel of narrow discs: a spot
         // light along each, by the light's forward, left and up (the game
         // turns the gel with them), each as bright in its cone as the light
         // was there, by the gel
-        let beams = if spot {
+        let beams = if spot || upward.is_some() {
             &[][..]
         } else {
             gels.entry(light.definition_index)
@@ -502,15 +606,22 @@ fn sync_lights(
             // (a spot light shines along its -Z)
             let transform = Transform::from_translation(position).looking_to(forward, if forward.y.abs() > 0.99 { Vec3::X } else { Vec3::Y });
             place_spot(&mut commands, &mut spots, &mut last_spots, &mut pools.free_spots, &mut pools.spots, key(light), spot_light, transform);
+        } else if let Some(Upward { inner, outer, .. }) = upward {
+            // (a point light in a cone wider than a spot light's: Solarik's
+            // cone, along the transform's forward, its -Z, the world's up)
+            let point_light = PointLight { color, intensity, range, radius, shadow_maps_enabled: false, ..default() };
+            let transform = Transform::from_translation(position).looking_to(Vec3::Y, Vec3::X);
+            let cone = SolarikLightCone { inner, outer };
+            place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform, Some(cone));
         } else {
             let point_light = PointLight { color, intensity, range, radius, shadow_maps_enabled: false, ..default() };
             let transform = Transform::from_translation(position);
-            place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform);
+            place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform, None);
         }
     }
     // (the rest go dark, free for the lights to come)
     for (_, entity) in last_points {
-        if let Ok((_, _, mut visibility)) = points.get_mut(entity) {
+        if let Ok((_, _, mut visibility, _)) = points.get_mut(entity) {
             visibility.set_if_neq(Visibility::Hidden);
         }
         pools.free_points.push(entity);

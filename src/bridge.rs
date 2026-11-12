@@ -1019,10 +1019,17 @@ fn node_matrix(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy: &A
 pub struct DrawnBsp(pub Option<usize>);
 
 /// Whether the game's camera is in a cluster with no sky, where the game
-/// draws none (the camera's skybox goes dark, `crate::follow_camera_sky`).
+/// draws none, and whether the level's sky has no model and the fog pass
+/// draws the game's clear, the fog's colour, under the picture
+/// (`crate::fog`): either, the camera's skybox goes dark
+/// (`crate::follow_camera_sky`).
 #[derive(Resource, Default)]
 pub struct CameraSky {
     pub none: bool,
+    /// b40's: its dome's panes and the energy field behind them, with
+    /// nothing opaque beyond, had been painted over with the fog's colour,
+    /// the stand-in skybox under it (`HALO_RT_SKY_CLEAR_OVER=1` the old)
+    pub clear: bool,
 }
 
 /// The game's lights (by definition and object) in the solid of the BSP

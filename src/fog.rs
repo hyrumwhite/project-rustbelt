@@ -115,7 +115,9 @@ pub struct HaloFog {
     /// rgb, maximum density
     planar_color: Vec4,
     /// maximum distance and depth, the camera's density, 1 when the level's
-    /// sky has no model (the sky shows the atmospheric fog's colour)
+    /// sky has no model (the atmospheric fog's colour under the sky's
+    /// pixels' picture, the game's clear), 2 the same painted over it
+    /// ([`sky_clear_over`])
     planar: Vec4,
     /// the fog screen: rgb, mode (0 none, 1 added by depth, 2 blended)
     screen_color: Vec4,
@@ -249,6 +251,14 @@ pub fn no_fog_layers() -> Handle<ShaderBuffer> {
     NO_FOG_LAYERS.get().cloned().unwrap_or_default()
 }
 
+/// `HALO_RT_SKY_CLEAR_OVER=1`: a modelless sky's fog colour painted over
+/// its pixels, the old rule (b40's dome panes and the energy field behind
+/// them hidden), and the camera's stand-in skybox left lit under it.
+fn sky_clear_over() -> bool {
+    static OVER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OVER.get_or_init(|| std::env::var("HALO_RT_SKY_CLEAR_OVER").is_ok_and(|v| v == "1"))
+}
+
 /// The latest frame's fog onto the camera.
 fn follow_fog(
     mut commands: Commands,
@@ -263,6 +273,7 @@ fn follow_fog(
     viewer_water: Option<Res<ViewerWater>>,
     lit_fog: Option<Res<LitFog>>,
     mut ray_fog: ResMut<bevy_solarik::scene::SolarikRayFog>,
+    mut camera_sky: ResMut<crate::bridge::CameraSky>,
 ) {
     let (entity, current) = *camera;
     let Some(snapshot) = link.latest.as_ref() else { return };
@@ -279,7 +290,11 @@ fn follow_fog(
     // (whether the level's skies have no model: the game clears its picture
     // to the atmospheric fog's colour (rasterizer_window_begin), and with
     // no sky drawn over it that is the sky: b40's snowy white, where a blue
-    // stood in, flat, over its canyons; play feedback: the sky incomplete)
+    // stood in, flat, over its canyons; play feedback: the sky incomplete.
+    // The pass adds the colour under what was drawn there, the camera's
+    // skybox dark (CameraSky::clear): b40's dome, its panes and the energy
+    // field behind them, with nothing opaque beyond, were painted over with
+    // the fog's colour; HALO_RT_SKY_CLEAR_OVER=1 paints it over, the old)
     if let Some(level) = level.as_deref()
         && modelless_sky.as_ref().is_none_or(|(name, _)| *name != level.builder.stats.map_name)
     {
@@ -314,9 +329,19 @@ fn follow_fog(
                 *logged_water = Some(on_water);
             }
             fog.atmospheric.w = if viewer_water.is_some() && on_water { 1.0 } else { 0.0 };
-            fog.planar.w = if modelless { 1.0 } else { 0.0 };
+            fog.planar.w = match (modelless, sky_clear_over()) {
+                (false, _) => 0.0,
+                (true, false) => 1.0,
+                (true, true) => 2.0,
+            };
             fog
         });
+    // (the clear under the picture only with the fog on the camera: else the
+    // stand-in sky stays)
+    let clear = fog.is_some_and(|fog| fog.planar.w == 1.0);
+    if camera_sky.clear != clear {
+        camera_sky.clear = clear;
+    }
     // the same fog over what reflections see beyond their surfaces
     // (`HALO_RT_NO_RAY_FOG`: none, for comparison)
     let traced = fog.filter(|_| std::env::var_os("HALO_RT_NO_RAY_FOG").is_none()).map_or_else(Default::default, |fog| {

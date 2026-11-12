@@ -83,3 +83,4 @@ b40's dome from below (the level viewer, BSP 3, `--camera 45,50,80,90,45`), the 
 - The cube-map sheen above, if MCC's look is wanted over the room's own light.
 - Glass built by the game bridge for objects gets no bump registry (`src/bridge.rs` passes none). No object's glass has a bumped reflection in the maps checked.
 - The pane pass's cache reads do not use the first-bounce light-leak prevention the other passes may.
+- A transparent surface behind a pane is drawn over it and not tinted by it (12 November, b40's dome: the energy field `b40_shaftenergy` behind `b40_domeglass`, whose tint is 0.20, 0.26, 0.46, shows brighter and bluer-green than MCC's; the rest of that difference is the cube map's sheen above).

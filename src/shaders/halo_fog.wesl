@@ -22,7 +22,13 @@
 // (its maximum density 1), the game draws nothing past its maximum distance:
 // there the sky is fogged as a surface at that distance. And where the
 // level's sky has no model (b40's), the sky is the game's clear: the fog's
-// colour.
+// colour, under what was drawn there (the camera's skybox dark,
+// crate::follow_camera_sky), added in the display's encoding as the game
+// adds its additive surfaces over the clear. b40's dome: its panes and the
+// energy field behind them, with nothing opaque beyond, were painted over
+// with the fog's colour (HALO_RT_SKY_CLEAR_OVER=1 the old, painted over).
+// An alpha-blended or tinting surface there cannot darken the clear, added
+// after it: only the additive ones are exact.
 //
 // Where the picture holds the water (atmospheric.w), a surface under the fog
 // plane seen from above it was seen through the water's surface (the plane,
@@ -57,7 +63,8 @@ struct HaloFog {
     // rgb, maximum density
     planar_color: vec4<f32>,
     // maximum distance and depth (metres), the camera's density, 1 when the
-    // level's sky has no model
+    // level's sky has no model (the fog's colour under the picture), 2 the
+    // same painted over it (HALO_RT_SKY_CLEAR_OVER)
     planar: vec4<f32>,
     // the fog screen: rgb, and its mode (0 none, 1 added by depth, 2 blended)
     screen_color: vec4<f32>,
@@ -137,9 +144,13 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
     // the fog, against the sky, stood out bare)
     let opaque = fog.atmospheric_color.a >= 1.0 && fog.atmospheric.y > 0.0;
     // (the sky, where the level's has no model: the game clears its picture
-    // to the fog's colour, and draws no sky over it: b40's snowy white)
+    // to the fog's colour, and draws no sky over it: b40's snowy white; its
+    // panes and additive surfaces over the clear, so the colour is added
+    // under them, no coverage: b40's dome, its panes and the energy field
+    // behind them were painted over. 2: painted over, the old)
     if z <= 0.0 && !opaque && fog.planar.w > 0.5 {
-        result.fogged = vec4(fog.atmospheric_color.rgb, 1.0);
+        let over = select(0.0, 1.0, fog.planar.w > 1.5);
+        result.fogged = vec4(fog.atmospheric_color.rgb, over);
         return result;
     }
     if z <= 0.0 && !opaque {
@@ -243,7 +254,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     var encoded = srgb_encode(saturate(colour.rgb));
     var changed = false;
-    if fogged.a > 0.0 {
+    // (a modelless sky's clear adds its colour with no coverage)
+    if fogged.a > 0.0 || any(fogged.rgb > vec3(0.0)) {
         encoded = fogged.rgb + encoded * (1.0 - fogged.a);
         changed = true;
     }

@@ -25,7 +25,7 @@ mod tlas;
 mod types;
 
 use bevy_shader::load_shader_library;
-pub use binder::{LIGHT_TRIANGLE_TABLE_CAPACITY, RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSeenLights, SolarikSkyLight, SolarikUnreflectedLight};
+pub use binder::{LIGHT_TRIANGLE_TABLE_CAPACITY, RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSeenLights, SolarikLightCone, SolarikSkyLight, SolarikUnreflectedLight};
 pub use ray_settings::SolarikRaySettings;
 pub use types::{RaytracingMask, RaytracingMesh3d};
 
@@ -98,6 +98,7 @@ impl Plugin for RaytracingScenePlugin {
         app.init_resource::<SolarikRaySettings>();
         app.init_resource::<SolarikDeformableMeshes>();
         app.add_plugins(bevy_render::extract_component::ExtractComponentPlugin::<SolarikUnreflectedLight>::default());
+        app.add_plugins(bevy_render::extract_component::ExtractComponentPlugin::<SolarikLightCone>::default());
     }
 
     fn finish(&self, app: &mut App) {

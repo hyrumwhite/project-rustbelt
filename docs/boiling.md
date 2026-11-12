@@ -38,7 +38,7 @@ As of 4 November 2026. Gathered from ROADMAP.md (the "Indoor flicker" passes and
 
 These weren't boiling fixes. They do change which lights win samples:
 
-- **Dimmed lights that flooded rooms or stole samples** (`LIGHT_DIMMING`, `SMALL_LIGHTS`): c10's coloured door lights to 5% and its batons to half. The user had wondered whether the strong red lights caused the c10 floor-light boiling. a50's door locks to 1/12, b40's door blinkers to 1/25, sparks to a quarter, Guilty Spark to 0.15.
+- **Dimmed lights that flooded rooms or stole samples** (`LIGHT_DIMMING`, `SMALL_LIGHTS`): c10's coloured door lights to 5% and its batons to half. The user had wondered whether the strong red lights caused the c10 floor-light boiling. a50's door locks to 1/12, b40's door blinkers to 1/25 (12 November: a fifth of that again, in a cone about straight up, `UPWARD_LIGHTS`), sparks to a quarter, Guilty Spark to 0.15.
 - **Per-level light shares** (`LEVEL_DIMMING`, `HALO_RT_LEVEL_LIGHT`): Forerunner levels keep 40% of their lamps, and c10 is a tenth darker overall. Darker rooms make the remaining noise more visible relative to the signal.
 - **Raised emission for the rays only** (`EMITTER_LIGHT_GAINS`): Truth and Reconciliation's circuits and strips ×12 (later 3), a10's monitors ×16, c20's holograms ×6, its door cards ×4. Each of these gives weak emitters a larger share of samples. This is a per-shader workaround, not a general fix.
 

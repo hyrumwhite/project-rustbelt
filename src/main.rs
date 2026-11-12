@@ -1322,8 +1322,11 @@ fn apply_lighting(
 }
 
 /// The camera's skybox dark where the game's camera is in a cluster with no
-/// sky ([`bridge::CameraSky`]), as the game draws none there; the sky's light
-/// is left as it is.
+/// sky, as the game draws none there, or where the fog pass draws the game's
+/// clear under the picture of a level whose sky has no model (b40's)
+/// ([`bridge::CameraSky`]); the sky's light is left as it is. Again whenever
+/// a skybox changes or is put on anew (a level change's, `apply_lighting`'s
+/// brightness after a BSP switch), which came back lit.
 fn follow_camera_sky(
     settings: Res<LightingSettings>,
     level_sky: Res<LevelSky>,
@@ -1331,13 +1334,11 @@ fn follow_camera_sky(
     mut skyboxes: Query<&mut Skybox>,
 ) {
     let Some(camera_sky) = camera_sky else { return };
-    if !camera_sky.is_changed() && !settings.is_changed() {
-        return;
-    }
+    let refresh = camera_sky.is_changed() || settings.is_changed();
     let Some((_, power)) = level_sky.0.sky else { return };
-    let brightness = if camera_sky.none { 0.0 } else { power * settings.sky_scale };
+    let brightness = if camera_sky.none || camera_sky.clear { 0.0 } else { power * settings.sky_scale };
     for mut skybox in &mut skyboxes {
-        if skybox.brightness != brightness {
+        if (refresh || skybox.is_changed()) && skybox.brightness != brightness {
             skybox.brightness = brightness;
         }
     }

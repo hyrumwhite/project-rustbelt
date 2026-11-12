@@ -85,6 +85,48 @@ pub struct SolarikSkyLight {
 #[extract_app(bevy_render::RenderApp)]
 pub struct SolarikUnreflectedLight;
 
+/// A point or spot light that shines only within a cone about its
+/// transform's forward axis (a spot light's): full inside `inner`, falling
+/// to nothing at `outer` by the spot light's smooth step, `outer` anything
+/// up to π (π: every way, no cone). `bevy_pbr` holds a spot light's cone
+/// under a quarter turn; a light that must shine a little below its own
+/// horizon but not straight down (a floor lamp that should not burn the
+/// fitting it sits on) needs more. Put it on a `PointLight`: the light keeps
+/// its intensity (candela) inside the cone; on a spot light it replaces the
+/// spot's angles.
+#[derive(Component, ExtractComponent, Clone, Copy, Debug, PartialEq)]
+#[extract_app(bevy_render::RenderApp)]
+pub struct SolarikLightCone {
+    /// Where the falloff starts (radians from the forward axis).
+    pub inner: f32,
+    /// Where the light ends (radians from the forward axis, at most π).
+    pub outer: f32,
+}
+
+/// The smallest outer angle a [`SolarikLightCone`] is held to (radians).
+const LIGHT_CONE_MIN_OUTER: f32 = 1e-3;
+
+impl SolarikLightCone {
+    /// Its angles, sanitised: outer in (0, π], inner in [0, outer]; none if
+    /// either is not finite (the light as it would be without the cone).
+    fn angles(self) -> Option<(f32, f32)> {
+        if !self.inner.is_finite() || !self.outer.is_finite() {
+            return None;
+        }
+        let outer = self.outer.clamp(LIGHT_CONE_MIN_OUTER, PI);
+        Some((self.inner.clamp(0.0, outer), outer))
+    }
+}
+
+/// A local light's cone (inner, outer radians): its [`SolarikLightCone`]'s
+/// if it has a usable one, else the spot light's, else none.
+fn local_light_cone(
+    light: &ExtractedPointLight,
+    cone: Option<&SolarikLightCone>,
+) -> Option<(f32, f32)> {
+    cone.and_then(|cone| cone.angles()).or(light.spot_light_angles)
+}
+
 /// The lights in sight of the camera's place, by what the application knows
 /// of its level (a game's clusters and their visibility sets): their
 /// main-world entities (an emissive mesh's, or a point or spot light's).
@@ -459,8 +501,13 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     ),
     directional_lights_query: Query<(Entity, &ExtractedDirectionalLight)>,
     // Point and spot lights: bevy_pbr extracts both into ExtractedPointLight
-    // (spot_light_angles tells them apart).
-    local_lights_query: Query<(Entity, &ExtractedPointLight, Has<SolarikUnreflectedLight>)>,
+    // (spot_light_angles tells them apart; a SolarikLightCone overrides it).
+    local_lights_query: Query<(
+        Entity,
+        &ExtractedPointLight,
+        Has<SolarikUnreflectedLight>,
+        Option<&SolarikLightCone>,
+    )>,
     mesh_allocator: Res<MeshAllocator>,
     mut blas_manager: ResMut<BlasManager>,
     material_assets: Res<StandardMaterialAssets>,
@@ -560,7 +607,9 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             .collect(),
         local: local_lights_query
             .iter()
-            .map(|(entity, light, unreflected)| (entity, GpuLocalLight::new(light, unreflected)))
+            .map(|(entity, light, unreflected, cone)| {
+                (entity, GpuLocalLight::new(light, unreflected, cone))
+            })
             .collect(),
         sky: sky_light.image.as_ref().map(Handle::id),
         sky_intensity: sky_light.intensity,
@@ -1223,24 +1272,26 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     // Point and spot lights are sphere lights of the light's radius, in the
     // raster path's candela; a light that cannot light anything (no power)
     // is left out so it costs no candidates.
-    for (entity, local_light, unreflected) in &local_lights_query {
+    for (entity, local_light, unreflected, cone) in &local_lights_query {
         if local_light.intensity <= 0.0 || local_light.color == LinearRgba::BLACK {
             continue;
         }
         let local_lights = local_lights.get_mut();
         let local_light_id = local_lights.len() as u32;
 
-        local_lights.push(GpuLocalLight::new(local_light, unreflected));
+        // (a coned light as a spot light: its flux by its cone's solid angle)
+        let spot_angles = local_light_cone(local_light, cone);
+        local_lights.push(GpuLocalLight::new(local_light, unreflected, cone));
         light_fluxes.push(local_flux(
             local_light.color.to_vec3(),
             local_light.intensity,
-            local_light.spot_light_angles,
+            spot_angles,
         ));
         light_seen.push(seen(entity));
 
         light_sources
             .get_mut()
-            .push(if local_light.spot_light_angles.is_some() {
+            .push(if spot_angles.is_some() {
                 GpuLightSource::new_spot_light(local_light_id)
             } else {
                 GpuLightSource::new_point_light(local_light_id)
@@ -1933,12 +1984,19 @@ struct GpuLocalLight {
 }
 
 impl GpuLocalLight {
-    fn new(light: &ExtractedPointLight, unreflected: bool) -> Self {
+    fn new(
+        light: &ExtractedPointLight,
+        unreflected: bool,
+        cone: Option<&SolarikLightCone>,
+    ) -> Self {
         let radius = light.radius.max(LOCAL_LIGHT_MIN_RADIUS);
         let area = 4.0 * PI * radius * radius;
         let radiance = light.color.to_vec3() * (light.intensity / (PI * radius * radius));
-        let (cos_inner, cos_outer) = match light.spot_light_angles {
-            Some((inner, outer)) => (cos(inner), cos(outer)),
+        // (a SolarikLightCone in place of the spot's angles; π is -1
+        // exactly, no cone)
+        let cone_cos = |angle: f32| if angle >= PI { -1.0 } else { cos(angle) };
+        let (cos_inner, cos_outer) = match local_light_cone(light, cone) {
+            Some((inner, outer)) => (cone_cos(inner), cone_cos(outer)),
             None => (-1.0, -1.0),
         };
         Self {
@@ -2358,7 +2416,7 @@ mod tests {
         // L × area × cos / d² over the whole sphere, whose expectation on the
         // facing side is L × π r² / d² (a quarter of the area sees the
         // receiver on average), so L × area / 4 must equal I.
-        let light = GpuLocalLight::new(&extracted_light(800.0, 0.05, None), false);
+        let light = GpuLocalLight::new(&extracted_light(800.0, 0.05, None), false, None);
         let intensity = 800.0 / (4.0 * PI);
         assert_eq!(light.radius, 0.05);
         assert!((light.radiance.x * light.inverse_pdf / 4.0 - intensity).abs() < 1e-3);
@@ -2373,7 +2431,7 @@ mod tests {
     fn zero_radius_lights_get_the_floor_radius() {
         // glTF lights arrive with radius 0; the sphere must stay finite and
         // its photometry unchanged.
-        let light = GpuLocalLight::new(&extracted_light(800.0, 0.0, None), false);
+        let light = GpuLocalLight::new(&extracted_light(800.0, 0.0, None), false, None);
         assert_eq!(light.radius, LOCAL_LIGHT_MIN_RADIUS);
         let intensity = 800.0 / (4.0 * PI);
         assert!((light.radiance.x * light.inverse_pdf / 4.0 - intensity).abs() < 1e-3);
@@ -2384,7 +2442,7 @@ mod tests {
     fn spot_light_carries_its_cone_and_direction() {
         let inner = 0.3f32;
         let outer = 0.5f32;
-        let light = GpuLocalLight::new(&extracted_light(1000.0, 0.0, Some((inner, outer))), false);
+        let light = GpuLocalLight::new(&extracted_light(1000.0, 0.0, Some((inner, outer))), false, None);
         assert!((light.cos_outer - outer.cos()).abs() < 1e-6);
         assert!((light.cos_inner - inner.cos()).abs() < 1e-6);
         // The cone points along the transform's forward axis, as bevy_pbr.
@@ -2394,5 +2452,47 @@ mod tests {
         // becomes a spot).
         let intensity = 1000.0 / (4.0 * PI);
         assert!((light.radiance.x * light.inverse_pdf / 4.0 - intensity).abs() < 1e-3);
+    }
+
+    #[test]
+    fn coned_point_light_shines_past_its_horizon() {
+        let (inner, outer) = (95f32.to_radians(), 97f32.to_radians());
+        let plain = extracted_light(800.0, 0.05, None);
+        let cone = SolarikLightCone { inner, outer };
+        let light = GpuLocalLight::new(&plain, false, Some(&cone));
+        assert!((light.cos_inner - inner.cos()).abs() < 1e-6);
+        assert!((light.cos_outer - outer.cos()).abs() < 1e-6);
+        assert!(light.cos_inner < 0.0 && light.cos_outer < 0.0, "wider than a hemisphere");
+        assert!((light.direction - Vec3::NEG_Y).length() < 1e-5, "along the forward axis");
+        // The point light's brightness inside the cone.
+        let point = GpuLocalLight::new(&plain, false, None);
+        assert_eq!(light.radiance, point.radiance);
+        assert_eq!(light.inverse_pdf, point.inverse_pdf);
+        // It overrides a spot light's angles.
+        let spot = extracted_light(800.0, 0.05, Some((0.3, 0.5)));
+        assert_eq!(GpuLocalLight::new(&spot, false, Some(&cone)), light);
+        assert_eq!(local_light_cone(&plain, Some(&cone)), Some((inner, outer)));
+        // π is the whole sphere: no cone, to the shader.
+        let whole = SolarikLightCone { inner: PI, outer: PI };
+        let light = GpuLocalLight::new(&plain, false, Some(&whole));
+        assert_eq!(light.cos_outer, -1.0);
+        assert_eq!(light.cos_inner, -1.0);
+    }
+
+    #[test]
+    fn light_cone_is_sanitised() {
+        let angles = |inner, outer| SolarikLightCone { inner, outer }.angles();
+        assert_eq!(angles(2.0, 4.0), Some((2.0, PI)), "outer at most π");
+        assert_eq!(angles(1.0, 0.5), Some((0.5, 0.5)), "inner at most outer");
+        assert_eq!(angles(-1.0, -1.0), Some((0.0, LIGHT_CONE_MIN_OUTER)));
+        assert_eq!(angles(f32::NAN, 1.0), None);
+        assert_eq!(angles(0.5, f32::INFINITY), None);
+        // An unusable cone leaves the light as it was.
+        let plain = extracted_light(800.0, 0.05, None);
+        let bad = SolarikLightCone { inner: f32::NAN, outer: 1.0 };
+        assert_eq!(
+            GpuLocalLight::new(&plain, false, Some(&bad)),
+            GpuLocalLight::new(&plain, false, None)
+        );
     }
 }

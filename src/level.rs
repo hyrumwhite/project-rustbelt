@@ -35,15 +35,27 @@ use std::sync::Arc;
 /// shader's material, whose emissive [`animate_self_illumination`] sets
 /// every frame, the object's phase, and the object's change colours (as the
 /// game gives them, unstepped: a30's crashed lifepod's lights flicker by
-/// them).
+/// them). And a glowing surface whose light follows its object (see
+/// [`GLOWS_FOLLOWING_OBJECT`]): its own copy of the rays' material.
 #[derive(Component, Clone)]
 pub struct AnimatedSelfIllumination {
-    pub materials: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, shader::ModelSelfIlluminationAnimation)>,
+    pub materials: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, IlluminationAnimation)>,
     /// Each material's shader, which [`LevelBuilder::recolour`] colours in
     /// place.
     shaders: Vec<ShaderUse>,
     pub phase: f32,
     pub change_colors: [[f32; 3]; 4],
+}
+
+/// What moves an [`AnimatedSelfIllumination`]'s emissive: a model shader's
+/// self-illumination, or a glowing surface's light (see
+/// [`GLOWS_FOLLOWING_OBJECT`]): its radiance at full colour times its
+/// shader's first coloured stage colour as the object has it now, as its
+/// picture's (`animate_transparent`).
+#[derive(Clone, Copy)]
+pub enum IlluminationAnimation {
+    Model(shader::ModelSelfIlluminationAnimation),
+    Glow { stage: shader::StageColorAnimation, radiance: Vec3 },
 }
 
 /// A moving object's mesh whose material its change colours can make anew
@@ -157,12 +169,18 @@ pub fn animate_transparent(
 
 /// Each animated model shader's emissive: its colour between the bounds by
 /// its periodic function (rasterizer_xbox_models.c), times the object's
-/// change colour when it says, at the lighting's emissive scale.
+/// change colour when it says, at the lighting's emissive scale. A glow
+/// that follows its object, its stage colour with the object's functions
+/// and colours, at the emissive scale and the level's lamps' share, as
+/// `apply_lighting`'s emitters (which sets its full colour's at a change of
+/// the lighting, put right here the same frame).
 pub fn animate_self_illumination(
     time: Res<Time>,
     tables: Res<PeriodicTables>,
     settings: Res<crate::LightingSettings>,
-    objects: Query<&AnimatedSelfIllumination>,
+    stats: Res<LevelStats>,
+    active_bsp: Res<crate::ActiveBsp>,
+    objects: Query<(&AnimatedSelfIllumination, Option<&ObjectFunctions>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut raster_materials: ResMut<Assets<HaloEnvironmentMaterial>>,
 ) {
@@ -173,23 +191,39 @@ pub fn animate_self_illumination(
     };
     // (HALO_RT_FREEZE_ANIMATION, diagnostics: the glow as at the start)
     let seconds = if std::env::var_os("HALO_RT_FREEZE_ANIMATION").is_some() { 0.0 } else { time.elapsed_secs() };
-    for object in &objects {
+    // (the level's lamps' share, for the glows: see crate::LEVEL_LIGHTING)
+    let (_, lamps) = crate::level_lighting(&stats.map_name, active_bsp.0);
+    for (object, object_functions) in &objects {
         for (material, raster, animation) in &object.materials {
-            let phase = if animation.random_phase { object.phase } else { 0.0 };
-            let mut fraction = functions.periodic(animation.function, seconds / animation.period + phase);
             // (in steps: each change is two materials through the asset
             // pipeline and the binder's rows, and 70 flickering objects
             // changed every frame in the library; a 32nd of the glow's
             // range is below what the eye picks from a pulsing light)
             let steps = self_illumination_steps();
-            if steps > 0.0 {
-                fraction = (fraction * steps).round() / steps;
-            }
-            let mut color = Vec3::from(animation.lower) + (Vec3::from(animation.upper) - Vec3::from(animation.lower)) * fraction;
-            if let Some(source) = animation.color_source {
-                color *= Vec3::from(object.change_colors[source]).clamp(Vec3::ZERO, Vec3::ONE);
-            }
-            let radiance = color * SELF_ILLUMINATION_RADIANCE * settings.emissive_scale;
+            let radiance = match animation {
+                IlluminationAnimation::Model(animation) => {
+                    let phase = if animation.random_phase { object.phase } else { 0.0 };
+                    let mut fraction = functions.periodic(animation.function, seconds / animation.period + phase);
+                    if steps > 0.0 {
+                        fraction = (fraction * steps).round() / steps;
+                    }
+                    let mut color = Vec3::from(animation.lower) + (Vec3::from(animation.upper) - Vec3::from(animation.lower)) * fraction;
+                    if let Some(source) = animation.color_source {
+                        color *= Vec3::from(object.change_colors[source]).clamp(Vec3::ZERO, Vec3::ONE);
+                    }
+                    color * SELF_ILLUMINATION_RADIANCE * settings.emissive_scale
+                }
+                // (each channel in steps, as above)
+                IlluminationAnimation::Glow { stage, radiance } => {
+                    let values = object_functions.map(|f| &f.values);
+                    let [r, g, b, _] = stage.evaluate(values, Some(&object.change_colors), seconds, |f, t| functions.periodic(f, t));
+                    let mut color = Vec3::new(r, g, b).clamp(Vec3::ZERO, Vec3::ONE);
+                    if steps > 0.0 {
+                        color = (color * steps).round() / steps;
+                    }
+                    *radiance * color * settings.emissive_scale * lamps
+                }
+            };
             let emissive = LinearRgba::rgb(radiance.x, radiance.y, radiance.z);
             // (only when it changes: each change prepares the material
             // again, and a material changed every frame flickers)
@@ -363,15 +397,15 @@ const GLOW_LIGHT: f32 = 8.0;
 /// card casts (see [`LevelBuilder::weigh_emitter_maps`]).
 const EMITTER_MAP_SHARE: f32 = 0.85;
 /// Transparent radiosity emitters patterned by their cards (see
-/// [`LevelBuilder::emitter_map`]), by shader tag: b40's direction markers,
-/// pentagonal plates whose card is a lit outline, lit the plate and the
-/// floor round it to white at their animation's peak (play feedback, 9
-/// November). Every card is patterned by default since 11 November 2026,
-/// the look liked in play (the user's choice), though in the harness a
-/// little less steady than the whole surfaces and 0.1 to 0.26 ms dearer
-/// (10 November, refined, the invisible lights whole: c20's strip hall's
-/// stills 0.010 to 0.013, its index hall's noise 0.024 to 0.039, the
-/// shaft's stills 0.010 to 0.012). This list is what
+/// [`LevelBuilder::emitter_map`]), by shader tag: b40's yellow light cards,
+/// taken for its direction markers in play feedback of 9 November (the
+/// marker lit to white at its pulse's peak); the markers proper are its door
+/// blinker scenery (see [`GLOWS_FOLLOWING_OBJECT`]). Every card is patterned by
+/// default since 11 November 2026, the look liked in play (the user's choice),
+/// though in the harness a little less steady than the whole surfaces and 0.1
+/// to 0.26 ms dearer (10 November, refined, the invisible lights whole: c20's
+/// strip hall's stills 0.010 to 0.013, its index hall's noise 0.024 to 0.039,
+/// the shaft's stills 0.010 to 0.012). This list is what
 /// `HALO_RT_EMITTER_MAPS=listed` patterns, the default until then.
 const EMITTER_MAPPED: [&str; 1] = [r"levels\b40\shaders\b40_light_yellow"];
 /// A light card whose brightest texel is under this (linear luminance)
@@ -389,6 +423,26 @@ const GLOW_UNLIT: [&str; 5] = ["weapons\\", "effects\\", "sky\\", "vol", "levels
 /// an energy door's white map, whole, would light like the ship's own lamps
 /// (theirs are near 100; a hologram's, mostly dark, under 1).
 const GLOW_MOST: f32 = 8.0;
+/// Glowing surfaces whose light follows their object, by shader tag, and
+/// that light's radiance at full colour (white; in place of the glow's
+/// own, [`GLOW_MOST`] at most): each object's copy of the emitter its own
+/// material, its emissive this times the shader's first coloured stage
+/// colour as the object has it now ([`IlluminationAnimation::Glow`]), so
+/// it pulses and goes dark with its picture, each object on its own; the
+/// others' light keeps still. b40's direction markers, its door blinkers:
+/// the arrow-and-bar card lying on the block before each door, pulsing by
+/// its object's change colour A, carries the glyph; the object's game
+/// light, a sphere, lit the block's top to white and hid the card, and
+/// shines every way but down onto the block now, a cone about straight up
+/// a little wider than the hemisphere (`crate::lights`' `UPWARD_LIGHTS`):
+/// the walls lit to the floor, the block dark (play feedback, 12 November:
+/// a crisp glyph on a dark block, the walls lit, as in the original); the
+/// card alone lit the walls hardly at all. (Tuning: `HALO_RT_MARKER_GLOW=<radiance>`;
+/// `HALO_RT_MARKER_POINT_LIGHT=1`, the point light and the still glow as
+/// before.)
+const GLOWS_FOLLOWING_OBJECT: [(&str, f32); 1] = [(r"levels\b40\scenery\b40_doorblinker\doorblinker", MARKER_GLOW)];
+/// b40's door blinkers' light at full colour (see [`GLOWS_FOLLOWING_OBJECT`]).
+const MARKER_GLOW: f32 = 60.0;
 
 /// Light strips added to a level where it has none (play feedback): an
 /// emitting rectangle, level with the world's floor, facing up, in a BSP
@@ -454,6 +508,34 @@ const EMITTERS_BOTH_WAYS: [&str; 2] = ["levels\\c20\\shaders\\c20 light bright w
 /// masked surfaces.)
 fn light_only_emitters() -> bool {
     std::env::var("HALO_RT_LIGHT_ONLY_EMITTERS").map_or(true, |v| v.trim() != "0")
+}
+
+/// Whether b40's door blinkers keep their point light, a sphere, and their
+/// glow keeps still, as before (`HALO_RT_MARKER_POINT_LIGHT=1`; else the
+/// light shines in a cone about straight up, `crate::lights`'
+/// `UPWARD_LIGHTS`; see
+/// [`GLOWS_FOLLOWING_OBJECT`]). Read once.
+pub(crate) fn marker_point_light() -> bool {
+    static POINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *POINT.get_or_init(|| std::env::var("HALO_RT_MARKER_POINT_LIGHT").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// A glowing shader's light at full colour, if it follows its object (see
+/// [`GLOWS_FOLLOWING_OBJECT`]; `HALO_RT_MARKER_GLOW=<radiance>` for each,
+/// read once).
+fn followed_glow(shader: &str) -> Option<Vec3> {
+    static TUNED: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    if marker_point_light() {
+        return None;
+    }
+    let &(_, radiance) = GLOWS_FOLLOWING_OBJECT.iter().find(|(name, _)| shader.eq_ignore_ascii_case(name))?;
+    let tuned = *TUNED.get_or_init(|| std::env::var("HALO_RT_MARKER_GLOW").ok().and_then(|v| v.trim().parse().ok()));
+    Some(Vec3::splat(tuned.unwrap_or(radiance)))
+}
+
+/// A generic shader's first stage with a colour (as [`LevelBuilder::glow_radiance`]'s tint).
+fn first_coloured_stage(stages: &[shader::StageColorAnimation]) -> Option<shader::StageColorAnimation> {
+    stages.iter().find(|stage| (0..3).any(|c| stage.color0[c].max(stage.color1[c]) > 0.0)).copied()
 }
 
 /// Whether a shader's emitter lights both ways (see [`EMITTERS_BOTH_WAYS`]).
@@ -1478,17 +1560,17 @@ impl LevelBuilder {
     /// scaled or moved (one set of texture coordinates). Halo's radiosity
     /// took the shader's emitted light over the whole surface; here the
     /// card's own picture emits, and the surface round its shape goes dark:
-    /// b40's direction markers, pentagonal plates whose card is a lit
-    /// triangle, lit the plate and the floor round it to white at their
-    /// animation's peak (play feedback, 9 November: the light should fill
-    /// the triangle). The emission in the bright texels is the shader's
-    /// own, so the light cast falls by the map's mean. A black card
+    /// b40's yellow light cards (see [`EMITTER_MAPPED`]), a lit triangle on
+    /// a plate, taken for its direction markers (play feedback, 9 November:
+    /// the marker lit to white at its pulse's peak, the light should fill
+    /// the triangle; the markers proper are its door blinkers, see
+    /// [`GLOWS_FOLLOWING_OBJECT`]). The emission in the bright texels is the
+    /// shader's own, so the light cast falls by the map's mean. A black card
     /// ([`EMITTER_MAP_BLACK`]) patterns nothing: patterned, every invisible
     /// light went out (every card patterned, 10 November). Every card by
-    /// default. (Tuning: `HALO_RT_EMITTER_MAPS=0`, the whole surface as
-    /// before; `=listed`, the shaders of [`EMITTER_MAPPED`] alone; `=1`, every
-    /// card, as the default; `HALO_RT_EMITTER_MAPS_BLACK=1`, black cards
-    /// patterned too.)
+    /// default. (Tuning: `HALO_RT_EMITTER_MAPS=0`, the whole surface as before;
+    /// `=listed`, the shaders of [`EMITTER_MAPPED`] alone; `=1`, every card, as
+    /// the default; `HALO_RT_EMITTER_MAPS_BLACK=1`, black cards patterned too.)
     fn emitter_map(&mut self, info: &ShaderInfo, assets: &mut LevelAssets) -> Option<(u32, Handle<Image>)> {
         use shader::BlendFunction;
         // (every card; HALO_RT_EMITTER_MAPS=0 none, =listed the listed
@@ -1528,11 +1610,11 @@ impl LevelBuilder {
     /// shader's own radiance, so the light cast falls by the card's mean
     /// over the mesh (a lit triangle on a dark plate, a third); raised
     /// again so that the light cast is `EMITTER_MAP_SHARE` of the whole
-    /// surface's (play feedback, 9 November: the marker's light to fill its
-    /// triangle, or failing that 15% less of it). Once per level, before
-    /// the meshes are spawned: the surfaces are shared by shader. (Every
-    /// card patterned, the default: b40's corridor strips were 8 to 30% lit
-    /// over their meshes, gains 3 to 10.)
+    /// surface's (play feedback, 9 November, of the cards taken for b40's
+    /// direction markers: the light to fill the triangle, or failing that 15%
+    /// less of it). Once per level, before the meshes are spawned: the surfaces
+    /// are shared by shader. (Every card patterned, the default: b40's corridor
+    /// strips were 8 to 30% lit over their meshes, gains 3 to 10.)
     fn weigh_emitter_maps(&mut self, assets: &mut LevelAssets) -> halo_map::Result<()> {
         let share: f32 = std::env::var("HALO_RT_EMITTER_MAP_SHARE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(EMITTER_MAP_SHARE);
         let cache = self.cache.clone();
@@ -1615,6 +1697,9 @@ impl LevelBuilder {
             .find(|color| color.max_element() > 0.0)
             .map_or(Vec3::ONE, |color| color / color.max_element());
         let radiance = (mean * SELF_ILLUMINATION_RADIANCE * scale).min(Vec3::splat(GLOW_MOST)) * tint;
+        // (or its light at full colour, one that follows its object: see
+        // GLOWS_FOLLOWING_OBJECT)
+        let radiance = followed_glow(&info.name).unwrap_or(radiance);
         // (HALO_RT_GLOW_LOG: each, in the log)
         if std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
             info!("glowing surface {}: mean {mean:.4}, radiance {radiance:.3}", info.name);
@@ -2207,23 +2292,50 @@ impl LevelBuilder {
         let root = commands.spawn((Name::new(model.name.clone()), Transform::default(), Visibility::default())).id();
         // the shaders whose self-illumination animates: a copy of each one's
         // material for this object (its phase is its own)
-        let mut animated: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, shader::ModelSelfIlluminationAnimation)> =
-            Vec::new();
+        let mut animated: Vec<(Handle<StandardMaterial>, Option<Handle<HaloEnvironmentMaterial>>, IlluminationAnimation)> = Vec::new();
         let mut animated_shaders: Vec<ShaderUse> = Vec::new();
         let mut animated_by_shader: HashMap<ShaderUse, Surface> = HashMap::new();
         let mut animate = |builder: &mut Self, surface: Surface, shader: Option<ShaderUse>, assets: &mut LevelAssets| -> Surface {
             // a glowing surface's picture, as a transparent surface's below
-            // (its light, the rays', keeps still)
+            // (its light, the rays', keeps still, but one that follows its
+            // object: see GLOWS_FOLLOWING_OBJECT)
             if let (Surface::Solid(solid @ SolidSurface { unseen: true, seen_as: Some(material), .. }), Some(shader)) = (&surface, shader) {
                 if let Some(copy) = animated_by_shader.get(&shader) {
                     return copy.clone();
                 }
-                let Some(mut copy) = assets.transparent_materials.get(material).cloned() else { return surface };
-                if !copy.animation.as_ref().is_some_and(|a| a.uses_object()) && copy.meter.is_none() && copy.plasma.is_none() {
+                let seen_as = assets
+                    .transparent_materials
+                    .get(material)
+                    .filter(|copy| copy.animation.as_ref().is_some_and(|a| a.uses_object()) || copy.meter.is_some() || copy.plasma.is_some())
+                    .cloned()
+                    .map(|mut copy| {
+                        copy.object = Some(root);
+                        assets.transparent_materials.add(copy)
+                    });
+                // (its light: a copy of the rays' material, whose emissive
+                // animate_self_illumination sets by the object's colours)
+                let info = shader::shader_info(&builder.cache, TagRef { group: 0, datum: Some(shader.datum) }).ok().flatten();
+                let glow = info.as_ref().and_then(|info| {
+                    Some(IlluminationAnimation::Glow {
+                        radiance: followed_glow(&info.name)?,
+                        stage: first_coloured_stage(&info.transparent.as_ref()?.stage_colors)?,
+                    })
+                });
+                let standard = glow.and_then(|glow| {
+                    let material = assets.materials.get(&solid.standard)?.clone();
+                    let handle = assets.materials.add(material);
+                    animated.push((handle.clone(), None, glow));
+                    animated_shaders.push(shader);
+                    Some(handle)
+                });
+                if seen_as.is_none() && standard.is_none() {
                     return surface;
                 }
-                copy.object = Some(root);
-                let copy = Surface::Solid(SolidSurface { seen_as: Some(assets.transparent_materials.add(copy)), ..solid.clone() });
+                let copy = Surface::Solid(SolidSurface {
+                    standard: standard.unwrap_or_else(|| solid.standard.clone()),
+                    seen_as: seen_as.or_else(|| Some(material.clone())),
+                    ..solid.clone()
+                });
                 animated_by_shader.insert(shader, copy.clone());
                 return copy;
             }
@@ -2259,7 +2371,7 @@ impl LevelBuilder {
             let Some(material) = assets.materials.get(&solid.standard).cloned() else { return surface };
             let handle = assets.materials.add(material);
             let raster = solid.raster.as_ref().and_then(|raster| assets.environment_materials.get(raster).cloned()).map(|raster| assets.environment_materials.add(raster));
-            animated.push((handle.clone(), raster.clone(), animation));
+            animated.push((handle.clone(), raster.clone(), IlluminationAnimation::Model(animation)));
             animated_shaders.push(shader);
             let copy = Surface::Solid(SolidSurface { standard: handle, raster: raster.or(solid.raster.clone()), ..solid.clone() });
             animated_by_shader.insert(shader, copy.clone());

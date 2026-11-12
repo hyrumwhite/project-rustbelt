@@ -78,6 +78,11 @@ pub fn launch_game(
     if start_on_map {
         command.env("HALO_BEVY_BRIDGE_MAP", &scenario);
     }
+    // (no ticks after a map's load until the viewer's level is in place and
+    // it releases the hold, crate::reveal)
+    if crate::reveal::loading_hold() {
+        command.env("HALO_BEVY_BRIDGE_HOLD", "1");
+    }
     if let Some(simulation) = &simulation {
         let systems = if simulation.systems == "none" { "" } else { simulation.systems };
         command.env("HALO_RUST_SIMULATION", systems);
@@ -229,7 +234,8 @@ fn spawn_game_banner(mut commands: Commands) {
         },
         BackgroundColor(Color::srgba(0.55, 0.05, 0.05, 0.9)),
         Visibility::Hidden,
-        GlobalZIndex(100),
+        // (over the level's cover, crate::reveal)
+        GlobalZIndex(i32::MAX),
         children![(Text::default(), TextFont { font_size: FontSize::Px(16.0), ..default() }, TextColor(Color::WHITE))],
     ));
 }

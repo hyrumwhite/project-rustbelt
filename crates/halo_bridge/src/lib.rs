@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 53;
+pub const VERSION: u32 = 54;
 pub const SCREEN_TEXTURES: usize = 512;
 pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
 pub const TEXT_ATLAS_SIZE: usize = 2048;
@@ -561,6 +561,7 @@ struct Frame {
     screen_vertices: [ScreenVertex; SCREEN_VERTICES],
     screen_effect: ScreenEffect,
     breakable_surfaces: [u8; 32],
+    hold_generation: u32,
 }
 
 /// (Protocol 50) The screen effect over the first player's view of the
@@ -1309,7 +1310,11 @@ struct Shared {
     writer_process_id: u32,
     /// nonzero while the game's menus are up and take a pointer
     menus_pointer: u32,
-    reserved: [u32; 2],
+    /// (Protocol 54) The hold generation the viewer releases
+    /// ([`Bridge::release_hold`]): the game runs no ticks while its own
+    /// differs from this.
+    hold_released: u32,
+    reserved: u32,
     input: Input,
     gamepads: Gamepads,
     frames: [Frame; FRAMES],
@@ -1418,6 +1423,11 @@ pub struct Snapshot {
     /// (Protocol 51) Which of the structure BSP's breakable surfaces stand
     /// (bit i of byte i / 8): a material naming a broken one isn't drawn.
     pub breakable_surfaces: [u8; 32],
+    /// (Protocol 54) The map load the game holds for, running no ticks
+    /// until the viewer releases it ([`Bridge::release_hold`]): a nonzero
+    /// generation, bumped on each map load with `HALO_BEVY_BRIDGE_HOLD=1` in
+    /// the game's environment; 0 when it is not holding.
+    pub hold_generation: u32,
 }
 
 impl Snapshot {
@@ -1542,6 +1552,17 @@ impl Bridge {
         unsafe {
             std::ptr::write_volatile(&raw const (*self.shared).overlay_viewer_looked as *mut u32, now);
             std::ptr::write_volatile(&raw const (*self.shared).overlay_viewer_interval as *mut u32, interval_microseconds);
+        }
+        fence(Ordering::Release);
+    }
+
+    /// (Protocol 54) Releases the game's hold for a map load (its
+    /// [`Snapshot::hold_generation`]): the game starts running ticks once its
+    /// generation is the one written here.
+    pub fn release_hold(&mut self, generation: u32) {
+        // SAFETY: as in write_input; the game only reads this word
+        unsafe {
+            std::ptr::write_volatile(&raw const (*self.shared).hold_released as *mut u32, generation);
         }
         fence(Ordering::Release);
     }
@@ -2117,6 +2138,7 @@ impl Bridge {
                         .collect(),
                     screen_effect: std::ptr::read_volatile(&(*frame).screen_effect),
                     breakable_surfaces: std::ptr::read_volatile(&(*frame).breakable_surfaces),
+                    hold_generation: std::ptr::read_volatile(&(*frame).hold_generation),
                 };
                 fence(Ordering::Acquire);
                 if std::ptr::read_volatile(&(*frame).sequence) != sequence {

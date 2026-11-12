@@ -48,7 +48,7 @@ pub struct SavedSettings {
     pub show_stats: bool,
 }
 
-fn settings_path() -> Option<PathBuf> {
+pub(crate) fn settings_path() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("XDG_CONFIG_HOME"))?;
     Some(PathBuf::from(base).join("halo_rt").join("settings.txt"))
 }

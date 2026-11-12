@@ -52,6 +52,10 @@ short main_get_difficulty(
 boolean main_saving_map(
 	void);
 
+/* port: whether the main menu's map is the one loaded */
+boolean main_menu_scenario_loaded(
+	void);
+
 void main_save_cancel(
 	void);
 

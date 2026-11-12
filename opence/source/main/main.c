@@ -381,6 +381,7 @@ symbols in this file:
 #include "networking/network_server_manager.h" /* port: a co-op game's level won */
 #include "network_coop.h" /* port: port/linux/game/network_coop.c */
 #include "network_voice.h" /* port: port/linux/game/network_voice.c */
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 #include "camera/director.h"
 #include "camera/observer.h"
 #include "cutscene/cinematics.h"
@@ -926,6 +927,14 @@ boolean main_saving_map(
 	void)
 {
 	return main_globals.saving_map;
+}
+
+/* port: whether the main menu's map (levels\ui\ui) is the one loaded
+(port/linux/game/bevy_bridge.c) */
+boolean main_menu_scenario_loaded(
+	void)
+{
+	return main_globals.main_menu_scenario_loaded;
 }
 
 void main_save_cancel(
@@ -3341,6 +3350,7 @@ void main_loop(
 	void)
 {
 	boolean render_frame;
+	boolean bevy_bridge_holding;
 	long connection;
 
 	if (!game_in_editor())
@@ -3457,6 +3467,7 @@ void main_loop(
 		event_manager_update();
 		telnet_console_process();
 
+		bevy_bridge_holding = FALSE;
 		if (!shell_application_is_paused())
 		{
 			render_frame = TRUE;
@@ -3539,6 +3550,15 @@ void main_loop(
 					if (halo_interpolation_enabled())
 						render_frame = main_globals.main_menu_scenario_loaded || main_globals.halt_time_scale;
 					render_frame &= !game_engine_running() || game_time_get()>=3;
+					/* port: while the Bevy renderer holds the new map's ticks
+					(port/linux/game/bevy_bridge.c), frames are drawn and
+					exported all the same, interpolation or not: without
+					interpolation none would be until a tick had run, and the
+					renderer, which learns of the map from the exported
+					frames, would never release the hold */
+					bevy_bridge_holding = bevy_bridge_hold_ticks();
+					if (bevy_bridge_holding)
+						render_frame = TRUE;
 
 					collision_log_continue_period(1);
 					director_update((real)main_globals.halt_time_scale*main_globals.seconds_elapsed);
@@ -3573,6 +3593,16 @@ void main_loop(
 			if (render_frame && !debug_no_drawing)
 			{
 				main_present_frame();
+			}
+
+			/* port: while the Bevy renderer holds the new map's ticks, nobody
+			sees these frames (the renderer only reads them to learn of the
+			map), and drawn as fast as they go (it runs the game without
+			vsync) they would take a core and GPU time from the shaders it
+			is compiling: about 10 ms back each pass */
+			if (bevy_bridge_holding)
+			{
+				Sleep(10);
 			}
 		}
 

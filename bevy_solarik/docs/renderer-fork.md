@@ -36,6 +36,22 @@ which Bevy's pass spans also require. The atmosphere capture audit checks that
 moving-generation and environment-filter spans are present before accepting
 performance totals.
 
+## Pipelines waited for, and pipelines wanted at once
+
+`PipelineCache::block_on_render_pipeline` creates the pipeline it waits for on the
+waiting thread. Upstream queues it on the async compute pool and blocks: with a
+hundred pipelines queued at startup, the heavy compute ones among them, the view's
+upscaling blit (waited for by `prepare_view_upscaling_pipelines`) stood about 31 s
+behind them with the main thread blocked and the window frozen. A pool task that
+has already finished is used; one that has not is dropped.
+`SOLARIK_BLOCKED_PIPELINE_QUEUED=1` restores the queued wait.
+
+`PipelineCache::create_immediately(label)` marks pipelines, by their descriptor's
+label, to be created on the thread that processes the queue instead of on the
+pool. It is for what must be drawable while the pool is busy: an application's
+loading indicator registers `ui_pipeline` from `RenderStartup`. Each such pipeline
+costs its compile on that frame.
+
 ## Missing geometry during asynchronous loading
 
 The CPU-visible entity list is sorted by **main-world entity**. Its old lookup

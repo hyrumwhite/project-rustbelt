@@ -112,6 +112,7 @@ struct game_time_globals_struct
 static struct game_time_globals_struct *game_time_globals;
 
 #include "hs_game_fields.h" /* port: port/linux/game */
+#include "bevy_bridge.h" /* port: port/linux/game/bevy_bridge.c */
 
 /* port: the speed the Rust port's game_speed sets (hs_runtime_port_game_fields) */
 void game_time_port_game_fields(
@@ -143,6 +144,9 @@ void game_time_initialize_for_new_map(
 	match_assert("c:\\halo\\SOURCE\\game\\game_time.c", 131, game_time_globals && !game_time_globals->initialized);
 	memset(game_time_globals, 0, sizeof(*game_time_globals));
 	game_time_globals->initialized = TRUE;
+	/* port: the Bevy renderer's hold on the new map's ticks
+	(port/linux/game/bevy_bridge.c) */
+	bevy_bridge_note_map_load();
 
 	return;
 }
@@ -384,6 +388,19 @@ void game_time_update(
 		long connection;
 		long ticks_elapsed;
 		real ticks_per_second = game_time_globals->speed*TICKS_PER_SECOND;
+
+		/* port: no game time passes while the Bevy renderer is still
+		compiling its shaders and loading the level after a map load: the
+		map's opening cutscene must not play unseen behind its cover
+		(port/linux/game/bevy_bridge.c). No tick and no game_frame; the
+		frames are still drawn and exported, which is how the renderer
+		learns of the map and releases the hold. */
+		if (bevy_bridge_hold_ticks())
+		{
+			game_time_globals->last_local_time_elapsed = 0;
+			game_time_globals->leftover_dt = 0;
+			return;
+		}
 
 		/* The native builds draw several frames per tick
 		(port/linux/game/render_interpolation.c). A frame that runs no tick has

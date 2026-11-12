@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 53
+#define BEVY_BRIDGE_VERSION 54
 #define BEVY_BRIDGE_SCREEN_TEXTURES 512
 #define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
 #define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
@@ -609,6 +609,10 @@ struct bevy_bridge_frame
 	(bit i of byte i / 8 set): a structure material naming one that is
 	broken is not drawn (structure_render.c) */
 	unsigned char breakable_surfaces[32];
+	/* (protocol 54) nonzero while the game holds its ticks after a map load,
+	waiting for the viewer to write this value into the header's
+	hold_released; 0 when it is not holding */
+	unsigned long hold_generation;
 };
 
 /* what the renderer's window receives, for the game to read as its own */
@@ -1278,7 +1282,10 @@ struct bevy_bridge_shared
 	/* nonzero while the game's menus are up and take a mouse pointer: the
 	renderer then frees its cursor and forwards its place (input.pointer) */
 	unsigned long menus_pointer;
-	unsigned long reserved[2];
+	/* (protocol 54) written by the viewer: the hold generation it has
+	released (bevy_bridge_frame.hold_generation) */
+	unsigned long hold_released;
+	unsigned long reserved;
 	struct bevy_bridge_input input;
 	struct bevy_bridge_gamepads gamepads;
 	struct bevy_bridge_frame frames[BEVY_BRIDGE_FRAMES];

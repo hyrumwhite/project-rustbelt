@@ -228,6 +228,15 @@ pub struct PipelineCache {
     /// If `true`, disables asynchronous pipeline compilation.
     /// This has no effect on macOS, wasm, or without the `multi_threaded` feature.
     pub(crate) synchronous_pipeline_compilation: bool,
+    /// The pipeline [`PipelineCache::block_on_render_pipeline`] is waiting
+    /// for, created on the waiting thread rather than queued on the pool.
+    urgent: Option<usize>,
+    /// `SOLARIK_BLOCKED_PIPELINE_QUEUED=1`: a pipeline waited for is queued
+    /// on the pool behind the rest, as upstream does.
+    blocked_pipeline_queued: bool,
+    /// The labels of pipelines created on the thread that processes the
+    /// queue rather than on the pool ([`PipelineCache::create_immediately`]).
+    create_immediately: HashSet<Cow<'static, str>>,
     /// If `true`, the shader cache needs to be repopulated from the main world's `Assets<Shader>`.
     needs_shader_reload: bool,
 }
@@ -283,6 +292,9 @@ impl PipelineCache {
             pipelines: default(),
             global_shader_defs,
             synchronous_pipeline_compilation,
+            urgent: None,
+            create_immediately: default(),
+            blocked_pipeline_queued: std::env::var("SOLARIK_BLOCKED_PIPELINE_QUEUED").is_ok_and(|v| v == "1"),
             needs_shader_reload: true,
         }
     }
@@ -382,10 +394,63 @@ impl PipelineCache {
         }
     }
 
+    /// Creates the pipelines labelled `label` on the thread that processes
+    /// the queue rather than on the async compute pool, as they are queued.
+    ///
+    /// For pipelines that must be drawable while the pool is busy: at
+    /// startup the pool compiles a hundred pipelines for about a minute, and
+    /// a loading indicator queued behind them shows only once most of that
+    /// is over. Each such pipeline costs its compile on that thread's frame.
+    pub fn create_immediately(&mut self, label: impl Into<Cow<'static, str>>) {
+        self.create_immediately.insert(label.into());
+    }
+
+    /// Whether the pipeline `id`, labelled `label`, is created on this
+    /// thread: compilation is synchronous, it is awaited, or its label asks.
+    fn create_here(&self, id: CachedPipelineId, label: Option<&Cow<'static, str>>) -> bool {
+        self.synchronous_pipeline_compilation
+            || self.urgent == Some(id)
+            || label.is_some_and(|label| self.create_immediately.contains(label))
+    }
+
     /// Wait for a render pipeline to finish compiling.
+    ///
+    /// The pipeline is created on this thread, not queued on the async
+    /// compute pool: at startup the pool holds a hundred pipelines, the
+    /// heavy compute ones among them, and the view's upscaling blit (waited
+    /// for by `prepare_view_upscaling_pipelines`) waited about 31 s behind
+    /// them with the main thread blocked and the window frozen. A task
+    /// already started on the pool for it is used if it has finished, and
+    /// otherwise dropped and the pipeline created here.
+    /// (`SOLARIK_BLOCKED_PIPELINE_QUEUED=1`: queued and waited for, as
+    /// upstream.)
     #[inline]
     pub fn block_on_render_pipeline(&mut self, id: CachedRenderPipelineId) {
-        if self.pipelines.len() <= id.id() {
+        if !self.blocked_pipeline_queued {
+            let id = id.id();
+            self.urgent = Some(id);
+            if self.pipelines.len() <= id {
+                self.process_queue();
+            }
+            // (process_pipeline takes the pipeline apart from the cache, as
+            // process_queue does)
+            let mut pipelines = mem::take(&mut self.pipelines);
+            let cached_pipeline = &mut pipelines[id];
+            if let CachedPipelineState::Creating(task) = &mut cached_pipeline.state {
+                cached_pipeline.state = match bevy_tasks::futures::check_ready(task) {
+                    Some(Ok(pipeline)) => CachedPipelineState::Ok(pipeline),
+                    Some(Err(err)) => CachedPipelineState::Err(err),
+                    // (the task dropped: cancelled if it hasn't started, its
+                    // result discarded if it has)
+                    None => CachedPipelineState::Queued,
+                };
+            }
+            if matches!(cached_pipeline.state, CachedPipelineState::Queued) {
+                self.process_pipeline(cached_pipeline, id);
+            }
+            self.pipelines = pipelines;
+            self.urgent = None;
+        } else if self.pipelines.len() <= id.id() {
             self.process_queue();
         }
 
@@ -538,6 +603,7 @@ impl PipelineCache {
         id: CachedPipelineId,
         descriptor: RenderPipelineDescriptor,
     ) -> CachedPipelineState {
+        let create_here = self.create_here(id, descriptor.label.as_ref());
         let device = self.device.clone();
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
@@ -651,7 +717,7 @@ impl PipelineCache {
                     device.create_render_pipeline(&descriptor),
                 ))
             },
-            self.synchronous_pipeline_compilation,
+            create_here,
         )
     }
 
@@ -660,6 +726,7 @@ impl PipelineCache {
         id: CachedPipelineId,
         descriptor: ComputePipelineDescriptor,
     ) -> CachedPipelineState {
+        let create_here = self.create_here(id, descriptor.label.as_ref());
         let device = self.device.clone();
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
@@ -713,7 +780,7 @@ impl PipelineCache {
                     device.create_compute_pipeline(&descriptor),
                 ))
             },
-            self.synchronous_pipeline_compilation,
+            create_here,
         )
     }
 
@@ -722,6 +789,7 @@ impl PipelineCache {
         id: CachedPipelineId,
         descriptor: MeshPipelineDescriptor,
     ) -> CachedPipelineState {
+        let create_here = self.create_here(id, descriptor.label.as_ref());
         let device = self.device.clone();
         let shader_cache = self.shader_cache.clone();
         let layout_cache = self.layout_cache.clone();
@@ -851,7 +919,7 @@ impl PipelineCache {
                     device.create_mesh_pipeline(&descriptor),
                 ))
             },
-            self.synchronous_pipeline_compilation,
+            create_here,
         )
     }
     /// Process the pipeline queue and create all pending pipelines if possible.

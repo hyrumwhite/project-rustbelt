@@ -48,6 +48,9 @@ comes from the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c).
 #include "bevy_bridge_protocol.h"
 
 boolean unit_animation_enhanced(long unit_index); /* units.c */
+boolean game_engine_running(void); /* game_engine.c */
+boolean main_menu_scenario_loaded(void); /* main.c */
+unsigned long system_milliseconds(void); /* cseries_windows.h */
 
 #include <stdlib.h>
 #include <string.h>
@@ -91,6 +94,15 @@ static boolean bevy_bridge_lights_overflow_logged;
 
 /* the overlay buffer being filled, or NONE */
 static long bevy_bridge_overlay_buffer = NONE;
+
+/* the hold after a map load (bevy_bridge_hold_ticks): its generation, 0
+before any map; when it began (system_milliseconds); and whether it was
+given up. Outside the game state, so that a saved game restored over the
+new map's state keeps it */
+#define BEVY_BRIDGE_HOLD_GIVE_UP_MILLISECONDS 600000UL
+static unsigned long bevy_bridge_hold_generation;
+static unsigned long bevy_bridge_hold_start_milliseconds;
+static boolean bevy_bridge_hold_given_up;
 
 /* ---------- private code */
 
@@ -461,6 +473,9 @@ static struct bevy_bridge_shared *bevy_bridge_get(void)
 	bevy_bridge_shared->version = BEVY_BRIDGE_VERSION;
 	bevy_bridge_shared->writer_process_id = bevy_bridge_platform_process_id();
 	bevy_bridge_shared->latest_frame = 0;
+	/* (a viewer's release from an earlier game sharing this name released
+	nothing of this one's) */
+	bevy_bridge_shared->hold_released = 0;
 	bevy_bridge_shared->overlay_enabled = config_boolean("game.bevy_bridge_overlay") != 0;
 	/* last, so a reader that sees the magic sees the rest */
 	__atomic_store_n(&bevy_bridge_shared->magic, BEVY_BRIDGE_MAGIC, __ATOMIC_RELEASE);
@@ -652,6 +667,7 @@ void bevy_bridge_export_frame(
 
 	frame->frame_index = ++bevy_bridge_frame_index;
 	frame->game_tick = (unsigned long)game_time_get();
+	frame->hold_generation = bevy_bridge_hold_ticks() ? bevy_bridge_hold_generation : 0;
 	frame->structure_bsp_index = global_structure_bsp_index;
 	memset(frame->scenario_name, 0, sizeof(frame->scenario_name));
 	if (global_scenario_index != NONE)
@@ -922,6 +938,55 @@ void bevy_bridge_export_frame(
 	__atomic_thread_fence(__ATOMIC_RELEASE);
 	__atomic_store_n(&frame->sequence, (frame->sequence | 1) + 1, __ATOMIC_RELAXED);
 	__atomic_store_n(&shared->latest_frame, buffer, __ATOMIC_RELEASE);
+}
+
+void bevy_bridge_note_map_load(void)
+{
+	bevy_bridge_hold_generation++;
+	if (!bevy_bridge_hold_generation)
+		bevy_bridge_hold_generation = 1;
+	bevy_bridge_hold_start_milliseconds = system_milliseconds();
+	bevy_bridge_hold_given_up = FALSE;
+}
+
+/* The viewer compiles its shaders and loads the level for many seconds
+behind a black cover, and the game would play on unseen meanwhile (the
+opening cutscenes ran 30 seconds and more before the picture appeared): with
+HALO_BEVY_BRIDGE_HOLD set, a local campaign game runs no ticks after a map
+load until the viewer writes the frames' hold generation into
+hold_released, so the cutscene starts at tick 0 as the cover lifts. Never a
+network game or a film, nor the main menu's map; given up after ten minutes
+in case the viewer never answers. */
+boolean bevy_bridge_hold_ticks(void)
+{
+	static int hold = -1;
+	struct bevy_bridge_shared *shared;
+	unsigned long released;
+
+	if (hold < 0)
+	{
+		char const *value = getenv("HALO_BEVY_BRIDGE_HOLD");
+
+		hold = value && *value && strcmp(value, "0") != 0;
+	}
+	if (!hold || !bevy_bridge_hold_generation || bevy_bridge_hold_given_up)
+		return FALSE;
+	shared = bevy_bridge_get();
+	if (!shared)
+		return FALSE;
+	released = __atomic_load_n(&shared->hold_released, __ATOMIC_ACQUIRE);
+	if (released == bevy_bridge_hold_generation)
+		return FALSE;
+	if (game_connection() != _game_connection_local || game_engine_running() || main_menu_scenario_loaded())
+		return FALSE;
+	if (system_milliseconds() - bevy_bridge_hold_start_milliseconds > BEVY_BRIDGE_HOLD_GIVE_UP_MILLISECONDS)
+	{
+		bevy_bridge_hold_given_up = TRUE;
+		platform_log("bevy bridge: the viewer did not release the hold %lu in %lu seconds; the game runs on",
+			bevy_bridge_hold_generation, BEVY_BRIDGE_HOLD_GIVE_UP_MILLISECONDS / 1000);
+		return FALSE;
+	}
+	return TRUE;
 }
 
 boolean bevy_bridge_overlay_enabled(void)

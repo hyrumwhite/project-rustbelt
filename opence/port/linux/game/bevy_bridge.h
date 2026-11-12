@@ -20,6 +20,14 @@ void bevy_bridge_export_frame(
 	struct render_window const *windows,
 	short window_count);
 
+/* game_time_initialize_for_new_map: a map was loaded, so the game holds its
+ticks until the viewer has the level in place (HALO_BEVY_BRIDGE_HOLD) */
+void bevy_bridge_note_map_load(void);
+/* game_time_update and main_loop: TRUE while the game should run no ticks,
+the viewer still compiling its shaders and loading the level after a map
+load; frames are still rendered and exported */
+boolean bevy_bridge_hold_ticks(void);
+
 /* a model the game draws by itself, posed and coloured (its change colours,
 or NULL; first_person_weapons.c): shared with the next frame */
 void bevy_bridge_record_model(

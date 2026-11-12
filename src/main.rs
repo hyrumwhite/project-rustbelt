@@ -1088,6 +1088,7 @@ fn follow_level(
     mut params: LevelAssetParams,
     mut failed: Local<Option<String>>,
     mut reset: ResMut<ResetHistory>,
+    mut unloadable: ResMut<reveal::UnloadableMap>,
 ) {
     let Some(snapshot) = &link.latest else { return };
     let map = snapshot.map_name();
@@ -1101,11 +1102,14 @@ fn follow_level(
             // (the old level stays; the game plays on)
             error!("the game changed to {}, which can't be loaded: {e}", snapshot.scenario_name);
             *failed = Some(map.to_string());
+            // (a hold the game keeps for it is released at once)
+            unloadable.0 = Some(map.to_string());
             return;
         }
     };
     info!("the game changed level: {} -> {}", stats.map_name, snapshot.scenario_name);
     *failed = None;
+    unloadable.0 = None;
     reset.0 = true;
     commands.entity(root.0).despawn();
     objects.clear();

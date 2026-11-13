@@ -325,6 +325,21 @@ normal in the camera's pane pass. A still bump map registers as one ripple with 
 drift and no fade (a host's bumped glass); the map's level of detail follows the
 ray's footprint, so a distant pane settles toward flat.
 
+A pixel traces one reflected path however many panes it crosses: each pane offers
+its reflection (`offer_reflection`), one is kept by weighted reservoir sampling, and
+its path is weighted by the offers' summed luminance over its own. The first offer
+is always kept. Bevy's `rand_f` returned 1.0 or a little over for one call in about
+two million, the test `rand_f * sum < luminance` then failed where the sum is the
+first offer's own, nothing was chosen, and the pass traced a zeroed surface and
+weighted it by 0 times infinity: one NaN pixel, which DLSS-RR's history spread into
+a black region that grew with movement until it covered the view (13 November
+2026, a camouflaged first person on a host's level; 5 of 5 runs black, none with
+any one of the guards). The pass now traces only a chosen reflection, and a pixel
+whose result is not finite keeps the radiance it came in with, or black.
+`SOLARIK_SHADER_DEFS=GLASS_UNGUARDED` restores the pass's old offer test, condition
+and unguarded store; `RAND_F_UNBOUNDED` restores the unclamped `rand_f` (see
+renderer-fork.md). Both together are the old shader.
+
 Diagnostic views of the pass, by `SOLARIK_SHADER_DEFS`: `GLASS_VIEW_REFLECTION`
 (the panes' reflected light alone, as weighted), `GLASS_VIEW_MIRROR` (the reflected
 path's radiance unweighted), `GLASS_NO_REFLECTION`.

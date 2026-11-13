@@ -35,6 +35,7 @@ import bevy_solarik::realtime::realtime_bindings::depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::constants;
 import bevy_solarik::realtime::realtime_bindings::primary_background;
+import bevy_solarik::scene::sampling::is_finite_f32;
 @if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::resolve_dlss_rr_textures::resolve_background_guides;
 import bevy_pbr::render::utils::rand_f;
 import bevy_render::maths::PI;
@@ -55,11 +56,26 @@ var<private> reflection_surface: ResolvedGPixel;
 var<private> reflection_distance: f32;
 var<private> reflection_wi: vec3f;
 
+// (the first offer is always kept, the random number still drawn: rand_f
+// at or over 1, one call in two million, failed the test where the sum is
+// the offer's own, nothing was chosen and the entry traced a zeroed surface
+// and weighted it 0 times infinity, one NaN pixel, which DLSS Ray
+// Reconstruction's history spread into a black region that grew with
+// movement until it covered the view; seen 13 November 2026 with the first
+// person camouflaged on a50. The entry traces only a chosen reflection and
+// guards its store. SOLARIK_SHADER_DEFS=GLASS_UNGUARDED the old, all three;
+// RAND_F_UNBOUNDED the old rand_f, bevy_pbr's utils.wesl)
 fn offer_reflection(weight: vec3f, surface: ResolvedGPixel, distance: f32, wi: vec3f, rng: ptr<function, u32>) {
     let luminance = dot(weight, vec3(0.2126, 0.7152, 0.0722));
     if luminance <= 0.0 { return; }
     reflection_sum += luminance;
-    if rand_f(rng) * reflection_sum < luminance {
+@if(GLASS_UNGUARDED) {
+    let chosen = rand_f(rng) * reflection_sum < luminance;
+}
+@if(!(GLASS_UNGUARDED)) {
+    let chosen = rand_f(rng) * reflection_sum < luminance || reflection_luminance <= 0.0;
+}
+    if chosen {
         reflection_luminance = luminance;
         reflection_weight = weight;
         reflection_surface = surface;
@@ -90,13 +106,20 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
     forest_set_seed(vec2u(id.x+id.y*u32(view.main_pass_viewport.z),constants.frame_index^0x71478d15u));
     let background = textureLoad(view_output, id.xy);
     reflection_sum = 0.0;
+    reflection_luminance = 0.0;
     var radiance = composite_primary_glass(id.xy, origin, direction, distance, background.rgb / view.exposure, background_point, &rng);
     // (diagnostics, SOLARIK_SHADER_DEFS: GLASS_VIEW_REFLECTION the panes'
     // reflected light alone, as weighted; GLASS_VIEW_MIRROR the reflected
     // path's radiance unweighted, a mirror's; GLASS_NO_REFLECTION none)
     var reflection = vec3(0.0);
 @if(!(GLASS_NO_REFLECTION)) {
-    if reflection_sum > 0.0 {
+@if(GLASS_UNGUARDED) {
+    let reflection_chosen = reflection_sum > 0.0;
+}
+@if(!(GLASS_UNGUARDED)) {
+    let reflection_chosen = reflection_sum > 0.0 && reflection_luminance > 0.0;
+}
+    if reflection_chosen {
         let reflected = trace_glossy_path(id.xy, reflection_surface, reflection_distance, reflection_wi, 1.0, true, &rng);
         reflection = reflection_weight * (reflection_sum / reflection_luminance) * reflected;
 @if(GLASS_VIEW_MIRROR) {
@@ -109,6 +132,18 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 @if(!(GLASS_VIEW_REFLECTION || GLASS_VIEW_MIRROR)) {
     radiance = vec4(radiance.rgb + reflection, radiance.a);
+}
+    // (no non-finite value into the picture: the pixel as it came, else
+    // black; see offer_reflection)
+@if(!(GLASS_UNGUARDED)) {
+    if !(is_finite_f32(radiance.r) && is_finite_f32(radiance.g) && is_finite_f32(radiance.b)) {
+        let incoming = background.rgb / view.exposure;
+        if is_finite_f32(incoming.r) && is_finite_f32(incoming.g) && is_finite_f32(incoming.b) {
+            radiance = vec4(incoming, radiance.a);
+        } else {
+            radiance = vec4(vec3(0.0), radiance.a);
+        }
+    }
 }
     textureStore(view_output, id.xy, vec4(radiance.rgb * view.exposure, background.a));
 @if(DLSS_RR_GUIDE_BUFFERS) {

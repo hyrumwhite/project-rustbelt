@@ -24,6 +24,20 @@ The complete NVIDIA SDK 310.9.1 is required by dlss_wgpu 6. The earlier Bistro
 measurements below describe the historical visibility fix, not new migration
 captures. Current source/runtime receipts must verify the accepted checkout.
 
+## A random float below one
+
+Bevy PBR's `rand_f` (`vendor/bevy_pbr/src/render/utils.wesl`) multiplies a 32-bit
+word by `bitcast<f32>(0x2f800004u)`, 2^-32 times (1 + 2^-21), so the top 2176 of
+the 2^32 words gave 1.0 to 1.0000005 where its comment promised [0, 1]. A weighted
+choice `rand_f() * sum < weight` could then refuse its first candidate; Solarik's
+camera pane pass did so about once in two million pixels, wrote NaN, and DLSS-RR
+spread it into a black region that covered the view (glass.md). The result is now
+held at 0.99999994, the largest f32 below 1 (`min`); every other value and the
+state's sequence are unchanged, and `rand_vec2f` follows. The vendored file uses
+WESL `@if`: `SOLARIK_SHADER_DEFS=RAND_F_UNBOUNDED` restores the unclamped return
+for Solarik's pipelines; Bevy's own pipelines that import it never set the
+definition and take the clamp.
+
 ## GPU preparation diagnostics
 
 Atmosphere and generated environment maps encode work during the outer

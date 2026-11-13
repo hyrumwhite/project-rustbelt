@@ -16,11 +16,24 @@ fn rand_u(state: ptr<function, u32>) -> u32 {
     return (word >> 22u) ^ word;
 }
 
-/// Generates a random f32 in range [0, 1.0].
+/// Generates a random f32 in range [0, 1.0).
+///
+/// (Solarik: the constant is 2^-32 times (1 + 2^-21), so the top 2176 of the
+/// 2^32 words gave 1.0 to 1.0000005, about one call in two million; they are
+/// held at 0.99999994, the largest f32 below 1, every other value and the
+/// state's sequence as upstream. A `rand_f() * sum < w` choice could fail its
+/// first candidate: the camera's pane pass left a pixel's reflection
+/// unchosen and wrote NaN, 13 November 2026. SOLARIK_SHADER_DEFS=RAND_F_UNBOUNDED
+/// the old, unclamped; pipelines that never set it get the clamp)
 fn rand_f(state: ptr<function, u32>) -> f32 {
     *state = *state * 747796405u + 2891336453u;
     let word = ((*state >> ((*state >> 28u) + 4u)) ^ *state) * 277803737u;
+@if(RAND_F_UNBOUNDED) {
     return f32((word >> 22u) ^ word) * bitcast<f32>(0x2f800004u);
+}
+@if(!(RAND_F_UNBOUNDED)) {
+    return min(f32((word >> 22u) ^ word) * bitcast<f32>(0x2f800004u), 0.99999994);
+}
 }
 
 /// Generates a random vec2<f32> where each value is in range [0, 1.0].

@@ -94,8 +94,13 @@ fn scene_consumers_compose_across_production_feature_variants() {
             // (the glass switches, each alone: the old reflected path, the
             // grime's near side alone, the reflection diagnostics, the
             // reflection's and the grime's single-cell cache reads, every
-            // layer of a first-person camouflage)
+            // layer of a first-person camouflage, the pane pass unguarded and
+            // rand_f unclamped, and the two together)
             if consumer == "realtime::primary_glass" || consumer == "realtime::specular_gi" {
+                let mut old_definitions = stage_definitions.clone();
+                old_definitions.push("GLASS_UNGUARDED".into());
+                old_definitions.push("RAND_F_UNBOUNDED".into());
+                graph.validate(&module, &old_definitions);
                 for name in [
                     "GLASS_REFLECTION_PATHS",
                     "GLASS_GRIME_ONE_SIDED",
@@ -105,6 +110,8 @@ fn scene_consumers_compose_across_production_feature_variants() {
                     "GLASS_REFLECTION_ONE_CELL",
                     "GLASS_GRIME_SPREAD",
                     "CAMOUFLAGE_ALL_LAYERS",
+                    "GLASS_UNGUARDED",
+                    "RAND_F_UNBOUNDED",
                 ] {
                     let mut glass_definitions = stage_definitions.clone();
                     glass_definitions.push(name.into());

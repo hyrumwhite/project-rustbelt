@@ -39,7 +39,9 @@ import bevy_solarik::scene::thin_glass::thin_glass_weights;
 import bevy_solarik::scene::thin_glass::sample_thin_glass;
 import bevy_solarik::scene::thin_glass::offset_thin_glass_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::emitted_radiance;
-import bevy_solarik::scene::raytracing_scene_bindings::trace_glass_ray;
+import bevy_solarik::scene::raytracing_scene_bindings::trace_glass_ray_seeing;
+import bevy_solarik::scene::raytracing_scene_bindings::RAY_MASK_REFLECTED;
+import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_REFLECTED_GLOW;
 import bevy_solarik::scene::raytracing_scene_bindings::materials;
 import bevy_solarik::scene::raytracing_scene_bindings::material_ids;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_ALPHA_BLEND;
@@ -386,6 +388,14 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
     var glass_interactions = 0u;
     var delta_reflection = false;
     var analytic_owned = primary_surface.material.roughness <= SPECULAR_GI_FOR_DI_ROUGHNESS_THRESHOLD;
+    // (the first ray alone, leaving the reflecting surface, meets the glows
+    // only reflections see (RaytracingMask::REFLECTED: Cortana's hologram,
+    // which no other ray meets); one it meets adds its emission and the ray
+    // goes on through it, as Halo adds her picture over what is behind her,
+    // her far side unseen. `glow_t`: the way to it, for the first hit's fog.
+    // With none in the scene the first ray's mask meets nothing more)
+    var sees_reflected_glows = true;
+    var glow_t = 0.0;
 
 @if(DLSS_RR_GUIDE_BUFFERS) {
     var mirror_rotations = reflection_matrix(primary_surface.world_normal);
@@ -395,11 +405,12 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
     // Three opaque bounces; thin panes have their own bounded budget.
     for (var i = 0u; i < 3u;) {
         // Trace ray
-        let ray = trace_glass_ray(ray_origin, wi, RAY_T_MIN, ray_max_distance());
+        let ray = trace_glass_ray_seeing(ray_origin, wi, RAY_T_MIN, ray_max_distance(), select(0u, RAY_MASK_REFLECTED, sees_reflected_glows));
+        sees_reflected_glows = false;
         if first_ray {
             first_ray = false;
             if !scene_hit_is_miss(ray) {
-                *first_hit = vec4(ray_origin + wi * ray.t, ray.t);
+                *first_hit = vec4(ray_origin + wi * ray.t, glow_t + ray.t);
             }
         }
         radiance += throughput * analytic_light_radiance(ray_origin, wi,
@@ -419,6 +430,20 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
         let ray_hit = resolve_ray_hit_full(ray);
 }
         let material = scene_hit_material(ray);
+        // (a glow only reflections see: its light, whole (it is no light
+        // source, which NEE could have found), and on through it; the first
+        // hit is what lies beyond)
+        if (material.flags & MATERIAL_FLAG_REFLECTED_GLOW) != 0u {
+            radiance += throughput * emitted_radiance(ray_hit.material, -wi);
+            if glass_interactions >= 32u { break; }
+            glass_interactions += 1u;
+            glow_t += ray.t;
+            first_ray = true;
+            *first_hit = vec4(0.0);
+            ray_origin = offset_thin_glass_ray(ray_hit.world_position,
+                ray_hit.geometric_world_normal, wi, RAY_T_MIN);
+            continue;
+        }
         if (material.flags & MATERIAL_FLAG_DIFFUSE_BLEND) != 0u {
 @if(DLSS_RR_GUIDE_BUFFERS) {
             psr_finished = true;

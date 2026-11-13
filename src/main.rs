@@ -15,6 +15,7 @@
 
 mod bridge;
 mod bundle;
+mod camera_cuts;
 mod clusters;
 mod cpu_times;
 mod combiners;
@@ -522,6 +523,9 @@ fn main() -> AppExit {
                 }
             }
         }
+    } else if lights::TestLights::asked() {
+        // (the level viewer: the test lights alone, as the game's would be)
+        app.add_plugins(lights::DynamicLightsPlugin);
     }
     if let Some(game_process) = game_process {
         app.insert_resource(game_process);
@@ -562,29 +566,66 @@ fn main() -> AppExit {
 #[derive(Resource, Default)]
 pub struct ResetHistory(pub bool);
 
-/// A camera that moved this far in a frame (metres) cut; or turned this far
-/// (radians): a cutscene's next shot, a respawn, a teleport, the free camera
-/// taken or given back. Moving the fastest vehicle or turning the fastest
-/// flick goes a small part of either in a frame.
-const CUT_DISTANCE: f32 = 3.0;
-const CUT_ANGLE: f32 = std::f32::consts::FRAC_PI_4;
-
 /// Drops the lighting's temporal history (Solarik's reservoirs and world
 /// cache, the pathtracer's accumulation, DLSS's past frames) at a camera
 /// cut or when `ResetHistory` asks: reprojected, they would ghost the old
-/// view into the new for a moment.
+/// view into the new for a moment. A cut is a jump out of line with the
+/// camera's recent motion ([`camera_cuts`]), so a fast flight's steps (The
+/// Maw's intro, 5 to 8 metres a game tick) keep the history; the fixed
+/// distance alone as before with `HALO_RT_CUT_DISTANCE_ONLY=1`.
+/// (`HALO_RT_CUT_LOG=1`: a line for every cut, and for every step past the
+/// fixed distance that was let through)
 fn reset_history_on_cuts(
     mut reset: ResMut<ResetHistory>,
-    mut last: Local<Option<(Vec3, Vec3)>>,
+    mut detector: Local<Option<camera_cuts::CutDetector>>,
+    time: Res<Time<Real>>,
     camera: Single<(&Transform, Option<&mut SolarikLighting>, Option<&mut Pathtracer>), With<Camera3d>>,
     #[cfg(feature = "dlss")] mut dlss: Query<&mut Dlss<DlssRayReconstructionFeature>, With<Camera3d>>,
 ) {
+    static CUT_LOG: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("HALO_RT_CUT_LOG").is_some());
     let (transform, lighting, pathtracer) = camera.into_inner();
-    let now = (transform.translation, *transform.forward());
-    let cut = last.is_some_and(|(position, forward)| {
-        position.distance(now.0) > CUT_DISTANCE || forward.angle_between(now.1) > CUT_ANGLE
-    });
-    *last = Some(now);
+    let detector = detector.get_or_insert_with(|| camera_cuts::CutDetector::new(std::env::var_os("HALO_RT_CUT_DISTANCE_ONLY").is_some()));
+    let step = detector.step(transform.translation, *transform.forward(), time.delta_secs());
+    let cut = step.is_some_and(|step| step.cut.is_some());
+    // (which allowance stood)
+    let allowance = |step: &camera_cuts::Step| {
+        if step.allowed <= camera_cuts::CUT_DISTANCE {
+            "the fixed distance"
+        } else if step.by_step >= step.by_speed {
+            "the longest recent step"
+        } else {
+            "the recent speed"
+        }
+    };
+    if *CUT_LOG && let Some(step) = step {
+        if let Some(rule) = step.cut {
+            info!(
+                "camera cut ({rule:?}): stepped {:.2} m (allowed {:.2} by {}; recent speed {:.1} m/s allowing {:.2}, longest recent step {:.2} m allowing {:.2}), turned {:.1} degrees",
+                step.distance,
+                step.allowed,
+                allowance(&step),
+                step.speed,
+                step.by_speed,
+                step.longest,
+                step.by_step,
+                step.angle.to_degrees()
+            );
+        } else if step.distance > camera_cuts::CUT_DISTANCE {
+            info!(
+                "camera step let through: stepped {:.2} m past the fixed {:.1} (allowed {:.2} by {}; recent speed {:.1} m/s allowing {:.2}, longest recent step {:.2} m allowing {:.2}{}), turned {:.1} degrees",
+                step.distance,
+                camera_cuts::CUT_DISTANCE,
+                step.allowed,
+                allowance(&step),
+                step.speed,
+                step.by_speed,
+                step.longest,
+                step.by_step,
+                if step.carried_on { ", going on as the last cut's step" } else { "" },
+                step.angle.to_degrees()
+            );
+        }
+    }
     if !cut && !reset.0 {
         return;
     }
@@ -694,6 +735,9 @@ fn load_level(
     params: &mut LevelAssetParams,
 ) {
     let level_sky = sky::SkyLighting::from_map(&cache, &cache.header.name);
+    // (HALO_RT_TEST_LIGHT: lights as if the game had sent them, their tags
+    // looked up in this map)
+    commands.insert_resource(lights::TestLights::from_env(&cache));
     let cache = std::sync::Arc::new(cache);
     // (covered until it is in place)
     commands.queue(|world: &mut World| {
@@ -1196,7 +1240,10 @@ const LEVEL_DIMMING: [(&str, f32); 1] = [
 /// - The Forerunner structures, lit inside by their own light strips, are
 ///   darker within (play feedback: a30's bridge room bright from its
 ///   door); the sun lights them outside.
-const LEVEL_LIGHTING: [(&str, Option<usize>, f32, f32); 7] = [
+/// - The Maw's interior lights are down a fifth (play feedback of 13
+///   November); The Pillar of Autumn, whose shaders and lights it shares,
+///   keeps its own as they are.
+const LEVEL_LIGHTING: [(&str, Option<usize>, f32, f32); 8] = [
     ("a50", Some(0), 0.12, 0.2),
     ("a30", None, 1.0, FORERUNNER_LAMPS),
     ("b30", None, 1.0, FORERUNNER_LAMPS),
@@ -1204,25 +1251,60 @@ const LEVEL_LIGHTING: [(&str, Option<usize>, f32, f32); 7] = [
     ("c10", None, 1.0, FORERUNNER_LAMPS),
     ("c20", None, 1.0, FORERUNNER_LAMPS),
     ("c40", None, 1.0, FORERUNNER_LAMPS),
+    ("d40", None, 1.0, D40_LAMPS),
 ];
 /// The Forerunner levels' lamps' share (see [`LEVEL_LIGHTING`]).
 const FORERUNNER_LAMPS: f32 = 0.4;
+/// The Maw's lamps' share (see [`LEVEL_LIGHTING`]; `HALO_RT_LAMPS=d40:1`
+/// the old).
+const D40_LAMPS: f32 = 0.8;
+
+/// The maps whose animated model glows (flickering, pulsing model lamps:
+/// `crate::level::animate_self_illumination`) take their lamps' share, as
+/// their still glows do: The Maw's, dimmed with the rest of its lamps. The
+/// other levels' keep the full light, as their looks were accepted with it
+/// (their share left to the still glows and fixtures).
+/// `HALO_RT_MODEL_ILLUMINATION_FULL_LAMPS=1`: none, as before.
+const MODEL_GLOWS_TAKING_LAMPS: &[&str] = &["d40"];
+
+/// Whether a map's animated model glows take its lamps' share (see
+/// [`MODEL_GLOWS_TAKING_LAMPS`]); the switch read once.
+pub(crate) fn model_glows_take_lamps(map: &str) -> bool {
+    static FULL: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("HALO_RT_MODEL_ILLUMINATION_FULL_LAMPS").is_some());
+    !*FULL && MODEL_GLOWS_TAKING_LAMPS.iter().any(|name| map.eq_ignore_ascii_case(name))
+}
 
 /// A level's (ambient, lamps) light in a BSP (see [`LEVEL_LIGHTING`]).
-/// (tuning: `HALO_RT_LEVEL_LIGHT=ambient,lamps` for any level)
+/// (tuning: `HALO_RT_LEVEL_LIGHT=ambient,lamps` for any level, which wins;
+/// `HALO_RT_LAMPS=<map>:<share>[,<map>:<share>...]` the lamps' share of the
+/// maps named, the ambient left as the table has it: `HALO_RT_LAMPS=d40:1`
+/// The Maw's lamps as they were)
 fn level_lighting(map: &str, bsp: Option<usize>) -> (f32, f32) {
-    let tuned = std::env::var("HALO_RT_LEVEL_LIGHT").ok().and_then(|text| {
+    use std::sync::LazyLock;
+    // (read once: this runs every frame)
+    static TUNED: LazyLock<Option<(f32, f32)>> = LazyLock::new(|| {
+        let text = std::env::var("HALO_RT_LEVEL_LIGHT").ok()?;
         let (ambient, lamps) = text.split_once(',')?;
         Some((ambient.trim().parse().ok()?, lamps.trim().parse().ok()?))
     });
-    tuned
-        .or_else(|| {
-            LEVEL_LIGHTING
-                .iter()
-                .find(|(name, only, _, _)| map.eq_ignore_ascii_case(name) && only.is_none_or(|only| bsp == Some(only)))
-                .map(|&(_, _, ambient, lamps)| (ambient, lamps))
-        })
-        .unwrap_or((1.0, 1.0))
+    static LAMPS_TUNED: LazyLock<Vec<(String, f32)>> = LazyLock::new(|| {
+        let text = std::env::var("HALO_RT_LAMPS").unwrap_or_default();
+        text.split(',')
+            .filter_map(|entry| {
+                let (name, share) = entry.split_once(':')?;
+                Some((name.trim().to_owned(), share.trim().parse().ok()?))
+            })
+            .collect()
+    });
+    TUNED.unwrap_or_else(|| {
+        let (ambient, lamps) = LEVEL_LIGHTING
+            .iter()
+            .find(|(name, only, _, _)| map.eq_ignore_ascii_case(name) && only.is_none_or(|only| bsp == Some(only)))
+            .map_or((1.0, 1.0), |&(_, _, ambient, lamps)| (ambient, lamps));
+        let lamps = LAMPS_TUNED.iter().find(|(name, _)| map.eq_ignore_ascii_case(name)).map_or(lamps, |&(_, share)| share);
+        (ambient, lamps)
+    })
 }
 
 /// The BSP the level is seen in: the one asked for (`--bsp`), or the
@@ -1391,16 +1473,22 @@ fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With
 /// program) and log where it was taken, in the log and a `.txt` beside it:
 /// the level, the game's tick and the camera, as a `--camera` argument; and
 /// the frame's times, the CPU's and the GPU's by pass (for a slow place:
-/// play feedback's dips, which no scripted run had staged).
+/// play feedback's dips, which no scripted run had staged). Also at the
+/// frames of `HALO_RT_CAPTURE_FRAME` ([`capture_frames`]).
+#[allow(clippy::too_many_arguments)]
 fn capture(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     camera: Single<&Transform, With<Camera3d>>,
     link: Option<Res<bridge::BridgeLink>>,
     diagnostics: Option<Res<bevy::diagnostic::DiagnosticsStore>>,
+    shown_lights: Option<Res<lights::ShownLights>>,
+    test_lights: Option<Res<lights::TestLights>>,
+    bridge_level: Option<Res<bridge::BridgeLevel>>,
+    frames: Res<CaptureFrames>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-    if !keys.just_pressed(KeyCode::F9) {
+    if !keys.just_pressed(KeyCode::F9) && !capture_frames().contains(&frames.0) {
         return;
     }
     let directory = std::env::current_exe()
@@ -1421,11 +1509,121 @@ fn capture(
     let times = [cpu_times::latest(), diagnostics.as_deref().map(gpu_times), diagnostics.as_deref().map(node_cpu_times)]
         .into_iter()
         .flatten();
-    let note: String = std::iter::once(place.clone()).chain(times).map(|line| line + "\n").collect();
+    // (and the lights and objects about the camera: a capture of a lighting
+    // problem names its source)
+    let sources = capture_sources(camera.translation, game, shown_lights.as_deref(), test_lights.as_deref(), bridge_level.as_deref());
+    let note: String = std::iter::once(place.clone()).chain(times).chain(sources).map(|line| line + "\n").collect();
     if let Err(error) = std::fs::write(path.with_extension("txt"), note) {
         warn!("capture: can't write where it was taken: {error}");
     }
     commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+}
+
+/// The frames (as [`CaptureFrames`] counts them, `--screenshot-from`'s)
+/// at which [`capture`] acts as if F9 had been pressed, for checking the
+/// capture's note in a scripted run with nobody at the keyboard:
+/// `HALO_RT_CAPTURE_FRAME=<n>[,<n>...]`; none unset. Read once.
+fn capture_frames() -> &'static [u32] {
+    static FRAMES: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    FRAMES.get_or_init(|| {
+        std::env::var("HALO_RT_CAPTURE_FRAME")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|frame| frame.trim().parse().ok())
+            .collect()
+    })
+}
+
+/// The most lights, and objects, a capture's note lists.
+const CAPTURE_MOST_LINES: usize = 64;
+/// How near the camera (metres) the objects a capture's note lists are.
+const CAPTURE_OBJECTS_NEAR: f32 = 10.0;
+
+/// The capture note's lights and objects: `lights: N` and a line for each
+/// light the scene took from the game this frame (its projectiles' and
+/// contrails' glows and the test lights with them), nearest first, as the
+/// game sent it (Halo's world units, as `--camera` and `HALO_RT_TEST_LIGHT`)
+/// and as it was built; then `objects near: N` and a line for each game
+/// object within [`CAPTURE_OBJECTS_NEAR`] of the camera, nearest first, with
+/// what the bridge says of it (`(level viewer)` with no game). Each list at
+/// most [`CAPTURE_MOST_LINES`], the rest counted.
+fn capture_sources(
+    camera: Vec3,
+    game: Option<&halo_bridge::Snapshot>,
+    shown: Option<&lights::ShownLights>,
+    test: Option<&lights::TestLights>,
+    level: Option<&bridge::BridgeLevel>,
+) -> Vec<String> {
+    let tag_name = |datum: u32| level.and_then(|level| level.builder.cache.tag(datum).ok()).map(|tag| tag.name.clone());
+    let objects = game.map_or(&[][..], |game| game.objects.as_slice());
+    let place = |position: [f32; 3]| Vec3::from(halo_to_bevy(position, METERS_PER_WORLD_UNIT));
+    let mut lines = Vec::new();
+    let mut shown: Vec<&lights::ShownLight> = shown.map_or_else(Vec::new, |shown| shown.0.iter().collect());
+    shown.sort_by(|a, b| place(a.light.position).distance(camera).total_cmp(&place(b.light.position).distance(camera)));
+    lines.push(format!("lights: {}", shown.len()));
+    for light in shown.iter().take(CAPTURE_MOST_LINES) {
+        let tag = tag_name(light.light.definition_index).or_else(|| test.and_then(|test| test.name(light.light.definition_index)).map(str::to_string));
+        // (a test light has no object; the game's first-person models carry
+        // made-up indices, `0xFFFF0000 | slot`, which no light's object is)
+        let object = objects
+            .iter()
+            .filter(|_| !light.test)
+            .find(|object| object.flags & halo_bridge::OBJECT_MODEL == 0 && object.object_index == light.light.object_index)
+            .and_then(|object| tag_name(object.definition_index));
+        lines.push(format!("  {}", light.note(camera, tag.as_deref(), object.as_deref())));
+    }
+    if shown.len() > CAPTURE_MOST_LINES {
+        lines.push(format!("  ({} more left out)", shown.len() - CAPTURE_MOST_LINES));
+    }
+    if game.is_none() {
+        lines.push("objects near: (level viewer)".to_string());
+        return lines;
+    }
+    let mut near: Vec<(f32, &halo_bridge::Object)> = objects
+        .iter()
+        .map(|object| (place(object.bounding_center).distance(camera), object))
+        .filter(|(distance, _)| *distance <= CAPTURE_OBJECTS_NEAR)
+        .collect();
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    lines.push(format!("objects near: {}", near.len()));
+    for (distance, object) in near.iter().take(CAPTURE_MOST_LINES) {
+        let [x, y, z] = object.bounding_center;
+        let [a, b, c, d] = object.function_values;
+        // (Halo's object types)
+        let kind = ["biped", "vehicle", "weapon", "equipment", "garbage", "projectile", "scenery", "machine", "control", "light fixture", "placeholder", "sound scenery"]
+            .get(object.kind as usize)
+            .copied()
+            .unwrap_or("?");
+        let mut state = Vec::new();
+        if object.flags & halo_bridge::OBJECT_MODEL != 0 {
+            state.push("a model (first-person weapon or hands)");
+        }
+        if object.flags & halo_bridge::OBJECT_FIRST_PERSON_BODY != 0 {
+            state.push("first-person body");
+        } else if object.flags & halo_bridge::OBJECT_FIRST_PERSON != 0 {
+            state.push("first person");
+        }
+        if object.flags & halo_bridge::OBJECT_HIDDEN != 0 {
+            state.push("hidden");
+        }
+        if object.object_flags & halo_bridge::OBJECT_OUTSIDE_OF_MAP != 0 {
+            state.push("outside the map");
+        }
+        let parent = if object.parent_index == u32::MAX { "none".to_string() } else { format!("{:#010x}", object.parent_index) };
+        lines.push(format!(
+            "  {distance:.2} m | at {x:.3},{y:.3},{z:.3} | radius {:.3} | {kind} | tag {} | object {:#010x} | parent {parent} | cluster {} | functions {a:.2},{b:.2},{c:.2},{d:.2} | camouflage {:.2} | {}",
+            object.bounding_radius,
+            tag_name(object.definition_index).unwrap_or_else(|| format!("{:#010x}", object.definition_index)),
+            object.object_index,
+            object.location_cluster,
+            object.active_camouflage,
+            if state.is_empty() { "shown".to_string() } else { state.join(", ") },
+        ));
+    }
+    if near.len() > CAPTURE_MOST_LINES {
+        lines.push(format!("  ({} more left out)", near.len() - CAPTURE_MOST_LINES));
+    }
+    lines
 }
 
 /// Frames the camera waits before it starts rendering. DLSS creates its

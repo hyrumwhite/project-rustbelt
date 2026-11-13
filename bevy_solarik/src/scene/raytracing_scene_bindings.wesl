@@ -103,6 +103,13 @@ const MATERIAL_FLAG_REFRACT = 64u;
 // A thin pane whose base colour texture is a grime layer over it (colour,
 // coverage: ResolvedMaterial.grime), not its tint or coverage (glass_grime.rs).
 const MATERIAL_FLAG_GRIME = 256u;
+// A thin pane of which the camera sees the nearest layer alone, an actively
+// camouflaged first-person weapon's (RayMaterialMarks::nearest_layer,
+// primary_glass.wesl).
+const MATERIAL_FLAG_NEAREST_LAYER = 1024u;
+// An emitter only reflections see, Cortana's hologram, on an instance masked
+// RAY_MASK_REFLECTED (RayMaterialMarks::reflected_glow, specular_gi.wesl).
+const MATERIAL_FLAG_REFLECTED_GLOW = 2048u;
 
 const TEXTURE_MAP_NONE = 0xFFFFFFFFu;
 
@@ -379,8 +386,14 @@ fn offset_surface_ray(position: vec3<f32>, normal: vec3<f32>, camera_position: v
 // RAY_T_MAX retains the historical default for external shader compatibility.
 fn ray_max_distance() -> f32 { return sky_light.ray_max_distance; }
 
-const RAY_NO_CULL = 0xFFu;
+// (every instance but those only reflections see, RAY_MASK_REFLECTED: no
+// other instance carries that bit alone, so for every other one this is the
+// 0xFF it was)
+const RAY_NO_CULL = 0xFBu;
 const RAY_MASK_NEAR = 0x01u;
+// Instances a reflection's first ray alone meets (RaytracingMask::REFLECTED):
+// trace_glass_ray_seeing's `also_seen`.
+const RAY_MASK_REFLECTED = 0x04u;
 
 fn trace_ray(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32) -> SceneHit {
     return trace_ray_impl(ray_origin, ray_direction, ray_t_min, ray_t_max, ray_flag, false);
@@ -421,7 +434,21 @@ fn trace_ray_query(ray_origin:vec3f,ray_direction:vec3f,ray_t_min:f32,ray_t_max:
     if event.event.normal_hit.w>0.0 {return scene_coarse(event);}
     return triangle;
 }
+// trace_glass_ray, also meeting the instances masked `also_seen` (0: none
+// more, trace_glass_ray itself; RAY_MASK_REFLECTED: a reflection's first ray,
+// specular_gi.wesl's trace_unfogged_glossy_path)
+fn trace_glass_ray_seeing(ray_origin: vec3f, ray_direction: vec3f, ray_t_min: f32, ray_t_max: f32, also_seen: u32) -> SceneHit {
+    let triangle = scene_hit_from_triangle(trace_triangle_ray_masked(ray_origin, ray_direction, ray_t_min, ray_t_max, RAY_FLAG_NONE, true, also_seen));
+    let maximum = select(min(ray_t_max, ray_max_distance()), triangle.t, scene_hit_is_triangle(triangle));
+    let event = forest_trace_scene_impl(ray_origin, ray_direction, ray_t_min, maximum, forest_next_seed(), false);
+    if event.event.normal_hit.w > 0.0 { return scene_coarse(event); }
+    return triangle;
+}
 fn trace_triangle_ray_impl(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32, include_glass: bool) -> RayIntersection {
+    return trace_triangle_ray_masked(ray_origin, ray_direction, ray_t_min, ray_t_max, ray_flag, include_glass, 0u);
+}
+// (`also_seen`: instance mask bits the ray meets besides its usual ones)
+fn trace_triangle_ray_masked(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32, include_glass: bool, also_seen: u32) -> RayIntersection {
     let minimum = max(ray_t_min, max(max(abs(ray_origin.x), abs(ray_origin.y)), abs(ray_origin.z)) * sky_light.relative_ray_min);
     let maximum = min(ray_t_max, ray_max_distance());
     if minimum > maximum {
@@ -429,7 +456,7 @@ fn trace_triangle_ray_impl(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_
         return miss;
     }
     let near = sky_light.near_rays;
-    let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
+    let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w) | also_seen;
     let ray = RayDesc(ray_flag, cull_mask, minimum, maximum, ray_origin, ray_direction);
     var rq: ray_query;
     rayQueryInitialize(&rq, tlas, ray);

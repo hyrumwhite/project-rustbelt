@@ -72,6 +72,7 @@ impl Plugin for RaytracingScenePlugin {
         app.add_plugins(crate::lommel::LommelSeeligerPlugin);
         app.add_plugins(crate::water_ripples::WaterRipplesPlugin);
         app.add_plugins(crate::glass_grime::GlassGrimePlugin);
+        app.add_plugins(crate::material_marks::MaterialMarksPlugin);
         app.add_plugins(crate::material::MaterialRegistrationPlugin);
         app.add_plugins(crate::publication::PublicationPlugin);
         app.add_plugins(crate::rings::RingPlugin);

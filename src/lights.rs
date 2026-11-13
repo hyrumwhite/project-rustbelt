@@ -287,13 +287,161 @@ struct LightTag {
     small: Option<f32>,
     /// Its upward cone, if it shines every way but down ([`UPWARD_LIGHTS`]).
     upward: Option<Upward>,
+    /// Its sphere and brightness as tuned, a point light's ([`light_tune`]).
+    tune: Option<Tune>,
+}
+
+/// What a light's tag says of it here, by the tag's name (none: a plain
+/// light).
+fn light_tag(name: Option<&str>) -> LightTag {
+    LightTag {
+        muzzle: name.is_some_and(|name| name.ends_with("muzzle flash")),
+        dimming: name.and_then(|name| LIGHT_DIMMING.iter().find(|(dimmed, _)| dimmed_by(name, dimmed))).map_or(1.0, |&(_, dimming)| dimming),
+        small: name.and_then(|name| SMALL_LIGHTS.iter().find(|(small, _)| name.eq_ignore_ascii_case(small))).map(|&(_, size)| size),
+        upward: name.and_then(upward_light),
+        tune: name.and_then(light_tune),
+    }
+}
+
+/// A point light's sphere and brightness as tuned for measuring
+/// (`HALO_RT_LIGHT_TUNE`, see [`light_tune`]).
+#[derive(Clone, Copy, Debug)]
+struct Tune {
+    /// The source sphere's radius (metres).
+    radius: f32,
+    /// How far it is raised from the game's position (metres, the world's
+    /// up; negative lower), in place of a small light's raise or an upward
+    /// light's.
+    raise: f32,
+    /// Its share of the power it would have had untuned.
+    share: f32,
+}
+
+/// The tuning of the point lights whose light tag's name holds a part,
+/// for measuring a light's look before its table entry is made:
+/// `HALO_RT_LIGHT_TUNE="<tag name part>=<source radius m>,<raise m>,<share>[;...]"`,
+/// the part matched without regard to case, the first that matches winning
+/// (a test light, [`TestLights`], by its tag's name, or by `test` without
+/// one). A light's power is its sphere's radiance times its sphere's size
+/// (`sphere_lumens_per_radiance`), so a smaller sphere at the same
+/// radiance is a dimmer light; [`SMALL_LIGHTS`]' are so on purpose (their
+/// twenty-fifth of the light is part of their tuning, and `LIGHT_DIMMING`'s
+/// shares were set over it). Tuned, the power is kept at what the light
+/// would have had at its untuned size (a small light's small sphere's, any
+/// other's [`LIGHT_RADIUS`]'s) and the sphere's radiance follows the size
+/// asked: the radius alone moves where the light comes from and how
+/// concentrated it is, not how much there is of it; the share then
+/// multiplies that power (1 the untuned light's); the raise replaces the
+/// untuned one (0 for most lights, `size × 1.2` for a small one, the upward
+/// lights' own). Spot lights, and a gelled light's beams (which take the
+/// raise alone), are left as they are. Read once.
+fn light_tune(name: &str) -> Option<Tune> {
+    static TUNES: std::sync::LazyLock<Vec<(String, Tune)>> = std::sync::LazyLock::new(|| {
+        let text = std::env::var("HALO_RT_LIGHT_TUNE").unwrap_or_default();
+        text.split(';')
+            .filter(|entry| !entry.trim().is_empty())
+            .filter_map(|entry| {
+                let parsed = entry.split_once('=').and_then(|(part, numbers)| {
+                    let numbers: Vec<f32> = numbers.split(',').map(|n| n.trim().parse().ok()).collect::<Option<_>>()?;
+                    let &[radius, raise, share] = numbers.as_slice() else { return None };
+                    Some((part.trim().to_ascii_lowercase(), Tune { radius: radius.max(0.001), raise, share: share.max(0.0) }))
+                });
+                if parsed.is_none() {
+                    warn!("HALO_RT_LIGHT_TUNE: {entry:?} is not <tag name part>=<radius>,<raise>,<share>");
+                }
+                parsed
+            })
+            .collect()
+    });
+    let name = name.to_ascii_lowercase();
+    TUNES.iter().find(|(part, _)| name.contains(part.as_str())).map(|&(_, tune)| tune)
+}
+
+/// The light tag (none in the maps) of a test light given no tag's name, or
+/// one the map hasn't, and the name it is tuned by ([`light_tune`]).
+const TEST_LIGHT_DEFINITION: u32 = u32::MAX - 1;
+const TEST_LIGHT_NAME: &str = "test";
+/// The test lights' objects (none in the game), from this one up. (The
+/// game's first-person models, `halo_bridge::OBJECT_MODEL`, take the same
+/// range, `0xFFFF0000 | slot`: no game light is attached to one, so the
+/// lights' keys don't meet, but nothing should look a test light's object
+/// up among the snapshot's.)
+const TEST_LIGHT_OBJECT: u32 = 0xFFFF_0000;
+
+/// Lights put in the level as if the game had sent them, for diagnosing a
+/// light's look where the game can't be made to show it (a plasma pistol
+/// dropped against a wall): in the level viewer, with no game, and bridged
+/// beside the game's. `HALO_RT_TEST_LIGHT="x,y,z,r,g,b,radius[,tag name]"`,
+/// several separated by `;`: the position in the game's world units and
+/// axes (as the bridge's lights'), the colour 0..1 a channel, the reach in
+/// world units, and a light tag's name from the loaded map, whose
+/// treatment here it takes (`LIGHT_DIMMING`, `SMALL_LIGHTS`,
+/// `UPWARD_LIGHTS`, a muzzle flash's by its name); without one, or with one
+/// the map hasn't, a plain point light. Each is built by `sync_lights` as a
+/// bridged light, shining every way. Read at each level's load.
+#[derive(Resource, Default)]
+pub struct TestLights {
+    lights: Vec<Light>,
+    /// The tags' names of those given one the map has, by its datum: the
+    /// level viewer keeps no map to look them up in.
+    names: HashMap<u32, String>,
+}
+
+impl TestLights {
+    pub fn from_env(cache: &halo_map::CacheFile) -> Self {
+        let mut test = Self::default();
+        let Ok(text) = std::env::var("HALO_RT_TEST_LIGHT") else { return test };
+        for (index, entry) in text.split(';').map(str::trim).filter(|entry| !entry.is_empty()).enumerate() {
+            let fields: Vec<&str> = entry.splitn(8, ',').map(str::trim).collect();
+            let numbers: Option<Vec<f32>> = fields.iter().take(7).map(|field| field.parse().ok()).collect();
+            let Some(n) = numbers.filter(|n| n.len() == 7) else {
+                warn!("HALO_RT_TEST_LIGHT: {entry:?} is not x,y,z,r,g,b,radius[,tag name]");
+                continue;
+            };
+            let name = fields.get(7).copied().filter(|name| !name.is_empty());
+            let tag = name.and_then(|name| cache.find_tag(halo_map::groups::LIGHT, name));
+            if let (Some(name), None) = (name, tag) {
+                warn!("HALO_RT_TEST_LIGHT: no light tag {name:?} in {}: a plain point light", cache.header.name);
+            }
+            let definition_index = tag.map_or(TEST_LIGHT_DEFINITION, |tag| {
+                test.names.insert(tag.datum, tag.name.clone());
+                tag.datum
+            });
+            test.lights.push(Light {
+                position: [n[0], n[1], n[2]],
+                forward: [1.0, 0.0, 0.0],
+                up: [0.0, 0.0, 1.0],
+                color: [n[3], n[4], n[5]],
+                radius: n[6],
+                cutoff_angle: std::f32::consts::PI,
+                falloff_angle: std::f32::consts::PI,
+                definition_index,
+                object_index: TEST_LIGHT_OBJECT + index as u32,
+                ..default()
+            });
+        }
+        test
+    }
+
+    /// Whether any were asked for (`HALO_RT_TEST_LIGHT`).
+    pub fn asked() -> bool {
+        std::env::var_os("HALO_RT_TEST_LIGHT").is_some()
+    }
+
+    /// A test light's tag's name, by its datum.
+    pub(crate) fn name(&self, definition_index: u32) -> Option<&str> {
+        if definition_index == TEST_LIGHT_DEFINITION {
+            return Some(TEST_LIGHT_NAME);
+        }
+        self.names.get(&definition_index).map(String::as_str)
+    }
 }
 
 pub struct DynamicLightsPlugin;
 
 impl Plugin for DynamicLightsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DynamicLights>().add_systems(Update, sync_lights);
+        app.init_resource::<DynamicLights>().init_resource::<ShownLights>().add_systems(Update, sync_lights);
     }
 }
 
@@ -382,37 +530,127 @@ fn place_point(
     now.insert(key, entity);
 }
 
+/// The lights `sync_lights` took this frame, each with what it made of it,
+/// for the F9 capture's note (`crate::capture`): a capture of a lighting
+/// problem names the light behind it. The numbers alone, written out only
+/// when a capture is taken.
+#[derive(Resource, Default)]
+pub struct ShownLights(pub Vec<ShownLight>);
+
+/// A light as the game sent it (or a projectile's, a contrail's, a test
+/// light) and as it was built.
+#[derive(Clone, Copy)]
+pub struct ShownLight {
+    pub light: Light,
+    pub test: bool,
+    pub spot: bool,
+    pub upward: bool,
+    /// Drawn as its gel's beams (spot lights).
+    pub gelled: bool,
+    /// Dimmed to none, or shining upward at no share: not in the scene.
+    pub left_out: bool,
+    /// The source sphere's radius and raise (metres).
+    pub radius: f32,
+    pub raise: f32,
+    /// Its share of its brightness ([`LIGHT_DIMMING`]).
+    pub dimming: f32,
+    /// Its power (lumens a channel, at an emissive scale of one).
+    pub power: Vec3,
+    pub tuned: bool,
+}
+
+impl ShownLight {
+    /// The capture note's line for it, `camera` the camera's place
+    /// (metres), `tag` and `object` the names of its light tag and object.
+    pub fn note(&self, camera: Vec3, tag: Option<&str>, object: Option<&str>) -> String {
+        let light = &self.light;
+        let [x, y, z] = light.position;
+        let [r, g, b] = light.color;
+        let distance = Vec3::from(halo_to_bevy(light.position, METERS_PER_WORLD_UNIT)).distance(camera);
+        let tag = tag.map_or_else(|| format!("{:#010x}", light.definition_index), str::to_string);
+        // (a test light's object index is made up: it has no object)
+        let object = if self.test || light.object_index == u32::MAX {
+            "none".to_string()
+        } else {
+            format!("{:#010x} {}", light.object_index, object.unwrap_or("-"))
+        };
+        let kind = if self.left_out {
+            "left out"
+        } else if self.gelled {
+            "gelled spots"
+        } else if self.spot {
+            "spot"
+        } else if self.upward {
+            "upward"
+        } else {
+            "point"
+        };
+        let [pr, pg, pb] = self.power.to_array();
+        format!(
+            "{distance:.2} m | at {x:.3},{y:.3},{z:.3} | colour {r:.3},{g:.3},{b:.3} | radius {:.3} | flags {:#x}{}{} | tag {tag} | object {object} | {kind}, source {:.3} m, raise {:.3} m, dimming {:.2}, power {pr:.0},{pg:.0},{pb:.0} lm, {}",
+            light.radius,
+            light.definition_flags,
+            if light.first_person != 0 { " first person" } else { "" },
+            if self.test { " test light" } else { "" },
+            self.radius,
+            self.raise,
+            self.dimming,
+            if self.tuned { "tuned" } else { "untuned" },
+        )
+    }
+}
+
+/// The game's lights (and the test lights, [`TestLights`]) as the scene's:
+/// bridged, or in the level viewer the test lights alone.
+#[allow(clippy::too_many_arguments)]
 fn sync_lights(
     mut commands: Commands,
-    link: Res<BridgeLink>,
+    link: Option<Res<BridgeLink>>,
+    test: Option<Res<TestLights>>,
     settings: Res<LightingSettings>,
     mut pools: ResMut<DynamicLights>,
     mut points: PointLights,
     mut spots: Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
     level: Option<Res<BridgeLevel>>,
-    in_solid: Res<crate::bridge::LightsInSolid>,
+    in_solid: Option<Res<crate::bridge::LightsInSolid>>,
     mut light_tags: Local<HashMap<u32, LightTag>>,
     mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
     mut glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
     mut contrail_glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
     mut scenario: Local<String>,
+    mut test_logged: Local<bool>,
+    mut shown: ResMut<ShownLights>,
 ) {
-    let Some(snapshot) = &link.latest else { return };
+    shown.0.clear();
+    static LIGHT_LOG: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("HALO_RT_LIGHT_LOG").is_some());
+    let snapshot = link.as_ref().and_then(|link| link.latest.as_ref());
+    let test_lights = test.as_deref().map_or(&[][..], |test| test.lights.as_slice());
+    // (a level's test lights, anew: logged as built, their tags looked up)
+    if test.as_ref().is_some_and(|test| test.is_changed()) {
+        *test_logged = false;
+        light_tags.clear();
+    }
+    if snapshot.is_none() && test_lights.is_empty() {
+        return;
+    }
     // (a new level: its own tags)
-    if snapshot.scenario_name != *scenario {
+    if let Some(snapshot) = snapshot
+        && snapshot.scenario_name != *scenario
+    {
         light_tags.clear();
         gels.clear();
         glows.clear();
         contrail_glows.clear();
         *scenario = snapshot.scenario_name.clone();
     }
+    let camera = snapshot.and_then(|snapshot| snapshot.camera.as_ref());
     // the glowing projectiles' lights, round from their middles (by no tag:
     // neither muzzle flashes nor gelled; hidden ones too: a projectile
     // without a model, a Sentinel's beam, the game hides; not those outside
     // the map: b40's two Wraith mortars, kept at the world's origin)
     let projectile_lights: Vec<Light> = snapshot
-        .objects
-        .iter()
+        .into_iter()
+        .flat_map(|snapshot| snapshot.objects.iter())
         .filter(|object| object.object_flags & OBJECT_OUTSIDE_OF_MAP == 0)
         .filter_map(|object| {
             let (color, radius) = (*glows.entry(object.definition_index).or_insert_with(|| {
@@ -436,7 +674,7 @@ fn sync_lights(
     // the glowing contrails' lights, evenly along each (the rest of the
     // contrails light nothing)
     let mut contrail_lights: Vec<Light> = Vec::new();
-    for contrail in snapshot.lights.iter().filter(|light| light.definition_flags & LIGHT_CONTRAIL != 0) {
+    for contrail in snapshot.into_iter().flat_map(|snapshot| snapshot.lights.iter()).filter(|light| light.definition_flags & LIGHT_CONTRAIL != 0) {
         let Some((color, radius)) = *contrail_glows.entry(contrail.definition_index).or_insert_with(|| {
             let tag = level.as_ref()?.builder.cache.tag(contrail.definition_index).ok()?;
             CONTRAIL_GLOWS.iter().find(|(name, ..)| tag.name.eq_ignore_ascii_case(name)).map(|&(_, color, radius)| (color, radius))
@@ -462,8 +700,9 @@ fn sync_lights(
         }
     }
     // (but those in the drawn BSP's solid, another BSP's: crate::bridge)
-    let lights = snapshot.lights.iter().filter(|light| {
-        light.definition_flags & LIGHT_CONTRAIL == 0 && !in_solid.0.contains(&(light.definition_index, light.object_index))
+    let lights = snapshot.into_iter().flat_map(|snapshot| snapshot.lights.iter()).filter(|light| {
+        light.definition_flags & LIGHT_CONTRAIL == 0
+            && !in_solid.as_ref().is_some_and(|in_solid| in_solid.0.contains(&(light.definition_index, light.object_index)))
     });
     let pools = &mut *pools;
     let (mut last_points, mut last_spots) = (std::mem::take(&mut pools.points), std::mem::take(&mut pools.spots));
@@ -474,39 +713,30 @@ fn sync_lights(
         *count += 1;
         (light.definition_index, light.object_index, *count - 1)
     };
-    for light in lights.chain(&projectile_lights).chain(&contrail_lights) {
-        let near = snapshot.camera.as_ref().filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
+    // (the test lights after the game's)
+    let all = lights.chain(&projectile_lights).chain(&contrail_lights).map(|light| (light, false)).chain(test_lights.iter().map(|light| (light, true)));
+    for (light, test_light) in all {
+        let near = camera.filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
         let own = light.first_person != 0;
-        // (a muzzle flash: its tag's flag, or its name)
+        // (a muzzle flash: its tag's flag, or its name; a test light's tag
+        // by the name it was given, the level viewer having no map)
         let tag = *light_tags.entry(light.definition_index).or_insert_with(|| {
-            let name = level.as_ref().and_then(|level| level.builder.cache.tag(light.definition_index).ok()).map(|tag| tag.name.as_str());
-            LightTag {
-                muzzle: name.is_some_and(|name| name.ends_with("muzzle flash")),
-                dimming: name.and_then(|name| LIGHT_DIMMING.iter().find(|(dimmed, _)| dimmed_by(name, dimmed))).map_or(1.0, |&(_, dimming)| dimming),
-                small: name.and_then(|name| SMALL_LIGHTS.iter().find(|(small, _)| name.eq_ignore_ascii_case(small))).map(|&(_, size)| size),
-                upward: name.and_then(upward_light),
-            }
+            let name = level
+                .as_ref()
+                .and_then(|level| level.builder.cache.tag(light.definition_index).ok())
+                .map(|tag| tag.name.as_str())
+                .or_else(|| test.as_deref().and_then(|test| test.name(light.definition_index)));
+            light_tag(name)
         });
         let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0 || tag.muzzle;
         let muzzle = light.cutoff_angle > SPOT_CUTOFF && muzzle_tag;
         let spot = light.cutoff_angle <= SPOT_CUTOFF || muzzle;
         // (the player's spot lights follow the camera's aim)
-        let near_camera = snapshot.camera.as_ref().filter(|_| spot && (own || (!muzzle && near.is_some())));
-        // (HALO_RT_LIGHT_LOG: each light, in the log)
-        if std::env::var_os("HALO_RT_LIGHT_LOG").is_some() {
-            let distance = snapshot.camera.as_ref().map(|c| Vec3::from(c.position).distance(Vec3::from(light.position)));
-            info!(
-                "light at tick {}: position {:?} forward {:?} colour {:?} radius {} cutoff {:.1} falloff {:.1} deg, {distance:?} from the camera (forward {:?}), own {own} muzzle {muzzle} aimed by the camera {} upward {:?} tag {:#x} flags {:#x} object {:#x}",
-                snapshot.game_tick, light.position, light.forward, light.color, light.radius, light.cutoff_angle.to_degrees(), light.falloff_angle.to_degrees(),
-                snapshot.camera.as_ref().map(|c| c.forward), near_camera.is_some(), tag.upward, light.definition_index, light.definition_flags, light.object_index
-            );
-        }
+        let near_camera = camera.filter(|_| spot && (own || (!muzzle && near.is_some())));
         // (one shining upward: a point light's but for its cone)
         let upward = tag.upward.filter(|_| !spot);
-        // (dimmed to none, or shining upward at no share: left out)
-        if tag.dimming <= 0.0 || upward.is_some_and(|upward| upward.share <= 0.0) {
-            continue;
-        }
+        // (a point light's tuning: HALO_RT_LIGHT_TUNE)
+        let tune = tag.tune.filter(|_| !spot);
         let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
         let vehicle = spot && !muzzle && near_camera.is_none();
         let flashlight = spot && !muzzle && near_camera.is_some();
@@ -535,9 +765,54 @@ fn sync_lights(
         let range = light.radius * METERS_PER_WORLD_UNIT * RANGE_PER_RADIUS;
         let radius = if spot { SPOT_RADIUS } else { tag.small.unwrap_or(LIGHT_RADIUS) };
         // (an upward light at its own height, the rest clear of the ground)
-        let position = position + Vec3::Y * upward.map_or_else(|| tag.small.map_or(0.0, |size| size * 1.2), |upward| upward.raise);
-        let source = LightSource { power: radiance * sphere_lumens_per_radiance(radius) };
+        let raise = upward.map_or_else(|| tag.small.map_or(0.0, |size| size * 1.2), |upward| upward.raise);
+        let power = radiance * sphere_lumens_per_radiance(radius);
+        // (tuned: its sphere's size and height, its power its untuned
+        // size's times the share; see light_tune)
+        let (radius, raise, power) = match tune {
+            Some(tune) => (tune.radius, tune.raise, power * tune.share),
+            None => (radius, raise, power),
+        };
+        let position = position + Vec3::Y * raise;
+        let source = LightSource { power };
         let (color, intensity) = source.color_and_intensity(settings.emissive_scale);
+        // (HALO_RT_LIGHT_LOG: each light, in the log)
+        if *LIGHT_LOG {
+            let distance = camera.map(|c| Vec3::from(c.position).distance(Vec3::from(light.position)));
+            info!(
+                "light at tick {}: position {:?} forward {:?} colour {:?} radius {} cutoff {:.1} falloff {:.1} deg, {distance:?} from the camera (forward {:?}), own {own} muzzle {muzzle} aimed by the camera {} upward {:?} tag {:#x} flags {:#x} object {:#x}; source radius {radius} m raise {raise} m power {power:.1?} lm ({intensity:.1} lm at the emissive scale) tuned {tune:?} test {test_light}",
+                snapshot.map_or(0, |snapshot| snapshot.game_tick), light.position, light.forward, light.color, light.radius, light.cutoff_angle.to_degrees(), light.falloff_angle.to_degrees(),
+                camera.map(|c| c.forward), near_camera.is_some(), tag.upward, light.definition_index, light.definition_flags, light.object_index
+            );
+        }
+        // (a test light, once as built)
+        if test_light && !*test_logged {
+            let name = test.as_deref().and_then(|test| test.name(light.definition_index)).unwrap_or(TEST_LIGHT_NAME);
+            info!(
+                "test light {name:?} at {position} m: radiance {radiance:.1?}, power {power:.1?} lm ({intensity:.1} lm at the emissive scale), range {range:.2} m, source radius {radius} m, raised {raise} m{}{}{}",
+                if spot { ", a spot light (a muzzle flash's name)" } else { "" },
+                if upward.is_some() { ", shining upward" } else { "" },
+                if tag.dimming <= 0.0 { ", dimmed to none: left out" } else { "" },
+            );
+        }
+        // (dimmed to none, or shining upward at no share: left out)
+        let left_out = tag.dimming <= 0.0 || upward.is_some_and(|upward| upward.share <= 0.0);
+        shown.0.push(ShownLight {
+            light: *light,
+            test: test_light,
+            spot,
+            upward: upward.is_some(),
+            gelled: false,
+            left_out,
+            radius,
+            raise,
+            dimming: tag.dimming,
+            power,
+            tuned: tune.is_some(),
+        });
+        if left_out {
+            continue;
+        }
         // a light shining every way through a gel of narrow discs: a spot
         // light along each, by the light's forward, left and up (the game
         // turns the gel with them), each as bright in its cone as the light
@@ -555,6 +830,9 @@ fn sync_lights(
         let (light_forward, light_up) = (Vec3::from(light.forward), Vec3::from(light.up));
         let light_left = light_forward.cross(light_up);
         if !beams.is_empty() && light_left.length_squared() > 1e-6 {
+            if let Some(shown) = shown.0.last_mut() {
+                shown.gelled = true;
+            }
             let light_left = light_left.normalize();
             let light_up = light_left.cross(light_forward).normalize();
             let source = LightSource { power: radiance * GEL_LIGHT_SCALE * sphere_lumens_per_radiance(SPOT_RADIUS) };
@@ -618,6 +896,9 @@ fn sync_lights(
             let transform = Transform::from_translation(position);
             place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform, None);
         }
+    }
+    if !test_lights.is_empty() {
+        *test_logged = true;
     }
     // (the rest go dark, free for the lights to come)
     for (_, entity) in last_points {

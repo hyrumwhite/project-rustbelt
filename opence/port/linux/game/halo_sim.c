@@ -34,6 +34,7 @@ bit for bit; differences are counted and the first few logged.
 #include "devices/devices.h"
 #include "items/items.h"
 #include "items/weapons.h"
+#include "items/weapon_definitions.h" /* (WEAPON_DEFINITION_TAG: HALO_SIM_GIVE_WEAPON) */
 #include "items/garbage.h"
 #include "objects/scenery.h"
 #include "items/projectiles.h"
@@ -11475,6 +11476,64 @@ int halo_sim_hs_begin(long operation, long expression, long *result, int *checki
 				}
 			}
 			platform_log("halo_sim: %d machines powered on", count);
+		}
+		/* (and HALO_SIM_GIVE_WEAPON: a weapon tag of the map, by name, made
+		and readied in the player's hands as a starting profile's primary
+		weapon is (players.c, create_weapon, player_add_equipment), no HS
+		giving one; HALO_SIM_GIVE_WEAPON_HEAT its heat, 0 to 1, as if fired) */
+		if (getenv("HALO_SIM_GIVE_WEAPON"))
+		{
+			char const *name = getenv("HALO_SIM_GIVE_WEAPON");
+			long definition_index = tag_loaded(WEAPON_DEFINITION_TAG, name);
+			long unit_index = player_index != NONE ? player_get(player_index)->unit_index : NONE;
+
+			if (definition_index == NONE)
+			{
+				platform_log("halo_sim: no weapon %s in this map", name);
+			}
+			else if (unit_index == NONE)
+			{
+				platform_log("halo_sim: no player unit to give %s", name);
+			}
+			else
+			{
+				struct object_placement_data placement_data;
+				struct unit_datum *unit = unit_get(unit_index);
+				long weapon_index;
+				short inventory_index;
+
+				/* (a full inventory: the weapons but the one held deleted,
+				which is what unit_delete_all_weapons does) */
+				for (inventory_index = 0; inventory_index < MAXIMUM_WEAPONS_PER_UNIT; inventory_index++)
+				{
+					if (unit->unit.weapon_object_indices[inventory_index] == NONE)
+						break;
+				}
+				if (inventory_index == MAXIMUM_WEAPONS_PER_UNIT)
+					unit_delete_all_weapons(unit_index);
+				object_placement_data_new(&placement_data, definition_index, unit_index);
+				weapon_index = object_new(&placement_data);
+				if (weapon_index == NONE)
+				{
+					platform_log("halo_sim: the weapon %s couldn't be made", name);
+				}
+				else if (!unit_add_weapon_to_inventory(unit_index, weapon_index, _unit_add_weapon_starting))
+				{
+					platform_log("halo_sim: the weapon %s couldn't be carried", name);
+					object_delete(weapon_index);
+				}
+				else
+				{
+					if (getenv("HALO_SIM_GIVE_WEAPON_HEAT"))
+					{
+						real heat = (real)atof(getenv("HALO_SIM_GIVE_WEAPON_HEAT"));
+
+						weapon_get(weapon_index)->weapon.heat = PIN(heat, 0.0f, 1.0f);
+					}
+					platform_log("halo_sim: the player given %s (weapon 0x%08lx)", name,
+						(unsigned long)weapon_index);
+				}
+			}
 		}
 		/* (then HALO_SIM_TELEPORT_COMMAND, if given) */
 		if (getenv("HALO_SIM_TELEPORT_COMMAND"))

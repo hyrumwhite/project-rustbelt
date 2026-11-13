@@ -511,7 +511,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     mesh_allocator: Res<MeshAllocator>,
     mut blas_manager: ResMut<BlasManager>,
     material_assets: Res<StandardMaterialAssets>,
-    (collimated, detailed, gaussian, lommel, ripples, pearl, grime, plain): (
+    (collimated, detailed, gaussian, lommel, ripples, pearl, grime, plain, marks): (
         Res<CollimatedMaterials>,
         Res<DetailedRayMaterials>,
         Res<GaussianRayMaterials>,
@@ -520,6 +520,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         Res<crate::lommel::PearlCoatMaterials>,
         Res<crate::glass_grime::GlassGrimeMaterials>,
         Res<crate::lommel::PlainCoatMaterials>,
+        Res<crate::material_marks::RayMaterialMarks>,
     ),
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
@@ -639,6 +640,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         || lommel.is_changed()
         || pearl.is_changed()
         || plain.is_changed()
+        || marks.is_changed()
         || ripples.is_changed()
         || grime.is_changed()
         || texture_assets.is_changed()
@@ -1020,6 +1022,16 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                 | if plain.0.contains(asset_id) { 512 } else { 0 }
                 | if grime.0.contains(asset_id) && alpha.flags & MATERIAL_FLAG_ALPHA_BLEND != 0 {
                     MATERIAL_FLAG_GRIME
+                } else {
+                    0
+                }
+                | if marks.nearest_layer.contains(asset_id) && alpha.flags & MATERIAL_FLAG_ALPHA_BLEND != 0 {
+                    MATERIAL_FLAG_NEAREST_LAYER
+                } else {
+                    0
+                }
+                | if marks.reflected_glow.contains(asset_id) {
+                    MATERIAL_FLAG_REFLECTED_GLOW
                 } else {
                     0
                 },
@@ -1813,6 +1825,12 @@ const MATERIAL_FLAG_REFRACT: u32 = 64;
 /// A thin pane whose base colour texture is a grime layer over it
 /// (`glass_grime`), not its tint or coverage.
 const MATERIAL_FLAG_GRIME: u32 = 256;
+/// A thin pane of which the camera sees the nearest layer alone
+/// ([`crate::material_marks::RayMaterialMarks::nearest_layer`]).
+const MATERIAL_FLAG_NEAREST_LAYER: u32 = 1024;
+/// An emitter only reflections see
+/// ([`crate::material_marks::RayMaterialMarks::reflected_glow`]).
+const MATERIAL_FLAG_REFLECTED_GLOW: u32 = 2048;
 
 /// How the rays treat a material's alpha: exactly one of `OPAQUE`,
 /// `ALPHA_MASK` (test the base colour alpha against `cutoff`) or

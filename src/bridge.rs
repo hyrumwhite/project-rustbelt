@@ -206,6 +206,7 @@ impl Plugin for BridgePlugin {
             .add_systems(PreUpdate, (grab_cursor, forward_input, forward_gamepads).chain().after(bevy::input::InputSystems))
             .add_systems(Update, (toggle_follow, sync_objects, sync_camera, sync_active_bsp, sync_breakable_surfaces).chain())
             .add_systems(Update, poll_texture_bakes.after(sync_objects))
+            .add_systems(Update, crate::level::follow_reflected_glows.after(sync_objects).after(crate::level::animate_transparent))
             .add_systems(Startup, spawn_game_banner)
             .add_systems(Update, watch_game);
     }
@@ -486,7 +487,7 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid, mut deformable, mut pearl_coats, mut glass_grime, mut plain_coats, mut skin_jobs): (
+    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid, mut deformable, mut pearl_coats, mut glass_grime, mut plain_coats, mut skin_jobs, mut ray_marks, masks): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<&mut crate::level::AnimatedSelfIllumination>,
         Query<&Children>,
@@ -500,6 +501,8 @@ fn sync_objects(
         ResMut<bevy_solarik::glass_grime::GlassGrimeMaterials>,
         ResMut<bevy_solarik::lommel::PlainCoatMaterials>,
         ResMut<crate::rt_skinning::RtSkinJobs>,
+        ResMut<bevy_solarik::material_marks::RayMaterialMarks>,
+        Query<&bevy_solarik::scene::RaytracingMask>,
     ),
     mut flat_normal: Local<Option<Handle<Image>>>,
     mut timing: Local<SyncTiming>,
@@ -743,6 +746,14 @@ fn sync_objects(
                 builder.spawn_animated_model(&mut commands, &model, raster, &change_colors, camouflaged(object), object.object_index, assets);
             builder.first_person = false;
             builder.self_occluding = false;
+            // (the materials it made for Solarik to mark: the first person's
+            // camouflage glass, Cortana's glow for reflections; the marks
+            // touched only when there are new ones, a change being a
+            // rebuild of the rays' scene)
+            if !builder.nearest_layer_panes.is_empty() || !builder.reflected_glow_materials.is_empty() {
+                ray_marks.nearest_layer.extend(builder.nearest_layer_panes.drain(..));
+                ray_marks.reflected_glow.extend(builder.reflected_glow_materials.drain(..));
+            }
             commands.entity(root).insert(object_functions(object));
             objects.tracked.insert(
                 object.object_index,
@@ -833,6 +844,11 @@ fn sync_objects(
         let body = object.flags & OBJECT_FIRST_PERSON_BODY != 0;
         if body != tracked.body {
             for entity in children.iter_descendants(tracked.root) {
+                // (but a glow reflections alone see keeps its mask:
+                // crate::level's REFLECTED_GLOWS)
+                if masks.get(entity).is_ok_and(|mask| *mask == bevy_solarik::scene::RaytracingMask::REFLECTED) {
+                    continue;
+                }
                 if body {
                     commands.entity(entity).try_insert(bevy_solarik::scene::RaytracingMask::AWAY);
                 } else {

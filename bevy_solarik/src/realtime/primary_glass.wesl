@@ -17,6 +17,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::material_ids;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_ALPHA_BLEND;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_DIFFUSE_BLEND;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_REFRACT;
+import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_NEAREST_LAYER;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_material_alpha;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
@@ -135,6 +136,14 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
     var transmission = vec3(1.0);
     var radiance = vec3(0.0);
     var has_glass = 0.0;
+    // (whether the ray has met a pane marked to show its nearest layer
+    // alone: an actively camouflaged first-person weapon and arms, glass of
+    // many closed parts, whose inner parts, far faces and the hands inside
+    // the grip each added a reflection, layer over layer; its later layers
+    // are passed through as if absent, other panes behind it composite as
+    // before. SOLARIK_SHADER_DEFS=CAMOUFLAGE_ALL_LAYERS the old, every
+    // layer)
+    var nearest_layer_met = false;
     for (var i = 0u; i <= 32u; i += 1u) {
         let remaining = max_distance - dot(origin - initial_origin, direction);
         if remaining <= RAY_T_MIN { return vec4(radiance + transmission * behind_near_pane(background, near_pane, background_point), has_glass); }
@@ -168,6 +177,17 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
             return vec4(radiance + transmission * opaque_radiance, has_glass);
         }
         if i == 32u { break; }
+@if(!(CAMOUFLAGE_ALL_LAYERS)) {
+        if (material.flags & MATERIAL_FLAG_NEAREST_LAYER) != 0u {
+            if nearest_layer_met {
+                // (on from the hit along the ray: the next trace's minimum
+                // distance passes the face)
+                origin += direction * ray.t;
+                continue;
+            }
+            nearest_layer_met = true;
+        }
+}
         let hit = resolve_ray_hit_filtered(ray, direction, cone);
         let near = sky_light.near_rays;
         if has_glass == 0.0 && near.w > 0.0 && distance(hit.world_position, near.xyz) < near.w {

@@ -111,6 +111,7 @@ fn tagged_hits_preserve_triangle_queries_and_reject_foreign_payloads_on_vulkan()
             "trace_ray_impl",
             "trace_ray_query",
             "trace_triangle_ray_impl",
+            "trace_triangle_ray_masked",
             "scene_hit_material",
             "scene_hit_alpha",
             "resolve_ray_hit_filtered",

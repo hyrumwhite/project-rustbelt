@@ -169,7 +169,13 @@ pub fn animate_transparent(
 
 /// Each animated model shader's emissive: its colour between the bounds by
 /// its periodic function (rasterizer_xbox_models.c), times the object's
-/// change colour when it says, at the lighting's emissive scale. A glow
+/// change colour when it says, at the lighting's emissive scale; on the
+/// maps in `crate::MODEL_GLOWS_TAKING_LAMPS` (The Maw) at the level's lamps'
+/// share too, as `apply_lighting` sets the still ones (which sets these
+/// with the share at a change of the lighting, put back here the same
+/// frame; `HALO_RT_MODEL_ILLUMINATION_FULL_LAMPS=1` without it, as before).
+/// Elsewhere the flickering lamps escape their level's share, left so as
+/// their looks were accepted. A glow
 /// that follows its object, its stage colour with the object's functions
 /// and colours, at the emissive scale and the level's lamps' share, as
 /// `apply_lighting`'s emitters (which sets its full colour's at a change of
@@ -193,6 +199,8 @@ pub fn animate_self_illumination(
     let seconds = if std::env::var_os("HALO_RT_FREEZE_ANIMATION").is_some() { 0.0 } else { time.elapsed_secs() };
     // (the level's lamps' share, for the glows: see crate::LEVEL_LIGHTING)
     let (_, lamps) = crate::level_lighting(&stats.map_name, active_bsp.0);
+    // (the animated model glows' share: The Maw's alone)
+    let model_lamps = if crate::model_glows_take_lamps(&stats.map_name) { lamps } else { 1.0 };
     for (object, object_functions) in &objects {
         for (material, raster, animation) in &object.materials {
             // (in steps: each change is two materials through the asset
@@ -211,7 +219,7 @@ pub fn animate_self_illumination(
                     if let Some(source) = animation.color_source {
                         color *= Vec3::from(object.change_colors[source]).clamp(Vec3::ZERO, Vec3::ONE);
                     }
-                    color * SELF_ILLUMINATION_RADIANCE * settings.emissive_scale
+                    color * SELF_ILLUMINATION_RADIANCE * settings.emissive_scale * model_lamps
                 }
                 // (each channel in steps, as above)
                 IlluminationAnimation::Glow { stage, radiance } => {
@@ -443,6 +451,53 @@ const GLOW_MOST: f32 = 8.0;
 const GLOWS_FOLLOWING_OBJECT: [(&str, f32); 1] = [(r"levels\b40\scenery\b40_doorblinker\doorblinker", MARKER_GLOW)];
 /// b40's door blinkers' light at full colour (see [`GLOWS_FOLLOWING_OBJECT`]).
 const MARKER_GLOW: f32 = 60.0;
+
+/// Glows that reflections see, by shader tag path (a prefix): Cortana's
+/// hologram (her body, hair and teeth; the Anniversary set's too). Drawn
+/// additively, a glowing see-through surface ([`GLOW_LIGHT`]), she is an
+/// emitter the rays never meet (`RaytracingMask::LIGHT_ONLY`), and nothing
+/// reflected her: not the Chief's visor in the cutscenes, not even as a blur
+/// (play feedback, 13 November). Each of an object's surfaces with such a
+/// shader that is a light-only emitter gets a second ray-traced copy, met by
+/// a reflection's first ray alone (`RaytracingMask::REFLECTED`, and no light
+/// source: her light stays the light-only copy's), black and emitting her
+/// picture: the shader's largest map at the model's own texture coordinates
+/// (her body's, hair's, teeth's bitmap; the noise and particle streams Halo
+/// scrolls over it are left out), its first map's mean colour where it has
+/// none, tinted by the shader's first coloured stage as
+/// [`LevelBuilder::glow_radiance`]'s light is, at [`REFLECTED_GLOW_RADIANCE`]
+/// times [`REFLECTED_GLOW_SCALE`]. It goes with her: her nodes, her skin as
+/// the rays' copy is posed, her visibility and her surface's fade
+/// ([`follow_reflected_glows`]). (A rule
+/// for every character's glow would take in the Jackals' shields and the
+/// armoured marines' visor displays too: untried.)
+const REFLECTED_GLOWS: [&str; 1] = ["characters\\cortana\\"];
+/// A reflected glow's radiance where its picture is full (see
+/// [`REFLECTED_GLOWS`]): self-illumination's, about display white, as Halo
+/// adds her picture to the screen; raised by [`REFLECTED_GLOW_SCALE`].
+const REFLECTED_GLOW_RADIANCE: f32 = SELF_ILLUMINATION_RADIANCE;
+/// How much brighter than [`REFLECTED_GLOW_RADIANCE`] a reflected glow is:
+/// she is small in the Chief's convex visor and its roughness spreads her,
+/// so at self-illumination's radiance her reflection read far below her
+/// picture on screen (c40's intro, the Chief facing her, 13 November 2026:
+/// at 1 a figure hardly to be found, at 8 a small green-yellow figure in the
+/// middle of the visor, readable, at 30 the same brighter, not clipped).
+/// (Tuning: `HALO_RT_REFLECTED_GLOW=<scale>` in its place, an absolute
+/// scale; =1 the first cut's, =0 no copies, as before.)
+const REFLECTED_GLOW_SCALE: f32 = 16.0;
+/// Under this fade (the combiner's, by its object's functions and
+/// camouflage) a reflected glow's surface counts as gone, and so does the
+/// glow (see [`follow_reflected_glows`]).
+const REFLECTED_GLOW_FADED: f32 = 0.1;
+
+/// The scale of [`REFLECTED_GLOW_RADIANCE`] (`HALO_RT_REFLECTED_GLOW`,
+/// [`REFLECTED_GLOW_SCALE`] by default; 0 no reflected glows). Read once.
+fn reflected_glow_scale() -> f32 {
+    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("HALO_RT_REFLECTED_GLOW").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(REFLECTED_GLOW_SCALE)
+    })
+}
 
 /// Light strips added to a level where it has none (play feedback): an
 /// emitting rectangle, level with the world's floor, facing up, in a BSP
@@ -808,6 +863,35 @@ const CAMOUFLAGE_THICKNESS: f32 = 0.6;
 /// behind, out of place in its outline.
 const FIRST_PERSON_CAMOUFLAGE_THICKNESS: f32 = 0.0;
 
+/// Whether the first person's camouflage is drawn as before
+/// (`HALO_RT_CAMOUFLAGE_LAYERS=1`): every layer of its glass composited for
+/// the camera, an alpha-tested surface glass over its whole polygons, and
+/// the glass inset as the rays' copies of opaque models are. Otherwise (play
+/// feedback, 13 November: odd shapes on the weapon, as if its collision
+/// shapes showed) it reads as one glass skin of the weapon and arms: the
+/// camera sees its nearest layer alone (Solarik's
+/// `RayMaterialMarks::nearest_layer`; `SOLARIK_SHADER_DEFS=CAMOUFLAGE_ALL_LAYERS`
+/// the old in the shader alone), its alpha-tested surfaces (the assault
+/// rifle's ammunition display, a rounded panel cut from a larger slab; the
+/// gun, its grip and the hands) cut out as the camera sees them
+/// ([`LevelBuilder::camouflage_glass_for`]), and the first-person models'
+/// rigid pieces where the camera's surface is, not inset
+/// ([`first_person_model`]): a part thinner than twice the inset turned
+/// inside out. Read once.
+fn camouflage_all_layers() -> bool {
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALL.get_or_init(|| std::env::var("HALO_RT_CAMOUFLAGE_LAYERS").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Whether a model (by its tag path) is a first-person one, the weapons'
+/// and the arms' (`weapons\assault rifle\fp\fp`, `characters\cyborg\fp\fp`),
+/// which the camera alone sees: its rigid pieces, which the rays see only as
+/// camouflage glass (the camera draws its skinned parts), are not inset (see
+/// [`camouflage_all_layers`]).
+fn first_person_model(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("\\fp\\")
+}
+
 /// Roughness where a reflective model shader's specular mask is zero: a
 /// plastic's sheen, not the matte of surfaces Halo gives no reflection. That
 /// is for the brightest reflections (armour, Covenant hulls); dimmer ones fade
@@ -951,8 +1035,23 @@ pub struct LevelBuilder {
     animated_models: HashMap<(u32, [u8; 8]), Option<Arc<AnimatedModel>>>,
     /// Its liquid glass, in the rays' scene.
     camouflage_glass: [Option<Handle<StandardMaterial>>; 2],
+    /// The first person's glass for each shader, cut out as an alpha-tested
+    /// shader's surface is (see [`LevelBuilder::camouflage_glass_for`]).
+    camouflage_cut_outs: HashMap<ShaderUse, Handle<StandardMaterial>>,
+    /// Glows reflections alone see, by shader (see [`REFLECTED_GLOWS`]):
+    /// their material and radiance, None for a shader that has none.
+    reflected_glows: HashMap<ShaderUse, Option<(Handle<StandardMaterial>, Vec3)>>,
+    /// Materials made since for Solarik to mark
+    /// (`bevy_solarik::material_marks::RayMaterialMarks`), which
+    /// crate::bridge hands it: panes the camera sees the nearest layer of
+    /// alone, and the glows reflections alone see.
+    pub nearest_layer_panes: Vec<AssetId<StandardMaterial>>,
+    pub reflected_glow_materials: Vec<AssetId<StandardMaterial>>,
     /// Surfaces tinted by a change colour, by shader and colour.
     coloured_surfaces: HashMap<(ShaderUse, [u8; 3]), Surface>,
+    /// The structure's copies of transparent materials, depth biased, by
+    /// the material copied ([`LevelBuilder::structure_surface`]).
+    structure_transparents: HashMap<AssetId<HaloTransparentMaterial>, Handle<HaloTransparentMaterial>>,
     loaded_bsps: Vec<usize>,
     /// Each loaded BSP's root entity, by BSP index.
     pub bsp_roots: Vec<(usize, Entity)>,
@@ -1025,7 +1124,12 @@ impl LevelBuilder {
             models: HashMap::default(),
             animated_models: HashMap::default(),
             coloured_surfaces: HashMap::default(),
+            structure_transparents: HashMap::default(),
             camouflage_glass: [None, None],
+            camouflage_cut_outs: HashMap::default(),
+            reflected_glows: HashMap::default(),
+            nearest_layer_panes: Vec::new(),
+            reflected_glow_materials: Vec::new(),
             loaded_bsps: Vec::new(),
             bsp_roots: Vec::new(),
             breakable_roots: Vec::new(),
@@ -1100,6 +1204,9 @@ impl LevelBuilder {
                     self.stats.skipped_transparent += 1;
                     continue;
                 };
+                // (its transparent pictures biased toward the camera, over
+                // the faces they lie in)
+                let surface = self.structure_surface(surface, assets);
                 if material.shader.group == halo_map::fourcc(b"swat") && !material.vertices.is_empty() {
                     let height = material.vertices.iter().map(|v| v.position[2]).sum::<f32>() / material.vertices.len() as f32;
                     self.water_heights.push(height);
@@ -2214,9 +2321,16 @@ impl LevelBuilder {
                 // (the rays' rigid copy sits a little inside the skinned
                 // surface the camera sees: where it bends differently, rays
                 // leaving that surface would otherwise hit it, and the model
-                // would shadow itself in blotches)
+                // would shadow itself in blotches); but a first-person
+                // model's opaque pieces, which the rays see only as its
+                // camouflage glass (see camouflage_all_layers)
+                let depth = if first_person_model(&model.name) && matches!(surface, Surface::Solid(_)) && !camouflage_all_layers() {
+                    0.0
+                } else {
+                    TRACED_INSET
+                };
                 let inset = |v: SourceVertex| SourceVertex {
-                    position: std::array::from_fn(|i| v.position[i] - v.normal[i] * TRACED_INSET),
+                    position: std::array::from_fn(|i| v.position[i] - v.normal[i] * depth),
                     ..v
                 };
                 for (node, indices) in by_node {
@@ -2391,8 +2505,7 @@ impl LevelBuilder {
         // (crate::bridge): a faint shell, they looked painted on beside the
         // camouflaged enemies' glass.
         if camouflaged {
-            let material = self.camouflage_glass(assets);
-            let glass = |commands: &mut Commands, parent: Entity, mesh: Handle<Mesh>| {
+            let glass = |commands: &mut Commands, parent: Entity, mesh: Handle<Mesh>, material: Handle<StandardMaterial>| {
                 commands
                     .spawn((
                         Name::new(format!("{} (camouflaged)", model.name)),
@@ -2410,8 +2523,11 @@ impl LevelBuilder {
             // then, as glass was a slab out from the first-person weapon,
             // the "shards" of play feedback)
             let solid = |surface: &Surface| matches!(surface, Surface::Solid(SolidSurface { unseen: false, .. }));
+            // (each piece's glass cut out as its surface is, the first
+            // person's: see camouflage_glass_for)
             for piece in model.pieces.iter().filter(|piece| solid(&piece.surface)) {
-                glass(commands, nodes[piece.node], piece.mesh.clone());
+                let material = self.camouflage_glass_for(piece.shader, assets);
+                glass(commands, nodes[piece.node], piece.mesh.clone(), material);
             }
             // (its bending parts skinned anew as its nodes move, as below)
             let rest = vec![Mat4::IDENTITY; model.default_inverses.len()];
@@ -2422,7 +2538,8 @@ impl LevelBuilder {
                 .traced_skins
                 .iter()
                 .map(|skin| {
-                    let entity = glass(commands, skin_parent, assets.meshes.add(skin.mesh(&rest)));
+                    let material = self.camouflage_glass_for(skin.shader, assets);
+                    let entity = glass(commands, skin_parent, assets.meshes.add(skin.mesh(&rest)), material);
                     if !solid(&skin.surface) {
                         commands.entity(entity).insert(Visibility::Hidden);
                     }
@@ -2449,8 +2566,12 @@ impl LevelBuilder {
                 _ => continue,
             };
             self.recolour = Some((root, piece.surface.clone(), piece.shader));
-            let _ = self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
+            let traced = self.spawn_mesh_as(commands, nodes[piece.node], model.name.clone(), piece.mesh.clone(), &surface, mode);
             self.recolour = None;
+            // (Cortana's glow, for reflections: see REFLECTED_GLOWS)
+            if let Some(traced) = traced {
+                self.spawn_reflected_glow(commands, nodes[piece.node], &model.name, traced, piece.mesh.clone(), &surface, piece.shader, assets);
+            }
         }
         // the bending parts, under the model's root node, given a mesh
         // skinned anew (relative to that node) as its nodes move
@@ -2476,9 +2597,12 @@ impl LevelBuilder {
             }
             if !self.first_person
                 && let Some(traced) =
-                    self.spawn_mesh_as(commands, skin_parent, model.name.clone(), mesh, &surface, MeshUse::Traced)
+                    self.spawn_mesh_as(commands, skin_parent, model.name.clone(), mesh.clone(), &surface, MeshUse::Traced)
             {
                 skins.push(traced);
+                // (Cortana's glow, for reflections, posed as this copy is:
+                // see REFLECTED_GLOWS)
+                self.spawn_reflected_glow(commands, skin_parent, &model.name, traced, mesh, &surface, skin.shader, assets);
             }
             self.recolour = None;
         }
@@ -2614,11 +2738,15 @@ impl LevelBuilder {
     /// An actively camouflaged object's liquid glass: clear but for a cool
     /// tinge, smooth, as thick as a limb (Solarik bends the picture behind
     /// it through that depth); the first person's thin.
+    /// The first person's is a pane Solarik shows the nearest layer of
+    /// alone (see [`camouflage_all_layers`]).
     fn camouflage_glass(&mut self, assets: &mut LevelAssets) -> Handle<StandardMaterial> {
         let thickness = if self.first_person { FIRST_PERSON_CAMOUFLAGE_THICKNESS } else { CAMOUFLAGE_THICKNESS };
+        let nearest_layer = self.first_person && !camouflage_all_layers();
+        let marks = &mut self.nearest_layer_panes;
         self.camouflage_glass[self.first_person as usize]
             .get_or_insert_with(|| {
-                assets.materials.add(StandardMaterial {
+                let material = assets.materials.add(StandardMaterial {
                     base_color: Color::srgb(0.93, 0.97, 1.0),
                     perceptual_roughness: 0.05,
                     reflectance: 0.5,
@@ -2628,9 +2756,153 @@ impl LevelBuilder {
                     cull_mode: None,
                     double_sided: true,
                     ..default()
-                })
+                });
+                if nearest_layer {
+                    marks.push(material.id());
+                }
+                material
             })
             .clone()
+    }
+
+    /// An object's glow seen by reflections alone, beside the light-only
+    /// emitter `source` that carries the same surface on the same mesh (see
+    /// [`REFLECTED_GLOWS`]); none for another surface.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_reflected_glow(
+        &mut self,
+        commands: &mut Commands,
+        parent: Entity,
+        name: &str,
+        source: Entity,
+        mesh: Handle<Mesh>,
+        surface: &Surface,
+        shader: Option<ShaderUse>,
+        assets: &mut LevelAssets,
+    ) {
+        let (Surface::Solid(SolidSurface { unseen: true, radiance: Some(_), seen_as: Some(seen_as), .. }), Some(shader)) = (surface, shader) else {
+            return;
+        };
+        if self.first_person {
+            return;
+        }
+        let Some((material, radiance)) = self.reflected_glow(shader, assets) else { return };
+        commands.spawn((
+            Name::new(format!("{name} (reflected glow)")),
+            RaytracingMesh3d(mesh.clone()),
+            TracedMesh(mesh),
+            bevy_solarik::scene::RaytracingMask::REFLECTED,
+            Visibility::Inherited,
+            MeshMaterial3d(material),
+            // (its emissive set as the level's emitters' are, by the
+            // lighting's emissive scale: apply_lighting)
+            EmissiveSurface { radiance },
+            ReflectedGlow { source, seen_as: seen_as.clone() },
+            Transform::default(),
+            ChildOf(parent),
+        ));
+    }
+
+    /// A glow's material for reflections and its radiance (see
+    /// [`REFLECTED_GLOWS`]), made once per shader: None for a shader not
+    /// listed, or with the copies off (`HALO_RT_REFLECTED_GLOW=0`).
+    fn reflected_glow(&mut self, shader: ShaderUse, assets: &mut LevelAssets) -> Option<(Handle<StandardMaterial>, Vec3)> {
+        if let Some(made) = self.reflected_glows.get(&shader) {
+            return made.clone();
+        }
+        let made = self.make_reflected_glow(shader, assets);
+        self.reflected_glows.insert(shader, made.clone());
+        made
+    }
+
+    fn make_reflected_glow(&mut self, shader: ShaderUse, assets: &mut LevelAssets) -> Option<(Handle<StandardMaterial>, Vec3)> {
+        let scale = reflected_glow_scale();
+        if scale <= 0.0 {
+            return None;
+        }
+        let info = shader::shader_info(&self.cache, TagRef { group: 0, datum: Some(shader.datum) }).ok().flatten()?;
+        let name = info.name.to_ascii_lowercase();
+        if !REFLECTED_GLOWS.iter().any(|prefix| name.starts_with(prefix)) {
+            return None;
+        }
+        let transparent = info.transparent.as_ref()?;
+        // (her picture: the largest map at the model's own texture
+        // coordinates; the smaller ones, the noise and streams scrolled over
+        // it, left out)
+        let picture = transparent
+            .maps
+            .iter()
+            .flatten()
+            .filter(|map| map.uv_scale == [1.0, 1.0] && map.uv_offset == [0.0, 0.0])
+            .filter_map(|map| {
+                let datum = map.bitmap.datum?;
+                Some((datum, bitmap_size(&self.cache, datum)?))
+            })
+            .max_by(|(_, a), (_, b)| (a.x * a.y).total_cmp(&(b.x * b.y)))
+            .and_then(|(datum, _)| self.textures.permuted(&self.cache, datum, shader.permutation, true, assets.images));
+        // (or, with none, its first map's mean colour all over, as its
+        // light's)
+        let mean = match picture {
+            Some(_) => Vec3::ONE,
+            None => {
+                let map = transparent.maps.first()?.as_ref()?.bitmap.datum?;
+                let alpha = matches!(transparent.blend, shader::BlendFunction::AlphaMultiplyAdd);
+                Vec3::from(self.textures.mean_linear(&self.cache, map, shader.permutation, alpha)?)
+            }
+        };
+        // (tinted as glow_radiance tints its light)
+        let tint = first_coloured_stage(&transparent.stage_colors).map_or(Vec3::ONE, |stage| {
+            let color = Vec3::new(stage.color1[0], stage.color1[1], stage.color1[2]).max(Vec3::new(stage.color0[0], stage.color0[1], stage.color0[2]));
+            color / color.max_element()
+        });
+        // (black, its emission all it shows; two-sided, as Halo draws her)
+        let material = assets.materials.add(StandardMaterial {
+            base_color: Color::BLACK,
+            perceptual_roughness: 1.0,
+            reflectance: 0.0,
+            emissive_texture: picture,
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        });
+        self.reflected_glow_materials.push(material.id());
+        Some((material, mean * tint * REFLECTED_GLOW_RADIANCE * scale))
+    }
+
+    /// A camouflaged piece's glass, by its shader: [`LevelBuilder::camouflage_glass`],
+    /// but the first person's cut out as an alpha-tested shader's surface is
+    /// (the game's alpha test on its base map's alpha, which the camera's
+    /// material keeps: see `make_surface`). A copy whose texture is that
+    /// test's outcome, white where it passes so that the tint stays the
+    /// glass's own: a texel cut out has no coverage, a hole the rays pass
+    /// (Solarik's thin glass), and the rest is the glass as before. Whole,
+    /// the assault rifle's ammunition display (a rounded panel cut from its
+    /// slab) stood beside the weapon as a flat slab of glass. (The third
+    /// person's as before; `HALO_RT_CAMOUFLAGE_LAYERS=1` the first person's
+    /// too: see [`camouflage_all_layers`].)
+    fn camouflage_glass_for(&mut self, shader: Option<ShaderUse>, assets: &mut LevelAssets) -> Handle<StandardMaterial> {
+        let glass = self.camouflage_glass(assets);
+        let Some(shader) = shader.filter(|_| self.first_person && !camouflage_all_layers()) else { return glass };
+        if let Some(made) = self.camouflage_cut_outs.get(&shader) {
+            return made.clone();
+        }
+        let info = shader::shader_info(&self.cache, TagRef { group: 0, datum: Some(shader.datum) }).ok().flatten();
+        let base = info
+            .filter(|info| info.environment.is_none() && (info.alpha_tested || info.alpha_blended_decal))
+            .and_then(|info| info.base_map)
+            .and_then(|map| map.datum);
+        let mask = base.and_then(|base| self.textures.baked(&self.cache, crate::textures::Bake::AlphaTest { base }, shader.permutation, assets.images));
+        let made = match (mask, assets.materials.get(&glass).cloned()) {
+            (Some(mask), Some(mut material)) => {
+                material.base_color_texture = Some(mask);
+                let material = assets.materials.add(material);
+                self.nearest_layer_panes.push(material.id());
+                material
+            }
+            _ => glass,
+        };
+        self.camouflage_cut_outs.insert(shader, made.clone());
+        made
     }
 
     /// A piece's surface with the object's change colour, where its shader
@@ -2732,6 +3004,41 @@ impl LevelBuilder {
         debug!("change colour {color:?} on {}", info.as_ref().map_or("", |i| i.name.as_str()));
         self.coloured_surfaces.insert((shader, color), surface.clone());
         surface
+    }
+
+    /// A structure's surface: its transparent material for the camera (a
+    /// transparent surface's, or the picture of a glowing card the rays
+    /// alone see, `seen_as`) a copy marked the structure's, which its
+    /// pipeline biases toward the camera (`crate::material`'s
+    /// STRUCTURE_DEPTH_BIAS), one copy a material; the shared surface is
+    /// left as it is for the objects that use the same shader. As it is
+    /// with `HALO_RT_NO_STRUCTURE_DEPTH_BIAS=1`.
+    fn structure_surface(&mut self, surface: Surface, assets: &mut LevelAssets) -> Surface {
+        if !crate::material::structure_depth_bias() {
+            return surface;
+        }
+        let mut biased = |material: &Handle<HaloTransparentMaterial>| -> Handle<HaloTransparentMaterial> {
+            if let Some(copy) = self.structure_transparents.get(&material.id()) {
+                return copy.clone();
+            }
+            let Some(mut copy) = assets.transparent_materials.get(material).cloned() else { return material.clone() };
+            // (a sky's layer is no surface of the structure's)
+            if copy.sky {
+                return material.clone();
+            }
+            copy.structure = true;
+            let copy = assets.transparent_materials.add(copy);
+            self.structure_transparents.insert(material.id(), copy.clone());
+            copy
+        };
+        match surface {
+            Surface::Transparent(material) => Surface::Transparent(biased(&material)),
+            Surface::Solid(mut solid) => {
+                solid.seen_as = solid.seen_as.as_ref().map(&mut biased);
+                Surface::Solid(solid)
+            }
+            other => other,
+        }
     }
 
     /// The material for a shader, made once per shader and permutation.
@@ -3227,6 +3534,7 @@ impl LevelBuilder {
             blend: blend as u16,
             one_sided: !sky && transparent.flags & shader::TransparentInfo::TWO_SIDED == 0,
             decal: !sky && transparent.flags & shader::TransparentInfo::DECAL != 0,
+            structure: false,
             sky,
             animation: Some(std::sync::Arc::new(transparent.clone())),
             object: None,
@@ -3305,6 +3613,7 @@ impl LevelBuilder {
             blend: 10,
             one_sided: false,
             decal: false,
+            structure: false,
             sky: false,
             animation: None,
             object: None,
@@ -3349,6 +3658,7 @@ impl LevelBuilder {
             blend,
             one_sided: meter.flags & shader::MeterInfo::TWO_SIDED == 0,
             decal: false,
+            structure: false,
             sky: false,
             animation: None,
             object: None,
@@ -3897,6 +4207,47 @@ pub fn sphere_lumens_per_radiance(radius: f32) -> f32 {
     std::f32::consts::PI * radius * radius * 4.0 * std::f32::consts::PI
 }
 
+/// A glow reflections alone see (see [`REFLECTED_GLOWS`]): the light-only
+/// emitter it stands beside, whose mesh it takes (a bending part's copy is
+/// posed anew by crate::bridge, and may be a new mesh), and the transparent
+/// material the camera sees there, whose fade it follows.
+#[derive(Component)]
+pub struct ReflectedGlow {
+    source: Entity,
+    seen_as: Handle<HaloTransparentMaterial>,
+}
+
+/// Keeps each reflected glow with its surface (see [`REFLECTED_GLOWS`]): on
+/// the mesh of the light-only copy beside it, as crate::bridge poses that
+/// (changed in place, or a new one), and gone while its surface's fade (the
+/// combiner's, by its object's functions and camouflage) is under
+/// [`REFLECTED_GLOW_FADED`]. Its object hidden or gone, it goes with it, as
+/// that copy does.
+pub fn follow_reflected_glows(
+    mut commands: Commands,
+    mut glows: Query<(Entity, &ReflectedGlow, &TracedMesh, &mut Visibility, Has<RaytracingMesh3d>)>,
+    sources: Query<&TracedMesh, Without<ReflectedGlow>>,
+    transparent_materials: Res<Assets<HaloTransparentMaterial>>,
+    table: Res<crate::combiners::CombinerTable>,
+) {
+    for (entity, glow, mesh, mut visibility, in_scene) in &mut glows {
+        if let Ok(source) = sources.get(glow.source)
+            && source.0 != mesh.0
+        {
+            let mut copy = commands.entity(entity);
+            copy.try_insert(TracedMesh(source.0.clone()));
+            if in_scene {
+                copy.try_insert(RaytracingMesh3d(source.0.clone()));
+            }
+        }
+        let fade = transparent_materials.get(&glow.seen_as).and_then(|material| table.params(material.slot)).map_or(1.0, |params| params.fade.x);
+        let wanted = if fade < REFLECTED_GLOW_FADED { Visibility::Hidden } else { Visibility::Inherited };
+        if *visibility != wanted {
+            *visibility = wanted;
+        }
+    }
+}
+
 /// Keeps the sky centred on the camera.
 /// A ray-traced mesh, kept so that it can leave the ray-traced scene while
 /// hidden and come back: Solari traces every `RaytracingMesh3d`, visible or
@@ -3915,7 +4266,9 @@ pub struct OnBsps(pub u32);
 /// once the body's skinned meshes were changed in place: a new mesh every
 /// frame had put it back each time, and the player lost their shadow.) A
 /// light-only emitter (`RaytracingMask::LIGHT_ONLY`) is masked for another
-/// reason and goes out with its level's BSP like any other.
+/// reason and goes out with its level's BSP like any other, and a glow
+/// reflections alone see (`RaytracingMask::REFLECTED`, see
+/// [`REFLECTED_GLOWS`]) goes out with its object.
 pub fn sync_traced_visibility(
     mut commands: Commands,
     traced: Query<
@@ -3927,7 +4280,9 @@ pub fn sync_traced_visibility(
 ) {
     let unmasked: Vec<Entity> = unmasked.read().collect();
     for (entity, mesh, visibility, in_scene, mask) in traced.iter().chain(unmasked.iter().filter_map(|&e| all.get(e).ok())) {
-        let masked = mask.is_some_and(|mask| *mask != bevy_solarik::scene::RaytracingMask::LIGHT_ONLY);
+        let masked = mask.is_some_and(|mask| {
+            *mask != bevy_solarik::scene::RaytracingMask::LIGHT_ONLY && *mask != bevy_solarik::scene::RaytracingMask::REFLECTED
+        });
         let wanted = visibility.get() || masked;
         if wanted && !in_scene {
             commands.entity(entity).insert(RaytracingMesh3d(mesh.0.clone()));

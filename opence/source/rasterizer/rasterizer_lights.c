@@ -352,6 +352,14 @@ static real lens_flare_evaluate_corona_rotation_function(
 	struct rasterizer_lens_flare_submit_parameters const *lens_flare_parameters);
 static void lens_flare_data_error(
 	char const *problem);
+static boolean flare_positional_queries(
+	void);
+static boolean flare_log_enabled(
+	void);
+static short flare_query_slot_get(
+	byte *identity);
+static void flare_query_slots_age(
+	void);
 
 /* ---------- globals */
 
@@ -360,6 +368,46 @@ static byte local_lens_flare_occlusion_test_results2[MAXIMUM_LENS_FLARE_MARKERS_
 static struct rasterizer_lens_flare_submit_parameters local_lens_flare_parameters[MAXIMUM_LENS_FLARES_PER_FRAME] = {0};
 static long local_lens_flare_count = 0;
 extern short global_screenshot_count;
+
+/* port: a lens flare's occlusion query by the flare, not by its place in the
+frame's list. The port's counts arrive a frame or two after their test
+(d3d8_gl.c, visibility_copy_batch) and the list's order and length change as
+the player moves, so by place a lamp read another flare's count, or that of a
+place nobody had tested, snapped to 0 and climbed back over the next frames:
+halos winking off for a frame or two. Each flare (the address its occlusion
+result lives at) keeps a query slot while it goes on being submitted, freed
+after FLARE_QUERY_FREE_AFTER_FRAMES frames without it, and its counts are
+used once the slot's tests of this frame and the two before were its own;
+until then its visibility stands. With the table full a flare is tested by
+place as before, and HALO_FLARE_POSITIONAL_QUERIES=1 tests every flare so. */
+enum
+{
+	FLARE_QUERY_SLOT_COUNT= MAXIMUM_LENS_FLARES_PER_FRAME,
+	/* (the slots' tests after the places' 0 to 1023, below the transparent
+	pixel counter's 0xfff) */
+	FLARE_QUERY_FIRST_TEST_INDEX= MAXIMUM_LENS_FLARES_PER_FRAME,
+	FLARE_QUERY_HASH_SIZE= 4*FLARE_QUERY_SLOT_COUNT,
+	FLARE_QUERY_FREE_AFTER_FRAMES= 8,
+	/* tested for the flare this frame and the two before: the count read is
+	from one of its own tests whether the GPU is one or two frames behind */
+	FLARE_QUERY_TRUSTED_HISTORY= 0x7
+};
+
+struct flare_query_slot
+{
+	byte *identity; /* NULL unused */
+	unsigned long last_used_frame;
+	unsigned long history; /* bit n: tested for this flare n frames ago */
+};
+
+static struct flare_query_slot flare_query_slots[FLARE_QUERY_SLOT_COUNT];
+/* identity to slot, open addressing (NONE empty); rebuilt after slots are freed */
+static short flare_query_hash[FLARE_QUERY_HASH_SIZE];
+static boolean flare_query_hash_valid= FALSE;
+static short flare_query_next_free= 0;
+static unsigned long flare_query_frame= 0;
+/* each listed flare's slot, NONE tested by place */
+static short local_lens_flare_query_slots[MAXIMUM_LENS_FLARES_PER_FRAME];
 
 /* ---------- private code */
 
@@ -440,6 +488,161 @@ static void lens_flare_data_error(
 		error(_error_silent, "### ERROR a BSP lens flare marker has a bad %s index; it is skipped", problem);
 		reported= TRUE;
 	}
+
+	return;
+}
+
+/* HALO_FLARE_POSITIONAL_QUERIES=1: every lens flare's occlusion test by its
+place in the frame's list, as before the slots */
+static boolean flare_positional_queries(
+	void)
+{
+	static long positional= NONE;
+
+	if (positional==NONE)
+	{
+		char const *setting= getenv("HALO_FLARE_POSITIONAL_QUERIES");
+
+		positional= setting && *setting && *setting!='0';
+	}
+
+	return positional ? TRUE : FALSE;
+}
+
+/* HALO_FLARE_LOG=1: a line to stderr each time a flare's visibility is
+snapped to 0, to count them in a scripted run */
+static boolean flare_log_enabled(
+	void)
+{
+	static long enabled= NONE;
+
+	if (enabled==NONE)
+	{
+		char const *setting= getenv("HALO_FLARE_LOG");
+
+		enabled= setting && *setting && *setting!='0';
+	}
+
+	return enabled ? TRUE : FALSE;
+}
+
+static long flare_query_hash_index(
+	byte const *identity)
+{
+	size_t key= (size_t)identity;
+
+	key^= key>>11;
+	key*= 2654435761u;
+
+	return (long)((key>>8)&(FLARE_QUERY_HASH_SIZE-1));
+}
+
+static void flare_query_hash_rebuild(
+	void)
+{
+	short slot_index;
+	long hash_index;
+
+	for (hash_index= 0; hash_index<FLARE_QUERY_HASH_SIZE; hash_index++)
+	{
+		flare_query_hash[hash_index]= NONE;
+	}
+	for (slot_index= 0; slot_index<FLARE_QUERY_SLOT_COUNT; slot_index++)
+	{
+		if (flare_query_slots[slot_index].identity)
+		{
+			/* (a quarter full at most: an empty entry is always found) */
+			hash_index= flare_query_hash_index(flare_query_slots[slot_index].identity);
+			while (flare_query_hash[hash_index]!=NONE)
+			{
+				hash_index= (hash_index+1)&(FLARE_QUERY_HASH_SIZE-1);
+			}
+			flare_query_hash[hash_index]= slot_index;
+		}
+	}
+	flare_query_hash_valid= TRUE;
+
+	return;
+}
+
+/* the flare's slot, given one if it has none; NONE with every slot taken */
+static short flare_query_slot_get(
+	byte *identity)
+{
+	long hash_index;
+	short slot_index;
+	short probe;
+
+	if (!flare_query_hash_valid)
+	{
+		flare_query_hash_rebuild();
+	}
+
+	hash_index= flare_query_hash_index(identity);
+	while ((slot_index= flare_query_hash[hash_index])!=NONE)
+	{
+		if (flare_query_slots[slot_index].identity==identity)
+		{
+			flare_query_slots[slot_index].last_used_frame= flare_query_frame;
+			return slot_index;
+		}
+		hash_index= (hash_index+1)&(FLARE_QUERY_HASH_SIZE-1);
+	}
+
+	for (probe= 0; probe<FLARE_QUERY_SLOT_COUNT; probe++)
+	{
+		slot_index= (short)((flare_query_next_free+probe)%FLARE_QUERY_SLOT_COUNT);
+		if (!flare_query_slots[slot_index].identity)
+		{
+			struct flare_query_slot *slot= &flare_query_slots[slot_index];
+
+			slot->identity= identity;
+			slot->last_used_frame= flare_query_frame;
+			slot->history= 0;
+			flare_query_hash[hash_index]= slot_index;
+			flare_query_next_free= (short)((slot_index+1)%FLARE_QUERY_SLOT_COUNT);
+			/* a flare given a slot afresh starts unseen, as a new one does:
+			the visibility it kept from when it was last submitted may be
+			from before a wall came between, and would show through the wall
+			until its own counts are trusted */
+			*identity= 0;
+			return slot_index;
+		}
+	}
+
+	return NONE;
+}
+
+/* at a frame's end: the slots' histories a frame older, and those of flares
+no longer submitted freed */
+static void flare_query_slots_age(
+	void)
+{
+	short slot_index;
+	boolean freed= FALSE;
+
+	for (slot_index= 0; slot_index<FLARE_QUERY_SLOT_COUNT; slot_index++)
+	{
+		struct flare_query_slot *slot= &flare_query_slots[slot_index];
+
+		if (slot->identity)
+		{
+			if (flare_query_frame-slot->last_used_frame>=FLARE_QUERY_FREE_AFTER_FRAMES)
+			{
+				slot->identity= NULL;
+				freed= TRUE;
+			}
+			else
+			{
+				slot->history<<= 1;
+			}
+		}
+	}
+	if (freed)
+	{
+		flare_query_hash_valid= FALSE;
+	}
+	flare_query_frame++;
 
 	return;
 }
@@ -592,6 +795,10 @@ void rasterizer_lights_reset_for_new_map(
 		sizeof(local_lens_flare_occlusion_test_results));
 	memset(local_lens_flare_occlusion_test_results2, 0, sizeof(local_lens_flare_occlusion_test_results2));
 	local_lens_flare_count = 0;
+	/* port: the flares' query slots with the results they point at */
+	memset(flare_query_slots, 0, sizeof(flare_query_slots));
+	flare_query_hash_valid= FALSE;
+	flare_query_next_free= 0;
 
 	return;
 }
@@ -632,8 +839,11 @@ void rasterizer_lens_flare_submit(
 				camera_distance<parameters->definition->far_fade_distance) &&
 				(parameters->compressed_light_color&LENS_FLARE_LIGHT_COLOR_ALPHA_MASK)>0)
 			{
-				struct rasterizer_lens_flare_submit_parameters *lens_flare_parameters=
-					lens_flare_parameters_get((short)local_lens_flare_count++);
+				struct rasterizer_lens_flare_submit_parameters *lens_flare_parameters;
+
+				/* port: given its query slot when tested */
+				local_lens_flare_query_slots[local_lens_flare_count]= NONE;
+				lens_flare_parameters= lens_flare_parameters_get((short)local_lens_flare_count++);
 
 				memcpy(lens_flare_parameters, parameters, sizeof(*lens_flare_parameters));
 
@@ -711,11 +921,24 @@ void rasterizer_lights_begin_for_new_frame(
 			struct rasterizer_lens_flare_submit_parameters *lens_flare_parameters= lens_flare_parameters_get(lens_flare_index);
 			byte *occlusion_test_result= lens_flare_occlusion_test_results_get(lens_flare_parameters);
 			byte latest_visibility;
+			/* port: the flare's query slot (NONE tested by place) */
+			short query_slot= local_lens_flare_query_slots[lens_flare_index];
 
 			if (lens_flare_parameters->internal__occlusion_pixels>0)
 			{
-				long visible_pixels= rasterizer_widget_get_occlusion_test_result(lens_flare_index);
+				long visible_pixels;
 				long occlusion_pixels= lens_flare_parameters->internal__occlusion_pixels;
+
+				if (query_slot!=NONE &&
+					(flare_query_slots[query_slot].history&FLARE_QUERY_TRUSTED_HISTORY)!=FLARE_QUERY_TRUSTED_HISTORY)
+				{
+					/* port: the slot's count may not be this flare's yet (a new
+					slot, or untested in a frame the count may come from): the
+					visibility stands */
+					continue;
+				}
+				visible_pixels= rasterizer_widget_get_occlusion_test_result(
+					query_slot!=NONE ? FLARE_QUERY_FIRST_TEST_INDEX+query_slot : lens_flare_index);
 
 				latest_visibility= (byte)MIN(255, (255*visible_pixels + (occlusion_pixels>>1))/occlusion_pixels);
 			}
@@ -726,6 +949,16 @@ void rasterizer_lights_begin_for_new_frame(
 
 			if (!latest_visibility)
 			{
+				if (*occlusion_test_result && flare_log_enabled())
+				{
+					fprintf(stderr, "flare snap: frame %lu slot %d identity %p stable %d was %d tested %d\n",
+						flare_query_frame,
+						query_slot!=NONE ? FLARE_QUERY_FIRST_TEST_INDEX+query_slot : lens_flare_index,
+						(void *)occlusion_test_result,
+						query_slot!=NONE,
+						*occlusion_test_result,
+						lens_flare_parameters->internal__occlusion_pixels>0);
+				}
 				*occlusion_test_result= 0;
 			}
 			else
@@ -761,6 +994,7 @@ void rasterizer_lights_begin_for_new_frame(
 		}
 
 		local_lens_flare_count= 0;
+		flare_query_slots_age();
 	}
 
 	rasterizer_profile_end(_rasterizer_profile_lens_flare_occlusion_query);
@@ -949,11 +1183,22 @@ void rasterizer_lens_flares_submit_occlusion_tests(
 					break;
 				}
 
-				lens_flare_parameters->internal__occlusion_pixels =
-					rasterizer_widget_submit_occlusion_test(
-						&occlusion_point,
-						occlusion_radius,
-						lens_flare_index);
+				{
+					/* port: the flare's own query slot (flare_query_slot_get) */
+					short query_slot = flare_positional_queries() ? NONE :
+						flare_query_slot_get(lens_flare_occlusion_test_results_get(lens_flare_parameters));
+
+					local_lens_flare_query_slots[lens_flare_index] = query_slot;
+					lens_flare_parameters->internal__occlusion_pixels =
+						rasterizer_widget_submit_occlusion_test(
+							&occlusion_point,
+							occlusion_radius,
+							query_slot != NONE ? FLARE_QUERY_FIRST_TEST_INDEX + query_slot : lens_flare_index);
+					if (query_slot != NONE && lens_flare_parameters->internal__occlusion_pixels > 0)
+					{
+						flare_query_slots[query_slot].history |= 1;
+					}
+				}
 			}
 		}
 

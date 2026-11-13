@@ -131,6 +131,12 @@ pub enum Bake {
     /// (f32 bits) over the base map, as the camera's material samples it.
     /// At the finer of the two's sizes (at most 2048 a side).
     CutOut { base: u32, bump: u32, scale: [u32; 2] },
+    /// A model shader's alpha test (the game's, reference 0x7f, on its base
+    /// map's alpha) as a texture: white, opaque where a texel passes and
+    /// clear where it is cut out, at the base map's size (an actively
+    /// camouflaged first-person surface's glass, cut out as the camera sees
+    /// the surface: crate::level's `camouflage_glass_for`).
+    AlphaTest { base: u32 },
 }
 
 /// A human weapon's finish (see [`Bake::Gunmetal`]). The base map's light
@@ -833,6 +839,11 @@ fn bake_rgba(cache: &CacheFile, bake: Bake, permutation: u16) -> halo_map::Resul
             let mask = rgba8(cache, multipurpose, permutation)?;
             let base = base.map(|b| rgba8(cache, b, permutation)).transpose()?;
             Ok(modulate_base(&mask, base.as_ref(), |texel| [texel[1] as f32 / 255.0; 3]))
+        }
+        Bake::AlphaTest { base } => {
+            let base = rgba8(cache, base, permutation)?;
+            let data = base.data.chunks_exact(4).flat_map(|texel| [255, 255, 255, if texel[3] > 0x7f { 255 } else { 0 }]).collect();
+            Ok((base.width, base.height, data, false))
         }
         Bake::CutOut { base, bump, scale } => {
             let base = rgba8(cache, base, permutation)?;

@@ -339,6 +339,13 @@ pub struct HaloTransparentMaterial {
     /// camera, as the game draws one (its z bias), over the surface it lies
     /// on (a30's wall lights, which fought with their walls).
     pub decal: bool,
+    /// The level structure's own (a BSP's surface, not an object's): drawn
+    /// with a depth bias toward the camera ([`STRUCTURE_DEPTH_BIAS`]), over
+    /// the structure's face it may lie in (b40's green light strips, in the
+    /// plane of their walls, fought with them). Objects' are left unbiased:
+    /// a weapon's or an effect's glow would be pulled through what is just
+    /// in front of it.
+    pub structure: bool,
     /// A sky layer: drawn in the transmissive phase (see
     /// `crate::level::LevelBuilder::spawn_sky`).
     pub sky: bool,
@@ -485,11 +492,19 @@ pub struct HaloTransparentKey {
     blend: u16,
     one_sided: bool,
     decal: bool,
+    /// The structure's, biased ([`STRUCTURE_DEPTH_BIAS`]; never with
+    /// `HALO_RT_NO_STRUCTURE_DEPTH_BIAS=1`).
+    structure: bool,
 }
 
 impl From<&HaloTransparentMaterial> for HaloTransparentKey {
     fn from(material: &HaloTransparentMaterial) -> Self {
-        HaloTransparentKey { blend: material.blend, one_sided: material.one_sided, decal: material.decal }
+        HaloTransparentKey {
+            blend: material.blend,
+            one_sided: material.one_sided,
+            decal: material.decal,
+            structure: material.structure && structure_depth_bias(),
+        }
     }
 }
 
@@ -497,6 +512,24 @@ impl From<&HaloTransparentMaterial> for HaloTransparentKey {
 /// game's z bias of 8 is 8 depth units plus 2 times the polygon's slope.
 const DECAL_DEPTH_BIAS: bevy::render::render_resource::DepthBiasState =
     bevy::render::render_resource::DepthBiasState { constant: 8, slope_scale: 2.0, clamp: 0.0 };
+
+/// The level structure's transparent surfaces' depth bias, toward the
+/// camera as a decal's (reversed depth, the same sign): a surface in the
+/// plane of an opaque face of the structure (b40's `b40_light_25green`, an
+/// additive strip, not a decal, on its `metal strips wide a` wall) tested
+/// equal to the face's depth, which the face's own triangles reach a hair
+/// apart, and flickered in and out of it. The decal's own: no more than a
+/// decal's, which then draws over such a surface as before (blended
+/// surfaces write no depth, so the two order by their sort, not this).
+/// `HALO_RT_NO_STRUCTURE_DEPTH_BIAS=1`: none, as before.
+const STRUCTURE_DEPTH_BIAS: bevy::render::render_resource::DepthBiasState = DECAL_DEPTH_BIAS;
+
+/// Whether the structure's transparent surfaces are biased (see
+/// [`STRUCTURE_DEPTH_BIAS`]); read once.
+pub fn structure_depth_bias() -> bool {
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("HALO_RT_NO_STRUCTURE_DEPTH_BIAS").is_none());
+    *ON
+}
 
 impl Material for HaloTransparentMaterial {
     fn fragment_shader() -> ShaderRef {
@@ -530,6 +563,10 @@ impl Material for HaloTransparentMaterial {
             && let Some(depth_stencil) = descriptor.depth_stencil.as_mut()
         {
             depth_stencil.bias = DECAL_DEPTH_BIAS;
+        } else if key.bind_group_data.structure
+            && let Some(depth_stencil) = descriptor.depth_stencil.as_mut()
+        {
+            depth_stencil.bias = STRUCTURE_DEPTH_BIAS;
         }
         // (a meter's blend takes a constant colour, its tint, which the
         // shader applies: tint mode 1, src times the tint's alpha plus what's

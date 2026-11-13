@@ -48,4 +48,13 @@ impl RaytracingMask {
     /// surface (every ray passing through it) cost its any-hit test to every
     /// ray crossing it.
     pub const LIGHT_ONLY: RaytracingMask = RaytracingMask(0);
+    /// Met by a reflection's first ray alone (`RAY_MASK_REFLECTED`, which
+    /// every other ray's cull mask leaves out: the specular paths' and the
+    /// panes' reflections leaving their surface, `specular_gi.wesl`), and no
+    /// light source: an additive hologram the rays otherwise never meet
+    /// (its light, if any, a [`RaytracingMask::LIGHT_ONLY`] copy's), seen
+    /// in a mirror or a visor. Its material is marked
+    /// ([`crate::material_marks::RayMaterialMarks::reflected_glow`]) so that
+    /// the ray adds its emission and goes on through it.
+    pub const REFLECTED: RaytracingMask = RaytracingMask(1 << 2);
 }

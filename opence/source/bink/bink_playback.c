@@ -393,6 +393,8 @@ static void bink_decompress_video_frame(
 	void);
 static void bink_playback_update__internal(
 	void);
+static boolean bink_movie_cannot_play(
+	const char *full_pathname);
 
 /* ---------- globals */
 
@@ -517,6 +519,16 @@ void bink_playback_start(
 		return;
 	if (cache_files_precache_in_progress())
 		return;
+	/* port: a movie that cannot play starts nothing: the attempt stole the
+	texture cache's top and write-protected it before BinkOpen failed, while
+	the cache's read thread went on filling those pages (the credits at the
+	end of The Maw: an access violation). The end state is the failed
+	open's: no movie, the cache whole, the flags untouched. */
+	if (bink_movie_cannot_play(full_pathname))
+	{
+		error(_error_silent, "### ERROR failed to open bink file '%s' (not started)", full_pathname ? full_pathname : "");
+		return;
+	}
 
 	match_dassert(
 		"c:\\halo\\SOURCE\\bink\\bink_playback.c",
@@ -775,6 +787,30 @@ static void bink_draw_frame(
 	}
 
 	return;
+}
+
+/* port: whether bink_playback_start should give up before taking anything.
+The native builds have no Bink decoder (port/linux/src/bink_null.c: BinkOpen
+fails for every movie), so no movie can play, whatever its path; an empty one
+(attract_mode_get_localized_movie_path finding no file) could not in any
+build. HALO_BINK_START_ALWAYS=1 makes the attempt as before (and crashes at
+the credits). */
+static boolean bink_movie_cannot_play(
+	const char *full_pathname)
+{
+	static long start_always= NONE;
+
+	if (start_always==NONE)
+	{
+		const char *setting= getenv("HALO_BINK_START_ALWAYS");
+
+		start_always= setting && *setting && *setting!='0';
+	}
+	if (start_always)
+		return FALSE;
+	(void)full_pathname;
+
+	return TRUE;
 }
 
 static void bink_free_texture_cache(

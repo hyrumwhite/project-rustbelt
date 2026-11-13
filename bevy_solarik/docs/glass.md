@@ -329,6 +329,30 @@ Diagnostic views of the pass, by `SOLARIK_SHADER_DEFS`: `GLASS_VIEW_REFLECTION`
 (the panes' reflected light alone, as weighted), `GLASS_VIEW_MIRROR` (the reflected
 path's radiance unweighted), `GLASS_NO_REFLECTION`.
 
+## Marked materials: the nearest layer, glows only reflections see
+
+(November 2026.) `RayMaterialMarks` holds two sets of materials, each a flag bit.
+
+`nearest_layer` (`MATERIAL_FLAG_NEAREST_LAYER`): a thin pane of which the camera
+pane pass composites the first layer it meets along each ray and passes through
+its later layers as if absent; other panes before or behind it composite as
+before, and every other ray sees every layer. For a closed body of many parts drawn
+as glass (a host's actively camouflaged first-person weapon and arms), whose inner
+parts and far faces each added a reflection. `SOLARIK_SHADER_DEFS=CAMOUFLAGE_ALL_LAYERS`
+composites every layer again. Unmarked panes take no other path than before.
+
+`reflected_glow` (`MATERIAL_FLAG_REFLECTED_GLOW`), with the instance mask
+`RaytracingMask::REFLECTED` (bit 2): an emitter that a reflection's first ray
+alone meets (`trace_glass_ray_seeing` with `RAY_MASK_REFLECTED`, from
+`trace_unfogged_glossy_path`, so the specular paths' and the camera panes'
+reflections). Every other ray's cull mask, `RAY_NO_CULL`, is 0xFB: no other
+instance carries bit 2 alone, so for every other instance the traversal is the
+same as with 0xFF. Such an instance is no light source (`is_light` takes masks
+0xFF and 0 alone). A first ray that meets one adds its emission whole and goes on
+through it; the later rays do not see it (an additive hologram, its far side unseen).
+With no such instance the change costs nothing but the cull mask's constant and a
+flag test at each glossy hit.
+
 ## Opaque interiors behind glass
 
 A ray-visible wall can be absent from the raster background when its material

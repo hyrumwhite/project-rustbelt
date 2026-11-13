@@ -39,6 +39,7 @@ pub mod surface_detail;
 pub mod thin_volume;
 pub mod water_ripples;
 pub mod glass_grime;
+pub mod material_marks;
 
 /// The solarik prelude.
 ///

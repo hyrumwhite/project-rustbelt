@@ -31,10 +31,10 @@ if [ -n "${period:-}" ]; then export HALO_RT_DOLLY_PERIOD=$period HALO_RT_DOLLY_
 [ -z "${name:-}" ] && { echo "no spot $spot in spots.txt"; exit 1; }
 out="$here/out/$label/$spot/views"; mkdir -p "$out"
 for view in $views; do
-  SOLARIK_SHADER_DEFS="$view,${EXTRA_DEFS:-}" timeout 600 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --screenshot "$out/${view#VISUALIZE_}_still.png" --screenshot-after 9000 > "$out/${view#VISUALIZE_}_still.log" 2>&1
+  HALO_RT_STATS=0 SOLARIK_SHADER_DEFS="$view,${EXTRA_DEFS:-}" timeout 600 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --screenshot "$out/${view#VISUALIZE_}_still.png" --screenshot-after 9000 > "$out/${view#VISUALIZE_}_still.log" 2>&1
   python "$here/view_shares.py" "$out/${view#VISUALIZE_}_still.png"
   if [ "${dolly:-0}" != "0" ]; then
-    SOLARIK_SHADER_DEFS="$view,${EXTRA_DEFS:-}" HALO_RT_DOLLY_DURING=1 timeout 600 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --dolly "$dolly" --screenshot "$out/${view#VISUALIZE_}_motion.png" --screenshot-after $motion_at > "$out/${view#VISUALIZE_}_motion.log" 2>&1
+    HALO_RT_STATS=0 SOLARIK_SHADER_DEFS="$view,${EXTRA_DEFS:-}" HALO_RT_DOLLY_DURING=1 timeout 600 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --dolly "$dolly" --screenshot "$out/${view#VISUALIZE_}_motion.png" --screenshot-after $motion_at > "$out/${view#VISUALIZE_}_motion.log" 2>&1
   fi
 done
 echo "views: $out"

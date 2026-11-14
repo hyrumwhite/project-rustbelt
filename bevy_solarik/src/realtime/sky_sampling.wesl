@@ -140,3 +140,63 @@ fn sample_sky_mixture(normal: vec3<f32>, rng: ptr<function, u32>) -> SkyMixtureS
         + (1.0 - sky_probability) * max(dot(normal, direction), 0.0) / PI;
     return SkyMixtureSample(direction, 1.0 / max(pdf, 1e-20));
 }
+
+// The density sample_sky_mixture draws its directions by, per steradian (the
+// same two terms; sample_sky_mixture keeps its own copy, as it was).
+fn sky_mixture_pdf(normal: vec3<f32>, direction: vec3<f32>) -> f32 {
+    let sky_probability = select(0.0, 0.5, sky_distribution.rows[767u] > 0.0);
+    return sky_probability * sky_pdf(direction)
+        + (1.0 - sky_probability) * max(dot(normal, direction), 0.0) / PI;
+}
+
+struct GuidedSkyMixtureSample {
+    direction: vec3<f32>,
+    inverse_pdf: f32,
+    // (whether the guide's cone drew it, for VISUALIZE_GI_GUIDE)
+    from_guide: bool,
+}
+
+// ReSTIR GI's guided initial direction (GI_GUIDE): with probability
+// `guide_share` a direction uniform in the cone of cosine `guide_cos_max`
+// about `guide_direction`, else sample_sky_mixture's. The density is the
+// one-sample balance mixture of both techniques at the direction, whichever
+// drew it, so the estimate stays unbiased: the cone adds density where the
+// pixel's light was last found, and every direction the sky mixture can draw
+// keeps (1 - share) of its density, the support unchanged. A share of 0 is
+// sample_sky_mixture itself, with no extra random number drawn.
+fn sample_sky_mixture_guided(normal: vec3<f32>, guide_direction: vec3<f32>, guide_share: f32, guide_cos_max: f32, rng: ptr<function, u32>) -> GuidedSkyMixtureSample {
+    if guide_share <= 0.0 {
+        let plain = sample_sky_mixture(normal, rng);
+        return GuidedSkyMixtureSample(plain.direction, plain.inverse_pdf, false);
+    }
+    var direction: vec3<f32>;
+    let from_guide = rand_f(rng) < guide_share;
+    if from_guide {
+        // Uniform in the cone's solid angle: cos theta uniform in
+        // [cos_max, 1], in a basis about the guide (the construction of
+        // bevy_render::maths::orthonormalize, written out here so this file
+        // keeps its few imports, which the sky distribution's fixture supplies).
+        let cos_theta = 1.0 - rand_f(rng) * (1.0 - guide_cos_max);
+        let sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+        let phi = 2.0 * PI * rand_f(rng);
+        let z = guide_direction;
+        let sign = select(-1.0, 1.0, z.z >= 0.0);
+        let a = -1.0 / (sign + z.z);
+        let b = z.x * z.y * a;
+        let x_basis = vec3(1.0 + sign * z.x * z.x * a, sign * b, -sign * z.x);
+        let y_basis = vec3(b, sign + z.y * z.y * a, -z.y);
+        direction = x_basis * (sin_theta * cos(phi)) + y_basis * (sin_theta * sin(phi)) + z * cos_theta;
+    } else {
+        // (sample_sky_mixture's draw, its density folded into the mixture's below)
+        let sky_probability = select(0.0, 0.5, sky_distribution.rows[767u] > 0.0);
+        if rand_f(rng) < sky_probability {
+            direction = sample_sky_direction(rng);
+        } else {
+            direction = sample_cosine_hemisphere(normal, rng);
+        }
+    }
+    let guide_solid_angle = 2.0 * PI * (1.0 - guide_cos_max);
+    let guide_pdf = select(0.0, 1.0 / guide_solid_angle, dot(direction, guide_direction) >= guide_cos_max);
+    let pdf = (1.0 - guide_share) * sky_mixture_pdf(normal, direction) + guide_share * guide_pdf;
+    return GuidedSkyMixtureSample(direction, 1.0 / max(pdf, 1e-20), from_guide);
+}

@@ -138,7 +138,7 @@ pub fn launch_game(
 }
 
 /// The game's output (`launch_game`'s).
-fn game_log_path() -> std::path::PathBuf {
+pub fn game_log_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("halo_rt_opence-{}.log", std::process::id()))
 }
 

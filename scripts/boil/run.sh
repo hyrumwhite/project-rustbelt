@@ -35,7 +35,9 @@ fi
 run() { # run <dir> <args...>: one viewer run, its log in <dir>/log.txt
   local dir=$1; shift
   mkdir -p "$dir"; rm -f "$dir"/x_*.png
-  timeout 900 "$exe" "$@" > "$dir/log.txt" 2>&1
+  # (the stats text hidden: the user's saved options must not reach the
+  # measured pictures)
+  HALO_RT_STATS=0 timeout 900 "$exe" "$@" > "$dir/log.txt" 2>&1
 }
 # (two spans summed: the specular pass is two stages with NRC's specular query)
 pass2() { python -c "import sys; a=sys.argv[1]; print(round(float(a) if a else 0, 2) + (float(sys.argv[2]) if sys.argv[2] else 0))" "$(pass "$1" "$2")" "$(pass "$1" "$3")"; }

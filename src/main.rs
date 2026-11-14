@@ -550,6 +550,7 @@ fn main() -> AppExit {
                 print_camera.run_if(bridge::not_forwarding),
             ),
         )
+            .init_resource::<StatusRates>()
             .add_systems(PostUpdate, (update_control_text, update_performance_text));
         #[cfg(feature = "dlss")]
         app.add_systems(Update, (toggle_dlss_rr, cycle_dlss_quality).run_if(bridge::not_forwarding));
@@ -1473,7 +1474,8 @@ fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With
 /// program) and log where it was taken, in the log and a `.txt` beside it:
 /// the level, the game's tick and the camera, as a `--camera` argument; and
 /// the frame's times, the CPU's and the GPU's by pass (for a slow place:
-/// play feedback's dips, which no scripted run had staged). Also at the
+/// play feedback's dips, which no scripted run had staged), with a game its
+/// rates and its log's last timing lines ([`capture_game_log`]). Also at the
 /// frames of `HALO_RT_CAPTURE_FRAME` ([`capture_frames`]).
 #[allow(clippy::too_many_arguments)]
 fn capture(
@@ -1486,6 +1488,7 @@ fn capture(
     test_lights: Option<Res<lights::TestLights>>,
     bridge_level: Option<Res<bridge::BridgeLevel>>,
     frames: Res<CaptureFrames>,
+    rates: Option<Res<StatusRates>>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     if !keys.just_pressed(KeyCode::F9) && !capture_frames().contains(&frames.0) {
@@ -1512,7 +1515,25 @@ fn capture(
     // (and the lights and objects about the camera: a capture of a lighting
     // problem names its source)
     let sources = capture_sources(camera.translation, game, shown_lights.as_deref(), test_lights.as_deref(), bridge_level.as_deref());
-    let note: String = std::iter::once(place.clone()).chain(times).chain(sources).map(|line| line + "\n").collect();
+    // (and with a game, its rates as the status line has them and its own
+    // log's last timing lines: a slow place compared with before)
+    let rates = game.zip(rates.as_deref()).map(|(game, rates)| {
+        format!(
+            "rates: tick {}, {} game frames/s, {} drawn/s, window {}",
+            game.game_tick,
+            rates.game,
+            rates.drawn,
+            if rates.unfocused { "unfocused" } else { "focused" }
+        )
+    });
+    let game_log = if game.is_some() { capture_game_log() } else { Vec::new() };
+    let note: String = std::iter::once(place.clone())
+        .chain(rates)
+        .chain(times)
+        .chain(game_log)
+        .chain(sources)
+        .map(|line| line + "\n")
+        .collect();
     if let Err(error) = std::fs::write(path.with_extension("txt"), note) {
         warn!("capture: can't write where it was taken: {error}");
     }
@@ -1532,6 +1553,36 @@ fn capture_frames() -> &'static [u32] {
             .filter_map(|frame| frame.trim().parse().ok())
             .collect()
     })
+}
+
+/// How much of the end of the game's log a capture's note reads (bytes).
+const CAPTURE_GAME_LOG_BYTES: u64 = 64 * 1024;
+
+/// The capture note's tail of the game's own log
+/// (`bridge::game_log_path`): `game log (last lines):` and its last 12 lines
+/// of frame timing or overlay pacing, or with none its last 6 lines, each
+/// cut to 400 characters; `(not readable)` when it can't be read.
+fn capture_game_log() -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut lines = vec!["game log (last lines):".to_string()];
+    let tail = std::fs::File::open(bridge::game_log_path()).and_then(|mut file| {
+        let length = file.seek(SeekFrom::End(0))?;
+        let start = length.saturating_sub(CAPTURE_GAME_LOG_BYTES);
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok((String::from_utf8_lossy(&bytes).into_owned(), start > 0))
+    });
+    let Ok((text, cut)) = tail else {
+        lines.push("  (not readable)".to_string());
+        return lines;
+    };
+    // (the first line, read from its middle, left out)
+    let all: Vec<&str> = text.lines().skip(usize::from(cut)).collect();
+    let timing: Vec<&str> = all.iter().copied().filter(|line| line.contains("frame timing:") || line.contains("overlay pacing:")).collect();
+    let chosen = if timing.is_empty() { &all[all.len().saturating_sub(6)..] } else { &timing[timing.len().saturating_sub(12)..] };
+    lines.extend(chosen.iter().map(|line| format!("  {}", line.chars().take(400).collect::<String>())));
+    lines
 }
 
 /// The most lights, and objects, a capture's note lists.
@@ -1827,6 +1878,22 @@ fn setup_ui(mut commands: Commands) {
     ));
 }
 
+/// The bridge's rates as its status line shows them ([`update_control_text`]),
+/// for the capture's note too.
+#[derive(Resource, Default)]
+struct StatusRates {
+    /// Seconds counted.
+    counted: f32,
+    /// The game's frames per second.
+    game: u32,
+    /// Frames drawn since the count began.
+    drawn_since: u32,
+    /// Frames drawn per second.
+    drawn: u32,
+    /// Whether the window was unfocused.
+    unfocused: bool,
+}
+
 fn update_control_text(
     mut text: Single<&mut Text, With<ControlText>>,
     settings: Res<LightingSettings>,
@@ -1839,32 +1906,31 @@ fn update_control_text(
     args: Res<Args>,
     time: Res<Time>,
     window: Option<Single<&Window, With<bevy::window::PrimaryWindow>>>,
-    // (seconds counted, the game's frames per second, frames drawn since the
-    // count began, frames drawn per second)
-    mut rate: Local<(f32, u32, u32, u32)>,
+    mut rate: ResMut<StatusRates>,
     #[cfg(feature = "dlss")] dlss_rr_supported: Option<Res<DlssRayReconstructionSupported>>,
     #[cfg(feature = "dlss")] dlss_camera: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
 ) {
     let mut s = String::new();
     if let (Some(mut link), Some(bridged), Some(follow)) = (link, bridged, follow) {
         // the game's frame rate and this one's, over the last second
-        rate.0 += time.delta_secs();
-        rate.2 += 1;
-        if rate.0 >= 1.0 {
-            rate.1 = (link.frames as f32 / rate.0).round() as u32;
-            rate.3 = (rate.2 as f32 / rate.0).round() as u32;
+        rate.counted += time.delta_secs();
+        rate.drawn_since += 1;
+        if rate.counted >= 1.0 {
+            rate.game = (link.frames as f32 / rate.counted).round() as u32;
+            rate.drawn = (rate.drawn_since as f32 / rate.counted).round() as u32;
             link.frames = 0;
-            rate.2 = 0;
-            rate.0 = 0.0;
+            rate.drawn_since = 0;
+            rate.counted = 0.0;
         }
         let game = link.latest.as_ref();
         let unfocused = window.is_some_and(|window| !window.focused);
+        rate.unfocused = unfocused;
         s += &format!(
             "OpenCE bridge: {} at tick {}, {} game frames/s, {} drawn/s{}, drawing {} of {} objects - F8: {}{}\n",
             game.map_or("", |g| g.scenario_name.as_str()),
             game.map_or(0, |g| g.game_tick),
-            rate.1,
-            rate.3,
+            rate.game,
+            rate.drawn,
             if unfocused { " (window unfocused)" } else { "" },
             bridged.count(),
             game.map_or(0, |g| g.objects.len()),

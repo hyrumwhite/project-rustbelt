@@ -29,11 +29,14 @@ impl Plugin for OptionsPlugin {
 pub struct OptionsPanel {
     pub open: bool,
     pub show_stats: bool,
+    /// Whether the stats row was pressed this run (with [`stats_override`],
+    /// only then is its value saved).
+    stats_pressed: bool,
 }
 
 impl Default for OptionsPanel {
     fn default() -> Self {
-        OptionsPanel { open: false, show_stats: true }
+        OptionsPanel { open: false, show_stats: stats_override().unwrap_or(true), stats_pressed: false }
     }
 }
 
@@ -278,7 +281,10 @@ fn press_buttons(
             Row::Emissive => lighting.emissive_scale *= step,
             Row::Exposure => lighting.exposure_ev100 += 0.5 * direction as f32,
             Row::Reset => *lighting = LightingSettings::default(),
-            Row::Stats => panel.show_stats = !panel.show_stats,
+            Row::Stats => {
+                panel.show_stats = !panel.show_stats;
+                panel.stats_pressed = true;
+            }
             #[cfg(feature = "dlss")]
             Row::DlssRr => {
                 if dlss_supported.is_some() {
@@ -372,7 +378,7 @@ fn apply_saved(
     }
     let saved = &pending.0;
     // (Solarik has no ReSTIR switch: the saved one is kept, unused)
-    panel.show_stats = saved.show_stats;
+    panel.show_stats = stats_override().unwrap_or(saved.show_stats);
     // (DLSS is on the camera from the start, as it has to be: added to a
     // camera that already renders, it stays off; so the saved quality is
     // set on it, and turning it off removes it)
@@ -386,6 +392,21 @@ fn apply_saved(
     }
     let _ = entity;
     commands.remove_resource::<PendingSettings>();
+}
+
+/// Whether the stats text shows whatever the saved options say
+/// (`HALO_RT_STATS=0` hidden, `=1` shown; unset, the saved choice): for the
+/// measuring harness, whose pictures are compared between builds and whose
+/// noise measure the stats' changing digits would land in. The panel can
+/// still turn it, but the value it was given is not saved as the user's
+/// choice (see [`save_settings`]). Read once.
+fn stats_override() -> Option<bool> {
+    static STATS: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *STATS.get_or_init(|| match std::env::var("HALO_RT_STATS").ok().as_deref().map(str::trim) {
+        Some("0") => Some(false),
+        Some("1") => Some(true),
+        _ => None,
+    })
 }
 
 /// Marks the stats text, which the panel can hide.
@@ -438,7 +459,9 @@ fn save_settings(
         restir: last.restir,
         dlss_rr,
         dlss_quality,
-        show_stats: panel.show_stats,
+        // (given by HALO_RT_STATS and not turned in the panel: the file's
+        // value kept)
+        show_stats: if stats_override().is_some() && !panel.stats_pressed { last.show_stats } else { panel.show_stats },
     };
     if *last == current {
         return;

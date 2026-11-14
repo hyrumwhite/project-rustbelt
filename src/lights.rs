@@ -114,6 +114,15 @@ const PROJECTILE_GLOWS: [(&str, [f32; 3], f32); 3] = [
     ("vehicles\\wraith\\wraith mortar", [0.5, 0.45, 1.0], 2.0),
 ];
 
+/// Whether a projectile's glow at exactly the world's origin is a light, as
+/// before (`HALO_RT_ORIGIN_GLOWS=1`): by default it is left out, an object
+/// the game holds there, not in the world yet or already gone, whose glow lit
+/// whatever was near the map's origin. Read once.
+fn origin_glows() -> bool {
+    static ORIGIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ORIGIN.get_or_init(|| std::env::var("HALO_RT_ORIGIN_GLOWS").is_ok_and(|v| v.trim() == "1"))
+}
+
 /// The contrails that glow (by their contrail tag's name), with the colour
 /// and reach (world units) of the lights along them: one each this far
 /// apart (world units), up to this many.
@@ -547,7 +556,8 @@ pub struct ShownLight {
     pub upward: bool,
     /// Drawn as its gel's beams (spot lights).
     pub gelled: bool,
-    /// Dimmed to none, or shining upward at no share: not in the scene.
+    /// Dimmed to none, shining upward at no share, or a projectile's glow at
+    /// the world's origin: not in the scene.
     pub left_out: bool,
     /// The source sphere's radius and raise (metres).
     pub radius: f32,
@@ -713,9 +723,14 @@ fn sync_lights(
         *count += 1;
         (light.definition_index, light.object_index, *count - 1)
     };
-    // (the test lights after the game's)
-    let all = lights.chain(&projectile_lights).chain(&contrail_lights).map(|light| (light, false)).chain(test_lights.iter().map(|light| (light, true)));
-    for (light, test_light) in all {
+    // (the test lights after the game's; each with whether it is a test
+    // light and a projectile's glow)
+    let all = lights
+        .map(|light| (light, false, false))
+        .chain(projectile_lights.iter().map(|light| (light, false, true)))
+        .chain(contrail_lights.iter().map(|light| (light, false, false)))
+        .chain(test_lights.iter().map(|light| (light, true, false)));
+    for (light, test_light, projectile) in all {
         let near = camera.filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
         let own = light.first_person != 0;
         // (a muzzle flash: its tag's flag, or its name; a test light's tag
@@ -795,8 +810,12 @@ fn sync_lights(
                 if tag.dimming <= 0.0 { ", dimmed to none: left out" } else { "" },
             );
         }
-        // (dimmed to none, or shining upward at no share: left out)
-        let left_out = tag.dimming <= 0.0 || upward.is_some_and(|upward| upward.share <= 0.0);
+        // (dimmed to none, or shining upward at no share: left out; and a
+        // projectile's glow at exactly the world's origin, where the game
+        // holds objects not in the world: three wraith mortar glows at 0,0,0
+        // in b40's notes of 13 November; HALO_RT_ORIGIN_GLOWS=1 the old)
+        let at_origin = projectile && light.position == [0.0; 3] && !origin_glows();
+        let left_out = tag.dimming <= 0.0 || upward.is_some_and(|upward| upward.share <= 0.0) || at_origin;
         shown.0.push(ShownLight {
             light: *light,
             test: test_light,

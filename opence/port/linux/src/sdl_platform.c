@@ -927,6 +927,25 @@ static Uint64 frame_interval_ns(void)
 	return (Uint64)(1e9f / rate);
 }
 
+/* (platform_video_cap_delay) */
+static Uint64 platform_video_last_cap_delay;
+
+Uint64 platform_video_cap_delay(void)
+{
+	return platform_video_last_cap_delay;
+}
+
+void platform_video_pacing(int *swap_interval, float *refresh_rate, Uint64 *cap_interval)
+{
+	SDL_DisplayID display = platform_window ? SDL_GetDisplayForWindow(platform_window) : 0;
+	const SDL_DisplayMode *mode = display ? SDL_GetCurrentDisplayMode(display) : NULL;
+	int interval = 0;
+
+	*swap_interval = SDL_GL_GetSwapInterval(&interval) ? interval : -2;
+	*refresh_rate = mode ? mode->refresh_rate : 0.0f;
+	*cap_interval = platform_window ? frame_interval_ns() : 0;
+}
+
 #endif
 void platform_video_swap(void)
 {
@@ -937,12 +956,14 @@ void platform_video_swap(void)
 #endif
 	SDL_GL_SwapWindow(platform_window);
 #ifndef HALO_ANDROID
+	platform_video_last_cap_delay = 0;
 	interval = frame_interval_ns();
 	if (!interval)
 		return;
 	now = SDL_GetTicksNS();
 	if (next_frame > now)
 	{
+		platform_video_last_cap_delay = next_frame - now;
 		SDL_DelayPrecise(next_frame - now);
 		now = next_frame;
 	}

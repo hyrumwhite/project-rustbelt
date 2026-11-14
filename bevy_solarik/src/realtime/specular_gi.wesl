@@ -191,6 +191,10 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(VISUALIZE_CACHE_AGE) {
     return;
 }
+// (and VISUALIZE_GI_GUIDE, restir_gi's initial pass)
+@if(GI_GUIDE && VISUALIZE_GI_GUIDE) {
+    return;
+}
     var pixel_color = textureLoad(view_output, global_id.xy);
     pixel_color += vec4(radiance, 0.0);
     textureStore(view_output, global_id.xy, pixel_color);

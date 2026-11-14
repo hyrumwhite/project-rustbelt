@@ -18,6 +18,14 @@ fn diagnostic_views_compose() {
         ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
         ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
         ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
+        ShaderDefVal::UInt("CACHE_HISTORY_CLAMP".into(), 1),
+        ShaderDefVal::UInt("CACHE_DROP_DETECT".into(), 1),
+        ShaderDefVal::UInt("CACHE_DROP_THRESHOLD".into(), 60),
+        ShaderDefVal::UInt("CACHE_DROP_FLOOR".into(), 4),
+        ShaderDefVal::UInt("LIGHT_NEAR_DISTANCE".into(), 100),
+        ShaderDefVal::UInt("GI_GUIDE_SHARE".into(), 50),
+        ShaderDefVal::UInt("GI_GUIDE_CONE".into(), 10),
+        ShaderDefVal::UInt("GI_GUIDE_WIDE".into(), 100),
         "BINDLESS_SURFACE_DETAIL".into(),
         "DI_CELL_LIGHTS".into(),
         "DI_SLOT_VISIBILITY_PRIOR".into(),
@@ -38,6 +46,7 @@ fn diagnostic_views_compose() {
         "VISUALIZE_WORLD_CACHE",
         "VISUALIZE_CELL_KEY_PROBE",
         "VISUALIZE_NORMAL_KEY",
+        "VISUALIZE_GI_GUIDE",
     ];
     for geometric in [false, true] {
         for unjittered in [false, true] {
@@ -53,6 +62,7 @@ fn diagnostic_views_compose() {
                     definitions.push("GI_ADAPTIVE_SPATIAL".into());
                     definitions.push("CELL_LOOKUP_NEIGHBOURS".into());
                     definitions.push("CACHE_SHADE_SECOND_RAY".into());
+                    definitions.push("GI_GUIDE".into());
                 }
                 if let Some(view) = view {
                     definitions.push((*view).into());

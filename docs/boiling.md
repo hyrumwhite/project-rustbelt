@@ -5,7 +5,7 @@ As of 4 November 2026. Gathered from ROADMAP.md (the "Indoor flicker" passes and
 ## Where it stands
 
 - **Fixed, or acceptable in play:** a10's corridors and Jefferies tubes, b30's Shaft A passage, the a10 fly-in cabin, the receding hull, the first-person weapon while walking, and the a30 drop pod. Outdoors was called "fantastic, great image stability" on 20 October.
-- **Still open:** dim rooms lit by many small, weak emitters. These are b40's elevator shafts, its light strips and the canyon wall seen from a Banshee (3 November), and c20's dark Library halls (4 November, deferred). They fit the same pattern as the c10 floor lights (25 October).
+- **Still open:** dim rooms lit by many small, weak emitters. These are b40's elevator shafts, its light strips and the canyon wall seen from a Banshee (3 November), and c20's dark Library halls (4 November, deferred). They fit the same pattern as the c10 floor lights (25 October). Bounce light through a small opening (d40's fire through a doorway, 13 November) is a quarter steadier since 14 November and still visible.
 - **The common cause of what's left:** Solarik picks lights by power across the whole level. A weak light (a strip of power 10 beside fluorescents of 80, or one of hundreds of emissive meshes) gets few samples. Its surroundings are then lit by whichever pixels happened to draw it, and the denoiser keeps the blotches. Each fix below either gives weak lights more samples near where they shine, keeps more history, or removes a light that stole samples.
 
 ## Why dim lights boil
@@ -33,6 +33,7 @@ As of 4 November 2026. Gathered from ROADMAP.md (the "Indoor flicker" passes and
 | 23 Oct | Animated self-illuminated objects recoloured in place instead of respawned | a30 pod: respawned 2573→0 times in 5000 frames. Its boiling and flashing stopped |
 | 28 Oct | ReSTIR DI weighs lights with an albedo floor of 4% | Black surfaces pick lights, so they keep their highlights |
 | 2 Nov | ReSTIR temporal reuse accepts a previous pixel in either frame's view (`temporal_pixel_dissimilar`) | First-person rifle black pixels while walking 32%→9% |
+| 14 Nov | **ReSTIR GI's first rays partly aimed at the sample the pixel already holds** (`GI_GUIDE`; `SOLARIK_GI_GUIDE=0` is the old). The share is half where the bounce light comes through a small opening and none where it comes from everywhere | d40, a fire's light through a doorway: std over time 0.94→0.71 of 255 (means of 7 and 12 runs), the worst wall blocks from 1.6 to 2.5 down to 0.8 to 1.4, brightness kept. +0.05 to 0.1 ms in the diffuse GI pass. The harness's spots unchanged |
 
 ### Light-level tuning that changed the balance
 
@@ -54,6 +55,8 @@ These weren't boiling fixes. They do change which lights win samples:
 - **Turning off fixture lights, animated glow, or DLSS:** the drift stayed, so none of them was the cause.
 - **`SOLARIK_CELL_LIGHTS=0`:** less stable elsewhere.
 - **Ending blurry reflections in the world cache** (a9cc1642, a perf win of 1.1 ms): the user saw "dramatically" more boiling and it was reverted (262bb268). Our measurements showed only up to a fifth more noise. **Lesson:** anything that routes more lighting through the cache is a stability risk that the metrics underrate.
+- **At the d40 fire spot (14 November):** the cache's drop detector off (0.96 against 0.97) and its history floor at 16 (0.93) changed nothing. A higher ReSTIR GI confidence cap (`SOLARIK_GI_CONFIDENCE_CAP=32`) was worse (1.72): a lucky find is kept longer and spread further. NRC was steady (0.24) but lost most of the bounce (mean 28.7 against 37.7).
+- **Guiding the world cache's bounce rays** (`CACHE_GUIDE`, built twice and removed): the cache's own picture hardly changed and the final picture not at all (0.96 with it alone, 0.68 to 0.71 with or without it beside `GI_GUIDE`). A cell's long average already smooths what pixels read from it; the spikes that reach the screen are the pixels' own first rays.
 
 ## Measuring
 
@@ -68,6 +71,8 @@ These weren't boiling fixes. They do change which lights win samples:
   - `HALO_RT_CACHE_LOG=1`.
   - `HALO_RT_LIGHT_LOG`: which game lights are live.
 - **In the bridged game:** `HALO_SIM_TELEPORT` puts the player at the capture's spot. The a50 hangar recipe is in `game_boil.sh`. The game sets `dynamic_scene`, so cache-reset theories don't apply there.
+- **The harness hides the stats text.** The viewer starts with the saved options (`%APPDATA%\halo_rt\settings.txt`). With the stats text on, the pass-time table's digits change every frame inside `noise.py`'s rows and read as 2 to 12% more noise. `run.sh`, `flash.sh` and `views.sh` set `HALO_RT_STATS=0`, which overrides the saved option for that run only. The other saved values still apply, so a table is only as default as that file.
+- **For a light the viewer lacks** (a flame, a carried weapon), take a still series in the game: teleport the player, face the light so the game keeps it lit, detach the camera to the view, and capture every 18 frames (scratchpad `firec.sh`, the d40 fire spot). The measure is each pixel's standard deviation over time. One build read 0.66 to 0.79 from run to run, so compare several runs a side.
 - **Pitfalls:**
   - The viewer has no player, so it misses player-carried lights (the plasma pistol case).
   - Look-input turns swamp noise metrics.
@@ -78,6 +83,7 @@ These weren't boiling fixes. They do change which lights win samples:
 - **b40 (3 November):** boiling in the elevator shafts, on the light strips, and on the canyon wall from a Banshee.
 - **c20 (4 November):** the dark Library halls, where the holograms and door cards are now the only light.
 - **c10 (25 October):** floor lights and other lights. The door lights were dimmed then, but no separate boiling fix is recorded.
+- **d40 (13 November):** a fire's light bouncing through a doorway onto a room's wall. `GI_GUIDE` took a quarter off it (see the table); it is still visible. More would need a different estimator for small openings, not a setting of this one.
 - **Candidates for next time:**
   - Check with `VISUALIZE_CELL_LIGHTS` whether these rooms' cells find their strips at all.
   - Check with `SOLARIK_LIGHT_FLUX_LOG` what share the strips get.

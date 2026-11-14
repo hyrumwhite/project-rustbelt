@@ -25,3 +25,11 @@ const CACHE_DROP_DETECT: u32 = constants::CACHE_DROP_DETECT;
 // one; and the fewest samples a drop, or the clamp, leaves a cell)
 const CACHE_DROP_THRESHOLD: u32 = constants::CACHE_DROP_THRESHOLD;
 const CACHE_DROP_FLOOR: u32 = constants::CACHE_DROP_FLOOR;
+// (ReSTIR GI's guided initial sampling, GI_GUIDE in restir_gi.wesl: the most
+// of the candidates aimed at the temporal reservoir's sample, in hundredths,
+// held under 0.9 where it is used; the cone's half-angle in degrees, held to
+// 1 to 80 there; and in hundredths of a steradian the effective solid angle
+// of the pixel's light at which the guide fades out)
+const GI_GUIDE_SHARE: f32 = f32(constants::GI_GUIDE_SHARE) / 100.0;
+const GI_GUIDE_CONE: f32 = f32(constants::GI_GUIDE_CONE);
+const GI_GUIDE_WIDE: f32 = f32(constants::GI_GUIDE_WIDE) / 100.0;

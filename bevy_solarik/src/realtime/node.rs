@@ -1216,6 +1216,15 @@ pub fn init_solari_lighting_pipelines(
             // emissive triangle's area, within which a receiver takes its
             // point by solid angle: sampling.wesl, near_triangle_warp)
             ("LIGHT_NEAR_DISTANCE", "SOLARIK_LIGHT_NEAR_DISTANCE", 100),
+            // (ReSTIR GI's guided initial sampling, GI_GUIDE below: the most
+            // of the candidates aimed at the temporal reservoir's sample, in
+            // percent, held under 90 in the shader; the cone's half-angle in
+            // degrees, held to 1 to 80; and in hundredths of a steradian the
+            // effective solid angle of the pixel's light, its W, at which the
+            // guide fades out; tuning.wesl)
+            ("GI_GUIDE_SHARE", "SOLARIK_GI_GUIDE_SHARE", 50),
+            ("GI_GUIDE_CONE", "SOLARIK_GI_GUIDE_CONE", 10),
+            ("GI_GUIDE_WIDE", "SOLARIK_GI_GUIDE_WIDE", 100),
         ] {
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).filter(|&v: &u32| v > 0).unwrap_or(default);
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));
@@ -1276,6 +1285,17 @@ pub fn init_solari_lighting_pipelines(
         // still too); docs/boiling-plan.md, Phase 3.
         if std::env::var("SOLARIK_GI_ADAPTIVE_SPATIAL").is_ok_and(|v| v == "1") {
             shader_defs.push("GI_ADAPTIVE_SPATIAL".into());
+        }
+        // ReSTIR GI aims part of its initial candidates in a cone at the
+        // sample the pixel's temporal reservoir holds, the candidate's density
+        // the exact mixture (on by default; SOLARIK_GI_GUIDE=0 the old): a room
+        // lit through a small doorway found its light one frame in a hundred
+        // and its walls boiled in slow blotches as the reservoir held each
+        // find and let it decay (restir_gi.wesl, make_gi_guide; the knobs
+        // SOLARIK_GI_GUIDE_SHARE, _CONE and _WIDE above; the view
+        // SOLARIK_SHADER_DEFS=VISUALIZE_GI_GUIDE).
+        if !std::env::var("SOLARIK_GI_GUIDE").is_ok_and(|v| v == "0") {
+            shader_defs.push("GI_GUIDE".into());
         }
         // A cache cell whose direct sample is dark traces two bounce rays an
         // update (on by default; SOLARIK_CACHE_SHADE_SECOND_RAY=0 as before).

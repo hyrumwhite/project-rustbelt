@@ -27,6 +27,9 @@ void bevy_bridge_note_map_load(void);
 the viewer still compiling its shaders and loading the level after a map
 load; frames are still rendered and exported */
 boolean bevy_bridge_hold_ticks(void);
+/* d3d8_gl.c's frame timing (port/linux/src): whether the game held its
+ticks at a load since it last asked, and how many maps have been loaded */
+unsigned char bevy_bridge_frame_timing_hold(unsigned long *map_loads);
 
 /* a model the game draws by itself, posed and coloured (its change colours,
 or NULL; first_person_weapons.c): shared with the next frame */

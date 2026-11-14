@@ -3184,6 +3184,10 @@ void bevy_bridge_overlay_commit(void);
 /* (the overlay shared with nothing drawn into it this frame: no pixels) */
 void bevy_bridge_overlay_mark_empty(void);
 unsigned char bevy_bridge_overlay_viewer(unsigned long *looked, unsigned long *interval);
+unsigned char bevy_bridge_frame_timing_hold(unsigned long *map_loads);
+/* source/game/game_time.c (for the frame timing line's tick) */
+unsigned char game_time_initialized(void);
+long game_time_get(void);
 #endif
 
 /* -1 until first asked */
@@ -5096,6 +5100,9 @@ static void overlay_shared(void)
 	overlay_frame_time = took > overlay_frame_time ? took : overlay_frame_time - (overlay_frame_time - took) / 16;
 }
 
+/* whether the last overlay_pace waited (the frame timing's) */
+static BOOL overlay_pace_waited;
+
 /* after a present: waits for the next frame's start */
 static void overlay_pace(void)
 {
@@ -5108,6 +5115,7 @@ static void overlay_pace(void)
 	long wait;
 	int step;
 
+	overlay_pace_waited = FALSE;
 	if (bevy_bridge_overlay_viewer(&looked, &interval) && interval <= 100000)
 	{
 		now = overlay_microseconds();
@@ -5125,6 +5133,7 @@ static void overlay_pace(void)
 			{
 				SDL_DelayPrecise((Uint64)wait * 1000);
 				waited += (Uint64)wait;
+				overlay_pace_waited = TRUE;
 			}
 		}
 		/* (HALO_BEVY_PACE_LOG: the pacing every 300 frames) */
@@ -5139,6 +5148,182 @@ static void overlay_pace(void)
 		}
 	}
 	overlay_frame_started = SDL_GetTicksNS();
+}
+
+/* The frame timing: with the overlay on (the game run by the viewer), how
+the time between frames was spent, over windows of 5 s, and a line in the
+log for a window whose frames came under 0.9 of the rate the viewer looks
+at them (once its looks are recent, not while the game held its ticks at a
+load, nor in the window of a map load or the one after it); with
+HALO_FRAME_TIMING_LOG=1, a line for every window, overlay or not. A frame
+runs from the end of one present's pacing to the end of the next's; the
+share is the overlay's readback and hand-over, the swap SDL_GL_SwapWindow,
+the cap display.max_fps's wait after it, the pace wait overlay_pace's, and
+the work the rest: the game's ticks and drawing. (The 13 November play on
+b40 had the game's frames at a steady 60 a second against the viewer's 85
+looks, which nothing in the log could explain.) */
+#define FRAME_TIMING_WINDOW_NANOSECONDS 5000000000ULL
+
+struct frame_timing_part
+{
+	Uint64 total;
+	Uint64 longest;
+};
+
+static struct
+{
+	int enabled; /* -1 until first asked */
+	int every_window;
+	Uint64 window_started;
+	Uint64 frame_started; /* 0 before the first frame */
+	Uint64 share; /* this frame's, until it ends */
+	unsigned long frames;
+	unsigned long paced_frames;
+	struct frame_timing_part frame, work, share_part, swap, cap, pace;
+	BOOL held;
+	BOOL loaded;
+	BOOL after_load;
+	BOOL map_loads_known;
+	unsigned long map_loads;
+} frame_timing = { -1 };
+
+static BOOL frame_timing_on(void)
+{
+	if (frame_timing.enabled < 0)
+	{
+		const char *value = getenv("HALO_FRAME_TIMING_LOG");
+
+		frame_timing.every_window = value && *value && strcmp(value, "0") != 0;
+		frame_timing.enabled = frame_timing.every_window || overlay_enabled();
+	}
+	return frame_timing.enabled > 0;
+}
+
+/* the clock for the frame timing, or 0 when it is off */
+static Uint64 frame_timing_now(void)
+{
+	return frame_timing_on() ? SDL_GetTicksNS() : 0;
+}
+
+static void frame_timing_add(struct frame_timing_part *part, Uint64 nanoseconds)
+{
+	part->total += nanoseconds;
+	if (nanoseconds > part->longest)
+		part->longest = nanoseconds;
+}
+
+static double frame_timing_mean(struct frame_timing_part const *part)
+{
+	return frame_timing.frames ? (double)part->total / (double)frame_timing.frames / 1e6 : 0.0;
+}
+
+static double frame_timing_longest(struct frame_timing_part const *part)
+{
+	return (double)part->longest / 1e6;
+}
+
+/* a window's end: its line, if it is to have one, and the next begun */
+static void frame_timing_window(Uint64 now)
+{
+	double seconds = (double)(now - frame_timing.window_started) / 1e9;
+	double rate = seconds > 0.0 ? (double)frame_timing.frames / seconds : 0.0;
+	double looks = 0.0;
+	unsigned long looked, interval;
+	BOOL viewer_looking = FALSE, slow;
+
+	if (bevy_bridge_overlay_viewer(&looked, &interval) && interval)
+	{
+		looks = 1e6 / (double)interval;
+		viewer_looking = overlay_microseconds() - looked < 1000000;
+	}
+	slow = viewer_looking && rate < 0.9 * looks &&
+		!frame_timing.held && !frame_timing.loaded && !frame_timing.after_load;
+	if (frame_timing.frames && (slow || frame_timing.every_window))
+	{
+		const char *no_vsync = getenv("HALO_NO_VSYNC");
+		int swap_interval;
+		float refresh_rate;
+		Uint64 cap_interval;
+
+		platform_video_pacing(&swap_interval, &refresh_rate, &cap_interval);
+		platform_log("frame timing: %.1f frames/s against the viewer's %.1f looks/s%s over %.1f s at tick %ld: "
+			"frame %.2f ms (longest %.2f), work %.2f (%.2f), share %.2f (%.2f), swap %.2f (%.2f), "
+			"cap %.2f (%.2f), pace wait %.2f (%.2f), %lu%% of frames paced; "
+			"swap interval %d, display %.1f Hz, vsync %s%s, max_fps %ld (cap %.2f ms), interpolation %s%s%s%s",
+			rate, looks, viewer_looking ? "" : " (not looking now)", seconds,
+			game_time_initialized() ? game_time_get() : -1L,
+			frame_timing_mean(&frame_timing.frame), frame_timing_longest(&frame_timing.frame),
+			frame_timing_mean(&frame_timing.work), frame_timing_longest(&frame_timing.work),
+			frame_timing_mean(&frame_timing.share_part), frame_timing_longest(&frame_timing.share_part),
+			frame_timing_mean(&frame_timing.swap), frame_timing_longest(&frame_timing.swap),
+			frame_timing_mean(&frame_timing.cap), frame_timing_longest(&frame_timing.cap),
+			frame_timing_mean(&frame_timing.pace), frame_timing_longest(&frame_timing.pace),
+			frame_timing.paced_frames * 100 / frame_timing.frames,
+			swap_interval, (double)refresh_rate,
+			config_boolean("display.vsync") ? "on" : "off",
+			no_vsync && *no_vsync ? " (HALO_NO_VSYNC set)" : "",
+			config_integer("display.max_fps"), (double)cap_interval / 1e6,
+			halo_interpolation_enabled() ? "on" : "off",
+			frame_timing.held ? "; held at a load" : "",
+			frame_timing.loaded ? "; a map loaded" : "",
+			frame_timing.after_load ? "; the first window after a load" : "");
+	}
+	frame_timing.after_load = frame_timing.loaded;
+	frame_timing.held = FALSE;
+	frame_timing.loaded = FALSE;
+	frame_timing.frames = 0;
+	frame_timing.paced_frames = 0;
+	memset(&frame_timing.frame, 0, sizeof(frame_timing.frame));
+	memset(&frame_timing.work, 0, sizeof(frame_timing.work));
+	memset(&frame_timing.share_part, 0, sizeof(frame_timing.share_part));
+	memset(&frame_timing.swap, 0, sizeof(frame_timing.swap));
+	memset(&frame_timing.cap, 0, sizeof(frame_timing.cap));
+	memset(&frame_timing.pace, 0, sizeof(frame_timing.pace));
+	frame_timing.window_started = now;
+}
+
+/* a frame's end, after the present's swap (begun and ended at the times
+given, 0 with the timing off) and pacing */
+static void frame_timing_frame(Uint64 swap_started, Uint64 swap_ended)
+{
+	Uint64 now, cap, swap, pace, share, used;
+	unsigned long map_loads;
+
+	if (!swap_started)
+		return;
+	now = SDL_GetTicksNS();
+	cap = platform_video_cap_delay();
+	swap = swap_ended - swap_started;
+	swap = swap > cap ? swap - cap : 0;
+	pace = now - swap_ended;
+	share = frame_timing.share;
+	frame_timing.share = 0;
+	if (bevy_bridge_frame_timing_hold(&map_loads))
+		frame_timing.held = TRUE;
+	if (frame_timing.map_loads_known && map_loads != frame_timing.map_loads)
+		frame_timing.loaded = TRUE;
+	frame_timing.map_loads = map_loads;
+	frame_timing.map_loads_known = TRUE;
+	if (!frame_timing.frame_started)
+	{
+		frame_timing.frame_started = now;
+		frame_timing.window_started = now;
+		return;
+	}
+	frame_timing_add(&frame_timing.frame, now - frame_timing.frame_started);
+	used = share + swap + cap + pace;
+	frame_timing_add(&frame_timing.work, now - frame_timing.frame_started > used ?
+		now - frame_timing.frame_started - used : 0);
+	frame_timing_add(&frame_timing.share_part, share);
+	frame_timing_add(&frame_timing.swap, swap);
+	frame_timing_add(&frame_timing.cap, cap);
+	frame_timing_add(&frame_timing.pace, pace);
+	frame_timing.frames++;
+	if (overlay_pace_waited)
+		frame_timing.paced_frames++;
+	frame_timing.frame_started = now;
+	if (now - frame_timing.window_started >= FRAME_TIMING_WINDOW_NANOSECONDS)
+		frame_timing_window(now);
 }
 
 #endif
@@ -5207,6 +5392,9 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 	{
 		struct render_target_entry *back_buffer = render_target_get(&device.back_buffer);
 		int window_width, window_height, width, height, x, y;
+#ifndef HALO_ANDROID
+		Uint64 share_started, swap_started, swap_ended;
+#endif
 
 		if (trace_frame())
 			platform_log("present back buffer %08lx texture %u", (unsigned long)device.back_buffer.Data,
@@ -5216,7 +5404,16 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		visibility_copy_batch();
 #endif
 		if (overlay_enabled())
+		{
+#ifndef HALO_ANDROID
+			share_started = frame_timing_now();
+#endif
 			overlay_share(back_buffer);
+#ifndef HALO_ANDROID
+			if (share_started)
+				frame_timing.share = SDL_GetTicksNS() - share_started;
+#endif
+		}
 		if (screenshot_every > 0 && device.frame % (unsigned long)screenshot_every == 0)
 			write_screenshot(back_buffer);
 #ifndef HALO_ANDROID
@@ -5244,10 +5441,15 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		/* row 0 of the render target is the top of the picture */
 		glBlitFramebuffer(0, 0, (GLint)back_buffer->target.gl_width, (GLint)back_buffer->target.gl_height,
 			x, y + height, x + width, y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+#ifndef HALO_ANDROID
+		swap_started = frame_timing_now();
+#endif
 		platform_video_swap();
 #ifndef HALO_ANDROID
+		swap_ended = swap_started ? SDL_GetTicksNS() : 0;
 		if (overlay_enabled())
 			overlay_pace();
+		frame_timing_frame(swap_started, swap_ended);
 #endif
 		xgpu_gl_state_invalidate();
 		memory_watch_begin_frame();

@@ -16,5 +16,7 @@ exe="${EXE:-$repo/target/release/halo_rt.exe}"
 export HALO_MAPS="${HALO_MAPS:-C:\Users\hyrum\Downloads\halo-windows-release\maps}"
 read -r name map bsp cam rest <<< "$(grep "^$spot\b" "$here/spots.txt")"
 d="$here/out/flash/$label/still"; mkdir -p "$d"; rm -f "$d"/x_*.png
-HALO_RT_GPU_LOG=1 timeout 900 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --screenshot "$d/x.png" --screenshot-every 20 --screenshot-from 9000 --screenshot-after 15000 > "$d/log.txt" 2>&1
+# (the stats text hidden: the user's saved options must not reach the
+# measured pictures)
+HALO_RT_STATS=0 HALO_RT_GPU_LOG=1 timeout 900 "$exe" "$map" --viewer --bsp "$bsp" --camera "$cam" --screenshot "$d/x.png" --screenshot-every 20 --screenshot-from 9000 --screenshot-after 15000 > "$d/log.txt" 2>&1
 echo "$label exit $? $(ls "$d"/x_*.png | wc -l) captures; $(sed 's/\x1b\[[0-9;]*m//g' "$d/log.txt" | grep -a 'gpu [0-9.]* ms' | tail -1 | grep -o 'gpu [0-9.]* ms')"

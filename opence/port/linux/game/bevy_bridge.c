@@ -103,6 +103,9 @@ new map's state keeps it */
 static unsigned long bevy_bridge_hold_generation;
 static unsigned long bevy_bridge_hold_start_milliseconds;
 static boolean bevy_bridge_hold_given_up;
+/* whether the game held its ticks since d3d8_gl.c's frame timing last
+asked (bevy_bridge_frame_timing_hold) */
+static boolean bevy_bridge_hold_seen;
 
 /* ---------- private code */
 
@@ -957,7 +960,7 @@ load until the viewer writes the frames' hold generation into
 hold_released, so the cutscene starts at tick 0 as the cover lifts. Never a
 network game or a film, nor the main menu's map; given up after ten minutes
 in case the viewer never answers. */
-boolean bevy_bridge_hold_ticks(void)
+static boolean bevy_bridge_hold_ticks_now(void)
 {
 	static int hold = -1;
 	struct bevy_bridge_shared *shared;
@@ -987,6 +990,24 @@ boolean bevy_bridge_hold_ticks(void)
 		return FALSE;
 	}
 	return TRUE;
+}
+
+boolean bevy_bridge_hold_ticks(void)
+{
+	boolean holding = bevy_bridge_hold_ticks_now();
+
+	if (holding)
+		bevy_bridge_hold_seen = TRUE;
+	return holding;
+}
+
+unsigned char bevy_bridge_frame_timing_hold(unsigned long *map_loads)
+{
+	boolean seen = bevy_bridge_hold_seen;
+
+	bevy_bridge_hold_seen = FALSE;
+	*map_loads = bevy_bridge_hold_generation;
+	return seen;
 }
 
 boolean bevy_bridge_overlay_enabled(void)

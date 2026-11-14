@@ -838,9 +838,26 @@ struct SkinnedPart {
     shader: Option<ShaderUse>,
 }
 
-/// How far inside a skinned model its rigid ray-traced copy sits (world
-/// units: 2 cm).
-const TRACED_INSET: f32 = 0.02 / METERS_PER_WORLD_UNIT;
+/// How far inside a model's surface its rigid ray-traced pieces sit (world
+/// units; `HALO_RT_RIGID_INSET=<metres>`, none by default, 0.02 the old).
+/// The inset kept rays leaving the camera's skinned surface off a rigid copy
+/// that bent differently, when every part was copied rigidly; a part is now
+/// copied rigidly only when all of it follows one node, so its pieces are the
+/// camera's own surface, and the inset turned slabs thinner than twice it
+/// inside out, their far face in front of the camera's surface: b40's giant
+/// door black in sections, the third-person weapon's shadow in fragments.
+/// An unparsable, negative or infinite value is none. Read once.
+fn rigid_inset() -> f32 {
+    static INSET: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *INSET.get_or_init(|| {
+        let metres = std::env::var("HALO_RT_RIGID_INSET")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|m| m.is_finite() && *m >= 0.0)
+            .unwrap_or(0.0);
+        metres / METERS_PER_WORLD_UNIT
+    })
+}
 
 /// StandardMaterial's reflectance for a surface Halo gives no reflection (1%
 /// head-on, not the usual 4%, and half at grazing angles, not all: Solarik
@@ -866,7 +883,8 @@ const FIRST_PERSON_CAMOUFLAGE_THICKNESS: f32 = 0.0;
 /// Whether the first person's camouflage is drawn as before
 /// (`HALO_RT_CAMOUFLAGE_LAYERS=1`): every layer of its glass composited for
 /// the camera, an alpha-tested surface glass over its whole polygons, and
-/// the glass inset as the rays' copies of opaque models are. Otherwise (play
+/// the glass inset as the rays' rigid pieces of opaque models are (see
+/// [`rigid_inset`]). Otherwise (play
 /// feedback, 13 November: odd shapes on the weapon, as if its collision
 /// shapes showed) it reads as one glass skin of the weapon and arms: the
 /// camera sees its nearest layer alone (Solarik's
@@ -876,8 +894,8 @@ const FIRST_PERSON_CAMOUFLAGE_THICKNESS: f32 = 0.0;
 /// gun, its grip and the hands) cut out as the camera sees them
 /// ([`LevelBuilder::camouflage_glass_for`]), and the first-person models'
 /// rigid pieces where the camera's surface is, not inset
-/// ([`first_person_model`]): a part thinner than twice the inset turned
-/// inside out. Read once.
+/// ([`first_person_model`]) whatever [`rigid_inset`] is: a part thinner
+/// than twice the inset turned inside out. Read once.
 fn camouflage_all_layers() -> bool {
     static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ALL.get_or_init(|| std::env::var("HALO_RT_CAMOUFLAGE_LAYERS").is_ok_and(|v| v.trim() == "1"))
@@ -2318,16 +2336,18 @@ impl LevelBuilder {
                         texcoord: v.texcoord,
                     })
                 };
-                // (the rays' rigid copy sits a little inside the skinned
-                // surface the camera sees: where it bends differently, rays
-                // leaving that surface would otherwise hit it, and the model
-                // would shadow itself in blotches); but a first-person
-                // model's opaque pieces, which the rays see only as its
-                // camouflage glass (see camouflage_all_layers)
+                // (the rays' rigid pieces are where the camera's skinned
+                // surface is, not inset: all of the part follows one node,
+                // so they are that surface, and an inset turned thin slabs
+                // inside out, b40's giant door black in sections and the
+                // weapon's shadow in fragments; HALO_RT_RIGID_INSET the
+                // old, see rigid_inset); a first-person model's opaque
+                // pieces, which the rays see only as its camouflage glass,
+                // never inset (see camouflage_all_layers)
                 let depth = if first_person_model(&model.name) && matches!(surface, Surface::Solid(_)) && !camouflage_all_layers() {
                     0.0
                 } else {
-                    TRACED_INSET
+                    rigid_inset()
                 };
                 let inset = |v: SourceVertex| SourceVertex {
                     position: std::array::from_fn(|i| v.position[i] - v.normal[i] * depth),

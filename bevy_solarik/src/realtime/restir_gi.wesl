@@ -12,6 +12,11 @@ import bevy_render::view::View;
 import bevy_solarik::scene::brdf::evaluate_diffuse_brdf;
 import bevy_solarik::realtime::surface_path::shade_surface_scattering;
 import bevy_solarik::realtime::sky_sampling::sample_sky_mixture;
+@if((GI_GUIDE)) import bevy_solarik::realtime::sky_sampling::sample_sky_mixture_guided;
+@if((GI_GUIDE)) import bevy_solarik::realtime::tuning::GI_GUIDE_SHARE;
+@if((GI_GUIDE)) import bevy_solarik::realtime::tuning::GI_GUIDE_CONE;
+@if((GI_GUIDE)) import bevy_solarik::realtime::tuning::GI_GUIDE_WIDE;
+@if((GI_GUIDE)) import bevy_solarik::scene::sampling::is_finite_f32;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::temporal_pixel_dissimilar;
@@ -110,6 +115,60 @@ var<private> nrc_light_tile: vec2<u32> = vec2(0u);
 @if((NRC && NRC_QUERY_AT_SPREAD))
 var<private> nrc_bounced: bool = false;
 
+// GI_GUIDE (on by default; SOLARIK_GI_GUIDE=0 the old): a room lit through a
+// small opening finds its light one initial direction in a hundred, and the
+// temporal reservoir holds each find while its weight decays, so the walls
+// boil in slow blotches. Part of the initial candidates are aimed in a cone
+// at the sample the pixel's temporal reservoir holds, the candidate's density
+// the mixture of the cone and the sky mixture at its direction, whichever
+// drew it (sky_sampling.wesl, sample_sky_mixture_guided). The guide is made
+// from last frame's reservoir alone, never from this frame's random numbers;
+// a share of 0 is no guide. (`gi_guide_from_cone` is this frame's candidate
+// coming from the cone, for VISUALIZE_GI_GUIDE.)
+@if((GI_GUIDE))
+struct GiGuide {
+    direction: vec3<f32>,
+    share: f32,
+    cos_max: f32,
+}
+@if((GI_GUIDE))
+var<private> gi_guide: GiGuide;
+@if((GI_GUIDE))
+var<private> gi_guide_from_cone: bool = false;
+
+@if((GI_GUIDE))
+fn make_gi_guide(temporal: Reservoir, world_position: vec3<f32>, world_normal: vec3<f32>) -> GiGuide {
+    let none = GiGuide(vec3(0.0, 0.0, 1.0), 0.0, 1.0);
+    let w = temporal.unbiased_contribution_weight;
+    let brightness = luminance(temporal.radiance);
+    if !(temporal.confidence_weight > 0.0) || !is_finite_f32(w) || !(w > 0.0) || !is_finite_f32(brightness) || !(brightness > 0.0) {
+        return none;
+    }
+    let to_sample = temporal.sample_point_world_position - world_position;
+    let distance_to_sample = length(to_sample);
+    if !is_finite_f32(distance_to_sample) || !(distance_to_sample > 1e-4) {
+        return none;
+    }
+    let direction = to_sample / distance_to_sample;
+    if !(dot(direction, world_normal) > 0.05) {
+        return none;
+    }
+    // The target function is luminance(radiance * cosine * brdf), so W, the
+    // reservoir's contribution weight, estimates the target's integral over
+    // the hemisphere divided by the target at the held sample: the solid
+    // angle (cosine weighted) the pixel's light would fill if all of it were
+    // as bright as the held sample. A few hundredths of a steradian where it
+    // comes through a small opening: guide strongly. About pi or more under
+    // an open sky or in an evenly lit room: no guide, where narrowing the
+    // candidates would only cost exploration.
+    let share = min(GI_GUIDE_SHARE, 0.9) * saturate(1.0 - w / GI_GUIDE_WIDE);
+    if !(share >= 0.01) {
+        return none;
+    }
+    let cos_max = cos(radians(clamp(GI_GUIDE_CONE, 1.0, 80.0)));
+    return GiGuide(direction, share, cos_max);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
@@ -141,6 +200,14 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(NRC && NRC_QUERY_AT_SPREAD) {
     nrc_light_tile = global_id.xy / 8u;
 }
+@if(GI_GUIDE) {
+    // The temporal reservoir, loaded before the initial sample it guides and
+    // merged with it below (it draws no random numbers, so the stream is as
+    // it was). With NRC the merge is nrc_resolve_and_temporal's, which loads
+    // it again in its own pass; here it only guides.
+    let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
+    gi_guide = make_gi_guide(temporal.reservoir, surface.world_position, surface.world_normal);
+}
     let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, &rng);
 // (SOLARIK_SHADER_DEFS=VISUALIZE_CACHE_AGE, with HALO_RT_NO_DLSS=1: the
 // samples in the cache cell this pixel's diffuse bounce read, red at one to
@@ -158,6 +225,18 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
         debug_colour = vec3(1.0 - t, t, 0.0);
     }
     textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
+}
+// (SOLARIK_SHADER_DEFS=VISUALIZE_GI_GUIDE, with HALO_RT_NO_DLSS=1: green the
+// guide's share this frame (0.5 the most at the default share), red where
+// this frame's candidate came from the cone, blue the temporal reservoir's W
+// over SOLARIK_GI_GUIDE_WIDE's steradians, saturated (no blue: an empty or
+// refused history). The reservoirs go on as without the view, the temporal
+// merge and the spatial pass included, so the guide is seen as it works;
+// the later passes leave the view.)
+@if(GI_GUIDE && VISUALIZE_GI_GUIDE) {
+    let guide_w = temporal.reservoir.unbiased_contribution_weight;
+    let guide_wide = select(0.0, saturate(guide_w / GI_GUIDE_WIDE), is_finite_f32(guide_w) && guide_w > 0.0);
+    textureStore(view_output, global_id.xy, vec4(select(0.0, 1.0, gi_guide_from_cone), gi_guide.share, guide_wide, 1.0));
 }
 // (SOLARIK_SHADER_DEFS=VISUALIZE_GI_INITIAL, with HALO_RT_NO_DLSS=1: the
 // initial sample's radiance from the world cache, times 32 as VISUALIZE_NRC
@@ -188,7 +267,9 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     gi_reservoirs_b[pixel_index] = initial_reservoir;
     return;
 }
+@if(!(GI_GUIDE)) {
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
+}
     let merge_result = merge_reservoirs(initial_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         temporal.reservoir, temporal.world_position, temporal.world_normal, temporal.diffuse_brdf, &rng);
 
@@ -348,6 +429,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(NRC_SPECULAR && VISUALIZE_NRC_SPECULAR) {
     return;
 }
+@if(GI_GUIDE && VISUALIZE_GI_GUIDE) {
+    return;
+}
 
     let wo = normalize(view.world_position - surface.world_position);
     let brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
@@ -365,7 +449,15 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
     reservoir.support_radius = ray_max_distance();
 }
 
+@if(!(GI_GUIDE)) {
     let direction_sample = sample_sky_mixture(world_normal, rng);
+}
+@if(GI_GUIDE) {
+    // (the guide initial_and_temporal made from the temporal reservoir; with
+    // a share of 0 the plain sample_sky_mixture, no extra number drawn)
+    let direction_sample = sample_sky_mixture_guided(world_normal, gi_guide.direction, gi_guide.share, gi_guide.cos_max, rng);
+    gi_guide_from_cone = direction_sample.from_guide;
+}
     let ray_direction = direction_sample.direction;
     // A full-sphere sky draw below the receiver has zero contribution.
     // Do not resample it: conditioning would change the mixture PDF.

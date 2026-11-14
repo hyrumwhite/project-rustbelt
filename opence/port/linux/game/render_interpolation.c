@@ -46,6 +46,8 @@ with their unit, and with what it rides.
 /* port/linux/src/port_config.c */
 int config_boolean(const char *name);
 unsigned long config_changes(void);
+/* port/linux/src/xbox_kernel.c */
+void platform_log(char const *format, ...);
 
 #include <math.h>
 #include <stdlib.h>
@@ -79,9 +81,22 @@ like robots.) */
 another: their sum is drawn): past the largest a client's own unit or
 vehicle is corrected by (3 and 4 world units), short of a snap */
 #define CORRECTION_MAXIMUM 8.0f
-/* a camera cut: a jump or turn no player or scripted camera makes in 33 ms */
+/* A camera cut: a turn no player or scripted camera makes in 33 ms, or a
+step out of line with the camera's own motion, longer than the distance
+below and more than the factor times the camera's previous step (held to the
+maximum below, so that no step over twice it is ever blended; none before
+the first step). A fixed distance alone took fast flights for cuts: The
+Maw's intro camera flies 2.5 to 3.5 world units a tick for hundreds of
+ticks, and snapped tick after tick, or every other tick, standing still
+between. The previous step is each new one, cut or not, so that the step
+after a cut is judged by the cut's (and blended) and a flight speeding up
+past the distance snaps for one tick at most. (HALO_CAMERA_CUT_DISTANCE_ONLY=1
+the old rule, the distance and the turn alone; HALO_CAMERA_CUT_LOG=1 a line
+for each cut and each step over the distance let through.) */
 #define CAMERA_CUT_DISTANCE 3.0f
 #define CAMERA_CUT_COSINE 0.5f
+#define CAMERA_CUT_STEP_FACTOR 2.0f
+#define CAMERA_CUT_REFERENCE_MAXIMUM 8.0f
 
 /* ---------- structures */
 
@@ -126,6 +141,11 @@ struct interpolated_camera
 	struct observer_result previous;
 	struct observer_result latest;
 	struct observer_result blended;
+	/* the length of the step before the latest, in world units a tick (0
+	when there was none), and whether latest is a cut from previous, judged
+	when the latest was taken */
+	real step_reference;
+	boolean cut;
 	/* its player's unit (or what it rides) corrected: as an object's */
 	real_vector3d correction;
 	real_vector3d correction_pending;
@@ -759,14 +779,57 @@ static void observer_blend(
 	result->field_of_view = lerp(a->field_of_view, b->field_of_view, t);
 }
 
-/* a cut between two of the observer's results (so written that a position
-or direction not a number cuts) */
-static boolean observer_cut(
-	struct observer_result const *a,
-	struct observer_result const *b)
+/* whether an environment switch is set (not empty, not "0"), read once */
+static boolean camera_cut_switch(char const *name, int *value)
 {
-	return !(distance_squared(&a->position, &b->position) <= CAMERA_CUT_DISTANCE * CAMERA_CUT_DISTANCE) ||
-		!(a->forward.i * b->forward.i + a->forward.j * b->forward.j + a->forward.k * b->forward.k >= CAMERA_CUT_COSINE);
+	if (*value < 0)
+	{
+		char const *text = getenv(name);
+
+		*value = text && *text && strcmp(text, "0") != 0;
+	}
+	return *value != 0;
+}
+
+/* Whether the camera's latest snapshot is a cut from its previous, taken
+the given ticks apart, and the step's length a tick kept as the reference
+for the next (see CAMERA_CUT_DISTANCE; so written that a position or
+direction not a number cuts). */
+static boolean camera_snapshot_cut(
+	struct interpolated_camera *camera,
+	real ticks)
+{
+	static int distance_only = -1;
+	static int logging = -1;
+	struct observer_result const *a = &camera->previous;
+	struct observer_result const *b = &camera->latest;
+	real distance = (real)sqrt(distance_squared(&a->position, &b->position));
+	real step = distance / ticks;
+	real reference = camera->step_reference;
+	boolean turned = !(a->forward.i * b->forward.i + a->forward.j * b->forward.j + a->forward.k * b->forward.k >= CAMERA_CUT_COSINE);
+	boolean jumped;
+
+	if (!(reference >= 0.0f))
+		reference = 0.0f;
+	else if (reference > CAMERA_CUT_REFERENCE_MAXIMUM)
+		reference = CAMERA_CUT_REFERENCE_MAXIMUM;
+	if (camera_cut_switch("HALO_CAMERA_CUT_DISTANCE_ONLY", &distance_only))
+	{
+		jumped = !(distance <= CAMERA_CUT_DISTANCE);
+	}
+	else
+	{
+		jumped = !(step <= CAMERA_CUT_DISTANCE) &&
+			!(step <= CAMERA_CUT_STEP_FACTOR * reference);
+	}
+	if (camera_cut_switch("HALO_CAMERA_CUT_LOG", &logging) && (turned || jumped || !(step <= CAMERA_CUT_DISTANCE)))
+	{
+		platform_log("render interpolation: camera at tick %ld: %.3f world units a tick, the reference %.3f: %s",
+			interpolation_tick, (double)step, (double)reference,
+			turned ? "a cut (turn)" : jumped ? "a cut (distance)" : "let through");
+	}
+	camera->step_reference = step;
+	return turned || jumped;
 }
 
 static struct observer_result const *render_interpolation_blended_camera(
@@ -826,10 +889,20 @@ static struct observer_result const *render_interpolation_blended_camera(
 		{
 			camera->correction = *global_zero_vector3d;
 			camera->correction_pending = *global_zero_vector3d;
+			camera->step_reference = 0.0f;
 		}
 		camera->has_previous = camera->valid;
 		camera->previous = camera->latest;
 		camera->latest = *observer;
+		/* judged once, by the step a tick (over all the ticks since the
+		last snapshot after a long frame), before the snapshots are moved */
+		camera->cut = FALSE;
+		if (camera->has_previous)
+		{
+			long ticks = interpolation_tick - camera->tick;
+
+			camera->cut = camera_snapshot_cut(camera, ticks > 1 ? (real)ticks : 1.0f);
+		}
 		/* Several ticks since the last snapshot (a long frame): the objects
 		are drawn between the last two ticks, so the camera's previous is
 		where it was a tick ago, as nearly as a steady move from the last
@@ -837,7 +910,7 @@ static struct observer_result const *render_interpolation_blended_camera(
 		moved further each frame than the world it is in, out through a
 		Pelican's hull for a frame.) A cut stays a cut. */
 		if (camera->has_previous && interpolation_tick - camera->tick > 1 &&
-			!observer_cut(&camera->previous, &camera->latest))
+			!camera->cut)
 		{
 			real ticks = (real)(interpolation_tick - camera->tick);
 			struct observer_result previous = camera->previous;
@@ -847,7 +920,7 @@ static struct observer_result const *render_interpolation_blended_camera(
 		camera->tick = interpolation_tick;
 		camera->valid = TRUE;
 	}
-	if (!camera->has_previous || observer_cut(&camera->previous, &camera->latest))
+	if (!camera->has_previous || camera->cut)
 	{
 		return observer;
 	}

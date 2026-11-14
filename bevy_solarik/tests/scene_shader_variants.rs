@@ -37,8 +37,12 @@ fn scene_consumers_compose_across_production_feature_variants() {
             ShaderDefVal::UInt("CACHE_DROP_THRESHOLD".into(), 60),
             ShaderDefVal::UInt("CACHE_DROP_FLOOR".into(), 4),
             ShaderDefVal::UInt("LIGHT_NEAR_DISTANCE".into(), 100),
+            ShaderDefVal::UInt("GI_GUIDE_SHARE".into(), 50),
+            ShaderDefVal::UInt("GI_GUIDE_CONE".into(), 10),
+            ShaderDefVal::UInt("GI_GUIDE_WIDE".into(), 100),
             "BINDLESS_SURFACE_DETAIL".into(),
             // (on by default in node.rs)
+            "GI_GUIDE".into(),
             "CACHE_WARM_START".into(),
             "GI_ADAPTIVE_SPATIAL".into(),
             "CELL_LOOKUP_NEIGHBOURS".into(),
@@ -84,6 +88,24 @@ fn scene_consumers_compose_across_production_feature_variants() {
                 stage_definitions.push("WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION".into());
             }
             graph.validate(&module, &stage_definitions);
+            // (ReSTIR GI's guided initial sampling off, the old shader
+            // (SOLARIK_GI_GUIDE=0), and its view; specular_gi has the view's
+            // early return, primary_glass imports specular_gi)
+            if consumer == "realtime::restir_gi"
+                || consumer == "realtime::specular_gi"
+                || consumer == "realtime::primary_glass"
+            {
+                let unguided: Vec<ShaderDefVal> = stage_definitions
+                    .iter()
+                    .filter(|d| !matches!(d, ShaderDefVal::Bool(name, _) if &**name == "GI_GUIDE"))
+                    .cloned()
+                    .collect();
+                assert_eq!(unguided.len() + 1, stage_definitions.len());
+                graph.validate(&module, &unguided);
+                let mut view_definitions = stage_definitions.clone();
+                view_definitions.push("VISUALIZE_GI_GUIDE".into());
+                graph.validate(&module, &view_definitions);
+            }
             if consumer == "realtime::primary_foliage" {
                 let mut direct_definitions = stage_definitions.clone();
                 direct_definitions.push("PRIMARY_CANOPY_DIRECT_ONLY".into());

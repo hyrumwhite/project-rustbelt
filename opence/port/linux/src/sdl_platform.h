@@ -85,6 +85,15 @@ void platform_video_drawable_size(int *width, int *height);
 just written it (the main thread's) */
 void platform_display_apply(void);
 void platform_video_swap(void);
+#ifndef HALO_ANDROID
+/* how long the last platform_video_swap waited for display.max_fps's limit
+after the swap (nanoseconds; 0 when it did not) */
+Uint64 platform_video_cap_delay(void);
+/* for the frame timing line (d3d8_gl.c): the swap interval SDL reports (-2
+when it cannot say), the window's display's refresh rate (0 unknown) and
+the limit's time between frames in use (nanoseconds, 0 none) */
+void platform_video_pacing(int *swap_interval, float *refresh_rate, Uint64 *cap_interval);
+#endif
 /* frames between the 30 Hz ticks at the display's refresh rate, unless
 display.interpolation is false (port/linux/game/render_interpolation.c) */
 int halo_interpolation_enabled(void);

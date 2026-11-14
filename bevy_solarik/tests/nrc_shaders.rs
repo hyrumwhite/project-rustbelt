@@ -18,6 +18,9 @@ fn base_defs() -> Vec<ShaderDefVal> {
         ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
         ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
         ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
+        ShaderDefVal::UInt("GI_GUIDE_SHARE".into(), 50),
+        ShaderDefVal::UInt("GI_GUIDE_CONE".into(), 10),
+        ShaderDefVal::UInt("GI_GUIDE_WIDE".into(), 100),
         "BINDLESS_SURFACE_DETAIL".into(),
         "GI_ADAPTIVE_SPATIAL".into(),
         "CELL_LOOKUP_NEIGHBOURS".into(),
@@ -72,6 +75,20 @@ fn nrc_shaders_compile() {
             "RAY_MATERIAL_FOOTPRINTS",
             "DLSS_RR_GUIDE_BUFFERS",
         ],
+        // (GI_GUIDE, on by default in node.rs: the initial pass loads the
+        // temporal reservoir for its guide alone)
+        &["GI_GUIDE"],
+        &["GI_GUIDE", "VISUALIZE_GI_GUIDE"],
+        &["GI_GUIDE", "VISUALIZE_NRC"],
+        &["GI_GUIDE", "NRC_QUERY_AT_SPREAD", "VISUALIZE_NRC", "VISUALIZE_NRC_BOUNCED"],
+        &[
+            "GI_GUIDE",
+            "NRC_QUERY_AT_SPREAD",
+            "REGIONAL_HISTORY",
+            "FOLIAGE_TRANSMISSION",
+            "RAY_MATERIAL_FOOTPRINTS",
+            "DLSS_RR_GUIDE_BUFFERS",
+        ],
     ] {
         let mut names = vec!["NRC"];
         names.extend_from_slice(extra);
@@ -84,6 +101,8 @@ fn nrc_shaders_compile() {
         &["VISUALIZE_NRC"],
         &["REGIONAL_HISTORY", "FOLIAGE_TRANSMISSION", "RAY_MATERIAL_FOOTPRINTS"],
         &["WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION", "FOLIAGE_TRANSMISSION"],
+        &["GI_GUIDE", "REGIONAL_HISTORY", "FOLIAGE_TRANSMISSION", "RAY_MATERIAL_FOOTPRINTS"],
+        &["GI_GUIDE", "VISUALIZE_GI_GUIDE"],
     ] {
         let mut names = vec!["NRC", "NRC_SPECULAR"];
         names.extend_from_slice(extra);

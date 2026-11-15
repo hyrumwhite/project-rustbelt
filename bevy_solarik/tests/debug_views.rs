@@ -18,6 +18,8 @@ fn diagnostic_views_compose() {
         ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
         ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
         ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
+        ShaderDefVal::UInt("SPECULAR_SHARP_ROUGHNESS".into(), 25),
+        ShaderDefVal::UInt("SPECULAR_SHARP_COATS".into(), 0),
         ShaderDefVal::UInt("CACHE_HISTORY_CLAMP".into(), 1),
         ShaderDefVal::UInt("CACHE_DROP_DETECT".into(), 1),
         ShaderDefVal::UInt("CACHE_DROP_THRESHOLD".into(), 60),

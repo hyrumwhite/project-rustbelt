@@ -94,6 +94,9 @@ struct ResolvedLightSamplePacked {
     spot_direction: u32,
     spot_cos: u32,
     range: f32,
+    // (a point/spot light's source sphere's radius, 0 for the others: the
+    // receiver inside it, sampling.wesl calculate_resolved_light_contribution)
+    source_radius: f32,
 }
 
 // Don't adjust the size of this struct without also adjusting `prepare::GI_RESERVOIR_STRUCT_SIZE`.

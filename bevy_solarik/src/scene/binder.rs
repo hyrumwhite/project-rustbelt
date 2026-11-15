@@ -234,6 +234,9 @@ pub struct RaytracingSceneBindings {
     pub(crate) history_regional: bool,
     history_regions: StorageBuffer<Vec<Vec4>>,
     previous_frame_light_entities: Vec<SceneInstance>,
+    /// Beside each of those, the radius its sphere was sampled with (a
+    /// point or spot light's, `GpuLocalLight::radius`; 0 for the others).
+    previous_frame_light_radii: Vec<f32>,
     settle_light_history: bool,
     #[cfg(feature = "graphics_debug")]
     /// Capture-only prepared scene generations and readback handles.
@@ -272,7 +275,7 @@ struct SceneStorage {
     light_sources: StorageBufferList<GpuLightSource>,
     directional_lights: StorageBufferList<GpuDirectionalLight>,
     local_lights: StorageBufferList<GpuLocalLight>,
-    previous_frame_light_id_translations: StorageBufferList<u32>,
+    previous_frame_light_id_translations: StorageBufferList<GpuLightIdTranslation>,
     sky: StorageBuffer<GpuSkyLight>,
     rings: StorageBuffer<crate::rings::RingData>,
 }
@@ -817,6 +820,10 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         .previous_frame_light_entities
         .drain(..)
         .collect();
+    let previous_frame_light_radii: Vec<_> = raytracing_scene_bindings
+        .previous_frame_light_radii
+        .drain(..)
+        .collect();
 
     if instances_query.len() == 0 {
         scene_cache.tlas.prepare(&render_device, 0);
@@ -1206,6 +1213,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             raytracing_scene_bindings
                 .previous_frame_light_entities
                 .push(entity);
+            raytracing_scene_bindings.previous_frame_light_radii.push(0.0);
         }
 
         instance_id += 1;
@@ -1279,6 +1287,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         raytracing_scene_bindings
             .previous_frame_light_entities
             .push(entity.into());
+        raytracing_scene_bindings.previous_frame_light_radii.push(0.0);
     }
 
     // Point and spot lights are sphere lights of the light's radius, in the
@@ -1293,7 +1302,9 @@ pub(crate) fn prepare_raytracing_scene_bindings(
 
         // (a coned light as a spot light: its flux by its cone's solid angle)
         let spot_angles = local_light_cone(local_light, cone);
-        local_lights.push(GpuLocalLight::new(local_light, unreflected, cone));
+        let gpu_local_light = GpuLocalLight::new(local_light, unreflected, cone);
+        let radius = gpu_local_light.radius;
+        local_lights.push(gpu_local_light);
         light_fluxes.push(local_flux(
             local_light.color.to_vec3(),
             local_light.intensity,
@@ -1313,20 +1324,40 @@ pub(crate) fn prepare_raytracing_scene_bindings(
         raytracing_scene_bindings
             .previous_frame_light_entities
             .push(entity.into());
+        raytracing_scene_bindings.previous_frame_light_radii.push(radius);
     }
 
     raytracing_scene_bindings.light_source_count = light_sources.get().len() as u32;
-    raytracing_scene_bindings.settle_light_history =
-        previous_frame_light_entities != raytracing_scene_bindings.previous_frame_light_entities;
-    for previous_frame_light_entity in previous_frame_light_entities {
+    let mut weights_scaled = false;
+    for (previous_index, previous_frame_light_entity) in previous_frame_light_entities.iter().enumerate() {
         let current_frame_index = this_frame_entity_to_light_id
-            .get(&previous_frame_light_entity)
+            .get(previous_frame_light_entity)
             .copied()
             .unwrap_or(LIGHT_NOT_PRESENT_THIS_FRAME);
+        // (the radii are pushed beside the entities, so this frame's light
+        // index is its place in this frame's list)
+        let weight_scale = if current_frame_index == LIGHT_NOT_PRESENT_THIS_FRAME {
+            1.0
+        } else {
+            light_history_weight_scale(
+                previous_frame_light_radii.get(previous_index).copied().unwrap_or(0.0),
+                raytracing_scene_bindings
+                    .previous_frame_light_radii
+                    .get(current_frame_index as usize)
+                    .copied()
+                    .unwrap_or(0.0),
+            )
+        };
+        weights_scaled |= weight_scale != 1.0;
         previous_frame_light_id_translations
             .get_mut()
-            .push(current_frame_index);
+            .push(GpuLightIdTranslation { light_id: current_frame_index, weight_scale });
     }
+    // (a reused frame keeps the translations as they were uploaded: settle
+    // the next frame, which rebuilds them, when the lights changed or a
+    // scale would otherwise be applied twice)
+    raytracing_scene_bindings.settle_light_history = weights_scaled
+        || previous_frame_light_entities != raytracing_scene_bindings.previous_frame_light_entities;
 
     if light_sources.get().len() > u16::MAX as usize {
         panic!("Too many light sources in the scene, maximum is 65535.");
@@ -1715,6 +1746,7 @@ impl RaytracingSceneBindings {
                 ),
             ),
             previous_frame_light_entities: Vec::new(),
+            previous_frame_light_radii: Vec::new(),
             settle_light_history: false,
             #[cfg(feature = "graphics_debug")]
             debug: super::graphics_debug::SceneSnapshot::default(),
@@ -2030,6 +2062,35 @@ impl GpuLocalLight {
             _padding: 0.0,
         }
     }
+}
+
+/// A light of last frame's as ReSTIR DI's temporal reservoirs find it this
+/// frame. Mirrors `LightIdTranslation` in `raytracing_scene_bindings.wesl`.
+#[derive(ShaderType, Default, Debug, Clone, Copy, PartialEq)]
+struct GpuLightIdTranslation {
+    /// Its index among this frame's light sources, or
+    /// [`LIGHT_NOT_PRESENT_THIS_FRAME`].
+    light_id: u32,
+    /// What a reservoir's contribution weight holding it is multiplied by
+    /// ([`light_history_weight_scale`]).
+    weight_scale: f32,
+}
+
+/// A reservoir's contribution weight is an inverse density over its light's
+/// area, and its sample is resolved again from its seed on the light as it
+/// is now: a sphere whose radius went from `previous` to `radius` moved the
+/// point under a scaling whose area Jacobian is (radius / previous)², so the
+/// weight takes that (14 November: a bridge lightning light shrunk from
+/// 0.87 m to 0.1 m read 75 times too bright through every reservoir holding
+/// it, a flash of the whole bridge decaying over the history). 1 where
+/// either radius is not a sphere's (0: an emissive mesh, a directional
+/// light) or the scale is not finite and positive.
+fn light_history_weight_scale(previous: f32, radius: f32) -> f32 {
+    if previous <= 0.0 || radius <= 0.0 {
+        return 1.0;
+    }
+    let scale = (radius / previous).powi(2);
+    if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
 }
 
 #[derive(ShaderType, Default, PartialEq)]
@@ -2454,6 +2515,23 @@ mod tests {
         let intensity = 800.0 / (4.0 * PI);
         assert!((light.radiance.x * light.inverse_pdf / 4.0 - intensity).abs() < 1e-3);
         assert!(light.radiance.x.is_finite());
+    }
+
+    #[test]
+    fn a_resized_lights_history_keeps_its_brightness() {
+        // A reservoir's weight made on the old sphere (its area), read on the
+        // new sphere's radiance: scaled, the product is the old one's.
+        let old = GpuLocalLight::new(&extracted_light(800.0, 0.87, None), false, None);
+        let new = GpuLocalLight::new(&extracted_light(800.0, 0.1, None), false, None);
+        let scale = light_history_weight_scale(old.radius, new.radius);
+        let before = old.radiance.x * old.inverse_pdf;
+        let after = new.radiance.x * old.inverse_pdf * scale;
+        assert!((after / before - 1.0).abs() < 1e-4, "{after} against {before}");
+        // Unchanged, and the lights that are not spheres, exactly 1.
+        assert_eq!(light_history_weight_scale(0.4, 0.4), 1.0);
+        assert_eq!(light_history_weight_scale(0.0, 0.0), 1.0);
+        assert_eq!(light_history_weight_scale(0.0, 0.4), 1.0);
+        assert_eq!(light_history_weight_scale(0.4, 0.0), 1.0);
     }
 
     #[test]

@@ -18,6 +18,8 @@ fn base_defs() -> Vec<ShaderDefVal> {
         ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
         ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
         ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
+        ShaderDefVal::UInt("SPECULAR_SHARP_ROUGHNESS".into(), 25),
+        ShaderDefVal::UInt("SPECULAR_SHARP_COATS".into(), 0),
         ShaderDefVal::UInt("GI_GUIDE_SHARE".into(), 50),
         ShaderDefVal::UInt("GI_GUIDE_CONE".into(), 10),
         ShaderDefVal::UInt("GI_GUIDE_WIDE".into(), 100),

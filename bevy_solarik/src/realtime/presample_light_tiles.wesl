@@ -83,6 +83,7 @@ fn pack_resolved_light_sample(sample: ResolvedLightSample) -> ResolvedLightSampl
         pack2x16unorm(octahedral_encode(select(vec3(0.0, 0.0, 1.0), sample.spot_direction, local || (emissive && sample.spot_cos.x > 0.0)))),
         pack2x16float(select(sample.spot_cos, vec2(sample.spot_cos.x, clamp(sample.spot_cos.y * 1.001, -65000.0, 65000.0)), emissive)),
         select(select(-1.0, -max(sample.range, 0.0), emissive), max(sample.range, 1e-4), local),
+        sample.source_radius,
     );
 }
 
@@ -97,5 +98,6 @@ fn unpack_resolved_light_sample(packed: ResolvedLightSamplePacked, exposure: f32
         octahedral_decode(unpack2x16unorm(packed.spot_direction)),
         unpack2x16float(packed.spot_cos),
         select(select(0.0, -packed.range, kind == LIGHT_SAMPLE_EMISSIVE_MESH), packed.range, local),
+        packed.source_radius,
     );
 }

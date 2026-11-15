@@ -159,6 +159,9 @@ struct ResolvedLightSample {
     spot_direction: vec3<f32>,
     spot_cos: vec2<f32>,
     range: f32,
+    // (a point or spot light's source sphere's radius, for the receiver
+    // inside it, calculate_resolved_light_contribution; 0 for the others)
+    source_radius: f32,
 }
 
 struct LightContribution {
@@ -275,6 +278,7 @@ fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) ->
             vec3(0.0, 0.0, 1.0),
             vec2(-1.0),
             0.0,
+            0.0,
         );
     } else if !light_source_is_emissive_mesh(light_source) {
         // A point or spot light: a point uniformly on its sphere, with the
@@ -296,6 +300,7 @@ fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) ->
             light.direction,
             vec2(light.cos_outer, light.cos_inner),
             light.range,
+            light.radius,
         );
     } else {
         // (the light's own resolve, not the full hit's: see resolve_light_triangle)
@@ -331,6 +336,7 @@ fn resolve_emissive_light_sample(light_source: LightSource, triangle: LightTrian
         raw_material.emission_cone.xyz,
         vec2(raw_material.emission_cone.w, near_distance),
         farthest_corner_distance(triangle, triangle_data.world_position),
+        0.0,
     );
 }
 
@@ -737,7 +743,27 @@ fn calculate_resolved_light_contribution(resolved_light_sample: ResolvedLightSam
         geometry_distance_squared = max(geometry_distance_squared, 0.25);
     }
 }
-    var radiance = resolved_light_sample.radiance * (cos_theta_light / geometry_distance_squared);
+    var light_geometry = cos_theta_light / geometry_distance_squared;
+    // (a receiver inside a point or spot light's source sphere: every point
+    // of the shell faces away from it, so cos_theta_light was 0 for every
+    // sample and a dark disc lay wherever the sphere cut a surface. Seen from
+    // within, the shell's radiance along each direction is weighted by the
+    // chord's share in front, t+ / (t+ + t-), and the chord's inner cosine
+    // is (t+ + t-) / 2r, so the uniform point's cos / d^2 times that weight
+    // is 1 / (2 r d): the irradiance continuous across the shell for every
+    // orientation, half the shell's peak at the centre; a receiver outside
+    // exactly as before. Inside: |x - P + r n|^2 < r^2 with the centre
+    // P - r n. SOLARIK_SHADER_DEFS=LIGHT_INSIDE_DARK the old)
+@if(!(LIGHT_INSIDE_DARK)) {
+    let source_radius = resolved_light_sample.source_radius;
+    if resolved_light_sample.world_position.w == LIGHT_SAMPLE_LOCAL && source_radius > 0.0 && reachable {
+        let from_light = -ray;
+        if dot(from_light, from_light) + 2.0 * source_radius * dot(from_light, resolved_light_sample.world_normal) < 0.0 {
+            light_geometry = 1.0 / (2.0 * source_radius * light_distance);
+        }
+    }
+}
+    var radiance = resolved_light_sample.radiance * light_geometry;
     if resolved_light_sample.world_position.w == LIGHT_SAMPLE_LOCAL {
         radiance *= local_light_attenuation(resolved_light_sample, wi, light_distance_squared);
     }
@@ -801,7 +827,8 @@ fn analytic_light_radiance(origin: vec3<f32>, wi: vec3<f32>, limit: f32, owned: 
         if t <= RAY_T_MIN || t >= limit { continue; }
         let sample = ResolvedLightSample(vec4(origin + t * wi, LIGHT_SAMPLE_LOCAL),
             normalize(origin + t * wi - light.position), light.radiance,
-            light.inverse_pdf, light.direction, vec2(light.cos_outer, light.cos_inner), light.range);
+            light.inverse_pdf, light.direction, vec2(light.cos_outer, light.cos_inner), light.range,
+            light.radius);
         // Straight panes move the traversal origin, not the lighting receiver.
         let light_ray = sample.world_position.xyz - scatter_position;
         let distance_squared = dot(light_ray, light_ray);

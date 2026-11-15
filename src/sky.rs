@@ -30,8 +30,14 @@ pub struct SkyLighting {
 /// this sun (fitted against them by halo_map's `lightmap_sun` example); b40's
 /// sky tag holds yaw 45, pitch 69, at which the canyon floors lie almost
 /// wholly in the cliffs' shadow, where the lightmaps (and MCC) light most of
-/// them and shade only near the cliffs.
-const BAKED_SUNS: &[(&str, f32, f32)] = &[("b40", 45.0, 83.0)];
+/// them and shade only near the cliffs. c40 (Two Betrayals, the same canyon
+/// as b40 at night; its sky tag holds yaw 120, pitch 69) takes the same
+/// offset from its tag as b40, the tag's yaw and 14 degrees more pitch, at
+/// the user's word (14 November 2026: "can we move the sun in Two Betrayals
+/// to the same offset used for Assault on the Control Room?"); its lightmaps
+/// fit about yaw 120 to 150, pitch 84 to 87 by `lightmap_sun`.
+/// `HALO_RT_SUN_DIRECTION=tag` the old.
+const BAKED_SUNS: &[(&str, f32, f32)] = &[("b40", 45.0, 83.0), ("c40", 120.0, 83.0)];
 
 /// The sun's yaw and pitch (degrees) on `map`, the sky tag's being `tag`:
 /// [`BAKED_SUNS`]'s where it lists the map, else the tag's. `text` is
@@ -209,6 +215,7 @@ mod tests {
     fn baked_sun_replaces_the_tags() {
         assert_eq!(sun_angles("b40", TAG, None), (45.0, 83.0));
         assert_eq!(sun_angles("B40", TAG, None), (45.0, 83.0));
+        assert_eq!(sun_angles("c40", (120.0, 69.0), None), (120.0, 83.0));
     }
 
     #[test]

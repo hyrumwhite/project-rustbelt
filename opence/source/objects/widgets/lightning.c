@@ -262,20 +262,59 @@ static void lightning_offset_marker_position(
 	return;
 }
 
+/* port: the tags under b40's bridge lightning markers folder, restyled
+and slowed below */
+static boolean lightning_port_is_bridge(long definition_index)
+{
+	static char const bridge[] = "levels\\b40\\scenery\\bridge lightning markers\\";
+	char const *name = tag_get_name(definition_index);
+
+	return (name && !csstrncmp(name, bridge, sizeof(bridge) - 1)) ? TRUE : FALSE;
+}
+
 /* port: b40's bridge lightning restyled blue-green: its tags' tint, green
 (0.24, 1, 0.37), added in the renderer's high range, showed bright green
 over the bridges' teal energy ropes (play feedback: more blue/green) */
 static void lightning_port_tint(long definition_index, real_argb_color *tint)
 {
-	static char const restyled[] = "levels\\b40\\scenery\\bridge lightning markers\\";
-	char const *name = tag_get_name(definition_index);
-
-	if (name && !csstrncmp(name, restyled, sizeof(restyled) - 1))
+	if (lightning_port_is_bridge(definition_index))
 	{
 		tint->red = 0.2f;
 		tint->green = 0.75f;
 		tint->blue = 0.7f;
 	}
+}
+
+/* port: b40's bridge lightning holds its shape four game ticks, a quarter
+of the game's rate, every other lightning (the Monitor's) a shape a tick as
+before (play feedback: "the rapid flickering is distracting");
+HALO_LIGHTNING_TICKS=<n> holds every lightning's shape n ticks (1 to 30),
+HALO_LIGHTNING_TICKS=1 the old */
+static long lightning_port_hold_ticks(long definition_index)
+{
+	static long override = NONE;
+
+	if (override == NONE)
+	{
+		char const *setting = getenv("HALO_LIGHTNING_TICKS");
+		long ticks = 0;
+
+		if (setting && *setting)
+		{
+			char *end = NULL;
+
+			ticks = (long)strtol(setting, &end, 10);
+			if (end == setting)
+				ticks = 0;
+			else
+				ticks = MAX(1, MIN(ticks, 30));
+		}
+		override = ticks;
+	}
+
+	if (override > 0)
+		return override;
+	return lightning_port_is_bridge(definition_index) ? 4 : 1;
 }
 
 /* ---------- public code */
@@ -313,11 +352,17 @@ void lightning_submit(
 				renderer's hundred frames a second b40's bridge lightning
 				flickered three times as fast as the Xbox's thirty (play
 				feedback: flickers very quickly); the frame's random sequence
-				is put back after */
+				is put back after; a shape held hold_ticks ticks (four for
+				b40's bridge lightning, lightning_port_hold_ticks), each
+				object's changing on its own tick of the hold, at 1 the seed
+				as before */
 				unsigned long *seed = get_global_local_random_seed_address();
 				unsigned long frame_seed = *seed;
+				unsigned long hold_ticks = (unsigned long)lightning_port_hold_ticks(lightning->definition_index);
+				unsigned long phase = ((unsigned long)object_index & 0xffffUL) % hold_ticks;
 
-				*seed = (unsigned long)object_index*2654435761UL ^ (unsigned long)game_time_get()*40503UL;
+				*seed = (unsigned long)object_index*2654435761UL ^
+					(((unsigned long)game_time_get() + phase)/hold_ticks)*40503UL;
 				for (instance_index = 0; instance_index < definition->count; instance_index++)
 				{
 					short point_count = 0;

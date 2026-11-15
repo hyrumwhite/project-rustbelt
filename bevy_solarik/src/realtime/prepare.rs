@@ -29,7 +29,7 @@ use bevy_render::{
 const LIGHT_SAMPLE_STRUCT_SIZE: u64 = 8;
 
 /// Size of the `ResolvedLightSamplePacked` shader struct in bytes.
-const RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE: u64 = 36;
+const RESOLVED_LIGHT_SAMPLE_STRUCT_SIZE: u64 = 40;
 
 /// Size of the GI `Reservoir` shader struct in bytes.
 const GI_RESERVOIR_STRUCT_SIZE: u64 = 48;

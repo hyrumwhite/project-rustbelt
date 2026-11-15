@@ -221,6 +221,17 @@ struct DirectionalLight {
 
 const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 
+// A light of last frame's as ReSTIR DI's temporal reservoirs find it: its
+// index this frame (LIGHT_NOT_PRESENT_THIS_FRAME if gone), and what a
+// reservoir's contribution weight holding it is multiplied by, (r / r_old)^2
+// for a sphere light whose radius changed, 1 for the rest (binder.rs
+// light_history_weight_scale). An empty list uploads one zeroed element,
+// read only for last frame's empty reservoirs, whose weight stays 0.
+struct LightIdTranslation {
+    light_id: u32,
+    weight_scale: f32,
+}
+
 @group(0) @binding(0) var<storage> vertex_buffers: binding_array<VertexBuffer>;
 @group(0) @binding(1) var<storage> index_buffers: binding_array<IndexBuffer>;
 @group(0) @binding(2) var textures: binding_array<texture_2d<f32>>;
@@ -234,7 +245,7 @@ const LIGHT_NOT_PRESENT_THIS_FRAME = 0xFFFFFFFFu;
 @group(0) @binding(10) var<storage> light_sources: array<LightSource>;
 @group(0) @binding(11) var<storage> directional_lights: array<DirectionalLight>;
 @group(0) @binding(12) var<storage> local_lights: array<LocalLight>;
-@group(0) @binding(13) var<storage> previous_frame_light_id_translations: array<u32>;
+@group(0) @binding(13) var<storage> previous_frame_light_id_translations: array<LightIdTranslation>;
 @group(0) @binding(14) var brdf_dfg_lut: texture_2d<f32>;
 @group(0) @binding(15) var brdf_dfg_lut_sampler: sampler;
 @group(0) @binding(16) var sky_texture: texture_cube<f32>;

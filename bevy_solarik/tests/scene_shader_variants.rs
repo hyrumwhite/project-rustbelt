@@ -32,6 +32,8 @@ fn scene_consumers_compose_across_production_feature_variants() {
             ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
             ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
             ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
+            ShaderDefVal::UInt("SPECULAR_SHARP_ROUGHNESS".into(), 25),
+            ShaderDefVal::UInt("SPECULAR_SHARP_COATS".into(), 0),
             ShaderDefVal::UInt("CACHE_HISTORY_CLAMP".into(), 1),
             ShaderDefVal::UInt("CACHE_DROP_DETECT".into(), 1),
             ShaderDefVal::UInt("CACHE_DROP_THRESHOLD".into(), 60),
@@ -100,6 +102,11 @@ fn scene_consumers_compose_across_production_feature_variants() {
                 let mut fixed_definitions = stage_definitions.clone();
                 fixed_definitions.push("RAY_OFFSET_FIXED".into());
                 graph.validate(&module, &fixed_definitions);
+                // (a receiver inside a local light's source sphere dark, the
+                // old (SOLARIK_SHADER_DEFS=LIGHT_INSIDE_DARK))
+                let mut inside_dark_definitions = stage_definitions.clone();
+                inside_dark_definitions.push("LIGHT_INSIDE_DARK".into());
+                graph.validate(&module, &inside_dark_definitions);
             }
             // (ReSTIR GI's guided initial sampling off, the old shader
             // (SOLARIK_GI_GUIDE=0), and its view; specular_gi has the view's
@@ -124,7 +131,9 @@ fn scene_consumers_compose_across_production_feature_variants() {
             // spatial neighbours (SOLARIK_GI_SPATIAL_COUNT), the guide's
             // neighbours at 0 and 16 (SOLARIK_GI_GUIDE_NEIGHBOURS, 8 in
             // these lists); and the views leaving out a part of the picture;
-            // with the loop's switches all off and all on alone.)
+            // ReSTIR DI's history unscaled for a resized light
+            // (LIGHT_HISTORY_UNSCALED); with the loop's switches all off and
+            // all on alone.)
             if (bits == 0 || bits == 15)
                 && (consumer == "realtime::restir_gi"
                     || consumer == "realtime::restir_di"
@@ -145,6 +154,7 @@ fn scene_consumers_compose_across_production_feature_variants() {
                 }
                 if consumer == "realtime::restir_di" {
                     variants.push(vec!["VIEW_NO_DI"]);
+                    variants.push(vec!["LIGHT_HISTORY_UNSCALED"]);
                 }
                 if consumer == "realtime::specular_gi" || consumer == "realtime::primary_glass" {
                     variants.push(vec!["VIEW_NO_SPECULAR_GI"]);

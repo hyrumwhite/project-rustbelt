@@ -575,11 +575,21 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     // Check if the light selected in the previous frame no longer exists in the current frame (e.g. entity despawned)
     let previous_light_id = temporal.reservoir.sample.light_id >> 16u;
     let triangle_id = temporal.reservoir.sample.light_id & 0xFFFFu;
-    let light_id = previous_frame_light_id_translations[previous_light_id];
+    let translation = previous_frame_light_id_translations[previous_light_id];
+    let light_id = translation.light_id;
     if light_id == LIGHT_NOT_PRESENT_THIS_FRAME {
         return NeighborInfo(empty_reservoir(), vec3(0.0), vec3(0.0), TargetLobe());
     }
     temporal.reservoir.sample.light_id = (light_id << 16u) | triangle_id;
+    // (the weight is an inverse density over the light's area, and the
+    // sample is resolved again on the light as it is now: a sphere light
+    // whose radius changed takes the scaling's Jacobian, (r / r_old)^2, or
+    // its history read (r_old / r)^2 too bright, the bridge lightning's
+    // flashes of 14 November. SOLARIK_SHADER_DEFS=LIGHT_HISTORY_UNSCALED the
+    // old)
+@if((!(LIGHT_HISTORY_UNSCALED))) {
+    temporal.reservoir.unbiased_contribution_weight *= translation.weight_scale;
+}
 
     temporal.reservoir.confidence_weight = min(temporal.reservoir.confidence_weight, CONFIDENCE_WEIGHT_CAP);
 

@@ -949,7 +949,46 @@ const DULL_ROUGHNESS: f32 = 0.6;
 /// visor reflects gold) instead of by its maps.
 const VISOR_SHADER: &str = "characters\\cyborg\\shaders\\visor";
 const VISOR_COLOR: Color = Color::srgb(0.8, 0.55, 0.2);
-const VISOR_ROUGHNESS: f32 = 0.12;
+/// (0.05 since 14 November 2026, a mirror the room and Cortana can be made
+/// out in; 0.12 before, a blur of the room, `HALO_RT_VISOR_ROUGHNESS=0.12`)
+const VISOR_ROUGHNESS: f32 = 0.05;
+
+/// Chief's visor's perceptual roughness: [`VISOR_ROUGHNESS`], or
+/// `HALO_RT_VISOR_ROUGHNESS=<perceptual roughness>` for a run (play feedback
+/// of 14 November 2026: "chief's visor is dull in this well lit scene"; for
+/// trying values). Clamped to 0 to 1; an unparsable or infinite value is the
+/// default. Read once.
+fn visor_roughness() -> f32 {
+    static ROUGHNESS: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *ROUGHNESS.get_or_init(|| {
+        std::env::var("HALO_RT_VISOR_ROUGHNESS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|r| r.is_finite())
+            .map_or(VISOR_ROUGHNESS, |r| r.clamp(0.0, 1.0))
+    })
+}
+
+/// Chief's visor's colour: [`VISOR_COLOR`], or `HALO_RT_VISOR_COLOR=<r>,<g>,<b>`
+/// (sRGB, 0 to 1 each) for a run, for trying values beside
+/// [`visor_roughness`]. An unparsable value is the default, with a warning.
+/// Read once.
+fn visor_color() -> Color {
+    static COLOR: std::sync::OnceLock<Color> = std::sync::OnceLock::new();
+    *COLOR.get_or_init(|| {
+        let Ok(text) = std::env::var("HALO_RT_VISOR_COLOR") else {
+            return VISOR_COLOR;
+        };
+        let channels: Vec<f32> = text.split(',').filter_map(|c| c.trim().parse::<f32>().ok()).filter(|c| c.is_finite()).collect();
+        match channels[..] {
+            [r, g, b] if text.split(',').count() == 3 => Color::srgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)),
+            _ => {
+                warn!("HALO_RT_VISOR_COLOR={text}: expected r,g,b (sRGB, 0 to 1); ignored");
+                VISOR_COLOR
+            }
+        }
+    })
+}
 
 /// How far inside the camera's skinned surface the rays' skinned copy sits
 /// (meters): the two are skinned alike, but on different processors.
@@ -3215,10 +3254,10 @@ impl LevelBuilder {
             }
         }
         let base_color_texture = if info.name.eq_ignore_ascii_case(VISOR_SHADER) {
-            material.base_color = VISOR_COLOR;
+            material.base_color = visor_color();
             material.base_color_texture = None;
             material.metallic = 1.0;
-            material.perceptual_roughness = VISOR_ROUGHNESS;
+            material.perceptual_roughness = visor_roughness();
             material.metallic_roughness_texture = None;
             None
         } else {

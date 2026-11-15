@@ -1212,6 +1212,19 @@ pub fn init_solari_lighting_pipelines(
             // 40 until 6 November: at 30 the harness pictures are the same and
             // a smooth-floored b40 corridor 0.8 ms cheaper, docs/boiling-plan.md)
             ("SPECULAR_REUSE_ROUGHNESS", "SOLARIK_SPECULAR_REUSE_ROUGHNESS", 30),
+            // (the roughness in thousandths of alpha under which a surface's
+            // own glossy path ends in the world cache at its first opaque
+            // hit that is not a mirror, as a pane's reflection does: Chief's
+            // visor, 0.0144, was dull; 25 since 14 November, 0 the old, no
+            // surface sharp; specular_gi.wesl glossy_lobe)
+            ("SPECULAR_SHARP_ROUGHNESS", "SOLARIK_SPECULAR_SHARP_ROUGHNESS", 25),
+            // (1: a clear coat's lobe under SPECULAR_SHARP_ROUGHNESS takes the
+            // sharp rule too; every coat in Halo is under it, Chief's and the
+            // Elites' armour, the eyes, the Hunters' worms, the Covenant
+            // vehicles, and with it Chief's armour reads as a mirror in a lit
+            // room; 0 the default since 14 November, the coats' paths as they
+            // were)
+            ("SPECULAR_SHARP_COATS", "SOLARIK_SPECULAR_SHARP_COATS", 0),
             // (the near distance in hundredths of the square root of an
             // emissive triangle's area, within which a receiver takes its
             // point by solid angle: sampling.wesl, near_triangle_warp)

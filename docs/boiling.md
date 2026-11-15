@@ -5,7 +5,7 @@ As of 4 November 2026. Gathered from ROADMAP.md (the "Indoor flicker" passes and
 ## Where it stands
 
 - **Fixed, or acceptable in play:** a10's corridors and Jefferies tubes, b30's Shaft A passage, the a10 fly-in cabin, the receding hull, the first-person weapon while walking, and the a30 drop pod. Outdoors was called "fantastic, great image stability" on 20 October.
-- **Still open:** dim rooms lit by many small, weak emitters. These are b40's elevator shafts, its light strips and the canyon wall seen from a Banshee (3 November), and c20's dark Library halls (4 November, deferred). They fit the same pattern as the c10 floor lights (25 October). Bounce light through a small opening (d40's fire through a doorway, 13 November) is about two thirds steadier after two steps on 14 November (see the table) and awaits the play.
+- **Still open:** dim rooms lit by many small, weak emitters. These are b40's elevator shafts, its light strips and the canyon wall seen from a Banshee (3 November), and c20's dark Library halls (4 November, deferred). They fit the same pattern as the c10 floor lights (25 October). Bounce light through a small opening (d40's fire through a doorway, 13 November) is about two thirds steadier after two steps on 14 November (see the table) and the user finds it acceptable (played 14 November).
 - **The common cause of what's left:** Solarik picks lights by power across the whole level. A weak light (a strip of power 10 beside fluorescents of 80, or one of hundreds of emissive meshes) gets few samples. Its surroundings are then lit by whichever pixels happened to draw it, and the denoiser keeps the blotches. Each fix below either gives weak lights more samples near where they shine, keeps more history, or removes a light that stole samples.
 
 ## Why dim lights boil
@@ -88,7 +88,7 @@ These weren't boiling fixes. They do change which lights win samples:
 - **b40 (3 November):** boiling in the elevator shafts, on the light strips, and on the canyon wall from a Banshee.
 - **c20 (4 November):** the dark Library halls, where the holograms and door cards are now the only light.
 - **c10 (25 October):** floor lights and other lights. The door lights were dimmed then, but no separate boiling fix is recorded.
-- **d40 (13 November):** a fire's light bouncing through a doorway onto a room's wall. `GI_GUIDE` took a quarter off it and `GI_GUIDE_NEIGHBOURS` about 60% of the rest (see the table). Awaiting the user's play. What is left is near the floor set by the flame's flicker and the direct light's grain.
+- **d40 (13 November):** a fire's light bouncing through a doorway onto a room's wall. `GI_GUIDE` took a quarter off it and `GI_GUIDE_NEIGHBOURS` about 60% of the rest (see the table). Played 14 November: "the fire bounce is acceptable". Closed unless it is seen again. What is left is near the floor set by the flame's flicker and the direct light's grain.
 - **Candidates for next time:**
   - Check with `VISUALIZE_CELL_LIGHTS` whether these rooms' cells find their strips at all.
   - Check with `SOLARIK_LIGHT_FLUX_LOG` what share the strips get.

@@ -46,8 +46,11 @@
 // the far density at the near distance, up to 1 at the far, along L; 1 for
 // the sky), when its densities differ; else blended over all of it.
 //
-// After both, the game's lens flares, added up (src/lens_flares.rs,
-// display-encoded light): added, as the game adds them over its picture.
+// After both, the game's weather (src/weather.rs: display-encoded, a
+// premultiplied layer, each flake already faded by its own fog), laid over,
+// as the game draws its effects after its fog. Then the game's lens flares,
+// added up (src/lens_flares.rs, display-encoded light): added, as the game
+// adds them over its picture.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_render::view::View;
@@ -92,6 +95,8 @@ struct HaloFog {
 // the main pass's depth: nearer than the prepass's where the first-person
 // weapon's panes (the needler's needles) are, which the prepass leaves out
 @group(0) @binding(11) var scene_depth: texture_depth_2d;
+// the weather's layer (src/weather.rs): premultiplied, display-encoded
+@group(0) @binding(12) var weather: texture_2d<f32>;
 
 // metres: the level's panes' masks' depth (src/material.rs,
 // GLASS_SKY_MASK_DISTANCE), which is none
@@ -220,6 +225,7 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     // (sampled before anything returns, as the layers)
     let flare = textureSample(flares, source_sampler, in.uv).rgb;
+    let weather_over = textureSample(weather, source_sampler, in.uv);
 
     // The depth is at the render resolution, jittered each frame, while the
     // picture is upscaled and steady: the fog of the four render pixels round
@@ -268,6 +274,11 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         } else {
             encoded = mix(encoded, fog.screen_color.rgb, screen_coverage);
         }
+        changed = true;
+    }
+    // (the weather over the fogged picture: its flakes faded by their own fog)
+    if weather_over.a > 0.0 || any(weather_over.rgb > vec3(0.0)) {
+        encoded = encoded * (1.0 - weather_over.a) + weather_over.rgb;
         changed = true;
     }
     // (added as the game's framebuffer adds them: up to 1)

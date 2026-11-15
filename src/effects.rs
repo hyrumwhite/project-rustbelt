@@ -11,7 +11,9 @@
 //!
 //! The same batches carry contrails and lightning, as quads. Lens flares'
 //! reflections come with them too, but are drawn after tonemapping, in the
-//! display's encoding (`src/lens_flares.rs`), so they're left out here.
+//! display's encoding (`src/lens_flares.rs`), so they're left out here. And
+//! the weather's batches the weather pass draws, after the fog as the game
+//! draws them (`src/weather.rs`, [`crate::weather::drawn_after_fog`]).
 
 use crate::bridge::{BridgeLevel, BridgeLink};
 use bevy::{
@@ -29,7 +31,7 @@ use bevy::{
 use halo_bridge::{
     SpriteBatch, DECAL_BLEND_ADD, DECAL_BLEND_ALPHA, DECAL_BLEND_ALPHA_MULTIPLY_ADD, DECAL_BLEND_DOUBLE_MULTIPLY,
     DECAL_BLEND_MAX, DECAL_BLEND_MIN, DECAL_BLEND_MULTIPLY, DECAL_BLEND_REVERSE_SUBTRACT, SPRITE_LENS_FLARE,
-    SPRITE_NONLINEAR_TINT,
+    SPRITE_NONLINEAR_TINT, SPRITE_WEATHER,
 };
 use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 
@@ -243,10 +245,12 @@ fn follow_sprites(
         sprites.shared = snapshot.sprite_batches.len();
         if sprites.shared == 0 || std::env::var_os("HALO_RT_SPRITE_LOG").is_some() {
             info!(
-                "the game's sprites: {} batches ({} vertices, {} lens flares) at tick {}",
+                "the game's sprites: {} batches ({} vertices, {} lens flares, {} weather, {} of them drawn after the fog) at tick {}",
                 snapshot.sprite_batches.len(),
                 snapshot.sprite_vertices.len(),
                 snapshot.sprite_batches.iter().filter(|b| b.kind == SPRITE_LENS_FLARE).count(),
+                snapshot.sprite_batches.iter().filter(|b| b.kind == SPRITE_WEATHER).count(),
+                snapshot.sprite_batches.iter().filter(|b| crate::weather::drawn_after_fog(b)).count(),
                 snapshot.game_tick
             );
         }
@@ -271,7 +275,8 @@ fn follow_sprites(
     };
 
     let mut used = 0;
-    for batch in snapshot.sprite_batches.iter().filter(|b| b.kind != SPRITE_LENS_FLARE) {
+    // (the lens flares and the weather the weather pass draws, elsewhere)
+    for batch in snapshot.sprite_batches.iter().filter(|b| b.kind != SPRITE_LENS_FLARE && !crate::weather::drawn_after_fog(b)) {
         let SpriteBatch { map, bitmap_index, blend_function, shader_flags, centroid, first_vertex, quad_count, .. } =
             *batch;
         let first = first_vertex as usize;

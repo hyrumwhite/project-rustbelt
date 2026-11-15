@@ -310,8 +310,9 @@ fn size_hud(
         return;
     }
     images.insert(list.image.id(), hud_image(size.0, size.1)).ok();
-    // (the material's bind group made again with the new texture)
-    let _ = materials.get_mut(list.material.id());
+    // (the material's bind group made again with the new texture: told by a
+    // mutable borrow, crate::overlay::rebind)
+    crate::overlay::rebind(&mut materials, list.material.id());
     list.size = size;
 }
 

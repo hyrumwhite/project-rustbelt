@@ -640,7 +640,9 @@ static void weather_particle_system_render(
 				}
 			}
 
-			build_sprites_begin(&sprite_data, type->particle_count, type_definition->bitmap.index, &type_definition->shader, 0);
+			/* port: marked as the weather's (shared with a Bevy renderer, which
+			draws them after its fog) */
+			build_sprites_begin(&sprite_data, type->particle_count, type_definition->bitmap.index, &type_definition->shader, FLAG(_build_sprites_weather_bit));
 
 			for (particle_index = type->first_particle_index; particle_index!=NONE; particle_index = particle->next_particle_index)
 			{

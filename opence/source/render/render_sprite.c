@@ -276,6 +276,9 @@ static void build_sprites_share(
 		batch.secondary_map = (unsigned long)NONE;
 	}
 	batch.first_person = TEST_FLAG(data->flags, _build_sprites_first_person_bit) ? 1 : 0;
+	/* port: the weather's, which the viewer draws after its fog */
+	if (TEST_FLAG(data->flags, _build_sprites_weather_bit))
+		batch.kind = BEVY_BRIDGE_SPRITE_WEATHER;
 	batch.centroid[0] = data->centroid.x;
 	batch.centroid[1] = data->centroid.y;
 	batch.centroid[2] = data->centroid.z;

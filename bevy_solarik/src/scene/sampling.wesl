@@ -160,7 +160,8 @@ struct ResolvedLightSample {
     spot_cos: vec2<f32>,
     range: f32,
     // (a point or spot light's source sphere's radius, for the receiver
-    // inside it, calculate_resolved_light_contribution; 0 for the others)
+    // inside it, calculate_resolved_light_contribution; 0 for the others
+    // and for a hollow light, SolarikHollowLight)
     source_radius: f32,
 }
 
@@ -300,7 +301,7 @@ fn resolve_light_sample(light_sample: LightSample, light_source: LightSource) ->
             light.direction,
             vec2(light.cos_outer, light.cos_inner),
             light.range,
-            light.radius,
+            select(light.radius, 0.0, light.hollow > 0.5),
         );
     } else {
         // (the light's own resolve, not the full hit's: see resolve_light_triangle)
@@ -753,7 +754,8 @@ fn calculate_resolved_light_contribution(resolved_light_sample: ResolvedLightSam
     // is 1 / (2 r d): the irradiance continuous across the shell for every
     // orientation, half the shell's peak at the centre; a receiver outside
     // exactly as before. Inside: |x - P + r n|^2 < r^2 with the centre
-    // P - r n. SOLARIK_SHADER_DEFS=LIGHT_INSIDE_DARK the old)
+    // P - r n. A hollow light's source_radius is 0, nothing inside lit, the
+    // old for it alone. SOLARIK_SHADER_DEFS=LIGHT_INSIDE_DARK the old)
 @if(!(LIGHT_INSIDE_DARK)) {
     let source_radius = resolved_light_sample.source_radius;
     if resolved_light_sample.world_position.w == LIGHT_SAMPLE_LOCAL && source_radius > 0.0 && reachable {
@@ -828,7 +830,7 @@ fn analytic_light_radiance(origin: vec3<f32>, wi: vec3<f32>, limit: f32, owned: 
         let sample = ResolvedLightSample(vec4(origin + t * wi, LIGHT_SAMPLE_LOCAL),
             normalize(origin + t * wi - light.position), light.radiance,
             light.inverse_pdf, light.direction, vec2(light.cos_outer, light.cos_inner), light.range,
-            light.radius);
+            select(light.radius, 0.0, light.hollow > 0.5));
         // Straight panes move the traversal origin, not the lighting receiver.
         let light_ray = sample.world_position.xyz - scatter_position;
         let distance_squared = dot(light_ray, light_ray);

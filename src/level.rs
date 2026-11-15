@@ -948,7 +948,9 @@ const DULL_ROUGHNESS: f32 = 0.6;
 /// Chief's visor's shader, drawn as a smooth metal of this colour (Halo's
 /// visor reflects gold) instead of by its maps.
 const VISOR_SHADER: &str = "characters\\cyborg\\shaders\\visor";
-const VISOR_COLOR: Color = Color::srgb(0.8, 0.55, 0.2);
+/// (since 15 November 2026 the colour chosen by eye in play, sRGB 137, 64,
+/// 0; 0.8, 0.55, 0.2 before, `HALO_RT_VISOR_COLOR=0.8,0.55,0.2`)
+const VISOR_COLOR: Color = Color::srgb(0.537, 0.251, 0.0);
 /// (0.05 since 14 November 2026, a mirror the room and Cortana can be made
 /// out in; 0.12 before, a blur of the room, `HALO_RT_VISOR_ROUGHNESS=0.12`)
 const VISOR_ROUGHNESS: f32 = 0.05;
@@ -971,8 +973,10 @@ fn visor_roughness() -> f32 {
 
 /// Chief's visor's colour: [`VISOR_COLOR`], or `HALO_RT_VISOR_COLOR=<r>,<g>,<b>`
 /// (sRGB, 0 to 1 each) for a run, for trying values beside
-/// [`visor_roughness`]. An unparsable value is the default, with a warning.
-/// Read once.
+/// [`visor_roughness`]. Since 15 November 2026 the default is the colour
+/// chosen by eye in play (sRGB 137, 64, 0); before, 0.8, 0.55, 0.2, which
+/// `HALO_RT_VISOR_COLOR=0.8,0.55,0.2` gives back. An unparsable value is the
+/// default, with a warning. Read once.
 fn visor_color() -> Color {
     static COLOR: std::sync::OnceLock<Color> = std::sync::OnceLock::new();
     *COLOR.get_or_init(|| {

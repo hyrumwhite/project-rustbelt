@@ -174,7 +174,7 @@ fn read_overlay(
         if !picture.empty || picture.size != size {
             if picture.size != size {
                 images.insert(picture.image.id(), overlay_image(size.0, size.1)).ok();
-                let _ = materials.get_mut(picture.material.id());
+                rebind(&mut materials, picture.material.id());
                 picture.size = size;
             }
             picture.pixels = Arc::new(vec![0; (size.0 * size.1 * 4) as usize]);
@@ -190,10 +190,10 @@ fn read_overlay(
     }
     picture.empty = false;
     if picture.size != size {
-        // a new texture at the new size (and the materials' bind groups made
+        // a new texture at the new size (and the material's bind group made
         // again with it)
         images.insert(picture.image.id(), overlay_image(size.0, size.1)).ok();
-        let _ = materials.get_mut(picture.material.id());
+        rebind(&mut materials, picture.material.id());
         picture.size = size;
     }
     // (the pixels go to the render world without copying; the buffer is
@@ -211,6 +211,23 @@ fn read_overlay(
     }
     stats.shown += 1;
     stats.size = size;
+}
+
+/// Has a material's bind group made again with its image, after the image
+/// was replaced (a new size): the bind group holds the texture it was made
+/// with, and Bevy's `AssetMut` reports the material changed only when it is
+/// borrowed mutably, so a guard dropped untouched told it nothing and the
+/// picture stayed on the old texture (the menus blank or frozen after the
+/// window's size changed). `HALO_RT_HUD_STALE_TEXTURE=1` the old (the
+/// material not told), for the overlay and the HUD alike. Read once.
+pub(crate) fn rebind(materials: &mut Assets<OverlayMaterial>, id: AssetId<OverlayMaterial>) {
+    static STALE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *STALE.get_or_init(|| std::env::var_os("HALO_RT_HUD_STALE_TEXTURE").is_some()) {
+        return;
+    }
+    if let Some(material) = materials.get_mut(id) {
+        material.into_inner();
+    }
 }
 
 /// Whether the game's frames are paced by this one's looks for an overlay

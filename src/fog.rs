@@ -11,8 +11,11 @@
 //! layers on each frame without drawing them (under the overlay it never
 //! drew them at all), and this draws them, with their bitmap's frames.
 //!
-//! And last, the game's lens flares (`src/lens_flares.rs`), added up first
-//! in a texture of their own, then added in the display's encoding.
+//! Then the game's weather (`src/weather.rs`), drawn first into a layer of
+//! its own, each flake faded by its own fog, then laid over the fogged
+//! picture, as the game draws its effects after its fog. And last, the
+//! game's lens flares (`src/lens_flares.rs`), added up first in a texture of
+//! their own, then added in the display's encoding.
 //!
 //! Where this viewer draws the water ([`ViewerWater`]), the planar fog seen
 //! through it covers only the light that came through the surface: the game
@@ -406,6 +409,8 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
                 sampler(SamplerBindingType::Filtering),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 texture_depth_2d(),
+                // (the weather's layer, src/weather.rs)
+                texture_2d(TextureSampleType::Float { filterable: true }),
             ),
         ),
     );
@@ -438,6 +443,7 @@ pub(crate) fn draw_fog(
     fallback: Res<FallbackImage>,
     fallback_zero: Res<FallbackImageZero>,
     (flares, flare_pipeline): (Option<Res<crate::lens_flares::LensFlares>>, Option<Res<crate::lens_flares::LensFlarePipeline>>),
+    (weather, weather_pipeline): (Option<Res<crate::weather::Weather>>, Option<Res<crate::weather::WeatherPipeline>>),
     mut texture_cache: ResMut<TextureCache>,
     fog_pipeline: Res<FogPipeline>,
     fullscreen: Res<FullscreenShader>,
@@ -502,6 +508,25 @@ pub(crate) fn draw_fog(
             target.main_texture().size(),
         )
     });
+    // the weather, a layer over (the picture's size), each flake faded by
+    // its own fog and hidden behind the scene's depths
+    let weather_view = weather.as_deref().zip(weather_pipeline.as_deref()).and_then(|(weather, weather_pipeline)| {
+        crate::weather::draw_weather(
+            &mut ctx,
+            weather,
+            weather_pipeline,
+            &cache,
+            &device,
+            &gpu_images,
+            &mut texture_cache,
+            &view_uniforms,
+            view_offset.offset,
+            &buffer,
+            depth,
+            main_depth,
+            target.main_texture().size(),
+        )
+    });
     let post_process = target.post_process_write();
     let bind_group = device.create_bind_group(
         "halo_fog",
@@ -519,6 +544,8 @@ pub(crate) fn draw_fog(
             &fog_pipeline.layer_sampler,
             flare_view.as_ref().unwrap_or(&fallback_zero.texture_view),
             main_depth,
+            // (none: transparent black, which lays nothing over)
+            weather_view.as_ref().unwrap_or(&fallback_zero.texture_view),
         )),
     );
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {

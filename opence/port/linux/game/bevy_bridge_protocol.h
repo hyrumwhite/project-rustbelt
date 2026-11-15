@@ -250,7 +250,9 @@ struct bevy_bridge_sprite_batch
 	BEVY_BRIDGE_SPRITE_LENS_FLARE, a lens flare's reflection: drawn over
 	everything (the game tests its occlusion itself), added by the vertex's
 	alpha, its colour (1 - v) tint t^6 + v t (rasterizer_xbox_widgets.c's
-	internal sprite), shader_flags and blend_function unused */
+	internal sprite), shader_flags and blend_function unused; or
+	BEVY_BRIDGE_SPRITE_WEATHER, an effect as any other, from a weather
+	particle system */
 	unsigned long kind;
 	float tint;
 	/* (protocol 42) a zsprite's radius (world units): how far toward the
@@ -263,7 +265,12 @@ struct bevy_bridge_sprite_batch
 enum
 {
 	BEVY_BRIDGE_SPRITE_EFFECT = 0,
-	BEVY_BRIDGE_SPRITE_LENS_FLARE = 1
+	BEVY_BRIDGE_SPRITE_LENS_FLARE = 1,
+	/* a weather particle system's batch (snow, rain): the viewer draws it
+	after its fog, each sprite faded by the fog at its own depth, as the game
+	draws its effects after its fog (render.c); the batch as an effect's, so
+	no new protocol: a viewer that doesn't know the kind draws it as one */
+	BEVY_BRIDGE_SPRITE_WEATHER = 2
 };
 
 /* a sprite's vertex: the game's coordinates, the bitmap's texture

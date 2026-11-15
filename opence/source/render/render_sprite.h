@@ -19,6 +19,9 @@ enum build_sprites_flags
 {
 	_build_sprites_screen_space_bit = 0,
 	_build_sprites_first_person_bit,
+	/* port: a weather particle system's sprites (shared with a Bevy renderer
+	as BEVY_BRIDGE_SPRITE_WEATHER, which it draws after its fog) */
+	_build_sprites_weather_bit,
 	NUMBER_OF_BUILD_SPRITES_FLAGS,
 };
 

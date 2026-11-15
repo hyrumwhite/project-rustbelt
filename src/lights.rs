@@ -28,7 +28,7 @@ use crate::{
     LightingSettings,
 };
 use bevy::{camera::visibility::NoFrustumCulling, platform::collections::HashMap, prelude::*};
-use bevy_solarik::scene::{SolarikLightCone, SolarikUnreflectedLight};
+use bevy_solarik::scene::{SolarikHollowLight, SolarikLightCone, SolarikUnreflectedLight};
 use halo_bridge::{Light, LIGHT_CONTRAIL, LIGHT_MUZZLE_FLASH, OBJECT_OUTSIDE_OF_MAP};
 use halo_map::{
     light_gel::{gel_beams, GelBeam},
@@ -104,14 +104,17 @@ const GEL_LIGHT_SCALE: f32 = 0.5;
 /// The projectiles that glow in flight with no light in their tags (the
 /// fuel rods, charged bolts and grenades have their own, the other bolts
 /// their lens flares'): their tag's name, their light's colour and reach
-/// (world units, as a light tag's radius).
-const PROJECTILE_GLOWS: [(&str, [f32; 3], f32); 3] = [
+/// (world units, as a light tag's radius), and the glow's share of that
+/// brightness (as a light tag's [`LIGHT_DIMMING`]; set for a run by the
+/// projectile's tag's name with [`light_dim`]'s `HALO_RT_LIGHT_DIM`).
+const PROJECTILE_GLOWS: [(&str, [f32; 3], f32, f32); 3] = [
     // (its exhaust's flame)
-    ("weapons\\rocket launcher\\rocket", [1.0, 0.55, 0.2], 2.0),
-    // (pink crystal, in flight and stuck in what it hit)
-    ("weapons\\needler\\needle", [1.0, 0.3, 0.8], 0.75),
+    ("weapons\\rocket launcher\\rocket", [1.0, 0.55, 0.2], 2.0, 1.0),
+    // (pink crystal, in flight and stuck in what it hit; play feedback of
+    // 15 November 2026: 50% less)
+    ("weapons\\needler\\needle", [1.0, 0.3, 0.8], 0.75, 0.5),
     // (a ball of blue plasma)
-    ("vehicles\\wraith\\wraith mortar", [0.5, 0.45, 1.0], 2.0),
+    ("vehicles\\wraith\\wraith mortar", [0.5, 0.45, 1.0], 2.0, 1.0),
 ];
 
 /// Whether a projectile's glow at exactly the world's origin is a light, as
@@ -135,14 +138,22 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 
 /// Lights dimmed from their tags' brightness (by the light tag's name, or
 /// a folder's, ending in a backslash): a wide reach is a bright light here
-/// (brightness grows with its square). Dimmed to 0, left out.
-const LIGHT_DIMMING: [(&str, f32); 13] = [
+/// (brightness grows with its square). Dimmed to 0, left out. Each share
+/// can be set for a run with [`light_dim`]'s `HALO_RT_LIGHT_DIM`.
+const LIGHT_DIMMING: [(&str, f32); 15] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
-    // floodlights)
-    ("characters\\monitor\\monitor dynamic", 0.15),
-    // (the grenades' glow in flight, and their explosions', reaching 10)
-    ("weapons\\frag grenade\\frag grenade", 0.7),
-    ("weapons\\plasma grenade\\plasma grenade", 0.7),
+    // floodlights; play feedback of 15 November 2026: "something like 50%"
+    // less, here 60%: in c40's control room cutscene he hangs half a metre
+    // from the console, whose top was 96% clipped at 0.15, 43% at half and
+    // 29% at this. His own shell, a white ball since the light's sphere
+    // lights what is inside it (14 November), is `HOLLOW_LIGHTS`' matter:
+    // no share of his light shows his insides)
+    ("characters\\monitor\\monitor dynamic", 0.06),
+    // (the grenades' glow in flight, reaching 10, the frag's 50% less and
+    // the plasma's 20% less by play feedback of 15 November 2026, and their
+    // explosions', as before)
+    ("weapons\\frag grenade\\frag grenade", 0.35),
+    ("weapons\\plasma grenade\\plasma grenade", 0.56),
     ("weapons\\frag grenade\\explosion", 0.6),
     ("weapons\\plasma grenade\\explosion", 0.6),
     // (b30's control room light, reaching 3.5 around its hologram until the
@@ -177,6 +188,20 @@ const LIGHT_DIMMING: [(&str, f32); 13] = [
     // ground before a firing Ghost glowed bright cyan; play feedback:
     // dimmer)
     ("vehicles\\ghost\\ghost bolt", 0.35),
+    // (c40's control room console's light in the cutscene, reaching 3,
+    // green, 116,000 lm of it at the console's own top: with the Monitor's
+    // it blew the console out white; play feedback of 15 November: dimmer.
+    // A twentieth leaves the console its green cast and its texture)
+    ("cinematics\\effects\\cortana powerup fx\\cortana powerup", 0.05),
+    // (the pulse generators' two lights on b40 and c40, `generator` and
+    // `generator overload`, reaching 3 from the same marker, one cyan and
+    // one white whenever the other's function is 0 (the game's colour
+    // interpolation gives a light with no lower alpha white): the pylons and
+    // the room round them were washed out; play feedback of 15 November:
+    // dimmer. A twentieth: the room still lit by the beam, the walls and
+    // the floor with their texture, the picture's mean 154 to 86 of 255,
+    // 37 with the lights off)
+    ("levels\\b40\\devices\\b40_generator_fx\\", 0.05),
 ];
 /// b40's door blinkers' light tag (see [`UPWARD_LIGHTS`]).
 const DOOR_BLINKER_LIGHT: &str = "levels\\b40\\scenery\\b40_doorblinker\\doorblinker";
@@ -276,6 +301,38 @@ const SMALL_LIGHTS: [(&str, f32); 3] = [
     (DOOR_BLINKER_LIGHT, 0.05),
 ];
 
+/// Light tags (by name) whose light lights nothing inside its own source
+/// sphere (`SolarikHollowLight`): the Monitor's light is at his centre and
+/// his body within its sphere, which since the inside term of 14 November
+/// lit his shell from all round, a featureless white ball; before it his
+/// shell got nothing from his own light and his eye and the shell's detail
+/// showed. `HALO_RT_HOLLOW_LIGHTS=0` none (the old);
+/// `HALO_RT_HOLLOW_LIGHTS="<tag name part>[;...]"` those instead of the
+/// table, for a run.
+const HOLLOW_LIGHTS: [&str; 1] = ["characters\\monitor\\monitor dynamic"];
+
+/// Whether a light tag's light is hollow ([`HOLLOW_LIGHTS`], or
+/// `HALO_RT_HOLLOW_LIGHTS`'s parts, matched without regard to case). Read
+/// once.
+fn hollow_light(name: &str) -> bool {
+    static PARTS: std::sync::LazyLock<Option<Vec<String>>> = std::sync::LazyLock::new(|| {
+        let text = std::env::var("HALO_RT_HOLLOW_LIGHTS").ok()?;
+        // (0: none)
+        Some(if text.trim() == "0" {
+            Vec::new()
+        } else {
+            text.split(';').map(|part| part.trim().to_ascii_lowercase()).filter(|part| !part.is_empty()).collect()
+        })
+    });
+    match PARTS.as_deref() {
+        None => HOLLOW_LIGHTS.iter().any(|hollow| name.eq_ignore_ascii_case(hollow)),
+        Some(parts) => {
+            let name = name.to_ascii_lowercase();
+            parts.iter().any(|part| name.contains(part.as_str()))
+        }
+    }
+}
+
 /// Whether a light tag's name is the dimmed one, or in the dimmed folder.
 fn dimmed_by(name: &str, dimmed: &str) -> bool {
     if dimmed.ends_with('\\') {
@@ -290,7 +347,7 @@ fn dimmed_by(name: &str, dimmed: &str) -> bool {
 struct LightTag {
     /// A muzzle flash, by its name.
     muzzle: bool,
-    /// Its share of its brightness ([`LIGHT_DIMMING`]).
+    /// Its share of its brightness ([`LIGHT_DIMMING`], or [`light_dim`]'s).
     dimming: f32,
     /// Its size, if small ([`SMALL_LIGHTS`]).
     small: Option<f32>,
@@ -298,6 +355,9 @@ struct LightTag {
     upward: Option<Upward>,
     /// Its sphere and brightness as tuned, a point light's ([`light_tune`]).
     tune: Option<Tune>,
+    /// Lighting nothing inside its sphere, a point light's
+    /// ([`HOLLOW_LIGHTS`]).
+    hollow: bool,
 }
 
 /// What a light's tag says of it here, by the tag's name (none: a plain
@@ -305,10 +365,13 @@ struct LightTag {
 fn light_tag(name: Option<&str>) -> LightTag {
     LightTag {
         muzzle: name.is_some_and(|name| name.ends_with("muzzle flash")),
-        dimming: name.and_then(|name| LIGHT_DIMMING.iter().find(|(dimmed, _)| dimmed_by(name, dimmed))).map_or(1.0, |&(_, dimming)| dimming),
+        dimming: name
+            .and_then(|name| light_dim(name).or_else(|| LIGHT_DIMMING.iter().find(|(dimmed, _)| dimmed_by(name, dimmed)).map(|&(_, dimming)| dimming)))
+            .unwrap_or(1.0),
         small: name.and_then(|name| SMALL_LIGHTS.iter().find(|(small, _)| name.eq_ignore_ascii_case(small))).map(|&(_, size)| size),
         upward: name.and_then(upward_light),
         tune: name.and_then(light_tune),
+        hollow: name.is_some_and(hollow_light),
     }
 }
 
@@ -364,6 +427,54 @@ fn light_tune(name: &str) -> Option<Tune> {
     });
     let name = name.to_ascii_lowercase();
     TUNES.iter().find(|(part, _)| name.contains(part.as_str())).map(|&(_, tune)| tune)
+}
+
+/// A light's share of its brightness as set for a run, by its light tag's
+/// name (a projectile's glow by the projectile's tag's name), in place of
+/// [`LIGHT_DIMMING`]'s or [`PROJECTILE_GLOWS`]' share, whether or not the
+/// tables have it: to try a value in play before the table is changed, or
+/// to get an old one back.
+/// `HALO_RT_LIGHT_DIM="<tag name part>=<share>[;...]"`, the part matched
+/// without regard to case, the first that matches winning (as
+/// [`light_tune`]'s); a share of 0 leaves the light out, as a tabled 0 does,
+/// and a negative one is 0. The shares before 15 November 2026, that day's
+/// changes undone:
+/// `HALO_RT_LIGHT_DIM="monitor dynamic=0.15;frag grenade\frag grenade=0.7;plasma grenade\plasma grenade=0.7;needler\needle=1;cortana powerup=1;b40_generator_fx\=1"`.
+/// (`HALO_RT_LIGHT_TUNE`'s share multiplies the power after this one.) Read
+/// once.
+fn light_dim(name: &str) -> Option<f32> {
+    static DIMS: std::sync::LazyLock<Vec<(String, f32)>> =
+        std::sync::LazyLock::new(|| parse_light_dim(&std::env::var("HALO_RT_LIGHT_DIM").unwrap_or_default()));
+    light_dim_in(&DIMS, name)
+}
+
+/// [`light_dim`]'s entries from the variable's text, each part in lower
+/// case: an entry that is not `<part>=<share>`, its part empty or its share
+/// not a finite number, skipped with a warning.
+fn parse_light_dim(text: &str) -> Vec<(String, f32)> {
+    text.split(';')
+        .filter(|entry| !entry.trim().is_empty())
+        .filter_map(|entry| {
+            let parsed = entry.split_once('=').and_then(|(part, share)| {
+                let part = part.trim();
+                let share = share.trim().parse::<f32>().ok().filter(|share| share.is_finite())?;
+                (!part.is_empty()).then(|| (part.to_ascii_lowercase(), share.max(0.0)))
+            });
+            if parsed.is_none() {
+                warn!("HALO_RT_LIGHT_DIM: {entry:?} is not <tag name part>=<share>");
+            }
+            parsed
+        })
+        .collect()
+}
+
+/// The share of the first of `dims` whose part the tag's name holds.
+fn light_dim_in(dims: &[(String, f32)], name: &str) -> Option<f32> {
+    if dims.is_empty() {
+        return None;
+    }
+    let name = name.to_ascii_lowercase();
+    dims.iter().find(|(part, _)| name.contains(part.as_str())).map(|&(_, share)| share)
 }
 
 /// The light tag (none in the maps) of a test light given no tag's name, or
@@ -496,12 +607,17 @@ fn place_spot(
     now.insert(key, entity);
 }
 
-/// The point lights' query: each one's cone, if it has one.
-type PointLights<'w, 's> =
-    Query<'w, 's, (&'static mut PointLight, &'static mut Transform, &'static mut Visibility, Option<&'static SolarikLightCone>), Without<SpotLight>>;
+/// The point lights' query: each one's cone, if it has one, and whether it
+/// is hollow.
+type PointLights<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut PointLight, &'static mut Transform, &'static mut Visibility, Option<&'static SolarikLightCone>, Has<SolarikHollowLight>),
+    Without<SpotLight>,
+>;
 
-/// A point light's entity (as [`place_spot`]), with its cone or none (a
-/// reused entity's given or taken away when it differs).
+/// A point light's entity (as [`place_spot`]), with its cone or none and
+/// hollow or not (a reused entity's given or taken away when it differs).
 #[allow(clippy::too_many_arguments)]
 fn place_point(
     commands: &mut Commands,
@@ -513,10 +629,11 @@ fn place_point(
     light: PointLight,
     transform: Transform,
     cone: Option<SolarikLightCone>,
+    hollow: bool,
 ) {
     let reused = last.remove(&key).or_else(|| free.pop());
     let entity = match reused.map(|entity| (entity, points.get_mut(entity))) {
-        Some((entity, Ok((mut light_component, mut light_transform, mut visibility, had)))) => {
+        Some((entity, Ok((mut light_component, mut light_transform, mut visibility, had, was_hollow)))) => {
             *light_component = light;
             *light_transform = transform;
             visibility.set_if_neq(Visibility::Inherited);
@@ -526,12 +643,22 @@ fn place_point(
                     None => commands.entity(entity).remove::<SolarikLightCone>(),
                 };
             }
+            if was_hollow != hollow {
+                if hollow {
+                    commands.entity(entity).insert(SolarikHollowLight);
+                } else {
+                    commands.entity(entity).remove::<SolarikHollowLight>();
+                }
+            }
             entity
         }
         _ => {
             let mut spawned = commands.spawn((Name::new("light"), light, transform, Visibility::Inherited, NoFrustumCulling, SolarikUnreflectedLight));
             if let Some(cone) = cone {
                 spawned.insert(cone);
+            }
+            if hollow {
+                spawned.insert(SolarikHollowLight);
             }
             spawned.id()
         }
@@ -562,11 +689,14 @@ pub struct ShownLight {
     /// The source sphere's radius and raise (metres).
     pub radius: f32,
     pub raise: f32,
-    /// Its share of its brightness ([`LIGHT_DIMMING`]).
+    /// Its share of its brightness ([`LIGHT_DIMMING`], a projectile's glow's
+    /// [`PROJECTILE_GLOWS`], or [`light_dim`]'s).
     pub dimming: f32,
     /// Its power (lumens a channel, at an emissive scale of one).
     pub power: Vec3,
     pub tuned: bool,
+    /// Lighting nothing inside its sphere ([`HOLLOW_LIGHTS`]).
+    pub hollow: bool,
 }
 
 impl ShownLight {
@@ -597,7 +727,7 @@ impl ShownLight {
         };
         let [pr, pg, pb] = self.power.to_array();
         format!(
-            "{distance:.2} m | at {x:.3},{y:.3},{z:.3} | colour {r:.3},{g:.3},{b:.3} | radius {:.3} | flags {:#x}{}{} | tag {tag} | object {object} | {kind}, source {:.3} m, raise {:.3} m, dimming {:.2}, power {pr:.0},{pg:.0},{pb:.0} lm, {}",
+            "{distance:.2} m | at {x:.3},{y:.3},{z:.3} | colour {r:.3},{g:.3},{b:.3} | radius {:.3} | flags {:#x}{}{} | tag {tag} | object {object} | {kind}, source {:.3} m, raise {:.3} m, dimming {:.2}, power {pr:.0},{pg:.0},{pb:.0} lm, {}{}",
             light.radius,
             light.definition_flags,
             if light.first_person != 0 { " first person" } else { "" },
@@ -606,6 +736,7 @@ impl ShownLight {
             self.raise,
             self.dimming,
             if self.tuned { "tuned" } else { "untuned" },
+            if self.hollow { " | hollow" } else { "" },
         )
     }
 }
@@ -625,7 +756,7 @@ fn sync_lights(
     in_solid: Option<Res<crate::bridge::LightsInSolid>>,
     mut light_tags: Local<HashMap<u32, LightTag>>,
     mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
-    mut glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
+    mut glows: Local<HashMap<u32, Option<([f32; 3], f32, f32)>>>,
     mut contrail_glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
     mut scenario: Local<String>,
     mut test_logged: Local<bool>,
@@ -657,17 +788,21 @@ fn sync_lights(
     // the glowing projectiles' lights, round from their middles (by no tag:
     // neither muzzle flashes nor gelled; hidden ones too: a projectile
     // without a model, a Sentinel's beam, the game hides; not those outside
-    // the map: b40's two Wraith mortars, kept at the world's origin)
-    let projectile_lights: Vec<Light> = snapshot
+    // the map: b40's two Wraith mortars, kept at the world's origin), each
+    // with its share of its brightness (PROJECTILE_GLOWS, or light_dim's)
+    let projectile_lights: Vec<(Light, f32)> = snapshot
         .into_iter()
         .flat_map(|snapshot| snapshot.objects.iter())
         .filter(|object| object.object_flags & OBJECT_OUTSIDE_OF_MAP == 0)
         .filter_map(|object| {
-            let (color, radius) = (*glows.entry(object.definition_index).or_insert_with(|| {
+            let (color, radius, share) = (*glows.entry(object.definition_index).or_insert_with(|| {
                 let tag = level.as_ref()?.builder.cache.tag(object.definition_index).ok()?;
-                PROJECTILE_GLOWS.iter().find(|(name, ..)| tag.name.eq_ignore_ascii_case(name)).map(|&(_, color, radius)| (color, radius))
+                PROJECTILE_GLOWS
+                    .iter()
+                    .find(|(name, ..)| tag.name.eq_ignore_ascii_case(name))
+                    .map(|&(_, color, radius, share)| (color, radius, light_dim(&tag.name).unwrap_or(share)))
             }))?;
-            Some(Light {
+            let light = Light {
                 position: object.bounding_center,
                 forward: [1.0, 0.0, 0.0],
                 up: [0.0, 0.0, 1.0],
@@ -678,7 +813,8 @@ fn sync_lights(
                 definition_index: u32::MAX,
                 object_index: object.object_index,
                 ..default()
-            })
+            };
+            Some((light, share))
         })
         .collect();
     // the glowing contrails' lights, evenly along each (the rest of the
@@ -724,13 +860,14 @@ fn sync_lights(
         (light.definition_index, light.object_index, *count - 1)
     };
     // (the test lights after the game's; each with whether it is a test
-    // light and a projectile's glow)
+    // light and a projectile's glow, and the glow's share of its brightness,
+    // the rest's 1: theirs is their tag's)
     let all = lights
-        .map(|light| (light, false, false))
-        .chain(projectile_lights.iter().map(|light| (light, false, true)))
-        .chain(contrail_lights.iter().map(|light| (light, false, false)))
-        .chain(test_lights.iter().map(|light| (light, true, false)));
-    for (light, test_light, projectile) in all {
+        .map(|light| (light, false, false, 1.0))
+        .chain(projectile_lights.iter().map(|(light, share)| (light, false, true, *share)))
+        .chain(contrail_lights.iter().map(|light| (light, false, false, 1.0)))
+        .chain(test_lights.iter().map(|light| (light, true, false, 1.0)));
+    for (light, test_light, projectile, share) in all {
         let near = camera.filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
         let own = light.first_person != 0;
         // (a muzzle flash: its tag's flag, or its name; a test light's tag
@@ -743,6 +880,8 @@ fn sync_lights(
                 .or_else(|| test.as_deref().and_then(|test| test.name(light.definition_index)));
             light_tag(name)
         });
+        // (its share of its brightness: its tag's, times a projectile's glow's)
+        let dimming = tag.dimming * share;
         let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0 || tag.muzzle;
         let muzzle = light.cutoff_angle > SPOT_CUTOFF && muzzle_tag;
         let spot = light.cutoff_angle <= SPOT_CUTOFF || muzzle;
@@ -752,6 +891,8 @@ fn sync_lights(
         let upward = tag.upward.filter(|_| !spot);
         // (a point light's tuning: HALO_RT_LIGHT_TUNE)
         let tune = tag.tune.filter(|_| !spot);
+        // (hollow: a point light's, HOLLOW_LIGHTS)
+        let hollow = tag.hollow && !spot;
         let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
         let vehicle = spot && !muzzle && near_camera.is_none();
         let flashlight = spot && !muzzle && near_camera.is_some();
@@ -774,7 +915,7 @@ fn sync_lights(
             SPOT_LIGHT_SCALE
         } else {
             POINT_LIGHT_SCALE * upward.map_or(1.0, |upward| upward.share)
-        } * tag.dimming;
+        } * dimming;
         let reach2 = if spot && !muzzle { light.radius * SPOT_REFERENCE_REACH } else { light.radius * light.radius };
         let radiance = Vec3::from(light.color) * RADIANCE_PER_REACH2 * scale * reach2;
         let range = light.radius * METERS_PER_WORLD_UNIT * RANGE_PER_RADIUS;
@@ -807,7 +948,7 @@ fn sync_lights(
                 "test light {name:?} at {position} m: radiance {radiance:.1?}, power {power:.1?} lm ({intensity:.1} lm at the emissive scale), range {range:.2} m, source radius {radius} m, raised {raise} m{}{}{}",
                 if spot { ", a spot light (a muzzle flash's name)" } else { "" },
                 if upward.is_some() { ", shining upward" } else { "" },
-                if tag.dimming <= 0.0 { ", dimmed to none: left out" } else { "" },
+                if dimming <= 0.0 { ", dimmed to none: left out" } else { "" },
             );
         }
         // (dimmed to none, or shining upward at no share: left out; and a
@@ -815,7 +956,7 @@ fn sync_lights(
         // holds objects not in the world: three wraith mortar glows at 0,0,0
         // in b40's notes of 13 November; HALO_RT_ORIGIN_GLOWS=1 the old)
         let at_origin = projectile && light.position == [0.0; 3] && !origin_glows();
-        let left_out = tag.dimming <= 0.0 || upward.is_some_and(|upward| upward.share <= 0.0) || at_origin;
+        let left_out = dimming <= 0.0 || upward.is_some_and(|upward| upward.share <= 0.0) || at_origin;
         shown.0.push(ShownLight {
             light: *light,
             test: test_light,
@@ -825,9 +966,10 @@ fn sync_lights(
             left_out,
             radius,
             raise,
-            dimming: tag.dimming,
+            dimming,
             power,
             tuned: tune.is_some(),
+            hollow,
         });
         if left_out {
             continue;
@@ -851,6 +993,7 @@ fn sync_lights(
         if !beams.is_empty() && light_left.length_squared() > 1e-6 {
             if let Some(shown) = shown.0.last_mut() {
                 shown.gelled = true;
+                shown.hollow = false;
             }
             let light_left = light_left.normalize();
             let light_up = light_left.cross(light_forward).normalize();
@@ -909,11 +1052,11 @@ fn sync_lights(
             let point_light = PointLight { color, intensity, range, radius, shadow_maps_enabled: false, ..default() };
             let transform = Transform::from_translation(position).looking_to(Vec3::Y, Vec3::X);
             let cone = SolarikLightCone { inner, outer };
-            place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform, Some(cone));
+            place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform, Some(cone), hollow);
         } else {
             let point_light = PointLight { color, intensity, range, radius, shadow_maps_enabled: false, ..default() };
             let transform = Transform::from_translation(position);
-            place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform, None);
+            place_point(&mut commands, &mut points, &mut last_points, &mut pools.free_points, &mut pools.points, key(light), point_light, transform, None, hollow);
         }
     }
     if !test_lights.is_empty() {
@@ -921,7 +1064,7 @@ fn sync_lights(
     }
     // (the rest go dark, free for the lights to come)
     for (_, entity) in last_points {
-        if let Ok((_, _, mut visibility, _)) = points.get_mut(entity) {
+        if let Ok((_, _, mut visibility, _, _)) = points.get_mut(entity) {
             visibility.set_if_neq(Visibility::Hidden);
         }
         pools.free_points.push(entity);
@@ -931,5 +1074,31 @@ fn sync_lights(
             visibility.set_if_neq(Visibility::Hidden);
         }
         pools.free_spots.push(entity);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn light_dim_parses_and_matches() {
+        let dims = parse_light_dim(" Monitor Dynamic = 0.15 ;frag grenade\\frag grenade=0.7;bad;=0.5;needle=x;needle=inf;grenade=-1;;needler\\needle=1");
+        assert_eq!(
+            dims,
+            vec![
+                ("monitor dynamic".to_string(), 0.15),
+                ("frag grenade\\frag grenade".to_string(), 0.7),
+                ("grenade".to_string(), 0.0),
+                ("needler\\needle".to_string(), 1.0),
+            ]
+        );
+        // (without regard to case, the first that matches winning)
+        assert_eq!(light_dim_in(&dims, "characters\\monitor\\MONITOR DYNAMIC"), Some(0.15));
+        assert_eq!(light_dim_in(&dims, "weapons\\frag grenade\\frag grenade"), Some(0.7));
+        assert_eq!(light_dim_in(&dims, "weapons\\frag grenade\\explosion"), Some(0.0));
+        assert_eq!(light_dim_in(&dims, "weapons\\needler\\needle"), Some(1.0));
+        assert_eq!(light_dim_in(&dims, "vehicles\\ghost\\ghost bolt"), None);
+        assert_eq!(light_dim_in(&[], "characters\\monitor\\monitor dynamic"), None);
     }
 }

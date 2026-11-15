@@ -243,6 +243,9 @@ pub struct SpriteBatch {
     /// flare's reflection, drawn over everything (the game tests its
     /// occlusion itself), added by the vertex's alpha, its colour
     /// (1 - v) tint t^6 + v t; `shader_flags` and `blend_function` unused.
+    /// Or [`SPRITE_WEATHER`]: an effect's batch as any other, from a weather
+    /// particle system (unmarked before the game's port set it: no protocol
+    /// change, an effect to a viewer that doesn't know the kind).
     pub kind: u32,
     pub tint: f32,
     /// (Protocol 42) A zsprite's radius (world units): how far toward the
@@ -358,6 +361,9 @@ pub const SCREEN_DRAW_COLOR_ONLY: u32 = 1 << 2;
 pub const SPRITE_NONLINEAR_TINT: u16 = 1 << 1;
 pub const SPRITE_EFFECT: u32 = 0;
 pub const SPRITE_LENS_FLARE: u32 = 1;
+/// A weather particle system's batch (snow, rain): drawn after the fog, each
+/// sprite faded by the fog at its own depth, as the game draws its effects.
+pub const SPRITE_WEATHER: u32 = 2;
 
 /// A sprite's vertex: the game's coordinates, the bitmap's texture
 /// coordinates and the colour (a8r8g8b8, alpha the fade).

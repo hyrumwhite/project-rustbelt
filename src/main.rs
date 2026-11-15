@@ -37,6 +37,7 @@ mod sprite_lights;
 #[cfg(feature = "dlss")]
 mod sky_overlay;
 mod textures;
+mod weather;
 
 use argh::FromArgs;
 use bevy::{
@@ -476,6 +477,9 @@ fn main() -> AppExit {
 
     app.add_systems(Update, capture);
     app.init_resource::<CaptureFrames>().add_systems(First, count_capture_frames);
+    if !test_resizes().is_empty() {
+        app.add_systems(Update, test_resize);
+    }
     if std::env::var_os("HALO_RT_CACHE_LOG").is_some() {
         app.add_systems(PostUpdate, log_world_cache);
     }
@@ -527,9 +531,11 @@ fn main() -> AppExit {
             if args.viewer_effects() {
                 app.add_plugins((effects::EffectsPlugin, sprite_lights::SpriteLightsPlugin));
                 // (the lens flares are added in the fog pass; without it the
-                // game draws them)
+                // game draws them; the weather is laid over the picture in
+                // the fog pass too, after the fog as the game draws it, and
+                // without the pass stays with the other sprites)
                 if args.viewer_fog() {
-                    app.add_plugins(lens_flares::LensFlaresPlugin);
+                    app.add_plugins((lens_flares::LensFlaresPlugin, weather::WeatherPlugin));
                 }
             }
         }
@@ -1579,6 +1585,46 @@ fn capture_frames() -> &'static [u32] {
             .filter_map(|frame| frame.trim().parse().ok())
             .collect()
     })
+}
+
+/// The window's sizes (physical pixels) set at frames of [`CaptureFrames`],
+/// for checking what a change of the window's size does (as a drag to a
+/// monitor of another scale) with one monitor and nobody at the mouse:
+/// `HALO_RT_TEST_RESIZE=<frame>:<width>x<height>[,...]`; an entry that
+/// doesn't parse is left out with a warning. Read once.
+fn test_resizes() -> &'static [(u32, u32, u32)] {
+    static RESIZES: std::sync::OnceLock<Vec<(u32, u32, u32)>> = std::sync::OnceLock::new();
+    RESIZES.get_or_init(|| {
+        let parse = |entry: &str| {
+            let (frame, size) = entry.split_once(':')?;
+            let (width, height) = size.split_once(['x', 'X'])?;
+            let (width, height) = (width.trim().parse::<u32>().ok()?, height.trim().parse::<u32>().ok()?);
+            Some((frame.trim().parse().ok()?, width, height)).filter(|_| width > 0 && height > 0)
+        };
+        std::env::var("HALO_RT_TEST_RESIZE")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|entry| !entry.trim().is_empty())
+            .filter_map(|entry| {
+                let resize = parse(entry);
+                if resize.is_none() {
+                    warn!("HALO_RT_TEST_RESIZE: {entry:?} isn't <frame>:<width>x<height>, left out");
+                }
+                resize
+            })
+            .collect()
+    })
+}
+
+/// `HALO_RT_TEST_RESIZE`'s sizes at their frames ([`test_resizes`]; a set
+/// size applies although the window isn't resizable by hand).
+fn test_resize(frames: Res<CaptureFrames>, mut window: Single<&mut Window, With<bevy::window::PrimaryWindow>>) {
+    for &(frame, width, height) in test_resizes() {
+        if frame == frames.0 {
+            info!("test resize at frame {frame}: {width}x{height}");
+            window.resolution.set_physical_resolution(width, height);
+        }
+    }
 }
 
 /// How much of the end of the game's log a capture's note reads (bytes).

@@ -179,7 +179,9 @@ struct LocalLight {
     cos_inner: f32,
     // 1 for a light smooth surfaces' rays pass (SolarikUnreflectedLight).
     unreflected: f32,
-    _padding: f32,
+    // 1 for a light that lights nothing inside its own sphere
+    // (SolarikHollowLight).
+    hollow: f32,
 }
 
 // The sky: a cubemap in the scene's radiance units, scaled by `intensity`

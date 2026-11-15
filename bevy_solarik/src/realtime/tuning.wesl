@@ -33,3 +33,30 @@ const CACHE_DROP_FLOOR: u32 = constants::CACHE_DROP_FLOOR;
 const GI_GUIDE_SHARE: f32 = f32(constants::GI_GUIDE_SHARE) / 100.0;
 const GI_GUIDE_CONE: f32 = f32(constants::GI_GUIDE_CONE);
 const GI_GUIDE_WIDE: f32 = f32(constants::GI_GUIDE_WIDE) / 100.0;
+// (ReSTIR GI's spatial reuse radius in pixels, restir_gi.wesl: the disk its
+// spatial pass draws a neighbour from; 30 by default, as the constant was,
+// and 30 for a pipeline built without the definition)
+@if((GI_SPATIAL_RADIUS))
+const GI_SPATIAL_RADIUS: f32 = f32(constants::GI_SPATIAL_RADIUS);
+@if((!(GI_SPATIAL_RADIUS)))
+const GI_SPATIAL_RADIUS: f32 = 30.0;
+// (ReSTIR GI's spatial neighbours a pixel merges, restir_gi.wesl, held to
+// at most 16 there; 1 by default, as before, and 1 for a pipeline built
+// without the definition)
+@if((GI_SPATIAL_COUNT))
+const GI_SPATIAL_COUNT: u32 = constants::GI_SPATIAL_COUNT;
+@if((!(GI_SPATIAL_COUNT)))
+const GI_SPATIAL_COUNT: u32 = 1u;
+// (ReSTIR GI's guide taken from a neighbour's history where the pixel's own
+// gives none, restir_gi.wesl, GI_GUIDE: how many of last frame's reservoirs
+// near the pixel it offers, held to at most 16 there, 8 by node.rs's
+// default, 0 the old (and 0 for a pipeline built without the definition);
+// and within how many pixels of the pixel's reprojected place, 30)
+@if((GI_GUIDE_NEIGHBOURS))
+const GI_GUIDE_NEIGHBOURS: u32 = constants::GI_GUIDE_NEIGHBOURS;
+@if((!(GI_GUIDE_NEIGHBOURS)))
+const GI_GUIDE_NEIGHBOURS: u32 = 0u;
+@if((GI_GUIDE_RADIUS))
+const GI_GUIDE_RADIUS: f32 = f32(constants::GI_GUIDE_RADIUS);
+@if((!(GI_GUIDE_RADIUS)))
+const GI_GUIDE_RADIUS: f32 = 30.0;

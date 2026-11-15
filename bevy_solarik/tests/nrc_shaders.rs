@@ -21,6 +21,10 @@ fn base_defs() -> Vec<ShaderDefVal> {
         ShaderDefVal::UInt("GI_GUIDE_SHARE".into(), 50),
         ShaderDefVal::UInt("GI_GUIDE_CONE".into(), 10),
         ShaderDefVal::UInt("GI_GUIDE_WIDE".into(), 100),
+        ShaderDefVal::UInt("GI_SPATIAL_RADIUS".into(), 30),
+        ShaderDefVal::UInt("GI_SPATIAL_COUNT".into(), 1),
+        ShaderDefVal::UInt("GI_GUIDE_NEIGHBOURS".into(), 8),
+        ShaderDefVal::UInt("GI_GUIDE_RADIUS".into(), 30),
         "BINDLESS_SURFACE_DETAIL".into(),
         "GI_ADAPTIVE_SPATIAL".into(),
         "CELL_LOOKUP_NEIGHBOURS".into(),
@@ -89,11 +93,22 @@ fn nrc_shaders_compile() {
             "RAY_MATERIAL_FOOTPRINTS",
             "DLSS_RR_GUIDE_BUFFERS",
         ],
+        &["GI_GUIDE", "VIEW_NO_DIFFUSE_GI"],
     ] {
         let mut names = vec!["NRC"];
         names.extend_from_slice(extra);
         graph.validate("bevy_solarik::realtime::restir_gi", &with(&names));
     }
+    // (the guide's neighbours at their default of 8, in base_defs, with
+    // GI_GUIDE above; and at 0, the old)
+    let unguided_neighbours: Vec<ShaderDefVal> = with(&["NRC", "GI_GUIDE"])
+        .into_iter()
+        .map(|d| match d {
+            ShaderDefVal::UInt(name, _) if &*name == "GI_GUIDE_NEIGHBOURS" => ShaderDefVal::UInt(name, 0),
+            _ => d,
+        })
+        .collect();
+    graph.validate("bevy_solarik::realtime::restir_gi", &unguided_neighbours);
     // NRC_SPECULAR: the resolve reads the specular slot (and its view).
     for extra in [
         &[][..],
@@ -103,6 +118,7 @@ fn nrc_shaders_compile() {
         &["WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION", "FOLIAGE_TRANSMISSION"],
         &["GI_GUIDE", "REGIONAL_HISTORY", "FOLIAGE_TRANSMISSION", "RAY_MATERIAL_FOOTPRINTS"],
         &["GI_GUIDE", "VISUALIZE_GI_GUIDE"],
+        &["GI_GUIDE", "VIEW_NO_SPECULAR_GI"],
     ] {
         let mut names = vec!["NRC", "NRC_SPECULAR"];
         names.extend_from_slice(extra);

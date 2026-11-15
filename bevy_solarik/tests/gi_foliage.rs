@@ -137,6 +137,7 @@ fn check_endpoints(no_cache: bool) {
     ));
     for name in [
         "sample_random_light_transmitted",
+        "sample_random_light_transmitted_offset",
         "shade_gi_connection",
         "balance_heuristic",
         "isnan",

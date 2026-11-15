@@ -8,6 +8,7 @@ const PI = 3.141592653589793;
 const RAY_T_MIN = 0.001;
 const RAY_T_MAX = 100000.0;
 fn ray_max_distance() -> f32 { return RAY_T_MAX; }
+fn ray_epsilon(p: vec3<f32>) -> f32 { return RAY_T_MIN; }
 const RAY_FLAG_NONE = 0u;
 const RAY_QUERY_INTERSECTION_NONE = 0u;
 const SKY_SAMPLE_DISTANCE = 10000.0;
@@ -84,13 +85,13 @@ fn probe() {
     var rng = 0u;
     let p = vec3(0.0);
     let n = vec3(0.0, 0.0, config[0].y);
-    var r = generate_initial_reservoir(p, n, &rng);
+    var r = generate_initial_reservoir(p, n, RAY_T_MIN, &rng);
     output[0] = vec4(r.radiance, r.unbiased_contribution_weight);
     output[1] = vec4(r.sample_point_world_normal, r.confidence_weight);
     output[2] = vec4(0.0, 0.0, 0.0, f32(rng));
     output[5] = vec4(0.0, 0.0, f32(queries), f32(errors));
     if config[0].z != 0.0 { return; }
-    output[2] = vec4(shade_gi_connection(p, n, r.sample_point_world_position, r.radiance, r.unbiased_contribution_weight), f32(rng));
+    output[2] = vec4(shade_gi_connection(p, n, RAY_T_MIN, r.sample_point_world_position, r.radiance, r.unbiased_contribution_weight), f32(rng));
     r.sample_age = 7.0;
     for (var i = 0u; i < 8u; i++) {
         r = merge_reservoirs(r, p, n, vec3(1.0), r, p, n, vec3(1.0), &rng).merged_reservoir;

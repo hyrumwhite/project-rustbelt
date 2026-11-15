@@ -15,6 +15,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::trace_transmission_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_ALPHA_BLEND;
 import bevy_solarik::scene::raytracing_scene_bindings::trace_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
+import bevy_solarik::scene::raytracing_scene_bindings::ray_epsilon;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
@@ -192,7 +193,7 @@ fn sample_random_light_two_sided(ray_origin: vec3<f32>, origin_world_normal: vec
     let sample = generate_random_light_sample(rng);
     var contribution = calculate_resolved_light_contribution(sample.resolved_light_sample, ray_origin, origin_world_normal);
     let side = select(-1.0, 1.0, dot(geometric_normal, contribution.wi) >= 0.0);
-    let origin = ray_origin + geometric_normal * (side * RAY_T_MIN);
+    let origin = ray_origin + geometric_normal * (side * ray_epsilon(ray_origin));
     contribution.radiance *= trace_light_visibility(origin, sample.resolved_light_sample.world_position);
     return contribution;
 }
@@ -842,11 +843,17 @@ struct TransmittedLightContribution {
 }
 
 // RGB transport is intentionally separate from scalar ReSTIR visibility.
+// (from a ray's hit: the shadow ray leaves it by ray_epsilon)
 fn sample_random_light_transmitted(ray_origin: vec3<f32>, world_normal: vec3<f32>, geometric_normal: vec3<f32>, rng: ptr<function, u32>) -> TransmittedLightContribution {
+    return sample_random_light_transmitted_offset(ray_origin, world_normal, geometric_normal, ray_epsilon(ray_origin), rng);
+}
+// (`ray_offset`: how far the shadow ray leaves the surface; a G-buffer
+// pixel's is gbuffer_utils' pixel_ray_offset)
+fn sample_random_light_transmitted_offset(ray_origin: vec3<f32>, world_normal: vec3<f32>, geometric_normal: vec3<f32>, ray_offset: f32, rng: ptr<function, u32>) -> TransmittedLightContribution {
     let sample = generate_random_light_sample(rng).resolved_light_sample;
     var light = calculate_resolved_light_contribution(sample, ray_origin, world_normal);
     let side = select(-1.0, 1.0, dot(geometric_normal, light.wi) >= 0.0);
-    let origin = ray_origin + geometric_normal * (side * RAY_T_MIN);
+    let origin = ray_origin + geometric_normal * (side * ray_offset);
     let transmission = trace_light_transmission(origin, sample.world_position);
 @if(PRIMARY_CANOPY_DIRECT_ONLY) {
     light_trace_set(10u,sample.world_position);
@@ -861,14 +868,17 @@ fn sample_random_light_transmitted(ray_origin: vec3<f32>, world_normal: vec3<f32
 
 // A GI reservoir stores outgoing endpoint radiance, never receiver transmission.
 // Both diffuse and rough-specular consumers evaluate the current connection.
-fn shade_gi_connection(world_position: vec3<f32>, world_normal: vec3<f32>, endpoint: vec3<f32>, radiance: vec3<f32>, weight: f32) -> vec3<f32> {
+// (`ray_offset`: how far the ray leaves the receiver, its pixel's
+// pixel_ray_offset; it stops the endpoint's ray_epsilon short of the endpoint)
+fn shade_gi_connection(world_position: vec3<f32>, world_normal: vec3<f32>, ray_offset: f32, endpoint: vec3<f32>, radiance: vec3<f32>, weight: f32) -> vec3<f32> {
     if weight <= 0.0 || all(radiance <= vec3(0.0)) { return vec3(0.0); }
-    let origin = world_position + world_normal * RAY_T_MIN;
+    let origin = world_position + world_normal * ray_offset;
     if trace_point_visibility(origin, endpoint) == 0.0 { return vec3(0.0); }
     let delta = endpoint - origin;
     let distance = length(delta);
-    if distance <= RAY_T_MIN { return vec3(0.0); }
-    let transmission = trace_shadow_transmission_impl(origin, delta / distance, distance - RAY_T_MIN, false);
+    let margin = ray_epsilon(endpoint);
+    if distance <= margin { return vec3(0.0); }
+    let transmission = trace_shadow_transmission_impl(origin, delta / distance, distance - margin, false);
     return radiance * weight * transmission.rgb;
 }
 
@@ -885,15 +895,17 @@ fn trace_light_transmission_with_support(origin: vec3<f32>, light_position: vec4
     return trace_light_transport(origin, light_position, true);
 }
 // (`closest`: the distance must be the nearest blocker's, see trace_shadow_transport)
+// (a light's point: stopped its ray_epsilon short of it)
 fn trace_light_transport(origin: vec3<f32>, light_position: vec4<f32>, closest: bool) -> ShadowTransmission {
     var direction = light_position.xyz;
     var distance = ray_max_distance();
     if light_position.w != LIGHT_SAMPLE_DIRECTIONAL {
         let delta = light_position.xyz - origin;
         distance = length(delta);
-        if distance <= RAY_T_MIN { return ShadowTransmission(vec4(0.0), 0.0); }
+        let margin = ray_epsilon(light_position.xyz);
+        if distance <= margin { return ShadowTransmission(vec4(0.0), 0.0); }
         direction = delta / distance;
-        return trace_shadow_transport(origin, direction, distance - RAY_T_MIN, true, closest);
+        return trace_shadow_transport(origin, direction, distance - margin, true, closest);
     }
     // A directional light comes from beyond the air.
     var shadow = trace_shadow_transport(origin, direction, distance - RAY_T_MIN, true, closest);
@@ -934,6 +946,7 @@ fn trace_shadow_transport(origin: vec3<f32>, direction: vec3<f32>, ray_t_max: f3
 }
 // End shadow transport
 
+// (a light's point: stopped its ray_epsilon short of it)
 fn trace_light_visibility(ray_origin: vec3<f32>, light_sample_world_position: vec4<f32>) -> f32 {
     var ray_direction = light_sample_world_position.xyz;
     var ray_t_max = ray_max_distance();
@@ -942,7 +955,7 @@ fn trace_light_visibility(ray_origin: vec3<f32>, light_sample_world_position: ve
         let ray = ray_direction - ray_origin;
         let dist = length(ray);
         ray_direction = ray / dist;
-        ray_t_max = dist - RAY_T_MIN;
+        ray_t_max = dist - ray_epsilon(light_sample_world_position.xyz);
     }
 
     if ray_t_max < RAY_T_MIN { return 0.0; }
@@ -951,12 +964,13 @@ fn trace_light_visibility(ray_origin: vec3<f32>, light_sample_world_position: ve
     return f32(scene_hit_is_miss(ray_hit));
 }
 
+// (stopped the point's ray_epsilon short of it)
 fn trace_point_visibility(ray_origin: vec3<f32>, point: vec3<f32>) -> f32 {
     let ray = point - ray_origin;
     let dist = length(ray);
     let ray_direction = ray / dist;
 
-    let ray_t_max = dist - RAY_T_MIN;
+    let ray_t_max = dist - ray_epsilon(point);
     if ray_t_max < RAY_T_MIN { return 0.0; }
 
     let ray_hit = trace_ray(ray_origin, ray_direction, RAY_T_MIN, ray_t_max, RAY_FLAG_TERMINATE_ON_FIRST_HIT);

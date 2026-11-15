@@ -182,9 +182,12 @@ fn pathtrace(@builtin(global_invocation_id) global_id: vec3<u32>) {
             analytic_owned = is_perfectly_specular;
             throughput *= next_bounce.throughput;
 
-            // Russian roulette for early termination
-            let p = luminance(throughput);
-            if rand_f(&rng) > p { break; }
+            // Russian roulette for early termination. The survival chance is
+            // at most 1: past it a path always went on and was still divided
+            // by the luminance, darkening every path whose throughput had
+            // grown (a BRDF sample's weight over 1), a bias in the reference.
+            let p = min(luminance(throughput), 1.0);
+            if !(p > 0.0) || rand_f(&rng) >= p { break; }
             throughput /= p;
         } else {
             // The ray left the scene: it sees the sky. The sky is not in the

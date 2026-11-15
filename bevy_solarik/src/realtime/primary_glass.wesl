@@ -21,6 +21,8 @@ import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_NEAREST_LAY
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_material_alpha;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
+import bevy_solarik::scene::raytracing_scene_bindings::ray_epsilon;
+import bevy_solarik::scene::raytracing_scene_bindings::surface_ray_epsilon;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::sky_light;
 import bevy_solarik::scene::ray_fog::fog_ray_segment;
@@ -99,7 +101,11 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
     var background_point = vec4(0.0);
     if depth > 0.0 {
         let background_position = reconstruct_world_position(id.xy, depth, view.main_pass_viewport.zw, view.world_from_clip);
-        distance = max(0.0, dot(background_position - origin, direction) - RAY_T_MIN);
+        // (short of the depth's surface by surface_ray_epsilon, without the
+        // raster's share, whose normal this pass doesn't decode; the
+        // background met short of its depth is caught below,
+        // HIDDEN_SURFACE_TOLERANCE)
+        distance = max(0.0, dot(background_position - origin, direction) - surface_ray_epsilon(background_position, view.world_position, 0.0));
         background_point = vec4(background_position, 1.0);
     }
     var rng = id.x + id.y * u32(view.main_pass_viewport.z) + constants.frame_index;
@@ -120,7 +126,7 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
     let reflection_chosen = reflection_sum > 0.0 && reflection_luminance > 0.0;
 }
     if reflection_chosen {
-        let reflected = trace_glossy_path(id.xy, reflection_surface, reflection_distance, reflection_wi, 1.0, true, &rng);
+        let reflected = trace_glossy_path(id.xy, reflection_surface, ray_epsilon(reflection_surface.world_position), reflection_distance, reflection_wi, 1.0, true, &rng);
         reflection = reflection_weight * (reflection_sum / reflection_luminance) * reflected;
 @if(GLASS_VIEW_MIRROR) {
         reflection = reflected;
@@ -249,7 +255,7 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
                 transmission *= weights.rgb;
                 if all(transmission <= vec3(0.0)) { return vec4(radiance, has_glass); }
             }
-            origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, direction, RAY_T_MIN);
+            origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, direction, ray_epsilon(hit.world_position));
             continue;
         }
         if (material.flags & MATERIAL_FLAG_DIFFUSE_BLEND) != 0u {
@@ -262,7 +268,7 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
             radiance += transmission * alpha * (surface_radiance / 4.0);
             transmission *= 1.0 - alpha;
             if all(transmission <= vec3(0.0)) { return vec4(radiance, has_glass); }
-            origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, direction, RAY_T_MIN);
+            origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, direction, ray_epsilon(hit.world_position));
             continue;
         }
         // (a water pane reflects about its rippled normal, toward the
@@ -314,7 +320,7 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
         }
         transmission *= weights.rgb;
         if all(transmission <= vec3(0.0)) { return vec4(radiance, has_glass); }
-        origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, direction, RAY_T_MIN);
+        origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, direction, ray_epsilon(hit.world_position));
     }
     // A bounded chain cannot assume unvisited panes are transparent.
     return vec4(radiance, has_glass);

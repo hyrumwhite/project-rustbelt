@@ -50,9 +50,17 @@ pub fn init_pathtracer_pipelines(
         ],
         shader: load_embedded_asset!(asset_server.as_ref(), "pathtracer.wesl"),
         shader_defs: {
+            // (PATHTRACER: the shared modules leave out what lives in the
+            // realtime passes' group 1, which this pipeline's group 1 is
+            // not: light_triangles.wesl's table; tests/pathtracer_layout.rs.
+            // UNSEEN_LIGHT_NEE: a light-only emitter, which no ray meets,
+            // keeps its whole next-event weight; without it its light was
+            // shared by MIS with BRDF hits that never come, and lost.)
             let mut defs = vec![
                 "BINDLESS_SURFACE_DETAIL".into(),
                 "FOLIAGE_TRANSMISSION".into(),
+                "PATHTRACER".into(),
+                "UNSEEN_LIGHT_NEE".into(),
             ];
             if std::env::var("SOLARIK_PATHTRACER_DEBUG_SAMPLE_COUNT").is_ok() {
                 defs.push("PATHTRACER_DEBUG_SAMPLE_COUNT".into());

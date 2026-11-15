@@ -36,6 +36,10 @@ struct LightTriangleRecord {
     d: vec4<f32>,
 }
 
+// (Not in the path tracer's module (PATHTRACER, set by its pipeline alone):
+// its group 1 is its own small layout, and its lights resolve from their
+// vertices, the table's fallback, which gives the same point and values.)
+@if((!(PATHTRACER)))
 @group(1) @binding(30) var<storage, read_write> light_triangles: array<LightTriangleRecord>;
 
 const NO_LIGHT_TRIANGLES: u32 = 0xFFFFFFFFu;
@@ -62,11 +66,13 @@ struct LightTriangleVertices {
 }
 
 fn load_light_triangle(light_source: LightSource, triangle_id: u32) -> LightTriangleVertices {
+@if((!(PATHTRACER))) {
     if light_source.triangle_offset != NO_LIGHT_TRIANGLES {
         let record = light_triangles[light_source.triangle_offset + triangle_id];
         return LightTriangleVertices(record.a.xyz, record.b.xyz, record.c.xyz,
             vec2(record.a.w, record.b.w), vec2(record.c.w, record.d.x), record.d.yz, bitcast<u32>(record.d.w));
     }
+}
     let vertices = load_vertices(geometry_ids[light_source.id], triangle_id);
     let positions = transform_positions(transforms[light_source.id], vertices);
     return LightTriangleVertices(positions[0], positions[1], positions[2],
@@ -96,6 +102,7 @@ fn light_triangle_at(triangle: LightTriangleVertices, material: Material, baryce
 }
 
 @compute @workgroup_size(64, 1, 1)
+@if((!(PATHTRACER)))
 fn build_light_triangles(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(local_invocation_index) thread: u32) {
     if workgroup_id.x >= arrayLength(&light_sources) { return; }
     let light = light_sources[workgroup_id.x];

@@ -409,6 +409,19 @@ fn stats_override() -> Option<bool> {
     })
 }
 
+/// The exposure for this run in place of the saved one
+/// (`HALO_RT_EXPOSURE=<ev100>`; unset or not a number, the saved choice): for
+/// measuring, where captures are compared at one exposure whatever the
+/// user's options hold. The level's dimming still applies on top
+/// (`apply_level_exposure`), and the value is not saved as the user's choice
+/// (see [`save_settings`]). Read once.
+pub fn exposure_override() -> Option<f32> {
+    static EXPOSURE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *EXPOSURE.get_or_init(|| {
+        std::env::var("HALO_RT_EXPOSURE").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite())
+    })
+}
+
 /// Marks the stats text, which the panel can hide.
 #[derive(Component)]
 pub struct StatsText;
@@ -454,8 +467,14 @@ fn save_settings(
     };
     #[cfg(not(feature = "dlss"))]
     let (dlss_rr, dlss_quality) = (last.dlss_rr, last.dlss_quality.clone());
+    let mut lighting = lighting.clone();
+    // (given by HALO_RT_EXPOSURE: the file's value kept, even if the
+    // exposure was turned during the run)
+    if exposure_override().is_some() {
+        lighting.exposure_ev100 = last.lighting.exposure_ev100;
+    }
     let current = SavedSettings {
-        lighting: lighting.clone(),
+        lighting,
         restir: last.restir,
         dlss_rr,
         dlss_quality,

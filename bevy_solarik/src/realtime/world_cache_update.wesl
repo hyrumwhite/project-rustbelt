@@ -24,6 +24,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::trace_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
 import bevy_solarik::scene::raytracing_scene_bindings::sample_sky;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
+import bevy_solarik::scene::raytracing_scene_bindings::ray_epsilon;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::realtime::world_cache_priority::selected_world_cache_cell_count;
 import bevy_solarik::realtime::world_cache_priority::PRIORITY_UPDATED_COUNT;
@@ -103,7 +104,7 @@ fn sample_di(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         let sun = calculate_resolved_light_contribution(resolved, geometry_data.world_position, geometry_data.world_normal);
         let contribution = sun.radiance * saturate(dot(sun.wi, geometry_data.world_normal)) * sun.inverse_pdf;
         if any(contribution > vec3(0.0)) {
-            let shadow = trace_light_transmission_with_support(geometry_data.world_position + (geometry_data.world_normal * RAY_T_MIN), resolved.world_position);
+            let shadow = trace_light_transmission_with_support(geometry_data.world_position + (geometry_data.world_normal * ray_epsilon(geometry_data.world_position)), resolved.world_position);
             new_radiance = vec4(new_radiance.rgb + contribution * shadow.energy.rgb, new_radiance.w);
         }
     }
@@ -145,12 +146,17 @@ fn sample_gi_ray(cell_index: u32, world_position: vec3<f32>, world_normal: vec3<
     // Traced to the end of the world so that geometry beyond the GI ray
     // distance is not mistaken for sky; such far hits contribute nothing, as
     // upstream's shorter ray had them.
-    let ray = trace_ray(world_position + (world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
+    let offset = ray_epsilon(world_position);
+    let origin = world_position + world_normal * offset;
+    let ray = trace_ray(origin, ray_direction, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
     // trace_ray skips thin panes when finding the endpoint. Apply their energy
-    // to this new cache sample once, excluding the endpoint itself.
-    let connection_distance = select(ray.t - RAY_T_MIN, ray_max_distance(), scene_hit_is_miss(ray));
-    var sample = vec4(0.0, 0.0, 0.0, connection_distance + 2.0 * RAY_T_MIN);
-    let transmission = trace_shadow_transmission_impl(world_position + world_normal * RAY_T_MIN, ray_direction, connection_distance, false).rgb;
+    // to this new cache sample once, excluding the endpoint itself (stopped
+    // the hit's ray_epsilon short of it; the support, w, is the way from the
+    // cell to the hit: the origin's offset and the ray's t)
+    let margin = select(ray_epsilon(origin + ray_direction * ray.t), offset, scene_hit_is_miss(ray));
+    let connection_distance = select(ray.t - margin, ray_max_distance(), scene_hit_is_miss(ray));
+    var sample = vec4(0.0, 0.0, 0.0, connection_distance + (margin + offset));
+    let transmission = trace_shadow_transmission_impl(origin, ray_direction, connection_distance, false).rgb;
     if scene_hit_is_miss(ray) {
         // Escaped to the sky: cosine sampling turns radiance into irradiance
         // with a factor of pi, the same units the cached direct light is in.

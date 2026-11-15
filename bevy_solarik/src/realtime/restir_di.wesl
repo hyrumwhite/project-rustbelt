@@ -16,6 +16,7 @@ import bevy_solarik::realtime::gbuffer_utils::temporal_pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
 @if((CELL_LOOKUP_GEOMETRIC)) import bevy_solarik::realtime::gbuffer_utils::pixel_geometric_normal;
 import bevy_solarik::realtime::gbuffer_utils::raster_reconstruction_error;
+import bevy_solarik::realtime::gbuffer_utils::RASTER_SUBPIXEL_STEP;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
 import bevy_solarik::realtime::presample_light_tiles::unpack_resolved_light_sample;
 import bevy_solarik::realtime::presample_light_tiles::light_tile_seed;
@@ -116,11 +117,6 @@ const SLOT_VISIBILITY_PRIOR: f32 = 0.1;
 const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
 // (SOLARIK_DI_CONFIDENCE_CAP)
 const CONFIDENCE_WEIGHT_CAP = DI_CONFIDENCE_CAP;
-@if((RASTER_SUBPIXEL_BITS))
-const RASTER_SUBPIXEL_STEP = 1.0 / f32(1u << constants::RASTER_SUBPIXEL_BITS);
-// Vulkan's guaranteed minimum, used by tools without adapter specialization.
-@if((!(RASTER_SUBPIXEL_BITS)))
-const RASTER_SUBPIXEL_STEP = 1.0 / 16.0;
 
 // (SOLARIK_SHADER_DEFS=VISUALIZE_DI_PICK, with HALO_RT_NO_DLSS=1: what the
 // initial candidates found. Red: the share of the tile candidates with any
@@ -249,6 +245,14 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     var pixel_color = shade_di_reservoir(merge_result, surface.world_position, surface.world_normal, raster_error);
     pixel_color *= brdf;
+// (SOLARIK_SHADER_DEFS=VIEW_NO_DI, a diagnostic: the direct light left out of
+// the view, everything this pass stores as without it, to split a picture
+// into its parts with VIEW_NO_DIFFUSE_GI and VIEW_NO_SPECULAR_GI. The
+// surface's own emission stays: it is not the DI's light, and this pass is
+// the one that starts the pixel's colour, which the later passes add to.)
+@if(VIEW_NO_DI) {
+    pixel_color = vec3(0.0);
+}
     pixel_color += surface.material.emissive;
     pixel_color *= view.exposure;
     textureStore(view_output, global_id.xy, vec4(pixel_color, 1.0));

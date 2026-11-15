@@ -25,7 +25,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
 import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
 import bevy_solarik::scene::raytracing_scene_bindings::LIGHT_SOURCE_KIND_DIRECTIONAL;
-import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
+import bevy_solarik::scene::raytracing_scene_bindings::ray_epsilon;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_NO_LIGHT;
 import bevy_solarik::realtime::world_cache_query::WORLD_CACHE_SLOT_LIGHT_SAMPLE_COUNT;
@@ -70,7 +70,7 @@ struct RisLightSample {
 // estimate (exposed), for the slots. Returns the irradiance contribution and
 // the support radius.
 fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, slots: vec4<u32>, slot_probabilities: vec4<f32>, rng: ptr<function, u32>, seen_light: ptr<function, u32>, seen_weight: ptr<function, f32>) -> vec4<f32> {
-    let sample = sample_light_ris(world_position, world_normal, workgroup_id, slots, slot_probabilities, WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT, rng);
+    let sample = sample_light_ris(world_position, world_normal, ray_epsilon(world_position), workgroup_id, slots, slot_probabilities, WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT, rng);
     if sample.seen_light != WORLD_CACHE_NO_LIGHT {
         *seen_light = sample.seen_light;
         *seen_weight = sample.seen_weight;
@@ -83,8 +83,10 @@ fn sample_random_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, w
 // read. `tile_candidates` is how many candidates come from the tile (the
 // cache update takes WORLD_CACHE_DIRECT_LIGHT_SAMPLE_COUNT; a caller with
 // many samples to take, as the NRC training pass, fewer: the estimate stays
-// unbiased, its variance grows).
-fn sample_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgroup_id: vec2<u32>, slots: vec4<u32>, slot_probabilities: vec4<f32>, tile_candidates: u32, rng: ptr<function, u32>) -> RisLightSample {
+// unbiased, its variance grows). `ray_offset`: how far the shadow ray leaves
+// the receiver (a cell's or a hit's ray_epsilon, a G-buffer pixel's
+// pixel_ray_offset).
+fn sample_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, ray_offset: f32, workgroup_id: vec2<u32>, slots: vec4<u32>, slot_probabilities: vec4<f32>, tile_candidates: u32, rng: ptr<function, u32>) -> RisLightSample {
     var workgroup_rng = light_tile_seed((workgroup_id.x * 5782582u) + workgroup_id.y, constants.frame_index);
     let light_tile_start = rand_range_u(128u, &workgroup_rng) * 1024u;
 
@@ -180,10 +182,10 @@ fn sample_light_ris(world_position: vec3<f32>, world_normal: vec3<f32>, workgrou
         // (1 / a denormal target overflows)
         if !is_finite_f32(unbiased_contribution_weight) { unbiased_contribution_weight = 0.0; }
 
-        let shadow = trace_light_transmission_with_support(world_position + (world_normal * RAY_T_MIN), pick.world_position);
+        let shadow = trace_light_transmission_with_support(world_position + (world_normal * ray_offset), pick.world_position);
         pick.sample_radiance *= shadow.energy.rgb;
         pick.light_radiance *= shadow.energy.rgb;
-        support_radius = shadow.distance + RAY_T_MIN;
+        support_radius = shadow.distance + ray_offset;
         if any(pick.sample_radiance > vec3(0.0)) {
             seen_light = pick.light;
             // (the light's irradiance here, estimated from this point on it)

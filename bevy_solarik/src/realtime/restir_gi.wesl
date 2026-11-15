@@ -16,11 +16,14 @@ import bevy_solarik::realtime::sky_sampling::sample_sky_mixture;
 @if((GI_GUIDE)) import bevy_solarik::realtime::tuning::GI_GUIDE_SHARE;
 @if((GI_GUIDE)) import bevy_solarik::realtime::tuning::GI_GUIDE_CONE;
 @if((GI_GUIDE)) import bevy_solarik::realtime::tuning::GI_GUIDE_WIDE;
+@if((GI_GUIDE)) import bevy_solarik::realtime::tuning::GI_GUIDE_NEIGHBOURS;
+@if((GI_GUIDE)) import bevy_solarik::realtime::tuning::GI_GUIDE_RADIUS;
 @if((GI_GUIDE)) import bevy_solarik::scene::sampling::is_finite_f32;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::temporal_pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
+import bevy_solarik::realtime::gbuffer_utils::pixel_ray_offset;
 import bevy_solarik::scene::sampling::sample_random_light_transmitted;
 import bevy_solarik::scene::sampling::shade_gi_connection;
 import bevy_solarik::scene::sampling::balance_heuristic;
@@ -46,7 +49,7 @@ import bevy_solarik::realtime::realtime_bindings::previous_depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::previous_view;
 import bevy_solarik::realtime::realtime_bindings::constants;
-import bevy_solarik::realtime::tuning::{GI_CONFIDENCE_CAP, GI_ADAPTIVE_CONFIDENCE};
+import bevy_solarik::realtime::tuning::{GI_CONFIDENCE_CAP, GI_ADAPTIVE_CONFIDENCE, GI_SPATIAL_RADIUS, GI_SPATIAL_COUNT};
 import bevy_solarik::realtime::realtime_bindings::Reservoir;
 import bevy_solarik::realtime::specular_gi::DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD;
 @if((REGIONAL_HISTORY)) import bevy_solarik::scene::raytracing_scene_bindings::scene_support_is_valid;
@@ -69,6 +72,7 @@ import bevy_solarik::realtime::specular_gi::DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::sampling::calculate_resolved_light_contribution;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::sampling::trace_light_transmission_with_support;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::thin_glass::offset_thin_glass_ray;
+@if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::ray_epsilon;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::light_sources;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
 @if((NRC && NRC_QUERY_AT_SPREAD)) import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
@@ -86,7 +90,9 @@ enable wgpu_ray_query;
 
 
 
-const SPATIAL_REUSE_RADIUS_PIXELS = 30.0;
+// (SOLARIK_GI_SPATIAL_RADIUS, tuning.wesl; 30 pixels as the constant was.
+// restir_di.wesl has its own, left as it is.)
+const SPATIAL_REUSE_RADIUS_PIXELS = GI_SPATIAL_RADIUS;
 // (SOLARIK_GI_CONFIDENCE_CAP, tuning.wesl)
 const CONFIDENCE_WEIGHT_CAP = GI_CONFIDENCE_CAP;
 // Confidence limits influence, not lifetime. Bright old samples can keep winning.
@@ -185,7 +191,8 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
         gi_reservoirs_b[pixel_index] = empty_reservoir();
         return;
     }
-    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    let gpixel = textureLoad(gbuffer, global_id.xy, 0);
+    let surface = gpixel_resolve(gpixel, depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
     if surface.material.metallic > 0.9999 && surface.material.roughness <= DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
 @if(NRC) {
         write_nrc_query_path_info(pixel_index);
@@ -207,8 +214,41 @@ fn initial_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // it again in its own pass; here it only guides.
     let temporal = load_temporal_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal);
     gi_guide = make_gi_guide(temporal.reservoir, surface.world_position, surface.world_normal);
+    // (SOLARIK_GI_GUIDE_NEIGHBOURS, tuning.wesl: where the pixel's own
+    // history holds one of the room's broad samples, its guide is none and
+    // it finds a small opening only by the sky mixture's luck. Up to that
+    // many of last frame's reservoirs near its reprojected place (8 by
+    // default), each read alone (load_guide_neighbour_reservoir) and
+    // offered as a guide toward its sample from here; the strongest guide
+    // stands. They only guide: the pixel's own temporal reservoir is the one
+    // merged, so no sample is spread by this. The guide is still fixed
+    // before this frame's candidate is drawn, and sample_sky_mixture_guided
+    // weighs the candidate by the mixture of whichever guide stands, so the
+    // estimate is as unbiased as before. At most 16, and none once the
+    // guide's share is nine tenths of its most, nor on a frame that drops
+    // the history; at 0 (SOLARIK_GI_GUIDE_NEIGHBOURS=0, the old) the loop
+    // never runs and no random number is drawn. On d40's doorway wall, lit
+    // through a small door, 8 took about 60% off the blotches' deviation
+    // over time for about 0.23 ms in this pass, the wall as bright; 16 was
+    // no steadier. VISUALIZE_GI_GUIDE's green is the guide that stands, its
+    // blue still the pixel's own W.)
+    let strong_share = 0.9 * min(GI_GUIDE_SHARE, 0.9);
+    if GI_GUIDE_NEIGHBOURS > 0u && (constants.reset & 1u) == 0u && (constants.reset & 6u) != 2u {
+        let centre = guide_neighbour_centre(global_id.xy);
+        for (var guide_index = 0u; guide_index < min(GI_GUIDE_NEIGHBOURS, 16u); guide_index++) {
+            if gi_guide.share >= strong_share { break; }
+            let neighbour_id = vec2<u32>(clamp(centre + sample_disk(GI_GUIDE_RADIUS, &rng), vec2(0.0), view.main_pass_viewport.zw - 1.0));
+            let neighbour = load_guide_neighbour_reservoir(neighbour_id);
+            let neighbour_guide = make_gi_guide(neighbour, surface.world_position, surface.world_normal);
+            if neighbour_guide.share > gi_guide.share {
+                gi_guide = neighbour_guide;
+            }
+        }
+    }
 }
-    let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, &rng);
+    let ray_offset = pixel_ray_offset(gpixel.a, global_id.xy, depth, surface.world_position, surface.world_normal,
+        view.world_position, view.main_pass_viewport.zw, view.world_from_clip);
+    let initial_reservoir = generate_initial_reservoir(surface.world_position, surface.world_normal, ray_offset, &rng);
 // (SOLARIK_SHADER_DEFS=VISUALIZE_CACHE_AGE, with HALO_RT_NO_DLSS=1: the
 // samples in the cache cell this pixel's diffuse bounce read, red at one to
 // green at the full history, blue for a cell made just now; magenta where
@@ -310,9 +350,13 @@ fn nrc_resolve_and_temporal(@builtin(global_invocation_id) global_id: vec3<u32>)
     textureStore(view_output, global_id.xy, vec4(specular_answer, 1.0));
     return;
 }
+// (VIEW_NO_SPECULAR_GI: this answer is the specular GI's, left out with
+// the rest of it)
+@if(!(VIEW_NO_SPECULAR_GI)) {
     if specular_info.query_buffer_index != 0xffffffffu {
         textureStore(view_output, global_id.xy, textureLoad(view_output, global_id.xy) + vec4(specular_answer, 0.0));
     }
+}
 }
 
     // The same early returns as initial_and_temporal, which has already
@@ -395,6 +439,17 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var merge_result = merge_reservoirs(input_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
         spatial.reservoir, spatial.world_position, spatial.world_normal, spatial.diffuse_brdf, &rng);
     var combined_reservoir = merge_result.merged_reservoir;
+    // (SOLARIK_GI_SPATIAL_COUNT, tuning.wesl: more spatial neighbours, each
+    // merged into what the ones before left, as GI_ADAPTIVE_SPATIAL chains
+    // its second; at the default 1 the loop never runs, so the random
+    // numbers are drawn as without it. At most 16; GI_ADAPTIVE_SPATIAL's
+    // neighbour comes on top.)
+    for (var neighbour_index = 1u; neighbour_index < min(GI_SPATIAL_COUNT, 16u); neighbour_index++) {
+        let neighbour = load_spatial_reservoir(global_id.xy, depth, surface.world_position, surface.world_normal, &rng);
+        merge_result = merge_reservoirs(combined_reservoir, surface.world_position, surface.world_normal, surface.material.base_color / PI,
+            neighbour.reservoir, neighbour.world_position, neighbour.world_normal, neighbour.diffuse_brdf, &rng);
+        combined_reservoir = merge_result.merged_reservoir;
+    }
 @if(GI_ADAPTIVE_SPATIAL) {
     // A pixel with a short history (its temporal sample refused by a
     // disocclusion or a fast camera, or a frame or two old) merges a second
@@ -435,14 +490,23 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let wo = normalize(view.world_position - surface.world_position);
     let brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
+    let ray_offset = pixel_ray_offset(textureLoad(gbuffer, global_id.xy, 0).a, global_id.xy, depth, surface.world_position, surface.world_normal,
+        view.world_position, view.main_pass_viewport.zw, view.world_from_clip);
+    let diffuse_gi = shade_gi_connection(surface.world_position, surface.world_normal, ray_offset, combined_reservoir.sample_point_world_position, combined_reservoir.radiance, combined_reservoir.unbiased_contribution_weight) * view.exposure * brdf;
 
+// (SOLARIK_SHADER_DEFS=VIEW_NO_DIFFUSE_GI, a diagnostic: the diffuse GI left
+// out of the view, everything this pass stores as without it, to split a
+// picture into its parts with VIEW_NO_DI and VIEW_NO_SPECULAR_GI)
+@if(!(VIEW_NO_DIFFUSE_GI)) {
     var pixel_color = textureLoad(view_output, global_id.xy);
-    pixel_color += vec4(shade_gi_connection(surface.world_position, surface.world_normal, combined_reservoir.sample_point_world_position, combined_reservoir.radiance, combined_reservoir.unbiased_contribution_weight) * view.exposure * brdf, 0.0);
+    pixel_color += vec4(diffuse_gi, 0.0);
     textureStore(view_output, global_id.xy, pixel_color);
+}
 }
 
 
-fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, rng: ptr<function, u32>) -> Reservoir {
+// (`ray_offset`: how far the ray leaves the pixel's surface, pixel_ray_offset)
+fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, ray_offset: f32, rng: ptr<function, u32>) -> Reservoir {
     var reservoir = empty_reservoir();
 @if(REGIONAL_HISTORY) {
     // Unknown path transport fails closed for bounded regional reuse.
@@ -467,7 +531,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         reservoir.sample_point_world_normal = -ray_direction;
         return reservoir;
     }
-    let ray = trace_ray(world_position + (world_normal * RAY_T_MIN), ray_direction, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
+    let ray = trace_ray(world_position + (world_normal * ray_offset), ray_direction, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
 
     if scene_hit_is_miss(ray) {
         // The ray left the scene: it sees the sky. The sample point is a far
@@ -565,7 +629,7 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
         cell_key_normal(sample_point.geometric_world_normal, sample_point.triangle_world_normal), sample_point.material.diffuse_transmission,
         view.world_position, ray.t, WORLD_CACHE_CELL_LIFETIME, rng);
     reservoir.radiance = cached.rgb;
-    reservoir.support_radius = max(ray.t + RAY_T_MIN, cached.w) * 1.00001 + 0.01;
+    reservoir.support_radius = max(ray.t + ray_offset, cached.w) * 1.00001 + 0.01;
 }
 @if(!(REGIONAL_HISTORY)) {
     reservoir.radiance = query_two_sided_world_cache(sample_point.world_position,
@@ -660,7 +724,7 @@ fn nrc_query_at_spread(world_position: vec3<f32>, world_normal: vec3<f32>, sampl
     if arrayLength(&light_sources) > 0u {
         let slots = world_cache_light_slots[cell];
         let slot_probabilities = world_cache_slot_probabilities(slots);
-        let light = sample_light_ris(sample_point.world_position, normal, nrc_light_tile,
+        let light = sample_light_ris(sample_point.world_position, normal, ray_epsilon(sample_point.world_position), nrc_light_tile,
             slots, slot_probabilities, max(nrc_constants.pad2, 1u), rng);
         if any(light.radiance > vec3(0.0)) {
             radiance += light.radiance * evaluate_brdf(wo, light.wi, normal, material);
@@ -672,7 +736,7 @@ fn nrc_query_at_spread(world_position: vec3<f32>, world_normal: vec3<f32>, sampl
             let sun = calculate_resolved_light_contribution(resolved, sample_point.world_position, normal);
             let sun_radiance = sun.radiance * sun.inverse_pdf;
             if any(sun_radiance > vec3(0.0)) && dot(sun.wi, normal) > 0.0 {
-                let shadow = trace_light_transmission_with_support(sample_point.world_position + (normal * RAY_T_MIN), resolved.world_position);
+                let shadow = trace_light_transmission_with_support(sample_point.world_position + (normal * ray_epsilon(sample_point.world_position)), resolved.world_position);
                 radiance += sun_radiance * shadow.energy.rgb * evaluate_brdf(wo, sun.wi, normal, material);
             }
         }
@@ -680,7 +744,7 @@ fn nrc_query_at_spread(world_position: vec3<f32>, world_normal: vec3<f32>, sampl
 
     // The bounce.
     let wi = next.wi;
-    let origin = offset_thin_glass_ray(sample_point.world_position, sample_point.geometric_world_normal, wi, RAY_T_MIN);
+    let origin = offset_thin_glass_ray(sample_point.world_position, sample_point.geometric_world_normal, wi, ray_epsilon(sample_point.world_position));
     let bounce = trace_ray(origin, wi, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
     if scene_hit_is_miss(bounce) {
         // The sky ends the path: no query.
@@ -717,6 +781,38 @@ fn load_temporal_reservoir(pixel_id: vec2<u32>, depth: f32, world_position: vec3
     temporal.reservoir = age_temporal_reservoir(temporal.reservoir);
 
     return temporal;
+}
+
+// (GI_GUIDE_NEIGHBOURS) This pixel's reprojected place, about which the
+// guide's neighbours are drawn: the motion vector's, before
+// load_temporal_reservoir's permutation, the pixel itself where that falls
+// off the screen.
+@if((GI_GUIDE))
+fn guide_neighbour_centre(pixel_id: vec2<u32>) -> vec2<f32> {
+    let motion_vector = textureLoad(motion_vectors, pixel_id, 0).xy;
+    let centre = round(vec2<f32>(pixel_id) - (motion_vector * view.main_pass_viewport.zw));
+    if any(centre < vec2(0.0)) || any(centre >= view.main_pass_viewport.zw) {
+        return vec2<f32>(pixel_id);
+    }
+    return centre;
+}
+
+// (GI_GUIDE_NEIGHBOURS) Last frame's reservoir at a neighbour, read alone:
+// a guide is only a direction to aim some rays at, any reservoir's sample
+// point is a fair target, and make_gi_guide refuses one under this pixel's
+// horizon or not finite, so the old surface is not loaded and tested
+// against this pixel's as the temporal load does (that cost about 0.055 ms
+// a neighbour and was no steadier). Aged as it is, and with REGIONAL_HISTORY refused where the scene
+// changed within its support, as the temporal load refuses it.
+@if((GI_GUIDE))
+fn load_guide_neighbour_reservoir(neighbour_id: vec2<u32>) -> Reservoir {
+    let reservoir = gi_reservoirs_a[neighbour_id.x + neighbour_id.y * u32(view.main_pass_viewport.z)];
+@if(REGIONAL_HISTORY) {
+    if (constants.reset & 4u) != 0u && !scene_support_is_valid(reservoir.sample_point_world_position, reservoir.support_radius) {
+        return empty_reservoir();
+    }
+}
+    return age_temporal_reservoir(reservoir);
 }
 
 fn age_temporal_reservoir(input: Reservoir) -> Reservoir {

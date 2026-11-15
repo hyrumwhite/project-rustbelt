@@ -40,6 +40,11 @@ fn scene_consumers_compose_across_production_feature_variants() {
             ShaderDefVal::UInt("GI_GUIDE_SHARE".into(), 50),
             ShaderDefVal::UInt("GI_GUIDE_CONE".into(), 10),
             ShaderDefVal::UInt("GI_GUIDE_WIDE".into(), 100),
+            ShaderDefVal::UInt("RAY_OFFSET_SCALE".into(), 16),
+            ShaderDefVal::UInt("GI_SPATIAL_RADIUS".into(), 30),
+            ShaderDefVal::UInt("GI_SPATIAL_COUNT".into(), 1),
+            ShaderDefVal::UInt("GI_GUIDE_NEIGHBOURS".into(), 8),
+            ShaderDefVal::UInt("GI_GUIDE_RADIUS".into(), 30),
             "BINDLESS_SURFACE_DETAIL".into(),
             // (on by default in node.rs)
             "GI_GUIDE".into(),
@@ -88,6 +93,14 @@ fn scene_consumers_compose_across_production_feature_variants() {
                 stage_definitions.push("WORLD_CACHE_FIRST_BOUNCE_LIGHT_LEAK_PREVENTION".into());
             }
             graph.validate(&module, &stage_definitions);
+            // (the rays' fixed millimetre off their surfaces, the old
+            // (SOLARIK_SHADER_DEFS=RAY_OFFSET_FIXED); every consumer but the
+            // canopy prepass imports the scene bindings)
+            if consumer != "filtered_canopy_prepass" {
+                let mut fixed_definitions = stage_definitions.clone();
+                fixed_definitions.push("RAY_OFFSET_FIXED".into());
+                graph.validate(&module, &fixed_definitions);
+            }
             // (ReSTIR GI's guided initial sampling off, the old shader
             // (SOLARIK_GI_GUIDE=0), and its view; specular_gi has the view's
             // early return, primary_glass imports specular_gi)
@@ -105,6 +118,60 @@ fn scene_consumers_compose_across_production_feature_variants() {
                 let mut view_definitions = stage_definitions.clone();
                 view_definitions.push("VISUALIZE_GI_GUIDE".into());
                 graph.validate(&module, &view_definitions);
+            }
+            // (ReSTIR GI's tunables away from their defaults, with
+            // GI_ADAPTIVE_SPATIAL (on in these lists) and without it: four
+            // spatial neighbours (SOLARIK_GI_SPATIAL_COUNT), the guide's
+            // neighbours at 0 and 16 (SOLARIK_GI_GUIDE_NEIGHBOURS, 8 in
+            // these lists); and the views leaving out a part of the picture;
+            // with the loop's switches all off and all on alone.)
+            if (bits == 0 || bits == 15)
+                && (consumer == "realtime::restir_gi"
+                    || consumer == "realtime::restir_di"
+                    || consumer == "realtime::specular_gi"
+                    || consumer == "realtime::primary_glass")
+            {
+                let unadaptive: Vec<ShaderDefVal> = stage_definitions
+                    .iter()
+                    .filter(|d| !matches!(d, ShaderDefVal::Bool(name, _) if &**name == "GI_ADAPTIVE_SPATIAL"))
+                    .cloned()
+                    .collect();
+                assert_eq!(unadaptive.len() + 1, stage_definitions.len());
+                let mut variants: Vec<Vec<&str>> = Vec::new();
+                if consumer == "realtime::restir_gi" {
+                    variants.push(vec!["VIEW_NO_DIFFUSE_GI"]);
+                    variants.push(vec!["VIEW_NO_DIFFUSE_GI", "VIEW_NO_SPECULAR_GI", "VIEW_NO_DI"]);
+                    variants.push(vec!["VISUALIZE_GI_INITIAL"]);
+                }
+                if consumer == "realtime::restir_di" {
+                    variants.push(vec!["VIEW_NO_DI"]);
+                }
+                if consumer == "realtime::specular_gi" || consumer == "realtime::primary_glass" {
+                    variants.push(vec!["VIEW_NO_SPECULAR_GI"]);
+                }
+                for names in &variants {
+                    for base in [&stage_definitions, &unadaptive] {
+                        let mut experiment_definitions = base.clone();
+                        experiment_definitions.extend(names.iter().map(|name| ShaderDefVal::from(*name)));
+                        graph.validate(&module, &experiment_definitions);
+                    }
+                }
+                if consumer == "realtime::restir_gi" {
+                    // (a tunable set to a value, the others as in the lists)
+                    let with_value = |base: &Vec<ShaderDefVal>, tunable: &str, value: u32| -> Vec<ShaderDefVal> {
+                        base.iter()
+                            .map(|d| match d {
+                                ShaderDefVal::UInt(name, _) if &**name == tunable => ShaderDefVal::UInt(name.clone(), value),
+                                _ => d.clone(),
+                            })
+                            .collect()
+                    };
+                    for base in [&stage_definitions, &unadaptive] {
+                        graph.validate(&module, &with_value(base, "GI_SPATIAL_COUNT", 4));
+                        graph.validate(&module, &with_value(base, "GI_GUIDE_NEIGHBOURS", 0));
+                        graph.validate(&module, &with_value(base, "GI_GUIDE_NEIGHBOURS", 16));
+                    }
+                }
             }
             if consumer == "realtime::primary_foliage" {
                 let mut direct_definitions = stage_definitions.clone();

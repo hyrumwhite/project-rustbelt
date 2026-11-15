@@ -1,6 +1,7 @@
 @group(0) @binding(0) var<storage,read> config:array<vec4<f32>>;
 @group(0) @binding(1) var<storage,read_write> output:array<vec4<f32>>;
 const RAY_T_MIN=0.001;
+fn ray_epsilon(p:vec3<f32>)->f32 { return RAY_T_MIN; }
 struct Reservoir {
  sample_point_world_position:vec3<f32>, sample_age:f32,
  radiance:vec3<f32>, confidence_weight:f32,
@@ -21,14 +22,14 @@ fn probe() {
  r.sample_point_world_position=vec3(0.0,0.0,2.0); r.confidence_weight=1.0;
  r.sample_point_world_normal=-n; r.unbiased_contribution_weight=2.0; r.radiance=vec3(1.0);
  for(var i=0u;i<u32(config[0].a);i++) {
-  output[0]=vec4(shade_gi_connection(p,n,r.sample_point_world_position,r.radiance,r.unbiased_contribution_weight),0.0);
+  output[0]=vec4(shade_gi_connection(p,n,RAY_T_MIN,r.sample_point_world_position,r.radiance,r.unbiased_contribution_weight),0.0);
   r.confidence_weight=min(r.confidence_weight,8.0);
   // The selected endpoint has already survived several frames. Spatial
   // reuse must preserve its age rather than making it fresh again.
   r.sample_age = 7.0;
   r=merge_reservoirs(r,p,n,vec3(1.0),r,p,n,vec3(1.0),&rng).merged_reservoir;
  }
- output[0]=vec4(shade_gi_connection(p,n,r.sample_point_world_position,r.radiance,r.unbiased_contribution_weight),0.0);
+ output[0]=vec4(shade_gi_connection(p,n,RAY_T_MIN,r.sample_point_world_position,r.radiance,r.unbiased_contribution_weight),0.0);
  output[1]=vec4(r.radiance,0.0);
  output[2]=vec4(r.unbiased_contribution_weight,r.sample_age,0.0,0.0);
  // A bright endpoint must die within the production frame bound, even if

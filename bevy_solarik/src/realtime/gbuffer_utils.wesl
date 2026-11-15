@@ -4,6 +4,7 @@ import bevy_render::utils::octahedral_decode;
 import bevy_render::view::View;
 import bevy_render::view::depth_ndc_to_view_z;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
+import bevy_solarik::scene::raytracing_scene_bindings::surface_ray_epsilon;
 
 
 
@@ -81,6 +82,26 @@ fn pixel_geometric_normal(pixel_id: vec2<u32>, depth: f32, shading_normal: vec3<
     }
     let unit = normal / sqrt(length_squared);
     return select(-unit, unit, dot(unit, shading_normal) >= 0.0);
+}
+
+@if((RASTER_SUBPIXEL_BITS))
+const RASTER_SUBPIXEL_STEP: f32 = 1.0 / f32(1u << constants::RASTER_SUBPIXEL_BITS);
+// Vulkan's guaranteed minimum, used by tools without adapter specialization.
+@if((!(RASTER_SUBPIXEL_BITS)))
+const RASTER_SUBPIXEL_STEP: f32 = 1.0 / 16.0;
+
+// How far a ray leaving this pixel's surface starts off it
+// (surface_ray_epsilon): the raster's snapping counted as ReSTIR DI counts
+// it, none for the surfaces whose depth is an analytic intersection's, the
+// finite canopy's and the Gaussians' (`gbuffer_a`'s flags 0x28000000).
+// (SOLARIK_SHADER_DEFS=RAY_OFFSET_FIXED the old millimetre)
+fn pixel_ray_offset(gbuffer_a: u32, pixel_id: vec2u, depth: f32, position: vec3f, normal: vec3f,
+    camera_position: vec3f, view_size: vec2f, world_from_clip: mat4x4f) -> f32 {
+    var raster_error = 0.0;
+    if (gbuffer_a & 0x28000000u) == 0u {
+        raster_error = raster_reconstruction_error(pixel_id, depth, normal, view_size, world_from_clip, RASTER_SUBPIXEL_STEP);
+    }
+    return surface_ray_epsilon(position, camera_position, raster_error);
 }
 
 // Rasterized vertices have quantized framebuffer XY. Interpolating their depth

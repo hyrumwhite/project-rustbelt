@@ -5,7 +5,7 @@ As of 4 November 2026. Gathered from ROADMAP.md (the "Indoor flicker" passes and
 ## Where it stands
 
 - **Fixed, or acceptable in play:** a10's corridors and Jefferies tubes, b30's Shaft A passage, the a10 fly-in cabin, the receding hull, the first-person weapon while walking, and the a30 drop pod. Outdoors was called "fantastic, great image stability" on 20 October.
-- **Still open:** dim rooms lit by many small, weak emitters. These are b40's elevator shafts, its light strips and the canyon wall seen from a Banshee (3 November), and c20's dark Library halls (4 November, deferred). They fit the same pattern as the c10 floor lights (25 October). Bounce light through a small opening (d40's fire through a doorway, 13 November) is a quarter steadier since 14 November and still visible.
+- **Still open:** dim rooms lit by many small, weak emitters. These are b40's elevator shafts, its light strips and the canyon wall seen from a Banshee (3 November), and c20's dark Library halls (4 November, deferred). They fit the same pattern as the c10 floor lights (25 October). Bounce light through a small opening (d40's fire through a doorway, 13 November) is about two thirds steadier after two steps on 14 November (see the table) and awaits the play.
 - **The common cause of what's left:** Solarik picks lights by power across the whole level. A weak light (a strip of power 10 beside fluorescents of 80, or one of hundreds of emissive meshes) gets few samples. Its surroundings are then lit by whichever pixels happened to draw it, and the denoiser keeps the blotches. Each fix below either gives weak lights more samples near where they shine, keeps more history, or removes a light that stole samples.
 
 ## Why dim lights boil
@@ -34,6 +34,8 @@ As of 4 November 2026. Gathered from ROADMAP.md (the "Indoor flicker" passes and
 | 28 Oct | ReSTIR DI weighs lights with an albedo floor of 4% | Black surfaces pick lights, so they keep their highlights |
 | 2 Nov | ReSTIR temporal reuse accepts a previous pixel in either frame's view (`temporal_pixel_dissimilar`) | First-person rifle black pixels while walking 32%→9% |
 | 14 Nov | **ReSTIR GI's first rays partly aimed at the sample the pixel already holds** (`GI_GUIDE`; `SOLARIK_GI_GUIDE=0` is the old). The share is half where the bounce light comes through a small opening and none where it comes from everywhere | d40, a fire's light through a doorway: std over time 0.94→0.71 of 255 (means of 7 and 12 runs), the worst wall blocks from 1.6 to 2.5 down to 0.8 to 1.4, brightness kept. +0.05 to 0.1 ms in the diffuse GI pass. The harness's spots unchanged |
+| 14 Nov | **Neighbours' histories guide ReSTIR GI's first rays too** (`GI_GUIDE_NEIGHBOURS`, 8; `SOLARIK_GI_GUIDE_NEIGHBOURS=0` is the old). A pixel whose own history holds no sample of the opening is aimed at one a nearby pixel holds. Nothing is merged, so brightness is unchanged | d40, the same doorway: the deviation of the wall over time in 32-pixel blocks 0.56 to 0.91 of 255 without and 0.22 to 0.49 with, over six runs a side in game at a mean of 36 (0.57 to 0.17 in linear captures in the viewer), the wall as bright. +0.23 ms in the diffuse GI pass there |
+| 14 Nov | Ray offsets grow with distance from the origin (`ray_epsilon`; `SOLARIK_SHADER_DEFS=RAY_OFFSET_FIXED` is the old millimetre) | The Maw's intro: the Autumn's hull and the ground under it, 2 to 4 km out, no longer go dark in patches that change each frame (frame-to-frame change on the ship 0.76 to 0.33). Not a sampling fix: rays were hitting their own surface |
 
 ### Light-level tuning that changed the balance
 
@@ -73,17 +75,20 @@ These weren't boiling fixes. They do change which lights win samples:
 - **In the bridged game:** `HALO_SIM_TELEPORT` puts the player at the capture's spot. The a50 hangar recipe is in `game_boil.sh`. The game sets `dynamic_scene`, so cache-reset theories don't apply there.
 - **The harness hides the stats text.** The viewer starts with the saved options (`%APPDATA%\halo_rt\settings.txt`). With the stats text on, the pass-time table's digits change every frame inside `noise.py`'s rows and read as 2 to 12% more noise. `run.sh`, `flash.sh` and `views.sh` set `HALO_RT_STATS=0`, which overrides the saved option for that run only. The other saved values still apply, so a table is only as default as that file.
 - **For a light the viewer lacks** (a flame, a carried weapon), take a still series in the game: teleport the player, face the light so the game keeps it lit, detach the camera to the view, and capture every 18 frames (scratchpad `firec.sh`, the d40 fire spot). The measure is each pixel's standard deviation over time. One build read 0.66 to 0.79 from run to run, so compare several runs a side.
+- **Check a steadier variant's brightness against the path tracer, in linear light.** `--pathtracer` gives the reference (it accumulates while the camera is still). `HALO_RT_TONEMAP=none` with `HALO_RT_EXPOSURE=<EV100>` makes captures linear (raise the EV until nothing clips), and a region's mean can then be compared. Tone-mapped means hide a lost bounce: the curve compresses, and fireflies clip. Two variants at the d40 doorway were steady only because the bounce was gone (NRC, and history stored before the spatial merge).
+- **Use long series where runs disagree.** At the doorway 17 captures gave 0.45 to 0.57 for one build; 65 captures gave 0.57 and 0.58.
 - **Pitfalls:**
   - The viewer has no player, so it misses player-carried lights (the plasma pistol case).
   - Look-input turns swamp noise metrics.
   - Captures made right after a shader change may still be compiling.
+  - Flicker that depends on where in the level it is (bad kilometres from the origin, fine near it) is float precision, not history or sampling.
 
 ## Open reports and likely next steps
 
 - **b40 (3 November):** boiling in the elevator shafts, on the light strips, and on the canyon wall from a Banshee.
 - **c20 (4 November):** the dark Library halls, where the holograms and door cards are now the only light.
 - **c10 (25 October):** floor lights and other lights. The door lights were dimmed then, but no separate boiling fix is recorded.
-- **d40 (13 November):** a fire's light bouncing through a doorway onto a room's wall. `GI_GUIDE` took a quarter off it (see the table); it is still visible. More would need a different estimator for small openings, not a setting of this one.
+- **d40 (13 November):** a fire's light bouncing through a doorway onto a room's wall. `GI_GUIDE` took a quarter off it and `GI_GUIDE_NEIGHBOURS` about 60% of the rest (see the table). Awaiting the user's play. What is left is near the floor set by the flame's flicker and the direct light's grain.
 - **Candidates for next time:**
   - Check with `VISUALIZE_CELL_LIGHTS` whether these rooms' cells find their strips at all.
   - Check with `SOLARIK_LIGHT_FLUX_LOG` what share the strips get.

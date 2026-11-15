@@ -26,6 +26,10 @@ fn diagnostic_views_compose() {
         ShaderDefVal::UInt("GI_GUIDE_SHARE".into(), 50),
         ShaderDefVal::UInt("GI_GUIDE_CONE".into(), 10),
         ShaderDefVal::UInt("GI_GUIDE_WIDE".into(), 100),
+        ShaderDefVal::UInt("GI_SPATIAL_RADIUS".into(), 30),
+        ShaderDefVal::UInt("GI_SPATIAL_COUNT".into(), 1),
+        ShaderDefVal::UInt("GI_GUIDE_NEIGHBOURS".into(), 8),
+        ShaderDefVal::UInt("GI_GUIDE_RADIUS".into(), 30),
         "BINDLESS_SURFACE_DETAIL".into(),
         "DI_CELL_LIGHTS".into(),
         "DI_SLOT_VISIBILITY_PRIOR".into(),
@@ -47,6 +51,10 @@ fn diagnostic_views_compose() {
         "VISUALIZE_CELL_KEY_PROBE",
         "VISUALIZE_NORMAL_KEY",
         "VISUALIZE_GI_GUIDE",
+        // (the views leaving out a part of the picture)
+        "VIEW_NO_DI",
+        "VIEW_NO_DIFFUSE_GI",
+        "VIEW_NO_SPECULAR_GI",
     ];
     for geometric in [false, true] {
         for unjittered in [false, true] {

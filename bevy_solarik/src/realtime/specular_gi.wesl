@@ -23,6 +23,7 @@ import bevy_solarik::scene::brdf::sample_glossy_lobes;
 import bevy_solarik::realtime::surface_path::shade_surface_scattering_vertices;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::ResolvedGPixel;
+import bevy_solarik::realtime::gbuffer_utils::pixel_ray_offset;
 @if((CELL_LOOKUP_GEOMETRIC)) import bevy_solarik::realtime::gbuffer_utils::pixel_geometric_normal;
 import bevy_solarik::scene::sampling::analytic_light_radiance;
 import bevy_solarik::scene::ray_fog::ray_fog_active;
@@ -51,6 +52,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
 import bevy_solarik::scene::raytracing_scene_bindings::sample_sky;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedRayHitFull;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
+import bevy_solarik::scene::raytracing_scene_bindings::ray_epsilon;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
 import bevy_solarik::realtime::world_cache_query::query_world_cache;
@@ -137,7 +139,8 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if depth == 0.0 {
         return;
     }
-    let surface = gpixel_resolve(textureLoad(gbuffer, global_id.xy, 0), depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
+    let gpixel = textureLoad(gbuffer, global_id.xy, 0);
+    let surface = gpixel_resolve(gpixel, depth, global_id.xy, view.main_pass_viewport.zw, view.world_from_clip);
 // With NRC's specular query the pass runs in two stages: this one
 // (NRC_SPECULAR) before QueryAndTrain for the surfaces that trace a glossy
 // path, and NRC_SPECULAR_REUSE at the usual place, after the GI's spatial
@@ -154,11 +157,13 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let wo_unnormalized = view.world_position - surface.world_position;
     let wo_length = length(wo_unnormalized);
     let wo = wo_unnormalized / wo_length;
+    let ray_offset = pixel_ray_offset(gpixel.a, global_id.xy, depth, surface.world_position, surface.world_normal,
+        view.world_position, view.main_pass_viewport.zw, view.world_from_clip);
 
 @if(NRC_SPECULAR) {
     nrc_specular_slot_open = true;
 }
-    let lobe = glossy_lobe(global_id.xy, pixel_index, surface, wo, wo_length, &rng);
+    let lobe = glossy_lobe(global_id.xy, pixel_index, surface, ray_offset, wo, wo_length, &rng);
     var radiance = lobe.radiance * evaluate_base_specular_brdf(wo, lobe.wi, surface.world_normal, surface.material);
 @if(NRC_SPECULAR) {
     nrc_specular_slot_open = false;
@@ -176,7 +181,7 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
         coat_surface.material.roughness = clearcoat_roughness(surface.material);
         coat_surface.material.metallic = 0.0;
         coat_surface.material.clearcoat = 0.0;
-        let coat = glossy_lobe(global_id.xy, pixel_index, coat_surface, wo, wo_length, &rng);
+        let coat = glossy_lobe(global_id.xy, pixel_index, coat_surface, ray_offset, wo, wo_length, &rng);
         radiance += coat.radiance * evaluate_clearcoat_brdf(wo, coat.wi, surface.world_normal, surface.material);
     }
     radiance *= view.exposure;
@@ -195,9 +200,15 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(GI_GUIDE && VISUALIZE_GI_GUIDE) {
     return;
 }
+// (SOLARIK_SHADER_DEFS=VIEW_NO_SPECULAR_GI, a diagnostic: the specular GI
+// left out of the view, NRC's specular query as written, to split a picture
+// into its parts with VIEW_NO_DI and VIEW_NO_DIFFUSE_GI; restir_gi leaves
+// out NRC's specular answer with it)
+@if(!(VIEW_NO_SPECULAR_GI)) {
     var pixel_color = textureLoad(view_output, global_id.xy);
     pixel_color += vec4(radiance, 0.0);
     textureStore(view_output, global_id.xy, pixel_color);
+}
 
 // (SOLARIK_SHADER_DEFS=VISUALIZE_CELL_KEY_PROBE: where the cell for this
 // pixel's surface is keyed. Green: found at the surface's own normal key
@@ -251,7 +262,7 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var debug_colour = vec3(1.0, 0.0, 1.0);
     if debug_cell >= 0 {
         let cell_position = world_cache_geometry_data[debug_cell].world_position;
-        let seen = trace_point_visibility(surface.world_position + surface.world_normal * RAY_T_MIN, cell_position + world_cache_geometry_data[debug_cell].world_normal * RAY_T_MIN);
+        let seen = trace_point_visibility(surface.world_position + surface.world_normal * ray_offset, cell_position + world_cache_geometry_data[debug_cell].world_normal * ray_epsilon(cell_position));
         debug_colour = vec3(1.0 - seen, seen, 0.0);
     }
     textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
@@ -307,15 +318,16 @@ struct GlossyLobe {
     wi: vec3<f32>,
 }
 
-// One sample of a glossy lobe of `surface.material.roughness`.
-fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, wo: vec3<f32>, wo_length: f32, rng: ptr<function, u32>) -> GlossyLobe {
+// One sample of a glossy lobe of `surface.material.roughness`. (`ray_offset`:
+// how far its rays leave the pixel's surface, pixel_ray_offset)
+fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, ray_offset: f32, wo: vec3<f32>, wo_length: f32, rng: ptr<function, u32>) -> GlossyLobe {
     var radiance: vec3<f32>;
     var wi: vec3<f32>;
     if surface.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
         // Surface is very rough, reuse the ReSTIR GI reservoir
         let gi_reservoir = gi_reservoirs_a[pixel_index];
         wi = normalize(gi_reservoir.sample_point_world_position - surface.world_position);
-        radiance = shade_gi_connection(surface.world_position, surface.world_normal,
+        radiance = shade_gi_connection(surface.world_position, surface.world_normal, ray_offset,
             gi_reservoir.sample_point_world_position, gi_reservoir.radiance, gi_reservoir.unbiased_contribution_weight);
     } else {
         // Surface is glossy or mirror-like, trace a new path
@@ -332,7 +344,7 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, w
             wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
             let pdf = ggx_vndf_pdf(wo_tangent, wi_tangent, surface.material.roughness);
 
-            radiance = trace_glossy_path(pixel_id, surface, wo_length, wi, pdf, false, rng);
+            radiance = trace_glossy_path(pixel_id, surface, ray_offset, wo_length, wi, pdf, false, rng);
             if surface.material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
                 radiance /= pdf;
 @if(NRC_SPECULAR) {
@@ -353,9 +365,11 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, w
 // was found): the first opaque surface it meets that is not a mirror ends it
 // in the world cache, its emission and its base colour times the cache's
 // irradiance; further panes, leaves and mirrors are followed as any path's)
-fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, pane_reflection: bool, rng: ptr<function, u32>) -> vec3<f32> {
+// (`initial_ray_offset`: how far the first ray leaves `primary_surface`, a
+// pixel's pixel_ray_offset, a pane's hit's ray_epsilon)
+fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_offset: f32, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, pane_reflection: bool, rng: ptr<function, u32>) -> vec3<f32> {
     var first_hit = vec4(0.0);
-    let radiance = trace_unfogged_glossy_path(pixel_id, primary_surface, initial_ray_t, initial_wi, initial_p_bounce, pane_reflection, rng, &first_hit);
+    let radiance = trace_unfogged_glossy_path(pixel_id, primary_surface, initial_ray_offset, initial_ray_t, initial_wi, initial_p_bounce, pane_reflection, rng, &first_hit);
     if first_hit.w <= 0.0 || !ray_fog_active() { return radiance; }
     let forward = -normalize(view.world_from_view[2].xyz);
     let surface_depth = dot(primary_surface.world_position - view.world_position, forward);
@@ -374,12 +388,12 @@ fn trace_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initi
 
 // (`first_hit`: where the first ray met a surface, and how far it went; w 0
 // for none)
-fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, pane_reflection: bool, rng: ptr<function, u32>, first_hit: ptr<function, vec4<f32>>) -> vec3<f32> {
+fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPixel, initial_ray_offset: f32, initial_ray_t: f32, initial_wi: vec3<f32>, initial_p_bounce: f32, pane_reflection: bool, rng: ptr<function, u32>, first_hit: ptr<function, vec4<f32>>) -> vec3<f32> {
     var first_ray = true;
     var radiance = vec3(0.0);
     var throughput = vec3(1.0);
 
-    var ray_origin = primary_surface.world_position + (primary_surface.world_normal * RAY_T_MIN);
+    var ray_origin = primary_surface.world_position + (primary_surface.world_normal * initial_ray_offset);
     var wi = initial_wi;
     var p_bounce = initial_p_bounce;
     var previous_scatter_position = primary_surface.world_position;
@@ -445,7 +459,7 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
             first_ray = true;
             *first_hit = vec4(0.0);
             ray_origin = offset_thin_glass_ray(ray_hit.world_position,
-                ray_hit.geometric_world_normal, wi, RAY_T_MIN);
+                ray_hit.geometric_world_normal, wi, ray_epsilon(ray_hit.world_position));
             continue;
         }
         if (material.flags & MATERIAL_FLAG_DIFFUSE_BLEND) != 0u {
@@ -458,7 +472,7 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
                 glass_interactions += 1u;
                 p_bounce *= 1.0 - alpha;
                 ray_origin = offset_thin_glass_ray(ray_hit.world_position,
-                    ray_hit.geometric_world_normal, wi, RAY_T_MIN);
+                    ray_hit.geometric_world_normal, wi, ray_epsilon(ray_hit.world_position));
                 continue;
             }
         }
@@ -481,7 +495,7 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
 }
             wi = next.wi;
             ray_origin = offset_thin_glass_ray(ray_hit.world_position,
-                ray_hit.geometric_world_normal, wi, RAY_T_MIN);
+                ray_hit.geometric_world_normal, wi, ray_epsilon(ray_hit.world_position));
             // Straight transmission keeps the preceding NEE competition; a
             // delta reflection bends away from it and owns subsequent emission.
             delta_reflection = delta_reflection || next.reflected;
@@ -613,7 +627,7 @@ fn trace_unfogged_glossy_path(pixel_id: vec2<u32>, primary_surface: ResolvedGPix
         let wi_tangent = glossy.xyz;
         if ggx_vndf_sample_invalid(wi_tangent) { break; }
         wi = wi_tangent.x * T + wi_tangent.y * B + wi_tangent.z * N;
-        ray_origin = ray_hit.world_position + (ray_hit.geometric_world_normal * RAY_T_MIN);
+        ray_origin = ray_hit.world_position + (ray_hit.geometric_world_normal * ray_epsilon(ray_hit.world_position));
 
         // Update throughput for next bounce
         p_bounce = glossy.w;

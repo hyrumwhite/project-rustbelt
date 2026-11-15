@@ -386,6 +386,46 @@ fn offset_surface_ray(position: vec3<f32>, normal: vec3<f32>, camera_position: v
 // RAY_T_MAX retains the historical default for external shader compatibility.
 fn ray_max_distance() -> f32 { return sky_light.ray_max_distance; }
 
+// How far the realtime passes' rays leave a surface and stop short of one: a
+// fixed millimetre is inside f32's error a few kilometres from the origin (an
+// ulp is a quarter of a millimetre at 4000 m, and a position comes from
+// products of several), where rays met their own surfaces and whole regions
+// of a ship 2 km away and the terrain under it went dark, changing frame to
+// frame (14 November 2026). RAY_OFFSET_SCALE of the position's magnitude,
+// never under RAY_T_MIN (exactly RAY_T_MIN within 1048 m of the origin at
+// the default 2^-20), for a position known to f32's precision: a ray's hit,
+// a light's point, a cache cell.
+// (SOLARIK_SHADER_DEFS=RAY_OFFSET_FIXED the old millimetre, here and in
+// surface_ray_epsilon; offset_surface_ray, ReSTIR DI's, is not switched)
+fn ray_epsilon(position: vec3<f32>) -> f32 {
+    var epsilon = max(RAY_T_MIN, max(max(abs(position.x), abs(position.y)), abs(position.z)) * RAY_OFFSET_SCALE);
+@if(RAY_OFFSET_FIXED) {
+    epsilon = RAY_T_MIN;
+}
+    return epsilon;
+}
+
+// ray_epsilon for a position reconstructed from the G-buffer's depth:
+// offset_surface_ray's distance (the camera's distance counted too, and the
+// raster's snapping, `raster_error`, gbuffer_utils' pixel_ray_offset), at
+// RAY_OFFSET_SCALE.
+fn surface_ray_epsilon(position: vec3<f32>, camera_position: vec3<f32>, raster_error: f32) -> f32 {
+    let magnitude = max(max(abs(position.x), abs(position.y)), abs(position.z));
+    let reconstruction_scale = max(magnitude, distance(position, camera_position));
+    var epsilon = max(RAY_T_MIN, reconstruction_scale * RAY_OFFSET_SCALE + raster_error);
+@if(RAY_OFFSET_FIXED) {
+    epsilon = RAY_T_MIN;
+}
+    return epsilon;
+}
+
+// (in units of 2^-24 from the environment, SOLARIK_RAY_OFFSET_SCALE, 16 by
+// default; 2^-20 where a pipeline passes none, the path tracer's)
+@if((RAY_OFFSET_SCALE))
+const RAY_OFFSET_SCALE: f32 = f32(constants::RAY_OFFSET_SCALE) / 16777216.0;
+@if((!(RAY_OFFSET_SCALE)))
+const RAY_OFFSET_SCALE: f32 = 0.00000095367431640625;
+
 // (every instance but those only reflections see, RAY_MASK_REFLECTED: no
 // other instance carries that bit alone, so for every other one this is the
 // 0xFF it was)

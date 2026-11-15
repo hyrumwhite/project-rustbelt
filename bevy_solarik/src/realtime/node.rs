@@ -1225,6 +1225,23 @@ pub fn init_solari_lighting_pipelines(
             ("GI_GUIDE_SHARE", "SOLARIK_GI_GUIDE_SHARE", 50),
             ("GI_GUIDE_CONE", "SOLARIK_GI_GUIDE_CONE", 10),
             ("GI_GUIDE_WIDE", "SOLARIK_GI_GUIDE_WIDE", 100),
+            // (in units of 2^-24, the share of a position's magnitude by
+            // which the rays leave a surface and stop short of one, never
+            // under the millimetre: raytracing_scene_bindings.wesl's
+            // ray_epsilon; SOLARIK_SHADER_DEFS=RAY_OFFSET_FIXED the old
+            // millimetre everywhere)
+            ("RAY_OFFSET_SCALE", "SOLARIK_RAY_OFFSET_SCALE", 16),
+            // (the radius in pixels of ReSTIR GI's spatial reuse, the disk
+            // its spatial pass draws a neighbour from; tuning.wesl. DI's
+            // radius is its own constant)
+            ("GI_SPATIAL_RADIUS", "SOLARIK_GI_SPATIAL_RADIUS", 30),
+            // (the spatial neighbours ReSTIR GI merges a pixel, in sequence,
+            // at most 16; tuning.wesl)
+            ("GI_SPATIAL_COUNT", "SOLARIK_GI_SPATIAL_COUNT", 1),
+            // (the radius in pixels of the pixel's reprojected place within
+            // which ReSTIR GI's guide takes its neighbours,
+            // GI_GUIDE_NEIGHBOURS below; tuning.wesl)
+            ("GI_GUIDE_RADIUS", "SOLARIK_GI_GUIDE_RADIUS", 30),
         ] {
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).filter(|&v: &u32| v > 0).unwrap_or(default);
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));
@@ -1241,6 +1258,12 @@ pub fn init_solari_lighting_pipelines(
             // the clamp, leave a cell 4 samples at the fewest)
             ("CACHE_DROP_THRESHOLD", "SOLARIK_CACHE_DROP_THRESHOLD", 60u32),
             ("CACHE_DROP_FLOOR", "SOLARIK_CACHE_DROP_FLOOR", 4u32),
+            // (ReSTIR GI's guide offered by up to this many neighbours'
+            // histories where the pixel's own gives none, at most 16 in the
+            // shader; 8 since 14 November, about 60% off the boiling of
+            // d40's doorway wall for about 0.23 ms;
+            // SOLARIK_GI_GUIDE_NEIGHBOURS=0 none, the old; tuning.wesl)
+            ("GI_GUIDE_NEIGHBOURS", "SOLARIK_GI_GUIDE_NEIGHBOURS", 8u32),
         ] {
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default);
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));

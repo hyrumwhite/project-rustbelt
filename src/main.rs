@@ -42,7 +42,10 @@ use argh::FromArgs;
 use bevy::{
     camera::{CameraMainTextureUsages, Exposure},
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin},
-    core_pipeline::Skybox,
+    core_pipeline::{
+        tonemapping::{DebandDither, Tonemapping},
+        Skybox,
+    },
     diagnostic::{Diagnostic, DiagnosticPath, DiagnosticsStore},
     light::EnvironmentMapLight,
     prelude::*,
@@ -452,7 +455,14 @@ fn main() -> AppExit {
     app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin, reveal::RevealPlugin, cpu_times::BufferFloodPlugin, rt_skinning::RtSkinningPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))
-        .insert_resource(saved.as_ref().map_or_else(LightingSettings::default, |s| s.lighting.clone()))
+        .insert_resource({
+            let mut lighting = saved.as_ref().map_or_else(LightingSettings::default, |s| s.lighting.clone());
+            // (HALO_RT_EXPOSURE: this run's exposure, not saved)
+            if let Some(ev100) = options::exposure_override() {
+                lighting.exposure_ev100 = ev100;
+            }
+            lighting
+        })
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
         .add_systems(Update, (start_camera, sync_sky_light))
@@ -1090,6 +1100,22 @@ fn setup_camera(
         camera.insert(Dlss::<DlssRayReconstructionFeature>::default());
     }
 
+    // (`HALO_RT_TONEMAP=none`, for measuring: no tone mapping, so a
+    // capture's values are the exposed linear light, clipped at 1 and
+    // sRGB-encoded by the window's surface, comparable between the realtime
+    // view and the path tracer's; Bevy's tonemapping pass then does nothing
+    // and the HDR picture goes on to the passes after it. Its dithering is
+    // done in that pass, so it goes too. The fog and the screen effects,
+    // drawn after it in the display's encoding, then blend over linear
+    // values.)
+    if std::env::var("HALO_RT_TONEMAP").is_ok_and(|v| v.trim().eq_ignore_ascii_case("none")) {
+        camera.insert((Tonemapping::None, DebandDither::Disabled));
+        info!("HALO_RT_TONEMAP=none: no tone mapping, the picture linear in light, clipped at 1");
+    }
+    if let Some(ev100) = options::exposure_override() {
+        info!("HALO_RT_EXPOSURE: exposure EV100 {ev100} for this run (the saved {} kept in the options file)",
+            options::SavedSettings::load().map_or_else(|| "default".to_string(), |s| s.lighting.exposure_ev100.to_string()));
+    }
 }
 /// The camera's environment light and skybox for the level's sky.
 fn sky_environment(

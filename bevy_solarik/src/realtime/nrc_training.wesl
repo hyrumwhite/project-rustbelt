@@ -9,7 +9,7 @@ import bevy_solarik::scene::brdf::evaluate_brdf;
 import bevy_solarik::scene::brdf::evaluate_and_sample_brdf;
 import bevy_solarik::scene::brdf::evaluate_brdf_pdf;
 import bevy_solarik::scene::sampling::analytic_light_radiance;
-import bevy_solarik::scene::sampling::sample_random_light_transmitted;
+import bevy_solarik::scene::sampling::sample_random_light_transmitted_offset;
 import bevy_solarik::scene::sampling::random_emissive_light_solid_angle_pdf;
 import bevy_solarik::scene::sampling::power_heuristic;
 import bevy_solarik::scene::sampling::LightSample;
@@ -26,9 +26,11 @@ import bevy_solarik::scene::raytracing_scene_bindings::directional_lights;
 import bevy_solarik::scene::raytracing_scene_bindings::has_sun;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
+import bevy_solarik::scene::raytracing_scene_bindings::ray_epsilon;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
+import bevy_solarik::realtime::gbuffer_utils::pixel_ray_offset;
 import bevy_solarik::realtime::realtime_bindings::gbuffer;
 import bevy_solarik::realtime::realtime_bindings::depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::view;
@@ -158,12 +160,17 @@ fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         nrc_write_training_path_info(path_index, nrc_pack_training_path_info(NrcTrainingPathInfo(state.packed_data, NRC_NO_QUERY)));
         return;
     }
-    let gpixel = gpixel_resolve(textureLoad(gbuffer, pixel, 0), depth, pixel, view.main_pass_viewport.zw, view.world_from_clip);
+    let gbuffer_texel = textureLoad(gbuffer, pixel, 0);
+    let gpixel = gpixel_resolve(gbuffer_texel, depth, pixel, view.main_pass_viewport.zw, view.world_from_clip);
     // The G-buffer has no geometric normal; the shading normal stands in for
     // it, as restir_gi.wesl's sample rays do.
     var surface = TrainingSurface(gpixel.world_position, gpixel.world_normal, gpixel.world_normal, gpixel.material);
     var wo = normalize(view.world_position - surface.world_position);
     var hit_distance = distance(view.world_position, surface.world_position);
+    // (how far the vertex's rays leave its surface: the pixel's
+    // pixel_ray_offset, then each hit's ray_epsilon)
+    var ray_offset = pixel_ray_offset(gbuffer_texel.a, pixel, depth, gpixel.world_position, gpixel.world_normal,
+        view.world_position, view.main_pass_viewport.zw, view.world_from_clip);
 
     // NVIDIA's segment accumulators: reset when a vertex is recorded, so they
     // hold what the path gathered since the last recorded vertex. Radiance is
@@ -269,7 +276,7 @@ fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
                         // (each sample from a tile of its own, as sample_di)
                         // (pad2 tile candidates, SOLARIK_NRC_TILE_CANDIDATES: the
                         // update's 128 cost the training pass 1.5 ms a frame)
-                        let light = sample_light_ris(surface.world_position, surface.world_normal,
+                        let light = sample_light_ris(surface.world_position, surface.world_normal, ray_offset,
                             workgroup_id.xy + vec2(0u, s * 7919u), slots, slot_probabilities, max(nrc_constants.pad2, 1u), &rng);
                         if any(light.radiance > vec3(0.0)) {
                             direct += light.radiance * evaluate_brdf(wo, light.wi, surface.world_normal, surface.material);
@@ -285,7 +292,7 @@ fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
                         let sun = calculate_resolved_light_contribution(resolved, surface.world_position, surface.world_normal);
                         let sun_radiance = sun.radiance * sun.inverse_pdf;
                         if any(sun_radiance > vec3(0.0)) && dot(sun.wi, surface.world_normal) > 0.0 {
-                            let shadow = trace_light_transmission_with_support(surface.world_position + (surface.world_normal * RAY_T_MIN), resolved.world_position);
+                            let shadow = trace_light_transmission_with_support(surface.world_position + (surface.world_normal * ray_offset), resolved.world_position);
                             radiance += sun_radiance * shadow.energy.rgb
                                 * evaluate_brdf(wo, sun.wi, surface.world_normal, surface.material);
                         }
@@ -299,8 +306,8 @@ fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
                     // stays unbiased and the emission weight below is
                     // unchanged.
                     for (var s = 0u; s < light_samples; s++) {
-                        let shadow = sample_random_light_transmitted(surface.world_position,
-                            surface.world_normal, surface.geometric_world_normal, &rng);
+                        let shadow = sample_random_light_transmitted_offset(surface.world_position,
+                            surface.world_normal, surface.geometric_world_normal, ray_offset, &rng);
                         let light = shadow.light;
                         var weight = 1.0;
                         if light.brdf_rays_can_hit {
@@ -326,7 +333,7 @@ fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         state.brdf_pdf = next.pdf;
 
         let wi = next.wi;
-        let origin = offset_thin_glass_ray(surface.world_position, surface.geometric_world_normal, wi, RAY_T_MIN);
+        let origin = offset_thin_glass_ray(surface.world_position, surface.geometric_world_normal, wi, ray_offset);
         let ray = trace_ray(origin, wi, RAY_T_MIN, ray_max_distance(), RAY_FLAG_NONE);
         // Point and spot lights are spheres no ray hits; NEE samples them,
         // except behind a mirror, where only this ray can find them
@@ -358,6 +365,7 @@ fn nrc_train(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(global_inv
         radiance += throughput * emitted_radiance(candidate.material, -wi) * emission_weight;
 
         surface = TrainingSurface(candidate.world_position, candidate.world_normal, candidate.geometric_world_normal, candidate.material);
+        ray_offset = ray_epsilon(candidate.world_position);
         wo = -wi;
         hit_distance = ray.t;
     }

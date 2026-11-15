@@ -27,6 +27,7 @@ import bevy_solarik::scene::raytracing_scene_bindings::resolve_material_alpha;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_ALPHA_BLEND;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_DIFFUSE_BLEND;
 import bevy_solarik::scene::raytracing_scene_bindings::RAY_T_MIN;
+import bevy_solarik::scene::raytracing_scene_bindings::ray_epsilon;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
 import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
 import bevy_solarik::scene::thin_glass::thin_glass_weights;
@@ -102,7 +103,7 @@ fn shade_surface_scattering_vertices(initial: ResolvedRayHitFull, initial_wo: ve
         var wi = next.wi;
         var path_pdf = next.pdf;
         var delta = mirror;
-        var origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, wi, RAY_T_MIN);
+        var origin = offset_thin_glass_ray(hit.world_position, hit.geometric_world_normal, wi, ray_epsilon(hit.world_position));
         for (var panes = 0u; panes <= 32u; panes += 1u) {
             let ray = trace_glass_ray(origin, wi, RAY_T_MIN, ray_max_distance());
             radiance += throughput * analytic_light_radiance(origin, wi,
@@ -124,7 +125,7 @@ fn shade_surface_scattering_vertices(initial: ResolvedRayHitFull, initial_wo: ve
             let alpha = clamp(scene_hit_alpha(ray, candidate.uv), 0.0, 1.0);
             if coverage && rand_f(rng) >= alpha {
                 path_pdf *= 1.0 - alpha;
-                origin = offset_thin_glass_ray(candidate.world_position, candidate.geometric_world_normal, wi, RAY_T_MIN);
+                origin = offset_thin_glass_ray(candidate.world_position, candidate.geometric_world_normal, wi, ray_epsilon(candidate.world_position));
                 continue;
             }
             var emission_weight = 1.0;
@@ -147,7 +148,7 @@ fn shade_surface_scattering_vertices(initial: ResolvedRayHitFull, initial_wo: ve
                 if branch.reflected { cone = scatter_ray_cone(cone, candidate.normal_spread, 0.0); }
 }
                 wi = branch.wi;
-                origin = offset_thin_glass_ray(candidate.world_position, candidate.geometric_world_normal, wi, RAY_T_MIN);
+                origin = offset_thin_glass_ray(candidate.world_position, candidate.geometric_world_normal, wi, ray_epsilon(candidate.world_position));
                 continue;
             }
             hit = candidate;

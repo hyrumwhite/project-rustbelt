@@ -3198,8 +3198,11 @@ unsigned char *bevy_bridge_overlay_begin(unsigned long width, unsigned long heig
 void bevy_bridge_overlay_commit(void);
 /* (the overlay shared with nothing drawn into it this frame: no pixels) */
 void bevy_bridge_overlay_mark_empty(void);
+/* (the last committed overlay's pixels if drawn and of that size, else NULL) */
+unsigned char const *bevy_bridge_overlay_last(unsigned long width, unsigned long height);
 unsigned char bevy_bridge_overlay_viewer(unsigned long *looked, unsigned long *interval);
 unsigned char bevy_bridge_frame_timing_hold(unsigned long *map_loads);
+unsigned long bevy_bridge_frame_trace(unsigned long *tick, float *fraction);
 /* source/game/game_time.c (for the frame timing line's tick) */
 unsigned char game_time_initialized(void);
 long game_time_get(void);
@@ -5102,10 +5105,14 @@ static unsigned long overlay_microseconds(void)
 	return (unsigned long)((counter / frequency) * 1000000 + (counter % frequency) * 1000000 / frequency);
 }
 
+/* when the last overlay was shared (overlay_microseconds) */
+static unsigned long overlay_shared_at;
+
 static void overlay_shared(void)
 {
 	Uint64 took;
 
+	overlay_shared_at = overlay_microseconds();
 	if (!overlay_frame_started)
 		return;
 	took = SDL_GetTicksNS() - overlay_frame_started;
@@ -5117,6 +5124,10 @@ static void overlay_shared(void)
 
 /* whether the last overlay_pace waited (the frame timing's) */
 static BOOL overlay_pace_waited;
+/* the last overlay_pace's numbers (the frame trace's): the viewer's look
+and interval, the lead and the wait, microseconds */
+static unsigned long overlay_pace_looked, overlay_pace_interval, overlay_pace_lead;
+static long overlay_pace_wait;
 
 /* after a present: waits for the next frame's start */
 static void overlay_pace(void)
@@ -5131,10 +5142,14 @@ static void overlay_pace(void)
 	int step;
 
 	overlay_pace_waited = FALSE;
+	overlay_pace_wait = 0;
 	if (bevy_bridge_overlay_viewer(&looked, &interval) && interval <= 100000)
 	{
 		now = overlay_microseconds();
 		lead = (unsigned long)(overlay_frame_time / 1000) + margin;
+		overlay_pace_looked = looked;
+		overlay_pace_interval = interval;
+		overlay_pace_lead = lead;
 		/* (not when the viewer has stopped looking: loading, or gone; nor
 		when a frame takes longer than the viewer's: then frames come as fast
 		as they can, and waiting would leave out every other look) */
@@ -5149,6 +5164,7 @@ static void overlay_pace(void)
 				SDL_DelayPrecise((Uint64)wait * 1000);
 				waited += (Uint64)wait;
 				overlay_pace_waited = TRUE;
+				overlay_pace_wait = wait;
 			}
 		}
 		/* (HALO_BEVY_PACE_LOG: the pacing every 300 frames) */
@@ -5298,6 +5314,48 @@ static void frame_timing_window(Uint64 now)
 	frame_timing.window_started = now;
 }
 
+/* which picture the last overlay_share shared (the frame trace's): 0 this
+frame's, 1 or 2 one that many frames old, 9 the last committed one again, -1
+the empty overlay or one read back at once */
+static int overlay_share_late = -1;
+
+/* HALO_FRAME_TRACE=<path>: a line a frame in that file, at the frame's end
+(microseconds of the performance counter, as the viewer's trace reads it):
+the frame's index, tick and interpolation fraction, when its overlay was
+shared, when its swap began and ended, when its pacing ended (the next
+frame's start), the pacing's numbers, and at the end `late`, which picture
+the overlay shared (overlay_share_late: 0 this frame's, 1 or 2 one that many
+frames old, 9 a repeat of the last one shared, -1 empty or read back at
+once) */
+static void frame_trace(Uint64 swap_started, Uint64 swap_ended)
+{
+	static int enabled = -1;
+	static FILE *file;
+	unsigned long index, tick, now;
+	float fraction;
+	Uint64 now_ns;
+
+	if (enabled < 0)
+	{
+		const char *path = getenv("HALO_FRAME_TRACE");
+
+		enabled = path && *path && (file = fopen(path, "w")) != NULL;
+		if (enabled)
+			setvbuf(file, NULL, _IOFBF, 1 << 16);
+	}
+	if (!enabled)
+		return;
+	now = overlay_microseconds();
+	now_ns = SDL_GetTicksNS();
+	index = bevy_bridge_frame_trace(&tick, &fraction);
+	fprintf(file, "G %lu %lu %.4f shared %lu swap %ld %ld end %lu looked %lu interval %lu lead %lu wait %ld late %d\n",
+		index, tick, (double)fraction, overlay_shared_at,
+		swap_started ? (long)((now_ns - swap_started) / 1000) : -1,
+		swap_ended ? (long)((now_ns - swap_ended) / 1000) : -1,
+		now, overlay_pace_looked, overlay_pace_interval, overlay_pace_lead, overlay_pace_wait,
+		overlay_share_late);
+}
+
 /* a frame's end, after the present's swap (begun and ended at the times
 given, 0 with the timing off) and pacing */
 static void frame_timing_frame(Uint64 swap_started, Uint64 swap_ended)
@@ -5342,11 +5400,219 @@ static void frame_timing_frame(Uint64 swap_started, Uint64 swap_ended)
 		frame_timing_window(now);
 }
 
+
+/* The overlay is read back without stalling on the GPU. Read straight into
+the shared memory, glReadPixels waits for everything drawn before it, and
+with the viewer's ray tracing on the same GPU that took 2 ms a frame on
+average at 2560x1440 and stalled 6 to 13 ms on 2 to 4% of frames, each stall
+making the viewer show a game frame twice and then skip one (stutter whenever
+anything is in the overlay). So each frame's picture goes into one of a few
+pixel pack buffers with a fence after it, and by default the frame waits up
+to 4 ms (HALO_BEVY_OVERLAY_WAIT, microseconds, 4000) for its own picture;
+with the realtime GPU priority (sdl_platform.c platform_gpu_priority) it
+comes in under 3 and every frame shares its own. A frame whose read back is
+later than that shares the newest finished older picture, else the picture
+last shared again, and only with nothing to show at all (the first drawn
+frame) does it wait for its own however long. HALO_BEVY_OVERLAY_WAIT=0 never
+waits: always the frame before's, measured, so overlay content such as
+grass trails the world by a game frame. An empty overlay
+frees every buffer, so no older picture comes back after it, and a buffer is
+only ever a source while it is newer than the picture last shared.
+HALO_BEVY_OVERLAY_SYNC=1 the old synchronous read. The GL context is
+made once (platform_video_initialize) and never made again, so the buffers
+live as long as the game. */
+#define OVERLAY_PACK_SLOTS 3
+
+struct overlay_pack_slot
+{
+	GLuint buffer;
+	/* bytes allocated */
+	unsigned long size;
+	/* the picture's size */
+	unsigned long width, height;
+	/* NULL: free */
+	GLsync fence;
+	/* the order the read backs were started in */
+	unsigned long serial;
+};
+
+static struct overlay_pack_slot overlay_pack_slots[OVERLAY_PACK_SLOTS];
+static unsigned long overlay_pack_serial;
+
+static void overlay_pack_free(struct overlay_pack_slot *slot)
+{
+	if (slot->fence)
+	{
+		glDeleteSync(slot->fence);
+		slot->fence = NULL;
+	}
+}
+
+static void overlay_pack_free_all(void)
+{
+	int i;
+
+	for (i = 0; i < OVERLAY_PACK_SLOTS; i++)
+		overlay_pack_free(&overlay_pack_slots[i]);
+}
+
+/* frees the slot started at serial and every one older */
+static void overlay_pack_free_through(unsigned long serial)
+{
+	int i;
+
+	for (i = 0; i < OVERLAY_PACK_SLOTS; i++)
+	{
+		if (overlay_pack_slots[i].fence && overlay_pack_slots[i].serial <= serial)
+			overlay_pack_free(&overlay_pack_slots[i]);
+	}
+}
+
+/* whether the slot's read back is done within the timeout (nanoseconds) */
+static BOOL overlay_pack_done(struct overlay_pack_slot *slot, GLbitfield flags, GLuint64 timeout)
+{
+	GLenum result = glClientWaitSync(slot->fence, flags, timeout);
+
+	return result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED;
+}
+
+/* waits for the slot's read back however long it takes; FALSE on failure */
+static BOOL overlay_pack_wait(struct overlay_pack_slot *slot)
+{
+	GLenum result;
+
+	do
+		result = glClientWaitSync(slot->fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000);
+	while (result == GL_TIMEOUT_EXPIRED);
+	return result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED;
+}
+
+/* copies the slot's picture into pixels (leaves the slot's buffer bound to
+GL_PIXEL_PACK_BUFFER); FALSE if it cannot be mapped */
+static BOOL overlay_pack_copy(struct overlay_pack_slot *slot, unsigned char *pixels)
+{
+	void *mapped;
+
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, slot->buffer);
+	mapped = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)slot->size, GL_MAP_READ_BIT);
+	if (!mapped)
+		return FALSE;
+	memcpy(pixels, mapped, slot->size);
+	return glUnmapBuffer(GL_PIXEL_PACK_BUFFER) == GL_TRUE;
+}
+
+/* the picture in the bound read framebuffer into pixels, which the overlay
+shares, through the slots (the pack state set up: alignment 4, row length
+0; leaves GL_PIXEL_PACK_BUFFER bound to something the caller restores) */
+static void overlay_share_async(unsigned long width, unsigned long height, unsigned char *pixels)
+{
+	static long wait = -1;
+	struct overlay_pack_slot *slot = NULL, *source = NULL, *candidate;
+	unsigned long size = width * height * 4;
+	unsigned char const *last;
+	int i;
+
+	if (wait < 0)
+	{
+		const char *value = getenv("HALO_BEVY_OVERLAY_WAIT");
+
+		wait = value && *value ? atol(value) : 4000;
+		wait = wait < 0 ? 0 : wait > 20000 ? 20000 : wait;
+	}
+	/* a picture of another size is never a source */
+	for (i = 0; i < OVERLAY_PACK_SLOTS; i++)
+	{
+		candidate = &overlay_pack_slots[i];
+		if (candidate->fence && (candidate->width != width || candidate->height != height))
+			overlay_pack_free(candidate);
+	}
+	/* a free slot, else the oldest pending one */
+	for (i = 0; i < OVERLAY_PACK_SLOTS; i++)
+	{
+		candidate = &overlay_pack_slots[i];
+		if (!candidate->fence)
+		{
+			slot = candidate;
+			break;
+		}
+		if (!slot || candidate->serial < slot->serial)
+			slot = candidate;
+	}
+	overlay_pack_free(slot);
+	if (!slot->buffer)
+		glGenBuffers(1, &slot->buffer);
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, slot->buffer);
+	if (slot->size != size)
+	{
+		glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)size, NULL, GL_STREAM_READ);
+		slot->size = size;
+	}
+	/* (row 0 of the render target is the top of the picture, as the
+	overlay's is) */
+	glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, (void *)0);
+	slot->fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+	slot->width = width;
+	slot->height = height;
+	slot->serial = ++overlay_pack_serial;
+	glFlush();
+	if (slot->fence)
+	{
+		/* this frame's, else the newest older one done */
+		if (overlay_pack_done(slot, GL_SYNC_FLUSH_COMMANDS_BIT, (GLuint64)wait * 1000))
+			source = slot;
+		else
+		{
+			for (i = 0; i < OVERLAY_PACK_SLOTS; i++)
+			{
+				candidate = &overlay_pack_slots[i];
+				if (candidate != slot && candidate->fence && (!source || candidate->serial > source->serial) &&
+					overlay_pack_done(candidate, 0, 0))
+				{
+					source = candidate;
+				}
+			}
+		}
+		if (source)
+		{
+			BOOL copied = overlay_pack_copy(source, pixels);
+
+			overlay_pack_free_through(source->serial);
+			if (copied)
+			{
+				overlay_share_late = (int)(slot->serial - source->serial);
+				return;
+			}
+		}
+		/* the picture last shared again */
+		last = bevy_bridge_overlay_last(width, height);
+		if (last)
+		{
+			memcpy(pixels, last, size);
+			overlay_share_late = 9;
+			return;
+		}
+		/* nothing to show: this frame's, however long it takes */
+		if (slot->fence && overlay_pack_wait(slot) && overlay_pack_copy(slot, pixels))
+		{
+			overlay_pack_free_through(slot->serial);
+			overlay_share_late = 0;
+			return;
+		}
+	}
+	/* (no fence or no map: at once, as HALO_BEVY_OVERLAY_SYNC; nothing
+	pending is then newer than what is shared) */
+	overlay_pack_free_all();
+	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+	glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	overlay_share_late = -1;
+}
+
 #endif
 /* the back buffer, which the overlay is, shared with the Bevy renderer */
 static void overlay_share(struct render_target_entry *target)
 {
 #ifndef HALO_ANDROID
+	static int sync = -1;
 	GLint framebuffer, pack_buffer, alignment, row_length;
 	unsigned long width = target->target.gl_width;
 	unsigned long height = target->target.gl_height;
@@ -5355,7 +5621,8 @@ static void overlay_share(struct render_target_entry *target)
 	if (!pixels)
 		return;
 	/* nothing drawn into it: shared empty, not read back
-	(HALO_BEVY_OVERLAY_ALWAYS: read back all the same) */
+	(HALO_BEVY_OVERLAY_ALWAYS: read back all the same), and no picture
+	still being read back is shared after it */
 	{
 		static int always = -1;
 
@@ -5363,12 +5630,20 @@ static void overlay_share(struct render_target_entry *target)
 			always = getenv("HALO_BEVY_OVERLAY_ALWAYS") != NULL;
 		if (!overlay_drawn && !always)
 		{
+			overlay_pack_free_all();
+			overlay_share_late = -1;
 			bevy_bridge_overlay_mark_empty();
 			bevy_bridge_overlay_commit();
 			overlay_shared();
 			return;
 		}
 		overlay_drawn = FALSE;
+	}
+	if (sync < 0)
+	{
+		const char *value = getenv("HALO_BEVY_OVERLAY_SYNC");
+
+		sync = value && atoi(value) != 0;
 	}
 	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
 	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
@@ -5378,9 +5653,15 @@ static void overlay_share(struct render_target_entry *target)
 	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 	glPixelStorei(GL_PACK_ALIGNMENT, 4);
 	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
-	/* (row 0 of the render target is the top of the picture, as the
-	overlay's is) */
-	glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	if (sync)
+	{
+		/* (row 0 of the render target is the top of the picture, as the
+		overlay's is) */
+		glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+		overlay_share_late = -1;
+	}
+	else
+		overlay_share_async(width, height, pixels);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
 	glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
 	glPixelStorei(GL_PACK_ALIGNMENT, alignment);
@@ -5465,6 +5746,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		swap_ended = swap_started ? SDL_GetTicksNS() : 0;
 		if (overlay_enabled())
 			overlay_pace();
+		frame_trace(swap_started, swap_ended);
 		frame_timing_frame(swap_started, swap_ended);
 #endif
 		xgpu_gl_state_invalidate();

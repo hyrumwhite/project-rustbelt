@@ -506,7 +506,7 @@ fn main() -> AppExit {
     // rays' light samples)
     app.add_systems(Update, clusters::mark_seen_lights);
     if std::env::var_os("HALO_RT_GPU_LOG").is_some() {
-        app.add_systems(Last, log_gpu_times);
+        app.add_systems(Last, (log_gpu_times, trace_gpu_times));
     }
     if args.dolly.is_some() {
         app.add_systems(Update, dolly_camera);
@@ -590,6 +590,12 @@ fn main() -> AppExit {
             .add_systems(PostUpdate, (update_control_text, update_performance_text));
         #[cfg(feature = "dlss")]
         app.add_systems(Update, (toggle_dlss_rr, cycle_dlss_quality).run_if(bridge::not_forwarding));
+        #[cfg(feature = "dlss")]
+        {
+            if std::env::var_os("HALO_RT_TEST_DLSS").is_some() {
+                app.add_systems(Update, test_dlss_quality);
+            }
+        }
         #[cfg(feature = "dlss")]
         app.add_plugins(sky_overlay::SkyOverlayPlugin);
     }
@@ -693,8 +699,10 @@ fn default_plugins(args: &Args, overlay: bool, follow: Option<Option<&halo_bridg
     };
     let title = format!("Halo RT - {}", args.map());
     // (a scripted capture opens behind the window in use, without taking
-    // the keyboard)
-    let mut window = Window { title, focused: args.screenshot.is_none(), ..default() };
+    // the keyboard; `HALO_RT_TEST_FOCUS=1`: in front all the same, for a
+    // check of what only the window in front shows)
+    let focused = args.screenshot.is_none() || std::env::var_os("HALO_RT_TEST_FOCUS").is_some();
+    let mut window = Window { title, focused, ..default() };
     // (`HALO_RT_FRAME_LATENCY=n`: the swap chain's frames in flight, wgpu's
     // 2 by default; an A/B for the GPU's idle between frames)
     if let Some(latency) = std::env::var("HALO_RT_FRAME_LATENCY").ok().and_then(|v| v.parse::<u32>().ok()).and_then(std::num::NonZero::new) {
@@ -1023,6 +1031,44 @@ fn log_gpu_times(store: Res<bevy::diagnostic::DiagnosticsStore>, mut last: Local
     *last = Some(std::time::Instant::now());
     info!("{}", gpu_times(&store));
     info!("{}", node_cpu_times(&store));
+}
+
+/// (`HALO_RT_FRAME_TRACE=<path>` with `HALO_RT_GPU_LOG=1`) A line in
+/// `<path>.gpu` for every frame whose GPU pass times came in: the time it
+/// was read (the bridge's clock, microseconds), the passes' sum and every
+/// pass of a millisecond or more (milliseconds, that frame's own and not
+/// the average), to see which pass a stalled frame's time went to.
+fn trace_gpu_times(
+    store: Res<bevy::diagnostic::DiagnosticsStore>,
+    mut file: Local<Option<Option<std::io::BufWriter<std::fs::File>>>>,
+    mut last: Local<Option<std::time::Instant>>,
+) {
+    use std::io::Write;
+    let file = file.get_or_insert_with(|| {
+        let mut path = std::env::var_os("HALO_RT_FRAME_TRACE")?;
+        path.push(".gpu");
+        Some(std::io::BufWriter::new(std::fs::File::create(path).ok()?))
+    });
+    let (Some(file), Some(now)) = (file.as_mut(), halo_bridge::performance_microseconds()) else { return };
+    let field = "/elapsed_gpu";
+    let times: Vec<(&str, f64, std::time::Instant)> = store
+        .iter()
+        .filter(|d| d.path().as_str().ends_with(field))
+        .filter_map(|d| {
+            let m = d.measurement()?;
+            Some((d.path().as_str().trim_end_matches(field), m.value, m.time))
+        })
+        .collect();
+    let Some(newest) = times.iter().map(|t| t.2).max() else { return };
+    if last.is_some_and(|last| newest <= last) {
+        return;
+    }
+    *last = Some(newest);
+    let fresh: Vec<&(&str, f64, std::time::Instant)> = times.iter().filter(|t| newest.duration_since(t.2).as_micros() < 500).collect();
+    let is_parent = |name: &str| fresh.iter().any(|(other, _, _)| other.len() > name.len() && other.starts_with(name) && other.as_bytes()[name.len()] == b'/');
+    let total: f64 = fresh.iter().filter(|t| !t.0.starts_with("render/frame_gpu") && !is_parent(t.0)).map(|t| t.1).sum();
+    let list: Vec<String> = fresh.iter().filter(|t| t.1 >= 1.0).map(|(name, ms, _)| format!("{}={ms:.2}", name.replace(' ', "_"))).collect();
+    let _ = writeln!(file, "P {now} {total:.2} {}", list.join(" "));
 }
 
 /// The GPU time of each render pass Bevy's render diagnostics time
@@ -1893,6 +1939,39 @@ fn toggle_dlss_rr(
             commands.entity(entity).remove::<(Dlss<DlssRayReconstructionFeature>, TemporalJitter, MipBias)>();
         } else {
             commands.entity(entity).insert(Dlss::<DlssRayReconstructionFeature>::default());
+        }
+    }
+}
+
+#[cfg(feature = "dlss")]
+/// Testing: `HALO_RT_TEST_DLSS=<frame>:<quality>[;...]` sets the quality at
+/// that frame as the options panel would, by its name there: Auto, Dlaa,
+/// Quality, Balanced, Performance, UltraPerformance.
+#[cfg(feature = "dlss")]
+fn test_dlss_quality(mut dlss: Query<&mut Dlss<DlssRayReconstructionFeature>>, mut frame: Local<u32>) {
+    *frame += 1;
+    if let Ok(text) = std::env::var("HALO_RT_TEST_DLSS") {
+        for entry in text.split(';') {
+            let Some((at, name)) = entry.split_once(':') else { continue };
+            if at.trim().parse::<u32>().ok() != Some(*frame) {
+                continue;
+            }
+            let quality = [
+                DlssPerfQualityMode::Auto,
+                DlssPerfQualityMode::Dlaa,
+                DlssPerfQualityMode::Quality,
+                DlssPerfQualityMode::Balanced,
+                DlssPerfQualityMode::Performance,
+                DlssPerfQualityMode::UltraPerformance,
+            ]
+            .into_iter()
+            .find(|q| format!("{q:?}") == name.trim());
+            if let Some(quality) = quality {
+                info!("test: DLSS quality {quality:?} at frame {}", *frame);
+                for mut dlss in &mut dlss {
+                    dlss.perf_quality_mode = quality;
+                }
+            }
         }
     }
 }

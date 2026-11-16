@@ -59,7 +59,7 @@ The camera starts at the scenario's first player start. Without `--features dlss
 | P | Log the current view as a `--camera` argument |
 | R | Toggle ReSTIR |
 | 3 | Toggle DLSS Ray Reconstruction (`dlss` builds) |
-| 4 | Cycle DLSS quality: Auto → DLAA → Quality → Balanced → Performance → Ultra Performance |
+| 4 | Cycle DLSS quality: Auto → DLAA → Quality → Balanced → Performance → Ultra Performance. Auto goes by the picture's size: DLAA under 2.03 megapixels (1280x720), Quality under 3.68 (1920x1080), Performance under 8.29 (2560x1440, 3440x1440), Ultra Performance above |
 | F10 | Options: DLSS Ray Reconstruction and quality, ReSTIR, light levels, exposure, the stats text. They are saved (`%APPDATA%\halo_rt\settings.txt`) and used again next time. Turning DLSS back on may need a restart. |
 
 The top-right panel shows GPU timings for each Solari pass and for DLSS-RR.
@@ -113,7 +113,7 @@ $env:HALO_NETWORK_TEST = "join"; $env:HALO_NET_ADDRESS = "127.0.0.201"; $env:HAL
 cargo run --release --features dlss -- --opence opence\build\windows\halo.exe --menu
 ```
 
-The game also shares its own picture without the opaque world: the HUD, menus, cutscene letterboxing, particles, decals, fog, water and every transparent surface, drawn over a clear screen and composited over the ray-traced frame (the *game overlay*, `src/overlay.rs`). The viewer pairs each overlay picture with the world frame it was drawn for. The window is then a fixed 1280×720, the size the hidden game draws at, so the two pictures share a shape. `--no-overlay` leaves the overlay out and draws the transparent surfaces in Bevy, as before. For debugging, `HALO_RT_OVERLAY_DEBUG=1` tints the overlay's coverage red. With `HALO_RT_OVERLAY_DEBUG=2` and `HALO_BEVY_OVERLAY_DEBUG_WORLD=1` (which makes the game draw its opaque world too), the game's whole picture shows at half strength over the viewer's, so you can compare the two.
+The game also shares its own picture without the opaque world: the HUD, menus, cutscene letterboxing, particles, decals, fog, water and every transparent surface, drawn over a clear screen and composited over the ray-traced frame (the *game overlay*, `src/overlay.rs`). The viewer pairs each overlay picture with the world frame it was drawn for. The overlay is the size of the picture the viewer draws (the game's Video Setup, above). Under a viewer the game asks Windows for the realtime GPU scheduling class, so that reading this picture back does not wait behind the ray tracing (a stutter otherwise: `HALO_GPU_PRIORITY=-1` leaves the class alone), and waits at most 4 ms for a frame's own picture before sharing the one before (`HALO_BEVY_OVERLAY_WAIT=<microseconds>`, `HALO_BEVY_OVERLAY_SYNC=1` the old read that waits however long). `scripts/pace/` measures how evenly frames reach the screen. `--no-overlay` leaves the overlay out and draws the transparent surfaces in Bevy, as before. For debugging, `HALO_RT_OVERLAY_DEBUG=1` tints the overlay's coverage red. With `HALO_RT_OVERLAY_DEBUG=2` and `HALO_BEVY_OVERLAY_DEBUG_WORLD=1` (which makes the game draw its opaque world too), the game's whole picture shows at half strength over the viewer's, so you can compare the two.
 
 ## Layout
 

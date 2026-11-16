@@ -815,6 +815,49 @@ static void platform_display_share(void)
 }
 #endif
 
+#ifdef _WIN32
+/* with no HALO_GPU_PRIORITY, for a game sharing its frames with a viewer
+(game.bevy_bridge with game.bevy_bridge_overlay): the class set; a game on
+its own keeps the system's */
+#define GPU_PRIORITY_VIEWER_DEFAULT 5
+
+/* port/windows/src/win32_library.c */
+int platform_gpu_priority_set(int priority_class, long *status);
+
+/* the game's GPU scheduling priority class (0 idle, 1 below normal, 2
+normal, the system's default, 3 above normal, 4 high, 5 realtime): by
+default realtime for a game drawing for a viewer, so its small GL work, the
+overlay's read back above all (d3d8_gl.c overlay_share), does not wait
+behind the viewer's ray tracing in Windows' GPU scheduler, as OBS raises its
+own for its capture. Measured at 2560x1440 (a30, b40): the read back's
+longest 2.2 to 2.7 ms where it was 10 to 13, the viewer's repeated frames 0
+to 0.1% where 1.2 to 1.6%; high (4) changed nothing. Realtime was accepted
+from an ordinary process on the machine measured; a refusal is logged.
+HALO_GPU_PRIORITY=<0 to 5> sets a class for any game, a negative value
+leaves the system's (the old). */
+static void platform_gpu_priority(void)
+{
+	char const *value = getenv("HALO_GPU_PRIORITY");
+	int priority_class = value && *value ? atoi(value) :
+		config_boolean("game.bevy_bridge") && config_boolean("game.bevy_bridge_overlay") ?
+		GPU_PRIORITY_VIEWER_DEFAULT : -1;
+	long status;
+	int result;
+
+	if (priority_class < 0)
+		return;
+	if (priority_class > 5)
+		priority_class = 5;
+	result = platform_gpu_priority_set(priority_class, &status);
+	if (result > 0)
+		platform_log("gpu priority: class %d set", priority_class);
+	else if (result == 0)
+		platform_log("gpu priority: class %d failed (status 0x%08lx)", priority_class, (unsigned long)status);
+	else
+		platform_log("gpu priority: not available");
+}
+#endif
+
 BOOL platform_video_initialize(unsigned long width, unsigned long height)
 {
 	int version;
@@ -913,6 +956,9 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	(void)version;
 	platform_event_thread = SDL_GetCurrentThreadID();
 	platform_log("OpenGL %s on %s", (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER));
+#ifdef _WIN32
+	platform_gpu_priority();
+#endif
 #ifndef HALO_ANDROID
 	platform_mouse_capture(TRUE);
 	/* (a viewer's window takes the settings: bevy_bridge.c) */

@@ -45,7 +45,7 @@ impl Plugin for OverlayPlugin {
         app.add_plugins((UiMaterialPlugin::<OverlayMaterial>::default(), ExtractResourcePlugin::<OverlayPicture>::default()))
             .init_resource::<OverlayStats>()
             .add_systems(Startup, spawn_overlay)
-            .add_systems(First, read_overlay.after(crate::bridge::ReadFrame));
+            .add_systems(First, (read_overlay.after(crate::bridge::ReadFrame), trace_frame.after(read_overlay)));
         app.sub_app_mut(RenderApp)
             .init_resource::<OverlayUploaded>()
             .add_systems(Render, upload_overlay.in_set(RenderSystems::PrepareResources));
@@ -215,6 +215,39 @@ fn read_overlay(
     }
     stats.shown += 1;
     stats.size = size;
+}
+
+/// `HALO_RT_FRAME_TRACE=<path>`: a line a frame in that file, once the
+/// frame's overlay is read: the performance counter (microseconds, as the
+/// game's `HALO_FRAME_TRACE` reads it), the game frame shown, its tick and
+/// the game's camera.
+fn trace_frame(
+    link: Res<BridgeLink>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut file: Local<Option<Option<std::io::BufWriter<std::fs::File>>>>,
+) {
+    use std::io::Write;
+    let file = file.get_or_insert_with(|| {
+        let path = std::env::var_os("HALO_RT_FRAME_TRACE")?;
+        Some(std::io::BufWriter::new(std::fs::File::create(path).ok()?))
+    });
+    let (Some(file), Some(snapshot), Some(now)) = (file.as_mut(), link.latest.as_ref(), halo_bridge::performance_microseconds()) else { return };
+    let position = snapshot.camera.map(|c| c.position).unwrap_or_default();
+    let forward = snapshot.camera.map(|c| c.forward).unwrap_or_default();
+    let _ = writeln!(
+        file,
+        "V {now} {} {} cam {:.4} {:.4} {:.4} fwd {:.5} {:.5} {:.5} pending {} focus {}",
+        snapshot.frame_index,
+        snapshot.game_tick,
+        position[0],
+        position[1],
+        position[2],
+        forward[0],
+        forward[1],
+        forward[2],
+        link.pending.len(),
+        windows.single().map_or(0, |w| w.focused as u8)
+    );
 }
 
 /// Has a material's bind group made again with its image, after the image

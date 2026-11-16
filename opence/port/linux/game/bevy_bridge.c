@@ -68,6 +68,10 @@ real_matrix4x3 *render_interpolation_object_node_matrices(long object_index);
 static struct bevy_bridge_shared *bevy_bridge_shared;
 static boolean bevy_bridge_failed;
 static unsigned long bevy_bridge_frame_index;
+/* the last exported frame's tick and interpolation fraction (the frame
+trace's, HALO_FRAME_TRACE) */
+static unsigned long bevy_bridge_trace_tick;
+static float bevy_bridge_trace_fraction;
 
 /* models drawn outside the object list this frame (the first-person weapon
 and hands), shared with it */
@@ -670,6 +674,8 @@ void bevy_bridge_export_frame(
 
 	frame->frame_index = ++bevy_bridge_frame_index;
 	frame->game_tick = (unsigned long)game_time_get();
+	bevy_bridge_trace_tick = frame->game_tick;
+	bevy_bridge_trace_fraction = render_interpolation_fraction();
 	frame->hold_generation = bevy_bridge_hold_ticks() ? bevy_bridge_hold_generation : 0;
 	frame->structure_bsp_index = global_structure_bsp_index;
 	memset(frame->scenario_name, 0, sizeof(frame->scenario_name));
@@ -999,6 +1005,13 @@ boolean bevy_bridge_hold_ticks(void)
 	if (holding)
 		bevy_bridge_hold_seen = TRUE;
 	return holding;
+}
+
+unsigned long bevy_bridge_frame_trace(unsigned long *tick, float *fraction)
+{
+	*tick = bevy_bridge_trace_tick;
+	*fraction = bevy_bridge_trace_fraction;
+	return bevy_bridge_frame_index;
 }
 
 unsigned char bevy_bridge_frame_timing_hold(unsigned long *map_loads)
@@ -1347,6 +1360,25 @@ void bevy_bridge_overlay_commit(void)
 	__atomic_store_n(&overlay->sequence, (overlay->sequence | 1) + 1, __ATOMIC_RELAXED);
 	__atomic_store_n(&shared->latest_overlay, (unsigned long)bevy_bridge_overlay_buffer, __ATOMIC_RELEASE);
 	bevy_bridge_overlay_buffer = NONE;
+}
+
+unsigned char const *bevy_bridge_overlay_last(
+	unsigned long width,
+	unsigned long height)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+	struct bevy_bridge_overlay const *overlay;
+	unsigned long latest;
+
+	if (!shared)
+		return NULL;
+	latest = __atomic_load_n(&shared->latest_overlay, __ATOMIC_RELAXED);
+	if (latest >= BEVY_BRIDGE_OVERLAYS || (long)latest == bevy_bridge_overlay_buffer)
+		return NULL;
+	overlay = &shared->overlays[latest];
+	if ((overlay->sequence & 1) || overlay->empty || overlay->width != width || overlay->height != height)
+		return NULL;
+	return shared->overlay_pixels[latest];
 }
 
 boolean bevy_bridge_overlay_viewer(

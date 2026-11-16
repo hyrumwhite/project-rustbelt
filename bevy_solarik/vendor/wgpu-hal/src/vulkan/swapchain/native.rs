@@ -261,7 +261,18 @@ impl Surface for NativeSurface {
         // avoid bad frame pacing when the Vulkan driver is using a DXGI swapchain. See
         // https://github.com/gfx-rs/wgpu/issues/8310 and
         // https://github.com/gfx-rs/wgpu/issues/8354 for more details.
-        let fence = if cfg!(target_os = "windows") {
+        //
+        // Solarik: off unless `WGPU_ACQUIRE_FENCE=1`. Measured on an RTX 5080 (a
+        // GPU-bound frame of 10 ms, three images): the acquire already waits for
+        // the submission that last drew on the image, and the driver's fence on
+        // top of that held an acquire back by every frame still in flight (one
+        // frame's time for each image but one, 20 to 30 ms) some twenty times a
+        // minute, in `Immediate` and `FifoRelaxed` alike and with a display
+        // holding the frame rate. Without it the frame interval's deviation halves
+        // and those stalls are gone.
+        let fence = if cfg!(target_os = "windows")
+            && std::env::var_os("WGPU_ACQUIRE_FENCE").is_some_and(|v| v != "0")
+        {
             let raw = unsafe {
                 device
                     .shared

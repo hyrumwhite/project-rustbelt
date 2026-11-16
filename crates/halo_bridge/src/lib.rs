@@ -1279,7 +1279,7 @@ const _: () = assert!(std::mem::size_of::<ProjectileRecord>() == 228 + 16 + 16 +
 /// The performance counter in microseconds (wrapping), as the game's
 /// `overlay_microseconds` reads it.
 #[cfg(windows)]
-fn performance_microseconds() -> Option<u32> {
+pub fn performance_microseconds() -> Option<u32> {
     unsafe extern "system" {
         fn QueryPerformanceCounter(count: *mut i64) -> i32;
         fn QueryPerformanceFrequency(frequency: *mut i64) -> i32;
@@ -1294,7 +1294,7 @@ fn performance_microseconds() -> Option<u32> {
 }
 
 #[cfg(not(windows))]
-fn performance_microseconds() -> Option<u32> {
+pub fn performance_microseconds() -> Option<u32> {
     None
 }
 

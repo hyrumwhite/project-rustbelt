@@ -114,6 +114,9 @@ struct Marks {
     stretch: Option<Instant>,
     spans: [Option<Instant>; SPANS],
     wait: Option<Instant>,
+    // (this render frame's, for the frame trace)
+    frame_stretches: [Duration; STRETCHES],
+    frame_wait: Duration,
 }
 
 /// The latest 5 seconds' times, as the log puts them (for a capture).
@@ -133,6 +136,23 @@ fn totals() -> &'static Mutex<(Totals, Marks)> {
 
 fn main_started() {
     totals().lock().unwrap().1.main = Some(Instant::now());
+}
+
+/// `HALO_RT_FRAME_TRACE=<path>`: beside the looks' trace (overlay.rs), a
+/// line for every main frame and every render frame in `<path>.cpu`: `M`,
+/// the time it ended (the bridge's clock, microseconds) and how long it
+/// took; `R`, the time it ended, how long it took without the wait for the
+/// window, the wait, and its stretches in order (all microseconds). For a
+/// stall of a frame or two, which the 5 second means hide.
+fn frame_trace() -> Option<&'static Mutex<std::io::BufWriter<std::fs::File>>> {
+    static TRACE: OnceLock<Option<Mutex<std::io::BufWriter<std::fs::File>>>> = OnceLock::new();
+    TRACE
+        .get_or_init(|| {
+            let mut path = std::env::var_os("HALO_RT_FRAME_TRACE")?;
+            path.push(".cpu");
+            Some(Mutex::new(std::io::BufWriter::new(std::fs::File::create(path).ok()?)))
+        })
+        .as_ref()
 }
 
 /// `HALO_RT_BUFFER_FLOOD=n`: n small buffers made at startup and kept, to
@@ -169,6 +189,10 @@ fn main_ended() {
         frame_ms = took.as_secs_f64() * 1000.0;
         totals.main += took;
         totals.main_frames += 1;
+        if let (Some(trace), Some(now)) = (frame_trace(), halo_bridge::performance_microseconds()) {
+            use std::io::Write;
+            let _ = writeln!(trace.lock().unwrap(), "M {now} {}", took.as_micros());
+        }
     }
     let mut spike: Vec<(&'static str, f64)> = Vec::new();
     for sample in bevy::render::diagnostic::take_cpu_profile() {
@@ -268,6 +292,7 @@ fn stretch_ended<const I: usize>() {
     let (totals, marks) = &mut *guard;
     if let Some(started) = marks.stretch.replace(now) {
         totals.stretches[I] += now.saturating_duration_since(started);
+        marks.frame_stretches[I] += now.saturating_duration_since(started);
     }
 }
 
@@ -293,6 +318,7 @@ fn window_wait_ended() {
     if let Some(started) = marks.wait.take() {
         let waited = started.elapsed();
         totals.window_wait += waited;
+        marks.frame_wait += waited;
         // (the render thread's own time leaves out the wait)
         if let Some(render) = marks.render.as_mut() {
             *render += waited;
@@ -309,5 +335,18 @@ fn render_ended() {
     if let Some(started) = marks.render.take() {
         totals.render += started.elapsed();
         totals.render_frames += 1;
+        if let (Some(trace), Some(now)) = (frame_trace(), halo_bridge::performance_microseconds()) {
+            use std::io::Write;
+            let stretches: Vec<String> = marks.frame_stretches.iter().map(|d| d.as_micros().to_string()).collect();
+            let _ = writeln!(
+                trace.lock().unwrap(),
+                "R {now} {} wait {} {}",
+                started.elapsed().as_micros(),
+                marks.frame_wait.as_micros(),
+                stretches.join(" ")
+            );
+        }
     }
+    marks.frame_stretches = Default::default();
+    marks.frame_wait = Duration::ZERO;
 }

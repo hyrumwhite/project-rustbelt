@@ -30,6 +30,8 @@ boolean bevy_bridge_hold_ticks(void);
 /* d3d8_gl.c's frame timing (port/linux/src): whether the game held its
 ticks at a load since it last asked, and how many maps have been loaded */
 unsigned char bevy_bridge_frame_timing_hold(unsigned long *map_loads);
+/* the last exported frame's index, tick and interpolation fraction */
+unsigned long bevy_bridge_frame_trace(unsigned long *tick, float *fraction);
 
 /* a model the game draws by itself, posed and coloured (its change colours,
 or NULL; first_person_weapons.c): shared with the next frame */
@@ -119,6 +121,12 @@ unsigned char *bevy_bridge_overlay_begin(
 	unsigned long width,
 	unsigned long height);
 void bevy_bridge_overlay_commit(void);
+/* the pixels of the overlay last committed, if it was drawn (not empty) and
+is width x height, else NULL (not the buffer bevy_bridge_overlay_begin
+handed out) */
+unsigned char const *bevy_bridge_overlay_last(
+	unsigned long width,
+	unsigned long height);
 /* when the viewer last looked for an overlay and how often it looks
 (microseconds of the performance counter, wrapping); FALSE if it doesn't say */
 boolean bevy_bridge_overlay_viewer(unsigned long *looked, unsigned long *interval);

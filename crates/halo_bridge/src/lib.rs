@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 54;
+pub const VERSION: u32 = 55;
 pub const SCREEN_TEXTURES: usize = 512;
 pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
 pub const TEXT_ATLAS_SIZE: usize = 2048;
@@ -70,8 +70,9 @@ pub const MAXIMUM_LIGHTS: usize = 192;
 pub const MAXIMUM_OBJECTS: usize = 4096;
 pub const MAXIMUM_NODES: usize = 49152;
 const FRAMES: usize = 2;
-/// The largest overlay picture, in pixels.
-pub const OVERLAY_MAXIMUM_PIXELS: usize = 2560 * 1440;
+/// The largest overlay picture, in pixels (protocol 55: 3840x2160, was
+/// 2560x1440).
+pub const OVERLAY_MAXIMUM_PIXELS: usize = 3840 * 2160;
 const OVERLAYS: usize = 2;
 /// The game's default bridge name (`game.bevy_bridge_name`). Each game
 /// shares under its own name, so several can run side by side.
@@ -1307,6 +1308,23 @@ struct OverlayHeader {
     reserved: [u32; 3],
 }
 
+/// The game's display settings as shared (`struct bevy_bridge_display`).
+#[repr(C)]
+struct DisplayShared {
+    /// counts up each time the game writes these; 0 before the first;
+    /// written last
+    serial: u32,
+    mode: u32,
+    resolution_width: u32,
+    resolution_height: u32,
+    window_width: u32,
+    window_height: u32,
+    vsync: u32,
+    max_fps: i32,
+    original: u32,
+    reserved: [u32; 3],
+}
+
 #[repr(C)]
 struct Shared {
     magic: u32,
@@ -1320,7 +1338,11 @@ struct Shared {
     /// ([`Bridge::release_hold`]): the game runs no ticks while its own
     /// differs from this.
     hold_released: u32,
-    reserved: u32,
+    /// (Protocol 55) The size the viewer shows the game's picture at
+    /// ([`Bridge::write_viewer_screen`]): `width | height << 16`, 0 for none.
+    viewer_screen: u32,
+    /// (Protocol 55) The game's display settings ([`Bridge::display`]).
+    display: DisplayShared,
     input: Input,
     gamepads: Gamepads,
     frames: [Frame; FRAMES],
@@ -1382,6 +1404,40 @@ const _: () = assert!(std::mem::size_of::<Node>() == 52);
 const _: () = assert!(std::mem::size_of::<Camera>() == 44);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);
 const _: () = assert!(std::mem::size_of::<Gamepad>() == 20);
+const _: () = assert!(std::mem::size_of::<DisplayShared>() == 48);
+
+/// (Protocol 55) The game's display mode (`display.mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayMode {
+    #[default]
+    Windowed,
+    Borderless,
+    Fullscreen,
+}
+
+/// (Protocol 55) The game's display settings, as its Video Setup menu has
+/// them ([`Bridge::display`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Display {
+    /// Counts up each time the game shares them (window opened, Settings
+    /// saved).
+    pub serial: u32,
+    pub mode: DisplayMode,
+    /// The resolution in pixels; `None` for the display's own.
+    pub resolution: Option<(u32, u32)>,
+    /// The window's size in pixels.
+    pub window: (u32, u32),
+    pub vsync: bool,
+    /// Frames a second at most: 0 twice the refresh rate, negative no limit.
+    pub max_fps: i32,
+    /// Resolution scaling "original" (the picture at 640x480).
+    pub original: bool,
+}
+
+/// `width | height << 16`, each clamped to 65535; (0, 0) is 0 (none).
+pub fn pack_viewer_screen(width: u32, height: u32) -> u32 {
+    width.min(0xFFFF) | height.min(0xFFFF) << 16
+}
 
 /// One frame of the game's world.
 #[derive(Debug, Clone, Default)]
@@ -1571,6 +1627,60 @@ impl Bridge {
             std::ptr::write_volatile(&raw const (*self.shared).hold_released as *mut u32, generation);
         }
         fence(Ordering::Release);
+    }
+
+    /// (Protocol 55) Tells the game the size in pixels the viewer shows its
+    /// picture at: the game draws its screen (and so the overlay and the
+    /// HUD's coordinates) at that size. (0, 0) for none (the game's own).
+    pub fn write_viewer_screen(&self, width: u32, height: u32) {
+        // SAFETY: as in write_input; the game only reads this word (one
+        // aligned 32-bit write)
+        unsafe {
+            std::ptr::write_volatile(&raw const (*self.shared).viewer_screen as *mut u32, pack_viewer_screen(width, height));
+        }
+        fence(Ordering::Release);
+    }
+
+    /// (Protocol 55) The game's display settings, once it has shared them
+    /// (`None` before the first).
+    pub fn display(&self) -> Option<Display> {
+        for _ in 0..4 {
+            // SAFETY: as in check(); the fields are copied and validated by
+            // the serial afterwards (the game writes it last)
+            unsafe {
+                let block = &raw const (*self.shared).display;
+                let serial = std::ptr::read_volatile(&raw const (*block).serial);
+                if serial == 0 {
+                    return None;
+                }
+                fence(Ordering::Acquire);
+                let mode = std::ptr::read_volatile(&raw const (*block).mode);
+                let resolution = (std::ptr::read_volatile(&raw const (*block).resolution_width), std::ptr::read_volatile(&raw const (*block).resolution_height));
+                let window = (std::ptr::read_volatile(&raw const (*block).window_width), std::ptr::read_volatile(&raw const (*block).window_height));
+                let vsync = std::ptr::read_volatile(&raw const (*block).vsync) != 0;
+                let max_fps = std::ptr::read_volatile(&raw const (*block).max_fps);
+                let original = std::ptr::read_volatile(&raw const (*block).original) != 0;
+                fence(Ordering::Acquire);
+                if std::ptr::read_volatile(&raw const (*block).serial) != serial {
+                    continue;
+                }
+                return Some(Display {
+                    serial,
+                    // (unknown values read as the window)
+                    mode: match mode {
+                        1 => DisplayMode::Borderless,
+                        2 => DisplayMode::Fullscreen,
+                        _ => DisplayMode::Windowed,
+                    },
+                    resolution: (resolution.0 != 0 && resolution.1 != 0).then_some(resolution),
+                    window,
+                    vsync,
+                    max_fps,
+                    original,
+                });
+            }
+        }
+        None
     }
 
     /// Forwards input to the game (see [`Input`]).
@@ -2204,5 +2314,17 @@ mod windows {
             }
             Ok((Handle { mapping, view }, view))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewer_screen_packs_and_clamps() {
+        assert_eq!(pack_viewer_screen(0, 0), 0);
+        assert_eq!(pack_viewer_screen(3440, 1440), 3440 | 1440 << 16);
+        assert_eq!(pack_viewer_screen(100_000, 70_000), 0xFFFF | 0xFFFF << 16);
     }
 }

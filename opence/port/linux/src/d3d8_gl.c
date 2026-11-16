@@ -26,6 +26,7 @@ Conventions carried over from the Xbox:
 #include "halo_ui_pointer.h"
 #include "port_config.h"
 #include "main/console.h"
+#include "../game/bevy_bridge_protocol.h"
 
 #include <SDL3/SDL.h>
 
@@ -170,6 +171,10 @@ static int anti_aliasing(void)
 	return anti_aliasing_values[anti_aliasing_value].mode;
 }
 
+#ifndef HALO_ANDROID
+static BOOL overlay_enabled(void);
+#endif
+
 static void screen_mode_choose(long *width, float scale[2])
 {
 #ifdef HALO_ANDROID
@@ -214,6 +219,13 @@ static void screen_mode_choose(long *width, float scale[2])
 				factor = (float)maximum_target_size / (*width * scale[0]);
 			if (SCREEN_HEIGHT * scale[1] * factor > (float)maximum_target_size)
 				factor = (float)maximum_target_size / (SCREEN_HEIGHT * scale[1]);
+			/* (nor more than the largest overlay, which is the back buffer:
+			a larger one is not shared, and the viewer waits for it) */
+			if (overlay_enabled() && *width * scale[0] * SCREEN_HEIGHT * scale[1] * factor * factor >
+				(float)BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS)
+			{
+				factor = sqrtf((float)BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS / (*width * scale[0] * SCREEN_HEIGHT * scale[1])) * 0.999f;
+			}
 			if (factor > 1.0f)
 			{
 				scale[0] *= factor;
@@ -1864,7 +1876,9 @@ int halo_scoreboard_pointer_update(int offered, struct halo_ui_pointer *pointer)
 /* a point in the window, as SDL reports it, in the menus' coordinates: the
 inverse of the letterboxed display blit at presentation, the screen's
 width and the menus' centering (halo_screen_ui_offset); or, not centered,
-the screen's (the game's drawing: the scoreboard's) */
+the screen's (the game's drawing: the scoreboard's). While a viewer shows
+the game's picture, the point is in its picture's space instead
+(platform_video_pointer_space), the back buffer letterboxed in it alike. */
 static void ui_point_from_window_on(float window_x, float window_y, int centered, short *x, short *y)
 {
 	struct render_target_entry *back_buffer = render_target_get(&device.back_buffer);
@@ -1874,8 +1888,9 @@ static void ui_point_from_window_on(float window_x, float window_y, int centered
 	*x = *y = -1;
 	if (!back_buffer)
 		return;
-	platform_video_window_size(&window_width, &window_height);
-	platform_video_drawable_size(&pixel_width, &pixel_height);
+	/* (the window's sizes, or both a viewer's picture's: the space the
+	bridge's pointer is a fraction of, laid out as the game draws at it) */
+	platform_video_pointer_space(&window_width, &window_height, &pixel_width, &pixel_height);
 	if (window_width <= 0 || window_height <= 0)
 		return;
 	width = pixel_width;
@@ -5249,7 +5264,7 @@ static void frame_timing_window(Uint64 now)
 		platform_log("frame timing: %.1f frames/s against the viewer's %.1f looks/s%s over %.1f s at tick %ld: "
 			"frame %.2f ms (longest %.2f), work %.2f (%.2f), share %.2f (%.2f), swap %.2f (%.2f), "
 			"cap %.2f (%.2f), pace wait %.2f (%.2f), %lu%% of frames paced; "
-			"swap interval %d, display %.1f Hz, vsync %s%s, max_fps %ld (cap %.2f ms), interpolation %s%s%s%s",
+			"swap interval %d, display %.1f Hz, vsync %s%s%s, max_fps %ld (cap %.2f ms), interpolation %s%s%s%s",
 			rate, looks, viewer_looking ? "" : " (not looking now)", seconds,
 			game_time_initialized() ? game_time_get() : -1L,
 			frame_timing_mean(&frame_timing.frame), frame_timing_longest(&frame_timing.frame),
@@ -5262,6 +5277,7 @@ static void frame_timing_window(Uint64 now)
 			swap_interval, (double)refresh_rate,
 			config_boolean("display.vsync") ? "on" : "off",
 			no_vsync && *no_vsync ? " (HALO_NO_VSYNC set)" : "",
+			config_boolean("game.bevy_bridge_unsynced") ? " (the viewer's: game.bevy_bridge_unsynced)" : "",
 			config_integer("display.max_fps"), (double)cap_interval / 1e6,
 			halo_interpolation_enabled() ? "on" : "off",
 			frame_timing.held ? "; held at a load" : "",

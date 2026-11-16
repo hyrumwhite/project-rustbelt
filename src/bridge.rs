@@ -38,7 +38,10 @@ pub struct Simulation<'a> {
 /// overlay (`crate::overlay`), drawing at the viewer's window size, and
 /// with `viewer_glass` leaves glass and water out of it (the viewer draws
 /// them), with `viewer_fog` its fog, with `viewer_decals` its decals and
-/// with `viewer_effects` its sprites, which it shares instead. With `simulation`, those systems run in Rust. Its output goes to
+/// with `viewer_effects` its sprites, which it shares instead. With
+/// `follow_display` (follow mode, `crate::display`; hidden, with the overlay)
+/// it keeps its own display settings, to share them, and draws at the size
+/// the viewer writes. With `simulation`, those systems run in Rust. Its output goes to
 /// `halo_rt_opence-<viewer process id>.log` in the temporary folder.
 pub fn launch_game(
     exe: &std::path::Path,
@@ -53,6 +56,7 @@ pub fn launch_game(
     viewer_effects: bool,
     viewer_transparent: bool,
     viewer_hud: bool,
+    follow_display: bool,
     simulation: Option<Simulation>,
 ) -> std::io::Result<std::process::Child> {
     use std::io::{Error, ErrorKind};
@@ -91,7 +95,14 @@ pub fn launch_game(
         }
         eprintln!("the simulation in Rust: {}", if systems.is_empty() { "none" } else { systems });
     }
-    if !show {
+    if follow_display {
+        // hidden, its display settings its own (its Video Setup menu shows
+        // and shares them, the viewer's window follows them); a display
+        // override in the viewer's environment (HALO_DISPLAY_MODE,
+        // HALO_RESOLUTION, HALO_WINDOW_SIZE, HALO_RESOLUTION_SCALING,
+        // HALO_NO_VSYNC, HALO_MAX_FPS) is inherited
+        command.env("HALO_HIDDEN_WINDOW", "1");
+    } else if !show {
         // hidden, and small and windowed so it never takes the display; it
         // stays vsynced, so its frames (and the poses it shares) come at the
         // display's rate
@@ -101,13 +112,18 @@ pub fn launch_game(
             .env("HALO_WINDOW_SIZE", "640x480");
     }
     if overlay {
-        let (width, height) = crate::overlay::WINDOW_SIZE;
-        command.env("HALO_BEVY_BRIDGE_OVERLAY", "1").env("HALO_WINDOW_SIZE", format!("{width}x{height}"));
+        command.env("HALO_BEVY_BRIDGE_OVERLAY", "1");
+        if !follow_display {
+            let (width, height) = crate::overlay::WINDOW_SIZE;
+            command.env("HALO_WINDOW_SIZE", format!("{width}x{height}"));
+        }
         // its frames paced by the viewer's looks for an overlay
         // (`Bridge::note_overlay_look`), not by the display: a vsynced swap
-        // waits as long as a frame of its own
+        // waits as long as a frame of its own (followed, its hidden window
+        // never waits for the display, its V-Sync setting left as it is:
+        // the viewer holds the frame limit)
         if crate::overlay::paced() {
-            command.env("HALO_NO_VSYNC", "1");
+            command.env(if follow_display { "HALO_BEVY_BRIDGE_UNSYNCED" } else { "HALO_NO_VSYNC" }, "1");
         }
         // (glass and water: the viewer's, ray traced)
         if viewer_glass {
@@ -1230,6 +1246,8 @@ pub struct ForwardInput {
     released: bool,
     /// the cursor over the menus, a fraction of the window
     pointer: Option<Vec2>,
+    /// `HALO_RT_TEST_POINTER` placed it (testing).
+    test_pointer: bool,
     state: halo_bridge::Input,
 }
 
@@ -1239,8 +1257,15 @@ pub fn not_forwarding(forward: Option<Res<ForwardInput>>) -> bool {
     forward.is_none_or(|f| !f.active)
 }
 
-/// Keys the viewer keeps for itself even while forwarding.
+/// Keys the viewer keeps for itself even while forwarding (and in follow
+/// mode F11 too, its window's fullscreen toggle: `viewer_key`).
 const VIEWER_KEYS: [KeyCode; 3] = [KeyCode::F8, KeyCode::F10, KeyCode::F12];
+
+/// Whether the viewer keeps a key for itself: [`VIEWER_KEYS`], and F11 in
+/// follow mode (`crate::display`; fixed, F11 goes to the game as before).
+fn viewer_key(key: KeyCode, follow_display: bool) -> bool {
+    VIEWER_KEYS.contains(&key) || (follow_display && key == KeyCode::F11)
+}
 
 /// Click to play (grab the cursor; over the game's menus, free, its place
 /// forwarded), F12 to let go.
@@ -1252,6 +1277,8 @@ fn grab_cursor(
     mut forward: ResMut<ForwardInput>,
     panel: Option<Res<crate::options::OptionsPanel>>,
     link: Res<BridgeLink>,
+    display: Option<Res<crate::display::DisplayState>>,
+    mut frame: Local<u32>,
 ) {
     use bevy::window::CursorGrabMode;
     let (window, mut cursor) = window.into_inner();
@@ -1271,10 +1298,36 @@ fn grab_cursor(
         cursor.visible = !grab;
     }
     forward.active = playing;
-    forward.pointer = (playing && menus)
-        .then(|| window.cursor_position())
-        .flatten()
-        .map(|at| at / Vec2::new(window.width(), window.height()).max(Vec2::ONE));
+    // (a fraction of the window, or of the picture's rectangle while it's
+    // scaled into it, crate::display: the game takes it as its screen's)
+    let rect = display.as_deref().and_then(crate::display::DisplayState::scaled_rect);
+    // (testing: `HALO_RT_TEST_POINTER=<frame>:<x>,<y>[;...]` holds the
+    // pointer at that pixel of the window from that frame on, the window's
+    // attention or not, through the same mapping as the mouse's)
+    *frame += 1;
+    let test = std::env::var("HALO_RT_TEST_POINTER").ok().and_then(|text| {
+        text.split(';')
+            .filter_map(|entry| {
+                let (at, place) = entry.split_once(':')?;
+                let (x, y) = place.split_once(',')?;
+                Some((at.trim().parse::<u32>().ok()?, Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?)))
+            })
+            .filter(|(at, _)| *at <= *frame)
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, place)| place / window.scale_factor())
+    });
+    forward.test_pointer = test.is_some() && menus;
+    let at = match test {
+        Some(at) => menus.then_some(at),
+        None => (playing && menus).then(|| window.cursor_position()).flatten(),
+    };
+    forward.pointer = at.map(|at| match rect {
+        Some(rect) => {
+            let at = at * window.scale_factor();
+            ((at - Vec2::new(rect.x as f32, rect.y as f32)) / Vec2::new(rect.width as f32, rect.height as f32).max(Vec2::ONE)).clamp(Vec2::ZERO, Vec2::ONE)
+        }
+        None => at / Vec2::new(window.width(), window.height()).max(Vec2::ONE),
+    });
 }
 
 fn forward_input(
@@ -1287,12 +1340,17 @@ fn forward_input(
     mut forward: ResMut<ForwardInput>,
     mut link: ResMut<BridgeLink>,
     mut frame: Local<u32>,
+    display: Option<Res<crate::display::DisplayState>>,
 ) {
-    let ForwardInput { active, pointer, state, .. } = &mut *forward;
+    let follow_display = display.is_some();
+    let ForwardInput { active, pointer, test_pointer, state, .. } = &mut *forward;
     state.active = u32::from(*active);
     state.keys = [0; 16];
     state.mouse_buttons = 0;
     state.pointer = pointer.map_or(0, |at| halo_bridge::Input::pointer_at(at.x, at.y));
+    if *test_pointer {
+        state.active = 1;
+    }
     // (testing: `HALO_RT_TEST_KEYS=<SDL scancode>@<frame>[+<frames>],...`
     // presses a key from that frame for six frames or as many as given, the
     // window's attention or not: 29@4000 zooms, 26@4000+300 walks forward)
@@ -1312,7 +1370,7 @@ fn forward_input(
         }
     }
     if *active {
-        for key in keys.get_pressed().filter(|k| !VIEWER_KEYS.contains(k)) {
+        for key in keys.get_pressed().filter(|k| !viewer_key(**k, follow_display)) {
             if let Some(scancode) = scancode(*key) {
                 state.set_key(scancode, true);
             }

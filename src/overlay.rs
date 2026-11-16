@@ -32,7 +32,9 @@ use bevy::{
 use std::sync::Arc;
 
 /// The window size the game draws at (logical pixels), and so the viewer's
-/// window too: the two must share a shape.
+/// window too: the two must share a shape (fixed mode; following the game's
+/// display settings, the game draws at the size the viewer writes,
+/// crate::display).
 pub const WINDOW_SIZE: (u32, u32) = (1280, 720);
 
 pub struct OverlayPlugin;
@@ -136,6 +138,8 @@ fn spawn_overlay(
     commands.spawn((
         Name::new("Game overlay"),
         MaterialNode(material.clone()),
+        // (the picture's rectangle where it's scaled into the window)
+        crate::display::PictureRect,
         Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
         // under the HUD (crate::hud) and the viewer's own text
         GlobalZIndex(-3),

@@ -226,6 +226,8 @@ fn spawn_flash(mut commands: Commands, mut materials: ResMut<Assets<FlashMateria
         commands.spawn((
             Name::new("Game screen flash"),
             MaterialNode(layer.clone()),
+            // (the picture's rectangle where it's scaled into the window)
+            crate::display::PictureRect,
             Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
             // over the HUD, under the viewer's own text
             GlobalZIndex(-1),
@@ -290,6 +292,8 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut mate
     commands.spawn((
         Name::new("Game HUD"),
         MaterialNode(material.clone()),
+        // (the picture's rectangle where it's scaled into the window)
+        crate::display::PictureRect,
         Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() },
         // over the game's overlay, under its screen flash and the viewer's
         // own text
@@ -298,14 +302,19 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut mate
     commands.insert_resource(HudList { image, material, size: (1, 1), vertices: default(), draws: default(), items: default() });
 }
 
-/// The texture at the window's size (its physical pixels).
+/// The texture at the window's size (its physical pixels), or the picture's
+/// rectangle's where it's scaled into the window (crate::display).
 fn size_hud(
     window: Single<&Window, With<PrimaryWindow>>,
     mut list: ResMut<HudList>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<OverlayMaterial>>,
+    display: Option<Res<crate::display::DisplayState>>,
 ) {
-    let size = (window.physical_width().max(1), window.physical_height().max(1));
+    let size = match display.as_deref().and_then(crate::display::DisplayState::scaled_rect) {
+        Some(rect) => (rect.width.max(1), rect.height.max(1)),
+        None => (window.physical_width().max(1), window.physical_height().max(1)),
+    };
     if list.size == size {
         return;
     }

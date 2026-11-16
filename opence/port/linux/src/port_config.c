@@ -326,6 +326,12 @@ static const struct config_setting config_settings[] =
 		"With game.bevy_bridge_overlay: the Bevy renderer fogs the world\n"
 		"itself, from the fog the game shares each frame, so the game draws no\n"
 		"environment fog into what it shares." },
+	{ "game.bevy_bridge_unsynced", _config_boolean, "false", "HALO_BEVY_BRIDGE_UNSYNCED", _environment_value,
+		_platform_desktop,
+		"With game.bevy_bridge_overlay: the viewer's window keeps display.vsync\n"
+		"and display.max_fps; the game's own hidden window never waits for the\n"
+		"display, and draws no faster than the higher of display.max_fps and\n"
+		"twice the display's refresh rate (as the viewer paces it)." },
 
 	{ "paths.data", _config_string, "\"\"", "HALO_DATA_ROOT", _environment_value, _platform_desktop,
 		"The folder holding the game data's maps folder; empty looks in the\n"
@@ -591,7 +597,8 @@ static pthread_mutex_t config_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---------- the file */
 
-static void config_path(char *path, size_t size)
+/* config.toml in the folder it belongs in (config_folder's) */
+static void config_default_path(char *path, size_t size)
 {
 #ifdef HALO_ANDROID
 	/* the data folder, which the app names (port/android/host/host_main.c) */
@@ -604,6 +611,23 @@ static void config_path(char *path, size_t size)
 
 	snprintf(path, size, "%sconfig.toml", base ? base : "");
 #endif
+}
+
+/* the settings file read and written: config.toml, or on the desktop
+HALO_CONFIG_FILE's where it is set (automated tests, which leave the
+player's own alone) */
+static void config_path(char *path, size_t size)
+{
+#ifndef HALO_ANDROID
+	const char *file = getenv("HALO_CONFIG_FILE");
+
+	if (file && *file)
+	{
+		snprintf(path, size, "%s", file);
+		return;
+	}
+#endif
+	config_default_path(path, size);
 }
 
 /* the whole file, NUL terminated, or NULL; free() it */
@@ -1284,7 +1308,9 @@ void config_folder(char *path, size_t size)
 	char file[1024];
 	char *separator;
 
-	config_path(file, sizeof(file));
+	/* (config.toml's own folder, HALO_CONFIG_FILE or not: the menus and
+	the brokers' file are found there) */
+	config_default_path(file, sizeof(file));
 	separator = strrchr(file, '/');
 #ifndef HALO_ANDROID
 	if (!separator || (strrchr(file, '\\') && strrchr(file, '\\') > separator))

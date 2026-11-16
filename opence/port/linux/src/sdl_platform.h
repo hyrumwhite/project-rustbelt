@@ -123,7 +123,13 @@ BOOL platform_ui_pointer_read(struct platform_ui_pointer *pointer);
 /* the open scoreboard's pointer, offered (a network game's) or not: TRUE
 while a right click has freed it, with what it did since the last call */
 BOOL platform_scoreboard_pointer(BOOL offered, struct platform_ui_pointer *pointer);
-void platform_video_window_size(int *width, int *height);
+/* the space the menus' pointer is in (d3d8_gl.c, ui_point_from_window_on;
+bevy_bridge_input.c): the window's size as SDL reports the pointer in it
+and its size in pixels; while a viewer shows the game's picture
+(bevy_bridge_viewer_screen, port/linux/game/bevy_bridge.c), the size in
+pixels of the viewer's picture for both, which the bridge's pointer is a
+fraction of and the game draws at */
+void platform_video_pointer_space(int *width, int *height, int *pixel_width, int *pixel_height);
 /* a menu's text field typed into or not (a password's or not): the system's
 on-screen keyboard up while it is, where there is one that text input shows
 (Steam's); each field begun brings it up again */

@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 54
+#define BEVY_BRIDGE_VERSION 55
 #define BEVY_BRIDGE_SCREEN_TEXTURES 512
 #define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
 #define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
@@ -85,7 +85,7 @@ pixels are its own) */
 #define BEVY_BRIDGE_MAXIMUM_NODES 49152
 #define BEVY_BRIDGE_FRAMES 2
 /* the largest overlay picture (pixels), and its buffers */
-#define BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS (2560 * 1440)
+#define BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS (3840 * 2160)
 #define BEVY_BRIDGE_OVERLAYS 2
 
 /* bevy_bridge_object.flags */
@@ -1277,6 +1277,21 @@ struct bevy_bridge_vehicle_update_record
 	unsigned long object_count;
 };
 
+/* (protocol 55) the game's display settings (Settings, Video Setup), for the viewer's window to take */
+struct bevy_bridge_display
+{
+	unsigned long serial;            /* counts up each time the game writes these (window opened, Settings saved); 0 before the first; written last */
+	unsigned long mode;              /* display.mode: 0 the window, 1 borderless, 2 fullscreen */
+	unsigned long resolution_width;  /* display.resolution in pixels; 0 and 0 for the display's own */
+	unsigned long resolution_height;
+	unsigned long window_width;      /* display.window_size in pixels */
+	unsigned long window_height;
+	unsigned long vsync;             /* display.vsync */
+	long max_fps;                    /* display.max_fps: 0 twice the refresh rate, negative none */
+	unsigned long original;          /* display.resolution_scaling "original" */
+	unsigned long reserved[3];
+};
+
 struct bevy_bridge_shared
 {
 	unsigned long magic;
@@ -1292,7 +1307,13 @@ struct bevy_bridge_shared
 	/* (protocol 54) written by the viewer: the hold generation it has
 	released (bevy_bridge_frame.hold_generation) */
 	unsigned long hold_released;
-	unsigned long reserved;
+	/* (protocol 55) written by the viewer: the size in pixels of the
+	picture it shows the game's picture at, width | height << 16, which the
+	game then draws at (sdl_platform.c, platform_screen_mode); 0 while it
+	has none (then the game's own window decides, as before protocol 55) */
+	unsigned long viewer_screen;
+	/* (protocol 55) the game's display settings */
+	struct bevy_bridge_display display;
 	struct bevy_bridge_input input;
 	struct bevy_bridge_gamepads gamepads;
 	struct bevy_bridge_frame frames[BEVY_BRIDGE_FRAMES];

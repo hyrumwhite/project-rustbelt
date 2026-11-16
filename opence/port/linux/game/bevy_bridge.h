@@ -122,6 +122,17 @@ void bevy_bridge_overlay_commit(void);
 /* when the viewer last looked for an overlay and how often it looks
 (microseconds of the performance counter, wrapping); FALSE if it doesn't say */
 boolean bevy_bridge_overlay_viewer(unsigned long *looked, unsigned long *interval);
+/* (protocol 55) sdl_platform.c: the display settings (struct
+bevy_bridge_display, its serial ignored), shared with the viewer for its
+window to take, at the window's opening and each time Settings saves them;
+the bridge mapped first if it is not yet */
+struct bevy_bridge_display;
+void bevy_bridge_display_share(struct bevy_bridge_display const *display);
+/* (protocol 55) the size in pixels of the viewer's picture the game's is
+shown at (bevy_bridge_shared.viewer_screen), which the game draws at and
+the menus' pointer is a fraction of; FALSE while the viewer gives none (or
+one under 320x240), or the bridge is not mapped */
+boolean bevy_bridge_viewer_screen(long *width, long *height);
 
 /* projectiles.c, with game.bevy_bridge_ray_tests: each projectile_update
 recorded for a renderer to replay (bevy_bridge_projectile_record) */

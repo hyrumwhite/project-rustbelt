@@ -93,8 +93,11 @@ The game starts hidden on the level (the map's folder's parent is its data root)
 | F12 | Let go of the mouse |
 | F8 | Leave the game's camera and fly free (WASD/QE, right mouse to look); F8 again follows. While you fly, you hear the game from the flying camera. |
 | F10 | The viewer's options (the mouse is the viewer's while they're open) |
+| F11 | The window to fullscreen (borderless) and back, until the next change in Video Setup |
 
 The viewer's lighting hotkeys work while you're not playing. `--show-game` also shows the game's own window. `--bridge` attaches to a game you started yourself with `HALO_BEVY_BRIDGE=1` (and `--bridge-name` to one started with `HALO_BEVY_BRIDGE_NAME`).
+
+The window follows the game's Video Setup (Settings, Edit Profile Settings in its menus; `display.*` in OpenCE's `config.toml`): Display Mode (windowed, borderless, fullscreen), Resolution, Window Size, Resolution Scaling, V-Sync and Frame Rate Limit act on the viewer's window when you press OK there, and at the start. Borderless at a resolution under the desktop's, and the original scaling (640x480), are drawn at that size and scaled into the window with black beside the picture (`HALO_RT_PICTURE_NATIVE=1` draws at the window's size always). The frame limit works with V-Sync off: 0 is twice the display's refresh rate, -1 none. `HALO_RT_DISPLAY=fixed` keeps a 1280x720 window whatever the game's settings say, as before (the default for a `--screenshot` run, where `HALO_RT_DISPLAY=follow` turns the following on). A display setting given by environment (`HALO_DISPLAY_MODE`, `HALO_RESOLUTION`, `HALO_WINDOW_SIZE`, `HALO_RESOLUTION_SCALING`, `HALO_NO_VSYNC`, `HALO_MAX_FPS`) reaches the game and beats the menu for that run.
 
 Sound is the game's own: OpenCE plays it with 3D positioning, occlusion and reverb.
 

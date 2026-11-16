@@ -20,6 +20,7 @@ mod clusters;
 mod cpu_times;
 mod combiners;
 mod decals;
+mod display;
 mod rt_skinning;
 mod effects;
 mod lens_flares;
@@ -321,6 +322,11 @@ fn main() -> AppExit {
     let mut link = None;
     let mut game_process = None;
     let mut overlay = false;
+    // (follow mode: the window takes the game's display settings, crate::display;
+    // fixed, the old fixed 1280x720 window; decided once, before the game is
+    // launched, as its launch differs)
+    let mut follow_display = false;
+    let mut initial_display = None;
     let mut bridge_name = args.bridge_name.clone().unwrap_or_else(|| halo_bridge::DEFAULT_NAME.to_string());
     // (a build carrying the game plays it: started hidden, every system in
     // Rust, at its menus unless a map was named)
@@ -387,10 +393,16 @@ fn main() -> AppExit {
                 return AppExit::error();
             }
         };
+        // (`HALO_RT_DISPLAY=fixed|follow`: unset, follow in play and fixed for
+        // a scripted run, crate::display::follows)
+        follow_display = display::follows(true, !args.show_game, !args.no_overlay, args.screenshot.is_some(), display::display_setting().as_deref());
+        if !follow_display && std::env::var_os("HALO_RT_TEST_DISPLAY").is_some() {
+            eprintln!("HALO_RT_TEST_DISPLAY is followed only in follow mode (HALO_RT_DISPLAY=follow)");
+        }
         match {
             bridge_name = bridge::own_bridge_name();
             let simulation = args.simulation.as_deref().map(|systems| bridge::Simulation { systems, dll: simulation_dll.as_deref() });
-            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, args.viewer_glass(), args.viewer_fog(), args.viewer_decals(), args.viewer_effects(), args.viewer_transparent(), args.draws_hud(), simulation)
+            bridge::launch_game(&exe, &map_path, !args.menu, &bridge_name, args.show_game, !args.no_overlay, args.viewer_glass(), args.viewer_fog(), args.viewer_decals(), args.viewer_effects(), args.viewer_transparent(), args.draws_hud(), follow_display, simulation)
         } {
             // (stops the game when the viewer exits, or gives up on it)
             Ok(child) => game_process = Some(bridge::GameProcess(child)),
@@ -408,6 +420,11 @@ fn main() -> AppExit {
         eprintln!("bridged to OpenCE: {} ({} objects)", snapshot.scenario_name, snapshot.objects.len());
         args.map = Some(snapshot.map_name().to_string());
         overlay = bridge.overlay_enabled();
+        // (followed only with the game's overlay)
+        follow_display &= overlay;
+        if follow_display {
+            initial_display = bridge.display();
+        }
         link = Some(bridge::BridgeLink::new(bridge, snapshot));
     }
     let path = match args.map_path() {
@@ -453,7 +470,7 @@ fn main() -> AppExit {
         bevy::winit::UpdateMode::Continuous
     };
     app.insert_resource(bevy::winit::WinitSettings { focused_mode: bevy::winit::UpdateMode::Continuous, unfocused_mode });
-    app.add_plugins((default_plugins(&args, overlay), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin, reveal::RevealPlugin, cpu_times::BufferFloodPlugin, rt_skinning::RtSkinningPlugin))
+    app.add_plugins((default_plugins(&args, overlay, follow_display.then_some(initial_display.as_ref())), SolarikPlugins, FreeCameraPlugin, RenderDiagnosticsPlugin, HaloMaterialsPlugin, reveal::RevealPlugin, cpu_times::BufferFloodPlugin, rt_skinning::RtSkinningPlugin))
         .insert_resource(args.clone())
         .insert_resource(overlay::OverlayMode(overlay))
         .insert_resource({
@@ -510,6 +527,9 @@ fn main() -> AppExit {
         }
         if overlay {
             app.add_plugins(overlay::OverlayPlugin);
+            if follow_display {
+                app.add_plugins(display::DisplayPlugin { initial: initial_display });
+            }
             if args.viewer_fog() {
                 app.add_plugins(fog::FogPlugin);
                 let lit_fog = args.lit_fog.clone().or_else(|| std::env::var("HALO_RT_LIT_FOG").ok());
@@ -664,7 +684,9 @@ fn reset_history_on_cuts(
 #[derive(Resource)]
 struct MapFile(Option<CacheFile>);
 
-fn default_plugins(args: &Args, overlay: bool) -> impl PluginGroup {
+/// `follow`: in follow mode, the game's display settings as shared before
+/// the window is made (`Some(None)`: none yet), [`display::initial_window`].
+fn default_plugins(args: &Args, overlay: bool, follow: Option<Option<&halo_bridge::Display>>) -> impl PluginGroup {
     use bevy::render::{
         settings::{Backends, WgpuSettings},
         RenderPlugin,
@@ -682,7 +704,10 @@ fn default_plugins(args: &Args, overlay: bool) -> impl PluginGroup {
     if std::env::var_os("HALO_RT_NO_VSYNC").is_some() {
         window.present_mode = bevy::window::PresentMode::AutoNoVsync;
     }
-    if overlay {
+    if let Some(settings) = follow {
+        // (the game draws at the size the viewer writes, crate::display)
+        display::initial_window(&mut window, settings);
+    } else if overlay {
         // the game's overlay is drawn at this shape (overlay::WINDOW_SIZE)
         window.resolution = overlay::WINDOW_SIZE.into();
         window.resizable = false;
@@ -1507,7 +1532,8 @@ fn print_camera(keys: Res<ButtonInput<KeyCode>>, camera: Single<&Transform, With
 /// the level, the game's tick and the camera, as a `--camera` argument; and
 /// the frame's times, the CPU's and the GPU's by pass (for a slow place:
 /// play feedback's dips, which no scripted run had staged), with a game its
-/// rates and its log's last timing lines ([`capture_game_log`]). Also at the
+/// rates and its log's last timing lines ([`capture_game_log`]), and in
+/// follow mode the display's line ([`display::DisplayState::note_line`]). Also at the
 /// frames of `HALO_RT_CAPTURE_FRAME` ([`capture_frames`]).
 #[allow(clippy::too_many_arguments)]
 fn capture(
@@ -1521,6 +1547,7 @@ fn capture(
     bridge_level: Option<Res<bridge::BridgeLevel>>,
     frames: Res<CaptureFrames>,
     rates: Option<Res<StatusRates>>,
+    display: Option<Res<display::DisplayState>>,
 ) {
     use bevy::render::view::screenshot::{save_to_disk, Screenshot};
     if !keys.just_pressed(KeyCode::F9) && !capture_frames().contains(&frames.0) {
@@ -1561,6 +1588,8 @@ fn capture(
     let game_log = if game.is_some() { capture_game_log() } else { Vec::new() };
     let note: String = std::iter::once(place.clone())
         .chain(rates)
+        // (follow mode's display: crate::display)
+        .chain(display.map(|display| display.note_line()))
         .chain(times)
         .chain(game_log)
         .chain(sources)
@@ -1776,7 +1805,7 @@ fn dolly_period() -> u32 {
 /// Frames since the app started, as `--screenshot` and `--dolly` count them
 /// (one count, so a capture's frame is the dolly's).
 #[derive(Resource, Default)]
-struct CaptureFrames(u32);
+pub(crate) struct CaptureFrames(pub(crate) u32);
 
 fn count_capture_frames(mut frames: ResMut<CaptureFrames>) {
     frames.0 += 1;

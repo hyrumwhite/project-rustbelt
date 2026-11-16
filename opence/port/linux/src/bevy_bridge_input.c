@@ -11,13 +11,21 @@ the renderer stops forwarding, everything it held is released.
 While the menus take a pointer (bevy_bridge_input_menus_pointer), the
 renderer's cursor is free and its place comes as a fraction of the
 renderer's window (the game draws at that window's shape, its overlay
-filling it), here put at the same place in the game's own window.
+filling it), here put at the same place in the game's own window; or,
+while the renderer gives the size of its picture (protocol 55,
+viewer_screen), at that place in a space of that size, which the menus'
+pointer mapping (d3d8_gl.c, ui_point_from_window_on) then takes as the
+window (sdl_platform.c, platform_video_pointer_space).
 */
 
 #include "../game/bevy_bridge_protocol.h"
 
 #include <SDL3/SDL.h>
 #include <string.h>
+
+/* sdl_platform.c: the space the menus' pointer is in (the viewer's
+picture, while it gives the game its size) */
+void platform_video_pointer_space(int *width, int *height, int *pixel_width, int *pixel_height);
 
 static struct bevy_bridge_input bevy_bridge_last;
 /* the game's window, which the events are for */
@@ -128,10 +136,14 @@ void bevy_bridge_input_pump(SDL_Window *window)
 	/* the pointer first, so that a click in the same frame is where it is */
 	if (input.pointer & (1ul << 30))
 	{
-		int width = 0, height = 0;
+		int width = 0, height = 0, pixel_width, pixel_height;
 		float x, y;
 
+#ifndef HALO_ANDROID
+		platform_video_pointer_space(&width, &height, &pixel_width, &pixel_height);
+#else
 		SDL_GetWindowSize(window, &width, &height);
+#endif
 		x = (float)(input.pointer & 0x7FFF) / 32767.0f * (float)width;
 		y = (float)((input.pointer >> 15) & 0x7FFF) / 32767.0f * (float)height;
 		if (input.pointer != bevy_bridge_last.pointer)

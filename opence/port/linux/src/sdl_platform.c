@@ -15,6 +15,7 @@ and the debug keyboard that the game's console reads.
 #include "port_config.h"
 #include "p2p.h"
 #include "xiso.h"
+#include "../game/bevy_bridge_protocol.h"
 
 #include <SDL3/SDL.h>
 #include <stdio.h>
@@ -149,6 +150,9 @@ BOOL platform_sdl_initialize(void)
 void bevy_bridge_input_pump(SDL_Window *window);
 void bevy_bridge_input_menus_pointer(int active);
 int bevy_bridge_input_attached(void);
+/* bevy_bridge.c (port/linux/game) */
+void bevy_bridge_display_share(const struct bevy_bridge_display *display);
+unsigned char bevy_bridge_viewer_screen(long *width, long *height);
 /* ---------- first start without game data (xbox_files.c) */
 
 struct data_extraction
@@ -515,7 +519,11 @@ static BOOL platform_window_fullscreen(void)
 window's, the display's while fullscreen, or display.resolution's while
 fullscreen (either kind) where the display has room for it; before the
 window opens, what it will be. FALSE where display.resolution_scaling is
-"original": the Xbox's 640x480, scaled to the window. */
+"original": the Xbox's 640x480, scaled to the window. While a viewer shows
+the game's picture (bevy_bridge_viewer_screen), its picture's size,
+whatever these settings say (the viewer's window has taken them): no more
+pixels than the largest overlay, the shape kept, since a larger overlay is
+not shared and the viewer waits for each frame's. */
 BOOL platform_screen_mode(long *width, long *height)
 {
 	/* (the size last given, for a window that has none: minimized) */
@@ -523,6 +531,22 @@ BOOL platform_screen_mode(long *width, long *height)
 	long resolution_width, resolution_height;
 	BOOL fullscreen;
 
+	if (bevy_bridge_viewer_screen(width, height))
+	{
+		if ((double)*width * (double)*height > (double)BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS)
+		{
+			double factor = SDL_sqrt((double)BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS / ((double)*width * (double)*height));
+
+			*width = (long)(*width * factor);
+			*height = (long)(*height * factor);
+			/* (the rounding's last pixel) */
+			while (*width * *height > BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS)
+				(*height)--;
+		}
+		last_width = *width;
+		last_height = *height;
+		return TRUE;
+	}
 	if (!strcmp(config_string("display.resolution_scaling"), "original"))
 		return FALSE;
 	if (platform_window)
@@ -759,6 +783,36 @@ SDL_AudioDeviceID platform_audio_device(int recording, const char *name)
 /* the window's size (platform_window_size_setting), as the window was made
 or last resized: platform_display_apply */
 static long platform_window_width = -1, platform_window_height = -1;
+
+/* game.bevy_bridge_unsynced (with the overlay on): the viewer's window keeps
+display.vsync and display.max_fps, and this hidden one never waits for the
+display (the setting itself left as Settings shows and saves it) */
+static BOOL platform_unsynced(void)
+{
+	return config_boolean("game.bevy_bridge_unsynced") && config_boolean("game.bevy_bridge_overlay");
+}
+
+/* the display settings as config.toml has them (not the window's state:
+a hidden window is never fullscreen), shared with a viewer for its window
+to take (bevy_bridge.c) */
+static void platform_display_share(void)
+{
+	struct bevy_bridge_display display;
+	long width, height;
+
+	memset(&display, 0, sizeof(display));
+	display.mode = (unsigned long)platform_display_mode();
+	platform_resolution_setting(&width, &height);
+	display.resolution_width = (unsigned long)width;
+	display.resolution_height = (unsigned long)height;
+	platform_window_size_setting(&width, &height);
+	display.window_width = (unsigned long)width;
+	display.window_height = (unsigned long)height;
+	display.vsync = config_boolean("display.vsync") ? 1 : 0;
+	display.max_fps = config_integer("display.max_fps");
+	display.original = !strcmp(config_string("display.resolution_scaling"), "original");
+	bevy_bridge_display_share(&display);
+}
 #endif
 
 BOOL platform_video_initialize(unsigned long width, unsigned long height)
@@ -851,21 +905,27 @@ BOOL platform_video_initialize(unsigned long width, unsigned long height)
 	SDL_GL_MakeCurrent(platform_window, platform_gl_context);
 	if (!gl_functions_load())
 		return FALSE;
+#ifndef HALO_ANDROID
+	version = SDL_GL_SetSwapInterval(config_boolean("display.vsync") && !platform_unsynced() ? 1 : 0);
+#else
 	version = SDL_GL_SetSwapInterval(config_boolean("display.vsync") ? 1 : 0);
+#endif
 	(void)version;
 	platform_event_thread = SDL_GetCurrentThreadID();
 	platform_log("OpenGL %s on %s", (const char *)glGetString(GL_VERSION), (const char *)glGetString(GL_RENDERER));
 #ifndef HALO_ANDROID
 	platform_mouse_capture(TRUE);
+	/* (a viewer's window takes the settings: bevy_bridge.c) */
+	platform_display_share();
 #endif
 	return TRUE;
 }
 
 /* display.mode, display.resolution (fullscreen's display mode),
 display.window_size (when it changes: the window can be resized) and
-display.vsync, as Settings has written them; display.resolution_scaling
-and borderless's resolution are taken up between frames
-(halo_screen_commit) */
+display.vsync, as Settings has written them, and shared with a viewer;
+display.resolution_scaling and borderless's resolution are taken up
+between frames (halo_screen_commit) */
 void platform_display_apply(void)
 {
 #ifndef HALO_ANDROID
@@ -884,12 +944,86 @@ void platform_display_apply(void)
 		platform_window_height = height;
 		SDL_SetWindowSize(platform_window, (int)width, (int)height);
 	}
+	SDL_GL_SetSwapInterval(config_boolean("display.vsync") && !platform_unsynced() ? 1 : 0);
+	platform_display_share();
 #else
 	if (!platform_window)
 		return;
-#endif
 	SDL_GL_SetSwapInterval(config_boolean("display.vsync") ? 1 : 0);
+#endif
 }
+
+#ifndef HALO_ANDROID
+/* HALO_TEST_DISPLAY="<frame>:<name>=<value>[,<name>=<value>...][;<frame>:...]"
+(automated tests): at that count of presented frames, each display.<name>
+written as Settings writes it and then applied, as Settings' OK does */
+#define TEST_DISPLAY_STEPS 16
+
+static struct
+{
+	unsigned long frame;
+	char pairs[256];
+} test_display_steps[TEST_DISPLAY_STEPS];
+static int test_display_step_count = -1;
+
+static void test_display_parse(void)
+{
+	const char *text = getenv("HALO_TEST_DISPLAY");
+
+	test_display_step_count = 0;
+	while (text && *text && test_display_step_count < TEST_DISPLAY_STEPS)
+	{
+		const char *end = text + strcspn(text, ";");
+		const char *colon = memchr(text, ':', (size_t)(end - text));
+
+		if (colon && colon + 1 < end)
+		{
+			test_display_steps[test_display_step_count].frame = strtoul(text, NULL, 10);
+			snprintf(test_display_steps[test_display_step_count].pairs, sizeof(test_display_steps[0].pairs), "%.*s",
+				(int)(end - colon - 1), colon + 1);
+			test_display_step_count++;
+		}
+		text = *end ? end + 1 : end;
+	}
+}
+
+/* after each present: the steps due at this frame */
+static void test_display_frame(void)
+{
+	static unsigned long frames;
+	int index;
+
+	if (test_display_step_count < 0)
+		test_display_parse();
+	frames++;
+	for (index = 0; index < test_display_step_count; index++)
+	{
+		char pairs[256];
+		char *pair, *next;
+
+		if (test_display_steps[index].frame != frames)
+			continue;
+		snprintf(pairs, sizeof(pairs), "%s", test_display_steps[index].pairs);
+		for (pair = pairs; pair; pair = next)
+		{
+			char *equals, name[96];
+
+			next = strchr(pair, ',');
+			if (next)
+				*next++ = 0;
+			equals = strchr(pair, '=');
+			if (!equals)
+				continue;
+			*equals = 0;
+			snprintf(name, sizeof(name), "display.%s", pair);
+			if (!config_write(name, equals + 1))
+				platform_log("test display: could not set %s", name);
+		}
+		platform_display_apply();
+		platform_log("test display: frame %lu: %s", frames, test_display_steps[index].pairs);
+	}
+}
+#endif
 
 void platform_video_drawable_size(int *width, int *height)
 {
@@ -900,10 +1034,14 @@ void platform_video_drawable_size(int *width, int *height)
 /* with vsync off, the time between frames display.max_fps asks for (0:
 twice the display's refresh rate), or 0 for no limit. A GPU never left idle
 can hang (Intel's Raptor Lake graphics, whose reset then takes the desktop
-with it); the limit gives it a rest every frame. */
+with it); the limit gives it a rest every frame. Unsynced
+(game.bevy_bridge_unsynced), vsync or not, the higher of display.max_fps's
+rate and twice the refresh rate: the viewer's window holds the real limit
+and the game is paced by the viewer's looks (d3d8_gl.c, overlay_pace), so
+this is only the GPU's rest and must not be slower than the viewer. */
 static Uint64 frame_interval_ns(void)
 {
-	static int vsync;
+	static int vsync, unsynced;
 	static long maximum;
 	static unsigned long read_at = (unsigned long)-1;
 	float rate;
@@ -913,16 +1051,19 @@ static Uint64 frame_interval_ns(void)
 		read_at = config_changes();
 		vsync = config_boolean("display.vsync");
 		maximum = config_integer("display.max_fps");
+		unsynced = platform_unsynced();
 	}
-	if (vsync || maximum < 0)
+	if ((vsync && !unsynced) || maximum < 0)
 		return 0;
 	rate = (float)maximum;
-	if (!maximum)
+	if (!maximum || unsynced)
 	{
 		SDL_DisplayID display = SDL_GetDisplayForWindow(platform_window);
 		const SDL_DisplayMode *mode = display ? SDL_GetCurrentDisplayMode(display) : NULL;
+		float twice_refresh = 2.0f * (mode && mode->refresh_rate > 0.0f ? mode->refresh_rate : 60.0f);
 
-		rate = 2.0f * (mode && mode->refresh_rate > 0.0f ? mode->refresh_rate : 60.0f);
+		if (twice_refresh > rate)
+			rate = twice_refresh;
 	}
 	return (Uint64)(1e9f / rate);
 }
@@ -956,6 +1097,7 @@ void platform_video_swap(void)
 #endif
 	SDL_GL_SwapWindow(platform_window);
 #ifndef HALO_ANDROID
+	test_display_frame();
 	platform_video_last_cap_delay = 0;
 	interval = frame_interval_ns();
 	if (!interval)
@@ -1281,7 +1423,7 @@ void platform_request_quit(void)
 mouse freed, at the window's middle, and nothing held for the triggers */
 static void scoreboard_pointer_start(void)
 {
-	int width, height;
+	int width, height, pixel_width, pixel_height;
 
 	scoreboard_pointer_active = TRUE;
 	memset(&scoreboard_pointer, 0, sizeof(scoreboard_pointer));
@@ -1291,6 +1433,9 @@ static void scoreboard_pointer_start(void)
 	platform_mouse_capture(FALSE);
 	SDL_GetWindowSize(platform_window, &width, &height);
 	SDL_WarpMouseInWindow(platform_window, width * 0.5f, height * 0.5f);
+	/* (the middle of the space the pointer is in: a viewer's picture's,
+	while there is one) */
+	platform_video_pointer_space(&width, &height, &pixel_width, &pixel_height);
 	scoreboard_pointer.x = width * 0.5f;
 	scoreboard_pointer.y = height * 0.5f;
 }
@@ -1716,9 +1861,20 @@ BOOL platform_ui_pointer_read(struct platform_ui_pointer *pointer)
 	return active;
 }
 
-void platform_video_window_size(int *width, int *height)
+void platform_video_pointer_space(int *width, int *height, int *pixel_width, int *pixel_height)
 {
+	long viewer_width, viewer_height;
+
+	/* (the viewer's picture: the bridge's pointer is a fraction of it, and
+	the game draws at its size, platform_screen_mode) */
+	if (bevy_bridge_viewer_screen(&viewer_width, &viewer_height))
+	{
+		*width = *pixel_width = (int)viewer_width;
+		*height = *pixel_height = (int)viewer_height;
+		return;
+	}
 	SDL_GetWindowSize(platform_window, width, height);
+	SDL_GetWindowSizeInPixels(platform_window, pixel_width, pixel_height);
 }
 
 /* ---------- the system's on-screen keyboard */

@@ -1362,6 +1362,45 @@ boolean bevy_bridge_overlay_viewer(
 	return *interval != 0;
 }
 
+void bevy_bridge_display_share(
+	struct bevy_bridge_display const *display)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_get();
+	unsigned long serial;
+
+	if (!shared)
+		return;
+	serial = shared->display.serial;
+	shared->display.mode = display->mode;
+	shared->display.resolution_width = display->resolution_width;
+	shared->display.resolution_height = display->resolution_height;
+	shared->display.window_width = display->window_width;
+	shared->display.window_height = display->window_height;
+	shared->display.vsync = display->vsync;
+	shared->display.max_fps = display->max_fps;
+	shared->display.original = display->original;
+	/* last, so a reader that sees it changed sees the rest */
+	__atomic_store_n(&shared->display.serial, serial + 1, __ATOMIC_RELEASE);
+}
+
+boolean bevy_bridge_viewer_screen(
+	long *width,
+	long *height)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+	unsigned long screen;
+
+	if (!shared)
+		return FALSE;
+	screen = __atomic_load_n(&shared->viewer_screen, __ATOMIC_ACQUIRE);
+	/* (none, or too small to be a picture) */
+	if ((screen & 0xFFFF) < 320 || (screen >> 16) < 240)
+		return FALSE;
+	*width = (long)(screen & 0xFFFF);
+	*height = (long)(screen >> 16);
+	return TRUE;
+}
+
 boolean bevy_bridge_listener(
 	real_matrix4x3 *matrix)
 {

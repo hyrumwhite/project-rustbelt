@@ -32,6 +32,13 @@ pub struct RaytracingMesh3d(pub Handle<Mesh>);
 /// Rays leaving a point near [`super::SolarikNearRays`]'s centre see only
 /// instances with [`RaytracingMask::NEAR`] set: [`RaytracingMask::AWAY`]
 /// (the player's body) is seen from everywhere else.
+///
+/// A mask's bits 0 to 2 are these; any of its bits 3 to 7 means "met by the
+/// usual rays" and nothing more. The scene binder owns those bits of the
+/// TLAS instance's mask: bit 7 for any of them, and bits 3 to 6 for the
+/// instance's material (a pane, foliage), each where the usual rays meet it,
+/// so that a probe ray meets one kind alone (`instance_ray_mask`,
+/// `RAY_MASK_PANE_NEAR` and its kin in `raytracing_scene_bindings.wesl`).
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Reflect)]
 #[reflect(Component, Clone, PartialEq)]
 #[require(SyncToRenderWorld)]

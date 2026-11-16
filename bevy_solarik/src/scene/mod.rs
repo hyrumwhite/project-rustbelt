@@ -25,7 +25,8 @@ mod tlas;
 mod types;
 
 use bevy_shader::load_shader_library;
-pub use binder::{LIGHT_TRIANGLE_TABLE_CAPACITY, RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSeenLights, SolarikLightCone, SolarikSkyLight, SolarikUnreflectedLight, SolarikHollowLight};
+pub use binder::{LIGHT_TRIANGLE_TABLE_CAPACITY, RaytracingSceneBindings, SolarikAlphaTesting, SolarikNearRays, SolarikRayFog, SolarikSeenLights, SolarikLightCone, SolarikSkyLight, SolarikStaticSky, SolarikUnreflectedLight, SolarikHollowLight};
+pub(crate) use binder::{SkyDistributionKey, sky_distribution_stale};
 pub use ray_settings::SolarikRaySettings;
 pub use types::{RaytracingMask, RaytracingMesh3d};
 
@@ -151,7 +152,7 @@ impl Plugin for RaytracingScenePlugin {
             .insert_resource(RaytracingSceneBindings::new())
             .add_systems(
                 ExtractSchedule,
-                (extract_raytracing_scene, assembly::extract),
+                (extract_raytracing_scene, assembly::extract, binder::extract_static_sky),
             )
             .add_systems(
                 Render,

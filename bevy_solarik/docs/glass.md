@@ -349,6 +349,34 @@ Diagnostic views of the pass, by `SOLARIK_SHADER_DEFS`: `GLASS_VIEW_REFLECTION`
 (the panes' reflected light alone, as weighted), `GLASS_VIEW_MIRROR` (the reflected
 path's radiance unweighted), `GLASS_NO_REFLECTION`.
 
+The pass runs over every pixel whenever the scene holds a pane (water counts), and
+most pixels have none along their ray: their first trace of the whole scene found
+an opaque surface or nothing and returned the background as it came, alpha 0. Each
+pixel now first sends a probe (`trace_kind_probe`) that meets only instances whose
+material is a pane, over the first trace's range, from the same near-rays choice
+and by the same confirm rule, stopping at its first hit; where it meets nothing the
+pixel returns that background at once, and elsewhere the pass runs exactly as
+before. Exact: before a pane every way out of the loop returns the background with
+alpha 0, nothing random is drawn before a pane, and a pane is met only by a hit the
+probe would also commit. The scene binder marks the kind in the TLAS instance mask
+(`instance_ray_mask`): bits 0 to 2 are the caller's `RaytracingMask`, bit 7 stands
+for any of its upper bits, and bits 3 to 6 say pane or foliage, each seen from near
+(`RAY_MASK_PANE_NEAR` 0x08, `RAY_MASK_FOLIAGE_NEAR` 0x20) or from elsewhere
+(`RAY_MASK_PANE` 0x10, `RAY_MASK_FOLIAGE` 0x40), set only where the usual rays
+(0x01 near, `RAY_NO_CULL` 0xFB elsewhere) meet the instance, so that no other ray
+meets more or fewer instances than before. The primary-foliage pass takes the same
+probe for leaves when the scene has no canopy (foliage.md).
+`SOLARIK_SHADER_DEFS=GLASS_UNPROBED` and `FOLIAGE_UNPROBED` are the old passes, a
+full trace for every pixel.
+
+The check: `SOLARIK_SHADER_DEFS=PROBE_CHECK` traces every pixel in full in both
+passes and paints one where a pane (or a leaf) was met although its probe misses a
+magenta of 1000, white once tone mapped; there must be none. `PROBE_CHECK_WRONG`
+with it gives each pass the other kind's probe, so that every pane and leaf is
+painted and the check is seen to work. For pictures of two runs to compare,
+`SOLARIK_FREEZE_TIME=1` holds the water ripples' drift, which goes by wall time and
+so differs at the same frame between two runs whose frames take different times.
+
 ## Marked materials: the nearest layer, glows only reflections see
 
 (November 2026.) `RayMaterialMarks` holds two sets of materials, each a flag bit.

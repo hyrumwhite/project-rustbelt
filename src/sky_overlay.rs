@@ -6,6 +6,7 @@
 //! bevy_solarik's vendored bevy_anti_alias). `HALO_RT_NO_SKY_OVERLAY=1`
 //! leaves the sky to the denoiser.
 
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::{
     anti_alias::dlss::{node::dlss_super_resolution, Dlss, DlssRayReconstructionFeature, ViewDlssRayReconstructionOverlay},
     asset::{embedded_asset, load_embedded_asset},
@@ -126,6 +127,8 @@ fn draw_overlay(
         &cache.get_bind_group_layout(&overlay_pipeline.layout),
         &BindGroupEntries::sequential((target.main_texture_view(), depth, main_depth)),
     );
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("sky_overlay"),
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -139,7 +142,9 @@ fn draw_overlay(
         occlusion_query_set: None,
         multiview_mask: None,
     });
+    let pass_span = diagnostics.pass_span(&mut pass, "sky_overlay");
     pass.set_render_pipeline(pipeline);
     pass.set_bind_group(0, &bind_group, &[]);
     pass.draw(0..3, 0..1);
+    pass_span.end(&mut pass);
 }

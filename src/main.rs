@@ -55,7 +55,7 @@ use bevy::{
 };
 use bevy_solarik::{
     pathtracer::{Pathtracer, PathtracingPlugin},
-    prelude::{SolarikLighting, SolarikPlugins, SolarikSkyLight},
+    prelude::{SolarikLighting, SolarikPlugins, SolarikSkyLight, SolarikStaticSky},
 };
 use halo_map::{
     math::{halo_to_bevy, METERS_PER_WORLD_UNIT},
@@ -484,6 +484,9 @@ fn main() -> AppExit {
         .insert_resource(MapFile(Some(cache)))
         .add_systems(Startup, (setup_level, setup_camera, setup_ui).chain())
         .add_systems(Update, (start_camera, sync_sky_light))
+        // (the sky's cubemaps are built on the CPU, uploaded once and never
+        // drawn into, sky::cubemap: Solarik keeps their sampling distribution)
+        .insert_resource(SolarikStaticSky)
         .init_resource::<ResetHistory>()
         .insert_resource(ActiveBsp(args.bsp))
         .init_resource::<level::PeriodicTables>()
@@ -1536,7 +1539,8 @@ fn follow_camera_sky(
 
 /// Solarik lights the rays that leave the level from `SolarikSkyLight`,
 /// where Solari took the camera's environment light: it gets the same
-/// cubemap and intensity (none without one).
+/// cubemap and intensity (none without one). A change of either rebuilds
+/// its sampling distribution, kept otherwise (`SolarikStaticSky`).
 fn sync_sky_light(
     mut commands: Commands,
     camera: Query<Option<Ref<EnvironmentMapLight>>, With<Camera3d>>,

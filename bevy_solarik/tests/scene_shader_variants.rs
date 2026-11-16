@@ -184,6 +184,15 @@ fn scene_consumers_compose_across_production_feature_variants() {
                 }
             }
             if consumer == "realtime::primary_foliage" {
+                // (every pixel traced in full, the old (FOLIAGE_UNPROBED))
+                let mut unprobed_definitions = stage_definitions.clone();
+                unprobed_definitions.push("FOLIAGE_UNPROBED".into());
+                graph.validate(&module, &unprobed_definitions);
+                let mut check_definitions = stage_definitions.clone();
+                check_definitions.push("PROBE_CHECK".into());
+                graph.validate(&module, &check_definitions);
+                check_definitions.push("PROBE_CHECK_WRONG".into());
+                graph.validate(&module, &check_definitions);
                 let mut direct_definitions = stage_definitions.clone();
                 direct_definitions.push("PRIMARY_CANOPY_DIRECT_ONLY".into());
                 graph.validate(&module, &direct_definitions);
@@ -194,7 +203,8 @@ fn scene_consumers_compose_across_production_feature_variants() {
             // grime's near side alone, the reflection diagnostics, the
             // reflection's and the grime's single-cell cache reads, every
             // layer of a first-person camouflage, the pane pass unguarded and
-            // rand_f unclamped, and the two together)
+            // rand_f unclamped, and the two together; every pixel traced in
+            // full, without the pane probe)
             if consumer == "realtime::primary_glass" || consumer == "realtime::specular_gi" {
                 let mut old_definitions = stage_definitions.clone();
                 old_definitions.push("GLASS_UNGUARDED".into());
@@ -211,11 +221,17 @@ fn scene_consumers_compose_across_production_feature_variants() {
                     "CAMOUFLAGE_ALL_LAYERS",
                     "GLASS_UNGUARDED",
                     "RAND_F_UNBOUNDED",
+                    "GLASS_UNPROBED",
+                    "PROBE_CHECK",
                 ] {
                     let mut glass_definitions = stage_definitions.clone();
                     glass_definitions.push(name.into());
                     graph.validate(&module, &glass_definitions);
                 }
+                let mut wrong_definitions = stage_definitions.clone();
+                wrong_definitions.push("PROBE_CHECK".into());
+                wrong_definitions.push("PROBE_CHECK_WRONG".into());
+                graph.validate(&module, &wrong_definitions);
             }
         }
     }

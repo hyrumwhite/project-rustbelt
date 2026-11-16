@@ -441,12 +441,23 @@ const RAY_OFFSET_SCALE: f32 = 0.00000095367431640625;
 
 // (every instance but those only reflections see, RAY_MASK_REFLECTED: no
 // other instance carries that bit alone, so for every other one this is the
-// 0xFF it was)
+// 0xFF it was. Bits 0 to 2 are the caller's RaytracingMask; bits 3 to 7 the
+// binder's, binder.rs instance_ray_mask: bit 7 for any of the caller's
+// upper bits, 3 to 6 the material's kind below)
 const RAY_NO_CULL = 0xFBu;
 const RAY_MASK_NEAR = 0x01u;
 // Instances a reflection's first ray alone meets (RaytracingMask::REFLECTED):
 // trace_glass_ray_seeing's `also_seen`.
 const RAY_MASK_REFLECTED = 0x04u;
+// Instances by their material's kind, each set where the usual rays meet the
+// instance, from near (RAY_MASK_NEAR's rays) or from elsewhere (RAY_NO_CULL's):
+// a pane (ALPHA_BLEND or DIFFUSE_BLEND) and foliage (a diffuse transmission,
+// the flags' high 16 bits). For trace_kind_probe alone; no other ray's cull
+// mask sees them apart.
+const RAY_MASK_PANE_NEAR = 0x08u;
+const RAY_MASK_PANE = 0x10u;
+const RAY_MASK_FOLIAGE_NEAR = 0x20u;
+const RAY_MASK_FOLIAGE = 0x40u;
 
 fn trace_ray(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ray_t_min: f32, ray_t_max: f32, ray_flag: u32) -> SceneHit {
     return trace_ray_impl(ray_origin, ray_direction, ray_t_min, ray_t_max, ray_flag, false);
@@ -524,6 +535,31 @@ fn trace_triangle_ray_masked(ray_origin: vec3<f32>, ray_direction: vec3<f32>, ra
         }
     }
     return rayQueryGetCommittedIntersection(&rq);
+}
+
+// Whether a ray meets any instance of a kind at all (`near_bit` and
+// `away_bit`: the kind's pair of mask bits, RAY_MASK_PANE_NEAR and
+// RAY_MASK_PANE or RAY_MASK_FOLIAGE_NEAR and RAY_MASK_FOLIAGE), over the
+// range and by the confirm rule trace_triangle_ray_masked would use (with
+// no `also_seen`): a pass whose work is all on that kind skips a pixel whose
+// probe misses, at the cost of a walk among that kind's instances alone. Any
+// hit will do, so it stops at the first.
+fn trace_kind_probe(ray_origin: vec3f, ray_direction: vec3f, ray_t_min: f32, ray_t_max: f32, include_glass: bool, near_bit: u32, away_bit: u32) -> bool {
+    let minimum = max(ray_t_min, max(max(abs(ray_origin.x), abs(ray_origin.y)), abs(ray_origin.z)) * sky_light.relative_ray_min);
+    let maximum = min(ray_t_max, ray_max_distance());
+    if minimum > maximum { return false; }
+    let near = sky_light.near_rays;
+    let cull_mask = select(away_bit, near_bit, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
+    var rq: ray_query;
+    rayQueryInitialize(&rq, tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, cull_mask, minimum, maximum, ray_origin, ray_direction));
+    while rayQueryProceed(&rq) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        if candidate.kind == RAY_QUERY_INTERSECTION_TRIANGLE && candidate_is_solid(candidate, include_glass, ray_origin, ray_direction) {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
+    let committed = rayQueryGetCommittedIntersection(&rq);
+    return committed.kind != RAY_QUERY_INTERSECTION_NONE;
 }
 
 // A shadow ray's straight-through energy (rgb, and a: the probability of

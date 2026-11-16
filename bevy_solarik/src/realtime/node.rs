@@ -566,7 +566,8 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         && scene_bindings.history_regional
         && s.history
             .has_one_pending_event(scene_bindings.history_generation);
-    let reset_flags = if solarik_lighting.reset || s.history.full_reset_pending() {
+    let full_reset = solarik_lighting.reset || s.history.full_reset_pending();
+    let reset_flags = if full_reset {
         1u32
     } else if solarik_lighting.dynamic_scene {
         // (scene changes keep the history: SolarikLighting::dynamic_scene)
@@ -700,11 +701,22 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         pass.dispatch_workgroups(dx, dy, 1);
     }
 
+    // (only here, never in the primary compositor: a static sky's
+    // distribution is kept until its inputs change, SolarikStaticSky)
     let d = diagnostics.time_span(&mut pass, "solarik_lighting/sky_distribution");
-    pass.set_pipeline(build_sky_rows_pipeline);
-    pass.dispatch_workgroups(6 * 128, 1, 1);
-    pass.set_pipeline(build_sky_marginal_pipeline);
-    pass.dispatch_workgroups(1, 1, 1);
+    if crate::scene::sky_distribution_stale(
+        &mut s
+            .sky_distribution_built
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        scene_bindings.sky_distribution_key(),
+        full_reset,
+    ) {
+        pass.set_pipeline(build_sky_rows_pipeline);
+        pass.dispatch_workgroups(6 * 128, 1, 1);
+        pass.set_pipeline(build_sky_marginal_pipeline);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
     d.end(&mut pass);
 
     let d = diagnostics.time_span(&mut pass, "solarik_lighting/presample_light_tiles");

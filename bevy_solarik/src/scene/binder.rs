@@ -40,7 +40,7 @@ use bevy_render::{
     extract_component::ExtractComponent,
     extract_resource::ExtractResource,
     mesh::allocator::MeshAllocator,
-    render_asset::RenderAssets,
+    render_asset::{ExtractedAssets, RenderAssets},
     render_resource::{binding_types::*, *},
     renderer::{RenderDevice, RenderQueue},
     texture::{FallbackImage, GpuImage},
@@ -74,6 +74,46 @@ pub struct SolarikSkyLight {
     pub image: Option<Handle<Image>>,
     /// Multiplier on the cubemap's radiance.
     pub intensity: f32,
+}
+
+/// The sky image's contents change only when its texture does (a cubemap
+/// built on the CPU, never rendered into): the lighting's sampling
+/// distribution over the sky (`sky_sampling.wesl`) is then rebuilt only when
+/// the texture, its sampler or the intensity changes or the image is
+/// uploaded again, where it is otherwise rebuilt every frame (0.12 ms).
+/// Leave it out for a sky the GPU renders into (Solarik's own
+/// [`crate::atmosphere::AtmosphereEnvironment`], a render target).
+/// (`SOLARIK_SKY_REBUILD=1` rebuilds every frame anyway.)
+#[derive(Resource, Clone, Copy, Default, Debug)]
+pub struct SolarikStaticSky;
+
+/// [`SolarikStaticSky`] in the render world while it is in the main world
+/// (a removal reaches it too, which resource extraction does not carry).
+pub(super) fn extract_static_sky(
+    mut commands: bevy_ecs::system::Commands,
+    main: bevy_render::Extract<Option<Res<SolarikStaticSky>>>,
+    render: Option<Res<SolarikStaticSky>>,
+) {
+    match (main.is_some(), render.is_some()) {
+        (true, false) => commands.insert_resource(SolarikStaticSky),
+        (false, true) => commands.remove_resource::<SolarikStaticSky>(),
+        _ => {}
+    }
+}
+
+/// `SOLARIK_FREEZE_TIME=1`: the water ripples' drift held at its start, so
+/// that two runs whose frames take different times draw the same water (a
+/// diagnostic for comparing pictures).
+fn time_frozen() -> bool {
+    static FROZEN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FROZEN.get_or_init(|| std::env::var("SOLARIK_FREEZE_TIME").is_ok_and(|v| v == "1"))
+}
+
+/// `SOLARIK_SKY_REBUILD=1`: the sky's distribution rebuilt every frame even
+/// with [`SolarikStaticSky`] (read once).
+fn sky_rebuild_forced() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| std::env::var("SOLARIK_SKY_REBUILD").is_ok_and(|v| v == "1"))
 }
 
 /// A point or spot light whose sphere smooth surfaces don't show: it lights
@@ -224,6 +264,40 @@ fn sky_shader_intensity(intensity: f32, image_bound: bool) -> f32 {
     if image_bound { intensity.max(0.0) } else { 0.0 }
 }
 
+/// Everything the sky's sampling distribution is built from: `build_sky_rows`
+/// reads only `sample_sky`, the cube and its sampler times the intensity the
+/// shader sees (no time, exposure, frame or rotation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SkyDistributionKey {
+    view: TextureViewId,
+    sampler: SamplerId,
+    image_bound: bool,
+    intensity: u32,
+    /// The sky image's uploads: one written into its texture in place
+    /// (same descriptor) keeps the texture's view.
+    uploads: u64,
+}
+
+impl SkyDistributionKey {
+    fn new(view: TextureViewId, sampler: SamplerId, image_bound: bool, intensity: f32) -> Self {
+        Self { view, sampler, image_bound, intensity: intensity.to_bits(), uploads: 0 }
+    }
+}
+
+/// Whether a view's sky distribution must be built this frame, given the key
+/// it was last built for (`built`, updated): always without a key (no
+/// [`SolarikStaticSky`]) or on a full history reset, else when the key
+/// differs. Call it only where the build is then dispatched.
+pub(crate) fn sky_distribution_stale(
+    built: &mut Option<SkyDistributionKey>,
+    key: Option<SkyDistributionKey>,
+    full_reset: bool,
+) -> bool {
+    let stale = key.is_none() || full_reset || *built != key;
+    *built = key;
+    stale
+}
+
 #[derive(Resource)]
 pub struct RaytracingSceneBindings {
     pub bind_group: Option<BindGroup>,
@@ -252,6 +326,12 @@ pub struct RaytracingSceneBindings {
     /// How many light sources the scene has this frame (the lighting's
     /// table of emissive triangles is built a workgroup a light).
     pub light_source_count: u32,
+    /// The sky distribution's inputs as `bind_group` holds them (set with it).
+    sky_source: Option<SkyDistributionKey>,
+    /// The sky image's uploads seen (counted every frame, before any return).
+    sky_uploads: u64,
+    /// [`SolarikStaticSky`] present and `SOLARIK_SKY_REBUILD` not set.
+    sky_static: bool,
 }
 
 #[derive(Default)]
@@ -536,7 +616,12 @@ pub(crate) fn prepare_raytracing_scene_bindings(
     ),
     texture_assets: Res<RenderAssets<GpuImage>>,
     fallback_texture: Res<FallbackImage>,
-    (dfg_lut, time): (Res<DfgLut>, Res<bevy_time::Time>),
+    (dfg_lut, time, static_sky, extracted_images): (
+        Res<DfgLut>,
+        Res<bevy_time::Time>,
+        Option<Res<SolarikStaticSky>>,
+        Res<ExtractedAssets<GpuImage>>,
+    ),
     (sky_light, near_rays, ray_fog, seen_lights, main_entities): (
         Res<SolarikSkyLight>,
         Res<SolarikNearRays>,
@@ -566,6 +651,16 @@ pub(crate) fn prepare_raytracing_scene_bindings(
 ) {
     let frame_id = frame.as_deref().map(|f| f.0);
     raytracing_scene_bindings.has_canopy = canopy.active;
+    // (before every return: the bound sky's texture keeps its view through
+    // an upload written into it, which still changes its distribution)
+    raytracing_scene_bindings.sky_static = static_sky.is_some() && !sky_rebuild_forced();
+    if sky_light
+        .image
+        .as_ref()
+        .is_some_and(|image| extracted_images.added.contains(&image.id()))
+    {
+        raytracing_scene_bindings.sky_uploads = raytracing_scene_bindings.sky_uploads.wrapping_add(1);
+    }
     let _source = frame_id.and_then(bevy_render::diagnostic::profile_source_frame);
     #[cfg(feature = "graphics_debug")]
     let dense_reference = {
@@ -1238,6 +1333,9 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             .get(&input.mesh)
             .and_then(Option::as_ref)
             .expect("active source");
+        // (its material's kind in the mask, from the flags the shader reads:
+        // written this pass, so a material's change reaches it here)
+        let flags = materials.get()[material_ids.get()[index as usize] as usize].flags;
         super::tlas::publish_slot(
             tlas,
             address as u32,
@@ -1245,7 +1343,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                 blas,
                 tlas_transform(&transforms.get()[index as usize]),
                 index,
-                input.mask,
+                instance_ray_mask(input.mask, flags),
             )),
         );
     }
@@ -1638,10 +1736,17 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             &fallback_texture.cube.texture_view,
             &fallback_texture.cube.sampler,
         ));
+    let sky_intensity = sky_shader_intensity(sky_light.intensity, sky_image.is_some());
+    raytracing_scene_bindings.sky_source = Some(SkyDistributionKey::new(
+        sky_view.id(),
+        sky_sampler.id(),
+        sky_image.is_some(),
+        sky_intensity,
+    ));
     // A storage buffer: wgpu refuses a uniform buffer in a bind group that
     // also holds binding arrays (the textures and mesh slabs above).
     sky_buffer.set(GpuSkyLight {
-        intensity: sky_shader_intensity(sky_light.intensity, sky_image.is_some()),
+        intensity: sky_intensity,
         ray_max_distance: ray_settings.max_distance(),
         relative_ray_min: ray_settings.relative_min_distance(),
         material_transport_flags,
@@ -1652,7 +1757,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
             weather_image.is_some(),
         ),
         fog: *ray_fog,
-        time: time.elapsed_secs_wrapped(),
+        time: if time_frozen() { 0.0 } else { time.elapsed_secs_wrapped() },
     });
     sky_buffer.write_buffer_changed(&render_device, &render_queue);
     ring_buffer.set(rings.0.clone());
@@ -1760,6 +1865,9 @@ impl RaytracingSceneBindings {
             #[cfg(feature = "graphics_debug")]
             debug: super::graphics_debug::SceneSnapshot::default(),
             light_source_count: 0,
+            sky_source: None,
+            sky_uploads: 0,
+            sky_static: false,
             glass_entities: HashSet::default(),
             has_foliage: false,
             has_canopy: false,
@@ -1775,6 +1883,16 @@ impl RaytracingSceneBindings {
 impl Default for RaytracingSceneBindings {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl RaytracingSceneBindings {
+    /// The key of the sky distribution the bound sky gives
+    /// ([`sky_distribution_stale`]); none: rebuilt every frame.
+    pub(crate) fn sky_distribution_key(&self) -> Option<SkyDistributionKey> {
+        self.sky_source
+            .filter(|_| self.sky_static)
+            .map(|key| SkyDistributionKey { uploads: self.sky_uploads, ..key })
     }
 }
 
@@ -1928,6 +2046,43 @@ pub(super) fn material_alpha(material: &StandardMaterial) -> MaterialAlpha {
         flags: mode | double_sided | refract | (transmission << 16),
         cutoff,
     }
+}
+
+/// The TLAS mask of an instance whose `RaytracingMask` is `mask` and whose
+/// material's flags are `flags`: the caller's bits 0 to 2 as they are
+/// (`NEAR`, `AWAY`, `REFLECTED`), bit 7 for any of its upper bits (so
+/// every usual ray, whose cull mask holds bit 7, meets such an instance as
+/// it met the 0xFF), and the material's kind in bits 3 to 6, each set
+/// where the usual rays would meet the instance: 0x08 a pane (`ALPHA_BLEND`
+/// or `DIFFUSE_BLEND`) met from near `SolarikNearRays`' centre, 0x10 a pane
+/// met from elsewhere, 0x20 foliage (a diffuse transmission in the high 16
+/// flag bits) met from near, 0x40 foliage met from elsewhere. A probe ray
+/// culling to one of them meets that kind alone (`trace_kind_probe`, the
+/// camera's glass and foliage passes); no other ray meets more or fewer
+/// instances than by `mask` (unit test instance_ray_mask_keeps_every_ray).
+pub(super) fn instance_ray_mask(mask: u8, flags: u32) -> u8 {
+    const NEAR: u8 = 0x01;
+    // (the usual rays' cull mask away from the near centre, RAY_NO_CULL)
+    const AWAY: u8 = 0xFB;
+    let pane = flags & (MATERIAL_FLAG_ALPHA_BLEND | MATERIAL_FLAG_DIFFUSE_BLEND) != 0;
+    let foliage = flags >> 16 != 0;
+    let mut result = mask & 0x07;
+    if mask & 0xF8 != 0 {
+        result |= 0x80;
+    }
+    if pane && mask & NEAR != 0 {
+        result |= 0x08;
+    }
+    if pane && mask & AWAY != 0 {
+        result |= 0x10;
+    }
+    if foliage && mask & NEAR != 0 {
+        result |= 0x20;
+    }
+    if foliage && mask & AWAY != 0 {
+        result |= 0x40;
+    }
+    result
 }
 
 /// The most emissive triangles the lighting's table of them holds
@@ -2373,6 +2528,29 @@ mod tests {
     }
 
     #[test]
+    fn sky_distribution_is_rebuilt_only_when_its_inputs_change() {
+        let (view, sampler) = (TextureViewId::new(), SamplerId::new());
+        let key = SkyDistributionKey::new(view, sampler, true, 1.5);
+        assert_eq!(key, SkyDistributionKey::new(view, sampler, true, 1.5));
+        assert_ne!(key, SkyDistributionKey::new(view, sampler, true, 1.25));
+        assert_ne!(key, SkyDistributionKey::new(TextureViewId::new(), sampler, true, 1.5));
+        assert_ne!(key, SkyDistributionKey::new(view, SamplerId::new(), true, 1.5));
+        assert_ne!(key, SkyDistributionKey::new(view, sampler, false, 1.5));
+        assert_ne!(key, SkyDistributionKey { uploads: 1, ..key });
+
+        let mut built = None;
+        assert!(sky_distribution_stale(&mut built, Some(key), false), "a new buffer");
+        assert!(!sky_distribution_stale(&mut built, Some(key), false));
+        assert!(sky_distribution_stale(&mut built, Some(key), true), "a full reset");
+        let brighter = SkyDistributionKey::new(view, sampler, true, 2.0);
+        assert!(sky_distribution_stale(&mut built, Some(brighter), false));
+        assert!(!sky_distribution_stale(&mut built, Some(brighter), false));
+        assert!(sky_distribution_stale(&mut built, None, false), "no static sky");
+        assert!(sky_distribution_stale(&mut built, None, false));
+        assert!(sky_distribution_stale(&mut built, Some(brighter), false));
+    }
+
+    #[test]
     fn only_explicit_blend_transmission_is_thin_glass() {
         let mut material = StandardMaterial::default();
         for mode in [
@@ -2463,6 +2641,47 @@ mod tests {
                 "{blended:?} blocks no ray"
             );
         }
+    }
+
+    #[test]
+    fn instance_ray_mask_keeps_every_ray() {
+        // (the cull masks of the rays that were there: near, away, and each
+        // seeing RAY_MASK_REFLECTED too, a reflection's first ray)
+        let rays = [0x01u8, 0xFB, 0x01 | 0x04, 0xFB | 0x04];
+        let kinds = [
+            (0u32, false, false),
+            (MATERIAL_FLAG_ALPHA_BLEND | MATERIAL_FLAG_DOUBLE_SIDED, true, false),
+            (MATERIAL_FLAG_DIFFUSE_BLEND, true, false),
+            (MATERIAL_FLAG_ALPHA_MASK | MATERIAL_FLAG_DOUBLE_SIDED | (32768 << 16), false, true),
+            (MATERIAL_FLAG_DIFFUSE_BLEND | (1 << 16), true, true),
+            (MATERIAL_FLAG_OPAQUE | MATERIAL_FLAG_REFRACT | MATERIAL_FLAG_REFLECTED_GLOW, false, false),
+        ];
+        for mask in 0..=255u8 {
+            for (flags, pane, foliage) in kinds {
+                let result = instance_ray_mask(mask, flags);
+                for cull in rays {
+                    assert_eq!(
+                        result & cull != 0,
+                        mask & cull != 0,
+                        "mask {mask:#04x}, flags {flags:#x}, cull {cull:#04x}"
+                    );
+                }
+                // (a probe meets exactly the instances of its kind a near
+                // ray, or an away ray, meets)
+                assert_eq!(result & 0x08 != 0, pane && mask & 0x01 != 0);
+                assert_eq!(result & 0x10 != 0, pane && mask & 0xFB != 0);
+                assert_eq!(result & 0x20 != 0, foliage && mask & 0x01 != 0);
+                assert_eq!(result & 0x40 != 0, foliage && mask & 0xFB != 0);
+                assert_eq!(result & 0x07, mask & 0x07);
+                assert_eq!(result & 0x80 != 0, mask & 0xF8 != 0);
+            }
+        }
+        // (reflected alone and light only: no kind)
+        let pane = MATERIAL_FLAG_ALPHA_BLEND | (1 << 16);
+        assert_eq!(instance_ray_mask(0x04, pane), 0x04);
+        assert_eq!(instance_ray_mask(0, pane), 0);
+        assert_eq!(instance_ray_mask(0xFF, pane), 0xFF);
+        assert_eq!(instance_ray_mask(0xFF, 0), 0x87);
     }
 
     #[test]

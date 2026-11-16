@@ -49,7 +49,7 @@ pub mod prelude {
     pub use crate::realtime::SolarikLighting;
     pub use crate::scene::{
         RaytracingAssembly3d, RaytracingAssemblyPart, RaytracingMesh3d, SolarikAlphaTesting,
-        SolarikRaySettings, SolarikSkyLight,
+        SolarikRaySettings, SolarikSkyLight, SolarikStaticSky,
     };
 }
 

@@ -9,6 +9,7 @@
 //! has the equations). The HUD is drawn after it, over it.
 
 use crate::bridge::{BridgeLevel, BridgeLink};
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     core_pipeline::{schedule::Core3d, tonemapping::tonemapping, Core3dSystems, FullscreenShader},
@@ -283,6 +284,8 @@ fn draw_screen_effect(
             &effect_pipeline.linear_sampler,
         )),
     );
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("halo_screen_effect"),
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -296,7 +299,9 @@ fn draw_screen_effect(
         occlusion_query_set: None,
         multiview_mask: None,
     });
+    let pass_span = diagnostics.pass_span(&mut pass, "halo_screen_effect");
     pass.set_render_pipeline(pipeline);
     pass.set_bind_group(0, &bind_group, &[]);
     pass.draw(0..3, 0..1);
+    pass_span.end(&mut pass);
 }

@@ -6,6 +6,7 @@ import bevy_solarik::filtered_canopy_scene::forest_set_seed;
 import bevy_solarik::filtered_canopy_scene::forest_primary_seed;
 import bevy_solarik::filtered_canopy_scene::forest_background_guides;
 import bevy_solarik::filtered_canopy_scene::forest_conditioning_enabled;
+import bevy_solarik::filtered_canopy_scene::forest_scene_empty;
 @if((RAY_MATERIAL_FOOTPRINTS)) import bevy_solarik::scene::raytracing_scene_bindings::primary_ray_cone;
 @if((RAY_MATERIAL_FOOTPRINTS)) import bevy_solarik::scene::raytracing_scene_bindings::advance_ray_cone;
 @if((RAY_MATERIAL_FOOTPRINTS)) import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_filtered;
@@ -13,6 +14,9 @@ import bevy_solarik::realtime::foliage_math::foliage_depth_matches;
 import bevy_solarik::realtime::surface_path::shade_surface_path;
 import bevy_solarik::scene::raytracing_scene_bindings::trace_primary_ray;
 import bevy_solarik::scene::raytracing_scene_bindings::trace_primary_conditioned;
+import bevy_solarik::scene::raytracing_scene_bindings::trace_kind_probe;
+import bevy_solarik::scene::raytracing_scene_bindings::RAY_MASK_FOLIAGE_NEAR;
+import bevy_solarik::scene::raytracing_scene_bindings::RAY_MASK_FOLIAGE;
 import bevy_solarik::scene::raytracing_scene_bindings::resolve_ray_hit_full;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedRayHitFull;
 import bevy_solarik::scene::raytracing_scene_bindings::ray_max_distance;
@@ -61,10 +65,38 @@ fn primary_foliage(@builtin(global_invocation_id) id: vec3<u32>) {
         shade_conditioned_primary(near,direction,distance_to_surface,depth,id.xy);
         return;
     }
-    let ray = trace_primary_ray(near, direction, 0.0, distance_to_surface + max(0.002, distance_to_surface * 0.00001), RAY_FLAG_NONE);
+    let maximum = distance_to_surface + max(0.002, distance_to_surface * 0.00001);
+    // (without a canopy the pass writes only where the ray's nearest hit is
+    // a triangle whose material has a diffuse transmission, the flags' high
+    // bits, so a probe among the instances of such materials alone,
+    // trace_kind_probe, answers most pixels in place of a trace of the whole
+    // scene; with one, a coarse event may be shaded and every pixel traces
+    // as before. SOLARIK_SHADER_DEFS=FOLIAGE_UNPROBED the old, the full
+    // trace for every pixel)
+@if(!(FOLIAGE_UNPROBED || PROBE_CHECK)) {
+    if forest_scene_empty() && !trace_kind_probe(near, direction, 0.0, maximum, false, RAY_MASK_FOLIAGE_NEAR, RAY_MASK_FOLIAGE) { return; }
+}
+    let ray = trace_primary_ray(near, direction, 0.0, maximum, RAY_FLAG_NONE);
     if scene_hit_is_miss(ray) { return; }
     let hit=primary_resolve(ray,direction,near);
     if !primary_surface_matches(hit, scene_hit_is_coarse(ray), id.xy, depth, distance_to_surface) { return; }
+    // (diagnostic, SOLARIK_SHADER_DEFS=PROBE_CHECK: every pixel traced in
+    // full, and one the pass shades although the probe misses painted a
+    // magenta of 1000, white once tone mapped: there must be none.
+    // PROBE_CHECK_WRONG with it probes among the panes instead, to see the
+    // check itself: every leaf the pass shades is then painted)
+@if(PROBE_CHECK) {
+@if(PROBE_CHECK_WRONG) {
+    let probed = trace_kind_probe(near, direction, 0.0, maximum, false, 0x08u, 0x10u);
+}
+@if(!(PROBE_CHECK_WRONG)) {
+    let probed = trace_kind_probe(near, direction, 0.0, maximum, false, RAY_MASK_FOLIAGE_NEAR, RAY_MASK_FOLIAGE);
+}
+    if forest_scene_empty() && !probed {
+        textureStore(view_output, id.xy, vec4f(1000.0, 0.0, 1000.0, 1.0));
+        return;
+    }
+}
     shade_primary_foliage(hit, direction, id.xy);
 }
 }

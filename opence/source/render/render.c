@@ -377,7 +377,10 @@ static void render_window(
 		structure_render_preprocess();
 		structure_render_lightmaps();
 		rasterizer_lens_flares_submit_occlusion_tests();
-		render_object_shadows();
+		/* port: not under the Bevy bridge's overlay, where nothing they
+		draw is seen (halo_screen_overlay_shadows) */
+		if (halo_screen_overlay_shadows())
+			render_object_shadows();
 		lights_render_diffuse();
 
 		halo_screen_overlay_world(FALSE);

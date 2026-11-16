@@ -51,6 +51,9 @@ pub const WORLD_CACHE_SIZE: u64 = 2u64.pow(20);
 #[derive(Component)]
 pub struct SolarikLightingResources {
     pub sky_distribution: Buffer,
+    /// The key `sky_distribution` was last built for (none: not yet, or
+    /// built every frame); a new buffer starts unbuilt.
+    pub(crate) sky_distribution_built: std::sync::Mutex<Option<crate::scene::SkyDistributionKey>>,
     pub light_tile_samples: Buffer,
     pub light_tile_resolved_samples: Buffer,
     /// The emissive triangles in world space (light_triangles.wesl).
@@ -307,6 +310,7 @@ pub fn prepare_solari_lighting_resources(
 
         commands.entity(entity).insert(SolarikLightingResources {
             sky_distribution,
+            sky_distribution_built: Default::default(),
             light_tile_samples,
             light_tile_resolved_samples,
             light_triangles,

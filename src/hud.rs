@@ -20,6 +20,7 @@
 
 use crate::bridge::{BridgeLevel, BridgeLink};
 use crate::overlay::OverlayMaterial;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::{
     asset::{embedded_asset, load_embedded_asset, RenderAssetUsages},
     core_pipeline::{schedule::Core3d, Core3dSystems},
@@ -849,6 +850,8 @@ fn draw_hud(
                 pass.draw(index * 6..index * 6 + 6, *index..*index + 1);
             }
         }
+        let diagnostics = ctx.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
         let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("halo_hud"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -862,6 +865,7 @@ fn draw_hud(
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        let pass_span = diagnostics.pass_span(&mut pass, "halo_hud");
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_bind_group(0, &draws_group, &[]);
         for (pipeline, maps, index, color) in &runs {
@@ -870,6 +874,7 @@ fn draw_hud(
             pass.set_blend_constant(LinearRgba::new(color[0] as f32, color[1] as f32, color[2] as f32, color[3] as f32));
             pass.draw(index * 6..index * 6 + 6, *index..*index + 1);
         }
+        pass_span.end(&mut pass);
     } else {
         // nothing this frame: the texture cleared
         let _pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {

@@ -11,6 +11,12 @@ view. Cells are weighted by luminance and their midpoint cubemap Jacobian.
 Uniform jitter inside the selected cell uses the exact Jacobian at the
 sampled direction when converting the PDF to solid angle.
 
+With `SolarikStaticSky` (a cubemap never rendered into) the CDF is kept
+per view and rebuilt only when the sky's texture view, sampler, shader
+intensity or upload count changes, on a full history reset and for a new
+buffer; the pass then reads about 0 ms. `SOLARIK_SKY_REBUILD=1` restores
+the per-frame rebuild.
+
 Both hit and miss paths use the reciprocal mixture PDF (one-sample balance
 MIS). Below-surface sky draws remain zero-valued samples with confidence
 one; discarding their count would condition temporal reuse on a successful

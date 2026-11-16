@@ -85,6 +85,10 @@ void platform_video_drawable_size(int *width, int *height);
 just written it (the main thread's) */
 void platform_display_apply(void);
 void platform_video_swap(void);
+/* ... with the swap itself left out at 0 (a hidden window's, which nobody
+sees: d3d8_gl.c, HALO_BEVY_HIDDEN_PRESENT), the rest of the frame's end
+(the display test steps, display.max_fps's limit) as it is */
+void platform_video_swap_paced(int swap);
 #ifndef HALO_ANDROID
 /* how long the last platform_video_swap waited for display.max_fps's limit
 after the swap (nanoseconds; 0 when it did not) */

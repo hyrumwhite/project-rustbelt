@@ -12,6 +12,9 @@ import bevy_solarik::realtime::gbuffer_utils::reconstruct_world_position;
 import bevy_solarik::realtime::gbuffer_utils::ResolvedGPixel;
 import bevy_solarik::scene::raytracing_scene_bindings::emitted_radiance;
 import bevy_solarik::scene::raytracing_scene_bindings::trace_glass_ray;
+import bevy_solarik::scene::raytracing_scene_bindings::trace_kind_probe;
+import bevy_solarik::scene::raytracing_scene_bindings::RAY_MASK_PANE_NEAR;
+import bevy_solarik::scene::raytracing_scene_bindings::RAY_MASK_PANE;
 import bevy_solarik::scene::raytracing_scene_bindings::materials;
 import bevy_solarik::scene::raytracing_scene_bindings::material_ids;
 import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_ALPHA_BLEND;
@@ -114,6 +117,22 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
     reflection_sum = 0.0;
     reflection_luminance = 0.0;
     var radiance = composite_primary_glass(id.xy, origin, direction, distance, background.rgb / view.exposure, background_point, &rng);
+    // (diagnostic, SOLARIK_SHADER_DEFS=PROBE_CHECK: every pixel traced in
+    // full, and one where a pane was met although the probe misses painted
+    // a magenta of 1000, white once tone mapped: there must be none.
+    // PROBE_CHECK_WRONG with it probes among the foliage in the panes'
+    // place, to see the check itself: every pane is then painted)
+@if(PROBE_CHECK) {
+@if(PROBE_CHECK_WRONG) {
+    let probed = distance > RAY_T_MIN && trace_kind_probe(origin, direction, RAY_T_MIN, distance, true, 0x20u, 0x40u);
+}
+@if(!(PROBE_CHECK_WRONG)) {
+    let probed = distance > RAY_T_MIN && trace_kind_probe(origin, direction, RAY_T_MIN, distance, true, RAY_MASK_PANE_NEAR, RAY_MASK_PANE);
+}
+    if radiance.a > 0.0 && !probed {
+        radiance = vec4(vec3(1000.0, 0.0, 1000.0) / view.exposure, radiance.a);
+    }
+}
     // (diagnostics, SOLARIK_SHADER_DEFS: GLASS_VIEW_REFLECTION the panes'
     // reflected light alone, as weighted; GLASS_VIEW_MIRROR the reflected
     // path's radiance unweighted, a mirror's; GLASS_NO_REFLECTION none)
@@ -185,6 +204,20 @@ fn composite_primary_glass(pixel_id: vec2u, initial_origin: vec3f, direction: ve
     // before. SOLARIK_SHADER_DEFS=CAMOUFLAGE_ALL_LAYERS the old, every
     // layer)
     var nearest_layer_met = false;
+    // (a ray that meets no pane before the background, most of the picture,
+    // is answered by a probe among the panes' instances alone,
+    // trace_kind_probe, in place of a trace of the whole scene: every way
+    // out of the loop before a pane returns the background as it came with
+    // alpha 0, and a pane is met only by a committed hit on an instance of a
+    // pane's material, over the same range and seen as the probe sees it.
+    // SOLARIK_SHADER_DEFS=GLASS_UNPROBED the old, the full trace for every
+    // pixel)
+@if(!(GLASS_UNPROBED || PROBE_CHECK)) {
+    let first_remaining = max_distance - dot(origin - initial_origin, direction);
+    if first_remaining > RAY_T_MIN && !trace_kind_probe(origin, direction, RAY_T_MIN, first_remaining, true, RAY_MASK_PANE_NEAR, RAY_MASK_PANE) {
+        return vec4(radiance + transmission * behind_near_pane(background, near_pane, background_point), has_glass);
+    }
+}
     for (var i = 0u; i <= 32u; i += 1u) {
         let remaining = max_distance - dot(origin - initial_origin, direction);
         if remaining <= RAY_T_MIN { return vec4(radiance + transmission * behind_near_pane(background, near_pane, background_point), has_glass); }

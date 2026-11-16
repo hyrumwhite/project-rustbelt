@@ -25,6 +25,7 @@
 //! the full fog the sea was a flat teal.
 
 use crate::bridge::BridgeLink;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     core_pipeline::{
@@ -548,6 +549,8 @@ pub(crate) fn draw_fog(
             weather_view.as_ref().unwrap_or(&fallback_zero.texture_view),
         )),
     );
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("halo_fog"),
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -561,7 +564,9 @@ pub(crate) fn draw_fog(
         occlusion_query_set: None,
         multiview_mask: None,
     });
+    let pass_span = diagnostics.pass_span(&mut pass, "halo_fog");
     pass.set_render_pipeline(pipeline);
     pass.set_bind_group(0, &bind_group, &[view_offset.offset]);
     pass.draw(0..3, 0..1);
+    pass_span.end(&mut pass);
 }

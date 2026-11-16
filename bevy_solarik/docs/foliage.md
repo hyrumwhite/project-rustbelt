@@ -19,6 +19,14 @@ distance) and normal before replacement; only authored nonzero-transmission
 foliage is shaded. It traces four independent paths with at most four scattering
 events each, using two-sided NEE and solid-angle MIS for emissive meshes.
 DLSS receives the original primary leaf depth, normal, albedo and motion.
+Without a canopy scene the pass writes only where the camera ray's nearest hit is
+a material with a nonzero transmission, so each pixel first sends a probe among
+those materials' instances alone (`trace_kind_probe` with `RAY_MASK_FOLIAGE_NEAR`
+and `RAY_MASK_FOLIAGE`, the instance mask bits the binder sets; see glass.md) over
+the same range and confirm rule, and only a pixel whose probe meets one traces the
+scene. With a canopy present every pixel traces as before, a coarse event being
+shaded too. `SOLARIK_SHADER_DEFS=FOLIAGE_UNPROBED` is the old pass, and
+`PROBE_CHECK` the check that the probe misses no leaf (glass.md).
 
 Glossy rays, including reflections launched by primary glass, hand authored
 transmissive leaf hits to the same two-sided surface estimator. The incoming

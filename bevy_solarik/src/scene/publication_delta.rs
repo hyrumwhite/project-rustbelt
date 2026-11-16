@@ -177,13 +177,17 @@ pub(super) fn try_publish(
             if slot.index != index {
                 return None;
             }
+            // (its material's kind in the mask, as the full path sets it: the
+            // material list is the full path's, unchanged by a delta)
+            let material = *cache.prepared.materials.get(&input.material)?;
+            let flags = cache.storage.materials.get().get(material as usize)?.flags;
             Some((
                 address,
                 TlasInstance::new(
                     blas.get(&input.mesh)?,
                     tlas_transform(&Mat4::from(input.transform)),
                     index,
-                    input.mask,
+                    instance_ray_mask(input.mask, flags),
                 ),
             ))
         })

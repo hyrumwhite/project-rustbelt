@@ -154,6 +154,8 @@ commands.insert_resource(SolarikSkyLight {
 });
 ```
 
+If the cubemap is only ever uploaded from the CPU and never rendered into, also insert `SolarikStaticSky`: the sky's sampling distribution is then rebuilt only when the texture, its sampler or the intensity changes (or the image is uploaded again), not every frame. Leave it out for a sky the GPU writes, such as the atmosphere's; `SOLARIK_SKY_REBUILD=1` rebuilds every frame anyway.
+
 Meshes need exactly `POSITION`, `NORMAL`, `UV_0` and `TANGENT` with u32 indices to go into the ray-traced scene; anything else stays raster-only. The camera's `Msaa` has to be off. `SolarikLighting::reset` drops screen-space and world-cache history for one frame on a camera cut, origin shift or material discontinuity, retaining GPU allocations. It automatically returns to false after extraction; separate upscalers may need their own reset. `SolarikPlugins::required_wgpu_features()` is what the GPU has to support; if it does not, the plugins log a warning and do nothing.
 
 Imported glTF may need its u16 indices converted to u32 and tangents generated first. The larger scene tests use a separate local rig that is not included in this repository. Solarik and [bevy_dlss5](https://github.com/AlrikOlson/bevy_dlss5), the DLSS 5 Neural Rendering plugin, can share one NGX instance; the two plugins are separate repositories.

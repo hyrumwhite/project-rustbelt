@@ -30,6 +30,10 @@ fn trace_glass_ray(origin: vec3f, direction: vec3f, tmin: f32, tmax: f32) -> Int
     if plane > inputs[1].x || t > tmax { return Intersection(0u, 0u, 0.0); }
     return Intersection(1u, 0u, t);
 }
+// (the pane probe always meets a pane here: the loop decides every case)
+const RAY_MASK_PANE_NEAR = 0x08u;
+const RAY_MASK_PANE = 0x10u;
+fn trace_kind_probe(origin: vec3f, direction: vec3f, tmin: f32, tmax: f32, include_glass: bool, near_bit: u32, away_bit: u32) -> bool { return true; }
 var<private> current_origin: vec3f;
 fn resolve_ray_hit_full(ray: Intersection) -> Hit {
     let position = current_origin + vec3(0.0, 0.0, ray.t);

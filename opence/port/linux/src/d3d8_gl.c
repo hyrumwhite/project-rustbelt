@@ -3219,6 +3219,28 @@ static BOOL overlay_first_person;
 shared (with the renderer drawing all of it, most frames nothing is: then
 it is shared empty, without reading it back) */
 static BOOL overlay_drawn;
+/* the draw being prepared writes nothing into the overlay
+(apply_raster_state, draw_skipped) */
+static BOOL overlay_noop;
+
+/* HALO_BEVY_DRAW_LOG: the GL draws a frame, those left out as writing
+nothing, and the frame's GPU time, once every DRAW_LOG_FRAMES frames */
+#define DRAW_LOG_FRAMES 300
+#define DRAW_LOG_QUERIES 4
+static int draw_log_on = -1;
+static struct
+{
+	unsigned long draws, skipped, frames, timed;
+	double gpu_ms;
+#ifndef HALO_ANDROID
+	/* GL_TIME_ELAPSED queries, a frame each, read once they say they are
+	available */
+	GLuint queries[DRAW_LOG_QUERIES];
+	BOOL pending[DRAW_LOG_QUERIES];
+	unsigned long next;
+	BOOL active;
+#endif
+} draw_log;
 
 static BOOL overlay_enabled(void)
 {
@@ -3283,6 +3305,52 @@ void halo_screen_overlay_first_person(unsigned char first_person)
 unsigned char halo_screen_overlay(void)
 {
 	return overlay_enabled() ? 1 : 0;
+}
+
+/* render.c: whether the objects' shadows are drawn. With the overlay, their
+maps (the shadow targets, which nothing else samples) feed only their
+projection onto the world, inside the world's depth-only bracket, which
+writes nothing there (depth equal, no depth write, the colour masked); the
+lighting each object's shadow reads its cache for was refreshed by
+render_objects in the same scene, so asking again changes nothing.
+(HALO_BEVY_OVERLAY_SHADOWS=1: drawn all the same, as they are with
+HALO_BEVY_OVERLAY_DEBUG_WORLD, which draws the world's colour) */
+unsigned char halo_screen_overlay_shadows(void)
+{
+	static int drawn = -1;
+
+	if (drawn < 0)
+	{
+		const char *value = getenv("HALO_BEVY_OVERLAY_SHADOWS");
+
+		drawn = (value && atoi(value) != 0) || getenv("HALO_BEVY_OVERLAY_DEBUG_WORLD") != NULL;
+	}
+	return !overlay_enabled() || drawn ? 1 : 0;
+}
+
+/* each draw entry point's last word before its glDraw*: with the overlay, a
+draw onto it that writes no colour, depth or stencil, and that no visibility
+test counts (a query or, on Android, the shaders' atomic counter), changes
+nothing and is left out (HALO_BEVY_OVERLAY_NOOP_DRAWS=1: drawn all the
+same); the state work before it is done either way, so the state caches
+stay as they were */
+static BOOL draw_skipped(void)
+{
+	static int noop_draws = -1;
+
+	if (noop_draws < 0)
+	{
+		const char *value = getenv("HALO_BEVY_OVERLAY_NOOP_DRAWS");
+
+		noop_draws = !(value && atoi(value) != 0);
+	}
+	if (overlay_noop && noop_draws && !device.visibility_test_active)
+	{
+		draw_log.skipped++;
+		return TRUE;
+	}
+	draw_log.draws++;
+	return FALSE;
 }
 
 static GLenum blend_equation(DWORD operation)
@@ -3465,6 +3533,13 @@ static void apply_raster_state(BOOL has_depth)
 		gl_state.color_mask = color_mask;
 		glColorMask((color_mask & 1) != 0, (color_mask & 2) != 0, (color_mask & 4) != 0, (color_mask & 8) != 0);
 	}
+	/* into the overlay, nothing written: no colour, no depth (its test off
+	or its writes), no stencil (its test off, a write mask of 0, or all
+	three operations keeping), for draw_skipped */
+	overlay_noop = overlay && !write && !gl_state.depth_mask &&
+		!(gl_state.stencil_test && gl_state.stencil_write_mask &&
+			(gl_state.stencil_operations[0] != GL_KEEP || gl_state.stencil_operations[1] != GL_KEEP ||
+			gl_state.stencil_operations[2] != GL_KEEP));
 
 	/* the cull mode names the winding to discard; FRONTFACE names the
 	front winding */
@@ -4597,6 +4672,8 @@ void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_v
 		return;
 	trace_draw("draw", primitive_type, vertex_count, NULL);
 	setup_streams(start_vertex, vertex_count);
+	if (draw_skipped())
+		return;
 	if (primitive_type == D3DPT_QUADLIST)
 	{
 		unsigned long count;
@@ -4637,10 +4714,14 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT 
 	{
 		/* the attributes start at vertex minimum */
 		state_element_array_buffer(index_buffer);
-		glDrawElementsBaseVertex(primitive_mode(primitive_type), (GLsizei)vertex_count, GL_UNSIGNED_SHORT,
-			(const void *)index_offset, -(GLint)minimum);
+		if (!draw_skipped())
+			glDrawElementsBaseVertex(primitive_mode(primitive_type), (GLsizei)vertex_count, GL_UNSIGNED_SHORT,
+				(const void *)index_offset, -(GLint)minimum);
 		return;
 	}
+	/* (the indices are streamed for the draw alone) */
+	if (draw_skipped())
+		return;
 	stats.streamed_bytes += vertex_count * sizeof(WORD);
 	count = vertex_count;
 	if (primitive_type == D3DPT_QUADLIST)
@@ -4727,6 +4808,8 @@ void WINAPI D3DDevice_End(void)
 		state_vertex_buffer(0, device.stream_buffer, offset, (GLsizei)stride);
 	}
 #endif
+	if (draw_skipped())
+		return;
 	if (type == D3DPT_QUADLIST)
 	{
 		unsigned long index_count;
@@ -5673,6 +5756,98 @@ static void overlay_share(struct render_target_entry *target)
 #endif
 }
 
+/* HALO_BEVY_HIDDEN_PRESENT: with the overlay on and the window hidden
+(debug.hidden_window), what Present does with the window nobody sees: 0
+clears it, draws the back buffer into it and swaps (the old); 1, the
+default, only swaps; 2 flushes in place of the swap, the frame's pacing kept
+(platform_video_swap_paced) */
+static int hidden_present(void)
+{
+	static int mode = -1;
+
+	if (!overlay_enabled())
+		return 0;
+	if (mode < 0)
+	{
+		const char *value = getenv("HALO_BEVY_HIDDEN_PRESENT");
+
+		mode = value && *value ? atoi(value) : 1;
+		if (mode < 0 || mode > 2)
+			mode = 1;
+		if (!config_boolean("debug.hidden_window"))
+			mode = 0;
+	}
+	return mode;
+}
+
+/* HALO_BEVY_DRAW_LOG's part of each present: before the swap the frame's
+timer query ends and those whose results are in are read (never waited
+for), after it the next frame's begins (GL_TIME_ELAPSED, which no other
+query here uses: the visibility tests' are VISIBILITY_QUERY); every
+DRAW_LOG_FRAMES frames, one line */
+static void draw_log_present(BOOL swapped)
+{
+#ifndef HALO_ANDROID
+	unsigned long index;
+#endif
+
+	if (draw_log_on < 0)
+	{
+		const char *value = getenv("HALO_BEVY_DRAW_LOG");
+
+		draw_log_on = value && atoi(value) != 0;
+		draw_log.draws = draw_log.skipped = 0;
+	}
+	if (!draw_log_on)
+		return;
+#ifndef HALO_ANDROID
+	if (swapped)
+	{
+		if (!draw_log.queries[0])
+			glGenQueries(DRAW_LOG_QUERIES, draw_log.queries);
+		/* (a query still unread DRAW_LOG_QUERIES frames on is given up) */
+		draw_log.pending[draw_log.next] = FALSE;
+		glBeginQuery(GL_TIME_ELAPSED, draw_log.queries[draw_log.next]);
+		draw_log.active = TRUE;
+		return;
+	}
+	if (draw_log.active)
+	{
+		glEndQuery(GL_TIME_ELAPSED);
+		draw_log.pending[draw_log.next] = TRUE;
+		draw_log.next = (draw_log.next + 1) % DRAW_LOG_QUERIES;
+		draw_log.active = FALSE;
+	}
+	for (index = 0; index < DRAW_LOG_QUERIES; index++)
+	{
+		GLuint available = 0;
+		GLuint64 elapsed = 0;
+
+		if (!draw_log.pending[index])
+			continue;
+		glGetQueryObjectuiv(draw_log.queries[index], GL_QUERY_RESULT_AVAILABLE, &available);
+		if (!available)
+			continue;
+		glGetQueryObjectui64v(draw_log.queries[index], GL_QUERY_RESULT, &elapsed);
+		draw_log.pending[index] = FALSE;
+		draw_log.gpu_ms += (double)elapsed / 1.0e6;
+		draw_log.timed++;
+	}
+#else
+	if (swapped)
+		return;
+#endif
+	if (++draw_log.frames >= DRAW_LOG_FRAMES)
+	{
+		platform_log("draw log: %.1f GL draws and %.1f left out as writing nothing a frame; GPU %.3f ms a frame "
+			"(%lu of %lu frames timed)",
+			(double)draw_log.draws / (double)draw_log.frames, (double)draw_log.skipped / (double)draw_log.frames,
+			draw_log.timed ? draw_log.gpu_ms / (double)draw_log.timed : 0.0, draw_log.timed, draw_log.frames);
+		draw_log.draws = draw_log.skipped = draw_log.frames = draw_log.timed = 0;
+		draw_log.gpu_ms = 0.0;
+	}
+}
+
 void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destination_rectangle,
 	void *unused, void *unused2)
 {
@@ -5688,7 +5863,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 	if (device.gl_ready)
 	{
 		struct render_target_entry *back_buffer = render_target_get(&device.back_buffer);
-		int window_width, window_height, width, height, x, y;
+		int window_width, window_height, width, height, x, y, hidden;
 #ifndef HALO_ANDROID
 		Uint64 share_started, swap_started, swap_ended;
 #endif
@@ -5718,30 +5893,44 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 			write_key_screenshot(back_buffer);
 #endif
 
-		platform_video_drawable_size(&window_width, &window_height);
-		/* letterbox to the back buffer's aspect ratio */
-		width = window_width;
-		height = (int)((long)window_width * back_buffer->target.gl_height / back_buffer->target.gl_width);
-		if (height > window_height)
+		/* (the screenshots above read the back buffer's texture, not the
+		window) */
+		hidden = hidden_present();
+		if (!hidden)
 		{
-			height = window_height;
-			width = (int)((long)window_height * back_buffer->target.gl_width / back_buffer->target.gl_height);
+			platform_video_drawable_size(&window_width, &window_height);
+			/* letterbox to the back buffer's aspect ratio */
+			width = window_width;
+			height = (int)((long)window_width * back_buffer->target.gl_height / back_buffer->target.gl_width);
+			if (height > window_height)
+			{
+				height = window_height;
+				width = (int)((long)window_height * back_buffer->target.gl_width / back_buffer->target.gl_height);
+			}
+			x = (window_width - width) / 2;
+			y = (window_height - height) / 2;
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+			glDisable(GL_SCISSOR_TEST);
+			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+			glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(back_buffer->target.texture, 0));
+			/* row 0 of the render target is the top of the picture */
+			glBlitFramebuffer(0, 0, (GLint)back_buffer->target.gl_width, (GLint)back_buffer->target.gl_height,
+				x, y + height, x + width, y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
 		}
-		x = (window_width - width) / 2;
-		y = (window_height - height) / 2;
-		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-		glDisable(GL_SCISSOR_TEST);
-		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-		glClear(GL_COLOR_BUFFER_BIT);
-		glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(back_buffer->target.texture, 0));
-		/* row 0 of the render target is the top of the picture */
-		glBlitFramebuffer(0, 0, (GLint)back_buffer->target.gl_width, (GLint)back_buffer->target.gl_height,
-			x, y + height, x + width, y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+		draw_log_present(FALSE);
 #ifndef HALO_ANDROID
 		swap_started = frame_timing_now();
 #endif
-		platform_video_swap();
+		if (hidden < 2)
+			platform_video_swap();
+		else
+		{
+			/* (the frame's work sent on as a swap would have) */
+			glFlush();
+			platform_video_swap_paced(0);
+		}
 #ifndef HALO_ANDROID
 		swap_ended = swap_started ? SDL_GetTicksNS() : 0;
 		if (overlay_enabled())
@@ -5749,6 +5938,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		frame_trace(swap_started, swap_ended);
 		frame_timing_frame(swap_started, swap_ended);
 #endif
+		draw_log_present(TRUE);
 		xgpu_gl_state_invalidate();
 		memory_watch_begin_frame();
 		xgpu_texture_cache_begin_frame();

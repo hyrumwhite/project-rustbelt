@@ -23,6 +23,9 @@ fn forest_primary_seed(pixel:vec2u,width:u32)->vec2u {
 // Explicit controls: 1 isolates guides, 2 conditions primary radiance.
 fn forest_background_guides()->bool {return forest_scene[1].y!=0u;}
 fn forest_conditioning_enabled()->bool {return forest_scene[1].y==2u;}
+// No canopy instance at all (the header's node count 0): forest_trace_scene_impl
+// then never returns an event, so no ray meets a coarse surface.
+fn forest_scene_empty()->bool {return forest_scene[0].x==0u;}
 fn forest_trace_scene(origin:vec3f,direction:vec3f,minimum:f32,maximum:f32,seed:vec2u)->ForestSceneEvent {
     return forest_trace_scene_impl(origin,direction,minimum,maximum,seed,false);
 }

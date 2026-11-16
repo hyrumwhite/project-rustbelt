@@ -12,6 +12,7 @@
 //! come out much fainter over a bright sky.
 
 use crate::bridge::{BridgeLevel, BridgeLink};
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     mesh::VertexBufferLayout,
@@ -258,6 +259,8 @@ pub(crate) fn draw_lens_flares(
         })
         .collect();
 
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("halo_lens_flares"),
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -271,6 +274,7 @@ pub(crate) fn draw_lens_flares(
         occlusion_query_set: None,
         multiview_mask: None,
     });
+    let pass_span = diagnostics.pass_span(&mut pass, "halo_lens_flares");
     pass.set_render_pipeline(pipeline);
     pass.set_bind_group(0, &view_group, &[view_offset]);
     pass.set_vertex_buffer(0, vertices.slice(..));
@@ -278,6 +282,7 @@ pub(crate) fn draw_lens_flares(
         pass.set_bind_group(1, group, &[]);
         pass.draw(*first..*first + *count, 0..1);
     }
+    pass_span.end(&mut pass);
     drop(pass);
     Some(texture.default_view)
 }

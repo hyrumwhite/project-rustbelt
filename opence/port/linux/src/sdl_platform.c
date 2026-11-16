@@ -1136,12 +1136,18 @@ void platform_video_pacing(int *swap_interval, float *refresh_rate, Uint64 *cap_
 #endif
 void platform_video_swap(void)
 {
+	platform_video_swap_paced(1);
+}
+
+void platform_video_swap_paced(int swap)
+{
 #ifndef HALO_ANDROID
 	static Uint64 next_frame;
 	Uint64 interval, now;
 
 #endif
-	SDL_GL_SwapWindow(platform_window);
+	if (swap)
+		SDL_GL_SwapWindow(platform_window);
 #ifndef HALO_ANDROID
 	test_display_frame();
 	platform_video_last_cap_delay = 0;

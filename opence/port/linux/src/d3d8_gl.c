@@ -6157,9 +6157,9 @@ static void overlay_share(struct render_target_entry *target)
 
 /* HALO_BEVY_HIDDEN_PRESENT: with the overlay on and the window hidden
 (debug.hidden_window), what Present does with the window nobody sees: 0
-clears it, draws the back buffer into it and swaps (the old); 1, the
-default, only swaps; 2 flushes in place of the swap, the frame's pacing kept
-(platform_video_swap_paced) */
+clears it, draws the back buffer into it and swaps (the first); 1 only
+swaps (the default until 17 November); 2, the default, flushes in place of
+the swap, the frame's pacing kept (platform_video_swap_paced) */
 static int hidden_present(void)
 {
 	static int mode = -1;
@@ -6170,9 +6170,9 @@ static int hidden_present(void)
 	{
 		const char *value = getenv("HALO_BEVY_HIDDEN_PRESENT");
 
-		mode = value && *value ? atoi(value) : 1;
+		mode = value && *value ? atoi(value) : 2;
 		if (mode < 0 || mode > 2)
-			mode = 1;
+			mode = 2;
 		if (!config_boolean("debug.hidden_window"))
 			mode = 0;
 	}

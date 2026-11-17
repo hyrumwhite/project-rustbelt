@@ -143,7 +143,7 @@ Under a viewer the hidden game draws only its overlay, but still ran the whole f
 
 In play at the user's setting, everything together (scripted, the frame's interval): a30's hillside 15.12 ms to 14.75, 14.66 and 14.65 over three runs (66 frames a second to 68), b40's corridor 14.83 to 14.69 and 14.48. Less than the viewer alone saves: the game's side moved the viewer's frame by 0.1 to 0.25 ms at most, near what two runs differ by, and the corridor's probes save less than the viewer's spots do (not looked into).
 
-`HALO_BEVY_HIDDEN_PRESENT=2` (a flush in place of the swap) is not the default: 14.45, 14.44 and 14.72 ms on a30 against the default's 14.75, 14.66 and 14.65, 13.87 against 14.69 and 14.48 in the corridor, and a fourth a30 run with it hitched six times a second (intervals of 25 to 100 ms) for a reason not found. Unproven either way.
+`HALO_BEVY_HIDDEN_PRESENT=2` (a flush in place of the swap) is not the default: 14.45, 14.44 and 14.72 ms on a30 against the default's 14.75, 14.66 and 14.65, 13.87 against 14.69 and 14.48 in the corridor, and a fourth a30 run with it hitched six times a second (intervals of 25 to 100 ms) for a reason not found. Unproven either way. (The default since 17 November, the last section.)
 
 ### Measured and left: they change the estimator
 
@@ -181,6 +181,10 @@ No pixel changed: with the game frozen, the overlay alone on screen and the firs
 
 What the other 0.37 ms is: the copy about 0.16 (`HALO_BEVY_OVERLAY_SHARED_CHECK=3` leaves it out), the rest the game's fence and flush and the viewer's blend of a full picture. Drawing the game's resolve straight into the shared texture would take the copy; not tried.
 
-`HALO_BEVY_HIDDEN_PRESENT=2`, run again beside it: the corridor 14.24 and 14.29 ms against 14.76 (an empty overlay 13.92 against 14.39), the hillside 14.02 to 14.27 over six runs against 14.37. That is 0.25 to 0.5 ms on any frame and none of nine runs hitched, where one of four did in the first round. Still not the default, the one bad run never having been explained; it is the next thing for a play A/B.
+`HALO_BEVY_HIDDEN_PRESENT=2`, run again beside it: the corridor 14.24 and 14.29 ms against 14.76 (an empty overlay 13.92 against 14.39), the hillside 14.02 to 14.27 over six runs against 14.37. That is 0.25 to 0.5 ms on any frame and none of nine runs hitched, where one of four did in the first round. Left opt-in that day, the one bad run never having been explained; the default since 17 November, below.
 
 Limits: proven on this machine's NVIDIA driver alone, a 64-bit Vulkan viewer and a 32-bit GL game; no semaphores and no layout hand-off between the two APIs (the fence and the held mask do the work); Windows alone, the Linux and Android game builds keep the pixels and were not compiled. No lighting changed and the harness was not run.
+
+## 17 November: the flush for the hidden swap, the default
+
+The user played with `HALO_BEVY_HIDDEN_PRESENT=2` set by hand: "ok, performane was great, it felt smooth, lets keep HALO_BEVY_HIDDEN_PRESENT=2 and I will keep an eye out for hitching in future playthroughs". It is the default now (`=1` the swap, `=0` the first present). On the rebuilt game with nothing set: a30's hillside 14.02 ms a frame against 14.47 with `=1`, b40's corridor with the overlay forced 14.12 against yesterday's 14.76; no repeats to speak of (0.0% and 0.2%), no render interval over 1.7 times the median. One difference from the swap: a dozen frames of a run wait 3.4 to 4.0 ms for the copy's fence where the swap's longest is under 1.0, each still sharing its own picture; nothing in the pacing measures shows it, and it is where to look first if hitching is met in play. docs/overlay-sharing.md's last section has the detail.

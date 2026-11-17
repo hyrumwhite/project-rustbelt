@@ -102,13 +102,12 @@ In follow mode with the display changed three times in a run (the overlay 2560x1
 
 ### Two things tried beside it
 
-- **`HALO_BEVY_HIDDEN_PRESENT=2`**, the first round's flush in place of the hidden window's swap, which had hitched in one run of four then. With the shared overlay: the corridor 14.24 and 14.29 ms against 14.76 (13.92 against 14.39 with an empty overlay), the hillside 14.13, 14.06, 14.05, 14.27, 14.27 and 14.02 against 14.37: 0.25 to 0.5 ms, more than the sharing itself saves, on any frame, and it steps two game frames on 4.3 to 5.7% of drawn frames in place of 8 to 11%. None of the nine runs hitched. It is still not the default: the one bad run was never explained, and a hitch costs more than a quarter of a millisecond gains. It is the next thing for a play A/B.
+- **`HALO_BEVY_HIDDEN_PRESENT=2`**, the first round's flush in place of the hidden window's swap, which had hitched in one run of four then. With the shared overlay: the corridor 14.24 and 14.29 ms against 14.76 (13.92 against 14.39 with an empty overlay), the hillside 14.13, 14.06, 14.05, 14.27, 14.27 and 14.02 against 14.37: 0.25 to 0.5 ms, more than the sharing itself saves, on any frame, and it steps two game frames on 4.3 to 5.7% of drawn frames in place of 8 to 11%. None of the nine runs hitched. It was left opt-in on 16 November, the one bad run never having been explained, and became the default on 17 November after the user's play with it (the last section).
 - **`HALO_BEVY_OVERLAY_WAIT=0`** (never wait for the frame's own copy): 14.51 ms in the corridor, and every picture a game frame old. Not taken.
 
 ## What is left
 
 - **The other half.** A frame with something in its overlay still costs 0.37 ms more than one with nothing. The copy (0.16) would go if the game drew its back buffer's resolve straight into the slot; that reaches into the render target's format and everything that reads the back buffer, and was not tried. The rest is the fence, the flush and the viewer's own blend.
-- **`HALO_BEVY_HIDDEN_PRESENT=2`** in play, above.
 - **Semaphores and a layout hand-off** (`GL_EXT_semaphore`, a Vulkan semaphore each way), if another driver ever needs them.
 - **Linux**, by file descriptors (`GL_EXT_memory_object_fd`): the header's handle type has room for it.
 
@@ -119,3 +118,20 @@ In follow mode with the display changed three times in a run (the overlay 2560x1
 - **The game runs a little ahead of the viewer** when its frame is this cheap: the viewer steps two game frames on 8.4 to 11.4% of its own (0.0 to 0.6% with the pixels, 16 to 18% with an empty overlay, which is how most of play has always been). The evenness of motion measures the same.
 - **Windows alone.** The Linux and Android builds of the game keep the pixels; they were not compiled for this change.
 - A fixed-size run's `HALO_RT_TEST_RESIZE` changes no overlay size (the game stays at 1280x720), so size changes were checked in follow mode.
+
+## 17 November: the flush for the hidden swap, the default
+
+The user played the build above with `HALO_BEVY_HIDDEN_PRESENT=2` set by hand on 17 November (a30 among the levels; the session's logs show the shared textures made and imported at 2560x1440 and no error; the F9 capture's note 69 drawn frames a second against 70 of the game's): "ok, performane was great, it felt smooth, lets keep HALO_BEVY_HIDDEN_PRESENT=2 and I will keep an eye out for hitching in future playthroughs". So the hidden game no longer swaps the window nobody sees: it flushes and keeps the frame's pacing (`hidden_present` in opence/port/linux/src/d3d8_gl.c). `HALO_BEVY_HIDDEN_PRESENT=1` is the swap, the default until now, and `=0` the clear, the blit and the swap of before the first headroom round.
+
+On the rebuilt game, with nothing set, against `HALO_BEVY_HIDDEN_PRESENT=1` (2560x1440 Quality, scripted, one run each):
+
+| spot | swap (`=1`) | flush (the default) |
+|---|---|---|
+| a30's hillside | 14.47 ms | 14.02 |
+| b40's corridor, overlay forced | 14.76 (yesterday's four) | 14.12 |
+
+Repeats 0.0% on the hillside and 0.2% in the corridor, a deviation of 0.61 and 0.85 ms, the viewer stepping two game frames on 5.6% of its own (9.2% with the swap), no render interval over 1.7 times the median in any of the three runs.
+
+One thing the flush does that the swap does not, seen in these runs and, looked for, in yesterday's with the switch too: now and then a frame's wait for its copy's fence runs 3.4 to 4.0 ms, where the swap's longest is under 1.0. It is the longest of about a third of the game's five-second timing windows; by the game's trace 12 to 14 frames of a run (of 13,400 on the hillside, of 7,900 in the corridor) spend over 3 ms from the frame's start to its picture shared, against 3 to 5 with the swap. Each still shares its own picture (the wait's bound is 4 ms) and none of the pacing measures shows it. If hitching is ever met in play, this is the first place to look: `HALO_BEVY_HIDDEN_PRESENT=1` is the way back, and the game's `frame timing:` line gives the share step's longest.
+
+The one run of the first round that hitched six times a second with the flush has not come back in eleven scripted runs and one play session since. It is still unexplained.

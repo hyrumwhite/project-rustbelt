@@ -466,6 +466,40 @@ struct framebuffer_entry
 static struct render_target_entry *render_targets;
 static struct framebuffer_entry *framebuffers;
 
+#ifdef _WIN32
+/* the back buffer drawn straight into a shared overlay texture (the
+overlay's slots, overlay_slots_redirect): the render target whose texture
+is a slot's view for the frame (NULL none), the texture of its own, put
+back whenever the slots go, and the texture it had the frame before, whose
+picture the frame must start from unless it first clears the whole target
+(carry, until the frame's first use of it decides; carries counts the
+copies made, for HALO_BEVY_DRAW_LOG) */
+static struct
+{
+	struct render_target_entry *entry;
+	GLuint own;
+	GLuint previous;
+	BOOL carry;
+	unsigned long carries;
+} back_buffer_redirect;
+
+/* the frame's first use of a target: for the back buffer drawn into a slot,
+the picture of the frame before copied in, unless the use clears all of
+it (cleared) and so needs none of it */
+static void back_buffer_used(const struct render_target_entry *entry, BOOL cleared)
+{
+	if (!back_buffer_redirect.carry || entry != back_buffer_redirect.entry)
+		return;
+	back_buffer_redirect.carry = FALSE;
+	if (cleared || back_buffer_redirect.previous == entry->target.texture)
+		return;
+	glCopyImageSubData(back_buffer_redirect.previous, GL_TEXTURE_2D, 0, 0, 0, 0,
+		entry->target.texture, GL_TEXTURE_2D, 0, 0, 0, 0, (GLsizei)entry->target.gl_width,
+		(GLsizei)entry->target.gl_height, 1);
+	back_buffer_redirect.carries++;
+}
+#endif
+
 /* ---------- the device */
 
 #ifdef HALO_ANDROID
@@ -1286,6 +1320,11 @@ struct xgpu_render_target *xgpu_render_target_find(unsigned long data)
 		if (entry->target.data == data && !entry->target.depth && (!best || entry->last_rendered > best->last_rendered))
 			best = entry;
 	}
+#ifdef _WIN32
+	/* (the back buffer about to be sampled: its picture so far) */
+	if (best)
+		back_buffer_used(best, FALSE);
+#endif
 	return best ? &best->target : NULL;
 }
 
@@ -1341,6 +1380,32 @@ static GLuint framebuffer_get(GLuint color, GLuint depth)
 {
 	return framebuffer_find(color, depth, FALSE);
 }
+
+#ifdef _WIN32
+/* the framebuffers of a texture about to be deleted, deleted and no longer
+found (a texture made later may be given its name) */
+static void framebuffers_forget(GLuint texture)
+{
+	struct framebuffer_entry *entry, **link = &framebuffers;
+	BOOL deleted = FALSE;
+
+	while ((entry = *link) != NULL)
+	{
+		if (!entry->renderbuffers && (entry->color == texture || entry->depth == texture))
+		{
+			*link = entry->next;
+			glDeleteFramebuffers(1, &entry->framebuffer);
+			free(entry);
+			deleted = TRUE;
+		}
+		else
+			link = &entry->next;
+	}
+	/* (a framebuffer bound when deleted leaves 0 bound) */
+	if (deleted)
+		xgpu_gl_state_invalidate();
+}
+#endif
 
 /* ---------- multisampling
 
@@ -1464,6 +1529,12 @@ static BOOL overlay_target(void);
 static GLenum blend_equation(DWORD operation);
 static BOOL overlay_multiply_draw(void);
 
+#ifdef _WIN32
+/* bind_targets called by a clear, which says itself whether it uses the
+back buffer's picture so far (D3DDevice_Clear, back_buffer_used) */
+static BOOL bind_targets_clearing;
+#endif
+
 static BOOL bind_targets(BOOL *has_depth)
 {
 	struct render_target_entry *color = render_target_get(device.render_target);
@@ -1490,6 +1561,13 @@ static BOOL bind_targets(BOOL *has_depth)
 	{
 		samples = 0;
 	}
+#ifdef _WIN32
+	/* the back buffer drawn into a slot: a draw uses its picture so far, and
+	so does a change of its samples (render_target_multisample reads its
+	texture) */
+	if (color && (!bind_targets_clearing || color->target.samples != samples))
+		back_buffer_used(color, FALSE);
+#endif
 	if (color)
 		render_target_multisample(&color->target, samples);
 	if (depth)
@@ -3232,8 +3310,9 @@ static BOOL overlay_noop;
 
 /* HALO_BEVY_DRAW_LOG: the GL draws a frame, those left out as writing
 nothing, the frame's GPU time, and how the overlays went (through a shared
-texture, as pixels, and of those for want of a free shared texture), once
-every DRAW_LOG_FRAMES frames */
+texture, and of those drawn into it in place, the frames that carried the
+picture before into it; as pixels, and of those for want of a free shared
+texture), once every DRAW_LOG_FRAMES frames */
 #define DRAW_LOG_FRAMES 300
 #define DRAW_LOG_QUERIES 4
 static int draw_log_on = -1;
@@ -3242,6 +3321,7 @@ static struct
 	unsigned long draws, skipped, frames, timed;
 	double gpu_ms;
 	unsigned long overlay_slot, overlay_pixels, overlay_no_slot;
+	unsigned long overlay_in_place, overlay_carried;
 #ifndef HALO_ANDROID
 	/* GL_TIME_ELAPSED queries, a frame each, read once they say they are
 	available */
@@ -4886,14 +4966,42 @@ void WINAPI D3DDevice_SetVertexDataColor(INT reg, D3DCOLOR color)
 
 /* ---------- clearing */
 
+#ifdef _WIN32
+/* a clear of the bound colour target within these pixel bounds, about to be
+made: the back buffer drawn into a slot used (back_buffer_used), and cleared
+whole when the bounds hold all of it and every channel is cleared */
+static void clear_used(BOOL every_channel, GLint x0, GLint y0, GLint x1, GLint y1)
+{
+	struct render_target_entry *target;
+
+	if (!back_buffer_redirect.carry)
+		return;
+	target = render_target_get(device.render_target);
+	if (target)
+	{
+		back_buffer_used(target, every_channel && x0 <= 0 && y0 <= 0 && x1 >= (GLint)target->target.gl_width &&
+			y1 >= (GLint)target->target.gl_height);
+	}
+}
+#endif
+
 void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags, D3DCOLOR color, float z, DWORD stencil)
 {
 	float rgba[4];
 	GLbitfield mask = 0;
-	BOOL has_depth = FALSE;
+	BOOL has_depth = FALSE, bound, every_channel = FALSE;
 	DWORD index;
 
-	if (!device.gl_ready || !bind_targets(&has_depth))
+	if (!device.gl_ready)
+		return;
+#ifdef _WIN32
+	bind_targets_clearing = TRUE;
+#endif
+	bound = bind_targets(&has_depth);
+#ifdef _WIN32
+	bind_targets_clearing = FALSE;
+#endif
+	if (!bound)
 		return;
 	if (trace_frame())
 		platform_log("clear flags %lx color %08lx z %g count %lu target %08lx depth %08lx", (unsigned long)flags,
@@ -4911,6 +5019,7 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 			glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
 			mask |= GL_COLOR_BUFFER_BIT;
+			every_channel = TRUE;
 		}
 	}
 	else if (flags & D3DCLEAR_TARGET)
@@ -4921,6 +5030,8 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 			(flags & D3DCLEAR_TARGET_B) != 0, (flags & D3DCLEAR_TARGET_A) != 0);
 		glClearColor(rgba[0], rgba[1], rgba[2], rgba[3]);
 		mask |= GL_COLOR_BUFFER_BIT;
+		every_channel = (flags & (D3DCLEAR_TARGET_R | D3DCLEAR_TARGET_G | D3DCLEAR_TARGET_B | D3DCLEAR_TARGET_A)) ==
+			(D3DCLEAR_TARGET_R | D3DCLEAR_TARGET_G | D3DCLEAR_TARGET_B | D3DCLEAR_TARGET_A);
 	}
 	if (has_depth && (flags & D3DCLEAR_ZBUFFER))
 	{
@@ -4942,10 +5053,15 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 		keeps a split-screen window's clear from wiping the other window */
 		GLint x0 = target_pixel((float)device.viewport.X, 0);
 		GLint y0 = target_pixel((float)device.viewport.Y, 1);
+		GLint x1 = target_pixel((float)(device.viewport.X + device.viewport.Width), 0);
+		GLint y1 = target_pixel((float)(device.viewport.Y + device.viewport.Height), 1);
 
+#ifdef _WIN32
+		if (mask & GL_COLOR_BUFFER_BIT)
+			clear_used(every_channel, x0, y0, x1, y1);
+#endif
 		glEnable(GL_SCISSOR_TEST);
-		glScissor(x0, y0, target_pixel((float)(device.viewport.X + device.viewport.Width), 0) - x0,
-			target_pixel((float)(device.viewport.Y + device.viewport.Height), 1) - y0);
+		glScissor(x0, y0, x1 - x0, y1 - y0);
 		glClear(mask);
 		glDisable(GL_SCISSOR_TEST);
 		xgpu_gl_state_invalidate();
@@ -4960,14 +5076,21 @@ void WINAPI D3DDevice_Clear(DWORD count, CONST D3DRECT *rectangles, DWORD flags,
 			rectangles[index].x2 : device.viewport.X + device.viewport.Width;
 		INT bottom = rectangles[index].y2 < device.viewport.Y + device.viewport.Height ?
 			rectangles[index].y2 : device.viewport.Y + device.viewport.Height;
-		GLint x0, y0;
+		GLint x0, y0, x1, y1;
 
 		if (left >= right || top >= bottom)
 			continue;
 		x0 = target_pixel((float)(left + UI_OFFSET), 0);
 		y0 = target_pixel((float)top, 1);
-		glScissor(x0, y0, target_pixel((float)(right + UI_OFFSET), 0) - x0,
-			target_pixel((float)bottom, 1) - y0);
+		x1 = target_pixel((float)(right + UI_OFFSET), 0);
+		y1 = target_pixel((float)bottom, 1);
+#ifdef _WIN32
+		/* (the first rectangle decides: one that holds less than all of
+		the target carries the picture before, whatever the others hold) */
+		if (mask & GL_COLOR_BUFFER_BIT)
+			clear_used(every_channel, x0, y0, x1, y1);
+#endif
+		glScissor(x0, y0, x1 - x0, y1 - y0);
 		glClear(mask);
 	}
 	glDisable(GL_SCISSOR_TEST);
@@ -4991,6 +5114,10 @@ void halo_screen_anti_alias(short x0, short y0, short x1, short y1)
 	target = render_target_get(&device.back_buffer);
 	if (!target)
 		return;
+#ifdef _WIN32
+	/* (drawn into a slot: the pass reads the picture so far) */
+	back_buffer_used(target, FALSE);
+#endif
 	/* (no longer multisampled, if it was before the setting changed) */
 	render_target_multisample(&target->target, 0);
 	corners[0] = scaled_pixel(x0, target->target.scale[0]);
@@ -5732,13 +5859,40 @@ them), so a picture drawn from one of those shows magenta: a tear detector
 for the held rule. =2 breaks the rule to show the detector can fail: the
 slots held and the last two named are filled too. =3 fills nothing and
 leaves the copy out (a slot is named with whatever it held): what the copy
-costs, by the frame's time without it. */
+costs, by the frame's time without it.
+
+Without the copy (HALO_BEVY_OVERLAY_SHARED_DRAW=1; not the default, the copy
+measured at 0.025 ms of the game's GPU time a frame at 2560x1440 and
+nothing of the viewer's frame, docs/overlay-sharing.md): each slot also has a GL_RGBA8 view of its texture
+(glTextureView, the same bytes as the copy's), and at the end of each
+present, after the share, the swap and the pace, a slot for the next frame
+is chosen by the copy's rule (overlay_slots_redirect: not held, not one of
+the last two named; one with no picture waiting to be named first, else the
+oldest waiting, which is then never named) and the back buffer's texture
+becomes its view, so the frame is drawn straight into it and at its end
+there is only the fence, the flush, the wait and the naming
+(overlay_slots_share). A slot drawn into has no fence until its frame ends,
+so it is never named for an older picture while it is drawn into. With its
+own texture the back buffer kept whatever a frame did not draw over; drawn
+into another slot each frame, a frame starts from the picture of the frame
+before unless its first use of the back buffer clears all of it
+(back_buffer_used, a copy counted as carried). Whenever no slot is free
+then, no set of the back buffer's size is imported or the views could not
+be made, the back buffer has its own texture back and the frame goes by the
+copy; it has it back too before any set is deleted
+(overlay_slots_unredirect). Without HALO_BEVY_OVERLAY_SHARED_DRAW=1 no frame
+is drawn into a slot: the copy alone. With the check, the fill is made as the
+next frame's slot is chosen, that slot among those filled, so a frame that
+neither clears nor carries shows magenta. */
 void platform_handle_close(unsigned long handle);
 
 struct overlay_slot
 {
 	GLuint memory;
 	GLuint texture;
+	/* the texture as GL_RGBA8 (0 none), which the back buffer is drawn
+	into */
+	GLuint view;
 	/* the copy's fence while the picture in it is newer than the one last
 	shared and may yet be shared, else NULL */
 	GLsync fence;
@@ -5765,6 +5919,13 @@ static struct
 	int published[2];
 	BOOL republish;
 	BOOL no_slot_logged;
+	/* HALO_BEVY_OVERLAY_SHARED_DRAW (0 unless it is set and not 0); whether
+	the set's views were made; the set whose first frame drawn in place was
+	logged; the reasons for not drawing in place logged (a bit each) */
+	int draw;
+	BOOL views;
+	unsigned long drawn_logged;
+	unsigned int draw_refusals_logged;
 } overlay_slots = { -1 };
 
 static BOOL overlay_slots_on(void)
@@ -5774,7 +5935,10 @@ static BOOL overlay_slots_on(void)
 		const char *value = getenv("HALO_BEVY_OVERLAY_SHARED");
 		const char *check = getenv("HALO_BEVY_OVERLAY_SHARED_CHECK");
 
+		const char *draw = getenv("HALO_BEVY_OVERLAY_SHARED_DRAW");
+
 		overlay_slots.check = check ? atoi(check) : 0;
+		overlay_slots.draw = draw && *draw && strcmp(draw, "0") != 0;
 		overlay_slots.published[0] = overlay_slots.published[1] = -1;
 		if (value && strcmp(value, "0") == 0)
 			overlay_slots.enabled = 0;
@@ -5809,17 +5973,56 @@ static void overlay_slots_pass(void)
 	overlay_slots.republish = FALSE;
 }
 
+/* the back buffer's own texture back, holding the picture it would have
+had: the slot's it was drawn into, or with that frame's picture not yet
+carried, the one before */
+static void overlay_slots_unredirect(void)
+{
+	struct render_target_entry *entry = back_buffer_redirect.entry;
+	GLuint source;
+
+	if (!entry)
+		return;
+	source = back_buffer_redirect.carry ? back_buffer_redirect.previous : entry->target.texture;
+	if (source && source != back_buffer_redirect.own)
+	{
+		glCopyImageSubData(source, GL_TEXTURE_2D, 0, 0, 0, 0, back_buffer_redirect.own, GL_TEXTURE_2D, 0, 0, 0, 0,
+			(GLsizei)entry->target.gl_width, (GLsizei)entry->target.gl_height, 1);
+	}
+	entry->target.texture = back_buffer_redirect.own;
+	back_buffer_redirect.entry = NULL;
+	back_buffer_redirect.carry = FALSE;
+	xgpu_gl_state_invalidate();
+}
+
+/* a reason the back buffer is not drawn into a slot, logged once */
+static void overlay_slots_draw_refused(unsigned int reason, const char *text)
+{
+	if (overlay_slots.draw_refusals_logged & reason)
+		return;
+	overlay_slots.draw_refusals_logged |= reason;
+	platform_log("overlay: not drawn into the shared textures: %s", text);
+}
+
 /* the set imported, if any, deleted (GL keeps what a copy in flight uses
-until it is done) */
+until it is done), the back buffer given its own texture back first and
+the views' framebuffers deleted with them */
 static void overlay_slots_release(void)
 {
 	int i;
 
+	overlay_slots_unredirect();
 	overlay_slots_pass();
 	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
 	{
 		struct overlay_slot *slot = &overlay_slots.slots[i];
 
+		if (slot->view)
+		{
+			framebuffers_forget(slot->view);
+			glDeleteTextures(1, &slot->view);
+		}
+		slot->view = 0;
 		if (slot->texture)
 			glDeleteTextures(1, &slot->texture);
 		if (slot->memory)
@@ -5828,6 +6031,7 @@ static void overlay_slots_release(void)
 		slot->memory = 0;
 	}
 	overlay_slots.imported = 0;
+	overlay_slots.views = FALSE;
 	overlay_slots.published[0] = overlay_slots.published[1] = -1;
 }
 
@@ -5863,6 +6067,52 @@ static GLenum overlay_slots_import(struct bevy_bridge_overlay_shared const *set)
 			error = GL_INVALID_VALUE;
 	}
 	return error;
+}
+
+/* the set's GL_RGBA8 views made (HALO_BEVY_OVERLAY_SHARED_DRAW=1), for the
+back buffer to be drawn into; none without the switch, and none, with the
+reason logged, if one cannot be made */
+static void overlay_slots_make_views(void)
+{
+	GLenum error = GL_NO_ERROR;
+	int i;
+
+	overlay_slots.views = FALSE;
+	if (!overlay_slots.draw)
+		return;
+	if (!glTextureView)
+	{
+		overlay_slots_draw_refused(2, "the driver lacks glTextureView");
+		return;
+	}
+	for (i = 0; i < 16 && glGetError() != GL_NO_ERROR; i++)
+		;
+	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS && error == GL_NO_ERROR; i++)
+	{
+		struct overlay_slot *slot = &overlay_slots.slots[i];
+
+		/* (a name never bound: glTextureView gives it its target) */
+		glGenTextures(1, &slot->view);
+		glTextureView(slot->view, GL_TEXTURE_2D, slot->texture, GL_RGBA8, 0, 1, 0, 1);
+		error = glGetError();
+		if (error == GL_NO_ERROR && !slot->view)
+			error = GL_INVALID_VALUE;
+	}
+	if (error != GL_NO_ERROR)
+	{
+		char text[96];
+
+		for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+		{
+			if (overlay_slots.slots[i].view)
+				glDeleteTextures(1, &overlay_slots.slots[i].view);
+			overlay_slots.slots[i].view = 0;
+		}
+		snprintf(text, sizeof(text), "no GL_RGBA8 view of a slot (GL error 0x%04x)", (unsigned int)error);
+		overlay_slots_draw_refused(4, text);
+		return;
+	}
+	overlay_slots.views = TRUE;
 }
 
 /* a new set from the viewer imported (or refused) and its handles closed;
@@ -5911,6 +6161,7 @@ static BOOL overlay_slots_ready(unsigned long width, unsigned long height)
 				BEVY_BRIDGE_OVERLAY_SHARED_SLOTS, set.width, set.height, set.serial,
 				set.handle_type == BEVY_BRIDGE_OVERLAY_HANDLE_D3D11 ? "D3D11" : "opaque",
 				set.dedicated ? ", dedicated" : "");
+			overlay_slots_make_views();
 		}
 		bevy_bridge_overlay_shared_answer(set.serial, reason == NULL);
 	}
@@ -5925,17 +6176,46 @@ static BOOL overlay_slot_done(struct overlay_slot *slot, GLbitfield flags, GLuin
 	return result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED;
 }
 
+/* the slot whose view the target is drawn into, else -1 */
+static int overlay_slots_drawn_into(struct render_target_entry *target)
+{
+	int i;
+
+	if (back_buffer_redirect.entry != target)
+		return -1;
+	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+	{
+		if (overlay_slots.slots[i].view && overlay_slots.slots[i].view == target->target.texture)
+			return i;
+	}
+	return -1;
+}
+
 /* the target's picture shared through a slot (bevy_bridge_overlay_begin
-called, the set ready at this size); FALSE when no slot is free or a copy
-could not be waited for, and the pixels are then shared as before */
+called, the set ready at this size): drawn into one already
+(overlay_slots_redirect), that one, else copied into a free one; FALSE when
+no slot is free or the picture could not be waited for, and the pixels are
+then shared as before */
 static BOOL overlay_slots_share(struct render_target_entry *target, unsigned long width, unsigned long height)
 {
 	static const GLubyte magenta[4] = { 255, 0, 255, 255 };
 	unsigned long held = bevy_bridge_overlay_shared_held();
 	unsigned long wait = overlay_wait_microseconds();
 	struct overlay_slot *slot, *candidate;
-	int i, index = -1, source = -1;
+	int i, index = overlay_slots_drawn_into(target), source = -1;
 
+	/* drawn into a slot: chosen by the rule below as the frame began, and
+	without a fence since, so no choice, no fill and no copy */
+	if (index >= 0)
+	{
+		slot = &overlay_slots.slots[index];
+		if (slot->fence)
+		{
+			glDeleteSync(slot->fence);
+			slot->fence = NULL;
+		}
+		goto fence;
+	}
 	/* a slot the viewer is not drawing from and not one of the last two
 	named; a free one first, else the oldest one copied and not shared */
 	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
@@ -5992,6 +6272,7 @@ static BOOL overlay_slots_share(struct render_target_entry *target, unsigned lon
 		glCopyImageSubData(target->target.texture, GL_TEXTURE_2D, 0, 0, 0, 0,
 			slot->texture, GL_TEXTURE_2D, 0, 0, 0, 0, (GLsizei)width, (GLsizei)height, 1);
 	}
+fence:
 	slot->fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
 	slot->serial = ++overlay_slots.copies;
 	glFlush();
@@ -6067,6 +6348,101 @@ static BOOL overlay_slots_share(struct render_target_entry *target, unsigned lon
 	overlay_pack_free_all();
 	return TRUE;
 }
+
+/* the slot the next frame is drawn into, its view made the back buffer's
+texture, chosen at the end of a present (after the share, the swap and the
+pace) by overlay_slots_share's rule: the one drawn into kept while it has
+no fence and is neither held nor one of the last two named (its frame
+shared empty, or as pixels), else one neither held nor one of the last two
+named, one with no fence first, else the oldest with one, whose fence is
+deleted so that its picture is never named; with none, no set of the back
+buffer's size or no views, the back buffer has its own texture back. The
+present's xgpu_gl_state_invalidate after it has the next draw bind the
+framebuffer of the new texture. */
+static void overlay_slots_redirect(struct render_target_entry *back_buffer)
+{
+	static const GLubyte magenta[4] = { 255, 0, 255, 255 };
+	unsigned long held;
+	struct overlay_slot *slot, *candidate;
+	int i, current, index = -1;
+	GLuint previous;
+
+	if (!back_buffer)
+		return;
+	/* (another back buffer since: the screen's size changed) */
+	if (back_buffer_redirect.entry && back_buffer_redirect.entry != back_buffer)
+		overlay_slots_unredirect();
+	if (!overlay_slots.imported || !overlay_slots.views || back_buffer->target.depth ||
+		overlay_slots.width != back_buffer->target.gl_width || overlay_slots.height != back_buffer->target.gl_height)
+	{
+		overlay_slots_unredirect();
+		return;
+	}
+	held = bevy_bridge_overlay_shared_held();
+	current = overlay_slots_drawn_into(back_buffer);
+	if (current >= 0 && !overlay_slots.slots[current].fence && !((held >> current) & 1) &&
+		current != overlay_slots.published[0] && current != overlay_slots.published[1])
+	{
+		index = current;
+	}
+	else
+	{
+		for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+		{
+			candidate = &overlay_slots.slots[i];
+			if (((held >> i) & 1) || i == overlay_slots.published[0] || i == overlay_slots.published[1])
+				continue;
+			if (!candidate->fence)
+			{
+				index = i;
+				break;
+			}
+			if (index < 0 || candidate->serial < overlay_slots.slots[index].serial)
+				index = i;
+		}
+	}
+	if (index < 0)
+	{
+		overlay_slots_draw_refused(8, "no shared texture free as a frame began (it is drawn into the back buffer's "
+			"own and copied, now and then)");
+		overlay_slots_unredirect();
+		return;
+	}
+	slot = &overlay_slots.slots[index];
+	if (slot->fence)
+	{
+		glDeleteSync(slot->fence);
+		slot->fence = NULL;
+	}
+	if (overlay_slots.check && overlay_slots.check < 3 && glClearTexImage)
+	{
+		/* (the frame's own slot among those filled, unless it is kept: it
+		holds the picture the frame starts from; one with a picture that
+		may be named next is left) */
+		for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+		{
+			candidate = &overlay_slots.slots[i];
+			if (i == index ? index == current : candidate->fence != NULL)
+				continue;
+			if (i != index && overlay_slots.check < 2 &&
+				(((held >> i) & 1) || i == overlay_slots.published[0] || i == overlay_slots.published[1]))
+			{
+				continue;
+			}
+			glClearTexImage(candidate->texture, 0, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
+		}
+		glFlush();
+	}
+	previous = back_buffer->target.texture;
+	if (!back_buffer_redirect.entry)
+	{
+		back_buffer_redirect.entry = back_buffer;
+		back_buffer_redirect.own = previous;
+	}
+	back_buffer->target.texture = slot->view;
+	back_buffer_redirect.previous = previous;
+	back_buffer_redirect.carry = previous != slot->view;
+}
 #endif
 
 #endif
@@ -6110,12 +6486,27 @@ static void overlay_share(struct render_target_entry *target)
 		overlay_drawn = FALSE;
 	}
 #ifdef _WIN32
-	if (slots_ready && overlay_slots_share(target, width, height))
+	if (slots_ready)
 	{
-		draw_log.overlay_slot++;
-		bevy_bridge_overlay_commit();
-		overlay_shared();
-		return;
+		BOOL in_place = overlay_slots_drawn_into(target) >= 0;
+
+		if (overlay_slots_share(target, width, height))
+		{
+			draw_log.overlay_slot++;
+			if (in_place)
+			{
+				draw_log.overlay_in_place++;
+				if (overlay_slots.drawn_logged != overlay_slots.imported)
+				{
+					overlay_slots.drawn_logged = overlay_slots.imported;
+					platform_log("overlay: drawn into the shared textures, serial %lu (rgba8 views)",
+						overlay_slots.imported);
+				}
+			}
+			bevy_bridge_overlay_commit();
+			overlay_shared();
+			return;
+		}
 	}
 	/* (no copy shared after these pixels) */
 	overlay_slots_pass();
@@ -6238,14 +6629,20 @@ static void draw_log_present(BOOL swapped)
 #endif
 	if (++draw_log.frames >= DRAW_LOG_FRAMES)
 	{
+#ifdef _WIN32
+		draw_log.overlay_carried = back_buffer_redirect.carries;
+		back_buffer_redirect.carries = 0;
+#endif
 		platform_log("draw log: %.1f GL draws and %.1f left out as writing nothing a frame; GPU %.3f ms a frame "
-			"(%lu of %lu frames timed); overlays %lu by shared texture, %lu by pixels (%lu of them for want of a "
-			"free shared texture)",
+			"(%lu of %lu frames timed); overlays %lu by shared texture (%lu drawn in place, %lu carried), %lu by "
+			"pixels (%lu of them for want of a free shared texture)",
 			(double)draw_log.draws / (double)draw_log.frames, (double)draw_log.skipped / (double)draw_log.frames,
 			draw_log.timed ? draw_log.gpu_ms / (double)draw_log.timed : 0.0, draw_log.timed, draw_log.frames,
-			draw_log.overlay_slot, draw_log.overlay_pixels, draw_log.overlay_no_slot);
+			draw_log.overlay_slot, draw_log.overlay_in_place, draw_log.overlay_carried, draw_log.overlay_pixels,
+			draw_log.overlay_no_slot);
 		draw_log.draws = draw_log.skipped = draw_log.frames = draw_log.timed = 0;
 		draw_log.overlay_slot = draw_log.overlay_pixels = draw_log.overlay_no_slot = 0;
+		draw_log.overlay_in_place = draw_log.overlay_carried = 0;
 		draw_log.gpu_ms = 0.0;
 	}
 }
@@ -6273,6 +6670,12 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 		if (trace_frame())
 			platform_log("present back buffer %08lx texture %u", (unsigned long)device.back_buffer.Data,
 				back_buffer->target.texture);
+#ifdef _WIN32
+		/* drawn into a slot and not used since: the picture before is the
+		frame's, unless a multisampled one is about to be resolved over all
+		of it */
+		back_buffer_used(back_buffer, back_buffer->target.unresolved);
+#endif
 		render_target_resolve(&back_buffer->target);
 #ifndef HALO_ANDROID
 		visibility_copy_batch();
@@ -6336,7 +6739,14 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
 #ifndef HALO_ANDROID
 		swap_ended = swap_started ? SDL_GetTicksNS() : 0;
 		if (overlay_enabled())
+		{
 			overlay_pace();
+#ifdef _WIN32
+			/* (as late as can be: the next frame is drawn into the slot
+			chosen now) */
+			overlay_slots_redirect(back_buffer);
+#endif
+		}
 		frame_trace(swap_started, swap_ended);
 		frame_timing_frame(swap_started, swap_ended);
 #endif

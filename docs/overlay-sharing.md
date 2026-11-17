@@ -43,6 +43,7 @@ The viewer makes the overlay's textures in Vulkan with exportable memory, the ga
 | `HALO_BEVY_OVERLAY_SHARED_CHECK=1` | the tear detector: before each copy the game fills with magenta every slot the rule says the viewer is not drawing from. A picture drawn from one of them shows magenta |
 | `HALO_BEVY_OVERLAY_SHARED_CHECK=2` | the detector made to fail: the slots held and the last two named are filled too |
 | `HALO_BEVY_OVERLAY_SHARED_CHECK=3` | no copy at all (a slot is named with whatever it held): what the copy costs |
+| `HALO_BEVY_OVERLAY_SHARED_DRAW=1` | the game draws each frame straight into a slot, no copy (17 November, the last section; not the default) |
 | `HALO_RT_OVERLAY_DEBUG=3` | the overlay alone on screen, opaque: its bytes as shared, for comparing the two paths |
 | `HALO_BEVY_DRAW_LOG=1` | the game's draw log, which now ends with the overlays shared by texture and by pixels of each 300 frames |
 
@@ -68,7 +69,7 @@ The viewer's render interval, median of a run, in ms:
 
 The corridor with the game's own switch (`HALO_BEVY_OVERLAY_SHARED=0`) reads 15.04, as the viewer's. About 66.1 frames a second to 67.7 in the corridor and 67.9 to 69.6 on the hillside.
 
-So sharing takes half of what an overlay with something in it cost: 0.37 ms of 0.74, and a frame with a picture in the overlay is still 0.37 ms dearer than one without. Of that, the copy itself is about 0.16 (the corridor with `HALO_BEVY_OVERLAY_SHARED_CHECK=3`, no copy: 14.67 and 14.53) and the rest, about 0.2, is not taken apart: the game's fence and flush each frame and the viewer laying a full picture over its own.
+So sharing takes half of what an overlay with something in it cost: 0.37 ms of 0.74, and a frame with a picture in the overlay is still 0.37 ms dearer than one without. Of that, the copy itself is about 0.16 (the corridor with `HALO_BEVY_OVERLAY_SHARED_CHECK=3`, no copy: 14.67 and 14.53; two runs, and too much by a factor of six: measured on 17 November with the copy really gone it is 0.025 ms of the game's GPU time and nothing of the frame, the last section) and the rest is not taken apart: the game's fence and flush each frame and the viewer laying a full picture over its own.
 
 ### The game's side
 
@@ -107,7 +108,7 @@ In follow mode with the display changed three times in a run (the overlay 2560x1
 
 ## What is left
 
-- **The other half.** A frame with something in its overlay still costs 0.37 ms more than one with nothing. The copy (0.16) would go if the game drew its back buffer's resolve straight into the slot; that reaches into the render target's format and everything that reads the back buffer, and was not tried. The rest is the fence, the flush and the viewer's own blend.
+- **The other half.** A frame with something in its overlay still costs 0.37 ms more than one with nothing. The copy is not it: the game drawing straight into the slot was built and measured on 17 November (the last section) and the frame is no shorter for it. What a picture in the overlay costs is the fence, the flush and the viewer's own blend of a full picture, 0.22 ms a frame in b40's corridor since the flush became the default (14.10 ms against 13.88 with the overlay empty).
 - **Semaphores and a layout hand-off** (`GL_EXT_semaphore`, a Vulkan semaphore each way), if another driver ever needs them.
 - **Linux**, by file descriptors (`GL_EXT_memory_object_fd`): the header's handle type has room for it.
 
@@ -135,3 +136,56 @@ Repeats 0.0% on the hillside and 0.2% in the corridor, a deviation of 0.61 and 0
 One thing the flush does that the swap does not, seen in these runs and, looked for, in yesterday's with the switch too: now and then a frame's wait for its copy's fence runs 3.4 to 4.0 ms, where the swap's longest is under 1.0. It is the longest of about a third of the game's five-second timing windows; by the game's trace 12 to 14 frames of a run (of 13,400 on the hillside, of 7,900 in the corridor) spend over 3 ms from the frame's start to its picture shared, against 3 to 5 with the swap. Each still shares its own picture (the wait's bound is 4 ms) and none of the pacing measures shows it. If hitching is ever met in play, this is the first place to look: `HALO_BEVY_HIDDEN_PRESENT=1` is the way back, and the game's `frame timing:` line gives the share step's longest.
 
 The one run of the first round that hitched six times a second with the flush has not come back in eleven scripted runs and one play session since. It is still unexplained.
+
+## 17 November: the frame drawn straight into the slot, tried and left opt-in
+
+The user, after the flush became the default: "Ok, next let's try your "draw straight to the shared texture" suggestion". It was the first thing under "What is left": the game copies its finished back buffer into a slot every frame (`glCopyImageSubData`, 14.7 MB at 2560x1440), and the copy would go if the frame were drawn into the slot to begin with. It was built, it gives the same picture to the bit, and it gains nothing that can be measured on the frame. It stays behind `HALO_BEVY_OVERLAY_SHARED_DRAW=1`; the copy is still the default.
+
+### What was built
+
+All of it in the game (opence/port/linux/src/d3d8_gl.c, Windows alone, `glTextureView` added to the optional functions in gl.h); no change to the protocol or the viewer.
+
+- **A view of each slot.** The game's back buffer is `GL_RGBA8` and the slots are `GL_SRGB8_ALPHA8` (the copy is a copy of bytes, so the difference never mattered). At import each slot gets a `GL_RGBA8` view of its texture (`overlay_slots_make_views`), so that drawing, blending, reading and sampling see the format they always did. The driver made the views without complaint; had it not, one log line says why and the copy stays.
+- **The redirect.** At the end of each present, after the share, the flush and the pace, the game chooses the slot for the next frame by the copy's own rule (not held by the viewer, not one of the last two named; one with no picture waiting first, else the oldest waiting, whose fence is deleted so that it is never named) and makes the back buffer's texture that slot's view (`overlay_slots_redirect`). The framebuffers are found by texture, so everything that draws into or reads the back buffer follows. At the frame's end there is no choice and no copy, only the fence, the flush, the wait and the naming as before (`overlay_slots_share`). A frame shared empty keeps its slot for the next.
+- **What a frame does not clear.** With one texture of its own the back buffer kept whatever a frame left alone; with another slot each frame it would show a picture several frames old there. So the first use of the back buffer in a frame decides (`back_buffer_used`): a clear of every channel over the whole target needs nothing, anything else (a draw, a sample, a partial clear, reaching the present untouched) first copies the picture of the frame before in, counted in the draw log as carried. Under the overlay the game clears the whole target as each frame begins, so no frame carried in any run here, the menus and the loading screens among them; a split screen's clear is partial and, by the code, would (not run).
+- **Giving it back.** Before a set is deleted (a new size, a refusal), when the back buffer is another (the screen's size changed) and when no slot is free as a frame begins, the back buffer has its own texture back with the picture copied into it (`overlay_slots_unredirect`), and the frame goes by the copy. The framebuffers cached for a deleted view are deleted with it (`framebuffers_forget`; the cache never forgot one before, and a texture made later can be given the same name).
+- **The log.** `overlay: drawn into the shared textures, serial S (rgba8 views)` once a set; `HALO_BEVY_DRAW_LOG=1` ends with "overlays 300 by shared texture (300 drawn in place, 0 carried), 0 by pixels".
+
+### Measured
+
+2560x1440 Quality, scripted, the two on one build by the switch, runs in turn; the render interval's median in ms.
+
+| spot | the copy | drawn in place |
+|---|---|---|
+| b40's corridor, overlay forced | 14.09, 14.13, 14.10, 14.10 | 14.12, 14.15, 14.05, 14.08 |
+| a30's hillside | 14.19, 14.13, 14.06, 14.10 | 14.03, 14.03, 14.08, 14.29 |
+| b40's corridor, overlay empty | 13.83, 13.92 | |
+
+The means are 14.11 against 14.10 in the corridor and 14.12 against 14.11 on the hillside: nothing, the runs of one setting lying up to 0.26 ms apart.
+
+| the game's side | the copy | drawn in place |
+|---|---|---|
+| its GPU time a frame, corridor | 0.278 to 0.281 ms | 0.252 to 0.257 |
+| its GPU time a frame, hillside | 0.253 to 0.259 | 0.230 to 0.233 |
+| its work a frame (median), corridor | 0.71 to 0.72 | 0.68 to 0.70 |
+| its work a frame (median), hillside | 0.73 to 0.74 | 0.70 to 0.72 |
+| the share step, corridor | 0.26 to 0.28 | 0.25 to 0.26 |
+| the share step, hillside | 0.31 to 0.33 | 0.29 to 0.30 |
+
+So the copy is 0.025 ms of the game's GPU time a frame, the same at both spots and in every run, and that is all of it. The 0.16 ms written down for it on 16 November came from two runs with `HALO_BEVY_OVERLAY_SHARED_CHECK=3` against one, inside what two runs of one setting differ by; a GPU moves 14.7 MB in a few hundredths of a millisecond.
+
+Pacing as it was on both: repeats 0.0 to 0.1% in place and 0.0 to 0.2% with the copy, a deviation of 0.61 to 0.77 ms and 0.64 to 0.89, the viewer stepping two game frames on 3.7 to 6.5% of its own and 4.6 to 6.3%, no render interval over 1.7 times the median in any of the sixteen runs. The flush's occasional long wait for the fence (3.1 to 3.8 ms as a five-second window's longest) is there on both.
+
+### Checked
+
+- **The same to the bit.** The frozen recipe above (a30, the game stopped by script, the overlay alone on screen, the weapon out of the picture): none of 4,752,000 pixels outside the viewer's own text differs between a run drawn in place and a run with the copy, nor between two runs drawn in place, in each of three captures (212,789 of them not black).
+- **No slot written while the viewer draws from it.** `HALO_BEVY_OVERLAY_SHARED_CHECK=1` fills the free slots with magenta as the next frame's slot is chosen, that slot among them, so it also shows a frame that neither cleared nor carried: none in 40 captures on a30 with the player turning. `=2`, the rule broken: 40 of 40.
+- **The menus** with the check on: no magenta in the captures, the frames drawn in place from the set's second on, none carried.
+- **A change of size** in follow mode through 1600x900, 1920x1080 and 1280x720: a new set each time, the back buffer given back and redirected again, "drawn into the shared textures" under each of the four serials, the frames between as pixels as before, no error on either side.
+- The new C checked for implicit declarations; the game alone rebuilt.
+
+### Why it is not the default
+
+It buys 0.025 ms of GPU work and no time on the frame, and it asks more of the driver than the copy does: the game renders the whole frame into memory that Vulkan owns, through a view, where the copy writes it once at the end. That works on this machine, as the copy does, with the same lack of a layout hand-off between the two APIs. Not exercised: the carry (no frame needed it), split screen, any anti-aliasing mode but the user's "off" (multisampling's resolve would land in the slot by itself; FXAA, SMAA and supersampling were only read), another driver. With nothing gained there is no reason to put it under every play session. `HALO_BEVY_OVERLAY_SHARED_DRAW=1` turns it on.
+
+What this settles: the 0.22 ms a picture in the overlay still costs is not the copy. It is the fence and the flush on the game's side (its GPU time is 0.085 ms with an empty overlay and 0.255 with a picture drawn in place) and the viewer's blend of a full picture, and the next step there would be to measure those two apart, not to build more.

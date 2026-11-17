@@ -268,7 +268,8 @@ and each user checks first (gl_functions_load) */
 	X(glDeleteMemoryObjectsEXT) \
 	X(glMemoryObjectParameterivEXT) \
 	X(glImportMemoryWin32HandleEXT) \
-	X(glTextureStorageMem2DEXT)
+	X(glTextureStorageMem2DEXT) \
+	X(glTextureView)
 #endif
 
 #define GL_DECLARE_FUNCTION(name) extern __typeof__(&name) halo_##name;
@@ -516,6 +517,7 @@ pointers, sees the declarations without these aliases */
 #define glMemoryObjectParameterivEXT halo_glMemoryObjectParameterivEXT
 #define glImportMemoryWin32HandleEXT halo_glImportMemoryWin32HandleEXT
 #define glTextureStorageMem2DEXT halo_glTextureStorageMem2DEXT
+#define glTextureView halo_glTextureView
 
 #endif
 #endif

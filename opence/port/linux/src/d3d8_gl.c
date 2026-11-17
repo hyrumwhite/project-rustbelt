@@ -3193,9 +3193,16 @@ is under them add their coverage, additive blends leave it, so the picture is
 premultiplied. Present shares it. */
 
 #ifndef HALO_ANDROID
+#include "../game/bevy_bridge_protocol.h"
+
 unsigned char bevy_bridge_overlay_enabled(void);
 unsigned char *bevy_bridge_overlay_begin(unsigned long width, unsigned long height);
 void bevy_bridge_overlay_commit(void);
+/* (protocol 56: the overlay's shared textures, bevy_bridge.h) */
+void bevy_bridge_overlay_mark_shared(unsigned long serial, unsigned long slot);
+unsigned char bevy_bridge_overlay_shared_set(unsigned long known, struct bevy_bridge_overlay_shared *set);
+void bevy_bridge_overlay_shared_answer(unsigned long serial, unsigned char imported);
+unsigned long bevy_bridge_overlay_shared_held(void);
 /* (the overlay shared with nothing drawn into it this frame: no pixels) */
 void bevy_bridge_overlay_mark_empty(void);
 /* (the last committed overlay's pixels if drawn and of that size, else NULL) */
@@ -3224,7 +3231,9 @@ static BOOL overlay_drawn;
 static BOOL overlay_noop;
 
 /* HALO_BEVY_DRAW_LOG: the GL draws a frame, those left out as writing
-nothing, and the frame's GPU time, once every DRAW_LOG_FRAMES frames */
+nothing, the frame's GPU time, and how the overlays went (through a shared
+texture, as pixels, and of those for want of a free shared texture), once
+every DRAW_LOG_FRAMES frames */
 #define DRAW_LOG_FRAMES 300
 #define DRAW_LOG_QUERIES 4
 static int draw_log_on = -1;
@@ -3232,6 +3241,7 @@ static struct
 {
 	unsigned long draws, skipped, frames, timed;
 	double gpu_ms;
+	unsigned long overlay_slot, overlay_pixels, overlay_no_slot;
 #ifndef HALO_ANDROID
 	/* GL_TIME_ELAPSED queries, a frame each, read once they say they are
 	available */
@@ -5584,16 +5594,11 @@ static BOOL overlay_pack_copy(struct overlay_pack_slot *slot, unsigned char *pix
 	return glUnmapBuffer(GL_PIXEL_PACK_BUFFER) == GL_TRUE;
 }
 
-/* the picture in the bound read framebuffer into pixels, which the overlay
-shares, through the slots (the pack state set up: alignment 4, row length
-0; leaves GL_PIXEL_PACK_BUFFER bound to something the caller restores) */
-static void overlay_share_async(unsigned long width, unsigned long height, unsigned char *pixels)
+/* how long a frame waits for its own overlay (HALO_BEVY_OVERLAY_WAIT,
+microseconds, 4000 by default, 0 to 20000) */
+static unsigned long overlay_wait_microseconds(void)
 {
 	static long wait = -1;
-	struct overlay_pack_slot *slot = NULL, *source = NULL, *candidate;
-	unsigned long size = width * height * 4;
-	unsigned char const *last;
-	int i;
 
 	if (wait < 0)
 	{
@@ -5602,6 +5607,20 @@ static void overlay_share_async(unsigned long width, unsigned long height, unsig
 		wait = value && *value ? atol(value) : 4000;
 		wait = wait < 0 ? 0 : wait > 20000 ? 20000 : wait;
 	}
+	return (unsigned long)wait;
+}
+
+/* the picture in the bound read framebuffer into pixels, which the overlay
+shares, through the slots (the pack state set up: alignment 4, row length
+0; leaves GL_PIXEL_PACK_BUFFER bound to something the caller restores) */
+static void overlay_share_async(unsigned long width, unsigned long height, unsigned char *pixels)
+{
+	unsigned long wait = overlay_wait_microseconds();
+	struct overlay_pack_slot *slot = NULL, *source = NULL, *candidate;
+	unsigned long size = width * height * 4;
+	unsigned char const *last;
+	int i;
+
 	/* a picture of another size is never a source */
 	for (i = 0; i < OVERLAY_PACK_SLOTS; i++)
 	{
@@ -5690,6 +5709,366 @@ static void overlay_share_async(unsigned long width, unsigned long height, unsig
 	overlay_share_late = -1;
 }
 
+#ifdef _WIN32
+/* The overlay through textures both sides hold (protocol 56,
+bevy_bridge_protocol.h struct bevy_bridge_overlay_shared): the viewer makes
+BEVY_BRIDGE_OVERLAY_SHARED_SLOTS textures of the overlay's size in Vulkan and
+duplicates their memory's handles into this process; they are imported here
+(GL_EXT_memory_object_win32) and each frame's picture is copied into one on
+the GPU and named in the overlay's header, in place of the read back, the
+copy into the shared memory and the viewer's upload (0.65 ms a frame at
+2560x1440 in b40's corridor, docs/overlay-sharing.md). There is no semaphore
+between the two APIs: the copy's fence says the picture is complete before
+it is named, and the viewer's mask of the slots it may still be drawing from
+(held) keeps every copy off them, nor does a copy go into either of the last
+two slots named, whose headers the viewer may have read without yet saying
+so. A frame waits for its copy as overlay_share_async waits for its read
+back. Whenever a slot cannot be had (no set, a set of another size, every
+slot held) the frame goes the old way. HALO_BEVY_OVERLAY_SHARED=0 imports
+nothing (each set refused, the pixels as before);
+HALO_BEVY_OVERLAY_SHARED_CHECK=1 fills with magenta, before each copy, every
+slot the rule says the viewer is not drawing from (the copy's own among
+them), so a picture drawn from one of those shows magenta: a tear detector
+for the held rule. =2 breaks the rule to show the detector can fail: the
+slots held and the last two named are filled too. =3 fills nothing and
+leaves the copy out (a slot is named with whatever it held): what the copy
+costs, by the frame's time without it. */
+void platform_handle_close(unsigned long handle);
+
+struct overlay_slot
+{
+	GLuint memory;
+	GLuint texture;
+	/* the copy's fence while the picture in it is newer than the one last
+	shared and may yet be shared, else NULL */
+	GLsync fence;
+	/* the order the copies were started in */
+	unsigned long serial;
+};
+
+static struct
+{
+	/* -1 until first asked, 0 off (the switch, or the driver lacks the
+	extensions), 1 on */
+	int enabled;
+	/* HALO_BEVY_OVERLAY_SHARED_CHECK */
+	int check;
+	/* the last set looked at, imported or refused; the one imported (0
+	none) and its size */
+	unsigned long seen;
+	unsigned long imported;
+	unsigned long width, height;
+	struct overlay_slot slots[BEVY_BRIDGE_OVERLAY_SHARED_SLOTS];
+	unsigned long copies;
+	/* the last two slots named, the latest first (-1 none), and whether the
+	latest may be named again (not after an empty overlay) */
+	int published[2];
+	BOOL republish;
+	BOOL no_slot_logged;
+} overlay_slots = { -1 };
+
+static BOOL overlay_slots_on(void)
+{
+	if (overlay_slots.enabled < 0)
+	{
+		const char *value = getenv("HALO_BEVY_OVERLAY_SHARED");
+		const char *check = getenv("HALO_BEVY_OVERLAY_SHARED_CHECK");
+
+		overlay_slots.check = check ? atoi(check) : 0;
+		overlay_slots.published[0] = overlay_slots.published[1] = -1;
+		if (value && strcmp(value, "0") == 0)
+			overlay_slots.enabled = 0;
+		else if (!glCreateTextures || !glCreateMemoryObjectsEXT || !glDeleteMemoryObjectsEXT ||
+			!glMemoryObjectParameterivEXT || !glImportMemoryWin32HandleEXT || !glTextureStorageMem2DEXT ||
+			!SDL_GL_ExtensionSupported("GL_EXT_memory_object") ||
+			!SDL_GL_ExtensionSupported("GL_EXT_memory_object_win32"))
+		{
+			platform_log("overlay: shared textures unavailable: the driver lacks GL_EXT_memory_object_win32");
+			overlay_slots.enabled = 0;
+		}
+		else
+			overlay_slots.enabled = 1;
+	}
+	return overlay_slots.enabled > 0;
+}
+
+/* the pictures copied and not shared are passed over: none is shared
+after what was shared since (an empty overlay, or a frame of pixels) */
+static void overlay_slots_pass(void)
+{
+	int i;
+
+	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+	{
+		if (overlay_slots.slots[i].fence)
+		{
+			glDeleteSync(overlay_slots.slots[i].fence);
+			overlay_slots.slots[i].fence = NULL;
+		}
+	}
+	overlay_slots.republish = FALSE;
+}
+
+/* the set imported, if any, deleted (GL keeps what a copy in flight uses
+until it is done) */
+static void overlay_slots_release(void)
+{
+	int i;
+
+	overlay_slots_pass();
+	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+	{
+		struct overlay_slot *slot = &overlay_slots.slots[i];
+
+		if (slot->texture)
+			glDeleteTextures(1, &slot->texture);
+		if (slot->memory)
+			glDeleteMemoryObjectsEXT(1, &slot->memory);
+		slot->texture = 0;
+		slot->memory = 0;
+	}
+	overlay_slots.imported = 0;
+	overlay_slots.published[0] = overlay_slots.published[1] = -1;
+}
+
+/* the set's textures imported; the GL error (GL_NO_ERROR on success, and
+GL_INVALID_VALUE for an object not made) */
+static GLenum overlay_slots_import(struct bevy_bridge_overlay_shared const *set)
+{
+	GLuint64 size = (GLuint64)set->allocation_size_low | (GLuint64)set->allocation_size_high << 32;
+	GLenum type = set->handle_type == BEVY_BRIDGE_OVERLAY_HANDLE_D3D11 ?
+		GL_HANDLE_TYPE_D3D11_IMAGE_EXT : GL_HANDLE_TYPE_OPAQUE_WIN32_EXT;
+	GLenum error = GL_NO_ERROR;
+	int i;
+
+	/* (errors left from before are not this one's) */
+	for (i = 0; i < 16 && glGetError() != GL_NO_ERROR; i++)
+		;
+	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS && error == GL_NO_ERROR; i++)
+	{
+		struct overlay_slot *slot = &overlay_slots.slots[i];
+		GLint dedicated = GL_TRUE;
+
+		glCreateMemoryObjectsEXT(1, &slot->memory);
+		if (set->dedicated)
+			glMemoryObjectParameterivEXT(slot->memory, GL_DEDICATED_MEMORY_OBJECT_EXT, &dedicated);
+		glImportMemoryWin32HandleEXT(slot->memory, size, type, (void *)(ULONG_PTR)set->handles[i]);
+		glCreateTextures(GL_TEXTURE_2D, 1, &slot->texture);
+		/* (the viewer's image is R8G8B8A8_SRGB: the bytes are the picture's
+		as the overlay shares them, display-encoded) */
+		glTextureStorageMem2DEXT(slot->texture, 1, GL_SRGB8_ALPHA8, (GLsizei)set->width, (GLsizei)set->height,
+			slot->memory, 0);
+		error = glGetError();
+		if (error == GL_NO_ERROR && (!slot->memory || !slot->texture))
+			error = GL_INVALID_VALUE;
+	}
+	return error;
+}
+
+/* a new set from the viewer imported (or refused) and its handles closed;
+TRUE while a set of this size is imported */
+static BOOL overlay_slots_ready(unsigned long width, unsigned long height)
+{
+	struct bevy_bridge_overlay_shared set;
+
+	if (bevy_bridge_overlay_shared_set(overlay_slots.seen, &set))
+	{
+		const char *reason = NULL;
+		GLenum error = GL_NO_ERROR;
+		int i;
+
+		overlay_slots.seen = set.serial;
+		overlay_slots_release();
+		if (!overlay_slots_on())
+			reason = "off";
+		else if (set.handle_type != BEVY_BRIDGE_OVERLAY_HANDLE_OPAQUE_WIN32 &&
+			set.handle_type != BEVY_BRIDGE_OVERLAY_HANDLE_D3D11)
+		{
+			reason = "an unknown kind of handle";
+		}
+		else if (!set.width || !set.height || set.width > 16384 || set.height > 16384)
+			reason = "an impossible size";
+		else if ((error = overlay_slots_import(&set)) != GL_NO_ERROR)
+			reason = "the import failed";
+		/* (the GL does not take the handles: they are closed whatever
+		happened) */
+		for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+			platform_handle_close(set.handles[i]);
+		if (reason)
+		{
+			overlay_slots_release();
+			if (overlay_slots.enabled != 0 || error != GL_NO_ERROR)
+				platform_log("overlay: shared textures refused, serial %lu: %s (GL error 0x%04x)", set.serial, reason,
+					(unsigned int)error);
+		}
+		else
+		{
+			overlay_slots.imported = set.serial;
+			overlay_slots.width = set.width;
+			overlay_slots.height = set.height;
+			overlay_slots.no_slot_logged = FALSE;
+			platform_log("overlay: shared textures imported, %d slots of %lux%lu, serial %lu (%s handles%s)",
+				BEVY_BRIDGE_OVERLAY_SHARED_SLOTS, set.width, set.height, set.serial,
+				set.handle_type == BEVY_BRIDGE_OVERLAY_HANDLE_D3D11 ? "D3D11" : "opaque",
+				set.dedicated ? ", dedicated" : "");
+		}
+		bevy_bridge_overlay_shared_answer(set.serial, reason == NULL);
+	}
+	return overlay_slots.imported && overlay_slots.width == width && overlay_slots.height == height;
+}
+
+/* whether the slot's copy is done within the timeout (nanoseconds) */
+static BOOL overlay_slot_done(struct overlay_slot *slot, GLbitfield flags, GLuint64 timeout)
+{
+	GLenum result = glClientWaitSync(slot->fence, flags, timeout);
+
+	return result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED;
+}
+
+/* the target's picture shared through a slot (bevy_bridge_overlay_begin
+called, the set ready at this size); FALSE when no slot is free or a copy
+could not be waited for, and the pixels are then shared as before */
+static BOOL overlay_slots_share(struct render_target_entry *target, unsigned long width, unsigned long height)
+{
+	static const GLubyte magenta[4] = { 255, 0, 255, 255 };
+	unsigned long held = bevy_bridge_overlay_shared_held();
+	unsigned long wait = overlay_wait_microseconds();
+	struct overlay_slot *slot, *candidate;
+	int i, index = -1, source = -1;
+
+	/* a slot the viewer is not drawing from and not one of the last two
+	named; a free one first, else the oldest one copied and not shared */
+	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+	{
+		candidate = &overlay_slots.slots[i];
+		if (((held >> i) & 1) || i == overlay_slots.published[0] || i == overlay_slots.published[1])
+			continue;
+		if (!candidate->fence)
+		{
+			index = i;
+			break;
+		}
+		if (index < 0 || candidate->serial < overlay_slots.slots[index].serial)
+			index = i;
+	}
+	if (index < 0)
+	{
+		draw_log.overlay_no_slot++;
+		if (!overlay_slots.no_slot_logged)
+		{
+			platform_log("overlay: no shared texture free (held 0x%02lx), a frame of pixels", held);
+			overlay_slots.no_slot_logged = TRUE;
+		}
+		return FALSE;
+	}
+	slot = &overlay_slots.slots[index];
+	if (slot->fence)
+	{
+		glDeleteSync(slot->fence);
+		slot->fence = NULL;
+	}
+	if (overlay_slots.check && overlay_slots.check < 3 && glClearTexImage)
+	{
+		/* (a copy done and not yet shared is left: it may be named next) */
+		for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+		{
+			candidate = &overlay_slots.slots[i];
+			if (i != index && candidate->fence)
+				continue;
+			if (i != index && overlay_slots.check < 2 &&
+				(((held >> i) & 1) || i == overlay_slots.published[0] || i == overlay_slots.published[1]))
+			{
+				continue;
+			}
+			glClearTexImage(candidate->texture, 0, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
+		}
+		glFlush();
+	}
+	/* texel for texel: the target's GL_RGBA8 and the slot's GL_SRGB8_ALPHA8
+	are of one size class, so the bytes go as they are, row 0 (the top of
+	the picture) to row 0, the bytes glReadPixels read */
+	if (overlay_slots.check != 3)
+	{
+		glCopyImageSubData(target->target.texture, GL_TEXTURE_2D, 0, 0, 0, 0,
+			slot->texture, GL_TEXTURE_2D, 0, 0, 0, 0, (GLsizei)width, (GLsizei)height, 1);
+	}
+	slot->fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+	slot->serial = ++overlay_slots.copies;
+	glFlush();
+	if (!slot->fence)
+	{
+		/* (no fence: this frame's once the GL is done) */
+		glFinish();
+		source = index;
+		overlay_share_late = -1;
+	}
+	/* this frame's, else the newest older one done, else the one last
+	named again, else this frame's however long it takes */
+	else if (overlay_slot_done(slot, GL_SYNC_FLUSH_COMMANDS_BIT, (GLuint64)wait * 1000))
+	{
+		source = index;
+		overlay_share_late = 0;
+	}
+	else
+	{
+		for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+		{
+			candidate = &overlay_slots.slots[i];
+			if (i != index && candidate->fence &&
+				(source < 0 || candidate->serial > overlay_slots.slots[source].serial) &&
+				overlay_slot_done(candidate, 0, 0))
+			{
+				source = i;
+			}
+		}
+		if (source >= 0)
+			overlay_share_late = (int)(slot->serial - overlay_slots.slots[source].serial);
+		else if (overlay_slots.republish && overlay_slots.published[0] >= 0)
+		{
+			bevy_bridge_overlay_mark_shared(overlay_slots.imported, (unsigned long)overlay_slots.published[0]);
+			overlay_share_late = 9;
+			overlay_pack_free_all();
+			return TRUE;
+		}
+		else
+		{
+			GLenum result;
+
+			do
+				result = glClientWaitSync(slot->fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000);
+			while (result == GL_TIMEOUT_EXPIRED);
+			if (result != GL_ALREADY_SIGNALED && result != GL_CONDITION_SATISFIED)
+			{
+				overlay_slots_pass();
+				return FALSE;
+			}
+			source = index;
+			overlay_share_late = 0;
+		}
+	}
+	/* the source and every older copy are no longer to be shared */
+	for (i = 0; i < BEVY_BRIDGE_OVERLAY_SHARED_SLOTS; i++)
+	{
+		candidate = &overlay_slots.slots[i];
+		if (candidate->fence && (i == source || candidate->serial <= overlay_slots.slots[source].serial))
+		{
+			glDeleteSync(candidate->fence);
+			candidate->fence = NULL;
+		}
+	}
+	if (overlay_slots.published[0] != source)
+	{
+		overlay_slots.published[1] = overlay_slots.published[0];
+		overlay_slots.published[0] = source;
+	}
+	overlay_slots.republish = TRUE;
+	bevy_bridge_overlay_mark_shared(overlay_slots.imported, (unsigned long)source);
+	/* (no picture read back before this one is shared after it) */
+	overlay_pack_free_all();
+	return TRUE;
+}
+#endif
+
 #endif
 /* the back buffer, which the overlay is, shared with the Bevy renderer */
 static void overlay_share(struct render_target_entry *target)
@@ -5703,9 +6082,14 @@ static void overlay_share(struct render_target_entry *target)
 
 	if (!pixels)
 		return;
+#ifdef _WIN32
+	/* (a new set of shared textures is imported whatever this frame shares,
+	so the first drawn frame after it does not wait for the import) */
+	BOOL slots_ready = overlay_slots_ready(width, height);
+#endif
 	/* nothing drawn into it: shared empty, not read back
 	(HALO_BEVY_OVERLAY_ALWAYS: read back all the same), and no picture
-	still being read back is shared after it */
+	still being read back or copied is shared after it */
 	{
 		static int always = -1;
 
@@ -5714,6 +6098,9 @@ static void overlay_share(struct render_target_entry *target)
 		if (!overlay_drawn && !always)
 		{
 			overlay_pack_free_all();
+#ifdef _WIN32
+			overlay_slots_pass();
+#endif
 			overlay_share_late = -1;
 			bevy_bridge_overlay_mark_empty();
 			bevy_bridge_overlay_commit();
@@ -5722,6 +6109,18 @@ static void overlay_share(struct render_target_entry *target)
 		}
 		overlay_drawn = FALSE;
 	}
+#ifdef _WIN32
+	if (slots_ready && overlay_slots_share(target, width, height))
+	{
+		draw_log.overlay_slot++;
+		bevy_bridge_overlay_commit();
+		overlay_shared();
+		return;
+	}
+	/* (no copy shared after these pixels) */
+	overlay_slots_pass();
+#endif
+	draw_log.overlay_pixels++;
 	if (sync < 0)
 	{
 		const char *value = getenv("HALO_BEVY_OVERLAY_SYNC");
@@ -5840,10 +6239,13 @@ static void draw_log_present(BOOL swapped)
 	if (++draw_log.frames >= DRAW_LOG_FRAMES)
 	{
 		platform_log("draw log: %.1f GL draws and %.1f left out as writing nothing a frame; GPU %.3f ms a frame "
-			"(%lu of %lu frames timed)",
+			"(%lu of %lu frames timed); overlays %lu by shared texture, %lu by pixels (%lu of them for want of a "
+			"free shared texture)",
 			(double)draw_log.draws / (double)draw_log.frames, (double)draw_log.skipped / (double)draw_log.frames,
-			draw_log.timed ? draw_log.gpu_ms / (double)draw_log.timed : 0.0, draw_log.timed, draw_log.frames);
+			draw_log.timed ? draw_log.gpu_ms / (double)draw_log.timed : 0.0, draw_log.timed, draw_log.frames,
+			draw_log.overlay_slot, draw_log.overlay_pixels, draw_log.overlay_no_slot);
 		draw_log.draws = draw_log.skipped = draw_log.frames = draw_log.timed = 0;
+		draw_log.overlay_slot = draw_log.overlay_pixels = draw_log.overlay_no_slot = 0;
 		draw_log.gpu_ms = 0.0;
 	}
 }

@@ -158,6 +158,29 @@ Both together (`SOLARIK_SPECULAR_REUSE_ROUGHNESS=20 SOLARIK_DI_TILE_CANDIDATES=1
 ### What is left, largest first
 
 - **The DLSS mode** (candidate 7) is now the user's own setting and by far the largest lever: Quality costs 12.0 to 14.7 ms where Performance (what Auto picks at this size) costs 8.0 to 9.6. Balanced was not measured in this round.
-- **The overlay's round trip.** A frame whose overlay is not empty (grass, particles, decals, water, a menu; the HUD is the viewer's own pass) is read back by the game (14.7 MB at 2560x1440), copied through shared memory and uploaded again by the viewer. In b40's corridor with the read back forced (`HALO_BEVY_OVERLAY_ALWAYS=1`) the frame is 15.13 ms against 14.48: 0.65 ms, 3 frames a second, wherever anything is in the overlay. Sharing the texture between the game's GL and the viewer's Vulkan would end it; reading and uploading only the rows drawn into would cut it. Neither is small.
+- **The overlay's round trip** (taken the same day, the next section: half of it). A frame whose overlay is not empty (grass, particles, decals, water, a menu; the HUD is the viewer's own pass) is read back by the game (14.7 MB at 2560x1440), copied through shared memory and uploaded again by the viewer. In b40's corridor with the read back forced (`HALO_BEVY_OVERLAY_ALWAYS=1`) the frame is 15.13 ms against 14.48: 0.65 ms, 3 frames a second, wherever anything is in the overlay. Sharing the texture between the game's GL and the viewer's Vulkan would end it; reading and uploading only the rows drawn into would cut it. Neither is small.
 - **The game-only passes** the viewer's GPU log times in play: the HUD 0.26 to 0.29 ms, the objects' acceleration structures 0.24 to 0.26, the fog 0.12 to 0.15, the UI 0.12, and about 1.2 to 1.6 ms a frame that no pass's timer covers (0.45 in the viewer alone). Not looked into.
 - Candidates 4, 5 and 6 above, untouched.
+
+## 16 November: the overlay's round trip
+
+The second item of the list above, taken the same day (the user: "go ahead and plan out the overlay round trip fix and implement it with subagents"). docs/overlay-sharing.md has the design, the switches, every table and the limits; this is the summary.
+
+The overlay's picture no longer leaves the GPU. The viewer makes eight Vulkan textures with exportable memory and hands the game their handles, the game imports them into GL (`GL_EXT_memory_object_win32`), copies its finished back buffer into a free one each frame and names it, and the viewer draws from that one. The read back, the two copies through shared memory and the upload are the fallback: wherever the import is not there or fails, during a change of size, and behind `HALO_RT_OVERLAY_SHARED=0` (the viewer makes no textures) or `HALO_BEVY_OVERLAY_SHARED=0` (the game refuses them). Protocol 56.
+
+At 2560x1440 Quality, scripted, the render interval's median over repeats:
+
+| spot | pixels (the old) | shared | empty overlay |
+|---|---|---|---|
+| b40's corridor, overlay forced | 15.13 ms | 14.76 | 14.39 |
+| a30's hillside (grass) | 14.73 | 14.37 | |
+
+About 0.37 ms a frame wherever anything is in the overlay, half of the 0.74 it cost on this build (0.65 by the first round's one pair of runs); 1.5 frames a second. The game's own GPU time a frame 1.57 ms to 0.27, its work a frame 2.0 ms to 0.7, the share step's longest 2.0 to 2.2 ms to 0.6 to 0.7. The pacing measures of the stutter work as they were (repeats 0.0 to 0.1%, a deviation of 0.63 to 0.77 ms against 0.66 to 0.83), but that the viewer now steps two game frames on 8 to 11% of its own, as it always did with an empty overlay (16 to 18%).
+
+No pixel changed: with the game frozen, the overlay alone on screen and the first-person weapon out of the picture, none of 4,752,000 pixels differs between the two paths. And the game never writes a texture the viewer is drawing from: `HALO_BEVY_OVERLAY_SHARED_CHECK=1` (magenta into every texture the rule calls free) shows none in 40 captures, `=2` (the rule broken on purpose) in 40 of 40.
+
+What the other 0.37 ms is: the copy about 0.16 (`HALO_BEVY_OVERLAY_SHARED_CHECK=3` leaves it out), the rest the game's fence and flush and the viewer's blend of a full picture. Drawing the game's resolve straight into the shared texture would take the copy; not tried.
+
+`HALO_BEVY_HIDDEN_PRESENT=2`, run again beside it: the corridor 14.24 and 14.29 ms against 14.76 (an empty overlay 13.92 against 14.39), the hillside 14.02 to 14.27 over six runs against 14.37. That is 0.25 to 0.5 ms on any frame and none of nine runs hitched, where one of four did in the first round. Still not the default, the one bad run never having been explained; it is the next thing for a play A/B.
+
+Limits: proven on this machine's NVIDIA driver alone, a 64-bit Vulkan viewer and a 32-bit GL game; no semaphores and no layout hand-off between the two APIs (the fence and the held mask do the work); Windows alone, the Linux and Android game builds keep the pixels and were not compiled. No lighting changed and the harness was not run.

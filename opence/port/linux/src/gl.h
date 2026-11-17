@@ -259,10 +259,23 @@ this list to generate the guest's entry points */
 	X(glGetQueryObjectui64v) \
 	X(glMemoryBarrier) \
 	X(glDebugMessageCallback)
+/* functions a driver may lack without the renderer failing: NULL then,
+and each user checks first (gl_functions_load) */
+#define GL_OPTIONAL_FUNCTIONS(X) \
+	X(glCreateTextures) \
+	X(glClearTexImage) \
+	X(glCreateMemoryObjectsEXT) \
+	X(glDeleteMemoryObjectsEXT) \
+	X(glMemoryObjectParameterivEXT) \
+	X(glImportMemoryWin32HandleEXT) \
+	X(glTextureStorageMem2DEXT)
 #endif
 
 #define GL_DECLARE_FUNCTION(name) extern __typeof__(&name) halo_##name;
 GL_FUNCTIONS(GL_DECLARE_FUNCTION)
+#ifdef GL_OPTIONAL_FUNCTIONS
+GL_OPTIONAL_FUNCTIONS(GL_DECLARE_FUNCTION)
+#endif
 #undef GL_DECLARE_FUNCTION
 
 /* call sites use the ordinary names; gl_functions.c, which defines the
@@ -496,6 +509,13 @@ pointers, sees the declarations without these aliases */
 #define glGetQueryObjectui64v halo_glGetQueryObjectui64v
 #define glMemoryBarrier halo_glMemoryBarrier
 #define glDebugMessageCallback halo_glDebugMessageCallback
+#define glCreateTextures halo_glCreateTextures
+#define glClearTexImage halo_glClearTexImage
+#define glCreateMemoryObjectsEXT halo_glCreateMemoryObjectsEXT
+#define glDeleteMemoryObjectsEXT halo_glDeleteMemoryObjectsEXT
+#define glMemoryObjectParameterivEXT halo_glMemoryObjectParameterivEXT
+#define glImportMemoryWin32HandleEXT halo_glImportMemoryWin32HandleEXT
+#define glTextureStorageMem2DEXT halo_glTextureStorageMem2DEXT
 
 #endif
 #endif

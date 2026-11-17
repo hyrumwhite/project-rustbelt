@@ -121,12 +121,26 @@ unsigned char *bevy_bridge_overlay_begin(
 	unsigned long width,
 	unsigned long height);
 void bevy_bridge_overlay_commit(void);
-/* the pixels of the overlay last committed, if it was drawn (not empty) and
-is width x height, else NULL (not the buffer bevy_bridge_overlay_begin
+/* the pixels of the overlay last committed, if it was drawn (not empty),
+shared its pixels (not a shared texture) and is width x height, else NULL (not the buffer bevy_bridge_overlay_begin
 handed out) */
 unsigned char const *bevy_bridge_overlay_last(
 	unsigned long width,
 	unsigned long height);
+/* (protocol 56) the overlay buffer bevy_bridge_overlay_begin handed out
+shares no pixels but the shared texture `slot` of the set `serial`
+(bevy_bridge_protocol.h, struct bevy_bridge_overlay_shared) */
+void bevy_bridge_overlay_mark_shared(unsigned long serial, unsigned long slot);
+/* (protocol 56) the viewer's set of shared overlay textures copied into
+*set, when there is one, its serial is not `known` and it was made for this
+process; FALSE otherwise */
+struct bevy_bridge_overlay_shared;
+boolean bevy_bridge_overlay_shared_set(unsigned long known, struct bevy_bridge_overlay_shared *set);
+/* (protocol 56) tells the viewer the set `serial` was imported, or refused */
+void bevy_bridge_overlay_shared_answer(unsigned long serial, boolean imported);
+/* (protocol 56) the shared slots the viewer may still be drawing from (bit
+n for slot n), read after bevy_bridge_overlay_begin */
+unsigned long bevy_bridge_overlay_shared_held(void);
 /* when the viewer last looked for an overlay and how often it looks
 (microseconds of the performance counter, wrapping); FALSE if it doesn't say */
 boolean bevy_bridge_overlay_viewer(unsigned long *looked, unsigned long *interval);

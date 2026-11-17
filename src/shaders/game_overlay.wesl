@@ -16,5 +16,8 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     if mode == 2u {
         return colour * 0.5;
     }
+    if mode == 3u {
+        return vec4(colour.rgb, 1.0);
+    }
     return colour;
 }

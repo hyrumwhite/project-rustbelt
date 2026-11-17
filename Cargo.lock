@@ -3219,6 +3219,7 @@ name = "halo_rt"
 version = "0.1.0"
 dependencies = [
  "argh",
+ "ash",
  "bevy",
  "bevy_solarik",
  "bytemuck",
@@ -3226,6 +3227,7 @@ dependencies = [
  "halo_bridge",
  "halo_map",
  "rand",
+ "wgpu",
 ]
 
 [[package]]

@@ -40,7 +40,7 @@ elsewhere */
 #define BEVY_BRIDGE_DEFAULT_NAME "HaloBevyBridge"
 #define BEVY_BRIDGE_MAXIMUM_NAME_LENGTH 64
 #define BEVY_BRIDGE_MAGIC 0x42524248UL /* "HBRB" */
-#define BEVY_BRIDGE_VERSION 55
+#define BEVY_BRIDGE_VERSION 56
 #define BEVY_BRIDGE_SCREEN_TEXTURES 512
 #define BEVY_BRIDGE_SCREEN_TEXTURE_BYTES (24UL << 20)
 #define BEVY_BRIDGE_TEXT_ATLAS_SIZE 2048
@@ -87,6 +87,11 @@ pixels are its own) */
 /* the largest overlay picture (pixels), and its buffers */
 #define BEVY_BRIDGE_OVERLAY_MAXIMUM_PIXELS (3840 * 2160)
 #define BEVY_BRIDGE_OVERLAYS 2
+/* (protocol 56) the overlay's shared textures (struct
+bevy_bridge_overlay_shared): how many a set holds, and the kinds of handle */
+#define BEVY_BRIDGE_OVERLAY_SHARED_SLOTS 8
+#define BEVY_BRIDGE_OVERLAY_HANDLE_OPAQUE_WIN32 1
+#define BEVY_BRIDGE_OVERLAY_HANDLE_D3D11 2
 
 /* bevy_bridge_object.flags */
 enum
@@ -665,7 +670,50 @@ struct bevy_bridge_overlay
 	/* (protocol 49) nonzero when nothing was drawn into it (the renderer
 	drawing all of it): no pixels shared, the picture clear */
 	unsigned long empty;
-	unsigned long reserved[3];
+	/* (protocol 56) the picture is in a shared texture, not the pixels: the
+	serial of the set (bevy_bridge_overlay_shared.serial) and the slot's
+	index + 1; 0 and 0 for the pixels as before */
+	unsigned long shared_serial;
+	unsigned long shared_slot;
+	unsigned long reserved;
+};
+
+/* (protocol 56) textures both sides hold, so the overlay crosses on the GPU
+without the pixels' round trip through this memory: the viewer makes a set
+of BEVY_BRIDGE_OVERLAY_SHARED_SLOTS textures of the overlay's size (Vulkan
+memory, RGBA8 sRGB, one allocation each), duplicates each allocation's
+handle into the game's process and writes them here; the game imports them
+into GL, copies a finished picture into a slot the viewer is not reading and
+names it in the overlay's header. A set the game cannot import it refuses,
+and the pixels carry on. */
+struct bevy_bridge_overlay_shared
+{
+	/* written by the viewer: counts up from 1 with each set it makes, 0
+	none; written last */
+	unsigned long serial;
+	/* the game process the handles were duplicated into */
+	unsigned long process_id;
+	/* the textures' size in pixels */
+	unsigned long width;
+	unsigned long height;
+	/* each allocation's size in bytes, low and high halves */
+	unsigned long allocation_size_low;
+	unsigned long allocation_size_high;
+	/* nonzero when each allocation is dedicated to its image */
+	unsigned long dedicated;
+	/* BEVY_BRIDGE_OVERLAY_HANDLE_* */
+	unsigned long handle_type;
+	/* the handles as the game's process sees them, which it closes */
+	unsigned long handles[BEVY_BRIDGE_OVERLAY_SHARED_SLOTS];
+	/* written by the viewer each frame: the slots it may still be drawing
+	from (bit n for slot n), which the game does not write into */
+	unsigned long held;
+	/* written by the game: the serial it has imported, 0 none */
+	unsigned long imported;
+	/* written by the game: the serial it tried and could not import (or
+	will not), whose set the viewer then frees */
+	unsigned long refused;
+	unsigned long reserved;
 };
 
 /* a gamepad the renderer forwards */
@@ -1391,6 +1439,8 @@ struct bevy_bridge_shared
 	unsigned long text_atlas_sequence;
 	unsigned long text_atlas_generation;
 	unsigned char text_atlas[BEVY_BRIDGE_TEXT_ATLAS_SIZE * BEVY_BRIDGE_TEXT_ATLAS_SIZE];
+	/* (protocol 56) the overlay's shared textures */
+	struct bevy_bridge_overlay_shared overlay_shared;
 };
 
 /* ---------- prototypes/the platform layer (posix_bevy_bridge.c, win32_bevy_bridge.c) */

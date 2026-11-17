@@ -1337,7 +1337,76 @@ unsigned char *bevy_bridge_overlay_begin(
 	overlay->width = width;
 	overlay->height = height;
 	overlay->empty = 0;
+	overlay->shared_serial = 0;
+	overlay->shared_slot = 0;
 	return shared->overlay_pixels[bevy_bridge_overlay_buffer];
+}
+
+void bevy_bridge_overlay_mark_shared(
+	unsigned long serial,
+	unsigned long slot)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+
+	if (shared && bevy_bridge_overlay_buffer != NONE)
+	{
+		shared->overlays[bevy_bridge_overlay_buffer].shared_serial = serial;
+		shared->overlays[bevy_bridge_overlay_buffer].shared_slot = slot + 1;
+	}
+}
+
+boolean bevy_bridge_overlay_shared_set(
+	unsigned long known,
+	struct bevy_bridge_overlay_shared *set)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+	struct bevy_bridge_overlay_shared *block;
+	unsigned long serial;
+
+	if (!shared || !shared->overlay_enabled)
+		return FALSE;
+	block = &shared->overlay_shared;
+	serial = __atomic_load_n(&block->serial, __ATOMIC_ACQUIRE);
+	if (!serial || serial == known)
+		return FALSE;
+	memcpy(set, block, sizeof(*set));
+	set->serial = serial;
+	/* (the viewer zeroes the serial before it writes another set: a set
+	read while it changed is read again next frame) */
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	if (__atomic_load_n(&block->serial, __ATOMIC_RELAXED) != serial)
+		return FALSE;
+	/* (a set left from a game before this one sharing the name holds
+	handles of another process) */
+	return set->process_id == bevy_bridge_platform_process_id();
+}
+
+void bevy_bridge_overlay_shared_answer(
+	unsigned long serial,
+	boolean imported)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+
+	if (!shared)
+		return;
+	if (imported)
+		__atomic_store_n(&shared->overlay_shared.imported, serial, __ATOMIC_RELEASE);
+	else
+		__atomic_store_n(&shared->overlay_shared.refused, serial, __ATOMIC_RELEASE);
+}
+
+unsigned long bevy_bridge_overlay_shared_held(void)
+{
+	struct bevy_bridge_shared *shared = bevy_bridge_shared;
+
+	if (!shared)
+		return ~0UL;
+	/* (after bevy_bridge_overlay_begin made the header odd: the viewer
+	writes the slot it reads into the mask before it checks the header's
+	sequence again, so either it sees this frame's begin and reads again,
+	or this sees its mask) */
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	return __atomic_load_n(&shared->overlay_shared.held, __ATOMIC_RELAXED);
 }
 
 void bevy_bridge_overlay_mark_empty(void)
@@ -1376,8 +1445,11 @@ unsigned char const *bevy_bridge_overlay_last(
 	if (latest >= BEVY_BRIDGE_OVERLAYS || (long)latest == bevy_bridge_overlay_buffer)
 		return NULL;
 	overlay = &shared->overlays[latest];
-	if ((overlay->sequence & 1) || overlay->empty || overlay->width != width || overlay->height != height)
+	if ((overlay->sequence & 1) || overlay->empty || overlay->shared_slot ||
+		overlay->width != width || overlay->height != height)
+	{
 		return NULL;
+	}
 	return shared->overlay_pixels[latest];
 }
 

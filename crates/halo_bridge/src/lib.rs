@@ -21,7 +21,7 @@
 use std::sync::atomic::{fence, Ordering};
 
 pub const MAGIC: u32 = 0x4252_4248; // "HBRB"
-pub const VERSION: u32 = 55;
+pub const VERSION: u32 = 56;
 pub const SCREEN_TEXTURES: usize = 512;
 pub const SCREEN_TEXTURE_BYTES: usize = 24 << 20;
 pub const TEXT_ATLAS_SIZE: usize = 2048;
@@ -1305,7 +1305,58 @@ struct OverlayHeader {
     width: u32,
     height: u32,
     empty: u32,
-    reserved: [u32; 3],
+    /// (Protocol 56) The shared texture set's serial and the slot's index +
+    /// 1 when the picture is in a shared texture; 0 and 0 for the pixels.
+    shared_serial: u32,
+    shared_slot: u32,
+    reserved: u32,
+}
+
+/// (Protocol 56) How many textures a shared overlay set holds
+/// (`BEVY_BRIDGE_OVERLAY_SHARED_SLOTS`).
+pub const OVERLAY_SHARED_SLOTS: usize = 8;
+/// (Protocol 56) `bevy_bridge_overlay_shared.handle_type`: an opaque Win32
+/// handle of Vulkan memory.
+pub const OVERLAY_HANDLE_OPAQUE_WIN32: u32 = 1;
+/// (Protocol 56) A D3D11 texture's shared handle.
+pub const OVERLAY_HANDLE_D3D11: u32 = 2;
+
+/// (Protocol 56) The overlay's shared textures (`struct
+/// bevy_bridge_overlay_shared`): the viewer writes the set and `held`, the
+/// game `imported` and `refused`.
+#[repr(C)]
+struct OverlaySharedBlock {
+    /// counts up from 1 with each set; 0 none; written last
+    serial: u32,
+    process_id: u32,
+    width: u32,
+    height: u32,
+    allocation_size_low: u32,
+    allocation_size_high: u32,
+    dedicated: u32,
+    handle_type: u32,
+    handles: [u32; OVERLAY_SHARED_SLOTS],
+    held: u32,
+    imported: u32,
+    refused: u32,
+    reserved: u32,
+}
+
+/// (Protocol 56) A set of shared overlay textures as the viewer offers it
+/// ([`Bridge::offer_overlay_set`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverlaySet {
+    pub serial: u32,
+    /// The game process the handles were duplicated into.
+    pub process_id: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Each allocation's size in bytes.
+    pub allocation_size: u64,
+    pub dedicated: bool,
+    pub handle_type: u32,
+    /// The handles' values in the game's process.
+    pub handles: [u32; OVERLAY_SHARED_SLOTS],
 }
 
 /// The game's display settings as shared (`struct bevy_bridge_display`).
@@ -1395,6 +1446,8 @@ struct Shared {
     text_atlas_sequence: u32,
     text_atlas_generation: u32,
     text_atlas: [u8; TEXT_ATLAS_SIZE * TEXT_ATLAS_SIZE],
+    /// (Protocol 56) The overlay's shared textures.
+    overlay_shared: OverlaySharedBlock,
 }
 
 /// The layout is the game's, measured there; keep these in step with
@@ -1405,6 +1458,8 @@ const _: () = assert!(std::mem::size_of::<Camera>() == 44);
 const _: () = assert!(std::mem::size_of::<Input>() == 128);
 const _: () = assert!(std::mem::size_of::<Gamepad>() == 20);
 const _: () = assert!(std::mem::size_of::<DisplayShared>() == 48);
+const _: () = assert!(std::mem::size_of::<OverlayHeader>() == 32);
+const _: () = assert!(std::mem::size_of::<OverlaySharedBlock>() == 80);
 
 /// (Protocol 55) The game's display mode (`display.mode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1515,6 +1570,9 @@ pub struct Overlay {
     /// (Protocol 49) Nothing was drawn into it: no pixels shared, the
     /// picture clear.
     pub empty: bool,
+    /// (Protocol 56) The picture is in a shared texture, not the pixels:
+    /// the set's serial and the slot.
+    pub shared: Option<(u32, u32)>,
 }
 
 #[derive(Debug)]
@@ -1601,6 +1659,67 @@ impl Bridge {
             )));
         }
         Ok(())
+    }
+
+    /// (Protocol 56) The game process's id, as it wrote it.
+    pub fn writer_process_id(&self) -> u32 {
+        // SAFETY: as in check()
+        unsafe { std::ptr::read_volatile(&(*self.shared).writer_process_id) }
+    }
+
+    /// (Protocol 56) Offers the game a set of shared overlay textures: the
+    /// serial is zeroed first and written last, so the game never reads a
+    /// set half written.
+    pub fn offer_overlay_set(&self, set: &OverlaySet) {
+        // SAFETY: as in write_input; the game only reads these words
+        unsafe {
+            let block = &raw const (*self.shared).overlay_shared as *mut OverlaySharedBlock;
+            std::ptr::write_volatile(&raw mut (*block).serial, 0);
+            fence(Ordering::SeqCst);
+            std::ptr::write_volatile(&raw mut (*block).process_id, set.process_id);
+            std::ptr::write_volatile(&raw mut (*block).width, set.width);
+            std::ptr::write_volatile(&raw mut (*block).height, set.height);
+            std::ptr::write_volatile(&raw mut (*block).allocation_size_low, set.allocation_size as u32);
+            std::ptr::write_volatile(&raw mut (*block).allocation_size_high, (set.allocation_size >> 32) as u32);
+            std::ptr::write_volatile(&raw mut (*block).dedicated, set.dedicated as u32);
+            std::ptr::write_volatile(&raw mut (*block).handle_type, set.handle_type);
+            std::ptr::write_volatile(&raw mut (*block).handles, set.handles);
+            fence(Ordering::Release);
+            std::ptr::write_volatile(&raw mut (*block).serial, set.serial);
+        }
+        fence(Ordering::Release);
+    }
+
+    /// (Protocol 56) Withdraws the set offered, if the game has not taken it
+    /// yet (the serial zeroed).
+    pub fn withdraw_overlay_set(&self) {
+        // SAFETY: as in write_input
+        unsafe {
+            std::ptr::write_volatile(&raw const (*self.shared).overlay_shared.serial as *mut u32, 0);
+        }
+        fence(Ordering::Release);
+    }
+
+    /// (Protocol 56) The serial of the set the game imported (0 none) and of
+    /// the one it refused (0 none).
+    pub fn overlay_set_answers(&self) -> (u32, u32) {
+        // SAFETY: as in check()
+        unsafe {
+            let imported = std::ptr::read_volatile(&(*self.shared).overlay_shared.imported);
+            let refused = std::ptr::read_volatile(&(*self.shared).overlay_shared.refused);
+            fence(Ordering::Acquire);
+            (imported, refused)
+        }
+    }
+
+    /// (Protocol 56) The shared overlay slots the viewer may still be
+    /// drawing from (bit n for slot n), which the game does not copy into.
+    pub fn write_overlay_held(&self, held: u32) {
+        // SAFETY: as in write_input; the game only reads this word
+        unsafe {
+            std::ptr::write_volatile(&raw const (*self.shared).overlay_shared.held as *mut u32, held);
+        }
+        fence(Ordering::SeqCst);
     }
 
     /// Tells the game the viewer is looking for an overlay now, and how often
@@ -2120,7 +2239,12 @@ impl Bridge {
         None
     }
 
-    pub fn read_overlay(&mut self, pixels: &mut Vec<u8>) -> Option<Overlay> {
+    /// The latest overlay, if it is newer than the last one returned: its
+    /// pixels copied into `pixels`, or (protocol 56) the shared texture it
+    /// is in, whose slot is added to `held` (the slots the viewer may still
+    /// be drawing from) in the shared mask before the header is checked
+    /// again, so the game cannot have begun a copy into it unseen.
+    pub fn read_overlay(&mut self, pixels: &mut Vec<u8>, held: u32) -> Option<Overlay> {
         for _ in 0..4 {
             // SAFETY: as in read(); the pixels are copied as bytes and
             // validated by the sequence afterwards
@@ -2136,15 +2260,30 @@ impl Bridge {
                 if self.last_overlay == Some((latest as u32, sequence)) {
                     return None;
                 }
+                let shared_slot = std::ptr::read_volatile(&(*header).shared_slot);
                 let overlay = Overlay {
                     frame_index: std::ptr::read_volatile(&(*header).frame_index),
                     width: std::ptr::read_volatile(&(*header).width),
                     height: std::ptr::read_volatile(&(*header).height),
                     empty: std::ptr::read_volatile(&(*header).empty) != 0,
+                    shared: (shared_slot != 0 && shared_slot as usize <= OVERLAY_SHARED_SLOTS)
+                        .then(|| (std::ptr::read_volatile(&(*header).shared_serial), shared_slot - 1)),
                 };
                 let picture = overlay.width as usize * overlay.height as usize * 4;
                 if picture == 0 || picture > OVERLAY_MAXIMUM_PIXELS * 4 {
                     return None;
+                }
+                if let Some((_, slot)) = overlay.shared.filter(|_| !overlay.empty) {
+                    // (held first, then the header again: the game reads the
+                    // mask after it begins a header, so either it sees the
+                    // slot held or this sees the header changed)
+                    std::ptr::write_volatile(&raw const (*self.shared).overlay_shared.held as *mut u32, held | 1 << slot);
+                    fence(Ordering::SeqCst);
+                    if std::ptr::read_volatile(&(*header).sequence) != sequence {
+                        continue;
+                    }
+                    self.last_overlay = Some((latest as u32, sequence));
+                    return Some(overlay);
                 }
                 if overlay.empty {
                     fence(Ordering::Acquire);
@@ -2320,6 +2459,22 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The protocol 56 words where the C header has them: the overlay
+    /// header's two words in its old reserved ones, the shared set's block
+    /// at the very end.
+    #[test]
+    fn overlay_shared_layout() {
+        assert_eq!(std::mem::offset_of!(OverlayHeader, empty), 16);
+        assert_eq!(std::mem::offset_of!(OverlayHeader, shared_serial), 20);
+        assert_eq!(std::mem::offset_of!(OverlayHeader, shared_slot), 24);
+        assert_eq!(std::mem::offset_of!(OverlaySharedBlock, handles), 32);
+        assert_eq!(std::mem::offset_of!(OverlaySharedBlock, held), 64);
+        assert_eq!(std::mem::offset_of!(OverlaySharedBlock, imported), 68);
+        assert_eq!(std::mem::offset_of!(OverlaySharedBlock, refused), 72);
+        assert_eq!(std::mem::offset_of!(Shared, overlay_shared), std::mem::size_of::<Shared>() - 80);
+        assert_eq!(std::mem::offset_of!(Shared, overlay_shared), std::mem::offset_of!(Shared, text_atlas) + TEXT_ATLAS_SIZE * TEXT_ATLAS_SIZE);
+    }
 
     #[test]
     fn viewer_screen_packs_and_clamps() {

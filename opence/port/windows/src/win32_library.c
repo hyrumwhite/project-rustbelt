@@ -33,3 +33,11 @@ int platform_gpu_priority_set(int priority_class, long *status)
 	*status = (long)set_priority(GetCurrentProcess(), priority_class);
 	return *status == 0 ? 1 : 0;
 }
+
+/* closes a handle another process duplicated into this one (the overlay's
+shared textures, d3d8_gl.c overlay_slots_ready) */
+void platform_handle_close(unsigned long handle)
+{
+	if (handle)
+		CloseHandle((HANDLE)(ULONG_PTR)handle);
+}

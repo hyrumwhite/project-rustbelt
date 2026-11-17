@@ -36,6 +36,12 @@ argh = "0.1.12"
 # (src/lens_flares.rs: its vertices into a buffer)
 bytemuck = { version = "1.25.2", features = ["derive"] }
 
+# (src/overlay/shared.rs: the overlay's shared textures, Vulkan images with
+# exportable memory; the same wgpu and ash as Bevy's)
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["vulkan"] }
+ash = "0.38"
+
 [dev-dependencies]
 # examples/solari_demo.rs
 chacha20 = { version = "0.10.0", default-features = false, features = ["rng"] }

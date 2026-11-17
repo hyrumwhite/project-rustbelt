@@ -186,7 +186,13 @@ impl Plugin for DlssPlugin {
                     prepare::prepare_dlss::<DlssRayReconstructionFeature>,
                 )
                     .in_set(RenderSystems::PrepareViews)
-                    .before(prepare_view_targets),
+                    .before(prepare_view_targets)
+                    // (halo-rt: never beside the window's surface being
+                    // configured: a feature made anew for a new size submits
+                    // its setup, and a submission while the configure waits
+                    // for the GPU to go idle fails it, a validation error
+                    // that quit the viewer on a display change now and then)
+                    .after(bevy_render::view::window::prepare_windows),
             );
 
         app.sub_app_mut(RenderApp).add_systems(

@@ -1,5 +1,7 @@
 # Halo RT: Halo: Combat Evolved with Bevy Solari ray tracing
 
+![The main menu, path traced: the ring seen edge on, its far side reflected in the ring's ocean](docs/images/main-menu.webp)
+
 This project ports Halo: Combat Evolved to the **Bevy 0.20** engine and renders it with:
 
 - **[Bevy Solari](https://docs.rs/bevy_solari/0.20.0/bevy_solari/)**: Bevy's fully dynamic, real-time ray-traced lighting.

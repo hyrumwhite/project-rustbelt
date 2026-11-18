@@ -25,6 +25,14 @@ pub struct RayMaterialMarks {
     /// rays otherwise never meet. A reflection's first ray adds its emission
     /// and goes on through it.
     pub reflected_glow: HashSet<AssetId<StandardMaterial>>,
+    /// Terrain, the blockers of the soft sun (`MATERIAL_FLAG_SOFT_SUN`,
+    /// `sampling.wesl`'s `sun_soft_transmission`): with `SOLARIK_SUN_BLUR`
+    /// or `SOLARIK_SUN_TERMINATOR` set, a terrain pixel's sun is tested
+    /// past these from a point of the terrain near it, and past everything
+    /// else from the pixel itself. A terrain receiver is a G-buffer pixel
+    /// without Bevy's shadow-receiver bit (`NotShadowReceiver` on the
+    /// entity the camera draws). Inert without the switches.
+    pub soft_sun: HashSet<AssetId<StandardMaterial>>,
 }
 
 pub struct MaterialMarksPlugin;

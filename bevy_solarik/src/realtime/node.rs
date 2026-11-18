@@ -1297,6 +1297,9 @@ pub fn init_solari_lighting_pipelines(
         if let Ok(defs) = std::env::var("SOLARIK_SHADER_DEFS") {
             shader_defs.extend(defs.split(',').filter(|d| !d.is_empty()).map(|d| d.trim().to_string().into()));
         }
+        // (the soft sun on terrain, SUN_SOFT: see sun_soft_shader_defs)
+        let sun_soft = sun_soft_shader_defs(&shader_defs);
+        shader_defs.extend(sun_soft);
         // (on by default; SOLARIK_CELL_LIGHTS=0 leaves them out)
         if !std::env::var("SOLARIK_CELL_LIGHTS").is_ok_and(|v| v == "0") {
             shader_defs.push("DI_CELL_LIGHTS".into());
@@ -1775,6 +1778,48 @@ pub fn init_solari_lighting_pipelines(
     if let Some(capture) = query_capture {
         commands.insert_resource(capture);
     }
+}
+
+// The soft sun on terrain's defaults (sampling.wesl, sun_soft_transmission):
+// the blur's radius in metres (SOLARIK_SUN_BLUR, 0 off), the terminator rule
+// (SOLARIK_SUN_TERMINATOR=1) and the thickest rock its ray may start in, in
+// metres (SOLARIK_SUN_TERMINATOR_REACH, 0 no limit). The blur 1.4 m, chosen
+// by eye in play (3.66, a lightmap texel's softness, 1.8 and 1.4 tried);
+// SOLARIK_SUN_BLUR=0 the old. The terminator rule off, opt-in.
+const SUN_BLUR_DEFAULT: f32 = 1.4;
+const SUN_TERMINATOR_DEFAULT: bool = false;
+const SUN_TERMINATOR_REACH_DEFAULT: f32 = 0.0;
+// (how far the probe runs, in its start-to-disc distances: 2 reaches as
+// deep under the pixel's plane as it starts above it; SOLARIK_SUN_BLUR_DROP,
+// held to 1 to 8)
+const SUN_BLUR_DROP_DEFAULT: f32 = 2.0;
+
+/// The soft sun's definitions from the environment: `SUN_SOFT` when the blur
+/// or the terminator is on (or one of its views, `VISUALIZE_SUN_SOFT` or
+/// `VISUALIZE_SUN_SOFT_FACES`, is among `shader_defs`), with its values in
+/// millimetres (`SUN_BLUR_MM`, `SUN_TERMINATOR_REACH_MM`), the probe's
+/// length in hundredths (`SUN_BLUR_DROP_PCT`) and `SUN_TERMINATOR`; nothing otherwise, so no pass compiles any of it.
+fn sun_soft_shader_defs(shader_defs: &[ShaderDefVal]) -> Vec<ShaderDefVal> {
+    let metres = |env: &str, default: f32| {
+        std::env::var(env).ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(default)
+    };
+    let blur = metres("SOLARIK_SUN_BLUR", SUN_BLUR_DEFAULT);
+    let terminator = std::env::var("SOLARIK_SUN_TERMINATOR").map_or(SUN_TERMINATOR_DEFAULT, |v| v.trim() == "1");
+    let reach = metres("SOLARIK_SUN_TERMINATOR_REACH", SUN_TERMINATOR_REACH_DEFAULT);
+    let drop = std::env::var("SOLARIK_SUN_BLUR_DROP").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite()).unwrap_or(SUN_BLUR_DROP_DEFAULT).clamp(1.0, 8.0);
+    let viewed = shader_defs.iter().any(|d| {
+        matches!(d, ShaderDefVal::Bool(name, true) if name == "VISUALIZE_SUN_SOFT" || name == "VISUALIZE_SUN_SOFT_FACES")
+    });
+    if blur <= 0.0 && !terminator && !viewed {
+        return Vec::new();
+    }
+    vec![
+        "SUN_SOFT".into(),
+        ShaderDefVal::UInt("SUN_BLUR_MM".into(), (blur * 1000.0).round() as u32),
+        ShaderDefVal::UInt("SUN_TERMINATOR".into(), terminator as u32),
+        ShaderDefVal::UInt("SUN_TERMINATOR_REACH_MM".into(), (reach * 1000.0).round() as u32),
+        ShaderDefVal::UInt("SUN_BLUR_DROP_PCT".into(), (drop * 100.0).round() as u32),
+    ]
 }
 
 /// `SOLARIK_THIN_FILM=thickness,ior,base_ior` (nanometres; the film's and the

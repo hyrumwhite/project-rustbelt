@@ -183,6 +183,48 @@ fn scene_consumers_compose_across_production_feature_variants() {
                     }
                 }
             }
+            // (the soft sun on terrain, SUN_SOFT as node.rs's
+            // sun_soft_shader_defs gives it: the blur alone, the terminator
+            // alone, both with a reach, and its two views (each with the
+            // blur, as node.rs adds SUN_SOFT for a view); the GI passes
+            // carry the views' early return)
+            if (bits == 0 || bits == 15)
+                && (consumer == "scene::sampling"
+                    || consumer == "realtime::restir_di"
+                    || consumer == "realtime::restir_gi"
+                    || consumer == "realtime::specular_gi")
+            {
+                let soft = |blur: u32, terminator: u32, reach: u32, view: Option<&'static str>| -> Vec<ShaderDefVal> {
+                    let mut soft_definitions = stage_definitions.clone();
+                    soft_definitions.push("SUN_SOFT".into());
+                    soft_definitions.push(ShaderDefVal::UInt("SUN_BLUR_MM".into(), blur));
+                    soft_definitions.push(ShaderDefVal::UInt("SUN_TERMINATOR".into(), terminator));
+                    soft_definitions.push(ShaderDefVal::UInt("SUN_TERMINATOR_REACH_MM".into(), reach));
+                    soft_definitions.push(ShaderDefVal::UInt("SUN_BLUR_DROP_PCT".into(), 200));
+                    if let Some(view) = view {
+                        soft_definitions.push(view.into());
+                    }
+                    soft_definitions
+                };
+                graph.validate(&module, &soft(3660, 0, 0, None));
+                graph.validate(&module, &soft(0, 1, 0, None));
+                graph.validate(&module, &soft(3660, 1, 2000, None));
+                // (the probe's start unclamped, the old (SUN_SOFT_APEX_UNCLAMPED))
+                let mut unclamped = soft(3660, 1, 0, None);
+                unclamped.push("SUN_SOFT_APEX_UNCLAMPED".into());
+                graph.validate(&module, &unclamped);
+                // (revision 1: a lowered start under a twentieth of a radius
+                // the pixel's own point, no sight ray (SUN_SOFT_APEX_LEAST_OWN))
+                let mut least_own = soft(3660, 1, 0, None);
+                least_own.push("SUN_SOFT_APEX_LEAST_OWN".into());
+                graph.validate(&module, &least_own);
+                // (the terminator's reach unjittered, the old (SUN_TERMINATOR_REACH_FIXED))
+                let mut fixed_reach = soft(3660, 1, 2000, None);
+                fixed_reach.push("SUN_TERMINATOR_REACH_FIXED".into());
+                graph.validate(&module, &fixed_reach);
+                graph.validate(&module, &soft(3660, 0, 0, Some("VISUALIZE_SUN_SOFT")));
+                graph.validate(&module, &soft(3660, 0, 0, Some("VISUALIZE_SUN_SOFT_FACES")));
+            }
             if consumer == "realtime::primary_foliage" {
                 // (every pixel traced in full, the old (FOLIAGE_UNPROBED))
                 let mut unprobed_definitions = stage_definitions.clone();

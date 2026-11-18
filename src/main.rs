@@ -754,6 +754,7 @@ struct LevelAssetParams<'w> {
     inverse_bindposes: ResMut<'w, Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<'w, NeutralDetail>,
     glass_sky_mask: Res<'w, material::GlassSkyMaskMaterial>,
+    ray_marks: Option<ResMut<'w, bevy_solarik::material_marks::RayMaterialMarks>>,
 }
 
 /// The parent of the loaded level's entities.
@@ -835,6 +836,11 @@ fn load_level(
     builder.draw_blended = !overlay || args.viewer_glass();
     if let Err(e) = builder.spawn_bsps(args.bsp, !args.pathtracer, &mut commands, &mut assets) {
         error!("loading {}: {e}", cache.header.name);
+    }
+    // (its terrain's materials for Solarik's soft sun, the last level's
+    // let go; inert without SOLARIK_SUN_BLUR or SOLARIK_SUN_TERMINATOR)
+    if let Some(marks) = params.ray_marks.as_deref_mut() {
+        marks.soft_sun = builder.soft_sun_materials.drain(..).collect();
     }
     // a bridged game places the objects itself; the map still gives the
     // light fixtures' lights

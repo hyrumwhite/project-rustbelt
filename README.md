@@ -15,7 +15,7 @@ It's based on the [OpenCE](opence) decompilation. See [ROADMAP.md](ROADMAP.md) f
 - the sky model.
 
 Lighting comes from the level's own data:
-- the sky tag's sun becomes a directional light;
+- the sky tag's sun becomes a directional light (its shadow on cliffs and ground is softened somewhat as the original lightmaps were soft, blurred over 1.4 m of the surface: `SOLARIK_SUN_BLUR=<metres>`, 0 the exact shadow of before; the shadows of characters, vehicles and trees stay sharp; `SOLARIK_SUN_TERMINATOR=1` with `SOLARIK_SUN_TERMINATOR_REACH=6.1` also lights facets that lean from the sun under smooth normals, opt-in: docs/soft-sun.md);
 - the sky model, baked into a cubemap, becomes the environment light;
 - shaders that emitted light in Halo's baked radiosity, and self-illuminated surfaces, become emissive light sources;
 - light fixtures become ray-traced light sources.

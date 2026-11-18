@@ -674,6 +674,10 @@ pub struct ShaderInfo {
     /// as the lightmapper used it); zero for most shaders.
     pub emitted_light: [f32; 3],
     pub emitted_power: f32,
+    /// The physics' material type (`shader_physics_properties`, the
+    /// game's material enum: 0 dirt, 1 sand, 2 stone, 3 snow, 4 wood, ...,
+    /// 28 water, 29 leaves, 31 ice).
+    pub material_type: i16,
     pub base_map: Option<TagRef>,
     pub detail_maps: Vec<(TagRef, f32)>,
     pub bump_map: Option<TagRef>,
@@ -740,6 +744,7 @@ pub fn shader_info(cache: &CacheFile, reference: TagRef) -> Result<Option<Shader
         shader_type,
         emitted_light: root.vec3(radiosity + layout::shader_radiosity_properties::COLOR_OF_EMITTED_LIGHT)?,
         emitted_power: root.f32(radiosity + layout::shader_radiosity_properties::POWER)?,
+        material_type: root.i16(layout::shader_base::PHYSICS + layout::shader_physics_properties::MATERIAL_TYPE)?,
         base_map: None,
         detail_maps: Vec::new(),
         bump_map: None,

@@ -14,7 +14,7 @@ import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::temporal_pixel_dissimilar;
 import bevy_solarik::realtime::gbuffer_utils::permute_pixel;
-@if((CELL_LOOKUP_GEOMETRIC)) import bevy_solarik::realtime::gbuffer_utils::pixel_geometric_normal;
+@if((CELL_LOOKUP_GEOMETRIC || SUN_SOFT)) import bevy_solarik::realtime::gbuffer_utils::pixel_geometric_normal;
 import bevy_solarik::realtime::gbuffer_utils::raster_reconstruction_error;
 import bevy_solarik::realtime::gbuffer_utils::RASTER_SUBPIXEL_STEP;
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedMaterial;
@@ -78,6 +78,10 @@ import bevy_solarik::realtime::tuning::DI_TILE_CANDIDATES;
 import bevy_solarik::realtime::tuning::DI_CELL_CANDIDATES;
 import bevy_solarik::realtime::tuning::DI_CONFIDENCE_CAP;
 import bevy_solarik::realtime::realtime_bindings::ResolvedLightSamplePacked;
+@if((SUN_SOFT)) import bevy_solarik::scene::sampling::sun_soft_transmission;
+@if((SUN_SOFT)) import bevy_solarik::scene::sampling::sun_soft_landing;
+@if((SUN_SOFT)) import bevy_solarik::realtime::gbuffer_utils::pixel_ray_offset;
+@if((SUN_SOFT && VISUALIZE_SUN_SOFT_FACES)) import bevy_solarik::scene::raytracing_scene_bindings::trace_triangle_ray_impl;
 
 // https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf
 // https://d1qx31qr3h6wln.cloudfront.net/publications/ReSTIR%20GI.pdf
@@ -136,6 +140,48 @@ var<private> debug_di_pick: vec3<f32>;
 // (LIGHT_NEAR_INLINE) itself. The later passes leave the view.)
 @if(VISUALIZE_LIGHT_NEAR) {
 var<private> debug_light_near: vec3<f32>;
+}
+
+// (SOLARIK_SHADER_DEFS=VISUALIZE_SUN_SOFT, with HALO_RT_NO_DLSS=1: the soft
+// sun's landing (sampling.wesl, sun_soft_landing) by a seed of the pixel's
+// own each frame. Black: not a terrain pixel (Bevy's shadow-receiver bit
+// set); red: the probe fell back to the pixel's own point (all of them
+// with no blur); green: it landed on terrain; plus blue: the facet there
+// leans from the sun, the terminator's case; at half brightness where the
+// probe's start was lowered under rock over the pixel (its own ray offset,
+// pixel_ray_offset, as the shading takes it); at a quarter where the room
+// was too small for that and the landing was checked by the pixel's sight;
+// grey (all three channels at a quarter) where that check refused it. The
+// later passes leave the view.)
+@if((SUN_SOFT && VISUALIZE_SUN_SOFT))
+fn sun_soft_view(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>, pixel_index: u32) -> vec3<f32> {
+    let gbuffer_a = textureLoad(gbuffer, pixel_id, 0).a;
+    if (gbuffer_a & GBUFFER_SHADOW_RECEIVER) != 0u { return vec3(0.0); }
+    let geometric_normal = pixel_geometric_normal(pixel_id, depth, world_normal, view.main_pass_viewport.zw, view.world_from_clip, depth_buffer);
+    let seed = (pixel_index * 2654435761u) ^ (lighting_constants.frame_index * 2246822519u);
+    let ray_offset = pixel_ray_offset(gbuffer_a, pixel_id, depth, world_position, geometric_normal, view.world_position,
+        view.main_pass_viewport.zw, view.world_from_clip);
+    let landing = sun_soft_landing(world_position, geometric_normal, ray_offset, seed);
+    var colour = select(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), landing.landed);
+    if has_sun() && dot(landing.normal, directional_lights[0].direction_to_light) <= 0.0 { colour.b = 1.0; }
+    if landing.refused { return vec3(0.25); }
+    return colour * select(select(1.0, 0.5, landing.clamped), 0.25, landing.sighted);
+}
+
+// (SOLARIK_SHADER_DEFS=VISUALIZE_SUN_SOFT_FACES, with HALO_RT_NO_DLSS=1:
+// which side of the terrain the ray queries call the front, for
+// SUN_SOFT_OUTSIDE_FRONT. On a terrain pixel, a ray from a metre above it
+// along its geometric normal back down, culling nothing: green, its hit is a
+// front face; red, a back face; black, a miss, or not a terrain pixel. The
+// later passes leave the view.)
+@if((SUN_SOFT && VISUALIZE_SUN_SOFT_FACES))
+fn sun_soft_faces_view(pixel_id: vec2<u32>, depth: f32, world_position: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    let gbuffer_a = textureLoad(gbuffer, pixel_id, 0).a;
+    if (gbuffer_a & GBUFFER_SHADOW_RECEIVER) != 0u { return vec3(0.0); }
+    let geometric_normal = pixel_geometric_normal(pixel_id, depth, world_normal, view.main_pass_viewport.zw, view.world_from_clip, depth_buffer);
+    let hit = trace_triangle_ray_impl(world_position + geometric_normal, -geometric_normal, RAY_T_MIN, 1.5, RAY_FLAG_NONE, false);
+    if hit.kind != RAY_QUERY_INTERSECTION_TRIANGLE { return vec3(0.0); }
+    return select(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), hit.front_face);
 }
 
 // (Timing switches, SOLARIK_SHADER_DEFS=DI_TIME_NO_...: each leaves a stage
@@ -213,6 +259,14 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(VISUALIZE_LIGHT_NEAR) {
     return;
 }
+@if((SUN_SOFT && VISUALIZE_SUN_SOFT)) {
+    textureStore(view_output, global_id.xy, vec4(sun_soft_view(global_id.xy, depth, surface.world_position, surface.world_normal, pixel_index), 1.0));
+    return;
+}
+@if((SUN_SOFT && VISUALIZE_SUN_SOFT_FACES)) {
+    textureStore(view_output, global_id.xy, vec4(sun_soft_faces_view(global_id.xy, depth, surface.world_position, surface.world_normal), 1.0));
+    return;
+}
 
     let wo = normalize(view.world_position - surface.world_position);
     var brdf = evaluate_diffuse_brdf(wo, merge_result.wi, surface.world_normal, surface.material);
@@ -243,7 +297,12 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
         raster_error = raster_reconstruction_error(global_id.xy, depth, surface.world_normal,
             view.main_pass_viewport.zw, view.world_from_clip, RASTER_SUBPIXEL_STEP);
     }
+@if((!(SUN_SOFT))) {
     var pixel_color = shade_di_reservoir(merge_result, surface.world_position, surface.world_normal, raster_error);
+}
+@if(SUN_SOFT) {
+    var pixel_color = shade_di_reservoir_soft(merge_result, surface.world_position, surface.world_normal, raster_error, global_id.xy, depth);
+}
     pixel_color *= brdf;
 // (SOLARIK_SHADER_DEFS=VIEW_NO_DI, a diagnostic: the direct light left out of
 // the view, everything this pass stores as without it, to split a picture
@@ -266,6 +325,41 @@ fn shade_di_reservoir(result: ReservoirMergeResult, world_position: vec3<f32>, w
         result.selected_light_world_position);
 }
     return result.selected_sample_radiance * result.merged_reservoir.unbiased_contribution_weight * transmission.rgb;
+}
+
+// shade_di_reservoir, a selected sun sample soft on terrain
+// (di_sun_transmission, with the sample's own seed).
+@if(SUN_SOFT)
+fn shade_di_reservoir_soft(result: ReservoirMergeResult, world_position: vec3<f32>, world_normal: vec3<f32>, raster_error: f32, pixel_id: vec2<u32>, depth: f32) -> vec3<f32> {
+    if !reservoir_valid(result.merged_reservoir) { return vec3(0.0); }
+    var transmission = vec4(1.0);
+@if((!(DI_TIME_NO_FINAL_RAY))) {
+    let origin = offset_surface_ray(world_position, world_normal, view.world_position, raster_error);
+    if result.selected_light_world_position.w == LIGHT_SAMPLE_DIRECTIONAL {
+        transmission = di_sun_transmission(origin, world_position, world_normal, result.selected_light_world_position,
+            result.merged_reservoir.sample.seed, pixel_id, depth);
+    } else {
+        transmission = trace_light_transmission(origin, result.selected_light_world_position);
+    }
+}
+    return result.selected_sample_radiance * result.merged_reservoir.unbiased_contribution_weight * transmission.rgb;
+}
+
+// The sun's transmission to a pixel (SUN_SOFT): soft on a terrain pixel, one
+// without Bevy's shadow-receiver bit (NotShadowReceiver on the entity the
+// camera draws; sampling.wesl's sun_soft_transmission, from the pixel's
+// geometric normal and its own ray offset, the same at both sites so their
+// rays are the same), today's test from `origin` elsewhere.
+@if(SUN_SOFT)
+const GBUFFER_SHADOW_RECEIVER: u32 = 0x04000000u;
+@if(SUN_SOFT)
+fn di_sun_transmission(origin: vec3<f32>, world_position: vec3<f32>, world_normal: vec3<f32>, light_position: vec4<f32>, seed: u32, pixel_id: vec2<u32>, depth: f32) -> vec4<f32> {
+    let gbuffer_a = textureLoad(gbuffer, pixel_id, 0).a;
+    if (gbuffer_a & GBUFFER_SHADOW_RECEIVER) != 0u { return trace_light_transmission(origin, light_position); }
+    let geometric_normal = pixel_geometric_normal(pixel_id, depth, world_normal, view.main_pass_viewport.zw, view.world_from_clip, depth_buffer);
+    let ray_offset = pixel_ray_offset(gbuffer_a, pixel_id, depth, world_position, geometric_normal, view.world_position,
+        view.main_pass_viewport.zw, view.world_from_clip);
+    return sun_soft_transmission(origin, world_position, geometric_normal, ray_offset, light_position, seed);
 }
 
 fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>, lobe: TargetLobe, workgroup_id: vec2<u32>, pixel_id: vec2<u32>, depth: f32, rng: ptr<function, u32>) -> Reservoir {
@@ -416,8 +510,13 @@ fn generate_initial_reservoir(world_position: vec3<f32>, world_normal: vec3<f32>
             GlossyMisLight(light_id, contribution.brdf_rays_can_hit, contribution.solid_angle_pdf));
         if target_function > 0.0 {
             var transmission = vec4(1.0);
-@if((!(DI_TIME_NO_SUN_RAY))) {
+@if((!(DI_TIME_NO_SUN_RAY || SUN_SOFT))) {
             transmission = trace_light_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0), resolved.world_position);
+}
+            // (soft on terrain: di_sun_transmission)
+@if((SUN_SOFT && !(DI_TIME_NO_SUN_RAY))) {
+            transmission = di_sun_transmission(offset_surface_ray(world_position, world_normal, view.world_position, 0.0),
+                world_position, world_normal, resolved.world_position, candidate.seed, pixel_id, depth);
 }
             if max(transmission.r, max(transmission.g, transmission.b)) > 0.0 {
                 let resampling_weight = target_function * contribution.inverse_pdf;

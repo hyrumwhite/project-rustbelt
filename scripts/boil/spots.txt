@@ -31,3 +31,6 @@ c20_strips   c20 0 -14.87,14.37,-4.28,-25.5,-3.7  1
 # inside it; F9 b40_1794335630353 and b40_1794335636454)
 b40_hall_out b40 4 42.47,-106.56,0.62,7.5,-6.2    1
 b40_hall_in  b40 4 43.33,-106.46,0.76,4.4,-22.8   1
+# (the user's capture of 17 November, a30_1794916951800: the cliff over the
+# first valley, faceted in the sun; the soft sun's spot, docs/soft-sun.md)
+a30_cliff    a30 1 -454.81,96.86,66.18,127.6,5.3  2

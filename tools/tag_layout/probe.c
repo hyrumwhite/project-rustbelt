@@ -152,7 +152,9 @@ LAYOUT_OFFSET(bitmap_data, pixels_size)
 
 /* shaders */
 LAYOUT_OFFSET(shader_base, radiosity)
+LAYOUT_OFFSET(shader_base, physics)
 LAYOUT_OFFSET(shader_base, type)
+LAYOUT_OFFSET(shader_physics_properties, material_type)
 LAYOUT_OFFSET(shader_radiosity_properties, flags)
 LAYOUT_OFFSET(shader_radiosity_properties, power)
 LAYOUT_OFFSET(shader_radiosity_properties, color_of_emitted_light)

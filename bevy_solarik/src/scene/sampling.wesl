@@ -34,6 +34,11 @@ import bevy_solarik::scene::raytracing_scene_bindings::MATERIAL_FLAG_DIFFUSE_BLE
 import bevy_solarik::scene::raytracing_scene_bindings::ResolvedRayHitFull;
 import bevy_solarik::scene::raytracing_scene_bindings::MIRROR_ROUGHNESS_THRESHOLD;
 import bevy_solarik::scene::collimated::collimated_weight;
+@if((SUN_SOFT)) import bevy_solarik::scene::raytracing_scene_bindings::SunSoftLanding;
+@if((SUN_SOFT)) import bevy_solarik::scene::raytracing_scene_bindings::trace_sun_soft_probe;
+@if((SUN_SOFT && !(SUN_SOFT_APEX_UNCLAMPED))) import bevy_solarik::scene::raytracing_scene_bindings::trace_sun_soft_clearance;
+@if((SUN_SOFT)) import bevy_solarik::scene::raytracing_scene_bindings::trace_sun_terrain_visibility;
+@if((SUN_SOFT)) import bevy_solarik::scene::raytracing_scene_bindings::trace_transmission_ray_past_terrain;
 
 enable wgpu_ray_query;
 
@@ -940,6 +945,187 @@ fn trace_light_transport(origin: vec3<f32>, light_position: vec4<f32>, closest: 
     var shadow = trace_shadow_transport(origin, direction, distance - RAY_T_MIN, true, closest);
     shadow.energy = vec4(shadow.energy.rgb * directional_light_transmittance(origin, direction), shadow.energy.a);
     return shadow;
+}
+
+// The soft sun on terrain (SUN_SOFT: SOLARIK_SUN_BLUR, SOLARIK_SUN_TERMINATOR,
+// node.rs's sun_soft_shader_defs). The game's lightmaps, about a texel a
+// world unit and filtered, shaded cliff and ground softly, where a sun ray
+// from each pixel's point draws every facet's edge razor sharp, and a facet
+// leaning from the sun black by its own rock. On a terrain pixel (a G-buffer
+// pixel without Bevy's shadow-receiver bit) the sun's shadow test is
+// V_terrain(q) * T_everything_else(p): the terrain alone (MATERIAL_FLAG_SOFT_SUN)
+// tested from q, a point of the terrain within SUN_BLUR of the pixel's
+// point p (the blur), and everything else from p as today, so that a
+// character's, a vehicle's or a structure's shadow on the terrain stays as
+// sharp as it is. q is a pure function of the sample's seed (and p and its
+// normal), so that the initial candidate's test and the shading's ray
+// agree, or the estimate would be the visibility squared; no rng is drawn.
+// Reflections, bounces and the world cache keep the sharp test.
+// (the blur's radius, metres; the terminator rule; the thickest rock its ray
+// may start in, metres, 0 no limit; the probe's start above the pixel, in
+// radii, at most; the share of the room above the pixel the start may
+// take, and the least start, in radii, under which the pixel keeps its own
+// point: see sun_soft_landing)
+@if(SUN_SOFT)
+const SUN_BLUR: f32 = f32(constants::SUN_BLUR_MM) / 1000.0;
+@if(SUN_SOFT)
+const SUN_TERMINATOR: bool = constants::SUN_TERMINATOR != 0;
+@if(SUN_SOFT)
+const SUN_TERMINATOR_REACH: f32 = f32(constants::SUN_TERMINATOR_REACH_MM) / 1000.0;
+@if(SUN_SOFT)
+const SUN_SOFT_PROBE_HEIGHT: f32 = 1.0;
+@if(SUN_SOFT)
+const SUN_SOFT_APEX_ROOM: f32 = 0.9;
+// (how far the probe runs, in its start-to-disc distances,
+// SOLARIK_SUN_BLUR_DROP: 2 reaches as deep under the pixel's plane as it
+// starts above it; more finds a far facet dropping more steeply at a convex
+// crease, where the probe missed and the pixel kept its own point, a hard
+// edge along the crease; 2 where a pipeline passes none)
+@if((SUN_SOFT && SUN_BLUR_DROP_PCT))
+const SUN_BLUR_DROP: f32 = f32(constants::SUN_BLUR_DROP_PCT) / 100.0;
+@if((SUN_SOFT && !(SUN_BLUR_DROP_PCT)))
+const SUN_BLUR_DROP: f32 = 2.0;
+// (the least lowered start, in radii: under it a start is too grazing to
+// blur, and the full start is taken with the sight check; the share of the
+// way to a landing the sight ray runs, so that the landing's own facet at
+// its end is not what it meets; and revision 1's least, under which the
+// pixel kept its own point, SOLARIK_SHADER_DEFS=SUN_SOFT_APEX_LEAST_OWN)
+@if(SUN_SOFT)
+const SUN_SOFT_APEX_LEAST: f32 = 0.25;
+@if(SUN_SOFT)
+const SUN_SOFT_SIGHT_SHARE: f32 = 0.98;
+@if(SUN_SOFT)
+const SUN_SOFT_APEX_LEAST_OLD: f32 = 0.05;
+
+// A hash of a light sample's seed, decorrelated from the uses the seed is
+// put to elsewhere (the point on the sun's disc) by `salt`.
+@if(SUN_SOFT)
+fn sun_soft_hash(seed: u32, salt: u32) -> f32 {
+    var h = (seed ^ salt) * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    h = (h >> 22u) ^ h;
+    return f32(h >> 8u) * (1.0 / 16777216.0);
+}
+
+// The point of the terrain the pixel's sun is tested from (q above) and the
+// plane normal there: a point of the disc of radius SUN_BLUR about the
+// pixel's point in the plane of its geometric normal, by the seed, and the
+// terrain surface a probe from above the pixel through it meets
+// (trace_sun_soft_probe, reaching SUN_BLUR_DROP - 1 times as far under the
+// plane as it starts above it); the pixel's own point and normal, not `landed`, with no blur or where
+// the probe meets anything but terrain or nothing. The probe starts no
+// higher than SUN_SOFT_APEX_ROOM of the room above the pixel (a ray up its
+// normal from `ray_offset` off it, trace_sun_soft_clearance): started past
+// a ledge, an arch or a cave roof thinner than the start's height, it landed
+// on the rock's sunlit top and lit the pixel in its shadow (`clamped`: the
+// start was lowered). Where the room is too small for a start of
+// SUN_SOFT_APEX_LEAST radii (a start that low sends the probes almost along
+// the surface: they dive into the pixel's own facet or skim to the foot of
+// the facet over it, and a crease kept a hard dark line whatever the
+// fallback), the start stays a radius up, beyond the surface the room ray
+// met (at a crease, behind the overhanging facet's back face, which the
+// probe passes), and a landing counts only if the pixel sees it (a ray by
+// the same rule toward it, SUN_SOFT_SIGHT_SHARE of the way): a thin ledge
+// just over the pixel would otherwise hand down its lit top's light
+// (`sighted`: this case; `refused`: its landing was not seen, the pixel's
+// own point kept). (SOLARIK_SHADER_DEFS=SUN_SOFT_APEX_LEAST_OWN, revision
+// 1: under SUN_SOFT_APEX_LEAST_OLD radii the pixel's own point, no sight
+// ray; SUN_SOFT_APEX_UNCLAMPED: no room ray, the start always a radius up,
+// the first form)
+@if(SUN_SOFT)
+fn sun_soft_landing(position: vec3f, geometric_normal: vec3f, ray_offset: f32, seed: u32) -> SunSoftLanding {
+    var own = SunSoftLanding(false, position, geometric_normal, false, false, false);
+    if SUN_BLUR <= 0.0 { return own; }
+    var height = SUN_BLUR * SUN_SOFT_PROBE_HEIGHT;
+    let eye = position + geometric_normal * ray_offset;
+@if((!(SUN_SOFT_APEX_UNCLAMPED))) {
+    let room = trace_sun_soft_clearance(eye, geometric_normal, height);
+    // (a surface met under the full height: `room` is height itself where none is)
+    if room < height {
+@if(SUN_SOFT_APEX_LEAST_OWN) {
+        height = SUN_SOFT_APEX_ROOM * room;
+        own.clamped = true;
+        if height < SUN_SOFT_APEX_LEAST_OLD * SUN_BLUR { return own; }
+}
+@if((!(SUN_SOFT_APEX_LEAST_OWN))) {
+        if SUN_SOFT_APEX_ROOM * room >= SUN_SOFT_APEX_LEAST * SUN_BLUR {
+            height = SUN_SOFT_APEX_ROOM * room;
+            own.clamped = true;
+        } else {
+            own.sighted = true;
+        }
+}
+    }
+}
+    // (a frame from the normal alone, Duff et al.'s)
+    let g = geometric_normal;
+    let s = select(-1.0, 1.0, g.z >= 0.0);
+    let a = -1.0 / (s + g.z);
+    let b = g.x * g.y * a;
+    let tangent = vec3(1.0 + s * g.x * g.x * a, s * b, -s * g.x);
+    let bitangent = vec3(b, s + g.y * g.y * a, -g.y);
+    let radius = SUN_BLUR * sqrt(sun_soft_hash(seed, 0x68e31da4u));
+    let angle = PI_2 * sun_soft_hash(seed, 0xb5297a4du);
+    let disc = position + (tangent * cos(angle) + bitangent * sin(angle)) * radius;
+    let apex = position + g * height;
+    let span = disc - apex;
+    let span_length = length(span);
+    if !(span_length > 0.0) { return own; }
+    var landing = trace_sun_soft_probe(apex, span / span_length, SUN_BLUR_DROP * span_length);
+    if !landing.landed { return own; }
+@if((!(SUN_SOFT_APEX_UNCLAMPED || SUN_SOFT_APEX_LEAST_OWN))) {
+    if own.sighted {
+        let sight_end = landing.position + landing.normal * ray_epsilon(landing.position);
+        let sight = sight_end - eye;
+        let sight_length = length(sight);
+        if sight_length > 0.0 {
+            let sight_max = sight_length * SUN_SOFT_SIGHT_SHARE;
+            if trace_sun_soft_clearance(eye, sight / sight_length, sight_max) < sight_max {
+                own.refused = true;
+                return own;
+            }
+        }
+    }
+}
+    landing.clamped = own.clamped;
+    landing.sighted = own.sighted;
+    return landing;
+}
+
+// The sun's transmission to a terrain pixel (see above): `origin` the ray's
+// start the site would trace today's test from (offset_surface_ray's), the
+// pixel's point, its geometric normal and how far its rays leave it
+// (`ray_offset`, gbuffer_utils' pixel_ray_offset), the sun's sample and its
+// seed. Where the facet at q faces the sun the terrain is tested from just
+// above it; where it leans from the sun, from just inside it with
+// SUN_TERMINATOR (only terrain's outside faces stopping the ray, and its
+// inside faces past SUN_TERMINATOR_REACH, jittered by the seed between half
+// and one and a half times itself, so that where the rock's thickness
+// crosses it is a gradient, not a line; SOLARIK_SHADER_DEFS=
+// SUN_TERMINATOR_REACH_FIXED the reach as it is, the old), else it is dark
+// without a ray.
+// Then the rest from the pixel itself, terrain passed (the pane tints, the
+// alpha tests and the canopy as trace_light_transmission takes them, in
+// one traversal whether or not the scene needs the ordered one).
+@if(SUN_SOFT)
+fn sun_soft_transmission(origin: vec3f, position: vec3f, geometric_normal: vec3f, ray_offset: f32, light_position: vec4f, seed: u32) -> vec4f {
+    let direction = light_position.xyz;
+    let landing = sun_soft_landing(position, geometric_normal, ray_offset, seed);
+    let faces = dot(landing.normal, direction) > 0.0;
+    if !faces && !SUN_TERMINATOR { return vec4(0.0); }
+    let offset = select(ray_offset, ray_epsilon(landing.position), landing.landed);
+    let start = landing.position + landing.normal * select(-offset, offset, faces);
+    var reach = SUN_TERMINATOR_REACH;
+@if((!(SUN_TERMINATOR_REACH_FIXED))) {
+    if reach > 0.0 { reach *= 0.5 + sun_soft_hash(seed, 0x1b873593u); }
+}
+    if trace_sun_terrain_visibility(start, direction, !faces, reach) == 0.0 { return vec4(0.0); }
+    var energy = vec4(1.0);
+    let ray_t_max = ray_max_distance() - RAY_T_MIN;
+    if ray_t_max >= RAY_T_MIN {
+        energy = trace_transmission_ray_past_terrain(origin, direction, ray_t_max);
+    }
+    return vec4(energy.rgb * directional_light_transmittance(origin, direction), energy.a);
 }
 
 // RGB straight-through energy plus probability of the competing BSDF path.

@@ -53,6 +53,9 @@ fn diagnostic_views_compose() {
         "VISUALIZE_CELL_KEY_PROBE",
         "VISUALIZE_NORMAL_KEY",
         "VISUALIZE_GI_GUIDE",
+        // (the soft sun's, with SUN_SOFT as node.rs adds it for them)
+        "VISUALIZE_SUN_SOFT",
+        "VISUALIZE_SUN_SOFT_FACES",
         // (the views leaving out a part of the picture)
         "VIEW_NO_DI",
         "VIEW_NO_DIFFUSE_GI",
@@ -76,6 +79,13 @@ fn diagnostic_views_compose() {
                 }
                 if let Some(view) = view {
                     definitions.push((*view).into());
+                }
+                if view.is_some_and(|view| view.starts_with("VISUALIZE_SUN_SOFT")) {
+                    definitions.push("SUN_SOFT".into());
+                    definitions.push(ShaderDefVal::UInt("SUN_BLUR_MM".into(), 3660));
+                    definitions.push(ShaderDefVal::UInt("SUN_TERMINATOR".into(), 0));
+                    definitions.push(ShaderDefVal::UInt("SUN_TERMINATOR_REACH_MM".into(), 0));
+                    definitions.push(ShaderDefVal::UInt("SUN_BLUR_DROP_PCT".into(), 200));
                 }
                 for consumer in consumers {
                     let mut stage_definitions = definitions.clone();

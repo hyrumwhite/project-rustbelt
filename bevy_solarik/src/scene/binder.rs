@@ -1136,16 +1136,7 @@ pub(crate) fn prepare_raytracing_scene_bindings(
                 } else {
                     0
                 }
-                | if marks.nearest_layer.contains(asset_id) && alpha.flags & MATERIAL_FLAG_ALPHA_BLEND != 0 {
-                    MATERIAL_FLAG_NEAREST_LAYER
-                } else {
-                    0
-                }
-                | if marks.reflected_glow.contains(asset_id) {
-                    MATERIAL_FLAG_REFLECTED_GLOW
-                } else {
-                    0
-                },
+                | mark_flags(&marks, asset_id, alpha.flags),
             base_color_alpha: LinearRgba::from(material.base_color).alpha,
             reflectance: material.reflectance,
             gaussian: gaussian_parameters,
@@ -1990,6 +1981,27 @@ const MATERIAL_FLAG_NEAREST_LAYER: u32 = 1024;
 /// An emitter only reflections see
 /// ([`crate::material_marks::RayMaterialMarks::reflected_glow`]).
 const MATERIAL_FLAG_REFLECTED_GLOW: u32 = 2048;
+/// Terrain, which a terrain pixel's sun is tested past from a point of the
+/// terrain near it ([`crate::material_marks::RayMaterialMarks::soft_sun`]).
+const MATERIAL_FLAG_SOFT_SUN: u32 = 4096;
+
+/// The flags a material's marks give it
+/// ([`crate::material_marks::RayMaterialMarks`]), over its
+/// alpha handling `alpha_flags`: the nearest layer for a thin pane alone,
+/// the soft sun for a solid surface alone (a pane is no terrain).
+fn mark_flags(marks: &crate::material_marks::RayMaterialMarks, asset_id: &AssetId<StandardMaterial>, alpha_flags: u32) -> u32 {
+    let mut flags = 0;
+    if marks.nearest_layer.contains(asset_id) && alpha_flags & MATERIAL_FLAG_ALPHA_BLEND != 0 {
+        flags |= MATERIAL_FLAG_NEAREST_LAYER;
+    }
+    if marks.reflected_glow.contains(asset_id) {
+        flags |= MATERIAL_FLAG_REFLECTED_GLOW;
+    }
+    if marks.soft_sun.contains(asset_id) && alpha_flags & (MATERIAL_FLAG_ALPHA_BLEND | MATERIAL_FLAG_DIFFUSE_BLEND) == 0 {
+        flags |= MATERIAL_FLAG_SOFT_SUN;
+    }
+    flags
+}
 
 /// How the rays treat a material's alpha: exactly one of `OPAQUE`,
 /// `ALPHA_MASK` (test the base colour alpha against `cutoff`) or
@@ -2682,6 +2694,60 @@ mod tests {
         assert_eq!(instance_ray_mask(0, pane), 0);
         assert_eq!(instance_ray_mask(0xFF, pane), 0xFF);
         assert_eq!(instance_ray_mask(0xFF, 0), 0x87);
+    }
+
+    #[test]
+    fn soft_sun_mark_sets_its_flag_alone() {
+        use crate::material_marks::RayMaterialMarks;
+        let terrain = AssetId::<StandardMaterial>::from(bevy_asset::uuid::Uuid::from_u128(1));
+        let other = AssetId::<StandardMaterial>::from(bevy_asset::uuid::Uuid::from_u128(2));
+        let mut marks = RayMaterialMarks::default();
+        let solids = [MATERIAL_FLAG_OPAQUE, MATERIAL_FLAG_ALPHA_MASK | MATERIAL_FLAG_DOUBLE_SIDED];
+        let panes = [MATERIAL_FLAG_ALPHA_BLEND, MATERIAL_FLAG_DIFFUSE_BLEND];
+        // (unmarked: nothing; and the other marks as they were)
+        for alpha in solids.into_iter().chain(panes) {
+            assert_eq!(mark_flags(&marks, &terrain, alpha), 0);
+        }
+        marks.soft_sun.insert(terrain);
+        for alpha in solids {
+            assert_eq!(mark_flags(&marks, &terrain, alpha), MATERIAL_FLAG_SOFT_SUN);
+            assert_eq!(mark_flags(&marks, &other, alpha), 0);
+        }
+        // (a pane is no terrain)
+        for alpha in panes {
+            assert_eq!(mark_flags(&marks, &terrain, alpha), 0);
+        }
+        // (beside the others, each its own bit)
+        marks.reflected_glow.insert(terrain);
+        assert_eq!(mark_flags(&marks, &terrain, MATERIAL_FLAG_OPAQUE), MATERIAL_FLAG_SOFT_SUN | MATERIAL_FLAG_REFLECTED_GLOW);
+        marks.nearest_layer.insert(other);
+        assert_eq!(mark_flags(&marks, &other, MATERIAL_FLAG_ALPHA_BLEND), MATERIAL_FLAG_NEAREST_LAYER);
+        assert_eq!(mark_flags(&marks, &other, MATERIAL_FLAG_OPAQUE), 0);
+        // (clear of every other flag the material carries: its alpha
+        // handling, the coats, the foliage's transmission and the mask's kinds)
+        assert_eq!(
+            MATERIAL_FLAG_SOFT_SUN
+                & (MATERIAL_FLAG_OPAQUE
+                    | MATERIAL_FLAG_ALPHA_MASK
+                    | MATERIAL_FLAG_ALPHA_BLEND
+                    | MATERIAL_FLAG_DOUBLE_SIDED
+                    | MATERIAL_FLAG_DIFFUSE_BLEND
+                    | 32
+                    | MATERIAL_FLAG_REFRACT
+                    | 128
+                    | MATERIAL_FLAG_GRIME
+                    | 512
+                    | MATERIAL_FLAG_NEAREST_LAYER
+                    | MATERIAL_FLAG_REFLECTED_GLOW
+                    | 0xFFFF_0000),
+            0
+        );
+        for mask in 0..=255u8 {
+            assert_eq!(
+                instance_ray_mask(mask, MATERIAL_FLAG_OPAQUE | MATERIAL_FLAG_SOFT_SUN),
+                instance_ray_mask(mask, MATERIAL_FLAG_OPAQUE)
+            );
+        }
     }
 
     #[test]

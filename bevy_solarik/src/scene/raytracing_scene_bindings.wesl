@@ -110,6 +110,11 @@ const MATERIAL_FLAG_NEAREST_LAYER = 1024u;
 // An emitter only reflections see, Cortana's hologram, on an instance masked
 // RAY_MASK_REFLECTED (RayMaterialMarks::reflected_glow, specular_gi.wesl).
 const MATERIAL_FLAG_REFLECTED_GLOW = 2048u;
+// Terrain, which a terrain pixel's sun is tested past from a point of the
+// terrain near it (RayMaterialMarks::soft_sun, sampling.wesl's
+// sun_soft_transmission; only with SUN_SOFT).
+@if(SUN_SOFT)
+const MATERIAL_FLAG_SOFT_SUN = 4096u;
 
 const TEXTURE_MAP_NONE = 0xFFFFFFFFu;
 
@@ -634,6 +639,161 @@ fn candidate_is_solid(candidate: RayIntersection, include_glass: bool, origin: v
     }
     // Zero-coverage glass is a hole, and must not consume a path interaction.
     return select(alpha >= material.alpha_cutoff, alpha > 0.0, glass);
+}
+
+// The soft sun's rays (SUN_SOFT, sampling.wesl's sun_soft_transmission).
+// Whether terrain's outside faces are the ray queries' front faces (the
+// BSP's winding through halo_to_bevy and the instance transform, as
+// VISUALIZE_SUN_SOFT_FACES shows it on the level): the probe culls the other
+// side, and from inside the rock the terminator lets the other side out.
+@if(SUN_SOFT)
+const SUN_SOFT_OUTSIDE_FRONT: bool = true;
+
+// Where the probe landed: on terrain (`landed`), at `position`, its
+// triangle's plane normal `normal` turned to the probe's start; `clamped`:
+// its start was lowered under rock over the pixel; `sighted`: too little
+// room for that, its landing checked by the pixel's line of sight instead;
+// `refused`: the pixel did not see it (sampling.wesl's sun_soft_landing).
+@if(SUN_SOFT)
+struct SunSoftLanding {
+    landed: bool,
+    position: vec3f,
+    normal: vec3f,
+    clamped: bool,
+    sighted: bool,
+    refused: bool,
+}
+
+// The soft sun's probe: the closest surface facing its start, passing
+// through panes as trace_ray does (no canopy: the terrain is the question,
+// and the canopy's shadow is the pixel's own ray's); landed only on terrain
+// (MATERIAL_FLAG_SOFT_SUN), its plane normal from the triangle's three
+// world positions (a hit's geometric_world_normal is the interpolated vertex
+// normal), the hit itself never resolved.
+@if(SUN_SOFT)
+fn trace_sun_soft_probe(ray_origin: vec3f, ray_direction: vec3f, ray_t_max: f32) -> SunSoftLanding {
+    var landing = SunSoftLanding(false, vec3f(0.0), vec3f(0.0), false, false, false);
+    let minimum = max(RAY_T_MIN, max(max(abs(ray_origin.x), abs(ray_origin.y)), abs(ray_origin.z)) * sky_light.relative_ray_min);
+    let maximum = min(ray_t_max, ray_max_distance());
+    if minimum > maximum { return landing; }
+    let near = sky_light.near_rays;
+    let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
+    var flags = RAY_FLAG_CULL_BACK_FACING;
+    if !SUN_SOFT_OUTSIDE_FRONT { flags = RAY_FLAG_CULL_FRONT_FACING; }
+    var rq: ray_query;
+    rayQueryInitialize(&rq, tlas, RayDesc(flags, cull_mask, minimum, maximum, ray_origin, ray_direction));
+    while rayQueryProceed(&rq) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        if candidate.kind == RAY_QUERY_INTERSECTION_TRIANGLE && candidate_is_solid(candidate, false, ray_origin, ray_direction) {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
+    let committed = rayQueryGetCommittedIntersection(&rq);
+    if committed.kind != RAY_QUERY_INTERSECTION_TRIANGLE { return landing; }
+    let instance = committed.instance_custom_data;
+    if (materials[material_ids[instance]].flags & MATERIAL_FLAG_SOFT_SUN) == 0u { return landing; }
+    let world = transform_positions(transforms[instance], load_vertices(geometry_ids[instance], committed.primitive_index));
+    let face = cross(world[1] - world[0], world[2] - world[0]);
+    let length_squared = dot(face, face);
+    if !(length_squared > 0.0) { return landing; }
+    let normal = face * inverseSqrt(length_squared);
+    landing.landed = true;
+    landing.position = ray_origin + ray_direction * committed.t;
+    landing.normal = select(normal, -normal, dot(normal, ray_direction) > 0.0);
+    return landing;
+}
+
+// How far a ray goes before the closest surface facing its start, by the
+// probe's rule (any solid surface, panes passed, the far side culled, no
+// canopy); `ray_t_max` if none: the room above a terrain pixel for the
+// probe's start (sampling.wesl's sun_soft_landing).
+@if(SUN_SOFT)
+fn trace_sun_soft_clearance(ray_origin: vec3f, ray_direction: vec3f, ray_t_max: f32) -> f32 {
+    let minimum = max(RAY_T_MIN, max(max(abs(ray_origin.x), abs(ray_origin.y)), abs(ray_origin.z)) * sky_light.relative_ray_min);
+    let maximum = min(ray_t_max, ray_max_distance());
+    if minimum > maximum { return ray_t_max; }
+    let near = sky_light.near_rays;
+    let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
+    var flags = RAY_FLAG_CULL_BACK_FACING;
+    if !SUN_SOFT_OUTSIDE_FRONT { flags = RAY_FLAG_CULL_FRONT_FACING; }
+    var rq: ray_query;
+    rayQueryInitialize(&rq, tlas, RayDesc(flags, cull_mask, minimum, maximum, ray_origin, ray_direction));
+    while rayQueryProceed(&rq) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        if candidate.kind == RAY_QUERY_INTERSECTION_TRIANGLE && candidate_is_solid(candidate, false, ray_origin, ray_direction) {
+            rayQueryConfirmIntersection(&rq);
+        }
+    }
+    let committed = rayQueryGetCommittedIntersection(&rq);
+    return select(ray_t_max, committed.t, committed.kind == RAY_QUERY_INTERSECTION_TRIANGLE);
+}
+
+// Whether the sun reaches a point past terrain alone (MATERIAL_FLAG_SOFT_SUN;
+// everything else is passed): every terrain face blocks it, or from `inside`
+// the rock (the terminator) only outside faces do, and inside faces further
+// than `reach` along the ray (0: none), the rock it starts in letting the
+// light out where it is no thicker than that.
+@if(SUN_SOFT)
+fn trace_sun_terrain_visibility(ray_origin: vec3f, ray_direction: vec3f, inside: bool, reach: f32) -> f32 {
+    let minimum = max(RAY_T_MIN, max(max(abs(ray_origin.x), abs(ray_origin.y)), abs(ray_origin.z)) * sky_light.relative_ray_min);
+    let maximum = ray_max_distance();
+    if minimum > maximum { return 1.0; }
+    let near = sky_light.near_rays;
+    let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
+    var rq: ray_query;
+    rayQueryInitialize(&rq, tlas, RayDesc(RAY_FLAG_FORCE_NO_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT, cull_mask, minimum, maximum, ray_origin, ray_direction));
+    while rayQueryProceed(&rq) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        if candidate.kind != RAY_QUERY_INTERSECTION_TRIANGLE { continue; }
+        let material = materials[material_ids[candidate.instance_custom_data]];
+        if (material.flags & MATERIAL_FLAG_SOFT_SUN) == 0u { continue; }
+        if inside && candidate.front_face != SUN_SOFT_OUTSIDE_FRONT && (reach <= 0.0 || candidate.t <= reach) { continue; }
+        if (material.flags & MATERIAL_FLAG_ALPHA_MASK) != 0u && !candidate_is_solid(candidate, false, ray_origin, ray_direction) { continue; }
+        rayQueryConfirmIntersection(&rq);
+    }
+    let committed = rayQueryGetCommittedIntersection(&rq);
+    return select(1.0, 0.0, committed.kind != RAY_QUERY_INTERSECTION_NONE);
+}
+
+// trace_transmission_ray with every coverage (`include_coverage`) and any
+// blocker (not `closest`), passing terrain (MATERIAL_FLAG_SOFT_SUN): the
+// sun's transport from a terrain pixel past everything but terrain, which
+// trace_sun_terrain_visibility answers for. Opaque geometry is a candidate
+// here too (RAY_FLAG_FORCE_NO_OPAQUE), so that terrain can be passed.
+@if(SUN_SOFT)
+fn trace_transmission_ray_past_terrain(ray_origin: vec3f, ray_direction: vec3f, ray_t_max: f32) -> vec4f {
+    let minimum = max(RAY_T_MIN, max(max(abs(ray_origin.x), abs(ray_origin.y)), abs(ray_origin.z)) * sky_light.relative_ray_min);
+    let maximum = min(ray_t_max, ray_max_distance());
+    if minimum > maximum { return vec4(1.0); }
+    let near = sky_light.near_rays;
+    let cull_mask = select(RAY_NO_CULL, RAY_MASK_NEAR, near.w > 0.0 && distance(ray_origin, near.xyz) < near.w);
+    var rq: ray_query;
+    rayQueryInitialize(&rq, tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT | RAY_FLAG_FORCE_NO_OPAQUE, cull_mask, minimum, maximum, ray_origin, ray_direction));
+    var energy = vec4(1.0);
+    while rayQueryProceed(&rq) {
+        let candidate = rayQueryGetCandidateIntersection(&rq);
+        if candidate.kind != RAY_QUERY_INTERSECTION_TRIANGLE { continue; }
+        let material = materials[material_ids[candidate.instance_custom_data]];
+        let glass = (material.flags & MATERIAL_FLAG_ALPHA_BLEND) != 0u;
+        let diffuse = (material.flags & MATERIAL_FLAG_DIFFUSE_BLEND) != 0u;
+        if !glass && !diffuse {
+            if (material.flags & MATERIAL_FLAG_SOFT_SUN) != 0u { continue; }
+            if candidate_is_solid(candidate, false, ray_origin, ray_direction) { rayQueryConfirmIntersection(&rq); }
+            continue;
+        }
+        let hit = resolve_ray_hit_full(scene_triangle(candidate.t, candidate.instance_custom_data,
+            candidate.primitive_index, candidate.barycentrics, candidate.front_face));
+        let alpha = clamp(resolve_material_alpha(material, hit.uv), 0.0, 1.0);
+        energy *= shadow_pane_energy(glass, -ray_direction, hit.geometric_world_normal,
+            hit.material.base_color, alpha, hit.material.reflectance, true);
+        if all(energy.rgb <= vec3(0.0)) { rayQueryConfirmIntersection(&rq); }
+    }
+    let committed = rayQueryGetCommittedIntersection(&rq);
+    if committed.kind != RAY_QUERY_INTERSECTION_NONE { return vec4(0.0); }
+    // (a canopy is solid to light)
+    let canopy = forest_trace_scene_impl(ray_origin, ray_direction, RAY_T_MIN, maximum, forest_next_seed(), false);
+    if canopy.event.normal_hit.w > 0.0 { return vec4(0.0); }
+    return energy;
 }
 
 fn resolve_material_alpha(material: Material, uv: vec2<f32>) -> f32 {

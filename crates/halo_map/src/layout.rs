@@ -3398,6 +3398,7 @@ pub mod screen_flash_definition {
 
 pub mod shader_base {
     pub const RADIOSITY: usize = 0x0;
+    pub const PHYSICS: usize = 0x20;
     pub const TYPE: usize = 0x24;
 }
 
@@ -3488,6 +3489,10 @@ pub mod shader_model_definition {
     pub const PARALLEL_BRIGHTNESS: usize = 0x154;
     pub const PARALLEL_TINT_COLOR: usize = 0x158;
     pub const REFLECTION_CUBE_MAP: usize = 0x164;
+}
+
+pub mod shader_physics_properties {
+    pub const MATERIAL_TYPE: usize = 0x2;
 }
 
 pub mod shader_radiosity_properties {

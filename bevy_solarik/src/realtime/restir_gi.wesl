@@ -472,6 +472,9 @@ fn spatial_and_shade(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(VISUALIZE_LIGHT_NEAR) {
     return;
 }
+@if((SUN_SOFT && (VISUALIZE_SUN_SOFT || VISUALIZE_SUN_SOFT_FACES))) {
+    return;
+}
 @if(VISUALIZE_CACHE_AGE) {
     return;
 }

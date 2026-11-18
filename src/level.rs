@@ -1108,6 +1108,19 @@ pub struct LevelBuilder {
     /// alone, and the glows reflections alone see.
     pub nearest_layer_panes: Vec<AssetId<StandardMaterial>>,
     pub reflected_glow_materials: Vec<AssetId<StandardMaterial>>,
+    /// The terrain's materials made since, for Solarik's soft sun
+    /// (`RayMaterialMarks::soft_sun`, see [`LevelBuilder::soft_sun_shader`]),
+    /// which the level's loading hands it.
+    pub soft_sun_materials: Vec<AssetId<StandardMaterial>>,
+    /// The BSP's own copy of each terrain shader's material, by the shared
+    /// one's: a mark on the shared one would mark an object's surface of
+    /// the same shader too.
+    soft_sun_copies: HashMap<AssetId<StandardMaterial>, Handle<StandardMaterial>>,
+    /// Each BSP shader's verdict, by shader (see [`LevelBuilder::soft_sun_shader`]).
+    soft_sun_verdicts: HashMap<Option<u32>, bool>,
+    /// While a terrain mesh is spawned: the entity the camera draws gets
+    /// `NotShadowReceiver`, Solarik's sign of a terrain pixel.
+    soft_sun_receiver: bool,
     /// Surfaces tinted by a change colour, by shader and colour.
     coloured_surfaces: HashMap<(ShaderUse, [u8; 3]), Surface>,
     /// The structure's copies of transparent materials, depth biased, by
@@ -1191,6 +1204,10 @@ impl LevelBuilder {
             reflected_glows: HashMap::default(),
             nearest_layer_panes: Vec::new(),
             reflected_glow_materials: Vec::new(),
+            soft_sun_materials: Vec::new(),
+            soft_sun_copies: HashMap::default(),
+            soft_sun_verdicts: HashMap::default(),
+            soft_sun_receiver: false,
             loaded_bsps: Vec::new(),
             bsp_roots: Vec::new(),
             breakable_roots: Vec::new(),
@@ -1365,7 +1382,18 @@ impl LevelBuilder {
                     }
                 } else {
                     let mode = if raster { MeshUse::Both } else { MeshUse::Traced };
+                    // (terrain, for Solarik's soft sun: the BSP's own copy of
+                    // its material marked, the camera's entity no shadow
+                    // receiver; see soft_sun_shader)
+                    let plain = matches!(&surface, Surface::Solid(solid) if solid.radiance.is_none() && !solid.unseen);
+                    let terrain = match &surface {
+                        Surface::Solid(solid) if self.soft_sun_shader(material.shader, reference.index, plain) => self.soft_sun_surface(solid, assets),
+                        _ => None,
+                    };
+                    self.soft_sun_receiver = terrain.is_some();
+                    let surface = terrain.map_or_else(|| surface.clone(), Surface::Solid);
                     let traced = self.spawn_mesh_as(commands, parent, name.clone(), mesh, &surface, mode);
+                    self.soft_sun_receiver = false;
                     if let (Some(traced), [(cluster, _)]) = (traced, chunks.as_slice()) {
                         commands.entity(traced).insert(LightPlace { bsp: reference.index, cluster: *cluster });
                     }
@@ -2199,9 +2227,17 @@ impl LevelBuilder {
                 // nothing moves it differently
                 (None, Some(traced)) if skin.is_none() && surface.seen_standard.is_none() => {
                     commands.entity(traced).insert(Mesh3d(mesh));
+                    if self.soft_sun_receiver {
+                        commands.entity(traced).insert(bevy::light::NotShadowReceiver);
+                    }
                 }
                 (raster, _) => {
                     let mut drawn = commands.spawn((Name::new(name), Mesh3d(mesh), Transform::default(), ChildOf(parent)));
+                    // (terrain: Solarik's sign of a terrain pixel, the
+                    // G-buffer's shadow-receiver bit clear)
+                    if self.soft_sun_receiver {
+                        drawn.insert(bevy::light::NotShadowReceiver);
+                    }
                     match raster {
                         // the camera sees the Halo material; rays see the standard one
                         Some(material) => drawn.insert(MeshMaterial3d(material.clone())),
@@ -3067,6 +3103,60 @@ impl LevelBuilder {
         debug!("change colour {color:?} on {}", info.as_ref().map_or("", |i| i.name.as_str()));
         self.coloured_surfaces.insert((shader, color), surface.clone());
         surface
+    }
+
+    /// Whether a BSP's shader is terrain, whose sun Solarik softens
+    /// (`RayMaterialMarks::soft_sun`, with `SOLARIK_SUN_BLUR` or
+    /// `SOLARIK_SUN_TERMINATOR`): an opaque, not alpha-tested
+    /// `shader_environment` of dirt, sand, stone, snow or ice (its physics'
+    /// material type), on a `plain` surface (solid, emitting nothing, seen);
+    /// never water, glass or a glow, nor the metal of the Forerunner
+    /// structures. `HALO_RT_SOFT_SUN_SHADERS=part,part` the shaders whose
+    /// names hold any of these instead (`none`: none), on a plain surface
+    /// still; `HALO_RT_SOFT_SUN_LOG=1` logs each BSP's shaders and verdicts.
+    fn soft_sun_shader(&mut self, shader: TagRef, bsp: usize, plain: bool) -> bool {
+        // (the game's material enum, game_globals.h: dirt, sand, stone, snow, ice)
+        const TERRAIN_MATERIAL_TYPES: [i16; 5] = [0, 1, 2, 3, 31];
+        if let Some(&verdict) = self.soft_sun_verdicts.get(&shader.datum) {
+            return verdict && plain;
+        }
+        let info = shader::shader_info(&self.cache, shader).ok().flatten();
+        let name = info.as_ref().map_or_else(String::new, |i| i.name.clone());
+        let verdict = match std::env::var("HALO_RT_SOFT_SUN_SHADERS") {
+            Ok(parts) if parts.trim() == "none" => false,
+            Ok(parts) => parts.split(',').map(str::trim).any(|part| !part.is_empty() && name.contains(part)),
+            Err(_) => info.as_ref().is_some_and(|i| {
+                i.shader_type == ShaderType::Environment
+                    && i.environment.is_some()
+                    && !i.alpha_tested
+                    && TERRAIN_MATERIAL_TYPES.contains(&i.material_type)
+            }),
+        };
+        if std::env::var_os("HALO_RT_SOFT_SUN_LOG").is_some() {
+            let material_type = info.as_ref().map_or(-1, |i| i.material_type);
+            let marked = if verdict && plain { "marked" } else if verdict { "not marked (not a plain surface)" } else { "not marked" };
+            info!("soft sun: BSP {bsp} shader {name}: material type {material_type}, {marked}");
+        }
+        self.soft_sun_verdicts.insert(shader.datum, verdict);
+        verdict && plain
+    }
+
+    /// A terrain surface (see [`Self::soft_sun_shader`]) with the BSP's own
+    /// copy of its material, marked for Solarik (`soft_sun_materials`): the
+    /// shared one may be an object's too, which is no terrain. None if its
+    /// material isn't there to copy.
+    fn soft_sun_surface(&mut self, solid: &SolidSurface, assets: &mut LevelAssets) -> Option<SolidSurface> {
+        let standard = match self.soft_sun_copies.get(&solid.standard.id()) {
+            Some(copy) => copy.clone(),
+            None => {
+                let material = assets.materials.get(&solid.standard)?.clone();
+                let copy = assets.materials.add(material);
+                self.soft_sun_copies.insert(solid.standard.id(), copy.clone());
+                self.soft_sun_materials.push(copy.id());
+                copy
+            }
+        };
+        Some(SolidSurface { standard, ..solid.clone() })
     }
 
     /// A structure's surface: its transparent material for the camera (a

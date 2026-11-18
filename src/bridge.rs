@@ -278,7 +278,9 @@ fn last_game_error() -> Option<String> {
 
 /// Tells when the game has stopped: its process gone, or no frame from it
 /// for a while (a halted game keeps its window open, on its error). The
-/// viewer otherwise sits on the last frame, looking frozen.
+/// viewer otherwise sits on the last frame, looking frozen. A game quit from
+/// its menu (exit code 0) closes the viewer too; `HALO_RT_STAY_AFTER_QUIT=1`
+/// keeps it, with the banner, the old.
 fn watch_game(
     link: Res<BridgeLink>,
     process: Option<ResMut<GameProcess>>,
@@ -286,12 +288,18 @@ fn watch_game(
     mut texts: Query<&mut Text>,
     mut checked: Local<Option<std::time::Instant>>,
     mut problem: Local<Option<String>>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     if checked.is_some_and(|checked| checked.elapsed() < Duration::from_secs(1)) {
         return;
     }
     *checked = Some(std::time::Instant::now());
     let exited = process.and_then(|mut process| process.0.try_wait().ok().flatten());
+    if exited.is_some_and(|status| status.success()) && !std::env::var("HALO_RT_STAY_AFTER_QUIT").is_ok_and(|v| v == "1") {
+        info!("the game was quit; closing the viewer");
+        exit.write(AppExit::Success);
+        return;
+    }
     let stalled = link.last_read.is_some_and(|read| read.elapsed() > GAME_STALLED_AFTER);
     let now = match (exited, stalled) {
         (Some(status), _) => Some(format!("The game has exited ({status}).")),

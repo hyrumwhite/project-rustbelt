@@ -331,10 +331,16 @@ fn main() -> AppExit {
     // (a build carrying the game plays it: started hidden, every system in
     // Rust, at its menus unless a map was named)
     let mut simulation_dll = None;
+    // (this build's unpacked folder: the other builds' are removed once the
+    // environment is set, bundle::prune_runtimes_in_background)
+    let mut runtime_dir = None;
     if bundle::EMBEDDED && args.opence.is_none() && !args.bridge && !args.viewer {
         match bundle::unpack() {
             Ok(Some(runtime)) => {
                 eprintln!("the game and the Rust simulation: {}", runtime.dir.display());
+                // (before the other builds' folders go: their settings may be copied)
+                bundle::share_game_settings(&runtime.dir);
+                runtime_dir = Some(runtime.dir);
                 args.opence = Some(runtime.game);
                 simulation_dll = Some(runtime.simulation);
                 args.menu |= args.map.is_none();
@@ -348,8 +354,9 @@ fn main() -> AppExit {
         }
     } else if bundle::EMBEDDED && cfg!(feature = "dlss") {
         // (DLSS's libraries all the same, for the viewer and another game)
-        if let Err(e) = bundle::unpack() {
-            eprintln!("could not unpack DLSS: {e}");
+        match bundle::unpack() {
+            Ok(runtime) => runtime_dir = runtime.map(|runtime| runtime.dir),
+            Err(e) => eprintln!("could not unpack DLSS: {e}"),
         }
     }
     // (a build run in place: DLSS's libraries in the SDK it was built with)
@@ -373,6 +380,10 @@ fn main() -> AppExit {
     if std::env::var_os("SOLARIK_PEARL_FILM").is_none() {
         // SAFETY: at start-up, before any other thread runs
         unsafe { std::env::set_var("SOLARIK_PEARL_FILM", PEARL_FILM) };
+    }
+    // (a thread: after the last set_var above)
+    if let Some(dir) = &runtime_dir {
+        bundle::prune_runtimes_in_background(dir);
     }
     if let Some(exe) = args.opence.clone() {
         args.bridge = true;

@@ -97,10 +97,43 @@ struct HaloFog {
 @group(0) @binding(11) var scene_depth: texture_depth_2d;
 // the weather's layer (src/weather.rs): premultiplied, display-encoded
 @group(0) @binding(12) var weather: texture_2d<f32>;
+// the picture read between its pixels, filtered: the guide at a render
+// pixel's centre (fog_edge_guide)
+@group(0) @binding(13) var guide_sampler: sampler;
 
 // metres: the level's panes' masks' depth (src/material.rs,
 // GLASS_SKY_MASK_DISTANCE), which is none
 const GLASS_SKY_MASK_DISTANCE: f32 = 50000.0;
+
+// the sky under the horizon fogged as the sea (fog_at);
+// HALO_RT_SEA_HORIZON_FOG=0 leaves it bare, the old
+@if(SEA_HORIZON_UNFOGGED) const SEA_HORIZON_FOG: bool = false;
+@if(!SEA_HORIZON_UNFOGGED) const SEA_HORIZON_FOG: bool = true;
+
+// Silhouettes (HALO_RT_FOG_EDGES): where the four render pixels' fogs differ
+// by more than the first (the largest difference of any channel, light or
+// coverage, in the display's encoding), the edge's rule takes over from the
+// filter, wholly by the second; between, the two mixed, so that a pixel
+// does not switch from one to the other as the jitter moves the depths
+// under it. A surface's neighbours mostly differ by less than the first
+// (where they do not, a surface seen at a grazing angle, the guide finds
+// their pictures alike and keeps the filter's weights); b30's leaves against
+// the sea under its fog (its density 0.5) by tenths.
+const FOG_EDGE_START: f32 = 0.01;
+const FOG_EDGE_FULL: f32 = 0.04;
+// The guide's sharpness, in the display's encoding: how far a render
+// pixel's picture (its luma, and its chroma, blue and red less the luma) may
+// be from this pixel's before its fog counts for less, a Gaussian's width.
+// The picture is before the fog, so the far side is the bare surface, not
+// the pale fogged one, and may be nearer the near side's colour than what is
+// seen: kept sharp, but meant to hold a surface's own texture (a few
+// hundredths) inside it (chosen by reasoning, not yet tuned on captures).
+const FOG_GUIDE_LUMA: f32 = 0.06;
+const FOG_GUIDE_CHROMA: f32 = 0.04;
+// The weight every render pixel keeps whatever its picture: where none is
+// like this pixel's, or all are alike, they fall back to the filter's
+// weights (and a sample's lead over another is at most 1 / this)
+const FOG_GUIDE_FLOOR: f32 = 0.01;
 
 // a 16-texel texture's coordinate as the texel it falls on (0 to 1 over the
 // texels' centres, clamped)
@@ -120,6 +153,24 @@ fn srgb_decode(encoded: vec3<f32>) -> vec3<f32> {
     return select(high, low, encoded <= vec3(0.04045));
 }
 
+// the picture's colour as the guide compares it: luma, and blue and red
+// less the luma, in the display's encoding, each over its width
+fn guide_of(colour: vec3<f32>) -> vec3<f32> {
+    let encoded = srgb_encode(saturate(colour));
+    let luma = dot(encoded, vec3(0.2126, 0.7152, 0.0722));
+    return vec3(luma / FOG_GUIDE_LUMA, (encoded.b - luma) / FOG_GUIDE_CHROMA, (encoded.r - luma) / FOG_GUIDE_CHROMA);
+}
+
+// How like this pixel's guide the picture is at a render pixel's centre
+// (where the jittered view saw it, on the picture: to_uv the jitter, there
+// in the picture's coordinates), filtered between the picture's pixels so
+// that it moves smoothly with the jitter; never less than the floor.
+fn fog_edge_guide(guide: vec3<f32>, pixel: vec2<i32>, viewport: vec4<f32>, to_uv: vec2<f32>) -> f32 {
+    let uv = (vec2<f32>(pixel) + 0.5 - viewport.xy) / viewport.zw - to_uv;
+    let difference = guide_of(textureSampleLevel(source, guide_sampler, uv, 0.0).rgb) - guide;
+    return exp(-0.5 * dot(difference, difference)) + FOG_GUIDE_FLOOR;
+}
+
 // a fog screen layer's density at the picture's point
 fn layer_density(index: u32, colour: vec4<f32>) -> f32 {
     let weights = fog.screen_weights[index];
@@ -127,11 +178,13 @@ fn layer_density(index: u32, colour: vec4<f32>) -> f32 {
 }
 
 // The environment fog at one of the render resolution's pixels: the light
-// it adds (rgb) and its coverage (a), and the fog screen's density there
-// (1 for the sky).
+// it adds (rgb) and its coverage (a), the fog screen's density there (1 for
+// the sky), and the depth it was fogged at (reversed: larger nearer, 0 for
+// the sky).
 struct Fogged {
     fogged: vec4<f32>,
     screen_density: f32,
+    z: f32,
 }
 
 fn fog_at(pixel: vec2<i32>) -> Fogged {
@@ -142,7 +195,7 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
     if pane_z > z * 1.0001 && abs(pane_z - mask_z) > mask_z * 0.01 {
         z = pane_z;
     }
-    var result = Fogged(vec4(0.0), 1.0);
+    var result = Fogged(vec4(0.0), 1.0, max(z, 0.0));
     // (the sky, where the atmospheric fog is opaque: the game brings its far
     // plane in to the fog's maximum distance (render.c), and draws no sky
     // past it, only fog; as a surface there. c10's swamps: the treetops in
@@ -158,7 +211,15 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
         result.fogged = vec4(fog.atmospheric_color.rgb, over);
         return result;
     }
-    if z <= 0.0 && !opaque {
+    // (the sky under the horizon, where the picture holds the sea and the
+    // camera is over it (HALO_RT_SEA_HORIZON_FOG): past the level's sea, a
+    // thousand world units out on b30, the sky's own water showed bare, a
+    // white band between the fogged sea and the sky (in the game too); now
+    // fogged as the sea over a deep floor, through the water below. The
+    // modelless sky and the opaque fog keep their rules)
+    let camera_height = dot(fog.plane.xyz, view.world_position) - fog.plane.w;
+    let sea_sky = SEA_HORIZON_FOG && z <= 0.0 && !opaque && fog.atmospheric.w > 0.5 && camera_height > 0.0;
+    if z <= 0.0 && !opaque && !sea_sky {
         return result;
     }
     // (the pixel's centre, where the jittered view sampled it)
@@ -167,7 +228,24 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
     let ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     let forward = -normalize(view.world_from_view[2].xyz);
     var position: vec3<f32>;
-    if z <= 0.0 {
+    // (the sea's floor under the plane, for the sky under the horizon: none
+    // else)
+    var sea_floor = 0.0;
+    if sea_sky {
+        let near = view.world_from_clip * vec4(ndc, 1.0, 1.0);
+        let ray = normalize(near.xyz / near.w - view.world_position);
+        let down = -dot(ray, fog.plane.xyz);
+        // (over the horizon: the sky, unfogged)
+        if down <= 0.0 {
+            return result;
+        }
+        // twice the planar fog's maximum depth under the plane, along the
+        // ray: its depth's density full. Its height is set, not found from
+        // the point, which near the horizon is a great way off, past the
+        // float's precision for a few metres
+        sea_floor = max(fog.planar.y, 1e-4) * 2.0;
+        position = view.world_position + ray * ((camera_height + sea_floor) / max(down, 1e-7));
+    } else if z <= 0.0 {
         let near = view.world_from_clip * vec4(ndc, 1.0, 1.0);
         let ray = near.xyz / near.w - view.world_position;
         position = view.world_position + ray * (fog.atmospheric.y / max(dot(ray, forward), 1e-6));
@@ -178,8 +256,10 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
     let view_depth = dot(position - view.world_position, forward);
 
     // (through the water: the camera above the plane, the surface under it)
-    let camera_height = dot(fog.plane.xyz, view.world_position) - fog.plane.w;
-    let surface_height = dot(fog.plane.xyz, position) - fog.plane.w;
+    var surface_height = dot(fog.plane.xyz, position) - fog.plane.w;
+    if sea_floor > 0.0 {
+        surface_height = -sea_floor;
+    }
     var transmitted = 1.0;
     var atmospheric_depth = view_depth;
     if fog.atmospheric.w > 0.5 && camera_height > 0.0 && surface_height < 0.0 {
@@ -255,8 +335,60 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let w10 = weight.x * (1.0 - weight.y);
     let w01 = (1.0 - weight.x) * weight.y;
     let w11 = weight.x * weight.y;
-    let fogged = f00.fogged * w00 + f10.fogged * w10 + f01.fogged * w01 + f11.fogged * w11;
-    let screen_density = f00.screen_density * w00 + f10.screen_density * w10 + f01.screen_density * w01 + f11.screen_density * w11;
+    var fogged = f00.fogged * w00 + f10.fogged * w10 + f01.fogged * w01 + f11.fogged * w11;
+    var screen_density = f00.screen_density * w00 + f10.screen_density * w10 + f01.screen_density * w01 + f11.screen_density * w11;
+
+    // A silhouette among the four (HALO_RT_FOG_EDGES): the picture is
+    // upscaled to the display's pixels, each edge where the upscaler put it,
+    // while the four are a render pixel apart, so filtered by place a near
+    // leaf's pixels within a render pixel of the far sea took part of the
+    // sea's fog (b30's trees against the water, a pale rim, wider the lower
+    // the render resolution; none against the sky, which takes no fog, the
+    // leaves' own little). Where they differ, each sample is taken whole, its
+    // light, coverage and screen density together. 0: filtered by place, the
+    // old.
+    @if(!FOG_EDGES_BILINEAR) {
+        let spread_low = min(min(f00.fogged, f10.fogged), min(f01.fogged, f11.fogged));
+        let spread_high = max(max(f00.fogged, f10.fogged), max(f01.fogged, f11.fogged));
+        let spread_fog = spread_high - spread_low;
+        var spread = max(max(spread_fog.r, spread_fog.g), max(spread_fog.b, spread_fog.a));
+        // (the screen's density counts only where it is added by depth)
+        if fog.screen_color.a > 0.5 && fog.screen_color.a < 1.5 {
+            let screen_low = min(min(f00.screen_density, f10.screen_density), min(f01.screen_density, f11.screen_density));
+            let screen_high = max(max(f00.screen_density, f10.screen_density), max(f01.screen_density, f11.screen_density));
+            spread = max(spread, (screen_high - screen_low) * max(max(fog.screen_color.r, fog.screen_color.g), fog.screen_color.b));
+        }
+        let edge = smoothstep(FOG_EDGE_START, FOG_EDGE_FULL, spread);
+        if edge > 0.0 {
+            var chosen: Fogged;
+            @if(FOG_EDGES_NEAR) {
+                // near: the nearest sample's fog, a near object's pixels
+                // none of the far side's (and the far side's within a render
+                // pixel of it the near object's: a thin rim less fogged)
+                chosen = f00;
+                if f10.z > chosen.z { chosen = f10; }
+                if f01.z > chosen.z { chosen = f01; }
+                if f11.z > chosen.z { chosen = f11; }
+            }
+            @if(!FOG_EDGES_NEAR) {
+                // guided (the default): each sample's filter weight times
+                // how like this pixel's picture the picture is where that
+                // sample lies, so that a pixel takes the fog of the side the
+                // upscaler drew it on
+                let guide = guide_of(colour.rgb);
+                let to_uv = vec2(jitter.x, -jitter.y) * 0.5;
+                let g00 = fog_edge_guide(guide, p00, viewport, to_uv) * w00;
+                let g10 = fog_edge_guide(guide, vec2(p11.x, p00.y), viewport, to_uv) * w10;
+                let g01 = fog_edge_guide(guide, vec2(p00.x, p11.y), viewport, to_uv) * w01;
+                let g11 = fog_edge_guide(guide, p11, viewport, to_uv) * w11;
+                let total = max(g00 + g10 + g01 + g11, 1e-6);
+                chosen.fogged = (f00.fogged * g00 + f10.fogged * g10 + f01.fogged * g01 + f11.fogged * g11) / total;
+                chosen.screen_density = (f00.screen_density * g00 + f10.screen_density * g10 + f01.screen_density * g01 + f11.screen_density * g11) / total;
+            }
+            fogged = mix(fogged, chosen.fogged, edge);
+            screen_density = mix(screen_density, chosen.screen_density, edge);
+        }
+    }
 
     var encoded = srgb_encode(saturate(colour.rgb));
     var changed = false;

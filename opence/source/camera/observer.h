@@ -115,6 +115,15 @@ void observer_set_camera(
 	short local_player_index,
 	struct observer_command *command);
 
+/* port: the interpolation trace's (port/linux/game/bevy_bridge.c) */
+void observer_get_trace(
+	short local_player_index,
+	real *checked_focus_distance,
+	real *focus_distance,
+	real *timer,
+	real parameter_timers[NUMBER_OF_OBSERVER_COMMAND_PARAMETERS],
+	real *raw_focus_distance);
+
 /* ---------- globals */
 
 /* ---------- public code */

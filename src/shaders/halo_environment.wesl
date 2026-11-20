@@ -235,6 +235,11 @@ fn fragment(
     if (halo.modes.w & 64u) != 0u {
         out.deferred.a |= 0x80000000u;
     }
+    // a thin-film coat's lobe sharp (SHARP_COAT, the Elites' armour): both
+    // bits, lommel_math.wesl's sharp_coat_gbuffer
+    if (halo.modes.w & 128u) != 0u {
+        out.deferred.a |= 0xC0000000u;
+    }
 } @else {
     out.color = apply_pbr_lighting(pbr_input);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);

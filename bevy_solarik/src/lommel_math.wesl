@@ -17,6 +17,14 @@ fn plain_coat_gbuffer(gbuffer: vec4<u32>) -> vec4<u32> {
     result.a |= 0x80000000u;
     return result;
 }
+// A thin-film coat marked sharp, its lobe ending in the world cache as a
+// near mirror's does (specular_gi's sharp rule), in both bits 30 and 31
+// (read exclusively: neither pearl nor plain; gbuffer_utils's gpixel_sharp_coat).
+fn sharp_coat_gbuffer(gbuffer: vec4<u32>) -> vec4<u32> {
+    var result = gbuffer;
+    result.a |= 0xC0000000u;
+    return result;
+}
 fn lommel_gbuffer(gbuffer:vec4<u32>,enabled:f32)->vec4<u32> {
     var result=gbuffer;
     if enabled>0.0 {result.a|=0x10000000u;}

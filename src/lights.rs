@@ -127,11 +127,16 @@ fn origin_glows() -> bool {
 }
 
 /// The contrails that glow (by their contrail tag's name), with the colour
-/// and reach (world units) of the lights along them: one each this far
-/// apart (world units), up to this many.
-const CONTRAIL_GLOWS: [(&str, [f32; 3], f32); 1] = [
-    // (the Sentinels' beam: an orange laser)
-    ("characters\\sentinel\\beam", [1.0, 0.45, 0.15], 1.0),
+/// and reach (world units) of the lights along them and their share of that
+/// brightness (as a light tag's [`LIGHT_DIMMING`]; set for a run by the
+/// contrail's tag's name with [`light_dim`]'s `HALO_RT_LIGHT_DIM`): one each
+/// this far apart (world units), up to this many. The share is the light
+/// the contrail casts alone; the beam itself is drawn as the game has it.
+const CONTRAIL_GLOWS: [(&str, [f32; 3], f32, f32); 1] = [
+    // (the Sentinels' beam: an orange laser; play feedback of 19 November
+    // 2026: "reduce the sentinel beam brightness just a bit", 30% less;
+    // `HALO_RT_LIGHT_DIM="characters\sentinel\beam=1"` the old)
+    ("characters\\sentinel\\beam", [1.0, 0.45, 0.15], 1.0, 0.7),
 ];
 const CONTRAIL_GLOW_SPACING: f32 = 3.0;
 const CONTRAIL_GLOW_MOST: usize = 4;
@@ -140,7 +145,7 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 /// a folder's, ending in a backslash): a wide reach is a bright light here
 /// (brightness grows with its square). Dimmed to 0, left out. Each share
 /// can be set for a run with [`light_dim`]'s `HALO_RT_LIGHT_DIM`.
-const LIGHT_DIMMING: [(&str, f32); 15] = [
+const LIGHT_DIMMING: [(&str, f32); 18] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights; play feedback of 15 November 2026: "something like 50%"
     // less, here 60%: in c40's control room cutscene he hangs half a metre
@@ -167,6 +172,14 @@ const LIGHT_DIMMING: [(&str, f32); 15] = [
     // (the batons, glow sticks: c10's landing zone is strewn with them;
     // play feedback: too bright)
     ("scenery\\baton\\baton light dynamic", 0.5),
+    // (a10's crewman's pair, the other baton light tag, reaching 0.5 from
+    // each stick, blinking in turn, 3,700 lm of blue at its brightest: a
+    // bright blue pool on the deck under him in the opening cutscene; play
+    // feedback of 18 November: "tone down the brightness on his batons
+    // significantly? They cast enough light that its odd looking". A
+    // twentieth: the sticks as bright, a faint glow on the deck and his
+    // legs)
+    ("scenery\\baton\\baton light", 0.05),
     // (a50's doors' lock lights, red, green or white, reaching 2.5 from
     // the middle of each door: they flooded the ship's rooms; play
     // feedback: much too bright. With its small sphere's twenty-fifth
@@ -202,7 +215,111 @@ const LIGHT_DIMMING: [(&str, f32); 15] = [
     // the floor with their texture, the picture's mean 154 to 86 of 255,
     // 37 with the lights off)
     ("levels\\b40\\devices\\b40_generator_fx\\", 0.05),
+    // (b30's two hologram rooms' lights: the violet holo beam's, reaching 5
+    // in shaft A's hologram room, and the teal control ring's, reaching 3 in
+    // the map room; play feedback of 19 November 2026: each washed its room
+    // out, "reduce the brightness". A tenth each, from captures in game at
+    // the user's two places (the picture's mean of 255, green: the violet
+    // room 121 as it was, 97 at 0.4, 85 at 0.25, 67 at 0.1, 56 at 0.05 and
+    // 33 with the light off; the map room 147, 116, 93 at 0.2, 73, 56 and
+    // 15): the walls with their texture and the map room's hologram seen;
+    // the faces a few units from the beam stay near white whatever the
+    // share. `HALO_RT_LIGHT_DIM="holo beam=1;holo control ring=1"` the
+    // old)
+    ("levels\\b30\\devices\\interior tech objects\\holo beam tube\\holo beam", 0.1),
+    ("levels\\b30\\devices\\interior tech objects\\holo control ring\\holo control ring", 0.1),
 ];
+/// Placed lights dimmed further, one placement each, over their tag's
+/// [`LIGHT_DIMMING`] share: the map's name, the light tag's name, the
+/// light's place (the game's world units, as the F9 capture note and
+/// `HALO_RT_LIGHT_LOG` print it), how near the light must be to it (world
+/// units: the light is at its object's marker, a few tenths from the
+/// object's origin) and the share that multiplies the tag's. Set for a run
+/// by place with [`light_dim_at`]'s `HALO_RT_LIGHT_DIM_AT`.
+const PLACED_LIGHT_DIMMING: [(&str, &str, [f32; 3], f32, f32); 2] = [
+    // (a10's two alarm klaxons on the bridge flanking where its two opening
+    // cutscenes play, round 0.9,-0.6,0.4; the user on 18 November 2026:
+    // "significantly less bright". The other pair, at -4.1, is 4.2 away
+    // and kept)
+    ("a10", "levels\\a10\\devices\\alert_light\\alert_light", [0.10, 2.20, 0.99], PLACED_LIGHT_WITHIN, BRIDGE_ALARM_SHARE),
+    ("a10", "levels\\a10\\devices\\alert_light\\alert_light", [0.10, -2.20, 0.99], PLACED_LIGHT_WITHIN, BRIDGE_ALARM_SHARE),
+];
+/// How near a placed light must be to its [`PLACED_LIGHT_DIMMING`] (or
+/// `HALO_RT_LIGHT_DIM_AT`) place, by default (world units).
+const PLACED_LIGHT_WITHIN: f32 = 0.5;
+/// a10's bridge alarm klaxons' share over their tag's 0.7 (see
+/// [`PLACED_LIGHT_DIMMING`]).
+const BRIDGE_ALARM_SHARE: f32 = 0.3;
+
+/// A light's share of its brightness by its place, set for a run (see
+/// [`PLACED_LIGHT_DIMMING`]): `HALO_RT_LIGHT_DIM_AT="x,y,z[,within]=share[;...]"`,
+/// the place in the game's world units, `within` the radius about it
+/// ([`PLACED_LIGHT_WITHIN`] if not given), any map's and any tag's light
+/// (but the test lights and the projectiles' and contrails' glows); the
+/// first place the light is within wins over the table, and the share
+/// multiplies the tag's as the table's does (0 leaves the light out).
+/// `HALO_RT_LIGHT_DIM_AT=none` leaves the table out (the old: the tag's
+/// share alone). Read once.
+fn light_dim_at() -> &'static DimAt {
+    static DIM_AT: std::sync::LazyLock<DimAt> = std::sync::LazyLock::new(|| parse_light_dim_at(&std::env::var("HALO_RT_LIGHT_DIM_AT").unwrap_or_default()));
+    &DIM_AT
+}
+
+/// [`light_dim_at`]'s places and whether the table is used.
+#[derive(Debug, PartialEq)]
+struct DimAt {
+    /// [`PLACED_LIGHT_DIMMING`] used (not `none`).
+    table: bool,
+    /// Each place, its radius and its share.
+    places: Vec<([f32; 3], f32, f32)>,
+}
+
+/// [`light_dim_at`]'s places from the variable's text: an entry that is not
+/// `x,y,z[,within]=share` of finite numbers skipped with a warning, a
+/// negative share or radius 0.
+fn parse_light_dim_at(text: &str) -> DimAt {
+    if text.trim().eq_ignore_ascii_case("none") {
+        return DimAt { table: false, places: Vec::new() };
+    }
+    let places = text
+        .split(';')
+        .filter(|entry| !entry.trim().is_empty())
+        .filter_map(|entry| {
+            let parsed = entry.split_once('=').and_then(|(place, share)| {
+                let share = share.trim().parse::<f32>().ok().filter(|share| share.is_finite())?;
+                let numbers: Vec<f32> = place.split(',').map(|n| n.trim().parse::<f32>().ok().filter(|n| n.is_finite())).collect::<Option<_>>()?;
+                let (x, y, z, within) = match numbers.as_slice() {
+                    &[x, y, z] => (x, y, z, PLACED_LIGHT_WITHIN),
+                    &[x, y, z, within] => (x, y, z, within.max(0.0)),
+                    _ => return None,
+                };
+                Some(([x, y, z], within, share.max(0.0)))
+            });
+            if parsed.is_none() {
+                warn!("HALO_RT_LIGHT_DIM_AT: {entry:?} is not x,y,z[,within]=share");
+            }
+            parsed
+        })
+        .collect();
+    DimAt { table: true, places }
+}
+
+/// The share by place of a light at `position` (world units) on `map`:
+/// the first of `dim_at`'s places it is within, else the first of `table`'s
+/// entries for the map and for `tag` (the table's tag name the light's
+/// equals, [`LightTag::placed`]) it is within, if the table is used.
+fn light_dim_at_in(dim_at: &DimAt, table: &[(&str, &str, [f32; 3], f32, f32)], map: &str, tag: Option<&str>, position: [f32; 3]) -> Option<f32> {
+    let within = |place: [f32; 3], radius: f32| Vec3::from(place).distance_squared(Vec3::from(position)) <= radius * radius;
+    if let Some(&(_, _, share)) = dim_at.places.iter().find(|&&(place, radius, _)| within(place, radius)) {
+        return Some(share);
+    }
+    let tag = tag.filter(|_| dim_at.table)?;
+    table
+        .iter()
+        .find(|&&(table_map, table_tag, place, radius, _)| table_map.eq_ignore_ascii_case(map) && table_tag.eq_ignore_ascii_case(tag) && within(place, radius))
+        .map(|&(.., share)| share)
+}
+
 /// b40's door blinkers' light tag (see [`UPWARD_LIGHTS`]).
 const DOOR_BLINKER_LIGHT: &str = "levels\\b40\\scenery\\b40_doorblinker\\doorblinker";
 
@@ -358,6 +475,10 @@ struct LightTag {
     /// Lighting nothing inside its sphere, a point light's
     /// ([`HOLLOW_LIGHTS`]).
     hollow: bool,
+    /// Its name as [`PLACED_LIGHT_DIMMING`] has it, if some of its
+    /// placements are dimmed there (only then are places compared, but for
+    /// `HALO_RT_LIGHT_DIM_AT`'s).
+    placed: Option<&'static str>,
 }
 
 /// What a light's tag says of it here, by the tag's name (none: a plain
@@ -372,6 +493,7 @@ fn light_tag(name: Option<&str>) -> LightTag {
         upward: name.and_then(upward_light),
         tune: name.and_then(light_tune),
         hollow: name.is_some_and(hollow_light),
+        placed: name.and_then(|name| PLACED_LIGHT_DIMMING.iter().find(|(_, placed, ..)| name.eq_ignore_ascii_case(placed))).map(|&(_, placed, ..)| placed),
     }
 }
 
@@ -430,8 +552,9 @@ fn light_tune(name: &str) -> Option<Tune> {
 }
 
 /// A light's share of its brightness as set for a run, by its light tag's
-/// name (a projectile's glow by the projectile's tag's name), in place of
-/// [`LIGHT_DIMMING`]'s or [`PROJECTILE_GLOWS`]' share, whether or not the
+/// name (a projectile's glow by the projectile's tag's name, a contrail's by
+/// the contrail's), in place of [`LIGHT_DIMMING`]'s, [`PROJECTILE_GLOWS`]' or
+/// [`CONTRAIL_GLOWS`]' share, whether or not the
 /// tables have it: to try a value in play before the table is changed, or
 /// to get an old one back.
 /// `HALO_RT_LIGHT_DIM="<tag name part>=<share>[;...]"`, the part matched
@@ -690,7 +813,8 @@ pub struct ShownLight {
     pub radius: f32,
     pub raise: f32,
     /// Its share of its brightness ([`LIGHT_DIMMING`], a projectile's glow's
-    /// [`PROJECTILE_GLOWS`], or [`light_dim`]'s).
+    /// [`PROJECTILE_GLOWS`], a contrail's [`CONTRAIL_GLOWS`], or
+    /// [`light_dim`]'s).
     pub dimming: f32,
     /// Its power (lumens a channel, at an emissive scale of one).
     pub power: Vec3,
@@ -757,7 +881,7 @@ fn sync_lights(
     mut light_tags: Local<HashMap<u32, LightTag>>,
     mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
     mut glows: Local<HashMap<u32, Option<([f32; 3], f32, f32)>>>,
-    mut contrail_glows: Local<HashMap<u32, Option<([f32; 3], f32)>>>,
+    mut contrail_glows: Local<HashMap<u32, Option<([f32; 3], f32, f32)>>>,
     mut scenario: Local<String>,
     mut test_logged: Local<bool>,
     mut shown: ResMut<ShownLights>,
@@ -818,12 +942,16 @@ fn sync_lights(
         })
         .collect();
     // the glowing contrails' lights, evenly along each (the rest of the
-    // contrails light nothing)
-    let mut contrail_lights: Vec<Light> = Vec::new();
+    // contrails light nothing), each with its share of its brightness
+    // (CONTRAIL_GLOWS, or light_dim's)
+    let mut contrail_lights: Vec<(Light, f32)> = Vec::new();
     for contrail in snapshot.into_iter().flat_map(|snapshot| snapshot.lights.iter()).filter(|light| light.definition_flags & LIGHT_CONTRAIL != 0) {
-        let Some((color, radius)) = *contrail_glows.entry(contrail.definition_index).or_insert_with(|| {
+        let Some((color, radius, share)) = *contrail_glows.entry(contrail.definition_index).or_insert_with(|| {
             let tag = level.as_ref()?.builder.cache.tag(contrail.definition_index).ok()?;
-            CONTRAIL_GLOWS.iter().find(|(name, ..)| tag.name.eq_ignore_ascii_case(name)).map(|&(_, color, radius)| (color, radius))
+            CONTRAIL_GLOWS
+                .iter()
+                .find(|(name, ..)| tag.name.eq_ignore_ascii_case(name))
+                .map(|&(_, color, radius, share)| (color, radius, light_dim(&tag.name).unwrap_or(share)))
         }) else {
             continue;
         };
@@ -831,7 +959,7 @@ fn sync_lights(
         let count = ((length / CONTRAIL_GLOW_SPACING).ceil() as usize).clamp(1, CONTRAIL_GLOW_MOST);
         for index in 0..count {
             let offset = ((index as f32 + 0.5) / count as f32 - 0.5) * length;
-            contrail_lights.push(Light {
+            let light = Light {
                 position: (middle + along * offset).to_array(),
                 forward: [1.0, 0.0, 0.0],
                 up: [0.0, 0.0, 1.0],
@@ -842,7 +970,8 @@ fn sync_lights(
                 definition_index: u32::MAX,
                 object_index: contrail.object_index,
                 ..default()
-            });
+            };
+            contrail_lights.push((light, share));
         }
     }
     // (but those in the drawn BSP's solid, another BSP's: crate::bridge)
@@ -860,13 +989,17 @@ fn sync_lights(
         (light.definition_index, light.object_index, *count - 1)
     };
     // (the test lights after the game's; each with whether it is a test
-    // light and a projectile's glow, and the glow's share of its brightness,
-    // the rest's 1: theirs is their tag's)
+    // light and a projectile's glow, and a projectile's or a contrail's
+    // glow's share of its brightness, the rest's 1: theirs is their tag's)
     let all = lights
         .map(|light| (light, false, false, 1.0))
         .chain(projectile_lights.iter().map(|(light, share)| (light, false, true, *share)))
-        .chain(contrail_lights.iter().map(|light| (light, false, false, 1.0)))
+        .chain(contrail_lights.iter().map(|(light, share)| (light, false, false, *share)))
         .chain(test_lights.iter().map(|light| (light, true, false, 1.0)));
+    // (the loaded level's map, whose tags these are, for the dimming by
+    // place)
+    let map = level.as_ref().map_or("", |level| level.builder.stats.map_name.as_str());
+    let dim_at = light_dim_at();
     for (light, test_light, projectile, share) in all {
         let near = camera.filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
         let own = light.first_person != 0;
@@ -880,8 +1013,13 @@ fn sync_lights(
                 .or_else(|| test.as_deref().and_then(|test| test.name(light.definition_index)));
             light_tag(name)
         });
-        // (its share of its brightness: its tag's, times a projectile's glow's)
-        let dimming = tag.dimming * share;
+        // (its share of its brightness: its tag's, times a projectile's
+        // glow's, times its placement's if dimmed by place: a game light's
+        // alone, PLACED_LIGHT_DIMMING or HALO_RT_LIGHT_DIM_AT)
+        let by_place = (!test_light && light.definition_index != u32::MAX && (tag.placed.is_some() || !dim_at.places.is_empty()))
+            .then(|| light_dim_at_in(dim_at, &PLACED_LIGHT_DIMMING, map, tag.placed, light.position))
+            .flatten();
+        let dimming = tag.dimming * share * by_place.unwrap_or(1.0);
         let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0 || tag.muzzle;
         let muzzle = light.cutoff_angle > SPOT_CUTOFF && muzzle_tag;
         let spot = light.cutoff_angle <= SPOT_CUTOFF || muzzle;
@@ -936,7 +1074,7 @@ fn sync_lights(
         if *LIGHT_LOG {
             let distance = camera.map(|c| Vec3::from(c.position).distance(Vec3::from(light.position)));
             info!(
-                "light at tick {}: position {:?} forward {:?} colour {:?} radius {} cutoff {:.1} falloff {:.1} deg, {distance:?} from the camera (forward {:?}), own {own} muzzle {muzzle} aimed by the camera {} upward {:?} tag {:#x} flags {:#x} object {:#x}; source radius {radius} m raise {raise} m power {power:.1?} lm ({intensity:.1} lm at the emissive scale) tuned {tune:?} test {test_light}",
+                "light at tick {}: position {:?} forward {:?} colour {:?} radius {} cutoff {:.1} falloff {:.1} deg, {distance:?} from the camera (forward {:?}), own {own} muzzle {muzzle} aimed by the camera {} upward {:?} tag {:#x} flags {:#x} object {:#x}; source radius {radius} m raise {raise} m power {power:.1?} lm ({intensity:.1} lm at the emissive scale) dimming {dimming:.3} (by place {by_place:?}) tuned {tune:?} test {test_light}",
                 snapshot.map_or(0, |snapshot| snapshot.game_tick), light.position, light.forward, light.color, light.radius, light.cutoff_angle.to_degrees(), light.falloff_angle.to_degrees(),
                 camera.map(|c| c.forward), near_camera.is_some(), tag.upward, light.definition_index, light.definition_flags, light.object_index
             );
@@ -1100,5 +1238,58 @@ mod tests {
         assert_eq!(light_dim_in(&dims, "weapons\\needler\\needle"), Some(1.0));
         assert_eq!(light_dim_in(&dims, "vehicles\\ghost\\ghost bolt"), None);
         assert_eq!(light_dim_in(&[], "characters\\monitor\\monitor dynamic"), None);
+    }
+
+    #[test]
+    fn b30_room_lights_and_sentinel_beam_dimmed() {
+        let tabled = |name: &str| LIGHT_DIMMING.iter().find(|(dimmed, _)| dimmed_by(name, dimmed)).map(|&(_, share)| share);
+        let beam = "levels\\b30\\devices\\interior tech objects\\holo beam tube\\holo beam";
+        let ring = "levels\\b30\\devices\\interior tech objects\\holo control ring\\holo control ring";
+        assert_eq!(tabled(beam), Some(0.1));
+        assert_eq!(tabled(ring), Some(0.1));
+        // (the control room's own light keeps its row)
+        assert_eq!(tabled("levels\\b30\\devices\\interior tech objects\\holo control room display\\light"), Some(0.15));
+        // (the old, by HALO_RT_LIGHT_DIM's parts, each matching its own)
+        let old = parse_light_dim("holo beam=1;holo control ring=1;characters\\sentinel\\beam=1");
+        assert_eq!(light_dim_in(&old, beam), Some(1.0));
+        assert_eq!(light_dim_in(&old, ring), Some(1.0));
+        assert_eq!(light_dim_in(&old, "levels\\b30\\devices\\interior tech objects\\holo control room display\\light"), None);
+        let (name, _, _, share) = CONTRAIL_GLOWS[0];
+        assert_eq!((name, share), ("characters\\sentinel\\beam", 0.7));
+        assert_eq!(light_dim_in(&old, name), Some(1.0));
+    }
+
+    #[test]
+    fn light_dim_at_parses_and_matches() {
+        assert_eq!(parse_light_dim_at(" NONE "), DimAt { table: false, places: Vec::new() });
+        assert_eq!(parse_light_dim_at(""), DimAt { table: true, places: Vec::new() });
+        let dim_at = parse_light_dim_at(" 1, 2 ,3 = 0.5 ;4,5,6,2=0.25;bad;1,2=0.5;1,2,3,4,5=1;1,2,3=x;1,2,3=inf;7,8,9,-1=-2;;");
+        assert_eq!(
+            dim_at,
+            DimAt { table: true, places: vec![([1.0, 2.0, 3.0], PLACED_LIGHT_WITHIN, 0.5), ([4.0, 5.0, 6.0], 2.0, 0.25), ([7.0, 8.0, 9.0], 0.0, 0.0)] }
+        );
+        let alarm = "levels\\a10\\devices\\alert_light\\alert_light";
+        let tag = Some(alarm);
+        // (the table: by map, tag and place, the light a little off the
+        // machine's origin; the other pair and other maps not)
+        let none = DimAt { table: true, places: Vec::new() };
+        assert_eq!(light_dim_at_in(&none, &PLACED_LIGHT_DIMMING, "A10", tag, [0.10, 2.20, 1.30]), Some(BRIDGE_ALARM_SHARE));
+        assert_eq!(light_dim_at_in(&none, &PLACED_LIGHT_DIMMING, "a10", tag, [0.30, -2.0, 0.99]), Some(BRIDGE_ALARM_SHARE));
+        assert_eq!(light_dim_at_in(&none, &PLACED_LIGHT_DIMMING, "a10", tag, [-4.10, 2.20, 0.99]), None);
+        assert_eq!(light_dim_at_in(&none, &PLACED_LIGHT_DIMMING, "a50", tag, [0.10, 2.20, 0.99]), None);
+        assert_eq!(light_dim_at_in(&none, &PLACED_LIGHT_DIMMING, "a10", None, [0.10, 2.20, 0.99]), None);
+        // (none: the table left out)
+        let off = parse_light_dim_at("none");
+        assert_eq!(light_dim_at_in(&off, &PLACED_LIGHT_DIMMING, "a10", tag, [0.10, 2.20, 0.99]), None);
+        // (a place wins over the table, any map's and tag's light; the
+        // first it is within)
+        let set = parse_light_dim_at("0.1,2.2,0.99=0.6;0,0,0,10=0.1");
+        assert_eq!(light_dim_at_in(&set, &PLACED_LIGHT_DIMMING, "a10", tag, [0.10, 2.20, 0.99]), Some(0.6));
+        assert_eq!(light_dim_at_in(&set, &PLACED_LIGHT_DIMMING, "a10", tag, [0.10, -2.20, 0.99]), Some(0.1));
+        assert_eq!(light_dim_at_in(&set, &PLACED_LIGHT_DIMMING, "c40", None, [5.0, 5.0, 5.0]), Some(0.1));
+        assert_eq!(light_dim_at_in(&set, &PLACED_LIGHT_DIMMING, "c40", None, [50.0, 5.0, 5.0]), None);
+        // (the table's tags are the names light_tag finds)
+        assert_eq!(light_tag(Some("LEVELS\\a10\\devices\\alert_light\\alert_light")).placed, Some(alarm));
+        assert_eq!(light_tag(Some("levels\\a10\\devices\\command display\\command display")).placed, None);
     }
 }

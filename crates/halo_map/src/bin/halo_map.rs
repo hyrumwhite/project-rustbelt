@@ -70,52 +70,28 @@ type CliResult = Result<(), Box<dyn std::error::Error>>;
 /// of their portals' centres another BSP holds in a cluster that sees none
 /// (where the viewer draws that other BSP, bridge.rs `DrawnBsp`).
 fn skyless_survey(cache: &CacheFile) -> CliResult {
-    use halo_map::collision::{CollisionBsp, StructureClusters};
-    use halo_map::layout::{structure_bsp, structure_cluster};
-    struct Loaded {
-        index: usize,
-        collision: CollisionBsp,
-        clusters: StructureClusters,
-        skies: Vec<i16>,
-        pvs: Vec<u32>,
-    }
-    impl Loaded {
-        fn sees_sky(&self, from: usize) -> bool {
-            let words = self.skies.len().div_ceil(32);
-            (0..self.skies.len()).any(|to| self.skies[to] >= 0 && self.pvs.get(from * words + to / 32).is_some_and(|b| b & (1 << (to % 32)) != 0))
-        }
-    }
-    let mut all = Vec::new();
-    for reference in bsp::references(cache)? {
-        let loaded = bsp::Bsp::load(cache, &reference)?;
-        let blocks = loaded.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF)?;
-        all.push(Loaded {
-            index: reference.index,
-            collision: CollisionBsp::load(&loaded)?,
-            clusters: StructureClusters::load(cache, &loaded)?,
-            skies: blocks.iter().map(|c| c.i16(structure_cluster::SKY_INDEX).unwrap_or(0)).collect(),
-            pvs: loaded.root.data_bytes(structure_bsp::CLUSTER_DATA)?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect(),
-        });
-    }
-    for a in &all {
+    use halo_map::collision::{BspOverride, ClusterVisibility};
+    let all = ClusterVisibility::load_all(cache);
+    let mut rule = BspOverride::default();
+    let loaded: Vec<(usize, &ClusterVisibility)> = all.iter().enumerate().filter_map(|(index, v)| Some((index, v.as_ref()?))).collect();
+    for &(a_index, a) in &loaded {
         for c in 0..a.skies.len() {
-            if a.skies[c] >= 0 || !a.sees_sky(c) {
+            if a.skies[c] >= 0 || !a.sees_sky(c as i16) {
                 continue;
             }
             // (the viewer's rule needs the other BSP to hold every portal of
             // each skyless cluster this one sees)
-            let words = a.skies.len().div_ceil(32);
-            let seen: Vec<usize> = (0..a.skies.len()).filter(|&o| a.skies[o] < 0 && a.pvs.get(c * words + o / 32).is_some_and(|b| b & (1 << (o % 32)) != 0)).collect();
-            for o in all.iter().filter(|o| o.index != a.index) {
-                let held = |p: [f32; 3]| o.clusters.cluster_from_leaf(o.collision.leaf_from_point(p)) >= 0;
+            let seen: Vec<usize> = (0..a.skies.len()).filter(|&o| a.skies[o] < 0 && a.sees(c as i16, o as i16)).collect();
+            for &(o_index, o) in loaded.iter().filter(|&&(index, _)| index != a_index) {
+                let held = |p: [f32; 3]| o.cluster(p) >= 0;
                 let all_held = seen.iter().all(|&s| a.clusters.cluster_portals.get(s).map(|v| v.as_slice()).unwrap_or(&[]).iter().all(|&p| held(a.clusters.portals[p as usize].centroid)));
                 // (cameras sampled at the cluster's portals' centres)
-                let cameras: Vec<i16> = a.clusters.cluster_portals.get(c).map(|v| v.as_slice()).unwrap_or(&[]).iter().map(|&p| o.clusters.cluster_from_leaf(o.collision.leaf_from_point(a.clusters.portals[p as usize].centroid))).collect();
-                let firing: Vec<i16> = cameras.iter().copied().filter(|&oc| oc >= 0 && !o.sees_sky(oc as usize)).collect();
+                let cameras: Vec<i16> = a.clusters.cluster_portals.get(c).map(|v| v.as_slice()).unwrap_or(&[]).iter().map(|&p| o.cluster(a.clusters.portals[p as usize].centroid)).collect();
+                let firing: Vec<i16> = cameras.iter().copied().filter(|&oc| oc >= 0 && !o.sees_sky(oc)).collect();
                 // (the sky clusters seen: whether a portal joins each to the
                 // skyless clusters seen, or the camera's own)
                 let seen_sky: Vec<(usize, bool)> = (0..a.skies.len())
-                    .filter(|&s| a.skies[s] >= 0 && a.pvs.get(c * words + s / 32).is_some_and(|b| b & (1 << (s % 32)) != 0))
+                    .filter(|&s| a.skies[s] >= 0 && a.sees(c as i16, s as i16))
                     .map(|s| {
                         let joined = a.clusters.cluster_portals.get(s).map(|v| v.as_slice()).unwrap_or(&[]).iter().any(|&p| {
                             let pair = a.clusters.portals[p as usize].clusters;
@@ -135,30 +111,52 @@ fn skyless_survey(cache: &CacheFile) -> CliResult {
                             let portal = &a.clusters.portals[p as usize];
                             let other = portal.clusters.iter().copied().find(|&k| k as usize != s)?;
                             (other >= 0 && (other as usize == c || seen.contains(&(other as usize)))).then_some(())?;
-                            let in_sky = |q: [f32; 3]| a.clusters.cluster_from_leaf(a.collision.leaf_from_point(q)) == s as i16;
+                            let in_sky = |q: [f32; 3]| a.cluster(q) == s as i16;
                             let past = [1.0, 3.0].map(|d| portal.past(d, in_sky).is_some_and(held));
                             Some((p as usize, past))
                         })
                         .collect();
                     println!("    past the openings onto the sky (portal, held at 1 m, 3 m): {beyond:?}");
                     println!("    the other BSP closes them all: {}", beyond.iter().all(|(_, held)| !held[0]));
-                    println!("  RULE: bsp {} cluster {c} draws bsp {} (its clusters {:?}, {} clusters, sky {:?})", a.index, o.index, firing, o.skies.len(), firing.iter().map(|&f| o.skies[f as usize]).collect::<Vec<_>>());
+                    // (those it closes with nothing drawn, which stop the
+                    // rule while in the camera's sight)
+                    for opening in rule.unclosed_openings(&all, a_index, c as i16, o_index) {
+                        let portal = &a.clusters.portals[opening.portal];
+                        println!(
+                            "    unclosed opening: portal {} {:?} at {:?} radius {:.2}, the other BSP's surface there: {}",
+                            opening.portal,
+                            portal.clusters,
+                            portal.centroid.map(|v| (v * 1000.0).round() / 1000.0),
+                            portal.bounding_radius,
+                            closure_name(opening.material)
+                        );
+                    }
+                    println!("  RULE: bsp {a_index} cluster {c} draws bsp {o_index} (its clusters {:?}, {} clusters, sky {:?})", firing, o.skies.len(), firing.iter().map(|&f| o.skies[f as usize]).collect::<Vec<_>>());
                 }
             }
             let mut hits = Vec::new();
             for &p in a.clusters.cluster_portals.get(c).map(|v| v.as_slice()).unwrap_or(&[]) {
                 let portal = &a.clusters.portals[p as usize];
-                for o in all.iter().filter(|o| o.index != a.index) {
-                    let oc = o.clusters.cluster_from_leaf(o.collision.leaf_from_point(portal.centroid));
-                    if oc >= 0 && !o.sees_sky(oc as usize) {
-                        hits.push(format!("bsp {} cluster {oc} at {:?}", o.index, portal.centroid.map(|v| (v * 10.0).round() / 10.0)));
+                for &(o_index, o) in loaded.iter().filter(|&&(index, _)| index != a_index) {
+                    let oc = o.cluster(portal.centroid);
+                    if oc >= 0 && !o.sees_sky(oc) {
+                        hits.push(format!("bsp {o_index} cluster {oc} at {:?}", portal.centroid.map(|v| (v * 10.0).round() / 10.0)));
                     }
                 }
             }
-            println!("bsp {} cluster {c}: skyless, sees sky; {}", a.index, if hits.is_empty() { "no other BSP holds it".to_string() } else { hits.join("; ") });
+            println!("bsp {a_index} cluster {c}: skyless, sees sky; {}", if hits.is_empty() { "no other BSP holds it".to_string() } else { hits.join("; ") });
         }
     }
     Ok(())
+}
+
+/// A closure's surface ([`halo_map::collision::ClusterVisibility::closure`]).
+fn closure_name(material: Option<i16>) -> String {
+    match material {
+        Some(m) if m >= 0 => format!("material {m} (drawn)"),
+        Some(m) => format!("material {m} (nothing drawn)"),
+        None => "none found".to_string(),
+    }
 }
 
 /// Each BSP's view from a point: its cluster there, the cluster's sky, what
@@ -275,6 +273,8 @@ fn where_point(cache: &CacheFile, args: &[String]) -> CliResult {
     use halo_map::layout::{structure_bsp, structure_cluster};
     let point: Vec<f32> = args.first().ok_or("usage: halo_map where <map> x,y,z")?.split(',').map(|v| v.parse()).collect::<Result<_, _>>()?;
     let point = [point[0], point[1], point[2]];
+    let all = halo_map::collision::ClusterVisibility::load_all(cache);
+    let mut rule = halo_map::collision::BspOverride::default();
     for reference in bsp::references(cache)? {
         let loaded = bsp::Bsp::load(cache, &reference)?;
         let collision = CollisionBsp::load(&loaded)?;
@@ -305,11 +305,22 @@ fn where_point(cache: &CacheFile, args: &[String]) -> CliResult {
             let end = hit.map(|h| h.t * 40.0);
             let last = leaves.iter().rev().map(|&l| clusters.cluster_from_leaf(l)).find(|&c| c >= 0).unwrap_or(-1);
             line += &match end {
-                Some(d) => format!(" {:>3}:{d:.1}(f{:x},c{last})", step * 15, hit.unwrap().flags),
+                Some(d) => format!(" {:>3}:{d:.1}(f{:x},m{},c{last})", step * 15, hit.unwrap().flags, hit.unwrap().material),
                 None => format!(" {:>3}:--(c{last})", step * 15),
             };
         }
-        println!("  rays (yaw:distance):{line}");
+        println!("  rays (yaw:distance(flags,material,cluster)):{line}");
+        // (the viewer's DrawnBsp with this BSP the game's, by each rule)
+        use halo_map::collision::OverrideRule;
+        for (name, which) in [("new (sight)", OverrideRule::Sight), ("old (clusters)", OverrideRule::Clusters)] {
+            let decision = rule.decide(&all, reference.index, point, which);
+            let drawn = decision.drawn.map_or(format!("bsp {} (the game's)", reference.index), |d| format!("bsp {d}"));
+            let stopped = decision.stopped.map_or(String::new(), |(other, portal, sample)| {
+                let opening = rule.unclosed_openings(&all, reference.index, cluster, other).iter().find(|o| o.portal == portal).map(|o| o.material);
+                format!("; bsp {other} stopped: unclosed opening portal {portal} in sight at {:?}, the other BSP's surface there: {}", sample.map(|v| (v * 1000.0).round() / 1000.0), closure_name(opening.flatten()))
+            });
+            println!("  override, {name} rule: draws {drawn}{stopped}");
+        }
     }
     Ok(())
 }

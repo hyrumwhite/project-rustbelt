@@ -220,6 +220,9 @@ pub const MODEL_DETAIL: u32 = 1 << 4;
 pub const PEARL_COAT: u32 = 1 << 5;
 /// A plain coat (no thin film): the G-buffer's flag bit 31.
 pub const PLAIN_COAT: u32 = 1 << 6;
+/// A thin-film coat whose lobe takes Solarik's sharp rule (the Elites'
+/// armour): the G-buffer's flag bits 30 and 31 both.
+pub const SHARP_COAT: u32 = 1 << 7;
 
 const SHADER: &str = "embedded://halo_rt/shaders/halo_environment.wesl";
 
@@ -235,7 +238,7 @@ impl MaterialExtension for HaloEnvironment {
 
 /// `HaloCombiner` in `halo_transparent.wesl`: a slot of the
 /// [`crate::combiners::CombinerTable`].
-#[derive(ShaderType, Debug, Clone, Default, Reflect, PartialEq)]
+#[derive(ShaderType, Debug, Clone, Reflect, PartialEq)]
 pub struct HaloCombinerParams {
     pub rgb_inputs: [UVec4; 2],
     pub rgb_outputs: [UVec4; 2],
@@ -249,12 +252,38 @@ pub struct HaloCombinerParams {
     pub map_rows: [Vec4; 8],
     /// Stage count, combiner flags, final ABCD, final EFG.
     pub program: UVec4,
-    /// The framebuffer blend function (`BlendFunction` as the tag's), maps
-    /// present (a bit per stage), `TransparentInfo::flags`, the fade mode.
+    /// The framebuffer blend function (`BlendFunction` as the tag's, or 11
+    /// a backed hologram's add), maps present (a bit per stage),
+    /// `TransparentInfo::flags`, the fade mode.
     pub modes: UVec4,
     /// x: the fade's scale (its source and the camouflage), y: 1 to show
     /// the surface in magenta (debugging)
     pub fade: Vec4,
+    /// A backed hologram's (blend 11, `crate::level`'s BACKED_HOLOGRAMS):
+    /// x the share of what is behind it taken away, y the gain on its
+    /// picture, z and w the low and high of its pattern's weight (its
+    /// picture's brightest channel, display space; the weight 1 everywhere
+    /// when w is not over z); (0, 1, 0, 0) for every other.
+    pub hologram: Vec4,
+}
+
+/// (By hand for the hologram's gain, 1: see [`HaloCombinerParams::hologram`].)
+impl Default for HaloCombinerParams {
+    fn default() -> Self {
+        HaloCombinerParams {
+            rgb_inputs: Default::default(),
+            rgb_outputs: Default::default(),
+            alpha_inputs: Default::default(),
+            alpha_outputs: Default::default(),
+            constant0: Default::default(),
+            constant1: Default::default(),
+            map_rows: Default::default(),
+            program: UVec4::ZERO,
+            modes: UVec4::ZERO,
+            fade: Vec4::ZERO,
+            hologram: Vec4::new(0.0, 1.0, 0.0, 0.0),
+        }
+    }
 }
 
 impl HaloCombinerParams {
@@ -271,6 +300,7 @@ impl HaloCombinerParams {
             program: UVec4::new(program.stage_count as u32, program.flags, program.final_abcd, program.final_efg),
             modes: UVec4::ZERO,
             fade: Vec4::new(1.0, 0.0, 0.0, 0.0),
+            hologram: Vec4::new(0.0, 1.0, 0.0, 0.0),
         }
     }
 }
@@ -589,7 +619,9 @@ impl Material for HaloTransparentMaterial {
             9 => component(BlendFactor::One, BlendFactor::SrcAlpha, BlendOperation::Add),
             // plasma: added by its alpha
             10 => component(BlendFactor::SrcAlpha, BlendFactor::One, BlendOperation::Add),
-            // alpha multiply add: premultiplied; meter, tint mode 1
+            // alpha multiply add: premultiplied; meter, tint mode 1; a backed
+            // hologram's add (11: what is there less its share where its
+            // pattern is, its picture added, crate::level's BACKED_HOLOGRAMS)
             _ => component(BlendFactor::One, BlendFactor::OneMinusSrcAlpha, BlendOperation::Add),
         };
         if let Some(fragment) = descriptor.fragment.as_mut() {

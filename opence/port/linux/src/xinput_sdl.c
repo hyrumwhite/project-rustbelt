@@ -553,7 +553,13 @@ it walks and strafes in circles, turns, fires every few seconds, jumps now
 and then and throws a grenade every seven seconds; "look:<seed>" stands
 still, only turning and looking up and down (where remote players aim and
 whether they stand); "walk:<seed>" walks forward and back without
-turning (lighting on the first-person weapon in motion); "throw" stands still, throwing a grenade every four
+turning (lighting on the first-person weapon in motion); "drive:<seed>",
+for a seated driver, drives forward nine seconds of every twelve and
+backs up the rest, weaving the look slowly left and right (the vehicle
+steers in wide S-curves after it, and the chase camera's look controls are
+active) with a little look up and down, and holds jump (the handbrake) for
+half a second every ten (a vehicle seen to jump ahead of its chase camera,
+port/linux/game/bevy_bridge.c's interpolation trace); "throw" stands still, throwing a grenade every four
 seconds (the effects' light, in the viewer), "throw:<seconds>" from that
 many seconds in (a level's grenades kept for a place a test teleports to) */
 static int test_input_holding_action;
@@ -575,6 +581,7 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	static int seed = -1;
 	static int looking;
 	static int walking;
+	static int driving;
 	static int throwing;
 	static double throwing_from;
 	double t;
@@ -609,6 +616,11 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 			seed = atoi(setting + 5);
 			walking = 1;
 		}
+		else if (!strncmp(setting, "drive:", 6))
+		{
+			seed = atoi(setting + 6);
+			driving = 1;
+		}
 	}
 	if (seed < 0)
 		return;
@@ -629,6 +641,15 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
 	if (walking)
 	{
 		pad->sThumbLY = (SHORT)(sin(t * 0.6) * 32000.0);
+		return;
+	}
+	if (driving)
+	{
+		pad->sThumbLY = fmod(t, 12.0) < 9.0 ? 32000 : -32000;
+		pad->sThumbRX = (SHORT)(sin(t * 0.8) * 16000.0);
+		pad->sThumbRY = (SHORT)(sin(t * 0.5) * 6000.0);
+		if (fmod(t, 10.0) < 0.5)
+			pad->bAnalogButtons[XINPUT_GAMEPAD_A] = 255;
 		return;
 	}
 	if (looking)

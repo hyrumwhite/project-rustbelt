@@ -1235,7 +1235,8 @@ pub fn init_solari_lighting_pipelines(
             // Elites' armour, the eyes, the Hunters' worms, the Covenant
             // vehicles, and with it Chief's armour reads as a mirror in a lit
             // room; 0 the default since 14 November, the coats' paths as they
-            // were)
+            // were; a coat marked sharp in the G-buffer, both coat bits, takes
+            // the rule whatever this says, since 18 November)
             ("SPECULAR_SHARP_COATS", "SOLARIK_SPECULAR_SHARP_COATS", 0),
             // (the near distance in hundredths of the square root of an
             // emissive triangle's area, within which a receiver takes its

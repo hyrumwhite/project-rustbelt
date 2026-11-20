@@ -956,6 +956,295 @@ fn convex_hull2d_test_circle(points: &[[f32; 2]], center: [f32; 2], radius: f32)
     true
 }
 
+/// A structure BSP's clusters and what they see: its collision tree (the
+/// cluster a point is in), its clusters' portals and skies, and its
+/// potentially visible sets (`structure_bsp_get_cluster_pvs`). The viewer's
+/// (its crate::clusters, crate::bridge) and the `halo_map` tool's.
+pub struct ClusterVisibility {
+    pub collision: CollisionBsp,
+    pub clusters: StructureClusters,
+    /// A bit vector of the clusters each cluster sees (32-bit words).
+    pvs: Vec<u32>,
+    words_per_cluster: usize,
+    /// Each cluster's sky (the scenario's), -1 for none: the game draws no
+    /// sky from a camera in such a cluster (`structure_visibility_find_camera`).
+    pub skies: Vec<i16>,
+}
+
+impl ClusterVisibility {
+    /// Each of the level's BSPs', by BSP index.
+    pub fn load_all(cache: &CacheFile) -> Vec<Option<Self>> {
+        let count = crate::bsp::references(cache).map(|r| r.iter().map(|r| r.index + 1).max().unwrap_or(0)).unwrap_or(0);
+        (0..count).map(|index| Self::load(cache, index as i32)).collect()
+    }
+
+    /// BSP `index`'s, None if it can't be read.
+    pub fn load(cache: &CacheFile, index: i32) -> Option<Self> {
+        use layout::{structure_bsp, structure_cluster};
+        let reference = crate::bsp::references(cache).ok()?.into_iter().find(|r| r.index as i32 == index)?;
+        let bsp = Bsp::load(cache, &reference).ok()?;
+        let clusters = bsp.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF).ok()?;
+        let count = clusters.count;
+        let skies = clusters.iter().map(|c| c.i16(structure_cluster::SKY_INDEX).unwrap_or(0)).collect();
+        let pvs: Vec<u32> = bsp.root.data_bytes(structure_bsp::CLUSTER_DATA).ok()?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+        let words_per_cluster = count.div_ceil(32);
+        if count == 0 || pvs.len() < count * words_per_cluster {
+            return None;
+        }
+        Some(ClusterVisibility {
+            collision: CollisionBsp::load(&bsp).ok()?,
+            clusters: StructureClusters::load(cache, &bsp).ok()?,
+            pvs,
+            words_per_cluster,
+            skies,
+        })
+    }
+
+    /// The cluster a point (world units) is in, -1 outside the BSP.
+    pub fn cluster(&self, point: [f32; 3]) -> i16 {
+        self.clusters.cluster_from_leaf(self.collision.leaf_from_point(point))
+    }
+
+    /// Whether cluster `from` sees any cluster with a sky.
+    pub fn sees_sky(&self, from: i16) -> bool {
+        from >= 0 && self.skies.iter().enumerate().any(|(to, &sky)| sky >= 0 && self.sees(from, to as i16))
+    }
+
+    /// Whether this BSP holds the interior that `active`'s cluster `from`
+    /// sees: the portals of each cluster without sky it sees, by their
+    /// centres.
+    pub fn holds_interior_seen(&self, active: &ClusterVisibility, from: i16) -> bool {
+        (0..active.skies.len()).filter(|&to| active.skies[to] < 0 && active.sees(from, to as i16)).all(|to| {
+            let portals = active.clusters.cluster_portals.get(to).map(|p| p.as_slice()).unwrap_or(&[]);
+            portals.iter().all(|&p| active.clusters.portals.get(p as usize).is_none_or(|portal| self.cluster(portal.centroid) >= 0))
+        })
+    }
+
+    /// The openings onto the outdoors that cluster `from` sees: the portals
+    /// joining the clusters without sky it sees, or its own, to those with
+    /// sky, each with its outdoor cluster.
+    pub fn openings_seen(&self, from: i16) -> impl Iterator<Item = (usize, i16)> + '_ {
+        let interior = move |k: i16| k >= 0 && (k == from || (self.skies.get(k as usize).is_some_and(|&sky| sky < 0) && self.sees(from, k)));
+        self.clusters.portals.iter().enumerate().filter_map(move |(index, portal)| {
+            let [a, b] = portal.clusters;
+            [(a, b), (b, a)]
+                .into_iter()
+                .find(|&(inside, outside)| interior(inside) && outside >= 0 && self.skies.get(outside as usize).is_some_and(|&sky| sky >= 0) && self.sees(from, outside))
+                .map(|(_, outside)| (index, outside))
+        })
+    }
+
+    /// Whether this BSP closes each opening onto the outdoors that `active`'s
+    /// cluster `from` sees ([`Self::openings_seen`]): a metre past each, this
+    /// BSP has no cluster, its own wall stands there. (b30's control room,
+    /// whose window BSP 1 closes with the shaft; where the other BSP's copy
+    /// runs on past the opening into nothing it built, b40's tunnel out into
+    /// the second canyon, from BSP 0, it would show the void the game
+    /// doesn't: the game draws its own BSP's land there.)
+    pub fn closes_openings_seen(&self, active: &ClusterVisibility, from: i16) -> bool {
+        active.openings_seen(from).all(|(portal, outside)| {
+            active.clusters.portals[portal].past(1.0, |p| active.cluster(p) == outside).is_none_or(|p| self.cluster(p) < 0)
+        })
+    }
+
+    /// Whether cluster `from` sees cluster `to` (`structure_bsp_get_cluster_pvs`).
+    pub fn sees(&self, from: i16, to: i16) -> bool {
+        let word = from as usize * self.words_per_cluster + to as usize / 32;
+        self.pvs.get(word).is_none_or(|bits| bits & (1 << (to as u32 % 32)) != 0)
+    }
+
+    /// What closes this BSP across a point of another BSP's opening, along
+    /// `outward` (unit, toward the outdoors): the material of the first
+    /// drawn surface the ray meets from [`CLOSURE_BEFORE`] before the point
+    /// (or nearer, from the first start this BSP holds) to a metre past it,
+    /// else -1 if it met only surfaces with no material (a seam's sealer:
+    /// collision with nothing drawn on it), None if it met none or this BSP
+    /// holds no start.
+    pub fn closure(&self, point: [f32; 3], outward: [f32; 3]) -> Option<i16> {
+        let along = |d: f32| [0, 1, 2].map(|i| point[i] + outward[i] * d);
+        let before = [CLOSURE_BEFORE, CLOSURE_BEFORE * 0.25].into_iter().find(|&d| self.cluster(along(-d)) >= 0)?;
+        let (mut from, mut undrawn) = (-before, None);
+        for _ in 0..SURFACES_PASSED {
+            let (start, length) = (along(from), 1.0 - from);
+            let vector = outward.map(|v| v * length);
+            match self.collision.test_vector(flags::FRONT_FACING | flags::BACK_FACING, start, vector, 1.0) {
+                Some(hit) if hit.material >= 0 => return Some(hit.material),
+                Some(hit) => {
+                    undrawn = Some(hit.material);
+                    from += hit.t * length + PASS_EPSILON;
+                }
+                None => break,
+            }
+        }
+        undrawn
+    }
+
+    /// Whether `to` is in sight from `from` through this BSP: no drawn
+    /// surface between them, short of `to` by [`SIGHT_SHORT`] (a pane in an
+    /// opening's own plane), surfaces with no material (a seam's sealer) and
+    /// glass and force fields (by their physics material type) passed.
+    pub fn in_sight(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        let mut start = from;
+        for _ in 0..SURFACES_PASSED {
+            let vector = sub3(to, start);
+            let length = dot3(vector, vector).sqrt();
+            if length <= SIGHT_SHORT {
+                return true;
+            }
+            let maximum_t = 1.0 - SIGHT_SHORT / length;
+            let Some(hit) = self.collision.test_vector(flags::FRONT_FACING | flags::BACK_FACING | flags::IGNORE_INVISIBLE, start, vector, maximum_t) else {
+                return true;
+            };
+            let kind = self.clusters.structure_material_type(hit.material);
+            if hit.material >= 0 && kind != MATERIAL_GLASS && kind != MATERIAL_FORCE_FIELD {
+                return false;
+            }
+            start = [0, 1, 2].map(|i| start[i] + vector[i] * (hit.t + PASS_EPSILON / length));
+        }
+        false
+    }
+}
+
+/// `_material_glass`, `_material_force_field`: seen through.
+pub const MATERIAL_GLASS: i16 = 9;
+pub const MATERIAL_FORCE_FIELD: i16 = 10;
+/// How far before an opening's plane a closure is looked for (world units).
+const CLOSURE_BEFORE: f32 = 1.0;
+/// How many undrawn surfaces a sight or closure ray passes before it gives
+/// up.
+const SURFACES_PASSED: usize = 4;
+/// How far past a passed surface a ray starts again (world units).
+const PASS_EPSILON: f32 = 0.01;
+/// How far short of an opening's point a sight ray stops (world units).
+const SIGHT_SHORT: f32 = 0.05;
+/// How many of a portal's vertices sample it, at most, and how far each
+/// is pulled in toward its centre (of the way).
+const SAMPLE_VERTICES: usize = 8;
+const SAMPLE_PULL: f32 = 0.25;
+
+/// The points an opening's sight is tested at: a portal's centre, and up
+/// to [`SAMPLE_VERTICES`] of its vertices, evenly spread, each pulled
+/// [`SAMPLE_PULL`] of the way in toward the centre (off the frame round it).
+pub fn portal_samples(portal: &Portal) -> Vec<[f32; 3]> {
+    let count = portal.vertices.len();
+    let taken = count.min(SAMPLE_VERTICES);
+    let mut samples = Vec::with_capacity(taken + 1);
+    samples.push(portal.centroid);
+    for k in 0..taken {
+        let v = portal.vertices[k * count / taken];
+        samples.push([0, 1, 2].map(|i| v[i] + (portal.centroid[i] - v[i]) * SAMPLE_PULL));
+    }
+    samples
+}
+
+/// Which rule picks a BSP drawn in place of the game's (the viewer's
+/// `HALO_RT_BSP_OVERRIDE`, its crate::bridge `DrawnBsp`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverrideRule {
+    /// The clusters' rule, while no opening onto the outdoors that the other
+    /// BSP leaves undrawn is in the camera's sight.
+    Sight,
+    /// The clusters' rule alone (before 19 November).
+    Clusters,
+}
+
+/// One of the active BSP's openings onto the outdoors (a portal from an
+/// interior cluster seen to a sky cluster seen) that another BSP closes
+/// with nothing drawn: at one of its sample points or more, the other BSP
+/// has only a surface with no material (b30's Shaft A door, BSP 1's seam
+/// sealer), or nothing found.
+#[derive(Clone, Debug)]
+pub struct UnclosedOpening {
+    pub portal: usize,
+    /// [`portal_samples`].
+    pub samples: Vec<[f32; 3]>,
+    /// [`ClusterVisibility::closure`] at the portal's centre.
+    pub material: Option<i16>,
+}
+
+/// What the override would draw from a camera position.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OverrideDecision {
+    /// The BSP drawn in place of the active one, None for the active one.
+    pub drawn: Option<usize>,
+    /// The first BSP the clusters' rule picked that an unclosed opening in
+    /// sight stopped: the BSP, the opening's portal and the sample in sight.
+    pub stopped: Option<(usize, usize, [f32; 3])>,
+}
+
+/// The override's rule (the viewer's crate::bridge `DrawnBsp`), with what
+/// depends on the BSPs alone kept: each (active BSP, camera cluster, other
+/// BSP)'s unclosed openings.
+#[derive(Default)]
+pub struct BspOverride {
+    unclosed: std::collections::HashMap<(usize, i16, usize), Vec<UnclosedOpening>>,
+}
+
+impl BspOverride {
+    /// Which BSP the viewer draws in place of `active` from a camera at
+    /// `position` (world units). The clusters' rule: the camera is in a
+    /// skyless cluster of the active BSP that sees clusters with sky (the
+    /// game draws the land beyond against black), another BSP holds the
+    /// place in a cluster that sees none, holds all of the interior the
+    /// camera's cluster sees and closes each opening onto the outdoors it
+    /// sees (b30's Shaft B control room, in its cutscene). With
+    /// [`OverrideRule::Sight`], also no opening that the other BSP closes
+    /// with nothing drawn is in the camera's sight: the other BSP drew the
+    /// void there (b30's Shaft A hall, from BSP 0: the outdoors' craft and
+    /// bodies in purple through the door, BSP 1 sealing it by collision
+    /// alone).
+    pub fn decide(&mut self, all: &[Option<ClusterVisibility>], active: usize, position: [f32; 3], rule: OverrideRule) -> OverrideDecision {
+        let mut decision = OverrideDecision::default();
+        let Some(Some(visibility)) = all.get(active) else { return decision };
+        let from = visibility.cluster(position);
+        if from < 0 || visibility.skies.get(from as usize).is_none_or(|&sky| sky >= 0) || !visibility.sees_sky(from) {
+            return decision;
+        }
+        for (index, other) in all.iter().enumerate() {
+            let Some(other) = other.as_ref().filter(|_| index != active) else { continue };
+            let cluster = other.cluster(position);
+            if cluster < 0 || other.sees_sky(cluster) || !other.holds_interior_seen(visibility, from) || !other.closes_openings_seen(visibility, from) {
+                continue;
+            }
+            if rule == OverrideRule::Sight {
+                let in_sight = self.unclosed_openings(all, active, from, index).iter().find_map(|opening| {
+                    opening.samples.iter().find(|&&sample| visibility.in_sight(position, sample)).map(|&sample| (opening.portal, sample))
+                });
+                if let Some((portal, sample)) = in_sight {
+                    decision.stopped.get_or_insert((index, portal, sample));
+                    continue;
+                }
+            }
+            decision.drawn = Some(index);
+            break;
+        }
+        decision
+    }
+
+    /// The openings onto the outdoors that `active`'s cluster `from` sees
+    /// which BSP `other` closes with nothing drawn (an opening it doesn't
+    /// close at all isn't one: the clusters' rule stops there).
+    pub fn unclosed_openings(&mut self, all: &[Option<ClusterVisibility>], active: usize, from: i16, other: usize) -> &[UnclosedOpening] {
+        self.unclosed.entry((active, from, other)).or_insert_with(|| {
+            let (Some(Some(visibility)), Some(Some(other))) = (all.get(active), all.get(other)) else { return Vec::new() };
+            visibility
+                .openings_seen(from)
+                .filter_map(|(index, outside)| {
+                    let portal = &visibility.clusters.portals[index];
+                    let normal = portal.normal()?;
+                    let outward = [1.0, -1.0].into_iter().map(|s| normal.map(|v| v * s)).find(|n| visibility.cluster([0, 1, 2].map(|i| portal.centroid[i] + n[i])) == outside)?;
+                    if other.cluster([0, 1, 2].map(|i| portal.centroid[i] + outward[i])) >= 0 {
+                        return None;
+                    }
+                    let samples = portal_samples(portal);
+                    let closures: Vec<Option<i16>> = samples.iter().map(|&s| other.closure(s, outward)).collect();
+                    closures.iter().any(|c| c.is_none_or(|m| m < 0)).then(|| UnclosedOpening { portal: index, samples, material: closures[0] })
+                })
+                .collect()
+        })
+    }
+}
+
 /// An object as the broad phase sees it (the game's runtime state).
 #[derive(Debug, Clone)]
 pub struct WorldObject {
@@ -2145,5 +2434,41 @@ impl VectorTest<'_> {
         self.last_leaf = leaf_index;
         self.last_contents = contents;
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ring(count: usize) -> Portal {
+        let vertices = (0..count).map(|k| {
+            let a = k as f32 / count as f32 * std::f32::consts::TAU;
+            [a.cos() * 2.0, a.sin() * 2.0, 5.0]
+        });
+        Portal { clusters: [0, 1], plane: 0, centroid: [0.0, 0.0, 5.0], bounding_radius: 2.0, vertices: vertices.collect() }
+    }
+
+    #[test]
+    fn portal_samples_are_the_centre_and_vertices_pulled_in() {
+        let samples = portal_samples(&ring(4));
+        assert_eq!(samples.len(), 5);
+        assert_eq!(samples[0], [0.0, 0.0, 5.0]);
+        for s in &samples[1..] {
+            let r = (s[0] * s[0] + s[1] * s[1]).sqrt();
+            assert!((r - 2.0 * (1.0 - SAMPLE_PULL)).abs() < 1e-5, "{s:?}");
+            assert_eq!(s[2], 5.0);
+        }
+    }
+
+    #[test]
+    fn portal_samples_spread_over_a_many_sided_portal() {
+        let samples = portal_samples(&ring(20));
+        assert_eq!(samples.len(), SAMPLE_VERTICES + 1);
+        // (every quarter of the ring has one)
+        for quarter in 0..4 {
+            assert!(samples[1..].iter().any(|s| ((s[1].atan2(s[0]).rem_euclid(std::f32::consts::TAU)) / std::f32::consts::FRAC_PI_2) as usize == quarter));
+        }
+        assert_eq!(portal_samples(&Portal::default()).len(), 1);
     }
 }

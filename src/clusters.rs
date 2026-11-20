@@ -7,6 +7,9 @@
 //! room lit by a few small strips had nine pixels in ten pick a light behind
 //! a wall, and the shadow ray dropped it (b40's elevator shaft, 92%; the
 //! lights' selection is global, by power, blind to where they shine).
+//! (The BSPs' data and the rule for the BSP drawn in place of the game's are
+//! halo_map::collision's, which the `halo_map` tool prints too: its `where`
+//! and `skyless`.)
 
 use crate::level::EmissiveSurface;
 use bevy::prelude::*;
@@ -14,90 +17,55 @@ use bevy_solarik::scene::SolarikSeenLights;
 use halo_map::math::METERS_PER_WORLD_UNIT;
 use std::sync::Arc;
 
-pub struct ClusterVisibility {
-    pub(crate) collision: halo_map::collision::CollisionBsp,
-    pub(crate) clusters: halo_map::collision::StructureClusters,
-    /// A bit vector of the clusters each cluster sees (32-bit words).
-    pvs: Vec<u32>,
-    words_per_cluster: usize,
-    /// Each cluster's sky (the scenario's), -1 for none: the game draws no
-    /// sky from a camera in such a cluster (`structure_visibility_find_camera`).
-    pub(crate) skies: Vec<i16>,
+pub use halo_map::collision::ClusterVisibility;
+use halo_map::collision::{OverrideDecision, OverrideRule};
+
+/// The rule for the BSP drawn in place of the game's (crate::bridge
+/// `DrawnBsp`), from `HALO_RT_BSP_OVERRIDE`: unset, the clusters' rule
+/// while no opening the other BSP leaves undrawn is in the camera's sight;
+/// `old` the clusters' rule alone (b30's Shaft A hall drew the void through
+/// its door); `off` none, the game's BSP always.
+pub(crate) fn override_rule_from_env() -> Option<OverrideRule> {
+    match std::env::var("HALO_RT_BSP_OVERRIDE").ok().as_deref() {
+        None | Some("") => Some(OverrideRule::Sight),
+        Some("old") => Some(OverrideRule::Clusters),
+        Some("off") => None,
+        Some(other) => {
+            warn!("HALO_RT_BSP_OVERRIDE={other}: not old or off; the sight rule");
+            Some(OverrideRule::Sight)
+        }
+    }
 }
 
-impl ClusterVisibility {
-    /// Each of the level's BSPs', by BSP index.
-    pub(crate) fn load_all(cache: &halo_map::CacheFile) -> Vec<Option<Self>> {
-        let count = halo_map::bsp::references(cache).map(|r| r.iter().map(|r| r.index as usize + 1).max().unwrap_or(0)).unwrap_or(0);
-        (0..count).map(|index| Self::load(cache, index as i32)).collect()
-    }
+/// How many frames in a row an opening that stopped the override must stay
+/// out of the camera's sight before the override draws the other BSP again
+/// ([`OverrideHold`]).
+pub(crate) const OVERRIDE_HOLD_FRAMES: u32 = 30;
 
-    /// BSP `index`'s, None if it can't be read.
-    pub(crate) fn load(cache: &halo_map::CacheFile, index: i32) -> Option<Self> {
-        use halo_map::layout::{structure_bsp, structure_cluster};
-        let reference = halo_map::bsp::references(cache).ok()?.into_iter().find(|r| r.index as i32 == index)?;
-        let bsp = halo_map::bsp::Bsp::load(cache, &reference).ok()?;
-        let clusters = bsp.root.block(structure_bsp::CLUSTERS, structure_cluster::SIZEOF).ok()?;
-        let count = clusters.count;
-        let skies = clusters.iter().map(|c| c.i16(structure_cluster::SKY_INDEX).unwrap_or(0)).collect();
-        let pvs: Vec<u32> = bsp.root.data_bytes(structure_bsp::CLUSTER_DATA).ok()?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
-        let words_per_cluster = count.div_ceil(32);
-        if count == 0 || pvs.len() < count * words_per_cluster {
+/// The override's hold: off at once when an unclosed opening comes into
+/// sight, on again only after [`OVERRIDE_HOLD_FRAMES`] frames without one,
+/// so the drawn BSP doesn't flicker as a sight ray grazes a pillar or the
+/// door's frame.
+pub(crate) struct OverrideHold {
+    /// Frames since an opening was last in sight (at most the hold).
+    clear: u32,
+}
+
+impl Default for OverrideHold {
+    fn default() -> Self {
+        OverrideHold { clear: OVERRIDE_HOLD_FRAMES }
+    }
+}
+
+impl OverrideHold {
+    /// The BSP drawn this frame, by this frame's decision.
+    pub(crate) fn step(&mut self, decision: &OverrideDecision) -> Option<usize> {
+        if decision.drawn.is_none() && decision.stopped.is_some() {
+            self.clear = 0;
             return None;
         }
-        Some(ClusterVisibility {
-            collision: halo_map::collision::CollisionBsp::load(&bsp).ok()?,
-            clusters: halo_map::collision::StructureClusters::load(cache, &bsp).ok()?,
-            pvs,
-            words_per_cluster,
-            skies,
-        })
-    }
-
-    /// The cluster a point (world units) is in, -1 outside the BSP.
-    pub(crate) fn cluster(&self, point: [f32; 3]) -> i16 {
-        self.clusters.cluster_from_leaf(self.collision.leaf_from_point(point))
-    }
-
-    /// Whether cluster `from` sees any cluster with a sky.
-    pub(crate) fn sees_sky(&self, from: i16) -> bool {
-        from >= 0 && self.skies.iter().enumerate().any(|(to, &sky)| sky >= 0 && self.sees(from, to as i16))
-    }
-
-    /// Whether this BSP holds the interior that `active`'s cluster `from`
-    /// sees: the portals of each cluster without sky it sees, by their
-    /// centres.
-    pub(crate) fn holds_interior_seen(&self, active: &ClusterVisibility, from: i16) -> bool {
-        (0..active.skies.len()).filter(|&to| active.skies[to] < 0 && active.sees(from, to as i16)).all(|to| {
-            let portals = active.clusters.cluster_portals.get(to).map(|p| p.as_slice()).unwrap_or(&[]);
-            portals.iter().all(|&p| active.clusters.portals.get(p as usize).is_none_or(|portal| self.cluster(portal.centroid) >= 0))
-        })
-    }
-
-    /// Whether this BSP closes each opening onto the outdoors that `active`'s
-    /// cluster `from` sees (the portals joining the clusters without sky it
-    /// sees, or its own, to those with sky): a metre past each, this BSP has
-    /// no cluster, its own wall stands there. (b30's control room, whose
-    /// window BSP 1 closes with the shaft; where the other BSP's copy runs on
-    /// past the opening into nothing it built, b40's tunnel out into the
-    /// second canyon, from BSP 0, it would show the void the game doesn't:
-    /// the game draws its own BSP's land there.)
-    pub(crate) fn closes_openings_seen(&self, active: &ClusterVisibility, from: i16) -> bool {
-        let interior = |k: i16| k >= 0 && (k == from || (active.skies.get(k as usize).is_some_and(|&sky| sky < 0) && active.sees(from, k)));
-        active.clusters.portals.iter().all(|portal| {
-            let [a, b] = portal.clusters;
-            let outdoors = [(a, b), (b, a)].into_iter().find(|&(inside, outside)| {
-                interior(inside) && outside >= 0 && active.skies.get(outside as usize).is_some_and(|&sky| sky >= 0) && active.sees(from, outside)
-            });
-            let Some((_, outside)) = outdoors else { return true };
-            portal.past(1.0, |p| active.cluster(p) == outside).is_none_or(|p| self.cluster(p) < 0)
-        })
-    }
-
-    /// Whether cluster `from` sees cluster `to` (`structure_bsp_get_cluster_pvs`).
-    pub(crate) fn sees(&self, from: i16, to: i16) -> bool {
-        let word = from as usize * self.words_per_cluster + to as usize / 32;
-        self.pvs.get(word).is_none_or(|bits| bits & (1 << (to as u32 % 32)) != 0)
+        self.clear = (self.clear + 1).min(OVERRIDE_HOLD_FRAMES);
+        decision.drawn.filter(|_| self.clear >= OVERRIDE_HOLD_FRAMES)
     }
 }
 
@@ -160,5 +128,53 @@ pub fn mark_seen_lights(
     }
     if seen.entities != entities {
         seen.entities = entities;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DRAWS: OverrideDecision = OverrideDecision { drawn: Some(1), stopped: None };
+    const STOPPED: OverrideDecision = OverrideDecision { drawn: None, stopped: Some((1, 186, [0.0; 3])) };
+    const NEITHER: OverrideDecision = OverrideDecision { drawn: None, stopped: None };
+
+    #[test]
+    fn hold_draws_at_once_when_nothing_was_in_sight() {
+        let mut hold = OverrideHold::default();
+        assert_eq!(hold.step(&DRAWS), Some(1));
+        assert_eq!(hold.step(&NEITHER), None);
+        assert_eq!(hold.step(&DRAWS), Some(1));
+    }
+
+    #[test]
+    fn hold_waits_after_an_opening_in_sight() {
+        let mut hold = OverrideHold::default();
+        assert_eq!(hold.step(&DRAWS), Some(1));
+        assert_eq!(hold.step(&STOPPED), None);
+        for _ in 1..OVERRIDE_HOLD_FRAMES {
+            assert_eq!(hold.step(&DRAWS), None);
+        }
+        assert_eq!(hold.step(&DRAWS), Some(1));
+    }
+
+    #[test]
+    fn hold_starts_again_when_the_opening_is_grazed() {
+        let mut hold = OverrideHold::default();
+        hold.step(&STOPPED);
+        for _ in 0..OVERRIDE_HOLD_FRAMES - 2 {
+            assert_eq!(hold.step(&DRAWS), None);
+        }
+        assert_eq!(hold.step(&STOPPED), None);
+        for _ in 1..OVERRIDE_HOLD_FRAMES {
+            assert_eq!(hold.step(&DRAWS), None);
+        }
+        assert_eq!(hold.step(&DRAWS), Some(1));
+        // (frames with no rule at all count as clear: outdoors, then back in)
+        hold.step(&STOPPED);
+        for _ in 0..OVERRIDE_HOLD_FRAMES {
+            hold.step(&NEITHER);
+        }
+        assert_eq!(hold.step(&DRAWS), Some(1));
     }
 }

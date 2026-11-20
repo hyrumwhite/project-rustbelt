@@ -111,6 +111,9 @@ symbols in this file:
 #include "scenario/scenario.h"
 #include "structures/structure_bsp_definitions.h"
 
+/* port: port/linux/src (halo.log) */
+void platform_log(const char *format, ...);
+
 /* ---------- constants */
 
 enum
@@ -282,6 +285,12 @@ static void observer_find_displacement(
 	struct observer_derivative *displacement);
 static void observer_postcheck(
 	short local_player_index);
+static void observer_press_ease_reset( /* port */
+	short local_player_index);
+static real observer_ease_press( /* port */
+	short local_player_index,
+	real unchecked_focus_distance,
+	real checked_focus_distance);
 static void observer_update_displacements(
 	short local_player_index);
 static void observer_pass_time(
@@ -320,6 +329,21 @@ static short observer_parameter_derivative_real_counts[NUMBER_OF_OBSERVER_COMMAN
 };
 
 static struct observer_globals observer_globals;
+
+/* port: the focus distance each observer's last update placed its camera at,
+after the penetration check (observer_postcheck), for the interpolation
+trace (observer_get_trace) */
+static real observer_checked_focus_distances[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
+
+/* port: the focus distance the penetration check itself allowed at each
+observer's last update (before observer_ease_press), for the interpolation
+trace */
+static real observer_raw_focus_distances[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
+
+/* port: observer_ease_press's state, each local player's held cut (world
+units) and the seconds left before it may be let out */
+static real observer_press_held_cuts[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
+static real observer_press_hold_timers[MAXIMUM_NUMBER_OF_LOCAL_PLAYERS];
 
 /* ---------- private code */
 
@@ -381,6 +405,7 @@ void observer_initialize_for_new_map(
 		local_player_index++)
 	{
 		observer_clear(observer_get(local_player_index));
+		observer_press_ease_reset(local_player_index); /* port */
 	}
 
 	return;
@@ -510,6 +535,7 @@ void observer_set_camera(
 			observer->pending_command->parameter_timers,
 			0,
 			sizeof(observer->pending_command->parameter_timers));
+		observer_press_ease_reset(local_player_index); /* port */
 	}
 
 	return;
@@ -1143,6 +1169,161 @@ static void observer_check_penetration(
 	return;
 }
 
+/* port: the obstruction cut's release eased. Driving a vehicle, the
+vehicle seemed to jump ahead for a few frames now and then; what moved was
+the chase camera: pressed against the ground or a wall behind it, the
+penetration check (observer_check_penetration) let it out by 0.15 to 0.5
+world units for a tick or two and then pressed it in again, so the camera
+popped back from the vehicle and returned. The cut (the distance before the
+check less the distance after it) is taken at once whenever it grows or
+stays; when it shrinks, the cut is held HOLD seconds of the observer's own
+time and then let fall toward the check's at RATE world units a second,
+never below it, so the camera is never further out than the check allows.
+HOLD 0.1 seconds swallows the pops, which last one or two ticks (33 to 66
+ms), whole; RATE 4 world units a second is over a real release's pace (a
+vehicle driving away from a wall lets the camera out at about 3.3 world
+units a second), which is followed 0.1 seconds late and caught up. Where
+the check does not run (no obstructions, a focus distance of 0: first
+person, cinematics) and at a camera's first command nothing is held.
+HALO_CAMERA_PRESS_EASE=<hold seconds>,<rate world units a second> sets them
+(a single number the hold alone), HALO_CAMERA_PRESS_EASE=0 the old (the
+check's own distance) */
+#define OBSERVER_PRESS_DEFAULT_HOLD 0.1f
+#define OBSERVER_PRESS_DEFAULT_RATE 4.f
+
+static boolean observer_press_ease_settings(
+	real *hold,
+	real *rate)
+{
+	static boolean read = FALSE;
+	static boolean enabled = TRUE;
+	static real setting_hold = OBSERVER_PRESS_DEFAULT_HOLD;
+	static real setting_rate = OBSERVER_PRESS_DEFAULT_RATE;
+
+	if (!read)
+	{
+		char const *setting = getenv("HALO_CAMERA_PRESS_EASE");
+
+		read = TRUE;
+		if (setting && *setting)
+		{
+			char *end = NULL;
+			double value = strtod(setting, &end);
+			boolean understood = FALSE;
+
+			if (end != setting && value >= 0.0)
+			{
+				if (*end == ',')
+				{
+					char const *rate_text = end + 1;
+					double rate_value = strtod(rate_text, &end);
+
+					if (end != rate_text && rate_value > 0.0)
+					{
+						setting_hold = (real)value;
+						setting_rate = (real)rate_value;
+						understood = TRUE;
+					}
+				}
+				else if (value == 0.0)
+				{
+					enabled = FALSE;
+					understood = TRUE;
+				}
+				else
+				{
+					setting_hold = (real)value;
+					understood = TRUE;
+				}
+			}
+
+			if (!enabled)
+			{
+				platform_log("camera: the obstruction cut not eased (HALO_CAMERA_PRESS_EASE=0)");
+			}
+			else
+			{
+				platform_log("camera: the obstruction cut's release held %.3f s, then %.2f world units a second%s (HALO_CAMERA_PRESS_EASE)",
+					(double)setting_hold,
+					(double)setting_rate,
+					understood ? "" : "; the defaults, the setting was not understood");
+			}
+		}
+	}
+
+	*hold = setting_hold;
+	*rate = setting_rate;
+
+	return enabled;
+}
+
+static void observer_press_ease_reset(
+	short local_player_index)
+{
+	observer_press_held_cuts[local_player_index] = 0.f;
+	observer_press_hold_timers[local_player_index] = 0.f;
+
+	return;
+}
+
+static real observer_ease_press(
+	short local_player_index,
+	real unchecked_focus_distance,
+	real checked_focus_distance)
+{
+	real *held_cut = &observer_press_held_cuts[local_player_index];
+	real *hold_timer = &observer_press_hold_timers[local_player_index];
+	real shortfall = unchecked_focus_distance - checked_focus_distance;
+	real hold;
+	real rate;
+
+	if (!observer_press_ease_settings(&hold, &rate))
+	{
+		return checked_focus_distance;
+	}
+
+	if (shortfall < 0.f)
+	{
+		shortfall = 0.f;
+	}
+
+	if (shortfall >= *held_cut)
+	{
+		*held_cut = shortfall;
+		*hold_timer = hold;
+	}
+	else if (observer_globals.dtime > 0.f)
+	{
+		/* the frame's time runs the hold out first and what is left of it
+		lets the cut fall (a timer left under a millisecond by rounding is
+		run out) */
+		real elapsed = observer_globals.dtime;
+
+		if (*hold_timer > 0.f)
+		{
+			real used = MIN(*hold_timer, elapsed);
+
+			*hold_timer -= used;
+			elapsed -= used;
+			if (*hold_timer < 0.001f)
+			{
+				*hold_timer = 0.f;
+			}
+		}
+		if (*hold_timer == 0.f)
+		{
+			*held_cut = MAX(*held_cut - rate*elapsed, shortfall);
+		}
+	}
+
+	if (*held_cut > unchecked_focus_distance)
+	{
+		*held_cut = unchecked_focus_distance;
+	}
+
+	return unchecked_focus_distance - *held_cut;
+}
+
 static void observer_postcheck(
 	short local_player_index)
 {
@@ -1187,13 +1368,27 @@ static void observer_postcheck(
 	if (!TEST_FLAG(observer->last_command.flags, _observer_command_ignore_obstructions_bit) &&
 		focus_distance != 0.f)
 	{
+		real unchecked_focus_distance = focus_distance; /* port */
+
 		observer_check_penetration(
 			&focus_position,
 			&observer->forward,
 			&observer->up,
 			&focus_distance,
 			0.02f);
+		observer_raw_focus_distances[local_player_index] = focus_distance; /* port */
+		focus_distance = observer_ease_press( /* port */
+			local_player_index,
+			unchecked_focus_distance,
+			focus_distance);
 	}
+	else
+	{
+		/* port: no check, so nothing is held into the next camera */
+		observer_raw_focus_distances[local_player_index] = focus_distance;
+		observer_press_ease_reset(local_player_index);
+	}
+	observer_checked_focus_distances[local_player_index] = focus_distance; /* port */
 
 	observer->result.position.x = focus_position.x - observer->forward.i*focus_distance;
 	observer->result.position.y = focus_position.y - observer->forward.j*focus_distance;
@@ -1340,6 +1535,35 @@ void observer_update(
 				observer->trailer_signature==OBSERVER_SIGNATURE);
 		}
 	}
+
+	return;
+}
+
+/* port: for the interpolation trace (port/linux/game/bevy_bridge.c,
+HALO_INTERPOLATION_TRACE): the focus distance the observer's last update
+placed the camera at after the penetration check (and observer_ease_press),
+its own (the distance the command asked for, as far as the parameters'
+timers have taken it), the last command's timer, its parameters' timers
+(focus position, offset, distance, field of view, orientation) and the
+distance the penetration check itself allowed */
+void observer_get_trace(
+	short local_player_index,
+	real *checked_focus_distance,
+	real *focus_distance,
+	real *timer,
+	real parameter_timers[NUMBER_OF_OBSERVER_COMMAND_PARAMETERS],
+	real *raw_focus_distance)
+{
+	struct observer *observer = observer_get(local_player_index);
+
+	*checked_focus_distance = observer_checked_focus_distances[local_player_index];
+	*raw_focus_distance = observer_raw_focus_distances[local_player_index];
+	*focus_distance = observer->focus_distance;
+	*timer = observer->last_command.timer;
+	csmemcpy(
+		parameter_timers,
+		observer->last_command.parameter_timers,
+		sizeof(observer->last_command.parameter_timers));
 
 	return;
 }

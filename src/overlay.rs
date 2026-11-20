@@ -567,7 +567,11 @@ fn read_overlay(
 /// `HALO_RT_FRAME_TRACE=<path>`: a line a frame in that file, once the
 /// frame's overlay is read: the performance counter (microseconds, as the
 /// game's `HALO_FRAME_TRACE` reads it), the game frame shown, its tick and
-/// the game's camera.
+/// the game's camera; last, the vehicle nearest the camera in the snapshot
+/// shown (`veh <object index> <root position> <bounding centre> <root
+/// forward>`, or `veh none`), to set the vehicle as received against the
+/// camera frame by frame (a Warthog seen to jump ahead of its chase camera
+/// now and then; scripts/pace/vehicle.py).
 fn trace_frame(
     link: Res<BridgeLink>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -581,9 +585,28 @@ fn trace_frame(
     let (Some(file), Some(snapshot), Some(now)) = (file.as_mut(), link.latest.as_ref(), halo_bridge::performance_microseconds()) else { return };
     let position = snapshot.camera.map(|c| c.position).unwrap_or_default();
     let forward = snapshot.camera.map(|c| c.forward).unwrap_or_default();
+    // (Halo's object type 1 is the vehicle; the nearest by its bounding
+    // centre, the camera's player's seat among them)
+    let distance = |p: [f32; 3]| (0..3).map(|i| (p[i] - position[i]) * (p[i] - position[i])).sum::<f32>();
+    let vehicle = snapshot
+        .objects
+        .iter()
+        .filter(|o| o.kind == 1 && o.flags & halo_bridge::OBJECT_MODEL == 0)
+        .filter_map(|o| Some((o, snapshot.object_nodes(o).first()?)))
+        .min_by(|a, b| distance(a.0.bounding_center).total_cmp(&distance(b.0.bounding_center)));
+    let vehicle = match vehicle {
+        Some((object, root)) => {
+            let (p, c, f) = (root.position, object.bounding_center, root.forward);
+            format!(
+                "{:x} {:.5} {:.5} {:.5} {:.5} {:.5} {:.5} {:.5} {:.5} {:.5}",
+                object.object_index, p[0], p[1], p[2], c[0], c[1], c[2], f[0], f[1], f[2]
+            )
+        }
+        None => "none".to_string(),
+    };
     let _ = writeln!(
         file,
-        "V {now} {} {} cam {:.4} {:.4} {:.4} fwd {:.5} {:.5} {:.5} pending {} focus {}",
+        "V {now} {} {} cam {:.4} {:.4} {:.4} fwd {:.5} {:.5} {:.5} pending {} focus {} veh {vehicle}",
         snapshot.frame_index,
         snapshot.game_tick,
         position[0],

@@ -511,7 +511,7 @@ fn sync_objects(
     mut images: ResMut<Assets<Image>>,
     mut inverse_bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     neutral_detail: Res<NeutralDetail>,
-    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut lights_in_solid, mut deformable, mut pearl_coats, mut glass_grime, mut plain_coats, mut skin_jobs, mut ray_marks, masks): (
+    (recolourable, mut animated, children, follow, mut visibility_data, mut camera_sky, mut drawn_bsp, mut drawn_rule, mut lights_in_solid, mut deformable, mut pearl_coats, mut glass_grime, mut plain_coats, mut skin_jobs, mut ray_marks, masks): (
         Query<(Entity, &crate::level::Recolourable)>,
         Query<&mut crate::level::AnimatedSelfIllumination>,
         Query<&Children>,
@@ -519,6 +519,7 @@ fn sync_objects(
         Local<Option<(String, Vec<Option<ClusterVisibility>>)>>,
         ResMut<CameraSky>,
         ResMut<DrawnBsp>,
+        Local<DrawnBspRule>,
         ResMut<LightsInSolid>,
         ResMut<bevy_solarik::scene::SolarikDeformableMeshes>,
         ResMut<bevy_solarik::lommel::PearlCoatMaterials>,
@@ -590,6 +591,7 @@ fn sync_objects(
     // a camera flying free sees them all)
     if visibility_data.as_ref().is_none_or(|(loaded, _)| *loaded != builder.stats.map_name) {
         *visibility_data = Some((builder.stats.map_name.clone(), ClusterVisibility::load_all(&builder.cache)));
+        drawn_rule.openings = Default::default();
     }
     let all_visibility = visibility_data.as_ref().map(|(_, v)| v.as_slice()).unwrap_or(&[]);
     let active_visibility = usize::try_from(snapshot.structure_bsp_index).ok().and_then(|i| all_visibility.get(i)).and_then(|v| v.as_ref());
@@ -620,16 +622,19 @@ fn sync_objects(
     // closes each opening onto it with a wall of its own: b30's room alone.
     // A seam room, whose other copy runs on into nothing, is drawn as the
     // game draws it, the land beyond and all: b40's tunnel to the second
-    // canyon, from BSP 0, showed rocks and trees over the void.)
-    let drawn = match (snapshot.camera, active_visibility.filter(|v| skyless && v.sees_sky(camera_cluster))) {
-        (Some(camera), Some(active)) => all_visibility.iter().enumerate().find_map(|(index, other)| {
-            let other = other.as_ref().filter(|_| index as i32 != snapshot.structure_bsp_index)?;
-            let cluster = other.cluster(camera.position);
-            (cluster >= 0 && !other.sees_sky(cluster) && other.holds_interior_seen(active, camera_cluster) && other.closes_openings_seen(active, camera_cluster))
-                .then_some(index)
-        }),
-        _ => None,
+    // canyon, from BSP 0, showed rocks and trees over the void.) Nor while
+    // an opening the other BSP closes with nothing drawn, collision alone, is
+    // in the camera's sight: b30's Shaft A hall, from BSP 0 as the game is
+    // back on it from halfway along the corridor below, showed the
+    // outdoors' craft and bodies over the void through its door, BSP 1's
+    // seam. (halo_map::collision::BspOverride, the rule; held off a moment
+    // after such an opening goes out of sight, crate::clusters::OverrideHold.)
+    let rule = *drawn_rule.rule.get_or_insert_with(crate::clusters::override_rule_from_env);
+    let decision = match (snapshot.camera, usize::try_from(snapshot.structure_bsp_index), rule) {
+        (Some(camera), Ok(active), Some(rule)) if follow.0 => drawn_rule.openings.decide(all_visibility, active, camera.position, rule),
+        _ => Default::default(),
     };
+    let drawn = drawn_rule.hold.step(&decision);
     if drawn_bsp.0 != drawn {
         drawn_bsp.0 = drawn;
     }
@@ -1063,6 +1068,16 @@ fn node_matrix(node: &halo_bridge::Node, default_inverse: &Affine3A, to_bevy: &A
 /// outdoors without sky (`sync_objects`).
 #[derive(Resource, Default)]
 pub struct DrawnBsp(pub Option<usize>);
+
+/// `sync_objects`' state for [`DrawnBsp`]: the rule (`HALO_RT_BSP_OVERRIDE`,
+/// read once; None, off), the openings the BSPs leave unclosed, by camera
+/// cluster, and the hold.
+#[derive(Default)]
+struct DrawnBspRule {
+    rule: Option<Option<halo_map::collision::OverrideRule>>,
+    openings: halo_map::collision::BspOverride,
+    hold: crate::clusters::OverrideHold,
+}
 
 /// Whether the game's camera is in a cluster with no sky, where the game
 /// draws none, and whether the level's sky has no model and the fog pass

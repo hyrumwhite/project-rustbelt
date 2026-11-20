@@ -51,11 +51,30 @@ pub struct AnimatedSelfIllumination {
 /// self-illumination, or a glowing surface's light (see
 /// [`GLOWS_FOLLOWING_OBJECT`]): its radiance at full colour times its
 /// shader's first coloured stage colour as the object has it now, as its
-/// picture's (`animate_transparent`).
+/// picture's (`animate_transparent`); or one that takes its object's change
+/// colour (see [`colour_following_stage`]): that stage's colour mixed toward
+/// `mix` by the stage's alpha, as its combiner mixes it ([`glow_color`]).
 #[derive(Clone, Copy)]
 pub enum IlluminationAnimation {
     Model(shader::ModelSelfIlluminationAnimation),
-    Glow { stage: shader::StageColorAnimation, radiance: Vec3 },
+    Glow { stage: shader::StageColorAnimation, radiance: Vec3, mix: Option<[f32; 3]> },
+}
+
+/// A glow's colour now (see [`IlluminationAnimation::Glow`]): its stage's
+/// colour with the object's functions and change colours, mixed toward
+/// `mix` by the stage's alpha where it has one, each channel 0 to 1.
+fn glow_color(
+    stage: &shader::StageColorAnimation,
+    mix: Option<[f32; 3]>,
+    values: Option<&[f32; 4]>,
+    colors: &[[f32; 3]; 4],
+    seconds: f32,
+    periodic: impl Fn(i16, f32) -> f32,
+) -> Vec3 {
+    let [r, g, b, a] = stage.evaluate(values, Some(colors), seconds, periodic);
+    let color = Vec3::new(r, g, b);
+    let color = mix.map_or(color, |to| color.lerp(Vec3::from(to), a.clamp(0.0, 1.0)));
+    color.clamp(Vec3::ZERO, Vec3::ONE)
 }
 
 /// A moving object's mesh whose material its change colours can make anew
@@ -222,10 +241,9 @@ pub fn animate_self_illumination(
                     color * SELF_ILLUMINATION_RADIANCE * settings.emissive_scale * model_lamps
                 }
                 // (each channel in steps, as above)
-                IlluminationAnimation::Glow { stage, radiance } => {
+                IlluminationAnimation::Glow { stage, radiance, mix } => {
                     let values = object_functions.map(|f| &f.values);
-                    let [r, g, b, _] = stage.evaluate(values, Some(&object.change_colors), seconds, |f, t| functions.periodic(f, t));
-                    let mut color = Vec3::new(r, g, b).clamp(Vec3::ZERO, Vec3::ONE);
+                    let mut color = glow_color(stage, *mix, values, &object.change_colors, seconds, |f, t| functions.periodic(f, t));
                     if steps > 0.0 {
                         color = (color * steps).round() / steps;
                     }
@@ -422,6 +440,63 @@ const EMITTER_MAPPED: [&str; 1] = [r"levels\b40\shaders\b40_light_yellow"];
 /// room, which emits whole as its shader says (see
 /// [`LevelBuilder::emitter_map`]).
 const EMITTER_MAP_BLACK: f32 = 0.02;
+/// The light cards' share of their cast light, by level (a card: a
+/// transparent shader with radiosity power, not a glowing surface's light;
+/// see [`LevelBuilder::make_surface`]): the map's name, the share its
+/// visible cards cast and the share its hidden ones (a black card, as
+/// [`LevelBuilder::emitter_map`] finds it, [`EMITTER_MAP_BLACK`]; a card with
+/// no first map counts as visible). By level, not by shader: The Library
+/// uses c10's, b30's and b40's cards beside its own. The card the camera
+/// sees is as it was; only the light cast changes. The Library (the user on
+/// 18 November 2026: "a departure from the original look, but I'd like the
+/// level to be a bit darker"). `HALO_RT_CARD_LIGHT=<map>:<cards>[:<hidden>],...`
+/// in place of the table (the hidden cards' share the visible ones' if not
+/// given); `HALO_RT_CARD_LIGHT=c20:1` the old. Read once.
+const CARD_LIGHT: [(&str, f32, f32); 1] = [("c20", 0.6, 0.6)];
+
+/// A level's light cards' shares, (visible, hidden), 1 for a level not in
+/// [`CARD_LIGHT`] nor in `HALO_RT_CARD_LIGHT`, which wins.
+fn card_light(map: &str) -> (f32, f32) {
+    static TUNED: std::sync::LazyLock<Vec<(String, f32, f32)>> =
+        std::sync::LazyLock::new(|| parse_card_light(&std::env::var("HALO_RT_CARD_LIGHT").unwrap_or_default()));
+    card_light_in(&TUNED, map)
+}
+
+/// [`card_light`]'s shares from `tuned` first, then [`CARD_LIGHT`].
+fn card_light_in(tuned: &[(String, f32, f32)], map: &str) -> (f32, f32) {
+    tuned
+        .iter()
+        .find(|(name, ..)| map.eq_ignore_ascii_case(name))
+        .map(|(_, cards, hidden)| (*cards, *hidden))
+        .or_else(|| CARD_LIGHT.iter().find(|(name, ..)| map.eq_ignore_ascii_case(name)).map(|&(_, cards, hidden)| (cards, hidden)))
+        .unwrap_or((1.0, 1.0))
+}
+
+/// `HALO_RT_CARD_LIGHT`'s entries from its text, each map in lower case: an
+/// entry that is not `<map>:<cards>[:<hidden>]` of finite numbers skipped
+/// with a warning, a negative share 0.
+fn parse_card_light(text: &str) -> Vec<(String, f32, f32)> {
+    text.split(',')
+        .filter(|entry| !entry.trim().is_empty())
+        .filter_map(|entry| {
+            let mut parts = entry.split(':').map(str::trim);
+            let parsed = (|| {
+                let map = parts.next().filter(|map| !map.is_empty())?;
+                let share = |text: &str| text.parse::<f32>().ok().filter(|share| share.is_finite()).map(|share| share.max(0.0));
+                let cards = share(parts.next()?)?;
+                let hidden = match parts.next() {
+                    Some(text) => share(text)?,
+                    None => cards,
+                };
+                parts.next().is_none().then(|| (map.to_ascii_lowercase(), cards, hidden))
+            })();
+            if parsed.is_none() {
+                warn!("HALO_RT_CARD_LIGHT: {entry:?} is not <map>:<cards>[:<hidden>]");
+            }
+            parsed
+        })
+        .collect()
+}
 /// Glowing surfaces that light nothing (a shader path's start, or a word
 /// in its name): what a weapon or effect holds is its own (its lights are
 /// the game's), and the volumetric cones picture a fixture's light, which
@@ -497,6 +572,109 @@ fn reflected_glow_scale() -> f32 {
     *SCALE.get_or_init(|| {
         std::env::var("HALO_RT_REFLECTED_GLOW").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(REFLECTED_GLOW_SCALE)
     })
+}
+
+/// Holograms backed, by shader tag path (a prefix), with the share of the
+/// picture behind them taken away, the gain on their own picture and the
+/// low and high of their pattern (their picture's brightest channel, 0 to 1
+/// in display space): Cortana's (body, hair, teeth) is added to what is
+/// behind her (her shaders' framebuffer blend), and with the ray traced
+/// lighting what is behind her is brighter than the game drew it, so she
+/// washed out (the user on 18 November 2026: "a little more opaque in those
+/// cutscenes"). Backed alone she read as a grey shadow by capture: her
+/// picture is added in linear light, where the game added it in display
+/// space, so over a lit background it shows less than it did; so her
+/// picture is raised by the gain too. Backed whole, everywhere inside her
+/// silhouette, her limbs, black in her picture but for its violet patterns,
+/// went dark (the same day, of the captures: "she now appears to have dark
+/// limbs. Is it possible for the opacity changes to just affect her
+/// colored patterns?"); so the backing is part of her own blend (blend 11,
+/// `halo_transparent.wesl`: what is behind her multiplied by one less the
+/// share, her picture added), weighted with the gain by where her picture
+/// is bright (a smooth step from the low to the high), so that where it is
+/// dark she is as the game's add. Once a pixel only because a
+/// self-occluding object's parts are drawn at their nearest surface (the
+/// self-occluding depth); a part over another of hers darkens the other's
+/// glow under it too. The light she casts and her reflected copy
+/// (`REFLECTED_GLOWS`) are as they were.
+/// `HALO_RT_HOLOGRAM_BACKING=<share>` in place of every listed shader's
+/// share, 0 no darkening; `HALO_RT_HOLOGRAM_GAIN=<gain>` in place of every
+/// listed shader's gain, 1 the old picture (the two together the old blend,
+/// the plain add); `HALO_RT_HOLOGRAM_PATTERN=<low>,<high>` in place of every
+/// listed shader's pattern, a high not over the low (`0,0`) the weight 1
+/// everywhere, the backing and the gain whole inside her silhouette. Each
+/// read once, and independent of the others.
+const BACKED_HOLOGRAMS: [(&str, f32, f32, [f32; 2]); 1] = [("characters\\cortana\\", 0.35, 1.5, [0.1, 0.5])];
+
+/// A backed hologram's blend (see [`BACKED_HOLOGRAMS`]): its share, gain and
+/// pattern, the switches applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hologram {
+    pub share: f32,
+    pub gain: f32,
+    pub pattern: [f32; 2],
+}
+
+/// `HALO_RT_HOLOGRAM_BACKING`'s share, if set (see [`BACKED_HOLOGRAMS`]).
+fn hologram_backing_override() -> Option<f32> {
+    static SHARE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| {
+        std::env::var("HALO_RT_HOLOGRAM_BACKING").ok().and_then(|v| v.trim().parse::<f32>().ok()).filter(|share| share.is_finite()).map(|share| share.clamp(0.0, 1.0))
+    })
+}
+
+/// `HALO_RT_HOLOGRAM_GAIN`'s gain, if set (see [`BACKED_HOLOGRAMS`]).
+fn hologram_gain_override() -> Option<f32> {
+    static GAIN: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *GAIN.get_or_init(|| parse_hologram_gain(&std::env::var("HALO_RT_HOLOGRAM_GAIN").unwrap_or_default()))
+}
+
+/// `HALO_RT_HOLOGRAM_PATTERN`'s low and high, if set (see [`BACKED_HOLOGRAMS`]).
+fn hologram_pattern_override() -> Option<[f32; 2]> {
+    static PATTERN: std::sync::OnceLock<Option<[f32; 2]>> = std::sync::OnceLock::new();
+    *PATTERN.get_or_init(|| parse_hologram_pattern(&std::env::var("HALO_RT_HOLOGRAM_PATTERN").unwrap_or_default()))
+}
+
+/// `HALO_RT_HOLOGRAM_GAIN`'s text as a gain: none for one that is not a
+/// finite number at least 0 (the table's kept).
+fn parse_hologram_gain(text: &str) -> Option<f32> {
+    text.trim().parse::<f32>().ok().filter(|gain| gain.is_finite() && *gain >= 0.0)
+}
+
+/// `HALO_RT_HOLOGRAM_PATTERN`'s text as a low and high: two finite numbers,
+/// each clamped to 0 to 1; none for anything else (the table's kept), with a
+/// warning if there was text.
+fn parse_hologram_pattern(text: &str) -> Option<[f32; 2]> {
+    let parsed = (|| {
+        let mut parts = text.split(',').map(|part| part.trim().parse::<f32>().ok().filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0)));
+        let low = parts.next()??;
+        let high = parts.next()??;
+        parts.next().is_none().then_some([low, high])
+    })();
+    if parsed.is_none() && !text.trim().is_empty() {
+        warn!("HALO_RT_HOLOGRAM_PATTERN: {text:?} is not <low>,<high>");
+    }
+    parsed
+}
+
+/// A shader's backed hologram blend, if it is one (see [`BACKED_HOLOGRAMS`]),
+/// the switches applied.
+pub fn backed_hologram(shader: &str) -> Option<Hologram> {
+    BACKED_HOLOGRAMS
+        .iter()
+        .find(|(prefix, ..)| shader.len() >= prefix.len() && shader.is_char_boundary(prefix.len()) && shader[..prefix.len()].eq_ignore_ascii_case(prefix))
+        .map(|&(_, share, gain, pattern)| Hologram {
+            share: hologram_backing_override().unwrap_or(share),
+            gain: hologram_gain_override().unwrap_or(gain),
+            pattern: hologram_pattern_override().unwrap_or(pattern),
+        })
+}
+
+/// The blend a transparent shader takes: a backed hologram's add (11, see
+/// [`BACKED_HOLOGRAMS`]) for an add (3) with a share or a gain, else the
+/// tag's (so with neither the old pipeline itself).
+fn hologram_blend(tag_blend: u32, share: f32, gain: f32) -> u32 {
+    if tag_blend == 3 && (share > 0.0 || gain != 1.0) { 11 } else { tag_blend }
 }
 
 /// Light strips added to a level where it has none (play feedback): an
@@ -591,6 +769,55 @@ fn followed_glow(shader: &str) -> Option<Vec3> {
 /// A generic shader's first stage with a colour (as [`LevelBuilder::glow_radiance`]'s tint).
 fn first_coloured_stage(stages: &[shader::StageColorAnimation]) -> Option<shader::StageColorAnimation> {
     stages.iter().find(|stage| (0..3).any(|c| stage.color0[c].max(stage.color1[c]) > 0.0)).copied()
+}
+
+/// Whether a glowing surface whose shader colours it by its object's change
+/// colour casts that colour as its object has it now
+/// ([`colour_following_stage`]; `HALO_RT_GLOW_FOLLOWS_COLOR=0`: its first
+/// coloured stage's colour, still, as before). Read once.
+fn glow_follows_color() -> bool {
+    static FOLLOWS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOLLOWS.get_or_init(|| std::env::var("HALO_RT_GLOW_FOLLOWS_COLOR").map_or(true, |v| v.trim() != "0"))
+}
+
+/// A generic stage's colour combiner (NV2A input bytes A, B, C, D) that
+/// mixes its constant colour 0 toward its constant colour 1 by colour 0's
+/// alpha: (1 - c0.a) × c0 + c0.a × c1.
+const STAGE_MIX_INPUTS: u32 = 0x3101_1102;
+
+/// Whether a generic stage's colour combiner is the mix of
+/// [`STAGE_MIX_INPUTS`] summed into a register: A×B and C×D discarded, no
+/// dot product, mux, shift or bias.
+fn stage_mixes_constants(rgb_inputs: u32, rgb_outputs: u32) -> bool {
+    rgb_inputs == STAGE_MIX_INPUTS && rgb_outputs & 0xff == 0 && (rgb_outputs >> 8) & 0xf != 0 && rgb_outputs >> 12 == 0
+}
+
+/// The stage a glowing surface's light takes its colour from as its object
+/// has it now, and the colour that stage mixes toward: the first stage
+/// coloured by the object's change colour (source A to D), where its
+/// combiner mixes that colour toward its constant colour 1 by its alpha (the
+/// object's function A, [`stage_mixes_constants`]). The Jackals' energy
+/// shields and the Covenant field generators' (one shader built alike):
+/// stage 0's blue, the first coloured stage, which tinted their light blue
+/// whatever the Jackal, only weighs two noise maps against each other; the
+/// colour drawn is stage 3's, change colour C (a Jackal's blue, a major's
+/// orange, a generator's violet) mixed toward red by function A, the shield
+/// hit a moment ago, fading back over a second or two (play feedback of 19
+/// November 2026: "orange jackal shields emit blue light"). Only this
+/// form: on the campaign's maps 16 other lit glowing shaders have a change
+/// colour stage (holograms, consoles, the powerups, b40's door blinkers
+/// aside), whose combiners multiply it into a map or a stage before, and
+/// keep their light as it was.
+fn colour_following_stage(
+    stages: &[shader::StageColorAnimation],
+    program: Option<&halo_map::combiner::CombinerProgram>,
+) -> Option<(shader::StageColorAnimation, [f32; 3])> {
+    let program = program?;
+    let (index, stage) = stages.iter().enumerate().find(|(_, stage)| (1..=4).contains(&stage.source))?;
+    (index < program.stage_count && stage_mixes_constants(program.rgb_inputs[index], program.rgb_outputs[index])).then(|| {
+        let [r, g, b, _] = program.constant1[index];
+        (*stage, [r, g, b])
+    })
 }
 
 /// Whether a shader's emitter lights both ways (see [`EMITTERS_BOTH_WAYS`]).
@@ -1173,6 +1400,16 @@ pub struct LevelBuilder {
     pub stats: LevelStats,
 }
 
+/// One of a BSP's water surfaces, for its skirt ([`WATER_SKIRTS`]).
+struct SeaPart {
+    /// its vertices' mean height (world units)
+    height: f32,
+    surface: Surface,
+    uv_scale: [f32; 2],
+    vertices: Vec<SourceVertex>,
+    indices: Vec<u32>,
+}
+
 /// One vertex in Halo's convention, as BSPs and models both provide.
 #[derive(Clone, Copy)]
 struct SourceVertex {
@@ -1273,6 +1510,8 @@ impl LevelBuilder {
                 .spawn((Name::new(reference.name.clone()), Transform::default(), Visibility::default()))
                 .id();
             self.adopt(commands, level);
+            // (its water surfaces, for a skirt: see WATER_SKIRTS)
+            let mut seas: Vec<SeaPart> = Vec::new();
             for (material_index, material) in loaded.materials()?.into_iter().enumerate() {
                 if material.indices.is_empty() {
                     continue;
@@ -1288,6 +1527,19 @@ impl LevelBuilder {
                 if material.shader.group == halo_map::fourcc(b"swat") && !material.vertices.is_empty() {
                     let height = material.vertices.iter().map(|v| v.position[2]).sum::<f32>() / material.vertices.len() as f32;
                     self.water_heights.push(height);
+                    if matches!(surface, Surface::Blended(_)) {
+                        seas.push(SeaPart {
+                            height,
+                            surface: surface.clone(),
+                            uv_scale: shader.uv_scale,
+                            vertices: material
+                                .vertices
+                                .iter()
+                                .map(|v| SourceVertex { position: v.position, normal: v.normal, binormal: v.binormal, tangent: v.tangent, texcoord: v.texcoord })
+                                .collect(),
+                            indices: material.indices.clone(),
+                        });
+                    }
                 }
                 let vertices = material.vertices.iter().map(|v| SourceVertex {
                     position: v.position,
@@ -1437,6 +1689,8 @@ impl LevelBuilder {
                     }
                 }
             }
+            // (and its sea run out to the horizon: see WATER_SKIRTS)
+            self.spawn_water_skirt(commands, assets, reference.index, level, seas, raster);
             // (and the light strips added to it: see ADDED_LIGHT_STRIPS)
             let gain = std::env::var("HALO_RT_ADDED_STRIPS").ok().and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(1.0);
             let map_name = self.stats.map_name.clone();
@@ -1488,6 +1742,60 @@ impl LevelBuilder {
         }
         self.stats.texture_failures = self.textures.failures;
         Ok(())
+    }
+
+    /// A BSP's sea continued outward to the horizon, for a level in
+    /// [`water_skirts`]: the outer outline of its water (the surfaces at the
+    /// height of its largest) extruded to the table's radius, one more mesh
+    /// with the water's own material, the BSP's child beside it, so that the
+    /// sky's water past its edge no longer shows under the horizon.
+    fn spawn_water_skirt(&mut self, commands: &mut Commands, assets: &mut LevelAssets, bsp: usize, level: Entity, seas: Vec<SeaPart>, raster: bool) {
+        let Some(&(_, radius)) = water_skirts().iter().find(|(map, _)| map.eq_ignore_ascii_case(&self.stats.map_name)) else { return };
+        let Some(largest) = seas.iter().max_by_key(|sea| sea.indices.len()) else { return };
+        let (height, surface, uv_scale) = (largest.height, largest.surface.clone(), largest.uv_scale);
+        // (the sea: the water surfaces at its height, flat)
+        let mut vertices: Vec<SourceVertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for sea in seas.iter().filter(|sea| (sea.height - height).abs() < WATER_SKIRT_HEIGHT_TOLERANCE) {
+            if sea.vertices.iter().any(|v| (v.position[2] - height).abs() >= WATER_SKIRT_HEIGHT_TOLERANCE) {
+                continue;
+            }
+            let base = vertices.len() as u32;
+            vertices.extend(sea.vertices.iter().copied());
+            indices.extend(sea.indices.iter().map(|i| i + base));
+        }
+        let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
+        let texcoords: Vec<[f32; 2]> = vertices.iter().map(|v| v.texcoord).collect();
+        let map = self.stats.map_name.clone();
+        let Some(outline) = outer_outline(&positions, &indices) else {
+            warn!("water skirt: {map} BSP {bsp}: its water's outline is not closed; none");
+            return;
+        };
+        let centre = outline.iter().fold(Vec2::ZERO, |sum, p| sum + Vec2::new(p[0], p[1])) / outline.len() as f32;
+        let Some((skirt, skirt_indices)) = water_skirt(&outline, centre.into(), radius / METERS_PER_WORLD_UNIT, WATER_SKIRT_PIECE_ANGLE) else {
+            warn!("water skirt: {map} BSP {bsp}: its water's outline ({} edges) is not seen whole from its centre, or reaches {radius} m; none", outline.len());
+            return;
+        };
+        // (its texture coordinates continued from the water's, which the
+        // game maps from the plane: b30's to a millionth)
+        let Some((uv, miss)) = fit_texcoords(&positions, &texcoords) else { return };
+        // (its tangent frame the water's, its normal straight up)
+        let mean = |f: fn(&SourceVertex) -> [f32; 3]| vertices.iter().fold(Vec3::ZERO, |sum, v| sum + Vec3::from(f(v))).normalize_or_zero();
+        let (tangent, binormal) = (mean(|v| v.tangent).to_array(), mean(|v| v.binormal).to_array());
+        let skirt_vertices = skirt.iter().map(|&position| SourceVertex {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            binormal,
+            tangent,
+            texcoord: [0, 1].map(|k| uv[k][0] * position[0] + uv[k][1] * position[1] + uv[k][2]),
+        });
+        let mesh = assets.meshes.add(build_mesh(skirt_vertices, &skirt_indices, uv_scale));
+        info!(
+            "water skirt: {map} BSP {bsp}, {} outline edges in {} pieces, out to {radius} m (texture coordinates fitted within {miss:.1e})",
+            outline.len(),
+            skirt.len() / 2
+        );
+        self.spawn_mesh(commands, level, format!("BSP {bsp} water skirt"), mesh, &surface, raster);
     }
 
     /// Spawns the objects the game would create in the loaded BSPs; with
@@ -1789,7 +2097,7 @@ impl LevelBuilder {
         // (a black card, an invisible light: whole, unless asked; the
         // image the handle below is made of, permutation % count)
         if std::env::var("HALO_RT_EMITTER_MAPS_BLACK").map_or(true, |v| v.trim() != "1") {
-            let peak = self.textures.luminance(&self.cache, datum, self.permutation)?.peak;
+            let peak = self.card_peak(datum)?;
             if peak < EMITTER_MAP_BLACK {
                 if std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
                     info!("emitter map {}: its card is black (peak {peak:.4}), the whole surface emits", info.name);
@@ -1798,6 +2106,21 @@ impl LevelBuilder {
             }
         }
         Some((datum, self.textures.permuted(&self.cache, datum, self.permutation, true, assets.images)?))
+    }
+
+    /// A light card's brightest texel (linear luminance) in its map, the
+    /// first stage's (see [`EMITTER_MAP_BLACK`]).
+    fn card_peak(&mut self, datum: u32) -> Option<f32> {
+        Some(self.textures.luminance(&self.cache, datum, self.permutation)?.peak)
+    }
+
+    /// Whether a light card is hidden, its first stage map black (see
+    /// [`EMITTER_MAP_BLACK`], the test [`LevelBuilder::emitter_map`] makes,
+    /// whatever `HALO_RT_EMITTER_MAPS*` say); not with no first map or none
+    /// to be read (see [`CARD_LIGHT`]).
+    fn hidden_card(&mut self, info: &ShaderInfo) -> bool {
+        let datum = info.transparent.as_ref().and_then(|transparent| transparent.maps.first()?.as_ref()?.bitmap.datum);
+        datum.and_then(|datum| self.card_peak(datum)).is_some_and(|peak| peak < EMITTER_MAP_BLACK)
     }
 
     /// Weighs the light of the emitters patterned by their cards (see
@@ -1865,6 +2188,51 @@ impl LevelBuilder {
     /// A glowing see-through surface's light, if its shader is one (see
     /// [`GLOW_LIGHT`]).
     fn glow_radiance(&mut self, info: &ShaderInfo) -> Option<Vec3> {
+        let (mean, light, tint) = self.glow_light(info)?;
+        let radiance = light * tint;
+        // (or its light at full colour, one that follows its object: see
+        // GLOWS_FOLLOWING_OBJECT)
+        let radiance = followed_glow(&info.name).unwrap_or(radiance);
+        // (HALO_RT_GLOW_LOG: each, in the log, and whether a moving object's
+        // takes its object's colour: see colour_following_stage)
+        if std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+            let follows = self.colour_following(info).map_or_else(String::new, |(stage, mix)| {
+                format!(", on an object its light {light:.3} times its change colour {} mixed toward {mix:?} by its function", stage.source)
+            });
+            info!("glowing surface {}: mean {mean:.4}, radiance {radiance:.3}{follows}", info.name);
+        }
+        (radiance.max_element() > 1e-3).then_some(radiance)
+    }
+
+    /// The stage and mix colour a glowing surface's light follows on a
+    /// moving object, if it takes its object's change colour (see
+    /// [`colour_following_stage`]): not one whose light follows its object
+    /// by [`GLOWS_FOLLOWING_OBJECT`], a radiosity emitter or one restyled
+    /// by [`EMITTER_LOOKS`].
+    fn colour_following(&self, info: &ShaderInfo) -> Option<(shader::StageColorAnimation, [f32; 3])> {
+        let emits = info.emitted_power > 0.0 && info.emitted_light != [0.0; 3];
+        if !glow_follows_color() || emits || followed_glow(&info.name).is_some() || emitter_look(&info.name).is_some() {
+            return None;
+        }
+        let transparent = info.transparent.as_ref()?;
+        let program = halo_map::combiner::program(&self.cache, TagRef { group: 0, datum: Some(info.datum) }).ok().flatten();
+        colour_following_stage(&transparent.stage_colors, program.as_ref())
+    }
+
+    /// A glowing see-through surface's light on a moving object, following
+    /// its object's change colour (see [`colour_following_stage`]): its
+    /// light without the still tint, a Jackal's blue shield's as bright in
+    /// blue as before (its change colour's blue is whole), times the colour
+    /// as the object has it now.
+    fn colour_following_glow(&mut self, info: &ShaderInfo) -> Option<IlluminationAnimation> {
+        let (stage, mix) = self.colour_following(info)?;
+        let (_, radiance, _) = self.glow_light(info)?;
+        (radiance.max_element() > 1e-3).then_some(IlluminationAnimation::Glow { stage, radiance, mix: Some(mix) })
+    }
+
+    /// A glowing see-through surface's map's mean, its light before its
+    /// tint and the tint (see [`LevelBuilder::glow_radiance`]).
+    fn glow_light(&mut self, info: &ShaderInfo) -> Option<(Vec3, Vec3, Vec3)> {
         use shader::{BlendFunction, TransparentInfo};
         let scale = std::env::var("HALO_RT_GLOW_LIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(GLOW_LIGHT);
         let transparent = info.transparent.as_ref()?;
@@ -1892,15 +2260,7 @@ impl LevelBuilder {
             .map(|stage| Vec3::new(stage.color1[0], stage.color1[1], stage.color1[2]).max(Vec3::new(stage.color0[0], stage.color0[1], stage.color0[2])))
             .find(|color| color.max_element() > 0.0)
             .map_or(Vec3::ONE, |color| color / color.max_element());
-        let radiance = (mean * SELF_ILLUMINATION_RADIANCE * scale).min(Vec3::splat(GLOW_MOST)) * tint;
-        // (or its light at full colour, one that follows its object: see
-        // GLOWS_FOLLOWING_OBJECT)
-        let radiance = followed_glow(&info.name).unwrap_or(radiance);
-        // (HALO_RT_GLOW_LOG: each, in the log)
-        if std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
-            info!("glowing surface {}: mean {mean:.4}, radiance {radiance:.3}", info.name);
-        }
-        (radiance.max_element() > 1e-3).then_some(radiance)
+        Some((mean, (mean * SELF_ILLUMINATION_RADIANCE * scale).min(Vec3::splat(GLOW_MOST)), tint))
     }
 
     /// A light fixture's light: a point light just in front of it, as
@@ -2526,13 +2886,17 @@ impl LevelBuilder {
                         assets.transparent_materials.add(copy)
                     });
                 // (its light: a copy of the rays' material, whose emissive
-                // animate_self_illumination sets by the object's colours)
+                // animate_self_illumination sets by the object's colours;
+                // one listed in GLOWS_FOLLOWING_OBJECT, or one coloured by
+                // its object's change colour, colour_following_stage)
                 let info = shader::shader_info(&builder.cache, TagRef { group: 0, datum: Some(shader.datum) }).ok().flatten();
-                let glow = info.as_ref().and_then(|info| {
-                    Some(IlluminationAnimation::Glow {
-                        radiance: followed_glow(&info.name)?,
+                let glow = info.as_ref().and_then(|info| match followed_glow(&info.name) {
+                    Some(radiance) => Some(IlluminationAnimation::Glow {
+                        radiance,
                         stage: first_coloured_stage(&info.transparent.as_ref()?.stage_colors)?,
-                    })
+                        mix: None,
+                    }),
+                    None => builder.colour_following_glow(info),
                 });
                 let standard = glow.and_then(|glow| {
                     let material = assets.materials.get(&solid.standard)?.clone();
@@ -3263,7 +3627,22 @@ impl LevelBuilder {
         }
         // (a transparent radiosity emitter's light in its card's own pattern:
         // see emitter_map)
-        let emitter_map = if emits && glow.is_none() && info.shader_type.is_transparent() { self.emitter_map(info, assets) } else { None };
+        let card = emits && glow.is_none() && info.shader_type.is_transparent();
+        let emitter_map = if card { self.emitter_map(info, assets) } else { None };
+        // (a light card's light at its level's share, visible or hidden: see
+        // CARD_LIGHT; before weigh_emitter_maps' gain, which multiplies it)
+        let radiance = if card {
+            let (cards, hidden_cards) = card_light(&self.stats.map_name);
+            // (the card's map looked at only for a level with a share)
+            let hidden = (cards != 1.0 || hidden_cards != 1.0) && self.hidden_card(info);
+            let share = if hidden { hidden_cards } else { cards };
+            if share != 1.0 && std::env::var_os("HALO_RT_GLOW_LOG").is_some() {
+                info!("light card {}: {}, its light at {share}", info.name, if hidden { "hidden" } else { "visible" });
+            }
+            radiance * share
+        } else {
+            radiance
+        };
         let self_illumination = info.self_illumination.and_then(|si| match si {
             shader::SelfIllumination::Model { multipurpose_map, color_upper, .. } => {
                 let bake = crate::textures::Bake::ModelSelfIllumination {
@@ -3390,8 +3769,9 @@ impl LevelBuilder {
             }
             // (a model's detail map: the camera's; the rays keep the base)
             // (and the plain coats', with no detail, for its G-buffer flag:
-            // the human eyes', the Hunters' worms')
-            (None, Some(base_map)) if info.model_detail.is_some() || plain_coat(&info.name) => {
+            // the human eyes', the Hunters' worms'; and the sharp coats':
+            // the Elites' armour)
+            (None, Some(base_map)) if info.model_detail.is_some() || plain_coat(&info.name) || sharp_coat(&info.name) => {
                 self.model_detail_material(base_map.clone(), &material, info, assets)
             }
             _ => None,
@@ -3481,7 +3861,8 @@ impl LevelBuilder {
                         0,
                         crate::material::MODEL_DETAIL
                             | if pearl_coat(&info.name) { crate::material::PEARL_COAT } else { 0 }
-                            | if plain_coat(&info.name) { crate::material::PLAIN_COAT } else { 0 },
+                            | if plain_coat(&info.name) { crate::material::PLAIN_COAT } else { 0 }
+                            | if sharp_coat(&info.name) { crate::material::SHARP_COAT } else { 0 },
                     ),
                     ..default()
                 },
@@ -3669,6 +4050,16 @@ impl LevelBuilder {
             BlendFunction::ComponentMin => 5,
             BlendFunction::ComponentMax => 6,
             BlendFunction::AlphaMultiplyAdd => 7,
+        };
+        // (a backed hologram's add, backed and raised where its pattern is:
+        // BACKED_HOLOGRAMS)
+        let hologram = if sky { None } else { backed_hologram(&info.name) };
+        let blend = match hologram {
+            Some(hologram) if hologram_blend(blend, hologram.share, hologram.gain) == 11 => {
+                params.hologram = Vec4::new(hologram.share, hologram.gain, hologram.pattern[0], hologram.pattern[1]);
+                11
+            }
+            _ => blend,
         };
         params.modes = UVec4::new(blend, present, transparent.flags as u32, transparent.fade_mode.clamp(0, 2) as u32);
         // (HALO_RT_TRANSPARENT_DEBUG=1: each in magenta, to see where they are)
@@ -4147,6 +4538,19 @@ fn plain_coat(shader: &str) -> bool {
 /// main.rs's `PEARL_FILM`): Chief's armour.
 fn pearl_coat(shader: &str) -> bool {
     CHIEF_ARMOUR.iter().any(|name| shader.eq_ignore_ascii_case(name))
+}
+
+/// Whether a shader's coat is a thin film whose lobe takes Solarik's sharp
+/// rule for very smooth lobes (the G-buffer's two coat bits both,
+/// `crate::material::SHARP_COAT`): the Elites' armour, with its coat (not
+/// the Covenant vehicles', which share its numbers, nor Chief's, whose
+/// armour went chrome with it). The user on 18 November 2026: "apply the
+/// sharp reflections to elite coatings without affecting chief's".
+/// `HALO_RT_ELITE_SHARP_COAT=0` the old (the coat's lobe as any other's).
+/// Read once.
+fn sharp_coat(shader: &str) -> bool {
+    static OFF: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("HALO_RT_ELITE_SHARP_COAT").is_ok_and(|v| v.trim() == "0"));
+    !*OFF && elite_armour(shader) && clear_coat(shader).is_some()
 }
 
 /// A tuning colour for the Elites' or Chief's armour, in place of an
@@ -4720,6 +5124,215 @@ fn card_under(card: &LuminanceGrid, corners: [Vec2; 3]) -> (f32, f32) {
     (sum / count.max(1) as f32, most)
 }
 
+/// The levels whose sea runs out to the horizon (metres): the BSP's water
+/// ends a few kilometres out (b30's an octagon 1200 world units, 3.7 km,
+/// from its centre), and past it the sky's own water showed, bright and
+/// unfogged, a white band between the fogged sea and the sky under the
+/// horizon (the game's too). A skirt continues the level's water outward to
+/// this radius, its last gap under the horizon the camera's height over this
+/// (from 3 m over the water, 4·10⁻⁵ of a radian: a tenth of a pixel at 1440
+/// lines). The rays reach 100 km (SolarikRaySettings), so every point of it
+/// is in reach from anywhere on the island; the pane's sky mask is at a fixed
+/// depth (GLASS_SKY_MASK_DISTANCE) whatever its distance. Other levels'
+/// water is bounded by land.
+const WATER_SKIRTS: [(&str, f32); 1] = [("b30", 80_000.0)];
+
+/// The skirt's pieces: each outline edge cut so that none spans more than
+/// this angle from the water's centre (radians), so that its far edge, a
+/// chord, stays near the circle (at 2°, within 1.5·10⁻⁴ of the radius).
+const WATER_SKIRT_PIECE_ANGLE: f32 = 2.0 * std::f32::consts::PI / 180.0;
+
+/// How near each other a level's water surfaces' heights are to be one sea
+/// (world units).
+const WATER_SKIRT_HEIGHT_TOLERANCE: f32 = 0.1;
+
+/// The water skirts' table (map, radius in metres): [`WATER_SKIRTS`], or
+/// `HALO_RT_WATER_SKIRT`: `0` none, the old; `<map>:<metres>[,...]` a table
+/// of its own (a radius tried, or another map's sea).
+fn water_skirts() -> &'static [(String, f32)] {
+    static SKIRTS: std::sync::OnceLock<Vec<(String, f32)>> = std::sync::OnceLock::new();
+    SKIRTS.get_or_init(|| parse_water_skirts(std::env::var("HALO_RT_WATER_SKIRT").ok().as_deref()))
+}
+
+fn parse_water_skirts(text: Option<&str>) -> Vec<(String, f32)> {
+    match text.map(str::trim) {
+        None | Some("") => WATER_SKIRTS.iter().map(|(map, radius)| (map.to_string(), *radius)).collect(),
+        Some("0") => Vec::new(),
+        Some(text) => text
+            .split(',')
+            .filter_map(|entry| {
+                let (map, radius) = entry.split_once(':')?;
+                let radius = radius.trim().parse::<f32>().ok().filter(|r| *r > 0.0 && r.is_finite())?;
+                Some((map.trim().to_string(), radius))
+            })
+            .collect(),
+    }
+}
+
+/// A flat mesh's outer outline: its boundary edges (each of one triangle,
+/// the vertices welded by position, a BSP's being split by material),
+/// chained into loops in the direction its triangles run them, and of those
+/// the one round the largest area (not an island's shore, nor a hole). None
+/// if the edges do not close into a loop.
+fn outer_outline(positions: &[[f32; 3]], indices: &[u32]) -> Option<Vec<[f32; 3]>> {
+    // (welded to a thousandth of a world unit)
+    let key = |p: [f32; 3]| p.map(|c| (c * 1000.0).round() as i64);
+    let mut welded: HashMap<[i64; 3], u32> = HashMap::default();
+    let mut points: Vec<[f32; 3]> = Vec::new();
+    let ids: Vec<u32> = positions
+        .iter()
+        .map(|p| {
+            *welded.entry(key(*p)).or_insert_with(|| {
+                points.push(*p);
+                points.len() as u32 - 1
+            })
+        })
+        .collect();
+    let mut uses: HashMap<(u32, u32), u32> = HashMap::default();
+    let mut directed = Vec::new();
+    for t in indices.chunks_exact(3) {
+        let Some(v) = t.iter().map(|i| ids.get(*i as usize).copied()).collect::<Option<Vec<u32>>>() else { continue };
+        if v[0] == v[1] || v[1] == v[2] || v[0] == v[2] {
+            continue;
+        }
+        for k in 0..3 {
+            let (a, b) = (v[k], v[(k + 1) % 3]);
+            *uses.entry((a.min(b), a.max(b))).or_default() += 1;
+            directed.push((a, b));
+        }
+    }
+    let boundary: Vec<(u32, u32)> = directed.into_iter().filter(|(a, b)| uses[&((*a).min(*b), (*a).max(*b))] == 1).collect();
+    let mut next: HashMap<u32, Vec<u32>> = HashMap::default();
+    for &(a, b) in &boundary {
+        next.entry(a).or_default().push(b);
+    }
+    let mut used: HashSet<(u32, u32)> = HashSet::default();
+    let mut best: Option<(f32, Vec<u32>)> = None;
+    for &(start, first) in &boundary {
+        if used.contains(&(start, first)) {
+            continue;
+        }
+        let mut chain = vec![start];
+        let (mut from, mut to) = (start, first);
+        let closed = loop {
+            used.insert((from, to));
+            if to == start {
+                break true;
+            }
+            chain.push(to);
+            from = to;
+            match next.get(&from).and_then(|out| out.iter().copied().find(|n| !used.contains(&(from, *n)))) {
+                Some(n) => to = n,
+                None => break false,
+            }
+        };
+        if !closed {
+            return None;
+        }
+        let area = (0..chain.len())
+            .map(|k| {
+                let (p, q) = (points[chain[k] as usize], points[chain[(k + 1) % chain.len()] as usize]);
+                p[0] * q[1] - q[0] * p[1]
+            })
+            .sum::<f32>()
+            .abs();
+        if best.as_ref().is_none_or(|(most, _)| area > *most) {
+            best = Some((area, chain));
+        }
+    }
+    best.map(|(_, chain)| chain.into_iter().map(|i| points[i as usize]).collect())
+}
+
+/// The skirt round a sea's outline (from [`outer_outline`], in its
+/// direction): each edge cut into pieces of at most `piece_angle` from
+/// `centre`, and each piece extruded straight out from the centre to
+/// `radius`, at the outline's heights; its triangles wound as the sea's
+/// beside them (each outline edge run back, the far side beyond it). None
+/// where the outline is not seen whole from the centre (an edge turning
+/// back, whose pieces would fold over one another), or reaches the radius.
+fn water_skirt(outline: &[[f32; 3]], centre: [f32; 2], radius: f32, piece_angle: f32) -> Option<(Vec<[f32; 3]>, Vec<u32>)> {
+    if outline.len() < 3 {
+        return None;
+    }
+    let from_centre = |p: [f32; 3]| Vec2::new(p[0] - centre[0], p[1] - centre[1]);
+    let mut turn = 0.0f32;
+    for k in 0..outline.len() {
+        let (a, b) = (from_centre(outline[k]), from_centre(outline[(k + 1) % outline.len()]));
+        let cross = a.perp_dot(b);
+        if a.length() >= radius || cross == 0.0 || cross * turn < 0.0 {
+            return None;
+        }
+        turn = cross.signum();
+    }
+    // (inner points, then far, two vertices each)
+    let mut positions = Vec::new();
+    for k in 0..outline.len() {
+        let (a, b) = (outline[k], outline[(k + 1) % outline.len()]);
+        let angle = from_centre(a).angle_to(from_centre(b)).abs();
+        let pieces = (angle / piece_angle).ceil().max(1.0) as usize;
+        for piece in 0..pieces {
+            let t = piece as f32 / pieces as f32;
+            let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+            let out = from_centre(p).normalize() * radius;
+            positions.push(p);
+            positions.push([centre[0] + out.x, centre[1] + out.y, p[2]]);
+        }
+    }
+    let count = positions.len() as u32 / 2;
+    let mut indices = Vec::with_capacity(count as usize * 6);
+    for k in 0..count {
+        let (a, a_far) = (2 * k, 2 * k + 1);
+        let (b, b_far) = (2 * ((k + 1) % count), 2 * ((k + 1) % count) + 1);
+        indices.extend([b, a, a_far, b, a_far, b_far]);
+    }
+    Some((positions, indices))
+}
+
+/// The affine map from a flat mesh's (x, y) to its texture coordinates, by
+/// least squares: u's (x, y, 1) then v's, and the largest miss over its
+/// vertices.
+fn fit_texcoords(positions: &[[f32; 3]], texcoords: &[[f32; 2]]) -> Option<([[f32; 3]; 2], f32)> {
+    let mut normal = [[0.0f64; 3]; 3];
+    let mut right = [[0.0f64; 3]; 2];
+    for (p, t) in positions.iter().zip(texcoords) {
+        let row = [f64::from(p[0]), f64::from(p[1]), 1.0];
+        for i in 0..3 {
+            for j in 0..3 {
+                normal[i][j] += row[i] * row[j];
+            }
+            for (k, side) in right.iter_mut().enumerate() {
+                side[i] += row[i] * f64::from(t[k]);
+            }
+        }
+    }
+    let det = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let whole = det(normal);
+    if whole.abs() < 1e-12 {
+        return None;
+    }
+    // (Cramer's rule)
+    let solve = |side: [f64; 3]| {
+        std::array::from_fn::<f64, 3, _>(|column| {
+            let mut m = normal;
+            for (row, value) in m.iter_mut().zip(side) {
+                row[column] = value;
+            }
+            det(m) / whole
+        })
+    };
+    let (u, v) = (solve(right[0]), solve(right[1]));
+    let at = |map: [f64; 3], p: [f32; 3]| map[0] * f64::from(p[0]) + map[1] * f64::from(p[1]) + map[2];
+    let miss = positions
+        .iter()
+        .zip(texcoords)
+        .map(|(p, t)| (at(u, *p) - f64::from(t[0])).abs().max((at(v, *p) - f64::from(t[1])).abs()))
+        .fold(0.0, f64::max);
+    Some(([u.map(|c| c as f32), v.map(|c| c as f32)], miss as f32))
+}
+
 /// Halo triangles as a Solari-compatible mesh: positions, normals, UV0 and
 /// tangents, u32 indices, no UV1.
 fn build_mesh(vertices: impl Iterator<Item = SourceVertex>, indices: &[u32], uv_scale: [f32; 2]) -> Mesh {
@@ -4788,6 +5401,77 @@ mod tests {
     use super::*;
     use halo_map::objects::ObjectKind;
 
+    /// A square sea round a square island, as two loops of boundary edges,
+    /// its vertices split at a seam as a BSP's are by material: the outline
+    /// is the outer square, in the direction its triangles run it.
+    fn square_sea() -> (Vec<[f32; 3]>, Vec<u32>) {
+        let ring = |r: f32| [[-r, -r, 0.0], [r, -r, 0.0], [r, r, 0.0], [-r, r, 0.0]];
+        let (outer, inner) = (ring(10.0), ring(2.0));
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        // (each side's quad its own four vertices: welded by position)
+        for k in 0..4 {
+            let base = positions.len() as u32;
+            positions.extend([outer[k], outer[(k + 1) % 4], inner[(k + 1) % 4], inner[k]]);
+            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        (positions, indices)
+    }
+
+    /// A triangle's turn seen from above (twice its signed area).
+    fn turn(positions: &[[f32; 3]], t: &[u32]) -> f32 {
+        let [a, b, c] = [t[0], t[1], t[2]].map(|i| Vec2::new(positions[i as usize][0], positions[i as usize][1]));
+        (b - a).perp_dot(c - a)
+    }
+
+    #[test]
+    fn water_outline_is_the_outer_loop() {
+        let (positions, indices) = square_sea();
+        let outline = outer_outline(&positions, &indices).unwrap();
+        assert_eq!(outline.len(), 4);
+        assert!(outline.iter().all(|p| p[0].abs() == 10.0 && p[1].abs() == 10.0));
+        // (run as the triangles run it: the first triangle's first edge)
+        let start = outline.iter().position(|p| *p == [-10.0, -10.0, 0.0]).unwrap();
+        assert_eq!(outline[(start + 1) % 4], [10.0, -10.0, 0.0]);
+        // (one side gone: the sea a C, its outline the one loop round it all)
+        assert_eq!(outer_outline(&positions, &indices[..indices.len() - 6]).map(|o| o.len()), Some(8));
+    }
+
+    #[test]
+    fn water_skirt_reaches_the_radius_wound_as_the_sea() {
+        let (positions, indices) = square_sea();
+        let outline = outer_outline(&positions, &indices).unwrap();
+        let (skirt, skirt_indices) = water_skirt(&outline, [0.0, 0.0], 1000.0, 10f32.to_radians()).unwrap();
+        // (each side 90 degrees from the centre: nine pieces, two triangles each)
+        assert_eq!(skirt.len(), 4 * 9 * 2);
+        assert_eq!(skirt_indices.len(), 4 * 9 * 6);
+        for pair in skirt.chunks_exact(2) {
+            let (inner, far) = (Vec2::new(pair[0][0], pair[0][1]), Vec2::new(pair[1][0], pair[1][1]));
+            assert!((far.length() - 1000.0).abs() < 1e-2);
+            assert!(inner.normalize().abs_diff_eq(far.normalize(), 1e-5));
+            assert!(inner.x.abs().max(inner.y.abs()) == 10.0);
+        }
+        // (every triangle turned the sea's way, none folded)
+        let sea = turn(&positions, &indices[..3]).signum();
+        assert!(skirt_indices.chunks_exact(3).all(|t| turn(&skirt, t) * sea > 0.0));
+        // (an outline that turns back from the centre, or reaches the radius: none)
+        let notched = [[-10.0, -10.0, 0.0], [10.0, -10.0, 0.0], [10.0, 10.0, 0.0], [0.0, -5.0, 0.0], [-10.0, 10.0, 0.0]];
+        assert!(water_skirt(&notched, [0.0, 0.0], 1000.0, 0.1).is_none());
+        assert!(water_skirt(&outline, [0.0, 0.0], 12.0, 0.1).is_none());
+    }
+
+    #[test]
+    fn water_texcoords_fit_and_skirt_switch() {
+        let positions = [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [0.0, 100.0, 0.0], [50.0, 70.0, 0.0]];
+        let texcoords = positions.map(|p| [0.004 * p[0] + 0.5, -0.004 * p[1] + 0.5]);
+        let (uv, miss) = fit_texcoords(&positions, &texcoords).unwrap();
+        assert!(miss < 1e-5);
+        assert!((uv[0][0] - 0.004).abs() < 1e-7 && (uv[1][1] + 0.004).abs() < 1e-7 && (uv[0][2] - 0.5).abs() < 1e-6);
+        assert_eq!(parse_water_skirts(None), vec![("b30".to_string(), 80_000.0)]);
+        assert!(parse_water_skirts(Some("0")).is_empty());
+        assert_eq!(parse_water_skirts(Some("b30:60000, a10:5000")), vec![("b30".to_string(), 60_000.0), ("a10".to_string(), 5_000.0)]);
+    }
+
     fn placement(rotation: [f32; 3]) -> Placement {
         Placement {
             kind: ObjectKind::Scenery,
@@ -4812,5 +5496,151 @@ mod tests {
         assert!(forward.abs_diff_eq(Vec3::NEG_Z, 1e-5), "{forward}");
         // up stays up
         assert!((t.rotation * Vec3::Y).abs_diff_eq(Vec3::Y, 1e-5));
+    }
+
+    #[test]
+    fn card_light_parses_and_matches() {
+        let tuned = parse_card_light(" C20 : 0.5 : 0.25 ,c10:0.8,bad,:1,a50:x,b30:1:2:3,d40:-1,,b40:0.7:inf");
+        assert_eq!(tuned, vec![("c20".to_string(), 0.5, 0.25), ("c10".to_string(), 0.8, 0.8), ("d40".to_string(), 0.0, 0.0)]);
+        // (the variable's first, then the table's, then the whole light)
+        assert_eq!(card_light_in(&tuned, "c20"), (0.5, 0.25));
+        assert_eq!(card_light_in(&tuned, "C10"), (0.8, 0.8));
+        assert_eq!(card_light_in(&[], "c20"), (CARD_LIGHT[0].1, CARD_LIGHT[0].2));
+        assert_eq!(card_light_in(&[], "b40"), (1.0, 1.0));
+        // (c20:1, the old)
+        assert_eq!(card_light_in(&parse_card_light("c20:1"), "c20"), (1.0, 1.0));
+    }
+
+    #[test]
+    fn sharp_coat_is_the_elites_armour_alone() {
+        // (the Elites' armour; never Chief's, the plain coats' nor the
+        // Covenant vehicles', which share the Elites' coat numbers)
+        for name in ELITE_ARMOUR.iter().chain([&ELITE_SPECIAL_ARMOUR]) {
+            assert!(!pearl_coat(name) && !plain_coat(name), "{name}");
+        }
+        for name in CHIEF_ARMOUR {
+            assert!(!sharp_coat(name), "{name}");
+        }
+        assert!(!sharp_coat("characters\\hunter\\shaders\\hunter torso"));
+        assert!(!sharp_coat("characters\\captain\\shaders\\captain_eyes"));
+        assert!(!sharp_coat("vehicles\\banshee\\shaders\\banshee"));
+        // (unless switched off or the coat is)
+        if std::env::var_os("HALO_RT_ELITE_SHARP_COAT").is_none() && std::env::var_os("HALO_RT_ELITE_COAT").is_none() {
+            assert!(sharp_coat("characters\\elite\\shaders\\elite torso"));
+            assert!(sharp_coat("CHARACTERS\\elite\\elite_special\\shaders\\elite special body"));
+        }
+    }
+
+    #[test]
+    fn hologram_backing_by_shader() {
+        // (the table's, unless a switch is set)
+        if ["HALO_RT_HOLOGRAM_BACKING", "HALO_RT_HOLOGRAM_GAIN", "HALO_RT_HOLOGRAM_PATTERN"].iter().all(|name| std::env::var_os(name).is_none()) {
+            let (_, share, gain, pattern) = BACKED_HOLOGRAMS[0];
+            let cortana = Some(Hologram { share, gain, pattern });
+            assert_eq!(backed_hologram("characters\\cortana\\shaders\\cortana"), cortana);
+            assert_eq!(backed_hologram("Characters\\Cortana\\shaders\\cortana hair"), cortana);
+        }
+        assert_eq!(backed_hologram("characters\\elite\\shaders\\elite torso"), None);
+        // (11 only for an add with a share or a gain; the old pipeline else)
+        assert_eq!(hologram_blend(3, 0.35, 1.5), 11);
+        assert_eq!(hologram_blend(3, 0.35, 1.0), 11);
+        assert_eq!(hologram_blend(3, 0.0, 1.5), 11);
+        assert_eq!(hologram_blend(3, 0.0, 1.0), 3);
+        assert_eq!(hologram_blend(7, 0.35, 1.5), 7);
+        assert_eq!(hologram_blend(0, 0.35, 1.5), 0);
+        // (the pattern's text: two finite numbers, each clamped to 0 to 1)
+        assert_eq!(parse_hologram_pattern(" 0.1 , 0.5 "), Some([0.1, 0.5]));
+        assert_eq!(parse_hologram_pattern("0,0"), Some([0.0, 0.0]));
+        assert_eq!(parse_hologram_pattern("2,-1"), Some([1.0, 0.0]));
+        for text in ["x", "", "0.1", "0.1,0.2,0.3", "nan,1", "0.1,inf", ","] {
+            assert_eq!(parse_hologram_pattern(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn hologram_gain_by_shader() {
+        // (the variable's text: a finite number at least 0, else the table's)
+        assert_eq!(parse_hologram_gain(" 2.5 "), Some(2.5));
+        assert_eq!(parse_hologram_gain("1"), Some(1.0));
+        assert_eq!(parse_hologram_gain("0"), Some(0.0));
+        assert_eq!(parse_hologram_gain("-1"), None);
+        assert_eq!(parse_hologram_gain("inf"), None);
+        assert_eq!(parse_hologram_gain("NaN"), None);
+        assert_eq!(parse_hologram_gain("x"), None);
+        assert_eq!(parse_hologram_gain(""), None);
+        if std::env::var_os("HALO_RT_HOLOGRAM_GAIN").is_some() {
+            return;
+        }
+        assert_eq!(backed_hologram("Characters\\Cortana\\shaders\\cortana hair").map(|hologram| hologram.gain), Some(BACKED_HOLOGRAMS[0].2));
+    }
+
+    fn stage(flags: u16, source: i16, color0: [f32; 4], color1: [f32; 4]) -> shader::StageColorAnimation {
+        shader::StageColorAnimation { flags, source, function: 0, period: 1.0, color0, color1 }
+    }
+
+    /// The Jackals' shield's stages and their combiner words (b30's
+    /// `characters\jackal\shaders\jackal shield`, the field generators'
+    /// alike): stage 0 blue, by function A; stage 3 change colour C, its
+    /// alpha function A, mixed toward its constant colour 1, red.
+    fn jackal_shield() -> (Vec<shader::StageColorAnimation>, halo_map::combiner::CombinerProgram) {
+        let none = stage(0, 0, [0.0; 4], [0.0; 4]);
+        let stages = vec![
+            stage(4, 0, [0.0, 0.0, 0.35, 0.25], [0.0, 0.0, 1.0, 1.0]),
+            none,
+            none,
+            stage(6, 3, [1.0, 1.0, 1.0, 0.0], [1.0; 4]),
+            stage(2, 0, [0.0; 4], [0.0; 4]),
+            none,
+            none,
+        ];
+        let mut program = halo_map::combiner::CombinerProgram { stage_count: 7, ..Default::default() };
+        program.rgb_inputs[..7].copy_from_slice(&[0x311a_1118, 0x1ba0_3b0c, 0x0c20_bc20, 0x3101_1102, 0, 0x3b20_0000, 0x1c0b_050d]);
+        program.rgb_outputs[..7].copy_from_slice(&[0xc00, 0xc00, 0xc00, 0x500, 0, 0xd0, 0xc00]);
+        program.constant1[3] = [1.0, 0.0, 0.0, 0.0];
+        (stages, program)
+    }
+
+    #[test]
+    fn colour_following_stage_is_the_mixed_change_colour() {
+        let (stages, program) = jackal_shield();
+        // (stage 3, not stage 0, the first coloured)
+        assert_eq!(colour_following_stage(&stages, Some(&program)), Some((stages[3], [1.0, 0.0, 0.0])));
+        assert_eq!(first_coloured_stage(&stages), Some(stages[0]));
+        // (no program, nothing)
+        assert_eq!(colour_following_stage(&stages, None), None);
+        // (a combiner that doesn't mix: a50's holo control, its change
+        // colour times its map; and the mix muxed, or shifted)
+        let mut other = program.clone();
+        other.rgb_inputs[3] = 0x010c_0000;
+        assert_eq!(colour_following_stage(&stages, Some(&other)), None);
+        for outputs in [0x4500, 0x10500, 0x5c0, 0x0] {
+            other = program.clone();
+            other.rgb_outputs[3] = outputs;
+            assert_eq!(colour_following_stage(&stages, Some(&other)), None, "{outputs:#x}");
+        }
+        // (no stage coloured by the object; or past the program's stages)
+        let mut plain = stages.clone();
+        plain[3].source = 0;
+        assert_eq!(colour_following_stage(&plain, Some(&program)), None);
+        other = program.clone();
+        other.stage_count = 3;
+        assert_eq!(colour_following_stage(&stages, Some(&other)), None);
+    }
+
+    #[test]
+    fn glow_color_mixes_toward_red_by_function_a() {
+        let (stages, program) = jackal_shield();
+        let (stage, mix) = colour_following_stage(&stages, Some(&program)).unwrap();
+        let (blue, orange) = ([0.129, 0.212, 1.0], [1.0, 0.678, 0.102]);
+        let colors = |c: [f32; 3]| [[1.0; 3], [1.0; 3], c, [1.0; 3]];
+        let color = |values: [f32; 4], c| glow_color(&stage, Some(mix), Some(&values), &colors(c), 0.0, |_, _| 1.0);
+        // (not hit: change colour C)
+        assert!(color([0.0; 4], blue).abs_diff_eq(Vec3::from(blue), 1e-6));
+        assert!(color([0.0; 4], orange).abs_diff_eq(Vec3::from(orange), 1e-6));
+        // (just hit: red; half way back, between)
+        assert!(color([1.0, 0.0, 0.0, 0.0], orange).abs_diff_eq(Vec3::X, 1e-6));
+        assert!(color([0.5, 0.0, 0.0, 0.0], blue).abs_diff_eq(Vec3::new(0.5645, 0.106, 0.5), 1e-4));
+        // (without a mix, the stage's colour alone, as b40's door blinkers)
+        assert!(glow_color(&stage, None, Some(&[1.0; 4]), &colors(blue), 0.0, |_, _| 1.0).abs_diff_eq(Vec3::from(blue), 1e-6));
     }
 }

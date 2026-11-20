@@ -24,13 +24,19 @@ struct HaloCombiner {
     // x: stage count, y: combiner flags, z: final ABCD, w: final EFG
     program: vec4<u32>,
     // x: framebuffer blend function (0 alpha blend, 1 multiply, 2 double
-    // multiply, 3 add, 4 subtract, 5 min, 6 max, 7 alpha multiply add),
+    // multiply, 3 add, 4 subtract, 5 min, 6 max, 7 alpha multiply add, 11
+    // a backed hologram's add),
     // y: maps present (bit per stage), z: the transparent flags (bit 0 alpha
     // tested, 3 first map in screen space, 6 scale first map with
     // distance), w: fade mode (0 none, 1 when perpendicular, 2 when parallel)
     modes: vec4<u32>,
     // x: the fade's scale, y: 1 to show it in magenta (debugging)
     fade: vec4<f32>,
+    // a backed hologram's (blend 11, crate::level's BACKED_HOLOGRAMS): x the
+    // share of what is behind it taken away, y the gain on its picture, z
+    // and w its pattern's low and high (its picture's brightest channel; the
+    // weight 1 everywhere when w is not over z)
+    hologram: vec4<f32>,
 }
 
 // the environment fog (halo_fog.wesl's first five; crate::fog::fog_layers),
@@ -373,6 +379,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         // plasma: added by its alpha
         case 10u: { return vec4(pow(rgb, vec3(2.2)) * fog.y, alpha * fade); }
+        // a backed hologram's add: what is behind it less its share and its
+        // picture raised by its gain, both where its pattern is bright, so
+        // that where its picture is dark it is the plain add
+        case 11u: {
+            let hologram = combiners[slot.index.x].hologram;
+            let peak = max(rgb.r, max(rgb.g, rgb.b));
+            var pattern = 1.0;
+            if hologram.w > hologram.z {
+                pattern = smoothstep(hologram.z, hologram.w, peak);
+            }
+            let gain = mix(1.0, hologram.y, pattern);
+            return vec4(pow(rgb, vec3(2.2)) * fade * fog.y * gain, hologram.x * pattern * fade);
+        }
         // add, subtract, max
         default: { return vec4(pow(rgb, vec3(2.2)) * fade * fog.y, 1.0); }
     }

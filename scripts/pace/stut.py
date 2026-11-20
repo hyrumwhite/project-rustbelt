@@ -57,5 +57,5 @@ dgf = [b - a for a, b in zip(ge, ge[1:])]
 print('game: %d frames, %.1f/s; interval mean %.2f ms, sd %.2f, p1 %.2f p99 %.2f max %.2f; swap mean %.2f ms p99 %.2f; wait mean %.2f; lead mean %.2f; viewer interval (game sees) mean %.2f' % (
     len(gg), 1e6 * len(dgf) / (ge[-1] - ge[0]), st.mean(dgf) / 1e3, st.pstdev(dgf) / 1e3, pct(dgf, .01) / 1e3, pct(dgf, .99) / 1e3, max(dgf) / 1e3,
     st.mean([g['swap'] for g in gg]) / 1e3, pct([g['swap'] for g in gg], .99) / 1e3, st.mean([g['wait'] for g in gg]) / 1e3, st.mean([g['lead'] for g in gg]) / 1e3, st.mean([g['interval'] for g in gg]) / 1e3))
-foc = [int(l.split()[-1]) for l in open(os.path.join(d, 'viewer_trace.txt')) if ' focus ' in l]
+foc = [int(l.split()[l.split().index('focus') + 1]) for l in open(os.path.join(d, 'viewer_trace.txt')) if ' focus ' in l]
 if foc: print('window focused in %.0f%% of the viewer frames (last: %d)' % (100.0 * sum(foc) / len(foc), foc[-1]))

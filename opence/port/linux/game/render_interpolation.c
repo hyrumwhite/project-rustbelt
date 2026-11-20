@@ -50,6 +50,7 @@ unsigned long config_changes(void);
 void platform_log(char const *format, ...);
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -122,6 +123,10 @@ struct interpolated_object
 	boolean has_previous;
 	byte latest; /* which snapshot is the latest */
 	long blended_frame;
+	/* the node whose move made the blend drawn snap to the latest (0 the
+	root's), NONE when it was blended: the interpolation trace's
+	(render_interpolation_object_trace) */
+	short snap_node;
 	/* where it is drawn from where it is: a correction fading, and those
 	since the last tick, drawn whole until the next begins to fade them */
 	real_vector3d correction;
@@ -559,6 +564,7 @@ real_matrix4x3 *render_interpolation_object_node_matrices(long object_index)
 		boolean snap = !(distance_squared(&previous[0].position, &latest[0].position) <=
 			OBJECT_SNAP_DISTANCE * OBJECT_SNAP_DISTANCE);
 
+		record->snap_node = snap ? 0 : NONE;
 		/* a node moved further in the root's frame than a tick allows: the
 		two snapshots are different poses, not one moving (so written that
 		a position not a number snaps) */
@@ -569,6 +575,8 @@ real_matrix4x3 *render_interpolation_object_node_matrices(long object_index)
 			matrix4x3_inverse_transform_point(&previous[0], &previous[node_index].position, &previous_local);
 			matrix4x3_inverse_transform_point(&latest[0], &latest[node_index].position, &latest_local);
 			snap = !(distance_squared(&previous_local, &latest_local) <= NODE_SNAP_DISTANCE * NODE_SNAP_DISTANCE);
+			if (snap)
+				record->snap_node = node_index;
 		}
 		if (!snap)
 		{
@@ -616,6 +624,48 @@ real_matrix4x3 *render_interpolation_object_node_matrices(long object_index)
 		record->blended_frame = interpolation_frame;
 	}
 	return record->nodes + 2 * record->node_capacity;
+}
+
+/* For the interpolation trace (bevy_bridge.c, HALO_INTERPOLATION_TRACE): the
+object's node matrices drawn this frame, as the function above gives them,
+and how they were found, written into state: "blend", "snap:root" or
+"snap:node<n>" (the node that moved too far for a tick), or, where the
+function above gives none and the latest tick's pose is drawn, "none:" and
+the first of its conditions that failed ("rendering", "records", "index",
+"object" (the record another object's or none), "tick" (none taken at the
+latest tick) or "prev" (none at the tick before, or of other nodes)). */
+real_matrix4x3 *render_interpolation_object_trace(long object_index, char *state, short state_size)
+{
+	real_matrix4x3 *drawn = render_interpolation_object_node_matrices(object_index);
+	struct interpolated_object const *record;
+	long absolute_index = object_index == NONE ? NONE : DATUM_INDEX_TO_ABSOLUTE_INDEX(object_index);
+	char const *why;
+
+	if (drawn)
+	{
+		record = &interpolated_objects[absolute_index];
+		if (record->snap_node == NONE)
+			snprintf(state, state_size, "blend");
+		else if (record->snap_node == 0)
+			snprintf(state, state_size, "snap:root");
+		else
+			snprintf(state, state_size, "snap:node%d", (int)record->snap_node);
+		return drawn;
+	}
+	if (!interpolation_rendering)
+		why = "rendering";
+	else if (!interpolated_objects)
+		why = "records";
+	else if (object_index == NONE || absolute_index >= MAXIMUM_INTERPOLATED_OBJECTS)
+		why = "index";
+	else if (interpolated_objects[absolute_index].object_index != object_index)
+		why = "object";
+	else if (interpolated_objects[absolute_index].tick != interpolation_tick)
+		why = "tick";
+	else
+		why = "prev";
+	snprintf(state, state_size, "none:%s", why);
+	return NULL;
 }
 
 /* ---------- corrections */
@@ -688,6 +738,43 @@ void render_interpolation_correct_object(long object_index, real_vector3d const 
 /* ---------- camera */
 
 static struct observer_result direct_cameras[MAXIMUM_LOCAL_PLAYERS];
+
+/* For the interpolation trace (render_interpolation_camera_trace): the way
+render_interpolation_blended_camera last went for each local player's
+camera ("raw": not drawing between ticks, or no observer; "rel": a scripted
+camera moved with its object; "first": no snapshot before the latest;
+"cut"; "blend"), the frame it went so and the observer's position it was
+given. */
+static char const *camera_trace_branches[MAXIMUM_LOCAL_PLAYERS];
+static long camera_trace_frames[MAXIMUM_LOCAL_PLAYERS];
+static real_point3d camera_trace_observer_positions[MAXIMUM_LOCAL_PLAYERS];
+
+static void camera_trace(
+	short local_player_index,
+	char const *branch,
+	struct observer_result const *observer)
+{
+	camera_trace_branches[local_player_index] = branch;
+	camera_trace_frames[local_player_index] = interpolation_frame;
+	camera_trace_observer_positions[local_player_index] = observer ? observer->position : *global_origin3d;
+}
+
+/* the way the camera of the local player was drawn this frame (above), or
+"-" when it was not, and the observer's position it was drawn from */
+char const *render_interpolation_camera_trace(
+	short local_player_index,
+	real_point3d *observer_position)
+{
+	if (local_player_index < 0 || local_player_index >= MAXIMUM_LOCAL_PLAYERS ||
+		!camera_trace_branches[local_player_index] ||
+		camera_trace_frames[local_player_index] != interpolation_frame)
+	{
+		*observer_position = *global_origin3d;
+		return "-";
+	}
+	*observer_position = camera_trace_observer_positions[local_player_index];
+	return camera_trace_branches[local_player_index];
+}
 
 static struct observer_result const *render_interpolation_blended_camera(
 	short local_player_index,
@@ -841,6 +928,7 @@ static struct observer_result const *render_interpolation_blended_camera(
 
 	if (!interpolation_rendering || !observer)
 	{
+		camera_trace(local_player_index, "raw", observer);
 		return observer;
 	}
 	camera = &interpolated_cameras[local_player_index];
@@ -877,6 +965,7 @@ static struct observer_result const *render_interpolation_blended_camera(
 			camera->blended.position.z += drawn[0].position.z - nodes[0].position.z;
 			/* (the snapshots start again after) */
 			camera->valid = FALSE;
+			camera_trace(local_player_index, "rel", observer);
 			return &camera->blended;
 		}
 	}
@@ -922,6 +1011,7 @@ static struct observer_result const *render_interpolation_blended_camera(
 	}
 	if (!camera->has_previous || camera->cut)
 	{
+		camera_trace(local_player_index, camera->cut ? "cut" : "first", observer);
 		return observer;
 	}
 
@@ -935,6 +1025,7 @@ static struct observer_result const *render_interpolation_blended_camera(
 		camera->blended.position.y += drawn.j;
 		camera->blended.position.z += drawn.k;
 	}
+	camera_trace(local_player_index, "blend", observer);
 	return &camera->blended;
 }
 

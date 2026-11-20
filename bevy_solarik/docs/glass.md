@@ -304,7 +304,10 @@ restores the path that took a light sample and bounced on at near or smooth hits
 The same ending serves an opaque surface's own reflection when its roughness is
 under `SOLARIK_SPECULAR_SHARP_ROUGHNESS` (Master Chief's visor; a clear coat only
 with `SOLARIK_SPECULAR_SHARP_COATS=1`, since the coats turned mirror-like; see the
-lighting notes, "Sharp surfaces' reflections end in the world cache").
+lighting notes, "Sharp surfaces' reflections end in the world cache"). Since
+18 November 2026 a thin-film coat can also be marked sharp per pixel, both coat
+bits of the G-buffer set (`sharp_coat_gbuffer`), which the viewer does for the
+Elites' armour; `SOLARIK_SHADER_DEFS=SHARP_COAT_MARK_IGNORED` ignores the mark.
 
 That read is `query_world_cache_spread`, not one cell. A mirror shows the cache's
 cells one by one, each wandering on its own, and DLSS-RR (no guide for the

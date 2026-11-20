@@ -52,6 +52,7 @@ use bevy::{
         RenderApp, RenderStartup,
     },
 };
+use bevy::shader::ShaderDefVal;
 use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 
 pub struct FogPlugin;
@@ -263,6 +264,68 @@ fn sky_clear_over() -> bool {
     *OVER.get_or_init(|| std::env::var("HALO_RT_SKY_CLEAR_OVER").is_ok_and(|v| v == "1"))
 }
 
+/// How the fog at a silhouette is chosen (`HALO_RT_FOG_EDGES`): the depth is
+/// at the render resolution and the picture upscaled, so where the render
+/// pixels round a picture's pixel differ, filtered by place a near object's
+/// pixels took the far side's fog (b30's leaves against the fogged sea, a pale
+/// rim). `guided` (the default): weighted by how like the pixel's picture
+/// each one's is; `near`: the nearest one's; `0`: filtered by place, the old.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FogEdges {
+    Guided,
+    Near,
+    Bilinear,
+}
+
+impl FogEdges {
+    fn parse(text: Option<&str>) -> Self {
+        match text.map(str::trim) {
+            Some("near") => Self::Near,
+            Some("0") => Self::Bilinear,
+            _ => Self::Guided,
+        }
+    }
+
+    fn get() -> Self {
+        static EDGES: std::sync::OnceLock<FogEdges> = std::sync::OnceLock::new();
+        *EDGES.get_or_init(|| {
+            let edges = Self::parse(std::env::var("HALO_RT_FOG_EDGES").ok().as_deref());
+            if edges != Self::Guided {
+                info!("the fog at silhouettes: {edges:?} (HALO_RT_FOG_EDGES)");
+            }
+            edges
+        })
+    }
+
+    /// The shader's defs for it (none for the default).
+    fn shader_defs(self) -> Vec<ShaderDefVal> {
+        match self {
+            Self::Guided => Vec::new(),
+            Self::Near => vec!["FOG_EDGES_NEAR".into()],
+            Self::Bilinear => vec!["FOG_EDGES_BILINEAR".into()],
+        }
+    }
+}
+
+/// `HALO_RT_SEA_HORIZON_FOG=0`: the sky under the horizon left bare where
+/// the picture holds the sea, the old (and the game's): past the level's sea
+/// (a thousand world units out on b30) the sky's own water showed as a white
+/// band between the fogged sea and the sky. Else it is fogged as the sea over
+/// a deep floor would be.
+fn sea_horizon_fog() -> bool {
+    static FOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOG.get_or_init(|| std::env::var("HALO_RT_SEA_HORIZON_FOG").map_or(true, |v| v.trim() != "0"))
+}
+
+/// The fog pass's shader defs: the silhouettes' rule and the sea's horizon.
+fn fog_shader_defs(edges: FogEdges, sea_horizon: bool) -> Vec<ShaderDefVal> {
+    let mut defs = edges.shader_defs();
+    if !sea_horizon {
+        defs.push("SEA_HORIZON_UNFOGGED".into());
+    }
+    defs
+}
+
 /// The latest frame's fog onto the camera.
 fn follow_fog(
     mut commands: Commands,
@@ -389,6 +452,8 @@ pub(crate) struct FogPipeline {
     sampler: Sampler,
     /// the fog screen's: its layers tile
     layer_sampler: Sampler,
+    /// the picture's, filtered: the silhouettes' guide between its pixels
+    guide_sampler: Sampler,
     shader: Handle<Shader>,
 }
 
@@ -412,6 +477,8 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
                 texture_depth_2d(),
                 // (the weather's layer, src/weather.rs)
                 texture_2d(TextureSampleType::Float { filterable: true }),
+                // (the silhouettes' guide, filtered)
+                sampler(SamplerBindingType::Filtering),
             ),
         ),
     );
@@ -424,6 +491,11 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
             mipmap_filter: MipmapFilterMode::Linear,
+            ..default()
+        }),
+        guide_sampler: device.create_sampler(&SamplerDescriptor {
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
             ..default()
         }),
         shader: load_embedded_asset!(assets.as_ref(), "shaders/halo_fog.wesl"),
@@ -472,6 +544,7 @@ pub(crate) fn draw_fog(
             vertex: fullscreen.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: fog_pipeline.shader.clone(),
+                shader_defs: fog_shader_defs(FogEdges::get(), sea_horizon_fog()),
                 targets: vec![Some(ColorTargetState {
                     format: extracted.target_format,
                     blend: None,
@@ -547,6 +620,7 @@ pub(crate) fn draw_fog(
             main_depth,
             // (none: transparent black, which lays nothing over)
             weather_view.as_ref().unwrap_or(&fallback_zero.texture_view),
+            &fog_pipeline.guide_sampler,
         )),
     );
     let diagnostics = ctx.diagnostic_recorder();
@@ -569,4 +643,72 @@ pub(crate) fn draw_fog(
     pass.set_bind_group(0, &bind_group, &[view_offset.offset]);
     pass.draw(0..3, 0..1);
     pass_span.end(&mut pass);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::shader::{ShaderCache, ShaderCacheSource};
+
+    #[test]
+    fn fog_edges_switch() {
+        assert_eq!(FogEdges::parse(None), FogEdges::Guided);
+        assert_eq!(FogEdges::parse(Some("guided")), FogEdges::Guided);
+        assert_eq!(FogEdges::parse(Some("near")), FogEdges::Near);
+        assert_eq!(FogEdges::parse(Some("0")), FogEdges::Bilinear);
+    }
+
+    /// The fog pass's shader composed by Bevy's WESL compiler with each of
+    /// `HALO_RT_FOG_EDGES`' defs, with and without `HALO_RT_SEA_HORIZON_FOG`'s,
+    /// and validated by naga, as the pipeline cache
+    /// would (its two imports: Bevy's view, from Solarik's fork of
+    /// bevy_render, and the fullscreen vertex output, from the registry).
+    #[test]
+    fn fog_shader_validates_in_every_edge_mode() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|home| std::path::PathBuf::from(home).join(".cargo")))
+            .expect("cargo's home");
+        let core_pipeline = std::fs::read_dir(cargo_home.join("registry/src"))
+            .expect("the registry")
+            .filter_map(|index| Some(index.ok()?.path().join("bevy_core_pipeline-0.20.0/src/fullscreen_vertex_shader.wesl")))
+            .find(|path| path.exists())
+            .expect("bevy_core_pipeline 0.20.0's fullscreen shader in the registry");
+        let modules = [
+            (manifest.join("bevy_solarik/vendor/bevy_render/src/view.wesl"), "embedded://bevy_render/view.wesl"),
+            (core_pipeline, "embedded://bevy_core_pipeline/fullscreen_vertex_shader.wesl"),
+            (manifest.join("src/shaders/halo_fog.wesl"), "embedded://halo_rt/shaders/halo_fog.wesl"),
+        ];
+        let mut cache: ShaderCache<String, ()> = ShaderCache::new((), |_, source, _| match source {
+            ShaderCacheSource::Wgsl(source) => Ok(source),
+            _ => panic!("WESL must produce WGSL"),
+        });
+        let mut assets = Assets::<Shader>::default();
+        let mut fog_id = None;
+        for (file, path) in modules {
+            let shader = Shader::from_wesl(std::fs::read_to_string(&file).unwrap(), path);
+            let id = assets.add(shader.clone()).id();
+            cache.set_shader(id, shader);
+            fog_id = Some(id);
+        }
+        let fog_id = fog_id.unwrap();
+        for (edges, sea_horizon) in [FogEdges::Guided, FogEdges::Near, FogEdges::Bilinear]
+            .into_iter()
+            .flat_map(|edges| [(edges, true), (edges, false)])
+        {
+            let defs = fog_shader_defs(edges, sea_horizon);
+            let source = cache.get(0, fog_id, &defs).unwrap_or_else(|e| panic!("{defs:?}: {e}"));
+            let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("{edges:?}: {}", e.emit_to_string(&source)));
+            wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{edges:?}: {}", e.emit_to_string(&source)));
+            // (each mode's own code there, and only its own)
+            assert_eq!(source.contains("fog_edge_guide("), edges == FogEdges::Guided, "{edges:?}");
+            assert_eq!(source.contains("FOG_EDGE_FULL"), edges != FogEdges::Bilinear, "{edges:?}");
+            // (the sea's horizon on or off by the constant)
+            let constant = if sea_horizon { "SEA_HORIZON_FOG: bool = true" } else { "SEA_HORIZON_FOG: bool = false" };
+            assert!(source.contains(constant), "{defs:?}");
+        }
+    }
 }

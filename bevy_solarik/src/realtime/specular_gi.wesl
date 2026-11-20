@@ -24,6 +24,9 @@ import bevy_solarik::realtime::surface_path::shade_surface_scattering_vertices;
 import bevy_solarik::realtime::gbuffer_utils::gpixel_resolve;
 import bevy_solarik::realtime::gbuffer_utils::ResolvedGPixel;
 import bevy_solarik::realtime::gbuffer_utils::pixel_ray_offset;
+import bevy_solarik::realtime::gbuffer_utils::gpixel_sharp_coat;
+@if((VISUALIZE_COAT_MARKS)) import bevy_solarik::realtime::gbuffer_utils::gpixel_pearl_coat;
+@if((VISUALIZE_COAT_MARKS)) import bevy_solarik::realtime::gbuffer_utils::gpixel_plain_coat;
 @if((CELL_LOOKUP_GEOMETRIC)) import bevy_solarik::realtime::gbuffer_utils::pixel_geometric_normal;
 import bevy_solarik::scene::sampling::analytic_light_radiance;
 import bevy_solarik::scene::ray_fog::ray_fog_active;
@@ -165,7 +168,7 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @if(NRC_SPECULAR) {
     nrc_specular_slot_open = true;
 }
-    let lobe = glossy_lobe(global_id.xy, pixel_index, surface, false, ray_offset, wo, wo_length, &rng);
+    let lobe = glossy_lobe(global_id.xy, pixel_index, surface, false, false, ray_offset, wo, wo_length, &rng);
     var radiance = lobe.radiance * evaluate_base_specular_brdf(wo, lobe.wi, surface.world_normal, surface.material);
 @if(NRC_SPECULAR) {
     nrc_specular_slot_open = false;
@@ -183,7 +186,13 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
         coat_surface.material.roughness = clearcoat_roughness(surface.material);
         coat_surface.material.metallic = 0.0;
         coat_surface.material.clearcoat = 0.0;
-        let coat = glossy_lobe(global_id.xy, pixel_index, coat_surface, true, ray_offset, wo, wo_length, &rng);
+        // (the coat marked sharp in the G-buffer, both coat bits;
+        // SHARP_COAT_MARK_IGNORED the old)
+        var coat_sharp = gpixel_sharp_coat(gpixel);
+@if(SHARP_COAT_MARK_IGNORED) {
+        coat_sharp = false;
+}
+        let coat = glossy_lobe(global_id.xy, pixel_index, coat_surface, true, coat_sharp, ray_offset, wo, wo_length, &rng);
         radiance += coat.radiance * evaluate_clearcoat_brdf(wo, coat.wi, surface.world_normal, surface.material);
     }
     radiance *= view.exposure;
@@ -272,6 +281,25 @@ fn specular_gi(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     textureStore(view_output, global_id.xy, vec4(debug_colour * 0.5, 1.0));
 }
+// (SOLARIK_SHADER_DEFS=VISUALIZE_COAT_MARKS: the G-buffer's coat marks, flat
+// in place of the picture: magenta both coat bits (a thin film marked sharp),
+// green the pearl bit alone, blue the plain bit alone, yellow a clear coat
+// by its material with neither bit, else the base colour at a quarter)
+@if(VISUALIZE_COAT_MARKS) {
+    // (halved at the store as the neighbouring views, so the base colour
+    // comes out at a quarter)
+    var coat_colour = surface.material.base_color * 0.5;
+    if gpixel_sharp_coat(gpixel) {
+        coat_colour = vec3(1.0, 0.0, 1.0);
+    } else if gpixel_pearl_coat(gpixel) {
+        coat_colour = vec3(0.0, 1.0, 0.0);
+    } else if gpixel_plain_coat(gpixel) {
+        coat_colour = vec3(0.0, 0.0, 1.0);
+    } else if clearcoat_albedo(surface.material, 1.0) > 0.0 {
+        coat_colour = vec3(1.0, 1.0, 0.0);
+    }
+    textureStore(view_output, global_id.xy, vec4(coat_colour * 0.5, 1.0));
+}
 
 @if(VISUALIZE_WORLD_CACHE) {
     textureStore(view_output, global_id.xy, vec4(query_world_cache(surface.world_position, surface.world_normal, view.world_position, ray_max_distance(), WORLD_CACHE_CELL_LIFETIME, &rng) * view.exposure, 1.0));
@@ -325,8 +353,9 @@ struct GlossyLobe {
 
 // One sample of a glossy lobe of `surface.material.roughness`. (`ray_offset`:
 // how far its rays leave the pixel's surface, pixel_ray_offset; `coat`: the
-// lobe is a clear coat's, `surface` carrying the coat's roughness)
-fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, coat: bool, ray_offset: f32, wo: vec3<f32>, wo_length: f32, rng: ptr<function, u32>) -> GlossyLobe {
+// lobe is a clear coat's, `surface` carrying the coat's roughness;
+// `coat_sharp`: the coat is marked sharp, gpixel_sharp_coat)
+fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, coat: bool, coat_sharp: bool, ray_offset: f32, wo: vec3<f32>, wo_length: f32, rng: ptr<function, u32>) -> GlossyLobe {
     var radiance: vec3<f32>;
     var wi: vec3<f32>;
     if surface.material.roughness > DIFFUSE_GI_REUSE_ROUGHNESS_THRESHOLD {
@@ -353,10 +382,12 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, c
             // (a sharp surface's path ends in the world cache as a pane's
             // reflection does, trace_glossy_path's `pane_reflection`: the
             // main lobe's always, a perfect mirror's too; a clear coat's only
-            // with SOLARIK_SPECULAR_SHARP_COATS=1, since every coat in Halo is
-            // under the knob and Chief's armour read as a mirror;
-            // SOLARIK_SPECULAR_SHARP_ROUGHNESS=0 the old)
-            let sharp = surface.material.roughness < SPECULAR_SHARP_ROUGHNESS && (!coat || SPECULAR_SHARP_COATS != 0u);
+            // where the pixel is marked (the G-buffer's two coat bits both
+            // set, the Elites' armour in the viewer, since 18 November) or
+            // with SOLARIK_SPECULAR_SHARP_COATS=1 for every coat, since every
+            // coat in Halo is under the knob and Chief's armour read as a
+            // mirror; SOLARIK_SPECULAR_SHARP_ROUGHNESS=0 the old)
+            let sharp = surface.material.roughness < SPECULAR_SHARP_ROUGHNESS && (!coat || coat_sharp || SPECULAR_SHARP_COATS != 0u);
             radiance = trace_glossy_path(pixel_id, surface, ray_offset, wo_length, wi, pdf, sharp, rng);
             if surface.material.roughness > MIRROR_ROUGHNESS_THRESHOLD {
                 radiance /= pdf;
@@ -379,8 +410,9 @@ fn glossy_lobe(pixel_id: vec2<u32>, pixel_index: u32, surface: ResolvedGPixel, c
 // in the world cache, its emission and its base colour times the cache's
 // irradiance; further panes, leaves and mirrors are followed as any path's.
 // Also true for a sharp opaque surface's own path, roughness under
-// SPECULAR_SHARP_ROUGHNESS (Chief's visor; a clear coat's only with
-// SOLARIK_SPECULAR_SHARP_COATS=1): the first lit
+// SPECULAR_SHARP_ROUGHNESS (Chief's visor; a clear coat's only where the
+// pixel is marked, the G-buffer's two coat bits both set, or with
+// SOLARIK_SPECULAR_SHARP_COATS=1 for every coat): the first lit
 // surface its mirror-sharp lobe met took one light sample among the level's
 // lights, a speck in fifty pixels that the denoiser smeared into a flat dull
 // colour, play feedback of 14 November 2026;

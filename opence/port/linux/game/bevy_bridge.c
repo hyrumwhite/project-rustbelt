@@ -52,6 +52,7 @@ boolean game_engine_running(void); /* game_engine.c */
 boolean main_menu_scenario_loaded(void); /* main.c */
 unsigned long system_milliseconds(void); /* cseries_windows.h */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,6 +63,11 @@ const char *config_string(const char *name);
 void platform_log(const char *format, ...);
 /* render_interpolation.c: this frame's blended node matrices, or NULL */
 real_matrix4x3 *render_interpolation_object_node_matrices(long object_index);
+/* ... the same, and how they were found (the interpolation trace's) */
+real_matrix4x3 *render_interpolation_object_trace(long object_index, char *state, short state_size);
+/* ... the way the local player's camera was drawn this frame, and the
+observer's position it was drawn from (the interpolation trace's) */
+char const *render_interpolation_camera_trace(short local_player_index, real_point3d *observer_position);
 
 /* ---------- globals */
 
@@ -651,6 +657,146 @@ void bevy_bridge_record_model(
 	bevy_bridge_recorded_count++;
 }
 
+/* HALO_INTERPOLATION_TRACE=<file>: a line a frame exported, of what the
+frame's blend did for the camera and for the vehicle the player rides (a
+Warthog seen to jump ahead of its chase camera now and then; set against
+the viewer's HALO_RT_FRAME_TRACE by scripts/pace/vehicle.py). The frame's
+index, tick and fraction as the frame trace's G lines have them
+(HALO_FRAME_TRACE, d3d8_gl.c), then
+
+	cam <branch> <observer position> <drawn camera position> <drawn camera forward>
+
+the way render_interpolation_blended_camera went (render_interpolation.c:
+raw, rel, first, cut, blend, or - when it did not run this frame), the
+observer's position it was given and the camera exported (or "cam none"
+with no player's window, and nothing after);
+
+	veh <object index> <state> <latest tick's root position> <drawn root position>
+
+the ultimate parent of the player's unit when that is not the unit itself
+(the player seated), or "veh none"; the state is
+render_interpolation_object_trace's (blend, snap:root, snap:node<n>, or
+none:<why>, the latest tick's pose drawn);
+
+	obs <focus distance> <its own> <timer> <parameter timers x5> <checked distance>
+
+the observer's focus distance the camera was placed at (after its
+penetration check and the check's eased release, observer_ease_press) and
+before the check, its last command's timer and parameter timers, and last
+(so that fields counted from obs keep their places) the distance the check
+itself allowed (observer_get_trace). The file is opened at the host path
+as given (bevy_bridge_host_fopen). Read once; each line flushed, so a game
+killed leaves its lines. */
+
+/* the C runtime's own fopen. The game's units see fopen as the port's
+wrapper (port/windows/include/crt/halo_windows_file_names.h on Windows,
+port/linux/include/stdio.h on Linux and Android), which takes the path for
+an Xbox one and puts it under the game's data or save folder, so a host
+path such as C:\Users\...\trace.txt or /tmp/trace.txt named something
+else; the platform layer (d3d8_gl.c's HALO_FRAME_TRACE) is built with
+HALO_LINUX_PLATFORM_LAYER and has no wrapper. Here the macro is set aside
+for this one function and given back after it, so the file's other uses
+keep the translation; where no build defines it nothing changes */
+#ifdef fopen
+#pragma push_macro("fopen")
+#undef fopen
+#define BEVY_BRIDGE_FOPEN_SET_ASIDE
+#endif
+static FILE *bevy_bridge_host_fopen(
+	char const *path,
+	char const *mode)
+{
+	return fopen(path, mode);
+}
+#ifdef BEVY_BRIDGE_FOPEN_SET_ASIDE
+#pragma pop_macro("fopen")
+#undef BEVY_BRIDGE_FOPEN_SET_ASIDE
+#endif
+
+static void bevy_bridge_interpolation_trace(
+	unsigned long frame_index,
+	unsigned long tick,
+	real fraction,
+	struct render_window const *window)
+{
+	static int state = -1;
+	static FILE *file;
+	short local_player_index;
+	real_point3d observer_position;
+	char const *branch;
+	long unit_index;
+	long vehicle_index = NONE;
+
+	if (state < 0)
+	{
+		char const *path = getenv("HALO_INTERPOLATION_TRACE");
+
+		file = path && *path ? bevy_bridge_host_fopen(path, "w") : NULL;
+		state = file != NULL;
+		if (path && *path && !file)
+			platform_log("bevy bridge: the interpolation trace %s could not be opened", path);
+	}
+	if (!state)
+		return;
+	fprintf(file, "I %lu %lu %.4f", frame_index, tick, (double)fraction);
+	if (!window)
+	{
+		fprintf(file, " cam none\n");
+		fflush(file);
+		return;
+	}
+	local_player_index = window->local_player_index;
+	branch = render_interpolation_camera_trace(local_player_index, &observer_position);
+	fprintf(file, " cam %s %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f", branch,
+		(double)observer_position.x, (double)observer_position.y, (double)observer_position.z,
+		(double)window->render_camera.position.x, (double)window->render_camera.position.y,
+		(double)window->render_camera.position.z,
+		(double)window->render_camera.forward.i, (double)window->render_camera.forward.j,
+		(double)window->render_camera.forward.k);
+
+	unit_index = player_control_get_unit_index(local_player_index);
+	if (unit_index != NONE && object_try_and_get_and_verify_type(unit_index, _object_mask_all))
+	{
+		vehicle_index = object_get_ultimate_parent(unit_index);
+		if (vehicle_index == unit_index)
+			vehicle_index = NONE;
+	}
+	if (vehicle_index != NONE)
+	{
+		char object_state[24];
+		/* (as of the last tick: object_get_node_matrices gives the drawn
+		pose while a frame is drawn) */
+		real_matrix4x3 const *latest = (real_matrix4x3 const *)object_header_block_get(
+			vehicle_index, &object_get(vehicle_index)->object.node_matrices);
+		real_matrix4x3 const *drawn = render_interpolation_object_trace(vehicle_index, object_state, sizeof(object_state));
+
+		/* (the latest tick's pose, as the export draws it, where the blend
+		gives none) */
+		if (!drawn)
+			drawn = latest;
+		fprintf(file, " veh %lx %s %.5f %.5f %.5f %.5f %.5f %.5f", (unsigned long)vehicle_index, object_state,
+			(double)latest[0].position.x, (double)latest[0].position.y, (double)latest[0].position.z,
+			(double)drawn[0].position.x, (double)drawn[0].position.y, (double)drawn[0].position.z);
+	}
+	else
+	{
+		fprintf(file, " veh none");
+	}
+
+	{
+		real checked_focus_distance, focus_distance, timer, raw_focus_distance;
+		real parameter_timers[NUMBER_OF_OBSERVER_COMMAND_PARAMETERS];
+
+		observer_get_trace(local_player_index, &checked_focus_distance, &focus_distance, &timer, parameter_timers,
+			&raw_focus_distance);
+		fprintf(file, " obs %.5f %.5f %.3f %.3f %.3f %.3f %.3f %.3f %.5f\n",
+			(double)checked_focus_distance, (double)focus_distance, (double)timer,
+			(double)parameter_timers[0], (double)parameter_timers[1], (double)parameter_timers[2],
+			(double)parameter_timers[3], (double)parameter_timers[4], (double)raw_focus_distance);
+	}
+	fflush(file);
+}
+
 void bevy_bridge_export_frame(
 	struct render_window const *windows,
 	short window_count)
@@ -664,6 +810,7 @@ void bevy_bridge_export_frame(
 	long first_person_unit = NONE;
 	real_point3d camera_position = { 0.0f, 0.0f, 0.0f };
 	boolean camera_known = FALSE;
+	struct render_window const *player_window = NULL;
 
 	if (!shared)
 		return;
@@ -754,8 +901,10 @@ void bevy_bridge_export_frame(
 		frame->ray_test_count = bevy_bridge_ray_tests(frame->ray_tests, &window->render_camera.position,
 			&window->render_camera.forward, &window->render_camera.up);
 		bevy_bridge_vehicle_ray_tests(frame, &window->render_camera.position);
+		player_window = window;
 		break;
 	}
+	bevy_bridge_interpolation_trace(frame->frame_index, frame->game_tick, bevy_bridge_trace_fraction, player_window);
 
 	/* (the decals staged for this frame, shared or not) */
 	bevy_bridge_decal_count = 0;

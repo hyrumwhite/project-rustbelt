@@ -52,6 +52,7 @@ fn diagnostic_views_compose() {
         "VISUALIZE_WORLD_CACHE",
         "VISUALIZE_CELL_KEY_PROBE",
         "VISUALIZE_NORMAL_KEY",
+        "VISUALIZE_COAT_MARKS",
         "VISUALIZE_GI_GUIDE",
         // (the soft sun's, with SUN_SOFT as node.rs adds it for them)
         "VISUALIZE_SUN_SOFT",

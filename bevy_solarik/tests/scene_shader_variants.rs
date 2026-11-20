@@ -108,6 +108,14 @@ fn scene_consumers_compose_across_production_feature_variants() {
                 inside_dark_definitions.push("LIGHT_INSIDE_DARK".into());
                 graph.validate(&module, &inside_dark_definitions);
             }
+            // (the coat's sharp mark ignored, the old
+            // (SOLARIK_SHADER_DEFS=SHARP_COAT_MARK_IGNORED); primary_glass
+            // imports specular_gi)
+            if consumer == "realtime::specular_gi" || consumer == "realtime::primary_glass" {
+                let mut unmarked_definitions = stage_definitions.clone();
+                unmarked_definitions.push("SHARP_COAT_MARK_IGNORED".into());
+                graph.validate(&module, &unmarked_definitions);
+            }
             // (ReSTIR GI's guided initial sampling off, the old shader
             // (SOLARIK_GI_GUIDE=0), and its view; specular_gi has the view's
             // early return, primary_glass imports specular_gi)

@@ -35,9 +35,26 @@ fn gpixel_resolve(gpixel: vec4<u32>, depth: f32, pixel_id: vec2<u32>, view_size:
     let clearcoat = f32(coat_props & 0x0fu) / 15.0;
     let clearcoat_perceptual_roughness = f32(coat_props >> 4u) / 30.0;
     let material = ResolvedMaterial(base_color, emissive, reflectance, perceptual_roughness, roughness, metallic, transmission, vec4(0.0), gaussian_weight, (gpixel.a & 0x10000000u) != 0u,
-        clearcoat, clearcoat_perceptual_roughness, (gpixel.a & 0x40000000u) != 0u, (gpixel.a & 0x80000000u) != 0u, vec4(0.0));
+        clearcoat, clearcoat_perceptual_roughness, gpixel_pearl_coat(gpixel), gpixel_plain_coat(gpixel), vec4(0.0));
 
     return ResolvedGPixel(world_position, world_normal, material);
+}
+
+// The coat kind in the flags' two top bits: bit 30 alone a pearl coat, bit 31
+// alone a plain coat, neither the ordinary thin film, both the ordinary thin
+// film marked sharp, its lobe taking specular_gi's sharp rule (the Elites'
+// armour in the viewer; lommel_math's sharp_coat_gbuffer). gpixel_resolve
+// decodes pearl and plain exclusively, so a marked pixel is neither.
+fn gpixel_sharp_coat(gpixel: vec4<u32>) -> bool {
+    return (gpixel.a & 0xC0000000u) == 0xC0000000u;
+}
+// (bit 30 alone: a pearl coat, lommel_math's pearl_coat_gbuffer)
+fn gpixel_pearl_coat(gpixel: vec4<u32>) -> bool {
+    return (gpixel.a & 0xC0000000u) == 0x40000000u;
+}
+// (bit 31 alone: a plain coat, lommel_math's plain_coat_gbuffer)
+fn gpixel_plain_coat(gpixel: vec4<u32>) -> bool {
+    return (gpixel.a & 0xC0000000u) == 0x80000000u;
 }
 
 fn reconstruct_world_position(pixel_id: vec2<u32>, depth: f32, view_size: vec2<f32>, world_from_clip: mat4x4<f32>) -> vec3<f32> {

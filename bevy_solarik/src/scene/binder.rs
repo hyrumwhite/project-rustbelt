@@ -225,12 +225,19 @@ pub struct SolarikRayFog {
     pub plane: Vec4,
     /// rgb, maximum density
     pub planar_color: Vec4,
-    /// maximum distance and depth, the camera's planar density (unused)
+    /// maximum distance and depth, the camera's planar density (unused); w
+    /// above 0.5 where the application fogs the picture before the denoiser
+    /// (the DLSS-RR guides then fade toward flat by the fog's coverage,
+    /// `realtime/resolve_dlss_rr_textures.wesl`, with `SOLARIK_RR_FOG_GUIDE=1`)
     pub planar: Vec4,
     /// Lit fog (`realtime/lit_fog.wesl`): the light the fog scatters toward
     /// the camera from the scene's lights. x its strength (0 none), y above
     /// 0.5 to let the directional lights light it too, z above 0.5 to show
-    /// the scattered light alone (for looking at it).
+    /// the scattered light alone (for looking at it), w above 0.5 when the
+    /// application lays the light over its own fog itself (then a surface's
+    /// light is not divided by the fog's transmittance, the sky's never is,
+    /// and `lit_fog_composite` adds nothing: the application reads it with
+    /// [`crate::realtime::SolarikLightingResources::lit_fog_light`]).
     pub lit: Vec4,
 }
 

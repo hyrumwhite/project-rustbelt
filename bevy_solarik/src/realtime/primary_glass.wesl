@@ -41,7 +41,7 @@ import bevy_solarik::realtime::realtime_bindings::view;
 import bevy_solarik::realtime::realtime_bindings::constants;
 import bevy_solarik::realtime::realtime_bindings::primary_background;
 import bevy_solarik::scene::sampling::is_finite_f32;
-@if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::resolve_dlss_rr_textures::resolve_background_guides;
+@if((DLSS_RR_GUIDE_BUFFERS)) import bevy_solarik::realtime::resolve_dlss_rr_textures::resolve_pane_guides;
 import bevy_pbr::render::utils::rand_f;
 import bevy_render::maths::PI;
 
@@ -172,7 +172,7 @@ fn primary_glass(@builtin(global_invocation_id) id: vec3<u32>) {
 }
     textureStore(view_output, id.xy, vec4(radiance.rgb * view.exposure, background.a));
 @if(DLSS_RR_GUIDE_BUFFERS) {
-    if radiance.a > 0.0 { resolve_background_guides(id.xy); }
+    if radiance.a > 0.0 { resolve_pane_guides(id.xy); }
 }
 }
 

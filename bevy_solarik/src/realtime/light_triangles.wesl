@@ -40,7 +40,7 @@ struct LightTriangleRecord {
 // its group 1 is its own small layout, and its lights resolve from their
 // vertices, the table's fallback, which gives the same point and values.)
 @if((!(PATHTRACER)))
-@group(1) @binding(30) var<storage, read_write> light_triangles: array<LightTriangleRecord>;
+@group(1) @binding(31) var<storage, read_write> light_triangles: array<LightTriangleRecord>;
 
 const NO_LIGHT_TRIANGLES: u32 = 0xFFFFFFFFu;
 

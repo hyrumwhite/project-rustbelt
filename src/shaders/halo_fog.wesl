@@ -51,6 +51,64 @@
 // as the game draws its effects after its fog. Then the game's lens flares,
 // added up (src/lens_flares.rs, display-encoded light): added, as the game
 // adds them over its picture.
+//
+// Lit fog (Solarik's lit_fog.wesl, src/fog.rs LitFog): the light the fog
+// scatters toward the camera from the scene's lights, at the render
+// resolution, laid over the environment fog here (before the fog screen, the
+// weather and the flares), taken from the four render pixels by the same
+// weights as the fog, so that the light and the fog always agree on which
+// surface a pixel is. Solarik then neither divides it by the fog's
+// transmittance nor adds it before tonemapping (its `lit.w`); that divide
+// and the multiply here disagreed wherever the two passes took different
+// depths (bright outlines at silhouettes, the light lost behind first-person
+// panes and on a sky the fog covers). HALO_RT_LIT_FOG_OVER=0 the old (fog.lit.x
+// 0 here, Solarik's composite).
+//
+// The fog curtain (src/fog.rs fog_curtain; fog.lit.z its b0, 0 off), where the
+// atmospheric fog is opaque and not over the water: the transparent surfaces
+// and sprites are drawn before this pass, which then fogs them by what lies
+// behind; where that is covered whole (the sky, everything past the fog's
+// reach) the picture there was multiplied by 0 and nothing drawn in front
+// survived (c10's Jackal shield against the fogged sky). So `curtain`, a
+// compute entry point run over the lit picture before the transparent pass,
+// takes each pixel whose coverage b (this file's fog_at, so exactly the
+// coverage this pass takes) is over b0 to the light whose display encoding is
+// its own times r = (1 - b) / (1 - b0) (the sky, b 1, black); and here a
+// sample's coverage over the picture is at most b0, the fog's light
+// unchanged. For an opaque surface that is the old picture again (the fog's
+// light plus the encoding times r times (1 - b0), the old (1 - b); exactly,
+// but for the tonemapper's curve between, taken as straight), while a
+// transparent surface, which takes its own colour to the light whose
+// encoding is its own over (1 - min(behind, b0)) (curtain_raised in
+// halo_transparent.wesl and halo_sprite.wesl), keeps its own fog alone. (A
+// plain factor, ((1 - b) / (1 - b0))^2.2 in linear light, was the first form:
+// the sRGB encoding is no 2.2 power in the dark, and c10's swamp past b0 came
+// out a seventh darker.)
+//
+// The fog before the upscaler (HALO_RT_FOG_BEFORE; fog.lit.w its form, 0 off):
+// `before`, a compute entry point run where the curtain runs (over the lit
+// picture, before the transparent pass, at the render resolution), blends
+// each render pixel by its own fog_at, so the upscaler takes a fogged picture
+// and the transparents are drawn over it as the game draws them over its
+// fog (each by its own fog alone: fog layers' planar.z under 0). The blend is
+// the game's, in the display's encoding, taken back to the linear light the
+// tonemapper follows with: form 1 takes the tonemapper as straight,
+//   P' = dec(F + enc(P) (1 - b)),
+// form 2 goes through the tonemapper's curve t along the grey axis, per
+// channel (TONE_CURVE, Bevy's TonyMcMapface sampled on its grey axis), so
+// that what is displayed is the game's blend of what was displayed:
+//   P' = t_inv(dec(F + enc(t(P)) (1 - b))).
+// Both taken at a mean and carried to the pixel as a ratio, never steeper
+// than 1 (affine_about, below: the picture here is noisy). Lit fog's light is
+// added after it (taken about the fogged mean the same way; the light itself
+// is denoised already), at the same pixel (fog.lit.x: 1 screened over what
+// is shown through the tonemapper's curve, 1 - exp(-light), as the fog pass
+// laid it over the tonemapped picture before, so that a strength looks as it
+// did; 2 added as linear light, HALO_RT_FOG_BEFORE_LIT=add; y the light in
+// place of the picture). The default (HALO_RT_FOG_BEFORE unset) is form 2
+// with the local mean at radius 2; HALO_RT_FOG_BEFORE=0 the old. This pass
+// then lays no environment fog, no curtain and no lit fog's light: only the fog screen, the weather and the
+// flares; the fog_at samples still give the screen's density by depth.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_render::view::View;
@@ -79,6 +137,12 @@ struct HaloFog {
     screen_transforms: array<vec4<f32>, 8>,
     // each layer's frame's weights, and 1 for a layer
     screen_weights: array<vec4<f32>, 4>,
+    // lit fog: x 1 where its light (lit_light) is laid over the fog (in the
+    // fog before the upscaler, added by `before`: 1 the shoulder, 2 plain), y 1 to show the light
+    // alone; z the fog curtain's coverage b0 where it is on (src/fog.rs
+    // fog_curtain; 0 off); w the fog before the upscaler's form (src/fog.rs
+    // FogBefore: 0 off, 1 the tonemapper taken as straight, 2 its curve)
+    lit: vec4<f32>,
 }
 
 @group(0) @binding(0) var source: texture_2d<f32>;
@@ -100,6 +164,10 @@ struct HaloFog {
 // the picture read between its pixels, filtered: the guide at a render
 // pixel's centre (fog_edge_guide)
 @group(0) @binding(13) var guide_sampler: sampler;
+// lit fog's light (Solarik's lit_fog_history of the frame): linear, at the
+// exposure and its strength, at the render resolution in the corner of the
+// texture below DLAA (the main pass's viewport); a black texel without it
+@group(0) @binding(14) var lit_light: texture_2d<f32>;
 
 // metres: the level's panes' masks' depth (src/material.rs,
 // GLASS_SKY_MASK_DISTANCE), which is none
@@ -169,6 +237,34 @@ fn fog_edge_guide(guide: vec3<f32>, pixel: vec2<i32>, viewport: vec4<f32>, to_uv
     let uv = (vec2<f32>(pixel) + 0.5 - viewport.xy) / viewport.zw - to_uv;
     let difference = guide_of(textureSampleLevel(source, guide_sampler, uv, 0.0).rgb) - guide;
     return exp(-0.5 * dot(difference, difference)) + FOG_GUIDE_FLOOR;
+}
+
+// Lit fog's light at this output pixel: the four render pixels' (p00 to p11
+// as the fog's), by the weights the fog took them by (w00, w10, w01, w11:
+// filtered by place, or the silhouette's rule where there is one), so a
+// pixel's light is from the same surface as its fog. Loaded, not filtered:
+// the fallback is a single texel
+fn lit_light_at(p00: vec2<i32>, p11: vec2<i32>, weights: vec4<f32>) -> vec3<f32> {
+    let last = vec2<i32>(textureDimensions(lit_light)) - 1;
+    let light = textureLoad(lit_light, min(p00, last), 0).rgb * weights.x
+        + textureLoad(lit_light, min(vec2(p11.x, p00.y), last), 0).rgb * weights.y
+        + textureLoad(lit_light, min(vec2(p00.x, p11.y), last), 0).rgb * weights.z
+        + textureLoad(lit_light, min(p11, last), 0).rgb * weights.w;
+    return max(light, vec3(0.0));
+}
+
+// Lit fog's light as shown over the tonemapped picture, in linear display
+// space: the light is the scene's (at the exposure, unbounded) and the
+// picture is already tonemapped, so it goes through a soft shoulder of its
+// own (1 - exp(-light): about the light where it is faint, never 1)
+fn lit_fog_shown(light: vec3<f32>) -> vec3<f32> {
+    return 1.0 - exp(-light);
+}
+
+// ... and screened over the picture (linear): brightens what is dark the
+// most, never over 1
+fn lit_fog_over(picture: vec3<f32>, light: vec3<f32>) -> vec3<f32> {
+    return picture + lit_fog_shown(light) * (1.0 - picture);
 }
 
 // a fog screen layer's density at the picture's point
@@ -288,6 +384,266 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
     return result;
 }
 
+// A sample's fog as laid over the picture where the fog curtain is on
+// (fog.lit.z, its b0): its coverage at most b0, its light as it is; else the
+// sample as it is.
+fn curtained(f: Fogged) -> Fogged {
+    var result = f;
+    if fog.lit.z > 0.0 {
+        result.fogged.a = min(f.fogged.a, fog.lit.z);
+    }
+    return result;
+}
+
+// The light the fog curtain leaves of a pixel's (linear, at the exposure)
+// whose coverage b is over b0: the light whose sRGB encoding is its own times
+// r = (1 - b) / (1 - b0), per channel (the encoding run on past 1 for light
+// over it); none where b is 1 (the sky, past the fog's reach).
+fn curtain_darken(light: vec3<f32>, coverage: f32, b0: f32) -> vec3<f32> {
+    if coverage <= b0 {
+        return light;
+    }
+    let r = saturate((1.0 - coverage) / max(1.0 - b0, 1e-4));
+    return srgb_decode(srgb_encode(max(light, vec3(0.0))) * r);
+}
+
+// the lit picture the fog curtain darkens in place (its entry point alone
+// binds it: the fog pass's layout leaves it out)
+@group(0) @binding(15) var curtain_picture: texture_storage_2d<rgba16float, read_write>;
+
+// The fog curtain (src/fog.rs fog_curtain): over the lit picture before the
+// transparent pass, at the render resolution (the main pass's viewport), so
+// that the fog pass's coverage over it can stop at b0. Each pixel by its own
+// fog_at, as this pass takes it there.
+@compute @workgroup_size(8, 8, 1)
+fn curtain(@builtin(global_invocation_id) id: vec3<u32>) {
+    let b0 = fog.lit.z;
+    let viewport = view.main_pass_viewport;
+    if b0 <= 0.0 || any(vec2<f32>(id.xy) >= viewport.zw) {
+        return;
+    }
+    let pixel = vec2<i32>(id.xy) + vec2<i32>(viewport.xy);
+    let coverage = fog_at(pixel).fogged.a;
+    if coverage <= b0 {
+        return;
+    }
+    let picture = textureLoad(curtain_picture, pixel);
+    textureStore(curtain_picture, pixel, vec4(curtain_darken(picture.rgb, coverage, b0), picture.a));
+}
+
+// The tonemapper's response along the grey axis (Bevy 0.20's TonyMcMapface,
+// the camera's, sampled by its LUT as its shader samples it), for the fog
+// before the upscaler's second form: TONE_CURVE at u = x / (x + 1) in 63
+// steps, TONE_INVERSE the u for a response in 63 steps up to TONE_MAX.
+// Made by tmp/fb/tony.py from the LUT; within 0.003 of it.
+const TONE_STEPS: f32 = 63.0;
+const TONE_MAX: f32 = 0.998047;
+// the most linear light the inverse gives (its display about 0.985): the
+// curve's top is flat, and a white fog would ask for thousands
+const TONE_INVERSE_CAP: f32 = 64.0;
+var<private> TONE_CURVE: array<f32, 64> = array<f32, 64>(0.000137, 0.017894, 0.035537, 0.053229, 0.071143, 0.088571, 0.106132, 0.123951, 0.142217, 0.159205, 0.176699, 0.194626, 0.213016, 0.229819, 0.247230, 0.265318, 0.283392, 0.300650, 0.317816, 0.336015, 0.354124, 0.370937, 0.388221, 0.406681, 0.424808, 0.441271, 0.458455, 0.477351, 0.495358, 0.511293, 0.528513, 0.547867, 0.565567, 0.580169, 0.597254, 0.616102, 0.633706, 0.648604, 0.665246, 0.684012, 0.700954, 0.714487, 0.730710, 0.749884, 0.764771, 0.777520, 0.792672, 0.811565, 0.824803, 0.836224, 0.850483, 0.868666, 0.879309, 0.889580, 0.901987, 0.917692, 0.926783, 0.935894, 0.947527, 0.962643, 0.968540, 0.977005, 0.990908, 0.998047);
+var<private> TONE_INVERSE: array<f32, 64> = array<f32, 64>(0.000000, 0.014039, 0.028280, 0.042503, 0.056603, 0.070839, 0.085223, 0.099480, 0.113531, 0.127322, 0.142124, 0.156519, 0.170599, 0.184374, 0.198763, 0.213470, 0.227700, 0.241605, 0.255591, 0.270163, 0.284812, 0.298680, 0.312552, 0.327130, 0.341848, 0.355938, 0.369643, 0.383774, 0.398955, 0.413508, 0.426815, 0.440693, 0.455986, 0.470912, 0.484486, 0.497985, 0.513095, 0.529371, 0.543676, 0.557121, 0.571405, 0.588178, 0.603275, 0.616675, 0.631262, 0.648921, 0.664732, 0.678144, 0.693770, 0.712715, 0.729560, 0.742988, 0.760684, 0.781566, 0.798003, 0.813468, 0.837518, 0.858161, 0.875015, 0.902645, 0.923779, 0.946520, 0.974190, 1.000000);
+
+fn tone_table_curve(at: f32) -> f32 {
+    let p = clamp(at, 0.0, 1.0) * TONE_STEPS;
+    let i = min(u32(p), 62u);
+    return mix(TONE_CURVE[i], TONE_CURVE[i + 1u], p - f32(i));
+}
+
+fn tone_table_inverse(at: f32) -> f32 {
+    let p = clamp(at, 0.0, 1.0) * TONE_STEPS;
+    let i = min(u32(p), 62u);
+    return mix(TONE_INVERSE[i], TONE_INVERSE[i + 1u], p - f32(i));
+}
+
+// the tonemapper's response to linear light, per channel
+fn tone_curve(light: vec3<f32>) -> vec3<f32> {
+    let x = max(light, vec3(0.0));
+    let u = x / (x + 1.0);
+    return vec3(tone_table_curve(u.r), tone_table_curve(u.g), tone_table_curve(u.b));
+}
+
+// the linear light the tonemapper takes to a response, per channel (capped)
+fn tone_inverse(response: vec3<f32>) -> vec3<f32> {
+    let y = clamp(response, vec3(0.0), vec3(TONE_MAX)) / TONE_MAX;
+    let u = vec3(tone_table_inverse(y.r), tone_table_inverse(y.g), tone_table_inverse(y.b));
+    return min(u / max(1.0 - u, vec3(1e-6)), vec3(TONE_INVERSE_CAP));
+}
+
+// The game's fog blend (light f.rgb added and coverage f.a, in the display's
+// encoding) over linear light, in linear light again for the tonemapper that
+// follows: through its curve (form 2) or taking it as straight (form 1). The
+// encoding is run on past 1 for light over it (form 1).
+fn fog_blend_linear(light: vec3<f32>, f: vec4<f32>, form: f32) -> vec3<f32> {
+    let p = max(light, vec3(0.0));
+    if form > 1.5 {
+        let shown = srgb_encode(min(tone_curve(p), vec3(1.0)));
+        return tone_inverse(srgb_decode(f.rgb + shown * (1.0 - f.a)));
+    }
+    return srgb_decode(f.rgb + srgb_encode(p) * (1.0 - f.a));
+}
+
+// Applied to the picture as it is here, the lighting's before the denoiser
+// (one noisy estimate a pixel), the blend g above is curved, so blended pixel
+// by pixel and then averaged by the denoiser it comes out darker than the
+// blend of the average, the old (3 to 5 of 255 in c10's mid fog). So it is
+// taken at a local mean m and carried to the pixel affinely, as a ratio:
+//   P' = g(0) + s P,   s = (g(m) - g(0)) / m,   while s <= 1;
+//   P' = g(m) + (P - m)                         where it would be over 1
+// (per channel; the second only where a fog's light lifts dark surfaces, the
+// encoding's toe). The denoiser's average of P' is g of the average m, so the
+// darkening goes; P' is continuous and monotone in P, never under g(0) (never
+// negative), never steeper than 1, and the pixel's own value never passes
+// through the tonemapper's inverse (a bright sample whose blended value neared
+// the top of the curve ran there to tens of linear units, in one channel more
+// than another). And a noisy sample keeps to its own pixel: taken about m with
+// g's slope at m, as first built, a firefly in the window raised m and with it
+// every pixel round it by the curve's offset g(m) - g'(m) m, a square of the
+// window's size each frame (d20's first corridor in its black fog, pink, cyan
+// and white, flickering); as a ratio from g(0) there is no offset, and a
+// firefly moves its neighbours' ratio only by g's curvature. The mean itself
+// counts the brightest sample of the window at no more than FOG_MEAN_CLIP times
+// the others' mean, so that a firefly hardly moves it at all.
+//
+// m is the picture's local mean (HALO_RT_FOG_BEFORE_MEAN=<radius>,
+// FOG_BEFORE_MEAN: the pixels within the radius at about this one's depth,
+// from the copy bound as `source`), or the pixel itself without it; either
+// held under FOG_MEAN_CAP, where the tables are well conditioned. With m the
+// pixel itself and P under the cap it is g(P) exactly.
+@if(FOG_BEFORE_MEAN) const FOG_MEAN_RADIUS: i32 = i32(constants::FOG_BEFORE_MEAN);
+// (a neighbour counts where its view depth is within this share of the pixel's)
+const FOG_MEAN_DEPTH: f32 = 0.05;
+// (linear light: the tonemapper's response 0.93 there, well inside the tables)
+const FOG_MEAN_CAP: f32 = 8.0;
+// (the window's brightest sample counted at most this many times the mean of
+// the rest, by luminance)
+const FOG_MEAN_CLIP: f32 = 4.0;
+
+// the picture's local mean round a pixel (the mean form), else the pixel
+fn fog_local_mean(p: vec3<f32>, pixel: vec2<i32>, viewport: vec4<f32>) -> vec3<f32> {
+    var mean = p;
+@if(FOG_BEFORE_MEAN) {
+    let near = view.clip_from_view[3][2];
+    let z = textureLoad(depth, pixel, 0);
+    let d = near / max(z, 1e-12);
+    let low = vec2<i32>(viewport.xy);
+    let high = vec2<i32>(viewport.xy + viewport.zw) - 1;
+    var total = vec3(0.0);
+    var count = 0.0;
+    var brightest = vec3(0.0);
+    for (var y = -FOG_MEAN_RADIUS; y <= FOG_MEAN_RADIUS; y++) {
+        for (var x = -FOG_MEAN_RADIUS; x <= FOG_MEAN_RADIUS; x++) {
+            let at = clamp(pixel + vec2(x, y), low, high);
+            let zn = textureLoad(depth, at, 0);
+            var same = false;
+            if z <= 0.0 || zn <= 0.0 {
+                same = z <= 0.0 && zn <= 0.0;
+            } else {
+                same = abs(near / zn - d) <= d * FOG_MEAN_DEPTH;
+            }
+            if same {
+                let sample = max(textureLoad(source, at, 0).rgb, vec3(0.0));
+                total += sample;
+                count += 1.0;
+                if luminance(sample) > luminance(brightest) {
+                    brightest = sample;
+                }
+            }
+        }
+    }
+    // (the brightest at most FOG_MEAN_CLIP times the others' mean)
+    if count > 1.5 {
+        let others = (total - brightest) / (count - 1.0);
+        let limit = FOG_MEAN_CLIP * luminance(others);
+        let bright = luminance(brightest);
+        let kept = select(brightest, brightest * (limit / bright), bright > limit);
+        total = total - brightest + kept;
+    }
+    mean = total / max(count, 1.0);
+}
+    return min(mean, vec3(FOG_MEAN_CAP));
+}
+
+fn luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// P' = g(m) + s (P - m), s = (g(m) - g(0)) / m held to 0..1, per channel:
+// g(0) + s P while the secant is under 1 (above)
+fn affine_about(p: vec3<f32>, m: vec3<f32>, at_mean: vec3<f32>, at_zero: vec3<f32>) -> vec3<f32> {
+    let s = clamp((at_mean - at_zero) / max(m, vec3(1e-6)), vec3(0.0), vec3(1.0));
+    return max(at_mean + (p - m) * s, vec3(0.0));
+}
+
+// lit fog's shoulder over linear light (the form's): 1 - exp(-light) screened
+// over what is shown, through the tonemapper's curve and back (form 2), or
+// over the light under 1 taken as shown (form 1)
+fn lit_shoulder(light: vec3<f32>, lit: vec3<f32>, form: f32) -> vec3<f32> {
+    let p = max(light, vec3(0.0));
+    if form > 1.5 {
+        return tone_inverse(lit_fog_over(min(tone_curve(p), vec3(1.0)), lit));
+    }
+    return p + lit_fog_shown(lit) * (1.0 - min(p, vec3(1.0)));
+}
+
+// The fog before the upscaler (src/fog.rs FogBefore, fog.lit.w its form): the
+// lit picture, at the render resolution (the main pass's viewport), before
+// the transparent pass, each pixel by its own fog_at, then lit fog's light
+// added (fog.lit.x; y the light alone), both taken about the mean (above).
+// A pixel with no coverage, no fog light and no lit fog's light is left as it
+// was.
+@compute @workgroup_size(8, 8, 1)
+fn before(@builtin(global_invocation_id) id: vec3<u32>) {
+    let form = fog.lit.w;
+    let viewport = view.main_pass_viewport;
+    if form <= 0.5 || any(vec2<f32>(id.xy) >= viewport.zw) {
+        return;
+    }
+    let pixel = vec2<i32>(id.xy) + vec2<i32>(viewport.xy);
+    let f = fog_at(pixel).fogged;
+    // (a modelless sky's clear adds its colour with no coverage)
+    let fogged = f.a > 0.0 || any(f.rgb > vec3(0.0));
+    var lit = vec3(0.0);
+    if fog.lit.x > 0.5 {
+        let last = vec2<i32>(textureDimensions(lit_light)) - 1;
+        lit = max(textureLoad(lit_light, min(pixel, last), 0).rgb, vec3(0.0));
+    }
+    let only = fog.lit.x > 0.5 && fog.lit.y > 0.5;
+    let lit_on = fog.lit.x > 0.5 && !only && any(lit > vec3(0.0));
+    if !fogged && !only && !lit_on {
+        return;
+    }
+    let picture = textureLoad(curtain_picture, pixel);
+    if only {
+        textureStore(curtain_picture, pixel, vec4(lit, picture.a));
+        return;
+    }
+    let p = max(picture.rgb, vec3(0.0));
+    let m = fog_local_mean(p, pixel, viewport);
+    var light = p;
+    // (the mean after the fog, for the light's shoulder)
+    var fogged_mean = m;
+    if fogged {
+        let at_mean = fog_blend_linear(m, f, form);
+        light = affine_about(p, m, at_mean, fog_blend_linear(vec3(0.0), f, form));
+        fogged_mean = at_mean;
+    }
+    if lit_on {
+        if fog.lit.x > 1.5 {
+            // (HALO_RT_FOG_BEFORE_LIT=add: linear light, the tonemapper
+            // following)
+            light += lit;
+        } else {
+            // (the shoulder, as the fog pass laid it over what was shown,
+            // taken about the fogged mean as the fog is)
+            let mf = min(fogged_mean, vec3(FOG_MEAN_CAP));
+            let at_mean = lit_shoulder(mf, lit, form);
+            light = affine_about(light, mf, at_mean, lit_shoulder(vec3(0.0), lit, form));
+        }
+    }
+    textureStore(curtain_picture, pixel, vec4(light, picture.a));
+}
+
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let colour = textureSample(source, source_sampler, in.uv);
@@ -315,6 +671,17 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     // elsewhere in the picture (b30's far sea a white band, streaked, and
     // outlines round models against it); from the nearest pixel alone, a
     // silhouette's edge was fogged as the surface beside it now and then.
+    // (With the fog before the upscaler, fog.lit.w, none of this but the fog
+    // screen's density by depth, mode 1: the four only for it, their fog's
+    // light and coverage dropped below)
+    let fog_before = fog.lit.w > 0.5;
+    let screen_by_depth = fog.screen_color.a > 0.5 && fog.screen_color.a < 1.5;
+    var fogged = vec4(0.0);
+    var screen_density = 1.0;
+    var weights = vec4(0.0);
+    var p00 = vec2<i32>(0);
+    var p11 = vec2<i32>(0);
+    if !fog_before || screen_by_depth {
     let anchor = view.world_position - normalize(view.world_from_view[2].xyz);
     let jittered = view.clip_from_world * vec4(anchor, 1.0);
     let steady = view.unjittered_clip_from_world * vec4(anchor, 1.0);
@@ -325,8 +692,8 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let weight = at - base;
     let low = vec2<i32>(viewport.xy);
     let high = vec2<i32>(viewport.xy + viewport.zw) - 1;
-    let p00 = clamp(vec2<i32>(base), low, high);
-    let p11 = clamp(vec2<i32>(base) + 1, low, high);
+    p00 = clamp(vec2<i32>(base), low, high);
+    p11 = clamp(vec2<i32>(base) + 1, low, high);
     let f00 = fog_at(p00);
     let f10 = fog_at(vec2(p11.x, p00.y));
     let f01 = fog_at(vec2(p00.x, p11.y));
@@ -335,8 +702,17 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let w10 = weight.x * (1.0 - weight.y);
     let w01 = (1.0 - weight.x) * weight.y;
     let w11 = weight.x * weight.y;
-    var fogged = f00.fogged * w00 + f10.fogged * w10 + f01.fogged * w01 + f11.fogged * w11;
-    var screen_density = f00.screen_density * w00 + f10.screen_density * w10 + f01.screen_density * w01 + f11.screen_density * w11;
+    // (the fog curtain: each sample's coverage over the picture at most its
+    // b0, the picture under it darkened by the curtain already; the samples'
+    // own, f00 to f11, for the silhouettes' spread)
+    let k00 = curtained(f00);
+    let k10 = curtained(f10);
+    let k01 = curtained(f01);
+    let k11 = curtained(f11);
+    fogged = k00.fogged * w00 + k10.fogged * w10 + k01.fogged * w01 + k11.fogged * w11;
+    screen_density = f00.screen_density * w00 + f10.screen_density * w10 + f01.screen_density * w01 + f11.screen_density * w11;
+    // (the four's weights as the fog ends up taking them, for lit fog's light)
+    weights = vec4(w00, w10, w01, w11);
 
     // A silhouette among the four (HALO_RT_FOG_EDGES): the picture is
     // upscaled to the display's pixels, each edge where the upscaler put it,
@@ -361,14 +737,16 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         let edge = smoothstep(FOG_EDGE_START, FOG_EDGE_FULL, spread);
         if edge > 0.0 {
             var chosen: Fogged;
+            var chosen_weights: vec4<f32>;
             @if(FOG_EDGES_NEAR) {
                 // near: the nearest sample's fog, a near object's pixels
                 // none of the far side's (and the far side's within a render
                 // pixel of it the near object's: a thin rim less fogged)
-                chosen = f00;
-                if f10.z > chosen.z { chosen = f10; }
-                if f01.z > chosen.z { chosen = f01; }
-                if f11.z > chosen.z { chosen = f11; }
+                chosen = k00;
+                chosen_weights = vec4(1.0, 0.0, 0.0, 0.0);
+                if k10.z > chosen.z { chosen = k10; chosen_weights = vec4(0.0, 1.0, 0.0, 0.0); }
+                if k01.z > chosen.z { chosen = k01; chosen_weights = vec4(0.0, 0.0, 1.0, 0.0); }
+                if k11.z > chosen.z { chosen = k11; chosen_weights = vec4(0.0, 0.0, 0.0, 1.0); }
             }
             @if(!FOG_EDGES_NEAR) {
                 // guided (the default): each sample's filter weight times
@@ -382,12 +760,19 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
                 let g01 = fog_edge_guide(guide, vec2(p00.x, p11.y), viewport, to_uv) * w01;
                 let g11 = fog_edge_guide(guide, p11, viewport, to_uv) * w11;
                 let total = max(g00 + g10 + g01 + g11, 1e-6);
-                chosen.fogged = (f00.fogged * g00 + f10.fogged * g10 + f01.fogged * g01 + f11.fogged * g11) / total;
+                chosen.fogged = (k00.fogged * g00 + k10.fogged * g10 + k01.fogged * g01 + k11.fogged * g11) / total;
                 chosen.screen_density = (f00.screen_density * g00 + f10.screen_density * g10 + f01.screen_density * g01 + f11.screen_density * g11) / total;
+                chosen_weights = vec4(g00, g10, g01, g11) / total;
             }
             fogged = mix(fogged, chosen.fogged, edge);
             screen_density = mix(screen_density, chosen.screen_density, edge);
+            weights = mix(weights, chosen_weights, edge);
         }
+    }
+    }
+    // (the fog before the upscaler laid the environment fog already)
+    if fog_before {
+        fogged = vec4(0.0);
     }
 
     var encoded = srgb_encode(saturate(colour.rgb));
@@ -396,6 +781,20 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     if fogged.a > 0.0 || any(fogged.rgb > vec3(0.0)) {
         encoded = fogged.rgb + encoded * (1.0 - fogged.a);
         changed = true;
+    }
+
+    // lit fog's light over the environment fog (the sky's too, lit out to
+    // the fog's reach), under the fog screen, the weather and the flares
+    if fog.lit.x > 0.5 {
+        let light = lit_light_at(p00, p11, weights);
+        // (the light alone, for looking at it: HALO_RT_LIT_FOG=<s>,only)
+        if fog.lit.y > 0.5 {
+            return vec4(lit_fog_shown(light), colour.a);
+        }
+        if any(light > vec3(0.0)) {
+            encoded = srgb_encode(lit_fog_over(srgb_decode(saturate(encoded)), light));
+            changed = true;
+        }
     }
 
     let mode = fog.screen_color.a;

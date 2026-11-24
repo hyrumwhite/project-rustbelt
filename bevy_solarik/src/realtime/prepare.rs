@@ -82,11 +82,32 @@ pub struct SolarikLightingResources {
     /// Lit fog (`lit_fog.wesl`): this frame's scattered light, and its
     /// accumulation over frames in two textures taken in turn (the frame's
     /// parity the one written), which `lit_fog_composite` adds after the
-    /// denoiser.
+    /// denoiser; and a scratch texture the a-trous prefilter
+    /// (`lit_fog_filter`) takes in turn with `lit_fog_raw`.
     pub lit_fog_raw: TextureView,
+    pub lit_fog_scratch: TextureView,
     pub lit_fog_history: [TextureView; 2],
+    /// Whether lit fog's passes ran on this view's last frame (when they
+    /// didn't, the history is from whenever they last did, so the next run
+    /// starts without it).
+    pub(crate) lit_fog_ran: core::sync::atomic::AtomicBool,
     pub view_size: UVec2,
     pub(crate) history: crate::scene::history::ViewHistory,
+}
+
+impl SolarikLightingResources {
+    /// Lit fog's light for the frame `frame_count` (the render world's
+    /// `FrameCount`), for an application that lays it over its own fog
+    /// (`SolarikRayFog::lit`'s w): the history the frame's accumulation
+    /// wrote, linear, at the exposure and the strength, at the render
+    /// resolution in the texture's corner (`main_pass_viewport` below DLAA);
+    /// none when lit fog's passes did not run on the view's last frame. Read
+    /// it after Solarik's lighting.
+    pub fn lit_fog_light(&self, frame_count: u32) -> Option<&TextureView> {
+        self.lit_fog_ran
+            .load(core::sync::atomic::Ordering::Relaxed)
+            .then(|| &self.lit_fog_history[(frame_count & 1) as usize])
+    }
 }
 
 pub fn prepare_solari_lighting_resources(
@@ -200,6 +221,7 @@ pub fn prepare_solari_lighting_resources(
                 .create_view(&TextureViewDescriptor::default())
         };
         let lit_fog_raw = lit_fog_texture("solarik_lighting_lit_fog_raw");
+        let lit_fog_scratch = lit_fog_texture("solarik_lighting_lit_fog_scratch");
         let lit_fog_history = [
             lit_fog_texture("solarik_lighting_lit_fog_history_a"),
             lit_fog_texture("solarik_lighting_lit_fog_history_b"),
@@ -333,7 +355,9 @@ pub fn prepare_solari_lighting_resources(
             primary_background,
             primary_background_view,
             lit_fog_raw,
+            lit_fog_scratch,
             lit_fog_history,
+            lit_fog_ran: Default::default(),
             view_size,
             history: Default::default(),
         });

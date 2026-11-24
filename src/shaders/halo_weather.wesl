@@ -41,6 +41,7 @@ struct HaloFog {
     screen: vec4<f32>,
     screen_transforms: array<vec4<f32>, 8>,
     screen_weights: array<vec4<f32>, 4>,
+    lit: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;

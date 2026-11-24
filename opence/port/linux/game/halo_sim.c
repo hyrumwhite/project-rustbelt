@@ -64,6 +64,7 @@ bit for bit; differences are counted and the first few logged.
 #include "render/render_cameras.h"
 #include "main/console.h"
 #include "hs/hs.h"
+#include "saved games/game_state.h" /* (game_state_reverted: HALO_SIM_HS_COMMAND_REVERTED) */
 #include "memory/data.h"
 unsigned char const *transition_function_table_get(short function_type); /* periodic_functions.c */
 #include "render/render.h"
@@ -2834,6 +2835,10 @@ static struct
 	unsigned long body_effect_count;
 	boolean command_run;
 	boolean later_command_run;
+	/* (HALO_SIM_HS_COMMAND_REVERTED's: whether the game has been reverted
+	since the process started, and whether the command has run) */
+	boolean reverted;
+	boolean reverted_command_run;
 } halo_sim_hs_checks;
 
 static char const *const halo_sim_hs_operation_names[NUMBER_OF_HALO_SIM_HS_OPERATIONS] =
@@ -11381,9 +11386,12 @@ int halo_sim_hs_begin(long operation, long expression, long *result, int *checki
 	struct halo_sim_hs_update_call call;
 
 	*checking = FALSE;
-	/* (for testing a console command's evaluation: HALO_SIM_HS_COMMAND, run
-	once at the update of the tick HALO_SIM_HS_COMMAND_TIME, 300 if not
-	given) */
+	/* (for testing a console command's evaluation, three commands, each run
+	once and in this order: HALO_SIM_HS_COMMAND at the update of the tick
+	HALO_SIM_HS_COMMAND_TIME, 300 if not given; HALO_SIM_HS_COMMAND_LATER at
+	the tick HALO_SIM_HS_COMMAND_LATER_TIME, 600 if not given; and
+	HALO_SIM_HS_COMMAND_REVERTED at the first update after the later one's
+	at which the game has been reverted since the process started) */
 	if (operation == _halo_sim_hs_update && !halo_sim_hs_checks.command_run)
 	{
 		char const *command = getenv("HALO_SIM_HS_COMMAND");
@@ -11426,6 +11434,29 @@ int halo_sim_hs_begin(long operation, long expression, long *result, int *checki
 		{
 			halo_sim_hs_checks.later_command_run = TRUE;
 			platform_log("halo_sim: evaluating the later command %s: %s", command,
+				hs_compile_and_evaluate(command) ? "compiled" : "didn't compile");
+		}
+	}
+	/* (and a third, after a revert: HALO_SIM_HS_COMMAND_REVERTED, once the
+	later command has run and the game has been reverted, as a cutscene
+	skipped back to its start. game_state_reverted is true only at the tick
+	the revert went back to, so every update looks and the answer is kept) */
+	if (operation == _halo_sim_hs_update && game_state_reverted())
+	{
+		halo_sim_hs_checks.reverted = TRUE;
+	}
+	if (operation == _halo_sim_hs_update && !halo_sim_hs_checks.reverted_command_run)
+	{
+		char const *command = getenv("HALO_SIM_HS_COMMAND_REVERTED");
+
+		if (!command)
+		{
+			halo_sim_hs_checks.reverted_command_run = TRUE;
+		}
+		else if (halo_sim_hs_checks.later_command_run && halo_sim_hs_checks.reverted)
+		{
+			halo_sim_hs_checks.reverted_command_run = TRUE;
+			platform_log("halo_sim: evaluating the reverted command %s: %s", command,
 				hs_compile_and_evaluate(command) ? "compiled" : "didn't compile");
 		}
 	}

@@ -31,9 +31,14 @@ use bevy_shader::load_shader_library;
 use extract::extract_solari_lighting;
 use node::{
     PrimaryGlassViews, init_solari_lighting_pipelines, prepare_primary_glass,
-    restore_primary_glass, solarik_lighting,
+    restore_primary_glass,
 };
 use prepare::prepare_solari_lighting_resources;
+pub use prepare::SolarikLightingResources;
+/// The lighting's systems, for ordering against: `solarik_lighting::<true>`
+/// is the last, after which the main texture holds the lit picture and the
+/// transparent pass has not drawn yet.
+pub use node::solarik_lighting;
 use tracing::warn;
 
 #[cfg(feature = "nrc")]

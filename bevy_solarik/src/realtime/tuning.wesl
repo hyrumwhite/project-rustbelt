@@ -67,3 +67,49 @@ const GI_GUIDE_NEIGHBOURS: u32 = 0u;
 const GI_GUIDE_RADIUS: f32 = f32(constants::GI_GUIDE_RADIUS);
 @if((!(GI_GUIDE_RADIUS)))
 const GI_GUIDE_RADIUS: f32 = 30.0;
+// (lit fog, lit_fog.wesl: the a-trous prefilter's levels, 0 none, the old
+// 5x5 inside lit_fog_accumulate; the most frames of the history, 24 the old;
+// the history's clamp band in hundredths of the prefiltered light, 0 none,
+// the old; the depth weights' tolerance in thousandths of the view depth;
+// the estimate's candidates from the light tiles. A pipeline built without
+// the definitions gets the old values throughout)
+@if((LIT_FOG_LEVELS))
+const LIT_FOG_LEVELS: u32 = constants::LIT_FOG_LEVELS;
+@if((!(LIT_FOG_LEVELS)))
+const LIT_FOG_LEVELS: u32 = 0u;
+@if((LIT_FOG_FRAMES))
+const LIT_FOG_FRAMES: u32 = constants::LIT_FOG_FRAMES;
+@if((!(LIT_FOG_FRAMES)))
+const LIT_FOG_FRAMES: u32 = 24u;
+@if((LIT_FOG_CLAMP))
+const LIT_FOG_CLAMP: u32 = constants::LIT_FOG_CLAMP;
+@if((!(LIT_FOG_CLAMP)))
+const LIT_FOG_CLAMP: u32 = 0u;
+// (the power of the share a clamped history kept by which its frame count is
+// scaled; 2 the first form, and 2 for a pipeline built without the
+// definition, where the clamp is off anyway)
+@if((LIT_FOG_CLAMP_POWER))
+const LIT_FOG_CLAMP_POWER: u32 = constants::LIT_FOG_CLAMP_POWER;
+@if((!(LIT_FOG_CLAMP_POWER)))
+const LIT_FOG_CLAMP_POWER: u32 = 2u;
+// (the clamp band widened by this many tenths of the prefiltered light's own
+// noise at the pixel, 0 the old band, and 0 for a pipeline built without the
+// definition)
+@if((LIT_FOG_CLAMP_NOISE))
+const LIT_FOG_CLAMP_NOISE: u32 = constants::LIT_FOG_CLAMP_NOISE;
+@if((!(LIT_FOG_CLAMP_NOISE)))
+const LIT_FOG_CLAMP_NOISE: u32 = 0u;
+// (a surface past an opaque fog's reach taken as the sky, 1 by default, 0
+// the old, and 0 for a pipeline built without the definition)
+@if((LIT_FOG_REACH))
+const LIT_FOG_REACH: u32 = constants::LIT_FOG_REACH;
+@if((!(LIT_FOG_REACH)))
+const LIT_FOG_REACH: u32 = 0u;
+@if((LIT_FOG_DEPTH))
+const LIT_FOG_DEPTH: u32 = constants::LIT_FOG_DEPTH;
+@if((!(LIT_FOG_DEPTH)))
+const LIT_FOG_DEPTH: u32 = 50u;
+@if((LIT_FOG_CANDIDATES))
+const LIT_FOG_CANDIDATES: u32 = constants::LIT_FOG_CANDIDATES;
+@if((!(LIT_FOG_CANDIDATES)))
+const LIT_FOG_CANDIDATES: u32 = 16u;

@@ -26,7 +26,9 @@
 // fog, and its colour is raised by what that pass will take from the surface
 // behind (1 over 1 - its coverage, up to 4 times; none over the sky, which
 // the pass leaves): an effect in front of a far fogged wall is no longer
-// fogged as much as the wall, nor one against the sky not at all.
+// fogged as much as the wall, nor one against the sky not at all. Where the
+// fog is opaque the fog curtain (src/fog.rs) stops the pass's coverage at its
+// b0, and the raise is by that at most (sprite_fog).
 
 import bevy_pbr::render::forward_io::VertexOutput;
 import bevy_pbr::render::mesh_view_bindings::view;
@@ -43,6 +45,9 @@ struct HaloSprite {
 // the environment fog (halo_fog.wesl's first five; crate::fog::fog_layers),
 // one buffer every material shares, so that the fog's changes (its distance
 // follows the camera on some levels) rewrite no material
+// (planar's z: the fog curtain's b0 where it is on, 0 off, -1 where the
+// fog is laid before the upscaler (FogBefore); src/fog.rs HaloFog::layers. Every copy of
+// this struct the same: halo_transparent.wesl, halo_sprite.wesl)
 struct HaloFogLayers {
     atmospheric_color: vec4<f32>,
     atmospheric: vec4<f32>,
@@ -121,12 +126,21 @@ fn fog_coverage(view_depth: f32, position: vec3<f32>) -> f32 {
 
 // the sprite's own fog's transmittance, and how much to raise its colour by
 // for the fog pass over what lies behind it
-fn sprite_fog(in: VertexOutput) -> vec2<f32> {
+// (x the sprite's own fog's transmittance, y the old raise, z the coverage
+// behind under the fog curtain, under 0 without it: curtain_raised)
+fn sprite_fog(in: VertexOutput) -> vec3<f32> {
     if fog_layers.atmospheric_color.a <= 0.0 && fog_layers.planar_color.a <= 0.0 {
-        return vec2(1.0);
+        return vec3(1.0, 1.0, -1.0);
     }
     let forward = -normalize(view.world_from_view[2].xyz);
     let own = 1.0 - fog_coverage(dot(in.world_position.xyz - view.world_position, forward), in.world_position.xyz);
+    // (the fog curtain's b0, 0 off: src/fog.rs fog_curtain; under 0 the fog
+    // before the upscaler, src/fog.rs FogBefore: the picture behind fogged
+    // already, as the game's, so the surface keeps its own fog alone)
+    let curtain = fog_layers.planar.z;
+    if curtain < 0.0 {
+        return vec3(own, 1.0, -1.0);
+    }
     var behind = 0.0;
 @if(DEPTH_PREPASS) {
     let depth = prepass_depth(in.position, 0u);
@@ -136,9 +150,32 @@ fn sprite_fog(in: VertexOutput) -> vec2<f32> {
         let p = view.world_from_clip * vec4(ndc, depth, 1.0);
         let position = p.xyz / p.w;
         behind = fog_coverage(dot(position - view.world_position, forward), position);
+    } else if curtain > 0.0 {
+        // (the sky, under the curtain: fogged whole, as past the fog's reach)
+        behind = 1.0;
     }
 }
-    return vec2(own, min(1.0 / max(1.0 - behind, 1e-4), 4.0));
+    // Under the fog curtain the picture behind was darkened beyond b0 and the
+    // fog pass covers by no more than b0, in the display's encoding: so the
+    // light is raised by what that takes (curtain_raised, z), and the surface
+    // keeps its own fog alone, whatever lies behind (halo_fog.wesl)
+    if curtain > 0.0 {
+        return vec3(own, 1.0, min(behind, curtain));
+    }
+    return vec3(own, min(1.0 / max(1.0 - behind, 1e-4), 4.0), -1.0);
+}
+
+// A transparent surface's or sprite's light (linear) raised for the fog pass
+// over what lies behind it. Under the fog curtain (fog.z, the coverage behind
+// it up to b0; under 0 off): the light whose sRGB encoding is its own over
+// (1 - fog.z), as the fog pass then multiplies the encoding by that (src/fog.rs
+// fog_curtain); else its old factor, fog.y (halo_fog.wesl, halo_transparent.wesl
+// and halo_sprite.wesl the same).
+fn curtain_raised(light: vec3<f32>, fog: vec3<f32>) -> vec3<f32> {
+    if fog.z < 0.0 {
+        return light * fog.y;
+    }
+    return srgb_decode(srgb_encode(light) / max(1.0 - fog.z, 1e-4));
 }
 
 fn shade(in: VertexOutput) -> vec4<f32> {
@@ -146,7 +183,7 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     let shaded = shade_unfogged(in);
     let mode = u32(sprite.mode.x);
     if sprite.mode.w > 2.5 {
-        return vec4(1.0 - fogged.x, (fogged.y - 1.0) / 3.0, 0.0, 1.0);
+        return vec4(1.0 - fogged.x, (fogged.y - 1.0) / 3.0, max(fogged.z, 0.0), 1.0);
     }
     if sprite.mode.w > 0.5 { return shaded; }
     switch mode {
@@ -159,15 +196,15 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         }
         // alpha blend: its coverage
         case 0u: {
-            return vec4(shaded.rgb * fogged.y, shaded.a * fogged.x);
+            return vec4(curtain_raised(shaded.rgb, fogged), shaded.a * fogged.x);
         }
         // alpha multiply add: premultiplied
         case 7u: {
-            return vec4(shaded.rgb * fogged.x * fogged.y, shaded.a * fogged.x);
+            return vec4(curtain_raised(shaded.rgb * fogged.x, fogged), shaded.a * fogged.x);
         }
         // add, subtract, max
         default: {
-            return vec4(shaded.rgb * fogged.x * fogged.y, shaded.a);
+            return vec4(curtain_raised(shaded.rgb * fogged.x, fogged), shaded.a);
         }
     }
 }

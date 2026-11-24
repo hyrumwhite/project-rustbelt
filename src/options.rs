@@ -4,6 +4,7 @@
 //! again at the next start. While the panel is open the mouse is the
 //! viewer's, not the game's.
 
+use crate::fog::LitFog;
 use crate::LightingSettings;
 use bevy::prelude::*;
 use bevy_solarik::prelude::SolarikLighting;
@@ -19,7 +20,7 @@ impl Plugin for OptionsPlugin {
         app.init_resource::<OptionsPanel>()
             .init_resource::<PressedButtons>()
             .add_systems(Startup, spawn_panel)
-            .add_systems(Update, (toggle_panel, press_buttons, label_rows, apply_saved, show_stats).chain())
+            .add_systems(Update, (toggle_panel, test_options, press_buttons, log_test_options, label_rows, apply_saved, show_stats).chain())
             .add_systems(Last, save_settings);
     }
 }
@@ -32,11 +33,14 @@ pub struct OptionsPanel {
     /// Whether the stats row was pressed this run (with [`stats_override`],
     /// only then is its value saved).
     stats_pressed: bool,
+    /// Whether a lit fog row was pressed this run (with
+    /// `fog::lit_fog_override`, only then is its value saved).
+    lit_fog_pressed: bool,
 }
 
 impl Default for OptionsPanel {
     fn default() -> Self {
-        OptionsPanel { open: false, show_stats: stats_override().unwrap_or(true), stats_pressed: false }
+        OptionsPanel { open: false, show_stats: stats_override().unwrap_or(true), stats_pressed: false, lit_fog_pressed: false }
     }
 }
 
@@ -49,6 +53,33 @@ pub struct SavedSettings {
     /// `DlssPerfQualityMode` by name.
     pub dlss_quality: String,
     pub show_stats: bool,
+    /// Lit fog ([`LitFog`]) on, and its strength (its sun and only flags
+    /// aren't saved).
+    pub lit_fog: bool,
+    pub lit_fog_strength: f32,
+}
+
+/// Lit fog's strength before any is chosen.
+pub const LIT_FOG_STRENGTH: f32 = 3.0;
+
+/// The strengths the panel steps lit fog through.
+const LIT_FOG_STRENGTHS: [f32; 8] = [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0];
+
+/// Lit fog's strength a step down (`direction` < 0) or up: the next of
+/// [`LIT_FOG_STRENGTHS`] below or above it (from one not in the list too),
+/// and none past the ends, the same.
+fn step_lit_fog_strength(strength: f32, direction: i8) -> f32 {
+    let next = if direction < 0 {
+        LIT_FOG_STRENGTHS.into_iter().rev().find(|s| *s < strength)
+    } else {
+        LIT_FOG_STRENGTHS.into_iter().find(|s| *s > strength)
+    };
+    next.unwrap_or(strength)
+}
+
+/// A strength as the panel shows it: whole, or to a tenth.
+fn strength_text(strength: f32) -> String {
+    if strength.fract() == 0.0 { format!("{strength:.0}") } else { format!("{strength:.1}") }
 }
 
 pub(crate) fn settings_path() -> Option<PathBuf> {
@@ -65,12 +96,19 @@ impl SavedSettings {
             dlss_rr: true,
             dlss_quality: "Auto".into(),
             show_stats: true,
+            lit_fog: false,
+            lit_fog_strength: LIT_FOG_STRENGTH,
         }
     }
 
     /// The saved settings, or `None` before any were saved.
     pub fn load() -> Option<Self> {
-        let text = std::fs::read_to_string(settings_path()?).ok()?;
+        Some(Self::parse(&std::fs::read_to_string(settings_path()?).ok()?))
+    }
+
+    /// The settings a file's text holds: a key it hasn't, or whose value
+    /// doesn't parse, the default.
+    fn parse(text: &str) -> Self {
         let mut settings = Self::defaults();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
@@ -86,10 +124,21 @@ impl SavedSettings {
                 "dlss_rr" => settings.dlss_rr = flag,
                 "dlss_quality" => settings.dlss_quality = value.to_string(),
                 "stats" => settings.show_stats = flag,
+                "lit_fog" => settings.lit_fog = flag,
+                "lit_fog_strength" => settings.lit_fog_strength = number.filter(|s| *s > 0.0).unwrap_or(settings.lit_fog_strength),
                 _ => {}
             }
         }
-        Some(settings)
+        settings
+    }
+
+    /// The file's text.
+    fn text(&self) -> String {
+        let l = &self.lighting;
+        format!(
+            "# halo_rt's options (F10 in the viewer)\nemissive = {}\nsun = {}\nsky = {}\nexposure = {}\nrestir = {}\ndlss_rr = {}\ndlss_quality = {}\nstats = {}\nlit_fog = {}\nlit_fog_strength = {}\n",
+            l.emissive_scale, l.sun_scale, l.sky_scale, l.exposure_ev100, self.restir, self.dlss_rr, self.dlss_quality, self.show_stats, self.lit_fog, self.lit_fog_strength
+        )
     }
 
     fn save(&self) -> std::io::Result<()> {
@@ -97,14 +146,7 @@ impl SavedSettings {
         if let Some(folder) = path.parent() {
             std::fs::create_dir_all(folder)?;
         }
-        let l = &self.lighting;
-        std::fs::write(
-            path,
-            format!(
-                "# halo_rt's options (F10 in the viewer)\nemissive = {}\nsun = {}\nsky = {}\nexposure = {}\nrestir = {}\ndlss_rr = {}\ndlss_quality = {}\nstats = {}\n",
-                l.emissive_scale, l.sun_scale, l.sky_scale, l.exposure_ev100, self.restir, self.dlss_rr, self.dlss_quality, self.show_stats
-            ),
-        )
+        std::fs::write(path, self.text())
     }
 }
 
@@ -124,7 +166,7 @@ fn quality_by_name(name: &str) -> Option<DlssPerfQualityMode> {
 }
 
 /// A row of the panel.
-#[derive(Component, Clone, Copy, PartialEq)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
 enum Row {
     DlssRr,
     DlssQuality,
@@ -132,13 +174,15 @@ enum Row {
     Sky,
     Emissive,
     Exposure,
+    LitFog,
+    LitFogStrength,
     Stats,
     Reset,
 }
 
 /// A button: its row, and which way it moves the setting (-1, +1, or 0 to
 /// toggle or cycle).
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
 struct OptionButton(Row, i8);
 
 /// The text of a row's value.
@@ -159,6 +203,8 @@ fn spawn_panel(mut commands: Commands) {
         Row::Sky,
         Row::Emissive,
         Row::Exposure,
+        Row::LitFog,
+        Row::LitFogStrength,
         Row::Stats,
         Row::Reset,
     ];
@@ -203,7 +249,7 @@ fn spawn_panel(mut commands: Commands) {
             ChildOf(line),
         ));
         let buttons: &[(i8, &str)] = match row {
-            Row::Sun | Row::Sky | Row::Emissive | Row::Exposure => &[(-1, "-"), (1, "+")],
+            Row::Sun | Row::Sky | Row::Emissive | Row::Exposure | Row::LitFogStrength => &[(-1, "-"), (1, "+")],
             Row::Reset => &[(0, "Reset")],
             _ => &[(0, "Change")],
         };
@@ -249,24 +295,123 @@ fn toggle_panel(
     if !keys.just_pressed(KeyCode::F10) {
         return;
     }
+    let (_, mut cursor) = window.into_inner();
+    flip_panel(&mut panel, &mut root, &mut cursor);
+}
+
+/// The panel opened or closed (F10's, and `HALO_RT_TEST_OPTIONS`' `panel`).
+fn flip_panel(panel: &mut OptionsPanel, root: &mut Node, cursor: &mut bevy::window::CursorOptions) {
     panel.open = !panel.open;
     root.display = if panel.open { Display::Flex } else { Display::None };
     if panel.open {
         // (the mouse is the viewer's while the panel is open)
-        let (_, mut cursor) = window.into_inner();
         cursor.grab_mode = bevy::window::CursorGrabMode::None;
         cursor.visible = true;
     }
 }
 
-/// Buttons clicked since the last update.
+/// Buttons clicked since the last update (and the names of those pressed
+/// by [`test_options`], for its log after them).
 #[derive(Resource, Default)]
-struct PressedButtons(Vec<OptionButton>);
+struct PressedButtons(Vec<OptionButton>, Vec<&'static str>);
+
+/// The buttons `HALO_RT_TEST_OPTIONS` names, by name.
+const TEST_BUTTONS: [(&str, OptionButton); 4] = [
+    ("lit_fog", OptionButton(Row::LitFog, 0)),
+    ("lit_fog_strength+", OptionButton(Row::LitFogStrength, 1)),
+    ("lit_fog_strength-", OptionButton(Row::LitFogStrength, -1)),
+    ("stats", OptionButton(Row::Stats, 0)),
+];
+
+/// What a `HALO_RT_TEST_OPTIONS` entry presses: a button, or F10.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TestPress {
+    Button(OptionButton),
+    Panel,
+}
+
+/// One `HALO_RT_TEST_OPTIONS` entry, `<frame>:<name>`.
+fn parse_test_press(entry: &str) -> Result<(u32, &'static str, TestPress), String> {
+    let (frame, name) = entry.split_once(':').ok_or("no <frame>:")?;
+    let frame = frame.trim().parse::<u32>().map_err(|e| format!("frame {frame:?}: {e}"))?;
+    let name = name.trim();
+    if name == "panel" {
+        return Ok((frame, "panel", TestPress::Panel));
+    }
+    let &(name, button) = TEST_BUTTONS.iter().find(|(n, _)| *n == name).ok_or_else(|| format!("no button {name:?}"))?;
+    Ok((frame, name, TestPress::Button(button)))
+}
+
+/// `HALO_RT_TEST_OPTIONS="<frame>:<name>[;<frame>:<name>...]"`: the panel's
+/// buttons pressed by script at frames of Bevy's `FrameCount` (names
+/// `lit_fog`, `lit_fog_strength+`, `lit_fog_strength-`, `stats`), and
+/// `panel` the panel opened or closed as F10 does; an entry that doesn't
+/// parse is left out with a warning. Read once.
+fn test_presses() -> &'static [(u32, &'static str, TestPress)] {
+    static PRESSES: std::sync::OnceLock<Vec<(u32, &'static str, TestPress)>> = std::sync::OnceLock::new();
+    PRESSES.get_or_init(|| {
+        std::env::var("HALO_RT_TEST_OPTIONS")
+            .unwrap_or_default()
+            .split(';')
+            .filter(|entry| !entry.trim().is_empty())
+            .filter_map(|entry| match parse_test_press(entry) {
+                Ok(press) => Some(press),
+                Err(e) => {
+                    warn!("HALO_RT_TEST_OPTIONS: {entry:?} left out: {e}");
+                    None
+                }
+            })
+            .collect()
+    })
+}
+
+/// `HALO_RT_TEST_OPTIONS`' buttons at their frames ([`test_presses`]), as
+/// clicks are, and the panel as F10 opens it.
+fn test_options(
+    frames: Res<bevy::diagnostic::FrameCount>,
+    mut pressed: ResMut<PressedButtons>,
+    mut panel: ResMut<OptionsPanel>,
+    mut root: Single<&mut Node, With<PanelRoot>>,
+    mut cursor: Single<&mut bevy::window::CursorOptions, With<bevy::window::PrimaryWindow>>,
+) {
+    for &(frame, name, press) in test_presses() {
+        if frame == frames.0 {
+            match press {
+                TestPress::Button(button) => pressed.0.push(button),
+                TestPress::Panel => flip_panel(&mut panel, &mut root, &mut cursor),
+            }
+            pressed.1.push(name);
+        }
+    }
+}
+
+/// What [`test_options`] pressed, and the state after.
+fn log_test_options(
+    frames: Res<bevy::diagnostic::FrameCount>,
+    mut pressed: ResMut<PressedButtons>,
+    panel: Res<OptionsPanel>,
+    lit_fog: Option<Res<LitFog>>,
+) {
+    if pressed.1.is_empty() {
+        return;
+    }
+    let names = std::mem::take(&mut pressed.1).join(", ");
+    let lit = lit_fog.map_or("no lit fog (needs the game's fog)".to_string(), |lit| {
+        format!("lit fog {}, strength {}", if lit.on { "on" } else { "off" }, strength_text(lit.strength))
+    });
+    info!(
+        "test options at frame {}: pressed {names}: panel {}, {lit}, stats text {}",
+        frames.0,
+        if panel.open { "open" } else { "closed" },
+        if panel.show_stats { "on" } else { "off" }
+    );
+}
 
 fn press_buttons(
     mut pressed: ResMut<PressedButtons>,
     mut panel: ResMut<OptionsPanel>,
     mut lighting: ResMut<LightingSettings>,
+    mut lit_fog: Option<ResMut<LitFog>>,
     #[cfg(feature = "dlss")] camera: Query<(Entity, Option<&mut Dlss<DlssRayReconstructionFeature>>), With<SolarikLighting>>,
     #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssRayReconstructionSupported>>,
     mut commands: Commands,
@@ -284,6 +429,19 @@ fn press_buttons(
             Row::Stats => {
                 panel.show_stats = !panel.show_stats;
                 panel.stats_pressed = true;
+            }
+            // (none without the game's fog)
+            Row::LitFog => {
+                if let Some(lit) = lit_fog.as_deref_mut() {
+                    lit.on = !lit.on;
+                    panel.lit_fog_pressed = true;
+                }
+            }
+            Row::LitFogStrength => {
+                if let Some(lit) = lit_fog.as_deref_mut() {
+                    lit.strength = step_lit_fog_strength(lit.strength, direction);
+                    panel.lit_fog_pressed = true;
+                }
             }
             #[cfg(feature = "dlss")]
             Row::DlssRr => {
@@ -328,6 +486,7 @@ fn set_dlss_rr(commands: &mut Commands, camera: Entity, on: bool, quality: Optio
 fn label_rows(
     panel: Res<OptionsPanel>,
     lighting: Res<LightingSettings>,
+    lit_fog: Option<Res<LitFog>>,
     #[cfg(feature = "dlss")] dlss: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
     #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssRayReconstructionSupported>>,
     mut labels: Query<(&RowLabel, &mut Text)>,
@@ -352,6 +511,14 @@ fn label_rows(
             Row::Sky => format!("Sky: {:.0}", lighting.sky_scale),
             Row::Emissive => format!("Emissive: {:.0}", lighting.emissive_scale),
             Row::Exposure => format!("Exposure: EV {:.1}", lighting.exposure_ev100),
+            Row::LitFog => match lit_fog.as_deref() {
+                Some(lit) => format!("Lit fog: {}", on_off(lit.on)),
+                None => "Lit fog: - (needs the game's fog)".to_string(),
+            },
+            Row::LitFogStrength => match lit_fog.as_deref() {
+                Some(lit) => format!("Lit fog strength: {}", strength_text(lit.strength)),
+                None => "Lit fog strength: -".to_string(),
+            },
             Row::Stats => format!("Stats text: {}", on_off(panel.show_stats)),
             Row::Reset => "Light levels".to_string(),
         };
@@ -443,6 +610,7 @@ fn save_settings(
     pending: Option<Res<PendingSettings>>,
     panel: Res<OptionsPanel>,
     lighting: Res<LightingSettings>,
+    lit_fog: Option<Res<LitFog>>,
     #[cfg(feature = "dlss")] dlss: Query<Option<&Dlss<DlssRayReconstructionFeature>>, With<SolarikLighting>>,
     #[cfg(feature = "dlss")] dlss_supported: Option<Res<DlssRayReconstructionSupported>>,
 ) {
@@ -473,6 +641,12 @@ fn save_settings(
     if exposure_override().is_some() {
         lighting.exposure_ev100 = last.lighting.exposure_ev100;
     }
+    // (lit fog from its resource; without the game's fog, or given by
+    // --lit-fog and not turned in the panel, the file's values kept)
+    let (lit_fog, lit_fog_strength) = match lit_fog.as_deref() {
+        Some(lit) if crate::fog::lit_fog_override().is_none() || panel.lit_fog_pressed => (lit.on, lit.strength),
+        _ => (last.lit_fog, last.lit_fog_strength),
+    };
     let current = SavedSettings {
         lighting,
         restir: last.restir,
@@ -481,6 +655,8 @@ fn save_settings(
         // (given by HALO_RT_STATS and not turned in the panel: the file's
         // value kept)
         show_stats: if stats_override().is_some() && !panel.stats_pressed { last.show_stats } else { panel.show_stats },
+        lit_fog,
+        lit_fog_strength,
     };
     if *last == current {
         return;
@@ -489,4 +665,71 @@ fn save_settings(
         warn!("saving the options: {e}");
     }
     *last = current;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file from before lit fog loads it off at the default strength; a
+    /// strength that isn't a number above 0 keeps the default.
+    #[test]
+    fn settings_text_lit_fog() {
+        let old = "# halo_rt's options (F10 in the viewer)\nemissive = 2\nsun = 3\nsky = 1\nexposure = 9.5\nrestir = true\ndlss_rr = false\ndlss_quality = Quality\nstats = false\n";
+        let settings = SavedSettings::parse(old);
+        assert!(!settings.lit_fog);
+        assert_eq!(settings.lit_fog_strength, LIT_FOG_STRENGTH);
+        assert_eq!(settings.dlss_quality, "Quality");
+        assert!(!settings.show_stats);
+        for bad in ["0", "-2", "nan", "inf", "bright"] {
+            let settings = SavedSettings::parse(&format!("lit_fog = true\nlit_fog_strength = {bad}\n"));
+            assert!(settings.lit_fog);
+            assert_eq!(settings.lit_fog_strength, LIT_FOG_STRENGTH, "{bad}");
+        }
+    }
+
+    /// What is written reads back the same.
+    #[test]
+    fn settings_text_round_trip() {
+        let mut settings = SavedSettings::defaults();
+        settings.lit_fog = true;
+        settings.lit_fog_strength = 0.5;
+        settings.dlss_quality = "Dlaa".into();
+        settings.lighting.exposure_ev100 = 8.25;
+        let text = settings.text();
+        assert!(text.contains("\nlit_fog = true\n") && text.contains("\nlit_fog_strength = 0.5\n"));
+        assert!(SavedSettings::parse(&text) == settings);
+        assert!(SavedSettings::parse(&SavedSettings::defaults().text()) == SavedSettings::defaults());
+    }
+
+    #[test]
+    fn lit_fog_strength_steps() {
+        assert_eq!(step_lit_fog_strength(3.0, 1), 5.0);
+        assert_eq!(step_lit_fog_strength(3.0, -1), 2.0);
+        // (the ends)
+        assert_eq!(step_lit_fog_strength(20.0, 1), 20.0);
+        assert_eq!(step_lit_fog_strength(0.5, -1), 0.5);
+        // (from one not in the list)
+        assert_eq!(step_lit_fog_strength(4.0, 1), 5.0);
+        assert_eq!(step_lit_fog_strength(4.0, -1), 3.0);
+        assert_eq!(step_lit_fog_strength(0.2, -1), 0.2);
+        assert_eq!(step_lit_fog_strength(0.2, 1), 0.5);
+        assert_eq!(step_lit_fog_strength(30.0, -1), 20.0);
+        assert_eq!(strength_text(3.0), "3");
+        assert_eq!(strength_text(0.5), "0.5");
+    }
+
+    #[test]
+    fn test_options_entries() {
+        let button = |row, direction| TestPress::Button(OptionButton(row, direction));
+        assert_eq!(parse_test_press("120:lit_fog"), Ok((120, "lit_fog", button(Row::LitFog, 0))));
+        assert_eq!(parse_test_press(" 5 : lit_fog_strength+"), Ok((5, "lit_fog_strength+", button(Row::LitFogStrength, 1))));
+        assert_eq!(parse_test_press("6:lit_fog_strength-"), Ok((6, "lit_fog_strength-", button(Row::LitFogStrength, -1))));
+        assert_eq!(parse_test_press("7:stats"), Ok((7, "stats", button(Row::Stats, 0))));
+        assert_eq!(parse_test_press("9: panel"), Ok((9, "panel", TestPress::Panel)));
+        assert!(parse_test_press("9:Panel").is_err());
+        assert!(parse_test_press("lit_fog").is_err());
+        assert!(parse_test_press("x:lit_fog").is_err());
+        assert!(parse_test_press("8:sun").is_err());
+    }
 }

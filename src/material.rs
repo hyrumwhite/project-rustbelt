@@ -34,8 +34,17 @@ impl Plugin for HaloMaterialsPlugin {
         ));
         let mut masks = app.world_mut().resource_mut::<Assets<GlassSkyMask>>();
         let far = masks.add(GlassSkyMask { distance: GLASS_SKY_MASK_DISTANCE, ..default() });
-        let near = masks.add(GlassSkyMask { distance: 0.0, ..default() });
-        let self_occlusion = masks.add(GlassSkyMask { distance: 0.0, sort_bias: Some(-SELF_OCCLUSION_LEAD) });
+        // (the first-person panes' depth in the transmissive phase, after
+        // the sky's layers, where the fog curtain is allowed or the fog is
+        // laid before the upscaler, both before the transparent pass: see
+        // GlassSkyMask::transmissive)
+        let near = if crate::fog::fog_curtain().is_some() || crate::fog::FogBefore::get().on() {
+            masks.add(GlassSkyMask { distance: 0.0, sort_bias: Some(0.0), transmissive: true })
+        } else {
+            masks.add(GlassSkyMask { distance: 0.0, ..default() })
+        };
+        let self_occlusion =
+            masks.add(GlassSkyMask { distance: 0.0, sort_bias: Some(-SELF_OCCLUSION_LEAD), transmissive: false });
         app.insert_resource(GlassSkyMaskMaterial { far, near, self_occlusion });
         let grey = app.world_mut().resource_mut::<Assets<Image>>().add(neutral_detail_image());
         app.insert_resource(NeutralDetail(grey));
@@ -653,6 +662,16 @@ pub struct GlassSkyMask {
     pub distance: f32,
     /// Its sort bias, if not the sky masks' (before the sky's layers).
     pub sort_bias: Option<f32>,
+    /// Drawn in the transmissive phase (after the opaque pass, before
+    /// Solarik's lighting; its sort bias then 0, after the sky's layers) in
+    /// place of first in the transparent pass: the first-person panes' mask
+    /// where the fog curtain is allowed (`crate::fog::fog_curtain`), so that
+    /// the curtain, drawn before the transparent pass, reads the depth the
+    /// fog pass reads (a needle against the fogged sky darkened by the
+    /// curtain and then fogged at its own depth would be black). The
+    /// transparent pass sees the same depth either way, and Solarik reads the
+    /// prepass's; `HALO_RT_FOG_CURTAIN=0` the old.
+    pub transmissive: bool,
 }
 
 /// A sky's water (`shaders/sky_water.wesl`): its reflection cube map along
@@ -830,6 +849,10 @@ impl Material for GlassSkyMask {
 
     fn depth_bias(&self) -> f32 {
         self.sort_bias.unwrap_or(GLASS_SKY_MASK_BIAS)
+    }
+
+    fn reads_view_transmission_texture(&self) -> bool {
+        self.transmissive
     }
 
     fn enable_prepass() -> bool {

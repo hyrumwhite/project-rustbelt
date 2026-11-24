@@ -11,6 +11,8 @@ import bevy_solarik::realtime::realtime_bindings::specular_albedo;
 import bevy_solarik::realtime::realtime_bindings::normal_roughness;
 import bevy_solarik::realtime::realtime_bindings::dlss_rr_depth;
 import bevy_solarik::realtime::realtime_bindings::specular_motion_vectors;
+@if(RR_FOG_GUIDE) import bevy_solarik::scene::ray_fog::ray_fog_layers;
+@if(RR_FOG_GUIDE) import bevy_solarik::scene::raytracing_scene_bindings::sky_light;
 
 enable wgpu_ray_query;
 
@@ -23,8 +25,21 @@ fn resolve_dlss_rr_textures(@builtin(global_invocation_id) global_id: vec3<u32>)
     resolve_background_guides(pixel_id);
 }
 
-// Primary panes retain the same opaque-background surface as depth and motion.
+// The guides of the surface a pixel sees (this pass, primary_foliage's), the
+// fog's fade with them (RR_FOG_GUIDE).
 fn resolve_background_guides(pixel_id: vec2u) {
+    resolve_guides(pixel_id, true);
+}
+
+// A camera-seen pane's (primary_glass): its guides are the opaque surface
+// behind it, which the pixel's picture is not (the pane's reflection, and
+// what shows through it), so no fog's fade.
+fn resolve_pane_guides(pixel_id: vec2u) {
+    resolve_guides(pixel_id, false);
+}
+
+// Primary panes retain the same opaque-background surface as depth and motion.
+fn resolve_guides(pixel_id: vec2u, fog_fade: bool) {
     textureStore(specular_motion_vectors, pixel_id, textureLoad(motion_vectors, pixel_id, 0));
 
     let depth = textureLoad(depth_buffer, pixel_id, 0);
@@ -57,6 +72,24 @@ fn resolve_background_guides(pixel_id: vec2u) {
         specular = base + coat;
         perceptual_roughness = mix(perceptual_roughness, coat_perceptual, coat / max(coat + dot(base, vec3(0.2126, 0.7152, 0.0722)), 1e-6));
     }
+    // (RR_FOG_GUIDE, opt-in by SOLARIK_RR_FOG_GUIDE=1: where the application
+    // fogs the picture before the denoiser (SolarikRayFog's planar.w, halo_rt's
+    // fog before the upscaler), the guides faded toward the sky's flat ones by
+    // the fog's coverage at the surface, so that the denoiser does not texture
+    // the fog's light with the albedo it covers: c10's rock in its mist came
+    // back through it, 3 of 255 darker and its texture plain. Not for a
+    // pane's pixel, whose guides are not what it shows: faded, b30's and c10's
+    // water came out brighter by 5 of 255)
+@if(RR_FOG_GUIDE) {
+    if fog_fade && sky_light.fog.planar.w > 0.5 {
+        let forward = -normalize(view.world_from_view[2].xyz);
+        let view_depth = dot(surface.world_position - view.world_position, forward);
+        let height = dot(sky_light.fog.plane.xyz, surface.world_position) - sky_light.fog.plane.w;
+        let coverage = saturate(ray_fog_layers(view_depth, height).a);
+        diffuse = mix(diffuse, vec3(0.5), coverage);
+        specular *= 1.0 - coverage;
+    }
+}
     textureStore(diffuse_albedo, pixel_id, vec4(diffuse, 0.0));
     textureStore(specular_albedo, pixel_id, vec4(specular, 0.0));
     textureStore(normal_roughness, pixel_id, vec4(surface.world_normal, perceptual_roughness));

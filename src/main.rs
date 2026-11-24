@@ -166,7 +166,8 @@ struct Args {
     /// with the viewer's fog, light it by the scene's lights (muzzle flashes,
     /// plasma, lamps), path traced: a strength (1 is physical), and ",sun" to
     /// let the sun light it too (",only" shows it alone); costly and noisy,
-    /// so off by default
+    /// so off by default; F10's panel turns it on and off, and this
+    /// overrides the saved choice for the run (0 or off: off)
     /// (HALO_RT_LIT_FOG takes the same)
     #[argh(option)]
     lit_fog: Option<String>,
@@ -545,12 +546,11 @@ fn main() -> AppExit {
                 app.add_plugins(display::DisplayPlugin { initial: initial_display });
             }
             if args.viewer_fog() {
-                app.add_plugins(fog::FogPlugin);
+                // (lit fog: the saved choice, F10's, unless given for the run)
                 let lit_fog = args.lit_fog.clone().or_else(|| std::env::var("HALO_RT_LIT_FOG").ok());
-                if let Some(lit_fog) = lit_fog.as_deref().and_then(fog::LitFog::parse) {
-                    info!("lit fog: {lit_fog:?}");
-                    app.insert_resource(lit_fog);
-                }
+                let given = fog::read_lit_fog_override(lit_fog.as_deref());
+                app.add_plugins(fog::FogPlugin)
+                    .insert_resource(fog::LitFog::starting(given, saved.as_ref().map(|s| (s.lit_fog, s.lit_fog_strength))));
                 if args.viewer_glass() {
                     app.insert_resource(fog::ViewerWater);
                 }
@@ -573,8 +573,9 @@ fn main() -> AppExit {
                 }
             }
         }
-    } else if lights::TestLights::asked() {
-        // (the level viewer: the test lights alone, as the game's would be)
+    } else if lights::TestLights::asked() || lights::static_lights_on() {
+        // (the level viewer: the test lights and the placed objects' static
+        // lights alone, as the game's would be)
         app.add_plugins(lights::DynamicLightsPlugin);
     }
     if let Some(game_process) = game_process {
@@ -860,6 +861,17 @@ fn load_level(
     {
         error!("placing objects: {e}");
     }
+    // (the static lights of its objects, lights::STATIC_OBJECT_LIGHTS: in the
+    // level viewer on the objects it placed, as spawn_objects chose them;
+    // bridged on the game's objects, each frame)
+    let placements = (!args.bridge && !args.no_objects).then(|| {
+        halo_map::objects::placements(&cache)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| !p.not_automatic && (p.on_bsp_flags == 0 || builder.loaded_bsps.iter().any(|&b| p.in_bsp(b))))
+            .collect::<Vec<_>>()
+    });
+    commands.insert_resource(lights::StaticLights::from_map(&cache, placements.as_deref()));
     // Each sky with a model, and its cubemaps; the one drawn is the BSP's
     // (its clusters'), the first sky with a model where none says
     let skies = halo_map::sky::skies(&cache).unwrap_or_default();
@@ -1611,6 +1623,7 @@ fn capture(
     diagnostics: Option<Res<bevy::diagnostic::DiagnosticsStore>>,
     shown_lights: Option<Res<lights::ShownLights>>,
     test_lights: Option<Res<lights::TestLights>>,
+    static_lights: Option<Res<lights::StaticLights>>,
     bridge_level: Option<Res<bridge::BridgeLevel>>,
     frames: Res<CaptureFrames>,
     rates: Option<Res<StatusRates>>,
@@ -1640,7 +1653,7 @@ fn capture(
         .flatten();
     // (and the lights and objects about the camera: a capture of a lighting
     // problem names its source)
-    let sources = capture_sources(camera.translation, game, shown_lights.as_deref(), test_lights.as_deref(), bridge_level.as_deref());
+    let sources = capture_sources(camera.translation, game, shown_lights.as_deref(), test_lights.as_deref(), static_lights.as_deref(), bridge_level.as_deref());
     // (and with a game, its rates as the status line has them and its own
     // log's last timing lines: a slow place compared with before)
     let rates = game.zip(rates.as_deref()).map(|(game, rates)| {
@@ -1771,6 +1784,7 @@ fn capture_sources(
     game: Option<&halo_bridge::Snapshot>,
     shown: Option<&lights::ShownLights>,
     test: Option<&lights::TestLights>,
+    statics: Option<&lights::StaticLights>,
     level: Option<&bridge::BridgeLevel>,
 ) -> Vec<String> {
     let tag_name = |datum: u32| level.and_then(|level| level.builder.cache.tag(datum).ok()).map(|tag| tag.name.clone());
@@ -1781,7 +1795,9 @@ fn capture_sources(
     shown.sort_by(|a, b| place(a.light.position).distance(camera).total_cmp(&place(b.light.position).distance(camera)));
     lines.push(format!("lights: {}", shown.len()));
     for light in shown.iter().take(CAPTURE_MOST_LINES) {
-        let tag = tag_name(light.light.definition_index).or_else(|| test.and_then(|test| test.name(light.light.definition_index)).map(str::to_string));
+        let tag = tag_name(light.light.definition_index)
+            .or_else(|| test.and_then(|test| test.name(light.light.definition_index)).map(str::to_string))
+            .or_else(|| statics.and_then(|statics| statics.name(light.light.definition_index)).map(str::to_string));
         // (a test light has no object; the game's first-person models carry
         // made-up indices, `0xFFFF0000 | slot`, which no light's object is)
         let object = objects

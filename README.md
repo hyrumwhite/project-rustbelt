@@ -62,7 +62,7 @@ The camera starts at the scenario's first player start. Without `--features dlss
 | R | Toggle ReSTIR |
 | 3 | Toggle DLSS Ray Reconstruction (`dlss` builds) |
 | 4 | Cycle DLSS quality: Auto → DLAA → Quality → Balanced → Performance → Ultra Performance. Auto goes by the picture's size: DLAA under 2.03 megapixels (1280x720), Quality under 3.68 (1920x1080), Performance under 8.29 (2560x1440, 3440x1440), Ultra Performance above |
-| F10 | Options: DLSS Ray Reconstruction and quality, ReSTIR, light levels, exposure, the stats text. They are saved (`%APPDATA%\halo_rt\settings.txt`) and used again next time. Turning DLSS back on may need a restart. |
+| F10 | Options: DLSS Ray Reconstruction and quality, ReSTIR, light levels, exposure, lit fog (the scene's lights glowing in the game's fog; off to begin with, with a strength; about 1.9 ms of GPU a frame at 2560x1440 with DLSS Quality, 1.1 ms with DLSS Auto), the stats text. They are saved (`%APPDATA%\halo_rt\settings.txt`) and used again next time. Turning DLSS back on may need a restart. |
 
 The top-right panel shows GPU timings for each Solari pass and for DLSS-RR.
 

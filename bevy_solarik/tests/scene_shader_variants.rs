@@ -286,3 +286,68 @@ fn scene_consumers_compose_across_production_feature_variants() {
         }
     }
 }
+
+/// The DLSS-RR guides' fade by the fog (RR_FOG_GUIDE, opt-in in node.rs by
+/// SOLARIK_RR_FOG_GUIDE=1): the guide pass and the two
+/// primary passes that resolve guides, with and without it, validated; the
+/// fade's code there only with it (its gate on SolarikRayFog's planar.w), and the panes' resolve (primary_glass)
+/// never fading.
+#[test]
+fn rr_fog_guide_composes_and_skips_panes() {
+    let mut graph = shader_graph::Graph::load();
+        let base = vec![
+            ShaderDefVal::UInt("WORLD_CACHE_SIZE".into(), 1 << 20),
+            ShaderDefVal::UInt("RASTER_SUBPIXEL_BITS".into(), 8),
+            ShaderDefVal::UInt("DI_TILE_CANDIDATES".into(), 16),
+            ShaderDefVal::UInt("DI_CELL_CANDIDATES".into(), 16),
+            ShaderDefVal::UInt("DI_CONFIDENCE_CAP".into(), 8),
+            ShaderDefVal::UInt("GI_CONFIDENCE_CAP".into(), 8),
+            ShaderDefVal::UInt("CACHE_TILE_CANDIDATES".into(), 128),
+            ShaderDefVal::UInt("GI_ADAPTIVE_CONFIDENCE".into(), 4),
+            ShaderDefVal::UInt("SPECULAR_REUSE_ROUGHNESS".into(), 30),
+            ShaderDefVal::UInt("SPECULAR_SHARP_ROUGHNESS".into(), 25),
+            ShaderDefVal::UInt("SPECULAR_SHARP_COATS".into(), 0),
+            ShaderDefVal::UInt("CACHE_HISTORY_CLAMP".into(), 1),
+            ShaderDefVal::UInt("CACHE_DROP_DETECT".into(), 1),
+            ShaderDefVal::UInt("CACHE_DROP_THRESHOLD".into(), 60),
+            ShaderDefVal::UInt("CACHE_DROP_FLOOR".into(), 4),
+            ShaderDefVal::UInt("LIGHT_NEAR_DISTANCE".into(), 100),
+            ShaderDefVal::UInt("GI_GUIDE_SHARE".into(), 50),
+            ShaderDefVal::UInt("GI_GUIDE_CONE".into(), 10),
+            ShaderDefVal::UInt("GI_GUIDE_WIDE".into(), 100),
+            ShaderDefVal::UInt("RAY_OFFSET_SCALE".into(), 16),
+            ShaderDefVal::UInt("GI_SPATIAL_RADIUS".into(), 30),
+            ShaderDefVal::UInt("GI_SPATIAL_COUNT".into(), 1),
+            ShaderDefVal::UInt("GI_GUIDE_NEIGHBOURS".into(), 8),
+            ShaderDefVal::UInt("GI_GUIDE_RADIUS".into(), 30),
+            "BINDLESS_SURFACE_DETAIL".into(),
+            // (on by default in node.rs)
+            "GI_GUIDE".into(),
+            "CACHE_WARM_START".into(),
+            "GI_ADAPTIVE_SPATIAL".into(),
+            "CELL_LOOKUP_NEIGHBOURS".into(),
+            "CACHE_SHADE_SECOND_RAY".into(),
+        ];
+    for consumer in ["realtime::resolve_dlss_rr_textures", "realtime::primary_glass", "realtime::primary_foliage"] {
+        let module = format!("bevy_solarik::{consumer}");
+        for transmission in [false, true] {
+            for fade in [false, true] {
+                let mut definitions = base.clone();
+                definitions.push("DLSS_RR_GUIDE_BUFFERS".into());
+                if transmission {
+                    definitions.push("FOLIAGE_TRANSMISSION".into());
+                }
+                if fade {
+                    definitions.push("RR_FOG_GUIDE".into());
+                }
+                graph.validate(&module, &definitions);
+                let source = graph.compile(&module, &definitions).unwrap();
+                // (the fade's gate, the application's flag: read nowhere else)
+                assert_eq!(source.contains("fog.planar.w"), fade, "{consumer} {fade}");
+                if consumer == "realtime::primary_glass" {
+                    assert!(source.contains("resolve_pane_guides"), "{consumer}");
+                }
+            }
+        }
+    }
+}

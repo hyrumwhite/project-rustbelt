@@ -76,6 +76,20 @@ const FLASHLIGHT_REACH: f32 = 1.0;
 /// lit most of the view), and its share of a spot light's brightness.
 const FLASHLIGHT_CONE: f32 = 0.7;
 const FLASHLIGHT_SCALE: f32 = 0.8;
+/// How far ahead of the game's position a fixed spot light shines from
+/// (metres): the light stands at its marker on the object. A fixed spot
+/// light is one carried by scenery, a machine, a control or a light fixture
+/// ([`LightHolder::Fixed`]; a30's holo control indicator, two spots of
+/// `holo indicator` on the wall beside it): it shines along its own forward
+/// in its tag's cone at a spot light's brightness, wherever the camera is
+/// (the user's play of 20 November 2026: "the light on the wall changes
+/// based on your proximity to it": near the camera it was taken for the
+/// flashlight and aimed by the view, further off for a vehicle's headlight,
+/// pushed ahead and dropped). `HALO_RT_FIXED_SPOT_FORWARD=<metres>` sets
+/// this for a run ([`fixed_spot_forward`]); `HALO_RT_FIXED_SPOTS=0` the old
+/// reading, such a light a flashlight within [`FLASHLIGHT_REACH`] of the
+/// camera and a headlight further off ([`fixed_spots`]). Each read once.
+const FIXED_SPOT_FORWARD: f32 = 0.0;
 /// A muzzle flash is a spot light: the player's this far out along the aim
 /// (metres, about the muzzle), others' this far out along their weapon's,
 /// with this cone (radians: full to the first, none at the second), and this
@@ -126,6 +140,135 @@ fn origin_glows() -> bool {
     *ORIGIN.get_or_init(|| std::env::var("HALO_RT_ORIGIN_GLOWS").is_ok_and(|v| v.trim() == "1"))
 }
 
+/// Whether spot lights carried by fixed objects are read as fixed (see
+/// [`FIXED_SPOT_FORWARD`]): `HALO_RT_FIXED_SPOTS=0` the old, every one a
+/// flashlight near the camera and a headlight further off. Read once.
+fn fixed_spots() -> bool {
+    static FIXED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FIXED.get_or_init(|| !std::env::var("HALO_RT_FIXED_SPOTS").is_ok_and(|v| v.trim() == "0"))
+}
+
+/// How far ahead of the game's position a fixed spot light shines from
+/// (metres): [`FIXED_SPOT_FORWARD`], or `HALO_RT_FIXED_SPOT_FORWARD`'s (a
+/// value that is not a finite number ignored with a warning). Read once.
+fn fixed_spot_forward() -> f32 {
+    static FORWARD: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+        let text = std::env::var("HALO_RT_FIXED_SPOT_FORWARD").ok();
+        parse_fixed_spot_forward(text.as_deref()).unwrap_or_else(|text| {
+            warn!("HALO_RT_FIXED_SPOT_FORWARD: {text:?} is not <metres>");
+            FIXED_SPOT_FORWARD
+        })
+    });
+    *FORWARD
+}
+
+/// [`fixed_spot_forward`]'s metres from the variable's text: none set
+/// [`FIXED_SPOT_FORWARD`], a text that is not a finite number the error.
+fn parse_fixed_spot_forward(text: Option<&str>) -> Result<f32, String> {
+    match text {
+        None => Ok(FIXED_SPOT_FORWARD),
+        Some(text) => text.trim().parse::<f32>().ok().filter(|metres| metres.is_finite()).ok_or_else(|| text.to_string()),
+    }
+}
+
+/// What carries a light tag, by the groups of the object tags whose
+/// attachments hold it (the maps' attached spot lights: Chief's and the
+/// assault rifle's flashlights, the Warthog's, the Scorpion's and
+/// the lifepods' lights, a30's holo control indicator's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LightHolder {
+    /// Scenery, a machine, a control or a light fixture: the light stays
+    /// where the game puts it.
+    Fixed,
+    /// A vehicle: its headlights.
+    Vehicle,
+    /// A biped or a weapon: a flashlight.
+    Carried,
+}
+
+/// The holder of a light tag held by object tags of `groups`: a biped's or
+/// a weapon's [`LightHolder::Carried`], a vehicle's
+/// [`LightHolder::Vehicle`], scenery's, a machine's, a control's or a light
+/// fixture's [`LightHolder::Fixed`], the first winning over the second over
+/// the third where several hold it; none by any other group or none at all.
+fn light_holder(groups: impl IntoIterator<Item = u32>) -> Option<LightHolder> {
+    use halo_map::fourcc;
+    groups
+        .into_iter()
+        .filter_map(|group| match group {
+            g if g == fourcc(b"bipd") || g == fourcc(b"weap") => Some(LightHolder::Carried),
+            g if g == fourcc(b"vehi") => Some(LightHolder::Vehicle),
+            g if g == fourcc(b"scen") || g == fourcc(b"mach") || g == fourcc(b"ctrl") || g == fourcc(b"lifi") => Some(LightHolder::Fixed),
+            _ => None,
+        })
+        .max()
+}
+
+/// Each light tag's holder in a map (by the light tag's datum), from every
+/// object tag's attachments ([`light_holder`]); a light tag no object holds
+/// is not in it.
+fn light_holders(cache: &halo_map::CacheFile) -> HashMap<u32, LightHolder> {
+    let mut groups: HashMap<u32, Vec<u32>> = HashMap::new();
+    for tag in cache.tags.iter() {
+        let Ok(root) = cache.tag_root(tag.datum, halo_map::groups::OBJECT) else { continue };
+        let Ok(attachments) = root.block(halo_map::layout::_object_definition::ATTACHMENTS, 0x48) else { continue };
+        for attachment in attachments.iter() {
+            let Ok(reference) = attachment.reference(0) else { continue };
+            if reference.group != halo_map::groups::LIGHT {
+                continue;
+            }
+            if let Some(light) = reference.datum {
+                groups.entry(light).or_default().push(tag.group);
+            }
+        }
+    }
+    groups.into_iter().filter_map(|(light, groups)| Some((light, light_holder(groups)?))).collect()
+}
+
+/// What a spot light is taken as ([`spot_reading`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SpotKind {
+    /// Not a spot light, or a muzzle flash.
+    #[default]
+    Neither,
+    /// The player's flashlight: aimed by the camera.
+    Flashlight,
+    /// A vehicle's headlight: further ahead, dropped, narrower, dimmer.
+    Vehicle,
+    /// A fixed object's ([`FIXED_SPOT_FORWARD`]): as the game has it.
+    Fixed,
+}
+
+/// [`spot_reading`]'s answer: what the light is taken as, and whether it is
+/// aimed by the camera (the player's flashlight, or their muzzle flash).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SpotReading {
+    kind: SpotKind,
+    aimed: bool,
+}
+
+/// What a light is taken as: `camera` whether the game sent a camera,
+/// `spot` and `muzzle` whether it is a spot light and a muzzle flash, `own`
+/// marked first person, `near` within [`FLASHLIGHT_REACH`] of the camera,
+/// `holder` its tag's ([`light_holders`]), `fixed_rule` [`fixed_spots`]'s.
+/// A spot light that is the player's (first person, or near the camera and
+/// not a muzzle flash) is aimed by the camera; one not a muzzle flash is the
+/// flashlight if aimed and a vehicle's headlight if not; but with the rule,
+/// one not a muzzle flash, not first person and held by a fixed object is
+/// fixed wherever the camera is.
+fn spot_reading(camera: bool, spot: bool, muzzle: bool, own: bool, near: bool, holder: Option<LightHolder>, fixed_rule: bool) -> SpotReading {
+    if fixed_rule && spot && !muzzle && !own && holder == Some(LightHolder::Fixed) {
+        return SpotReading { kind: SpotKind::Fixed, aimed: false };
+    }
+    let aimed = camera && spot && (own || (!muzzle && near));
+    let kind = match (spot && !muzzle, aimed) {
+        (false, _) => SpotKind::Neither,
+        (true, true) => SpotKind::Flashlight,
+        (true, false) => SpotKind::Vehicle,
+    };
+    SpotReading { kind, aimed }
+}
+
 /// The contrails that glow (by their contrail tag's name), with the colour
 /// and reach (world units) of the lights along them and their share of that
 /// brightness (as a light tag's [`LIGHT_DIMMING`]; set for a run by the
@@ -145,7 +288,7 @@ const CONTRAIL_GLOW_MOST: usize = 4;
 /// a folder's, ending in a backslash): a wide reach is a bright light here
 /// (brightness grows with its square). Dimmed to 0, left out. Each share
 /// can be set for a run with [`light_dim`]'s `HALO_RT_LIGHT_DIM`.
-const LIGHT_DIMMING: [(&str, f32); 18] = [
+const LIGHT_DIMMING: [(&str, f32); 19] = [
     // (Guilty Spark's, reaching 5.5 world units: it lit rooms like
     // floodlights; play feedback of 15 November 2026: "something like 50%"
     // less, here 60%: in c40's control room cutscene he hangs half a metre
@@ -228,6 +371,16 @@ const LIGHT_DIMMING: [(&str, f32); 18] = [
     // old)
     ("levels\\b30\\devices\\interior tech objects\\holo beam tube\\holo beam", 0.1),
     ("levels\\b30\\devices\\interior tech objects\\holo control ring\\holo control ring", 0.1),
+    // (a30's light bridge control's two indicator lamps, teal spot lights
+    // of 16,000 lm on the posts either side of it, blinking, turned from the
+    // wall toward the bridge; play feedback of 20 November 2026: "cast a
+    // light on the wall (brightness should be reduced)". The light on the
+    // wall was the flashlight's reading of them (`SpotKind::Fixed` now);
+    // standing at the lamp's own place each lit its post's top white. A
+    // thirtieth, from captures in game from before the posts (0.3 still
+    // white, 0.1 pale): the top a teal lamp under the game's flare.
+    // `HALO_RT_LIGHT_DIM="holo indicator=1"` the old)
+    ("levels\\a30\\scenery\\holo control indicator\\holo indicator", 0.03),
 ];
 /// Placed lights dimmed further, one placement each, over their tag's
 /// [`LIGHT_DIMMING`] share: the map's name, the light tag's name, the
@@ -680,6 +833,322 @@ impl TestLights {
     }
 }
 
+/// Lights of fixed objects that the game does not light with (their light
+/// tags lack the dynamic flag: in the game their light is the lightmaps',
+/// baked, and the tag is a lens flare alone, so the bridge never sends
+/// them), given a cast light here, by the light tag's name: each object the
+/// level has whose definition attaches such a light gets a point light at
+/// the attachment's marker, at the tag's upper colour and its radius as the
+/// reach, as bright as the game's dynamic light of that colour and reach
+/// would be here, times the share, from a source sphere of the given radius
+/// (metres), raised by the given height (metres, the world's up). Set for a
+/// run, or added to, with [`static_light`]'s `HALO_RT_STATIC_LIGHTS`;
+/// `HALO_RT_STATIC_LIGHTS=0` none (the old).
+const STATIC_OBJECT_LIGHTS: [(&str, StaticLight); 1] = [
+    // (the Covenant torches standing in b40's and c40's snow, a teal flame
+    // on a pole, its light a point at the flame reaching 1 world unit; play
+    // feedback of 23 November 2026, c40: "these kinds of lights don't
+    // actually seem to cast light, can we update them to do so?")
+    ("levels\\b40\\scenery\\b40_ctorch\\ctorch", StaticLight { share: STATIC_TORCH_SHARE, source_radius: 0.1, raise: 0.0 }),
+];
+/// The torch's share (see [`STATIC_OBJECT_LIGHTS`]): chosen from a series
+/// at the user's camera (c40 at night, exposure EV 9.7; 0.5, 0.1, 0.05, 0.02,
+/// 0.01): at 0.1 and up the cup glared white and the snow round the next
+/// torch was a white floodlit patch; at 0.02 the pole and the snow at its
+/// foot read lit, the cup's rim bright but not blown out.
+const STATIC_TORCH_SHARE: f32 = 0.02;
+
+/// A static light's treatment ([`STATIC_OBJECT_LIGHTS`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StaticLight {
+    /// Its share of the power a game light of its colour and reach gets.
+    pub share: f32,
+    /// Its source sphere's radius (metres).
+    pub source_radius: f32,
+    /// How far it is raised from its marker (metres, the world's up).
+    pub raise: f32,
+}
+
+/// [`static_light`]'s setting: the table, none, or entries by tag name part
+/// (a share, and the source radius and raise if given), tried before the
+/// table.
+#[derive(Clone, Debug, PartialEq)]
+enum StaticLightsSetting {
+    Table,
+    Off,
+    Entries(Vec<(String, f32, Option<f32>, Option<f32>)>),
+}
+
+/// `HALO_RT_STATIC_LIGHTS`'s setting from its text: unset the table, `0`
+/// none, else `<tag name part>=<share>[,<source radius m>[,<raise m>]][;...]`
+/// (the part in lower case; an entry that does not parse skipped with a
+/// warning).
+fn parse_static_lights(text: Option<&str>) -> StaticLightsSetting {
+    let Some(text) = text else { return StaticLightsSetting::Table };
+    if text.trim() == "0" {
+        return StaticLightsSetting::Off;
+    }
+    StaticLightsSetting::Entries(
+        text.split(';')
+            .filter(|entry| !entry.trim().is_empty())
+            .filter_map(|entry| {
+                let parsed = entry.split_once('=').and_then(|(part, numbers)| {
+                    let part = part.trim();
+                    let numbers: Vec<f32> =
+                        numbers.split(',').map(|n| n.trim().parse::<f32>().ok().filter(|n| n.is_finite())).collect::<Option<_>>()?;
+                    if part.is_empty() || numbers.is_empty() || numbers.len() > 3 {
+                        return None;
+                    }
+                    Some((part.to_ascii_lowercase(), numbers[0].max(0.0), numbers.get(1).map(|r| r.max(0.001)), numbers.get(2).copied()))
+                });
+                if parsed.is_none() {
+                    warn!("HALO_RT_STATIC_LIGHTS: {entry:?} is not <tag name part>=<share>[,<source radius m>[,<raise m>]]");
+                }
+                parsed
+            })
+            .collect(),
+    )
+}
+
+/// Whether any static light can be made (`HALO_RT_STATIC_LIGHTS` is not
+/// `0`). Read once.
+pub fn static_lights_on() -> bool {
+    *static_lights_setting() != StaticLightsSetting::Off
+}
+
+fn static_lights_setting() -> &'static StaticLightsSetting {
+    static SETTING: std::sync::LazyLock<StaticLightsSetting> =
+        std::sync::LazyLock::new(|| parse_static_lights(std::env::var("HALO_RT_STATIC_LIGHTS").ok().as_deref()));
+    &SETTING
+}
+
+/// A light tag's static light, by its name ([`STATIC_OBJECT_LIGHTS`], or
+/// `HALO_RT_STATIC_LIGHTS`'s).
+fn static_light(name: &str) -> Option<StaticLight> {
+    static_light_in(static_lights_setting(), name)
+}
+
+/// [`static_light`] by a setting: an entry's part the name holds (without
+/// regard to case, the first winning) before the table's whole name; an
+/// entry's missing radius and raise the table's for that name, else
+/// [`LIGHT_RADIUS`] and none; a share of 0 none.
+fn static_light_in(setting: &StaticLightsSetting, name: &str) -> Option<StaticLight> {
+    let tabled = STATIC_OBJECT_LIGHTS.iter().find(|(tabled, _)| name.eq_ignore_ascii_case(tabled)).map(|&(_, light)| light);
+    let light = match setting {
+        StaticLightsSetting::Off => None,
+        StaticLightsSetting::Table => tabled,
+        StaticLightsSetting::Entries(entries) => {
+            let lower = name.to_ascii_lowercase();
+            match entries.iter().find(|(part, ..)| lower.contains(part.as_str())) {
+                Some(&(_, share, radius, raise)) => Some(StaticLight {
+                    share,
+                    source_radius: radius.or(tabled.map(|t| t.source_radius)).unwrap_or(LIGHT_RADIUS),
+                    raise: raise.or(tabled.map(|t| t.raise)).unwrap_or(0.0),
+                }),
+                None => tabled,
+            }
+        }
+    };
+    light.filter(|light| light.share > 0.0)
+}
+
+/// A static light an object definition carries ([`STATIC_OBJECT_LIGHTS`]).
+#[derive(Clone, Copy, Debug)]
+struct StaticLightDef {
+    /// The light tag's datum.
+    light: u32,
+    /// The marker's node, and the marker in the node's space.
+    node: usize,
+    local: halo_map::model::Matrix4x3,
+    /// The marker in the object's space at rest (the node's rest pose).
+    rest: halo_map::model::Matrix4x3,
+    color: [f32; 3],
+    radius: f32,
+    cutoff: f32,
+    falloff: f32,
+    flags: u32,
+    treatment: StaticLight,
+}
+
+/// Each object definition's static lights in a map (by the definition's
+/// datum), with the light tags' names: the light attachments whose tag is
+/// one of [`static_light`]'s and has no dynamic flag (the game lights with
+/// those itself), at the attachment's marker (its first instance; the
+/// object's origin if the model has no such marker), coloured by the tag's
+/// upper colour (the game's colour for an attached light with no function
+/// to drive it) and reaching its radius times its upper radius modifier.
+fn static_light_defs(cache: &halo_map::CacheFile) -> (HashMap<u32, Vec<StaticLightDef>>, HashMap<u32, String>) {
+    use halo_map::{collision::matrix_inverse, markers, pose::matrix_multiply};
+    let mut defs: HashMap<u32, Vec<StaticLightDef>> = HashMap::new();
+    let mut names = HashMap::new();
+    if !static_lights_on() {
+        return (defs, names);
+    }
+    let identity = halo_map::model::Matrix4x3 { scale: 1.0, forward: [1.0, 0.0, 0.0], left: [0.0, 1.0, 0.0], up: [0.0, 0.0, 1.0], position: [0.0; 3] };
+    for tag in cache.tags.iter() {
+        let Ok(root) = cache.tag_root(tag.datum, halo_map::groups::OBJECT) else { continue };
+        let Ok(attachments) = root.block(halo_map::layout::_object_definition::ATTACHMENTS, 0x48) else { continue };
+        let mut model: Option<(Option<markers::ModelMarkers>, Vec<halo_map::model::Node>)> = None;
+        for attachment in attachments.iter() {
+            let Ok(reference) = attachment.reference(0) else { continue };
+            let Some(light) = reference.datum.filter(|_| reference.group == halo_map::groups::LIGHT) else { continue };
+            let Ok(light_tag) = cache.tag(light) else { continue };
+            let Some(treatment) = static_light(&light_tag.name) else { continue };
+            let Ok(definition) = cache.tag_root(light, halo_map::groups::LIGHT) else { continue };
+            let f = |offset: usize| definition.f32(offset).unwrap_or(0.0);
+            // (struct point_light_definition: flags, radius, its modifiers'
+            // bounds, the falloff and cutoff angles; the upper colour, argb)
+            let flags = definition.u32(0x0).unwrap_or(0);
+            if flags & 1 != 0 {
+                continue;
+            }
+            let modifier = if f(0xc) > 0.0 { f(0xc) } else { 1.0 };
+            let radius = f(0x4) * modifier;
+            if radius <= 0.0 {
+                continue;
+            }
+            let (model_markers, nodes) = model.get_or_insert_with(|| {
+                let definition = halo_map::TagRef { group: tag.group, datum: Some(tag.datum) };
+                let model = halo_map::objects::object_model(cache, definition).ok().flatten().and_then(|m| m.datum);
+                (
+                    model.and_then(|model| markers::ModelMarkers::load(cache, model).ok()),
+                    model.and_then(|model| halo_map::model::Model::load(cache, model).ok()).map(|m| m.nodes).unwrap_or_default(),
+                )
+            });
+            let marker = attachment.bytes(0x10, 32).ok().map(|bytes| bytes.split(|&b| b == 0).next().unwrap_or(&[]).to_vec()).unwrap_or_default();
+            let found = (!marker.is_empty())
+                .then(|| model_markers.as_ref()?.markers.iter().find(|m| m.name.eq_ignore_ascii_case(&marker))?.instances.first().copied())
+                .flatten();
+            let (node, local, rest) = match found {
+                Some(instance) => {
+                    let local = markers::matrix_from_point_and_quaternion(instance.translation, instance.rotation);
+                    let rest = nodes.get(instance.node as usize).map_or(local, |node| matrix_multiply(&matrix_inverse(&node.default_inverse), &local));
+                    (instance.node as usize, local, rest)
+                }
+                None => {
+                    warn!("static light {:?} of {:?}: no marker {:?} on its model, at the object's origin", light_tag.name, tag.name, String::from_utf8_lossy(&marker));
+                    (0, identity, identity)
+                }
+            };
+            names.insert(light, light_tag.name.clone());
+            defs.entry(tag.datum).or_default().push(StaticLightDef {
+                light,
+                node,
+                local,
+                rest,
+                color: [f(0x4c), f(0x50), f(0x54)],
+                radius,
+                cutoff: f(0x14),
+                falloff: f(0x10),
+                flags,
+                treatment,
+            });
+        }
+    }
+    (defs, names)
+}
+
+/// A static light as a game light would be, at a marker's place and facing
+/// in the world (`matrix`, Halo's units), on the object `object_index`.
+fn static_light_at(def: &StaticLightDef, matrix: &halo_map::model::Matrix4x3, object_index: u32) -> Light {
+    Light {
+        position: matrix.position,
+        forward: matrix.forward,
+        up: matrix.up,
+        color: def.color,
+        radius: def.radius,
+        cutoff_angle: def.cutoff,
+        falloff_angle: def.falloff,
+        definition_index: def.light,
+        definition_flags: def.flags,
+        object_index,
+        ..default()
+    }
+}
+
+/// The objects of the level viewer's static lights (none in the game), from
+/// this one up by placement: below the test lights' and the game's
+/// first-person models' range.
+const STATIC_LIGHT_OBJECT: u32 = 0xFFFE_0000;
+
+/// The level's static lights ([`STATIC_OBJECT_LIGHTS`]): what each object
+/// definition carries, and in the level viewer, which has no game to say
+/// where its objects are, the lights of its placed objects (those
+/// `LevelBuilder::spawn_objects` places), made once. Bridged, `sync_lights`
+/// puts them on the game's objects each frame. Made at each level's load.
+#[derive(Resource, Default)]
+pub struct StaticLights {
+    defs: HashMap<u32, Vec<StaticLightDef>>,
+    names: HashMap<u32, String>,
+    placed: Vec<(Light, StaticLight)>,
+}
+
+impl StaticLights {
+    /// The map's static lights; with `placements` (the level viewer's
+    /// placed objects) their lights too.
+    pub fn from_map(cache: &halo_map::CacheFile, placements: Option<&[halo_map::objects::Placement]>) -> Self {
+        let (defs, names) = static_light_defs(cache);
+        let mut placed = Vec::new();
+        for (index, placement) in placements.unwrap_or(&[]).iter().enumerate() {
+            let Some(carried) = placement.definition.datum.and_then(|datum| defs.get(&datum)) else { continue };
+            let [forward, left, up] = placement.axes();
+            let object = halo_map::model::Matrix4x3 { scale: 1.0, forward, left, up, position: placement.position };
+            for def in carried {
+                let matrix = halo_map::pose::matrix_multiply(&object, &def.rest);
+                placed.push((static_light_at(def, &matrix, STATIC_LIGHT_OBJECT + index as u32), def.treatment));
+            }
+        }
+        if placements.is_some() {
+            static_lights_log(&cache.header.name, &names, placed.iter().map(|(light, _)| light));
+        }
+        Self { defs, names, placed }
+    }
+
+    /// A static light's tag's name, by its datum.
+    pub(crate) fn name(&self, definition_index: u32) -> Option<&str> {
+        self.names.get(&definition_index).map(String::as_str)
+    }
+
+    /// The static lights on the game's objects this frame: each object not
+    /// hidden, not a model and not outside the map whose definition carries
+    /// some, at its marker on its node as the game posed it.
+    fn on_objects(&self, snapshot: &halo_bridge::Snapshot) -> Vec<(Light, StaticLight)> {
+        let mut lights = Vec::new();
+        if self.defs.is_empty() {
+            return lights;
+        }
+        for object in &snapshot.objects {
+            if object.flags & (halo_bridge::OBJECT_HIDDEN | halo_bridge::OBJECT_MODEL) != 0 || object.object_flags & OBJECT_OUTSIDE_OF_MAP != 0 {
+                continue;
+            }
+            let Some(carried) = self.defs.get(&object.definition_index) else { continue };
+            for def in carried {
+                let node = (def.node < object.node_count as usize).then(|| snapshot.nodes.get(object.first_node as usize + def.node)).flatten();
+                let Some(node) = node else { continue };
+                let node = halo_map::model::Matrix4x3 { scale: node.scale, forward: node.forward, left: node.left, up: node.up, position: node.position };
+                let matrix = halo_map::pose::matrix_multiply(&node, &def.local);
+                lights.push((static_light_at(def, &matrix, object.object_index), def.treatment));
+            }
+        }
+        lights
+    }
+}
+
+/// The level's one line on its static lights: how many, of which tags.
+fn static_lights_log<'a>(map: &str, names: &HashMap<u32, String>, lights: impl Iterator<Item = &'a Light>) {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for light in lights {
+        let name = names.get(&light.definition_index).cloned().unwrap_or_default();
+        match counts.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((name, 1)),
+        }
+    }
+    let total: usize = counts.iter().map(|(_, count)| count).sum();
+    let each: Vec<String> = counts.iter().map(|(name, count)| format!("{count} of {name}")).collect();
+    info!("static lights in {map}: {total}{}{}", if each.is_empty() { "" } else { ": " }, each.join(", "));
+}
+
 pub struct DynamicLightsPlugin;
 
 impl Plugin for DynamicLightsPlugin {
@@ -821,6 +1290,11 @@ pub struct ShownLight {
     pub tuned: bool,
     /// Lighting nothing inside its sphere ([`HOLLOW_LIGHTS`]).
     pub hollow: bool,
+    /// What a spot light was taken as ([`spot_reading`]; a muzzle flash and
+    /// a light not a spot neither).
+    pub spot_kind: SpotKind,
+    /// A static light ([`STATIC_OBJECT_LIGHTS`]), not one the game sent.
+    pub static_light: bool,
 }
 
 impl ShownLight {
@@ -843,7 +1317,12 @@ impl ShownLight {
         } else if self.gelled {
             "gelled spots"
         } else if self.spot {
-            "spot"
+            match self.spot_kind {
+                SpotKind::Fixed => "spot (fixed)",
+                SpotKind::Flashlight => "spot (flashlight)",
+                SpotKind::Vehicle => "spot (vehicle)",
+                SpotKind::Neither => "spot",
+            }
         } else if self.upward {
             "upward"
         } else {
@@ -851,11 +1330,12 @@ impl ShownLight {
         };
         let [pr, pg, pb] = self.power.to_array();
         format!(
-            "{distance:.2} m | at {x:.3},{y:.3},{z:.3} | colour {r:.3},{g:.3},{b:.3} | radius {:.3} | flags {:#x}{}{} | tag {tag} | object {object} | {kind}, source {:.3} m, raise {:.3} m, dimming {:.2}, power {pr:.0},{pg:.0},{pb:.0} lm, {}{}",
+            "{distance:.2} m | at {x:.3},{y:.3},{z:.3} | colour {r:.3},{g:.3},{b:.3} | radius {:.3} | flags {:#x}{}{}{} | tag {tag} | object {object} | {kind}, source {:.3} m, raise {:.3} m, dimming {:.2}, power {pr:.0},{pg:.0},{pb:.0} lm, {}{}",
             light.radius,
             light.definition_flags,
             if light.first_person != 0 { " first person" } else { "" },
             if self.test { " test light" } else { "" },
+            if self.static_light { " static" } else { "" },
             self.radius,
             self.raise,
             self.dimming,
@@ -877,16 +1357,23 @@ fn sync_lights(
     mut points: PointLights,
     mut spots: Query<(&mut SpotLight, &mut Transform, &mut Visibility), Without<PointLight>>,
     level: Option<Res<BridgeLevel>>,
+    statics: Option<Res<StaticLights>>,
     in_solid: Option<Res<crate::bridge::LightsInSolid>>,
-    mut light_tags: Local<HashMap<u32, LightTag>>,
+    // (each light tag's reading, and what carries each: light_holders)
+    mut tags: Local<(HashMap<u32, LightTag>, Option<HashMap<u32, LightHolder>>)>,
     mut gels: Local<HashMap<u32, Vec<GelBeam>>>,
-    mut glows: Local<HashMap<u32, Option<([f32; 3], f32, f32)>>>,
-    mut contrail_glows: Local<HashMap<u32, Option<([f32; 3], f32, f32)>>>,
+    // (the projectiles' glows and the contrails', by their tags)
+    mut all_glows: Local<(HashMap<u32, Option<([f32; 3], f32, f32)>>, HashMap<u32, Option<([f32; 3], f32, f32)>>)>,
     mut scenario: Local<String>,
-    mut test_logged: Local<bool>,
+    // (whether the test lights were logged as built, and the level whose
+    // static lights were counted in the log and their count, bridged)
+    mut logged: Local<(bool, (String, usize))>,
     mut shown: ResMut<ShownLights>,
 ) {
     shown.0.clear();
+    let (test_logged, statics_logged) = &mut *logged;
+    let (glows, contrail_glows) = &mut *all_glows;
+    let (light_tags, holders) = &mut *tags;
     static LIGHT_LOG: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("HALO_RT_LIGHT_LOG").is_some());
     let snapshot = link.as_ref().and_then(|link| link.latest.as_ref());
     let test_lights = test.as_deref().map_or(&[][..], |test| test.lights.as_slice());
@@ -894,8 +1381,11 @@ fn sync_lights(
     if test.as_ref().is_some_and(|test| test.is_changed()) {
         *test_logged = false;
         light_tags.clear();
+        *holders = None;
     }
-    if snapshot.is_none() && test_lights.is_empty() {
+    // (the level viewer's static lights, placed once at the level's load)
+    let placed_statics = statics.as_deref().filter(|_| snapshot.is_none()).map_or(&[][..], |statics| statics.placed.as_slice());
+    if snapshot.is_none() && test_lights.is_empty() && placed_statics.is_empty() {
         return;
     }
     // (a new level: its own tags)
@@ -903,10 +1393,20 @@ fn sync_lights(
         && snapshot.scenario_name != *scenario
     {
         light_tags.clear();
+        *holders = None;
         gels.clear();
         glows.clear();
         contrail_glows.clear();
         *scenario = snapshot.scenario_name.clone();
+    }
+    // (what carries each light tag, once a level from its map's object tags,
+    // with the fixed spots' rule alone: light_holders; none without a map)
+    let fixed_rule = fixed_spots();
+    if fixed_rule
+        && holders.is_none()
+        && let Some(level) = level.as_ref()
+    {
+        *holders = Some(light_holders(&level.builder.cache));
     }
     let camera = snapshot.and_then(|snapshot| snapshot.camera.as_ref());
     // the glowing projectiles' lights, round from their middles (by no tag:
@@ -974,6 +1474,22 @@ fn sync_lights(
             contrail_lights.push((light, share));
         }
     }
+    // the static lights (STATIC_OBJECT_LIGHTS): on the game's objects as it
+    // posed them, or the level viewer's placed; each with its treatment
+    let static_lights: Vec<(Light, StaticLight)> = match (snapshot, statics.as_deref()) {
+        (Some(snapshot), Some(statics)) => {
+            let lights = statics.on_objects(snapshot);
+            // (counted in the log when its objects have come, and again when
+            // the count changes: a switch of BSP puts the objects of
+            // another outside the map)
+            if !snapshot.objects.is_empty() && (statics_logged.0 != snapshot.scenario_name || statics_logged.1 != lights.len()) {
+                *statics_logged = (snapshot.scenario_name.clone(), lights.len());
+                static_lights_log(&snapshot.scenario_name, &statics.names, lights.iter().map(|(light, _)| light));
+            }
+            lights
+        }
+        _ => placed_statics.to_vec(),
+    };
     // (but those in the drawn BSP's solid, another BSP's: crate::bridge)
     let lights = snapshot.into_iter().flat_map(|snapshot| snapshot.lights.iter()).filter(|light| {
         light.definition_flags & LIGHT_CONTRAIL == 0
@@ -988,19 +1504,21 @@ fn sync_lights(
         *count += 1;
         (light.definition_index, light.object_index, *count - 1)
     };
-    // (the test lights after the game's; each with whether it is a test
-    // light and a projectile's glow, and a projectile's or a contrail's
-    // glow's share of its brightness, the rest's 1: theirs is their tag's)
+    // (the test lights after the game's, the static lights last; each with
+    // whether it is a test light and a projectile's glow, a projectile's or
+    // a contrail's glow's share of its brightness, the rest's 1: theirs is
+    // their tag's, and a static light's treatment)
     let all = lights
-        .map(|light| (light, false, false, 1.0))
-        .chain(projectile_lights.iter().map(|(light, share)| (light, false, true, *share)))
-        .chain(contrail_lights.iter().map(|(light, share)| (light, false, false, *share)))
-        .chain(test_lights.iter().map(|light| (light, true, false, 1.0)));
+        .map(|light| (light, false, false, 1.0, None))
+        .chain(projectile_lights.iter().map(|(light, share)| (light, false, true, *share, None)))
+        .chain(contrail_lights.iter().map(|(light, share)| (light, false, false, *share, None)))
+        .chain(test_lights.iter().map(|light| (light, true, false, 1.0, None)))
+        .chain(static_lights.iter().map(|(light, treatment)| (light, false, false, treatment.share, Some(*treatment))));
     // (the loaded level's map, whose tags these are, for the dimming by
     // place)
     let map = level.as_ref().map_or("", |level| level.builder.stats.map_name.as_str());
     let dim_at = light_dim_at();
-    for (light, test_light, projectile, share) in all {
+    for (light, test_light, projectile, share, statik) in all {
         let near = camera.filter(|camera| Vec3::from(camera.position).distance(Vec3::from(light.position)) < FLASHLIGHT_REACH);
         let own = light.first_person != 0;
         // (a muzzle flash: its tag's flag, or its name; a test light's tag
@@ -1010,7 +1528,8 @@ fn sync_lights(
                 .as_ref()
                 .and_then(|level| level.builder.cache.tag(light.definition_index).ok())
                 .map(|tag| tag.name.as_str())
-                .or_else(|| test.as_deref().and_then(|test| test.name(light.definition_index)));
+                .or_else(|| test.as_deref().and_then(|test| test.name(light.definition_index)))
+                .or_else(|| statics.as_deref().and_then(|statics| statics.name(light.definition_index)));
             light_tag(name)
         });
         // (its share of its brightness: its tag's, times a projectile's
@@ -1023,8 +1542,11 @@ fn sync_lights(
         let muzzle_tag = light.definition_flags & LIGHT_MUZZLE_FLASH != 0 || tag.muzzle;
         let muzzle = light.cutoff_angle > SPOT_CUTOFF && muzzle_tag;
         let spot = light.cutoff_angle <= SPOT_CUTOFF || muzzle;
-        // (the player's spot lights follow the camera's aim)
-        let near_camera = camera.filter(|_| spot && (own || (!muzzle && near.is_some())));
+        // (the player's spot lights follow the camera's aim; a fixed
+        // object's never: spot_reading)
+        let holder = holders.as_ref().and_then(|holders| holders.get(&light.definition_index).copied());
+        let reading = spot_reading(camera.is_some(), spot, muzzle, own, near.is_some(), holder, fixed_rule);
+        let near_camera = camera.filter(|_| reading.aimed);
         // (one shining upward: a point light's but for its cone)
         let upward = tag.upward.filter(|_| !spot);
         // (a point light's tuning: HALO_RT_LIGHT_TUNE)
@@ -1032,12 +1554,14 @@ fn sync_lights(
         // (hollow: a point light's, HOLLOW_LIGHTS)
         let hollow = tag.hollow && !spot;
         let forward = Vec3::from(halo_to_bevy(near_camera.map_or(light.forward, |camera| camera.forward), 1.0)).normalize_or(Vec3::NEG_Z);
-        let vehicle = spot && !muzzle && near_camera.is_none();
-        let flashlight = spot && !muzzle && near_camera.is_some();
+        let vehicle = reading.kind == SpotKind::Vehicle;
+        let flashlight = reading.kind == SpotKind::Flashlight;
+        let fixed = reading.kind == SpotKind::Fixed;
         let ahead = match (muzzle, spot) {
             (true, _) if near_camera.is_some() => MUZZLE_FORWARD,
             (true, _) => OTHERS_MUZZLE_FORWARD,
             (false, true) if vehicle => SPOT_FORWARD + VEHICLE_SPOT_FORWARD,
+            (false, true) if fixed => fixed_spot_forward(),
             (false, true) => SPOT_FORWARD,
             (false, false) => 0.0,
         };
@@ -1062,10 +1586,12 @@ fn sync_lights(
         let raise = upward.map_or_else(|| tag.small.map_or(0.0, |size| size * 1.2), |upward| upward.raise);
         let power = radiance * sphere_lumens_per_radiance(radius);
         // (tuned: its sphere's size and height, its power its untuned
-        // size's times the share; see light_tune)
-        let (radius, raise, power) = match tune {
-            Some(tune) => (tune.radius, tune.raise, power * tune.share),
-            None => (radius, raise, power),
+        // size's times the share, see light_tune; a static light's point
+        // light as its treatment has it, its share in the dimming)
+        let (radius, raise, power) = match (tune, statik.filter(|_| !spot)) {
+            (Some(tune), _) => (tune.radius, tune.raise, power * tune.share),
+            (None, Some(statik)) => (statik.source_radius, statik.raise, power),
+            (None, None) => (radius, raise, power),
         };
         let position = position + Vec3::Y * raise;
         let source = LightSource { power };
@@ -1108,6 +1634,8 @@ fn sync_lights(
             power,
             tuned: tune.is_some(),
             hollow,
+            spot_kind: reading.kind,
+            static_light: statik.is_some(),
         });
         if left_out {
             continue;
@@ -1181,8 +1709,17 @@ fn sync_lights(
                 shadow_maps_enabled: false,
                 ..default()
             };
-            // (a spot light shines along its -Z)
-            let transform = Transform::from_translation(position).looking_to(forward, if forward.y.abs() > 0.99 { Vec3::X } else { Vec3::Y });
+            // (a spot light shines along its -Z; a fixed one's up its own,
+            // as the game has it, unless along its forward)
+            let own_up = Vec3::from(halo_to_bevy(light.up, 1.0)).normalize_or_zero();
+            let up = if fixed && own_up != Vec3::ZERO && own_up.dot(forward).abs() < 0.99 {
+                own_up
+            } else if forward.y.abs() > 0.99 {
+                Vec3::X
+            } else {
+                Vec3::Y
+            };
+            let transform = Transform::from_translation(position).looking_to(forward, up);
             place_spot(&mut commands, &mut spots, &mut last_spots, &mut pools.free_spots, &mut pools.spots, key(light), spot_light, transform);
         } else if let Some(Upward { inner, outer, .. }) = upward {
             // (a point light in a cone wider than a spot light's: Solarik's
@@ -1291,5 +1828,151 @@ mod tests {
         // (the table's tags are the names light_tag finds)
         assert_eq!(light_tag(Some("LEVELS\\a10\\devices\\alert_light\\alert_light")).placed, Some(alarm));
         assert_eq!(light_tag(Some("levels\\a10\\devices\\command display\\command display")).placed, None);
+    }
+
+    #[test]
+    fn light_holder_by_group_and_precedence() {
+        use halo_map::fourcc;
+        assert_eq!(light_holder([fourcc(b"bipd")]), Some(LightHolder::Carried));
+        assert_eq!(light_holder([fourcc(b"weap")]), Some(LightHolder::Carried));
+        assert_eq!(light_holder([fourcc(b"vehi")]), Some(LightHolder::Vehicle));
+        for group in [b"scen", b"mach", b"ctrl", b"lifi"] {
+            assert_eq!(light_holder([fourcc(group)]), Some(LightHolder::Fixed));
+        }
+        // (carried over vehicle over fixed, in any order)
+        assert_eq!(light_holder([fourcc(b"scen"), fourcc(b"vehi")]), Some(LightHolder::Vehicle));
+        assert_eq!(light_holder([fourcc(b"vehi"), fourcc(b"weap"), fourcc(b"mach")]), Some(LightHolder::Carried));
+        assert_eq!(light_holder([fourcc(b"lifi"), fourcc(b"bipd")]), Some(LightHolder::Carried));
+        // (another group counts for nothing; none held, none)
+        assert_eq!(light_holder([fourcc(b"eqip"), fourcc(b"ctrl")]), Some(LightHolder::Fixed));
+        assert_eq!(light_holder([fourcc(b"eqip"), fourcc(b"proj")]), None);
+        assert_eq!(light_holder([]), None);
+    }
+
+    #[test]
+    fn spot_reading_as_before_but_fixed() {
+        let bools = [false, true];
+        for camera in bools {
+            for spot in bools {
+                for muzzle in bools {
+                    for own in bools {
+                        for near in bools {
+                            // (near is by the camera: never without it)
+                            let near = near && camera;
+                            // (the old reading, as sync_lights had it)
+                            let aimed = camera && spot && (own || (!muzzle && near));
+                            let vehicle = spot && !muzzle && !aimed;
+                            let flashlight = spot && !muzzle && aimed;
+                            let kind = if vehicle {
+                                SpotKind::Vehicle
+                            } else if flashlight {
+                                SpotKind::Flashlight
+                            } else {
+                                SpotKind::Neither
+                            };
+                            let old = SpotReading { kind, aimed };
+                            let context = format!("camera {camera} spot {spot} muzzle {muzzle} own {own} near {near}");
+                            for holder in [None, Some(LightHolder::Carried), Some(LightHolder::Vehicle)] {
+                                for rule in bools {
+                                    assert_eq!(spot_reading(camera, spot, muzzle, own, near, holder, rule), old, "{context} holder {holder:?} rule {rule}");
+                                }
+                            }
+                            // (a fixed object's: the old without the rule;
+                            // with it fixed at any distance, but a muzzle
+                            // flash, a light not a spot and one first person
+                            // as before)
+                            assert_eq!(spot_reading(camera, spot, muzzle, own, near, Some(LightHolder::Fixed), false), old, "{context}");
+                            let fixed = spot_reading(camera, spot, muzzle, own, near, Some(LightHolder::Fixed), true);
+                            if spot && !muzzle && !own {
+                                assert_eq!(fixed, SpotReading { kind: SpotKind::Fixed, aimed: false }, "{context}");
+                            } else {
+                                assert_eq!(fixed, old, "{context}");
+                                assert_ne!(fixed.kind, SpotKind::Fixed, "{context}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_spot_forward_parses() {
+        assert_eq!(parse_fixed_spot_forward(None), Ok(FIXED_SPOT_FORWARD));
+        assert_eq!(parse_fixed_spot_forward(Some(" 0.25 ")), Ok(0.25));
+        assert_eq!(parse_fixed_spot_forward(Some("-0.1")), Ok(-0.1));
+        assert_eq!(parse_fixed_spot_forward(Some("x")), Err("x".to_string()));
+        assert_eq!(parse_fixed_spot_forward(Some("inf")), Err("inf".to_string()));
+        assert_eq!(parse_fixed_spot_forward(Some("")), Err(String::new()));
+    }
+
+    #[test]
+    fn note_names_the_spot_kind() {
+        let shown = |spot, spot_kind| ShownLight {
+            light: Light { definition_index: 7, object_index: u32::MAX, ..default() },
+            test: false,
+            spot,
+            upward: false,
+            gelled: false,
+            left_out: false,
+            radius: SPOT_RADIUS,
+            raise: 0.0,
+            dimming: 1.0,
+            power: Vec3::ONE,
+            tuned: false,
+            hollow: false,
+            spot_kind,
+            static_light: false,
+        };
+        let note = |spot, kind| shown(spot, kind).note(Vec3::ZERO, Some("tag"), None);
+        assert!(note(true, SpotKind::Fixed).contains("| spot (fixed), source 0.150 m, raise 0.000 m, dimming 1.00, power 1,1,1 lm, untuned"));
+        assert!(note(true, SpotKind::Flashlight).contains("| spot (flashlight), source"));
+        assert!(note(true, SpotKind::Vehicle).contains("| spot (vehicle), source"));
+        // (a muzzle flash as before)
+        assert!(note(true, SpotKind::Neither).contains("| spot, source"));
+        assert!(note(false, SpotKind::Neither).contains("| point, source"));
+        // (a static light marked as such, a game light not)
+        assert!(!note(false, SpotKind::Neither).contains("static"));
+        let statik = ShownLight { static_light: true, ..shown(false, SpotKind::Neither) };
+        assert!(statik.note(Vec3::ZERO, Some("tag"), None).contains("| flags 0x0 static | tag tag |"));
+    }
+
+    #[test]
+    fn static_lights_parse() {
+        use StaticLightsSetting::*;
+        assert_eq!(parse_static_lights(None), Table);
+        assert_eq!(parse_static_lights(Some(" 0 ")), Off);
+        assert_eq!(parse_static_lights(Some("")), Entries(vec![]));
+        assert_eq!(
+            parse_static_lights(Some(" CTorch = 0.3 ;lamp=1,0.2;lamp2=0.5,0.05,-0.1;bad;=1;x=;y=a;z=1,2,3,4;neg=-1,0")),
+            Entries(vec![
+                ("ctorch".to_string(), 0.3, None, None),
+                ("lamp".to_string(), 1.0, Some(0.2), None),
+                ("lamp2".to_string(), 0.5, Some(0.05), Some(-0.1)),
+                ("neg".to_string(), 0.0, Some(0.001), None),
+            ])
+        );
+    }
+
+    #[test]
+    fn static_lights_match() {
+        use StaticLightsSetting::*;
+        let torch = r"levels\b40\scenery\b40_ctorch\ctorch";
+        let tabled = StaticLight { share: STATIC_TORCH_SHARE, source_radius: 0.1, raise: 0.0 };
+        // (the table by the whole name, without regard to case)
+        assert_eq!(static_light_in(&Table, torch), Some(tabled));
+        assert_eq!(static_light_in(&Table, &torch.to_ascii_uppercase()), Some(tabled));
+        assert_eq!(static_light_in(&Table, r"levels\b40\scenery\b40_ctorch\ctorch2"), None);
+        assert_eq!(static_light_in(&Table, r"levels\c10\scenery\lamp"), None);
+        // (none at all)
+        assert_eq!(static_light_in(&Off, torch), None);
+        // (an entry by part first, its missing numbers the table's for that
+        // name, else the plain light's; a share of 0 none)
+        let set = parse_static_lights(Some("ctorch=0.2;lamp=0.4;lit=1,0.3,0.1"));
+        assert_eq!(static_light_in(&set, torch), Some(StaticLight { share: 0.2, ..tabled }));
+        assert_eq!(static_light_in(&set, r"levels\c10\scenery\lamp"), Some(StaticLight { share: 0.4, source_radius: LIGHT_RADIUS, raise: 0.0 }));
+        assert_eq!(static_light_in(&set, r"levels\x\lit"), Some(StaticLight { share: 1.0, source_radius: 0.3, raise: 0.1 }));
+        assert_eq!(static_light_in(&parse_static_lights(Some("lamp=1")), torch), Some(tabled));
+        assert_eq!(static_light_in(&parse_static_lights(Some("ctorch=0")), torch), None);
     }
 }

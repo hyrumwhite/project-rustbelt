@@ -395,10 +395,134 @@ static void observer_clear(
 	return;
 }
 
+/* port: observer_clear leaves the observer's motion alone: its focus
+position, offset and distance, its velocities, accelerations, displacements
+and the polynomial's coefficients a to f, so they carried from the old map
+into the new one. The port holds the new map's ticks for a while
+(bevy_bridge_hold_ticks) while the director and the observer still update
+every frame, so that stale motion could be integrated, and a focus position
+gone out of the world halts the game in observer_postcheck (every command is
+asserted valid, so it can come from nothing else). So at a new map they are
+cleared too. The forward, up and field of view, which share the parameters
+with them, are observer_clear's and kept. HALO_OBSERVER_KEEP_MOTION=1 the
+old (nothing cleared); HALO_OBSERVER_TEST_STALE_MOTION=<world units a second>
+plants a velocity first, to be seen cleared or carried */
+static boolean observer_port_keep_motion(
+	void)
+{
+	static boolean read = FALSE;
+	static boolean keep = FALSE;
+
+	if (!read)
+	{
+		char const *setting = getenv("HALO_OBSERVER_KEEP_MOTION");
+
+		read = TRUE;
+		keep = setting && *setting && atoi(setting) != 0;
+		if (keep)
+		{
+			platform_log("camera: the observer's motion carried into a new map (HALO_OBSERVER_KEEP_MOTION=1)");
+		}
+	}
+
+	return keep;
+}
+
+static real observer_port_test_stale_motion(
+	void)
+{
+	static boolean read = FALSE;
+	static real velocity = 0.f;
+
+	if (!read)
+	{
+		char const *setting = getenv("HALO_OBSERVER_TEST_STALE_MOTION");
+
+		read = TRUE;
+		if (setting && *setting)
+		{
+			velocity = (real)strtod(setting, NULL);
+		}
+	}
+
+	return velocity;
+}
+
+static void observer_port_reset_motion(
+	struct observer *observer,
+	boolean *planted,
+	boolean *cleared_logged)
+{
+	real stale_velocity = observer_port_test_stale_motion();
+
+	if (stale_velocity != 0.f)
+	{
+		observer->velocities.n[0] = stale_velocity;
+		observer->velocities.n[1] = stale_velocity/2.f;
+		observer->velocities.n[2] = stale_velocity/4.f;
+		if (!*planted)
+		{
+			*planted = TRUE;
+			platform_log("camera: test: stale motion %g planted", (double)stale_velocity);
+		}
+	}
+
+	if (observer_port_keep_motion())
+	{
+		return;
+	}
+
+	if (!*cleared_logged)
+	{
+		boolean carried = FALSE;
+		short index;
+
+		for (index = 0; index < NUMBER_OF_OBSERVER_VELOCITIES; index++)
+		{
+			carried = carried || observer->velocities.n[index] != 0.f;
+		}
+		carried = carried ||
+			observer->velocities.rotation_offset.i != 0.f ||
+			observer->velocities.rotation_offset.j != 0.f ||
+			observer->velocities.rotation_offset.k != 0.f ||
+			observer->focus_position.x != 0.f ||
+			observer->focus_position.y != 0.f ||
+			observer->focus_position.z != 0.f ||
+			observer->focus_offset.i != 0.f ||
+			observer->focus_offset.j != 0.f ||
+			observer->focus_offset.k != 0.f ||
+			observer->focus_distance != 0.f;
+		if (carried)
+		{
+			*cleared_logged = TRUE;
+			platform_log("camera: new map: carried motion cleared (focus %g %g %g, velocity %g %g %g)",
+				(double)observer->parameters[0], (double)observer->parameters[1], (double)observer->parameters[2],
+				(double)observer->velocities.n[0], (double)observer->velocities.n[1], (double)observer->velocities.n[2]);
+		}
+	}
+
+	csmemset(&observer->focus_position, 0, sizeof(observer->focus_position));
+	csmemset(&observer->focus_offset, 0, sizeof(observer->focus_offset));
+	csmemset(&observer->focus_distance, 0, sizeof(observer->focus_distance));
+	csmemset(&observer->velocities, 0, sizeof(observer->velocities));
+	csmemset(&observer->accelerations, 0, sizeof(observer->accelerations));
+	csmemset(&observer->displacements, 0, sizeof(observer->displacements));
+	csmemset(observer->a, 0, sizeof(observer->a));
+	csmemset(observer->b, 0, sizeof(observer->b));
+	csmemset(observer->c, 0, sizeof(observer->c));
+	csmemset(observer->d, 0, sizeof(observer->d));
+	csmemset(observer->e, 0, sizeof(observer->e));
+	csmemset(observer->f, 0, sizeof(observer->f));
+
+	return;
+}
+
 void observer_initialize_for_new_map(
 	void)
 {
 	short local_player_index;
+	boolean planted = FALSE; /* port */
+	boolean cleared_logged = FALSE; /* port */
 
 	for (local_player_index = 0;
 		local_player_index < MAXIMUM_NUMBER_OF_LOCAL_PLAYERS;
@@ -406,6 +530,7 @@ void observer_initialize_for_new_map(
 	{
 		observer_clear(observer_get(local_player_index));
 		observer_press_ease_reset(local_player_index); /* port */
+		observer_port_reset_motion(observer_get(local_player_index), &planted, &cleared_logged); /* port */
 	}
 
 	return;
@@ -1333,6 +1458,43 @@ static void observer_postcheck(
 	real_vector2d heading;
 	real water_depth;
 
+	/* port: for the halt below, seen once on b30's first frames after a50's
+	ending was skipped and not reproduced: the observer's state written to
+	the log before the game halts, so the next one says where the bad focus
+	came from */
+	if (!valid_world_real_point3d(&focus_position))
+	{
+		struct observer_command const *last = &observer->last_command;
+		struct observer_command const *pending = observer->pending_command;
+
+		platform_log("camera: invalid focus position for local player %d: dtime %g, first command %d, updated for frame %d",
+			local_player_index, observer_globals.dtime, observer->first_command, observer->updated_for_frame);
+		platform_log("camera:   focus %g %g %g, distance %g, offset %g %g %g",
+			focus_position.x, focus_position.y, focus_position.z, observer->focus_distance,
+			observer->focus_offset.i, observer->focus_offset.j, observer->focus_offset.k);
+		platform_log("camera:   forward %g %g %g, up %g %g %g",
+			observer->forward.i, observer->forward.j, observer->forward.k,
+			observer->up.i, observer->up.j, observer->up.k);
+		platform_log("camera:   velocities %g %g %g, displacements %g %g %g",
+			observer->velocities.n[0], observer->velocities.n[1], observer->velocities.n[2],
+			observer->displacements.n[0], observer->displacements.n[1], observer->displacements.n[2]);
+		platform_log("camera:   last command flags 0x%lx, timer %g, parameter timers %g %g %g %g %g, parameter flags %d %d %d %d %d, focus %g %g %g",
+			(unsigned long)last->flags, last->timer,
+			last->parameter_timers[0], last->parameter_timers[1], last->parameter_timers[2],
+			last->parameter_timers[3], last->parameter_timers[4],
+			last->parameter_flags[0], last->parameter_flags[1], last->parameter_flags[2],
+			last->parameter_flags[3], last->parameter_flags[4],
+			last->focus_position.x, last->focus_position.y, last->focus_position.z);
+		if (pending)
+		{
+			platform_log("camera:   pending command flags 0x%lx, timer %g",
+				(unsigned long)pending->flags, pending->timer);
+		}
+		else
+		{
+			platform_log("camera:   no pending command");
+		}
+	}
 	match_assert(
 		"c:\\halo\\SOURCE\\camera\\observer.c",
 		0x3AF,

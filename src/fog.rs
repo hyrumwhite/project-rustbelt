@@ -23,13 +23,38 @@
 //! its water's reflection over that, but here the water is already in the
 //! picture, its reflection and the seabed through it together, and under
 //! the full fog the sea was a flat teal.
+//!
+//! Lit fog ([`LitFog`], Solarik's light scattered by the fog) is laid over the
+//! environment fog by this pass, from the render pixels by the fog's own
+//! weights, Solarik told to leave it undivided and not composite it
+//! (`SolarikRayFog::lit`'s w; [`lit_fog_over`], `HALO_RT_LIT_FOG_OVER=0` the
+//! old).
+//!
+//! The fog curtain ([`fog_curtain`], `HALO_RT_FOG_CURTAIN=0` the old), where the
+//! atmospheric fog is opaque (c10's): the transparent surfaces and sprites are
+//! drawn before this pass, which fogs each pixel by what lies behind, and
+//! where that is covered whole (the sky, everything past the fog's reach)
+//! nothing drawn in front survived (a Jackal's shield against the fogged
+//! sky). So the lit picture is darkened by the fog beyond a coverage b0
+//! before the transparent pass ([`draw_fog_curtain`]), this pass covers the
+//! picture by no more than b0, and the transparents raise their colour by no
+//! more than b0 takes (`shaders/halo_fog.wesl` has the equations).
+//!
+//! The fog before the upscaler ([`FogBefore`], `HALO_RT_FOG_BEFORE`, on by
+//! default, `=0` the old whole): the environment fog laid over the lit picture at the
+//! render resolution, each render pixel by its own depth, by the curtain's
+//! pass ([`draw_fog_curtain`]) before the transparent pass, so that the
+//! upscaler takes a fogged picture and the transparents are drawn over it as
+//! the game draws them over its fog; this pass then lays only the fog screen,
+//! the weather and the flares, and lit fog's light is added by the same pass.
 
 use crate::bridge::BridgeLink;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     core_pipeline::{
-        prepass::ViewPrepassTextures, schedule::Core3d, tonemapping::tonemapping, Core3dSystems, FullscreenShader,
+        core_3d::main_transparent_pass_3d, prepass::ViewPrepassTextures, schedule::Core3d, tonemapping::tonemapping,
+        Core3dSystems, FullscreenShader,
     },
     platform::collections::HashMap,
     prelude::*,
@@ -39,9 +64,12 @@ use bevy::{
         storage::ShaderBuffer,
         texture::{FallbackImage, FallbackImageZero, GpuImage, TextureCache},
         render_resource::{
-            binding_types::{sampler, texture_2d, texture_depth_2d, uniform_buffer},
+            binding_types::{sampler, texture_2d, texture_depth_2d, texture_storage_2d, uniform_buffer},
+            TextureDescriptor, TextureDimension, TextureUsages,
             encase::UniformBuffer,
-            BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BufferInitDescriptor, BufferUsages,
+            BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+            BufferInitDescriptor, BufferUsages, CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
+            StorageTextureAccess,
             CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, Operations, PipelineCache,
             RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler, SamplerBindingType,
             AddressMode, FilterMode, MipmapFilterMode, SamplerDescriptor, ShaderStages, ShaderType, TextureFormat,
@@ -52,7 +80,9 @@ use bevy::{
         RenderApp, RenderStartup,
     },
 };
+use bevy::diagnostic::FrameCount;
 use bevy::shader::ShaderDefVal;
+use bevy_solarik::realtime::SolarikLightingResources;
 use halo_map::math::{halo_to_bevy, METERS_PER_WORLD_UNIT};
 
 pub struct FogPlugin;
@@ -67,11 +97,13 @@ pub struct ViewerWater;
 const WATER_PLANE_TOLERANCE: f32 = 0.1;
 
 /// The fog lit by the scene's lights (Solarik's lit fog: single scattering
-/// of the lights along each view ray, through the game's fog): its strength,
-/// and whether the sun lights it too (the game's fog colour already stands
-/// for the daylight, so not by default).
-#[derive(Resource, Clone, Copy, Debug)]
+/// of the lights along each view ray, through the game's fog): whether it's
+/// on (F10's panel), its strength, and whether the sun lights it too (the
+/// game's fog colour already stands for the daylight, so not by default).
+/// Present wherever [`FogPlugin`] is.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct LitFog {
+    pub on: bool,
     pub strength: f32,
     pub sun: bool,
     /// The scattered light alone, for looking at it.
@@ -79,17 +111,100 @@ pub struct LitFog {
 }
 
 impl LitFog {
-    /// "strength[,sun][,only]"; none for a strength of 0 or one that isn't a number.
+    /// "strength[,sun][,only]", on; "0" or "off", off (its strength 0, for
+    /// the saved one to fill); none for anything else.
     pub fn parse(text: &str) -> Option<Self> {
         let mut parts = text.split(',').map(str::trim);
-        let strength = parts.next()?.parse::<f32>().ok().filter(|s| *s > 0.0 && s.is_finite())?;
+        let first = parts.next()?;
+        if first.eq_ignore_ascii_case("off") {
+            return Some(Self { on: false, strength: 0.0, sun: false, only: false });
+        }
+        let strength = first.parse::<f32>().ok().filter(|s| s.is_finite() && *s >= 0.0)?;
+        if strength == 0.0 {
+            return Some(Self { on: false, strength: 0.0, sun: false, only: false });
+        }
         let (mut sun, mut only) = (false, false);
         for part in parts {
             sun |= part.eq_ignore_ascii_case("sun");
             only |= part.eq_ignore_ascii_case("only");
         }
-        Some(Self { strength, sun, only })
+        Some(Self { on: true, strength, sun, only })
     }
+
+    /// The run's start: the override ([`read_lit_fog_override`]) if given
+    /// (off at the saved strength), else the saved choice (on and strength;
+    /// none saved, off at the default).
+    pub fn starting(given: Option<Self>, saved: Option<(bool, f32)>) -> Self {
+        let (saved_on, saved_strength) = saved.unwrap_or((false, crate::options::LIT_FOG_STRENGTH));
+        match given {
+            Some(lit) if lit.on => lit,
+            Some(_) => Self { on: false, strength: saved_strength, sun: false, only: false },
+            None => Self { on: saved_on, strength: saved_strength, sun: false, only: false },
+        }
+    }
+
+    /// What Solarik is given (`SolarikRayFog::lit`): zero when off. Its w
+    /// (the light left undivided and not composited by Solarik) where this
+    /// pass lays it over the fog ([`lit_fog_over`]) or the fog before the
+    /// upscaler adds it ([`FogBefore`]).
+    fn shared(&self) -> Vec4 {
+        self.shared_with(lit_fog_over() || FogBefore::get().on())
+    }
+
+    /// The same with w 1 when the fog pass lays the light over the fog
+    /// (`over`, [`lit_fog_over`]).
+    fn shared_with(&self, over: bool) -> Vec4 {
+        if !self.on {
+            return Vec4::ZERO;
+        }
+        Vec4::new(self.strength, f32::from(u8::from(self.sun)), f32::from(u8::from(self.only)), f32::from(u8::from(over)))
+    }
+}
+
+/// `HALO_RT_LIT_FOG_OVER=0`: lit fog's light divided by the fog's
+/// transmittance in Solarik and added by its composite before tonemapping,
+/// for this pass to multiply back, the old; the two passes took different
+/// depths at silhouettes (bright outlines), behind first-person panes and on
+/// a sky the fog covers (c10's), and the light came out wrong there. Else
+/// (the default) this pass lays it over the fog, by the fog's own weights.
+fn lit_fog_over() -> bool {
+    static OVER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OVER.get_or_init(|| {
+        let over = parse_lit_fog_over(std::env::var("HALO_RT_LIT_FOG_OVER").ok().as_deref());
+        if !over {
+            info!("lit fog: added by Solarik before tonemapping, divided by the fog (HALO_RT_LIT_FOG_OVER=0)");
+        }
+        over
+    })
+}
+
+/// "0" the old path; anything else, or nothing, laid over by the fog pass.
+fn parse_lit_fog_over(text: Option<&str>) -> bool {
+    text.is_none_or(|text| text.trim() != "0")
+}
+
+static LIT_FOG_OVERRIDE: std::sync::OnceLock<Option<LitFog>> = std::sync::OnceLock::new();
+
+/// This run's lit fog in place of the saved choice, from `--lit-fog` or
+/// `HALO_RT_LIT_FOG` (the text main resolves, given here; see
+/// [`LitFog::parse`]): logged, and a value that doesn't parse left out with
+/// a warning. Read once (the first call's text kept).
+pub fn read_lit_fog_override(text: Option<&str>) -> Option<LitFog> {
+    *LIT_FOG_OVERRIDE.get_or_init(|| {
+        let text = text?;
+        let lit = LitFog::parse(text);
+        match lit {
+            Some(lit) => info!("lit fog: {lit:?}"),
+            None => warn!("lit fog: {text:?} isn't <strength>[,sun][,only] or off, left out"),
+        }
+        lit
+    })
+}
+
+/// [`read_lit_fog_override`]'s value (none before it was read, as where the
+/// viewer draws no fog).
+pub fn lit_fog_override() -> Option<LitFog> {
+    LIT_FOG_OVERRIDE.get().copied().flatten()
 }
 
 impl Plugin for FogPlugin {
@@ -100,7 +215,15 @@ impl Plugin for FogPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
         render_app
             .add_systems(RenderStartup, init_pipeline)
-            .add_systems(Core3d, draw_fog.in_set(Core3dSystems::PostProcess).after(tonemapping));
+            .add_systems(Core3d, draw_fog.in_set(Core3dSystems::PostProcess).after(tonemapping))
+            // (the fog curtain: over the lit picture, before the transparents)
+            .add_systems(
+                Core3d,
+                draw_fog_curtain
+                    .after(bevy_solarik::realtime::solarik_lighting::<true>)
+                    .before(main_transparent_pass_3d)
+                    .in_set(Core3dSystems::MainPass),
+            );
     }
 }
 
@@ -134,6 +257,11 @@ pub struct HaloFog {
     screen_transforms: [Vec4; 8],
     /// each layer's frame's weights, and 1 for a layer
     screen_weights: [Vec4; 4],
+    /// lit fog, set by the pass alone: x 1 where its light is bound and laid
+    /// over the fog, y 1 to show it alone; z the fog curtain's b0 where it is
+    /// on, else 0 ([`fog_curtain`], set by [`follow_fog`]) (last: the
+    /// weather's shader reads the fields before it)
+    lit: Vec4,
 }
 
 /// The fog screen layers' frames, in the layers' order.
@@ -154,7 +282,11 @@ impl HaloFog {
         let mut planar = self.planar;
         // (atmosphere dominant: the eye's atmospheric term, 1, kept as a flag)
         atmospheric.z = if atmospheric.z >= 1.0 { 1.0 } else { 0.0 };
-        planar.z = 0.0;
+        // (the planar eye term those shaders find for themselves: in its
+        // place the fog curtain's b0, 0 off, fog_curtain; -1 where the fog
+        // is laid before the upscaler, FogBefore: the surfaces keep their
+        // own fog alone)
+        planar.z = if self.lit.w > 0.5 { -1.0 } else { self.lit.z };
         [self.atmospheric_color, atmospheric, self.plane, self.planar_color, planar]
     }
 
@@ -210,6 +342,7 @@ impl HaloFog {
             screen: screen_parameters,
             screen_transforms,
             screen_weights,
+            lit: Vec4::ZERO,
         })
     }
 }
@@ -317,6 +450,204 @@ fn sea_horizon_fog() -> bool {
     *FOG.get_or_init(|| std::env::var("HALO_RT_SEA_HORIZON_FOG").map_or(true, |v| v.trim() != "0"))
 }
 
+/// The fog curtain's coverage b0 when nothing says otherwise: the picture is
+/// darkened beyond it before the transparent pass, and the fog pass covers it
+/// by no more (`shaders/halo_fog.wesl`). A half: a transparent surface's colour
+/// raised by at most 2^2.2 (4.6, the old raise's cap 4), and the darkening
+/// begun where the fog is already thick.
+pub const FOG_CURTAIN_B0: f32 = 0.5;
+
+/// `HALO_RT_FOG_CURTAIN`: `0` none, the old whole (the transparents and
+/// sprites over a sky or a surface the opaque fog covers whole multiplied away
+/// by the fog pass); a number over 0 and under 1, b0 in place of
+/// [`FOG_CURTAIN_B0`], for tuning; anything else, or nothing, on at the
+/// constant. Its b0 where it is on; read once, logged when set.
+pub(crate) fn fog_curtain() -> Option<f32> {
+    static CURTAIN: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *CURTAIN.get_or_init(|| {
+        let text = std::env::var("HALO_RT_FOG_CURTAIN").ok();
+        let curtain = parse_fog_curtain(text.as_deref());
+        match (text.as_deref(), curtain) {
+            (None, _) => {}
+            (Some(_), None) => info!("the fog curtain: off, the old (HALO_RT_FOG_CURTAIN=0)"),
+            (Some(text), Some(b0)) if text.trim().parse::<f32>().ok() == Some(b0) => {
+                info!("the fog curtain: b0 {b0} (HALO_RT_FOG_CURTAIN)");
+            }
+            (Some(text), Some(_)) => {
+                warn!("the fog curtain: {text:?} isn't 0 or a b0 between 0 and 1, left at {FOG_CURTAIN_B0}");
+            }
+        }
+        curtain
+    })
+}
+
+/// "0" off; a number over 0 and under 1, that b0; anything else, or nothing,
+/// [`FOG_CURTAIN_B0`].
+fn parse_fog_curtain(text: Option<&str>) -> Option<f32> {
+    let Some(text) = text.map(str::trim) else { return Some(FOG_CURTAIN_B0) };
+    match text.parse::<f32>() {
+        Ok(value) if value == 0.0 => None,
+        Ok(value) if value > 0.0 && value < 1.0 => Some(value),
+        _ => Some(FOG_CURTAIN_B0),
+    }
+}
+
+/// The fog curtain's b0 for this fog, 0 where it is off: on (the switch
+/// allowing) only where the atmospheric fog is opaque (its maximum density 1,
+/// with a distance), and not where its plane is the water's surface in a
+/// picture that holds the water (`atmospheric.w`), whose rule the curtain
+/// does not follow.
+fn curtain_for(fog: &HaloFog, curtain: Option<f32>) -> f32 {
+    let opaque = fog.atmospheric_color.w >= 1.0 && fog.atmospheric.y > 0.0;
+    match curtain {
+        Some(b0) if opaque && fog.atmospheric.w < 0.5 => b0,
+        _ => 0.0,
+    }
+}
+
+/// The fog before the upscaler (`HALO_RT_FOG_BEFORE`): the environment fog
+/// laid over the lit picture at the render resolution, each render pixel by
+/// its own depth, before the transparent pass and so before the upscaler and
+/// the tonemapper (`halo_fog.wesl`'s `before`, [`draw_fog_curtain`]); the fog
+/// pass then lays only the fog screen, the weather and the flares, the
+/// transparents and sprites keep their own fog alone, the curtain is off and
+/// lit fog's light is added by the same pass ([`FogBeforeLit`]). Nothing, or
+/// `tone` (or `2`): on, through the tonemapper's curve along the grey axis,
+/// so that what is shown is the game's blend of what was shown (the default);
+/// `1`: the tonemapper taken as straight; `0`: off, the old whole (the fog
+/// after the tonemapper and the upscaler, the curtain, the transparents'
+/// raise, lit fog laid over by the fog pass); anything else the default,
+/// with a warning.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FogBefore {
+    Off,
+    Straight,
+    Curve,
+}
+
+impl FogBefore {
+    /// The value and whether the text was understood.
+    fn parse(text: Option<&str>) -> (Self, bool) {
+        match text.map(str::trim) {
+            None => (Self::Curve, true),
+            Some("0") => (Self::Off, true),
+            Some("1") => (Self::Straight, true),
+            Some(text) if text.eq_ignore_ascii_case("tone") || text == "2" => (Self::Curve, true),
+            Some(_) => (Self::Curve, false),
+        }
+    }
+
+    pub(crate) fn get() -> Self {
+        static BEFORE: std::sync::OnceLock<FogBefore> = std::sync::OnceLock::new();
+        *BEFORE.get_or_init(|| {
+            let text = std::env::var("HALO_RT_FOG_BEFORE").ok();
+            let (before, understood) = Self::parse(text.as_deref());
+            if !understood {
+                warn!("the fog before the upscaler: {text:?} isn't 0, 1 or tone, left at the default (tone)");
+            }
+            match before {
+                Self::Off => info!("the fog after the upscaler, the old (HALO_RT_FOG_BEFORE=0)"),
+                Self::Straight => info!("the fog before the upscaler, the tonemapper taken as straight (HALO_RT_FOG_BEFORE=1)"),
+                Self::Curve => info!("the fog before the upscaler, through the tonemapper's curve"),
+            }
+            before
+        })
+    }
+
+    pub(crate) fn on(self) -> bool {
+        self != Self::Off
+    }
+
+    /// The fog's `lit.w`: 0 off, 1 straight, 2 the curve.
+    fn form(self) -> f32 {
+        match self {
+            Self::Off => 0.0,
+            Self::Straight => 1.0,
+            Self::Curve => 2.0,
+        }
+    }
+}
+
+/// The fog before the upscaler's local mean's radius when nothing says
+/// otherwise ([`fog_before_mean`]).
+pub const FOG_BEFORE_MEAN_RADIUS: u32 = 2;
+
+/// `HALO_RT_FOG_BEFORE_MEAN=<radius>`: the fog before the upscaler blended at
+/// a local mean of the picture (the render pixels within the radius, 1 to 4,
+/// at about the pixel's depth) and the pixel's difference from it carried
+/// through the blend's slope, at most 1 (`halo_fog.wesl`'s `affine_about`), so that
+/// the denoiser's average of the noisy picture is not darkened by the blend's
+/// curve (c10's mid fog 3 to 5 of 255 darker without it); `0` each pixel
+/// blended as it is; nothing, or anything else, [`FOG_BEFORE_MEAN_RADIUS`].
+/// Read once, logged when set.
+pub(crate) fn fog_before_mean() -> u32 {
+    static MEAN: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MEAN.get_or_init(|| {
+        let text = std::env::var("HALO_RT_FOG_BEFORE_MEAN").ok();
+        let mean = parse_fog_before_mean(text.as_deref());
+        if text.is_some() && FogBefore::get().on() {
+            info!("the fog before the upscaler: the picture's local mean's radius {mean}, 0 none (HALO_RT_FOG_BEFORE_MEAN)");
+        }
+        mean
+    })
+}
+
+/// `0`, none; a radius from 1 to 4; anything else, or nothing, the default.
+fn parse_fog_before_mean(text: Option<&str>) -> u32 {
+    text.and_then(|text| text.trim().parse::<u32>().ok()).filter(|radius| *radius <= 4).unwrap_or(FOG_BEFORE_MEAN_RADIUS)
+}
+
+/// How the fog before the upscaler adds lit fog's light
+/// (`HALO_RT_FOG_BEFORE_LIT`): `Shoulder` (the default), as the fog pass laid
+/// it over the tonemapped picture before (1 - exp(-light) screened over what
+/// is shown, through the tonemapper's curve and back), so that a strength
+/// looks as it did; `Add` (`add`): added as linear light, the tonemapper
+/// following (brighter walls, a glow's core less white).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FogBeforeLit {
+    Shoulder,
+    Add,
+}
+
+impl FogBeforeLit {
+    fn parse(text: Option<&str>) -> Self {
+        match text.map(str::trim) {
+            Some(text) if text.eq_ignore_ascii_case("add") => Self::Add,
+            _ => Self::Shoulder,
+        }
+    }
+
+    fn get() -> Self {
+        static LIT: std::sync::OnceLock<FogBeforeLit> = std::sync::OnceLock::new();
+        *LIT.get_or_init(|| {
+            let lit = Self::parse(std::env::var("HALO_RT_FOG_BEFORE_LIT").ok().as_deref());
+            if lit == Self::Add && FogBefore::get().on() {
+                info!("the fog before the upscaler: lit fog's light added as linear light (HALO_RT_FOG_BEFORE_LIT=add)");
+            }
+            lit
+        })
+    }
+
+    /// The fog's `lit.x` in the fog before the upscaler's pass where the
+    /// light is bound: 1 the shoulder, 2 added.
+    fn flag(self) -> f32 {
+        match self {
+            Self::Shoulder => 1.0,
+            Self::Add => 2.0,
+        }
+    }
+}
+
+/// The fog before the upscaler's pass's shader defs: the fog pass's, and the
+/// local mean's radius where it is on.
+fn fog_before_shader_defs(edges: FogEdges, sea_horizon: bool, mean: u32) -> Vec<ShaderDefVal> {
+    let mut defs = fog_shader_defs(edges, sea_horizon);
+    if mean > 0 {
+        defs.push(ShaderDefVal::UInt("FOG_BEFORE_MEAN".into(), mean));
+    }
+    defs
+}
+
 /// The fog pass's shader defs: the silhouettes' rule and the sea's horizon.
 fn fog_shader_defs(edges: FogEdges, sea_horizon: bool) -> Vec<ShaderDefVal> {
     let mut defs = edges.shader_defs();
@@ -341,6 +672,7 @@ fn follow_fog(
     lit_fog: Option<Res<LitFog>>,
     mut ray_fog: ResMut<bevy_solarik::scene::SolarikRayFog>,
     mut camera_sky: ResMut<crate::bridge::CameraSky>,
+    mut logged_curtain: Local<Option<(String, bool)>>,
 ) {
     let (entity, current) = *camera;
     let Some(snapshot) = link.latest.as_ref() else { return };
@@ -401,6 +733,21 @@ fn follow_fog(
                 (true, false) => 1.0,
                 (true, true) => 2.0,
             };
+            // (the fog curtain, where the fog is opaque: lit.z its b0; none
+            // with the fog before the upscaler, lit.w its form)
+            let before = FogBefore::get();
+            fog.lit.w = before.form();
+            fog.lit.z = if before.on() { 0.0 } else { curtain_for(&fog, fog_curtain()) };
+            let map = level.as_deref().map(|level| level.builder.stats.map_name.clone()).unwrap_or_default();
+            let on = fog.lit.z > 0.0;
+            if logged_curtain.as_ref().is_none_or(|(logged_map, logged_on)| *logged_map != map || *logged_on != on) {
+                if on {
+                    info!("the fog curtain: on for {map} (opaque fog), b0 {}", fog.lit.z);
+                } else if logged_curtain.as_ref().is_some_and(|(logged_map, logged_on)| *logged_map == map && *logged_on) {
+                    info!("the fog curtain: off for {map}");
+                }
+                *logged_curtain = Some((map, on));
+            }
             fog
         });
     // (the clear under the picture only with the fog on the camera: else the
@@ -417,8 +764,12 @@ fn follow_fog(
             atmospheric: fog.atmospheric,
             plane: fog.plane,
             planar_color: fog.planar_color,
-            planar: fog.planar,
-            lit: lit_fog.as_deref().map_or(Vec4::ZERO, |lit| Vec4::new(lit.strength, f32::from(u8::from(lit.sun)), f32::from(u8::from(lit.only)), 0.0)),
+            // (w: 1 where the picture is fogged before the denoiser, the fog
+            // before the upscaler, for the DLSS-RR guides' fade; Solarik reads
+            // nothing else there, and the modelless sky's flag HaloFog keeps
+            // in it is not for Solarik)
+            planar: fog.planar.truncate().extend(if fog.lit.w > 0.5 { 1.0 } else { 0.0 }),
+            lit: lit_fog.as_deref().map_or(Vec4::ZERO, LitFog::shared),
         }
     });
     if *ray_fog != traced {
@@ -449,6 +800,9 @@ fn follow_fog(
 #[derive(Resource)]
 pub(crate) struct FogPipeline {
     layout: BindGroupLayoutDescriptor,
+    /// the fog curtain's: the fog pass's bindings, for the compute stage,
+    /// and the picture it darkens in place (draw_fog_curtain)
+    curtain_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     /// the fog screen's: its layers tile
     layer_sampler: Sampler,
@@ -479,11 +833,39 @@ fn init_pipeline(mut commands: Commands, device: Res<RenderDevice>, assets: Res<
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 // (the silhouettes' guide, filtered)
                 sampler(SamplerBindingType::Filtering),
+                // (lit fog's light, loaded)
+                texture_2d(TextureSampleType::Float { filterable: true }),
+            ),
+        ),
+    );
+    let curtain_layout = BindGroupLayoutDescriptor::new(
+        "halo_fog_curtain",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+                texture_depth_2d(),
+                uniform_buffer::<ViewUniform>(true),
+                uniform_buffer::<HaloFog>(false),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_depth_2d(),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                // (the lit picture, darkened in place)
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
             ),
         ),
     );
     commands.insert_resource(FogPipeline {
         layout,
+        curtain_layout,
         sampler: device.create_sampler(&SamplerDescriptor::default()),
         layer_sampler: device.create_sampler(&SamplerDescriptor {
             address_mode_u: AddressMode::Repeat,
@@ -511,7 +893,9 @@ pub(crate) fn draw_fog(
         &ExtractedView,
         &HaloFog,
         Option<&FogScreenMaps>,
+        Option<&SolarikLightingResources>,
     )>,
+    (ray_fog, frame_count): (Option<Res<bevy_solarik::scene::SolarikRayFog>>, Res<FrameCount>),
     gpu_images: Res<RenderAssets<GpuImage>>,
     fallback: Res<FallbackImage>,
     fallback_zero: Res<FallbackImageZero>,
@@ -526,7 +910,7 @@ pub(crate) fn draw_fog(
     mut pipelines: Local<HashMap<TextureFormat, CachedRenderPipelineId>>,
     mut ctx: RenderContext,
 ) {
-    let (target, prepass, main_depth, view_offset, extracted, fog, maps) = view.into_inner();
+    let (target, prepass, main_depth, view_offset, extracted, fog, maps, lighting) = view.into_inner();
     let layer = |index: usize| {
         maps.and_then(|maps| maps.0[index].as_ref())
             .and_then(|handle| gpu_images.get(handle))
@@ -545,6 +929,8 @@ pub(crate) fn draw_fog(
             fragment: Some(FragmentState {
                 shader: fog_pipeline.shader.clone(),
                 shader_defs: fog_shader_defs(FogEdges::get(), sea_horizon_fog()),
+                // (the module holds the fog curtain's entry point too)
+                entry_point: Some("fragment".into()),
                 targets: vec![Some(ColorTargetState {
                     format: extracted.target_format,
                     blend: None,
@@ -556,7 +942,19 @@ pub(crate) fn draw_fog(
         })
     });
     let Some(pipeline) = cache.get_render_pipeline(id) else { return };
-    let fog = *fog;
+    let mut fog = *fog;
+    // lit fog's light, laid over the fog here when Solarik was told so
+    // (`lit.w`, lit_fog_over) and its passes ran this frame; else nothing
+    // (and nothing with the fog before the upscaler, fog.lit.w, which adds it)
+    let lit = ray_fog.as_deref().map_or(Vec4::ZERO, |ray_fog| ray_fog.lit);
+    let lit_light = (lit.x > 0.0 && lit.w > 0.5 && fog.lit.w <= 0.5)
+        .then(|| lighting.and_then(|lighting| lighting.lit_fog_light(frame_count.0)))
+        .flatten();
+    if lit_light.is_some() {
+        // (z, the fog curtain's b0, kept)
+        fog.lit.x = 1.0;
+        fog.lit.y = if lit.z > 0.5 { 1.0 } else { 0.0 };
+    }
 
     let mut uniform = UniformBuffer::new(Vec::new());
     if uniform.write(&fog).is_err() {
@@ -621,6 +1019,8 @@ pub(crate) fn draw_fog(
             // (none: transparent black, which lays nothing over)
             weather_view.as_ref().unwrap_or(&fallback_zero.texture_view),
             &fog_pipeline.guide_sampler,
+            // (none: black, which adds nothing; the flag off besides)
+            lit_light.unwrap_or(&fallback_zero.texture_view),
         )),
     );
     let diagnostics = ctx.diagnostic_recorder();
@@ -645,10 +1045,345 @@ pub(crate) fn draw_fog(
     pass_span.end(&mut pass);
 }
 
+/// The fog curtain (the fog's `lit.z`, its b0; [`fog_curtain`]): the lit
+/// picture, at the render resolution, before the transparent pass, darkened in
+/// place by `halo_fog.wesl`'s `curtain` (a pixel whose fog's coverage b is over
+/// b0 to the light whose display encoding is its own times (1 - b) / (1 - b0),
+/// the sky black). Nothing where it is off, or on a picture not of Rgba16Float
+/// (the format the pass binds it as).
+///
+/// The same pass lays the fog before the upscaler where that is on (the fog's
+/// `lit.w`, [`FogBefore`]; the curtain then off): `halo_fog.wesl`'s `before`,
+/// each render pixel fogged by its own depth, and lit fog's light added.
+pub(crate) fn draw_fog_curtain(
+    view: ViewQuery<(
+        &ViewTarget,
+        &ViewPrepassTextures,
+        &ViewDepthStencilTexture,
+        &ViewUniformOffset,
+        &ExtractedView,
+        &HaloFog,
+        Option<&SolarikLightingResources>,
+    )>,
+    (ray_fog, frame_count): (Option<Res<bevy_solarik::scene::SolarikRayFog>>, Res<FrameCount>),
+    fallback: Res<FallbackImage>,
+    fallback_zero: Res<FallbackImageZero>,
+    fog_pipeline: Res<FogPipeline>,
+    cache: Res<PipelineCache>,
+    device: Res<RenderDevice>,
+    view_uniforms: Res<ViewUniforms>,
+    mut texture_cache: ResMut<TextureCache>,
+    mut pipeline_ids: Local<[Option<CachedComputePipelineId>; 2]>,
+    mut ctx: RenderContext,
+) {
+    let (target, prepass, main_depth, view_offset, extracted, fog, lighting) = view.into_inner();
+    let before = fog.lit.w > 0.5;
+    if (fog.lit.z <= 0.0 && !before) || target.main_texture_format() != TextureFormat::Rgba16Float {
+        return;
+    }
+    let (Some(depth), Some(main_depth), Some(view_binding)) =
+        (prepass.depth_only_view(), main_depth.attachment.depth_stencil_views().depth_only_view(), view_uniforms.uniforms.binding())
+    else {
+        return;
+    };
+    let (label, entry) = if before { ("halo_fog_before", "before") } else { ("halo_fog_curtain", "curtain") };
+    let id = *pipeline_ids[usize::from(before)].get_or_insert_with(|| {
+        cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some(label.into()),
+            layout: vec![fog_pipeline.curtain_layout.clone()],
+            shader: fog_pipeline.shader.clone(),
+            shader_defs: if before {
+                fog_before_shader_defs(FogEdges::get(), sea_horizon_fog(), fog_before_mean())
+            } else {
+                fog_shader_defs(FogEdges::get(), sea_horizon_fog())
+            },
+            entry_point: Some(entry.into()),
+            ..default()
+        })
+    });
+    let Some(pipeline) = cache.get_compute_pipeline(id) else { return };
+    let mut fog = *fog;
+    // (the fog before the upscaler: lit fog's light, added after the fog
+    // where Solarik's passes ran this frame and left it undivided, lit.w)
+    let lit = ray_fog.as_deref().map_or(Vec4::ZERO, |ray_fog| ray_fog.lit);
+    let lit_light = (before && lit.x > 0.0 && lit.w > 0.5)
+        .then(|| lighting.and_then(|lighting| lighting.lit_fog_light(frame_count.0)))
+        .flatten();
+    if lit_light.is_some() {
+        fog.lit.x = FogBeforeLit::get().flag();
+        fog.lit.y = if lit.z > 0.5 { 1.0 } else { 0.0 };
+    }
+    let mut uniform = UniformBuffer::new(Vec::new());
+    if uniform.write(&fog).is_err() {
+        return;
+    }
+    let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some(label),
+        contents: uniform.as_ref(),
+        usage: BufferUsages::UNIFORM,
+    });
+    // (the fog pass's bindings, its pictures none but lit fog's light, then
+    // the picture itself; with the local mean, a copy of the picture as the
+    // source, read round each pixel while the pass writes it)
+    let picture = target.get_unsampled_color_attachment();
+    let copy = (before && fog_before_mean() > 0).then(|| {
+        let main = target.main_texture();
+        let copy = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("halo_fog_before_source"),
+                size: main.size(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba16Float,
+                usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+        ctx.command_encoder().copy_texture_to_texture(main.as_image_copy(), copy.texture.as_image_copy(), main.size());
+        copy
+    });
+    let bind_group = device.create_bind_group(
+        label,
+        &cache.get_bind_group_layout(&fog_pipeline.curtain_layout),
+        &BindGroupEntries::sequential((
+            copy.as_ref().map_or(&fallback.d2.texture_view, |copy| &copy.default_view),
+            &fog_pipeline.sampler,
+            depth,
+            view_binding,
+            buffer.as_entire_binding(),
+            &fallback.d2.texture_view,
+            &fallback.d2.texture_view,
+            &fallback.d2.texture_view,
+            &fallback.d2.texture_view,
+            &fog_pipeline.layer_sampler,
+            &fallback_zero.texture_view,
+            main_depth,
+            &fallback_zero.texture_view,
+            &fog_pipeline.guide_sampler,
+            lit_light.unwrap_or(&fallback_zero.texture_view),
+            picture.view,
+        )),
+    );
+    // (the main pass's viewport: the render resolution, in the corner below
+    // DLAA)
+    let size = extracted.viewport.zw();
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let encoder = ctx.command_encoder();
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+    let span = diagnostics.time_span(&mut pass, label);
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bind_group, &[view_offset.offset]);
+    pass.dispatch_workgroups(size.x.div_ceil(8), size.y.div_ceil(8), 1);
+    span.end(&mut pass);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bevy::shader::{ShaderCache, ShaderCacheSource};
+
+    #[test]
+    fn lit_fog_parse() {
+        assert_eq!(LitFog::parse("3"), Some(LitFog { on: true, strength: 3.0, sun: false, only: false }));
+        assert_eq!(LitFog::parse("0.5, sun,ONLY"), Some(LitFog { on: true, strength: 0.5, sun: true, only: true }));
+        let off = Some(LitFog { on: false, strength: 0.0, sun: false, only: false });
+        assert_eq!(LitFog::parse("0"), off);
+        assert_eq!(LitFog::parse("Off"), off);
+        assert_eq!(LitFog::parse("bright"), None);
+        assert_eq!(LitFog::parse("-1"), None);
+        assert_eq!(LitFog::parse("nan"), None);
+    }
+
+    #[test]
+    fn lit_fog_starting() {
+        let on = |strength| LitFog { on: true, strength, sun: false, only: false };
+        let off = |strength| LitFog { on: false, strength, sun: false, only: false };
+        // (nothing given: the saved choice, or off at the default)
+        assert_eq!(LitFog::starting(None, None), off(crate::options::LIT_FOG_STRENGTH));
+        assert_eq!(LitFog::starting(None, Some((true, 5.0))), on(5.0));
+        // (given on: that, flags and all; given off: off at the saved strength)
+        let given = LitFog { on: true, strength: 2.0, sun: true, only: false };
+        assert_eq!(LitFog::starting(Some(given), Some((false, 5.0))), given);
+        assert_eq!(LitFog::starting(LitFog::parse("off"), Some((true, 5.0))), off(5.0));
+        assert_eq!(off(5.0).shared(), Vec4::ZERO);
+        assert_eq!(off(5.0).shared_with(true), Vec4::ZERO);
+        assert_eq!(given.shared_with(false), Vec4::new(2.0, 1.0, 0.0, 0.0));
+        assert_eq!(given.shared_with(true), Vec4::new(2.0, 1.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn lit_fog_over_switch() {
+        assert!(parse_lit_fog_over(None));
+        assert!(parse_lit_fog_over(Some("1")));
+        assert!(parse_lit_fog_over(Some("")));
+        assert!(!parse_lit_fog_over(Some("0")));
+        assert!(!parse_lit_fog_over(Some(" 0 ")));
+    }
+
+    #[test]
+    fn fog_curtain_switch() {
+        assert_eq!(parse_fog_curtain(None), Some(FOG_CURTAIN_B0));
+        assert_eq!(parse_fog_curtain(Some("0")), None);
+        assert_eq!(parse_fog_curtain(Some(" 0.0 ")), None);
+        assert_eq!(parse_fog_curtain(Some("0.6")), Some(0.6));
+        // (out of range or not a number: the constant)
+        assert_eq!(parse_fog_curtain(Some("1")), Some(FOG_CURTAIN_B0));
+        assert_eq!(parse_fog_curtain(Some("-0.2")), Some(FOG_CURTAIN_B0));
+        assert_eq!(parse_fog_curtain(Some("on")), Some(FOG_CURTAIN_B0));
+        assert_eq!(parse_fog_curtain(Some("")), Some(FOG_CURTAIN_B0));
+    }
+
+    #[test]
+    fn fog_curtain_only_where_opaque() {
+        let fog = |density: f32, distance: f32, water: f32| HaloFog {
+            atmospheric_color: Vec4::new(0.157, 0.176, 0.275, density),
+            atmospheric: Vec4::new(0.0, distance, 1.0, water),
+            ..default()
+        };
+        // (c10's: opaque, 22 world units)
+        assert_eq!(curtain_for(&fog(1.0, 67.0, 0.0), Some(0.5)), 0.5);
+        assert_eq!(curtain_for(&fog(1.0, 67.0, 0.0), None), 0.0);
+        // (not opaque, no distance, or the water's plane: off)
+        assert_eq!(curtain_for(&fog(0.5, 67.0, 0.0), Some(0.5)), 0.0);
+        assert_eq!(curtain_for(&fog(1.0, 0.0, 0.0), Some(0.5)), 0.0);
+        assert_eq!(curtain_for(&fog(1.0, 67.0, 1.0), Some(0.5)), 0.0);
+        // (the layers carry it in planar's z, the eye term they leave out)
+        let mut on = fog(1.0, 67.0, 0.0);
+        on.planar.z = 0.7;
+        on.lit.z = 0.5;
+        assert_eq!(on.layers()[4].z, 0.5);
+        assert_eq!(fog(1.0, 67.0, 0.0).layers()[4].z, 0.0);
+    }
+
+    #[test]
+    fn fog_before_switch() {
+        // (on by default, through the tonemapper's curve; 0 the old)
+        assert_eq!(FogBefore::parse(None), (FogBefore::Curve, true));
+        assert_eq!(FogBefore::parse(Some("0")), (FogBefore::Off, true));
+        assert_eq!(FogBefore::parse(Some(" 0 ")), (FogBefore::Off, true));
+        assert_eq!(FogBefore::parse(Some(" 1 ")), (FogBefore::Straight, true));
+        assert_eq!(FogBefore::parse(Some("tone")), (FogBefore::Curve, true));
+        assert_eq!(FogBefore::parse(Some("TONE")), (FogBefore::Curve, true));
+        assert_eq!(FogBefore::parse(Some("2")), (FogBefore::Curve, true));
+        assert_eq!(FogBefore::parse(Some("")), (FogBefore::Curve, false));
+        assert_eq!(FogBefore::parse(Some("yes")), (FogBefore::Curve, false));
+        assert_eq!(FogBeforeLit::parse(None), FogBeforeLit::Shoulder);
+        assert_eq!(FogBeforeLit::parse(Some("ADD")), FogBeforeLit::Add);
+        assert_eq!(FogBeforeLit::parse(Some("0")), FogBeforeLit::Shoulder);
+        assert_eq!([FogBeforeLit::Shoulder.flag(), FogBeforeLit::Add.flag()], [1.0, 2.0]);
+        assert!(!FogBefore::Off.on() && FogBefore::Straight.on() && FogBefore::Curve.on());
+        assert_eq!([FogBefore::Off, FogBefore::Straight, FogBefore::Curve].map(FogBefore::form), [0.0, 1.0, 2.0]);
+        // (the layers carry it in planar's z as -1, over the curtain's b0)
+        let mut fog = HaloFog { atmospheric_color: Vec4::new(0.2, 0.2, 0.2, 1.0), atmospheric: Vec4::new(0.0, 67.0, 1.0, 0.0), ..default() };
+        fog.lit.z = 0.5;
+        assert_eq!(fog.layers()[4].z, 0.5);
+        fog.lit.w = 1.0;
+        assert_eq!(fog.layers()[4].z, -1.0);
+        fog.lit.w = 2.0;
+        assert_eq!(fog.layers()[4].z, -1.0);
+    }
+
+    #[test]
+    fn fog_before_mean_switch() {
+        // (radius 2 by default; 0 none)
+        assert_eq!(parse_fog_before_mean(None), FOG_BEFORE_MEAN_RADIUS);
+        assert_eq!(FOG_BEFORE_MEAN_RADIUS, 2);
+        assert_eq!(parse_fog_before_mean(Some("0")), 0);
+        assert_eq!(parse_fog_before_mean(Some(" 1 ")), 1);
+        assert_eq!(parse_fog_before_mean(Some("4")), 4);
+        assert_eq!(parse_fog_before_mean(Some("5")), FOG_BEFORE_MEAN_RADIUS);
+        assert_eq!(parse_fog_before_mean(Some("x")), FOG_BEFORE_MEAN_RADIUS);
+        assert!(!fog_before_shader_defs(FogEdges::Guided, true, 0).iter().any(|d| matches!(d, ShaderDefVal::UInt(name, _) if name == "FOG_BEFORE_MEAN")));
+        assert!(fog_before_shader_defs(FogEdges::Guided, true, 2).iter().any(|d| matches!(d, ShaderDefVal::UInt(name, 2) if name == "FOG_BEFORE_MEAN")));
+    }
+
+    /// The fog before the upscaler's blend, mirrored from `halo_fog.wesl`
+    /// (its tone tables read from the shader's source): taken about a mean
+    /// and carried as a ratio (`affine_about`), it is the plain blend at the
+    /// mean, monotone in the pixel, never negative, never steeper than 1 (a
+    /// bright noisy sample no brighter than the blend at the mean plus
+    /// itself, where the plain blend's per-channel inverse ran to tens), its
+    /// average over any noise is the blend of the mean, and under a black fog
+    /// a firefly raising the mean raises none of its neighbours.
+    #[test]
+    fn fog_before_blend_bounded() {
+        let source = include_str!("shaders/halo_fog.wesl");
+        let table = |name: &str| -> Vec<f32> {
+            let start = source.find(&format!("var<private> {name}: array<f32, 64> = array<f32, 64>(")).expect(name);
+            let body = &source[start..];
+            let open = body.find(">(").unwrap() + 2;
+            let close = body.find(");").unwrap();
+            body[open..close].split(',').map(|v| v.trim().parse::<f32>().unwrap()).collect()
+        };
+        let (curve, inverse) = (table("TONE_CURVE"), table("TONE_INVERSE"));
+        assert_eq!((curve.len(), inverse.len()), (64, 64));
+        let lerp = |t: &[f32], at: f32| {
+            let p = at.clamp(0.0, 1.0) * 63.0;
+            let i = (p as usize).min(62);
+            t[i] + (t[i + 1] - t[i]) * (p - i as f32)
+        };
+        let (tone_max, cap) = (0.998047_f32, 64.0_f32);
+        let tone = |x: f32| lerp(&curve, x.max(0.0) / (x.max(0.0) + 1.0));
+        let tone_inverse = |y: f32| {
+            let u = lerp(&inverse, y.clamp(0.0, tone_max) / tone_max);
+            (u / (1.0 - u).max(1e-6)).min(cap)
+        };
+        let enc = |x: f32| if x <= 0.0031308 { x * 12.92 } else { 1.055 * x.max(0.0).powf(1.0 / 2.4) - 0.055 };
+        let dec = |e: f32| if e <= 0.04045 { e / 12.92 } else { ((e.max(0.0) + 0.055) / 1.055).powf(2.4) };
+        // (form 2, one channel: f the fog's light added, b its coverage)
+        let blend = |x: f32, f: f32, b: f32| tone_inverse(dec(f + enc(tone(x.max(0.0)).min(1.0)) * (1.0 - b)));
+        let affine = |p: f32, m: f32, f: f32, b: f32| {
+            let m = m.min(8.0);
+            let at_mean = blend(m, f, b);
+            let s = ((at_mean - blend(0.0, f, b)) / m.max(1e-6)).clamp(0.0, 1.0);
+            (at_mean + (p - m) * s).max(0.0)
+        };
+        // (dark, mid and white fogs, thin to whole; d20's corridor, c10's
+        // swamp, b40's snow)
+        for (colour, b) in [(0.2_f32, 0.3_f32), (0.5, 0.5), (0.9, 0.5), (1.0, 0.8), (0.3, 1.0), (0.05, 0.05)] {
+            let f = colour * b;
+            for m in [0.0005_f32, 0.003, 0.02, 0.2, 1.0, 5.0] {
+                // (exact at the mean, and the old tangent's slope for the record)
+                assert!((affine(m, m, f, b) - blend(m, f, b)).abs() <= 1e-4 * blend(m, f, b).max(1.0), "{colour} {b} {m}");
+                let mut last = -1.0_f32;
+                for i in 0..=2000 {
+                    let p = i as f32 * 0.5;
+                    let out = affine(p, m, f, b);
+                    assert!(out.is_finite() && out >= 0.0, "{colour} {b} {m} {p}: {out}");
+                    assert!(out >= last - 1e-5, "not monotone at {p}: {out} < {last}");
+                    assert!(out <= blend(m.min(8.0), f, b) + p + 1e-4, "{colour} {b} {m} {p}: {out} over the bound");
+                    last = out;
+                }
+                // (any noise about the mean averages to the blend of the mean)
+                let samples = [0.0, 0.0, 0.0, 4.0 * m, 0.5 * m, 1.5 * m, 0.0, m];
+                let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+                if mean <= 8.0 {
+                    let averaged = samples.iter().map(|&p| affine(p, mean, f, b)).sum::<f32>() / samples.len() as f32;
+                    let exact = blend(mean, f, b);
+                    // (the floor at 0 the only way off it, where s is the secant)
+                    assert!((averaged - exact).abs() <= 1e-3 * exact.max(0.01), "{colour} {b} {m}: {averaged} against {exact}");
+                }
+            }
+        }
+        // (the plain blend of a lone bright sample, the squares' cause: a
+        // white fog half over a sample of 30 gives the inverse's cap, over
+        // twice the sample; carried from a dark mean, at most the sample)
+        assert!(blend(30.0, 0.5, 0.5) > 60.0);
+        assert!(affine(30.0, 0.02, 0.5, 0.5) <= 30.0 + blend(0.02, 0.5, 0.5));
+        // (d20's black fog: a firefly raising the window's mean does not
+        // raise its neighbours, the squares of the first form, which took g's
+        // slope at the mean and added its offset to every pixel)
+        for b in [0.3_f32, 0.6, 0.9] {
+            for (m, raised) in [(0.002_f32, 0.006_f32), (0.02, 0.05), (0.2, 0.6)] {
+                for p in [0.0_f32, 0.5 * m, m, 2.0 * m] {
+                    assert!(affine(p, raised, 0.0, b) <= affine(p, m, 0.0, b) + 1e-6, "{b} {m} {p}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn fog_edges_switch() {
@@ -709,6 +1444,30 @@ mod tests {
             // (the sea's horizon on or off by the constant)
             let constant = if sea_horizon { "SEA_HORIZON_FOG: bool = true" } else { "SEA_HORIZON_FOG: bool = false" };
             assert!(source.contains(constant), "{defs:?}");
+            // (lit fog's light laid over in every mode, by the fog's weights)
+            assert!(source.contains("lit_light_at(") && source.contains("lit_fog_over("), "{defs:?}");
+            assert_eq!(source.contains("chosen_weights"), edges != FogEdges::Bilinear, "{edges:?}");
+            // (the fog curtain's entry point, and its clamp on every
+            // sample's coverage, in every mode)
+            assert!(module.entry_points.iter().any(|entry| entry.name == "curtain"), "{defs:?}");
+            assert!(module.entry_points.iter().any(|entry| entry.name == "fragment"), "{defs:?}");
+            assert!(source.contains("curtain_darken(") && source.contains("curtained("), "{defs:?}");
+            // (the fog before the upscaler's entry point, both its forms)
+            assert!(module.entry_points.iter().any(|entry| entry.name == "before"), "{defs:?}");
+            assert!(source.contains("fog_blend_linear(") && source.contains("tone_inverse("), "{defs:?}");
+        }
+        // (the fog before the upscaler's pass with its local mean, in every
+        // edge mode: the radius's loop there, and not without it)
+        for edges in [FogEdges::Guided, FogEdges::Near, FogEdges::Bilinear] {
+            for mean in [0, 2] {
+                let defs = fog_before_shader_defs(edges, true, mean);
+                let source = cache.get(0, fog_id, &defs).unwrap_or_else(|e| panic!("{defs:?}: {e}"));
+                let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("{defs:?}: {}", e.emit_to_string(&source)));
+                wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{defs:?}: {}", e.emit_to_string(&source)));
+                assert_eq!(source.contains("FOG_MEAN_RADIUS"), mean > 0, "{defs:?}");
+            }
         }
     }
 }

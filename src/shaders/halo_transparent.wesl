@@ -42,6 +42,9 @@ struct HaloCombiner {
 // the environment fog (halo_fog.wesl's first five; crate::fog::fog_layers),
 // one buffer every material shares, so that the fog's changes (its distance
 // follows the camera on some levels) rewrite no material
+// (planar's z: the fog curtain's b0 where it is on, 0 off, -1 where the
+// fog is laid before the upscaler (FogBefore); src/fog.rs HaloFog::layers. Every copy of
+// this struct the same: halo_transparent.wesl, halo_sprite.wesl)
 struct HaloFogLayers {
     atmospheric_color: vec4<f32>,
     atmospheric: vec4<f32>,
@@ -140,12 +143,21 @@ fn fog_coverage(view_depth: f32, position: vec3<f32>) -> f32 {
 // by for the fog pass over what lies behind it (as the sprites',
 // halo_sprite.wesl): the game draws its transparent surfaces after its fog,
 // each faded by the fog at its own depth (the combiners' last stage).
-fn surface_fog(in: VertexOutput) -> vec2<f32> {
+// (x the surface's own fog's transmittance, y the old raise, z the coverage
+// behind under the fog curtain, under 0 without it: curtain_raised)
+fn surface_fog(in: VertexOutput) -> vec3<f32> {
     if fog_layers.atmospheric_color.a <= 0.0 && fog_layers.planar_color.a <= 0.0 {
-        return vec2(1.0);
+        return vec3(1.0, 1.0, -1.0);
     }
     let forward = -normalize(view.world_from_view[2].xyz);
     let own = 1.0 - fog_coverage(dot(in.world_position.xyz - view.world_position, forward), in.world_position.xyz);
+    // (the fog curtain's b0, 0 off: src/fog.rs fog_curtain; under 0 the fog
+    // before the upscaler, src/fog.rs FogBefore: the picture behind fogged
+    // already, as the game's, so the surface keeps its own fog alone)
+    let curtain = fog_layers.planar.z;
+    if curtain < 0.0 {
+        return vec3(own, 1.0, -1.0);
+    }
     var behind = 0.0;
 @if(DEPTH_PREPASS) {
     let depth = prepass_depth(in.position, 0u);
@@ -155,9 +167,44 @@ fn surface_fog(in: VertexOutput) -> vec2<f32> {
         let p = view.world_from_clip * vec4(ndc, depth, 1.0);
         let position = p.xyz / p.w;
         behind = fog_coverage(dot(position - view.world_position, forward), position);
+    } else if curtain > 0.0 {
+        // (the sky, under the curtain: fogged whole, as past the fog's reach)
+        behind = 1.0;
     }
 }
-    return vec2(own, min(1.0 / max(1.0 - behind, 1e-4), 4.0));
+    // Under the fog curtain the picture behind was darkened beyond b0 and the
+    // fog pass covers by no more than b0, in the display's encoding: so the
+    // light is raised by what that takes (curtain_raised, z), and the surface
+    // keeps its own fog alone, whatever lies behind (halo_fog.wesl)
+    if curtain > 0.0 {
+        return vec3(own, 1.0, min(behind, curtain));
+    }
+    return vec3(own, min(1.0 / max(1.0 - behind, 1e-4), 4.0), -1.0);
+}
+
+// A transparent surface's or sprite's light (linear) raised for the fog pass
+// over what lies behind it. Under the fog curtain (fog.z, the coverage behind
+// it up to b0; under 0 off): the light whose sRGB encoding is its own over
+// (1 - fog.z), as the fog pass then multiplies the encoding by that (src/fog.rs
+// fog_curtain); else its old factor, fog.y (halo_fog.wesl, halo_transparent.wesl
+// and halo_sprite.wesl the same).
+fn curtain_raised(light: vec3<f32>, fog: vec3<f32>) -> vec3<f32> {
+    if fog.z < 0.0 {
+        return light * fog.y;
+    }
+    return srgb_decode(srgb_encode(light) / max(1.0 - fog.z, 1e-4));
+}
+
+fn srgb_encode(linear: vec3<f32>) -> vec3<f32> {
+    let low = linear * 12.92;
+    let high = 1.055 * pow(max(linear, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+    return select(high, low, linear <= vec3(0.0031308));
+}
+
+fn srgb_decode(encoded: vec3<f32>) -> vec3<f32> {
+    let low = encoded / 12.92;
+    let high = pow((max(encoded, vec3(0.0)) + 0.055) / 1.055, vec3(2.4));
+    return select(high, low, encoded <= vec3(0.04045));
 }
 
 // the game's fade (its combiners' last stage): by the view's angle to the
@@ -360,25 +407,25 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let fade = surface_fade(in) * fog.x;
     switch combiners[slot.index.x].modes.x {
         // alpha blend: by its coverage
-        case 0u: { return vec4(pow(rgb, vec3(2.2)) * fog.y, alpha * fade); }
+        case 0u: { return vec4(curtain_raised(pow(rgb, vec3(2.2)), fog), alpha * fade); }
         // multiply, min: the factor toward 1
         case 1u, 5u: { return vec4(pow(mix(vec3(1.0), rgb, fade), vec3(2.2)), 1.0); }
         // double multiply: twice the factor, toward 0.5
         case 2u: { return vec4(pow(2.0 * mix(vec3(0.5), rgb, fade), vec3(2.2)), 1.0); }
         // alpha multiply add: premultiplied
-        case 7u: { return vec4(pow(rgb, vec3(2.2)) * fade * fog.y, alpha * fade); }
+        case 7u: { return vec4(curtain_raised(pow(rgb, vec3(2.2)) * fade, fog), alpha * fade); }
         // a meter: its blend's constant colour, the tint (stage 3's c1)
         case 8u: {
             let tint = combiners[slot.index.x].constant1[3];
             let keep = dot(pow(tint.rgb, vec3(2.2)), vec3(1.0 / 3.0));
-            return vec4(pow(rgb, vec3(2.2)) * tint.a * fade * fog.y, 1.0 - keep);
+            return vec4(curtain_raised(pow(rgb, vec3(2.2)) * tint.a * fade, fog), 1.0 - keep);
         }
         case 9u: {
             let tint = combiners[slot.index.x].constant1[3];
-            return vec4(pow(rgb, vec3(2.2)) * pow(tint.rgb, vec3(2.2)) * fade * fog.y, alpha);
+            return vec4(curtain_raised(pow(rgb, vec3(2.2)) * pow(tint.rgb, vec3(2.2)) * fade, fog), alpha);
         }
         // plasma: added by its alpha
-        case 10u: { return vec4(pow(rgb, vec3(2.2)) * fog.y, alpha * fade); }
+        case 10u: { return vec4(curtain_raised(pow(rgb, vec3(2.2)), fog), alpha * fade); }
         // a backed hologram's add: what is behind it less its share and its
         // picture raised by its gain, both where its pattern is bright, so
         // that where its picture is dark it is the plain add
@@ -390,9 +437,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                 pattern = smoothstep(hologram.z, hologram.w, peak);
             }
             let gain = mix(1.0, hologram.y, pattern);
-            return vec4(pow(rgb, vec3(2.2)) * fade * fog.y * gain, hologram.x * pattern * fade);
+            return vec4(curtain_raised(pow(rgb, vec3(2.2)) * fade * gain, fog), hologram.x * pattern * fade);
         }
         // add, subtract, max
-        default: { return vec4(pow(rgb, vec3(2.2)) * fade * fog.y, 1.0); }
+        default: { return vec4(curtain_raised(pow(rgb, vec3(2.2)) * fade, fog), 1.0); }
     }
 }

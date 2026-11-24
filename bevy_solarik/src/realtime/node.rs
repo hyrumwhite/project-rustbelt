@@ -62,7 +62,13 @@ pub struct SolarikLightingPipelines {
     gi_spatial_and_shade_pipeline: CachedComputePipelineId,
     specular_gi_pipeline: CachedComputePipelineId,
     lit_fog_pipeline: CachedComputePipelineId,
+    /// One level of lit fog's a-trous prefilter (`lit_fog_filter`),
+    /// dispatched `lit_fog_levels` times between the two others.
+    lit_fog_filter_pipeline: CachedComputePipelineId,
     lit_fog_accumulate_pipeline: CachedComputePipelineId,
+    /// The prefilter's level count, as its shader definition gave it
+    /// (`lit_fog_levels`).
+    lit_fog_levels: u32,
     primary_glass_pipeline: CachedComputePipelineId,
     primary_foliage_pipeline: CachedComputePipelineId,
     #[cfg(all(feature = "dlss", not(feature = "force_disable_dlss")))]
@@ -529,6 +535,7 @@ pub fn solarik_lighting<const PRIMARY: bool>(
             &s.lit_fog_raw,
             &s.lit_fog_history[0],
             &s.lit_fog_history[1],
+            &s.lit_fog_scratch,
             s.light_triangles.as_entire_binding(),
         )),
     );
@@ -1040,28 +1047,48 @@ pub fn solarik_lighting<const PRIMARY: bool>(
         d.end(&mut pass);
     }
 
-    // lit fog, when asked for (and compiled: it doesn't hold the rest back)
-    if ray_fog.lit.x > 0.0 {
-        if let (Some(lit_fog_pipeline), Some(accumulate_pipeline)) = (
-            pipeline_cache.get_compute_pipeline(pipelines.lit_fog_pipeline),
-            pipeline_cache.get_compute_pipeline(pipelines.lit_fog_accumulate_pipeline),
-        ) {
-            let d = diagnostics.time_span(&mut pass, "solarik_lighting/lit_fog");
-            for pipeline in [lit_fog_pipeline, accumulate_pipeline] {
-                pass.set_pipeline(pipeline);
-                pass.set_immediates(
-                    0,
-                    bytemuck::cast_slice(&[
-                        frame_index,
-                        reset_flags,
-                        render_frame,
-                        stable_radius.to_bits(),
-                    ]),
-                );
-                pass.dispatch_workgroups(dx, dy, 1);
-            }
-            d.end(&mut pass);
+    // lit fog, when asked for (and compiled: it doesn't hold the rest back;
+    // the prefilter's pipeline waited for only when it has levels to run)
+    let lit_fog_levels = pipelines.lit_fog_levels;
+    let lit_fog_pipelines = (ray_fog.lit.x > 0.0)
+        .then(|| {
+            let filter = if lit_fog_levels > 0 {
+                Some(pipeline_cache.get_compute_pipeline(pipelines.lit_fog_filter_pipeline)?)
+            } else {
+                None
+            };
+            Some((
+                pipeline_cache.get_compute_pipeline(pipelines.lit_fog_pipeline)?,
+                filter,
+                pipeline_cache.get_compute_pipeline(pipelines.lit_fog_accumulate_pipeline)?,
+            ))
+        })
+        .flatten();
+    // (the first frame it runs after one it didn't starts without the
+    // history, which is from whenever it last ran: bit 0, which only
+    // lit_fog_accumulate reads)
+    let lit_fog_ran = s
+        .lit_fog_ran
+        .swap(lit_fog_pipelines.is_some(), core::sync::atomic::Ordering::Relaxed);
+    if let Some((lit_fog_pipeline, filter_pipeline, accumulate_pipeline)) = lit_fog_pipelines {
+        let lit_fog_reset = if lit_fog_ran { reset_flags } else { reset_flags | 1 };
+        let d = diagnostics.time_span(&mut pass, "solarik_lighting/lit_fog");
+        // (the estimate, the prefilter's levels, the accumulation; each
+        // level's index in the fourth immediate, which lit_fog_filter reads
+        // as its bits, the others stable_radius, which they don't read)
+        let levels = filter_pipeline.map_or(0, |_| lit_fog_levels);
+        let steps = core::iter::once((lit_fog_pipeline, stable_radius.to_bits()))
+            .chain((0..levels).filter_map(|level| filter_pipeline.map(|p| (p, level))))
+            .chain(core::iter::once((accumulate_pipeline, stable_radius.to_bits())));
+        for (pipeline, fourth) in steps {
+            pass.set_pipeline(pipeline);
+            pass.set_immediates(
+                0,
+                bytemuck::cast_slice(&[frame_index, lit_fog_reset, render_frame, fourth]),
+            );
+            pass.dispatch_workgroups(dx, dy, 1);
         }
+        d.end(&mut pass);
     }
 
     drop(pass);
@@ -1147,6 +1174,8 @@ pub fn init_solari_lighting_pipelines(
                 storage_buffer_sized(false, None),
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
+                // (lit fog's scratch texture, the prefilter's)
                 texture_storage_2d(TextureFormat::Rgba16Float, StorageTextureAccess::ReadWrite),
                 // (the emissive triangles' table)
                 storage_buffer_sized(false, None),
@@ -1290,9 +1319,62 @@ pub fn init_solari_lighting_pipelines(
             // d40's doorway wall for about 0.23 ms;
             // SOLARIK_GI_GUIDE_NEIGHBOURS=0 none, the old; tuning.wesl)
             ("GI_GUIDE_NEIGHBOURS", "SOLARIK_GI_GUIDE_NEIGHBOURS", 8u32),
+            // (lit fog, lit_fog.wesl: the most frames of its history, held
+            // to 1 to 1024 in the shader, 24 the old; the history's clamp,
+            // its band in hundredths of the prefiltered light, 0 none, the
+            // old, and off whatever this says with no prefilter; the depth
+            // weights' tolerance in thousandths of the view depth, held to
+            // at least 1; the estimate's candidates from the light tiles,
+            // held to 1 to 64. The prefilter's levels, LIT_FOG_LEVELS, are
+            // pushed below from lit_fog_levels, which the dispatch reads too)
+            ("LIT_FOG_FRAMES", "SOLARIK_LIT_FOG_FRAMES", 96u32),
+            ("LIT_FOG_CLAMP", "SOLARIK_LIT_FOG_CLAMP", 25u32),
+            // (the power of the share of its luminance a clamped history
+            // kept by which its frame count is scaled, held to 1 to 64 in
+            // the shader; 2, the plain square: 8 and 24 followed a muzzle
+            // flash no sooner and 8 read a little grainier on stills)
+            ("LIT_FOG_CLAMP_POWER", "SOLARIK_LIT_FOG_CLAMP_POWER", 2u32),
+            // (the clamp's band widened by this many tenths of the
+            // prefiltered light's own noise at the pixel, the difference of
+            // the last a-trous level from the one before it averaged over
+            // the history's 3x3, held to 200 in the shader and nothing with
+            // fewer than two levels; 40, four times the noise (20 left a quarter of
+            // the blobs, 60 and 80 no fewer than 40): one frame's light
+            // in dark far fog is off by more than the band, the clamp chased
+            // it and soft blobs crawled; SOLARIK_LIT_FOG_CLAMP_NOISE=0 the
+            // old band)
+            ("LIT_FOG_CLAMP_NOISE", "SOLARIK_LIT_FOG_CLAMP_NOISE", 40u32),
+            // (a surface past an opaque fog's reach, where its coverage is
+            // whole, taken as the sky: its ray's end and its depth for the
+            // filter and the history the sky's; c10's far trees among the
+            // fogged sky were each a few pixels of their own to the depth
+            // weights, blocky streaks through the lit fog;
+            // SOLARIK_LIT_FOG_REACH=0 the old)
+            ("LIT_FOG_REACH", "SOLARIK_LIT_FOG_REACH", 1u32),
+            ("LIT_FOG_DEPTH", "SOLARIK_LIT_FOG_DEPTH", 50u32),
+            ("LIT_FOG_CANDIDATES", "SOLARIK_LIT_FOG_CANDIDATES", 16u32),
         ] {
             let value = std::env::var(env).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default);
+            if name == "LIT_FOG_REACH" && value == 0 {
+                // (once: these definitions are built for every pipeline)
+                static LOGGED: std::sync::Once = std::sync::Once::new();
+                LOGGED.call_once(|| {
+                    tracing::info!("lit fog: a surface past an opaque fog's reach lit as a surface (SOLARIK_LIT_FOG_REACH=0)");
+                });
+            }
             shader_defs.push(ShaderDefVal::UInt(name.into(), value));
+        }
+        // (lit fog's a-trous prefilter levels, 0 to 6, 0 none: the old 5x5
+        // in lit_fog_accumulate; lit_fog_levels)
+        shader_defs.push(ShaderDefVal::UInt("LIT_FOG_LEVELS".into(), lit_fog_levels()));
+        // (the DLSS-RR guides faded by the fog where the application fogs
+        // the picture before the denoiser, resolve_dlss_rr_textures.wesl;
+        // nothing without its SolarikRayFog planar.w; opt-in,
+        // SOLARIK_RR_FOG_GUIDE=1: on c10's rock in mid fog it flattened the
+        // texture's return when still but left the rock 3.6 of 255 darker and
+        // blurred in motion)
+        if rr_fog_guide() {
+            shader_defs.push("RR_FOG_GUIDE".into());
         }
         // (diagnostics: extra definitions, comma separated)
         if let Ok(defs) = std::env::var("SOLARIK_SHADER_DEFS") {
@@ -1723,6 +1805,14 @@ pub fn init_solari_lighting_pipelines(
             None,
             vec![],
         ),
+        lit_fog_filter_pipeline: create_pipeline(
+            "solarik_lighting_lit_fog_filter_pipeline",
+            "lit_fog_filter",
+            load_embedded_asset!(asset_server.as_ref(), "lit_fog.wesl"),
+            None,
+            vec![],
+        ),
+        lit_fog_levels: lit_fog_levels(),
         lit_fog_accumulate_pipeline: create_pipeline(
             "solarik_lighting_lit_fog_accumulate_pipeline",
             "lit_fog_accumulate",
@@ -1794,6 +1884,49 @@ const SUN_TERMINATOR_REACH_DEFAULT: f32 = 0.0;
 // deep under the pixel's plane as it starts above it; SOLARIK_SUN_BLUR_DROP,
 // held to 1 to 8)
 const SUN_BLUR_DROP_DEFAULT: f32 = 2.0;
+
+/// `SOLARIK_RR_FOG_GUIDE=1`: the DLSS-RR guides faded by the fog where the
+/// application says it fogs the picture before the denoiser
+/// (`SolarikRayFog::planar`'s w); else (the default) never, the old. Read
+/// once, logged when on.
+fn rr_fog_guide() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = parse_rr_fog_guide(std::env::var("SOLARIK_RR_FOG_GUIDE").ok().as_deref());
+        if on {
+            tracing::info!("DLSS-RR guides: faded by the fog where the picture is fogged before the denoiser (SOLARIK_RR_FOG_GUIDE=1)");
+        }
+        on
+    })
+}
+
+/// `1` on; anything else, or nothing, off.
+fn parse_rr_fog_guide(text: Option<&str>) -> bool {
+    text.is_some_and(|text| text.trim() == "1")
+}
+
+#[cfg(test)]
+mod rr_fog_guide_tests {
+    #[test]
+    fn rr_fog_guide_switch() {
+        assert!(!super::parse_rr_fog_guide(None));
+        assert!(super::parse_rr_fog_guide(Some("1")));
+        assert!(super::parse_rr_fog_guide(Some(" 1 ")));
+        assert!(!super::parse_rr_fog_guide(Some("0")));
+    }
+}
+
+/// Lit fog's a-trous prefilter levels (`SOLARIK_LIT_FOG_LEVELS`, 4 by
+/// default, held to 0 to 6; 0 no prefilter, the old 5x5 inside
+/// `lit_fog_accumulate`): read by both the shader definition and the
+/// dispatch, so the two cannot disagree.
+fn lit_fog_levels() -> u32 {
+    std::env::var("SOLARIK_LIT_FOG_LEVELS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(4)
+        .min(6)
+}
 
 /// The soft sun's definitions from the environment: `SUN_SOFT` when the blur
 /// or the terminator is on (or one of its views, `VISUALIZE_SUN_SOFT` or

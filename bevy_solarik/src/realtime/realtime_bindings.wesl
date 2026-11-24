@@ -43,11 +43,14 @@ enable wgpu_ray_query;
 // Per world cache cell, four lights (light source indices) its direct light
 // updates found in sight, from which ReSTIR DI draws candidates by place.
 @group(1) @binding(26) var<storage, read_write> world_cache_light_slots: array<vec4<u32>, constants::WORLD_CACHE_SIZE>;
-// Lit fog (lit_fog.wesl): this frame's scattered light, and its accumulation
-// in two textures taken in turn by the frame's parity.
+// Lit fog (lit_fog.wesl): this frame's scattered light (its alpha the
+// pixel's view depth), its accumulation in two textures taken in turn by the
+// frame's parity, and the scratch texture the a-trous prefilter's levels
+// take in turn with lit_fog_raw. (binding 31 is light_triangles.wesl's)
 @group(1) @binding(27) var lit_fog_raw: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(28) var lit_fog_history_a: texture_storage_2d<rgba16float, read_write>;
 @group(1) @binding(29) var lit_fog_history_b: texture_storage_2d<rgba16float, read_write>;
+@group(1) @binding(30) var lit_fog_scratch: texture_storage_2d<rgba16float, read_write>;
 
 // The DLSS guide textures: group 2, or group 3 in the specular pass with
 // NRC_SPECULAR, which binds NRC's buffers at group 2 as every NRC pass does

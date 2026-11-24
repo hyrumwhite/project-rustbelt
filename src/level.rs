@@ -1353,7 +1353,7 @@ pub struct LevelBuilder {
     /// The structure's copies of transparent materials, depth biased, by
     /// the material copied ([`LevelBuilder::structure_surface`]).
     structure_transparents: HashMap<AssetId<HaloTransparentMaterial>, Handle<HaloTransparentMaterial>>,
-    loaded_bsps: Vec<usize>,
+    pub(crate) loaded_bsps: Vec<usize>,
     /// Each loaded BSP's root entity, by BSP index.
     pub bsp_roots: Vec<(usize, Entity)>,
     /// The surfaces of each BSP's breakable surfaces, under an entity each

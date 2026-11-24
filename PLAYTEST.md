@@ -38,16 +38,24 @@ To find anything still left to the game's picture, run with `HALO_RT_OVERLAY_DEB
 
 ## Optional: lit fog
 
-`dist/halo_rt.exe --lit-fog 1` (or `HALO_RT_LIT_FOG=1`) lights the game's fog with the scene's lights: muzzle flashes, plasma and glowing surfaces should light the haze around them, path traced. It's off by default. Things to try:
+`dist/halo_rt.exe --lit-fog 1` (or `HALO_RT_LIT_FOG=1`) lights the game's fog with the scene's lights: muzzle flashes, plasma and glowing surfaces should light the haze around them, path traced. It's off by default, and F10's panel has it too (`Lit fog: on|off` and `Lit fog strength`, saved). Things to try:
 
 - **Where:** foggy levels, such as c10's swamp, b30's sea fog and d20.
 - **Strength:** 1 is physical. Try 3 to 10 for a stronger look (10 is strong on c10).
 - **The sun:** add `,sun` to let it light the fog too (`--lit-fog 3,sun`). The game's fog colour already stands for daylight, so this is off by default.
 - **See the term alone:** add `,only`.
 - **What to look for:**
-  - smearing behind a moving light (the light is averaged over up to 24 frames)
+  - grain or shimmer in the glow, above all at the higher strengths (there was, crawling, at every strength over 0.5; filtered wider and over up to 96 frames on 20 November, `SOLARIK_LIT_FOG_LEVELS=0 SOLARIK_LIT_FOG_FRAMES=24 SOLARIK_LIT_FOG_CLAMP=0` the old)
+  - soft blotches that crawl in dark far fog, a corridor's far end or a hangar door (there were, on a50 at strength 3; the history's clamp widened by the light's own noise on 22 November, `SOLARIK_LIT_FOG_CLAMP_NOISE=0` the old)
+  - bright lines along silhouettes in thick fog, far things pale against a darker sky, patches over glass (there were, on c10 at strength 3; the light laid over the depth fog by the fog pass on 22 November, `HALO_RT_LIT_FOG_OVER=0` the old; the lift's glass not reproduced by script, look there)
+  - a shield, a bolt or a glow cut off where it stands against far fog, or far trunks showing as streaks in lit fog (there were, on c10; the fog curtain and the light's reach on 23 November, `HALO_RT_FOG_CURTAIN=0` and `SOLARIK_LIT_FOG_REACH=0` the old; look for dark rims on leaves against far fog, and a dark background through a transparent object)
+  - the Covenant torches on b40 and c40 light the snow and their poles (since 23 November, share 0.02; `HALO_RT_STATIC_LIGHTS=0` the old, `HALO_RT_STATIC_LIGHTS="ctorch=<share>"` to try another): too bright, too pale, a white cup, a light popping in or out
+  - the fog is laid before the upscaler since 23 November (`HALO_RT_FOG_BEFORE=0` the old whole): look for any outline left on things against fog, fog darker or blotchier when moving than standing (c10), rock or ground texture too clear through mid fog, b30's shore foam and c10's near water (both show more now), lit fog's glow against what it was, b40's sky and dome, c40's snow against the sky, a shield or a pane against far fog
+  - a glow that trails a moving light or hangs after a light goes out (it should not: the history is clamped to each frame's light)
+  - a soft mottle while firing in thick fog (known: a muzzle flash is one frame's light)
   - glows that look too strong right in front of glowing surfaces
-  - the cost: about 0.75 ms a frame at 1280x720
+  - squares in the glow (there were, at every strength; smoothed on 20 November, `SOLARIK_SHADER_DEFS=LIT_FOG_COVERAGE_POINT,LIT_FOG_BOX` the old)
+  - the cost: about 1.9 ms a frame at 2560x1440 with DLSS Quality, 1.1 ms with DLSS Auto
 
 ## Fixes from the c10 pass to check
 

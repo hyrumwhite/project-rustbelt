@@ -2,7 +2,10 @@
 //! the render resolution, added to the picture after the denoiser (DLSS-RR
 //! would take it as the surfaces' light and texture it with their albedo)
 //! and before tonemapping; with `SolarikRayFog::lit`'s z, in place of the
-//! picture, to see it alone.
+//! picture, to see it alone. Nothing where the application lays the light
+//! over its own fog (`SolarikRayFog::lit`'s w: halo_rt's fog pass, after
+//! tonemapping, with the fog's own weights; `HALO_RT_LIT_FOG_OVER=0` there
+//! this composite, the old).
 
 use super::prepare::SolarikLightingResources;
 use crate::scene::SolarikRayFog;
@@ -63,7 +66,8 @@ pub(super) fn lit_fog_composite(
     mut pipelines: Local<HashMap<(TextureFormat, bool), CachedRenderPipelineId>>,
     mut ctx: RenderContext,
 ) {
-    if ray_fog.lit.x <= 0.0 {
+    // (none, or laid over the application's fog by its own pass: lit.w)
+    if ray_fog.lit.x <= 0.0 || ray_fog.lit.w > 0.5 {
         return;
     }
     let Some(composite) = composite else { return };

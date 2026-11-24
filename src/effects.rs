@@ -266,8 +266,7 @@ fn follow_sprites(
             }
         }
     }
-    // (HALO_RT_SPRITE_DEBUG=3: each sprite as its fog, red its own coverage,
-    // green the raise for what lies behind)
+    // (HALO_RT_SPRITE_DEBUG=3: each sprite as its fog, red its own coverage)
     let debug = match std::env::var("HALO_RT_SPRITE_DEBUG").as_deref() {
         Ok("1") => 1.0,
         Ok("3") => 3.0,

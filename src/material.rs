@@ -35,14 +35,9 @@ impl Plugin for HaloMaterialsPlugin {
         let mut masks = app.world_mut().resource_mut::<Assets<GlassSkyMask>>();
         let far = masks.add(GlassSkyMask { distance: GLASS_SKY_MASK_DISTANCE, ..default() });
         // (the first-person panes' depth in the transmissive phase, after
-        // the sky's layers, where the fog curtain is allowed or the fog is
-        // laid before the upscaler, both before the transparent pass: see
+        // the sky's layers, for the fog laid before the transparent pass: see
         // GlassSkyMask::transmissive)
-        let near = if crate::fog::fog_curtain().is_some() || crate::fog::FogBefore::get().on() {
-            masks.add(GlassSkyMask { distance: 0.0, sort_bias: Some(0.0), transmissive: true })
-        } else {
-            masks.add(GlassSkyMask { distance: 0.0, ..default() })
-        };
+        let near = masks.add(GlassSkyMask { distance: 0.0, sort_bias: Some(0.0), transmissive: true });
         let self_occlusion =
             masks.add(GlassSkyMask { distance: 0.0, sort_bias: Some(-SELF_OCCLUSION_LEAD), transmissive: false });
         app.insert_resource(GlassSkyMaskMaterial { far, near, self_occlusion });
@@ -664,13 +659,11 @@ pub struct GlassSkyMask {
     pub sort_bias: Option<f32>,
     /// Drawn in the transmissive phase (after the opaque pass, before
     /// Solarik's lighting; its sort bias then 0, after the sky's layers) in
-    /// place of first in the transparent pass: the first-person panes' mask
-    /// where the fog curtain is allowed (`crate::fog::fog_curtain`), so that
-    /// the curtain, drawn before the transparent pass, reads the depth the
-    /// fog pass reads (a needle against the fogged sky darkened by the
-    /// curtain and then fogged at its own depth would be black). The
-    /// transparent pass sees the same depth either way, and Solarik reads the
-    /// prepass's; `HALO_RT_FOG_CURTAIN=0` the old.
+    /// place of first in the transparent pass: the first-person panes'
+    /// mask, so that the environment fog, laid before the transparent pass
+    /// (`crate::fog::draw_fog_before`), fogs a needle at its own depth and
+    /// not by the far side behind it. The transparent pass sees the same
+    /// depth either way, and Solarik reads the prepass's.
     pub transmissive: bool,
 }
 

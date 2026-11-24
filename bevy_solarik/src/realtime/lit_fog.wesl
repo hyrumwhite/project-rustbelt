@@ -23,15 +23,14 @@
 //
 // The application then fogs the picture by its own fog, which covers what
 // lies behind by the coverage at the surface. Where it lays this light over
-// that fog itself (lit.w: halo_rt's fog pass, src/shaders/halo_fog.wesl,
-// with the fog's own weights for the render pixels, so the light and the fog
-// agree on which surface a pixel is), the light is left as it is. Else (and
-// with HALO_RT_LIT_FOG_OVER=0 in halo_rt, the old) `lit_fog_composite` adds
-// it before tonemapping and over a surface it is divided here by what that
-// fog lets through, which the two passes' different depths at silhouettes,
-// behind first-person panes and on a sky the fog covers made outlines and
-// losses of. The sky is left unfogged by the application, and here is lit
-// out to the fog's maximum distance.
+// that fog itself (lit.w: halo_rt's fog, laid at the render resolution before
+// the transparent pass, src/shaders/halo_fog.wesl's `before`, at the same
+// pixel), the light is left as it is. Else `lit_fog_composite` adds it before
+// tonemapping and over a surface it is divided here by what that fog lets
+// through, which a fog taken at other depths (at silhouettes, behind
+// first-person panes, on a sky the fog covers) makes outlines and losses of.
+// The sky is left unfogged by the application, and here is lit out to the
+// fog's maximum distance.
 //
 // One light a pixel a frame is noisy, and the denoiser (DLSS-RR) takes the
 // picture's light as the surfaces' and would texture it with their albedo:

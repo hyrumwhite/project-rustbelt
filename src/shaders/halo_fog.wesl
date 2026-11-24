@@ -1,9 +1,8 @@
-// The game's environment fog and fog screen (src/fog.rs), over the
-// tonemapped picture as the game draws them over its world, in the display's
-// encoding.
+// The game's environment fog, fog screen, weather and lens flares
+// (src/fog.rs).
 //
-// The fog is rasterizer_xbox_environment_fog.c's pass, whose register
-// combiners, decoded, are
+// The environment fog is rasterizer_xbox_environment_fog.c's pass, whose
+// register combiners, decoded, are
 //   atmospheric = maximum density * A(view depth from its minimum distance
 //                 over its range)
 //   planar      = maximum density * mix(L(distance) * L(depth), L(distance),
@@ -11,104 +10,59 @@
 //   colour      = atmospheric colour * atmospheric * (1 - (1 - eye) * planar)
 //               + planar colour * planar * (1 - atmospheric * eye)
 //   coverage    = 1 - (1 - atmospheric) * (1 - planar)
-// blended ONE, INVSRCALPHA, where eye is the camera's atmospheric density (1
-// above the fog plane, 0 under it), the distance is the view depth over the
-// planar maximum distance, and the depth is under the fog plane over its
-// maximum depth. A and L are the game's density textures
-// (rasterizer\atmospheric fog density: a ramp; rasterizer\planar fog
-// density: a smoothstep), 16 texels sampled with linear filtering, clamped.
-// The sky (nothing in the depth buffer) is left as it is: the game's fog pass
-// covers the level's surfaces only. But where the atmospheric fog is opaque
-// (its maximum density 1), the game draws nothing past its maximum distance:
-// there the sky is fogged as a surface at that distance. And where the
-// level's sky has no model (b40's), the sky is the game's clear: the fog's
-// colour, under what was drawn there (the camera's skybox dark,
-// crate::follow_camera_sky), added in the display's encoding as the game
-// adds its additive surfaces over the clear. b40's dome: its panes and the
-// energy field behind them, with nothing opaque beyond, were painted over
-// with the fog's colour (HALO_RT_SKY_CLEAR_OVER=1 the old, painted over).
-// An alpha-blended or tinting surface there cannot darken the clear, added
-// after it: only the additive ones are exact.
+// blended ONE, INVSRCALPHA over the display's picture, where eye is the
+// camera's atmospheric density (1 above the fog plane, 0 under it), the
+// distance is the view depth over the planar maximum distance, and the depth
+// is under the fog plane over its maximum depth. A and L are the game's
+// density textures (rasterizer\atmospheric fog density: a ramp; rasterizer\
+// planar fog density: a smoothstep), 16 texels sampled with linear filtering,
+// clamped (fog_at). The sky (nothing in the depth buffer) is left as it is,
+// but for three rules: where the atmospheric fog is opaque (its maximum
+// density 1) the game draws nothing past its maximum distance, so the sky is
+// fogged as a surface there; where the level's sky has no model (b40's) the
+// sky is the game's clear, the fog's colour, added under what was drawn there
+// (the camera's skybox dark, crate::follow_camera_sky; HALO_RT_SKY_CLEAR_OVER=1
+// paints it over); and under the horizon over the sea it is fogged as the
+// sea over a deep floor (HALO_RT_SEA_HORIZON_FOG=0 leaves it bare). Where the
+// picture holds the water (atmospheric.w), a surface under the fog plane seen
+// from above it was seen through the water's surface: the planar fog covers
+// only the light that came through, 1 - the water's Fresnel reflectance
+// (Schlick's, F0 0.04) at the view's angle to the plane, and the atmospheric
+// fog is to the surface.
 //
-// Where the picture holds the water (atmospheric.w), a surface under the fog
-// plane seen from above it was seen through the water's surface (the plane,
-// in b30): the game fogs it and draws the water's reflection over it, but
-// here the reflection is already in the picture with it. So there the
-// planar fog covers only the light that came through, 1 - the water's
-// Fresnel reflectance (Schlick's, F0 0.04, as its ray-traced pane's) at the
-// view's angle to the plane, and the atmospheric fog is to the surface.
+// `before`, a compute entry point run over the lit picture after Solarik's
+// lighting and before the transparent pass, at the render resolution (the
+// main pass's viewport), lays that fog on each render pixel by its own depth,
+// so the upscaler takes a fogged picture and the transparents are drawn over
+// it with their own fog alone, as the game draws its effects after its fog.
+// The blend is the game's, in the display's encoding, taken back to the linear
+// light the tonemapper follows with: form 2 (fog.lit.w, the default) through
+// the tonemapper's curve t along the grey axis, per channel (TONE_CURVE,
+// Bevy's TonyMcMapface sampled on its grey axis), so that what is displayed is
+// the game's blend of what was displayed,
+//   g(P) = t_inv(dec(F + enc(t(P)) (1 - b))),
+// form 1 (HALO_RT_FOG_BEFORE=1) taking the tonemapper as straight,
+//   g(P) = dec(F + enc(P) (1 - b)).
+// The picture there is noisy (the lighting's, before the denoiser), so g is
+// taken at a local mean and carried to the pixel as a ratio (affine_about).
+// Lit fog's light (Solarik's lit_fog.wesl, at the render resolution, already
+// denoised) is laid over in the same pass, screened over what is shown through
+// the tonemapper's curve as 1 - exp(-light), taken about the fogged mean the
+// same way (HALO_RT_FOG_BEFORE_LIT=add: added as linear light).
 //
-// The fog screen is its _rasterizer_environment_fog_screen_end: up to four
-// layers over the picture, each a density, the dot product of its frame's
-// colour and its weights (the game moves them on and shares them), covering
-// 1 - the product of (1 - each) in the screen's colour. Added to the
-// picture, times the surface's density from its first pass (the near over
-// the far density at the near distance, up to 1 at the far, along L; 1 for
-// the sky), when its densities differ; else blended over all of it.
-//
-// After both, the game's weather (src/weather.rs: display-encoded, a
-// premultiplied layer, each flake already faded by its own fog), laid over,
-// as the game draws its effects after its fog. Then the game's lens flares,
-// added up (src/lens_flares.rs, display-encoded light): added, as the game
-// adds them over its picture.
-//
-// Lit fog (Solarik's lit_fog.wesl, src/fog.rs LitFog): the light the fog
-// scatters toward the camera from the scene's lights, at the render
-// resolution, laid over the environment fog here (before the fog screen, the
-// weather and the flares), taken from the four render pixels by the same
-// weights as the fog, so that the light and the fog always agree on which
-// surface a pixel is. Solarik then neither divides it by the fog's
-// transmittance nor adds it before tonemapping (its `lit.w`); that divide
-// and the multiply here disagreed wherever the two passes took different
-// depths (bright outlines at silhouettes, the light lost behind first-person
-// panes and on a sky the fog covers). HALO_RT_LIT_FOG_OVER=0 the old (fog.lit.x
-// 0 here, Solarik's composite).
-//
-// The fog curtain (src/fog.rs fog_curtain; fog.lit.z its b0, 0 off), where the
-// atmospheric fog is opaque and not over the water: the transparent surfaces
-// and sprites are drawn before this pass, which then fogs them by what lies
-// behind; where that is covered whole (the sky, everything past the fog's
-// reach) the picture there was multiplied by 0 and nothing drawn in front
-// survived (c10's Jackal shield against the fogged sky). So `curtain`, a
-// compute entry point run over the lit picture before the transparent pass,
-// takes each pixel whose coverage b (this file's fog_at, so exactly the
-// coverage this pass takes) is over b0 to the light whose display encoding is
-// its own times r = (1 - b) / (1 - b0) (the sky, b 1, black); and here a
-// sample's coverage over the picture is at most b0, the fog's light
-// unchanged. For an opaque surface that is the old picture again (the fog's
-// light plus the encoding times r times (1 - b0), the old (1 - b); exactly,
-// but for the tonemapper's curve between, taken as straight), while a
-// transparent surface, which takes its own colour to the light whose
-// encoding is its own over (1 - min(behind, b0)) (curtain_raised in
-// halo_transparent.wesl and halo_sprite.wesl), keeps its own fog alone. (A
-// plain factor, ((1 - b) / (1 - b0))^2.2 in linear light, was the first form:
-// the sRGB encoding is no 2.2 power in the dark, and c10's swamp past b0 came
-// out a seventh darker.)
-//
-// The fog before the upscaler (HALO_RT_FOG_BEFORE; fog.lit.w its form, 0 off):
-// `before`, a compute entry point run where the curtain runs (over the lit
-// picture, before the transparent pass, at the render resolution), blends
-// each render pixel by its own fog_at, so the upscaler takes a fogged picture
-// and the transparents are drawn over it as the game draws them over its
-// fog (each by its own fog alone: fog layers' planar.z under 0). The blend is
-// the game's, in the display's encoding, taken back to the linear light the
-// tonemapper follows with: form 1 takes the tonemapper as straight,
-//   P' = dec(F + enc(P) (1 - b)),
-// form 2 goes through the tonemapper's curve t along the grey axis, per
-// channel (TONE_CURVE, Bevy's TonyMcMapface sampled on its grey axis), so
-// that what is displayed is the game's blend of what was displayed:
-//   P' = t_inv(dec(F + enc(t(P)) (1 - b))).
-// Both taken at a mean and carried to the pixel as a ratio, never steeper
-// than 1 (affine_about, below: the picture here is noisy). Lit fog's light is
-// added after it (taken about the fogged mean the same way; the light itself
-// is denoised already), at the same pixel (fog.lit.x: 1 screened over what
-// is shown through the tonemapper's curve, 1 - exp(-light), as the fog pass
-// laid it over the tonemapped picture before, so that a strength looks as it
-// did; 2 added as linear light, HALO_RT_FOG_BEFORE_LIT=add; y the light in
-// place of the picture). The default (HALO_RT_FOG_BEFORE unset) is form 2
-// with the local mean at radius 2; HALO_RT_FOG_BEFORE=0 the old. This pass
-// then lays no environment fog, no curtain and no lit fog's light: only the fog screen, the weather and the
-// flares; the fog_at samples still give the screen's density by depth.
+// `fragment`, the fog pass after tonemapping and the upscaler, lays the rest
+// over the display's picture in its encoding. The fog screen is
+// _rasterizer_environment_fog_screen_end: up to four layers, each a density,
+// the dot product of its frame's colour and its weights (the game moves them
+// on and shares them), covering 1 - the product of (1 - each) in the screen's
+// colour; added to the picture times the surface's density from its first
+// pass (the near over the far density at the near distance, up to 1 at the
+// far, along L; 1 for the sky) when its densities differ, from the four render
+// pixels round where the jittered view saw this one, filtered by place; else
+// blended over all of it. Then the game's weather (src/weather.rs:
+// display-encoded, a premultiplied layer, each flake already faded by its own
+// fog), laid over, and last the game's lens flares (src/lens_flares.rs),
+// added, as the game draws its effects after its fog.
 
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_render::view::View;
@@ -137,11 +91,10 @@ struct HaloFog {
     screen_transforms: array<vec4<f32>, 8>,
     // each layer's frame's weights, and 1 for a layer
     screen_weights: array<vec4<f32>, 4>,
-    // lit fog: x 1 where its light (lit_light) is laid over the fog (in the
-    // fog before the upscaler, added by `before`: 1 the shoulder, 2 plain), y 1 to show the light
-    // alone; z the fog curtain's coverage b0 where it is on (src/fog.rs
-    // fog_curtain; 0 off); w the fog before the upscaler's form (src/fog.rs
-    // FogBefore: 0 off, 1 the tonemapper taken as straight, 2 its curve)
+    // x lit fog's light laid over by `before` (1 by the shoulder, 2 added; 0
+    // none), y 1 to show the light alone, z unused, w the blend's form
+    // (src/fog.rs FogBefore: 1 the tonemapper taken as straight, 2 its curve;
+    // 0 no fog)
     lit: vec4<f32>,
 }
 
@@ -161,13 +114,14 @@ struct HaloFog {
 @group(0) @binding(11) var scene_depth: texture_depth_2d;
 // the weather's layer (src/weather.rs): premultiplied, display-encoded
 @group(0) @binding(12) var weather: texture_2d<f32>;
-// the picture read between its pixels, filtered: the guide at a render
-// pixel's centre (fog_edge_guide)
-@group(0) @binding(13) var guide_sampler: sampler;
+// (`before` alone, src/fog.rs's two layouts: 0 the picture's copy for the
+// local mean, 2 to 4, 11, and these two)
 // lit fog's light (Solarik's lit_fog_history of the frame): linear, at the
 // exposure and its strength, at the render resolution in the corner of the
 // texture below DLAA (the main pass's viewport); a black texel without it
 @group(0) @binding(14) var lit_light: texture_2d<f32>;
+// the lit picture, fogged in place
+@group(0) @binding(15) var fogged_picture: texture_storage_2d<rgba16float, read_write>;
 
 // metres: the level's panes' masks' depth (src/material.rs,
 // GLASS_SKY_MASK_DISTANCE), which is none
@@ -177,31 +131,6 @@ const GLASS_SKY_MASK_DISTANCE: f32 = 50000.0;
 // HALO_RT_SEA_HORIZON_FOG=0 leaves it bare, the old
 @if(SEA_HORIZON_UNFOGGED) const SEA_HORIZON_FOG: bool = false;
 @if(!SEA_HORIZON_UNFOGGED) const SEA_HORIZON_FOG: bool = true;
-
-// Silhouettes (HALO_RT_FOG_EDGES): where the four render pixels' fogs differ
-// by more than the first (the largest difference of any channel, light or
-// coverage, in the display's encoding), the edge's rule takes over from the
-// filter, wholly by the second; between, the two mixed, so that a pixel
-// does not switch from one to the other as the jitter moves the depths
-// under it. A surface's neighbours mostly differ by less than the first
-// (where they do not, a surface seen at a grazing angle, the guide finds
-// their pictures alike and keeps the filter's weights); b30's leaves against
-// the sea under its fog (its density 0.5) by tenths.
-const FOG_EDGE_START: f32 = 0.01;
-const FOG_EDGE_FULL: f32 = 0.04;
-// The guide's sharpness, in the display's encoding: how far a render
-// pixel's picture (its luma, and its chroma, blue and red less the luma) may
-// be from this pixel's before its fog counts for less, a Gaussian's width.
-// The picture is before the fog, so the far side is the bare surface, not
-// the pale fogged one, and may be nearer the near side's colour than what is
-// seen: kept sharp, but meant to hold a surface's own texture (a few
-// hundredths) inside it (chosen by reasoning, not yet tuned on captures).
-const FOG_GUIDE_LUMA: f32 = 0.06;
-const FOG_GUIDE_CHROMA: f32 = 0.04;
-// The weight every render pixel keeps whatever its picture: where none is
-// like this pixel's, or all are alike, they fall back to the filter's
-// weights (and a sample's lead over another is at most 1 / this)
-const FOG_GUIDE_FLOOR: f32 = 0.01;
 
 // a 16-texel texture's coordinate as the texel it falls on (0 to 1 over the
 // texels' centres, clamped)
@@ -221,42 +150,10 @@ fn srgb_decode(encoded: vec3<f32>) -> vec3<f32> {
     return select(high, low, encoded <= vec3(0.04045));
 }
 
-// the picture's colour as the guide compares it: luma, and blue and red
-// less the luma, in the display's encoding, each over its width
-fn guide_of(colour: vec3<f32>) -> vec3<f32> {
-    let encoded = srgb_encode(saturate(colour));
-    let luma = dot(encoded, vec3(0.2126, 0.7152, 0.0722));
-    return vec3(luma / FOG_GUIDE_LUMA, (encoded.b - luma) / FOG_GUIDE_CHROMA, (encoded.r - luma) / FOG_GUIDE_CHROMA);
-}
-
-// How like this pixel's guide the picture is at a render pixel's centre
-// (where the jittered view saw it, on the picture: to_uv the jitter, there
-// in the picture's coordinates), filtered between the picture's pixels so
-// that it moves smoothly with the jitter; never less than the floor.
-fn fog_edge_guide(guide: vec3<f32>, pixel: vec2<i32>, viewport: vec4<f32>, to_uv: vec2<f32>) -> f32 {
-    let uv = (vec2<f32>(pixel) + 0.5 - viewport.xy) / viewport.zw - to_uv;
-    let difference = guide_of(textureSampleLevel(source, guide_sampler, uv, 0.0).rgb) - guide;
-    return exp(-0.5 * dot(difference, difference)) + FOG_GUIDE_FLOOR;
-}
-
-// Lit fog's light at this output pixel: the four render pixels' (p00 to p11
-// as the fog's), by the weights the fog took them by (w00, w10, w01, w11:
-// filtered by place, or the silhouette's rule where there is one), so a
-// pixel's light is from the same surface as its fog. Loaded, not filtered:
-// the fallback is a single texel
-fn lit_light_at(p00: vec2<i32>, p11: vec2<i32>, weights: vec4<f32>) -> vec3<f32> {
-    let last = vec2<i32>(textureDimensions(lit_light)) - 1;
-    let light = textureLoad(lit_light, min(p00, last), 0).rgb * weights.x
-        + textureLoad(lit_light, min(vec2(p11.x, p00.y), last), 0).rgb * weights.y
-        + textureLoad(lit_light, min(vec2(p00.x, p11.y), last), 0).rgb * weights.z
-        + textureLoad(lit_light, min(p11, last), 0).rgb * weights.w;
-    return max(light, vec3(0.0));
-}
-
 // Lit fog's light as shown over the tonemapped picture, in linear display
-// space: the light is the scene's (at the exposure, unbounded) and the
-// picture is already tonemapped, so it goes through a soft shoulder of its
-// own (1 - exp(-light): about the light where it is faint, never 1)
+// space: the light is the scene's (at the exposure, unbounded), so it goes
+// through a soft shoulder of its own (1 - exp(-light): about the light where
+// it is faint, never 1)
 fn lit_fog_shown(light: vec3<f32>) -> vec3<f32> {
     return 1.0 - exp(-light);
 }
@@ -274,13 +171,11 @@ fn layer_density(index: u32, colour: vec4<f32>) -> f32 {
 }
 
 // The environment fog at one of the render resolution's pixels: the light
-// it adds (rgb) and its coverage (a), the fog screen's density there (1 for
-// the sky), and the depth it was fogged at (reversed: larger nearer, 0 for
-// the sky).
+// it adds (rgb) and its coverage (a), and the fog screen's density there (1
+// for the sky).
 struct Fogged {
     fogged: vec4<f32>,
     screen_density: f32,
-    z: f32,
 }
 
 fn fog_at(pixel: vec2<i32>) -> Fogged {
@@ -291,7 +186,7 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
     if pane_z > z * 1.0001 && abs(pane_z - mask_z) > mask_z * 0.01 {
         z = pane_z;
     }
-    var result = Fogged(vec4(0.0), 1.0, max(z, 0.0));
+    var result = Fogged(vec4(0.0), 1.0);
     // (the sky, where the atmospheric fog is opaque: the game brings its far
     // plane in to the fog's maximum distance (render.c), and draws no sky
     // past it, only fog; as a surface there. c10's swamps: the treetops in
@@ -384,56 +279,9 @@ fn fog_at(pixel: vec2<i32>) -> Fogged {
     return result;
 }
 
-// A sample's fog as laid over the picture where the fog curtain is on
-// (fog.lit.z, its b0): its coverage at most b0, its light as it is; else the
-// sample as it is.
-fn curtained(f: Fogged) -> Fogged {
-    var result = f;
-    if fog.lit.z > 0.0 {
-        result.fogged.a = min(f.fogged.a, fog.lit.z);
-    }
-    return result;
-}
-
-// The light the fog curtain leaves of a pixel's (linear, at the exposure)
-// whose coverage b is over b0: the light whose sRGB encoding is its own times
-// r = (1 - b) / (1 - b0), per channel (the encoding run on past 1 for light
-// over it); none where b is 1 (the sky, past the fog's reach).
-fn curtain_darken(light: vec3<f32>, coverage: f32, b0: f32) -> vec3<f32> {
-    if coverage <= b0 {
-        return light;
-    }
-    let r = saturate((1.0 - coverage) / max(1.0 - b0, 1e-4));
-    return srgb_decode(srgb_encode(max(light, vec3(0.0))) * r);
-}
-
-// the lit picture the fog curtain darkens in place (its entry point alone
-// binds it: the fog pass's layout leaves it out)
-@group(0) @binding(15) var curtain_picture: texture_storage_2d<rgba16float, read_write>;
-
-// The fog curtain (src/fog.rs fog_curtain): over the lit picture before the
-// transparent pass, at the render resolution (the main pass's viewport), so
-// that the fog pass's coverage over it can stop at b0. Each pixel by its own
-// fog_at, as this pass takes it there.
-@compute @workgroup_size(8, 8, 1)
-fn curtain(@builtin(global_invocation_id) id: vec3<u32>) {
-    let b0 = fog.lit.z;
-    let viewport = view.main_pass_viewport;
-    if b0 <= 0.0 || any(vec2<f32>(id.xy) >= viewport.zw) {
-        return;
-    }
-    let pixel = vec2<i32>(id.xy) + vec2<i32>(viewport.xy);
-    let coverage = fog_at(pixel).fogged.a;
-    if coverage <= b0 {
-        return;
-    }
-    let picture = textureLoad(curtain_picture, pixel);
-    textureStore(curtain_picture, pixel, vec4(curtain_darken(picture.rgb, coverage, b0), picture.a));
-}
-
 // The tonemapper's response along the grey axis (Bevy 0.20's TonyMcMapface,
-// the camera's, sampled by its LUT as its shader samples it), for the fog
-// before the upscaler's second form: TONE_CURVE at u = x / (x + 1) in 63
+// the camera's, sampled by its LUT as its shader samples it), for the
+// blend's second form: TONE_CURVE at u = x / (x + 1) in 63
 // steps, TONE_INVERSE the u for a response in 63 steps up to TONE_MAX.
 // Made by tmp/fb/tony.py from the LUT; within 0.003 of it.
 const TONE_STEPS: f32 = 63.0;
@@ -586,12 +434,12 @@ fn lit_shoulder(light: vec3<f32>, lit: vec3<f32>, form: f32) -> vec3<f32> {
     return p + lit_fog_shown(lit) * (1.0 - min(p, vec3(1.0)));
 }
 
-// The fog before the upscaler (src/fog.rs FogBefore, fog.lit.w its form): the
-// lit picture, at the render resolution (the main pass's viewport), before
-// the transparent pass, each pixel by its own fog_at, then lit fog's light
-// added (fog.lit.x; y the light alone), both taken about the mean (above).
-// A pixel with no coverage, no fog light and no lit fog's light is left as it
-// was.
+// The fog before the upscaler (src/fog.rs draw_fog_before; fog.lit.w its
+// form): the lit picture, at the render resolution (the main pass's
+// viewport), before the transparent pass, each pixel by its own fog_at, then
+// lit fog's light laid over (fog.lit.x; y the light alone), both taken about
+// the mean (above). A pixel with no coverage, no fog light and no lit fog's
+// light is left as it was.
 @compute @workgroup_size(8, 8, 1)
 fn before(@builtin(global_invocation_id) id: vec3<u32>) {
     let form = fog.lit.w;
@@ -613,9 +461,9 @@ fn before(@builtin(global_invocation_id) id: vec3<u32>) {
     if !fogged && !only && !lit_on {
         return;
     }
-    let picture = textureLoad(curtain_picture, pixel);
+    let picture = textureLoad(fogged_picture, pixel);
     if only {
-        textureStore(curtain_picture, pixel, vec4(lit, picture.a));
+        textureStore(fogged_picture, pixel, vec4(lit, picture.a));
         return;
     }
     let p = max(picture.rgb, vec3(0.0));
@@ -641,7 +489,7 @@ fn before(@builtin(global_invocation_id) id: vec3<u32>) {
             light = affine_about(light, mf, at_mean, lit_shoulder(vec3(0.0), lit, form));
         }
     }
-    textureStore(curtain_picture, pixel, vec4(light, picture.a));
+    textureStore(fogged_picture, pixel, vec4(light, picture.a));
 }
 
 @fragment
@@ -663,144 +511,34 @@ fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let flare = textureSample(flares, source_sampler, in.uv).rgb;
     let weather_over = textureSample(weather, source_sampler, in.uv);
 
-    // The depth is at the render resolution, jittered each frame, while the
-    // picture is upscaled and steady: the fog of the four render pixels round
-    // where the jittered view saw this point, filtered. Below DLAA the depth
-    // texture is the picture's size, the view drawn in its corner (the main
-    // pass's viewport): read over the whole texture, the fog was from depths
-    // elsewhere in the picture (b30's far sea a white band, streaked, and
-    // outlines round models against it); from the nearest pixel alone, a
-    // silhouette's edge was fogged as the surface beside it now and then.
-    // (With the fog before the upscaler, fog.lit.w, none of this but the fog
-    // screen's density by depth, mode 1: the four only for it, their fog's
-    // light and coverage dropped below)
-    let fog_before = fog.lit.w > 0.5;
-    let screen_by_depth = fog.screen_color.a > 0.5 && fog.screen_color.a < 1.5;
-    var fogged = vec4(0.0);
-    var screen_density = 1.0;
-    var weights = vec4(0.0);
-    var p00 = vec2<i32>(0);
-    var p11 = vec2<i32>(0);
-    if !fog_before || screen_by_depth {
-    let anchor = view.world_position - normalize(view.world_from_view[2].xyz);
-    let jittered = view.clip_from_world * vec4(anchor, 1.0);
-    let steady = view.unjittered_clip_from_world * vec4(anchor, 1.0);
-    let jitter = jittered.xy / jittered.w - steady.xy / steady.w;
-    let viewport = view.main_pass_viewport;
-    let at = viewport.xy + (in.uv + vec2(jitter.x, -jitter.y) * 0.5) * viewport.zw - 0.5;
-    let base = floor(at);
-    let weight = at - base;
-    let low = vec2<i32>(viewport.xy);
-    let high = vec2<i32>(viewport.xy + viewport.zw) - 1;
-    p00 = clamp(vec2<i32>(base), low, high);
-    p11 = clamp(vec2<i32>(base) + 1, low, high);
-    let f00 = fog_at(p00);
-    let f10 = fog_at(vec2(p11.x, p00.y));
-    let f01 = fog_at(vec2(p00.x, p11.y));
-    let f11 = fog_at(p11);
-    let w00 = (1.0 - weight.x) * (1.0 - weight.y);
-    let w10 = weight.x * (1.0 - weight.y);
-    let w01 = (1.0 - weight.x) * weight.y;
-    let w11 = weight.x * weight.y;
-    // (the fog curtain: each sample's coverage over the picture at most its
-    // b0, the picture under it darkened by the curtain already; the samples'
-    // own, f00 to f11, for the silhouettes' spread)
-    let k00 = curtained(f00);
-    let k10 = curtained(f10);
-    let k01 = curtained(f01);
-    let k11 = curtained(f11);
-    fogged = k00.fogged * w00 + k10.fogged * w10 + k01.fogged * w01 + k11.fogged * w11;
-    screen_density = f00.screen_density * w00 + f10.screen_density * w10 + f01.screen_density * w01 + f11.screen_density * w11;
-    // (the four's weights as the fog ends up taking them, for lit fog's light)
-    weights = vec4(w00, w10, w01, w11);
-
-    // A silhouette among the four (HALO_RT_FOG_EDGES): the picture is
-    // upscaled to the display's pixels, each edge where the upscaler put it,
-    // while the four are a render pixel apart, so filtered by place a near
-    // leaf's pixels within a render pixel of the far sea took part of the
-    // sea's fog (b30's trees against the water, a pale rim, wider the lower
-    // the render resolution; none against the sky, which takes no fog, the
-    // leaves' own little). Where they differ, each sample is taken whole, its
-    // light, coverage and screen density together. 0: filtered by place, the
-    // old.
-    @if(!FOG_EDGES_BILINEAR) {
-        let spread_low = min(min(f00.fogged, f10.fogged), min(f01.fogged, f11.fogged));
-        let spread_high = max(max(f00.fogged, f10.fogged), max(f01.fogged, f11.fogged));
-        let spread_fog = spread_high - spread_low;
-        var spread = max(max(spread_fog.r, spread_fog.g), max(spread_fog.b, spread_fog.a));
-        // (the screen's density counts only where it is added by depth)
-        if fog.screen_color.a > 0.5 && fog.screen_color.a < 1.5 {
-            let screen_low = min(min(f00.screen_density, f10.screen_density), min(f01.screen_density, f11.screen_density));
-            let screen_high = max(max(f00.screen_density, f10.screen_density), max(f01.screen_density, f11.screen_density));
-            spread = max(spread, (screen_high - screen_low) * max(max(fog.screen_color.r, fog.screen_color.g), fog.screen_color.b));
-        }
-        let edge = smoothstep(FOG_EDGE_START, FOG_EDGE_FULL, spread);
-        if edge > 0.0 {
-            var chosen: Fogged;
-            var chosen_weights: vec4<f32>;
-            @if(FOG_EDGES_NEAR) {
-                // near: the nearest sample's fog, a near object's pixels
-                // none of the far side's (and the far side's within a render
-                // pixel of it the near object's: a thin rim less fogged)
-                chosen = k00;
-                chosen_weights = vec4(1.0, 0.0, 0.0, 0.0);
-                if k10.z > chosen.z { chosen = k10; chosen_weights = vec4(0.0, 1.0, 0.0, 0.0); }
-                if k01.z > chosen.z { chosen = k01; chosen_weights = vec4(0.0, 0.0, 1.0, 0.0); }
-                if k11.z > chosen.z { chosen = k11; chosen_weights = vec4(0.0, 0.0, 0.0, 1.0); }
-            }
-            @if(!FOG_EDGES_NEAR) {
-                // guided (the default): each sample's filter weight times
-                // how like this pixel's picture the picture is where that
-                // sample lies, so that a pixel takes the fog of the side the
-                // upscaler drew it on
-                let guide = guide_of(colour.rgb);
-                let to_uv = vec2(jitter.x, -jitter.y) * 0.5;
-                let g00 = fog_edge_guide(guide, p00, viewport, to_uv) * w00;
-                let g10 = fog_edge_guide(guide, vec2(p11.x, p00.y), viewport, to_uv) * w10;
-                let g01 = fog_edge_guide(guide, vec2(p00.x, p11.y), viewport, to_uv) * w01;
-                let g11 = fog_edge_guide(guide, p11, viewport, to_uv) * w11;
-                let total = max(g00 + g10 + g01 + g11, 1e-6);
-                chosen.fogged = (k00.fogged * g00 + k10.fogged * g10 + k01.fogged * g01 + k11.fogged * g11) / total;
-                chosen.screen_density = (f00.screen_density * g00 + f10.screen_density * g10 + f01.screen_density * g01 + f11.screen_density * g11) / total;
-                chosen_weights = vec4(g00, g10, g01, g11) / total;
-            }
-            fogged = mix(fogged, chosen.fogged, edge);
-            screen_density = mix(screen_density, chosen.screen_density, edge);
-            weights = mix(weights, chosen_weights, edge);
-        }
-    }
-    }
-    // (the fog before the upscaler laid the environment fog already)
-    if fog_before {
-        fogged = vec4(0.0);
-    }
-
     var encoded = srgb_encode(saturate(colour.rgb));
     var changed = false;
-    // (a modelless sky's clear adds its colour with no coverage)
-    if fogged.a > 0.0 || any(fogged.rgb > vec3(0.0)) {
-        encoded = fogged.rgb + encoded * (1.0 - fogged.a);
-        changed = true;
-    }
-
-    // lit fog's light over the environment fog (the sky's too, lit out to
-    // the fog's reach), under the fog screen, the weather and the flares
-    if fog.lit.x > 0.5 {
-        let light = lit_light_at(p00, p11, weights);
-        // (the light alone, for looking at it: HALO_RT_LIT_FOG=<s>,only)
-        if fog.lit.y > 0.5 {
-            return vec4(lit_fog_shown(light), colour.a);
-        }
-        if any(light > vec3(0.0)) {
-            encoded = srgb_encode(lit_fog_over(srgb_decode(saturate(encoded)), light));
-            changed = true;
-        }
-    }
-
     let mode = fog.screen_color.a;
     if mode > 0.5 && screen_coverage > 0.0 {
         if mode < 1.5 {
-            // added, by the surface's density (the sky's: 1)
+            // Added, by the surface's density (the sky's: 1). The depth is at
+            // the render resolution, jittered each frame, while the picture is
+            // upscaled and steady: the density of the four render pixels round
+            // where the jittered view saw this point, filtered by place (below
+            // DLAA the depth texture is the picture's size, the view drawn in
+            // its corner, the main pass's viewport)
+            let anchor = view.world_position - normalize(view.world_from_view[2].xyz);
+            let jittered = view.clip_from_world * vec4(anchor, 1.0);
+            let steady = view.unjittered_clip_from_world * vec4(anchor, 1.0);
+            let jitter = jittered.xy / jittered.w - steady.xy / steady.w;
+            let viewport = view.main_pass_viewport;
+            let at = viewport.xy + (in.uv + vec2(jitter.x, -jitter.y) * 0.5) * viewport.zw - 0.5;
+            let base = floor(at);
+            let weight = at - base;
+            let low = vec2<i32>(viewport.xy);
+            let high = vec2<i32>(viewport.xy + viewport.zw) - 1;
+            let p00 = clamp(vec2<i32>(base), low, high);
+            let p11 = clamp(vec2<i32>(base) + 1, low, high);
+            let screen_density = mix(
+                mix(fog_at(p00).screen_density, fog_at(vec2(p11.x, p00.y)).screen_density, weight.x),
+                mix(fog_at(vec2(p00.x, p11.y)).screen_density, fog_at(p11).screen_density, weight.x),
+                weight.y,
+            );
             encoded += fog.screen_color.rgb * screen_coverage * screen_density;
         } else {
             encoded = mix(encoded, fog.screen_color.rgb, screen_coverage);

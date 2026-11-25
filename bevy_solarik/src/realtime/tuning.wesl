@@ -105,6 +105,26 @@ const LIT_FOG_CLAMP_NOISE: u32 = 0u;
 const LIT_FOG_REACH: u32 = constants::LIT_FOG_REACH;
 @if((!(LIT_FOG_REACH)))
 const LIT_FOG_REACH: u32 = 0u;
+// (the clamp band's widening by the noise faded out by the pixel's motion,
+// gone at this many tenths of a render pixel a frame; 0 the old: in full)
+@if((LIT_FOG_NOISE_STILL))
+const LIT_FOG_NOISE_STILL: u32 = constants::LIT_FOG_NOISE_STILL;
+@if((!(LIT_FOG_NOISE_STILL)))
+const LIT_FOG_NOISE_STILL: u32 = 0u;
+// (lit fog's point and spot lights sampled on their own, by their light along
+// the ray, LIT_FOG_LOCAL samples a pixel, 1 by default; 0 the old, from the
+// light tiles, and 0 for a pipeline built without the definition)
+@if((LIT_FOG_LOCAL))
+const LIT_FOG_LOCAL: u32 = constants::LIT_FOG_LOCAL;
+@if((!(LIT_FOG_LOCAL)))
+const LIT_FOG_LOCAL: u32 = 0u;
+// (the history refused where the surface it was gathered over is not the
+// pixel's, by the previous frame's depth, 1 by default, 0 the old, and 0 for a
+// pipeline built without the definition)
+@if((LIT_FOG_DISOCCLUSION))
+const LIT_FOG_DISOCCLUSION: u32 = constants::LIT_FOG_DISOCCLUSION;
+@if((!(LIT_FOG_DISOCCLUSION)))
+const LIT_FOG_DISOCCLUSION: u32 = 0u;
 @if((LIT_FOG_DEPTH))
 const LIT_FOG_DEPTH: u32 = constants::LIT_FOG_DEPTH;
 @if((!(LIT_FOG_DEPTH)))

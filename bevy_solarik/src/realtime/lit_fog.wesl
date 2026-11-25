@@ -84,6 +84,15 @@ import bevy_solarik::realtime::tuning::LIT_FOG_CLAMP_POWER;
 import bevy_solarik::realtime::tuning::LIT_FOG_CLAMP_NOISE;
 import bevy_solarik::realtime::tuning::LIT_FOG_DEPTH;
 import bevy_solarik::realtime::tuning::LIT_FOG_REACH;
+import bevy_solarik::realtime::tuning::LIT_FOG_DISOCCLUSION;
+import bevy_solarik::realtime::tuning::LIT_FOG_LOCAL;
+import bevy_solarik::realtime::tuning::LIT_FOG_NOISE_STILL;
+import bevy_solarik::scene::raytracing_scene_bindings::local_lights;
+import bevy_solarik::scene::raytracing_scene_bindings::LocalLight;
+import bevy_solarik::scene::sampling::uniform_sphere_direction;
+import bevy_solarik::scene::sampling::LIGHT_SAMPLE_LOCAL;
+import bevy_solarik::realtime::realtime_bindings::previous_depth_buffer;
+import bevy_solarik::realtime::realtime_bindings::previous_view;
 import bevy_solarik::realtime::tuning::LIT_FOG_CANDIDATES;
 import bevy_solarik::realtime::realtime_bindings::depth_buffer;
 import bevy_solarik::realtime::realtime_bindings::motion_vectors;
@@ -187,9 +196,61 @@ fn segment_at(t: f32, ray_length: f32) -> u32 {
     return min(u32(max(t, 0.0) / ray_length * f32(SEGMENTS)), SEGMENTS - 1u);
 }
 
+// The point and spot lights a workgroup's rays can reach (LIT_FOG_LOCAL): the
+// workgroup's 64 threads test the lights between them against the farthest
+// end of its rays (a light within its range plus that of the camera), and
+// local_light_scattering picks among those alone; more than FOG_LIGHT_LIST
+// and it takes every light, as without the list.
+const FOG_LIGHT_LIST: u32 = 64u;
+var<workgroup> fog_light_list: array<u32, FOG_LIGHT_LIST>;
+var<workgroup> fog_light_count: atomic<u32>;
+var<workgroup> fog_ray_reach: atomic<u32>;
+
+// How far from the camera the pixel's ray ends (scattered_light's end).
+fn ray_reach(pixel: vec2<u32>) -> f32 {
+    let size = view.main_pass_viewport.zw;
+    let depth = textureLoad(depth_buffer, pixel, 0);
+    let forward = -normalize(view.world_from_view[2].xyz);
+    var sky = depth == 0.0;
+    var surface = vec3(0.0);
+    if !sky {
+        surface = reconstruct_world_position(pixel, depth, size, view.world_from_clip);
+        if LIT_FOG_REACH > 0u { sky = past_reach(dot(surface - view.world_position, forward)); }
+    }
+    if sky {
+        let far = reconstruct_world_position(pixel, 1e-7, size, view.world_from_clip);
+        let direction = normalize(far - view.world_position);
+        let reach = max(sky_light.fog.atmospheric.y, sky_light.fog.planar.x);
+        return reach / max(dot(direction, forward), 0.05);
+    }
+    return length(surface - view.world_position);
+}
+
 @compute @workgroup_size(8, 8, 1)
-fn lit_fog(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if any(global_id.xy >= vec2u(view.main_pass_viewport.zw)) { return; }
+fn lit_fog(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_index) local: u32) {
+    let inside = all(global_id.xy < vec2u(view.main_pass_viewport.zw));
+    if LIT_FOG_LOCAL > 0u {
+        if local == 0u {
+            atomicStore(&fog_light_count, 0u);
+            atomicStore(&fog_ray_reach, 0u);
+        }
+        workgroupBarrier();
+        if inside && sky_light.fog.lit.x > 0.0 {
+            atomicMax(&fog_ray_reach, bitcast<u32>(max(ray_reach(global_id.xy), 0.0)));
+        }
+        workgroupBarrier();
+        let reach = bitcast<f32>(atomicLoad(&fog_ray_reach));
+        let count = arrayLength(&local_lights);
+        for (var i = local; i < count; i += 64u) {
+            let light = local_lights[i];
+            if light.range <= 0.0 || length(light.position - view.world_position) <= light.range + reach {
+                let slot = atomicAdd(&fog_light_count, 1u);
+                if slot < FOG_LIGHT_LIST { fog_light_list[slot] = i; }
+            }
+        }
+        workgroupBarrier();
+    }
+    if !inside { return; }
     // (the pixel's view depth in alpha, for the prefilter's and the
     // history's depth weights, whatever light the pixel has)
     let depth = store_depth(view_depth(vec2<i32>(global_id.xy)));
@@ -307,6 +368,8 @@ fn scattered_light(pixel: vec2<u32>) -> vec3<f32> {
     for (var i = 0u; i < CANDIDATES; i += 1u) {
         let sample = unpack_resolved_light_sample(light_tile_resolved_samples[tile_start + rand_range_u(1024u, &rng)], view.exposure);
         if sample.world_position.w == LIGHT_SAMPLE_DIRECTIONAL { continue; }
+        // (point and spot lights sampled on their own: local_light_scattering)
+        if LIT_FOG_LOCAL > 0u && sample.world_position.w == LIGHT_SAMPLE_LOCAL { continue; }
         let light_position = sample.world_position.xyz;
         let along = dot(light_position - view.world_position, direction);
         let nearest = max(length(light_position - (view.world_position + direction * along)), EQUIANGULAR_NEAREST);
@@ -346,6 +409,11 @@ fn scattered_light(pixel: vec2<u32>) -> vec3<f32> {
         let visibility = trace_light_visibility(chosen_point, chosen_position);
         scattered += fog_albedo(chosen_point, forward) * chosen_radiance * (weight_sum / chosen_luminance) * visibility / (4.0 * PI);
     }
+    // the point and spot lights, each sample a light picked by its light along
+    // the ray (LIT_FOG_LOCAL)
+    for (var s = 0u; s < LIT_FOG_LOCAL; s += 1u) {
+        scattered += local_light_scattering(direction, ray_length, rises, total, forward, &rng) / f32(LIT_FOG_LOCAL);
+    }
     // the sun, at a point of its own by the coverage
     if lit.y > 0.5 && has_sun() {
         let sun_point = view.world_position + direction * coverage_distance(rises, total, ray_length, &rng);
@@ -365,6 +433,91 @@ fn scattered_light(pixel: vec2<u32>) -> vec3<f32> {
     scattered *= lit.x * view.exposure;
     if !finite_light(vec4(scattered, 0.0)) { return vec3(0.0); }
     return scattered;
+}
+
+// A point or spot light's importance to a ray from the camera (LIT_FOG_LOCAL):
+// its intensity (the sphere's radiance times pi r^2) times the integral of
+// 1/d^2 along the ray, span / nearest as the equiangular density takes it,
+// times its cone at the ray's nearest point and its end (the larger, never
+// under a twentieth, so that a light lighting any of the ray is never left
+// out: the estimate stays unbiased, a poor importance only noisier); none
+// for a light whose range the ray never comes within.
+fn local_importance(light: LocalLight, direction: vec3<f32>, ray_length: f32) -> f32 {
+    let along = dot(light.position - view.world_position, direction);
+    let nearest_point = view.world_position + direction * clamp(along, 0.0, ray_length);
+    let nearest = max(length(light.position - nearest_point), EQUIANGULAR_NEAREST);
+    if light.range > 0.0 && nearest > light.range { return 0.0; }
+    let line_nearest = max(length(light.position - (view.world_position + direction * along)), EQUIANGULAR_NEAREST);
+    let span = atan2(ray_length - along, line_nearest) - atan2(-along, line_nearest);
+    var cone = 1.0;
+    if light.cos_outer > -1.0 {
+        let end = view.world_position + direction * ray_length;
+        let to_nearest = normalize(nearest_point - light.position);
+        let to_end = normalize(end - light.position);
+        let cosine = max(dot(to_nearest, light.direction), dot(to_end, light.direction));
+        cone = max(smoothstep(light.cos_outer, light.cos_inner, cosine), 0.05);
+    }
+    let intensity = luminance(light.radiance) * light.inverse_pdf * 0.25;
+    return intensity * max(span, 0.0) / line_nearest * cone;
+}
+
+// One sample of the point and spot lights' scattered light along the ray
+// (LIT_FOG_LOCAL): a light picked by local_importance (a weighted reservoir
+// over all of them), a point on the ray by the mixture of the coverage and the
+// equiangular density about it (as the tiles' candidates draw theirs), a
+// point on its sphere, its light there traced for its shadow, over the three
+// densities. The light tiles leave these lights out when this is on.
+fn local_light_scattering(direction: vec3<f32>, ray_length: f32, rises: array<f32, SEGMENTS>, total: f32, forward: vec3<f32>, rng: ptr<function, u32>) -> vec3<f32> {
+    // (the workgroup's list, or every light where it overflowed)
+    let listed = atomicLoad(&fog_light_count);
+    let whole = listed > FOG_LIGHT_LIST;
+    let count = select(listed, arrayLength(&local_lights), whole);
+    var importance_sum = 0.0;
+    var chosen = 0u;
+    var chosen_importance = 0.0;
+    for (var n = 0u; n < count; n += 1u) {
+        let i = select(fog_light_list[min(n, FOG_LIGHT_LIST - 1u)], n, whole);
+        let importance = local_importance(local_lights[i], direction, ray_length);
+        if importance <= 0.0 { continue; }
+        importance_sum += importance;
+        if rand_f(rng) * importance_sum < importance {
+            chosen = i;
+            chosen_importance = importance;
+        }
+    }
+    if importance_sum <= 0.0 || chosen_importance <= 0.0 { return vec3(0.0); }
+    let light = local_lights[chosen];
+    let light_pdf = chosen_importance / importance_sum;
+
+    let along = dot(light.position - view.world_position, direction);
+    let nearest = max(length(light.position - (view.world_position + direction * along)), EQUIANGULAR_NEAREST);
+    let angle_start = atan2(-along, nearest);
+    let angle_end = atan2(ray_length - along, nearest);
+    let span = angle_end - angle_start;
+    let equiangular_share = select(0.0, 0.5, span > 1e-6);
+    var t: f32;
+    if rand_f(rng) < equiangular_share {
+        t = along + nearest * tan(mix(angle_start, angle_end, rand_f(rng)));
+    } else {
+        t = coverage_distance(rises, total, ray_length, rng);
+    }
+    t = clamp(t, 0.0, ray_length);
+    let density = rises[segment_at(t, ray_length)] * f32(SEGMENTS) / ray_length;
+    let offset = t - along;
+    let equiangular_pdf = nearest / (max(span, 1e-6) * (nearest * nearest + offset * offset));
+    let point_pdf = (1.0 - equiangular_share) * density / total + equiangular_share * equiangular_pdf;
+    if point_pdf <= 0.0 || density <= 0.0 { return vec3(0.0); }
+    let point = view.world_position + direction * t;
+
+    let normal = uniform_sphere_direction(rand_u(rng));
+    let sample = ResolvedLightSample(vec4(light.position + normal * light.radius, LIGHT_SAMPLE_LOCAL),
+        normal, light.radiance, light.inverse_pdf, light.direction, vec2(light.cos_outer, light.cos_inner),
+        light.range, select(light.radius, 0.0, light.hollow > 0.5));
+    let contribution = calculate_resolved_light_contribution(sample, point, forward);
+    if luminance(contribution.radiance) <= 0.0 { return vec3(0.0); }
+    let visibility = trace_light_visibility(point, sample.world_position);
+    return fog_albedo(point, forward) * contribution.radiance * contribution.inverse_pdf * density * visibility
+        / (point_pdf * light_pdf * 4.0 * PI);
 }
 
 // (by the bits: a compiler may take x != x as never true)
@@ -416,6 +569,48 @@ fn view_depth(pixel: vec2<i32>) -> f32 {
     // (past an opaque fog's reach: at it, as the sky)
     if reach > 0.0 { return min(d, reach); }
     return d;
+}
+
+// The disocclusion test (LIT_FOG_DISOCCLUSION): how much the history at the
+// previous frame's `tap` stands for the surface the current pixel `stands_for`
+// sees. The fog's light is the ray's in front of a surface, so
+// history gathered over another surface (a rock's edge that has moved off the
+// sky behind it) is another ray's light: an afterimage of the edge, kept up
+// to the history's length. Both taken as view depths of the previous frame's
+// view: the previous frame's surface at the tap from its depth, and the
+// current pixel's surface carried into that view, weighed against each other
+// as the filter weighs depths (the sky against the sky in full, the sky
+// against a surface not at all; past an opaque fog's reach, at the reach).
+// 1 without the rule.
+fn history_disocclusion(tap: vec2<i32>, stands_for: vec2<i32>) -> f32 {
+    if LIT_FOG_DISOCCLUSION == 0u { return 1.0; }
+    let size = view.main_pass_viewport.zw;
+    let reach = reach_depth();
+    var expected = 1e9;
+    let current_raw = textureLoad(depth_buffer, stands_for, 0);
+    if current_raw > 0.0 {
+        let position = reconstruct_world_position(vec2<u32>(stands_for), current_raw, size, view.world_from_clip);
+        expected = -(previous_view.view_from_world * vec4(position, 1.0)).z;
+    }
+    if reach > 0.0 { expected = min(expected, reach); }
+    // (the best of the tap and its four neighbours: the two frames' jitters
+    // differ by a fraction of a pixel, and a still edge must keep its history)
+    var best = 0.0;
+    let last = vec2<i32>(size) - 1;
+    for (var i = 0; i < 5; i += 1) {
+        var offset = vec2(0, 0);
+        if i == 1 { offset = vec2(1, 0); } else if i == 2 { offset = vec2(-1, 0); } else if i == 3 { offset = vec2(0, 1); } else if i == 4 { offset = vec2(0, -1); }
+        let at = clamp(tap + offset, vec2(0), last);
+        var previous_depth = 1e9;
+        let previous_raw = textureLoad(previous_depth_buffer, at, 0);
+        if previous_raw > 0.0 {
+            let position = reconstruct_world_position(vec2<u32>(at), previous_raw, size, previous_view.world_from_clip);
+            previous_depth = -(previous_view.view_from_world * vec4(position, 1.0)).z;
+        }
+        if reach > 0.0 { previous_depth = min(previous_depth, reach); }
+        best = max(best, depth_weight(previous_depth, expected));
+    }
+    return best;
 }
 
 // How much a neighbour at view depth d counts for a pixel at view depth
@@ -694,6 +889,9 @@ fn lit_fog_accumulate(@builtin(global_invocation_id) global_id: vec3<u32>) {
             }
         }
         if history_weights > 1e-6 { history = history_sum / history_weights; }
+        // (the history's frames scaled by the disocclusion test at where the
+        // pixel was: none where its surface was another)
+        history.a *= history_disocclusion(previous_pixel, pixel);
     }
 }
     // (nothing that isn't a finite light is kept: one would spread through
@@ -718,7 +916,12 @@ fn lit_fog_accumulate(@builtin(global_invocation_id) global_id: vec3<u32>) {
         var low = current_light * (1.0 - CLAMP_BAND) - CLAMP_FLOOR;
         var high = current_light * (1.0 + CLAMP_BAND) + CLAMP_FLOOR;
         if CLAMP_NOISE_ON {
-            let noise = CLAMP_NOISE * prefilter_noise(pixel, size, centre);
+            var noise = CLAMP_NOISE * prefilter_noise(pixel, size, centre);
+            // (LIT_FOG_NOISE_STILL: faded out by how far the pixel moved)
+            if LIT_FOG_NOISE_STILL > 0u {
+                let moved = length(textureLoad(motion_vectors, pixel, 0).xy * vec2<f32>(size));
+                noise *= saturate(1.0 - moved * 10.0 / f32(LIT_FOG_NOISE_STILL));
+            }
             low -= noise;
             high += noise;
         }

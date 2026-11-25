@@ -1957,6 +1957,10 @@ fn dolly_camera(
     // (HALO_RT_DOLLY_LEVEL: along the ground, the view's pitch left out, as
     // a flight down a canyon goes)
     let mut forward = *start.forward();
+    // (HALO_RT_DOLLY_SIDE: sideways, to the right, as a pan across an edge)
+    if std::env::var_os("HALO_RT_DOLLY_SIDE").is_some() {
+        forward = *start.right();
+    }
     if std::env::var_os("HALO_RT_DOLLY_LEVEL").is_some() {
         forward = Vec3::new(forward.x, forward.y, 0.0).normalize_or(forward);
     }

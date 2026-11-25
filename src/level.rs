@@ -898,7 +898,16 @@ const SHIP_PINK: [f32; 3] = [1.55, 0.81, 1.29];
 /// ones stacked under them), mostly dark round their lines: they lit
 /// nothing in its dark halls (play feedback, 4 November). (b30's, flush on
 /// the wall, some turned to face it, lit it as bright as themselves at 12.)
-/// (Tuning: `HALO_RT_SHIP_LIGHT=<gain>` for all of them, 1 as Halo's.)
+/// The Pelican's troop bay lamps (`vehicles\pelican\shaders\pelican_bay`,
+/// the bay piece's self-illumination) are not in it: raised 32 times they
+/// lit the bay, which then boiled while the Pelican flew (play feedback, 24
+/// November: "I'd rather turn the lights back off"); the noise of the moving
+/// bay's lighting grows with its brightness, in the same proportion with
+/// their light shared out over the lamps' texels alone, and frozen there was
+/// none. (Tuning: `HALO_RT_SHIP_LIGHT=<gain>` for all of the rows, 1 as
+/// Halo's; `HALO_RT_EMITTER_LIGHT=<shader name part>=<gain>;...` for those it
+/// names, any emitter, before the table and that, see
+/// [`emitter_light_gain`]; `pelican_bay=32` the lamps as they were played.)
 const EMITTER_LIGHT_GAINS: [(&str, f32); 13] = [
     ("levels\\a50\\shaders\\covenant circuits", 3.0),
     ("levels\\a50\\shaders\\covenant circuits 0percent", 3.0),
@@ -915,10 +924,44 @@ const EMITTER_LIGHT_GAINS: [(&str, f32); 13] = [
     ("levels\\c20\\shaders\\c20 light bright white", 4.0),
 ];
 
-/// An emitter's light gain (see [`EMITTER_LIGHT_GAINS`]).
+/// An emitter's light gain: `HALO_RT_EMITTER_LIGHT`'s first entry whose
+/// name part the shader's name holds, else its [`EMITTER_LIGHT_GAINS`] row
+/// (or `HALO_RT_SHIP_LIGHT` for every row), else 1. Read once.
 fn emitter_light_gain(shader: &str) -> f32 {
+    static TUNED: std::sync::LazyLock<Vec<(String, f32)>> =
+        std::sync::LazyLock::new(|| parse_emitter_light(&std::env::var("HALO_RT_EMITTER_LIGHT").unwrap_or_default()));
+    if let Some(gain) = tuned_emitter_light(&TUNED, shader) {
+        return gain;
+    }
     let Some(&(_, gain)) = EMITTER_LIGHT_GAINS.iter().find(|(name, _)| shader.eq_ignore_ascii_case(name)) else { return 1.0 };
     std::env::var("HALO_RT_SHIP_LIGHT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(gain)
+}
+
+/// The gain of `tuned`'s first entry whose name part `shader` holds,
+/// ignoring case.
+fn tuned_emitter_light(tuned: &[(String, f32)], shader: &str) -> Option<f32> {
+    let shader = shader.to_ascii_lowercase();
+    tuned.iter().find(|(part, _)| shader.contains(part.as_str())).map(|&(_, gain)| gain)
+}
+
+/// `HALO_RT_EMITTER_LIGHT`'s entries from its text, each name part in lower
+/// case: an entry that is not `<shader name part>=<gain>` of a finite number
+/// skipped with a warning, a negative gain 0.
+fn parse_emitter_light(text: &str) -> Vec<(String, f32)> {
+    text.split(';')
+        .filter(|entry| !entry.trim().is_empty())
+        .filter_map(|entry| {
+            let parsed = entry.rsplit_once('=').and_then(|(part, gain)| {
+                let part = part.trim();
+                let gain = gain.trim().parse::<f32>().ok().filter(|gain| gain.is_finite())?;
+                (!part.is_empty()).then(|| (part.to_ascii_lowercase(), gain.max(0.0)))
+            });
+            if parsed.is_none() {
+                warn!("HALO_RT_EMITTER_LIGHT: {entry:?} is not <shader name part>=<gain>");
+            }
+            parsed
+        })
+        .collect()
 }
 
 /// An emitter's restyling (see [`EMITTER_LOOKS`]).
@@ -5509,6 +5552,24 @@ mod tests {
         assert_eq!(card_light_in(&[], "b40"), (1.0, 1.0));
         // (c20:1, the old)
         assert_eq!(card_light_in(&parse_card_light("c20:1"), "c20"), (1.0, 1.0));
+    }
+
+    #[test]
+    fn emitter_light_parses_and_matches() {
+        let tuned = parse_emitter_light(" Pelican_Bay = 4 ;monitors=2;bad;=3;x=y;holo=-1;;a=inf");
+        assert_eq!(tuned, vec![("pelican_bay".to_string(), 4.0), ("monitors".to_string(), 2.0), ("holo".to_string(), 0.0)]);
+        // (by a part of the name, ignoring case; the first that matches)
+        assert_eq!(tuned_emitter_light(&tuned, "vehicles\\pelican\\shaders\\pelican_bay"), Some(4.0));
+        assert_eq!(tuned_emitter_light(&tuned, "LEVELS\\A10\\SHADERS\\MONITORS"), Some(2.0));
+        assert_eq!(tuned_emitter_light(&tuned, "vehicles\\pelican\\shaders\\hull"), None);
+        // (a backslash in a name part)
+        assert_eq!(tuned_emitter_light(&parse_emitter_light("pelican\\shaders\\pelican_bay=1"), "vehicles\\pelican\\shaders\\pelican_bay"), Some(1.0));
+        // (the table's row, the variable unset)
+        if std::env::var_os("HALO_RT_EMITTER_LIGHT").is_none() && std::env::var_os("HALO_RT_SHIP_LIGHT").is_none() {
+            assert_eq!(emitter_light_gain("levels\\a10\\shaders\\monitors"), 16.0);
+            assert_eq!(emitter_light_gain("vehicles\\pelican\\shaders\\pelican_bay"), 1.0);
+            assert_eq!(emitter_light_gain("vehicles\\pelican\\shaders\\hull"), 1.0);
+        }
     }
 
     #[test]

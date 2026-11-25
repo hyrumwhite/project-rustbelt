@@ -1351,6 +1351,31 @@ pub fn init_solari_lighting_pipelines(
             // weights, blocky streaks through the lit fog;
             // SOLARIK_LIT_FOG_REACH=0 the old)
             ("LIT_FOG_REACH", "SOLARIK_LIT_FOG_REACH", 1u32),
+            // (lit fog's history refused where the previous frame's surface
+            // at the reprojected place is not at the pixel's surface's depth:
+            // the fog's light belongs to the ray in front of a surface, and a
+            // rock's edge passing dragged its short ray's light across the
+            // sky behind it as an afterimage; SOLARIK_LIT_FOG_DISOCCLUSION=0
+            // the old)
+            ("LIT_FOG_DISOCCLUSION", "SOLARIK_LIT_FOG_DISOCCLUSION", 1u32),
+            // (lit fog's point and spot lights, a flashlight among them,
+            // sampled apart from the light tiles: each pixel picks one by its
+            // light along the pixel's ray, LIT_FOG_LOCAL samples a pixel. The
+            // tiles presample every light by its power, so a flashlight among
+            // c10's emitters was a candidate of one pixel in some fourteen, and
+            // one frame's light was 7% of the pixels carrying 94% of it, which
+            // the a-trous levels painted into cells, the "leopard" pattern
+            // after every move; SOLARIK_LIT_FOG_LOCAL=0 the old)
+            ("LIT_FOG_LOCAL", "SOLARIK_LIT_FOG_LOCAL", 1u32),
+            // (the clamp band's widening by the prefiltered light's noise
+            // faded out as the pixel moves, gone at this many tenths of a
+            // render pixel a frame: the widening, for steady dark far fog,
+            // let a moved view's stale history through whole, and what it
+            // held (the shadows of leaves in the fog, seen from where the
+            // view had been) stood in crisp dark cells over the fog for the
+            // frames after the move, the "leopard" pattern;
+            // SOLARIK_LIT_FOG_NOISE_STILL=0 the old, widened however it moves)
+            ("LIT_FOG_NOISE_STILL", "SOLARIK_LIT_FOG_NOISE_STILL", 20u32),
             ("LIT_FOG_DEPTH", "SOLARIK_LIT_FOG_DEPTH", 50u32),
             ("LIT_FOG_CANDIDATES", "SOLARIK_LIT_FOG_CANDIDATES", 16u32),
         ] {

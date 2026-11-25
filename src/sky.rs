@@ -163,9 +163,46 @@ pub fn sky_model_cubemap(cache: &CacheFile, model_datum: u32, images: &mut Asset
     Ok(Some(SkyModelCubemaps { lighting, background }))
 }
 
+/// A cube texel's direction in the texture's own terms (wgpu's face order
+/// and orientation: +X, -X, +Y, -Y, +Z, -Z), `u` and `v` in -1..1 across the
+/// face, not normalised.
+fn face_direction(face: u32, u: f32, v: f32) -> Vec3 {
+    match face {
+        0 => Vec3::new(1.0, -v, -u),
+        1 => Vec3::new(-1.0, -v, u),
+        2 => Vec3::new(u, 1.0, v),
+        3 => Vec3::new(u, -1.0, -v),
+        4 => Vec3::new(u, -v, 1.0),
+        _ => Vec3::new(-u, -v, -1.0),
+    }
+}
+
+/// The world direction (Bevy coordinates) whose colour the cube texel at
+/// `cube` (its direction in the texture's own terms, [`face_direction`])
+/// must hold. Bevy's skybox and environment light and Solarik's sky
+/// sampling all read a cube texture at the world direction with z negated
+/// (cube textures are left-handed), so the texel at (x, y, z) is the one
+/// seen along (x, y, -z). Filled by the cube direction itself (`handed`
+/// false, `HALO_RT_SKY_CUBE_HANDED=0`, the old), every sky model's cubemap
+/// came out mirrored front to back in Bevy terms (across Halo's x-z plane):
+/// the main menu showed its gas giant twice, the drawn sky layer and its
+/// mirror image in the skybox behind the layers, and every level's sky light
+/// and reflections of the sky were mirrored likewise.
+fn texel_world_direction(cube: Vec3, handed: bool) -> Vec3 {
+    if handed { Vec3::new(cube.x, cube.y, -cube.z) } else { cube }
+}
+
+/// `HALO_RT_SKY_CUBE_HANDED`: anything but `0` (the default) fills the
+/// cubemaps the way they are read (see [`texel_world_direction`]).
+fn handed_cubes() -> bool {
+    std::env::var("HALO_RT_SKY_CUBE_HANDED").map_or(true, |v| v.trim() != "0")
+}
+
 /// A cubemap whose texel colours (sRGB, 0..1) `colour` gives per direction
-/// (Bevy coordinates, unit length).
+/// (Bevy coordinates, unit length): the direction from which the texel is
+/// seen through Bevy's and Solarik's sampling (see [`texel_world_direction`]).
 fn cubemap(size: u32, images: &mut Assets<Image>, colour: impl Fn(Vec3) -> [f32; 3] + Sync) -> Handle<Image> {
+    let handed = handed_cubes();
     // (a face a thread)
     let face_texels = |face: u32| {
         let mut data = Vec::with_capacity((size * size * 4) as usize);
@@ -173,16 +210,7 @@ fn cubemap(size: u32, images: &mut Assets<Image>, colour: impl Fn(Vec3) -> [f32;
             for x in 0..size {
                 let u = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
                 let v = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
-                // wgpu cube face order and orientation: +X, -X, +Y, -Y, +Z, -Z
-                let dir = match face {
-                    0 => Vec3::new(1.0, -v, -u),
-                    1 => Vec3::new(-1.0, -v, u),
-                    2 => Vec3::new(u, 1.0, v),
-                    3 => Vec3::new(u, -1.0, -v),
-                    4 => Vec3::new(u, -v, 1.0),
-                    _ => Vec3::new(-u, -v, -1.0),
-                }
-                .normalize();
+                let dir = texel_world_direction(face_direction(face, u, v).normalize(), handed);
                 let [r, g, b] = colour(dir);
                 data.extend([r, g, b, 1.0].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
             }
@@ -232,6 +260,41 @@ mod tests {
     fn tuned_direction_on_any_level() {
         assert_eq!(sun_angles("b40", TAG, Some("10,20")), (10.0, 20.0));
         assert_eq!(sun_angles("a10", TAG, Some(" 10 , 20 ")), (10.0, 20.0));
+    }
+
+    /// The face and texel direction a GPU reads for cube-space direction
+    /// `d` (wgpu's / Vulkan's selection by the major axis), inverting
+    /// [`face_direction`].
+    fn addressed_texel(d: Vec3) -> Vec3 {
+        let a = d.abs();
+        let (face, u, v) = if a.x >= a.y && a.x >= a.z {
+            if d.x > 0.0 { (0, -d.z / a.x, -d.y / a.x) } else { (1, d.z / a.x, -d.y / a.x) }
+        } else if a.y >= a.z {
+            if d.y > 0.0 { (2, d.x / a.y, d.z / a.y) } else { (3, d.x / a.y, -d.z / a.y) }
+        } else if d.z > 0.0 {
+            (4, d.x / a.z, -d.y / a.z)
+        } else {
+            (5, -d.x / a.z, -d.y / a.z)
+        };
+        face_direction(face, u, v).normalize()
+    }
+
+    #[test]
+    fn sampled_texel_holds_the_world_direction() {
+        // (Threshold's direction on the menu, in Bevy terms, and others)
+        for world in [Vec3::new(0.85, 0.20, -0.45), Vec3::new(-0.3, 0.9, 0.2), Vec3::new(0.1, -0.2, 0.97), Vec3::new(-0.7, 0.1, -0.7)] {
+            let world = world.normalize();
+            // (as Bevy's skybox and Solarik's sample_sky read it)
+            let texel = addressed_texel(Vec3::new(world.x, world.y, -world.z));
+            assert!(texel_world_direction(texel, true).distance(world) < 1e-5, "{world}");
+        }
+    }
+
+    #[test]
+    fn old_rule_mirrors_front_to_back() {
+        let world = Vec3::new(0.85, 0.20, -0.45).normalize();
+        let texel = addressed_texel(Vec3::new(world.x, world.y, -world.z));
+        assert!(texel_world_direction(texel, false).distance(Vec3::new(world.x, world.y, -world.z)) < 1e-5);
     }
 
     #[test]

@@ -1392,6 +1392,20 @@ fn forward_input(
             }
         }
     }
+    // (testing: `HALO_RT_TEST_MOUSE=<frame>:<dx>,<dy>[;...]` moves the
+    // mouse by that many counts in that frame, to turn the player's look)
+    if let Ok(text) = std::env::var("HALO_RT_TEST_MOUSE") {
+        for entry in text.split(';') {
+            let Some((at, delta)) = entry.split_once(':') else { continue };
+            let Some((dx, dy)) = delta.split_once(',') else { continue };
+            let (Ok(at), Ok(dx), Ok(dy)) = (at.trim().parse::<u32>(), dx.trim().parse::<i32>(), dy.trim().parse::<i32>()) else { continue };
+            if at == *frame {
+                state.active = 1;
+                state.mouse_x = state.mouse_x.wrapping_add(dx);
+                state.mouse_y = state.mouse_y.wrapping_add(dy);
+            }
+        }
+    }
     if *active {
         for key in keys.get_pressed().filter(|k| !viewer_key(**k, follow_display)) {
             if let Some(scancode) = scancode(*key) {
